@@ -294,3 +294,44 @@ class TestTheRuntimeSourceLocator:
             assert wiring_sources.current_sources() is explicit
         finally:
             wiring_sources.unbind_sources()
+
+
+class TestTheProbeReportsTheResolvedInstallDir:
+    """ND-5 — the install_dir flag is the RESOLVED PATH's presence.
+
+    The bundle carries the install-dir RESOLVER CALLABLE (the import is
+    deferred to the tick that needs it), so the callable's presence
+    said nothing about whether an install dir EXISTS: the callable is
+    always there, while the resolved path is ``None`` in dev and in
+    every lane with no staged install.  The probe must report the
+    truth.
+    """
+
+    def test_the_flag_is_false_when_no_install_dir_resolves(self, fake_daemon_api):
+        bundle = wiring_sources.current_sources()
+        presence = wiring_sources.bundle_handle_presence(bundle)
+        assert bundle.install_dir is not None, (
+            "the bundle always carries the resolver CALLABLE — that is the "
+            "point: the CALLABLE's presence says nothing about the path"
+        )
+        assert presence["install_dir"] is False, (
+            "no install dir resolves in this lane — the flag must report the "
+            "RESOLVED PATH's absence, not the callable's presence"
+        )
+
+    def test_the_flag_is_true_when_a_path_resolves(self):
+        import pathlib
+
+        bundle = wiring_sources.WiringSources(
+            install_dir=lambda: pathlib.Path("/tmp/ensemble-install")
+        )
+        presence = wiring_sources.bundle_handle_presence(bundle)
+        assert presence["install_dir"] is True
+
+    def test_a_failing_resolver_reads_as_no_install_dir(self):
+        def _boom():
+            raise RuntimeError("the resolver is broken")
+
+        bundle = wiring_sources.WiringSources(install_dir=_boom)
+        presence = wiring_sources.bundle_handle_presence(bundle)
+        assert presence["install_dir"] is False

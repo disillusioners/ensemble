@@ -86,6 +86,20 @@ handle 7 of the 10 dark families depended on), `manager`,
 `mcps_gateway_service`, `wedge_watchdog`. `db_connect` stays absent by
 design (it is the test-injection seam).
 
+**THE `install_dir` FLAG IN THE LINES ABOVE IS THE PRE-ND-5 SEMANTICS**
+(the delta-3 review's rider ND-5, fixed after this observation was
+taken): the flag then reported the presence of the install-dir
+**RESOLVER CALLABLE** — which the bundle always carries — instead of
+the **RESOLVED PATH**'s presence.  So the observed lines above claim
+`present=…install_dir…` even though **no install dir resolves in the
+dev lane** (the fence resolves `_resolve_install_dir("dev")` to
+`None` — §1).  ND-5 fixed the flag to report the resolved path, so a
+re-run of the same observation would read **`absent=…install_dir…`** in
+the first line and `present=…install_dir…` only in a lane that HAS an
+install dir.  The DARK→LIVE TRANSITION this section exists to prove is
+unaffected: it is `dsn` / `manager` / `mcps_gateway_service` /
+`wedge_watchdog` that flipped, and none of them is `install_dir`.
+
 **On the pre-fix code the second line would never have appeared**: the
 bundle was cached by `id(app.state)`, `app.state` is never replaced, and
 the first tick's bundle (every handle `None`) would have been served for
@@ -129,10 +143,13 @@ runtime proof that the cache is gone.
 * The council's expectation was "16/16 or the re-scoped count after the
   Q1 verdict adjustment". **The re-scoped count is 10/16** — and **NO
   family is dark because of the C-1 locator**: every dark family has a
-  named, non-C-1 cause (§4). The C-1 defect was worth **7 families**
-  (the seven that were dark solely because `dsn` was `None`); those
-  seven are live now (F4, F5, F8, F10, F11, F13 and — with the §4.1
-  correction — F6).
+  named, non-C-1 cause (§4). The C-1 defect was worth **seven
+  dsn-gated adapters** — **F0.3, F3, F8, F10, F11, F13 and F18** (the
+  seven whose adapters read `sources.dsn`; **F4/F5 carry no dsn
+  gate** — they were handle-dark — and **F6 was never dsn-dark**). Of
+  those seven, **five are live now** (F0.3, F8, F10, F11, F13); **F3
+  and F18 are still dark**, for their own non-C-1 reasons
+  (`capture_off` and `series_absent` — §4).
 
 ### 3.2 The other two routes
 
@@ -300,7 +317,7 @@ method at all** (`grep -n "counters" daemon/services/{job_lock,upgrade_journal,s
 | Claim | Verdict |
 |---|---|
 | the C-1 locator resolves the LIVE handles through the real path | **PROVEN** — the probe's presence map flipped `dsn`/`manager`/`mcps_gateway_service`/`wedge_watchdog` from ABSENT to PRESENT between the sampler's first and second tick (§2) |
-| the seven families that were dark solely because `dsn` was `None` | **LIVE** (F4, F5, F8, F10, F11, F13 + F6 with the §4.1 correction) |
+| the seven dsn-gated adapters (F0.3, F3, F8, F10, F11, F13, F18) | **five LIVE** (F0.3, F8, F10, F11, F13) — **F3 and F18 are STILL DARK**, for their own non-C-1 reasons (`capture_off` · `series_absent`, §4). F4/F5 carry **no** dsn gate; F6 was **never** dsn-dark |
 | the live family set | **10 of 16** — the re-scoped count, with a named reason for each of the 6 dark families (§3.1) |
 | any dark family caused by the C-1 locator | **NONE** |
 | the Q1 verdict adjustment | **no verdict change**; the stale_pause lane is documented-dark for two independent reasons; F12's live lanes are the three with `counters()` readers (§5) |

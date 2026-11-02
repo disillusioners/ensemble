@@ -296,11 +296,36 @@ _PROBE_PRESENCE: dict[str, bool] | None = None
 _ABSENCE_LOGGED: bool = False
 
 
+def _install_dir_present(bundle: WiringSources) -> bool:
+    """Whether the bundle's install dir RESOLVES to a path (ND-5).
+
+    The bundle carries the RESOLVER CALLABLE (the import is deferred
+    to the tick that needs it), so the CALLABLE's presence says nothing
+    about whether an install dir EXISTS: the callable is always there,
+    while the resolved path is ``None`` in dev and in every lane with
+    no staged install.  The probe must report the RESOLVED path's
+    presence — otherwise the presence map claims an install dir that
+    does not exist.
+    """
+    resolver = bundle.install_dir
+    if resolver is None:
+        return False
+    try:
+        return resolver() is not None
+    except Exception:  # noqa: BLE001 — a resolver failure is "no install dir"
+        return False
+
+
 def bundle_handle_presence(bundle: WiringSources) -> dict[str, bool]:
     """The bundle's handle-presence map (the probe's payload).
 
     The map is about HANDLES, never about series: a handle that is
     present but has published nothing is still PRESENT (absent ≠ zero).
+
+    ONE EXCEPTION, and it is the truth (ND-5): ``install_dir`` reports
+    the RESOLVED PATH's presence, not the resolver callable's — the
+    callable is a handle that is ALWAYS there, while the install dir
+    itself may not exist.
     """
     return {
         "manager": bundle.manager is not None,
@@ -311,7 +336,7 @@ def bundle_handle_presence(bundle: WiringSources) -> dict[str, bool]:
         "mcp_snapshot": bundle.mcp_snapshot is not None,
         "mcps_gateway_service": bundle.mcps_gateway_service is not None,
         "sweeps": bool(bundle.sweeps),
-        "install_dir": bundle.install_dir is not None,
+        "install_dir": _install_dir_present(bundle),
         "dsn": bundle.dsn is not None,
         "db_connect": bundle.db_connect is not None,
     }
