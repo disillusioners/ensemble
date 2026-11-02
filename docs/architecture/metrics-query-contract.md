@@ -567,9 +567,9 @@ registered composition should be the DERIVED set.
 
 | Leg | HEAD (D1 + D2) | BASE (D2) | FAILED digest (BARE-ID / GREP-FULL) | Verdict |
 |---|---|---|---|---|
-| P4-G1 (W1) | 533 passed · 1 failed · **exit 1** | 493 passed · 1 failed · **exit 1** | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
-| P4-G2 (W2) | 534 passed · 1 failed · **exit 1** | 493 passed · 1 failed · **exit 1** | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
-| P4-G3 (W3) | 527 passed · 1 failed · **exit 1** | 493 passed · 1 failed · **exit 1** | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
+| P4-G1 (W1) | 534 passed · 1 failed · **exit 1** | 493 passed · 1 failed · **exit 1** | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
+| P4-G2 (W2) | 536 passed · 1 failed · **exit 1** | 493 passed · 1 failed · **exit 1** | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
+| P4-G3 (W3) | 528 passed · 1 failed · **exit 1** | 493 passed · 1 failed · **exit 1** | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
 | the widened supplementary leg (all three) | 295/296/289 passed · 2 failed · **exit 1** | 278 passed · 2 failed · **exit 1** | `ec0572e69c9ab178` / `041380df27ec0d4e` — **IDENTICAL both sides** | net-new **EMPTY** |
 
 **The ONE failure on every D2 leg is the KNOWN base red**
