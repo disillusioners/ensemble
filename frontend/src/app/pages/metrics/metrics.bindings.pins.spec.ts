@@ -99,11 +99,11 @@ describe('metrics bindings — the D2 zero-dependency guard', () => {
 
 describe('metrics bindings — the gate build legs (P5-M11 / AM-23)', () => {
   it('the gate runs the DEV build leg (the AOT leg)', () => {
-    expect(packScript).toContain('--configuration development');
+    expect(packScript).toContain('./node_modules/.bin/ng build --configuration development');
   });
 
   it('the gate runs the PRODUCTION build leg (the only budgets configuration)', () => {
-    expect(packScript).toContain('--configuration production');
+    expect(packScript).toContain('./node_modules/.bin/ng build --configuration production');
   });
 
   it('the gate runs the scoped type-check leg (the P5-M9 surface)', () => {

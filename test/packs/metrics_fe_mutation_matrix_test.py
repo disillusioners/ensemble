@@ -77,8 +77,8 @@ MUTATIONS: list[Mutation] = [
         file="frontend/src/app/pages/metrics/overview/overview-tab.component.ts",
         old="readonly POLL_INTERVAL_MS = 10_000;",
         new="readonly POLL_CADENCE_MS = 10_000;",
-        command=["jest"] + PACK_BINDINGS,
-        extra_red=["metrics-fe-page (the overview spec reads the constant)"],
+        command=["jest"] + PACK_PAGE,
+        extra_red=["the overview spec (it reads the constant)"],
     ),
     Mutation(
         label="P5-M2",
@@ -86,8 +86,8 @@ MUTATIONS: list[Mutation] = [
         file="frontend/src/app/pages/metrics/overview/overview-tab.component.ts",
         old="      clearInterval(this.pollHandle);\n",
         new="      // MUTATION P5-M2: the teardown removed\n",
-        command=["jest"] + PACK_BINDINGS,
-        extra_red=["metrics-fe-page (the runtime teardown assertion)"],
+        command=["jest"] + PACK_PAGE,
+        extra_red=["the overview spec (the runtime teardown assertion)"],
     ),
     Mutation(
         label="P5-M3",
@@ -159,7 +159,7 @@ MUTATIONS: list[Mutation] = [
         intent="the production-config build leg is dropped from the gate",
         file="test/packs/metrics_fe_dual_side_test.sh",
         old='    timeout 900 ./node_modules/.bin/ng build --configuration production 2>&1 | tee "$BUILD_PROD_LOG"',
-        new='    timeout 900 ./node_modules/.bin/ng build --configuration production 2>&1 | tee "$BUILD_PROD_LOG"\n    # MUTATION P5-M11: the production-config build leg dropped from the gate',
+        new='    :  # MUTATION P5-M11: the production-config build leg dropped from the gate',
         command=["jest"] + PACK_BINDINGS,
     ),
 ]
