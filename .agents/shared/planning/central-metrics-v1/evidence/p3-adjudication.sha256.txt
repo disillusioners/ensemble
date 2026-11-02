@@ -20,6 +20,21 @@
 # `p3-adjudication/`) — the set SPANS TWO DIRECTORIES, which is exactly why the
 # previous per-set-dir recipe could not express it.
 #
+# THE LISTING IS THE TWO-COLUMN HOUSE FORM (`<sha256>  <path>`) — the same form as
+# `p1-p2-mutation-logs.sha256.txt` — so it is CHECKABLE DIRECTLY:
+#
+#     cd <the evidence dir> && sha256sum -c p3-adjudication.sha256.txt
+#
+# …which reports 21/21 OK. (The earlier capture was `sha256sum`'s THREE-COLUMN
+# default form — `sha256 SIZE path` — which `sha256sum -c` cannot parse: it took
+# the SIZE column for the filename and reported "21 listed files could not be
+# read". The per-file digests were never wrong; only the LAYOUT was.)
+#
+# THE SET AGGREGATE IS **NOT** A HASH OF THIS FILE'S LINES: it is the canonical
+# recipe over the MEMBERS (`sha256sum <members> | LC_ALL=C sort | sha256sum`),
+# re-derived above as 50d74e64…. Hashing this file's own lines yields a
+# different number — do not expect otherwise.
+#
 # THE SUPERSEDED AGGREGATE — NOT RE-DERIVABLE:
 #
 #     76a69edd9bd3ec454541b4d81ecce0cf5e88151d6a36602d4f3373df8f85c218
@@ -39,25 +54,25 @@
 # Generated 2026-11-02 (the P3 evidence-repair round); aggregate re-anchored the
 # same day.
 
-f2a47cbb9ab11a5c0b67bf0ba90060ba380c4a9dcac2485c7b0a8f3955d9cc35        4783  p3-scratch/sweep_digest_verdict.sh
-5ae2e20fce20893e12f4276279945ab4877546a63be5ec16f344f782d6e71813        1498  p3-scratch/sweep_sharded.verdict-block.patch
-a592aca7509f3efc3727837c93e804b9e1977a87b55ec34f63a10f8de2a5862e       10615  p3-scratch/adjudicate_diff_ids.py
-d1d0e139f74bafa2330c2be883dc496b1ffdf6041c6dd5a2d37801c6063a36c3        4533  p3-scratch/rederive_adjudication_verdict.py
-7068a58ff9b8602f52e1c57399610e298f1fa1487bc4d9ae8c33ebb54610b68d        9583  p3-scratch/prove_grouping_signature.py
-466db3cdeb4824ec5283e1292077c2af1c987334fd7f80834b1c521c0738304c       13448  p3-scratch/summarise_grouping_proof.py
-4d41d895a4de6d2dc97bed3300ce8135770ba1100215b0a13b3ef4a112fb58e0     3557481  p3-adjudication/BASE.collected-nodes.txt
-a259e0a6c27863f540fb3f43c640f7748344c36130c121ccc6069e9d2f2fb836      245767  p3-adjudication/BASE.shard-002.txt
-7f3ac16d611176b43b99f1ad06ef28336c91436b4a3ab177f42cb6896009be75      285259  p3-adjudication/BASE.shard-005.txt
-e9915e32455da5005a851f3d2d98b35f25a9bfcc3f26c7af2bac37cbddc82fcb       63949  p3-adjudication/adjudication-matrix.tsv
-ae6c8e1b78728afe89b2588a0925183523cca330fd8bd8f05b41654482e485dc       22427  p3-adjudication/adjudication-verdict.json
-4d7a1dc6667882c17b45ab805b18b425e75a872fa2f87bc425ed7ae48383f201       12626  p3-adjudication/adjudication-verdict.tsv
-6b51b387ac271deb92f6eaf35f27c47ceb9881bc4b27a6fa71b3db4f540415fa        4084  p3-adjudication/bareid.base-only.txt
-dfbf1eda148d6bbdc149360d118e6d4a447688f679d288945712d1cbd065b3a5        3500  p3-adjudication/bareid.head-only.txt
-addf3336c1c341c12ea598da4e4eb79e186a6f7f136789b6db8fada54e25c411      101513  p3-adjudication/batch-matrix.tsv
-cc70d85179959b4993c01ffdf8bbb5cff118d3c7b792a03647fc3b23ca7f55c8       65622  p3-adjudication/file-level-matrix.tsv
-1099f5bb0a6d34a081c741769e1d83840c587e8ab7eeecf529282a163349f362        4219  p3-adjudication/grepfull.base-only.txt
-dfbf1eda148d6bbdc149360d118e6d4a447688f679d288945712d1cbd065b3a5        3500  p3-adjudication/grepfull.head-only.txt
-dfb43f56a3da23e7d343a11c831f079c2dc5b7d6985d8162286ef136f6f96d97       13072  p3-adjudication/grouping-proof-summary.txt
-66e057b0ad0473dcebe7ff7163117a584ca44ccadfd4f3ed391f6ced98aa02ea       31420  p3-adjudication/shard-determinism-matrix.tsv
-c9bfd38fc120d3e03a2d697e60a776e17d4a8d5f38a70cd262eddec95543f180       34650  p3-adjudication/sweep-digest-verdict.log
+f2a47cbb9ab11a5c0b67bf0ba90060ba380c4a9dcac2485c7b0a8f3955d9cc35  p3-scratch/sweep_digest_verdict.sh
+5ae2e20fce20893e12f4276279945ab4877546a63be5ec16f344f782d6e71813  p3-scratch/sweep_sharded.verdict-block.patch
+a592aca7509f3efc3727837c93e804b9e1977a87b55ec34f63a10f8de2a5862e  p3-scratch/adjudicate_diff_ids.py
+d1d0e139f74bafa2330c2be883dc496b1ffdf6041c6dd5a2d37801c6063a36c3  p3-scratch/rederive_adjudication_verdict.py
+7068a58ff9b8602f52e1c57399610e298f1fa1487bc4d9ae8c33ebb54610b68d  p3-scratch/prove_grouping_signature.py
+466db3cdeb4824ec5283e1292077c2af1c987334fd7f80834b1c521c0738304c  p3-scratch/summarise_grouping_proof.py
+4d41d895a4de6d2dc97bed3300ce8135770ba1100215b0a13b3ef4a112fb58e0  p3-adjudication/BASE.collected-nodes.txt
+a259e0a6c27863f540fb3f43c640f7748344c36130c121ccc6069e9d2f2fb836  p3-adjudication/BASE.shard-002.txt
+7f3ac16d611176b43b99f1ad06ef28336c91436b4a3ab177f42cb6896009be75  p3-adjudication/BASE.shard-005.txt
+e9915e32455da5005a851f3d2d98b35f25a9bfcc3f26c7af2bac37cbddc82fcb  p3-adjudication/adjudication-matrix.tsv
+ae6c8e1b78728afe89b2588a0925183523cca330fd8bd8f05b41654482e485dc  p3-adjudication/adjudication-verdict.json
+4d7a1dc6667882c17b45ab805b18b425e75a872fa2f87bc425ed7ae48383f201  p3-adjudication/adjudication-verdict.tsv
+6b51b387ac271deb92f6eaf35f27c47ceb9881bc4b27a6fa71b3db4f540415fa  p3-adjudication/bareid.base-only.txt
+dfbf1eda148d6bbdc149360d118e6d4a447688f679d288945712d1cbd065b3a5  p3-adjudication/bareid.head-only.txt
+addf3336c1c341c12ea598da4e4eb79e186a6f7f136789b6db8fada54e25c411  p3-adjudication/batch-matrix.tsv
+cc70d85179959b4993c01ffdf8bbb5cff118d3c7b792a03647fc3b23ca7f55c8  p3-adjudication/file-level-matrix.tsv
+1099f5bb0a6d34a081c741769e1d83840c587e8ab7eeecf529282a163349f362  p3-adjudication/grepfull.base-only.txt
+dfbf1eda148d6bbdc149360d118e6d4a447688f679d288945712d1cbd065b3a5  p3-adjudication/grepfull.head-only.txt
+dfb43f56a3da23e7d343a11c831f079c2dc5b7d6985d8162286ef136f6f96d97  p3-adjudication/grouping-proof-summary.txt
+66e057b0ad0473dcebe7ff7163117a584ca44ccadfd4f3ed391f6ced98aa02ea  p3-adjudication/shard-determinism-matrix.tsv
+c9bfd38fc120d3e03a2d697e60a776e17d4a8d5f38a70cd262eddec95543f180  p3-adjudication/sweep-digest-verdict.log
 # files: 21
