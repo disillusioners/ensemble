@@ -67,6 +67,7 @@ ALLOWED_DAEMON_DIFF = (
     # removed; the package NEVER reads or writes a metric).
     "daemon/api.py",
     "daemon/services/metrics_query/__init__.py",
+    "daemon/services/metrics_query/availability.py",
     "daemon/services/metrics_query/constants.py",
     "daemon/services/metrics_query/envelope.py",
     "daemon/services/metrics_query/provider.py",
