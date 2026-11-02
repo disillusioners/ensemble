@@ -1,0 +1,4 @@
+ERROR: file or directory not found:    daemon.manager:manager.py:15748 Error during shutdown step 'dispose_db_pools': object MagicMock can't be used in 'await' expression
+
+
+no tests ran in 0.14s

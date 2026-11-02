@@ -1,0 +1,60 @@
+# P3 — the verdict-bearing lines from the preserved P3 gate dir + the sweep dirs.
+#
+## the P3-G1 gate legs (rc + summary, both sides)
+#   HEAD.d1.rc = 0 
+#   HEAD.d1.summary = 110 passed in 14.70s 
+#   HEAD.d1cage.rc = 0 
+#   HEAD.d1cage.summary = 7 passed in 5.04s 
+#   HEAD.d2.rc = 1 
+#   HEAD.d2.summary = 1 failed, 301 passed in 10.72s 
+#   HEAD.d2cage.rc = 0 
+#   HEAD.d2cage.summary = 12 passed in 7.85s 
+#   BASE.d2.rc = 1 
+#   BASE.d2.summary = 1 failed, 301 passed in 10.36s 
+#   BASE.d2cage.rc = 0 
+#   BASE.d2cage.summary = 12 passed in 7.33s 
+#
+## the single-shot -n auto attempt (the VACUOUS leg — disclosure (4))
+#   BASE collected: 32450 nodes
+#   HEAD collected: 32723 nodes
+#   BASE rc=3
+#   INTERNALERROR> assert not 'tests/test_custom_agent_lifecycle.py::TestCustomAgentCreation::test_creates_config_and_v1_soul_in_one_txn'
+#   82 failed, 2323 passed, 74 skipped, 1886 warnings in 180.99s (0:03:00)
+#   BASE digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+#   HEAD rc=3
+#   INTERNALERROR> assert not 'tests/test_loader_empty_content_m16.py::TestCoreClassEmptyContent::test_selected_empty_string_preserved'
+#   76 failed, 2053 passed, 67 skipped, 1743 warnings in 170.13s (0:02:50)
+#   HEAD digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+#   DIGEST-EQUAL: the FAILED sets are byte-identical (net-new = EMPTY)
+#
+## the FIRST sharded attempt (060325Z) — every shard rc=126, so the digests are the
+## EMPTY-STRING digest again: the 'DIGEST-EQUAL' there is VACUOUS too
+#   BASE collected: 32450 nodes
+#   HEAD collected: 32725 nodes
+#   BASE digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+#   HEAD digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+#   DIGEST-EQUAL: the FAILED sets are byte-identical (net-new = EMPTY)
+#   (the empty-string digest is e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+##    == sha256("") — the digest of ZERO nodes, i.e. the leg produced no FAILED ids)
+#
+## the REAL sharded run (061340Z) — the per-shard counts + the digests
+#   BASE collected: 32450 nodes
+#   HEAD collected: 32725 nodes
+#   head-only nodes (the additive lane's own files): 275
+#   base-only nodes: 0
+#   BASE FAILED/ERROR ids: 488
+#   BASE digest (BARE-ID): 341def50afc03f3b0aa069d6fd0b497c4d57178d2d7aed608915a811b377ee50
+#   HEAD FAILED/ERROR ids: 484
+#   HEAD digest (BARE-ID): 0b04686a331bec960af1726098fba744e0a2a0ada150b5b3cf2abc78f6b301ab
+#
+## THE SET COMPARISON the script's verdict block does NOT contain (it is empty by
+## construction — the 'comm' output went to stdout, not into the log: ';' vs '|')
+#   BASE.nodeids.txt sha256 = 341def50afc03f3b0aa069d6fd0b497c4d57178d2d7aed608915a811b377ee50
+#   HEAD.nodeids.txt sha256 = 0b04686a331bec960af1726098fba744e0a2a0ada150b5b3cf2abc78f6b301ab
+#   comm -23 (base-only, FIXED at head) = 37 entries
+#   comm -13 (head-only, NET-NEW reds)  = 33 entries
+#   BASE unique ids = 488   HEAD unique ids = 484
+#   -> the FAILED-id SETS are NOT equal: the two whole-tree legs differ by
+#      37 base-only and
+#      33 head-only entries.
+#      (the per-id lists are in the two *.nodeids.txt files preserved beside this record)

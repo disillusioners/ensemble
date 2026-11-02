@@ -1,0 +1,236 @@
+bringing up nodes...
+bringing up nodes...
+
+........................................................................ [  0%]
+................F....................................................... [  0%]
+....F.................................................................F. [  0%]
+................F..................F.........F..............F.sss.s.s... [  0%]
+.....F........F.........F..F........F............F.......F.............. [  1%]
+.....F.....F..............F....F.....F.................................. [  1%]
+F.....F.......F......F............F.............F....sssssssssssssssssss [  1%]
+sssss.s.F........F.......F......F......F.......F...F..........F......... [  1%]
+........................................................................ [  1%]
+F............................F.......................................... [  2%]
+............................................................F........F.. [  2%]
+.F........................................F.FF..FF..FF.............FFF.. [  2%]
+..F.F.......FFF.F..............................FFFF....F.F...........F.. [  2%]
+....................................F....F.......F...................... [  3%]
+...................................................................ssss. [  3%]
+................F.............s.ssss.......ss.sss.ssss..s............... [  3%]
+..........................s............................................. [  3%]
+..............F......F...........................F.FF................... [  3%]
+..........F...F......................................................... [  4%]
+......................................................................F. [  4%]
+...........F....F............F.......................................... [  4%]
+.....................................ss................................. [  4%]
+........................................................................ [  5%]
+.........ssssssssssssss................................................. [  5%]
+........................................................................ [  5%]
+........................................................................ [  5%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+........................................................................ [  6%]
+........................................................................ [  6%]
+...................................--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "<string>", line 1, in <module>
+    import sys;exec(eval(sys.stdin.readline()))
+  File "<string>", line 8, in <module>
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1806, in serve
+    WorkerGateway(io=io, id=id, _startcount=2).serve()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1273, in serve
+    self._execpool.integrate_as_primary_thread()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 389, in integrate_as_primary_thread
+    self._perform_spawn(reply)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 411, in _perform_spawn
+    reply.run()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 341, in run
+    self._result = func(*args, **kwargs)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1291, in executetask
+    exec(co, loc)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/remote.py", line 427, in <module>
+    config.hook.pytest_cmdline_main(config=config)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 365, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 353, in wrap_session
+    config.hook.pytest_sessionfinish(
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 112, in pytest_sessionfinish
+    session._setupstate.teardown_exact(None)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 555, in teardown_exact
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1042, in finish
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 924, in _teardown_yield_fixture
+    next(it)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-head/tests/job_queue/conftest.py", line 532, in dependency_bus
+    set_dependency_bus(None)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-head/daemon/services/dependency_bus.py", line 2812, in set_dependency_bus
+    logger.info("DependencyBus unregistered")
+Message: 'DependencyBus unregistered'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "<string>", line 1, in <module>
+    import sys;exec(eval(sys.stdin.readline()))
+  File "<string>", line 8, in <module>
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1806, in serve
+    WorkerGateway(io=io, id=id, _startcount=2).serve()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1273, in serve
+    self._execpool.integrate_as_primary_thread()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 389, in integrate_as_primary_thread
+    self._perform_spawn(reply)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 411, in _perform_spawn
+    reply.run()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 341, in run
+    self._result = func(*args, **kwargs)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1291, in executetask
+    exec(co, loc)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/remote.py", line 427, in <module>
+    config.hook.pytest_cmdline_main(config=config)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 365, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 353, in wrap_session
+    config.hook.pytest_sessionfinish(
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 112, in pytest_sessionfinish
+    session._setupstate.teardown_exact(None)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 555, in teardown_exact
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1042, in finish
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 924, in _teardown_yield_fixture
+    next(it)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-head/tests/job_queue/conftest.py", line 532, in dependency_bus
+    set_dependency_bus(None)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-head/daemon/services/dependency_bus.py", line 2812, in set_dependency_bus
+    logger.info("DependencyBus unregistered")
+Message: 'DependencyBus unregistered'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "<string>", line 1, in <module>
+    import sys;exec(eval(sys.stdin.readline()))
+  File "<string>", line 8, in <module>
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1806, in serve
+    WorkerGateway(io=io, id=id, _startcount=2).serve()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1273, in serve
+    self._execpool.integrate_as_primary_thread()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 389, in integrate_as_primary_thread
+    self._perform_spawn(reply)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 411, in _perform_spawn
+    reply.run()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 341, in run
+    self._result = func(*args, **kwargs)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1291, in executetask
+    exec(co, loc)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/remote.py", line 427, in <module>
+    config.hook.pytest_cmdline_main(config=config)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 365, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 353, in wrap_session
+    config.hook.pytest_sessionfinish(
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 112, in pytest_sessionfinish
+    session._setupstate.teardown_exact(None)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 555, in teardown_exact
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1042, in finish
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 924, in _teardown_yield_fixture
+    next(it)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-head/tests/job_queue/conftest.py", line 532, in dependency_bus
+    set_dependency_bus(None)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-head/daemon/services/dependency_bus.py", line 2812, in set_dependency_bus
+    logger.info("DependencyBus unregistered")
+Message: 'DependencyBus unregistered'
+Arguments: ()
+INTERNALERROR> Traceback (most recent call last):
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 318, in wrap_session
+INTERNALERROR>     session.exitstatus = doit(config, session) or 0
+INTERNALERROR>                          ~~~~^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 372, in _main
+INTERNALERROR>     config.hook.pytest_runtestloop(session=session)
+INTERNALERROR>     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+INTERNALERROR>     return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+INTERNALERROR>            ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+INTERNALERROR>     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+INTERNALERROR>            ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+INTERNALERROR>     raise exception
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+INTERNALERROR>     teardown.throw(exception)
+INTERNALERROR>     ~~~~~~~~~~~~~~^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/logging.py", line 801, in pytest_runtestloop
+INTERNALERROR>     return (yield)  # Run all the tests.
+INTERNALERROR>             ^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+INTERNALERROR>     teardown.throw(exception)
+INTERNALERROR>     ~~~~~~~~~~~~~~^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/terminal.py", line 707, in pytest_runtestloop
+INTERNALERROR>     result = yield
+INTERNALERROR>              ^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+INTERNALERROR>     res = hook_impl.function(*args)
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/dsession.py", line 138, in pytest_runtestloop
+INTERNALERROR>     self.loop_once()
+INTERNALERROR>     ~~~~~~~~~~~~~~^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/dsession.py", line 163, in loop_once
+INTERNALERROR>     call(**kwargs)
+INTERNALERROR>     ~~~~^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/dsession.py", line 217, in worker_workerfinished
+INTERNALERROR>     assert not crashitem, (crashitem, node)
+INTERNALERROR> AssertionError: ('tests/test_loader_empty_content_m16.py::TestCoreClassEmptyContent::test_selected_empty_string_preserved', <WorkerController gw8>)
+INTERNALERROR> assert not 'tests/test_loader_empty_content_m16.py::TestCoreClassEmptyContent::test_selected_empty_string_preserved'
+
+76 failed, 2053 passed, 67 skipped, 1743 warnings in 170.13s (0:02:50)

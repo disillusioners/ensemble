@@ -1,0 +1,29 @@
+.......FFFFFFFFFFFFFFFFFFFFFFFFFF                                        [100%]
+=========================== short test summary info ============================
+FAILED tests/test_injection_api.py::TestQueuedField::test_queued_value_is_propagated[True]
+FAILED tests/test_instance_list_order_api.py::TestOrderActivity::test_activity_descendants_unchanged
+FAILED tests/test_instance_list_order_api.py::TestOrderActivity::test_activity_fresh_live_above_pinned_terminal
+FAILED tests/test_instance_list_order_api.py::TestOrderActivity::test_activity_live_root_above_all_terminal
+FAILED tests/test_instance_list_order_api.py::TestOrderActivity::test_activity_terminal_roots_updated_at_desc
+FAILED tests/unit/routers/test_defer_blocked_api.py::TestConsistencyPin::test_queued_only_fixture_agrees_both_directions
+FAILED tests/unit/routers/test_defer_blocked_api.py::TestConsistencyPin::test_route_executes_the_derived_witness_statement
+FAILED tests/unit/routers/test_defer_blocked_api.py::TestFreshEngineNegativeFixture::test_terminated_instance_with_residual_active_job_is_not_a_witness
+FAILED tests/unit/routers/test_defer_blocked_api.py::TestPurity::test_endpoint_emits_zero_dml
+FAILED tests/unit/routers/test_defer_blocked_api.py::TestRouteRegistration::test_empty_db_serves_200_idle
+FAILED tests/unit/routers/test_defer_blocked_api.py::TestSeverityShapes::test_amber_paused_holder_via_legacy_clause
+FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_running_injection
+FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_terminal_revival
+FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_disabled_mode_treats_slash_as_plain_text
+FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_double_slash_escape_passes_through_as_plain_text
+FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_inflight_busy_rejects_with_reason
+FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_known_command_short_circuits_with_200_ack
+FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_pending_injections_guard_rejects_at_router
+FAILED tests/unit/routers/test_work_router.py::TestCombinedFilters::test_kind_and_status_compose
+FAILED tests/unit/routers/test_work_router.py::TestInstanceFilter::test_instance_id_filter
+FAILED tests/unit/routers/test_work_router.py::TestKindFilter::test_kind_filter_job_returns_only_jobs
+FAILED tests/unit/routers/test_work_router.py::TestSerialization::test_none_fields_serialized_as_null
+FAILED tests/unit/routers/test_work_router.py::TestSerialization::test_response_field_shape
+FAILED tests/unit/routers/test_work_router.py::TestStatusFilter::test_status_filter_comma_separated_handles_whitespace_and_dupes
+FAILED tests/unit/routers/test_work_router.py::TestStatusFilter::test_status_filter_comma_separated_returns_union
+FAILED tests/unit/routers/test_work_router.py::TestStatusFilter::test_status_filter_processing_returns_running_task
+26 failed, 7 passed in 8.92s

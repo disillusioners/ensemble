@@ -7,11 +7,21 @@
 > `phase{1..6}-plan.md` (the per-phase task rows and the declared mutation tables).
 > **Contract:** [`docs/architecture/metrics-query-contract.md`](../../../../docs/architecture/metrics-query-contract.md)
 > carries the per-phase evidence blocks this pack cites.
-> **Machine-readable evidence preserved in this directory:**
+> **Machine-readable evidence preserved in this directory (142 files, ~1.5 MB):**
 > `evidence/am16-exposition-{base,head}.txt` (the AM-16 structural diff inputs),
 > `evidence/p4-failed-digests.txt` (the recomputed P4 FAILED digests),
 > `evidence/p1-mutations-final.log` + `evidence/p2-mutations-final.log` (the surviving Stage-A
-> mutation logs) and `evidence/p1-p2-mutation-logs.sha256.txt` (their sha256 table + leg census).
+> mutation logs) and `evidence/p1-p2-mutation-logs.sha256.txt` (their sha256 table + leg census);
+> the **P3** set (`p3-gate-final/` in full · `p3-scratch/` · `p3-sweep-crash/` ·
+> `p3-sweep-sharded/{20261102T060325Z,20261102T061340Z}/`), the **P4** set (`p4-gate/` ·
+> `p4-mutations/`) and the **P5** set (`p5/`); the per-set **sha256 manifests**
+> (`p3-preservation-manifest.txt` · `p4-preservation-manifest.txt` ·
+> `p5-preservation-manifest.txt` · `set-digests.txt`) and the **verdict-bearing excerpts**
+> (`p3-verdict-lines.txt` · `p5-verdict-lines.txt`). **Every preserved file was
+> byte-identity-checked** against its source (`cmp`). The multi-MB bulk (`.collect.txt` /
+> `.nodes.txt` / `.shard-*.out`) is deliberately **not** copied — the per-shard FAILED/ERROR
+> excerpts are extracted instead. **The full preservation table — path + sha256 + what it proves
+> — is §13 item 3.**
 
 **How to read this pack.** Every leg is recorded with its **declared tier**, its **D1/D2
 split**, the **slicing proof**, the **pre-exclusion record** and the **expected-skip census**.
@@ -46,7 +56,7 @@ guessed.
 | P2-G1 | D1 137 + D2 281 green | D2 281 green | **bare-id `d78b09cf2549c371` / grep-full `d9bff11a731d8ba3` — IDENTICAL both sides** (recomputed from the preserved Stage-A gate artefacts, `evidence/p2-gate-digests.txt`; the D2 leg: `1 failed, 280 passed` on both sides) | net-new **EMPTY** |
 | P3-G1 | D1 110 + D2 302 green | D2 302 green | digest-equal | net-new **EMPTY** |
 | P3-G1 blast-radius supplementary | 226 nodes, both legs green | 226 nodes, both legs green | digest-equal | net-new **EMPTY** |
-| P3-G1 whole-tree (sharded) | HEAD **32 725** nodes | BASE **32 450** nodes | net-new **0** | net-new **EMPTY** |
+| P3-G1 whole-tree (sharded) | HEAD **32 725** nodes | BASE **32 450** nodes | **no verdict was recorded** (the sweep script's net-new block is empty by construction — a `;` vs `|` bug); recomputing from the preserved node-id lists: `comm -23` = **37** base-only, `comm -13` = **33** head-only (BASE 488 / HEAD 484 unique ids) ⇒ **the sets are NOT equal**; the two EARLIER runs recorded "DIGEST-EQUAL" over the **empty-string digest** (`nodes=0`) ⇒ vacuous | **NOT ESTABLISHED** — see §12 row 4 and §13 item 3 |
 | P3-G2 | D1 7 + D2 12 green | D2 12 green | digest-equal | PASS |
 | P4-G1 (W1) | 534 passed · 1 failed · exit 1 | 493 passed · 1 failed · exit 1 | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
 | P4-G2 (W2) | 536 passed · 1 failed · exit 1 | 493 passed · 1 failed · exit 1 | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
@@ -375,7 +385,7 @@ budget.** They are **recorded findings, never auto-fixed.**
 | 1 | The **series budget** landed under the pinned projection (the three shortfalls) | §3.2 |
 | 2 | The **P4 bridge does not import `daemon/api.py`** (a mechanical Tier-2 file the plan forbids touching) — it looks the already-imported module up in `sys.modules` (`daemon/services/metrics_query/wiring/sources.py:128`). The shipped code gives a second reason: importing it from there would create a **circular import** (`daemon.api` imports the wiring package). Consequence: in a process where `daemon.api` was never imported, the families degrade to "no series"; the running daemon always has it imported (the uvicorn entry is `daemon.api:app`). The alternative was one line in `api.py` forcing a whole-tree Tier-2 leg | the lane's P4 evidence; `sources.py:20-25` + `:118-129` |
 | 3 | The plan's **DECLARED dual-side compositions were short** vs the blast-radius derivation in **P2, P3 AND P4** — the derived sets ran as **disclosed supplementary legs** (digest-equal) and the widened registration input is recorded for the tester lane | §1.2 + the contract doc's per-phase FINDINGs |
-| 4 | The whole-tree single-shot `-n auto` form **aborts rc=3 on BOTH legs** (an xdist worker exits mid-node; reproduced at BASE). The first attempt's "digest equal" was **VACUOUS** (both legs aborted before digests existed) and was recorded as a **FAILED leg**, then re-run in the sharded form (BASE 32 450 / HEAD 32 725 ⇒ net-new 0) | §1.2 |
+| 4 | The whole-tree single-shot `-n auto` form **aborts rc=3 on BOTH legs** (an xdist worker exits mid-node; reproduced at BASE). The first attempt's "digest equal" was **VACUOUS** — both legs aborted before any FAILED ids existed, so the digest was the **empty-string digest** `e3b0c442…b855` (`= sha256("")`, `nodes=0`) and the "DIGEST-EQUAL … net-new = EMPTY" verdict that followed from it was vacuous. It was recorded as a **FAILED leg** and re-run in the sharded form (BASE 32 450 / HEAD 32 725 nodes). **CORRECTION (2026-11-02, from the preserved evidence):** the **first sharded attempt was vacuous too** (every shard `rc=126` ⇒ the empty-string digest again), and in the **real sharded run** the script's net-new verdict block is **empty by construction** (a `;` vs `|` bug — the `comm` output went to stdout, not into the log) ⇒ **no net-new verdict was recorded**. Recomputing the comparison from the preserved node-id lists gives `comm -23` = **37** base-only and `comm -13` = **33** head-only entries (BASE 488 / HEAD 484 unique ids) ⇒ **the two legs' FAILED-id sets are NOT equal**, and the "net-new 0" figure is **not evidenced as stated**. The 33 head-only entries are whole-file groupings that appear on one side only — the signature of an order/parallelism-dependent flake, not a lane regression — but **this pack does not adjudicate that**; the per-id lists and the comparator are preserved in `evidence/` for the council | the evidence pack §13 item 3 + `evidence/p3-sweep-sharded/20261102T061340Z/` + `evidence/p3-scratch/sweep_sharded.sh` + `evidence/p3-verdict-lines.txt` |
 | 5 | The **F7 HELP carrier renders under both spellings** — the exposition mask covers both | §7 |
 | 6 | `db_offload` is a **process-level singleton** bound to the first loop that uses it (a test-harness caveat; production unaffected) | the lane's P3 evidence |
 | 7 | The pre-existing base red `test_rdrs_lanes_come_from_the_config_kill_switchs` (an 8-vs-7 RDRS lane drift, identical on both legs) is **NOT lane-attributable** — fixing it would edit `SWEEP_LANE_VOCABULARY`, an exposition footer **outside** the AM-16 allowlist | §1.2 + `evidence/p4-failed-digests.txt` |
@@ -404,17 +414,47 @@ budget.** They are **recorded findings, never auto-fixed.**
    not carry the lane). **Resolution path:** read `live_series_count` from
    `/api/metrics/families` at the **staged boot smoke** — once, from the staged artefact — and
    record it in the disclosure before the flip (see the stage-prep checklist §3).
-3. **The P3 per-leg FAILED digests.** The contract doc records the P4 and P5 digests, and the
-   **P2** digests are now **RECOVERED and RECORDED** (bare-id `d78b09cf2549c371` / grep-full
-   `d9bff11a731d8ba3`, IDENTICAL on both sides — recomputed from the preserved Stage-A gate
-   artefacts, `evidence/p2-gate-digests.txt` + `evidence/p2-gate/`). They are also the **same
-   digests as the P4 D2 legs** — the FAILED set is the single known base red on both. **The P3
-   half remains open:** the P3 artefacts also survive on disk (`/tmp/p3-gate-20261102T051039Z/`,
-   `/tmp/p3-gate-final/`, the sweep dirs incl. the `FAILED-worker-crash` and the two
-   `sweep-sharded` legs, and the `p3mut_*.log` mutation logs), so the P3 digest is recoverable —
-   but preserving them was **not** in this phase's mandate, so they are **not** yet in the lane.
-   **Not a blocker** — the mutation legs are separately evidenced by the preserved Stage-A logs
-   (§2.3) and the P2 leg is now digest-recorded.
+3. **The per-leg FAILED digests — CLOSED (2026-11-02).** Every leg's digest is now **preserved
+   in-repo** and **digest-backed**, across P2, P3, P4 AND P5. The artefacts that were "not
+   recoverable" are recovered (they had never gone — an earlier scan of `/tmp` was truncated by
+   `head -20` and cut the listing exactly above them). **The preservation table:**
+
+| Preserved set | Files | Set digest (sha256 over the sorted per-file manifest) | What it proves |
+|---|---|---|---|
+| `evidence/p1-mutations-final.log` | 1 | `f59dd12b5b22bbef3777761047688c046ae0e3f518608943da1fea7e514e835e` | the **P1** mutation matrix — **3** legs, each `RED-OK`, ending `RESTORED → 21 passed → GREEN-OK` |
+| `evidence/p2-mutations-final.log` | 1 | `be0fe2e24da1ce20e254dc5c14fa1e584b6bb21e468e5e3435af370b44fd29c1` | the **P2** mutation matrix — **16** legs (`P2-M1…M15` **+ `P2-M13b`**), each `RED-OK`, ending `RESTORED → 156 passed → GREEN-OK` |
+| `evidence/p1-p2-mutation-logs.sha256.txt` | 1 | (the sha256 table + leg census for the two logs above) | the P1/P2 leg census + the digests + the `/tmp` source paths/sizes/mtimes |
+| `evidence/p2-gate/` + `p2-gate-digests.txt` | 12 + 1 | `e14b63d1e8f03b193699127ca4c4c39be980e35b6caea066dc10fa1c522ebc79` | the **P2-G1** dual-side gate: `HEAD.d2.out` / `BASE.d2.out` (`1 failed, 280 passed` each) ⇒ bare-id `d78b09cf2549c371` / grep-full `d9bff11a731d8ba3`, **IDENTICAL both sides**; the D1 leg (`21 passed`); the 9-file D2 composition; the env **fence** record |
+| `evidence/p3-gate-final/` | 64 | `e83b8f6b07c1ea3adef3b2a66d55d7701dbcdfe15b8dc63948d70a79c7534d77` | the **P3-G1** gate dir **in full**: the D1/D2/cage legs' rc + summary (HEAD `110 passed` / `1 failed, 301 passed` / `7 passed` / `12 passed`; BASE `1 failed, 301 passed` / `12 passed`), the **exposition bodies** (the AM-16 structural diff), the adjudicate/fixed/netnew sets, the collect outputs (the slicing proof) |
+| `evidence/p3-scratch/` | 2 | `4e0ec17ade4c21f97357128081319c75b00f44ebfff5aebc488a050ee6969538` | `mutation-ledger.json` (the P3 mutation ledger) + **`sweep_sharded.sh`** — the whole-tree **comparator** whose verdict semantics the council must read (§12 row 4) |
+| `evidence/p3-sweep-crash/` | 5 | `ef692965142e3772b89c3d04b6259618d2ee5fa096bd870f242f270c31c68a47` | the **single-shot `-n auto` attempt**: `rc=3` on BOTH legs, the `INTERNALERROR>` lines, and the **VACUOUS** digest `e3b0c442…b855` (`= sha256("")`, **nodes=0**) with the "DIGEST-EQUAL … net-new = EMPTY" verdict that followed from it — the disclosure-(4) evidence |
+| `evidence/p3-sweep-sharded/20261102T060325Z/` | 11 | `a51e8cc6d3ef58568c8570fc15f6e2dc150818cb81a69bb45dde5b38a42a7f50` | the **first sharded attempt** — every shard `rc=126` ⇒ the digests are the **empty-string digest again** ⇒ its "DIGEST-EQUAL" is **vacuous too** |
+| `evidence/p3-sweep-sharded/20261102T061340Z/` | 11 | `94892c061221ade63228509f49736946e259c3bf9ac7ad441fee8981887467f9` | the **real whole-tree sharded run** — BASE 32 450 / HEAD 32 725 nodes, 275 head-only nodes, the per-shard `progress.tsv`, the FAILED-id lists and the node-id lists (**the digests**, the per-id lists) |
+| `evidence/p4-gate/` | 24 | `7ddb778696753614a36b5e9acc4ca4fe038aa2937adedb8ef61fc81af79dd831` | the **raw digest inputs** for all six P4 D2 legs and all six widened-leg legs (the `.bare` node-id lists + the `.full` grep forms) — the inputs behind `evidence/p4-failed-digests.txt` |
+| `evidence/p4-mutations/results.json` | 1 | `ed737facd21f39bf8956ca0c17dba8d99650dc44c8e245a1b46b1c095a01ed3e` | the **P4** mutation matrix (the 13 legs), machine-readable |
+| `evidence/p5/` | 5 | `5a65e01e5c7a137d4be876b611026fa275fa6cc2a8fef7b686c4e17ea84386b0` | the **P5** FE gate: `summary.json` (**11** mutations, **0** failures, all PASS, all `restored_byte_identical`), the two build legs (the **10** budget WARNINGs — all pre-existing, **none** in a lane file), the e2e (**2 passed, 31.3 s**), and the full FE corpus (**9 failed / 4 279 passed / 4 288**) |
+| `evidence/p3-preservation-manifest.txt` · `p4-preservation-manifest.txt` · `p5-preservation-manifest.txt` · `set-digests.txt` | 4 | (the per-set manifests + the set-level digests) | the **sha256 manifest of each preserved set** — the p1-p2 pattern. A reviewer re-derives a set digest with `cd <set-dir> && sha256sum * \| sort \| sha256sum` |
+| `evidence/p3-verdict-lines.txt` · `p5-verdict-lines.txt` | 2 | (the verdict-bearing excerpts) | the **verdict-bearing lines** of each set, extracted so the council reads the verdicts without re-running anything |
+
+**Every preserved file was byte-identity-checked against its source** (`cmp`, 119 checked /
+119 identical / 0 mismatched for the newly copied sets). **The multi-MB bulk was deliberately
+NOT copied**: the `.collect.txt` / `.nodes.txt` / `.shard-*.out` files are excluded, and the
+per-shard FAILED/ERROR excerpts are extracted instead
+(`*.per-shard-failed-ids.excerpt.txt`). The whole preserved tree is **142 files / ~1.5 MB**.
+
+**One material finding fell out of the preservation — it is recorded, not smoothed.** The
+whole-tree sharded leg's **net-new claim is not evidenced as stated** (§12 row 4 carries the
+detail). The two legs' FAILED-id **sets are NOT equal**: `comm -23` = **37** base-only (fixed at
+HEAD) and `comm -13` = **33** head-only entries, against BASE **488** / HEAD **484** unique ids.
+The sweep script's own verdict block is **empty by construction** (a `;` vs `|` bug: the `comm`
+output went to stdout, not into the log), so no net-new verdict was ever recorded for the real
+run — while the two earlier runs recorded "DIGEST-EQUAL … net-new = EMPTY" over the
+**empty-string digest** (`nodes=0`), i.e. **vacuously**. The 33 head-only entries are
+whole-file groupings (e.g. `tests/test_injection_api.py::…`, `tests/unit/routers/test_work_router.py::…`)
+that appear on one side and not the other — the signature of an order/parallelism-dependent
+flake rather than a lane regression — but **this pack does not adjudicate that**; the per-id
+lists are preserved beside the record and the question belongs to the council.
+
 4. **The P6-G1 reconciliation pack.** The pack id `central_metrics_ledger_reconciliation` is
    **declared** by the plan; `.agents/tester/PACKS.md` is the **tester lane's** file and the
    brief forbids this lane from touching it, so the pack's **registration** (and hence its

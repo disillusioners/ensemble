@@ -1,0 +1,564 @@
+ts-jest[config] (WARN) [94mmessage[0m[90m TS151001: [0mIf you have issues related to imports, you should consider setting `esModuleInterop` to `true` in your TypeScript configuration file (usually `tsconfig.json`). See https://blogs.msdn.microsoft.com/typescript/2018/01/31/announcing-typescript-2-7/#easier-ecmascript-module-interoperability for more information.
+FAIL src/app/pages/settings/settings.component.spec.ts (5.703 s)
+  ● Timezone preference (user-timezone-setting) › renders the timezone section with the native picker when Intl.supportedValuesOf is available
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["Auto / not set", "Asia/Bangkok (UTC+07:00)", "America/New_York (UTC-05:00)", "UTC (UTC+00:00)"]
+
+      1504 |     // and a non-empty offset.
+      1505 |     expect(labels).toContain('Asia/Bangkok (UTC+07:00)');
+    > 1506 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+           |                    ^
+      1507 |     expect(labels).toContain('UTC (UTC+00:00)');
+      1508 |
+      1509 |     // The Auto sentinel is the first option in the list.
+
+      at src/app/pages/settings/settings.component.spec.ts:1506:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● Timezone preference (user-timezone-setting) › uses the API list when the GET /api/settings/timezones response is non-empty
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["Auto / not set", "Asia/Ho_Chi_Minh (UTC+07:00)", "Asia/Bangkok (UTC+07:00)", "America/New_York (UTC-05:00)", "UTC (UTC+00:00)"]
+
+      1739 |     expect(labels).toContain('Asia/Ho_Chi_Minh (UTC+07:00)');
+      1740 |     expect(labels).toContain('Asia/Bangkok (UTC+07:00)');
+    > 1741 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+           |                    ^
+      1742 |     expect(labels).toContain('UTC (UTC+00:00)');
+      1743 |     // Picker is shown (the API list was non-empty).
+      1744 |     expect(component.isTzNativeSupported()).toBe(true);
+
+      at src/app/pages/settings/settings.component.spec.ts:1741:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+PASS src/app/pages/jobs/jobs.component.spec.ts
+PASS src/app/pages/jobs/jobs-page.bindings.pins.spec.ts
+PASS src/app/components/job-queue-panel/job-queue-panel.component.spec.ts
+PASS src/app/models/instance-node.model.spec.ts
+PASS src/app/services/workspace.service.spec.ts
+PASS src/app/pages/snapshots/snapshots.component.spec.ts (5.857 s)
+PASS src/app/models/skill.model.spec.ts
+PASS src/app/services/notification.service.spec.ts
+PASS src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.spec.ts
+PASS src/app/components/ab-test-dashboard/ab-test-dashboard.component.spec.ts
+PASS src/app/components/vscode-editor-cache/vscode-editor-cache.component.spec.ts
+PASS src/app/pages/jobs/jobs-page.store.spec.ts
+PASS src/app/components/code-viewer/code-viewer.component.spec.ts
+PASS src/app/models/job.model.spec.ts
+PASS src/app/services/job.service.spec.ts
+PASS src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts
+FAIL src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts
+  ● schedule-create-dialog — timezone picker source chain › (1) the API list drives the picker when the GET /api/settings/timezones response is non-empty
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["America/Chicago (UTC-06:00)", "America/Denver (UTC-07:00)", "America/Los_Angeles (UTC-08:00)", "America/New_York (UTC-05:00)", "Asia/Shanghai (UTC+08:00)", "Asia/Singapore (UTC+08:00)", "Asia/Tokyo (UTC+09:00)", "Australia/Sydney (UTC+11:00)", "Europe/Berlin (UTC+01:00)", "Europe/London (UTC+00:00)", …]
+
+      254 |     const labels = dialog.timezoneOptions().map((o) => o.label);
+      255 |     // Each API zone renders with the standard "<zone> (UTC±HH:MM)" label.
+    > 256 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+          |                    ^
+      257 |     expect(labels).toContain('Asia/Tokyo (UTC+09:00)');
+      258 |     expect(labels).toContain('UTC (UTC+00:00)');
+      259 |     // Picker is shown (the API list was non-empty).
+
+      at src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts:256:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● schedule-create-dialog — timezone picker source chain › (2) falls back to Intl.supportedValuesOf when the GET /api/settings/timezones response is empty
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["America/Chicago (UTC-06:00)", "America/Denver (UTC-07:00)", "America/Los_Angeles (UTC-08:00)", "America/New_York (UTC-05:00)", "Asia/Shanghai (UTC+08:00)", "Asia/Singapore (UTC+08:00)", "Asia/Tokyo (UTC+09:00)", "Australia/Sydney (UTC+11:00)", "Europe/Berlin (UTC+01:00)", "Europe/London (UTC+00:00)", …]
+
+      277 |     // The Intl list (patched to CANONICAL_IANA_FIXTURE) takes over.
+      278 |     const labels = dialog.timezoneOptions().map((o) => o.label);
+    > 279 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+          |                    ^
+      280 |     expect(dialog.isTzNativeSupported()).toBe(true);
+      281 |   });
+      282 |
+
+      at src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts:279:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● schedule-create-dialog — timezone picker source chain › (2) falls back to Intl.supportedValuesOf when the GET /api/settings/timezones call errors
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["America/Chicago (UTC-06:00)", "America/Denver (UTC-07:00)", "America/Los_Angeles (UTC-08:00)", "America/New_York (UTC-05:00)", "Asia/Shanghai (UTC+08:00)", "Asia/Singapore (UTC+08:00)", "Asia/Tokyo (UTC+09:00)", "Australia/Sydney (UTC+11:00)", "Europe/Berlin (UTC+01:00)", "Europe/London (UTC+00:00)", …]
+
+      288 |     expect(dialog.apiTimezones()).toBeNull();
+      289 |     const labels = dialog.timezoneOptions().map((o) => o.label);
+    > 290 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+          |                    ^
+      291 |     expect(dialog.isTzNativeSupported()).toBe(true);
+      292 |   });
+      293 |
+
+      at src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts:290:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+PASS src/app/components/skill-lineage-tree/skill-lineage-tree.component.spec.ts
+PASS src/app/models/defer-blocked.model.spec.ts
+PASS src/app/services/skill.service.spec.ts
+FAIL src/app/models/jobs-grouping.model.spec.ts
+  ● jobs-grouping — groupMetaLine (agent · N jobs · timeAgo) › renders agent + N jobs + ago when all three segments are populated
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected substring: "ago"
+    Received string:    "leader · 5 jobs · 9/10/2026"
+
+      495 |         lastActivityAt: '2026-09-10T08:00:00Z',
+      496 |       }),
+    > 497 |     ).toContain('ago');
+          |       ^
+      498 |   });
+      499 |
+      500 |   it('uses singular "job" when jobCount === 1', () => {
+
+      at src/app/models/jobs-grouping.model.spec.ts:497:7
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● jobs-grouping — groupHeaderTitle (instanceDisplayTitle port) › renders "agent · timeAgo" when both fields are populated
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected substring: "ago"
+    Received string:    "leader · 9/10/2026"
+
+      557 |     });
+      558 |     expect(t).toContain('leader');
+    > 559 |     expect(t).toContain('ago');
+          |               ^
+      560 |   });
+      561 |
+      562 |   it('falls back to agent-only when no timestamp is available', () => {
+
+      at src/app/models/jobs-grouping.model.spec.ts:559:15
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● jobs-grouping — groupHeaderTitle (instanceDisplayTitle port) › falls back to timeAgo-only when no agent is available
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected substring: "ago"
+    Received string:    "9/10/2026"
+
+      576 |       lastActivityAt: '2026-09-10T10:00:00Z',
+      577 |     });
+    > 578 |     expect(t).toContain('ago');
+          |               ^
+      579 |     expect(t).not.toContain('·');
+      580 |   });
+      581 |
+
+      at src/app/models/jobs-grouping.model.spec.ts:578:15
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+PASS src/app/services/persona.service.spec.ts
+PASS src/app/services/image-upload.spec.ts
+PASS src/app/services/tab-state.service.spec.ts
+PASS src/app/pages/jobs/jobs-window.model.spec.ts
+PASS src/app/pages/resources/live/live-tab.component.spec.ts
+PASS src/app/components/skill-trigger-form/skill-trigger-form.component.spec.ts
+PASS src/app/pages/resources/timeline/timeline-tab.component.spec.ts
+PASS src/app/components/message-input/message-input.submit.spec.ts
+PASS src/app/components/project-tab-bar/project-tab-bar.component.spec.ts
+PASS src/app/services/api.service.spec.ts
+PASS src/app/pages/chat/chat-send-error.spec.ts
+PASS src/app/constants/ens-img-marker.spec.ts
+PASS src/app/components/vscode-viewer/vscode-viewer.component.spec.ts
+PASS src/app/pages/persona/persona.component.spec.ts
+PASS src/app/components/message-input/message-input.component.spec.ts
+PASS src/app/components/skill-usage-table/skill-usage-table.component.spec.ts
+PASS src/app/components/skill-trigger-list/skill-trigger-list.component.spec.ts
+PASS src/app/pages/jobs/defer-holders-panel/defer-holders-panel.component.spec.ts
+PASS src/app/services/work.service.spec.ts
+PASS src/app/services/instances-view-state.service.spec.ts
+PASS src/app/pages/jobs/jobs-keyboard.model.spec.ts
+PASS src/app/components/message-input/message-input.component.autocomplete.spec.ts
+PASS src/app/components/queue-list/queue-list.component.spec.ts
+PASS src/app/services/mission.service.spec.ts
+PASS src/app/models/jobs-enrichment.model.spec.ts
+PASS src/app/components/live-view-dialog/live-view-dialog.component.spec.ts
+PASS src/app/pages/snapshots/snapshots-table.component.spec.ts
+PASS src/app/models/mission-terminal-token-guard.spec.ts
+PASS src/app/components/confirm-dialog/confirm-dialog.component.spec.ts
+PASS src/app/constants/live-view-url.spec.ts
+FAIL src/app/models/jobs-filter-state.model.spec.ts
+  ● JobsFilterState — shape + defaults › canonical status/source tables cover the model unions (exhaustiveness guard compiles)
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 0
+    + Received  + 1
+
+    @@ -1,8 +1,9 @@
+      Array [
+        "cancelled",
+        "completed",
+    +   "completed (gate escalated — unverified)",
+        "dead_letter",
+        "failed",
+        "paused",
+        "pending",
+        "processing",
+
+      47 |     // this runtime sanity pin keeps the lists honest if someone
+      48 |     // edits them by hand.
+    > 49 |     expect([...JOB_STATUS_VALUES].sort()).toEqual(
+         |                                           ^
+      50 |       ['cancelled', 'completed', 'dead_letter', 'failed', 'paused', 'pending', 'processing', 'settled'].sort(),
+      51 |     );
+      52 |     expect([...JOB_SOURCE_VALUES].sort()).toEqual(['api', 'scheduler', 'telegram', 'webhook'].sort());
+
+      at src/app/models/jobs-filter-state.model.spec.ts:49:43
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+PASS src/app/components/image-viewer-dialog/image-viewer-dialog.component.spec.ts
+PASS src/app/services/queue.service.spec.ts
+PASS src/app/components/message-input/message-input.paste.spec.ts
+PASS src/app/components/job-create-dialog/job-create-dialog.component.spec.ts
+PASS src/app/services/job-sse.service.spec.ts
+PASS src/app/components/searchable-select/searchable-select.component.spec.ts
+PASS src/app/components/vscode-viewer/vscode-viewer.integration.spec.ts
+PASS src/app/components/job-card/job-card.component.spec.ts
+PASS src/app/services/settings.service.spec.ts
+PASS src/app/pages/jobs/jobs-url-state.model.spec.ts
+PASS src/app/pages/resources/svg-timeline/svg-timeline.component.spec.ts
+PASS src/app/components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component.spec.ts
+PASS src/app/components/notification-bell/notification-bell.component.spec.ts
+PASS src/app/components/diff-viewer/diff-viewer.component.spec.ts
+PASS src/app/services/resources.service.spec.ts
+PASS src/app/components/todo-list/todo-list.component.spec.ts
+PASS src/app/models/work.model.spec.ts
+PASS src/app/app.persona-nav.spec.ts
+PASS src/app/services/snapshot.service.spec.ts
+PASS src/app/services/image-viewer-actions.spec.ts
+PASS src/app/components/code-viewer/codemirror.directive.spec.ts
+PASS src/app/services/live-view-actions.spec.ts
+PASS src/app/components/version-picker/version-picker.component.spec.ts
+PASS src/app/pages/jobs/jobs-empty-state.model.spec.ts
+PASS src/app/pages/maintenance/maintenance.component.spec.ts
+PASS src/app/pages/resources/resources.component.spec.ts
+PASS src/app/models/cleanup-preflight.model.spec.ts
+PASS src/app/components/instance-id-copy/instance-id-copy.component.spec.ts
+PASS src/app/services/workspace-overlay.service.spec.ts
+PASS src/app/constants/image-ref.spec.ts
+PASS src/app/services/command-registry.service.spec.ts
+PASS src/app/pages/jobs/jobs-poll.model.spec.ts
+PASS src/app/pages/instance-detail/instance-detail.component.spec.ts
+PASS src/app/components/mermaid-graph/mermaid-graph.component.spec.ts
+PASS src/app/models/mission.model.spec.ts
+PASS src/app/models/job-queue.model.spec.ts
+PASS src/app/pages/workspace/workspace.component.spec.ts (7.665 s)
+PASS src/app/pages/chat/chat.component.spec.ts
+PASS src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.spec.ts
+PASS src/app/components/chat-interface/chat-interface.component.spec.ts
+PASS src/app/pages/metrics/metrics.component.spec.ts
+PASS src/app/components/agent-selector/agent-selector.component.spec.ts
+PASS src/app/components/chat-interface/live-view-chip.spec.ts
+PASS src/app/pages/mcps-gateway/mcps-gateway.component.spec.ts
+PASS src/app/pages/metrics/overview/overview-tab.component.spec.ts
+PASS src/app/components/edit-source-modal/edit-source-modal.component.spec.ts
+PASS src/app/pages/metrics/families/families-tab.component.spec.ts
+PASS src/app/components/add-source-modal/add-source-modal.component.spec.ts
+PASS src/app/pages/metrics/charts/charts-tab.component.spec.ts
+PASS src/app/services/metrics.service.spec.ts
+PASS src/app/components/agent-switcher/agent-switcher.component.spec.ts
+PASS src/app/components/file-tabs/file-tabs.component.spec.ts
+PASS src/app/pages/mcps-gateway/mcps-gateway.service.spec.ts
+PASS src/app/services/command-state.service.spec.ts
+PASS src/app/components/charts/svg-line-chart/svg-line-chart.component.spec.ts
+PASS src/app/components/file-tree/file-tree.component.spec.ts
+PASS src/app/models/metrics.model.spec.ts
+PASS src/app/pages/metrics/metrics.bindings.pins.spec.ts
+PASS src/app/components/job-queue-indicator/job-queue-indicator.component.spec.ts
+PASS src/app/pages/metrics/metrics-gear-menu.spec.ts
+PASS src/app/components/mcp-server-dialog/mcp-server-dialog.component.spec.ts
+PASS src/app/services/instance.service.spec.ts
+PASS src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.service.spec.ts
+PASS src/app/components/instance-list/instance-list.component.spec.ts
+PASS src/app/services/sse.service.spec.ts
+PASS src/app/services/message-merge.util.spec.ts
+PASS src/app/components/instance-delete-dialog/instance-delete-dialog.component.spec.ts
+PASS src/app/app.component.spec.ts
+PASS src/app/services/parse-command-ack.spec.ts
+PASS src/app/components/mcp-server-list/mcp-server-list.component.spec.ts
+PASS src/app/pages/home/home.component.spec.ts
+PASS src/app/services/mcp-server.service.spec.ts
+PASS src/app/pages/maintenance/maintenance.bindings.pins.spec.ts
+PASS src/app/components/message-input/slash-command-palette.util.spec.ts
+PASS src/app/services/sse-error-row.spec.ts
+PASS src/app/pages/instances/instances.component.spec.ts
+PASS src/app/app.routes.spec.ts
+PASS src/app/services/sse-command-progress.spec.ts
+PASS src/app/utils/agent-dedup.spec.ts
+PASS src/app/pages/mcps-gateway/mcps-gateway.pins.spec.ts
+PASS src/app/pages/resources/resources-gear-menu.spec.ts
+
+Summary of all failing tests
+FAIL src/app/pages/settings/settings.component.spec.ts (5.703 s)
+  ● Timezone preference (user-timezone-setting) › renders the timezone section with the native picker when Intl.supportedValuesOf is available
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["Auto / not set", "Asia/Bangkok (UTC+07:00)", "America/New_York (UTC-05:00)", "UTC (UTC+00:00)"]
+
+      1504 |     // and a non-empty offset.
+      1505 |     expect(labels).toContain('Asia/Bangkok (UTC+07:00)');
+    > 1506 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+           |                    ^
+      1507 |     expect(labels).toContain('UTC (UTC+00:00)');
+      1508 |
+      1509 |     // The Auto sentinel is the first option in the list.
+
+      at src/app/pages/settings/settings.component.spec.ts:1506:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● Timezone preference (user-timezone-setting) › uses the API list when the GET /api/settings/timezones response is non-empty
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["Auto / not set", "Asia/Ho_Chi_Minh (UTC+07:00)", "Asia/Bangkok (UTC+07:00)", "America/New_York (UTC-05:00)", "UTC (UTC+00:00)"]
+
+      1739 |     expect(labels).toContain('Asia/Ho_Chi_Minh (UTC+07:00)');
+      1740 |     expect(labels).toContain('Asia/Bangkok (UTC+07:00)');
+    > 1741 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+           |                    ^
+      1742 |     expect(labels).toContain('UTC (UTC+00:00)');
+      1743 |     // Picker is shown (the API list was non-empty).
+      1744 |     expect(component.isTzNativeSupported()).toBe(true);
+
+      at src/app/pages/settings/settings.component.spec.ts:1741:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+FAIL src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts
+  ● schedule-create-dialog — timezone picker source chain › (1) the API list drives the picker when the GET /api/settings/timezones response is non-empty
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["America/Chicago (UTC-06:00)", "America/Denver (UTC-07:00)", "America/Los_Angeles (UTC-08:00)", "America/New_York (UTC-05:00)", "Asia/Shanghai (UTC+08:00)", "Asia/Singapore (UTC+08:00)", "Asia/Tokyo (UTC+09:00)", "Australia/Sydney (UTC+11:00)", "Europe/Berlin (UTC+01:00)", "Europe/London (UTC+00:00)", …]
+
+      254 |     const labels = dialog.timezoneOptions().map((o) => o.label);
+      255 |     // Each API zone renders with the standard "<zone> (UTC±HH:MM)" label.
+    > 256 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+          |                    ^
+      257 |     expect(labels).toContain('Asia/Tokyo (UTC+09:00)');
+      258 |     expect(labels).toContain('UTC (UTC+00:00)');
+      259 |     // Picker is shown (the API list was non-empty).
+
+      at src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts:256:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● schedule-create-dialog — timezone picker source chain › (2) falls back to Intl.supportedValuesOf when the GET /api/settings/timezones response is empty
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["America/Chicago (UTC-06:00)", "America/Denver (UTC-07:00)", "America/Los_Angeles (UTC-08:00)", "America/New_York (UTC-05:00)", "Asia/Shanghai (UTC+08:00)", "Asia/Singapore (UTC+08:00)", "Asia/Tokyo (UTC+09:00)", "Australia/Sydney (UTC+11:00)", "Europe/Berlin (UTC+01:00)", "Europe/London (UTC+00:00)", …]
+
+      277 |     // The Intl list (patched to CANONICAL_IANA_FIXTURE) takes over.
+      278 |     const labels = dialog.timezoneOptions().map((o) => o.label);
+    > 279 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+          |                    ^
+      280 |     expect(dialog.isTzNativeSupported()).toBe(true);
+      281 |   });
+      282 |
+
+      at src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts:279:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● schedule-create-dialog — timezone picker source chain › (2) falls back to Intl.supportedValuesOf when the GET /api/settings/timezones call errors
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["America/Chicago (UTC-06:00)", "America/Denver (UTC-07:00)", "America/Los_Angeles (UTC-08:00)", "America/New_York (UTC-05:00)", "Asia/Shanghai (UTC+08:00)", "Asia/Singapore (UTC+08:00)", "Asia/Tokyo (UTC+09:00)", "Australia/Sydney (UTC+11:00)", "Europe/Berlin (UTC+01:00)", "Europe/London (UTC+00:00)", …]
+
+      288 |     expect(dialog.apiTimezones()).toBeNull();
+      289 |     const labels = dialog.timezoneOptions().map((o) => o.label);
+    > 290 |     expect(labels).toContain('America/New_York (UTC-04:00)');
+          |                    ^
+      291 |     expect(dialog.isTzNativeSupported()).toBe(true);
+      292 |   });
+      293 |
+
+      at src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts:290:20
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+FAIL src/app/models/jobs-grouping.model.spec.ts
+  ● jobs-grouping — groupMetaLine (agent · N jobs · timeAgo) › renders agent + N jobs + ago when all three segments are populated
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected substring: "ago"
+    Received string:    "leader · 5 jobs · 9/10/2026"
+
+      495 |         lastActivityAt: '2026-09-10T08:00:00Z',
+      496 |       }),
+    > 497 |     ).toContain('ago');
+          |       ^
+      498 |   });
+      499 |
+      500 |   it('uses singular "job" when jobCount === 1', () => {
+
+      at src/app/models/jobs-grouping.model.spec.ts:497:7
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● jobs-grouping — groupHeaderTitle (instanceDisplayTitle port) › renders "agent · timeAgo" when both fields are populated
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected substring: "ago"
+    Received string:    "leader · 9/10/2026"
+
+      557 |     });
+      558 |     expect(t).toContain('leader');
+    > 559 |     expect(t).toContain('ago');
+          |               ^
+      560 |   });
+      561 |
+      562 |   it('falls back to agent-only when no timestamp is available', () => {
+
+      at src/app/models/jobs-grouping.model.spec.ts:559:15
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● jobs-grouping — groupHeaderTitle (instanceDisplayTitle port) › falls back to timeAgo-only when no agent is available
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected substring: "ago"
+    Received string:    "9/10/2026"
+
+      576 |       lastActivityAt: '2026-09-10T10:00:00Z',
+      577 |     });
+    > 578 |     expect(t).toContain('ago');
+          |               ^
+      579 |     expect(t).not.toContain('·');
+      580 |   });
+      581 |
+
+      at src/app/models/jobs-grouping.model.spec.ts:578:15
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+FAIL src/app/models/jobs-filter-state.model.spec.ts
+  ● JobsFilterState — shape + defaults › canonical status/source tables cover the model unions (exhaustiveness guard compiles)
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 0
+    + Received  + 1
+
+    @@ -1,8 +1,9 @@
+      Array [
+        "cancelled",
+        "completed",
+    +   "completed (gate escalated — unverified)",
+        "dead_letter",
+        "failed",
+        "paused",
+        "pending",
+        "processing",
+
+      47 |     // this runtime sanity pin keeps the lists honest if someone
+      48 |     // edits them by hand.
+    > 49 |     expect([...JOB_STATUS_VALUES].sort()).toEqual(
+         |                                           ^
+      50 |       ['cancelled', 'completed', 'dead_letter', 'failed', 'paused', 'pending', 'processing', 'settled'].sort(),
+      51 |     );
+      52 |     expect([...JOB_SOURCE_VALUES].sort()).toEqual(['api', 'scheduler', 'telegram', 'webhook'].sort());
+
+      at src/app/models/jobs-filter-state.model.spec.ts:49:43
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+
+Test Suites: 4 failed, 130 passed, 134 total
+Tests:       9 failed, 4279 passed, 4288 total
+Snapshots:   0 total
+Time:        110.043 s

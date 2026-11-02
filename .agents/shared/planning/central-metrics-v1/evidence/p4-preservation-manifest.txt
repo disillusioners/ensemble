@@ -1,0 +1,34 @@
+# P4 — the gate digest inputs, preserved 2026-11-02 (Phase 6 close-out).
+# Source: /tmp/p4-gate/*.bare + *.full (the 24 per-leg digest INPUTS — the FAILED
+# node-id list in two forms) and /tmp/p4-mutations/results.json (the mutation
+# matrix's machine-readable result). The recomputed digest table lives beside them
+# in evidence/p4-failed-digests.txt.
+#
+## p4-gate/  (the digest inputs)
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  W1_base_d2.log.bare
+#   d9bff11a731d8ba3f99e3a425bc092746c03f4f838491b78ca37be3b530737ff  W1_base_d2.log.full
+#   ec0572e69c9ab178e22b4dbe275fe60668f3dd1699ae01d877ffdc4d5f2af418  W1_base_wide.log.bare
+#   041380df27ec0d4ed4ce0133e77373263f709edf4e5c5b5d881d89dde831c26c  W1_base_wide.log.full
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  W1_head_d1d2.log.bare
+#   d9bff11a731d8ba3f99e3a425bc092746c03f4f838491b78ca37be3b530737ff  W1_head_d1d2.log.full
+#   ec0572e69c9ab178e22b4dbe275fe60668f3dd1699ae01d877ffdc4d5f2af418  W1_head_wide.log.bare
+#   041380df27ec0d4ed4ce0133e77373263f709edf4e5c5b5d881d89dde831c26c  W1_head_wide.log.full
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  W2_base_d2.log.bare
+#   d9bff11a731d8ba3f99e3a425bc092746c03f4f838491b78ca37be3b530737ff  W2_base_d2.log.full
+#   ec0572e69c9ab178e22b4dbe275fe60668f3dd1699ae01d877ffdc4d5f2af418  W2_base_wide.log.bare
+#   041380df27ec0d4ed4ce0133e77373263f709edf4e5c5b5d881d89dde831c26c  W2_base_wide.log.full
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  W2_head_d1d2.log.bare
+#   d9bff11a731d8ba3f99e3a425bc092746c03f4f838491b78ca37be3b530737ff  W2_head_d1d2.log.full
+#   ec0572e69c9ab178e22b4dbe275fe60668f3dd1699ae01d877ffdc4d5f2af418  W2_head_wide.log.bare
+#   041380df27ec0d4ed4ce0133e77373263f709edf4e5c5b5d881d89dde831c26c  W2_head_wide.log.full
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  W3_base_d2.log.bare
+#   d9bff11a731d8ba3f99e3a425bc092746c03f4f838491b78ca37be3b530737ff  W3_base_d2.log.full
+#   ec0572e69c9ab178e22b4dbe275fe60668f3dd1699ae01d877ffdc4d5f2af418  W3_base_wide.log.bare
+#   041380df27ec0d4ed4ce0133e77373263f709edf4e5c5b5d881d89dde831c26c  W3_base_wide.log.full
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  W3_head_d1d2.log.bare
+#   d9bff11a731d8ba3f99e3a425bc092746c03f4f838491b78ca37be3b530737ff  W3_head_d1d2.log.full
+#   ec0572e69c9ab178e22b4dbe275fe60668f3dd1699ae01d877ffdc4d5f2af418  W3_head_wide.log.bare
+#   041380df27ec0d4ed4ce0133e77373263f709edf4e5c5b5d881d89dde831c26c  W3_head_wide.log.full
+#
+## p4-mutations/
+#   1a7849016bbde6ee0021a10be972577957a09156686b66f4ec3cac34cce410ba  results.json

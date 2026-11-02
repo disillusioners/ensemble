@@ -1,0 +1,85 @@
+=== gate dir: /tmp/p3-gate-final ===
+=== worktrees ===
+=== fence (the scrubbed env) ===
+
+=== D1 leg: HEAD (the five lane-owned P3 packs) ===
+--- HEAD.d1 (rc=0) ---
+........................................................................ [ 65%]
+......................................                                   [100%]
+110 passed in 14.70s
+  digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+  skips: 
+
+=== D1 leg: HEAD (the P3-G2 scope-cage pin) ===
+--- HEAD.d1cage (rc=0) ---
+.......                                                                  [100%]
+7 passed in 5.04s
+  digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+  skips: 
+
+=== slicing proof: BASE (D2 metrics) ===
+BASE.d2 collected: 302 nodes
+=== slicing proof: HEAD (D2 metrics) ===
+HEAD.d2 collected: 302 nodes
+SLICING-OK: the D2 (metrics) node set is identical on both legs
+
+=== slicing proof: BASE (D2 scope cage) ===
+BASE.d2cage collected: 12 nodes
+=== slicing proof: HEAD (D2 scope cage) ===
+HEAD.d2cage collected: 12 nodes
+SLICING-OK: the D2 (scope cage) node set is identical on both legs
+
+=== D2 leg: BASE (metrics) ===
+--- BASE.d2 (rc=1) ---
+=========================== short test summary info ============================
+FAILED tests/unit/persistence/test_checkpoint_metrics_vocabulary.py::TestSweepLaneVocabulary::test_rdrs_lanes_come_from_the_config_kill_switchs
+1 failed, 301 passed in 10.36s
+  digest (BARE-ID): d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  nodes=1
+  skips: 
+
+=== D2 leg: HEAD (metrics) ===
+--- HEAD.d2 (rc=1) ---
+=========================== short test summary info ============================
+FAILED tests/unit/persistence/test_checkpoint_metrics_vocabulary.py::TestSweepLaneVocabulary::test_rdrs_lanes_come_from_the_config_kill_switchs
+1 failed, 301 passed in 10.72s
+  digest (BARE-ID): d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  nodes=1
+  skips: 
+
+=== D2 leg: BASE (scope cage) ===
+--- BASE.d2cage (rc=0) ---
+............                                                             [100%]
+12 passed in 7.33s
+  digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+  skips: 
+
+=== D2 leg: HEAD (scope cage) ===
+--- HEAD.d2cage (rc=0) ---
+............                                                             [100%]
+12 passed in 7.85s
+  digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+  skips: 
+
+=== DIGEST COMPARISON ===
+--- d2 ---
+  base digest: d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  nodes=1
+  head digest: d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  nodes=1
+  DIGEST-EQUAL: the FAILED sets are byte-identical (net-new = EMPTY)
+--- d2cage ---
+  base digest: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+  head digest: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+  DIGEST-EQUAL: the FAILED sets are byte-identical (net-new = EMPTY)
+
+=== exposition structural identity (AM-16) ===
+  base digest: f03c54e68563b7049b18804b49a803748a620bd1f1d6451ebb14e7cb4c352988
+  head digest: f03c54e68563b7049b18804b49a803748a620bd1f1d6451ebb14e7cb4c352988
+  EXPOSITION-IDENTICAL: the masked bodies are byte-identical (the 3-carrier allowlist applied)
+
+=== gate dir: /tmp/p3-gate-final ===
+blast-radius BASE collected: 226 nodes
+blast-radius HEAD collected: 226 nodes
+SLICING-OK: the blast-radius node set is identical on both legs
+blast-radius BASE rc=0  226 passed, 1 warning in 20.38s
+  digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+blast-radius HEAD rc=0  226 passed, 1 warning in 19.09s
+  digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+BLAST-RADIUS DIGEST-EQUAL: the FAILED sets are byte-identical (net-new = EMPTY)

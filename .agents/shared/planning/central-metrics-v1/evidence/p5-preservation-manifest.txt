@@ -1,0 +1,12 @@
+# P5 — the FE gate evidence, preserved 2026-11-02 (Phase 6 close-out).
+# Source: /tmp/metrics-fe-mutations/summary.json (the 11-leg mutation matrix),
+# /tmp/p5-build-dev.log + /tmp/p5-build-prod.log (the two build legs and the budget
+# WARNINGS), /tmp/p5-e2e2.log (the Playwright e2e) and /tmp/p5-jest-full.txt (the full
+# FE corpus). ALL FOUR logs are trivially small (7-32 kB) and are copied IN FULL.
+#
+## p5/
+#   3f73eac2c2d3f852ce2940406a1d6988545365faecf0d90a26709ba725870f75  p5-build-dev.log
+#   d8c66158bfd7213c0f95c6d42fe6bc2574d4523991592f4351140adb993a0b39  p5-build-prod.log
+#   268abc6cdab02e1bc65cab7be0fb0e7cf4f151c84276c140510f202fcb4bfd37  p5-e2e2.log
+#   d31e5574832cd56030a899c5f3216127e729424714602ccd571d708362dacc1d  p5-jest-full.txt
+#   19683276817cf9d7eceb8a27b32572c2d7530eb1ef57a18fc0a5e9ff1ca99339  summary.json

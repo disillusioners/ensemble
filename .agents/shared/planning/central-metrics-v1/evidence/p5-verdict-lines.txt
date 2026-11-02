@@ -1,0 +1,44 @@
+# P5 — the verdict-bearing lines from the preserved FE gate evidence.
+#
+## the two build legs (the 10 BUDGET warnings — all pre-existing, NONE in a lane file)
+#   ▲ [WARNING] bundle initial exceeded maximum budget. Budget 1.00 MB was not met by 4.91 MB with a total of 5.91 MB.
+#   ▲ [WARNING] src/app/components/agent-selector/agent-selector.scss exceeded maximum budget. Budget 8.00 kB was not met by 765 bytes with a total of 8.77 kB.
+#   ▲ [WARNING] src/app/components/add-source-modal/add-source-modal.scss exceeded maximum budget. Budget 8.00 kB was not met by 318 bytes with a total of 8.32 kB.
+#   ▲ [WARNING] src/app/pages/blueprint/blueprint.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 10.32 kB with a total of 18.32 kB.
+#   ▲ [WARNING] src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 701 bytes with a total of 8.70 kB.
+#   ▲ [WARNING] src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 697 bytes with a total of 8.70 kB.
+#   ▲ [WARNING] src/app/pages/snapshots/snapshots.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 4.29 kB with a total of 12.29 kB.
+#   ▲ [WARNING] src/app/components/instance-list/instance-list.scss exceeded maximum budget. Budget 8.00 kB was not met by 2.17 kB with a total of 10.17 kB.
+#   ▲ [WARNING] src/app/pages/jobs/jobs.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 6.77 kB with a total of 14.77 kB.
+#   ▲ [WARNING] src/app/components/chat-interface/chat-interface.scss exceeded maximum budget. Budget 8.00 kB was not met by 8.15 kB with a total of 16.15 kB.
+#                       | Initial total             |   5.91 MB |                 1.27 MB
+#   Application bundle generation complete. [28.700 seconds] - 2026-11-02T09:54:31.879Z
+#
+## the e2e (Playwright, the own proxy config)
+#   [1A[2K  2 passed (31.3s)
+#
+## the full FE corpus (the whole-tree reference for an FE-only lane)
+#   Test Suites: 4 failed, 130 passed, 134 total
+#   Tests:       9 failed, 4279 passed, 4288 total
+#   FAIL src/app/pages/settings/settings.component.spec.ts (5.703 s)
+#   FAIL src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts
+#   FAIL src/app/models/jobs-grouping.model.spec.ts
+#   FAIL src/app/models/jobs-filter-state.model.spec.ts
+#   FAIL src/app/pages/settings/settings.component.spec.ts (5.703 s)
+#   FAIL src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts
+#   FAIL src/app/models/jobs-grouping.model.spec.ts
+#   FAIL src/app/models/jobs-filter-state.model.spec.ts
+#
+## the mutation matrix (the machine-readable summary)
+#   mutations=11 failures=0 total=11 statuses=['PASS'] all_restored_byte_identical=True
+#   P5-M1: the named POLL_INTERVAL_MS is renamed  red_exit=1 green_exit=0 status=PASS
+#   P5-M2: the clearInterval teardown is removed  red_exit=1 green_exit=0 status=PASS
+#   P5-M3: the supersede token check is inverted (the older response wins)  red_exit=1 green_exit=0 status=PASS
+#   P5-M4: the empty-state condition switches from 'no family live' to 'no families at all'  red_exit=1 green_exit=0 status=PASS
+#   P5-M5: the model mirror's field name drifts from the wire  red_exit=1 green_exit=0 status=PASS
+#   P5-M6: the SVG scale function's normalisation is removed  red_exit=1 green_exit=0 status=PASS
+#   P5-M7: the gear-menu ordering pin's expected position changes  red_exit=1 green_exit=0 status=PASS
+#   P5-M8: the JSON_HEADERS are dropped from the service call  red_exit=1 green_exit=0 status=PASS
+#   P5-M9: the availability union is narrowed to a closed literal set  red_exit=2 green_exit=0 status=PASS
+#   P5-M10: the panel copy reverts to 'metrics disabled'  red_exit=1 green_exit=0 status=PASS
+#   P5-M11: the production-config build leg is dropped from the gate  red_exit=1 green_exit=0 status=PASS

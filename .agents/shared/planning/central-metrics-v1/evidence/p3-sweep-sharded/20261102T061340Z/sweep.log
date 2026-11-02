@@ -1,0 +1,47 @@
+=== sweep dir: /tmp/p3-sweep-sharded-20261102T061340Z ===
+=== CPUs: 16 · xdist: 12 · shard size: 2500 ===
+BASE collected: 32450 nodes
+HEAD collected: 32725 nodes
+head-only nodes (the additive lane's own files): 275
+base-only nodes: 0
+
+=== sweep leg: BASE ===
+  BASE/shard-000 nodes=2500 P=2387 F=67 E=4 dur=158s rc=1
+  BASE/shard-001 nodes=2500 P=2405 F=40 E=0 dur=688s rc=1
+  BASE/shard-002 nodes=2500 P=2366 F=86 E=0 dur=92s rc=1
+  BASE/shard-003 nodes=2500 P=2365 F=65 E=0 dur=126s rc=1
+  BASE/shard-004 nodes=2500 P=2429 F=46 E=0 dur=94s rc=1
+  BASE/shard-005 nodes=2500 P=2414 F=62 E=2 dur=100s rc=1
+  BASE/shard-006 nodes=2500 P=2495 F=5 E=0 dur=94s rc=1
+  BASE/shard-007 nodes=2500 P=2449 F=21 E=21 dur=140s rc=1
+  BASE/shard-008 nodes=2500 P=2469 F=27 E=0 dur=101s rc=1
+  BASE/shard-009 nodes=2500 P=2475 F=7 E=0 dur=136s rc=1
+  BASE/shard-010 nodes=2500 P=2455 F=9 E=0 dur=143s rc=1
+  BASE/shard-011 nodes=2500 P=2482 F=12 E=0 dur=81s rc=1
+  BASE/shard-012 nodes=2450 P=2443 F=5 E=0 dur=42s rc=1
+BASE FAILED/ERROR ids: 488
+BASE digest (BARE-ID): 341def50afc03f3b0aa069d6fd0b497c4d57178d2d7aed608915a811b377ee50
+
+=== sweep leg: HEAD ===
+  HEAD/shard-000 nodes=2500 P=2392 F=62 E=4 dur=149s rc=1
+  HEAD/shard-001 nodes=2500 P=2408 F=37 E=0 dur=678s rc=1
+  HEAD/shard-002 nodes=2500 P=2364 F=88 E=0 dur=88s rc=1
+  HEAD/shard-003 nodes=2500 P=2366 F=64 E=0 dur=128s rc=1
+  HEAD/shard-004 nodes=2500 P=2429 F=46 E=0 dur=92s rc=1
+  HEAD/shard-005 nodes=2500 P=2413 F=63 E=2 dur=105s rc=1
+  HEAD/shard-006 nodes=2500 P=2491 F=9 E=0 dur=82s rc=1
+  HEAD/shard-007 nodes=2500 P=2448 F=23 E=21 dur=122s rc=1
+  HEAD/shard-008 nodes=2500 P=2468 F=27 E=0 dur=97s rc=1
+  HEAD/shard-009 nodes=2500 P=2477 F=5 E=0 dur=115s rc=1
+  HEAD/shard-010 nodes=2500 P=2455 F=9 E=0 dur=155s rc=1
+  HEAD/shard-011 nodes=2500 P=2484 F=10 E=0 dur=72s rc=1
+  HEAD/shard-012 nodes=2500 P=2492 F=6 E=0 dur=40s rc=1
+  HEAD/shard-013 nodes=225 P=225 F=0 E=0 dur=23s rc=0
+HEAD FAILED/ERROR ids: 484
+HEAD digest (BARE-ID): 0b04686a331bec960af1726098fba744e0a2a0ada150b5b3cf2abc78f6b301ab
+
+=== SWEEP DIGEST DIFF ===
+-- base-only (FIXED at head) --
+-- head-only (NET-NEW reds) --
+
+=== sweep dir: /tmp/p3-sweep-sharded-20261102T061340Z ===

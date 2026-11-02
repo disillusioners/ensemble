@@ -1,0 +1,13 @@
+# SET-LEVEL DIGESTS — one identifier per preserved set (the sha256 over the set's
+# sorted '<file-sha256>  <name>' manifest). A reviewer can re-derive one by:
+#   cd <set-dir> && sha256sum * | sort | sha256sum
+
+#   p3-gate-final                                files=64   set-digest=e83b8f6b07c1ea3adef3b2a66d55d7701dbcdfe15b8dc63948d70a79c7534d77
+#   p3-scratch                                   files=2    set-digest=4e0ec17ade4c21f97357128081319c75b00f44ebfff5aebc488a050ee6969538
+#   p3-sweep-crash                               files=5    set-digest=ef692965142e3772b89c3d04b6259618d2ee5fa096bd870f242f270c31c68a47
+#   p3-sweep-sharded/20261102T060325Z            files=11   set-digest=a51e8cc6d3ef58568c8570fc15f6e2dc150818cb81a69bb45dde5b38a42a7f50
+#   p3-sweep-sharded/20261102T061340Z            files=11   set-digest=94892c061221ade63228509f49736946e259c3bf9ac7ad441fee8981887467f9
+#   p4-gate                                      files=24   set-digest=7ddb778696753614a36b5e9acc4ca4fe038aa2937adedb8ef61fc81af79dd831
+#   p4-mutations                                 files=1    set-digest=ed737facd21f39bf8956ca0c17dba8d99650dc44c8e245a1b46b1c095a01ed3e
+#   p5                                           files=5    set-digest=5a65e01e5c7a137d4be876b611026fa275fa6cc2a8fef7b686c4e17ea84386b0
+#   p2-gate                                      files=12   set-digest=e14b63d1e8f03b193699127ca4c4c39be980e35b6caea066dc10fa1c522ebc79
