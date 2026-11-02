@@ -74,10 +74,22 @@ def derive_availability(
     ``{"state": "dark", "reason": <closed reason>}`` for a dark one.
     """
     if source_idiom == SOURCE_IDIOM_POSTGRES_CENSUS:
-        if facts.census_gated:
-            return {"state": "dark", "reason": "census_gated"}
+        # The ORDER is the lane-owned property (ND-micro).  The
+        # census-not-running fact is checked FIRST because it is the
+        # fact that EXPLAINS the darkness (the non-PG truth-table row:
+        # "F6 availability → census_not_running (the switch state is NOT
+        # inferable)").  The census_gated fact is checked SECOND.
+        #
+        # The POLARITY of `census.gated` itself is R-i — an OUT-OF-LANE
+        # defect in daemon/services/metrics_census.py (the property
+        # returns "enabled" where its docstring says "gated off"), and
+        # it is NOT fixed here: this lane only reads the PUBLIC property
+        # (the two-check-sites invariant; AM-13/AM-18/D-11b).  The pin
+        # below therefore asserts only the ORDER, never the polarity.
         if not facts.census_running:
             return {"state": "dark", "reason": "census_not_running"}
+        if facts.census_gated:
+            return {"state": "dark", "reason": "census_gated"}
     elif source_idiom == SOURCE_IDIOM_WEDGE_CAPTURE:
         if not facts.capture_active:
             return {"state": "dark", "reason": "capture_off"}

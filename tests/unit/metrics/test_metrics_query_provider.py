@@ -356,6 +356,70 @@ class TestAvailability:
         provider = RegistryMetricsQueryProvider(metrics_provider=lambda: [metric])
         assert provider.families()[0]["availability"] == {"state": "live"}
 
+
+class TestAvailabilityOrderIsLaneOwned:
+    """ND-micro — the ORDER property, pinned against the REAL class.
+
+    The availability model must check `not census_running` BEFORE
+    `census_gated`: a sampler that is not running reports
+    `census_not_running` (the fact that explains it), regardless of
+    the gate's polarity.  The census's `gated` property itself carries
+    the OUT-OF-LANE (R-i) inversion — the sampler reports "enabled"
+    where its own docstring says "gated off" — so this pin deliberately
+    asserts ONLY the ORDER (the lane-owned property), never the
+    polarity.  R-i is routed, not fixed, here: the query package must
+    keep reading the public `CensusSampler.gated` (the two-check-sites
+    invariant; AM-13/AM-18/D-11b).
+
+    Uses the REAL `daemon.services.metrics_census.CensusSampler`
+    (constructed but NOT started, so `running` is False) — not a fake —
+    so the class-level gap is structurally visible.  The sampler's
+    `gate_enabled` is seeded True so that `gated` is True; with the
+    pre-fix order that would make the family report `census_gated`
+    (RED), and with the fixed order it reports `census_not_running`
+    (GREEN).  That is the discrimination.
+    """
+
+    def test_a_real_non_running_census_reports_not_running_not_gated(self) -> None:
+        from daemon.services.metrics_census import CensusSampler
+
+        metric = _metric(
+            "ensemble_nd_micro_census_gauge", source_idiom="postgres_census"
+        )
+        # gate_enabled=True ⇒ gated=True (the inversion, R-i); NOT started
+        # ⇒ running=False.  The ORDER property must still win.
+        sampler = CensusSampler(gate_enabled=lambda: True, dsn=None)
+        assert sampler.running is False
+        provider = RegistryMetricsQueryProvider(
+            census=sampler, metrics_provider=lambda: [metric]
+        )
+        availability = provider.families()[0]["availability"]
+        assert availability == {"state": "dark", "reason": "census_not_running"}, availability
+
+    def test_a_real_running_census_reports_the_gate_state(self) -> None:
+        """Control: a running census reports the gate state, not 'not_running'.
+
+        This is the switch-invariance direction — the gate property
+        (R-i's inverted polarity aside) is what a running census
+        surfaces.  It pins that the new order did not break the running
+        case.
+        """
+        from daemon.services.metrics_census import CensusSampler
+
+        metric = _metric(
+            "ensemble_nd_micro_census_gauge_2", source_idiom="postgres_census"
+        )
+        sampler = CensusSampler(gate_enabled=lambda: True, dsn=None)
+        # Mark it running without starting the thread (the property is a
+        # plain boolean attribute set by start()).
+        sampler._started = True
+        provider = RegistryMetricsQueryProvider(
+            census=sampler, metrics_provider=lambda: [metric]
+        )
+        availability = provider.families()[0]["availability"]
+        # With gated=True (R-i) and running=True, the gate state wins.
+        assert availability == {"state": "dark", "reason": "census_gated"}, availability
+
     def test_every_emitted_reason_is_inside_the_closed_v1_set(self) -> None:
         """A-9 — the BACKEND-side reason-set assertion.
 
