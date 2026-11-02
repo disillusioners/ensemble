@@ -47,6 +47,22 @@ class _Clock:
         return self.now
 
 
+@pytest.fixture(autouse=True)
+def _pinned_publisher_cadence(monkeypatch):
+    """The publisher cadence is PROCESS-GLOBAL — pin it for this file.
+
+    ``Metric.set()`` re-publishes the snapshot once the publisher cadence
+    window has elapsed (``_maybe_publish_locked``) and the sampler's
+    identity-dedupe compares the published snapshot by IDENTITY
+    (``self._last_snapshots.get(name) is snapshot``).  A neighbouring file
+    that installs a cadence-0 provider therefore makes an UNPUBLISHED
+    change VISIBLE — an order dependence of these pins, not product
+    behaviour.  Pinning the cadence here makes every pin below
+    deterministic whatever the file order is.
+    """
+    monkeypatch.setattr(cm, "_publisher_cadence_provider", lambda: 3600.0)
+
+
 class TestAdapterIsolation:
     def test_a_raising_adapter_does_not_stop_the_tick(self) -> None:
         """P2-M5 — the tick continues after an adapter raises."""
@@ -122,7 +138,12 @@ class TestIdentityDedupe:
         metric = _metric("ensemble_sampler_unpublished_gauge")
         sampler = MetricsSampler(ring=ring, metrics_provider=lambda: [metric])
         assert sampler.tick() == 1
+        published = metric.published_snapshot()
         metric.set(99.0)  # not published
+        assert metric.published_snapshot() is published, (
+            "the change must stay UNPUBLISHED — this pin is about the ring "
+            "reading the published snapshot, not about the publish cadence"
+        )
         assert sampler.tick() == 0
 
 
