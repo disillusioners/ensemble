@@ -1,0 +1,35 @@
+=== LEG l2  self_env=dev slug_mode=nea port=8951 db=ens_smoke_l2_1793659884_7260 ===
+port 8951 bound: LISTEN 0 2048 127.0.0.1:8951 0.0.0.0:* users:(("python",pid=2247413,fd=24)) 
+livez http=200
+readyz http=200
+livez:  {"status":"alive","uptime_seconds":32.399210691452026,"version":"0.28.5"}
+readyz: status=ready components={'database': True, 'queue_freshness': True, 'services': True, 'checkpoint_saver': True} reasons=[]
+mcp-servers http=200
+DB plane row: 
+DB plane row count: 0
+scratch ensemble.json: {
+  "database": "postgres",
+  "postgres": {
+    "host": "localhost",
+    "port": 5432,
+    "db": "ensemble",
+    "user": "ensemble",
+    "password": ""
+  },
+  "sqlite": {
+    "instances_db": "./data/instances.db",
+    "checkpoints_db": "./data/checkpoints.db"
+  }
+}
+--- boot log: plane / builtin / workspace lines ---
+    73:22:51:48 - daemon.repositories.mcp_server.repository - INFO - Created MCP server: id=2e16e776-2dc3-42c6-9b88-70b2e73f5fbb, name=webfetch
+    74:22:51:48 - daemon.manager - INFO - Created built-in MCP server: webfetch
+    76:22:51:48 - daemon.mcp.builtin_servers.plane - INFO - Plane workspace resolution: env=dev source=explicit-marker slug=(account-default)
+    78:22:51:48 - daemon.manager - WARNING - Builtin 'plane' skipped — workspace refused (POLICY): workspace 'nea' is production-only; this environment resolves to dev; agents with mcp_full_access=['plane']: project-manager
+--- vacuity tripwire ---
+  env-name census (names only): 25 names
+  PRESENT: PLANE_MCP_URL
+  PRESENT: PLANE_MCP_API_KEY
+  PRESENT: PLANE_MCP_WORKSPACE_SLUG
+  TRIPWIRE CLEAR: no missing-credential skip reason in the log
+=== END LEG l2 ===
