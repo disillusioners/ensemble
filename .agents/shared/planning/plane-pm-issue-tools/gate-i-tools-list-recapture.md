@@ -247,7 +247,7 @@ Per-tool values are in the committed fixture (`tool_schemas[name].schema_tokens`
 
 ### 7.3 Baseline comparability disclosure + re-baseline instruction (fix-cycle F1, 2026-11-02)
 
-**The recorded `baseline_tokens = 20 111` (measured 08:12Z) PREDATES the prefix-sweep ownership guard** (commit `95e999b20`, 10:54Z) — the fix that removed `plane_sync_project` from PM's resolved toolset (assertion 3 above disclosed it as IN the baseline's 47-tool toolset: the `plane_sync` REST tool swept into the empty `plane` category). That tool contributed **≈105 tokens** of the measured `tool_schema_tokens`.
+**The recorded `baseline_tokens = 20 111` (measured 08:12Z) PREDATES the prefix-sweep ownership guard** (commit `95e999b20`, 10:54Z) — the fix that removed `plane_sync_project` from PM's resolved toolset (assertion 3 above disclosed it as IN the baseline's 47-tool toolset: the `plane_sync` REST tool swept into the empty `plane` category). That tool contributed **≈105 tokens** (REVIEWER ESTIMATE derived from the council's analysis — NOT re-measured; recomputation at the FC9 formula gives 59–84 tokens with the short description, 441–466 with the full `_full_doc_`) of the measured `tool_schema_tokens`.
 
 **Consequence for FC9:** Phase-5's present-leg, measured on the post-guard tree, will **NOT** contain `plane_sync_project` ⇒ the growth delta `present − baseline` computed against this 08:12Z figure is **UNDERSTATED by ≈105 tokens** (~0.5 % of baseline; ~2 % of the 5 028 ceiling = 25 % growth band) — a bias **AGAINST** the breach firing. The two legs would not be measured on the same code.
 
