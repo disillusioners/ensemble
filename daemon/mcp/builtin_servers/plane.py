@@ -33,8 +33,9 @@ Plane opts into the hybrid resilience layer via ``resilience_config``:
 - **Retry** — transient failures (5xx, timeouts, connection resets) get
   retried with exponential backoff (1s/2s/4s + jitter, max 3 attempts).
   Auth and tool errors propagate immediately.
-- **Result caching** — read tools (``list_*``, ``get_*``, ``search_*``)
-  cache results for 5 min (avoids hammering Plane on repeated lookups).
+- **Result caching** — read tools (``list_*``, ``get_*``, ``search_*``,
+  ``retrieve_*``, ``count_*``, ``read_*``) cache results for 5 min
+  (avoids hammering Plane on repeated lookups).
 - **Circuit breaker** — 5 consecutive failures opens the circuit for 60s
   before the next call probes recovery (5s timeout on the probe).
 - **Graceful degradation** — when the circuit is OPEN or all retries
@@ -63,6 +64,10 @@ from typing import Any
 
 from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
 from daemon.mcp.config import _sanitize_quoted_url, _strip_wrapping_quotes
+from daemon.plane_workspace import (
+    PlaneWorkspaceResolution,
+    current_plane_workspace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,18 +131,34 @@ class PlaneServerDefinition(BuiltinServerDefinition):
 
     @property
     def schema_version(self) -> str:
-        """Bumped 1 → 2 (2026-09-20): the quote-leak sanitization.
+        """Bumped 1 → 2 (2026-09-20) → **3** (2026-11-02): workspace scoping.
 
-        The live ``mcp_servers`` row carries literal ``"`` characters in
+        **1 → 2** (2026-09-20): the quote-leak sanitization. The live
+        ``mcp_servers`` row carried literal ``"`` characters in
         ``url`` / ``headers`` (persisted 2026-08-13 by a quote-leaking
-        env loader). This bump makes the next bootstrap that runs with
+        env loader). This bump made the next bootstrap that runs with
         the env available rebuild the config from sanitized defaults via
         the existing schema-drift refresh in
         ``InstanceManager._bootstrap_builtin_servers``. Boots WITHOUT
         the env skip plane entirely — those keep being healed at
         session-creation time by the config validators instead.
+
+        **2 → 3** (2026-11-02, ``plane-pm-issue-tools`` E4): workspace
+        scoping. ``get_base_config`` now emits the **resolver's**
+        effective slug (``daemon/plane_workspace.py``) rather than the raw
+        ``PLANE_MCP_WORKSPACE_SLUG`` env value, so a persisted row whose
+        ``headers['x-workspace-slug']`` predates the env-scoping contract
+        has to be re-materialised once. The heal
+        (``_heal_config_preserving_env``) rebuilds ``headers`` from the
+        template (i.e. the current env) while PRESERVING the operator's
+        ``config.env`` axis, so the operator-set env keys and the KMS
+        markers survive the bump.
+
+        The heal runs only on a boot where ``is_available()`` is True (a
+        workspace refusal defers it) — see the heal-conditionality gate in
+        ``InstanceManager._bootstrap_builtin_servers``.
         """
-        return "2"
+        return "3"
 
     @property
     def tool_name_prefix(self) -> str:
@@ -239,23 +260,50 @@ class PlaneServerDefinition(BuiltinServerDefinition):
             # 5 min — avoids hitting Plane API on every tool call when
             # the agent polls the same view repeatedly within a turn.
             stale_threshold=300.0,
+            # P2-K (plane-pm-issue-tools, 2026-11-02): the read/write
+            # patterns are reconciled against the ACTUAL captured catalog
+            # (177 verbs, gate (i) 2026-11-02). The pre-reconciliation set
+            # was written against a vocabulary that does not exist: `add_`,
+            # `edit_` and `assign_` matched ZERO catalog verbs, while 47
+            # verbs (`retrieve_`23 + `count_`1 + `read_`1 + 22 write
+            # families) matched NEITHER tuple — and `is_read_tool` returns
+            # False for an unclassified verb, so the CR-3 strip silently
+            # dropped them from every non-full-access agent (risk R18).
+            #
+            # Read verbs (73): list_ 36, get_ 11, search_ 1, retrieve_ 23,
+            # count_ 1, read_ 1 (`read_work_item_attachment`).
             read_tool_patterns=(
                 "list_",
                 "get_",
                 "search_",
+                "retrieve_",
+                "count_",
+                "read_",
             ),
-            # ``set_`` and ``edit_`` are Plane-specific verb variants
-            # (e.g. ``plane_set_issue_priority``). ``assign_`` covers
-            # the assignee-update tools.
+            # Write verbs (104): create_ 26, update_ 27, delete_ 26,
+            # remove_ 1, set_ 2, manage_ 14 (the real assignee verb is
+            # `manage_work_item_assignee`), transfer_ / complete_ / link_ /
+            # import_ / attach_ / detach_ / upload_ / resolve_ ×1 each.
+            #
+            # `set_` and `remove_` are LIVE patterns (`set_work_item_property_value`,
+            # `set_customer_property_values`, `remove_work_item_relation`) and
+            # are kept deliberately. Write-first precedence in `is_read_tool`
+            # means a verb that matched both tuples stays a write.
             write_tool_patterns=(
                 "create_",
                 "update_",
                 "delete_",
-                "add_",
                 "remove_",
                 "set_",
-                "edit_",
-                "assign_",
+                "manage_",
+                "transfer_",
+                "complete_",
+                "link_",
+                "import_",
+                "attach_",
+                "detach_",
+                "upload_",
+                "resolve_",
             ),
         )
 
@@ -287,6 +335,19 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         quarantine hole). The ``super()`` call is therefore the FIRST
         statement: the base class consults the quarantine registry (and
         the ``required_package`` check) before the plane-specific gates.
+
+        E3 (plane-pm-issue-tools, 2026-11-02) — the WORKSPACE gate. After
+        the three pre-existing gates pass, the workspace resolution
+        (``daemon.plane_workspace``) must permit the configured slug. A
+        refused resolution ⇒ ``False`` ⇒ **no row, no tools** — the
+        existing skip machinery applies (Phase 3 makes that skip loud and
+        typed). This single classmethod is the anchor for the whole gate
+        chain: the bootstrap skip, the warmup, the schema warm, and the
+        preload gate all consult it, so a refusal closes all four.
+
+        Live is NEVER refused (ADJ-1 live-exempt: any configured slug is
+        permitted on live, and an unset slug keeps the account-default
+        behavior — byte-identical to the pre-lane daemon).
         """
         if not super().is_available():
             return False
@@ -295,7 +356,12 @@ class PlaneServerDefinition(BuiltinServerDefinition):
             return False
         url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
         api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
-        return bool(url) and bool(api_key)
+        if not (url and api_key):
+            return False
+        # Resolve ONCE per operation (memoized on the env fingerprint) so
+        # ``get_base_config`` — which runs microseconds later in the same
+        # bootstrap pass — sees the SAME resolution. No env TOCTOU.
+        return current_plane_workspace().allowed
 
     @classmethod
     def _log_kill_switch_once(cls) -> None:
@@ -322,7 +388,11 @@ class PlaneServerDefinition(BuiltinServerDefinition):
             "(PLANE_MCP_ENABLED=false) — builtin skipped at registration"
         )
 
-    def get_base_config(self) -> dict[str, Any]:
+    def get_base_config(
+        self,
+        *,
+        resolution: PlaneWorkspaceResolution | None = None,
+    ) -> dict[str, Any]:
         """Return base configuration for the Plane streamable-http MCP.
 
         Reads all three env vars lazily at call time so the daemon
@@ -338,12 +408,26 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         2026-08-13 and stranded every plane session at
         ``McpError: Connection closed`` until the config-layer
         sanitization landed (tests/unit/test_mcp_quote_sanitization.py).
+
+        E3 (``plane-pm-issue-tools``, 2026-11-02) — the emitted
+        ``x-workspace-slug`` is the **resolver's** effective slug, never
+        the raw env value: one canonical normalization (trim + strip one
+        outer quote pair) shared with the REST lane, and the non-live
+        ``e2e`` substitution. On live an unset slug still means the
+        account-default workspace (``""`` — byte-identical to the
+        pre-lane daemon).
+
+        Args:
+            resolution: An already-computed resolution to thread through
+                (P2-M resolve-once). ``None`` uses the memoized
+                process-wide resolution — which is the SAME object
+                ``is_available()`` returned microseconds earlier.
         """
         url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
         api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
-        workspace_slug = _strip_wrapping_quotes(
-            os.environ.get("PLANE_MCP_WORKSPACE_SLUG", "")
-        )
+        if resolution is None:
+            resolution = current_plane_workspace()
+        workspace_slug = resolution.slug or ""
         return {
             "transport": "streamable-http",
             "url": url,

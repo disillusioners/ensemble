@@ -7,13 +7,20 @@ existing pattern of constructing a fresh ``httpx.AsyncClient`` per call
 
 Endpoint shape::
 
-    {PLANE_BASE_URL}/api/v1/workspaces/{PLANE_MCP_WORKSPACE_SLUG}/projects/
+    {PLANE_BASE_URL}/api/v1/workspaces/{RESOLVED_SLUG}/projects/
 
 Headers::
 
     X-Api-Key: {PLANE_API_KEY}
-    x-workspace-slug: {PLANE_MCP_WORKSPACE_SLUG}
+    x-workspace-slug: {RESOLVED_SLUG}
     Content-Type: application/json
+
+Where ``RESOLVED_SLUG`` is the **resolver's** effective workspace slug
+(``daemon.plane_workspace``), never the raw ``PLANE_MCP_WORKSPACE_SLUG``
+env value: on a non-live environment the resolver permits only ``e2e``
+and refuses everything else, so this lane can never target the production
+workspace. On live, any configured slug is permitted (unset ⇒ the REST
+lane is absent — see :func:`_rest_base_url`).
 
 **Authentication scheme.** Plane REST uses the ``X-Api-Key`` header
 (``Authorization: Bearer`` is rejected with HTTP 401). ``PLANE_API_KEY``
@@ -53,6 +60,11 @@ from typing import Any
 
 import httpx
 
+from daemon.plane_workspace import (
+    PlaneWorkspaceResolution,
+    current_plane_workspace,
+    normalize_workspace_slug,
+)
 from daemon.sources.circuit_breaker import CircuitBreaker
 
 logger = logging.getLogger(__name__)
@@ -293,19 +305,54 @@ def sanitize_plane_name(name: str) -> str:
     return cleaned or _PLANE_NAME_EMPTY_FALLBACK
 
 
-def _rest_base_url() -> str | None:
-    """Compose the REST base URL.
+def _rest_base_url(
+    resolution: "PlaneWorkspaceResolution | None" = None,
+) -> str | None:
+    """Compose the REST base URL from the RESOLVED workspace.
 
-    Returns ``None`` when any required env var is missing so callers can
-    skip the integration cleanly.
+    Returns ``None`` when any required input is missing (or the workspace
+    resolution is REFUSED) so callers can skip the integration cleanly.
+
+    E2 (``plane-pm-issue-tools``, 2026-11-02): the workspace segment is the
+    **resolver's** effective slug — never the raw env value. On a non-live
+    environment that is ``e2e`` (or nothing at all: the resolver refuses
+    every other slug). On live an unset slug keeps the pre-lane behaviour:
+    the REST lane is ABSENT (``None``), because the URL cannot be composed
+    without a workspace — this asymmetry with the MCP lane (which falls
+    back to the account-default workspace) is pre-existing and deliberate.
+
+    Args:
+        resolution: An already-computed resolution to thread through
+            (P2-M resolve-once). ``None`` uses the memoized process-wide
+            resolution.
     """
     base = _env("PLANE_BASE_URL")
-    workspace = _env("PLANE_MCP_WORKSPACE_SLUG")
-    if not base or not workspace:
+    if not base:
+        return None
+    if resolution is None:
+        resolution = current_plane_workspace()
+    if not resolution.allowed:
+        return None
+    workspace = resolution.slug or ""
+    if not workspace:
+        # P3 pin: live + unset slug ⇒ the REST lane is ABSENT (pre-existing
+        # behaviour; distinct from the MCP lane's account-default).
         return None
     # Strip trailing slash to avoid double-slash when joining paths.
     base = base.rstrip("/")
     return f"{base}/api/v1/workspaces/{workspace}/projects/"
+
+
+#: ``/api/v1/workspaces/<slug>/`` — the workspace segment of a REST base URL.
+_WORKSPACE_PATH_RE = re.compile(r"/workspaces/([^/]+)/")
+
+
+def _base_url_workspace_slug(base_url: str | None) -> str | None:
+    """Extract the workspace slug embedded in a REST base URL, if any."""
+    if not base_url:
+        return None
+    match = _WORKSPACE_PATH_RE.search(base_url)
+    return match.group(1) if match else None
 
 
 # ── Client ──────────────────────────────────────────────────────────────────
@@ -330,47 +377,123 @@ class PlaneHttpClient:
         workspace_slug: str | None = None,
         breaker: CircuitBreaker | None = None,
         timeout: float | None = None,
+        *,
+        resolution: PlaneWorkspaceResolution | None = None,
     ) -> None:
         """Construct a client.
 
         Args:
-            base_url: REST base URL. Defaults to ``_rest_base_url()``.
+            base_url: REST base URL. Defaults to ``_rest_base_url()`` (composed
+                from the RESOLVED workspace). An explicit value is honored —
+                but if its path already carries ``/workspaces/<slug>/`` and
+                that slug is not the resolved slug, the client is made
+                INERT (P2-D: one request must never span two workspaces).
             api_key: REST API token. Defaults to ``PLANE_API_KEY``.
                 Sent as the ``X-Api-Key`` header. We do **not** fall back
                 to ``PLANE_MCP_API_KEY`` — separation-of-concerns
                 (independent rotation, scoped blast radius, clean
                 audit trail in Plane's API Tokens UI); a silent
                 fallback would mask misconfiguration.
-            workspace_slug: Workspace slug. Defaults to
-                ``PLANE_MCP_WORKSPACE_SLUG``. Used for the
-                ``x-workspace-slug`` header.
+            workspace_slug: Workspace slug override (tests). **Ignored for
+                the effective value** — P2-D: the RESOLVED slug is
+                authoritative, so an explicit parameter can never
+                introduce a workspace the resolver did not return. Retained
+                in the signature for backward compatibility.
             breaker: Optional :class:`CircuitBreaker` override (tests).
                 Defaults to the module-level shared breaker.
             timeout: Per-request timeout in seconds.
+            resolution: An already-computed resolution to thread through
+                (P2-M resolve-once; also the gate-(iv) injection seam).
+                ``None`` uses the memoized process-wide resolution.
+
+        P2-D — the constructor bypass is CLOSED:
+
+        * a REFUSED resolution ⇒ an **inert** client — every method raises
+          :class:`PlaneAPIError` carrying the typed refusal reason;
+        * the effective workspace slug is ALWAYS ``resolution.slug``;
+        * an explicit ``base_url`` whose path disagrees with that slug ⇒
+          inert (a split-brain URL/header pair is unrepresentable).
         """
-        self._base_url = base_url if base_url is not None else _rest_base_url()
-        self._api_key = api_key if api_key is not None else _env("PLANE_API_KEY")
-        self._workspace_slug = (
-            workspace_slug
-            if workspace_slug is not None
-            else _env("PLANE_MCP_WORKSPACE_SLUG")
-        )
+        if resolution is None:
+            resolution = current_plane_workspace()
+        self._resolution = resolution
+        self._inert_reason: str | None = None
         self._breaker = breaker if breaker is not None else _plane_breaker
         self._timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT_S
+
+        if not resolution.allowed:
+            self._inert_reason = (
+                resolution.reason or "workspace resolution refused"
+            )
+            self._base_url = None
+            self._api_key = ""
+            self._workspace_slug = ""
+            return
+
+        resolved_slug = resolution.slug or ""
+
+        # An explicit base_url must not smuggle a DIFFERENT workspace in its
+        # path — the header would then disagree with the URL.
+        embedded = _base_url_workspace_slug(base_url)
+        if embedded is not None and embedded != resolved_slug:
+            self._inert_reason = (
+                f"explicit base URL targets workspace '{embedded}' but the "
+                f"resolver permits '{resolved_slug}'"
+            )
+            self._base_url = None
+            self._api_key = ""
+            self._workspace_slug = ""
+            return
+
+        self._base_url = base_url if base_url is not None else _rest_base_url(resolution)
+        self._api_key = api_key if api_key is not None else _env("PLANE_API_KEY")
+        # P2-D: the resolved slug wins. ``workspace_slug`` is validated for
+        # shape only (so a poisoned quoted value can never reach the header)
+        # and then DISCARDED as an authority.
+        if workspace_slug is not None:
+            normalize_workspace_slug(workspace_slug)
+        self._workspace_slug = resolved_slug
+
+    def _base_url_error(self) -> str:
+        """The error message for a client that cannot issue requests."""
+        if self._inert_reason:
+            return f"Plane client is inert — {self._inert_reason}"
+        return "Plane base URL not configured"
+
+    @property
+    def workspace_slug(self) -> str:
+        """The RESOLVED workspace slug this client targets (read-only).
+
+        P2-D: the value is always ``resolution.slug`` — there is no setter,
+        so no caller can re-point a constructed client at another
+        workspace.
+        """
+        return self._workspace_slug
+
+    @property
+    def inert_reason(self) -> str | None:
+        """The typed reason this client is INERT, or ``None`` when usable."""
+        return self._inert_reason
 
     # ── Feature gating ──────────────────────────────────────────────────
 
     @classmethod
     def is_available(cls) -> bool:
-        """Return True when all required env vars are present.
+        """Return True when the env is configured AND the workspace permits it.
 
-        Gated on ``PLANE_BASE_URL`` + ``PLANE_API_KEY``. We do **not**
-        accept ``PLANE_MCP_API_KEY`` as a substitute — separation-of-
-        concerns (independent rotation, scoped blast radius, clean
-        audit trail in Plane's API Tokens UI); a silent fallback would
-        mask misconfiguration (the exact incident class Phase 2 fixed).
+        Gated on ``PLANE_BASE_URL`` + ``PLANE_API_KEY`` **and** on the
+        workspace resolution: a refused resolution makes the lane inert, so
+        no request can ever be issued against a workspace this environment
+        may not touch. We do **not** accept ``PLANE_MCP_API_KEY`` as a
+        substitute — separation-of-concerns (independent rotation, scoped
+        blast radius, clean audit trail in Plane's API Tokens UI); a silent
+        fallback would mask misconfiguration (the exact incident class
+        Phase 2 fixed).
         """
-        return _rest_base_url() is not None and bool(_env("PLANE_API_KEY"))
+        resolution = current_plane_workspace()
+        if not resolution.allowed:
+            return False
+        return _rest_base_url(resolution) is not None and bool(_env("PLANE_API_KEY"))
 
     @classmethod
     def create(cls) -> "PlaneHttpClient | None":
@@ -390,6 +513,10 @@ class PlaneHttpClient:
 
         Plane REST uses the ``X-Api-Key`` header (not
         ``Authorization: Bearer`` — which is rejected with HTTP 401).
+
+        The ``x-workspace-slug`` value is the **resolved** workspace (P2-D)
+        — never a caller-supplied one — so the header and the URL always
+        name the same workspace.
         """
         return {
             "X-Api-Key": self._api_key,
@@ -585,7 +712,7 @@ class PlaneHttpClient:
             PlaneAPIError: any other non-2xx, or unexpected exception.
         """
         if not self._base_url:
-            raise PlaneAPIError("Plane base URL not configured")
+            raise PlaneAPIError(self._base_url_error())
         # Plane rejects names containing characters outside
         # [A-Za-z0-9 _] with HTTP 400 ("Project name cannot contain
         # special characters." — live-probed 2026-09-22). Sanitize at
@@ -629,7 +756,7 @@ class PlaneHttpClient:
             PlaneAuthError, PlaneAPIError: see :meth:`_request`.
         """
         if not self._base_url:
-            raise PlaneAPIError("Plane base URL not configured")
+            raise PlaneAPIError(self._base_url_error())
         body: dict[str, Any] = {}
         if name is not None:
             # Same Plane-side rejection rule as create (sanitize at the
@@ -662,7 +789,7 @@ class PlaneHttpClient:
             PlaneAuthError, PlaneAPIError: see :meth:`_request`.
         """
         if not self._base_url:
-            raise PlaneAPIError("Plane base URL not configured")
+            raise PlaneAPIError(self._base_url_error())
         url = f"{self._base_url}{plane_id}/"
         try:
             result = await self._request("GET", url)
@@ -684,7 +811,7 @@ class PlaneHttpClient:
             PlaneAuthError, PlaneAPIError: see :meth:`_request`.
         """
         if not self._base_url:
-            raise PlaneAPIError("Plane base URL not configured")
+            raise PlaneAPIError(self._base_url_error())
         result = await self._request("GET", self._base_url)
         if result is None:
             return []
