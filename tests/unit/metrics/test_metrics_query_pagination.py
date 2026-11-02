@@ -584,3 +584,85 @@ class TestSnapshotCursorExpiry:
                 "the expiry probe must run OFF the event loop — it ran on "
                 f"{thread_name!r}"
             )
+
+
+class TestCursorPrecedence:
+    """ND-5 — the cursor-expiry probe PRECEDES the unknown-family check.
+
+    ``GET /api/metrics/snapshot`` is the ONLY route whose page builder
+    carries a family check at all, and the expiry probe runs FIRST
+    there.  THE PINNED PRECEDENCE: an EXPIRED cursor combined with an
+    UNKNOWN ``?family=`` answers ``400 invalid_cursor`` — NOT ``404
+    unknown_family`` — because the expiry wins.
+
+    THE SOURCE ANCHORS (``daemon/routers/metrics.py``): the probe is
+    ``_expire_cursor(provider, cursor)`` at :504 and the family check is
+    the block directly below it at :505-508 (``known = {entry.get("id")
+    ...}`` / ``raise _UnknownFamily(family)``).
+
+    THE DOC ANCHORS (the published contract — both pages state this
+    precedence):
+
+    * ``docs/architecture/metrics-query-contract.md:296`` — "Cursor
+      precedence (ND-5)": the probe runs FIRST on all three page
+      builders and the ``/snapshot`` unknown-family check sits
+      DOWNSTREAM of it;
+    * ``docs/architecture/metrics-query-api.md:179`` — the same
+      precedence, stated for the API consumer.
+
+    THE THREE LEGS — one load-bearing leg and two controls, so that
+    NEITHER mechanism can be dead:
+
+    * an EXPIRED cursor + an UNKNOWN family ⇒ ``400 invalid_cursor``
+      (the precedence itself — the leg that reds when the two blocks
+      are swapped);
+    * a LIVE cursor + an UNKNOWN family ⇒ ``404 unknown_family`` (the
+      family check is alive);
+    * an EXPIRED cursor + a KNOWN family ⇒ ``400 invalid_cursor`` (the
+      expiry probe is alive).
+
+    A cursor is EXPIRED when its pinned instant predates the buffer's
+    oldest sample (``_expire_cursor``: ``instant < oldest``); the
+    instant rides the cursor payload's ``"t"`` key.
+    """
+
+    def test_an_expired_cursor_wins_over_an_unknown_family(self):
+        """The precedence — the expiry is answered BEFORE the family."""
+        cursor = encode_cursor({"v": 1, "t": 1_000, "o": 0})
+        provider = _provider(oldest_sample_timestamp=5_000)
+        response = build_client(provider).get(
+            f"/api/metrics/snapshot?cursor={cursor}&family=no_such_family"
+        )
+        assert response.status_code == 400, response.text
+        assert error_code(response) == "invalid_cursor"
+        assert "families" not in provider.reads, (
+            "the expiry probe must WIN before the family check is "
+            f"consulted — the door read {provider.reads!r}"
+        )
+
+    def test_a_live_cursor_still_reports_an_unknown_family(self):
+        """The CONTROL — the family check is not dead."""
+        cursor = encode_cursor({"v": 1, "t": 6_000, "o": 0})
+        provider = _provider(oldest_sample_timestamp=1_000)
+        response = build_client(provider).get(
+            f"/api/metrics/snapshot?cursor={cursor}&family=no_such_family"
+        )
+        assert response.status_code == 404, response.text
+        assert error_code(response) == "unknown_family"
+        assert "families" in provider.reads, (
+            "the family check must have been consulted — the door read "
+            f"{provider.reads!r}"
+        )
+
+    def test_an_expired_cursor_is_refused_for_a_known_family(self):
+        """The CONTROL — the expiry probe is not dead."""
+        cursor = encode_cursor({"v": 1, "t": 1_000, "o": 0})
+        provider = _provider(
+            families=[{"id": "ensemble_known_family"}],
+            oldest_sample_timestamp=5_000,
+        )
+        response = build_client(provider).get(
+            f"/api/metrics/snapshot?cursor={cursor}&family=ensemble_known_family"
+        )
+        assert response.status_code == 400, response.text
+        assert error_code(response) == "invalid_cursor"
