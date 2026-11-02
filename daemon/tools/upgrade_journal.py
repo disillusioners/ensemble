@@ -546,6 +546,13 @@ def journal_history_has_event(
     ``journal_history_has_intent_flip`` in scripts/upgrade/lib.sh) — all
     three implement the SAME per-entry, delimiter-anchored contract.
 
+    PER-TARGET semantics (stated — the key is NOT per-txn): the promote
+    lane emits ``intent_flip`` BEFORE ``journal_open_txn``
+    (``promote.sh:515`` vs ``:522``) ⇒ the authorization row exists before
+    the txn does ⇒ it cannot be keyed per txn. The ORDERING INVARIANT this
+    depends on: ``intent_flip`` first, the txn second — re-keying the
+    reader per txn would break authorization entirely.
+
     A torn journal ⇒ False (the degradation principle: absent / torn ⇒
     "no evidence", never a spurious authorization or a spurious request).
     """

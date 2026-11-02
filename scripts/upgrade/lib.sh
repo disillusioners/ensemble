@@ -223,6 +223,14 @@ HANDBACK_START_BUDGET_S="$(_numeric_knob HANDBACK_START_BUDGET_S "${HANDBACK_STA
 # (R-P1-15): UPGRADE_CLOSER_BOOT_GRACE_S (daemon-side) must stay ≥
 # HANDBACK_VERIFY_BUDGET_S — both windows cover the same measured boot.
 HANDBACK_VERIFY_BUDGET_S="$(_numeric_knob HANDBACK_VERIFY_BUDGET_S "${HANDBACK_VERIFY_BUDGET_S:-}" 300)"
+# F4 (fix-cycle, code-council W2): EXPORT the knob. The daemon-side closer
+# floors its boot-grace at max(UPGRADE_CLOSER_BOOT_GRACE_S, this value) and
+# reads it from its environment; the transport is (a) here — every child of
+# a lib.sh-sourcing context inherits the RESOLVED value — and (b) the
+# launcher's .env export seam (launcher.sh exports every .env key and the
+# daemon is the launcher's child). Exporting does not change the shell's own
+# reads (the variable is read by name; export only marks it for children).
+export HANDBACK_VERIFY_BUDGET_S
 HANDBACK_VERIFY_FLOOR_S="$(_numeric_knob HANDBACK_VERIFY_FLOOR_S "${HANDBACK_VERIFY_FLOOR_S:-}" 180)"
 HANDBACK_VERIFY_GRACE_S="$(_numeric_knob HANDBACK_VERIFY_GRACE_S "${HANDBACK_VERIFY_GRACE_S:-}" 60)"
 HANDBACK_TAIL_RESERVE_S="$(_numeric_knob HANDBACK_TAIL_RESERVE_S "${HANDBACK_TAIL_RESERVE_S:-}" 120)"

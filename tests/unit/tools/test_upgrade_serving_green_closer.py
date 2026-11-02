@@ -708,3 +708,249 @@ def test_per_entry_reader_closes_the_prefix_and_cross_entry_hazards(
     assert not uj.journal_history_has_event(
         install, "rollback_requested", TARGET, "r1"
     )
+
+
+# ── FIX-CYCLE F2 (code-council W3): the P9 authorization is re-checked
+# UNDER the journal lock, against the already-loaded history ────────────────
+
+
+def test_f2_authorization_withdrawn_under_the_lock_is_not_committed(
+    tmp_path: Path,
+) -> None:
+    """The journal mutated between the pre-lock P9 read and the lock ⇒ NO
+    commit.
+
+    The ``readiness_provider`` call sits exactly in that window (after the
+    pre-lock P9 read, before ``lock_acquire``) — the provider below
+    removes the ``intent_flip`` row on its first call. Pre-fix the
+    under-lock re-validation checked only in_flight/target/flipped/
+    displaced_version, so the commit-close sailed through on the STALE
+    pre-lock authorization.
+    """
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    mutated = {"done": False}
+
+    def mutating_provider():  # noqa: ANN001 — the seam under test
+        if not mutated["done"]:
+            mutated["done"] = True
+            data = json.loads(state.read_text(encoding="utf-8"))
+            data["history"] = [
+                h
+                for h in data.get("history", [])
+                if h.get("event") != "intent_flip"
+            ]
+            state.write_text(
+                json.dumps(data, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+        return _composite(ready=True)
+
+    svc = _service(install, provider=mutating_provider)
+    result = _run(svc)
+    assert result["action"] != "committed", result
+    assert result.get("reason") == "no_intent_flip_under_lock", result
+    data = _journal(install)
+    assert data["in_flight"] is not None, "the txn must stay OPEN"
+    assert data["current"] == PREV, "current must be untouched"
+    assert "serving_green_commit" not in _events(install)
+
+
+def test_f2_authorization_withdrawn_under_the_lock_writes_no_request(
+    tmp_path: Path,
+) -> None:
+    """The NOT-GREEN arm has the same hole: the verdict + the REQUEST are
+    writes too — a withdrawn authorization under the lock must journal
+    NEITHER."""
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    calls = {"n": 0}
+
+    def mutating_provider():  # noqa: ANN001 — the seam under test
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            # mutate on the provider call of the tick that reaches the
+            # VERDICT arm: the pre-lock P9 read of THAT tick has already
+            # passed, and this call sits between it and lock_acquire
+            data = json.loads(state.read_text(encoding="utf-8"))
+            data["history"] = [
+                h
+                for h in data.get("history", [])
+                if h.get("event") != "intent_flip"
+            ]
+            state.write_text(
+                json.dumps(data, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+        return _composite(ready=False, grace_active=False)
+
+    svc = _service(install, provider=mutating_provider)
+    # tick 1 arms the (1s) boot-grace; tick 2 (after the grace elapses)
+    # reaches the verdict arm with the authorization withdrawn under the
+    # lock
+    _run(svc)
+    import time
+
+    time.sleep(1.05)
+    result = _run(svc)
+    assert result["action"] != "unhealthy", result
+    assert result.get("reason") == "no_intent_flip_under_lock", result
+    assert "serving_unhealthy" not in _events(install)
+    assert "rollback_requested" not in _events(install)
+
+
+def test_f2_healthy_commit_still_works_when_authorization_holds(
+    tmp_path: Path,
+) -> None:
+    """Positive control: the SAME under-lock re-check must not refuse a
+    journal whose authorization IS present (the re-check is a guard, not a
+    brake)."""
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+
+    def benign_provider():  # noqa: ANN001
+        return _composite(ready=True)
+
+    svc = _service(install, provider=benign_provider)
+    result = _run(svc)
+    assert result["action"] == "committed", result
+    assert "serving_green_commit" in _events(install)
+
+
+# ── FIX-CYCLE F4 (code-council W2): the effective grace floor ──────────────
+
+
+def test_f4_handback_budget_raises_the_effective_grace(tmp_path: Path, monkeypatch) -> None:
+    """``HANDBACK_VERIFY_BUDGET_S`` in the daemon's environment FLOORS the
+    effective boot-grace (``max(300, <budget>)``) — the derivation rule
+    becomes EFFECTIVE, not just declared."""
+    install = tmp_path / "install"
+    _write_journal(install)
+    svc = svm.UpgradeJournalSweepService(
+        install,
+        reconcile_interval_seconds=1,
+        reaper_timeout_seconds=60,
+        readiness_provider=None,
+        closer_boot_grace_seconds=None,   # the env/default path, no seam
+    )
+    monkeypatch.setenv(svm.HANDBACK_VERIFY_BUDGET_ENV, "900")
+    assert svc._closer_boot_grace_s() == 900
+    # an operator override may still RAISE above the floor
+    monkeypatch.setenv(svm.UPGRADE_CLOSER_BOOT_GRACE_ENV, "1200")
+    assert svc._closer_boot_grace_s() == 1200
+    # the operator override may NOT go below the hand-back floor
+    monkeypatch.setenv(svm.UPGRADE_CLOSER_BOOT_GRACE_ENV, "400")
+    assert svc._closer_boot_grace_s() == 900
+    # garbage in the hand-back knob is IGNORED (fail-safe: default floor)
+    monkeypatch.setenv(svm.UPGRADE_CLOSER_BOOT_GRACE_ENV, "")
+    monkeypatch.setenv(svm.HANDBACK_VERIFY_BUDGET_ENV, "not-a-number")
+    assert svc._closer_boot_grace_s() == svm.UPGRADE_CLOSER_BOOT_GRACE_S
+
+
+def test_f4_the_effective_value_is_logged_on_clamp(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The clamp is surfaced ONCE at WARNING with the EFFECTIVE value."""
+    import logging
+
+    install = tmp_path / "install"
+    _write_journal(install)
+    svc = svm.UpgradeJournalSweepService(
+        install,
+        reconcile_interval_seconds=1,
+        reaper_timeout_seconds=60,
+        readiness_provider=None,
+        closer_boot_grace_seconds=None,
+    )
+    monkeypatch.setenv(svm.HANDBACK_VERIFY_BUDGET_ENV, "777")
+    with caplog.at_level(logging.WARNING, logger=svm.logger.name):
+        assert svc._closer_boot_grace_s() == 777
+        assert svc._closer_boot_grace_s() == 777   # repeat: once only
+    warnings = [
+        r for r in caplog.records
+        if "raises the effective" in r.getMessage()
+    ]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert "777" in warnings[0].getMessage()
+
+
+# ── FIX-CYCLE A5/A6 (code-council advisories 5/6) ──────────────────────────
+
+
+def test_a6_missing_previous_field_never_half_applies_a_commit(
+    tmp_path: Path,
+) -> None:
+    """A journal without ``previous`` (schema drift) must NOT mutate
+    ``current``: pre-fix the commit wrote ``current`` first and the
+    ``previous`` write raised KeyError ⇒ caught as journal_write_failed
+    with ``current`` ALREADY mutated (a half-applied commit)."""
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    data = json.loads(state.read_text(encoding="utf-8"))
+    del data["previous"]
+    state.write_text(json.dumps(data), encoding="utf-8")
+    svc = _service(install, composite=_composite(ready=True))
+    result = _run(svc)
+    assert result["action"] != "committed", result
+    assert result.get("reason") == "journal_field_missing", result
+    after = _journal(install)
+    assert after["current"] == PREV, "current must be UNTOUCHED"
+    assert after["in_flight"] is not None, "the txn must stay OPEN"
+    assert "serving_green_commit" not in _events(install)
+
+
+def test_a5_the_unhealthy_verdict_logs_once(
+    tmp_path: Path, caplog
+) -> None:
+    """The verdict WARNING mirrors the write-once: the first verdict tick
+    logs at WARNING, repeat ticks at DEBUG (the 90s-tick noise class)."""
+    import logging
+
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=False, grace_active=False))
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=svm.logger.name):
+        _run(svc)          # arms the 1s boot-grace
+        import time
+
+        time.sleep(1.05)
+        _run(svc)          # the first VERDICT tick ⇒ WARNING
+        _run(svc)          # the repeat tick ⇒ DEBUG
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "NOT SERVING GREEN" in r.getMessage()
+    ]
+    debugs = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and "repeat tick" in r.getMessage()
+    ]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert len(debugs) == 1, [r.getMessage() for r in caplog.records]

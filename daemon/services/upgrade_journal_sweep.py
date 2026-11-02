@@ -157,6 +157,10 @@ sweep-local constants — NOT in ``daemon/constants.py`` (that module is
 cited only as the site whose pool-busy horizon is NOT borrowed)."""
 
 UPGRADE_CLOSER_BOOT_GRACE_ENV: str = "UPGRADE_CLOSER_BOOT_GRACE_S"
+"""Env name of the shell-side hand-back verify budget (F4) — read by
+``_handback_verify_budget_s`` so the closer's grace floor is EFFECTIVE,
+not just declared."""
+HANDBACK_VERIFY_BUDGET_ENV: str = "HANDBACK_VERIFY_BUDGET_S"
 """Env override for the closer's boot-grace horizon (RAISE-ONLY — see
 ``UPGRADE_CLOSER_BOOT_GRACE_S``'s derivation rule)."""
 
@@ -312,6 +316,7 @@ class UpgradeJournalSweepService:
         # arm, never extended, re-armed only for a NEW txn identity).
         self._closer_grace_key: str | None = None
         self._closer_grace_armed_at: datetime | None = None
+        self._closer_grace_clamp_logged: bool = False
         self._reaper_queue: asyncio.Queue[ReaperJob] = asyncio.Queue()
         self._sweep_task: asyncio.Task[None] | None = None
         self._reaper_task: asyncio.Task[None] | None = None
@@ -2081,17 +2086,100 @@ class UpgradeJournalSweepService:
         declared default — the one-way derivation rule (AM-P2-24 fold (b)):
         ``UPGRADE_CLOSER_BOOT_GRACE_S`` ≥ ``HANDBACK_VERIFY_BUDGET_S``. The
         constructor test seam bypasses that clamp (it is not an operator
-        surface)."""
+        surface).
+
+        F4 (code-council W2) — the floor is now EFFECTIVE, not just
+        declared: the effective grace is
+        ``max(UPGRADE_CLOSER_BOOT_GRACE_S, HANDBACK_VERIFY_BUDGET_S)``
+        where the hand-back budget is read from the environment. The
+        transport is the .env export seam (``launcher.sh`` exports every
+        .env key and the daemon is the launcher's child), plus the
+        ``export`` added beside the knob in ``scripts/upgrade/lib.sh`` so
+        lib.sh-sourced contexts propagate it to their children. Both
+        windows must cover the SAME measured unit-active→serving boot —
+        pre-fix the docstring asserted the floor while the code clamped
+        ONLY at the 300 constant, so an operator who raised the hand-back
+        budget left the closer free to judge NOT-GREEN before the
+        hand-back verifier had finished waiting.
+        """
         if self._closer_boot_grace_override is not None:
             return max(1, int(self._closer_boot_grace_override))
         raw = os.environ.get(UPGRADE_CLOSER_BOOT_GRACE_ENV, "")
         try:
             value = int(float(raw))
         except (TypeError, ValueError):
-            return UPGRADE_CLOSER_BOOT_GRACE_S
+            value = UPGRADE_CLOSER_BOOT_GRACE_S
         if value < UPGRADE_CLOSER_BOOT_GRACE_S:
-            return UPGRADE_CLOSER_BOOT_GRACE_S
+            value = UPGRADE_CLOSER_BOOT_GRACE_S
+        handback = self._handback_verify_budget_s()
+        if handback > value:
+            value = handback
+            # log the EFFECTIVE value on clamp — once per process (the
+            # per-tick precedent is the read itself; a WARNING per tick
+            # would be the A5 noise class).
+            if not self._closer_grace_clamp_logged:
+                self._closer_grace_clamp_logged = True
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer — "
+                    "HANDBACK_VERIFY_BUDGET_S=%ss raises the effective "
+                    "boot-grace floor to %ss (UPGRADE_CLOSER_BOOT_GRACE_S "
+                    "default %ss; the one-way rule AM-P2-24: the closer's "
+                    "horizon may never be lower than the hand-back budget)",
+                    handback, value, UPGRADE_CLOSER_BOOT_GRACE_S,
+                )
         return value
+
+    @staticmethod
+    def _handback_verify_budget_s() -> int:
+        """The shell knob ``HANDBACK_VERIFY_BUDGET_S`` as seen by this
+        process (0 = unset/unparseable ⇒ the declared default applies).
+
+        Fail-safe on garbage: an unparseable value is IGNORED (the default
+        floor stands) — the same ``_numeric_knob`` degradation lib.sh
+        documents for the shell side.
+        """
+        raw = os.environ.get(HANDBACK_VERIFY_BUDGET_ENV, "")
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            return 0
+        return value if value > 0 else 0
+
+    @staticmethod
+    def _closer_authorized_under_lock(
+        fresh: dict[str, Any], target: str
+    ) -> bool:
+        """F2 (code-council W3) — the P9 AUTHORIZATION conjunct, re-checked
+        against the **already-loaded under-lock** history (NO extra read).
+
+        The pre-lock P9 read happens BEFORE the journal lock is taken; the
+        under-lock re-validation re-checked only ``in_flight`` / ``target``
+        / ``flipped`` / ``displaced_version`` — **not** the authorization
+        event. A journal mutated in that window (the evidence withdrawn,
+        or a different txn's evidence substituted) therefore sailed through
+        the commit-close ⇒ a direct AM-P2-3 non-conformance ("re-check
+        ALL predicates P1-P9 under the lock").
+
+        The matcher is the SAME per-entry, delimiter-anchored one the
+        pre-lock read uses (``uj.history_entry_matches``) ⇒ the two reads
+        share one contract (no substring conjunction, no cross-entry false
+        positive).
+
+        PER-TARGET semantics (A7, stated — the key is NOT per-txn): the
+        promote lane emits ``intent_flip`` **BEFORE** ``journal_open_txn``
+        (``promote.sh:515`` vs ``:522``) ⇒ the authorization row exists
+        before the txn does, so it CANNOT be keyed per txn; the reader
+        matches the event against the TARGET. The ORDERING INVARIANT this
+        depends on: ``intent_flip`` is emitted first and the txn second —
+        re-keying the reader per txn would break authorization entirely.
+        """
+        history = fresh.get("history")
+        if not isinstance(history, list):
+            return False
+        return any(
+            uj.history_entry_matches(entry, "intent_flip", target)
+            for entry in history
+        )
 
     @staticmethod
     def _closer_txn_identity(in_flight: dict[str, Any], target: str) -> str:
@@ -2162,10 +2250,11 @@ class UpgradeJournalSweepService:
         """The closer's OWN boot-grace window (P8, first conjunct).
 
         OBSERVATION-RELATIVE: armed on the FIRST tick where the pre-grace
-        predicates hold; NEVER extended; re-armed only for a NEW txn
-        identity (a full lapse does not re-arm the SAME txn — the verdict
-        is write-once, so a re-arm would only defer ticks that have
-        nothing left to decide)."""
+        predicates (P1-P9 — the call site sits AFTER the P9 authorization
+        gate) hold; NEVER extended; re-armed only for a NEW txn identity
+        (a full lapse does not re-arm the SAME txn — the verdict is
+        write-once, so a re-arm would only defer ticks that have nothing
+        left to decide)."""
         now = datetime.now(tz=timezone.utc)
         if self._closer_grace_key != key or self._closer_grace_armed_at is None:
             self._closer_grace_key = key
@@ -2280,6 +2369,11 @@ class UpgradeJournalSweepService:
         result["run_id"] = run_id
         # P9 — the authorization conjunct. ABSENT ⇒ NO ACTION THIS TICK
         # (never a commit, never a verdict, never a request).
+        # PER-TARGET, not per-txn (A7, stated): promote emits intent_flip
+        # BEFORE journal_open_txn (promote.sh:515 vs :522) ⇒ the evidence
+        # predates the txn ⇒ per-txn keying would break authorization.
+        # This read is PRE-LOCK; the under-lock re-check lives in
+        # _closer_authorized_under_lock (F2) inside both arms.
         if not uj.journal_history_has_event(
             install_dir, "intent_flip", target
         ):
@@ -2432,6 +2526,20 @@ class UpgradeJournalSweepService:
                     and not self._closer_symlink_flipped(fresh, target):
                 result["reason"] = "not_flipped_under_lock"
                 return result
+            # F2 (code-council W3): re-check the AUTHORIZATION under the
+            # lock, against the already-loaded history (no extra read).
+            if not self._closer_authorized_under_lock(fresh, target):
+                result["action"] = "deferred"
+                result["reason"] = "no_intent_flip_under_lock"
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer — the "
+                    "intent_flip authorization for target=%s is NOT present "
+                    "in the journal re-read UNDER the lock — no commit "
+                    "(P9 re-checked under the lock; the evidence was "
+                    "withdrawn or mutated between the pre-lock read and "
+                    "the lock)", target,
+                )
+                return result
             displaced = fresh_in_flight.get("displaced_version")
             if not isinstance(displaced, str) or not displaced \
                     or displaced == "null":
@@ -2451,6 +2559,28 @@ class UpgradeJournalSweepService:
                     "UpgradeJournalSweepService: serving-green closer — "
                     "stale flipped txn target=%s has no displaced_version — "
                     "halt-for-human, txn left open", target,
+                )
+                return result
+            # A6 (code-council advisory 6) — pre-check the fields BEFORE the
+            # first write: the commit mutates `current` then `previous`, and
+            # `journal_update_field` raises KeyError on an absent field
+            # (schema drift ⇒ ensure_extensions). Pre-fix the KeyError was
+            # caught as journal_write_failed AFTER `current` had already
+            # been mutated — a half-applied commit. (The `quarantined`
+            # rewrite below is guarded by `journal_quarantined_contains`,
+            # which reads False when the field is absent ⇒ no KeyError.)
+            missing_fields = [
+                f for f in ("current", "previous") if f not in fresh
+            ]
+            if missing_fields:
+                result["action"] = "deferred"
+                result["reason"] = "journal_field_missing"
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer — "
+                    "journal is missing required field(s) %s — refusing to "
+                    "commit (a half-applied commit is worse than a defer); "
+                    "the txn is left untouched",
+                    ", ".join(missing_fields),
                 )
                 return result
             try:
@@ -2559,10 +2689,28 @@ class UpgradeJournalSweepService:
             if str(fresh_in_flight.get("target") or "") != target:
                 result["reason"] = "txn_changed_under_lock"
                 return result
+            # F2 (code-council W3): re-check the AUTHORIZATION under the
+            # lock, against the already-loaded history (no extra read) —
+            # the unhealthy VERDICT and the REQUEST are writes too.
+            if not self._closer_authorized_under_lock(fresh, target):
+                result["action"] = "deferred"
+                result["reason"] = "no_intent_flip_under_lock"
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer — the "
+                    "intent_flip authorization for target=%s is NOT present "
+                    "in the journal re-read UNDER the lock — no verdict, no "
+                    "request (P9 re-checked under the lock)",
+                    target,
+                )
+                return result
             try:
-                if not uj.journal_history_has_event(
+                verdict_already = uj.journal_history_has_event(
                     install_dir, SERVING_UNHEALTHY_EVENT, target, run_id
-                ):
+                )
+                request_already = uj.journal_history_has_event(
+                    install_dir, ROLLBACK_REQUESTED_EVENT, target, run_id
+                )
+                if not verdict_already:
                     uj.journal_history_append(
                         install_dir,
                         SERVING_UNHEALTHY_EVENT,
@@ -2571,9 +2719,7 @@ class UpgradeJournalSweepService:
                         f"the daemon — the launcher executes the disposition "
                         f"at its next boot",
                     )
-                if not uj.journal_history_has_event(
-                    install_dir, ROLLBACK_REQUESTED_EVENT, target, run_id
-                ):
+                if not request_already:
                     uj.journal_history_append(
                         install_dir,
                         ROLLBACK_REQUESTED_EVENT,
@@ -2590,13 +2736,28 @@ class UpgradeJournalSweepService:
                 )
                 return result
             result["action"] = "unhealthy"
-            logger.warning(
-                "UpgradeJournalSweepService: serving-green closer — stale "
-                "flipped txn target=%s run_id=%s is NOT SERVING GREEN "
-                "(reason=%s, age %ss) — verdict + rollback request journaled "
-                "(the launcher executes it at its next boot)",
-                target, run_id, reason, age_s,
-            )
+            # A5 (code-council advisory 5) — log the verdict ONCE: the
+            # journal writes above are WRITE-ONCE per (run_id, target), so
+            # the log must mirror them. A WARNING on every 90s tick is
+            # noise that buries the operator backstop; the repeat ticks
+            # downgrade to DEBUG.
+            if verdict_already and request_already:
+                logger.debug(
+                    "UpgradeJournalSweepService: serving-green closer — "
+                    "repeat tick for target=%s run_id=%s (reason=%s): the "
+                    "verdict + rollback request were already journaled — "
+                    "no new rows (the launcher executes them at its next "
+                    "boot)",
+                    target, run_id, reason,
+                )
+            else:
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer — stale "
+                    "flipped txn target=%s run_id=%s is NOT SERVING GREEN "
+                    "(reason=%s, age %ss) — verdict + rollback request journaled "
+                    "(the launcher executes it at its next boot)",
+                    target, run_id, reason, age_s,
+                )
             return result
         finally:
             uj.lock_release(install_dir)
