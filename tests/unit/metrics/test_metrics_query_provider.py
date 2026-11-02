@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -417,8 +418,13 @@ class TestContention:
         worker.start()
         try:
             assert held.wait(2.0)
+            started = time.monotonic()
             assert provider.snapshot()
             assert provider.families()
+            elapsed = time.monotonic() - started
+            assert elapsed < 1.0, (
+                f"the provider must not wait on a metric lock; it took {elapsed:.3f}s"
+            )
         finally:
             release.set()
             worker.join(2.0)
