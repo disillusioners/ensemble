@@ -86,6 +86,13 @@ The full verification is in `inventory-vendor/PROVENANCE.md` (§"Verification ro
 one **pre-existing** and in **another component's SCSS**; **none** of the lane's own components is
 over the 8 kB warn budget. They are **recorded findings, never auto-fixed**.
 
+**The live count — one ceremony-time observation.** At the staged boot smoke, read
+`/api/metrics/families` **ONCE** from the staged artefact and record the **live** count in the
+disclosure before the flip (**ceremony-time observation; owner: the staged-verification lane**).
+The disclosure carries the **measured closed label space (425)** as-is until then — the live total
+is observation-dependent and is not asserted by the lane (the running daemons do not carry the
+lane).
+
 ---
 
 ## 4. The live surface — **UNTOUCHED** by this lane ✅
