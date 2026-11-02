@@ -49,6 +49,26 @@ describe('Resources — gear menu entry', () => {
   });
 });
 
+// The gear-menu ORDERING pin — the shared surface every gear entry
+// depends on. The central-metrics-v1 Phase 5 lane appends the Metrics
+// entry after MCP Gateway; this assertion is the D2-leg evidence that
+// the append did not push the conditional Database/Maintenance
+// appends out of the menu tail (P5-M7).
+describe('Gear-menu ordering — the Metrics entry (central-metrics-v1 P5)', () => {
+  it('places Metrics AFTER MCP Gateway and BEFORE the conditional appends', () => {
+    const gatewayIdx = appTs.indexOf("{ label: 'MCP Gateway'");
+    const metricsIdx = appTs.indexOf("{ label: 'Metrics'");
+    const dbUpdateIdx = appTs.indexOf('settingsMenuItems.update(items => [');
+
+    expect(gatewayIdx).toBeGreaterThan(-1);
+    expect(metricsIdx).toBeGreaterThan(-1);
+    expect(dbUpdateIdx).toBeGreaterThan(-1);
+
+    expect(gatewayIdx).toBeLessThan(metricsIdx);
+    expect(metricsIdx).toBeLessThan(dbUpdateIdx);
+  });
+});
+
 describe('Resources — lazy route', () => {
   it('declares a lazy /resources route via loadComponent', () => {
     const routeMatch = routesSrc.match(
