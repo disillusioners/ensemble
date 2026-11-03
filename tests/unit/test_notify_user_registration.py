@@ -6,8 +6,9 @@ construction) is proven END-TO-END here, in the instance_ops shape:
 
 * (a) the AST discovery finds ``notify_user`` in the category module;
 * (b) the category is in ``PRIVILEGED_TOOL_CATEGORIES``;
-* (c) the frozenset LENGTH is 16 (ari-voice joined 2026-10-25);
-* (d) the set is EXACTLY the sixteen entries (pin);
+* (c) the frozenset LENGTH is 17 (ari-voice joined 2026-10-25 as the
+  sixteenth member; metrics-read joined 2026-11-03);
+* (d) the set is EXACTLY the seventeen entries (pin);
 * (e) ``CATEGORY_MODULES["notify-user"]`` resolves to a
   ``daemon.tools.*`` path (the AST scanner resolves the value as
   ``daemon/tools/<parts[2:]>.py`` — a ``daemon.services.*`` value is
@@ -174,10 +175,10 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_sixteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_sixteen_members(self) -> None:
+    def test_the_set_has_seventeen_members(self) -> None:
         assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
 
 

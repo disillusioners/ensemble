@@ -347,7 +347,7 @@ nine-id block is NOT widened):**
 | `metrics_read_docs_surface` | **20** | the agent-visible docs chain (the registry resolves the category, the loader renders the section for the three holders, NOTHING metrics-shaped reaches a non-holder, `tool_help` serves the `_full_doc_`, the three tools_note sections carry the AmC-11 asymmetry) |
 | `metrics_query_protocol_consumer` | **28** | the Phase-1 seam pins (the completeness pin, the identity + lifecycle-triple pins, the reachability leg, the public-reader pin, the no-second-provider pin) |
 
-**The mutation matrix — 27/27 PASS (26 RED/GREEN + 1 FOLLOW leg).** The ARCHIVED log (plan task 5.2's "the matrix log + digests archived for the evidence pack"): `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`, 3 587 bytes — the run's own pre-run manifest records the HEAD sha `035a4cd4b` (the council-fold commit — the FINAL code) + the sha256 of every touched file) and `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`). — see §H.10's SUPERSESSION note Each leg plants a mutation INDEPENDENTLY on the
+**The mutation matrix — 27/27 PASS (26 RED/GREEN + 1 FOLLOW leg).** The ARCHIVED log (plan task 5.2's "the matrix log + digests archived for the evidence pack"): `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`, 4 446 bytes — the run's own pre-run manifest records the HEAD sha `d50b95e3d` (the MT-23..MT-27 legs commit — the FINAL code) + the sha256 of every touched file) and `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`). — see §H.10's SUPERSESSION note Each leg plants a mutation INDEPENDENTLY on the
 production source, requires RED **through the intended assertion** (a per-leg RED marker — the
 marker's absence is a FAIL, so a mutation that reds for an unrelated reason does not pass),
 restores the file BYTE-IDENTICALLY and requires GREEN again. The restore discipline is the
@@ -609,6 +609,18 @@ count is 17 (`test_board_registration.py:201` `test_the_set_is_exactly_the_sixte
 are stale. A rename would change the node ids of a registered pack, so it is routed rather
 than done silently here.
 
+**RESIDUAL CLOSED (2026-11-03, the tidier pass — see §H.13):** the rename has been done, and
+the routing's churn basis was OVERSTATED — the rename-time sweep found `sixteen` **0×** in the
+mutation-matrix pack (`test/packs/metrics_read_mutation_legs.sh` +
+`test/packs/metrics_read_mutation_matrix_test.py`) and **0×** in `.agents/tester/PACKS.md`;
+the only other references to the old names are immutable archived collect-lists
+(`.agents/tester/RESULTS/raw/**`, `.agents/tester/EVIDENCE/**`, the sibling lane's
+`evidence/**` snapshots) plus historical sweep/approver records. The one live harness coupling
+is MT-01, whose intended-RED marker is `test_board_is_the_ninth_entry` — a node the rename does
+not touch (its find-string `assert len(PRIVILEGED_TOOL_CATEGORIES) == 17` is likewise
+untouched). The full cluster as folded spans SIX files / TEN node ids (not two files / three
+sites): see §H.13.
+
 ---
 
 ### H.12 — The verification's EVIDENCE GAP (closed 2026-11-03 — MT-23..MT-27)
@@ -630,8 +642,8 @@ expressed as legs, so both got legs rather than a rewording):
 | **MT-23** `compose-overwrite` | the families body's byte-ceiling hint is assigned DIRECTLY (`payload["narrow_hint"] = byte_hint`) instead of through `_compose_hint` — the 5b-② regression | `test_both_bounds_on_one_response_keep_both_hints` (`:767`) |
 | **MT-24** `per-body-disclosure-violated` | the families lever names a `name_prefix=` — i.e. the per-body disclosure is violated (5b-③) | `test_the_byte_ceiling_disclosure_names_only_accepted_filters` (`:799`) |
 | **MT-25** `caveat-disagreement` | the names-bound caveat is restored to the DISOWNED wording ("Ask for one family at a time, or use `details=false` for the small projection") — the caveat contradicts the corrected hint (5b-①) | `test_the_names_bound_caveat_agrees_with_its_hint` (`:884`) |
-| **MT-26** `shape-projection-lost` | the history body's ceiling is handed the RAW provider rows again (`items=series_out` → `items=kept`) — the C1 regression itself | `test_the_history_series_shape_is_the_same_on_both_paths` (`:818`) |
-| **MT-27** `ring-empty-direction-flipped` | the ring-empty heuristic's direction is flipped (`age == 0.0` → `age > 0.0`) — the false positive the RULING-1 disclosure names is no longer reachable | `test_the_ring_empty_flag_is_the_ages_heuristic_not_a_fact` (`:913`) |
+| **MT-26** `shape-projection-lost` | the history body's ceiling is handed the RAW provider rows again (`items=series_out` → `items=kept`) — the C1 regression itself | `test_the_history_series_shape_is_the_same_on_both_paths` (`:974`) |
+| **MT-27** `ring-empty-direction-flipped` | the ring-empty heuristic's direction is flipped (`age == 0.0` → `age > 0.0`) — the false positive the RULING-1 disclosure names is no longer reachable | `test_the_ring_empty_flag_is_the_ages_heuristic_not_a_fact` (`:1069`) |
 
 Each find-string is UNIQUELY locatable (verified: exactly 1 occurrence each — the harness
 SKIPs a non-unique find-string, which is how MT-12 was caught), and each mutation REDS its
@@ -646,6 +658,32 @@ sha; the SUPERSESSION CHAIN in §H.10 now links every prior artefact.
 **THE DEVIATION, STATED:** the council's expectation of 25 legs assumed only the fold's three
 pins; the class had two more claims, so the matrix carries **27**. The alternative — leaving
 two more unarchived claims behind for the next verification — would have left the gap open.
+
+---
+
+### H.13 — The tidier pass (2026-11-03, the council round-4 record-hygiene fold)
+
+The code council's round-4 verdict (CLEAR-WITH-NOTES) routed its residual record-hygiene
+items to this pass. **ZERO behavior change:** test names/docstrings + records only; `daemon/`
+untouched (the fold's diff touches no path outside `tests/` + `.agents/`).
+
+| Item | Disposition |
+|---|---|
+| the §2 verdict cell | **FOLDED** — `evidence-pack.md:41` "22/22 PASS" → "27/27 PASS" (one token; the row's own composition cell, `:215` and §8e already carried 27/27) |
+| the fold-ledger prose fragments | **FOLDED** — §H.6's matrix paragraph (`:350`): "3 587 bytes" → 4 446 bytes; "HEAD sha `035a4cd4b` (the council-fold commit…)" → `d50b95e3d` (the MT-23..MT-27 legs commit). Both digests were verified CURRENT against the archived artefacts before the prose fix (log = 4 446 B, sha256 `eb2423eb…`; manifest `head_sha` = `d50b95e3d…`). The SAME two stale fragments were found duplicated in `evidence-pack.md`'s archived-log paragraph (`:220-222`) — folded with the same two tokens (the sweep that produced the item had counted only the fold-ledger copy) |
+| the §H.12 pin citations | **FOLDED** — MT-26/MT-27 pin line refs `:818`/`:913` → `:974`/`:1069` (re-derived by grep at fold time; the legs bind by NAME, the harness is unaffected) |
+| the "sixteen"-name cluster | **FOLDED** — the full sweep: SIX files / TEN node ids renamed (`test_the_set_is_exactly_the_sixteen_entries` ×5 → `…seventeen_entries`, board/self-alarm/wedge/notify/instance-ops; `test_the_set_has_sixteen_members` ×4 → `…seventeen_members`, self-alarm/wedge/notify/instance-ops; `test_privileged_categories_is_exactly_sixteen_entries` → `…seventeen_entries`, upgrade), matching the correctly-named counter-examples (`test_metrics_read_registration.py:217/:220`, `test_maintenancer_spawn_resolves_tools.py:343`). PLUS the stale-count docstrings/comments the numeral sweep found beyond the council's two: the module-docstring "(c) the frozenset LENGTH is 16" lines in wedge/notify/instance-ops (wedge + instance-ops also carried a wrong "ari-voice joined 2026-10-25" copy-paste artifact), wedge's `EXPECTED_PRIVILEGED_SET` "= 15 members" pin comment, and notify's "(d) …sixteen entries" line. The HISTORICAL arithmetic comments (the cu-removal "16 -> 15 members" at `test_self_alarm_registration.py:75` and `test_instance_ops_registration.py:87`) stay as history. The upgrade docstring's nine-item enumeration → the full seventeen, in registry literal order |
+| evidence-pack §3's per-leg table | **FOLDED** — the five MT-23..MT-27 rows appended after MT-22 (terse §3 form; content from §H.12's authoritative table) + a one-line provenance note pointing at §8e/§H.12 |
+| the routing entry's churn basis | **CORRECTED + CLOSED** — recorded in the §H.11 residual block above: `sixteen` 0× in the matrix pack + PACKS.md; only archived collect-lists carry the old names; MT-01's marker untouched |
+| §G (the six numbered tidier Mediums) | **OUTCOME RECORDED (§C option 2)** — see §G.2: the numbered list is not recoverable by the tidier pass either; the six items stay routed exactly as the central-metrics-v1 lane record left them |
+
+**Verification (this pass):** collection census BEFORE == AFTER — 123 nodes over the six
+files, the only id diffs the ten renames (`--collect-only` lists diffed 1:1); all six files
+green in one invocation; the registered multi-file packs re-run green with unchanged counts;
+the lane's five-leg unit shell pack re-run green (the tools/personas/registration/docs-surface/
+seam packs); the mutation-matrix pack NOT re-run — its harness binds markers by the METRICS
+pack node names (grep-proven zero references to the renamed ids; MT-01's marker
+`test_board_is_the_ninth_entry` is not among them).
 
 ---
 
@@ -687,6 +725,20 @@ What this lane DID do, so the protocol is not stalled:
   section — each item id → its finding text, its target file:line and its disposition
   (fold-here / still-routed) — or records THAT outcome verbatim if it cannot recover the list
   either. **The rows above stay empty until then; they are never guessed.**
+
+### G.2 — The outcome recorded by the TIDIER pass (2026-11-03, post-code-council)
+
+**The verbatim outcome: THE NUMBERED LIST WAS NOT RECOVERED BY THE TIDIER PASS EITHER — and
+no mapping is recorded (§C, option 2).**
+
+The tidier pass re-checked the recoverability basis at fold time: `.agents/tidier/notes.md`
+(the central-metrics-v1 entry, `:750-763`) carries the aggregate verdict (27 Mediums within
+the 51-finding pass) and the headline-Medium prose ONLY — the per-item numbering of the
+original list exists nowhere in this tree (§C's search table stands: no tidier-report.md, no
+`T-M<n>` markers), and re-running the lens over `1497bf51f..c3a003668` would not reproduce
+the original numbering. Per the binding protocol the six items (3, 5, 10, 16, 17, 21) stay
+routed exactly as the central-metrics-v1 lane record left them; the placeholder rows above
+stay empty; nothing is guessed. What this pass DID fold on this lane is recorded in §H.13.
 
 **Status: OPEN — routed to the tidier pass (this lane's own §H records the deviation
 dispositions it DID make).**

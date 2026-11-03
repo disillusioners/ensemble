@@ -99,11 +99,14 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_sixteen_entries(self) -> None:
-        """The default-deny set is exactly sixteen entries —
+    def test_privileged_categories_is_exactly_seventeen_entries(self) -> None:
+        """The default-deny set is exactly seventeen entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``secrets``,
-        ``settings``, ``board`` and ``self-alarm``.
+        ``settings``, ``board``, ``self-alarm``,
+        ``view-write``, ``board-link``, ``wedge-capture``,
+        ``instance_read``, ``instance_ops``, ``mcp_rpc``,
+        ``notify-user`` and ``metrics-read``.
 
         ``service`` was REMOVED from this set by user override
         2026-09-16 (D4 reversed; see

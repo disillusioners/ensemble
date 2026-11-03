@@ -198,7 +198,7 @@ class TestPrivilegedCategory:
     def test_board_is_in_the_privileged_set(self) -> None:
         assert BOARD_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_sixteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
         """The set is exact — the phase-2 commit moved this pin with the
         tenth entry (``self-alarm``) and the phase-3 commit moved it
         again with the eleventh + twelfth (``view-write`` /
@@ -211,8 +211,9 @@ class TestPrivilegedCategory:
         9 -> 10 in phase 2 (``self-alarm``) and 10 -> 12 in phase 3
         (``view-write`` + ``board-link``). That was the count AT THE
         TIME of the phase-1 commit; the ``cu`` category was removed
-        from the set on 2026-10-24, so the live set is 15 members and
-        ``board`` now sits one slot earlier.
+        from the set on 2026-10-24 (15 members then; 17 after the
+        ari-voice 2026-10-25 and metrics-read 2026-11-03 additions)
+        and ``board`` now sits one slot earlier.
 
         The registry constant is a frozenset (unordered), so the
         "ninth entry" is a property of the SET SIZE at the time of the

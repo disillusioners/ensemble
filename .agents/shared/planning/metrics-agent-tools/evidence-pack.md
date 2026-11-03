@@ -38,7 +38,7 @@ the `instance.py` extend + the three metas + the three `tools_note.md` + the 16-
 | 4 | the scoped type-check | `frontend/./node_modules/.bin/tsc --noEmit -p tsconfig.metrics-fe.json` | rc=0 | — | green (the frontend-local toolchain ONLY) |
 | 4 | both builds | `ng build --configuration development` + `--configuration production` | rc=0 / rc=0 | — | green; the production budget WARNs are RECORDED FINDINGS (none names a file this lane touched) |
 | 4 | the FE e2e | `playwright test --config=playwright.metrics-gate.config.ts` | **3/3 passed** (real Chromium, zero daemon contact) | — | green |
-| 5 | **the mutation matrix** | **26 RED/GREEN + 1 FOLLOW = 27 legs** (12 at the first cut; +10 by the 2026-11-03 council fix cycle; +5 by the verification's evidence-gap close — MT-23..MT-27) | **22/22 PASS** (RED via the intended assertion → byte-identical restore → GREEN; the FOLLOW leg's consumer value MOVED 235 → 215) — **ARCHIVED**: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`) + `.../mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`) | — | green; the post-run manifest confirms every touched file is byte-identical |
+| 5 | **the mutation matrix** | **26 RED/GREEN + 1 FOLLOW = 27 legs** (12 at the first cut; +10 by the 2026-11-03 council fix cycle; +5 by the verification's evidence-gap close — MT-23..MT-27) | **27/27 PASS** (RED via the intended assertion → byte-identical restore → GREEN; the FOLLOW leg's consumer value MOVED 235 → 215) — **ARCHIVED**: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`) + `.../mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`) | — | green; the post-run manifest confirms every touched file is byte-identical |
 | 5 | the unit shell pack | `test/packs/metrics_read_unit_test.sh` | **PASS (5 legs)** — 30 + 51 + 15 + 20 + 28 = 144 nodes | — | green |
 | 5 | the mutation shell pack | `test/packs/metrics_read_mutation_legs.sh` | **PASS** (the matrix's own `RESULT: PASS` + the byte-identical-restore assertion) | — | green |
 | 5b/5c | **the two fix cycles' scoped packs** (the six-pack set: tools + personas + registration + docs-surface + the seam pack + the contract-doc pack) | 6 file arguments | **165 passed** (the tools pack **51** — the AST wiring pin + the two SHAPE pins + the ring-state DISCLOSURE pin + the fold's three disclosure pins) | — | green; the shell pack's five legs re-run: 30 + 51 + 15 + 20 + 28 = **144 nodes**, `RESULT: PASS (5 legs)` |
@@ -83,6 +83,14 @@ requires GREEN again. The restore discipline is the in-memory byte copy + the pr
 | MT-20 | the racy-bool doctrine statement removed | the doctrine leg |
 | MT-21 | the AmM-1 clamp applied SILENTLY | the non-silence leg |
 | **MT-22** | **the seam's `MAX_TOTAL_POINTS` mutated → the tool's clamp must MOVE** | **the FOLLOW leg (a new shape — the consumer's value follows the producer: 235 → 215)** (**the RESTORED binding leg**) |
+| **MT-23** `compose-overwrite` | the families body's byte-ceiling hint assigned DIRECTLY (bypassing `_compose_hint`) — the 5b-② regression | the combined-bounds pin |
+| **MT-24** `per-body-disclosure-violated` | the families lever names a `name_prefix=` (metrics_families accepts neither it nor `top_n`) — the 5b-③ violation | the per-body disclosure pin |
+| **MT-25** `caveat-disagreement` | the names-bound caveat restored to the DISOWNED wording — the caveat contradicts the corrected hint (5b-①) | the caveat/hint agreement pin |
+| **MT-26** `shape-projection-lost` | the history body's ceiling handed the RAW provider rows again (`items=series_out` → `items=kept`) — the C1 regression itself | the history-series-shape pin |
+| **MT-27** `ring-empty-direction-flipped` | the ring-empty heuristic's direction flipped (`age == 0.0` → `age > 0.0`) — the false positive the RULING-1 disclosure names is no longer reachable | the ring-state disclosure pin |
+
+*(MT-01..MT-22 were the first cut + the council fix cycle; MT-23..MT-27 were appended by the
+verification's evidence-gap close — the full leg descriptions are in §8e and fold-ledger §H.12.)*
 
 ---
 
@@ -217,9 +225,9 @@ C2/W1/W2/W3/W4. The second cycle's dispositions, with the loci:
 
 **The ARCHIVED matrix log (plan task 5.2's requirement):**
 `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log`
-(sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0` — 3 587 bytes;
-the run's own pre-run manifest records the HEAD sha `035a4cd4b` + the sha256 of every
-touched file — the council-fold commit, i.e. the FINAL code) and
+(sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0` — 4 446 bytes;
+the run's own pre-run manifest records the HEAD sha `d50b95e3d` + the sha256 of every
+touched file — the MT-23..MT-27 legs commit, i.e. the FINAL code) and
 `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json`
 (sha256 `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`).
 
