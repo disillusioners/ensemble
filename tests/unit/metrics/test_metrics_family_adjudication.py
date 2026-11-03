@@ -398,18 +398,25 @@ class TestWsAAncestryVerdict:
 
 
 class TestTheBudget:
-    def test_the_vocabulary_version_is_not_double_bumped(self) -> None:
-        """THE FINDING — P4 requires NO further vocabulary bump.
+    def test_the_vocabulary_version_moved_only_for_the_tool_category_axis(self) -> None:
+        """THE MARKER MOVED — ON THE TOOL-CATEGORY AXIS ONLY.
 
-        The P1 contract freezes ``vocabulary_version: 2`` ("2 after this
-        lane") and P2's success criterion is ``VOCABULARY_VERSION == 2``
-        — Stage A delivered that bump (the F7 op narrowing).  P4's new
-        families' label vocabularies are part of the SAME frozen annex
-        (the D5 F18 row puts the amended audit vocabulary on the 1→2
-        bump), so the registry-side version stays 2.  A bump to 3 here
-        would break the frozen contract's pinned value.
+        The original finding (P4) required NO further vocabulary bump:
+        the P1 contract freezes ``vocabulary_version: 2`` ("2 after this
+        lane") and P2's success criterion was ``VOCABULARY_VERSION == 2``
+        — Stage A delivered that bump (the F7 op narrowing), and P4's
+        new families' label vocabularies are part of the SAME frozen
+        annex (the D5 F18 row puts the amended audit vocabulary on the
+        1→2 bump).
+
+        The marker has since moved 2 → 3 — for a DIFFERENT vocabulary:
+        the TOOL-CATEGORY label set (the metrics-agent-tools lane
+        registered the ``metrics-read`` privileged category, so the
+        frozen label set changed and the bump contract requires the
+        marker to move).  The F7 op enum's own annex (``{aget, other}``)
+        did NOT move, and the op-enum pins in this file still hold.
         """
-        assert cm.VOCABULARY_VERSION == 2
+        assert cm.VOCABULARY_VERSION == 3
 
     def test_each_family_stays_inside_its_declared_band(self) -> None:
         specs = registry.registered_families()

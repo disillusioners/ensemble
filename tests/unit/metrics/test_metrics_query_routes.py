@@ -377,13 +377,22 @@ class TestExpositionStructuralIdentity:
             "OUTSIDE the 3-carrier value-delta allowlist"
         )
 
-    def test_the_allowlist_covers_exactly_three_carriers(self):
+    def test_the_allowlist_covers_exactly_four_carriers(self):
+        """The ratified allowlist — FOUR carriers.
+
+        The fourth is the TOOL-CATEGORY vocabulary line: the
+        metrics-agent-tools lane registered the ``metrics-read``
+        privileged category, so the frozen set (the committed artifact)
+        legitimately grew.  The artifact pack is the authority on that
+        set's integrity, so masking its VALUE here costs no coverage.
+        """
         from tests.helpers.metrics_exposition_baseline import ALLOWLIST
 
         assert set(ALLOWLIST) == {
             "frozen_vocabulary_version",
             "vocabulary_version_gauge",
             "checkpoint_op_seconds_help",
+            "tool_category_vocabulary",
         }
 
 

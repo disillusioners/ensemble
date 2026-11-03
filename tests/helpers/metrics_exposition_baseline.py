@@ -5,14 +5,22 @@ STRUCTURALLY IDENTICAL to the lane's base artifact for the same
 registry state — the same series set, the same TYPE lines, the same
 label vocabularies and the same HELP structure.
 
-Exactly THREE carriers may differ in VALUE (the ratified allowlist):
+Exactly FOUR carriers may differ in VALUE (the ratified allowlist):
 
 1. the ``# frozen vocabulary version: N`` footer;
 2. the ``ensemble_metrics_vocabulary_version`` gauge value;
-3. the ``# HELP ensemble_checkpoint_op_seconds …`` text.
+3. the ``# HELP ensemble_checkpoint_op_seconds …`` text;
+4. the ``# frozen vocabulary tool_category: count=N <set>`` line — the
+   TOOL-CATEGORY vocabulary, whose frozen SET is the committed artifact
+   ``.agents/shared/metrics/tool-categories.json``.  The
+   metrics-agent-tools lane registered the ``metrics-read`` privileged
+   category, so the derived set legitimately grew; the artifact pack
+   (``tests/unit/tools/test_tool_category_artifact.py``) is the
+   authority on that set's integrity, so masking its VALUE here costs
+   no coverage.
 
 Every other byte must match.  :func:`mask_exposition` replaces those
-three with a fixed placeholder, so the masked bodies of the two legs are
+four with a fixed placeholder, so the masked bodies of the two legs are
 directly comparable; anything else that moved is a gate RED.
 
 THE CAPTURE IS A SUBPROCESS on purpose.  The registry is a PROCESS-WIDE
@@ -40,6 +48,14 @@ ALLOWLIST: dict[str, str] = {
     ),
     "vocabulary_version_gauge": (
         "the 'ensemble_metrics_vocabulary_version' gauge value"
+    ),
+    "tool_category_vocabulary": (
+        "the '# frozen vocabulary tool_category: count=N <set>' line — the "
+        "TOOL-CATEGORY vocabulary, whose frozen SET is the committed "
+        "artifact `.agents/shared/metrics/tool-categories.json`; the "
+        "metrics-agent-tools lane registered the `metrics-read` privileged "
+        "category, so the derived set legitimately grew (the artifact pack "
+        "is the authority on that set's integrity)"
     ),
     "checkpoint_op_seconds_help": (
         "the '# HELP ensemble_checkpoint_op_seconds ...' text — and its "
@@ -74,11 +90,17 @@ sys.stdout.write(cm.render_metrics())
 
 
 def mask_exposition(body: str) -> str:
-    """Replace the three allowlisted carriers with a fixed placeholder."""
+    """Replace the four allowlisted carriers with a fixed placeholder."""
     out: list[str] = []
     for line in body.splitlines():
         if line.startswith("# frozen vocabulary version:"):
             out.append("# frozen vocabulary version: <N>")
+            continue
+        if line.startswith("# frozen vocabulary tool_category:"):
+            # The carrier is the VALUE (the count + the set); the LINE
+            # PREFIX is kept, so a renamed vocabulary line still shows up
+            # as a delta.
+            out.append("# frozen vocabulary tool_category: <SET>")
             continue
         if line.startswith(_OP_SECONDS_HELP_PREFIXES):
             # "# HELP <name> <text>" → keep the NAME (a renamed carrier
