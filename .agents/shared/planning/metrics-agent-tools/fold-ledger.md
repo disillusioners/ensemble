@@ -228,6 +228,49 @@ approver N12's "the EIGHT-site pin") were updated in the same commit.
     `AssertionError: daemon/__init__.py` line is byte-identical on both legs.
 * **The prompt-artifact baseline**: `python3 scripts/protection/generate_prompt_artifact_baseline.py --check` reports **exactly 3 modified files** — the 3 `tools_note.md` — confirming council W7's derivation (the baseline tracks `tools_note.md`, NOT `meta.json`; the `agents/` PAYLOAD delta is 6 files). The baseline re-stamp is a STAGE-TIME step (giter), recorded in the Phase-6 stage-prep checklist.
 
+### H.4 — Phase 3 (the scope split + the E-1 amendment)
+
+**THE SCOPE-PIN CENSUS ALSO SHIFTED (the same re-derivation rule).** The plan's task 3.3
+enumerated TWO scope-manifest pin sites. The grep-derived census is **THREE** — a third site
+(the query door's OWN route-declaration pin) reds when the routes' any-of set changes:
+
+| # | file:line | pin | kind |
+|---|---|---|---|
+| 1 | `tests/unit/test_router_scope_manifest.py` — the `"/api/metrics"` manifest row | the pipe-delimited scope string | EDIT → `"maintenance:read|metrics:read"` |
+| 2 | `tests/unit/metrics/test_metrics_query_scope_cage.py:42-50` — `FAMILY_SCOPE` + the new `FAMILY_SCOPE_SET` | the family scope constant + the per-route assert | EDIT |
+| 3 | **`tests/unit/metrics/test_metrics_query_routes.py:404-429`** — the query door's own `TestScopeDeclaration` | the per-route exact scope set | **EDIT — NOT IN THE PLAN'S PROSE** (caught by the gate leg, not by a guess) |
+
+Site 3 also gained a NEW leg: the text-exposition route keeps `maintenance:read` ALONE.
+
+**The E-1 amendment — EXECUTED (guardrail (b)-as-restated satisfied).**
+The amendment is the PRIMARY variant (P-1 / E-1, ADJUDICATED 2026-11-03 + amendment-2). It
+touches **EXACTLY nine lines**, all inside the FIVE canonical ranges, and the line count is
+UNCHANGED (819 → 819) — so the diff is line-scoped by construction:
+
+| range | changed lines |
+|---|---|
+| `:31-32` (§1.13 matrix rows 2-3) | `:31` (the text route's scope is `maintenance:read` ALONE) · `:32` (the query routes' any-of set) |
+| `:318-322` (§6 truth table) | `:318` · `:319` · `:322` (the three rows that name a scope) |
+| `:379-380` (§7 door disclosure) | `:380` (`maintenance:read` or `metrics:read`; **"before any registry read" preserved byte-identically**) |
+| `:387` (§7 the emergency-off lever) | `:387` (the revocation lever now names BOTH grants) |
+| `:404-405` (AM-20 over-grant) | `:405` (the split IS BUILT; the untouched `:406` now reads as the v1 historical note — "Its v1 status — a NAMED COMMITMENT …, not built in v1." — which stays TRUE) |
+
+**Evidence the guardrail (b)-as-restated holds:**
+* the `central_metrics_contract_doc` pack is **GREEN WITH THE AMENDMENT APPLIED** — 21/21, expectations UNTOUCHED, **never re-pinned**;
+* all **SIX** machine-pinned fenced blocks are **BYTE-IDENTICAL** before/after (`activation-surfaces`, `query-routes`, `error-vocabulary`, `truth-table-invariants`, `availability-reasons`, `gate-pack-ids`);
+* all **NINETEEN** prose literals the pack asserts are **BYTE-IDENTICAL** before/after — including the load-bearing `checkpoint-cleanup-EXECUTE` (inside the amended `:404-405` range), `before any registry read` (inside the amended `:379-380` range), `token revocation`, `at the BODY level`, `the socket still binds`, `The switch never touches authenticated surfaces`, `maintenance:read`, `FROZEN`, `central-metrics-v1` and the rest (the FULL list is reproduced by the pack's own asserts; the derivation script re-extracted them from the test module and diffed before/after);
+* the line count is unchanged ⇒ no line was added, removed or shifted ⇒ the "line-scoped" assertion holds trivially.
+
+**The route censuses did NOT move (task 3.4):** declared-route **111**, mount **37**,
+class-manifest **33** — all three count pins are byte-unchanged in the diff.
+
+**The Tier-1 gate leg (task 3.7):** D1 = the extended auth-matrix rows + the cage pack;
+D2 = the scope-cage dual side (the manifest + the class manifest) + the routes pack + the
+switch-invariance pack + the API-wiring pack + the contract-doc pack + the whole
+`tests/unit/metrics/` corpus. HEAD **493 collected / 492 passed / 1 failed**; BASE **421 / 420 /
+1** — the FAILED list is IDENTICAL on both legs (the base-proven lane-#1 daemon-diff pin) ⇒
+**net-new deterministic reds = 0**.
+
 ---
 
 ## §G — The implementation-tidier backfill (placeholder — DO NOT fill before the tidier pass)

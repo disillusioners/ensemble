@@ -159,14 +159,22 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # middleware must never own it).
     "/api/mcps-gateway": "mcp:read|*",
     # checkpoint read-path plan / Track-1 item 4 — the /api/metrics
-    # family mounts ONE route (GET "" — the metric registry rendered as
-    # Prometheus text-exposition). M-1: the route carries the EXISTING
-    # ``maintenance:read`` scope (the /api/wedge-captures precedent —
-    # deliberate scope REUSE, no new scope minted): the metric registry
-    # holds INTERNAL counters, so the family is scope-pinned (NOT the
-    # wildcard) and the route ALSO refuses in auth-OFF (503
+    # family mounts FOUR routes (GET "" — the metric registry rendered as
+    # Prometheus text-exposition — plus the three JSON query routes). M-1:
+    # the family carries the EXISTING ``maintenance:read`` scope (the
+    # /api/wedge-captures precedent — deliberate scope REUSE): the metric
+    # registry holds INTERNAL counters, so the family is scope-pinned (NOT
+    # the wildcard) and the routes ALSO refuse in auth-OFF (503
     # AUTH_NOT_CONFIGURED — the prompts-family fail-closed gate).
-    "/api/metrics": "maintenance:read",
+    #
+    # metrics-agent-tools (2026-11-03): the three QUERY routes accept the
+    # ANY-OF set ``maintenance:read|metrics:read`` — the second taxonomy
+    # entry was minted so a machine lane can read the query door WITHOUT
+    # the destructive checkpoint-cleanup capability that
+    # ``maintenance:read`` also confers. The cage is a SUBSET check, so
+    # the text-exposition route's lone ``maintenance:read`` stays inside
+    # the OR-set (both directions remain green).
+    "/api/metrics": "maintenance:read|metrics:read",
 }
 
 #: The wildcard sentinel as stored in the manifest.

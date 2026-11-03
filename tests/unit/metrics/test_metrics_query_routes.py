@@ -52,6 +52,10 @@ from tests.helpers.metrics_query_fixtures import (
     build_client,
 )
 
+#: The second scope of the query door's any-of set (the
+#: metrics-agent-tools lane).
+METRICS_READ_SCOPE = "metrics:read"
+
 #: The lane's base artifact — the masked exposition body captured at the
 #: lane's BASE commit (see ``tests/helpers/metrics_exposition_baseline.py``).
 #: (NOT under a ``data/`` directory — the repo's ``.gitignore`` carries a
@@ -384,7 +388,14 @@ class TestExpositionStructuralIdentity:
 
 
 class TestScopeDeclaration:
-    """Every query route carries the family's EXISTING scope."""
+    """Every query route carries the family's any-of scope set.
+
+    The set is ``maintenance:read`` OR ``metrics:read`` (the
+    metrics-agent-tools lane minted the narrower scope so a machine lane
+    can read the query door without the destructive checkpoint-cleanup
+    capability ``maintenance:read`` also confers).  The TEXT-exposition
+    route keeps ``maintenance:read`` ALONE.
+    """
 
     @pytest.mark.parametrize("path", QUERY_PATHS)
     def test_each_route_declares_the_read_scope(self, path):
@@ -396,6 +407,23 @@ class TestScopeDeclaration:
             r
             for r in metrics_router.routes
             if getattr(r, "path", None) == path[len("/api") :]
+        )
+        assert isinstance(route, APIRoute)
+        scopes: set[str] = set()
+        for dep in getattr(getattr(route, "dependant", None), "dependencies", None) or []:
+            scopes.update(getattr(dep.call, "required_scopes", None) or ())
+        assert scopes == {READ_SCOPE, METRICS_READ_SCOPE}
+
+    def test_the_text_exposition_route_keeps_maintenance_read_alone(self):
+        """The scraping surface is NOT part of the split (D6 step 3)."""
+        from fastapi.routing import APIRoute
+
+        from daemon.routers.metrics import router as metrics_router
+
+        route = next(
+            r
+            for r in metrics_router.routes
+            if getattr(r, "path", None) == "/metrics"
         )
         assert isinstance(route, APIRoute)
         scopes: set[str] = set()
