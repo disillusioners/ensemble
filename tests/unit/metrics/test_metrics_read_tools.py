@@ -910,6 +910,52 @@ class TestRingStateSignal:
         out = await _call(_tools(provider=provider)["metrics_families"])
         assert out["read_status"]["trend_empty_since_restart"] is False
 
+    async def test_the_ring_empty_flag_is_the_ages_heuristic_not_a_fact(self) -> None:
+        """THE DISCLOSURE PIN — the ring-empty flag is the AGE HEURISTIC,
+        and the direction of its error is a FALSE POSITIVE.
+
+        The leader's ruling (2026-11-03, advisory 5(d), Branch B): the
+        precise signal (``last_sample_timestamp() is None`` ⟺ the ring is
+        empty) is NOT reachable from this lane — it is not on the
+        consumed Protocol, and the points array is not in hand in two of
+        the three bodies (the catalog and the published values never
+        touch the ring). The age heuristic therefore stays, and its
+        known imprecision is pinned HERE so it cannot rot silently:
+        ``age == 0.0`` reads "the ring is empty" EVEN WHEN a fresh
+        sample exists — the FALSE-POSITIVE direction the disclosure
+        names.
+
+        This is a PIN OF A KNOWN IMPRECISION, not of a desired
+        behaviour: when the seam-level reader lands (central-metrics-v1
+        OWNS the seam), this pin is UPDATED DELIBERATELY.
+        """
+        provider = FakeProvider(
+            families=[_family("F1")],
+            snapshot=[
+                {
+                    "name": "ensemble_fresh_00000",
+                    "labels": {},
+                    "kind": "gauge",
+                    "monotonic": False,
+                    "last_publish_age_s": 0.0,
+                    "value": 1,
+                }
+            ],
+        )
+        # The age reads exactly zero WHILE the call observes a FRESH
+        # sample — the shape the disclosure calls out.
+        provider.last_sample_age_s = 0.0
+        out = await _call(_tools(provider=provider)["metrics_families"])
+        assert out["read_status"]["trend_empty_since_restart"] is True, (
+            "the age heuristic reads 'empty' at age 0.0 — INCLUDING when a "
+            "fresh sample exists (the FALSE-POSITIVE direction the "
+            "disclosure names); the precise signal needs the seam's own "
+            "reader, which belongs to the seam's owning lane"
+        )
+        assert isinstance(out["read_status"]["trend_empty_since_restart"], bool), (
+            "the flag stays a BOOL — the disclosure changes no wire shape"
+        )
+
     async def test_an_absent_fact_is_never_reported_as_empty(self) -> None:
         """An absent age fact must NEVER be reported as "the ring is
         empty" — the tool asserts only what it can verify.

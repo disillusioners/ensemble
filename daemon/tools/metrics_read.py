@@ -492,18 +492,52 @@ def _read_status(provider: Any) -> dict[str, Any]:
     # -1.0 sentinel). An absent fact reads as False ("not empty"), and
     # the tool never emits null on this field.
     #
-    # THE EXACT SIGNAL IS NOT REACHABLE FROM HERE (disclosed, flagged
-    # back to the leader — the delta re-review's advisory 5(d)): the
-    # seam's concrete provider exposes ``last_sample_timestamp()``
-    # (``None`` exactly when the ring is empty), but that member is NOT
-    # on the consumed ``MetricsQueryProvider`` Protocol, it is not a
-    # numeric fact (the seam's public ``read_numeric_fact`` cannot carry
-    # an optional), and reading it here would need either a raw
-    # ``getattr`` — which the seam's own convention forbids for this
-    # door ("never through getattr") — or an extension of the CLEARED
-    # seam/Protocol surface. The age-based signal therefore STAYS, and
-    # its one known imprecision (an age of exactly 0.0 also matches a
-    # sample taken at this very instant) is recorded, not hidden.
+    # ── THE RING-EMPTY SIGNAL IS A HEURISTIC, NOT A FACT ──────────────
+    # (Branch B — the leader's ruling of 2026-11-03 on the delta
+    # re-review's advisory 5(d): NO seam extension, NO raw getattr.)
+    #
+    # WHAT THE TOOL HOLDS — THE OBSERVABILITY CHECK, performed BEFORE
+    # the ruling was applied. The signal is derived in ONE place (this
+    # function), so it means the same thing in ALL THREE bodies; and
+    # this place holds only the provider handle:
+    #   * ``metrics_families`` holds the CATALOG — the registry's
+    #     families; the catalog never touches the ring;
+    #   * ``metrics_snapshot`` holds the PUBLISHED current values, and
+    #     ``provider.snapshot()`` NEVER reads the ring at all
+    #     (``provider.py:281-316`` — no ``_ring`` reference);
+    #   * ``metrics_history`` holds the windowed POINTS — but the ring's
+    #     emptiness surfaces there as NO ROWS AT ALL
+    #     (``provider.py:340-341``: ``if self._ring is None: return []``),
+    #     which is AMBIGUOUS with "nothing matched / nothing published";
+    #     and a RETURNED row's points array can be EMPTY because that
+    #     series has no samples IN THE WINDOW while the ring is full
+    #     (the rows are appended regardless — ``provider.py:378-388``).
+    # So the points array is NOT the ring-empty signal, and it is not in
+    # hand in two of the three bodies: deriving the flag from it would
+    # ship a BODY-DEPENDENT flag (one body saying "empty" while the
+    # others cannot observe the fact at all). Branch A is therefore
+    # CLOSED — on two independent grounds.
+    #
+    # THE DISCLOSURE — THE ERROR DIRECTION IS A FALSE POSITIVE.
+    # ``age == 0.0`` reads "the ring is empty" whenever the age comes out
+    # exactly zero. That is the seam's own EMPTY-RING default
+    # (``last_sample_age_s()`` returns 0.0 when ``self._ring is None``),
+    # but it ALSO matches a fresh sample — one dated at this very
+    # instant, or dated in the FUTURE (the age is clamped at 0.0 by
+    # ``max(0.0, …)``). In those non-empty cases the flag claims
+    # "empty" while the ring HOLDS a sample. The signal is a HEURISTIC,
+    # not a fact; the direction of its error is the FALSE POSITIVE.
+    #
+    # THE PRECISE SIGNAL (``last_sample_timestamp() is None`` ⟺ the ring
+    # is empty) lives on the CONCRETE provider
+    # (``daemon/services/metrics_query/provider.py:406-410``) but NOT on
+    # the consumed ``MetricsQueryProvider`` Protocol, and it is not
+    # readable through the seam's public ``read_numeric_fact`` (the fact
+    # is optional-typed and the reader is numeric-only). Per the ruling,
+    # this lane does NOT extend the seam and does NOT bypass it with
+    # ``getattr``: a seam-level reader belongs to the lane that OWNS the
+    # seam (central-metrics-v1). ROUTED there — this lane keeps the
+    # heuristic and discloses it.
     age = read_numeric_fact(provider, "last_sample_age_s", -1.0)
     ring_empty = bool(age == 0.0)
     return {
