@@ -70,6 +70,33 @@ const routeFetchSetBytes = routeChunk
   ? routeDeps.reduce((a, d) => a + size(d), size(routeChunk))
   : null;
 
+// ── THE LAZY-ONLY DECOMPOSITION (the B4 rider — 2026-11-03) ─────────────
+//
+// The route fetch set is NOT all NEW bytes: a member that is ALSO in the
+// initial set (index.html's refs + the transitive static-import closure) is
+// downloaded at app STARTUP, whether or not the operator ever opens
+// /metrics. D-1 protects NEW bytes the page fetches; the eager case stays
+// caught by B1 + the initial error budget.
+//
+// So the route fetch set is decomposed:
+//   * the LAZY-ONLY portion — the route chunk + its direct static deps
+//     that are NOT in the initial set (the bytes the /metrics page really
+//     adds); and
+//   * the SHARED portion — the members that are already in the initial set.
+//
+// The two fields are ADDITIVE (no existing field's semantics change), stay
+// route-keyed and absent-tolerant, and are `null` exactly when the route
+// chunk is unresolvable — the tool never throws and never mis-resolves.
+const routeFetchSetMembers = routeChunk ? [routeChunk, ...routeDeps] : [];
+const lazyOnlyMembers = routeFetchSetMembers.filter((f) => !initial.has(f));
+const sharedMembers = routeFetchSetMembers.filter((f) => initial.has(f));
+const metricsRouteFetchSetLazyOnlyBytes = routeChunk
+  ? lazyOnlyMembers.reduce((a, f) => a + size(f), 0)
+  : null;
+const metricsRouteFetchSetSharedWithInitialBytes = routeChunk
+  ? sharedMembers.reduce((a, f) => a + size(f), 0)
+  : null;
+
 // the PRE-RETIREMENT /resources route chunk (Phase 7 retires the route, so it
 // does not survive the lane — absent-tolerant, never mis-resolved)
 const resourcesRouteChunk = uniqueChunkByKey(LEGACY_RESOURCES_MARKER);
@@ -89,6 +116,11 @@ const out = {
   metrics_route_chunk: routeChunk,                        // null when unavailable
   metrics_route_chunk_bytes: routeChunk ? size(routeChunk) : null,
   metrics_route_fetch_set_bytes: routeFetchSetBytes,       // null when unavailable
+  // the B4 rider's decomposition (2026-11-03): the LAZY-ONLY portion of the
+  // route fetch set (the bytes /metrics really adds) and the SHARED portion
+  // (the members the app shell already downloads at startup).
+  metrics_route_fetch_set_lazy_only_bytes: metricsRouteFetchSetLazyOnlyBytes,
+  metrics_route_fetch_set_shared_with_initial_bytes: metricsRouteFetchSetSharedWithInitialBytes,
   largest_lazy: bySize[0], largest_lazy_bytes: size(bySize[0]),
   second_largest_lazy: bySize[1], second_largest_lazy_bytes: size(bySize[1]),
   pre_retirement_resources_route_chunk: resourcesRouteChunk,          // null after Phase 7

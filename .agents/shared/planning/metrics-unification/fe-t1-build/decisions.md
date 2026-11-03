@@ -718,3 +718,54 @@ W1's startup-log read-back.
 | The 7-tab family binding's currency (the 16-family census) | Code-verified at lane base (the registry SSOT). Per **E-1** the binding is re-derived at Phase 2's freeze against the registry file, so a daemon-side drift cannot silently change the tab table. |
 | **Which "initial set" definition a promotion uses** (the builder's 36-chunk basis vs the whole payload incl. `index.html`) | Both readings are defensible; the **budget's own basis is the former** (`InitialCalculator` sums chunks; `index.html` is an asset). The plan uses the **builder's basis** (5,909,018 B) for every guard and states the whole-payload figure (5,918,275 B) alongside it. A house wording decision would be nice-to-have, not a blocker. |
 | **The plan-review council's model mapping** (`decision` → `coding`) | Carried as a **disclosure** (`plan-overview.md` §0.4) and on the user's morning list — the findings stand (all 4 criticals independently re-verified by direct commands; 2 models converged over 2 rounds), but the **D7 proxy-side repair remains user-owned**. The fold author re-verified 9 of the findings independently (`fold-audit.md` §G). |
+
+## Implementation-time rulings (2026-11-03, lane B4)
+
+> These entries are **implementation-time rulings** taken during the lane's execution, on measured
+> evidence. They do NOT amend the approved D-1 / D-2 / D-3 or any approved decision text above —
+> they are recorded here, in their own section, so the approved record stays byte-identical.
+
+### IMPL-21 — B4 part (2) gates on the LAZY-ONLY portion of the `/metrics` route fetch set
+
+**The ruling (the leader's, on evidence — recorded verbatim, the threshold is NOT re-litigated):**
+
+> B4 part (2) — "the /metrics route fetch set grows ≤ 65,536 B vs the 496,338 B baseline" —
+> measures the growth of the **LAZY-ONLY portion** of the route fetch set (the route chunk + its
+> direct static deps, RESTRICTED to members NOT in the initial set). The threshold (65,536 B) is
+> UNCHANGED. The total remains reported for transparency but is NOT the gate. Rationale: D-1
+> protects NEW bytes the /metrics page fetches; initial-set members are downloaded at startup
+> regardless; the plan's own G4b reasoning targets the lazy-only sibling class; the eager case
+> remains caught by B1 + the initial error budget.
+
+**The measured composition evidence (re-derived from the real trees, not asserted):**
+
+| Tree | route chunk | route fetch set (total) | SHARED with the initial set | LAZY-ONLY |
+|---|---|---|---|---|
+| the lane base (`7961bcb21`, the artifact's `measured_at_commit`) | 27,672 B | **496,338 B** | 423,630 B | **72,708 B** |
+| the phase-2 freeze (`1474952fe`) | 39,332 B | **591,467 B** | **506,881 B** | **84,586 B** |
+| the phase-3 freeze (`b0b1a1bcb`) | 50,872 B | 603,420 B | 506,881 B | **96,539 B** |
+
+The phase-2 row reproduces the rider's numbers EXACTLY (591,467 / 506,881 / 84,586). The lane-base
+row reproduces the frozen artifact's figures EXACTLY (`initial_total_bytes` 5,909,018 · route chunk
+27,672 B · route fetch set 496,338 B · pre-retirement `/resources` chunk 38,914 B) — so the
+lazy-only baseline is a MEASURED figure, not an estimate.
+
+**Why the old wording would have failed.** On the TOTAL basis the phase-2 freeze already showed
+591,467 − 496,338 = **+95,129 B**, a FALSE breach of the 65,536 B threshold — while the genuine
+new payload of the route was only the route chunk's +11,718 B. On the LAZY-ONLY basis the same
+tree shows 84,586 − 72,708 = **+11,878 B**, and the phase-3 freeze shows
+96,539 − 72,708 = **+23,831 B** — both inside the unchanged 65,536 B threshold.
+
+**The tool change (additive).** `bundle-baseline.measure.js` gained two fields:
+`metrics_route_fetch_set_lazy_only_bytes` and `metrics_route_fetch_set_shared_with_initial_bytes`.
+No existing field's semantics changed; the locator stays route-keyed and absent-tolerant; both
+new fields are `null` exactly when the route chunk is unresolvable. The recorded baseline lives in
+`bundle-baseline.json` under `guards.B4_new_chart_chunk_size` as
+`baseline_metrics_route_fetch_set_lazy_only_bytes: 72708` with the derivation in its
+`provenance` note (B8 — the artifact stays the single machine-readable source).
+
+**Derivation path taken:** the REAL BUILD path (a throwaway detached worktree at the artifact's
+`measured_at_commit`, `node_modules` symlinked from the lane worktree, the worktree removed +
+`git worktree prune`d afterwards, the shared checkout `/home/nea/ensemble-src` never touched).
+The plan's own analytic figure (27,672 + 43,688 + 1,348 = 72,708 B) was NOT needed as a
+fallback — the real build agrees with it digit for digit.

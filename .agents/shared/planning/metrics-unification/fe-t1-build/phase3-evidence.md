@@ -232,3 +232,105 @@ cd $WT && python3 scripts/generate_prompt_artifact_baseline.py --check   # house
 cd $WT && git status --short
 → (empty — the freeze is committed; nothing pushed, merged, tagged or staged)
 ```
+
+---
+
+## 8. The B4 rider — the lazy-only route-fetch-set measurement (separate commit)
+
+**The ruling** (the leader's, on evidence; recorded verbatim in `decisions.md` §"Implementation-time
+rulings (2026-11-03, lane B4)" → IMPL-21): B4 part (2) measures the growth of the **LAZY-ONLY**
+portion of the `/metrics` route fetch set (the route chunk + its direct static deps, restricted to
+the members NOT in the initial set). **The threshold (65,536 B) is UNCHANGED**; the total stays
+reported for transparency but is not the gate.
+
+### 8.1 The tool (additive)
+
+`bundle-baseline.measure.js` gained two fields — `metrics_route_fetch_set_lazy_only_bytes` and
+`metrics_route_fetch_set_shared_with_initial_bytes`. No existing field's semantics changed; the
+locator stays route-keyed and absent-tolerant; both new fields are `null` exactly when the route
+chunk is unresolvable.
+
+**The absent-tolerance, proven on a synthetic dist** (a route chunk that does not exist):
+
+```
+$ node .../bundle-baseline.measure.js /tmp/p3-noroute-dist
+  "route_chunk_locator": null,
+  "route_chunk_resolved_to_exactly_one": false,
+  "metrics_route_chunk": null,
+  "metrics_route_fetch_set_bytes": null,
+  "metrics_route_fetch_set_lazy_only_bytes": null,          ← null, not a guess
+  "metrics_route_fetch_set_shared_with_initial_bytes": null,
+EXIT=0
+```
+
+**A pre-existing edge, disclosed and NOT changed:** on a dist with ZERO JavaScript files the tool
+throws in `largest_lazy_bytes` (`size(undefined)`) — a pre-existing behaviour, untouched by this
+rider (the rider's fields are correct in that case; the throw is in an unrelated field and a real
+dist always has chunks).
+
+### 8.2 The lane-base re-derivation — the REAL BUILD path
+
+```
+cd $WT
+$ git worktree add --detach /tmp/p3-b4-base-wt 7961bcb21     # the artifact's measured_at_commit
+$ ln -s $WT/frontend/node_modules /tmp/p3-b4-base-wt/frontend/node_modules
+$ cd /tmp/p3-b4-base-wt/frontend && ./node_modules/.bin/ng build --configuration production
+$ node $WT/.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js \
+      /tmp/p3-b4-base-wt/frontend/dist/frontend/browser
+```
+
+```json
+{
+  "initial_total_bytes": 5909018,          ← the artifact's frozen baseline, EXACTLY
+  "metrics_route_chunk": "chunk-QUI65QT3.js",
+  "metrics_route_chunk_bytes": 27672,      ← the artifact's value, EXACTLY
+  "metrics_route_fetch_set_bytes": 496338, ← the artifact's value, EXACTLY
+  "metrics_route_fetch_set_lazy_only_bytes": 72708,        ← THE NEW BASELINE
+  "metrics_route_fetch_set_shared_with_initial_bytes": 423630,
+  "pre_retirement_resources_route_chunk_bytes": 38914      ← the artifact's value, EXACTLY
+}
+```
+
+**The plan's analytic figure agrees digit for digit**: the G4b text (lane-base route chunk
+27,672 B + exactly two lazy-only deps 43,688 B + 1,348 B) predicts 72,708 B — the real build
+measures 72,708 B. The analytic fallback was therefore NOT needed.
+
+**The phase-2 freeze re-measured the same way** (a second throwaway worktree at `1474952fe`):
+route fetch set **591,467 B** · shared **506,881 B** · lazy-only **84,586 B** — the rider's
+numbers, reproduced from the real tree.
+
+**The cleanup (proven):**
+
+```
+$ rm -f /tmp/p3-b4-*/frontend/node_modules
+$ git worktree remove --force /tmp/p3-b4-base-wt && git worktree remove --force /tmp/p3-b4-p2-wt
+$ git worktree prune
+$ git worktree list | grep -c p3-b4        → 0
+$ ls -d /tmp/p3-b4-base-wt /tmp/p3-b4-p2-wt → No such file or directory (both)
+$ git status --short                      → only the rider's own files
+```
+
+The shared checkout `/home/nea/ensemble-src` was never touched (the worktrees were detached
+additions to THIS repo, removed with `git worktree remove`).
+
+### 8.3 The current tree (the phase-3 freeze)
+
+```
+$ cd $WT/frontend && node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser
+  "metrics_route_fetch_set_bytes": 603420,
+  "metrics_route_fetch_set_lazy_only_bytes": 96539,        ← the NEW field
+  "metrics_route_fetch_set_shared_with_initial_bytes": 506881,  ← the NEW field
+```
+
+**B4 part (2) on the lazy-only basis: 96,539 − 72,708 = +23,831 B ≤ 65,536 B → GREEN.**
+(On the old TOTAL basis the same tree would read +107,082 B — the false breach the ruling
+describes.)
+
+### 8.4 The recorded baseline
+
+`bundle-baseline.json` → `guards.B4_new_chart_chunk_size` gained
+`baseline_metrics_route_fetch_set_lazy_only_bytes: 72708` and
+`baseline_metrics_route_fetch_set_shared_with_initial_bytes: 423630`, plus a `provenance` note
+naming the ruling, the date and the derivation path. **No existing value was altered**, and the
+bundle guard still reads the artifact and reports **GREEN** (§4.3).
+
