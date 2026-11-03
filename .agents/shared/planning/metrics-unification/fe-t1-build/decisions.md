@@ -585,7 +585,74 @@ headroom is **90,982 B** and chart.js's raw minified size is ~250–400 kB ⇒ t
 
 ---
 
-## Part IV — Explicitly NOT decided here (and why)
+## Part IV — The LEADER RULINGS of fold #3 (binding; folded, not re-litigated)
+
+### LEADER RULING 1 (C-1f) — "first paint" = THE APP SHELL
+
+> **"first paint" = APP SHELL** (normative — matches §10 criterion 8's
+> operationalisation and the builder's `initial` budget basis). The
+> page-scoped import-graph marker assertion is RETAINED anyway, so the D-1
+> guarantee holds under BOTH readings. Pin + B4 threshold + G4 orphan-row fix
+> land per the review's required changes.
+
+**Folded as:** the D-1 row in `plan-overview.md` §3; §6.3's guard set (B1–B8);
+Phase 1's tasks 1.2(c)/1.7/1.9; Phase 4's 4.4/4.14; Phase 5's 5.14; Phase 9's
+9.8. **Concretely:** the wrapper's **final home** is
+`frontend/src/app/pages/metrics/charts/chart-panel.component.ts` — **inside** the
+`src/app/pages/metrics/**` tree the import-site rule covers — so the location
+rule holds by construction (C-1a); the **shape** is gated too: **every**
+`chart.js` import is the **dynamic** `await import('chart.js')` form and there
+are **0** static `from 'chart.js'` sites (C-1b); B4 now has a **threshold**
+(≤ 64 KiB min+gz) **and** a **baseline** (G4's 27,672 B route chunk + G4b's
+496,338 B route fetch set) (C-1c); the **route fetch set** — not the route
+chunk — is the measurement that catches a static-shape leak (C-1d); and the
+guard carries **both** planted variants, eager **and** static-inside-the-lazy-
+tree (C-1e).
+
+### LEADER RULING 2 (C-2) — severity accepted as 🔴; the fix set is identical under both readings
+
+**Folded as:** Phase 2's task **2.4 is SPLIT** (the tab bodies + the family
+binding + the fetch + the availability surfacing stay in Phase 2; the registry
+hand-off and the per-kind+unit-group **panel composition** MOVE to Phase 4's
+new task **4.15**); the coupling map's 2↔4 cells read **tight** in both
+directions, and Phase 2's + Phase 4's Coupling blocks say so; Phase 2's exit
+criterion gains *"each of the 6 central tabs fetches its bound families and
+surfaces their availability … no central tab is an empty shell"* (W-10); and
+Phase 4's exit **re-asserts** 2.4's two-panels property.
+
+### LEADER RULING 3 (C-4) — the fence is independently confirmed safe; the PORT re-export must be unconditional and POST-source
+
+> the fence is independently confirmed safe (worktree .env, mode 600, carries
+> POSTGRES_HOST=127.0.0.1, POSTGRES_PORT=5432, POSTGRES_DB=ensemble_dev,
+> POSTGRES_USER=ensemble_dev_app, POSTGRES_PASSWORD (dev credential),
+> DAEMON_PORT=8079 (INERT per AM-5), and NO `PORT` at all → no live-port
+> binding path exists). STILL REQUIRED: the PORT=8079 re-export must be
+> UNCONDITIONAL and POST-source (never inherited from a sourced env), and the
+> effective port must be asserted FROM /livez, not from the intent.
+
+**Folded as:** `plan-overview.md` §6.1's P7 + the ordered boot sequence;
+Phase 9's task 9.2. **The order is the fix:** scrub → **source the worktree
+`.env`** → assert the loaded `POSTGRES_DB == ensemble_dev` → **re-export
+`PORT=8079` unconditionally, AFTER the source** → boot `python -m daemon` →
+assert the effective port **from `/livez`** + the DB read-back + the
+`ensemble.json` assertion. **C-4 was closed on CODE-PATH evidence, not on an
+executed boot**; the three cheap falsification checks are named as
+implementation-time assertions in Phase 9's task 9.2.
+
+### THE FOLD-QUALITY RULE (the reviewer's systemic finding — binding on every landing)
+
+> the prose landed; the task-graph entry, acceptance fixture, or numeric
+> threshold did not — 4 of 7 weak landings were 🔴
+
+**Folded as:** the `fold-audit.md` artifact — the machine-checkable landing
+ledger carrying, per amendment and per finding: **task-graph entry · fixture/leg
+· threshold · plan section · status**. Every one of the 29 prior amendments is
+re-stated in that triple, and each of the 7 weak/partial landings (AM-3 → W-2,
+AM-6 → W-13, AM-7 → C-2, AM-10 → W-1, AM-11 → W-3, AM-15 → C-1, AM-29 → W-7)
+carries a **REPAIR** row. **Prose-only landings are not acceptable; a grep for
+"AM-n present" does not count as a fold.**
+
+## Part V — Explicitly NOT decided here (and why)
 
 | Item | Why not decided in this plan |
 |---|---|
@@ -595,3 +662,5 @@ headroom is **90,982 B** and chart.js's raw minified size is ~250–400 kB ⇒ t
 | Whether the mini tier gets a y-axis | **No** (ADJ-ii scope guard): a mini is sparkline-scale; axes belong to panels. Per **R-2** the mini role has **no page surface in T1** at all — it is exercised via the mount-failure fallback and the renderer specs. |
 | The enable-auth operator decision | **User-owned** (D-2; the lane writes the recipe, it does not execute it on live). |
 | The 7-tab family binding's currency (the 16-family census) | Code-verified at lane base (the registry SSOT). Per **E-1** the binding is re-derived at Phase 2's freeze against the registry file, so a daemon-side drift cannot silently change the tab table. |
+| **Which "initial set" definition a promotion uses** (the builder's 36-chunk basis vs the whole payload incl. `index.html`) | Both readings are defensible; the **budget's own basis is the former** (`InitialCalculator` sums chunks; `index.html` is an asset). The plan uses the **builder's basis** (5,909,018 B) for every guard and states the whole-payload figure (5,918,275 B) alongside it. A house wording decision would be nice-to-have, not a blocker. |
+| **The plan-review council's model mapping** (`decision` → `coding`) | Carried as a **disclosure** (`plan-overview.md` §0.4) and on the user's morning list — the findings stand (all 4 criticals independently re-verified by direct commands; 2 models converged over 2 rounds), but the **D7 proxy-side repair remains user-owned**. The fold author re-verified 9 of the findings independently (`fold-audit.md` §G). |

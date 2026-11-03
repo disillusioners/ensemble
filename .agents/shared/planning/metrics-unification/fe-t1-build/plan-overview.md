@@ -26,7 +26,8 @@ Plan set files (this directory):
 ### 0.1 E-1 — THE STANDING LANE RULE (every MEASURED figure is re-derived at lane base)
 
 > **Every MEASURED figure a phase exit criterion depends on must be
-> RE-DERIVED at lane base (this worktree's tree) before that phase freezes.**
+> RE-DERIVED at lane base (this worktree's tree) before that phase freezes —
+> and a label without a COMMAND is not a re-derivation.**
 
 **Why (the architect's escalation, E-1):** the research digest's MEASURED
 ledger carries a **wrong-tree provenance problem** — the bundle baseline was
@@ -35,43 +36,116 @@ internal arithmetic never self-checked. The process concern is that **every**
 MEASURED figure, not just the one that was wrong, must be re-derived before it
 becomes a gate.
 
+**Why the COMMAND clause (the plan-review's C-3, generalised):** C-3 caught a
+row that was labelled *"(a) re-derived at lane base"* while carrying a **false
+census** (8 warnings instead of 9). A label is an assertion about a
+re-derivation; only a **command plus its real output** is the re-derivation
+itself. **Every row marked (a) in §0.2 therefore carries the exact command
+that produced the number and the output that command returned.**
+
 **How it is honoured in this plan set:**
 
 1. Each phase's **Exit Criterion** section ends with an explicit **"E-1
    re-derivation"** line naming the MEASURED figures that phase gates on and
-   stating, for each, whether it is **(a) re-derived at lane base by this
-   fold** (with the value frozen in the plan set) or **(b) a re-derivation
-   task in that phase** (with the task id).
+   stating, for each, whether it is **(a) re-derived at lane base** — with
+   the command and its output — or **(b) a re-derivation task in that phase**
+   (with the task id).
 2. §0.2 below is the **audit table**: every MEASURED figure any exit criterion
-   depends on, with its status. The claim *"no exit criterion depends on an
-   un-re-derived MEASURED figure"* is auditable line by line.
-3. Where a figure could not be re-derived at lane base (because it is a
+   depends on, with its status **and its command + output**.
+3. The **named baseline artifact** (plan-review A-8) makes the numbers
+   machine-readable in one place: **`bundle-baseline.json`** (the single source
+   the guards read) + **`bundle-baseline.measure.js`** (the re-derivation tool,
+   living in the plan dir — not `scripts/`, not the shipped tree). The §0.2
+   rows are generated from that artifact, so the ledger and the guard cannot
+   drift apart.
+4. Where a figure could not be re-derived at lane base (because it is a
    **post-implementation** artifact — a new chunk's size, a new component's
    style bytes), the plan carries an explicit **phase-freeze re-derivation
    task** instead of inheriting a digest number.
 
 ### 0.2 The gated-figures ledger (the E-1 audit table)
 
-| # | MEASURED figure | Value | Status under E-1 | Gates |
+**Every row marked (a) carries its exact COMMAND and the OUTPUT that command
+returned.** The G1–G7 rows share one command; the JSON output is reproduced
+verbatim in `bundle-baseline.json` → `reproduce.output`.
+
+**The re-derivation command (G1–G7), run from the lane worktree:**
+
+```
+cd frontend
+npm ci                                  # node_modules absent in the fresh worktree
+./node_modules/.bin/ng build --configuration production
+node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser
+```
+
+**Its verbatim output:**
+
+```json
+{
+  "initial_total_bytes": 5909018,
+  "initial_file_count": 36,
+  "error_budget_bytes": 6000000,
+  "headroom_bytes": 90982,
+  "index_html_bytes": 9257,
+  "whole_initial_payload_bytes": 5918275,
+  "lazy_chunk_count": 52,
+  "lazy_bytes_total": 1702633,
+  "metrics_route_chunk": "chunk-ZA3RV4HY.js",
+  "metrics_route_chunk_bytes": 27672,
+  "metrics_route_fetch_set_bytes": 496338,
+  "largest_lazy": "chunk-QS2K3YLH.js",
+  "largest_lazy_bytes": 157141,
+  "second_largest_lazy": "chunk-HNKUMJNH.js",
+  "second_largest_lazy_bytes": 135690,
+  "resources_route_chunk": "chunk-FOLCEMN3.js",
+  "resources_route_chunk_bytes": 38914
+}
+```
+
+**The G10 command (the `anyComponentStyle` census) and its verbatim output:**
+
+```
+grep -E "scss exceeded maximum budget" <build-log> | sed 's/^▲ \[WARNING\] //'
+```
+
+```
+src/app/components/agent-selector/agent-selector.scss exceeded maximum budget. Budget 8.00 kB was not met by 765 bytes with a total of 8.77 kB.
+src/app/pages/snapshots/snapshots.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 4.29 kB with a total of 12.29 kB.
+src/app/pages/jobs/jobs.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 6.77 kB with a total of 14.77 kB.
+src/app/components/add-source-modal/add-source-modal.scss exceeded maximum budget. Budget 8.00 kB was not met by 318 bytes with a total of 8.32 kB.
+src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 697 bytes with a total of 8.70 kB.
+src/app/pages/blueprint/blueprint.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 10.32 kB with a total of 18.32 kB.
+src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 701 bytes with a total of 8.70 kB.
+src/app/components/instance-list/instance-list.scss exceeded maximum budget. Budget 8.00 kB was not met by 2.17 kB with a total of 10.17 kB.
+src/app/components/chat-interface/chat-interface.scss exceeded maximum budget. Budget 8.00 kB was not met by 8.15 kB with a total of 16.15 kB.
+```
+
+(the same log also carries the pre-existing
+`bundle initial exceeded maximum budget. Budget 1.00 MB was not met by 4.91 MB with a total of 5.91 MB.`)
+
+| # | MEASURED figure | Value | Status under E-1 (with command + output above) | Gates |
 |---|---|---|---|---|
-| G1 | **Initial total** (the builder's own "Initial total" basis — 36 chunk files; `index.html` is an asset, not a chunk) | **5,909,018 B** | **(a) re-derived at lane base** — this fold: a fresh production build at lane base, **two independent derivations agreeing byte-for-byte** (the builder's own table summed from disk; an independent transitive-static-import closure), cross-checked against the shipped v0.28.9 dist which measures **identically**. Method + numbers: `research-findings.md` §14 | Phase 1's bundle guard (1.9), Phase 4's re-run (4.14), Phase 9's B1 |
-| G2 | **Headroom** vs the 6,000,000 B decimal `initial` error budget | **90,982 B** | **(a) derived from G1** (re-derived at lane base). The digest's `89,982 B` was a **1,000 B digit slip**; AM-2's `884,180 B` undercounts by 793,198 B (it summed only the index.html-referenced files, omitting the builder's 23 transitive static-import chunks) | the eager-leak reasoning; Phase 1/4/9 guards |
-| G3 | **Lazy chunk count** | **52** | **(a) re-derived at lane base** — reproduces the digest **exactly** | Phase 9's B-table (the baseline the new chunk is measured against) |
-| G4 | **`/metrics` lazy chunk size** | **27,672 B** | **(a) re-derived at lane base** — reproduces the digest **exactly** | the "no first-paint growth" argument; Phase 9's new-chunk comparison |
-| G5 | **`/resources` lazy chunk size** | **38,914 B** | **(a) re-derived at lane base** — **newly measured** (the digest did not carry it) | the retirement's bundle delta; Phase 9 |
-| G6 | **Lazy bytes total** | **1,702,633 B** (≈1.70 MB) | **(a) re-derived at lane base** — reproduces the digest | Phase 9 |
-| G7 | **Largest lazy chunk** | **157,141 B** (the digest's 135,690 B is now the **second** largest — a one-position drift, disclosed) | **(a) re-derived at lane base** | Phase 9's context |
-| G8 | **Per-component `anyComponentStyle` figures** for the new components | *post-implementation* | **(b) re-derivation task** — Phase 4's task 4.11 measures and records them at that phase's freeze (the 8 kB warn / 24 kB ERROR caps are config constants, not measurements) | Phase 4's exit criterion; Phase 9's B6 |
-| G9 | **The new lazy chart chunk's real min + gz bytes** | *post-implementation* | **(b) re-derivation task** — Phase 9's task 9.8(d) measures it (this closes governance item §9-6; the ~65 kB figure was an ESTIMATE) | Phase 9's exit criterion |
-| G10 | **The `anyComponentStyle` warning count** (8 pre-existing) and the `initial` budget warning | *pre-implementation* | **(a) re-derived at lane base** — the fresh build emitted **8** `anyComponentStyle` warnings, all in **other** components' SCSS, plus the pre-existing `initial` warning | Phase 9's B6 (the "no new warning" comparison) |
-| G11 | **The 16-family registry census** the 7-tab table binds to | 16 registered / 10 live / 6 dark | **(a) re-derived at lane base** (the registry SSOT `daemon/services/metrics_query/wiring/registry.py:64` + `wiring/adjudication.py:51-78`, read at `c26cec612`) and **(b) re-derived again at Phase 2's freeze** (the registry file is re-read and the manifest's bindings re-checked) | the tab table; Phase 2's exit criterion |
+| G1 | **Initial total** (the builder's own "Initial total" basis — 36 chunk files; `index.html` is an asset, not a chunk) | **5,909,018 B** | **(a) re-derived at lane base** — command + output above; **two independent derivations agreeing byte-for-byte** (the builder's own 36-row table summed from disk; an independent transitive-static-import closure), cross-checked against the shipped v0.28.9 dist which measures **identically**. Method: `research-findings.md` §14 | Phase 1's bundle guard (1.9), Phase 4's re-run (4.14), Phase 5's re-run (5.14), Phase 9's B1 |
+| G2 | **Headroom** vs the 6,000,000 B decimal `initial` error budget | **90,982 B** | **(a) derived from G1** by the same command. The digest's `89,982 B` was a **1,000 B digit slip**; AM-2's `884,180 B` undercounts by 793,198 B (it summed only the index.html-referenced files, omitting the builder's 23 transitive static-import chunks) | the eager-leak reasoning; the Phase 1/4/5/9 guards |
+| G3 | **Lazy chunk count** | **52** | **(a) re-derived at lane base** — the same command; reproduces the digest **exactly** | Phase 9's B-table (the baseline the new chunk is measured against) |
+| G4 | **`/metrics` lazy route chunk size** | **27,672 B** (`chunk-ZA3RV4HY.js`) | **(a) re-derived at lane base** — the same command; reproduces the digest **exactly**. **No longer an orphan (C-1):** it is now **B4's declared baseline**, and its consumer is Phase 9's 9.8(d) route-fetch-set comparison | Phase 9's B4 (the new-chunk comparison) |
+| **G4b** | **`/metrics` route FETCH SET** (the route chunk + its **direct** static deps) | **496,338 B** | **(a) re-derived at lane base** — the same command (`metrics_route_fetch_set_bytes`). **Newly measured** (neither the digest nor AM-2 carried it). **This is the threshold that actually catches a static-shape leak**: on the real dist the route chunk statically imports `chunk-6Y6F4JKW.js` (43,688 B) and `chunk-AOZCSBSC.js` (1,348 B), **both LAZY-ONLY** — so a static `chart.js` import would land in a lazy-only sibling and the route chunk alone would not grow | Phase 9's B4 (the route fetch set's growth bound) |
+| G5 | **`/resources` lazy route chunk size** | **38,914 B** (`chunk-FOLCEMN3.js`) | **(a) re-derived at lane base** — the same command; **newly measured** | the retirement's bundle delta; Phase 9 |
+| G6 | **Lazy bytes total** | **1,702,633 B** (≈1.70 MB) | **(a) re-derived at lane base** — the same command; reproduces the digest | Phase 9 |
+| G7 | **Largest lazy chunk** | **157,141 B** (`chunk-QS2K3YLH.js`); second 135,690 B (`chunk-HNKUMJNH.js`) | **(a) re-derived at lane base** — the same command. The digest's 135,690 B is now the **second** largest — a one-position drift, disclosed | Phase 9's context |
+| G8 | **Per-component `anyComponentStyle` figures** for the new components | *post-implementation* | **(b) re-derivation task** — Phase 4's task 4.11 measures and records them at that phase's freeze (the 8 kB warn / 24 kB ERROR caps are config constants, not measurements) | Phase 4's exit criterion; Phase 9's B5 |
+| G9 | **The new lazy chart chunk's real min + gz bytes** | *post-implementation* | **(b) re-derivation task** — Phase 9's task 9.8(d) measures it (this closes governance item §9-6; the ~65 kB figure was an ESTIMATE) | Phase 9's B4 |
+| **G10** | **The `anyComponentStyle` warning SET** (not a count) | **9 paths** — `agent-selector` 8.77 kB · `snapshots` 12.29 · `jobs` 14.77 · `add-source-modal` 8.32 · `snapshot-detail-drawer` 8.70 · **`blueprint` 18.32 (the LARGEST)** · `checkpoint-cleanup` 8.70 · `instance-list` 10.17 · `chat-interface` 16.15 — **plus** the pre-existing `initial` warning | **(a) re-derived at lane base** — command + verbatim output above. **CORRECTED (C-3): the census is 9, NOT 8** — `blueprint.component.scss` (18.32 kB) had been omitted. The guard is a **set difference** against this set (0 added, 0 removed), **never a count ceiling** — a ceiling can be loosened and silently lose detection | Phase 1's baseline capture (1.9), Phase 9's B6 |
+| G11 | **The 16-family registry census** the 7-tab table binds to | 16 registered / 10 live / 6 dark | **(a) AND (b) — a DUAL status** (A-2): **(a)** re-derived at lane base (the registry SSOT `daemon/services/metrics_query/wiring/registry.py:64` + `wiring/adjudication.py:51-78`, read at `c26cec612`; the adjudicated set is "10 full + 6 partial = 16 of 26"); **(b)** re-derived again at **Phase 2's freeze** (the registry file is re-read and the manifest's bindings re-checked). Counted **once** in the (a) bucket | the tab table; Phase 2's exit criterion |
 | G12 | **Spec line counts** (241 / 237 / 519 / 316 / 1,645) | informational | **NOT a gate** — no exit criterion depends on a line count. AM-26 replaced the line-count framing with a **per-assertion disposition table** (the real gate) | Phase 4's exit criterion |
 | G13 | **Code constants** (2 h = 7200 s, the 15 s effective interval, the 4-value resources ladder, the 256-entry anomaly cap, the 8 s live poll, the 30 s/60 s/3600 s tiers) | n/a | **Not measurements** — code facts, re-read at lane base and re-read at each owning phase's freeze | Phases 3, 5, 6 |
 
-**Audit conclusion:** every MEASURED figure that any exit criterion depends on
-is either **(a) re-derived at lane base by this fold** (G1, G2, G3, G4, G5, G6,
-G7, G10, G11) or **(b) carries an explicit phase-freeze re-derivation task**
-(G8, G9). **No exit criterion depends on an un-re-derived MEASURED figure.**
+**Audit conclusion:** **no MEASURED figure gating an exit criterion is
+un-re-derived — 11/13 rows are (a) or (b)** (G1, G2, G3, G4, G4b, G5, G6, G7,
+G10 are (a); G8 and G9 are (b); G11 is **(a) and (b)**, counted once in (a));
+**G12 is explicitly not a gate** and **G13 is a code-fact set**. The split is
+**9 (a) / 2 (b) / 1 not-a-gate / 1 code-facts = 13** (G11 counted once — the
+circulating "9/3/1/1" figure double-counted it).
 
 ### 0.3 House conventions binding on this lane
 
@@ -83,6 +157,22 @@ targeted `git add` of new paths only · frozen-binary boot smokes pin
 `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` explicitly · `env -u POSTGRES_*` is
 a silent NO-OP (scrub per variable) · never resolve live-shaped paths in test
 scripts.
+
+### 0.4 DISCLOSURE — the plan-review council's model mapping (carried into the release narrative)
+
+> **The plan-review council's requested model `decision` is NOT in this
+> deployment's allowed set** (`agentic`, `coding` only), so the governor
+> **mapped it to `coding`** — the alias recorded in project metadata as the
+> **known-poisoned upstream row** (D7: a deprecated-row drop, ~210 errors/day,
+> which killed 6+ lane instances during the v0.27.15 gates).
+>
+> **The findings STAND.** All 4 criticals were independently re-verified by
+> direct commands against the tree; 2 models converged over 2 refinement rounds
+> with mutual concessions; and the fold author **independently re-verified
+> C-1, C-3, C-4, W-7, W-9, W-12, W-14, W-6 and A-5** against this tree (the
+> command/output pairs are recorded in `fold-audit.md` §G). **But the mapping
+> fact belongs in the disclosure set and on the user's morning list** — the
+> **D7 proxy-side repair remains user-owned.**
 
 ---
 
@@ -111,7 +201,11 @@ fail-closed state **while tab 1 still shows live data**.
 
 1. **Tab manifest** — FE-local typed config (`frontend/src/app/pages/metrics/tabs.manifest.ts`),
    discriminated `central | custom` slots, per `resource-refactor-architecture.md` §1.1,
-   **widened to express all four module dispositions** (AM-8).
+   **widened to express all four module dispositions** (AM-8). **Qualification
+   (A-3):** "adding a series to a wired module is registration-only" holds on
+   the **family axis** only — after AM-9/AM-12 the **unit vocabulary is
+   metric-name-keyed**, so a genuinely new *metric name* renders
+   **"unit unknown"** (never a guess) until the vocabulary names it.
 2. **7 tabs, all producer-live** (§4). Modules with no source are **hidden
    entirely** — planned manifest entries document them; they render nothing.
 3. **Page frame above the tabs** — the central range selector + the
@@ -161,7 +255,7 @@ review re-opens none of them, and neither does the fold.
 
 | Ruling | What this plan does | Where |
 |---|---|---|
-| **D-1 CHARTING** | Chart.js v4 = the ONLY vendor engine, **interactive panels only**, **lazy-chunk-only**. ONE consolidated house SVG renderer for the mini + fallback roles. The "drop Chart.js if interaction is deferred" flip-condition is **void**. The governance amendment lands in the **same commit** as the dependency. **The corrected safety mechanism (AM-2):** a **lazy** leak trips **no** budget — the guards are a numeric initial-total delta + an import-graph assertion, co-located in Phases 1 and 4. | Phase 1 (dependency + amendment + the first guard), Phase 4 (the engines + the guard re-run), Phase 0 (the audit-doc amendment) |
+| **D-1 CHARTING** | Chart.js v4 = the ONLY vendor engine, **interactive panels only**, **lazy-chunk-only**. ONE consolidated house SVG renderer for the mini + fallback roles. The "drop Chart.js if interaction is deferred" flip-condition is **void**. The governance amendment lands in the **same commit** as the dependency. **"FIRST PAINT" = THE APP SHELL** (LEADER RULING 1 — normative; it matches §10 criterion 8's operationalisation and the builder's `initial` budget basis). **The corrected safety mechanism (AM-2 + C-1):** a **lazy** leak trips **no** budget — the build stays green and both FE packs stay green — so the guards are (i) a numeric initial-total delta, (ii) an initial-chunk marker scan, (iii) an **import-shape + import-site** assertion, and (iv) a **route-fetch-set growth bound**. The page-scoped import-graph marker assertion is **retained anyway**, so the D-1 guarantee holds under **both** readings (app shell **and** the `/metrics` page). The guards are **co-located in Phases 1, 4, 5 and 9** — the exposure window is Phases 1–8. | Phase 1 (dependency + amendment + the first guard), Phase 4 (the engines + the guard re-run), Phase 5 (the guard re-run), Phase 9 (B1–B8), Phase 0 (the audit-doc amendment) |
 | **D-2 AUTH POSTURE** | The central door's fail-closed posture is **unchanged**. The FE distinguishes the door's failure **classes** (widened to ten, AM-4) and renders an **actionable** empty state for `AUTH_NOT_CONFIGURED` — **on the central surfaces only** (AM-1). The operator recipe lives in §9 and is **not executed** by the lane. | Phase 8 (the class table + the actionable state), Phase 2 (the timeout), Phase 9 (L1b/L2/L4), §9 (the recipe) |
 | **D-3 ROUTE FATE** | `/resources` is retired in the same release, behind a **param-preserving** redirect to `/metrics?tab=resource` (mechanism + precedence named, AM-3). | Phase 7 |
 
@@ -234,15 +328,15 @@ is **surfaced**, never silent.
 | Phase | Name | Objective | Tasks | Coupling | Status |
 |---|---|---|---|---|---|
 | 0 | Housekeeping — the audit-doc what-changed-and-why amendment | Record the 4-engine proposal → measured reality → D-1 supersession chain, incl. the not-chosen zero-dep counter-option | 6 | independent | pending |
-| 1 | Charting dependency + same-commit governance amendment + the **first bundle guard** | Land Chart.js v4 + the canvas-mock devDep with the pins/pack/doc amendments; extract `chart-theme.ts`; install the numeric bundle guard | 9 | tight with 0, 4, 9 | pending |
+| 1 | Charting dependency + same-commit governance amendment + the **first bundle guard** | Land Chart.js v4 + the canvas-mock devDep with the pins/pack/doc amendments; extract `chart-theme.ts`; install the numeric bundle guard + the warning-baseline capture | 9 | tight with 0, 4, 5, 9 | pending |
 | 2 | Tab manifest + 7-tab shell + `?tab=` deep links + the **per-source state model** | FE-local typed manifest (4 dispositions), the 7-tab shell, deep-links, the door timeout, the per-source state model | 13 | tight with 3, 5, 7, 8, 9 | pending |
 | 3 | Page frame — range selector + baseline | The central-sourced range control with per-tab vocabulary; the server-anchored client-split baseline (central tabs only); the request-generation discipline | 12 | tight with 2, 4, 5, 6 | pending |
-| 4 | Renderer consolidation — house SVG + Chart.js wrapper + registry + the **second bundle guard** | Merge the two engines into one; build the panel wrapper; the intent→renderer registry; re-specify the canvas-fatal e2e legs | 14 | tight with 1, 3, 5, 6, 9 | pending |
-| 5 | Tab 1 (Resources, custom slot) | Relocate the resource module; Live strip + Timeline panel + anomalies panel; the panel's own range control; the per-source state | 13 | tight with 2, 3, 4, 6, 7, 9 | pending |
+| 4 | Renderer consolidation — house SVG + Chart.js wrapper + registry + the **second bundle guard** + the per-tab panel composition | Merge the two engines into one; build the panel wrapper; the intent→renderer registry; re-specify the canvas-fatal e2e legs; **compose the per-tab panels** (C-2's moved half of 2.4) | 15 | tight with 1, 2, 3, 5, 6, 9 | pending |
+| 5 | Tab 1 (Resources, custom slot) | Relocate the resource module; Live strip + Timeline panel + anomalies panel; the panel's own range control; the per-source state; **the third bundle-guard re-run** (W-4) | 14 | tight with 2, 3, 4, 6, 7, 9 | pending |
 | 6 | Chart correctness — units, panel granularity, attribution | Per kind+unit-group panels; the metric-name unit vocabulary; the coverage displayed verbatim | 7 | tight with 4, 5, 3 | pending |
 | 7 | Route fate (D-3) — retire `/resources` + redirect | Param-preserving redirect (mechanism named); gear menu; the widened sweep; the operator runbooks | 9 | tight with 2, 5, **8** | pending |
 | 8 | Empty state + honesty (D-2) | The widened class table; the actionable `AUTH_NOT_CONFIGURED` state on the central surfaces; the page-scoped posture chip; the copy SSOT | 12 | tight with 2, 4, 6, **7** | pending |
-| 9 | Verification + close-out | The four legs; the pixel list split by posture; the bundle guard; the packs; the routed-out register; the operator recipe | 11 | tight with all | pending |
+| 9 | Verification + close-out | The four legs; the pixel list split by posture (9.7a/9.7b); the bundle guard B1–B8; the packs; the routed-out register; the operator recipe | 12 | tight with all | pending |
 
 ### Coupling map (AM-7: row 8 corrected; the 7↔8 edge is now in the task graph)
 
@@ -250,17 +344,27 @@ is **surfaced**, never silent.
 |---|---|---|---|---|---|---|---|---|---|---|
 | **0** | — | loose | independent | independent | loose | independent | independent | independent | independent | loose |
 | **1** | loose | — | independent | independent | **tight** | loose | independent | independent | independent | tight |
-| **2** | independent | independent | — | **tight** | independent | **tight** | independent | **tight** | **tight** | loose |
+| **2** | independent | independent | — | **tight** | **tight** | **tight** | independent | **tight** | **tight** | loose |
 | **3** | independent | independent | **tight** | — | **tight** | **tight** | **tight** | independent | loose | loose |
-| **4** | loose | **tight** | independent | **tight** | — | **tight** | **tight** | independent | independent | loose |
+| **4** | loose | **tight** | **tight** | **tight** | — | **tight** | **tight** | independent | independent | loose |
 | **5** | independent | loose | **tight** | **tight** | **tight** | — | **tight** | **tight** | independent | loose |
 | **6** | independent | independent | independent | **tight** | **tight** | **tight** | — | independent | independent | loose |
 | **7** | independent | independent | **tight** | independent | independent | **tight** | independent | — | **tight** | loose |
 | **8** | independent | independent | **tight** | loose | **tight** | independent | **tight** | **tight** | — | loose |
 | **9** | loose | tight | loose | loose | loose | loose | loose | loose | loose | — |
 
-**The corrected couplings (AM-7):**
+**The corrected couplings (AM-7 + C-2):**
 
+- **2 ↔ 4 is TIGHT (C-2).** Phase 2's task 2.4 originally required the
+  **renderer registry** that only Phase 4's task 4.8 creates, while four
+  declarations asserted 2↔4 independence — a numeric-order execution hit a
+  phase-2 freeze whose tab bodies could not compile. **Task 2.4 is now SPLIT**
+  (the tab bodies + the family binding + the fetch + the availability
+  surfacing stay in Phase 2; the registry hand-off and the per-kind+unit-group
+  panel composition MOVE to Phase 4's new task **4.15**), and the map's 2↔4
+  cells read **tight** in both directions. Phase 4's exit re-asserts 2.4's
+  two-panels property, mirroring the plan's own two-step-migration idiom
+  (AM-27).
 - **8 ↔ 4 and 8 ↔ 6 are TIGHT.** Task 8.10's data-end marker is a **renderer**
   capability (Phase 4) and its meta interacts with Phase 6's derived-spacing
   meta — a lane sequenced by the map would otherwise reach Phase 8 before the
@@ -281,24 +385,61 @@ is **surfaced**, never silent.
 Everything runs in the lane worktree against a **fenced DEV daemon on
 `127.0.0.1:8079`**.
 
-**Pre-flight (any failure ⇒ STOP, not "proceed and watch"):**
+**Pre-flight (any failure ⇒ STOP, not "proceed and watch"):** — P1–P9,
+corrected by the plan-review's **C-4** (a quiet-failure class: no daemon module
+loads `.env`, so a scrub alone leaves the daemon with **no** `POSTGRES_*` and
+the sqlite fallback gets **persisted**), **W-7** (there is no `config.yaml`
+database stanza), **W-8/W-9** (the `ensemble.json` assertion must be pinned to
+the JSON path and the pre-seed must be specified), and **A-6** (`DAEMON_PORT` is
+inert).
 
 | # | Assertion | Check | Fail ⇒ |
 |---|---|---|---|
-| P1 | The worktree `.env` is the dev fence | `ENSEMBLE_SELF_ENV=dev`, `POSTGRES_DB=ensemble_dev`, `DAEMON_PORT=8079` | STOP |
-| P2 | `POSTGRES_DB != ensemble_prod` | `grep '^POSTGRES_DB=' .env` | STOP |
-| P3 | The untracked `data/ensemble.json` pin does not point at prod | absent, or `database == "postgres"` with the DB name `ensemble_dev`. The file **outranks the env** for the engine choice (`daemon/ensemble_config.py:56-89`) and is persisted on first boot | STOP |
-| P4 | A scratch data dir | `ENSEMBLE_DATA_DIR=/tmp/fe-t1-dev-data` (pre-seeded `ensemble.json`) — the live install's `data/` is unreachable | STOP |
+| P1 | The worktree `.env` is the dev fence | `ENSEMBLE_SELF_ENV=dev`, `POSTGRES_HOST=127.0.0.1`, `POSTGRES_PORT=5432`, `POSTGRES_DB=ensemble_dev`, `POSTGRES_USER=ensemble_dev_app`, `POSTGRES_PASSWORD` present, and **NO `PORT` at all** (so no live-port binding path exists). **`DAEMON_PORT=8079` is NOT asserted** — it is inert (A-6); the port clause is P7's | STOP |
+| P2 | The **loaded** `POSTGRES_DB` is the dev DB, never prod | after the `.env` source (step 2 of the boot sequence): the loaded `POSTGRES_DB == ensemble_dev` **and** `!= ensemble_prod` | STOP |
+| P3 | The `ensemble.json` pin is pinned **to the JSON path** (W-9) | `jq -e '.database == "postgres" and .postgres.db == "ensemble_dev"' <data-dir>/ensemble.json` — **never** a literal `ensemble_prod` substring check (the live file's `$.postgres.db` is `"ensemble"`, which a substring checker passes) | STOP |
+| P4 | A scratch data dir, **with an exact pre-seed** (W-8) | `ENSEMBLE_DATA_DIR=/tmp/fe-t1-dev-data` with `ensemble.json` pre-seeded to **exactly** `{"database":"postgres","postgres":{"host":"127.0.0.1","port":5432,"db":"ensemble_dev","user":"ensemble_dev_app","password":"<the dev password>"}}` — the **full** `postgres` block, because a pre-seed without host/user/password leaves the connection parameters to the file's own (possibly prod) values. **P3 is re-run after P4** with the same `jq` expression | STOP |
 | P5 | The sweep guard is pinned EXPLICITLY | `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` — **never** `env -u` on it | STOP |
-| P6 | The env is scrubbed **per variable**, following the house **family rule** (AM-29) | prefix `POSTGRES_*` **and** `PG*` (PGPASSWORD is a known ambient vector), plus `BLUEPRINT_*` and suffix `*_API_KEY` — scrubbed one by one; `env -u POSTGRES_*` is a **silent NO-OP** (bash does not glob env names). **`DAEMON_PORT` is NOT scrubbed as if it mattered** — it is inert (P7) | STOP |
-| P7 | The **effective** port is `PORT=8079`, set **after** the scrub (AM-5) | `DAEMON_PORT` appears **nowhere** under `daemon/`; `config.yaml:112-113` reads `port: ${PORT:-8088}` ⇒ the default is **8088**. `PORT=8079` is exported after the scrub; the **effective** port is then asserted **from the running daemon** (the boot log / the `/livez` body), never from an env var | STOP |
-| P8 | `config.yaml`'s effective stanza **and the daemon's actual DB, read back from the running daemon** (AM-29) | the config file's port/DB stanza is inspected **and** the running daemon's database is read back (not from a file) | STOP |
+| P6 | The env is scrubbed **per variable**, following the house **family rule** (AM-29) | prefix `POSTGRES_*` **and** `PG*` (PGPASSWORD is a known ambient vector), plus `BLUEPRINT_*` and suffix `*_API_KEY` — scrubbed one by one; `env -u POSTGRES_*` is a **silent NO-OP** (bash does not glob env names) | STOP |
+| P7 | The **effective** port is `PORT=8079`, re-exported **AFTER** the `.env` source and **unconditionally** (LEADER RULING 3) | `PORT` is re-exported **after** the source (the live install's `.env` carries `PORT=9797` — sourcing first and exporting after is what closes the live-port bind); the export is **unconditional** (never inherited from a sourced env); the **effective** port is then asserted **from the running daemon's `/livez`**, never from the intent | STOP |
+| P8a | `config.yaml`'s effective **port** stanza (W-7) | `config.yaml` carries **no** database stanza (`grep -i "postgres\|database" config.yaml` = 0 hits) — only `daemon.host`/`daemon.port` (`:111-113`); the port stanza is inspected and must resolve to 8079 | STOP |
+| P8b | The running daemon's **actual database**, read back (the load-bearing half of AM-29's P8) | the daemon's resolved database identity is read back **from the running daemon** (not from a file) and must be `ensemble_dev` | STOP |
+| P9 | The boot path is the one that can reach the dev DB (C-4) | the boot sequence below is executed in the **stated order**; a 200-with-empty-catalog from `/api/metrics/families` is a **FAIL**, not a success (see L1's non-emptiness threshold) | STOP |
 
-**Boot (AM-5 — the command is named):** `python -m daemon` — the `__main__`
-path, so the boot preflight **and** the boot sweep run. **Not `dev.sh`**,
-which uses `uvicorn --reload` and **bypasses** the `__main__` preflight/sweep
-(`dev.sh:155`). `/livez` 200 + the boot banner + the observed effective port
-are asserted after boot.
+**The boot sequence (C-4 — ORDERED; the order is the fix):**
+
+```
+(1) scrub the ambient env per variable                    # P6
+(2) source the WORKTREE's .env into the daemon's env      # set -a; . ./.env; set +a
+                                                        #   (the house dev.sh:70-76 idiom)
+(3) assert the LOADED POSTGRES_DB == ensemble_dev          # P2  (!= ensemble_prod)
+(4) re-export PORT=8079 — UNCONDITIONALLY, AFTER the source  # P7 (LEADER RULING 3)
+(5) boot:  python -m daemon                              # the __main__ path (preflight + boot sweep run)
+(6) assert the EFFECTIVE port from /livez                # P7's second half
+    assert the daemon's ACTUAL database == ensemble_dev   # P8b
+    assert the ensemble.json in $ENSEMBLE_DATA_DIR        # P3, re-run after P4
+    assert the anyComponentStyle + initial warning SET    # the Phase-1 captured baseline set
+```
+
+**Why step (2) is load-bearing (C-4's code-path conclusion, falsifiable at
+implementation time by three cheap checks):** no daemon module loads `.env` —
+`grep -rnE "dotenv|load_dotenv" daemon/ --include=*.py` returns **2 hits, both
+prose in docstrings** (`daemon/config.py:3698`, `:3897`); `daemon/config.py:6571`
+substitutes `${VAR}` from `os.environ` only; `daemon/ensemble_config.py:81-83`
+auto-detects postgres only when **both** `POSTGRES_HOST` **and** `POSTGRES_DB`
+are present; `:90-91` logs *"No PostgreSQL ENV vars detected, defaulting to
+sqlite"*; and `:95` **persists** that choice into `ensemble.json`, which then
+**outranks the env on every later boot from that tree**. Without step (2), the
+scrub of step (1) removes the **only** source of `POSTGRES_*` and the daemon
+silently runs on sqlite — a **quiet** failure that still answers 200 with an
+empty catalog.
+
+**C-4 was closed on CODE-PATH evidence, not on an executed boot.** The three
+implementation-time assertions that would falsify it (named in Phase 9's task
+9.2): `env | grep POSTGRES` (expect **nothing** before the `.env` load) · the
+boot log line `No PostgreSQL ENV vars detected, defaulting to sqlite` (must
+**not** appear) · `cat $ENSEMBLE_DATA_DIR/ensemble.json` (must show
+`.database == "postgres"` and `.postgres.db == "ensemble_dev"`).
 
 **Leg L1 — data-bearing (auth ON, scoped operator bearer).** Auth ON requires
 `client_id` + `client_secret` + `issuer` (https) + non-empty `allowed_origins`
@@ -313,7 +454,16 @@ fe-t1-operator --scopes "maintenance:read"` (the door accepts
 `maintenance:read` OR `metrics:read` — `daemon/routers/metrics.py:57-63`; the
 plaintext prints ONCE and never enters a repo file). The browser presents it
 via the Playwright context's `extraHTTPHeaders: { Authorization: 'Bearer
-<token>' }` — **no production FE change**.
+<token>' }` — **no production FE change**. **The auth env vars are exported
+BEFORE the boot (Phase 9's task graph), not after it** — auth has no live
+toggle (`config.yaml:133`), so enabling it after a boot would leave the daemon
+serving the auth-OFF posture.
+
+**Leg L1 — the non-emptiness threshold (W-11; a 200-with-empty-catalog is a
+FAIL):** `/api/metrics/families` must return **≥ 1** registered family **and**
+**≥ 1** of the 7 bound families; `/api/metrics/snapshot?family=F9` must return
+**≥ 1** series; `/api/resources/live` must return a **non-zero**
+`daemon_rss_mb`. The observed counts are recorded in the evidence.
 
 **Leg L1b — auth required, no bearer (AM-4).** Auth ON, **no** credential ⇒
 **401** ⇒ the **sign-in panel** (`auth_required`) — not `unexpected`, not a
@@ -361,7 +511,7 @@ followed by a **`/livez` re-assertion**.
 Every capture is GET-only (assert 0 non-GET in the API census) and the live
 daemon is never contacted.
 
-### 6.3 Bundle guard (AM-2 — the architecture fixed three ways)
+### 6.3 Bundle guard (AM-2 + C-1 — the architecture fixed three ways, then four)
 
 **The corrected mechanism (stated plainly):** the Angular `initial` budget
 counts entry points + their transitive **static** imports; **lazy chunks are
@@ -369,30 +519,49 @@ counted by NO budget** (only `initial` + `anyComponentStyle` are configured).
 Therefore **a lazy Chart.js leak trips nothing** — the production build stays
 green and both FE packs stay green. The plan's original claim ("a static-import
 leak hard-fails the production build … and both FE packs") was **false for the
-lazy case** and is withdrawn.
+lazy case** and is withdrawn. Worse (C-1): **a STATIC `from 'chart.js'` inside
+the lazily-loaded metrics tree satisfies B1, B2 and B3** — the initial total
+does not move, no initial chunk carries the marker, and the import site is
+inside the tree B3 requires — because a module reachable only from a lazy
+graph is extracted into a **lazy-only sibling chunk**, not into the initial
+set. On the real dist the `/metrics` route chunk statically imports
+`chunk-6Y6F4JKW.js` (43,688 B) and `chunk-AOZCSBSC.js` (1,348 B), **both
+lazy-only** (absent from the builder's 36-row initial table) — so the route
+chunk need not even grow. **Hence B3 gates the SHAPE and B4 measures the
+route FETCH SET** (the route chunk + its direct static deps), which is the
+measurement that actually catches the static form.
+
+**"First paint" = the APP SHELL** (LEADER RULING 1, normative — it matches
+§10 criterion 8's operationalisation and the builder's `initial` budget basis).
+The page-scoped import-graph marker assertion is **retained anyway**, so the
+D-1 guarantee holds under **both** readings.
 
 | # | Guard | Threshold | Where |
 |---|---|---|---|
-| B1 | **Numeric initial-total delta** vs the **frozen lane-base baseline 5,909,018 B** (the builder's own "Initial total" basis, 36 chunk files) | **\|Δ\| ≤ 2 kB** | Phase 1 (1.9), Phase 4 (4.14), Phase 9 (9.8) — **co-located**, because the leak window spans Phases 1–8 |
-| B2 | **No `chart.js` marker in ANY initial chunk** | 0 hits | Phase 1 (1.9), Phase 4 (4.14), Phase 9 (9.8) |
-| B3 | **Import-graph assertion** — every `from 'chart.js'` / `import('chart.js')` site lives inside `src/app/pages/metrics/**`; the wrapper's own import is either inside that tree or a dynamic `await import('chart.js')` | 0 violations | Phase 1 (1.2c, 1.7), Phase 4 (4.14) |
-| B4 | **The new lazy chart chunk's real min + gz bytes** | measured and recorded (closes governance item §9-6 — the ~65 kB figure was an ESTIMATE) | Phase 9 (9.8d) |
+| B1 | **Numeric initial-total delta** vs the **frozen lane-base baseline 5,909,018 B** (the builder's own "Initial total" basis, 36 chunk files) | **\|Δ\| ≤ 2 kB** | Phase 1 (1.9), Phase 4 (4.14), **Phase 5 (5.14)**, Phase 9 (9.8a) — **co-located**, because the leak window spans Phases 1–8 and Phase 5 is the other chunk-graph-changing phase (W-4) |
+| B2 | **No `chart.js` marker in ANY initial chunk** | **0** hits across the 36-file initial set | Phase 1 (1.9), Phase 4 (4.14), Phase 5 (5.14), Phase 9 (9.8b) |
+| B3 | **Import SHAPE + import SITE** (C-1, AM-15) | **every** `chart.js` import is the **dynamic** `await import('chart.js')` form — **0** static `from 'chart.js'` sites anywhere; the wrapper's own home is **under `src/app/pages/metrics/**`** (a named relocation task, 1.7/4.4), so the location rule holds by construction. The **planted variants** are now **both**: an eager import (in the initial set) **and** a static import inside the lazy metrics tree (the case that slips through B1/B2) | Phase 1 (1.2c, 1.7, 1.9), Phase 4 (4.4, 4.14), Phase 5 (5.14), Phase 9 (9.8c) |
+| **B4** | **The new lazy chart chunk's size AND the `/metrics` route FETCH SET's growth** (C-1: B4 had no threshold and no baseline; G4 was an orphan) | the new chart chunk's real **min + gz ≤ 65,536 B (64 KiB)**; **AND** the `/metrics` route fetch set grows by **≤ 65,536 B** vs the **496,338 B** baseline (G4b) | Phase 9 (9.8d) — the comparison leg that G4's "Phase 9's new-chunk comparison" named but that did not exist |
 | B5 | The per-component **`anyComponentStyle`** figures for the new components | each **< 8 kB** (the 24 kB cap is a hard build error) | Phase 4 (4.11), Phase 9 (9.8e) |
-| B6 | The budget **warnings**, recorded verbatim as adjudication data (never auto-fixed) | the 8 pre-existing `anyComponentStyle` warnings (all in other components' SCSS) + the pre-existing `initial` warning — **no NEW** warning | Phase 9 (9.8f) |
+| B6 | The budget **warnings** as a **SET DIFFERENCE** against the baseline set captured **mechanically** from the Phase-1 production build log (C-3) — **never a count ceiling** (a ceiling can be loosened and silently lose detection) | the warning set must equal the captured baseline set **exactly**: **0 added, 0 removed** | Phase 1 (1.9 captures the baseline), Phase 9 (9.8f) |
 | B7 | **Both FE packs green** + the **161/161** prompt-artifact baseline | 2/2 green; 161/161 | Phase 9 (9.9, 9.10) |
+| **B8** | **The baseline artifact is the single source** (A-8) | the guards read `bundle-baseline.json`; a number duplicated only in plan prose is **not** accepted as a baseline | Phase 1 (1.9), Phase 9 (9.8) |
 
-**The baseline's provenance (E-1, re-derived at lane base):** the fresh
-production build at lane base measures **5,909,018 B** initial / **90,982 B**
-headroom, confirmed by **two independent derivations** and cross-checked
-against the shipped v0.28.9 dist (byte-identical). The digest's 5,909,018 B
-**total** was correct; its `89,982 B` headroom had a 1,000 B digit slip; AM-2's
-`5,115,820 / 884,180` **undercounts by 793,198 B** (it summed only the
-index.html-referenced files, omitting the builder's 23 transitive static-import
-chunks). Full method: `research-findings.md` §14.
+**The baseline's provenance (E-1, re-derived at lane base, with the command and
+its verbatim output in §0.2):** the fresh production build at lane base
+measures **5,909,018 B** initial / **90,982 B** headroom. The digest's
+5,909,018 B **total** was correct; its `89,982 B` headroom had a 1,000 B digit
+slip; AM-2's `5,115,820 / 884,180` **undercounts by 793,198 B** (it summed
+only the index.html-referenced files, omitting the builder's 23 transitive
+static-import chunks). The G10 census is **9** (C-3), not 8. Full method:
+`research-findings.md` §14; the machine-readable artifact:
+`bundle-baseline.json` + `bundle-baseline.measure.js`.
 
 **An EAGER leak does break the build** against the corrected baseline: the
 headroom is 90,982 B and chart.js's raw minified size is ~250–400 kB ⇒ the
-`initial` **error** budget trips. The unsafe case is the LAZY one — hence B1–B3.
+`initial` **error** budget trips. The unsafe case is the LAZY one — and, per
+C-1, the **static-inside-a-lazy-tree** case, which is why B3 gates the shape
+and B4 measures the route fetch set.
 
 ### 6.4 Expected FE pack / test additions (SPECIFIED here — not built by this plan)
 
@@ -434,7 +603,8 @@ line count.
 ## 7. Routed-out register
 
 Each item: owner + reason + the exact handoff. **The lane does not build any
-of these.**
+of these — except (n), which Phase 7 retires** (the `/resources` Playwright gate
+must die with the route it drives).
 
 | # | Routed item | Owner | Reason / handoff |
 |---|---|---|---|
@@ -529,7 +699,11 @@ summary.**
 > while the central tabs are dark. The moment the user completes the §9
 > enablement (auth ON + a scoped token + **one daemon restart**), the central
 > tabs light up with no FE change. **This is the expected auth-timeline
-> outcome under D-2, not a defect and not a regression.** The FE's job in this
+> outcome under D-2, not a defect and not a regression.**
+>
+> **Also carried in the disclosure set (see §0.4):** the plan-review council's
+> requested model `decision` was **mapped to `coding`** — the known-poisoned
+> upstream alias (D7) — and the **D7 proxy-side repair remains user-owned**. The FE's job in this
 > state is to be **honest and actionable** — which is exactly what it now does:
 > one panel, the real cause, the runbook, and no dead Retry button.
 
@@ -546,14 +720,14 @@ summary.**
 | 5 | **Every PANEL carries a unit-labeled y-axis**; the mini role renders no axis and has **no page surface** | PX-10 + the correctness spec + the surface map | 0 unlabeled panel axes; 3 unit classes on the resource timeline (incl. the toggle path); 0 mini surfaces in T1 |
 | 6 | The attribution card **reconciles or says it cannot** — and the FE computes **no** coverage percentage | the correctness spec + a pixel read | the coverage is the payload's value verbatim; the disagreement is stated in words; no FE-side coverage arithmetic exists |
 | 7 | The consolidation keeps the older engine's capabilities | the capability checklist + the per-assertion disposition table | the checklist passes **6/6**; the disposition table accounts for **every** assertion of both original specs |
-| 8 | **Zero first-paint growth** from the charting dependency | B1/B2/B3 (the initial-total delta, the initial-chunk scan, the import-graph assertion) | \|Δ initial-total\| **≤ 2 kB** vs 5,909,018 B; 0 `chart.js` markers in any initial chunk; 0 import-site violations |
+| 8 | **Zero first-paint growth** from the charting dependency — **first paint = the APP SHELL** (LEADER RULING 1) — **and** the `/metrics` page's fetch set does not grow by the vendor payload | B1/B2/B3 (the initial-total delta, the initial-chunk scan, the import **shape** + site assertion) **and B4** (the new chunk's min+gz **and** the route fetch set's growth vs the 496,338 B baseline) | \|Δ initial-total\| **≤ 2 kB** vs 5,909,018 B; 0 `chart.js` markers in any initial chunk; **0** static `from 'chart.js'` sites; the new chunk **≤ 64 KiB** min+gz; the route fetch set grows **≤ 64 KiB** |
 | 9 | The new lazy chart chunk is **measured**, not estimated | B4 | real min + gz bytes recorded in the lane's evidence |
 | 10 | Both FE packs are green, with Leg 7 asserting the **expected dependency set** | the packs | 2/2 green; the assertion is by name, not by count |
 | 11 | The prompt-artifact baseline is untouched | `agents/.prompt-artifacts.sha256` | **161/161 clean**; the `agents/` tree has zero diffs |
 | 12 | The lane touches **no live daemon** | the capture log's API census + the boot fence | 0 requests to `:9797`; 0 non-GET anywhere; the live symlink + `state.json` byte-identical; the live uptime **monotone** |
 | 13 | The routed-out register is **closed out** — 14 items, each with an owner | Phase 9's exit criterion | 14/14 recorded with an owner and a reason |
 | 14 | The operator recipe is handed over, not executed, and the **mostly-dark live posture** is narrated as expected | §9 + §9.1 + Phase 9's exit criterion | the recipe exists with the restart implication named; 0 live config writes; the E-2 narrative rides the release disclosure |
-| 15 | **No exit criterion depends on an un-re-derived MEASURED figure** | the §0.2 gated-figures ledger + each phase's "E-1 re-derivation" line | 13/13 ledger rows are (a) re-derived at lane base or (b) carry a phase-freeze re-derivation task |
+| 15 | **No MEASURED figure gating an exit criterion is un-re-derived** | the §0.2 gated-figures ledger (each (a) row carries its **command + output**) + each phase's "E-1 re-derivation" line | **11/13** rows are (a) or (b); G12 is explicitly **not a gate** and G13 is a **code-fact set** |
 
 ---
 

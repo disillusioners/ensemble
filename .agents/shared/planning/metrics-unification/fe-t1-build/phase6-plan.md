@@ -60,8 +60,11 @@ and a stated non-reconciliation.
 - The panels' meta reports the **derived** effective spacing.
 - The Live strip's attribution subtitle no longer promises per-instance
   attribution.
-- The correctness spec is mutation-proven: each of the four fixes has a
-  planted-violation leg that goes red → restored → green.
+- The correctness spec is mutation-proven: each of the **five** substantive
+  fixes (the per-unit panel split incl. the toggle path, the unit vocabulary
+  keyed on the metric name, the attribution basis, the coverage displayed
+  verbatim, the derived-spacing meta) has a planted-violation leg that goes
+  red → restored → green (A-9).
 - **E-1 re-derivation:** this phase gates on **no** MEASURED artifact figure.
   Its inputs are **code facts** (the wire's `chart_role`, the sampler's
   `coverage_pct` formula, the timeline's series defs) re-verified at lane base

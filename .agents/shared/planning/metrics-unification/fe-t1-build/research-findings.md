@@ -209,11 +209,15 @@ resource ladder), **NOT** picker options. The **picker** vocabulary is
 
 ## 6. Bundle + dependency facts (MEASURED — re-derived at lane base, 2026-11-03)
 
-> **E-1 STANDING LANE RULE (folded 2026-11-03):** every MEASURED figure a phase
-> exit criterion depends on must be **re-derived at lane base** (this worktree's
-> tree) before that phase freezes. The figures in this table were re-derived by a
-> fresh production build at the lane base — **see §14 for the full method,
-> numbers, and the comparison against the architect's AM-2 figures.**
+> **E-1 STANDING LANE RULE (folded 2026-11-03, tightened by the plan-review's
+> C-3):** every MEASURED figure a phase exit criterion depends on must be
+> **re-derived at lane base** (this worktree's tree) before that phase freezes —
+> **and a label without a COMMAND is not a re-derivation**. The figures in this
+> table were re-derived by a fresh production build at the lane base — **see §14
+> for the full method, the exact commands, their verbatim output, and the
+> comparison against the architect's AM-2 figures.** The machine-readable
+> single source is **`bundle-baseline.json`** (+ the re-derivation tool
+> `bundle-baseline.measure.js`), both in this plan directory.
 
 | Fact | Value | Status |
 |---|---|---|
@@ -485,6 +489,19 @@ dist-derived numbers as **5,115,820 B initial / 884,180 B headroom**. The
 leader ordered a re-derivation **at lane base** before the fold. This section is
 that re-derivation, in full.
 
+### 14.0 The single-source artifact (fold #3, A-8)
+
+The baseline lives in **`bundle-baseline.json`** — machine-readable, the single
+source the T1 bundle guards read — with **`bundle-baseline.measure.js`** as the
+re-derivation tool. A number duplicated only in plan prose can drift; a file
+cannot. Reproduce with:
+
+```
+cd frontend && node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser
+```
+
+Its verbatim output is §14.4's table, row by row.
+
 ### 14.1 Method (the build)
 
 - Tree: `/home/nea/ensemble-src-wt-fe-metrics-dashboard` @ `c26cec612`
@@ -546,9 +563,10 @@ difference empty in both directions) — two independent derivations, one number
 | Lazy chunk count | **52** |
 | Lazy bytes total | **1,702,633 B** (≈1.70 MB) |
 | `/metrics` lazy chunk | **27,672 B** (`chunk-ZA3RV4HY.js`) |
+| **`/metrics` route FETCH SET** (the route chunk + its **direct** static deps) | **496,338 B** — route chunk 27,672 + `chunk-6Y6F4JKW.js` 43,688 (**LAZY-ONLY**) + `chunk-AOZCSBSC.js` 1,348 (**LAZY-ONLY**) + 6 initial deps. **Newly measured (fold #3, C-1):** this is the threshold that actually catches a **static** `chart.js` import inside the lazy metrics tree — the route chunk alone does **not** grow (the vendor lands in a lazy-only sibling chunk) |
 | `/resources` lazy chunk | **38,914 B** (`chunk-FOLCEMN3.js`) |
 | Largest lazy chunk | **157,141 B** (`chunk-QS2K3YLH.js`); second 135,690 B |
-| `anyComponentStyle` warnings | **8**, all in **other** components' SCSS (`agent-selector`, `snapshots`, `jobs`, `add-source-modal`, `snapshot-detail-drawer`, `checkpoint-cleanup`, `instance-list`, `chat-interface`) — **pre-existing**; the `initial` budget warning is pre-existing too |
+| `anyComponentStyle` warnings | **9** — `agent-selector` 8.77 kB · `snapshots` 12.29 · `jobs` 14.77 · `add-source-modal` 8.32 · `snapshot-detail-drawer` 8.70 · **`blueprint` 18.32 (the LARGEST)** · `checkpoint-cleanup` 8.70 · `instance-list` 10.17 · `chat-interface` 16.15 — all in **other** components' SCSS, **pre-existing**; the `initial` budget warning is pre-existing too. **CORRECTION (fold #3, C-3): the original figure was 8 — `blueprint.component.scss` had been omitted.** The guard is a **set difference** against this set, **never a count ceiling** |
 
 ### 14.5 Comparison against the architect's AM-2 figures — **MISMATCH, disclosed**
 
@@ -596,5 +614,16 @@ reproducible.
    - (c) B1's "byte-identical file list" is unsatisfiable under
      `outputHashing: "all"` (any change renames chunks) ⇒ B1 is redefined
      numerically (§6.3 of the plan).
-3. **The guard is co-located** (Phase 1 and Phase 4 exit criteria), not a
+3. **The guard is co-located** (Phases **1, 4, 5 and 9** exit criteria), not a
    Phase-9-only gate — the leak window spans Phases 1–8.
+4. **C-1 (fold #3):** a **static** `from 'chart.js'` inside the lazily-loaded
+   metrics tree satisfies the initial-total delta, the initial-chunk marker scan
+   **and** a location-only import rule — the vendor is extracted into a
+   **lazy-only sibling chunk**. Hence the guard set gains (a) the import **SHAPE**
+   gate (**every** `chart.js` import is the dynamic `await import('chart.js')`
+   form), (b) the **route fetch set** as the measurement that catches it
+   (496,338 B baseline), and (c) a **second planted variant** (the static case,
+   not only the eager one).
+5. **C-3 (fold #3):** the `anyComponentStyle` baseline is a **SET of 9 paths**,
+   captured mechanically from the Phase-1 build log, and compared as a **set
+   difference** — a count ceiling is forbidden.

@@ -31,6 +31,7 @@ actionable state.**
 | 5.11 | **Request-generation discipline for tab 1 (AM-16).** Tab 1 gains **three concurrent request classes** (the 8 s live poll, the frame/panel-driven window load, the anomalies load) with no stated token discipline. Apply the Phase-3 request-generation rule: a **window change invalidates the window + anomalies loads** but **NOT** the live strip's 8 s poll (the poll is not gated by the window generation) | 5.3, 5.4 | A spec asserts: a window change discards an in-flight window/anomalies response; the live strip's poll response is not discarded by a window change |
 | 5.12 | Remove the tab-1 **placeholder** left by Phase 2 and wire the custom slot's `loadComponent` to the real tab-1 body | 5.2 | Grep: 0 hits for the placeholder string; the manifest's custom slot resolves to the real component |
 | 5.13 | **Residue check pinned (AM-23).** The exact command for "the old window picker is gone" is `grep -rn "TIMELINE_WINDOWS\|window-picker" frontend/src/app/pages/metrics/resource/` with the allowlist row `frontend/src/app/models/resources.models.ts:16` (the frozen union definition) — every other hit must be zero | 5.4 | The pinned grep returns **zero** hits outside its allowlist row |
+| 5.14 | **BUNDLE GUARD, third re-run (AM-2 + W-4).** Phase 5 is the **other chunk-graph-changing phase**: it moves the resource module INTO `src/app/pages/metrics/resource/` (the very tree the import-site rule covers) and re-points the timeline to the Chart.js panel role (5.9). Re-run the Phase-1/4 guard here, reading the **named baseline artifact** `bundle-baseline.json`: numeric `\|Δ initial-total\| ≤ 2 kB` vs 5,909,018 B; no `chart.js` marker in ANY initial chunk; the import-shape assertion (**0** static `from 'chart.js'` sites); the import-site assertion (every site inside `src/app/pages/metrics/**`) | 5.1, 5.9 | The guard is green at this commit; both planted variants (the eager import and the static-inside-the-lazy-tree import) turn it red; the initial total is unchanged within 2 kB |
 
 ## Coupling
 
@@ -76,7 +77,9 @@ actionable state.**
 - The Phase-2 placeholder is gone.
 - The relocated specs are green; the existing live/timeline specs were **moved
   or dispositioned**, not dropped (the disposition is listed per assertion).
-- **E-1 re-derivation:** this phase gates on **no** MEASURED artifact figure.
-  Its constants (the 8 s poll cadence, the 4-value ladder, the 256-entry
-  journal cap) are **code facts** re-verified at lane base and re-read at this
-  phase's freeze.
+- **E-1 re-derivation:** this phase gates on **no** MEASURED artifact figure of
+  its own; the **bundle baseline (G1/G2)** it re-checks in 5.14 is **re-derived
+  at lane base** with its command and output (`plan-overview.md` §0.2). Its
+  constants (the 8 s poll cadence, the 4-value ladder, the 256-entry journal
+  cap) are **code facts** re-verified at lane base and re-read at this phase's
+  freeze.
