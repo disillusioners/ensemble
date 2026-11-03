@@ -114,6 +114,7 @@ Root cause: ring freshness signals cannot distinguish **empty-ring** from **fres
 
 Add (post-review severities):
 - **R13 (🟡→low residual): tool output/context blowup** — M-1; residual after fold: bounded by clamp + byte ceiling.
+  **⚠️ CORRECTION (the metrics-agent-tools council fix cycle, 2026-11-03) — the byte-ceiling half of this residual claim was FALSE at the first cut and is NOW TRUE.** The lane's implementation carried the byte-ceiling helpers as **dead code** (no body called them), so the "bounded by clamp + byte ceiling" residual did not hold; the measured exposure was **1.26× the seam's own 1 MiB ceiling** at today's catalog (**6.6 MB** at the legal `MAX_FAMILIES=500` cap) — and the catalog is runtime-extensible, so today's fit was an accident, not an invariant. **Remediated:** the trim is wired into all three tool bodies with a non-silent surface, the names projection carries its own bound, and the two mutation legs that would have caught it are restored. The residual now reads: **bounded by the returned-leg clamp + a WIRED byte ceiling + a bounded names projection.** (Recorded rather than silently backfilled — the architect's verdict and rulings are untouched.)
 - **R14 (🟢): loop interaction of tool bodies** — resolved negative for DB (§0); placement decision pinned by RULING-4; worst-case on-loop build ~3.7 ms even unoffloaded.
 - **R15 (🟡): missing-mount behaviour** — resolved by RULING-1 (loud refusal, pinned); pre-ruling this was a silent-vanish defect.
 

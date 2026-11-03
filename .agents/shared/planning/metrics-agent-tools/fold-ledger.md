@@ -189,7 +189,7 @@ is EXEMPT and NEVER triggers an edit to a frozen input).
 **THE PIN-CENSUS ARITHMETIC SHIFTED (the plan's task 2.8 re-derivation rule).**
 The plan's prose says "10 files / 15 EDIT sites + 1 VERIFY-ONLY". The
 GREP-DERIVED census at implementation time is **16 EDIT sites + 1
-VERIFY-ONLY = 17 sites across 11 files** — one site the plan's prose did
+VERIFY-ONLY = 17 sites across 10 files** — one site the plan's prose did
 not enumerate:
 
 | # | file | site | kind |
@@ -199,6 +199,17 @@ not enumerate:
 | 11-15 | the five count pins (`:215` / `:203` / `:175` / `:212` / `:172`) | `== 16` → `== 17` | EDIT |
 | **16** | **`test_maintenancer_spawn_resolves_tools.py:141`** — the maintenancer meta's EXACT allow list (the real meta's `tools.allow`) | the literal | **EDIT — NOT IN THE PLAN'S PROSE** |
 | 17 | `test_board_registration.py:249-287` — the ari trailing-entry allow-array pin | VERIFY-ONLY (read, never edited: `metrics-read` is not granted to ari) | — |
+
+**The FILE count is TEN, not eleven (the council fix cycle, W4 — a record
+correction, not a change to the work).** Site 16 lives in
+`test_maintenancer_spawn_resolves_tools.py` — already one of the ten pin
+files (it carries BOTH an inline `frozenset` literal AND the allow-list
+literal) — and site 17 (the VERIFY-ONLY ari trailing pin) lives in
+`test_board_registration.py`, also one of the ten. The first cut's record
+said "11 files" because the two extra SITES were counted as extra FILES.
+**The site count (16 EDIT + 1 VERIFY-ONLY) and the one-commit discipline
+both HELD** — the cluster is still one commit and the set is still exact;
+only the census row was wrong.
 
 The 16th EDIT site is a **consequence of the category being granted to the
 maintenancer** — the maintenancer's real meta allow list is pinned by
@@ -390,6 +401,59 @@ byte-identical restore).
 
   **Verdict: ZERO live residue. The plan set is internally consistent.**
 
+### H.8 — Phase 5 / the mutation-matrix leg census (W1 — the FULL planned set's dispositions)
+
+**The census, BEFORE → AFTER.** The plan's task 5.2 enumerated **~24** mutation legs; the first
+cut shipped **12** and dropped the rest **silently** (no disposition recorded). The council's
+fix cycle restored the two BINDING ones and folded the rest that had a pin to bite.
+
+| | planned legs | shipped legs | covered | deferred |
+|---|---|---|---|---|
+| the FIRST cut | ~24 | **12** | 13 (one merge: #2 + #3 → MT-07) | **11 — SILENTLY DROPPED** |
+| the FIX cycle | ~24 | **22** (21 RED/GREEN + 1 FOLLOW) | **23** | **1** (an explicit duplicate) |
+
+**The per-leg dispositions (every planned leg):**
+
+| # | the plan's leg | the first cut | the fix cycle |
+|---|---|---|---|
+| 1 | the decorator order flip | MT-08 | — |
+| 2 | the body gate demoted from the first statement | MT-07 (merged with #3) | — |
+| 3 | the authorization/substrate order swapped | MT-07 (merged with #2) | — |
+| 4 | the count pins re-broken (17→16) | MT-01 | — |
+| 5 | the `stale` 3× multiplier dropped | MT-04 | — |
+| 6 | `truncated` hardwired false | DROPPED | **MT-14 — FOLDED** (the snapshot drop leg bites) |
+| 7 | the insufficient-window delta emits `0` | MT-09 | — |
+| 8 | the availability block re-derived | MT-02 | — |
+| 9 | the `narrow_hint` emptied | DROPPED | **MT-15 — FOLDED** (the unknown-family leg bites) |
+| 10 | the caveat given a defect-attribution token | DROPPED | **MT-16 — FOLDED** (the genericity leg bites) |
+| 11 | the hard floor removed | MT-11 (the re-check variant) | — |
+| 12 | a cursor member added to an input schema | MT-10 | — |
+| 13 | the AmM-1 clamp removed | MT-05 | — |
+| 14 | **the tool-local byte ceiling dropped** | DROPPED | **MT-13 — RESTORED (the BINDING leg)** — it is the leg that would have caught C1 |
+| 15 | the combined selector cap reverted to names-only | MT-06 | — |
+| 16 | the sort-before-cut removed | MT-03 | — |
+| 17 | the `families` list filter dropped | DROPPED | **MT-17 — FOLDED** (the multi-family leg bites) |
+| 18 | the ring-state signal removed | DROPPED | **MT-18 — FOLDED** (the new W3 behavioural leg bites) |
+| 19 | the per-series freshness field dropped | DROPPED | **MT-19 — FOLDED** (the per-series leg bites) |
+| 20 | the caveat attribution token planted | DROPPED | **DEFERRED — an explicit DUPLICATE of #10** (the same mutation class against the same pin; a second copy would add run time without adding coverage) |
+| 21 | the racy-bool doctrine statement removed | DROPPED | **MT-20 — FOLDED** (the doctrine leg bites) |
+| 22 | **the seam constant changed → the tool's clamp FOLLOWS** | DROPPED | **MT-22 — RESTORED (the BINDING leg)** — the FOLLOW shape: the seam's `MAX_TOTAL_POINTS` is mutated and the tool's effective clamp MUST MOVE (observed 235 → 215). It is the leg that would have caught C2/the W2 drift |
+| 23 | a pinned contract-doc substring perturbed | MT-12 | — |
+| 24 | the AmM-1 clamp applied SILENTLY | DROPPED | **MT-21 — FOLDED** (the non-silence leg bites) |
+
+**WHY THE FIRST CUT DROPPED THEM (the honest root cause — and it is the C1 root cause).** The first
+cut's matrix was written against the pins that existed at that moment; the legs whose PIN was
+missing were dropped instead of the PIN being written. That is exactly backwards: the
+mutation matrix is the instrument that finds a missing pin, so dropping a leg because its pin is
+missing removes the very instrument that would have demanded the pin. **The fix cycle's rule:**
+a leg with no pin is a MISSING PIN, not a leg to drop — the pin is written first, then the leg.
+
+**The new leg SHAPE (the FOLLOW leg).** A leg whose expected result is not a RED but a VALUE
+that MOVES with the mutated source. It exists because a RED/GREEN pair cannot express
+single-sourcing: if the tool DUPLICATED the seam's constant, every behavioural pin would stay
+green while the door's budget moved. The FOLLOW leg mutates the PRODUCER and asserts the
+CONSUMER's value moved with it (235 → 215).
+
 ---
 
 ## §G — The implementation-tidier backfill (placeholder — DO NOT fill before the tidier pass)
@@ -442,7 +506,23 @@ Source: `architecture-recommendation.md` (READ-ONLY input — verdict SOUND-WITH
 
 | ID | Cluster / class | Disposition | Landing site(s) |
 |---|---|---|---|
-| **M-1** (B-5+C-2) | output-budget enforcement — 🟡 must fold | **FOLDED** — binding tool design: (a) returned-leg clamp ≤ MAX_TOTAL_POINTS=12 000 (kills the 12 240 > 12 000 breach); (b) compare leg's transient provider work declared separately (22 %-not-11 % framing corrected); (c) tool-local byte ceiling with the door's trim + six-member bound block; (d) default-call agent-context cost in CATEGORY_DOC. Amends D-UX-4 (Part 5 AmM-1); design inline pointer at the budget claim | `decisions.md` Part 5 AmM-1 · `phase2-plan.md` tasks 2.2/2.4 · `phase5-plan.md` task 5.2 (clamp/byte-ceiling mutation legs) · `technical-analysis.md` inline pointer (budget claim) |
+| **M-1** (B-5+C-2) | output-budget enforcement — 🟡 must fold | **FOLDED — PARTIALLY, AT THE FIRST CUT; the (c) half was FALSE and was remediated by the 2026-11-03 council fix cycle (see the row's history below).** (a) returned-leg clamp ≤ MAX_TOTAL_POINTS=12 000 (kills the 12 240 > 12 000 breach) — **TRUE**; (b) compare leg's transient provider work declared separately (22 %-not-11 % framing corrected) — **TRUE**; (c) tool-local byte ceiling with the door's trim + six-member bound block — **WAS FALSE: the helpers were DEAD CODE (no body called them)**; (d) default-call agent-context cost in CATEGORY_DOC — **TRUE**. Amends D-UX-4 (Part 5 AmM-1); design inline pointer at the budget claim | `decisions.md` Part 5 AmM-1 · `phase2-plan.md` tasks 2.2/2.4 · `phase5-plan.md` task 5.2 (clamp/byte-ceiling mutation legs) · `technical-analysis.md` inline pointer (budget claim) |
+
+**M-1's fix-cycle history (2026-11-03, the council's C1/C2 — recorded HONESTLY, not silently backfilled).**
+The first cut recorded this row as a flat **FOLDED**. That was **not true for clause (c)**: the
+implementation carried `_encoded_size` + `_trim_to_byte_ceiling` but **no body ever called
+them** — the byte ceiling was DEAD CODE, so the "bounded by clamp + byte ceiling" claim (here
+and in the architect's risk delta) was FALSE. The council measured the exposure at **1.26× the
+seam's own 1 MiB ceiling** at today's catalog, **6.6 MB** at the legal `MAX_FAMILIES=500` cap,
+and — decisively — **the catalog is runtime-extensible, so today's fit was an ACCIDENT, not an
+invariant.**
+**REMEDIATION (the fix cycle):** the trim is now wired into ALL THREE bodies with a non-silent
+surface (`truncated` + the count block + a caveat naming the byte ceiling + a `narrow_hint`); the
+probe measures the tool's OWN output form (`indent=2`); the trim reserves 2 KiB for the caveat
++ hint; the **names projection is bounded** (200/family, 2000/response) with its own non-silent
+surface; and the two dropped mutation legs that would have caught this (the byte-ceiling leg
+and the AmA-7/PL-3 single-sourcing leg) are **restored**. The row above now says
+"PARTIALLY, AT THE FIRST CUT" — the history stays visible.
 | **M-2** (B-8+C-5+C-10) | freshness semantics — 🟡 must fold (one root cause, three landing sites) | **FOLDED** — (i) per-series `last_sample_age_s`/`points_span_s` on history rows; (ii) explicit ring-state signal (`trend_empty_since_restart`) in `read_status`; (iii) the outline's §C.2 "Gap: none" cell corrected (design-only) | `decisions.md` Part 5 AmM-2 · `phase2-plan.md` tasks 2.2/2.4 · `phase5-plan.md` task 5.2 (empty-ring + per-series legs) · `phase6-plan.md` task 6.1 (the outline correction) |
 | **M-3** (C-3) | mount/unavailable contradiction — 🟡 must fold, resolved by RULING-1 | **FOLDED** — Option A: tools stay PRESENT on degraded boot; body reads the mount per call; typed `metrics-unavailable` refusal; `_if_available` dropped from the factory name; registration-pack degraded-boot leg; task 1.6(ii) identity pin stands | `decisions.md` Part 5 AmM-3 + RULING-1 · `phase2-plan.md` tasks 2.1/2.6/2.9 · `phase5-plan.md` task 5.3 |
 | **A-1** | citation hygiene | **FOLDED** — D-SCOPE-2's bypass cite corrected to `instance.py:550-560` + `:561-568` (the `_tool_registry.py:559-560` range is a comment) | `decisions.md` Part 5 AmA-1 |

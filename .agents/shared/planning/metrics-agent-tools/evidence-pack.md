@@ -38,7 +38,7 @@ the `instance.py` extend + the three metas + the three `tools_note.md` + the 16-
 | 4 | the scoped type-check | `frontend/./node_modules/.bin/tsc --noEmit -p tsconfig.metrics-fe.json` | rc=0 | — | green (the frontend-local toolchain ONLY) |
 | 4 | both builds | `ng build --configuration development` + `--configuration production` | rc=0 / rc=0 | — | green; the production budget WARNs are RECORDED FINDINGS (none names a file this lane touched) |
 | 4 | the FE e2e | `playwright test --config=playwright.metrics-gate.config.ts` | **3/3 passed** (real Chromium, zero daemon contact) | — | green |
-| 5 | **the mutation matrix** | 12 legs | **12/12 PASS** (RED via the intended assertion → byte-identical restore → GREEN) | — | green; the post-run manifest confirms every touched file is byte-identical |
+| 5 | **the mutation matrix** | **21 RED/GREEN + 1 FOLLOW = 22 legs** (12 at the first cut; +10 by the 2026-11-03 council fix cycle) | **22/22 PASS** (RED via the intended assertion → byte-identical restore → GREEN; the FOLLOW leg's consumer value MOVED 235 → 215) | — | green; the post-run manifest confirms every touched file is byte-identical |
 | 5 | the unit shell pack | `test/packs/metrics_read_unit_test.sh` | **PASS (5 legs)** — 30 + 34 + 15 + 20 + 28 = 127 nodes | — | green |
 | 5 | the mutation shell pack | `test/packs/metrics_read_mutation_legs.sh` | **PASS** (the matrix's own `RESULT: PASS` + the byte-identical-restore assertion) | — | green |
 
@@ -71,6 +71,16 @@ requires GREEN again. The restore discipline is the in-memory byte copy + the pr
 | MT-10 | a cursor member added to the input schema | the no-cursor leg |
 | MT-11 | the floor RE-CHECK removed | the unknown-family leg |
 | MT-12 | a pinned contract-doc substring perturbed | the contract-doc closed-set pin (the C-1 non-vacuity leg) |
+| **MT-13** | **the byte-ceiling trim removed** | the byte-ceiling behavioural pin (**the RESTORED binding leg**) |
+| MT-14 | `truncated` hardwired false | the snapshot drop leg |
+| MT-15 | the `narrow_hint` emptied | the unknown-family leg |
+| MT-16 | the caveat given a defect-attribution token | the genericity leg |
+| MT-17 | the `families` list filter dropped | the multi-family leg |
+| MT-18 | the ring-state signal removed | the ring-state behavioural leg (W3) |
+| MT-19 | the per-series freshness field dropped | the per-series freshness leg |
+| MT-20 | the racy-bool doctrine statement removed | the doctrine leg |
+| MT-21 | the AmM-1 clamp applied SILENTLY | the non-silence leg |
+| **MT-22** | **the seam's `MAX_TOTAL_POINTS` mutated → the tool's clamp must MOVE** | **the FOLLOW leg (a new shape — the consumer's value follows the producer: 235 → 215)** (**the RESTORED binding leg**) |
 
 ---
 
@@ -102,7 +112,13 @@ requires GREEN again. The restore discipline is the in-memory byte copy + the pr
 ## 5. The pin-fan-out re-derivation (AmC-9 — a RECORDED artefact)
 
 The plan's prose says "10 files / 15 EDIT sites + 1 VERIFY-ONLY". The **grep-derived** census at
-implementation time is **16 EDIT sites + 1 VERIFY-ONLY = 17 sites across 11 files**:
+implementation time is **16 EDIT sites + 1 VERIFY-ONLY = 17 sites across 10 files**
+(the 16th EDIT site — the maintenancer meta's exact allow list — lives in
+`test_maintenancer_spawn_resolves_tools.py`, which is ALREADY one of the ten
+pin files; and the VERIFY-ONLY site — the ari trailing-entry pin — lives in
+`test_board_registration.py`, also one of the ten. **The site count and the
+one-commit discipline HELD; only the FILE count was misrecorded.** Fixed by
+the council fix cycle, 2026-11-03):
 
 * the five `EXPECTED_PRIVILEGED_SET` constants;
 * the five inline `frozenset` literals;
@@ -156,6 +172,34 @@ leg, not by a guess).
 
 ---
 
+## 8b. The 2026-11-03 code-council fix cycle (M-1 — output-budget evidence integrity)
+
+The council REJECTED the lane on ONE axis (the M-1 output-budget evidence) and cleared
+everything else. The finding: **`_encoded_size` / `_trim_to_byte_ceiling` were DEAD CODE** — no
+tool body ever called them — so the "bounded by clamp + byte ceiling" claim in the fold record
+was FALSE, and the measured exposure was **1.26× the seam's own 1 MiB ceiling** at today's
+catalog (**6.6 MB** at the legal `MAX_FAMILIES=500` cap). The catalog is runtime-extensible, so
+today's fit was an ACCIDENT, not an invariant.
+
+**The remediation (six items, all in this commit's cluster):**
+
+| Item | What changed |
+|---|---|
+| **C1** | the trim is wired into ALL THREE bodies with a non-silent surface (`truncated` + the count block + a caveat naming the byte ceiling + a `narrow_hint`); the probe measures the tool's OWN output form (`indent=2` — a compact probe measures a fiction); the trim reserves 2 KiB for the caveat + hint; the **names projection is bounded** (200/family, 2000/response) with its own non-silent surface and `name_count` keeping the family's TRUE declared count; the static wiring pin + the byte-ceiling behavioural pins for all three bodies were added |
+| **C2** | the two false records now say so: the fold-ledger's M-1 row reads "**FOLDED — PARTIALLY, AT THE FIRST CUT**" with the (c) clause marked FALSE-then-remediated, and the architect's R13 risk delta carries the correction (the verdict and the rulings are untouched) |
+| **W1** | the two binding legs are **restored** (the byte-ceiling leg; the AmA-7/PL-3 single-sourcing leg — the latter in a NEW leg shape, a FOLLOW leg) and eight more dropped legs are folded; the FULL planned set's dispositions (24 planned → 23 covered, 1 deferred as an explicit duplicate) are recorded in fold-ledger §H.8 |
+| **W2** | the budget pin imports the seam's `MAX_TOTAL_POINTS` instead of the hardcoded `12000 // 51` |
+| **W3** | the `trend_empty_since_restart` signal is BEHAVIOURAL now — and a provider that does not carry the age fact is UNKNOWN, not "empty" (the seam's `0.0` default would have asserted a fact the tool cannot verify) |
+| **W4** | the pin census record corrected: **10 files**, not 11 (the 16th EDIT site lives in a file that is ALREADY one of the ten, and so does the VERIFY-ONLY site — the site count and the one-commit discipline HELD; only the file count was misrecorded) |
+
+**The root cause of the dropped legs (recorded honestly):** the first cut's matrix was written
+against the pins that EXISTED, and the legs whose pin was missing were dropped instead of the
+pin being written — backwards, because the mutation matrix is the instrument that finds a
+missing pin. The fix cycle's rule is now explicit: **a leg with no pin is a MISSING PIN, not a
+leg to drop.**
+
+---
+
 ## 9. The disclosed deviations (the dispositions)
 
 Every deviation is recorded in `fold-ledger.md` §F.2 (the approver advisories) + §H (the
@@ -171,6 +215,11 @@ implementation log). The three that change a count or a scope are:
    house-wide characteristic (`get_category_doc` is resolved by the display name, which never
    matches the registry key). The `CATEGORY_DOC` therefore reaches the agent through
    `tool_help` and through the agent's `tools_note.md` — both asserted.
+4. **The byte ceiling was dead code at the first cut** — the council's M-1 finding, remediated
+   in the fix cycle (see §8b). It is recorded here because it was the lane's own false
+   evidence, not a pre-existing defect.
+5. **The mutation matrix shipped 12 of ~24 planned legs at the first cut** — the dispositions
+   for every planned leg are in fold-ledger §H.8.
 
 **No migration, no dependency, no configuration knob, no contract-wire change.** The migration
 delta is EMPTY; `pyproject.toml` and `frontend/package.json` are untouched; `schema_version`
