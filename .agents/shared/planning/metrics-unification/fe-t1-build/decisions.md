@@ -58,7 +58,47 @@ deep links are NEW FE work, and the gear-menu `Resources` entry is removed.
 
 ---
 
-## Part II — Adjudication owed (six decisions, all made)
+## Part II — The two accepted analyst rulings (R-1, R-2) + the six adjudications owed
+
+### R-1 — ACCEPTED (binding analyst ruling, architect review 2026-11-03)
+
+> **R-1 — Panel granularity (central tabs): one panel per metric-kind + unit
+> group, kind read from the WIRE.** Registered families mix kinds (F4 registers
+> a gauge *and* a counter — `daemon/services/metrics_query/wiring/w1.py:194-228`;
+> F9 likewise — `w2.py:120-150`), and the wire already carries `chart_role` per
+> metric (`metrics.model.ts:164`, resolved per series at
+> `charts-tab.component.ts:222`). Per-family panels would break counter-honesty
+> and falsify unit labels; per-raw-series panels lose the family grouping the
+> manifest promises. Granularity therefore derives at panel-composition time
+> from wire kinds; the manifest stays registration-only on the family axis.
+> (Lands in AM-9/AM-12.)
+
+**Accepted as binding.** Folded into IMPL-04 (the renderer roles + the
+granularity rule), IMPL-10 (the unit vocabulary keys on the **metric name**, not
+the family), and the new surface→intent→renderer→granularity table in
+`plan-overview.md` §4. **Effect on the plan:** the manifest binds FAMILIES; the
+PANELS are composed at render time from the wire's per-metric kinds, so a
+family that registers both a gauge and a counter yields **two** panels (one per
+kind+unit group) — never one mixed axis.
+
+### R-2 — ACCEPTED (binding analyst ruling, architect review 2026-11-03)
+
+> **R-2 — House-SVG mini role in T1: capability-retained, NO page surface.**
+> No mini consumer exists anywhere in the plan's consumer map (grep
+> "sparkline" = 0 hits in `frontend/src`; phases 4–5 name exactly two renderer
+> consumers, both panel/fallback). D-1/ADJ-ii's five mini-tier extensions stay
+> IN the consolidated renderer and are exercised via (a) the mount-failure
+> fallback path and (b) renderer-level specs — not via a live page surface.
+> Phase 3.7 must name the renderer that actually draws the baseline in T1 (the
+> Chart.js panel is the normal path; the house SVG carries the baseline as
+> fallback capability). (Lands in AM-9.)
+
+**Accepted as binding.** Folded into IMPL-04 (the house SVG's role is
+**capability-retained** — mini + fallback — with **no page surface in T1**),
+ADJ-ii (the scope guard's third bullet is restated: the five extensions are
+exercised via the **mount-failure fallback** and the **renderer specs**, not a
+live mini), and Phase 3's baseline task (the renderer that draws the T1
+baseline is named explicitly).
 
 ### ADJ-i — Fate of the old three tabs (Overview / Charts / Families)
 
@@ -133,9 +173,17 @@ record it*; this record is the pick. The universal frame control renders the
 
 **The retention-tier correction (must appear in the UI copy, precisely):**
 48 h / 14 d / 180 d are **PG RETENTION TIERS** — raw 30 s/48 h, minute 60 s/14 d,
-hour 3600 s/180 d (`daemon/services/flusher.py:360-368`, `daemon/config.py:811-827`;
-`resource-refactor-architecture.md` §6.1 `:233`) — the tiers **backing** the
-ladder, **NOT** picker options. The picker never offers 48h/14d/180d.
+hour 3600 s/180 d — the tier knobs live in `daemon/config.py:925-931` (the
+docstring listing `retention_raw_minutes` / `retention_minute_hours` /
+`retention_hour_days`) and `:980-1001` (the Field definitions: 2880 min = 48 h,
+336 h = 14 d, 180 d); also `resource-refactor-architecture.md` §6.1 `:233` — the
+tiers **backing** the ladder, **NOT** picker options. The picker never offers
+48h/14d/180d. **CITATION CORRECTION (AM-17):** the previously cited
+`daemon/services/flusher.py:360-368` names a file that does not exist (the
+flusher is `daemon/services/resource_monitor/flusher.py`, and those lines are
+the **sweeper's** row-drain body, not tier configuration), and
+`daemon/config.py:811-827` holds the **metrics** sampler intervals, not the
+resource tiers.
 
 ### ADJ-iv — Event overlay (scope 7): ship-vs-route
 
@@ -250,7 +298,7 @@ Timeline's own window-picker UI is removed — one range control for the page).
 The Live strip keeps its own 8 s poll cadence (a different question, a
 different cadence).
 
-### IMPL-04 — Renderer roles: house SVG = mini + fallback; Chart.js = interactive panels
+### IMPL-04 — Renderer roles: house SVG = mini + fallback (capability-retained, NO T1 page surface); Chart.js = interactive panels
 
 - **House SVG renderer** (ONE consolidated engine, merged from
   `svg-line-chart.component.ts` + `svg-timeline.component.ts`): serves the
@@ -258,6 +306,12 @@ different cadence).
   **never-silent fallback** role (a Chart.js mount failure surfaces a badge
   and falls back to SVG — never a silent downgrade,
   `resource-refactor-architecture.md` §10.6 three-layer fallback).
+  **Per R-2, the mini role has NO page surface in T1**: the five mini-tier
+  extensions (ADJ-ii) are **capability-retained** and are exercised through
+  (a) the **mount-failure fallback** path and (b) **renderer-level specs** —
+  never by a live mini on any of the 7 tabs. The completion sentence is
+  therefore "every **panel** carries a unit-labeled y-axis; the mini role
+  renders no axis" (AM-9).
 - **Chart.js wrapper**: serves the **interactive panel** role — value axis with
   units, crosshair + nearest-point snap, legend toggles, shared-y multi-series,
   `stepped: true` (the house counter-honesty rule), click → drill-down
@@ -265,6 +319,13 @@ different cadence).
   to it** (its anomaly markers become a house plugin — the severity colors
   verbatim from `svg-timeline.component.ts:169-173` — and its marker click
   becomes the wrapper's `pointClick`).
+- **Panel granularity (per R-1):** the manifest binds **families**; a **panel**
+  is composed at render time as **one metric-kind + unit group**, with the kind
+  read from the **wire** (`chart_role` per metric — `metrics.model.ts:164`;
+  resolved per series at `charts-tab.component.ts:222`) and **never** guessed
+  from an FE table. A family that registers both a gauge and a counter (F4:
+  `w1.py:194-228`; F9: `w2.py:120-150`) yields **two** panels — a mixed-kind
+  panel would break counter-honesty and falsify the unit label.
 - **The intent + renderer registry** (shape B) is the contract:
   `trend | sparkline | stat` intents → a registry mapping intents to
   `ChartRenderer { capabilities, supports(), render(), teardown() }`
@@ -273,7 +334,8 @@ different cadence).
 - **The consolidation deletes one engine.** The 241 L + 237 L pure-helper
   specs are **ported** (not re-invented): the exported helpers stay exported
   and unit-asserted — that property is why the audit could cite them precisely
-  (`fe-metrics-source-audit.md` §7.6).
+  (`fe-metrics-source-audit.md` §7.6). **Per AM-26 the port is a 12-symbol
+  enumeration plus a per-assertion disposition table**, not a line count.
 - **The wrapper MUST** emit a per-series DOM proxy (preserving the
   `data-series` / `data-render-mode` hooks) **and** a visually-hidden data
   table (restoring the a11y surface the canvas removes and keeping the
@@ -294,7 +356,7 @@ different cadence).
 name**, not a raw entry count (a count assertion breaks on an unrelated
 transitive bump).
 
-### IMPL-06 — The redirect is a `canMatch → UrlTree` guard
+### IMPL-06 — The redirect is a `canMatch → UrlTree` guard, with a named param-reading mechanism (AM-3)
 
 The app's `redirectTo` idiom does not preserve query params
 (`app.routes.ts:35,:104`); `canMatch` returning a `UrlTree` does
@@ -302,17 +364,54 @@ The app's `redirectTo` idiom does not preserve query params
 alternative; the guard is preferred because it keeps the route table as the
 single source of route truth and needs no new component.
 
-### IMPL-07 — The frame owns range + baseline; the baseline is an FE-only client split
+**The mechanism is named (AM-3) — a `canMatch` guard receives `(route,
+segments)`, NOT query params.** The guard therefore reads
+`Router.getCurrentNavigation()?.extractedUrl.queryParams` with an **explicit
+null-fallback** (log + degrade to a param-less redirect, **never** crash and
+never a silent param loss). **Precedence:** the redirect's own `tab=resource`
+**overrides** an incoming `tab` — the preservation claim is therefore narrowed
+to **"all params except `tab`"**. The acceptance is an **end-to-end**
+`router.navigateByUrl('/resources?window=24h&x=1')` asserting the **landed
+URL's parsed `queryParams`** (not a raw string — string comparison is
+order-brittle), plus the leg `/resources?tab=charts` ⇒ lands on `?tab=resource`.
+A unit assertion on a hand-built UrlTree is explicitly **not** accepted.
 
-Baseline = **2× window fetch + client-side split at the midpoint** (points
-carry epoch seconds, `envelope.py:386-388`), working for **W ≤ 1 h** (2W ≤
-7200). Disclosed fidelity limits, stated in the UI, not in a comment:
-`bucket_max` downsampling runs over the whole fetched window so a bucket can
-straddle the split; the older half sits at the ring's eviction edge; the
-resolution halves. **Forged cursors are forbidden** (the cursor is unsigned
-base64 JSON — out-of-contract and brittle; `resource-refactor-architecture.md`
-§3.2). The first-class `end_offset_s`/`compare` backend param is **routed out**
-(ADJ list, item f).
+### IMPL-07 — The frame owns range + baseline; the baseline is an FE-only client split, **scoped to the central tabs** (AM-14)
+
+Baseline = **2× window fetch + client-side split at the midpoint**, working for
+**W ≤ 1 h** (2W ≤ 7200). **The split is anchored on the RESPONSE's
+`window.from_utc/to_utc` midpoint** (parsed with the house `parseNaiveUtc`),
+**never the client clock** (AM-17: a 60 s client-clock skew would misassign
+~8 % of a 2 h window; the epoch points themselves live at
+`daemon/services/metrics_query/provider.py:384-387` and the window anchor at
+`envelope.py:201-203,:226-228` — the previously cited `envelope.py:386-388`
+does not exist, the file is 316 lines).
+
+**The baseline is scoped to the CENTRAL tabs only** (AM-14): the 2W overfetch is
+defined against the central door's `window_s`. The **custom slot renders the
+toggle disabled with its reason** ("the resources door serves a fixed
+15m/1h/24h/7d vocabulary with no previous-window offset") — the resources door
+accepts exactly those four values (`daemon/routers/resources.py:120-130`, 400
+otherwise) and `/api/resources/history` takes only `window` + `resolution`
+(`frontend/src/app/services/resources.service.ts:54-56`), so a "previous
+window" is **not fetchable** there; a client-side split of one payload would
+yield two HALF-length windows mislabeled "previous window".
+
+**The guard is request-time, not UI-only** (defence in depth): the toggle
+auto-clears with its reason when the range crosses 1 h; the request builder
+**never emits `window_s > 7200`**; and the FE compares the response's window
+span against 2W and **refuses to render a baseline on a clamped payload** — the
+central door silently clamps to 7200 s and returns 200
+(`daemon/routers/metrics.py:778`), which would otherwise let the FE split a
+2 h payload at a fake midpoint while the UI claims two 2 h windows.
+
+Disclosed fidelity limits, stated in the UI, not in a comment: `bucket_max`
+downsampling runs over the whole fetched window so a bucket can straddle the
+split; the older half sits at the ring's eviction edge; the resolution halves.
+**Forged cursors are forbidden** (the cursor is unsigned base64 JSON —
+out-of-contract and brittle; `resource-refactor-architecture.md` §3.2). The
+first-class `end_offset_s`/`compare` backend param is **routed out** (ADJ
+list, item f).
 
 ### IMPL-08 — Stat cards read the snapshot scoped by family, with truncation honesty
 
@@ -324,43 +423,67 @@ family is absent from a **bounded** snapshot page (`truncated` + `next_cursor`),
 the card renders "not on this page" + the truncation hint — **never a fake
 zero** and never a silent absence.
 
-### IMPL-09 — The `AUTH_NOT_CONFIGURED` empty state is a distinct panel, not a banner variant
+### IMPL-09 — The door state is PER-SOURCE, not frame-level (AM-1)
 
-D-2 requires the FE to distinguish it from other dark causes. The current copy
-(`metrics.model.ts:387-388`) is a one-line banner that names the cause but
-offers no remedy, and the page renders TWO of them (page-level + tab-level)
-plus two Retry buttons that can never succeed. Ship: **one** frame-level
-actionable panel for `auth_not_configured` — cause, what it means ("no
-credential can fix this — it is daemon configuration"), the runbook pointer
-(`docs/runbooks/oauth2-auth.md`), and **no Retry button** (a config error is
-not transient). The other four classes keep their banner + Retry semantics
-(network/unexpected are transient; scope_insufficient is actionable but not a
-config fix).
+D-2 requires the FE to distinguish 503 `AUTH_NOT_CONFIGURED` from every other
+dark cause. **The state model is per source, not per frame** (AM-1): the
+manifest's `central | custom` slot is the seam. The `auth_not_configured`
+actionable panel renders on **central-door surfaces only** (the catalog drawer
++ the 6 central tab bodies); **each custom slot renders its own source's
+state** — so under the default install posture (auth OFF ⇒ central door 503,
+`/api/resources/*` 200 open) **tab 1 stays lit** with its live strip and
+timeline while the central tabs carry the actionable state. The frame holds
+**per-tab state**, not one global state.
 
-### IMPL-10 — The resource timeline's mixed-unit defect is fixed by SPLITTING, not by normalizing
+The class table is **widened** (AM-4, a consequence beneath D-2 — the ruling
+itself is untouched): `auth_required` (401 — cause + "sign in / obtain a
+scoped token"; **no** Retry), `auth_not_configured` (503 — actionable, runbook
+pointer, **no** Retry), `scope_insufficient` (403 with the
+`SCOPE_INSUFFICIENT` token), `forbidden_other` (a 403 without that token —
+"rejected before the scope check"), `unknown_family` (404 — version skew; no
+Retry), `bad_request` (400 — an FE-bug class; no Retry), `timeout` (a
+client-side ~15 s deadline — no Retry), `registry_unavailable` (503 with that
+body code), `network` (status 0), `unexpected`. **401 is the FIRST state every
+real user meets** once auth is enabled (the FE sends
+`Accept: application/json`, so the middleware's **401** branch applies, not the
+browser 302) — today it decodes to `unexpected` + a dead Retry
+(`metrics.model.ts:437-441`).
 
-The timeline plots RSS (MB), cgroup (MB) and CPU (%) on one unlabeled axis
-with each series independently min-max normalized, so the area fills read as a
-stacked-area chart (nonsense across units). Ship: **per-unit panels** — a
-memory panel (MB, one shared scale, unit-labeled y-axis) and a CPU panel (%, its
-own axis) — each with a labeled y-axis and a unit suffix. A single mixed-unit
-axis with an unlabeled normalization is **rejected**: it is the defect.
+### IMPL-10 — The unit vocabulary keys on the METRIC name; panels are per kind+unit group (AM-12, R-1)
 
-### IMPL-11 — The attribution card states its basis, or says it cannot reconcile
+The door's families carry `labels` and `role`, **not** units, and a family
+**mixes kinds** (F4 registers a gauge *and* a counter — `w1.py:194-228`; F9 a
+counter + a 0/1 gauge — `w2.py:120-150`). Therefore: (i) the unit vocabulary
+keys on the **metric (series) name**, never on the family; (ii) **panels are
+composed per kind+unit group** with the kind read from the **wire**
+(`chart_role`, `metrics.model.ts:164`) and **never guessed** from an FE table;
+(iii) a metric with no known unit renders "unit unknown" — a wrong unit is
+worse than no unit; (iv) the resource timeline's panels are **three** unit
+classes (memory MB, CPU %, **counts** — `threads`, `instances_active`,
+`svg-timeline.component.ts:56-63`), and the count class must survive the
+**series-toggle path** (5 series, 3 unit classes) — toggling a count series on
+must never land it on an MB/% panel.
+
+### IMPL-11 — The attribution card states its basis, or says it cannot reconcile (AM-13)
 
 The displayed numbers do not cohere (71 MB attributed + 1,119 MB unattributed
 ⇒ 1,190 MB implied total; daemon RSS 633 MB; cgroup current 6,178 MB; coverage
-0 %). The FE **cannot invent a basis** — the payload's fields are what they
-are. Ship: the coverage figure renders with the **basis it is computed on**,
-and when the displayed components do not reconcile with the stated total, the
-card **says so explicitly** ("these figures do not reconcile against the
-daemon RSS reading — the daemon process is not the whole cgroup") instead of
-presenting a 0 % next to numbers that imply ~6 %. The **per-instance top-N list**
-(the `instances[]`/`children[]` payload that is fetched every 8 s and never
-rendered — `resource-tab-forensics.md` A3) is **deferred to a follow-up
-commission**: it is a NEW capability (top-N? sort? click-through?), the
-commission's scope item 6 named the math and the coverage figure specifically,
-and the payload is already present so the deferral is cheap.
+0 %). The FE **cannot invent a basis** — and, per AM-13, it **cannot compute
+the coverage either**: the daemon computes `coverage_pct = min(1.0, attributed
+/ anon_bytes)` (`daemon/services/resource_monitor/sampler.py:759`, computed at
+`:841,:849-851`) and `anon_bytes` comes from `snap.daemon.anon_kb` — it is
+**NOT** the sum of the displayed components. **Therefore the FE displays the
+payload's `coverage_pct` verbatim** beside the components, and renders an
+explicit non-reconciliation sentence when the payload's own fields disagree.
+**Pinned: "the FE computes NO coverage percentage."**
+
+The **per-instance top-N list** (the `instances[]`/`children[]` payload that is
+fetched every 8 s and never rendered — `resource-tab-forensics.md` A3) is
+**deferred to a follow-up commission** (routed (m)): it is a NEW capability
+(top-N? sort? click-through?), the commission's scope item 6 named the math and
+the coverage figure specifically, and the payload is already present so the
+deferral is cheap. The Live strip's attribution subtitle stops promising what
+it does not deliver.
 
 ### IMPL-12 — The family catalog drawer replaces the Families tab, and fixes the inert table
 
@@ -380,15 +503,22 @@ back to the default tab (tab 1, Resources) **without** a redirect loop. The
 manifest's `id` is the slug, and `?tab=resource` is the D-3 redirect target —
 so the redirect's target id must equal the manifest entry's id.
 
-### IMPL-14 — The verification route is a fenced DEV daemon on :8079, with two auth legs
+### IMPL-14 — The verification route is a fenced DEV daemon on :8079, with FOUR legs
 
-See `plan-overview.md` §Verification and `phase9-plan.md`. Two legs:
+See `plan-overview.md` §Verification and `phase9-plan.md`. The legs:
 **L1 (data-bearing)** — dev daemon, auth ON with a minted operator bearer
 (`maintenance:read`) presented by the browser context's
-`extraHTTPHeaders` (**no production FE change**); **L2 (auth-absent)** — the
-same dev env with auth OFF → 503 `AUTH_NOT_CONFIGURED` → the actionable
-empty-state. **Never** the live daemon; never `:9797`; live config out of
-bounds.
+`extraHTTPHeaders` (**no production FE change**); **L1b (auth required, no
+bearer)** — auth ON, **no** credential → **401** → the sign-in panel (AM-4 —
+this is the FIRST state a real user meets); **L2 (auth-absent)** — the same dev
+env with auth OFF → 503 `AUTH_NOT_CONFIGURED` → the actionable empty state
+**on the central surfaces only**, while **tab 1 stays lit** (AM-1); **L4** (the
+AM-1 capture leg: tab 1 renders real data while the central tabs carry the
+actionable state). **Never** the live daemon; never `:9797`; live config out of
+bounds. The dev daemon binds **`PORT=8079`** — `DAEMON_PORT` is **inert**
+(`config.yaml:112-113` reads `port: ${PORT:-8088}`; `DAEMON_PORT` appears
+nowhere under `daemon/`), so the fence sets `PORT` **after** the scrub and
+asserts the **effective** port from the running daemon (AM-5).
 
 ### IMPL-15 — The backend endpoint retirements are ROUTED OUT of this lane
 
@@ -414,6 +544,45 @@ The existing pack `test/packs/fe_static_typecheck_build_test.sh` Stage 1 uses
 `npx tsc --noEmit` — the lane **verifies its working directory** is `frontend/`
 before invoking it, and does not extend that idiom.
 
+### IMPL-18 — One copy SSOT: every door-state class carries a structured copy (AM-20)
+
+The door-state copy moves to **one structured const per class** in
+`frontend/src/app/models/metrics.model.ts` — each with **cause / meaning /
+action / pointer** — replacing the flat `Record<MetricsDoorErrorCode, string>`
+(`metrics.model.ts:384-392`) that cannot hold a 3-part actionable copy. The
+**two duplicated degraded-registry suffixes** (`overview-tab.component.ts:295`
+and `charts-tab.component.ts:311`) move into that SSOT as well.
+
+The **403 predicate is narrowed** (AM-20): `scope_insufficient` is
+`rawCode === 'SCOPE_INSUFFICIENT'` (case-insensitive) **only**; any other 403
+becomes the new **`forbidden_other`** class ("rejected before the scope
+check"). The current predicate labels *any* 403-with-a-code as
+`scope_insufficient` (`metrics.model.ts:426-428`) — a false statement about the
+operator's session, contradicting the function's own doc comment. **Both 403
+branches are pinned by a spec.**
+
+### IMPL-19 — The manifest carries per-tab VARIANTS of the frame states, never a parallel copy source (AM-20)
+
+The frame owns the **state**; the manifest may carry a per-tab **variant** of
+a state's copy (e.g. "the MCP families are dark — reason X") but never a
+second, parallel copy source. The state model is **per source** (IMPL-09): the
+frame holds per-tab state; the `central | custom` slot is the seam.
+
+### IMPL-20 — The bundle guard is numeric + import-graph based, and lives in the phase that can break it (AM-2)
+
+The D-1 safety claim is restated: **a LAZY Chart.js leak trips no budget** —
+lazy chunks are counted by no budget type (only `initial` + `anyComponentStyle`
+are configured), so the production build stays green and both FE packs stay
+green. The guards are therefore: **(a) a numeric `|Δ initial-total| ≤ 2 kB`
+against the frozen lane-base baseline** (5,909,018 B — the builder's own
+"Initial total" basis, 36 chunk files; the full derivation is
+`research-findings.md` §14), **(b) no `chart.js` marker in ANY initial chunk**,
+and **(c) an import-graph assertion over resolved import sites** (AM-15). The
+**eager** leak case *does* break the build against the correct baseline: the
+headroom is **90,982 B** and chart.js's raw minified size is ~250–400 kB ⇒ the
+`initial` **error** budget trips. The guard is **co-located** in Phases 1 and 4
+(the leak window spans Phases 1–8), not deferred to Phase 9.
+
 ---
 
 ## Part IV — Explicitly NOT decided here (and why)
@@ -423,5 +592,6 @@ before invoking it, and does not extend that idiom.
 | Whether the family catalog is a drawer vs a sub-tab of a "more" tab | Settled in ADJ-i (frame-level drawer) — the alternative was considered and rejected for the 8th-tab contradiction. |
 | Whether Chart.js covers the **central** tabs' trend panels | Settled in IMPL-04: the central panels ARE interactive panels (y-axis+units, crosshair, legend toggles, shared-y, drill) — the whole point of D-1. |
 | Whether the anomalies panel belongs on the central tabs | Out of scope: the anomalies journal is a **resource-module** artifact (`/api/resources/anomalies`); no central family carries anomaly data. |
-| Whether the mini tier gets a y-axis | **No** (ADJ-ii scope guard): a mini is sparkline-scale; axes belong to panels. |
+| Whether the mini tier gets a y-axis | **No** (ADJ-ii scope guard): a mini is sparkline-scale; axes belong to panels. Per **R-2** the mini role has **no page surface in T1** at all — it is exercised via the mount-failure fallback and the renderer specs. |
 | The enable-auth operator decision | **User-owned** (D-2; the lane writes the recipe, it does not execute it on live). |
+| The 7-tab family binding's currency (the 16-family census) | Code-verified at lane base (the registry SSOT). Per **E-1** the binding is re-derived at Phase 2's freeze against the registry file, so a daemon-side drift cannot silently change the tab table. |

@@ -131,7 +131,7 @@ zero coupling in either direction to the central door (grep-proven;
 | Endpoint | In FE today | Tab-1 role | Notes |
 |---|---|---|---|
 | `GET /api/resources/live` (`resources.py:276`) | yes | Live strip | Reads the in-process `ResourceMonitor.ring` — **unreconstructible** from the central door |
-| `GET /api/resources/history` (`:458`) | yes | Timeline panel | Tier ladder: raw 30 s/48 h, minute 60 s/14 d, hour 3600 s/180 d (`flusher.py:360-368`, `config.py:811-827`; `config.py:927-931,980-1000`) |
+| `GET /api/resources/history` (`:458`) | yes | Timeline panel | Tier ladder: raw 30 s/48 h, minute 60 s/14 d, hour 3600 s/180 d — the tier knobs live in `daemon/config.py:925-931` (the docstring listing `retention_raw_minutes` / `retention_minute_hours` / `retention_hour_days`) and `:980-1001` (the Field definitions: 2880 min = 48 h, 336 h = 14 d, 180 d). **CITATION CORRECTION (fold, AM-17):** the original cite `daemon/services/flusher.py:360-368` named a file that does not exist — the flusher is `daemon/services/resource_monitor/flusher.py` and the lines cited there (`:355-372`) are the **sweeper's** row-drain body, not tier configuration; and `daemon/config.py:811-827` holds the **metrics** sampler intervals, not the resource tiers. The corrected cites are the two above. |
 | `GET /api/resources/anomalies` (`:1080`) | yes | Anomalies panel | **Process-local** in-RAM `deque(maxlen=256)`, reset per restart, ~3.2 h cold-boot replay cap — can never span overnight BY CONSTRUCTION |
 | `GET /api/resources/anomalies/{id}/evidence` (`:1121`) | yes | Anomaly drill-down | |
 | `GET /api/resources/traceback` (`:983`) | yes | Anomaly drill-down | Joins 9 tables |
@@ -207,21 +207,27 @@ resource ladder), **NOT** picker options. The **picker** vocabulary is
 
 ---
 
-## 6. Bundle + dependency facts (MEASURED)
+## 6. Bundle + dependency facts (MEASURED — re-derived at lane base, 2026-11-03)
+
+> **E-1 STANDING LANE RULE (folded 2026-11-03):** every MEASURED figure a phase
+> exit criterion depends on must be **re-derived at lane base** (this worktree's
+> tree) before that phase freezes. The figures in this table were re-derived by a
+> fresh production build at the lane base — **see §14 for the full method,
+> numbers, and the comparison against the architect's AM-2 figures.**
 
 | Fact | Value | Status |
 |---|---|---|
-| Initial budget semantics | `initial` = entry points + static imports only; **lazy chunks counted by NO budget** (only `initial` + `anyComponentStyle` configured; 5 more types unused; zero per-chunk assertions repo-wide) | MEASURED (builder source) |
-| Initial total today | **5,909,018 B vs 6,000,000 B error ⇒ 89,982 B headroom** (mermaid alone = 3.56 MB raw / 972 kB gz ≈ 80 % of the initial set, loaded on EVERY page) | MEASURED |
-| Lazy baseline | 52 chunks / 1.70 MB; **`/metrics` chunk 27,672 B**; largest lazy 135,690 B | MEASURED |
+| Initial budget semantics | `initial` = entry points + static imports only; **lazy chunks counted by NO budget** (only `initial` + `anyComponentStyle` configured; 5 more types unused; zero per-chunk assertions repo-wide) | MEASURED (builder source: `node_modules/@angular/build/src/utils/bundle-calculator.js:155-167` — `InitialCalculator` sums the chunks flagged `initial`; `index.html` is an **asset**, not a chunk, so it is NOT in the budget total) |
+| Initial total today | **5,909,018 B** (36 chunk files) vs the 6,000,000 B decimal error budget ⇒ **90,982 B headroom**; the 1 MB warning budget is exceeded by 4,909,018 B (pre-existing). `index.html` (9,257 B) is outside the budget ⇒ whole initial payload 5,918,275 B / 81,725 B headroom | **RE-DERIVED at lane base 2026-11-03** (§14). The digest's original `89,982 B` headroom was an **arithmetic slip** (6,000,000 − 5,909,018 = **90,982**); the 5,909,018 B total itself was **correct** |
+| Lazy baseline | **52** lazy chunks / **1,702,633 B** (≈1.70 MB); **`/metrics` chunk 27,672 B**; **`/resources` chunk 38,914 B**; largest lazy **157,141 B** | **RE-DERIVED at lane base 2026-11-03** (§14). The digest's "52 chunks / 1.70 MB / metrics 27,672 B" all reproduce **exactly**; its "largest lazy 135,690 B" is now the **second** largest (a drift of one chunk position) |
 | `chart.js` 4.6.1 | 6.2 MB unpacked; **1 dep** (`@kurkle/color` ^0.3.0); MIT; last publish 2026-10-22 | MEASURED (re-verified 2026-11-03 via `npm view`) |
 | `jest-canvas-mock` 2.5.8 | deps `cssfontparser` ^1.2.1 + `moo-color` ^1.0.2 | MEASURED (re-verified 2026-11-03 via `npm view`) |
 | `echarts` 6.1.0 / `apexcharts` 8.7.0 / `angular-gridster2` | 60.3 MB / 30 MB / 480 kB; gridster2 peers `@angular/core ^22` — **incompatible with our 21.2.5**; its `angular2-d3` premise is **FALSE** (package 404s) | MEASURED |
-| Governance | pack Leg 7 hard-fails on ANY `frontend/package.json` diff (`test/packs/metrics_fe_dual_side_test.sh:275-286`); **5 "zero FE deps" sites** must be amended in the same commit | MEASURED |
+| Governance | pack Leg 7 hard-fails on ANY `frontend/package.json` diff (`test/packs/metrics_fe_dual_side_test.sh:275-286`); the "zero FE deps" claim lives at **six** live sites (see AM-24) | MEASURED (AM-24 corrected the count from five) |
 | FE deps today | 33 deps + 12 devDeps; `mermaid ^11.4.0` (pulls d3 7.9.0 transitively); **zero charting libraries** | MEASURED (`frontend/package.json`) |
 | The app is ZONELESS | `zone.js` declared but never loaded (no `polyfills` entry, no provider in `app.config.ts`); Angular v21 defaults zoneless ⇒ canvas redraw is unentangled, **provided** the rule "no Angular-rendered overlay may depend on a library redraw" is written down | MEASURED |
-| Test surface | 1,645 L of metrics specs (svg-line-chart 241, metrics.component 519, charts-tab 213, overview-tab 274, families-tab 173, metrics-gear-menu 98, metrics.bindings.pins 127) + a Playwright gate (`frontend/e2e/metrics-gate.spec.ts`, 3 scenarios) | MEASURED |
-| The pins that ban charts | `frontend/src/app/pages/metrics/metrics.bindings.pins.spec.ts:94` bans `['chart.js','d3-',"from 'd3'",'ngx-charts','moment','dayjs']` over the svg-line-chart source + metrics.service.ts | MEASURED |
+| Test surface | 1,645 L of metrics specs (svg-line-chart 241, metrics.component 519, charts-tab 213, overview-tab 274, families-tab 173, metrics-gear-menu 98, metrics.bindings.pins 127) + a Playwright gate (`frontend/e2e/metrics-gate.spec.ts`, 3 scenarios) | MEASURED — **informational only**: no exit criterion in the plan set gates on a spec **line count** (AM-26 replaces the line-count framing with a per-assertion disposition table) |
+| The pins that ban charts | `frontend/src/app/pages/metrics/metrics.bindings.pins.spec.ts:94` bans `['chart.js','d3-',"from 'd3'",'ngx-charts','moment','dayjs']` over the svg-line-chart source + metrics.service.ts; the spec ALSO **reads the engine file from disk** at `:76-88` — a path that Phase 4 deletes (AM-10) | MEASURED |
 
 ---
 
@@ -467,3 +473,128 @@ Read in the tree at this commit:
 - `env -u POSTGRES_*` is a **silent NO-OP** (bash does not glob env names) —
   scrub per-variable, one by one.
 - Never resolve live-shaped paths (HOME-derived install dirs) in test scripts.
+
+---
+
+## 14. LANE-BASE MEASUREMENT (2026-11-03) — the bundle baseline re-derived
+
+**Why this section exists.** The architect's review (AM-2) flagged the bundle
+baseline in §6 above as carrying **provenance doubt** (the digest's figures may
+have been measured on the main checkout's v0.27.8-era FE) and reported its own
+dist-derived numbers as **5,115,820 B initial / 884,180 B headroom**. The
+leader ordered a re-derivation **at lane base** before the fold. This section is
+that re-derivation, in full.
+
+### 14.1 Method (the build)
+
+- Tree: `/home/nea/ensemble-src-wt-fe-metrics-dashboard` @ `c26cec612`
+  (the lane's three commits — `c32029d1c`, `3a6bf7ba5`, `c26cec612` — are
+  **docs-only**, so HEAD's `frontend/` tree **is** the lane base's `frontend/`
+  tree; a build at HEAD IS a lane-base measurement).
+- `frontend/node_modules` was **absent** (fresh worktree) → `npm ci` inside
+  `frontend/` (lockfile `package-lock.json`, 506,083 B; node v22.23.2, npm
+  10.9.8). `npm ci` touches only untracked `node_modules/`.
+- Build: `cd frontend && ./node_modules/.bin/ng build --configuration production`
+  — the **local** toolchain only (never a bare `tsc`/`npx tsc` outside
+  `frontend/`). Output: `frontend/dist/frontend/browser/` (93 files, untracked).
+- **No daemon was booted** and nothing was written to any tracked file.
+
+### 14.2 What the BUILDER itself reported
+
+From the build log (`/tmp/fe-t1-build-prod.log`):
+
+```
+Initial chunk files | Names | Raw size | Estimated transfer size
+scripts-DN54Y2NQ.js | scripts | 3.56 MB | 737.45 kB
+styles-S2UMLXTA.css  | styles  | 655.43 kB | 58.41 kB
+… 36 chunk rows …
+| Initial total | 5.91 MB | 1.28 MB |
+
+▲ [WARNING] bundle initial exceeded maximum budget.
+   Budget 1.00 MB was not met by 4.91 MB with a total of 5.91 MB.
+```
+
+The warning's own arithmetic (5.91 − 4.91 = 1.00 MB) is consistent with a
+total of **5,909,018 B** (5.909 → truncated "5.91"; 4.909 → "4.91").
+
+**Builder semantics** (`node_modules/@angular/build/src/utils/bundle-calculator.js:155-167`):
+`InitialCalculator` sums the chunks flagged `initial` — entry points plus their
+transitive **static** imports. `index.html` is an **asset**, not a chunk, so it
+is **not** in the budget total. Lazy chunks are counted by **no** budget (only
+`initial` + `anyComponentStyle` are configured).
+
+### 14.3 Two independent derivations of the same number
+
+| Method | Files | Bytes |
+|---|---|---|
+| **A** — the builder's own "Initial total" table (36 chunk rows), summed from disk by exact byte size | 36 | **5,909,018** |
+| **B** — an independent closure: `index.html`'s referenced files + the transitive **static**-import closure of every referenced JS (`from "…"`, `import "…"`), excluding dynamic `import(…)` | 36 | **5,909,018** |
+| **C** — the whole initial payload (A + `index.html`, 9,257 B) | 37 | 5,918,275 |
+
+Methods A and B agree **byte-for-byte** and the file sets are identical (set
+difference empty in both directions) — two independent derivations, one number.
+
+### 14.4 The measured baseline (frozen for the lane)
+
+| Figure | Value |
+|---|---|
+| **Initial total (builder basis — the budget's own number)** | **5,909,018 B** |
+| Error budget (`initial`, decimal) | 6,000,000 B |
+| **Headroom** | **90,982 B** |
+| Warning budget (`initial`, decimal) | 1,000,000 B — exceeded by 4,909,018 B (**pre-existing**) |
+| `index.html` (outside the budget) | 9,257 B → whole initial payload 5,918,275 B, headroom 81,725 B |
+| Lazy chunk count | **52** |
+| Lazy bytes total | **1,702,633 B** (≈1.70 MB) |
+| `/metrics` lazy chunk | **27,672 B** (`chunk-ZA3RV4HY.js`) |
+| `/resources` lazy chunk | **38,914 B** (`chunk-FOLCEMN3.js`) |
+| Largest lazy chunk | **157,141 B** (`chunk-QS2K3YLH.js`); second 135,690 B |
+| `anyComponentStyle` warnings | **8**, all in **other** components' SCSS (`agent-selector`, `snapshots`, `jobs`, `add-source-modal`, `snapshot-detail-drawer`, `checkpoint-cleanup`, `instance-list`, `chat-interface`) — **pre-existing**; the `initial` budget warning is pre-existing too |
+
+### 14.5 Comparison against the architect's AM-2 figures — **MISMATCH, disclosed**
+
+| Source | Initial total | Headroom | Verdict |
+|---|---|---|---|
+| Architect AM-2 (shipped `releases/v0.28.9` dist) | 5,115,820 B | 884,180 B | **undercounts by 793,198 B** |
+| **This fold (fresh lane-base build)** | **5,909,018 B** | **90,982 B** | **authoritative** |
+| Research digest §6 (original) | 5,909,018 B | *89,982 B* | the **total was correct**; the headroom had a **1,000 B digit slip** (6,000,000 − 5,909,018 = 90,982) |
+
+**The delta is fully explained, not a mystery.** AM-2's number is exactly the
+sum of the files `index.html` **references** (`styles` + `scripts` + `main` +
+the 10 `modulepreload` chunks) **without** the builder's transitive
+static-import closure — 5,125,077 − 9,257 (`index.html`) = **5,115,820**.
+The builder counts **36** initial chunk files; the index.html-referenced subset
+is **13** of them. The remaining **23** chunks (≈793 kB) are reachable from the
+entry points by **static** import and are counted by the builder — and are
+printed in the builder's own "Initial chunk files" table, which AM-2 did not
+reproduce.
+
+**Cross-check (the strongest one available).** The **shipped** `releases/v0.28.9`
+dist on disk was measured with the same script: **identical output** — 37 files,
+5,918,275 B, 81,725 B headroom, 52 lazy chunks, `/metrics` chunk 27,672 B,
+`/resources` chunk 38,914 B, and the **same chunk filenames and byte sizes**
+(`chunk-K3LECV3O.js` 316,339 B, `chunk-QU4CTU7Q.js` 263,458 B, `main-SAUX6EY3.js`
+215,495 B, `scripts-DN54Y2NQ.js` 3,559,319 B). The lane base and the shipped
+v0.28.9 artifact are the **same FE tree**, byte-for-byte — which is the
+expected result of a docs-only lane and independently confirms the build is
+reproducible.
+
+### 14.6 What this changes for the plan (AM-2 folded)
+
+1. **The baseline is 5,909,018 B / 90,982 B headroom** — NOT AM-2's
+   5,115,820 / 884,180, and NOT the digest's 89,982.
+2. **AM-2's MECHANISM findings stand** — they are the part that matters:
+   - (a) **lazy chunks are counted by no budget** ⇒ a **lazy** Chart.js leak
+     trips **nothing** (no build failure, no pack failure). The plan's original
+     claim ("a static-import leak hard-fails the production build … and both FE
+     packs") was **false** for the lazy case.
+   - (b) an **eager** Chart.js leak **does** break the build against the
+     correct baseline: the headroom is **90,982 B** and chart.js's raw
+     minified size is ~250–400 kB ⇒ 5,909,018 + 250 kB > 6,000,000 ⇒ the
+     `initial` **error** budget trips. (Against AM-2's undercounted baseline
+     the same leak would have fit — which is exactly why the baseline had to be
+     re-derived.)
+   - (c) B1's "byte-identical file list" is unsatisfiable under
+     `outputHashing: "all"` (any change renames chunks) ⇒ B1 is redefined
+     numerically (§6.3 of the plan).
+3. **The guard is co-located** (Phase 1 and Phase 4 exit criteria), not a
+   Phase-9-only gate — the leak window spans Phases 1–8.

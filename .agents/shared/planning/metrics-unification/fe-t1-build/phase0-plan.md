@@ -49,3 +49,12 @@ only: no `frontend/`, no `daemon/`, no dependency, no test.
   broad `git add`).
 - The document contains the words "NOT CHOSEN" next to the zero-dep
   counter-option, and the three ruling ids D-1/D-2/D-3.
+- **The architect review's placement check** (the one item the review recorded
+  as missing for phase 0): a machine-checkable assertion that the new §8
+  section exists and sits **after §7** and **before the evidence index** —
+  `grep -n '^## 8\. What changed and why' <file>` returns a line number
+  greater than §7's and less than the evidence index's.
+- **E-1 re-derivation (standing lane rule):** this phase gates on **no**
+  MEASURED figure, so nothing is re-derived here. (The rule and the
+  gated-figures table live in `plan-overview.md` §0.1; every phase's exit
+  section carries its own E-1 line.)
