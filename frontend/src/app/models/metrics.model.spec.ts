@@ -29,6 +29,7 @@ import {
   MetricsSnapshotPayload,
   MetricsSeriesPayload,
   METRICS_DOOR_ERROR_COPY,
+  MetricsDoorTimeoutError,
   decodeMetricsDoorError,
   formatAvailabilityReason,
   formatMetricsDeclaredLabels,
@@ -468,5 +469,24 @@ describe('metrics model mirror — the door error decode (A-5, contract §5)', (
       METRICS_DOOR_ERROR_COPY.network,
     );
     expect(METRICS_DOOR_ERROR_COPY.unexpected).not.toBe(METRICS_DOOR_ERROR_COPY.network);
+  });
+
+  it('decodes the CLIENT-SIDE deadline to the `timeout` class (T1 phase 2, 2.10)', () => {
+    const decoded = decodeMetricsDoorError(new MetricsDoorTimeoutError());
+    expect(decoded.code).toBe('timeout');
+    expect(decoded.copy).toBe(METRICS_DOOR_ERROR_COPY.timeout);
+    // The timeout copy must NOT claim the door is unreachable — the
+    // client gave up, the door may be perfectly reachable.
+    expect(decoded.copy).not.toBe(METRICS_DOOR_ERROR_COPY.network);
+    expect(decoded.copy.toLowerCase()).not.toContain('unreachable');
+  });
+
+  it('the timeout copy is DISTINCT from every other class copy', () => {
+    for (const [name, copy] of Object.entries(METRICS_DOOR_ERROR_COPY)) {
+      if (name === 'timeout') {
+        continue;
+      }
+      expect(METRICS_DOOR_ERROR_COPY.timeout).not.toBe(copy);
+    }
   });
 });

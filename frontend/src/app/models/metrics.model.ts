@@ -361,7 +361,27 @@ export type MetricsDoorErrorCode =
   | 'auth_not_configured'
   | 'registry_unavailable'
   | 'network'
+  | 'timeout'
   | 'unexpected';
+
+/**
+ * The typed CLIENT-SIDE deadline failure (T1 phase 2, task 2.10).
+ *
+ * The rxjs `timeout` operator throws a plain `TimeoutError` on expiry;
+ * the service maps it to THIS typed error so the decoder can name the
+ * class honestly (`timeout`) instead of letting it fall through to
+ * `unexpected` (or worse — to `network`, which claims the door is
+ * unreachable when the truth is that the CLIENT gave up).
+ *
+ * NO Retry: the read may still be in flight server-side, so a retry
+ * would double the load on a door that is already slow.
+ */
+export class MetricsDoorTimeoutError extends Error {
+  constructor(message = 'the metrics door read timed out') {
+    super(message);
+    this.name = 'MetricsDoorTimeoutError';
+  }
+}
 
 /**
  * The copy for a DEGRADED registry read (`activation.registry_read_ok`
@@ -389,6 +409,8 @@ export const METRICS_DOOR_ERROR_COPY: Readonly<Record<MetricsDoorErrorCode, stri
   registry_unavailable:
     'The metrics door has no provider wired — the metrics service is unavailable on this daemon.',
   network: 'The metrics door is unreachable.',
+  timeout:
+    'The metrics door did not answer in time — the read may still be running on the daemon.',
   unexpected: 'The metrics door returned an unexpected error.',
 };
 
@@ -417,6 +439,12 @@ export function decodeMetricsDoorError(err: unknown): {
   code: MetricsDoorErrorCode;
   copy: string;
 } {
+  // The CLIENT-SIDE deadline is checked FIRST: it is not an HTTP
+  // failure at all, and the transport-shaped reads below would call it
+  // `network` (a false claim — the door may be perfectly reachable).
+  if (err instanceof MetricsDoorTimeoutError) {
+    return { code: 'timeout', copy: METRICS_DOOR_ERROR_COPY.timeout };
+  }
   const response = asRecord(err);
   const status = typeof response?.['status'] === 'number' ? (response['status'] as number) : 0;
   const body = asRecord(response?.['error']);
