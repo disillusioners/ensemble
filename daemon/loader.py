@@ -518,6 +518,14 @@ def _ensure_tool_metadata_populated() -> None:
     # section until some instance build happened to repopulate the
     # cache. Same maintenancer W1-fix pattern as the modules above.
     from .tools.snapshot_tools import create_snapshot_tools
+    # metrics-read (metrics-agent-tools lane, 2026-11-03): the READ-ONLY
+    # metric-registry category. The same cold-boot pattern as the entries
+    # above: the ``@register_tool_category("metrics-read")`` decorator must
+    # run HERE so the cold-boot metadata scan registers the category —
+    # otherwise the metrics section is MISSING from the agent's rendered
+    # prompt until some instance build repopulates the metadata (the
+    # W1-FIX-NOW class, verbatim).
+    from .tools.metrics_read import create_metrics_read_tools
 
     # Create dummy instances to get the tools (these create closures with None manager)
     # We just need the tool objects themselves for metadata scanning
@@ -552,6 +560,10 @@ def _ensure_tool_metadata_populated() -> None:
     # the cold-boot metadata scan registers the category before the
     # no-TTL prompt cache pins tool docs.
     snapshot_tools = create_snapshot_tools(None, "", "")
+    # Metrics read tools (metrics-agent-tools lane): the factory only
+    # builds closures — the manager and the provider are dereferenced at
+    # CALL time, never at construction.
+    metrics_read_tools = create_metrics_read_tools(None)
     # create_db_tools reads manager.credential_manager at construction
     # (N1 — shared Fernet handle), so it needs a minimal attribute stub;
     # None is sufficient — the credential manager is only invoked inside
@@ -579,6 +591,7 @@ def _ensure_tool_metadata_populated() -> None:
     for factory_tools in (
         system_log_tools, ens_db_tools, knowledge_tools,
         upgrade_tools, db_tools, service_tools, snapshot_tools,
+        metrics_read_tools,
     ):
         if factory_tools:
             all_tools.extend(factory_tools)

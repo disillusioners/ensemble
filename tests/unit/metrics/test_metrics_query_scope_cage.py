@@ -38,8 +38,16 @@ DECLARED_ROUTE_CENSUS = 111
 MOUNT_CENSUS = 37
 CLASS_MANIFEST_FAMILIES = 33
 
-#: The scope the family carries.
-FAMILY_SCOPE = "maintenance:read"
+#: The scope the family carries — the ANY-OF set the three query routes
+#: declare (the metrics-agent-tools lane minted ``metrics:read`` so a
+#: machine lane can read the query door without the destructive
+#: checkpoint-cleanup capability ``maintenance:read`` also confers). The
+#: text-exposition route keeps ``maintenance:read`` ALONE — and the cage
+#: is a SUBSET check, so that lone scope stays inside the OR-set.
+FAMILY_SCOPE = "maintenance:read|metrics:read"
+
+#: The any-of set the three query routes declare, as a set.
+FAMILY_SCOPE_SET: frozenset[str] = frozenset({"maintenance:read", "metrics:read"})
 
 
 def _route_required_scopes(route: APIRoute) -> frozenset[str] | None:
@@ -141,7 +149,7 @@ class TestThreeWayCage:
 class TestFamilyScope:
     """The family carries its EXISTING scope."""
 
-    def test_the_family_scope_is_maintenance_read(self):
+    def test_the_family_scope_is_the_any_of_set(self):
         from tests.unit.test_router_scope_manifest import PINNED_SCOPE_MANIFEST
 
         assert PINNED_SCOPE_MANIFEST["/api/metrics"] == FAMILY_SCOPE
@@ -151,9 +159,9 @@ class TestFamilyScope:
             path = getattr(route, "path", "")
             if path in ("/metrics/families", "/metrics/snapshot", "/metrics/series"):
                 scopes = _route_required_scopes(route)
-                assert scopes == frozenset({FAMILY_SCOPE}), (
+                assert scopes == FAMILY_SCOPE_SET, (
                     f"{path} declares {scopes} — every query route carries "
-                    f"the family's EXISTING {FAMILY_SCOPE}"
+                    f"the family's any-of set {sorted(FAMILY_SCOPE_SET)}"
                 )
 
     def test_the_scope_dependency_form_is_used(self):
@@ -164,3 +172,7 @@ class TestFamilyScope:
             .read_text(encoding="utf-8")
         )
         assert "dependencies=[scope_required(_SCOPE_READ)]" in source
+        assert (
+            "dependencies=[scope_required(_SCOPE_READ, _SCOPE_READ_METRICS)]"
+            in source
+        ), "the three query routes declare the any-of set"

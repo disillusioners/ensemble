@@ -119,11 +119,11 @@ class TestRealMaintenancerMetaShape:
     granted or denied must fail here first."""
 
     def test_real_meta_allow_is_exact_category_set(self) -> None:
-        """tools.allow = exactly the 9 categories: the privileged pair
+        """tools.allow = exactly the 10 categories: the privileged pair
         (system-log, ens-db), system_upgrade, system_restart, knowledge,
         db (D19 — external user-registered connections only), the two
-        nest-ops fleet categories (instance_read / instance_ops) and the
-        wedge-capture read surface.
+        nest-ops fleet categories (instance_read / instance_ops), the
+        wedge-capture read surface and the metrics-read registry surface.
 
         nest-ops (2026-10-21): the inherited 3-red fold. ``system_restart``
         was added to the allow list by ``ff27305c4`` (which updated only
@@ -136,7 +136,14 @@ class TestRealMaintenancerMetaShape:
         capture-evidence surface (``wedge_capture_list`` /
         ``wedge_capture_get``). The category is PRIVILEGED, so an
         explicit allow entry is the only access path; the tool bodies
-        ALSO carry their own agent_id gate."""
+        ALSO carry their own agent_id gate.
+
+        metrics-read (2026-11-03, metrics-agent-tools lane): the tenth
+        entry — the READ-ONLY metric-registry surface
+        (``metrics_families`` / ``metrics_snapshot`` /
+        ``metrics_history``). The category is PRIVILEGED, so an explicit
+        allow entry is the only access path; the tool bodies ALSO carry
+        their own agent_id gate."""
         assert MAINTAINER_META_ALLOW == [
             "system-log",
             "ens-db",
@@ -147,6 +154,7 @@ class TestRealMaintenancerMetaShape:
             "instance_read",
             "instance_ops",
             "wedge-capture",
+            "metrics-read",
         ]
 
     def test_real_meta_deny_is_exact_category_set(self) -> None:
@@ -304,7 +312,7 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly fifteen categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly seventeen categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
@@ -318,7 +326,12 @@ class TestPrivilegedCategoryRegistryShape:
     the ari-tools Phase 3 commission 2026-10-20, and
     ``instance_read`` + ``instance_ops`` per the nest-ops
     commission 2026-10-21 — 13/14 = instance_read/instance_ops;
-    the count moved 12→14). The ``service``
+    the count moved 12→14), ``wedge-capture`` per the wedge-capture
+    commission 2026-10-22 (12), ``mcp_rpc`` per the remote-hands
+    commission 2026-10-22 (15), ``notify-user`` per the ari-voice
+    commission 2026-10-25 (16) and ``metrics-read`` per the
+    metrics-agent-tools commission 2026-11-03 (17 — the count moved
+    16→17). The ``service``
     category was REMOVED from this set by user override 2026-09-16
     (D4 reversed; see
     ``.agents/shared/planning/service-tool/decisions.md`` §D4
@@ -327,7 +340,7 @@ class TestPrivilegedCategoryRegistryShape:
     (the fifth exact-set pin added by the iteration-002 council B2
     correction)."""
 
-    def test_privileged_categories_contains_fifteen_entries(self) -> None:
+    def test_privileged_categories_contains_seventeen_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
@@ -434,6 +447,12 @@ class TestPrivilegedCategoryRegistryShape:
         # allow entry is the only access path, and the tool body ALSO
         # carries its own agent_id gate.
         "notify-user",
+        # metrics-read (2026-11-03, metrics-agent-tools lane): the
+        # READ-ONLY metric-registry category — opt-in-only; the
+        # maintenancer / devops / wanderer allow entries are the only
+        # access path, and every tool body ALSO carries its own
+        # agent_id gate.
+        "metrics-read",
 })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

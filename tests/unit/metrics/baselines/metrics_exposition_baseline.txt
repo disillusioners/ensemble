@@ -72,5 +72,5 @@ ensemble_metrics_up 0
 # frozen vocabulary instance_status: completed,error,failed,idle,paused,queued,running,terminated,waiting,waiting_children
 # frozen vocabulary sweep_lane: rdrs_deferred,rdrs_no_row_backstop,rdrs_pending_age,rdrs_recovery_retry,rdrs_orphan,rdrs_stuck_wake,rdrs_mission_reconciliation,watch_reconcile,eligible_pending,stale_pause,orphan_watcher,job_lock,upgrade_journal
 # frozen vocabulary mcp_roster: context7,plane,webfetch,custom,other
-# frozen vocabulary tool_category: count=57 attestation,bash,blueprint,board,board-link,chart,context,council,critical_notes,db,design,doc_maintenance,dynamic-skill,ens-db,ens-env,filesystem,help,image,image-gen,infra,instance,instance_ops,instance_read,job,knowledge,language,mcp,mcp_rpc,midflight,mission,mother,notify-user,other,plane,plane_sync,proc,project,project_history,question,rag,scheduling,secrets,self,self-alarm,service,settings,shared_meta_kv,skill-evolution,snapshot,system,system-log,system_upgrade,time,todo,view-views,view-write,wedge-capture
+# frozen vocabulary tool_category: <SET>
 # frozen vocabulary version: <N>

@@ -103,6 +103,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # allow entry is the only access path, and the tool body ALSO
 # carries its own agent_id gate.
 "notify-user",
+# metrics-read (2026-11-03, metrics-agent-tools lane): the
+# READ-ONLY metric-registry category — opt-in-only; the
+# maintenancer / devops / wanderer allow entries are the only
+# access path, and every tool body ALSO carries its own
+# agent_id gate.
+"metrics-read",
 })
 
 #: The ONLY agent allowed to hold the board category.
@@ -192,7 +198,7 @@ class TestPrivilegedCategory:
     def test_board_is_in_the_privileged_set(self) -> None:
         assert BOARD_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_sixteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
         """The set is exact — the phase-2 commit moved this pin with the
         tenth entry (``self-alarm``) and the phase-3 commit moved it
         again with the eleventh + twelfth (``view-write`` /
@@ -205,14 +211,15 @@ class TestPrivilegedCategory:
         9 -> 10 in phase 2 (``self-alarm``) and 10 -> 12 in phase 3
         (``view-write`` + ``board-link``). That was the count AT THE
         TIME of the phase-1 commit; the ``cu`` category was removed
-        from the set on 2026-10-24, so the live set is 15 members and
-        ``board`` now sits one slot earlier.
+        from the set on 2026-10-24 (15 members then; 17 after the
+        ari-voice 2026-10-25 and metrics-read 2026-11-03 additions)
+        and ``board`` now sits one slot earlier.
 
         The registry constant is a frozenset (unordered), so the
         "ninth entry" is a property of the SET SIZE at the time of the
         phase-1 commit and of the registry's literal order afterwards;
         the comment block in the registry records the ordinal."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")

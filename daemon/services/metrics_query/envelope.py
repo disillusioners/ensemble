@@ -151,6 +151,13 @@ def effective_interval_s(provider: MetricsQueryProvider) -> float:
     return _provider_float(provider, "effective_interval_s", 15.0)
 
 
+#: The PUBLIC name of the seam's numeric-fact reader (the agent-tool door
+#: reads the provider's numeric facts through THIS — never through the
+#: private ``_provider_float`` and never through ``getattr``).  The
+#: internal name is kept so every existing call site is untouched.
+read_numeric_fact = _provider_float
+
+
 def build_series_envelope(
     provider: MetricsQueryProvider,
     *,

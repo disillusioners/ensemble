@@ -811,12 +811,14 @@ def test_manager_logs_disabled_when_off(
 
 @pytest.mark.integration
 def test_privileged_category_set_is_pinned() -> None:
-    """Sanity: the EIGHT-site pin at ``PRIVILEGED_TOOL_CATEGORIES``
+    """Sanity: the exact-set pin at ``PRIVILEGED_TOOL_CATEGORIES``
     is intact — ``service`` was REMOVED from the union by user
     override 2026-09-16 (D4 reversed; see decisions.md §D4
     override note).
 
-    The pin lives at EIGHT sites:
+    The exact-set pin lives at TEN sites (5 ``EXPECTED_PRIVILEGED_SET``
+    constants + 5 inline ``frozenset`` literals — 15 EDIT sites plus the
+    1 VERIFY-ONLY ari trailing-entry pin in total):
     ``tests/unit/tools/test_upgrade_registration.py``,
     ``tests/unit/tools/test_attestation_registration.py``,
     ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
@@ -904,6 +906,12 @@ def test_privileged_category_set_is_pinned() -> None:
         # allow entry is the only access path, and the tool body ALSO
         # carries its own agent_id gate.
         "notify-user",
+        # metrics-read (2026-11-03, metrics-agent-tools lane): the
+        # READ-ONLY metric-registry category — opt-in-only; the
+        # maintenancer / devops / wanderer allow entries are the only
+        # access path, and every tool body ALSO carries its own
+        # agent_id gate.
+        "metrics-read",
 }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "

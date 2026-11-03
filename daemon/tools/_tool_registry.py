@@ -270,6 +270,16 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "mcp_rpc_connect",
     "mcp_rpc_command",
     "mcp_rpc_disconnect",
+    # metrics-read (2026-11-03, metrics-agent-tools lane): the three
+    # READ-ONLY metric-registry tools — created by the
+    # create_metrics_read_tools() factory (daemon/tools/metrics_read.py).
+    # Factory-built (not import-time registered), so they belong in
+    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
+    # PRIVILEGED (entry #17) — opt-in only, never default-granted; the
+    # runtime agent gate lives in the tool bodies.
+    "metrics_families",
+    "metrics_snapshot",
+    "metrics_history",
 })
 
 
@@ -615,6 +625,29 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # are mandatory (this entry ships in the SAME commit as those bumps
     # — the set must never be red between two commits).
     "notify-user",
+    # metrics-read (2026-11-03, metrics-agent-tools lane): the THREE
+    # read-only metric-registry tools — created by the
+    # create_metrics_read_tools() factory (daemon/tools/metrics_read.py).
+    # The category is PRIVILEGED (entry #17 of
+    # PRIVILEGED_TOOL_CATEGORIES): the daemon's own metric registry is an
+    # internal counter surface, so the empty-allow inherit universe must
+    # NOT auto-grant it. Explicit ``tools.allow: ["metrics-read"]`` on
+    # maintenancer + devops + wanderer is the only access path, and every
+    # tool body ALSO carries its own ``agent_id`` gate (the ONE shared
+    # helper in ``daemon/tools/metrics_read.py``) — a LITERAL tool name
+    # in an allow list bypasses the category gate outright, so the
+    # category alone cannot spell the audience.
+    #
+    # The surface is structurally READ-ONLY: no write tool exists in it,
+    # and the tools read the SAME provider instance (and the SAME in-RAM
+    # trend ring) the HTTP query door serves from — one provider, one
+    # ring, one truth.
+    #
+    # SAME-PR pin updates at the TEN files carrying the SIXTEEN assertion
+    # sites (10 exact-set + 5 count + 1 allow-array trailing-entry pin)
+    # are mandatory (this entry ships in the SAME commit as those bumps
+    # — the set must never be red between two commits).
+    "metrics-read",
 })
 
 
@@ -1077,6 +1110,19 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # (``notify_user``) — the house pattern (``self-alarm`` →
     # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
     "notify-user": "daemon.tools.notify_user",
+    # metrics-read (2026-11-03, metrics-agent-tools lane): the READ-ONLY
+    # metric-registry category. PRIVILEGED category (entry #17 of
+    # PRIVILEGED_TOOL_CATEGORIES): the daemon's own internal counters must
+    # never reach the empty-allow inherit universe.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot. The category key is
+    # KEBAB-case (``metrics-read``) while the tool names are snake_case
+    # (``metrics_*``) — the house pattern (``self-alarm`` →
+    # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
+    "metrics-read": "daemon.tools.metrics_read",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1571,6 +1617,16 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "secret_list",
     "secret_read_public",
     "secret_retire",
+    # metrics-read (2026-11-03, metrics-agent-tools lane): the three
+    # READ-ONLY metric-registry tools — created by the
+    # create_metrics_read_tools() factory (daemon/tools/metrics_read.py).
+    # Factory-built (not import-time registered), so they belong in
+    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
+    # PRIVILEGED (entry #17) — opt-in only, never default-granted; the
+    # runtime agent gate lives in the tool bodies.
+    "metrics_families",
+    "metrics_snapshot",
+    "metrics_history",
     "terminate_instance",
     "time",
     "todo_clear",

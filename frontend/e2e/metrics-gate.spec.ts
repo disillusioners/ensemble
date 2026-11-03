@@ -177,6 +177,19 @@ function jsonRoute(route: Route, body: unknown, status = 200): Promise<void> {
 let unstubbedCalls: string[] = [];
 let doorCalls: string[] = [];
 
+/**
+ * The DEGRADED families payload — the door answered a FAILED registry
+ * read, so the body is a 200 with an EMPTY family list. The only thing
+ * that distinguishes it from an empty registry is
+ * `activation.registry_read_ok === false`.
+ */
+const DEGRADED_FAMILIES_PAYLOAD = {
+  ...ENVELOPE,
+  activation: { ...ENVELOPE.activation, registry_read_ok: false },
+  truncated: false,
+  families: [],
+};
+
 /** Install ALL stubs. Catch-all FIRST (lowest precedence), specifics after. */
 async function installStubs(page: Page): Promise<void> {
   await page.route('**/api/**', (route) => {
@@ -316,4 +329,32 @@ test('[P5] deep-link /metrics renders without a daemon', async ({ page }) => {
   // is selected.
   await page.getByRole('tab', { name: 'Families' }).click();
   await expect(page.locator('[data-test="families-table"]')).toBeVisible();
+});
+
+test('[P5] a FAILED registry read renders the DISTINCT degraded badge (never the empty panel, never the error banner)', async ({ page }) => {
+  // Re-stub the families route with the DEGRADED body (a 200 with an
+  // empty family list + registry_read_ok=false). The stub is registered
+  // AFTER the catch-all, so it shadows it (Playwright routes are LIFO).
+  await page.route(/\/api\/metrics\/families/, (route) => {
+    doorCalls.push(route.request().url());
+    return jsonRoute(route, DEGRADED_FAMILIES_PAYLOAD);
+  });
+
+  await page.goto('/');
+  await page.locator('[data-test="gear-menu"]').click();
+  const metricsItem = page.locator('a[mat-menu-item]').filter({ hasText: 'Metrics' });
+  await expect(metricsItem).toBeVisible();
+  await metricsItem.click();
+  await expect(page).toHaveURL(/\/metrics/);
+
+  // ── The DISTINCT degraded surface. ──
+  const badge = page.locator('[data-test="metrics-registry-degraded"]');
+  await expect(badge).toBeVisible();
+  await expect(badge).toContainText(/incomplete/i);
+
+  // ── Never the transport-failure banner (the 200-EMPTY pin). ──
+  await expect(page.locator('[data-test="metrics-catalog-error"]')).toHaveCount(0);
+
+  // ── Never the empty panel (the payload is UNKNOWN, not empty). ──
+  await expect(page.locator('[data-test="metrics-empty-panel"]')).toHaveCount(0);
 });

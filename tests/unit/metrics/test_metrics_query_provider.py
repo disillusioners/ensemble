@@ -556,6 +556,11 @@ class TestContention:
 class TestProtocolConformance:
     def test_a_duck_typed_fake_satisfies_the_protocol(self) -> None:
         class _Fake:
+            # GAP-3 of the seam-side Protocol amendment — the trimmed
+            # Protocol declares exactly ONE new member (``registry_read_ok``);
+            # GAP-4/GAP-5 are NOT declared, so they cost nothing here.
+            registry_read_ok = True
+
             def families(self):
                 return []
 

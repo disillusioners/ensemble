@@ -28,6 +28,7 @@
     "language",
     "mcp",
     "mcp_rpc",
+    "metrics-read",
     "midflight",
     "mission",
     "mother",
@@ -57,8 +58,8 @@
     "view-write",
     "wedge-capture"
   ],
-  "count": 56,
+  "count": 57,
   "reserved": "other",
   "source": "daemon/tools/_tool_registry.py CATEGORY_MODULES + @register_tool_category call sites",
-  "vocabulary_version": 1
+  "vocabulary_version": 3
 }

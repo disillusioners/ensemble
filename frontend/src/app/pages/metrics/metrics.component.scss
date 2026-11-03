@@ -44,6 +44,17 @@
   letter-spacing: 0.04em;
 }
 
+.metrics-registry-degraded-badge {
+  display: inline-block;
+  margin-bottom: 0.5rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #7f1d1d;
+  border-radius: 4px;
+  color: #fca5a5;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
 .metrics-truncated-hint {
   display: inline-block;
   margin: 0 0 0.5rem 0.5rem;

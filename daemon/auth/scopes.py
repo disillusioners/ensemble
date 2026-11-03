@@ -12,7 +12,7 @@ The v1 taxonomy (D4.2 — the fine-grained set shipped day 1):
     jobs:read  jobs:write
     messages:write
     sources:write
-    maintenance:read
+    maintenance:read  metrics:read
     mcp:read  mcpkb:admin
     snapshot:write  workspace:read
     auth:admin
@@ -30,8 +30,14 @@ family via SESSION_OPERATOR_SCOPES = SCOPE_TAXONOMY), and
 Ruling 4 — the daemon-settings surface is the infrastructure
 precedent class: GET reports effective daemon config incl. env/yaml
 tier values, so its reads gate like instances/maintenance rather than
-the ungated language/timezone preference family). Nothing invented
-beyond the plan text.
+the ungated language/timezone preference family), and ``metrics:read``
+(metrics-agent-tools commission 2026-11-03 — the READ-ONLY half of the
+metrics query door: ``maintenance:read`` also confers the destructive
+checkpoint-cleanup capability, so a machine lane that only needs to READ
+the metrics query door carries this narrower scope instead; the three
+query routes accept EITHER scope, the Prometheus text-exposition route
+keeps ``maintenance:read`` alone). Nothing invented beyond the plan
+text.
 
 Grant model (P4 — the M-3 close; supersedes the P3
 "session-valid-is-enough" decorator branch):
@@ -68,6 +74,16 @@ SCOPE_TAXONOMY: frozenset[str] = frozenset(
         "messages:write",
         "sources:write",
         "maintenance:read",
+        # metrics-agent-tools (2026-11-03): the READ-ONLY scope of the
+        # metrics query door.  ``maintenance:read`` ALSO confers the
+        # destructive checkpoint-cleanup capability (AM-20), so a machine
+        # lane that only needs to READ the metrics query door carries THIS
+        # scope instead.  The three query routes accept EITHER scope
+        # (``maintenance:read`` OR ``metrics:read``); the text-exposition
+        # route keeps ``maintenance:read`` ALONE.  Auto-joins
+        # SESSION_OPERATOR_SCOPES via the SCOPE_TAXONOMY reference below
+        # (no operator re-grant, no session-row migration).
+        "metrics:read",
         "mcp:read",
         "mcpkb:admin",
         "snapshot:write",

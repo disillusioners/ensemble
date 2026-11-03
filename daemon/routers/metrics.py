@@ -29,9 +29,10 @@ module:
   ``GET /api/metrics/series`` are the query door.  They are the
   READ side of the same registry, served from the query package
   (:mod:`daemon.services.metrics_query`) behind the SAME
-  ``maintenance:read`` scope — no new scope is minted, and the scope
-  declaration rides the route's ``dependencies=[scope_required(...)]``
-  form exactly as the exposition route's does;
+  ``maintenance:read`` OR ``metrics:read`` scope (the any-of set minted
+  by the metrics-agent-tools lane) and the scope declaration rides the
+  route's ``dependencies=[scope_required(...)]`` form exactly as the
+  exposition route's does;
 * they are BOUNDED: the ``offset``/``limit`` pair pages the body, the
   byte ceiling bounds the page, and a bounded body carries the opaque
   ``next_cursor`` that resumes it — a bounded body is never a SILENT
@@ -50,17 +51,21 @@ docstring states the SHAPE, the doc states the CONTRACT.
 AUTH POSTURE — the metric registry carries INTERNAL counters, so the
 route is deliberately NOT world-readable:
 
-* **SCOPE** — the route carries the ``maintenance:read`` scope (the
+* **SCOPE** — the TEXT route carries the ``maintenance:read`` scope (the
   EXISTING taxonomy entry for a maintenance/diagnostic read — the same
-  scope the ``/api/wedge-captures`` family carries; no new scope is
-  minted). The declaration rides the route's
+  scope the ``/api/wedge-captures`` family carries). The three QUERY
+  routes carry the ANY-OF set ``maintenance:read`` OR ``metrics:read``
+  (the second taxonomy entry was minted by the metrics-agent-tools lane
+  so a machine lane can read the query door WITHOUT the destructive
+  checkpoint-cleanup capability that ``maintenance:read`` also confers).
+  The declaration rides the route's
   ``dependencies=[scope_required(...)]`` form, so the handler signature
   is unchanged by the scope check.
 * **AUTH-ON** — the route carries NO class tag, so it is protected by
   default (an untagged route is protected; see
   ``daemon/auth/route_meta.py``). The middleware 401s an
   unauthenticated caller, and the scope check 403s an authenticated
-  caller WITHOUT ``maintenance:read`` (``SCOPE_INSUFFICIENT``).
+  caller WITHOUT a sufficient scope (``SCOPE_INSUFFICIENT``).
 * **AUTH-OFF** — the route REFUSES: the inline
   :func:`_require_auth_on` gate returns ``503 AUTH_NOT_CONFIGURED``
   (the D3 fail-closed contract of the prompts family, mirrored
@@ -93,11 +98,21 @@ router = APIRouter(prefix="/metrics", tags=["metrics"])
 #: parameter, not off ``application/json``).
 METRICS_MEDIA_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
-#: The scope the family carries — the EXISTING taxonomy entry for a
-#: maintenance/diagnostic read (deliberate scope REUSE, the same
-#: convention the ``/api/wedge-captures`` family follows; NO new scope
-#: is minted for the metrics surface).
+#: The scope the TEXT-exposition route carries — the EXISTING taxonomy
+#: entry for a maintenance/diagnostic read (deliberate scope REUSE, the
+#: same convention the ``/api/wedge-captures`` family follows).  The
+#: THREE QUERY routes accept this scope OR ``metrics:read`` (the
+#: any-of set minted by the metrics-agent-tools lane).
 _SCOPE_READ = "maintenance:read"
+
+#: The SECOND scope of the query door's any-of set (the
+#: metrics-agent-tools lane, 2026-11-03).  ``maintenance:read`` also
+#: confers the destructive checkpoint-cleanup capability (AM-20), so a
+#: machine lane that only needs to READ the query door carries this
+#: scope instead.  The three QUERY routes accept EITHER scope; the
+#: text-exposition route keeps ``maintenance:read`` ALONE (D6 step 3 —
+#: Prometheus text exposition is the scraping surface).
+_SCOPE_READ_METRICS = "metrics:read"
 
 #: The auth-OFF posture error code (D3 fail-closed). The prompts family
 #: (``daemon/routers/prompts.py``) and the custom-agents family use
@@ -150,7 +165,13 @@ def _require_auth_on(request: Request) -> None:
             "content": {METRICS_MEDIA_TYPE: {"example": "# TYPE ..."}},
         },
         401: {"description": "Auth is ON and the caller is unauthenticated."},
-        403: {"description": "The caller lacks the ``maintenance:read`` scope."},
+        403: {
+            "description": (
+                "The caller lacks the ``maintenance:read`` scope (the "
+                "text-exposition route carries that scope ALONE — it is the "
+                "scraping surface, not the query door)."
+            )
+        },
         503: {"description": "Auth is OFF — the route refuses (fail-closed)."},
     },
 )
@@ -177,7 +198,8 @@ async def get_metrics(request: Request) -> PlainTextResponse:
 # * ``GET /api/metrics/series``   — the windowed trend.
 #
 # The routes EXTEND the existing family — no new router module, no new
-# mount, no new scope (the family's EXISTING ``maintenance:read``).
+# mount; the query routes' scope is the any-of set
+# ``maintenance:read`` OR ``metrics:read``.
 #
 # POSTURE (the contract's truth table — docs/architecture/
 # metrics-query-contract.md §6):
@@ -187,7 +209,8 @@ async def get_metrics(request: Request) -> PlainTextResponse:
 #   AUTH_NOT_CONFIGURED and never reads the registry;
 # * the door is NEVER switch-gated (AM-17/AM-18).  The kill-switch's
 #   emergency-off lever for THIS surface is TOKEN REVOCATION of the
-#   ``maintenance:read`` grant — not the switch.  The query package
+#   the query routes' grant (``maintenance:read`` / ``metrics:read``)
+#   — not the switch.  The query package
 #   never reads the switch (the ``census_gated`` reason comes from the
 #   public ``CensusSampler.gated`` property);
 # * the response BODY is BUILT off the event loop (``db_offload.offload``
@@ -557,11 +580,16 @@ def _build_series_page(
 
 @router.get(
     "/families",
-    dependencies=[scope_required(_SCOPE_READ)],
+    dependencies=[scope_required(_SCOPE_READ, _SCOPE_READ_METRICS)],
     responses={
         200: {"description": "The registered metric families, as served."},
         401: {"description": "Auth is ON and the caller is unauthenticated."},
-        403: {"description": "The caller lacks the ``maintenance:read`` scope."},
+        403: {
+            "description": (
+                "The caller lacks the required scope (``maintenance:read`` "
+                "OR ``metrics:read`` — the query routes accept either)."
+            )
+        },
         503: {
             "description": (
                 "Auth is OFF (fail-closed) or the query provider is "
@@ -601,12 +629,17 @@ async def get_metrics_families(request: Request) -> dict[str, Any]:
 
 @router.get(
     "/snapshot",
-    dependencies=[scope_required(_SCOPE_READ)],
+    dependencies=[scope_required(_SCOPE_READ, _SCOPE_READ_METRICS)],
     responses={
         200: {"description": "The current published values."},
         400: {"description": "The requested filters are invalid."},
         401: {"description": "Auth is ON and the caller is unauthenticated."},
-        403: {"description": "The caller lacks the ``maintenance:read`` scope."},
+        403: {
+            "description": (
+                "The caller lacks the required scope (``maintenance:read`` "
+                "OR ``metrics:read`` — the query routes accept either)."
+            )
+        },
         404: {"description": "The requested family is not registered."},
         503: {
             "description": (
@@ -669,12 +702,17 @@ async def get_metrics_snapshot(
 
 @router.get(
     "/series",
-    dependencies=[scope_required(_SCOPE_READ)],
+    dependencies=[scope_required(_SCOPE_READ, _SCOPE_READ_METRICS)],
     responses={
         200: {"description": "The windowed trend series."},
         400: {"description": "The selector or the cursor is invalid."},
         401: {"description": "Auth is ON and the caller is unauthenticated."},
-        403: {"description": "The caller lacks the ``maintenance:read`` scope."},
+        403: {
+            "description": (
+                "The caller lacks the required scope (``maintenance:read`` "
+                "OR ``metrics:read`` — the query routes accept either)."
+            )
+        },
         503: {
             "description": (
                 "Auth is OFF (fail-closed) or the query provider is "

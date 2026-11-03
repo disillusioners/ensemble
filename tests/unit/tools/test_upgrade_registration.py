@@ -99,11 +99,14 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_sixteen_entries(self) -> None:
-        """The default-deny set is exactly sixteen entries —
+    def test_privileged_categories_is_exactly_seventeen_entries(self) -> None:
+        """The default-deny set is exactly seventeen entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``secrets``,
-        ``settings``, ``board`` and ``self-alarm``.
+        ``settings``, ``board``, ``self-alarm``,
+        ``view-write``, ``board-link``, ``wedge-capture``,
+        ``instance_read``, ``instance_ops``, ``mcp_rpc``,
+        ``notify-user`` and ``metrics-read``.
 
         ``service`` was REMOVED from this set by user override
         2026-09-16 (D4 reversed; see
@@ -219,6 +222,12 @@ class TestStaticRegistrationChecklist:
         # allow entry is the only access path, and the tool body ALSO
         # carries its own agent_id gate.
         "notify-user",
+        # metrics-read (2026-11-03, metrics-agent-tools lane): the
+        # READ-ONLY metric-registry category — opt-in-only; the
+        # maintenancer / devops / wanderer allow entries are the only
+        # access path, and every tool body ALSO carries its own
+        # agent_id gate.
+        "metrics-read",
 })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

@@ -18,7 +18,8 @@
       "db",
       "instance_read",
       "instance_ops",
-      "wedge-capture"
+      "wedge-capture",
+      "metrics-read"
     ],
     "deny": ["git_commit", "edit_file", "write_file"]
   },

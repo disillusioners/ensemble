@@ -2531,6 +2531,10 @@ async def lifespan(app: FastAPI):
             sampler_interval_s=_metrics_sampler_interval_s,
         )
         app.state.metrics_query = _metrics_query_provider
+        # The agent-tool door reads the SAME provider (one provider, one
+        # ring, one truth) — the manager-held mount beside the app-state
+        # assignment.
+        manager.metrics_query_provider = _metrics_query_provider
         _metrics_sampler = MetricsSampler(
             ring=_metrics_ring,
             interval_s=_metrics_sampler_interval_s,
@@ -2539,6 +2543,10 @@ async def lifespan(app: FastAPI):
         app.state.metrics_sampler = _metrics_sampler
     except Exception as metrics_query_boot_exc:
         app.state.metrics_query = None
+        # Fail-visible, not implicit: the tool door's handle is cleared in
+        # the SAME breath as the door's handle, so a degraded boot leaves
+        # BOTH at None (the tools stay present and refuse loudly).
+        manager.metrics_query_provider = None
         app.state.metrics_sampler = None
         logger.error(
             "[Metrics] query provider/sampler DISABLED — boot failed: %s",
@@ -3787,6 +3795,10 @@ async def lifespan(app: FastAPI):
             )
     app.state.metrics_sampler = None
     app.state.metrics_query = None
+    # Symmetric teardown: the tool door's handle is cleared with the
+    # door's handle, so the tool can never read a live-but-shutting-down
+    # provider after the door's handle is gone.
+    manager.metrics_query_provider = None
 
     # ── Metrics exposition listener stop (metrics-collection P0 T1) ─────
     # Drain order: AFTER the resource-monitor stop and the wedge-capture

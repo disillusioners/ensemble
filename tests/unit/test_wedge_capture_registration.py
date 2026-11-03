@@ -11,7 +11,7 @@ This pack pins:
   discovered by the AST scanner and the exact-equality drift pin
   fails at boot);
 * (b) the category is in ``PRIVILEGED_TOOL_CATEGORIES``;
-* (c) the frozenset LENGTH is 16 (ari-voice joined 2026-10-25);
+* (c) the frozenset LENGTH is 17 (metrics-read joined 2026-11-03);
 * (d) both tool names are in ``DYNAMIC_TOOL_NAMES`` and
   ``KNOWN_TOOL_NAMES``;
 * (e) the AST scanner finds both ``@tool`` functions (decorator-only
@@ -66,7 +66,9 @@ EXPECTED_HOLDERS: list[str] = ["ari", "leader", "maintenancer"]
 
 #: The privileged universe — 14 pre-existing entries (base's 15 minus
 #: the ``cu`` category REMOVED 2026-10-24 with the cu builtin MCP
-#: server) plus the wedge-capture category = 15 members.
+#: server) plus the wedge-capture category = 15 members at the wedge
+#: join (17 after the ari-voice 2026-10-25 and metrics-read
+#: 2026-11-03 additions).
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
@@ -89,6 +91,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # allow entry is the only access path, and the tool body ALSO
 # carries its own agent_id gate.
 "notify-user",
+# metrics-read (2026-11-03, metrics-agent-tools lane): the
+# READ-ONLY metric-registry category — opt-in-only; the
+# maintenancer / devops / wanderer allow entries are the only
+# access path, and every tool body ALSO carries its own
+# agent_id gate.
+"metrics-read",
 })
 
 
@@ -165,11 +173,11 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_sixteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_sixteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
+    def test_the_set_has_seventeen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
 
 
 # ── A13: the attribute pin + the default-deny behavioral leg ───────────────

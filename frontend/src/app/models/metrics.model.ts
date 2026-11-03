@@ -116,6 +116,20 @@ export interface MetricsActivation {
   readonly census_enabled: boolean;
   /** The door's own posture — always `auth-gated-always-on`. */
   readonly query_api: string;
+  /**
+   * Whether the LAST registry read SUCCEEDED (the door's degraded-read
+   * flag, H5).
+   *
+   * `false` means the registry read RAISED — the door then answers a
+   * **200 with an EMPTY body**, byte-identical to a legitimately empty
+   * registry, so this flag is the ONLY way a client can tell the two
+   * apart.
+   *
+   * **OPTIONAL and DEFAULT-SAFE**: absent reads as healthy. The backend
+   * always emits it, but a consumer must IGNORE unknown members (AM-7),
+   * so the failure predicate is `=== false` — never a truthiness check.
+   */
+  readonly registry_read_ok?: boolean;
 }
 
 /** The envelope header — shared by all three routes (contract §4.1). */
@@ -348,6 +362,23 @@ export type MetricsDoorErrorCode =
   | 'registry_unavailable'
   | 'network'
   | 'unexpected';
+
+/**
+ * The copy for a DEGRADED registry read (`activation.registry_read_ok`
+ * is `false`).
+ *
+ * GENERIC by design: the copy asserts only the FACT the flag carries —
+ * the read failed, so the catalog below is INCOMPLETE or UNKNOWN, not
+ * "no data". It never attributes a CAUSE (no defect naming): a shipped
+ * string that names one goes stale the moment the owning lane lands,
+ * and the failure mode it must not become is "the badge says 'empty'".
+ *
+ * It is deliberately NOT `registry_unavailable` — that copy means "no
+ * provider wired" (the 503 case), and a failed registry READ is a
+ * different fact.
+ */
+export const METRICS_REGISTRY_DEGRADED_COPY =
+  'The metrics registry read failed — the catalog below is INCOMPLETE or UNKNOWN, not "no data".';
 
 /** The copy the page banners for each decoded failure class (A-5). */
 export const METRICS_DOOR_ERROR_COPY: Readonly<Record<MetricsDoorErrorCode, string>> = {

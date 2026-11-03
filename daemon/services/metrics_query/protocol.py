@@ -47,9 +47,33 @@ class MetricsQueryProvider(Protocol):
         series: Sequence[str] | None = None,
         window_s: int | None = None,
         max_points: int | None = None,
+        now: int | None = None,
+        max_series: int | None = None,
     ) -> list[dict[str, Any]]:
         """The windowed trend points of the matching series."""
         ...
+
+    @property
+    def registry_read_ok(self) -> bool:
+        """Whether the LAST registry read SUCCEEDED.
+
+        ``False`` means the registry read RAISED — the door answered an
+        EMPTY body, byte-identical to an empty registry, so this fact is
+        the only way a consumer can tell the two apart.
+        """
+        ...
+
+
+# SEAM-SIDE AMENDMENT (the metrics-agent-tools lane): ``now`` (GAP-1),
+# ``max_series`` (GAP-2) and ``registry_read_ok`` (GAP-3) were added to the
+# Protocol so the FIRST consumer (the agent-tool door) can be typed against
+# it with no ``Any``/``getattr`` escape.  The amendment is SEAM-side: the
+# contract governs the HTTP/wire semantics, this Protocol governs the
+# in-process seam.  GAP-4 (``listener_enabled``) and GAP-5
+# (``census_enabled``) are deliberately NOT declared — no consumer reads
+# them (the activation facts come from the shipped ``activation_block``
+# builder instead), and a Protocol member no consumer references
+# guarantees nothing.
 
 
 __all__ = ["MetricsQueryProvider"]

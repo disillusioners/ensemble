@@ -28,8 +28,8 @@ the *behavioural check site* as `<file>:<call line>`):
 | # | Surface | Switch-gated? | Auth-gated? | Off-state semantics | Anchor |
 |---|---|---|---|---|---|
 | 1 | `:9798` exposition **listener body** | YES — default-OFF **at the body level**: the socket still binds and serves a valid empty 200 while OFF (AM-19(a)) | NO — unauthenticated, loopback-only in-constructor (`metrics_listener.py:361-368`) | HTTP 200 with a VALID EMPTY body — no `ensemble_metrics_up`, no family series; the socket is still bound | gate method `metrics_listener.py:408-419`; call line `:419` |
-| 2 | `/api/metrics` **text exposition** | NO — never consults the switch | YES — `maintenance:read` (`daemon/routers/metrics.py:96`, `:143`) | served in both switch states | auth seam `metrics.py:117-133` |
-| 3 | **Query routes** (`families` / `snapshot` / `series`) | NO — never switch-gated (D-11b / D1(b) wins; AM-17) | YES — `maintenance:read` on all three + the same fail-closed 503 seam | **availability, not emptiness** — the door serves live registry data in both switch states | this contract §6 |
+| 2 | `/api/metrics` **text exposition** | NO — never consults the switch | YES — `maintenance:read` ALONE — the scraping surface, not the query door (D6 step 3) (`daemon/routers/metrics.py:106`, `:158`) | served in both switch states | auth seam `metrics.py:136-148` |
+| 3 | **Query routes** (`families` / `snapshot` / `series`) | NO — never switch-gated (D-11b / D1(b) wins; AM-17) | YES — `maintenance:read` **OR** `metrics:read` on all three (the any-of set minted by the metrics-agent-tools lane, 2026-11-03 — D6) + the same fail-closed 503 seam | **availability, not emptiness** — the door serves live registry data in both switch states | this contract §6 |
 | 4 | **Census DB work** | YES — the census sampler performs NO database work while OFF | n/a (internal thread) | the sampler keeps ticking; its DB leg is skipped; F6 families go dark with `availability.reason="census_gated"` | gate method `metrics_census.py:347-355`; call line `:355` |
 | 5 | **Registry accumulation** | NO — ungated, always on | n/a (in-process) | writers flip dirty flags and increment regardless of the switch; switch-OFF does NOT stop data collection | `checkpoint_metrics.py` observe paths carry no gate |
 | 6 | **FE charts polling** (the third activation surface, leader F6) | NO — polls the query door only; the FE **never polls the listener surface** | YES — the caller's session scope | the FE polls `/snapshot` (10 s) and `/series` (15 s); when the door is unreachable or the session has expired the tab **degrades to its cached/last-good view, marked stale** (`phase5-plan.md` task 5.4) rather than polling harder or blanking | `phase5-plan.md` 5.4 |
@@ -315,11 +315,11 @@ value-enumerated.
 | Surface | Auth configured | Switch | Runtime | Scope | Result |
 |---|---|---|---|---|---|
 | `/api/metrics/{families,snapshot,series}` | OFF | any | any | any | **503 `AUTH_NOT_CONFIGURED`** — before any provider read (fail-closed) |
-| the three query routes | ON | ON | any | `maintenance:read` | **200** — registry-sourced series live |
-| the three query routes | ON | OFF | any | `maintenance:read` | **200** — registry-sourced series **identical** to the switch-ON case; only the permitted diffs below appear |
+| the three query routes | ON | ON | any | `maintenance:read` or `metrics:read` | **200** — registry-sourced series live |
+| the three query routes | ON | OFF | any | `maintenance:read` or `metrics:read` | **200** — registry-sourced series **identical** to the switch-ON case; only the permitted diffs below appear |
 | the three query routes | ON | any | any | scope miss | **403** |
 | the three query routes | ON | any | any | no session | **401** |
-| the three query routes | ON | any | non-PG | `maintenance:read` | **200** — F6 `availability` → `census_not_running` (the switch state is NOT inferable) |
+| the three query routes | ON | any | non-PG | `maintenance:read` or `metrics:read` | **200** — F6 `availability` → `census_not_running` (the switch state is NOT inferable) |
 | `:9798` listener body | n/a (unauthenticated, loopback-only) | OFF | any | n/a | **200 valid empty** — no `ensemble_metrics_up`, no family series; the socket is still bound |
 | `:9798` listener body | n/a | ON | any | n/a | **200** — full exposition body |
 
@@ -377,14 +377,14 @@ registered family with no observation ⇒ `series_absent`.
 
 > central-metrics-v1 ships the metrics query API (`GET /api/metrics/families`,
 > `GET /api/metrics/snapshot`, `GET /api/metrics/series`) AUTH-GATED ONLY — scope
-> `maintenance:read`, 503 `AUTH_NOT_CONFIGURED` fail-closed before any registry read — and
+> `maintenance:read` or `metrics:read`, 503 `AUTH_NOT_CONFIGURED` fail-closed before any registry read — and
 > deliberately does NOT consult `ENSEMBLE_METRICS_ENABLED`, consistent with the shipped
 > `/api/metrics` text-exposition route. The unauthenticated `:9798` exposition listener REMAINS
 > default-OFF (`limits.metrics_enabled=False` unchanged) — **at the BODY level: the socket still
 > binds and serves a valid empty 200 while OFF** (AM-19(a)). Enabling it for Prometheus scraping
 > is a live managed-key flip (≤ 5 s TTL, no restart).
 > **The query door has NO kill-switch of its own — its emergency-off lever is token revocation of
-> the `maintenance:read` grant** (AM-19(c); the runbook names the lever). Switch-OFF does NOT
+> the `maintenance:read` / `metrics:read` grant** (AM-19(c); the runbook names the lever). Switch-OFF does NOT
 > blank the query API: the registry accumulates ungated, so query routes serve live data in both
 > switch states; only the listener body goes empty and the census sampler's DB work stops (F6
 > `ensemble_pg_*` families go dark with `availability.reason="census_gated"`). Emergency-off
@@ -402,7 +402,7 @@ registered family with no observation ⇒ `series_absent`.
 > via `restart_epoch` (AM-14), never a silent gap.
 >
 > **Scope disclosure (AM-20):** `maintenance:read` ALSO confers checkpoint-cleanup-EXECUTE
-> capability (`daemon/routers/maintenance.py`). The scope split (`metrics:read`) is a NAMED
+> capability (`daemon/routers/maintenance.py`). The scope split (`metrics:read`) IS BUILT (the metrics-agent-tools lane, 2026-11-03): the three query routes accept `maintenance:read` OR `metrics:read`, and `metrics:read` alone does NOT confer the checkpoint-cleanup capability. Its v1 status — a NAMED
 > COMMITMENT (LR-1, `decisions.md` §D6), not built in v1.
 >
 > **Cardinality budget (AM-26/LR-2):** +274 series → post-lane 363 ≈ 18.2 % (F7c-inclusive; 361 on

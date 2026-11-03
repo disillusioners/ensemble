@@ -32,7 +32,7 @@ They add **no new mount** and **no new scope**.
 | `GET /api/metrics/snapshot` | the **current published values** of the matching series | filters: `?family=`, `?name_prefix=` |
 | `GET /api/metrics/series` | the **windowed trend** of the matching series | filters: `?series=`, `?names=`, `?window_s=`, `?max_points=`, `?cursor=` |
 
-**Scope:** all three require `maintenance:read` and share the same **fail-closed** auth seam:
+**Scope:** all three require `maintenance:read` **or** `metrics:read` and share the same **fail-closed** auth seam:
 when auth is not configured the door returns **503 `AUTH_NOT_CONFIGURED`** *before any registry
 read* — it never serves an unauthenticated body. See §5 for the scope over-grant disclosure.
 
@@ -139,7 +139,7 @@ An expected condition is **never** a 500.
 | 400 | `invalid_label_filter` | a malformed label-aware selector, or a `?names=` request over the 50-name ceiling (**rejected, never silently truncated**) |
 | 400 | `invalid_cursor` | the cursor is invalid or expired (older than the buffer's oldest point) |
 | 401 | — | auth is ON and the caller has no session (the auth middleware) |
-| 403 | `SCOPE_INSUFFICIENT` | the caller lacks `maintenance:read` — the body is `{"error": "SCOPE_INSUFFICIENT", "message": "Token lacks required scope"}` (`daemon/auth/decorators.py:75-78`). **Never a 404** — the caller is authenticated, just not permitted |
+| 403 | `SCOPE_INSUFFICIENT` | the caller lacks a sufficient scope — the three **query** routes accept `maintenance:read` **or** `metrics:read`; the **text-exposition** route (`GET /api/metrics`) requires `maintenance:read` ALONE — the body is `{"error": "SCOPE_INSUFFICIENT", "message": "Token lacks required scope"}` (`daemon/auth/decorators.py:75-78`). **Never a 404** — the caller is authenticated, just not permitted |
 | 503 | `AUTH_NOT_CONFIGURED` | auth is **not configured** — fail-closed, **before any registry read** |
 | 503 | `registry_unavailable` | the query provider is not wired |
 
@@ -209,7 +209,7 @@ mis-guess the others:
 |---|---|---|---|---|
 | 1 | `:9798` exposition **listener body** | YES — default-OFF **at the body level** | NO — unauthenticated, loopback-only | HTTP **200 with a valid empty body**; the socket **is still bound** |
 | 2 | `/api/metrics` **text exposition** | NO — never consults the switch | YES — `maintenance:read` | served in both switch states |
-| 3 | the **three query routes** | NO — never switch-gated | YES — `maintenance:read` + the same fail-closed 503 seam | **availability, not emptiness** — live registry data in both switch states |
+| 3 | the **three query routes** | NO — never switch-gated | YES — `maintenance:read` **or** `metrics:read` + the same fail-closed 503 seam | **availability, not emptiness** — live registry data in both switch states |
 | 4 | **census DB work** | YES — the census sampler does no DB work while OFF | n/a (internal thread) | the sampler keeps ticking; its DB leg is skipped; the F6 families go dark with `availability.reason="census_gated"` |
 | 5 | **registry accumulation** | NO — ungated, always on | n/a (in-process) | writers flip dirty flags and increment regardless of the switch |
 | 6 | **FE charts polling** | NO — polls the query door only, never the listener | YES — the caller's session scope | degrades to the cached/stale view, never blanking |
@@ -272,24 +272,41 @@ history — the ring is a 2-hour working window, not a store.
 than the maintenance scope it borrows: a caller who can read the metrics can also trigger a
 checkpoint cleanup.
 
-This is **not** an accident and it is **not** being fixed in v1. The scope split
-(`metrics:read`) is a **NAMED COMMITMENT** (leader ruling LR-1) — see
-`.agents/shared/planning/central-metrics-v1/decisions.md` §D6 for the retrofit map:
+This is **not** an accident. The scope split (`metrics:read`) is a **NAMED COMMITMENT** (leader
+ruling LR-1) — see `.agents/shared/planning/central-metrics-v1/decisions.md` §D6 for the
+retrofit map — and it is **BUILT** as of the metrics-agent-tools lane (2026-11-03):
 
-1. **1 taxonomy line** — add `metrics:read` to the scope taxonomy (`daemon/auth/scopes.py`).
-2. **1 manifest line** — the family's scope becomes `"/api/metrics": "maintenance:read|metrics:read"`.
-3. **4 decorator lines** — the three new query routes declare `metrics:read`; the shipped text
-   route keeps `maintenance:read`.
+1. **1 taxonomy line** — `metrics:read` is in the scope taxonomy (`daemon/auth/scopes.py`).
+2. **1 manifest line** — the family's scope is `"/api/metrics": "maintenance:read|metrics:read"`.
+3. **4 decorator lines** — the three query routes declare the any-of set; the shipped text
+   route keeps `maintenance:read` ALONE.
 4. **Cage note** — the scope cage is a **subset** check, so the three routes stay inside the
    pinned set, and `SESSION_OPERATOR_SCOPES` auto-grants, so **no operator re-grant is needed**.
 
-**The trigger for the retrofit (the recorded condition):** a non-operator machine lane reads the
-door in this lane's lifetime (a Grafana token, or the deferred agent-tool door) ⇒ mint
-`metrics:read` at that point. **Until then** v1 stays on `maintenance:read` and the query-API
-docs disclose the over-grant — this section.
+**What the split buys.** A caller holding `metrics:read` ALONE reads the three query routes and
+is refused (403) on the Prometheus text-exposition route **and** on the destructive
+checkpoint-cleanup route — so the over-grant above no longer reaches a machine lane that only
+needs to READ the metrics. A caller holding `maintenance:read` is UNCHANGED on every route.
 
-**This section is binding guidance for the deferred lanes** (the deferred agent-tool door and
-the deferred Grafana layer). It is not a "revisit later".
+### 5.1 Forward-declaration — the item-#3 text-route seam (OPEN)
+
+**The Grafana datasource (item #3) consumes the PROMETHEUS TEXT surface**
+(`daemon/routers/metrics.py` — "no filtering, no reshaping" ⇒ the WIDER surface), and that
+surface **KEEPS `maintenance:read` ALONE** (D6 step 3). A Grafana token minted with
+`metrics:read` alone is therefore **403 on the text route**.
+
+**Item #3 must decide the text-route scope**, and there are exactly two options:
+
+* **Option A** — grant `maintenance:read` to the datasource. That re-opens the destructive
+  checkpoint-cleanup over-grant this split closed (`daemon/routers/maintenance.py` — the
+  `checkpoint-cleanup-EXECUTE` capability).
+* **Option B** — amend the SAME manifest-family pin a SECOND time
+  (`tests/unit/test_router_scope_manifest.py` — the `"/api/metrics"` manifest row) and
+  deliberately flip the auth-matrix REVERSAL pin (the row asserting that a `metrics:read`-only
+  caller is refused on the text route).
+
+Both options name their amendment sites; neither is this lane's to take. **This entry is
+binding guidance for item #3, not a "revisit later".**
 
 ---
 
