@@ -219,6 +219,12 @@ class TestStaticRegistrationChecklist:
         # allow entry is the only access path, and the tool body ALSO
         # carries its own agent_id gate.
         "notify-user",
+        # metrics-read (2026-11-03, metrics-agent-tools lane): the
+        # READ-ONLY metric-registry category — opt-in-only; the
+        # maintenancer / devops / wanderer allow entries are the only
+        # access path, and every tool body ALSO carries its own
+        # agent_id gate.
+        "metrics-read",
 })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

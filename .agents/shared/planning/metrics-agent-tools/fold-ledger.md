@@ -184,6 +184,50 @@ is EXEMPT and NEVER triggers an edit to a frozen input).
   `registry_read_ok` declaration reds the completeness pin (3 nodes RED),
   and the restore is byte-identical.
 
+### H.3 — Phase-2 (the ONE-commit cluster) — pin-census re-derivation + the Tier-1 gate
+
+**THE PIN-CENSUS ARITHMETIC SHIFTED (the plan's task 2.8 re-derivation rule).**
+The plan's prose says "10 files / 15 EDIT sites + 1 VERIFY-ONLY". The
+GREP-DERIVED census at implementation time is **16 EDIT sites + 1
+VERIFY-ONLY = 17 sites across 11 files** — one site the plan's prose did
+not enumerate:
+
+| # | file | site | kind |
+|---|---|---|---|
+| 1-5 | the five `EXPECTED_PRIVILEGED_SET` constants (`test_board_registration.py:70`, `test_instance_ops_registration.py:88`, `test_notify_user_registration.py:54`, `test_self_alarm_registration.py:76`, `test_wedge_capture_registration.py:70`) | the constant | EDIT |
+| 6-10 | the five inline `frozenset` literals (`test_upgrade_registration.py:149`, `test_attestation_registration.py:192`, `test_secrets_registration.py:226`, `test_maintenancer_spawn_resolves_tools.py:369`, `test_service_tool_flag_off_byte_identical.py:832`) | the literal | EDIT |
+| 11-15 | the five count pins (`:215` / `:203` / `:175` / `:212` / `:172`) | `== 16` → `== 17` | EDIT |
+| **16** | **`test_maintenancer_spawn_resolves_tools.py:141`** — the maintenancer meta's EXACT allow list (the real meta's `tools.allow`) | the literal | **EDIT — NOT IN THE PLAN'S PROSE** |
+| 17 | `test_board_registration.py:249-287` — the ari trailing-entry allow-array pin | VERIFY-ONLY (read, never edited: `metrics-read` is not granted to ari) | — |
+
+The 16th EDIT site is a **consequence of the category being granted to the
+maintenancer** — the maintenancer's real meta allow list is pinned by
+exact equality, so the new category entry MUST land there too. The two
+same-commit DOCSTRING sites (advisory A6's "exactly fifteen categories" and
+approver N12's "the EIGHT-site pin") were updated in the same commit.
+
+**The Tier-1 gate leg (task 2.10).**
+* **D1** (HEAD-only, base-absent by construction): the new registration pack
+  (`tests/unit/test_metrics_read_registration.py`, **30 nodes**) + the new
+  tools pack (`tests/unit/metrics/test_metrics_read_tools.py`, **33 nodes**)
+  — **63/63 green**.
+* **D2** (dual-side comparable): the 14 derived files (the 10 pin files +
+  the frozen-drift pin + the two integration pin files + the two agent-meta
+  packs + the loader pack) + the whole `tests/unit/metrics/` corpus.
+  HEAD **813 collected / 800 passed / 4 failed**; BASE **752 collected /
+  739 passed / 4 failed** (the +61 delta is the two new packs net of the
+  pack-file node-count delta).
+* **FAILED-list diff**: the four FAILED node-ids are **IDENTICAL** on both
+  legs ⇒ **net-new deterministic reds = 0**, every residual base-proven:
+  * `tests/unit/test_maintenancer_agent.py::TestConventionCompliance::{test_all_prompt_files_exist, test_prompt_file_non_empty[memory.md], test_no_forbidden_system_tokens[memory.md]}` — `agents/maintenancer/memory.md` is missing AT BASE too;
+  * `tests/unit/metrics/test_metrics_family_adjudication.py::TestNoProducerInstrumentation::test_the_daemon_diff_is_confined_to_the_allowed_files` — `AssertionError: daemon/__init__.py` (identical on both legs).
+  * The extracted error-line digests DIFFER between the legs **only** in the
+    worktree path embedded in the `FileNotFoundError` messages
+    (`ensemble-src-wt-metrics-tools` vs `ensemble-src-wt-base-metrics`) — a
+    benign path difference, not a behavioural one. The
+    `AssertionError: daemon/__init__.py` line is byte-identical on both legs.
+* **The prompt-artifact baseline**: `python3 scripts/protection/generate_prompt_artifact_baseline.py --check` reports **exactly 3 modified files** — the 3 `tools_note.md` — confirming council W7's derivation (the baseline tracks `tools_note.md`, NOT `meta.json`; the `agents/` PAYLOAD delta is 6 files). The baseline re-stamp is a STAGE-TIME step (giter), recorded in the Phase-6 stage-prep checklist.
+
 ---
 
 ## §G — The implementation-tidier backfill (placeholder — DO NOT fill before the tidier pass)

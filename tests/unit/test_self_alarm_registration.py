@@ -109,6 +109,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # allow entry is the only access path, and the tool body ALSO
 # carries its own agent_id gate.
 "notify-user",
+# metrics-read (2026-11-03, metrics-agent-tools lane): the
+# READ-ONLY metric-registry category — opt-in-only; the
+# maintenancer / devops / wanderer allow entries are the only
+# access path, and every tool body ALSO carries its own
+# agent_id gate.
+"metrics-read",
 })
 
 #: The ONLY agent allowed to hold the self-alarm category.
@@ -209,7 +215,7 @@ class TestPrivilegedCategory:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
     def test_the_set_has_sixteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
 
 
 # ── the allow-lists ──────────────────────────────────────────────────────

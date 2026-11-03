@@ -289,6 +289,7 @@ from .view_write import create_view_write_tools
 from .board_link import create_board_link_tools
 from .wedge_capture import create_wedge_capture_tools
 from .notify_user import create_notify_user_tools
+from .metrics_read import create_metrics_read_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools, create_kms_tools, create_mcp_env_tools
 from .system import create_system_tools
@@ -6617,6 +6618,47 @@ Returns:
     tools.extend(
         create_notify_user_tools_if_available(
             manager, current_instance_id, agent_id, agent_tag=version_tag
+        )
+    )
+
+    # ── Metrics read tools (metrics-agent-tools lane, 2026-11-03) ────────
+    # Same critical list-append pattern as board_tool_list /
+    # self_alarm_tool_list / the wedge-capture extend above:
+    # decorator-only registration is SILENTLY INVISIBLE — this extend is
+    # the third step of the three-step registration seam (decorator +
+    # registry entries + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # The category is PRIVILEGED (entry #17): the daemon's own metric
+    # registry is an internal counter surface, so the empty-allow inherit
+    # universe must never auto-grant it. The tool bodies carry a SECOND,
+    # independent agent_id gate (the shared helper in
+    # ``daemon/tools/metrics_read.py``) — a LITERAL tool name in an allow
+    # list bypasses the category gate, so the category alone cannot spell
+    # the audience.
+    #
+    # NO ``*_if_available`` wrapper (RULING-1): the factory gates on
+    # MODULE + manager-handle existence only, and the tool BODY reads
+    # ``manager.metrics_query_provider`` PER CALL — so a degraded boot
+    # leaves the tools PRESENT and loudly refusing (the notify_user
+    # kill-switch shape), never silently vanished.
+    #
+    # ``agent_id`` is the layer-3 gate's input; it is a parameter of THIS
+    # function already (``create_instance_tools(..., agent_id="", ...)``),
+    # so it is in scope here. A construction that omitted it would fall
+    # back to ``""`` ⇒ the body gate denies every call (fail-closed, but a
+    # dead tool).
+    tools.extend(
+        create_metrics_read_tools(
+            manager,
+            current_instance_id=current_instance_id,
+            agent_id=agent_id,
+            agent_tag=version_tag,
         )
     )
 
