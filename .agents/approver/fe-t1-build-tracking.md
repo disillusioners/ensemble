@@ -51,3 +51,37 @@ findings will be appended to `approval.md` as an addendum (a REJECTED verdict ca
 only be strengthened, not reversed).
 
 **Next iteration:** 002 — fold round against B1/B2/B3 (+W1–W5), then re-review.
+
+---
+
+## Iteration 001 addendum — independent cross-check (2026-11-03)
+
+Cold-context `plan-approval` worker `82404cdb-8458-4a83-a5ba-00f1286e3a35` returned
+**REJECTED** (4 blocking issues): 2 confirm the approver's (B1 mint fence, B3
+measurement tool), 2 are NEW and were independently verified by the approver against
+the tree before being folded in.
+
+| # | Issue | Status |
+|---|---|---|
+| B1 | The mint (the lane's only DB write) is unfenced | **SHARPENED** — `daemon/repositories/factory.py:346-350` resolves host/port/db/user/password as `os.environ` OVER the file's postgres block, so the P4 pre-seed does NOT protect the mint while `POSTGRES_DB` is ambient (`ensemble_prod`, `POSTGRES_HOST=10.44.0.2`); the discharge must therefore scrub the env, not only point `ENSEMBLE_DATA_DIR` at the scratch dir. Narrower `--scopes "metrics:read"` recommended for the dev leg |
+| B2 | Phase 9's task graph contradicts the auth-env-before-boot ordering | unchanged |
+| B3 | The Phase-9 route-chunk re-derivation is unstable under the lane's own changes | unchanged (cross-check: the tool throws → B1/B2/B3/B4 all become unmeasurable) |
+| **B4** | **NEW** — §9's D-2 operator recipe omits `ENSEMBLE_AUTH_ISSUER`; `AuthConfig.issuer` has no default and is not derived from `discovery_url` (`daemon/config.py:3738-3748`, `:3953-3954`) ⇒ the recipe's daemon refuses to boot (exit 78). §6.1 states the requirement correctly; §9 contradicts it | **folded as a blocker** |
+| **B5** | **NEW** — Phase 5's exit ("the old directory is gone") contradicts Phase 7's 7.4 (which deletes the page shell; the route still lazily imports it at `app.routes.ts:74`) ⇒ the directory cannot be gone at Phase 5's freeze, and deleting it there breaks the build | **folded as a blocker** |
+
+Warnings folded: W6 (the new import pin must be statement-anchored — a substring
+scan trips on 1.7's own doc comment and reddens the Phase-1 freeze), W7 (per-series
+min-max normalization never explicitly removed), W8 (task 6.6 targets the page shell's
+subtitle, a file Phase 7 deletes), W9 (no interpreter pinned; the worktree has no
+`.venv` and bare `python` does not exist), W10 (the dev leg writes into the shared
+`ensemble_dev` DB with no DROP teardown), W11 (G11 juxtaposes the LIVE/DARK split
+with the full/PARTIAL adjudication split — an implementer could hide tabs 5 and 6,
+whose families are live).
+
+**Blocking set after the addendum: B1–B5 (5).** Verdict unchanged: **REJECTED**.
+Corroborated by the cross-check: citation discipline, C-4's code-path analysis, the
+bundle-guard correction and the C-1 lazy-sibling insight, exit-criteria non-vacuity,
+FE-only discipline across all 107 task rows, the six zero-dep governance sites, and
+the task-graph shape (2 disclosed forward edges + the 9.11 self-loop; no hidden cycle).
+
+**Next:** fold B1–B5 + W1–W11, then iteration 002 re-review.

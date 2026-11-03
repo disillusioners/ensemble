@@ -214,3 +214,144 @@ was dispatched in parallel for a second opinion across the whole plan set. Any
 material finding it raises will be appended to this file as an addendum. A REJECTED
 verdict can only be strengthened by that cross-check, not reversed, so the lane's
 next action (a fold round against B1–B3) does not wait on it.
+
+---
+
+# 9. ADDENDUM — independent cross-check report (2026-11-03)
+
+**Status: the verdict is unchanged — REJECTED.** An independent cold-context
+`plan-approval` worker (`82404cdb-8458-4a83-a5ba-00f1286e3a35`) returned **REJECTED**
+with **4 blocking issues**: two confirm mine (B1 the unfenced mint, B3 the unstable
+measurement tool) and **two are new**, both verified by me against the tree before
+being folded in. **The blocking set is now 5 (B1–B5).**
+
+## 9.1 B1 — SHARPENED by the cross-check (the hazard is larger than first stated)
+
+The cross-check traced one hop further and found the decisive line:
+`daemon/repositories/factory.py:346-350` (`create_postgres_engine`) resolves
+`host / port / db / user / password` as **`os.environ` OVER the file's postgres
+block**. Consequences that strengthen B1:
+
+- The P4 pre-seed (`ensemble.json` → `ensemble_dev`) does **not** protect the mint if
+  `POSTGRES_DB` is ambient — the **env wins** at the factory. The ambient agent
+  shell on this host carries `POSTGRES_DB=ensemble_prod`, `POSTGRES_HOST=10.44.0.2`,
+  `PORT=9797`.
+- With no `data/` dir in the worktree, `EnsembleConfig.load_or_create` auto-detects
+  postgres from the ambient env and **persists** a prod-pinned `ensemble.json` into
+  the worktree — the second poison vector the plan itself flags in C-4, now applied
+  to a **write**.
+
+**Discharge (amended):** the mint must run inside the same scrubbed shell as the boot
+(per-variable `POSTGRES_*`/`PG*` scrub — the scrub, not the file, is what protects it),
+with `ENSEMBLE_DATA_DIR=/tmp/fe-t1-dev-data` exported so the file's dev block is the
+fallback, plus a **pre-mint assertion that the resolved engine's database is
+`ensemble_dev`** and a post-mint read-back proving the row landed there. The
+cross-check also recommends the narrower `--scopes "metrics:read"` for the dev leg
+(the door's ANY-OF accepts it — `daemon/routers/metrics.py:57-63` — while
+`maintenance:read` additionally confers the destructive checkpoint-cleanup capability,
+`daemon/auth/scopes.py:32-38`). Adopted.
+
+## 9.2 B4 — NEW: the D-2 operator recipe omits a REQUIRED env var; it would not boot the daemon
+
+**Where:** `plan-overview.md:658-664` (§9 step 2 — the recipe) vs `plan-overview.md:445-449`
+(§6.1 / L1, which states the requirement correctly).
+
+**Found.** The recipe lists `ENSEMBLE_AUTH_ENABLED`, `_CLIENT_ID`, `_CLIENT_SECRET`,
+`_DISCOVERY_URL`, `_ALLOWED_ORIGINS` — and omits **`ENSEMBLE_AUTH_ISSUER`**.
+`AuthConfig.issuer` has **no default** (`daemon/config.py:3738-3742`) and is **not**
+derived from `discovery_url` ("Optional OIDC discovery override. Default derives as
+`<issuer>/.well-known/openid-configuration`" — `daemon/config.py:3743-3748`);
+`daemon/config.py:3953-3954` appends `"issuer"` to the `missing` list and the boot
+**refuses with exit 78**. The plan states the requirement correctly in §6.1 and
+incorrectly in §9 — the two sections contradict each other, and the cited source
+(`docs/runbooks/oauth2-auth.md` §1b) carries the same omission.
+
+**Why it blocks.** D-2 mandates the **exact operator recipe** as a deliverable
+("the exact operator recipe (steps + restart implication) belongs in the close-out
+report"). A user following §9 literally would set the listed vars and the daemon
+would refuse to boot (exit 78) — the recipe does not deliver the outcome it claims.
+
+**Discharge.** Add `ENSEMBLE_AUTH_ISSUER=https://<idp>/` to §9 step 2 and state that
+the issuer's origin must match the discovery document's issuer
+(`daemon/config.py:3984-3988`); amend `docs/runbooks/oauth2-auth.md` §1b, or record
+explicitly that the runbook's env list is incomplete.
+
+## 9.3 B5 — NEW: Phase 5's and Phase 7's exit criteria contradict each other on the same directory
+
+**Where:** `phase5-plan.md:60-61` (Phase 5 exit: "the old directory is gone") vs
+`phase5-plan.md:21` (5.1) and `phase7-plan.md:20` (7.4 + acceptance: "the directory
+`frontend/src/app/pages/resources/` no longer exists").
+
+**Found (verified in the tree).** `frontend/src/app/pages/resources/` contains
+`live/`, `timeline/`, `svg-timeline/` **and** the page shell
+(`resources.component.ts/.html/.scss/.spec.ts`) + `resources-gear-menu.spec.ts`.
+Phase 5's 5.1 moves only `live/` + `timeline/` (+ the new anomalies panel);
+`svg-timeline/` goes in 4.12; the **page shell survives until Phase 7's 7.4** —
+which still owns the route's lazy import (`frontend/src/app/app.routes.ts:74`).
+
+**Why it blocks.** At Phase 5's freeze "the old directory is gone" is **false**, and
+satisfying it by deleting the shell would break the build (the route still imports
+it). The lane therefore cannot satisfy Phase 5's exit criterion without breaking the
+build or silently violating Phase 7's — a contradiction between two exit criteria
+on the same artifact.
+
+**Discharge.** Amend Phase 5's exit to: "the module's `live/` and `timeline/`
+subtrees are relocated; the **page shell remains** in `pages/resources/` until Phase 7
+retires the route", and keep 7.4's directory-removal acceptance as the single
+statement of the deletion.
+
+## 9.4 Additional warnings folded in (from the cross-check, all non-blocking)
+
+- **W6 (was N-2) — the new positive import pin must be statement-anchored.** The
+  existing guard is a naive `expect(sources).not.toContain('chart.js')` over
+  concatenated file bodies (`metrics.bindings.pins.spec.ts:89-95`), and task 1.7
+  requires the stub's doc comment to state the dynamic-import shape — which contains
+  the literal `from 'chart.js'`. As written, 1.2(c)'s new pin would go **RED at the
+  Phase-1 freeze** that 1.2(c) itself requires to be green. Specify a
+  statement-anchored match (e.g. `^\s*import\s[^\n]*from\s+['"]chart\.js['"]`) or an
+  explicit comment exclusion.
+- **W7 (was N-4) — per-series min-max normalization is named as the defect but never
+  removed.** Phase 6's objective cites "each independently min-max normalized", yet
+  6.1 only requires the memory series to share one scale and the planted variant is
+  "one mixed axis" only; a per-series rescale **inside** a single-unit panel would
+  still pass. Add an acceptance that no series is independently rescaled within a panel.
+- **W8 (was N-5) — task 6.6 targets a string in the wrong file.** The
+  "per-instance attribution" promise is the page shell's subtitle
+  (`resources.component.html:5`) — a file Phase 7 deletes; the Live strip's card
+  already carries the honest label ("attribution is partial by physics",
+  `live/live-tab.component.html:144-157`). Re-target 6.6 or fold it into 7.4.
+- **W9 (was N-6) — the boot and mint commands name no interpreter.** The worktree has
+  no `.venv`/`venv`, bare `python` does not exist on this host (only `/usr/bin/python3`),
+  and the house resolution is the certified main-venv interpreter run from the
+  worktree cwd. Pin it for `python -m daemon` and `python -m daemon.auth.cli`.
+- **W10 (was N-7) — the dev leg writes into the shared `ensemble_dev` database** with
+  no throwaway-DB/DROP teardown stated (house PG convention).
+- **W11 (was N-3) — G11 juxtaposes two coincidental 10/6 splits.** The census is
+  correct (10 LIVE = F0.3/F4/F5/F8/F9/F10/F11/F12/F13/F17; 6 DARK = F1/F3/F6 +
+  F7/F18/F21), but the same row also cites the adjudication split ("10 full + 6
+  partial"), whose 6 PARTIAL are F7/F8/F11/F13/F18/F21 — a **different** partition.
+  An implementer could read "6 partial = 6 dark" and hide tabs 5 and 6, whose
+  families (F8/F11/F13) are **LIVE**. State the two splits side by side with their
+  family lists.
+
+## 9.5 Cross-check's positive findings (corroborated, recorded)
+
+The cross-check independently confirmed: the citation discipline (~40 line-precise
+claims checked, no material mis-citation, including the plan's own correction of the
+stale `envelope.py:386-388` cite); C-4's code-path analysis (exactly 2 `dotenv`
+hits, the sqlite-fallback persistence at `ensemble_config.py:95`, the effective-port
+and DB read-backs as the right instruments); the bundle-guard correction (Angular's
+`initial` budget counts entry points + transitive static imports only) and the C-1
+lazy-sibling insight; the non-vacuity of the exit criteria; the FE-only discipline
+(a row-by-row scan of all 107 task rows found no deliverable in `daemon/`,
+`daemon/migrations/` or `scripts/upgrade` — every `daemon/**` mention is a read-only
+citation); the correct scope of the six zero-dep governance sites; and the task-graph
+shape (exactly 2 disclosed forward edges — 3.7→Phase 4 and 7.1→Phase 8 — plus the
+`9.11` self-loop, no hidden cycle).
+
+## 9.6 Re-review scope (unchanged, now larger)
+
+Fold **B1 (with the factory.py env-over-file detail), B2, B3, B4, B5** and
+**W1–W11**, then re-review. The architectural shape of the plan, the requirement
+coverage (1–8), the rulings (D-1/D-2/D-3) and the FE-only discipline are **not** in
+question; every blocking item is mechanical.
