@@ -128,6 +128,15 @@ export interface MetricsCentralTab {
   /** The window vocabulary this module may serve. */
   readonly allowedWindows: NonEmpty<MetricsCentralWindow>;
   /**
+   * The window this module opens on — the snap target when the operator
+   * switches to a tab that cannot serve the current window (3.2).
+   *
+   * The manifest OWNS it (the frame never owns a second list), and it is
+   * always a member of `allowedWindows` — a snap can never land outside
+   * the tab's own vocabulary.
+   */
+  readonly defaultWindowS: MetricsCentralWindow;
+  /**
    * The per-tab copy VARIANT of a door state — a KEY into the copy SSOT,
    * never free text (AM-20 / IMPL-19).
    */
@@ -150,6 +159,15 @@ export interface MetricsCustomTab {
   readonly label: string;
   /** The window vocabulary — typed as the frozen union, so drift fails the build. */
   readonly allowedWindows: NonEmpty<ResourcesWindow>;
+  /**
+   * The window this module opens on — the snap target when the operator
+   * switches to a tab that cannot serve the current window (3.2).
+   *
+   * It matches the retired timeline panel's own default
+   * (`DEFAULT_TIMELINE_WINDOW` in `pages/resources/timeline/`), so the
+   * relocated module opens on the same window it always did.
+   */
+  readonly defaultWindowS: ResourcesWindow;
 }
 
 /** A module that IS a tab. */
@@ -222,6 +240,8 @@ export const METRICS_TABS = [
     // The custom module's OWN ladder (its own vocabulary, NOT the
     // door's) — a subset of the frozen `ResourcesWindow` union.
     allowedWindows: ['15m', '1h', '24h', '7d'],
+    // The module opens on the retired timeline panel's own default.
+    defaultWindowS: '1h',
   },
   {
     disposition: 'bound',
@@ -234,6 +254,9 @@ export const METRICS_TABS = [
     // F3 is stat-primary (it is not in the chart-primary roster).
     statFamilyIds: ['F3'],
     allowedWindows: ['15m', '30m', '1h', '2h'],
+    // The central ladder's default — the window the tab asked for before
+    // the frame owned it (the hardcoded 1 h).
+    defaultWindowS: '1h',
     copyVariant: 'auth_not_configured',
   },
   {
@@ -244,6 +267,9 @@ export const METRICS_TABS = [
     // F4, F5 (live) + [F6] (the PG census — bound NOW, dark until R-i).
     familyIds: ['F4', 'F5', 'F6'],
     allowedWindows: ['15m', '30m', '1h', '2h'],
+    // The central ladder's default — the window the tab asked for before
+    // the frame owned it (the hardcoded 1 h).
+    defaultWindowS: '1h',
     copyVariant: 'auth_not_configured',
   },
   {
@@ -255,6 +281,9 @@ export const METRICS_TABS = [
     // F12 (the sweep counters) is stat-primary.
     statFamilyIds: ['F12'],
     allowedWindows: ['15m', '30m', '1h', '2h'],
+    // The central ladder's default — the window the tab asked for before
+    // the frame owned it (the hardcoded 1 h).
+    defaultWindowS: '1h',
     copyVariant: 'auth_not_configured',
   },
   {
@@ -264,6 +293,9 @@ export const METRICS_TABS = [
     label: 'Instances',
     familyIds: ['F13', 'F11'],
     allowedWindows: ['15m', '30m', '1h', '2h'],
+    // The central ladder's default — the window the tab asked for before
+    // the frame owned it (the hardcoded 1 h).
+    defaultWindowS: '1h',
     copyVariant: 'auth_not_configured',
   },
   {
@@ -273,6 +305,9 @@ export const METRICS_TABS = [
     label: 'Checkpoint',
     familyIds: ['F8'],
     allowedWindows: ['15m', '30m', '1h', '2h'],
+    // The central ladder's default — the window the tab asked for before
+    // the frame owned it (the hardcoded 1 h).
+    defaultWindowS: '1h',
     copyVariant: 'auth_not_configured',
   },
   {
@@ -284,6 +319,9 @@ export const METRICS_TABS = [
     // F17 (the init-guard snapshot) is stat-primary.
     statFamilyIds: ['F17'],
     allowedWindows: ['15m', '30m', '1h', '2h'],
+    // The central ladder's default — the window the tab asked for before
+    // the frame owned it (the hardcoded 1 h).
+    defaultWindowS: '1h',
     copyVariant: 'auth_not_configured',
   },
 ] as const satisfies readonly MetricsTabEntry[];

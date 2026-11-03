@@ -19,7 +19,11 @@ import {
   MetricsFamily,
   decodeMetricsDoorError,
 } from '../../models/metrics.model';
-import { METRICS_DEFAULT_TAB_ID, metricsTabById } from './tabs.manifest';
+import {
+  METRICS_DEFAULT_TAB_ID,
+  MetricsTabEntry,
+  metricsTabById,
+} from './tabs.manifest';
 import { METRICS_TAB_BINDINGS } from './tabs/tabs.components';
 import {
   EMPTY_METRICS_TAB_STATE,
@@ -27,6 +31,19 @@ import {
   MetricsTabStateReporter,
 } from './metrics-state';
 import { MetricsFamilyCatalogComponent } from './families/families-tab.component';
+import {
+  METRICS_BASELINE_CUSTOM_SLOT_REASON,
+  METRICS_BASELINE_FIDELITY_DISCLOSURE,
+  METRICS_BASELINE_MAX_WINDOW_S,
+  METRICS_BASELINE_RANGE_REASON,
+  METRICS_RANGE_CUSTOM_SLOT_NOTE,
+  METRICS_RANGE_OPTIONS,
+  MetricsRangeOption,
+  metricsCentralWindowSeconds,
+  metricsRangeEnabledFor,
+  metricsSnapNote,
+  resolveWindowOnTabChange,
+} from './metrics-range';
 
 /**
  * The ROUTE-CHUNK MARKER (T1 phase 2, task 2.13 — B3).
@@ -53,6 +70,15 @@ export const METRICS_ROUTE_CHUNK_MARKER = 'ensemble-metrics-route-v1';
  * never says "error" (a 200-empty response is not an error).
  */
 export const METRICS_EMPTY_PANEL_COPY = 'No metrics available yet';
+
+/**
+ * The frame's INITIAL window — the default tab's OWN default.
+ *
+ * The frame never invents a default: the manifest owns it (the custom
+ * module opens on the window its retired panel always opened on).
+ */
+const initialRangeOption: MetricsRangeOption =
+  (metricsTabById(METRICS_DEFAULT_TAB_ID)?.defaultWindowS as MetricsRangeOption) ?? '1h';
 
 /**
  * Metrics page shell — the consolidated `/metrics` surface.
@@ -119,6 +145,43 @@ export class MetricsComponent implements OnInit {
   /** The selected tab id — the manifest id is the single slug source. */
   readonly activeTabId = signal<string>(METRICS_DEFAULT_TAB_ID);
 
+  /**
+   * The frame's window VALUE — the union of the two vocabularies (3.1).
+   *
+   * ONE value, two vocabularies: the central tabs map it onto the door's
+   * `window_s`, the custom panel maps it onto its own ladder. The frame
+   * never owns a second list of the windows — the option set is DERIVED
+   * from the manifest (`METRICS_RANGE_OPTIONS`).
+   */
+  readonly window = signal<MetricsRangeOption>(initialRangeOption);
+
+  /**
+   * Whether the previous-window comparison is ON.
+   *
+   * The baseline is a CENTRAL-tabs-only capability (AM-14): the custom
+   * slot renders the toggle disabled with its reason, and the state is
+   * cleared when the operator switches to it.
+   */
+  readonly baselineOn = signal(false);
+
+  /**
+   * The one-line meta note — the snap announcement (3.2).
+   *
+   * A snap is NEVER silent: the operator is told that the range moved.
+   */
+  readonly rangeNote = signal<string | null>(null);
+
+  /**
+   * The baseline's own note — why it was cleared or refused (3.5a).
+   */
+  readonly baselineNote = signal<string | null>(null);
+
+  /** The frame-level disclosure — the baseline's fidelity limits (3.8). */
+  readonly baselineDisclosure = METRICS_BASELINE_FIDELITY_DISCLOSURE;
+
+  /** The option set — the union of the manifest's per-tab ladders. */
+  readonly rangeOptions = METRICS_RANGE_OPTIONS;
+
   /** The frame-level family catalog drawer. */
   readonly drawerOpen = signal(false);
 
@@ -159,6 +222,61 @@ export class MetricsComponent implements OnInit {
     this.tabs.findIndex((tab) => tab.entry.id === this.activeTabId()),
   );
 
+  /** The SELECTED tab's manifest entry — the vocabulary's owner. */
+  readonly activeTab = computed<MetricsTabEntry | null>(() =>
+    metricsTabById(this.activeTabId()),
+  );
+
+  /**
+   * Whether the ACTIVE slot is the central door's.
+   *
+   * The baseline and the frame's central-sourced range control are scoped
+   * to it (AM-1 / AM-14 / AM-19).
+   */
+  readonly activeIsCentral = computed(() => this.activeTab()?.slot === 'central');
+
+  /**
+   * Whether the SELECTED tab can serve an option — the VISIBLE enforcement
+   * (3.1).
+   *
+   * The door would answer a longer window with a 200 and a clamped value
+   * and no marker (`daemon/routers/metrics.py:778`), so the control
+   * DISABLES what the tab cannot serve instead of letting the operator
+   * pick it.
+   */
+  rangeOptionEnabled(option: MetricsRangeOption): boolean {
+    const tab = this.activeTab();
+    return tab ? metricsRangeEnabledFor(option, tab) : false;
+  }
+
+  /**
+   * The frame's range control is INERT on the custom slot (AM-19): the
+   * custom panel carries its own labelled control, and a frame control that
+   * appeared to govern it would be a lie.
+   */
+  readonly rangeControlDisabled = computed(() => !this.activeIsCentral());
+
+  /** Why the frame's range control is inert on the custom slot. */
+  readonly rangeControlReason = computed<string | null>(() =>
+    this.activeIsCentral() ? null : METRICS_RANGE_CUSTOM_SLOT_NOTE,
+  );
+
+  /** The baseline's disabled reason on the custom slot (3.6). */
+  readonly baselineDisabledReason = computed<string | null>(() =>
+    this.activeIsCentral() ? null : METRICS_BASELINE_CUSTOM_SLOT_REASON,
+  );
+
+  /**
+   * Whether the current window can carry a baseline.
+   *
+   * The baseline fetches 2W, so W must be at most 1 h — the substrate
+   * ceiling (2 h) admits no 2W fetch.
+   */
+  readonly baselineAllowedForWindow = computed(() => {
+    const seconds = metricsCentralWindowSeconds(this.window());
+    return seconds !== null && seconds <= METRICS_BASELINE_MAX_WINDOW_S;
+  });
+
   /**
    * The empty panel appears exactly when no family is live — driven by
    * the AVAILABILITY block, never by the kill-switch (D-8 / D-11b). A
@@ -184,6 +302,12 @@ export class MetricsComponent implements OnInit {
       out[tab.entry.id] = {
         state: states[tab.entry.id] ?? EMPTY_METRICS_TAB_STATE,
         onState: this.tabStateReporter(tab.entry.id),
+        // The frame owns the window (3.3): every slot maps it onto its own
+        // door — the central tabs as `window_s`, the custom panel as its
+        // own ladder name.
+        window: this.window(),
+        baseline: this.baselineOn(),
+        onRangeChange: this.rangeChangeReporter,
       };
     }
     return out;
@@ -213,13 +337,30 @@ export class MetricsComponent implements OnInit {
   private applyDeepLink(requested: string | null): void {
     const known = metricsTabById(requested);
     if (known) {
-      this.activeTabId.set(known.id);
+      this.selectTab(known);
       return;
     }
-    this.activeTabId.set(METRICS_DEFAULT_TAB_ID);
+    const fallback = metricsTabById(METRICS_DEFAULT_TAB_ID);
+    if (fallback) {
+      this.selectTab(fallback);
+    }
     if (requested !== null && requested !== METRICS_DEFAULT_TAB_ID) {
       this.writeTabParam(METRICS_DEFAULT_TAB_ID);
     }
+  }
+
+  /**
+   * Select a tab and apply the keep-or-snap window rule.
+   *
+   * Re-selecting the SAME tab is a no-op: the rule must not fire twice
+   * (a second snap would clear the announcement the operator just read).
+   */
+  private selectTab(tab: MetricsTabEntry): void {
+    if (tab.id === this.activeTabId()) {
+      return;
+    }
+    this.activeTabId.set(tab.id);
+    this.applyWindowForTab(tab);
   }
 
   /** Write the selected tab back to the URL (the query is preserved). */
@@ -242,7 +383,7 @@ export class MetricsComponent implements OnInit {
       // Already selected — writing again would be a navigation storm.
       return;
     }
-    this.activeTabId.set(id);
+    this.selectTab(tab.entry);
     this.writeTabParam(id);
   }
 
@@ -269,6 +410,94 @@ export class MetricsComponent implements OnInit {
     }));
   }
 
+  /**
+   * The operator picked a window in the frame's control (3.1/3.3).
+   *
+   * An option the SELECTED tab cannot serve is NEVER applied: the control
+   * disables it, and the guard refuses it if the event is forged.
+   */
+  selectWindow(option: MetricsRangeOption): void {
+    const tab = this.activeTab();
+    if (!tab || !metricsRangeEnabledFor(option, tab)) {
+      return;
+    }
+    if (option === this.window()) {
+      return;
+    }
+    this.window.set(option);
+    this.rangeNote.set(null);
+    // The baseline rides the range: crossing 1 h clears it (3.5a).
+    this.applyBaselineRangeGuard();
+  }
+
+  /** The frame's control change handler — the option comes from our own list. */
+  onRangeChange(value: string): void {
+    const option = METRICS_RANGE_OPTIONS.find((candidate) => candidate === value);
+    if (!option) {
+      return;
+    }
+    this.selectWindow(option);
+  }
+
+  /**
+   * The baseline toggle (3.4/3.5a).
+   *
+   * The toggle is refused — with its reason — on the custom slot and
+   * beyond the 1 h guard. It is never silently ignored.
+   */
+  setBaseline(on: boolean): void {
+    if (!this.activeIsCentral()) {
+      this.baselineNote.set(METRICS_BASELINE_CUSTOM_SLOT_REASON);
+      return;
+    }
+    if (on && !this.baselineAllowedForWindow()) {
+      this.baselineNote.set(METRICS_BASELINE_RANGE_REASON);
+      this.baselineOn.set(false);
+      return;
+    }
+    this.baselineOn.set(on);
+    if (!on) {
+      this.baselineNote.set(null);
+    }
+  }
+
+  /** The frame's toggle change handler. */
+  onBaselineChange(checked: boolean): void {
+    this.setBaseline(checked);
+  }
+
+  /**
+   * The range crossed the baseline's guard — clear the baseline and SAY
+   * why (3.5a).
+   */
+  private applyBaselineRangeGuard(): void {
+    if (!this.baselineOn()) {
+      return;
+    }
+    if (this.baselineAllowedForWindow()) {
+      return;
+    }
+    this.baselineOn.set(false);
+    this.baselineNote.set(METRICS_BASELINE_RANGE_REASON);
+  }
+
+  /**
+   * The tab changed — keep the window when the new tab can serve it,
+   * otherwise snap to that tab's default AND announce the snap (3.2).
+   */
+  private applyWindowForTab(tab: MetricsTabEntry): void {
+    const resolution = resolveWindowOnTabChange(this.window(), tab);
+    if (resolution.snapped) {
+      this.window.set(resolution.window);
+      this.rangeNote.set(metricsSnapNote(resolution.window, tab.label));
+    }
+    if (tab.slot !== 'central') {
+      // The baseline is a central-tabs-only capability (AM-14).
+      this.baselineOn.set(false);
+    }
+    this.applyBaselineRangeGuard();
+  }
+
   /** The stable per-tab state reporter. */
   private tabStateReporter(tabId: string): MetricsTabStateReporter {
     let reporter = this.reporters.get(tabId);
@@ -278,6 +507,14 @@ export class MetricsComponent implements OnInit {
     }
     return reporter;
   }
+
+  /**
+   * The stable range-change reporter — the custom panel's own labelled
+   * control edits the frame's value through it (AM-19).
+   */
+  private readonly rangeChangeReporter = (option: MetricsRangeOption): void => {
+    this.selectWindow(option);
+  };
 
   /**
    * Publish the CENTRAL door's outcome to the central tabs ONLY.

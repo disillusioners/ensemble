@@ -58,6 +58,63 @@
     </section>
   }
 
+  <div class="metrics-toolbar" data-test="metrics-toolbar">
+    <div class="metrics-range" role="group" aria-label="Time range">
+      <label class="metrics-range-label" for="metrics-range-select">Range</label>
+      <select
+        id="metrics-range-select"
+        class="metrics-range-select"
+        data-test="metrics-range-select"
+        [value]="window()"
+        [disabled]="rangeControlDisabled()"
+        [attr.aria-label]="'Select the metrics time range'"
+        (change)="onRangeChange($any($event.target).value)"
+      >
+        @for (option of rangeOptions; track option) {
+          <option
+            [value]="option"
+            [selected]="option === window()"
+            [disabled]="!rangeOptionEnabled(option)"
+            [attr.data-test]="'metrics-range-option-' + option"
+          >
+            {{ option }}
+          </option>
+        }
+      </select>
+      @if (rangeControlReason(); as reason) {
+        <span class="metrics-range-note" data-test="metrics-range-control-note">{{ reason }}</span>
+      }
+    </div>
+
+    <div class="metrics-baseline" role="group" aria-label="Previous-window comparison">
+      <label class="metrics-baseline-label" for="metrics-baseline-toggle">Baseline</label>
+      <input
+        id="metrics-baseline-toggle"
+        class="metrics-baseline-toggle"
+        type="checkbox"
+        data-test="metrics-baseline-toggle"
+        [checked]="baselineOn()"
+        [disabled]="!activeIsCentral()"
+        (change)="onBaselineChange($any($event.target).checked)"
+      />
+      @if (baselineDisabledReason(); as reason) {
+        <span class="metrics-baseline-note" data-test="metrics-baseline-disabled-reason">{{ reason }}</span>
+      }
+      @if (baselineNote(); as note) {
+        <span class="metrics-baseline-note" data-test="metrics-baseline-note">{{ note }}</span>
+      }
+      @if (baselineOn()) {
+        <span class="metrics-baseline-disclosure" data-test="metrics-baseline-disclosure">{{
+          baselineDisclosure
+        }}</span>
+      }
+    </div>
+
+    @if (rangeNote(); as note) {
+      <span class="metrics-range-note" data-test="metrics-range-note">{{ note }}</span>
+    }
+  </div>
+
   <div class="metrics-tabs-host">
     <mat-tab-group [selectedIndex]="activeIndex()" (selectedIndexChange)="onTabChange($event)">
       @for (tab of tabs; track tab.entry.id) {

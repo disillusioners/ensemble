@@ -18,6 +18,8 @@ import {
   METRICS_DOOR_ERROR_COPY,
   MetricsChartRole,
   MetricsFamily,
+  MetricsSeriesEntry,
+  MetricsSeriesPayload,
   MetricsSnapshotSeries,
   decodeMetricsDoorError,
   formatAvailabilityReason,
@@ -34,6 +36,15 @@ import {
   METRICS_CENTRAL_WINDOW_MINUTES,
   METRICS_SELECTOR_CEILING,
 } from '../metrics-door';
+import {
+  METRICS_BASELINE_CLAMPED_REASON,
+  MetricsRangeOption,
+  metricsCentralWindowSeconds,
+  metricsDerivedIntervalS,
+  metricsPayloadPointCount,
+  metricsSeriesWindowS,
+  splitSeriesAtMidpoint,
+} from '../metrics-range';
 import {
   EMPTY_METRICS_TAB_STATE,
   MetricsTabState,
@@ -102,6 +113,19 @@ export interface MetricsCentralSeriesSpec {
           Waiting for the family catalog — {{ entry().label }} binds
           {{ familySummary() }}.
         </p>
+      }
+
+      <p class="tab-meta" data-test="central-tab-meta">
+        @if (metaIntervalS(); as interval) {
+          window {{ window() }} · {{ metaPointCount() }} points · effective spacing
+          {{ interval | number: '1.0-1' }}s (derived from the payload)
+        } @else {
+          window {{ window() }} — no points yet
+        }
+      </p>
+
+      @if (state().baselineRefusal; as refusal) {
+        <p class="tab-hint" data-test="central-tab-baseline-refused">{{ refusal }}</p>
       }
 
       <div class="family-list" data-test="central-tab-families">
@@ -214,6 +238,12 @@ export interface MetricsCentralSeriesSpec {
         font-size: 0.8rem;
       }
 
+      .tab-meta {
+        margin: 0 0 0.5rem;
+        color: #64748b;
+        font-size: 0.72rem;
+      }
+
       .family-list {
         display: block;
       }
@@ -316,14 +346,64 @@ export class MetricsCentralTabComponent {
   /** The frame's per-tab state reporter. */
   readonly onState = input<MetricsTabStateReporter | null>(null);
 
+  /**
+   * The frame's window VALUE (the union) — the frame owns the window
+   * (3.3): the tab body never hard-codes one.
+   */
+  readonly window = input<MetricsRangeOption>('1h');
+
+  /**
+   * Whether the previous-window comparison is ON (3.4).
+   *
+   * The baseline SHARES this tab's single series request: the request
+   * carries 2W and the split happens client-side (3.10's invariant).
+   */
+  readonly baseline = input(false);
+
+  /**
+   * The frame's range-change reporter (AM-19).
+   *
+   * The central tabs never edit the range themselves — the frame's
+   * control owns it — but the input is DECLARED so the frame's per-tab
+   * input record binds cleanly on every slot.
+   */
+  readonly onRangeChange = input<(option: MetricsRangeOption) => void>(() => undefined);
+
   private readonly metrics = inject(MetricsService);
   private readonly destroyRef = inject(DestroyRef);
 
   /** The door's selector ceiling. */
   readonly ceiling = METRICS_SELECTOR_CEILING;
 
-  /** The window the tab asks for — the central ladder's default (1 h). */
-  readonly windowS = METRICS_CENTRAL_WINDOW_MINUTES['1h'] * 60;
+  /**
+   * The window this tab asks for — the FRAME's value, mapped onto the
+   * central ladder (3.3).
+   *
+   * The fallback is the ladder's own default: a custom-only option can
+   * never reach a central tab (the frame snaps before it does).
+   */
+  readonly windowS = computed(() => {
+    const seconds = metricsCentralWindowSeconds(this.window());
+    return seconds ?? METRICS_CENTRAL_WINDOW_MINUTES['1h'] * 60;
+  });
+
+  /**
+   * The `window_s` the request carries — 2W when the baseline is on, and
+   * NEVER above the substrate ceiling (3.5b).
+   */
+  readonly requestWindowS = computed(() => metricsSeriesWindowS(this.windowS(), this.baseline()));
+
+  /**
+   * The EFFECTIVE point spacing, DERIVED from the payload (3.11 / AM-18).
+   *
+   * The door's `interval_s` is the OBSERVED sampler cadence; the plotted
+   * points can be much further apart, so the meta line reports the spacing
+   * of the points that are actually on screen.
+   */
+  readonly metaIntervalS = computed(() => metricsDerivedIntervalS(this.state().lastGood));
+
+  /** The number of points the payload carries — the meta line's companion. */
+  readonly metaPointCount = computed(() => metricsPayloadPointCount(this.state().lastGood));
 
   /** The stat-role series, keyed by the family they belong to. */
   private readonly statByFamily = signal<Readonly<Record<string, readonly MetricsSnapshotSeries[]>>>({});
@@ -331,6 +411,21 @@ export class MetricsCentralTabComponent {
   private requestSeq = 0;
   private statSeq = 0;
   private inFlight = 0;
+
+  /**
+   * The request GENERATION (AM-16 / 3.10).
+   *
+   * The supersede token bumps at request START, so it only discards a
+   * response when a NEWER request has started. A range change or a
+   * baseline toggle that starts no request would let an OLD-shape
+   * response paint under the NEW label. The generation is bumped on every
+   * such change — the in-flight response is then discarded even when no
+   * new request followed it.
+   */
+  private requestGeneration = 0;
+
+  /** The generation of the request that is currently in flight. */
+  private inFlightGeneration = -1;
 
   /** The families this tab binds (projected by the frame). */
   readonly families = computed(() => this.state().families);
@@ -428,11 +523,16 @@ export class MetricsCentralTabComponent {
 
   constructor() {
     effect(() => {
+      // The dependencies are read FIRST: a window or baseline change must
+      // bump the generation even when no request is started (3.10).
       const key = this.chartSpecKey();
+      const requestWindowS = this.requestWindowS();
+      const baseline = this.baseline();
+      this.requestGeneration += 1;
       if (!key) {
         return;
       }
-      untracked(() => this.fetchTrend());
+      untracked(() => this.fetchTrend(requestWindowS, baseline));
     });
 
     effect(() => {
@@ -446,7 +546,7 @@ export class MetricsCentralTabComponent {
 
   /** The user-initiated refresh — always fires. */
   refresh(): void {
-    this.fetchTrend();
+    this.fetchTrend(this.requestWindowS(), this.baseline());
     this.fetchStatStrip(this.entry().statFamilyIds ?? []);
   }
 
@@ -460,14 +560,16 @@ export class MetricsCentralTabComponent {
 
   /** The rendered panels of one family (its live series). */
   panelsOf(familyId: string): readonly ChartSeries[] {
-    const payload = this.state().lastGood;
-    if (!payload) {
+    // The state's `series` is the CURRENT half: with the baseline on, the
+    // payload covers 2W and the panels must show the recent window only.
+    const entries = this.state().series;
+    if (!entries.length) {
       return [];
     }
     const specs = this.chartSpecs().filter((spec) => spec.familyId === familyId);
     const out: ChartSeries[] = [];
     specs.forEach((spec, index) => {
-      const entry = payload.series.find((candidate) => candidate.name === spec.name);
+      const entry = entries.find((candidate) => candidate.name === spec.name);
       if (!entry) {
         return;
       }
@@ -483,8 +585,13 @@ export class MetricsCentralTabComponent {
     return out;
   }
 
-  private fetchTrend(): void {
-    if (this.inFlight > 0) {
+  private fetchTrend(requestWindowS: number, baseline: boolean): void {
+    const generation = this.requestGeneration;
+    if (this.inFlight > 0 && this.inFlightGeneration === generation) {
+      // The in-flight request IS this generation — its answer is current,
+      // so the skip-if-in-flight guard holds. A generation that MOVED (a
+      // window or baseline change) never skips: the in-flight payload is
+      // old-shape and must be replaced (3.10).
       return;
     }
     const specs = this.chartSpecs();
@@ -492,9 +599,10 @@ export class MetricsCentralTabComponent {
       return;
     }
     this.inFlight += 1;
+    this.inFlightGeneration = generation;
     const token = ++this.requestSeq;
     this.metrics
-      .getSeries({ names: specs.map((spec) => spec.name), windowS: this.windowS })
+      .getSeries({ names: specs.map((spec) => spec.name), windowS: requestWindowS })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (payload) => {
@@ -502,16 +610,20 @@ export class MetricsCentralTabComponent {
           if (token !== this.requestSeq) {
             return;
           }
-          this.onState()?.({
-            series: payload.series,
-            lastGood: payload,
-            errorClass: null,
-            doorState: 'ok',
-          });
+          if (generation !== this.requestGeneration) {
+            // The window or the baseline moved while this request was in
+            // flight — the payload is OLD-SHAPE and is discarded rather
+            // than painted under the new label (3.10).
+            return;
+          }
+          this.publishTrend(payload, baseline);
         },
         error: (err: unknown) => {
           this.inFlight -= 1;
           if (token !== this.requestSeq) {
+            return;
+          }
+          if (generation !== this.requestGeneration) {
             return;
           }
           const decoded = decodeMetricsDoorError(err);
@@ -519,6 +631,37 @@ export class MetricsCentralTabComponent {
           this.onState()?.({ errorClass: decoded.code, doorState: decoded.code });
         },
       });
+  }
+
+  /**
+   * Publish the trend — and the baseline's two halves (3.4).
+   *
+   * The split is SERVER-ANCHORED: it uses the RESPONSE's own window
+   * anchors, never the client clock. A payload whose span is shorter than
+   * 2W was CLAMPED by the door, so no baseline is published and the
+   * refusal is stated (3.5c).
+   */
+  private publishTrend(payload: MetricsSeriesPayload, baseline: boolean): void {
+    let series = payload.series;
+    let baselineSeries: readonly MetricsSeriesEntry[] = [];
+    let baselineRefusal: string | null = null;
+    if (baseline) {
+      const split = splitSeriesAtMidpoint(payload, this.windowS());
+      if (split === null) {
+        baselineRefusal = METRICS_BASELINE_CLAMPED_REASON;
+      } else {
+        series = split.current;
+        baselineSeries = split.previous;
+      }
+    }
+    this.onState()?.({
+      series,
+      baselineSeries,
+      baselineRefusal,
+      lastGood: payload,
+      errorClass: null,
+      doorState: 'ok',
+    });
   }
 
   private fetchStatStrip(ids: readonly string[]): void {

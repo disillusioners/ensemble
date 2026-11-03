@@ -53,8 +53,27 @@ export interface MetricsTabState {
   readonly doorState: MetricsDoorState;
   /** The families this tab binds (projected from the catalog). */
   readonly families: readonly MetricsFamily[];
-  /** The series this tab published. */
+  /**
+   * The series this tab published.
+   *
+   * With the baseline ON this is the CURRENT half of the 2W payload — the
+   * panels show the recent window, never the whole fetch.
+   */
   readonly series: readonly MetricsSeriesEntry[];
+  /**
+   * The PREVIOUS window's series — the baseline's second dataset (3.4).
+   *
+   * It is EMPTY unless the baseline is on AND the payload was not clamped;
+   * a clamped payload publishes no baseline and states why
+   * (`baselineRefusal`).
+   */
+  readonly baselineSeries?: readonly MetricsSeriesEntry[];
+  /**
+   * Why NO baseline is rendered — the clamped-payload refusal (3.5c).
+   *
+   * `null` while the baseline renders normally.
+   */
+  readonly baselineRefusal?: string | null;
   /** The last-good payload — retained across a failure, never cleared. */
   readonly lastGood: MetricsSeriesPayload | null;
   /** The failure class — `null` while healthy. */
@@ -66,6 +85,8 @@ export const EMPTY_METRICS_TAB_STATE: MetricsTabState = {
   doorState: 'loading',
   families: [],
   series: [],
+  baselineSeries: [],
+  baselineRefusal: null,
   lastGood: null,
   errorClass: null,
 };

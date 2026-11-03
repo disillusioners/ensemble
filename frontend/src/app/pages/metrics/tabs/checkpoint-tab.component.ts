@@ -6,6 +6,7 @@ import {
   MetricsTabState,
   MetricsTabStateReporter,
 } from '../metrics-state';
+import { MetricsRangeOption } from '../metrics-range';
 import { metricsCentralTab } from '../tabs.manifest';
 
 /**
@@ -23,6 +24,9 @@ import { metricsCentralTab } from '../tabs.manifest';
     [entry]="entry"
     [state]="state()"
     [onState]="onState()"
+    [window]="window()"
+    [baseline]="baseline()"
+    [onRangeChange]="onRangeChange()"
   ></app-metrics-central-tab>`,
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
@@ -35,4 +39,13 @@ export class CheckpointTabComponent {
 
   /** The frame's per-tab state reporter. */
   readonly onState = input<MetricsTabStateReporter | null>(null);
+
+  /** The frame's window VALUE (the union) — the frame owns the window (3.3). */
+  readonly window = input<MetricsRangeOption>('1h');
+
+  /** Whether the previous-window comparison is ON (3.4) — the central tabs only. */
+  readonly baseline = input(false);
+
+  /** The frame's range-change reporter (AM-19) — the panel's own control edits the value. */
+  readonly onRangeChange = input<(option: MetricsRangeOption) => void>(() => undefined);
 }

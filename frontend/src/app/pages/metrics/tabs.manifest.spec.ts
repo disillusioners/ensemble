@@ -36,6 +36,7 @@ import {
   MetricsModuleEntry,
   isMetricsTabId,
   metricsCopyVariantFor,
+  metricsCustomTab,
   metricsTabById,
 } from './tabs.manifest';
 import { METRICS_DOOR_ERROR_COPY } from '../../models/metrics.model';
@@ -267,7 +268,7 @@ describe('the tab manifest — the FOUR dispositions (AM-8, 2.1 / 2.3)', () => {
 
 describe('the tab manifest — it carries NO wire-derivable field', () => {
   const ALLOWED_KEYS: Record<string, readonly string[]> = {
-    bound: ['disposition', 'slot', 'id', 'label', 'familyIds', 'statFamilyIds', 'allowedWindows', 'copyVariant'],
+    bound: ['disposition', 'slot', 'id', 'label', 'familyIds', 'statFamilyIds', 'allowedWindows', 'defaultWindowS', 'copyVariant'],
     'planned-unbound': ['disposition', 'id', 'label', 'familyIds', 'trackingNote', 'owner'],
     hidden: ['disposition', 'id', 'label', 'trackingNote', 'owner'],
     dropped: ['disposition', 'id', 'label', 'familyIds', 'reason'],
@@ -386,5 +387,29 @@ describe('the tab manifest — the id helpers', () => {
     expect(metricsTabById(null)).toBeNull();
     expect(metricsTabById(undefined)).toBeNull();
     expect(metricsTabById('')).toBeNull();
+  });
+});
+
+// ── THE PER-TAB DEFAULT WINDOW (T1 phase 3, task 3.2) ───────────────────
+//
+// The manifest OWNS the range vocabulary — the frame never owns a second
+// list. The default window is the SNAP TARGET when the operator switches
+// to a tab that cannot serve the current window, so it must always be a
+// member of the tab's OWN ladder.
+describe('the tab manifest — the per-tab default window (3.2)', () => {
+  it('every BOUND tab names a default window ON its own ladder', () => {
+    for (const tab of METRICS_TABS) {
+      expect(tab.allowedWindows).toContain(tab.defaultWindowS);
+    }
+  });
+
+  it('the CENTRAL tabs open on 1 h — the window they asked for before the frame owned it', () => {
+    for (const tab of METRICS_CENTRAL_ENTRIES) {
+      expect(tab.defaultWindowS).toBe('1h');
+    }
+  });
+
+  it('the CUSTOM module opens on 1 h — the retired timeline panel\'s own default', () => {
+    expect(metricsCustomTab().defaultWindowS).toBe('1h');
   });
 });

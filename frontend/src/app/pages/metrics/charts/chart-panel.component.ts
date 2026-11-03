@@ -144,6 +144,17 @@ export class ChartPanelComponent implements OnDestroy {
   /** The series to render — the panel is one metric-kind + unit group. */
   readonly series = input<readonly ChartPanelSeries[]>([]);
 
+  /**
+   * The BASELINE dataset — the previous window's series (T1 phase 3, 3.7).
+   *
+   * This is the NORMAL path for the baseline (the Chart.js panel); the
+   * house SVG carries the same capability as its fallback. The input is
+   * DECLARED here — the frame→renderer contract — and the DRAWING lands
+   * in phase 4; the baseline never adds a request of its own (it rides
+   * the panel's single series fetch).
+   */
+  readonly baseline = input<readonly ChartPanelSeries[]>([]);
+
   /** The panel's accessible label. */
   readonly label = input('metrics panel');
 

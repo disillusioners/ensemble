@@ -778,3 +778,260 @@ describe('MetricsComponent — the family-catalog drawer (2.7)', () => {
     expect(fixture.nativeElement.querySelector('[data-test="metrics-catalog-drawer"]')).toBeNull();
   });
 });
+
+// ── THE PHASE-3 FRAME SURFACE (the range control + the baseline) ────────
+//
+// The load-bearing pins:
+//
+//   * the range control's OPTION SET is the union of the manifest's
+//     ladders, and the options the ACTIVE tab cannot serve are DISABLED
+//     (the visible enforcement — the door would clamp silently);
+//   * the tab switch KEEPS the window when the new tab serves it and
+//     SNAPS to that tab's default otherwise — and the snap is ANNOUNCED
+//     (a silent snap is a lie);
+//   * the baseline toggle is scoped to the central tabs and DISABLED with
+//     its reason on the custom slot;
+//   * crossing the 1 h guard AUTO-CLEARS the baseline WITH its reason;
+//   * the fidelity disclosure is VISIBLE next to the baseline control.
+describe('MetricsComponent — the range control (3.1)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  /** The rendered options of the frame's control, with their disabled flag. */
+  function renderedOptions(): { value: string; disabled: boolean }[] {
+    const select = fixture.nativeElement.querySelector(
+      '[data-test="metrics-range-select"]',
+    ) as HTMLSelectElement;
+    expect(select).not.toBeNull();
+    return Array.from(select.options).map((option) => ({
+      value: option.value,
+      disabled: option.disabled,
+    }));
+  }
+
+  it('carries the UNION of the manifest\'s ladders', () => {
+    expect(renderedOptions().map((option) => option.value)).toEqual([
+      '15m',
+      '30m',
+      '1h',
+      '2h',
+      '24h',
+      '7d',
+    ]);
+  });
+
+  it('a CENTRAL tab shows 15m/30m/1h/2h with 24h/7d DISABLED', () => {
+    component.onTabChange(1); // runtime — a central tab
+    fixture.detectChanges();
+    const options = renderedOptions();
+    expect(options.filter((option) => !option.disabled).map((option) => option.value)).toEqual([
+      '15m',
+      '30m',
+      '1h',
+      '2h',
+    ]);
+    expect(options.find((option) => option.value === '24h')?.disabled).toBe(true);
+    expect(options.find((option) => option.value === '7d')?.disabled).toBe(true);
+  });
+
+  it('the CUSTOM tab shows 15m/1h/24h/7d with 30m/2h DISABLED', () => {
+    component.onTabChange(0); // resource — the custom slot
+    fixture.detectChanges();
+    const options = renderedOptions();
+    expect(options.filter((option) => !option.disabled).map((option) => option.value)).toEqual([
+      '15m',
+      '1h',
+      '24h',
+      '7d',
+    ]);
+    expect(options.find((option) => option.value === '30m')?.disabled).toBe(true);
+    expect(options.find((option) => option.value === '2h')?.disabled).toBe(true);
+  });
+
+  it('the frame\'s control is INERT on the custom slot, and says why (AM-19)', () => {
+    component.onTabChange(0);
+    fixture.detectChanges();
+    const select = fixture.nativeElement.querySelector(
+      '[data-test="metrics-range-select"]',
+    ) as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    const note = fixture.nativeElement.querySelector('[data-test="metrics-range-control-note"]');
+    expect(note).not.toBeNull();
+    expect((note.textContent ?? '')).toContain('own range control');
+  });
+
+  it('an option the SELECTED tab cannot serve is NEVER applied', () => {
+    component.onTabChange(1); // a central tab
+    component.selectWindow('24h');
+    expect(component.window()).not.toBe('24h');
+  });
+});
+
+describe('MetricsComponent — the tab switch (3.2)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('KEEPS the window when the new tab serves it, and says NOTHING', () => {
+    component.onTabChange(1); // runtime
+    component.selectWindow('2h');
+    component.onTabChange(2); // db-pool
+    fixture.detectChanges();
+    expect(component.window()).toBe('2h');
+    expect(fixture.nativeElement.querySelector('[data-test="metrics-range-note"]')).toBeNull();
+  });
+
+  it('SNAPS to the new tab\'s default and ANNOUNCES the snap', () => {
+    component.onTabChange(1); // runtime — a central tab
+    component.selectWindow('2h');
+    component.onTabChange(0); // resource — the custom slot
+    fixture.detectChanges();
+    expect(component.window()).toBe('1h');
+    const note = fixture.nativeElement.querySelector('[data-test="metrics-range-note"]');
+    expect(note).not.toBeNull();
+    expect((note.textContent ?? '')).toContain('snapped');
+    expect((note.textContent ?? '')).toContain('Resources');
+  });
+
+  it('a resources-only window SNAPS back onto the central default', () => {
+    component.onTabChange(0); // resource — the custom slot
+    component.selectWindow('24h');
+    component.onTabChange(1); // runtime
+    fixture.detectChanges();
+    expect(component.window()).toBe('1h');
+    expect(fixture.nativeElement.querySelector('[data-test="metrics-range-note"]')).not.toBeNull();
+  });
+});
+
+describe('MetricsComponent — the baseline toggle (3.4 / 3.5 / 3.6)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('the toggle is LIVE on a central tab', () => {
+    component.onTabChange(1);
+    fixture.detectChanges();
+    const toggle = fixture.nativeElement.querySelector(
+      '[data-test="metrics-baseline-toggle"]',
+    ) as HTMLInputElement;
+    expect(toggle.disabled).toBe(false);
+    component.setBaseline(true);
+    fixture.detectChanges();
+    expect(component.baselineOn()).toBe(true);
+  });
+
+  it('the CUSTOM slot renders the toggle DISABLED with its reason (3.6)', () => {
+    component.onTabChange(0);
+    fixture.detectChanges();
+    const toggle = fixture.nativeElement.querySelector(
+      '[data-test="metrics-baseline-toggle"]',
+    ) as HTMLInputElement;
+    expect(toggle.disabled).toBe(true);
+    const reason = fixture.nativeElement.querySelector(
+      '[data-test="metrics-baseline-disabled-reason"]',
+    );
+    expect(reason).not.toBeNull();
+    expect((reason.textContent ?? '')).toContain(
+      'the resources door serves a fixed 15m/1h/24h/7d vocabulary with no previous-window offset',
+    );
+  });
+
+  it('crossing 1 h AUTO-CLEARS the baseline WITH its reason (3.5a)', () => {
+    component.onTabChange(1);
+    component.setBaseline(true);
+    expect(component.baselineOn()).toBe(true);
+    component.selectWindow('2h');
+    fixture.detectChanges();
+    expect(component.baselineOn()).toBe(false);
+    const note = fixture.nativeElement.querySelector('[data-test="metrics-baseline-note"]');
+    expect(note).not.toBeNull();
+    expect((note.textContent ?? '')).toContain('1 h or less');
+  });
+
+  it('the baseline is REFUSED beyond 1 h, with the reason', () => {
+    component.onTabChange(1);
+    component.selectWindow('2h');
+    component.setBaseline(true);
+    expect(component.baselineOn()).toBe(false);
+    expect(component.baselineNote()).toContain('1 h or less');
+  });
+
+  it('the FIDELITY DISCLOSURE is visible while the baseline is on (3.8)', () => {
+    component.onTabChange(1);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-test="metrics-baseline-disclosure"]')).toBeNull();
+    component.setBaseline(true);
+    fixture.detectChanges();
+    const disclosure = fixture.nativeElement.querySelector(
+      '[data-test="metrics-baseline-disclosure"]',
+    );
+    expect(disclosure).not.toBeNull();
+    expect((disclosure.textContent ?? '')).toContain('bucket can straddle the split');
+  });
+
+  it('the tab inputs carry the window, the baseline and the range reporter (3.3)', () => {
+    component.onTabChange(1);
+    component.selectWindow('30m');
+    component.setBaseline(true);
+    fixture.detectChanges();
+    const inputs = component.tabInputs()['runtime'];
+    expect(inputs['window']).toBe('30m');
+    expect(inputs['baseline']).toBe(true);
+    expect(typeof inputs['onRangeChange']).toBe('function');
+  });
+});
