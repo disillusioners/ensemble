@@ -15,7 +15,7 @@
 
 ## Ground rules (A-0, binding)
 
-Stage-only lane: **NO live promote, NO live restarts, NO `.env` edits, zero live contact.** Surgical diff (~6 lines + one method, 3 files). Migration census delta EMPTY expected at stage (standing rule: delta-empty-legitimate). No tool-category registration changes ⇒ no generated-artifact regen. Do not touch `.agents/shared/planning/metrics-unification/**`, `screenshots/**`, or the tester RESULTS doc (read-only evidence).
+Stage-only lane: **NO live promote, NO live restarts, NO `.env` edits, zero live contact.** Surgical diff (~6 lines + one method, 3 files, + the P1-6 docstring corrections). Migration census delta EMPTY expected at stage (standing rule: delta-empty-legitimate). No tool-category registration changes ⇒ no generated-artifact regen. Do not touch `.agents/shared/planning/metrics-unification/**`, `screenshots/**`, or the tester RESULTS doc (read-only evidence). **Next free version slot (W6 fold; council census 2026-11-03, re-verified read-only): `v0.28.10`** — `releases/` = {v0.28.7, v0.28.8, v0.28.9}, highest tag `v0.28.9`, live `v0.28.9`; **re-derive at stage time** (concurrent lanes may consume it).
 
 ## Planner-level adjudications
 
@@ -27,7 +27,28 @@ Stage-only lane: **NO live promote, NO live restarts, NO `.env` edits, zero live
 | A-4 | **Token-only edits at :765/:1119-1123**: keep the `short_id` variable name; keep the `"Use skill_search() to find it."` sentence and the `"unknown"` fallback. | R4 mandates ❌-shape-change: renaming the local or trimming the sentence is diff-widening churn with zero contract value. |
 | A-5 | **`to_dict()` implementation shape**: `dataclasses.fields`-based; `pseudo_id` = attribute value inserted BEFORE the `id` override; no `version` key (property, not field); mutable fields (`manifest` dict, `shadows` list) copied defensively (mirrors `to_summary` :181-182 practice). | Field-set equality is the pinned invariant (R6-7b); copies prevent aliasing surprises in JSON serialization. |
 | A-6 | **Pin exercises BOTH search render paths** (fused + file-only degraded via :219). | R2(d) names two seams under ONE ruling item; a single-path pin would leave the other unpinned (observation O-2). |
-| A-7 | **Injection branch discriminator**: `getattr(skill, "source", None) == "project-file"` (import/compare against the model's `source` field default), matching skill_search_service.py:127-130. | Ruling R2(e) prescribes exactly this duck-type; do NOT invent an isinstance-based test (fixtures use SimpleNamespace duck-types by design). |
+| A-7 | **Injection branch discriminator**: adopt the `_is_project_file_skill` helper semantics WHOLE (A2 fold): `pf:` address-prefix test FIRST, then `source == "project-file"` duck-tag fallback — i.e. skill_search_service.py:**:118-130** (the module-level helper), not a bare `getattr(source)` test. | Safe both directions: DB `Skill` rows carry neither a `pf:` address nor a `source` field, while a file skill constructed without the source tag still resolves via its address; matches the pipeline's duck-typed design (fixtures use light fakes). |
+| A-8 *(council A6)* | *(cosmetic, council-noted)* The `short_id` local variable NAME at :765 is retained post-fix (A-4 minimal-diff adjudication stands). | Local-scope name only; renaming widens the diff with zero contract value. |
+
+## Council fold record (2026-11-03 — verdict APPROVE-WITH-ADVISORIES, 0 critical / 7 warnings / 6 advisories)
+
+Per-item discharge (every fold verified against HEAD `c4161335b` before amending; one sub-claim did not reproduce — noted):
+
+| Item | Discharge → doc § |
+|---|---|
+| W1 docstrings teach truncated shape | plan-overview §4 **P1-6** (3 daemon docstring sites as explicit P1 edit rows; :1126 pointer adjudicated retention) + implementation-steps P1 step 6; test-side companion → P2c |
+| W2 M5 embedding half vacuous (harness `embedding_service=None` ⇒ `[]` at BASE) | pin-spec §M **M5** — seed via `replace_for_skill` (repo receipt project_skill_file/repository.py:245); asserts (a) shape, (b) non-empty at sha16, (c) empty at address |
+| W3 M6 needs the REAL indexed pseudo-id | pin-spec §M **M6** + §D1-4 feedback leg — `list_by_project(PROJECT_ID)[0].id` idiom (pf_surface :732-734) |
+| W4 nested id path + scoped field-set | pin-spec §D1-4 — nested `["injected"][i]["skill"]["id"]` (precedent fusion_guard :150); field-set equality fused-path-only; file-only path asserts consumability + pseudo_id + address |
+| W5 fused leg stage-3 unspecified | pin-spec §H — `_skill_search_service` wiring; `config=None` ⇒ deterministic `_degraded_select` (gate verified :692-697, `self._config` stored plainly :527); BOTH degraded seams named; implementer-TODO flag on the constructor-vs-manager.py confirmation |
+| W6 version slot unnamed | decisions §Ground rules (A-0) + plan-overview §7 row 8 — **v0.28.10**, census re-verified read-only, re-derive-at-stage caveat |
+| W7 P2b corpus row false + citation + omissions + "COMPLETE" overclaim | implementation-steps §P2b — test_skill_tools.py row corrected (:999/:1033 stub/mock id assertions, unaffected, reworded); e2e row re-verified (**33 `[:8]` hits in test_u7s15 — the council's "has no `[:8]`" did NOT reproduce; citation retained with grep-count evidence**); tool-name-only 5+ files row added; header softened to "every id-shape hit adjudicated" |
+| A1 stale anchors (`_render_pf_view` :399-400; `_format_injection` :1173-1332 context) | plan-overview §3 drift table (two new rows) + §5 row fixed + §2/P1-5 wording |
+| A2 discriminator cite | decisions **A-7** amended (adopt `_is_project_file_skill` :118-130 whole) + plan-overview P1-5 |
+| A3 uuid mint is model default_factory | plan-overview §2 control-leg receipt corrected (repro phrasing noted) |
+| A4 M5 anchor :1115 | pin-spec §M M5 (`id=meta.pseudo_id` at :1115, `_to_file_skill` :1111-1122) |
+| A5 P1-4 sketch omits A-5 copies | plan-overview P1-4 — explicit "implementation follows A-5, not the sketch" note |
+| A6 short_id name note | plan-overview §4 header note + decisions A-8 (council A6) row |
 
 ## Routed follow-ups (report to dispatcher; NOT this lane)
 

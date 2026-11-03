@@ -37,7 +37,7 @@ Fix is **render-layer only**: no id minting/scheme change, no `skill_view` resol
 
 **Runtime proof (RED-at-BASE anchor)** — `.agents/tester/RESULTS/2026-11-03-wi76d89e11-phase0-runtime-repro.md` (worker e6ee309c, real-tool harness, real services/repos):
 - list returned `[a3f15088]` → verbatim `skill_view('a3f15088')` → **`ERROR: skill_view: no skill with id 'a3f15088'`** (verbatim envelope);
-- control leg: `skill_view('a3f15088-49a7-47a8-993d-d7074c9005ba')` resolves (that full uuid is the stored `skills.id` PK, minted uuid4 by `SkillRepository.create`; `repositories/skill/models.py:161-165` = `str(uuid.uuid4())` PK);
+- control leg: `skill_view('a3f15088-49a7-47a8-993d-d7074c9005ba')` resolves (that full uuid is the stored `skills.id` PK — uuid4 minted by the MODEL field `default_factory`, `repositories/skill/models.py:161-165`; there is NO repo-side mint — A3 fold, correcting the repro doc's `SkillRepository.create` phrasing);
 - all 5 file rows already emit consumable `pf:tester:<name>` addresses (all 5 RESOLVE through the `is_pf_address` branch, skill_tools.py:924);
 - adjacent facet: `pf-<hex16>` pseudo-ids are REFUSED by `skill_view` (injection-path render class — the second half of the fix).
 
@@ -50,6 +50,8 @@ Fix is **render-layer only**: no id minting/scheme change, no `skill_view` resol
 | `_pf_skill_payload["id"]` | :141 | **:145** (function def :134, dict :144-160) |
 | `_format_injection` id read/render | :1266-1281 | **read :1262, render :1271-1275** (within `_render_file_skill` :771-795 context) |
 | feedback dual-form predicate | :1457-1465 | comment :1449-1462, **predicate :1463-1466** |
+| `_render_pf_view` address/id lines | :404-405 (ruling receipt) | **:399-400** (A1 fold) |
+| `_format_injection` span | — | def at **:1173** (runs to ~:1332); the id segment (:1262 read, :1271-1275 render) sits INSIDE `_format_injection`, which `_render_file_skill` (:771-795) calls for the body — A1 fold |
 | skill_create id ternary | :1119-1125 | :1119-1123 (`created.id[:8]` at :1120), return :1124-1127 |
 | file-row append | :823-826 | append expression :822-827 |
 
@@ -57,7 +59,7 @@ All other receipts matched exactly (skill_list :764-771; `[:8]` :765; view :913/
 
 ## 4. Fix inventory — R2-IN, per site (exact before → after)
 
-**4 sites (5 concrete edits) in 3 files. Shipped-code delta target: ~6 changed lines + one new short method. Zero `.sql`, zero minting changes, zero view changes.**
+**4 sites (5 code edits + 1 docstring cluster) in 3 files, plus the P1-6 doc-only corrections in the same files. Shipped-code delta target: ~6 changed lines + one new short method + 3 docstring lines. Zero `.sql`, zero minting changes, zero view changes.** *(A6 note: the `short_id` local variable NAME at :765 is retained post-fix per adjudication A-4 — minimal diff; the name is local-scope only.)*
 
 ### P1-1 — skill_list DB bracket token → full uuid
 `daemon/tools/skill_tools.py:765` (one token; render :769-771 and the `db_suffix` logic :762 byte-unchanged)
@@ -100,15 +102,28 @@ All other receipts matched exactly (skill_list :764-771; `[:8]` :765; view :913/
       d["id"] = self.address     # the agent-facing verbatim-consumable id — R1
       return d
   ```
+- **Implementation follows adjudication A-5, not this sketch** (A5 fold): the shipped method must defensively COPY the mutable fields (`manifest` dict, `shadows` list — mirroring `to_summary` :181-182 practice); the sketch above is shape-only and would alias the originals.
 - Constraint pins: `set(to_dict()) == {f.name for f in dataclasses.fields(ProjectFileSkill)} | {"pseudo_id"}` (a vanishing key = real shape churn — R6-7(b)); `version` is a **property, not a field** — NOT in `to_dict()` (matches `__dict__`, observation O-3); the `.id` ATTRIBUTE stays the pseudo-id (M5).
 
 ### P1-5 — injection file-body id segment → address
-`daemon/services/skill_injection_service.py` `_format_injection` (id read at :1262, rendered :1271-1275) — ONE branch, file-only, discriminated by the sanctioned duck-type (`getattr(skill, "source", None) == "project-file"` — same test as skill_search_service.py:127-130):
+`daemon/services/skill_injection_service.py` `_format_injection` (def :1173; id read at :1262, rendered :1271-1275) — ONE branch, file-only, discriminated by adopting the sanctioned helper semantics **`_is_project_file_skill`** (skill_search_service.py:118-130: `pf:` address-prefix test FIRST, then the `source == "project-file"` duck-tag — safe both directions; DB `Skill` rows carry neither) — A2 fold:
 
 - BEFORE: file skills render `📋 **Skill: <name>** (id: pf-<hex16>, match score: X)`
 - AFTER:  file skills render `📋 **Skill: <name>** (id: pf:<ns>:<name>, match score: X)`
 - DB path byte-unchanged (already renders the full uuid); segment layout unchanged; the `if skill_id:` omission branch (:1271/:1276-1279) preserved.
 - `track_injection`/`_injected_skills` attribution (ruling R3: :460-465/:643-648) reads the id attribute DIRECTLY — untouched, stays pseudo-id, consistent with the usage table.
+
+### P1-6 — agent-visible docstring corrections (W1 fold — doc-only edits, DEVELOPER-executed in commit 1)
+The tool `_full_doc_` surfaces render to agents via tool_help; post-fix they must not teach the truncated shape:
+
+| Site | Current (verified) | Correction |
+|---|---|---|
+| skill_tools.py:**904** (skill_list `_full_doc_` Returns example) | `- [<short_id>] <name> — <category> — <status>` | `- [<id>] <name> — <category> — <status>` (full uuid token) |
+| skill_tools.py:**1160** (skill_create `_full_doc_` Returns example) | `✅ Skill '<name>' created with id <short_id>.` | `… with id <id>.` |
+| skill_tools.py:**1163-1164** (skill_create `_full_doc_` explanation) | "Where ``<short_id>`` is the first 8 chars of the skill's UUID4 primary key." | "Where ``<id>`` is the skill's full UUID4 primary key." |
+| skill_tools.py:**1126** (retained `Use skill_search() to find it.` pointer) | kept per adjudication A-4 (shape-preservation) | **NO edit — adjudicated retention**: the sentence remains useful discovery guidance, not truncation teaching |
+
+Test-side companion (rides the P2 fold commit, not P1): `tests/tools/test_skill_tools_pf_surface.py:726-729` — `test_pseudo_id_form_accepted` docstring tense ("the ``pf-<hex16>`` pseudo-id the injection path renders") goes stale post-fix; reword to the compatibility framing ("the ``pf-`` pseudo-id form remains accepted — legacy-transcript compatibility, R2g").
 
 ## 5. OUT / NO-CHANGE list (R2-OUT + ruled NO-CHANGE + routed)
 
@@ -121,7 +136,7 @@ All other receipts matched exactly (skill_list :764-771; `[:8]` :765; view :913/
 | skill_feedback dual-form routing | skill_tools.py:1449-1466 | **NO CHANGE — PRESERVED AS INVARIANT** (R2g): `pf:` OR `pf-` → `_feedback_pf_skill`; W5 fail-closed (:744-770 pins); metrics-only writes keyed by the RESOLVED pseudo-id; compatibility path for pre-fix transcripts. M6 pins it. |
 | skill_fix `pf-` refusal gap | skill_tools.py:1211 | **OUT — ROUTED** (skill-evolution/fix-dispatch lane): prefix test on `ADDRESS_PREFIX` only → a `pf-<hex16>` falls through to `dispatch_fix` as a bogus DB id; harmless today (evolution lane disabled) and LESS reachable after this fix; belongs to the P7-refusal family (siblings :1201-1206: skill_analyze / skill_evolve / skill_get_metrics + REST POST /{id}/fix) which must move together |
 | REST/FE fusion | routers/skills.py:282-308; skill_search_service.py:592-600 | **OUT — REPORT-ONLY** (parked v2): REST shares NOTHING with the tool projection (full uuid via `to_dict()`; REST search DB-only v1 — file corpus invisible at `instance_id=None`) — the dispatcher's "if it shares the projection" premise resolves to: it does not |
-| `_render_pf_view` `- id: <pseudo-id>` line under `- address:` | skill_tools.py:404-405 (ruling receipt) | **NO CHANGE** (address leads; relabelling = shape churn on a surface the dispatcher did not name) |
+| `_render_pf_view` `- id: <pseudo-id>` line under `- address:` | skill_tools.py:**:399-400** (A1 fold; ruling receipt said :404-405) | **NO CHANGE** (address leads; relabelling = shape churn on a surface the dispatcher did not name) |
 | `ProjectFileSkill.to_summary()` `"id": pseudo-id` | model.py:162-183 | **NO CHANGE — planner observation O-1**: ZERO consumers tree-wide (grep daemon/ + tests/); dead surface, not an emission seam; recorded so future lanes don't mistake it for one |
 | id minting/scheme (`uuid4()` PK default; `mint_pseudo_id`; `mint_address`) | models.py:161-165; model.py:68-84 | **NO CHANGE** |
 | schema / migrations | — | **NO CHANGE** — zero `.sql`; migration census delta EMPTY expected at stage (standing rule: delta-empty-legitimate) |
@@ -144,6 +159,7 @@ All other receipts matched exactly (skill_list :764-771; `[:8]` :765; view :913/
 | 5 | Pin non-vacuous: RED-at-BASE/GREEN-at-HEAD + id == stored full uuid for BOTH sources | `pin-spec.md` §D1 (iv) str-equal value assertions per source; §PROC RED-at-BASE at c4161335b anchored to the runtime repro RESULTS doc |
 | 6 | OUT OF SCOPE: REST/FE fusion (report-only), id format changes, v2 loader itself | §5 OUT/ROUTED rows; REST finding reported in `decisions.md` §Routed |
 | 7 | Ground rules: stage-only, no live promote, no live restarts, no .env edits, surgical diff, preserve every safety property | `decisions.md` §Ground rules; `risk-register.md` maps every R6 property → guarding pin |
+| 8 | *(council W6)* Named next free version slot: **v0.28.10** — read-only census 2026-11-03: `releases/` = {v0.28.7, v0.28.8, v0.28.9}, highest tag `v0.28.9`, live `v0.28.9`; **re-derive at stage time** per the standard stage-freshness rule (concurrent lanes may consume it) | `decisions.md` §Ground rules (A-0) |
 
 ## 8. Deliverable map (this lane's planning set)
 

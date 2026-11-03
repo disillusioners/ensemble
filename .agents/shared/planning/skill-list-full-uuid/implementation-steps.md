@@ -3,13 +3,13 @@
 Ordered, small, single surgical lane — **no phases beyond P1–P3**. Shipped-code delta target: ~6 changed lines + one short method, 3 files; one 2-line test fold; one new pin pack. All edits in the worktree `/home/nea/ensemble-src-wt-skill-list-full-uuid` on `fix/skill-list-full-uuid`.
 
 Commit granularity (adjudication A-1): three commits —
-1. `fix(skill-tools): emit verbatim-consumable ids — full uuid (db) + address (project-file) at the 4 render seams (wi-76d89e11)`
-2. `test(skill-tools): fold stale 8-hex expectation in pf_surface W4 pin (wi-76d89e11)`
+1. `fix(skill-tools): emit verbatim-consumable ids — full uuid (db) + address (project-file) at the 4 render seams + agent-visible docstrings (wi-76d89e11)`
+2. `test(skill-tools): fold stale 8-hex expectation + docstring tense in pf_surface (wi-76d89e11)`
 3. `test(skill-tools): pin pack — skill id verbatim contract, M1-M6+M2b mutation legs (wi-76d89e11)`
 
 ---
 
-## P1 — the emission-site fixes (4 sites, 5 edits, 3 files; details + before→after in `plan-overview.md` §4)
+## P1 — the emission-site fixes (4 sites, 5 edits, 3 files + the W1 docstring cluster; details + before→after in `plan-overview.md` §4)
 
 Order is dependency-free; this sequence keeps each file reviewable in one pass:
 
@@ -17,7 +17,8 @@ Order is dependency-free; this sequence keeps each file reviewable in one pass:
 2. **`daemon/tools/skill_tools.py:1119-1123`** — skill_create success line: `created.id[:8]` → `created.id` (inside the existing None-guard ternary; sentence + `"unknown"` fallback kept). *(P1-2)*
 3. **`daemon/tools/skill_tools.py:145`** — `_pf_skill_payload`: `"id"` re-keys to `getattr(file_skill, "address", None)`; ADD `"pseudo_id": getattr(file_skill, "id", None)` adjacent. All other keys untouched. Covers the fused-path file entries AND the file-only degraded path (consumer at :219). *(P1-3)*
 4. **`daemon/services/project_skill_source/model.py`** — NEW `ProjectFileSkill.to_dict()`: `dataclasses.fields`-based dict, `pseudo_id` additive (attribute value), `id` = address. `_json_default` (skill_tools.py:91-96) picks it up with NO edit there. Field-set pin target: `set(to_dict()) == fields ∪ {"pseudo_id"}`; NO `version` key (property, not field — O-3). *(P1-4)*
-5. **`daemon/services/skill_injection_service.py` `_format_injection` (:1262 read / :1271-1275 render)** — one file-only branch on the sanctioned duck-type `getattr(skill, "source", None) == "project-file"` (precedent skill_search_service.py:127-130): file body renders the ADDRESS in the id segment; DB path byte-unchanged; `track_injection` attribution untouched (stays pseudo-id). *(P1-5)*
+5. **`daemon/services/skill_injection_service.py` `_format_injection` (:1262 read / :1271-1275 render)** — one file-only branch adopting the `_is_project_file_skill` helper semantics (skill_search_service.py:118-130: `pf:` address-prefix test FIRST, then `source == "project-file"` duck-tag — safe both directions; A2 fold): file body renders the ADDRESS in the id segment; DB path byte-unchanged; `track_injection` attribution untouched (stays pseudo-id). *(P1-5)*
+6. **Agent-visible docstring corrections (W1 fold — doc-only, 3 sites, same commit)**: skill_tools.py:904 (skill_list `_full_doc_` example `- [<short_id>]` → `- [<id>]`), :1160 (`<short_id>` → `<id>`), :1163-1164 ("first 8 chars" sentence → full-uuid wording). The :1126 `Use skill_search() to find it.` pointer is ADJUDICATED RETENTION (A-4 — discovery guidance, not truncation teaching; no edit). Companion test-docstring tense fix rides P2 (P2c). *(P1-6 — details in plan-overview.md §4 P1-6)*
 
 **Forbidden in P1** (ruling R3/R2 — the unsafe rewrite): remapping the `ProjectFileSkill.id` ATTRIBUTE, DB rows, or any internal join key. Pseudo-id remains THE internal key everywhere (embeddings, usage records, attribution, gc joins).
 
@@ -32,9 +33,9 @@ Order is dependency-free; this sequence keeps each file reviewable in one pass:
 
 The knob-OFF leg at **:498** re-uses `legacy_line` (`assert off_out.splitlines()[1] == legacy_line`) — no third line needed. The pin's PURPOSE (the ` — source: db` suffix additivity, ON at :492 / OFF at :497-498) is preserved; only the id token grows. Precedent: v0.28.5 R1 stale-expectation fold ruling.
 
-### P2b — Planner-run sweep (complete enumeration; nothing else reddens at gate time)
+### P2b — Planner-run sweep (every id-shape hit adjudicated; fold list + verified-unaffected corpus)
 
-Sweep method: grep over `tests/` + `test/packs/` for `[:8]`, 8-hex assertion patterns (`abcdef01`, bracket-line renders), `"id"` expectations on file payloads, `pf-<hex16>` fixtures, `created with id`, `(id: …, match score` segments, and `source: db`/`source: project-file` renders; every hit adjudicated below.
+Sweep method: grep over `tests/` + `test/packs/` for `[:8]`, 8-hex assertion patterns (`abcdef01`, bracket-line renders), `"id"` expectations on file payloads, `pf-<hex16>` fixtures, `created with id`, `(id: …, match score` segments, and `source: db`/`source: project-file` renders; every id-shape hit adjudicated below (W7 fold: completeness claim scoped to id-shape hits — tool-name-only matches adjudicated by category, above).
 
 **FOLD list (stale expectations on the OLD shapes): exactly the 2 lines above — nothing else.**
 
@@ -42,7 +43,8 @@ Sweep method: grep over `tests/` + `test/packs/` for `[:8]`, 8-hex assertion pat
 
 | Test site | Shape | Why unaffected |
 |---|---|---|
-| `tests/tools/test_skill_tools.py` (whole file) | soft-fail + service-call coverage | ZERO id-render assertions (no bracket-line, no `[:8]`, no `created with id`, no refusal-envelope pin) |
+| `tests/tools/test_skill_tools.py` (whole file) | soft-fail + service-call coverage | **W7 fold (row corrected)**: the file DOES carry id-render assertions — **:999** (`parsed["injected"][0]["skill"]["id"] == "sk-x"`) and **:1033** (`== "sk-bare"`, the `_json_default` `__dict__`-fallback leg, test :1006-1033). Both run against STUB/MOCK surfaces: fake search services returning hand-built dict entries (:999) and a bare to_dict-less object (:1033) — neither is a `ProjectFileSkill`, and our change adds `to_dict` only to that class; stub entries pass through `json.dumps` unchanged. UNAFFECTED both sides — and :1006-1033 doubles as armor that the `__dict__` fallback still works for to_dict-less objects |
+| tool-name-only matches (5+ files: `test_skill_feedback_tool.py`, `test_skill_service_init.py`, `test_skill_repository.py`, `test_registry_skill_injection.py`, `test_skill_capture_killswitch.py`, plus wanderer/llm-failover/integration-flow files) | matched skill TOOL NAMES in imports/mocks only | **W7 fold**: no id-shape assertions anywhere in them; benign category adjudication |
 | `tests/tools/test_skill_tools_pf_surface.py:744-770` | pseudo-id feedback routing/refusals (`pf-deadbeefdeadbeef`, `pf:` address routing) | routing is R2g NO-CHANGE; these keep running green and form adjacent armor for M6 |
 | `tests/tools/test_skill_search_fusion_guard.py:150/:200/:231` | payload `skill.id == "db-skill-1"` | DB-shaped fixtures; DB render path unchanged |
 | `tests/services/test_skill_search_fusion.py:875-911` | `_tag_result_sources` dedupe; `ProjectFileSkill(id="pf-deadbeefdeadbeef")` fixture | asserts object identity (`is file_skill`) + source tagging, NOT the payload id value; adding `to_dict()` changes no attribute |
@@ -57,7 +59,11 @@ Sweep method: grep over `tests/` + `test/packs/` for `[:8]`, 8-hex assertion pat
 | `tests/postgres/test_project_skill_fusion_pg.py` | no id-render assertions | — |
 | `tests/packs/psl_fix_cycle_mutation_matrix.py:130-136` | mutation pack; W4 leg exact-string-mutates the `db_suffix = " — source: db" if …` line (skill_tools.py:762) | our P1-1 edits :765 only — the pack's `old=` string survives verbatim; no pack leg touches `short_id`/`[:8]`/`_pf_skill_payload` |
 | shell packs in `test/packs/` | — | NO existing pack pins skill_list/skill_view/skill_create renders (grep: zero hits) |
-| e2e `[:8]` hits (`test_u7s15_realseat_acceptance.py` etc.) | instance/job-id display prefixes | unrelated domain — not skill ids |
+| e2e `[:8]` hits (`tests/e2e/test_u7s15_realseat_acceptance.py` — **33 hits, re-verified at HEAD by grep count**; the council's "has no `[:8]`" sub-claim did NOT reproduce — citation retained with evidence; + 4 other e2e files incl. `mock_source_server.py`) | instance/job/mission-id display prefixes (`job_id[:8]`, `parent_id[:8]`, …) | unrelated domain — not skill ids |
+
+### P2c — Test-docstring tense correction (W1 fold, test-side, rides the fold commit)
+
+`tests/tools/test_skill_tools_pf_surface.py:726-729` (`test_pseudo_id_form_accepted`): the docstring "The ``pf-<hex16>`` pseudo-id the injection path renders is accepted directly" goes stale post-fix (the injection path will render the ADDRESS). Reword to the compatibility framing: the `pf-` pseudo-id form REMAINS accepted — legacy-transcript compatibility per R2g/M6. Docstring only; the test body (verified :730-735: real-index `list_by_project(PROJECT_ID)[0].id` idiom) is untouched and stays green.
 
 ## P3 — the pin pack (concretized in `pin-spec.md`)
 
