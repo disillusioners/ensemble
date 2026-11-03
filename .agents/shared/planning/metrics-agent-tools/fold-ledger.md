@@ -323,6 +323,73 @@ and `package-lock.json` are **byte-unchanged** (`package_json_diff_lines=0`).
   SCSS, the spec, the e2e spec). `frontend/package.json` + `frontend/package-lock.json`
   are byte-identical.
 
+### H.6 — Phase 5 (the verification + docs phase)
+
+**The lane's packs (all registered in `.agents/tester/PACKS.md` with RE-DERIVED counts — the
+nine-id block is NOT widened):**
+
+| Pack | Nodes | What it proves |
+|---|---|---|
+| `metrics_read_registration` | **30** | the registration + wiring proof (the AST discovery, the category, the count + the EXACT set, the two name universes, the extend's placement, the decorator order, the A13 attribute pin + the default-deny leg, the holders census, the fail-closed helper, the GATE-ORDERING pin, the literal-name probe, the AmA-3 equality leg, the AmA-2 threaded-`agent_id` leg, the AmRULING-4 callable-shape leg, the AmRULING-1 degraded-boot leg) |
+| `metrics_read_tools` | **34** | the three tools' behaviour (the counts, the VERBATIM availability, the derived members, the ONE provider read, the SORT-before-cut, the derived stale/cardinality, the bound block, the HARD FLOOR, the COMBINED cap, the ANCHORED pair, the `top_n+1` probe, the null-not-zero delta, the per-series freshness, the non-silent clamp, the no-cursor posture, the four-token ladder + its ORDERING, the degraded-read block) |
+| `metrics_read_personas` | **15** | the design's TWO persona examples as STRUCTURAL assertions (the field sets + the vocabularies; a leg proves the pack pins NO observation) |
+| `metrics_read_docs_surface` | **20** | the agent-visible docs chain (the registry resolves the category, the loader renders the section for the three holders, NOTHING metrics-shaped reaches a non-holder, `tool_help` serves the `_full_doc_`, the three tools_note sections carry the AmC-11 asymmetry) |
+| `metrics_query_protocol_consumer` | **28** | the Phase-1 seam pins (the completeness pin, the identity + lifecycle-triple pins, the reachability leg, the public-reader pin, the no-second-provider pin) |
+
+**The mutation matrix — 12/12 PASS.** Each leg plants a mutation INDEPENDENTLY on the
+production source, requires RED **through the intended assertion** (a per-leg RED marker — the
+marker's absence is a FAIL, so a mutation that reds for an unrelated reason does not pass),
+restores the file BYTE-IDENTICALLY and requires GREEN again. The restore discipline is the
+in-memory byte copy + the pre-run manifest + the recovery journal + the dirty-tree refusal; **no
+`git checkout --`**. The post-run manifest confirms every touched file is byte-identical.
+
+**The shell packs.** `test/packs/metrics_read_unit_test.sh` (five python legs, the house
+exit-code contract, the VACUOUS-GREEN guard — a leg that collected nothing is a FAIL) and
+`test/packs/metrics_read_mutation_legs.sh` (the matrix wrapper, which also asserts the
+byte-identical restore).
+
+**THREE GAPS the docs-surface pack found (all real, all fixed):**
+1. **the loader's COLD-BOOT metadata scan did not know the metrics category** — the agent's
+   rendered prompt had NO "## Metrics" section until an instance build happened to repopulate
+   the registry (the W1-FIX-NOW class, verbatim). Fixed: the metrics factory joins the warm
+   scan.
+2. **the three tools carried no `_full_doc_`** — `tool_help(<name>)` fell back to "No detailed
+   documentation available.". Fixed: the three full docs are set on the tool objects.
+3. **the CATEGORY_DOC did not state that the caveat is GENERIC** — fixed (the doc now says so).
+
+### H.7 — Phase 6 (the close-out)
+
+* **task 6.1** — the watch/alert outline is authored: `docs/architecture/metrics-watch-outline.md`
+  (the §C outline FOLDED, with the AmM-2iii correction that the `3 × interval` trigger is
+  **silently inert post-restart** — the future lane must pair it with a ring-state signal). It
+  plans NOTHING: no tool, no category, no schedule row, no trigger vocabulary, no knob.
+* **task 6.2** — the §G backfill protocol is EXECUTED in the one admissible way this lane
+  admits: the tidier's per-item list was never held by the implementation lane, so §G.1 records
+  the **verbatim cannot-recover outcome** and the protocol is handed to the tidier pass. **No
+  mapping is invented.**
+* **task 6.3** — the stage-prep checklist is assembled:
+  `.agents/shared/planning/metrics-agent-tools/stage-prep-checklist.md` (the five EMPTY-delta
+  assertions with their commands, the NON-empty deltas with their observed counts, the
+  prompt-artifact re-stamp implication, the E-1 disclosure, the gate facts and the two
+  hand-overs). **No version string appears in it** (the slot is giter's) and it contains **no
+  promote step** beyond naming the user's ceremony command.
+* **task 6.4** — the final consistency sweep: the task 1.0 greps are re-run (zero LIVE hits),
+  the plan-file manifest matches the tree (17 files), every task's acceptance traces to a
+  phase + a lane criterion, and every decision id cited in a phase file exists in
+  `decisions.md`.
+
+  **The sweep's re-run (2026-11-03, close-out):**
+
+  | pair | hits | disposition |
+  |---|---|---|
+  | (i) `4 cited` / `four cited` / `exactly the 4` | **5** — `decisions.md:184` (the ORIGINAL guardrail-(a) enumeration inside the marked historical block), `:195` (the amendment-2 ruling QUOTING the original), `:202` (the marked P-1 pre-adjudication record), `phase1-plan.md:23` (the sweep's own text), `fold-ledger.md:148` (the sweep's own log) | **0 LIVE** |
+  | (ii) `three booleans` / `three facts` / `three properties` | **7** — every hit is the CORRECT fold wording ("the fake cost SHRINKS three booleans → ONE") or the sweep's own text/log, or the READ-ONLY design | **0 LIVE** |
+  | (iii) `quintet` | **9** — the Part 1 VERBATIM fold + the design's POINTER amendment + two READ-ONLY inputs + two fold/supersede rows + the sweep's own text/log | **0 LIVE** |
+  | (iv) `sixteen` / `fifteen` count wording | **6** — the sweep's own log + the fold-ledger's own disposition + the binding task 2.8 header | **0 LIVE** |
+  | (v) manifest-vs-ls | **tree 17 / manifest 17** — every lane-dir `.md` is named in the plan-file manifest (the two close-out artefacts were added to it in this task) | **MATCH** |
+
+  **Verdict: ZERO live residue. The plan set is internally consistent.**
+
 ---
 
 ## §G — The implementation-tidier backfill (placeholder — DO NOT fill before the tidier pass)
@@ -339,6 +406,33 @@ and `package-lock.json` are **byte-unchanged** (`package_json_diff_lines=0`).
 > | tidier Medium **21** | *(to be recorded)* | — | — | — |
 >
 > If the numbered list cannot be recovered, record that outcome here verbatim instead of any row above.
+
+### G.1 — The outcome recorded by the IMPLEMENTATION lane (2026-11-03)
+
+**The verbatim outcome: THE NUMBERED LIST WAS NOT RECOVERED IN THIS LANE — and no mapping is
+recorded.**
+
+The six numbered tidier Mediums (items 3, 5, 10, 16, 17, 21) belong to the **tidier pass**, a
+separate step in the house flow (it runs after the code council, on the finished code). This
+lane is the IMPLEMENTATION lane: it authored the code, ran the gate legs and produced the
+evidence pack, and it did **not** run a tidier pass — so it never held the tidier's per-item
+list and therefore **cannot** record a mapping without fabricating one (P-2's explicit
+prohibition).
+
+What this lane DID do, so the protocol is not stalled:
+
+* the two ADJUDICATED advisories that map to the tidier's findings are ALREADY folded (§F.2's
+  i2-N1..N10 dispositions cover the plan-doc ones; the phase-map count cell, the lifespan touch
+  set, the preservation list, the FE provisioning, the sweep exclusion, the ceremony disclosure,
+  the observation-dependent counts, the wedge-trigger blemish, the cite and the pin-census
+  harmonisation);
+* the tidier pass, when it runs on this lane's code, records the numbered mapping into THIS
+  section — each item id → its finding text, its target file:line and its disposition
+  (fold-here / still-routed) — or records THAT outcome verbatim if it cannot recover the list
+  either. **The rows above stay empty until then; they are never guessed.**
+
+**Status: OPEN — routed to the tidier pass (this lane's own §H records the deviation
+dispositions it DID make).**
 
 ---
 

@@ -181,7 +181,9 @@ Shared-file couplings: `daemon/services/metrics_query/protocol.py` + `envelope.p
 | `phase6-plan.md` | Close-out: watch/alert outline doc, fold-ledger backfill protocol, stage-prep checklist, consistency sweep (Tier 0) |
 | `architecture-recommendation.md` | the architect enrichment — BINDING INPUT, untouched (SOUND-WITH-AMENDMENTS; the fold-map + RULING-1..4 that `decisions.md` Part 5 and fold-ledger §E/§F fold) |
 | `decisions.md` | the decisions record — D-UX-1..15, D-SCOPE-1..7, D-WATCH-1..4 folded VERBATIM from the design (cited by section), PLUS planner adjudications P-1..P-7 |
-| `fold-ledger.md` | the fold ledger — §A IN folds (with provenance + fold site), §B OUT exclusions (with reasons), §C the provenance-gap protocol (P-2), §D recorded deviations, §G the implementation-tidier backfill placeholder |
+| `fold-ledger.md` | the fold ledger — §A IN folds (with provenance + fold site), §B OUT exclusions (with reasons), §C the provenance-gap protocol (P-2), §D recorded deviations, §F.2 the approver advisories' dispositions, §G the implementation-tidier backfill, §H the implementation lane's running log (the sweeps + the gate records) |
+| `evidence-pack.md` | the implementation lane's evidence pack — per-leg results, the mutation table, the E-1 variant record, the pin re-derivation and the deviation dispositions (authored by the implementation lane, Phase 5 task 5.7) |
+| `stage-prep-checklist.md` | the stage-prep checklist — the expected EMPTY/NON-empty deltas with their verification commands, the prompt-artifact re-stamp implication, the E-1 disclosure and the two hand-overs (Phase 6 task 6.3) |
 | `research-findings.md` | the research index — pointers to the three research files with one-paragraph summaries (no content duplication) |
 | `technical-analysis.md` | the design — BINDING INPUT, pointer-amended only (seven inline fold pointers; no content rewrites) |
 | `research-metrics-surface.md` / `research-tool-conventions.md` / `research-folds.md` | the three research reports — INPUTS, untouched |

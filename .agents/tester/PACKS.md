@@ -92,6 +92,30 @@
 
 # Test Packs
 
+## Commission metrics-agent-tools — gate packs REGISTERED (2026-11-03, implementation lane)
+
+> **Why this block exists.** The lane's own packs must be runnable BY ID (a leg invokes its D2
+> set by pack id, so an unregistered id makes the leg unrunnable). The counts below are
+> MECHANICAL `pytest --collect-only -q` counts, re-derived at registration time — never
+> remembered.
+>
+> **The nine-id block is NOT widened.** The frozen contract's `gate-pack-ids` block pins that
+> count; this lane's packs take NEW ids OUTSIDE that block.
+>
+> **No PG row.** The lane adds no DB-touching code; the existing `metrics_census_pg_test` row
+> is untouched.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `metrics_read_registration` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/test_metrics_read_registration.py -q --tb=line -rfE -p no:randomly --timeout=120` | **Leg P2-G1 (Tier 1).** The registration + wiring proof: the AST discovery, the category in `PRIVILEGED_TOOL_CATEGORIES`, the count (17) + the EXACT set, `CATEGORY_MODULES`/`DYNAMIC_TOOL_NAMES`/`KNOWN_TOOL_NAMES`, the extend's placement before the three constraint sites, the DECORATOR ORDER, the A13 attribute pin + the default-deny behavioural leg, the holders census, the fail-closed helper, the GATE-ORDERING pin, the literal-name probe, the AmA-3 equality leg, the AmA-2 threaded-`agent_id` leg, the AmRULING-4 callable-shape leg and the AmRULING-1 degraded-boot leg. **30 nodes.** | 2026-11-03 | ✅ registered (implementation lane) |
+| `metrics_read_tools` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/metrics/test_metrics_read_tools.py -q --tb=line -rfE -p no:randomly --timeout=120` | **Leg P2-G2 (Tier 1).** The three tools' behaviour: the exact counts, the availability carriage VERBATIM, the derived members, the details projection, the ONE provider read for a multi-family filter, the SORT-before-cut, the derived `stale`/`cardinality_class`, the six-member bound block, the HARD FLOOR, the COMBINED selector cap, the ANCHORED pair of provider reads, the `top_n+1` probe, the null-not-zero delta, the per-series freshness, the non-silent clamp, the no-cursor posture, the four-token ladder (with the ORDERING) and the degraded-read block. **34 nodes.** | 2026-11-03 | ✅ registered (implementation lane) |
+| `metrics_read_personas` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/metrics/test_metrics_read_personas.py -q --tb=line -rfE -p no:randomly --timeout=120` | **Leg P5-G1 (Tier 0).** The design's TWO persona examples (technical-analysis.md §A.12) as STRUCTURAL assertions — the exact field sets and vocabularies only. A leg proves the pack itself pins NO observation-dependent value. **15 nodes.** | 2026-11-03 | ✅ registered (implementation lane) |
+| `metrics_read_docs_surface` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/metrics/test_metrics_read_docs_surface.py -q --tb=line -rfE -p no:randomly --timeout=120` | **Leg P5-G2 (Tier 0).** The agent-visible docs chain: the registry resolves the category, the loader renders the section for each of the three holders, NOTHING metrics-shaped reaches an agent that does not hold it, `tool_help` serves the `_full_doc_`, and the three `tools_note.md` sections carry the AmC-11 asymmetry sentence. **20 nodes.** | 2026-11-03 | ✅ registered (implementation lane) |
+| `metrics_query_protocol_consumer` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/metrics/test_metrics_query_protocol_consumer.py -q --tb=line -rfE -p no:randomly --timeout=120` | **Leg P1-G1 (Tier 2).** The Phase-1 seam pins: the Protocol-completeness pin (the declared member set asserted EXACTLY), the single-substrate identity pin + the lifecycle-triple pin, the mount-handle reachability leg, the public-reader pin and the no-second-provider pin. **28 nodes.** | 2026-11-03 | ✅ registered (implementation lane) |
+| `metrics_read_unit_test` | `cd $WT && timeout 900 bash test/packs/metrics_read_unit_test.sh` (self-capped `PACK_BUDGET_S=900`; five python legs; the house exit-code contract `0 PASS / 1 FAIL / 124 TIMEOUT`; the VACUOUS-GREEN guard — a leg that collected nothing is a FAIL) | **Leg P5-G3 (Tier 0).** The lane's five python legs in ONE invocation (registration + tools + personas + docs-surface + the seam pack). | 2026-11-03 | ✅ registered (implementation lane) |
+| `metrics_read_mutation_legs` | `cd $WT && timeout 1800 bash test/packs/metrics_read_mutation_legs.sh` (the matrix wrapper; the harness owns the restore discipline — the in-memory byte copies, the pre-run manifest + recovery journal, the dirty-tree refusal and the NO-`git checkout --` rule) | **Leg P5-G4 (Tier 0).** The mutation matrix: **12 legs**, each planted INDEPENDENTLY on the production source → the intended pack REDs → the file is restored BYTE-IDENTICALLY → the pack is GREEN again. The per-leg RED marker proves the INTENDED assertion is what went red. | 2026-11-03 | ✅ registered (implementation lane) |
+
+
 ## Lane plane-pm-issue-tools — GATE D Tier-2 whole-tree leg REGISTERED (2026-11-02, GATE D)
 
 > Registered by GATE D (Tier-2 whole-tree dual-side regression leg, RESUMED). Whole-tree
