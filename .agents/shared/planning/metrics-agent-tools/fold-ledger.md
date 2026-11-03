@@ -342,12 +342,12 @@ nine-id block is NOT widened):**
 | Pack | Nodes | What it proves |
 |---|---|---|
 | `metrics_read_registration` | **30** | the registration + wiring proof (the AST discovery, the category, the count + the EXACT set, the two name universes, the extend's placement, the decorator order, the A13 attribute pin + the default-deny leg, the holders census, the fail-closed helper, the GATE-ORDERING pin, the literal-name probe, the AmA-3 equality leg, the AmA-2 threaded-`agent_id` leg, the AmRULING-4 callable-shape leg, the AmRULING-1 degraded-boot leg) |
-| `metrics_read_tools` | **47** | the three tools' behaviour (the counts, the VERBATIM availability, the derived members, the ONE provider read, the SORT-before-cut, the derived stale/cardinality, the bound block, the HARD FLOOR, the COMBINED cap, the ANCHORED pair, the `top_n+1` probe, the null-not-zero delta, the per-series freshness, the non-silent clamp, the no-cursor posture, the four-token ladder + its ORDERING, the degraded-read block) |
+| `metrics_read_tools` | **48** | the three tools' behaviour (the counts, the VERBATIM availability, the derived members, the ONE provider read, the SORT-before-cut, the derived stale/cardinality, the bound block, the HARD FLOOR, the COMBINED cap, the ANCHORED pair, the `top_n+1` probe, the null-not-zero delta, the per-series freshness, the non-silent clamp, the no-cursor posture, the four-token ladder + its ORDERING, the degraded-read block) |
 | `metrics_read_personas` | **15** | the design's TWO persona examples as STRUCTURAL assertions (the field sets + the vocabularies; a leg proves the pack pins NO observation) |
 | `metrics_read_docs_surface` | **20** | the agent-visible docs chain (the registry resolves the category, the loader renders the section for the three holders, NOTHING metrics-shaped reaches a non-holder, `tool_help` serves the `_full_doc_`, the three tools_note sections carry the AmC-11 asymmetry) |
 | `metrics_query_protocol_consumer` | **28** | the Phase-1 seam pins (the completeness pin, the identity + lifecycle-triple pins, the reachability leg, the public-reader pin, the no-second-provider pin) |
 
-**The mutation matrix — 22/22 PASS (21 RED/GREEN + 1 FOLLOW leg).** The ARCHIVED log (plan task 5.2's "the matrix log + digests archived for the evidence pack"): `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def`, 3 587 bytes — the run's own pre-run manifest records the HEAD sha `e5d29e8c6` + the sha256 of every touched file) and `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `44629b770ab1767c125b038134eb080d4e484f5c93a52d1cbfb49aca088f45ac`). Each leg plants a mutation INDEPENDENTLY on the
+**The mutation matrix — 22/22 PASS (21 RED/GREEN + 1 FOLLOW leg).** The ARCHIVED log (plan task 5.2's "the matrix log + digests archived for the evidence pack"): `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `5f030ad43c85902a2d3409b8f5baf887695e8f28764cec53492c03722007f849`, 3 587 bytes — the run's own pre-run manifest records the HEAD sha `04f1c856e` (the RULING-1 commit — the FINAL code) + the sha256 of every touched file) and `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `5c23aa4c929ec304a2f6fc7817c7165124553f81739eb3dafe82b5b6f321c128`). — see §H.10's SUPERSESSION note Each leg plants a mutation INDEPENDENTLY on the
 production source, requires RED **through the intended assertion** (a per-leg RED marker — the
 marker's absence is a FAIL, so a mutation that reds for an unrelated reason does not pass),
 restores the file BYTE-IDENTICALLY and requires GREEN again. The restore discipline is the
@@ -485,18 +485,52 @@ items 1-3 from here.
 | **4 — the stale records** | **ALL FOLDED IN THIS CYCLE** (the ceremony-fiction class — `stage-prep-checklist.md` is the file giter reads at stage time): the pin-file count reconciled to **10**; the matrix count **12/12 → 22/22** in both records; the node counts re-derived (the tools pack **34 → 47**, the five-pack total **127 → 140**); the §H.9 line-citation drift corrected (and re-corrected for the C1 repair's own line shift — the CURRENT sites are `:758` / `:871` / `:1131`); the §H.5/§E fix-cycle paragraph moved OUT of the GFM table into **§E.1** (it rendered as ~40 header-less pipe rows); the R13 residual row carries a fix-cycle marker; the matrix log is **CITED + ARCHIVED**. | `stage-prep-checklist.md` (:104 + :140) · `fold-ledger.md` (§H.6's counts, §H.9's loci, §E.1) · `evidence-pack.md` (§2's counts, §3's archived log) · `plan-overview.md` §Risk register (R13) | the stage-time file agrees with the tree |
 | **5 — the in-place advisories** | **ALL FOUR FOLDED.** (a) the reservation is GUARDED by an import-time assertion (1 228 bytes needed, 2 048 reserved); (b) the names-bound hint names what ACTUALLY WORKS; (c) the static wiring pin WALKS THE AST; (d) **the ring-empty signal — DISCLOSED and FLAGGED BACK** (see below). | `daemon/tools/metrics_read.py` — `_post_trim_overhead_bytes` + the module-level `assert` (`:308`/`:334`), `_names_bound_hint` (`:281`), the `_read_status` comment (`:475`) | every advisory is either fixed or disclosed — none is silently deferred |
 
-**5(d) — THE RING-EMPTY SIGNAL: DISCLOSED AND FLAGGED BACK (the leader's ruling).**
-The exact signal (`last_sample_timestamp() is None` ⟺ the ring is empty) exists on the seam's
-CONCRETE provider (`daemon/services/metrics_query/provider.py:406`) — but it is **NOT on the
-consumed `MetricsQueryProvider` Protocol**, it is not readable through the seam's public
-`read_numeric_fact` (the fact is optional-typed, and the reader is numeric-only), and
-reading it here would need either a raw `getattr` — which the seam's own convention forbids
-for this door ("never through getattr") — or an extension of the CLEARED seam/Protocol
-surface. **Per the ruling, the signal was NOT extended and the behaviour was NOT changed:**
-the age-based signal stays, and its one known imprecision (an age of exactly `0.0` also
-matches a sample taken at this very instant, not only an empty ring) is **recorded in the
-code** and here. **FLAGGED BACK to the leader for a ruling** — the fix needs either a
-seam-side reader (a cleared-surface decision) or an accepted raw `getattr`.
+**5(d) — THE RING-EMPTY SIGNAL: RULING 1 APPLIED — BRANCH B (the leader's ruling of
+2026-11-03: NO seam extension, NO raw `getattr`).**
+
+**BRANCH A WAS CHECKED FIRST, AND IT IS CLOSED — ON TWO INDEPENDENT GROUNDS.** The
+observability check (what the tool ACTUALLY holds, per body):
+
+| body | what it holds | does it read the ring? |
+|---|---|---|
+| `metrics_families` | the CATALOG (the registry's families) | **NO** — the catalog never touches the ring |
+| `metrics_snapshot` | the PUBLISHED current values | **NO** — `provider.snapshot()` never reads the ring at all (`provider.py:281-316`, no `_ring` reference in the method) |
+| `metrics_history` | the windowed POINTS | yes — but the ring's emptiness surfaces as **NO ROWS AT ALL** (`provider.py:340-341`: `if self._ring is None: return []`), which is AMBIGUOUS with "nothing matched / nothing published"; and a RETURNED row's points array can be EMPTY because that series has no samples IN THE WINDOW while the ring is full (the rows are appended regardless — `provider.py:378-388`) |
+
+So the points array is **not** the ring-empty signal, and it is not in hand in two of the
+three bodies: deriving the flag from it would ship a **BODY-DEPENDENT** flag (one body
+saying "empty" while the others cannot observe the fact at all) — which the ruling forbids.
+
+**THE DISCLOSURE (in-code, `daemon/tools/metrics_read.py` — the `_read_status` comment block,
+`:485-531`):** the signal is a **HEURISTIC, not a fact**, and the direction of its error is a
+**FALSE POSITIVE** — `age == 0.0` reads "the ring is empty" whenever the age comes out
+exactly zero, which is the seam's own EMPTY-RING default (`last_sample_age_s()` returns 0.0
+when `self._ring is None`) but ALSO matches a fresh sample (dated at this instant, or dated in
+the future — the age is clamped at 0.0). In those non-empty cases the flag claims "empty"
+while the ring HOLDS a sample.
+
+**THE PRECISE SIGNAL** (`last_sample_timestamp() is None` ⟺ the ring is empty) lives on the
+CONCRETE provider (`provider.py:406-410`) but **NOT on the consumed
+`MetricsQueryProvider` Protocol**, and it is not readable through the seam's public
+`read_numeric_fact` (the fact is optional-typed; the reader is numeric-only). **A seam-level
+reader is ROUTED to the lane that OWNS the seam (central-metrics-v1) — NOT to this lane.**
+
+**THE CONSISTENCY TREATMENT:** the signal keeps its SINGLE derivation point
+(`_read_status`), so it means the same thing in ALL THREE bodies; the wire field stays a
+**BOOL** with the meaning it has today, **no member was added**, no `None` on the wire, and
+the personas pack's field-presence pin stays green (its `read_status` set is pinned in BOTH
+directions — the set did not move).
+
+**THE NEW DISCLOSURE PIN** (the imprecision is pinned, not just prose):
+`test_the_ring_empty_flag_is_the_ages_heuristic_not_a_fact` exhibits the FALSE POSITIVE — a
+provider whose age reads 0.0 while the call observes a FRESH sample still reports "empty".
+It is **mutation-verified**: flipping the heuristic's direction (`age == 0.0` → `age > 0.0`)
+REDs it. It is a pin of a KNOWN IMPRECISION, not of a desired behaviour — when the seam
+reader lands, the pin is updated DELIBERATELY.
+
+**THE W3 LEG IS UNCHANGED** — "an absent fact must NEVER be reported as empty" still holds,
+and the earlier over-claim correction stands (the UNKNOWN state is INTERNAL; on the wire an
+absent fact reads `False`).
 
 **THE MATRIX AFTER THE SECOND CYCLE: 22/22 PASS (21 RED/GREEN + 1 FOLLOW).** One leg's
 EXPRESSION was re-cut — MT-13 ("the byte ceiling is ENFORCED"): its first expression (the
@@ -505,9 +539,11 @@ to the plain ceiling (the leg went GREEN — a vacuous leg, caught by the matrix
 expression now removes the CEILING ITSELF (the module-level binding), and the leg REDS
 again. The leg's INTENT and its id are unchanged. **The ARCHIVED log:**
 `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log`
-(sha256 `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def`) + the run's own
+(sha256 `5f030ad43c85902a2d3409b8f5baf887695e8f28764cec53492c03722007f849`) + the run's own
 pre-run manifest `.../mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256
-`44629b770ab1767c125b038134eb080d4e484f5c93a52d1cbfb49aca088f45ac`).
+`5c23aa4c929ec304a2f6fc7817c7165124553f81739eb3dafe82b5b6f321c128`).
+
+**SUPERSESSION (recorded, never silent):** the log archived BEFORE RULING 1 (sha256 `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def`, the run against the pre-RULING-1 HEAD `e5d29e8c6`; the manifest sha256 `44629b770ab1767c125b038134eb080d4e484f5c93a52d1cbfb49aca088f45ac`) is **SUPERSEDED** by the one above — RULING 1 changed `daemon/tools/metrics_read.py`, so the matrix was REGENERATED against the FINAL code (the current manifest carries the HEAD `04f1c856e` + the new `metrics_read.py` sha `02482cb7491218f83f2d0b102748e4c95b6b6ef70d1207df28f7add0d7f32c27`). The superseded blob remains in the repo history at `c45a7ecb7`.
 
 ---
 
