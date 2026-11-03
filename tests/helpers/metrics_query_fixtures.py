@@ -60,6 +60,7 @@ class RecordingProvider:
         history: list[dict[str, Any]] | None = None,
         listener_enabled: bool = True,
         census_enabled: bool = True,
+        registry_read_ok: bool = True,
         effective_interval_s: float = 15.0,
         last_sample_age_s: float = 0.0,
         oldest_sample_timestamp: int | None = None,
@@ -69,6 +70,10 @@ class RecordingProvider:
         self._history = list(history or [])
         self.listener_enabled = listener_enabled
         self.census_enabled = census_enabled
+        # GAP-3 of the seam-side Protocol amendment: the degraded-read
+        # flag.  Default ``True`` (a successful read); flip it to model a
+        # registry read that RAISED.
+        self.registry_read_ok = registry_read_ok
         self.effective_interval_s = effective_interval_s
         self.last_sample_age_s = last_sample_age_s
         self._oldest = oldest_sample_timestamp

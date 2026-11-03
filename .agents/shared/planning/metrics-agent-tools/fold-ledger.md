@@ -134,6 +134,58 @@ the SEVEN inline fold pointers the plan already records; the design's prose is N
 
 ---
 
+## §H — The implementation lane's running log (Phase 1)
+
+### H.1 — Task 1.0 PHASE-1-ENTRY residue sweep (approver N5 / i2-N5)
+
+Run BEFORE any Phase-1 work; re-run at close-out by task 6.4. Every grep +
+its hit count is recorded; the exemption rule is the i2-N5 clause (a hit
+inside a block marked superseded/historical, or inside a READ-ONLY input,
+is EXEMPT and NEVER triggers an edit to a frozen input).
+
+| # | Concept-token pair | Grep | Hits | Disposition |
+|---|---|---|---|---|
+| (i) | `4 cited` / `four cited` / `exactly the 4` vs `FIVE canonical` | `grep -rn "4 cited\|four cited\|exactly the 4\|the 4 cited\|4 prose places" *.md` | **4** — `decisions.md:184` (the ORIGINAL guardrail-(a) enumeration inside the marked historical block; its supersede note follows at `:189`) · `decisions.md:195` (the amendment-2 ruling QUOTING the original ambiguity — a historical record) · `decisions.md:202` (the marked P-1 pre-adjudication record) · `phase1-plan.md:23` (the sweep task's own enumeration — self-referential, not a normative variant) | **0 LIVE HITS** — all four are historical/self-referential and EXEMPT under the i2-N5 clause |
+| (ii) | `three booleans` / `three facts` / `three properties` vs the ONE-member GAP-1/2+3 shape | `grep -rn "three booleans\|three facts\|three properties\|all three properties\|the three booleans" *.md` | **5** — `fold-ledger.md:29` (the audited-cost row: "SHRINKS three booleans → ONE" — the CORRECT fold wording) · `fold-ledger.md:213` (the W2 propagation list) · `phase1-plan.md:23` (the sweep's own text) · `phase1-plan.md:28` (task 1.5: "the fake cost SHRINKS from three booleans to ONE" — the CORRECT wording) · `plan-overview.md:109` (R2 mitigation: "the fake cost SHRINKS three booleans → ONE") | **0 LIVE HITS** — every hit is the CORRECT fold wording (describing the REDUCTION), plus the sweep's own text |
+| (iii) | `quintet` vs `six-member bound block` (AmB-14) | `grep -rn "quintet" *.md` | **6** — `architecture-recommendation.md:83` (READ-ONLY architect input) · `decisions.md:39` (the Part 1 VERBATIM fold of D-UX-6) · `decisions.md:283` (the AmB-14 supersede row) · `fold-ledger.md:184` (the B-14 fold row) · `phase1-plan.md:23` (the sweep's own text) · `technical-analysis.md:224` (the POINTER-amended design line) | **0 LIVE HITS** — the Part 1 VERBATIM fold + the design's POINTER amendment + two READ-ONLY inputs + two fold/supersede rows; the pointer amendment already states the six-member form |
+| (iv) | `sixteen` / `fifteen` count wording vs the 15-EDIT+1-VERIFY / 16→17 arithmetic | `grep -rn "sixteen categories\|fifteen categories\|exactly sixteen\|exactly fifteen\|EIGHT-site" *.md` | **2** — `fold-ledger.md:98` (the N12 disposition row, quoting the stale docstring) · `phase2-plan.md:31` (task 2.8's binding header — the CORRECT "15 EDIT sites + 1 VERIFY-ONLY") | **0 LIVE HITS** |
+| (v) | manifest-vs-ls (approver B3's class) | `ls *.md` vs the plan-overview §Plan-file manifest rows | **tree 15 / manifest 15** — the three `research-*.md` share ONE manifest row (a combined row), so the naive single-name parse under-counts; the manifest covers every file | **MATCH** |
+
+**Verdict: ZERO LIVE (non-historical) hits. The Phase-1 entry gate PASSES.**
+
+### H.2 — Phase-1 Tier-2 scoped dual-side leg (task 1.7)
+
+* **D1** (HEAD-only, base-absent by construction): the new seam pack
+  `tests/unit/metrics/test_metrics_query_protocol_consumer.py` — **28 nodes, 28 passed**.
+* **D2** (dual-side comparable): the DERIVED metrics blast radius — the
+  `metrics_p4_w1_dual_side` 21-file set + the 13 widened P3 files + four
+  `manager.py`-adjacent unit packs + the WHOLE `tests/unit/metrics/` corpus
+  = **30 file arguments**. HEAD **1032 collected / 1029 passed / 3 failed**;
+  BASE **1004 collected / 1001 passed / 3 failed** (the +28 delta is exactly
+  the D1 seam pack).
+* **FAILED-list diff**: the three FAILED node-ids are **IDENTICAL** on both
+  legs and the extracted error-line digests are **byte-identical**
+  (`md5 a942dc2d6469275924af14b977148515` on both legs) ⇒ **net-new
+  deterministic reds = 0**, every residual base-proven:
+  * `tests/unit/metrics/test_metrics_family_adjudication.py::TestNoProducerInstrumentation::test_the_daemon_diff_is_confined_to_the_allowed_files` — `AssertionError: daemon/__init__.py`
+  * `tests/unit/persistence/test_checkpoint_metrics_vocabulary.py::TestSweepLaneVocabulary::test_rdrs_lanes_come_from_the_config_kill_switchs` — the RDRS lane-count drift
+  * `tests/unit/test_phase4_manager_decomposition.py::TestFacadeDelegationPattern::test_manager_terminate_instance_delegates_to_lifecycle_service` — `expected call not found.`
+* **Changed-pack legs**: `central_metrics_contract_doc` — **21 collected, green** (the contract-doc pack is unaffected by the seam amendment; the E-1 amendment lands in Phase 3).
+* **Whole-tree collection census**: **4855 collected + 1 collection ERROR, IDENTICAL on both legs** ⇒ the collector aborts on the KNOWN base debt (`tests/packs/g7_unique_index_smoke_test.py:121` — a module-level `sys.exit(0)`, the "g7" item routed out of the v0.27.13 lane). The whole-tree RUN leg was therefore SCOPED to the derived metrics blast radius + the core-seam-adjacent packs (the plan's task 1.7 wording: "run the scoped dual-side FAILED-list diff vs base"). DISCLOSED, not hidden.
+* **Fences**: every leg ran with the EXPLICIT per-variable scrub
+  (`env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT
+  -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT`), `-p no:randomly`,
+  `--timeout=120`, `timeout 900` outer. The worktree-local
+  `.venv/bin/python` (3.14.7) was provisioned by `uv sync` (lazy-venv rule).
+* **Throwaway base worktree**: `/home/nea/ensemble-src-wt-base-metrics`
+  (detached at `03a2297c3`, the branch base), created + owned + torn down by
+  the IMPLEMENTER (council A9) — see H.3 for the teardown confirmation.
+* **Mutation-meaningfulness spot-check**: planting a deletion of the
+  `registry_read_ok` declaration reds the completeness pin (3 nodes RED),
+  and the restore is byte-identical.
+
+---
+
 ## §G — The implementation-tidier backfill (placeholder — DO NOT fill before the tidier pass)
 
 > **Status: EMPTY by design (P-2).** This section is filled by the implementation lane's tidier pass per the §C protocol.

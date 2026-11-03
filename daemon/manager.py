@@ -222,6 +222,11 @@ if TYPE_CHECKING:
     # resolvers. Runtime import is inlined in ``__init__`` next
     # to the tmp_image_store one (same pattern).
     from .services.live_views import LiveViewsService
+    # The metrics query provider (the ONE read substrate shared by the
+    # HTTP query door and the agent-tool door). TYPE_CHECKING-only — the
+    # runtime import would be a needless module-load cycle for a type
+    # annotation, and the mount itself is set by the lifespan.
+    from .services.metrics_query.protocol import MetricsQueryProvider
 
 
 
@@ -617,6 +622,24 @@ def _dormant_descendants_with_work_en_route(
 
 class InstanceManager:
     """Manages all agent instances, their graphs, and lifecycle."""
+
+    #: The live metrics query provider — the ONE read substrate shared by
+    #: the HTTP query door (``app.state.metrics_query``) and the agent-tool
+    #: door.  Mounted by the lifespan right beside the app-state assignment;
+    #: ``None`` when the metrics stack is boot-degraded or on a test double
+    #: that never mounted it.  A CLASS-LEVEL default means ``getattr``
+    #: always succeeds (never an AttributeError on an unmounted manager).
+    metrics_query_provider: "MetricsQueryProvider | None" = None
+
+    @property
+    def metrics_query(self) -> "MetricsQueryProvider | None":
+        """The metrics query provider (or ``None`` when not mounted).
+
+        The tool factory resolves the provider through this seam, so the
+        agent-tool door reads the SAME provider and the SAME in-RAM trend
+        ring as the HTTP door — one provider, one ring, one truth.
+        """
+        return self.metrics_query_provider
 
     def __init__(
         self,
