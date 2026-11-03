@@ -130,13 +130,13 @@ src/app/components/chat-interface/chat-interface.scss exceeded maximum budget. B
 | G3 | **Lazy chunk count** | **52** | **(a) re-derived at lane base** — the same command; reproduces the digest **exactly** | Phase 9's B-table (the baseline the new chunk is measured against) |
 | G4 | **`/metrics` lazy route chunk size** | **27,672 B** (`chunk-ZA3RV4HY.js`) | **(a) re-derived at lane base** — the same command; reproduces the digest **exactly**. **No longer an orphan (C-1):** it is now **B4's declared baseline**, and its consumer is Phase 9's 9.8(d) route-fetch-set comparison | Phase 9's B4 (the new-chunk comparison) |
 | **G4b** | **`/metrics` route FETCH SET** (the route chunk + its **direct** static deps) | **496,338 B** | **(a) re-derived at lane base** — the same command (`metrics_route_fetch_set_bytes`). **Newly measured** (neither the digest nor AM-2 carried it). **This is the threshold that actually catches a static-shape leak**: on the real dist the route chunk statically imports `chunk-6Y6F4JKW.js` (43,688 B) and `chunk-AOZCSBSC.js` (1,348 B), **both LAZY-ONLY** — so a static `chart.js` import would land in a lazy-only sibling and the route chunk alone would not grow | Phase 9's B4 (the route fetch set's growth bound) |
-| G5 | **`/resources` lazy route chunk size** | **38,914 B** (`chunk-FOLCEMN3.js`) | **(a) re-derived at lane base** — the same command; **newly measured** | the retirement's bundle delta; Phase 9 |
+| G5 | **`/resources` lazy route chunk size** (the PRE-retirement route chunk) | **38,914 B** (`chunk-FOLCEMN3.js`) | **(a) re-derived at lane base** — the same command; **newly measured**. **RESTATED (B3):** Phase 7 retires the `/resources` route, so this chunk **does not survive the lane** — G5 is the **pre-retirement baseline** of the retirement's bundle delta, **not** a Phase-9 gate; the Phase-9 re-derivation covers **the surviving route chunk(s)** only (G4/G4b), and the measurement tool is **absent-tolerant** so a retired route is reported as **absent**, never mis-resolved | the retirement's bundle delta (pre-retirement baseline); **not** a Phase-9 exit criterion |
 | G6 | **Lazy bytes total** | **1,702,633 B** (≈1.70 MB) | **(a) re-derived at lane base** — the same command; reproduces the digest | Phase 9 |
 | G7 | **Largest lazy chunk** | **157,141 B** (`chunk-QS2K3YLH.js`); second 135,690 B (`chunk-HNKUMJNH.js`) | **(a) re-derived at lane base** — the same command. The digest's 135,690 B is now the **second** largest — a one-position drift, disclosed | Phase 9's context |
 | G8 | **Per-component `anyComponentStyle` figures** for the new components | *post-implementation* | **(b) re-derivation task** — Phase 4's task 4.11 measures and records them at that phase's freeze (the 8 kB warn / 24 kB ERROR caps are config constants, not measurements) | Phase 4's exit criterion; Phase 9's B5 |
 | G9 | **The new lazy chart chunk's real min + gz bytes** | *post-implementation* | **(b) re-derivation task** — Phase 9's task 9.8(d) measures it (this closes governance item §9-6; the ~65 kB figure was an ESTIMATE) | Phase 9's B4 |
 | **G10** | **The `anyComponentStyle` warning SET** (not a count) | **9 paths** — `agent-selector` 8.77 kB · `snapshots` 12.29 · `jobs` 14.77 · `add-source-modal` 8.32 · `snapshot-detail-drawer` 8.70 · **`blueprint` 18.32 (the LARGEST)** · `checkpoint-cleanup` 8.70 · `instance-list` 10.17 · `chat-interface` 16.15 — **plus** the pre-existing `initial` warning | **(a) re-derived at lane base** — command + verbatim output above. **CORRECTED (C-3): the census is 9, NOT 8** — `blueprint.component.scss` (18.32 kB) had been omitted. The guard is a **set difference** against this set (0 added, 0 removed), **never a count ceiling** — a ceiling can be loosened and silently lose detection | Phase 1's baseline capture (1.9), Phase 9's B6 |
-| G11 | **The 16-family registry census** the 7-tab table binds to | 16 registered / 10 live / 6 dark | **(a) AND (b) — a DUAL status** (A-2): **(a)** re-derived at lane base (the registry SSOT `daemon/services/metrics_query/wiring/registry.py:64` + `wiring/adjudication.py:51-78`, read at `c26cec612`; the adjudicated set is "10 full + 6 partial = 16 of 26"); **(b)** re-derived again at **Phase 2's freeze** (the registry file is re-read and the manifest's bindings re-checked). Counted **once** in the (a) bucket | the tab table; Phase 2's exit criterion |
+| G11 | **The 16-family registry census** the 7-tab table binds to | 16 registered / **10 LIVE** / **6 DARK** | **(a) AND (b) — a DUAL status** (A-2): **(a)** re-derived at lane base (the registry SSOT `daemon/services/metrics_query/wiring/registry.py:64` + `wiring/adjudication.py:51-78`, read at `c26cec612`); **(b)** re-derived again at **Phase 2's freeze** (the registry file is re-read and the manifest's bindings re-checked). Counted **once** in the (a) bucket. **THE TWO TAXONOMIES ARE DISAMBIGUATED (W11) — they are coincidental 10/6 splits and MUST NOT be conflated:** **LIVE/DARK (availability — the axis the tabs bind):** LIVE = F0.3, F4, F5, F8, F9, F10, F11, F12, F13, F17 (10); DARK = F1, F3, F6, F7, F18, F21 (6). **FULL/PARTIAL (adjudication coverage — a DIFFERENT partition: `adjudication.py:45` "10 full + 6 partial = 16 of 26"):** FULL = F0.3, F1, F3, F4, F5, F6, F9, F10, F12, F17; PARTIAL = **F7, F8, F11, F13, F18, F21**. **"6 partial" is NOT "6 dark"** — F8, F11 and F13 are **PARTIAL** yet **LIVE**, which is exactly why tabs 5 (Instances) and 6 (Checkpoint) must render: their families are live. Reading the two splits together would hide two live tabs | the tab table; Phase 2's exit criterion |
 | G12 | **Spec line counts** (241 / 237 / 519 / 316 / 1,645) | informational | **NOT a gate** — no exit criterion depends on a line count. AM-26 replaced the line-count framing with a **per-assertion disposition table** (the real gate) | Phase 4's exit criterion |
 | G13 | **Code constants** (2 h = 7200 s, the 15 s effective interval, the 4-value resources ladder, the 256-entry anomaly cap, the 8 s live poll, the 30 s/60 s/3600 s tiers) | n/a | **Not measurements** — code facts, re-read at lane base and re-read at each owning phase's freeze | Phases 3, 5, 6 |
 
@@ -173,6 +173,22 @@ scripts.
 > command/output pairs are recorded in `fold-audit.md` §G). **But the mapping
 > fact belongs in the disclosure set and on the user's morning list** — the
 > **D7 proxy-side repair remains user-owned.**
+>
+> **The approver's independent cold-context cross-check worker**
+> (`82404cdb-8458-4a83-a5ba-00f1286e3a35`) found **B4** (the operator recipe
+> omitted `ENSEMBLE_AUTH_ISSUER`) and **B5** (Phase 5's and Phase 7's exit
+> criteria contradict each other on `pages/resources/`) — both **independently
+> re-verified by the approver against the tree** before being folded. **The
+> independent cold-context check is earning its keep.**
+>
+> **Three further disclosures ride the staged-release notes (see §9.1):** the
+> **mini role has no T1 page surface** (W2 — capability-retained, exercised via
+> the fallback and the renderer specs); the **baseline comparison is scoped to
+> the central tabs** (W3 — a disclosed narrowing of commission scope item 3);
+> and **`docs/runbooks/oauth2-auth.md` §1b is env-INCOMPLETE** (B4 — it omits
+> `ENSEMBLE_AUTH_ISSUER`, so a user following it literally hits the exit-78
+> refusal; **§9 is the canonical recipe source**; the runbook gap is a routed
+> documentation item, owner: the auth-docs owner).
 
 ---
 
@@ -201,11 +217,13 @@ fail-closed state **while tab 1 still shows live data**.
 
 1. **Tab manifest** — FE-local typed config (`frontend/src/app/pages/metrics/tabs.manifest.ts`),
    discriminated `central | custom` slots, per `resource-refactor-architecture.md` §1.1,
-   **widened to express all four module dispositions** (AM-8). **Qualification
-   (A-3):** "adding a series to a wired module is registration-only" holds on
-   the **family axis** only — after AM-9/AM-12 the **unit vocabulary is
-   metric-name-keyed**, so a genuinely new *metric name* renders
-   **"unit unknown"** (never a guess) until the vocabulary names it.
+   **widened to express all four module dispositions** (AM-8). **"Adding a
+   series to a wired module is registration-only" is stated HERE, ONCE, next to
+   the manifest (W4)** — and it means exactly two **FE-local typed-table**
+   edits: **the family binding** (the manifest) **and a metric→unit vocabulary
+   entry** (the unit map, Phase 6's 6.3). A genuinely new *metric name* that
+   has no vocabulary entry renders **"unit unknown"** (never a guess) until
+   the vocabulary names it — a typed-table edit, not a code change (A-3).
 2. **7 tabs, all producer-live** (§4). Modules with no source are **hidden
    entirely** — planned manifest entries document them; they render nothing.
 3. **Page frame above the tabs** — the central range selector + the
@@ -285,7 +303,10 @@ an install posture, not a producer fact.
 ### 4.2 Surface → intent → renderer → granularity (AM-9, per R-1/R-2)
 
 The roles are assigned to **surfaces**, not to engines in the abstract. **This
-table is the mapping the implementation must satisfy.**
+table is the mapping the implementation must satisfy.** The manifest's own
+contract — *"adding a series to a wired module is registration-only"* — is
+stated in §2 (W4: **family binding + metric→unit vocabulary entry**, both
+FE-local typed tables) and is **not** restated here.
 
 | Surface | Intent | Renderer | Granularity | Role of the axis | Notes |
 |---|---|---|---|---|---|
@@ -329,14 +350,14 @@ is **surfaced**, never silent.
 |---|---|---|---|---|---|
 | 0 | Housekeeping — the audit-doc what-changed-and-why amendment | Record the 4-engine proposal → measured reality → D-1 supersession chain, incl. the not-chosen zero-dep counter-option | 6 | independent | pending |
 | 1 | Charting dependency + same-commit governance amendment + the **first bundle guard** | Land Chart.js v4 + the canvas-mock devDep with the pins/pack/doc amendments; extract `chart-theme.ts`; install the numeric bundle guard + the warning-baseline capture | 9 | tight with 0, 4, 5, 9 | pending |
-| 2 | Tab manifest + 7-tab shell + `?tab=` deep links + the **per-source state model** | FE-local typed manifest (4 dispositions), the 7-tab shell, deep-links, the door timeout, the per-source state model | 13 | tight with 3, 5, 7, 8, 9 | pending |
+| 2 | Tab manifest + 7-tab shell + `?tab=` deep links + the **per-source state model** + the **route-chunk marker constant** (B3) | FE-local typed manifest (4 dispositions), the 7-tab shell, deep-links, the door timeout, the per-source state model, the marker constant | 14 | tight with 3, 5, 7, 8, 9 | pending |
 | 3 | Page frame — range selector + baseline | The central-sourced range control with per-tab vocabulary; the server-anchored client-split baseline (central tabs only); the request-generation discipline | 12 | tight with 2, 4, 5, 6 | pending |
 | 4 | Renderer consolidation — house SVG + Chart.js wrapper + registry + the **second bundle guard** + the per-tab panel composition | Merge the two engines into one; build the panel wrapper; the intent→renderer registry; re-specify the canvas-fatal e2e legs; **compose the per-tab panels** (C-2's moved half of 2.4) | 15 | tight with 1, 2, 3, 5, 6, 9 | pending |
 | 5 | Tab 1 (Resources, custom slot) | Relocate the resource module; Live strip + Timeline panel + anomalies panel; the panel's own range control; the per-source state; **the third bundle-guard re-run** (W-4) | 14 | tight with 2, 3, 4, 6, 7, 9 | pending |
 | 6 | Chart correctness — units, panel granularity, attribution | Per kind+unit-group panels; the metric-name unit vocabulary; the coverage displayed verbatim | 7 | tight with 4, 5, 3 | pending |
 | 7 | Route fate (D-3) — retire `/resources` + redirect | Param-preserving redirect (mechanism named); gear menu; the widened sweep; the operator runbooks | 9 | tight with 2, 5, **8** | pending |
 | 8 | Empty state + honesty (D-2) | The widened class table; the actionable `AUTH_NOT_CONFIGURED` state on the central surfaces; the page-scoped posture chip; the copy SSOT | 12 | tight with 2, 4, 6, **7** | pending |
-| 9 | Verification + close-out | The four legs; the pixel list split by posture (9.7a/9.7b); the bundle guard B1–B8; the packs; the routed-out register; the operator recipe | 12 | tight with all | pending |
+| 9 | Verification + close-out | The **fenced mint** (9.3a) + the boot (9.2) + the four legs; the pixel list split by posture (9.7a/9.7b); the bundle guard B1–B8; the dev-DB teardown; the routed-out register; the operator recipe | 13 | tight with all | pending |
 
 ### Coupling map (AM-7: row 8 corrected; the 7↔8 edge is now in the task graph)
 
@@ -403,7 +424,7 @@ inert).
 | P6 | The env is scrubbed **per variable**, following the house **family rule** (AM-29) | prefix `POSTGRES_*` **and** `PG*` (PGPASSWORD is a known ambient vector), plus `BLUEPRINT_*` and suffix `*_API_KEY` — scrubbed one by one; `env -u POSTGRES_*` is a **silent NO-OP** (bash does not glob env names) | STOP |
 | P7 | The **effective** port is `PORT=8079`, re-exported **AFTER** the `.env` source and **unconditionally** (LEADER RULING 3) | `PORT` is re-exported **after** the source (the live install's `.env` carries `PORT=9797` — sourcing first and exporting after is what closes the live-port bind); the export is **unconditional** (never inherited from a sourced env); the **effective** port is then asserted **from the running daemon's `/livez`**, never from the intent | STOP |
 | P8a | `config.yaml`'s effective **port** stanza (W-7) | `config.yaml` carries **no** database stanza (`grep -i "postgres\|database" config.yaml` = 0 hits) — only `daemon.host`/`daemon.port` (`:111-113`); the port stanza is inspected and must resolve to 8079 | STOP |
-| P8b | The running daemon's **actual database**, read back (the load-bearing half of AM-29's P8) | the daemon's resolved database identity is read back **from the running daemon** (not from a file) and must be `ensemble_dev` | STOP |
+| P8b | The running daemon's **actual database**, read back (the load-bearing half of AM-29's P8) — **the mechanism is the STARTUP LOG** (W1): `daemon/ensemble_config.py:75` logs `Loaded ensemble config: database=postgres`, and the daemon prints the engine DSN it resolves; **no endpoint exposes the DB identity** (`daemon/routers/database.py` exposes only `POST /api/database/switch`), and **no new endpoint is added** — a daemon change would break the FE-only constraint | the daemon's resolved database identity is read back **from the running daemon's startup log** (not from a file) and must be `ensemble_dev` | STOP |
 | P9 | The boot path is the one that can reach the dev DB (C-4) | the boot sequence below is executed in the **stated order**; a 200-with-empty-catalog from `/api/metrics/families` is a **FAIL**, not a success (see L1's non-emptiness threshold) | STOP |
 
 **The boot sequence (C-4 — ORDERED; the order is the fix):**
@@ -441,7 +462,28 @@ boot log line `No PostgreSQL ENV vars detected, defaulting to sqlite` (must
 **not** appear) · `cat $ENSEMBLE_DATA_DIR/ensemble.json` (must show
 `.database == "postgres"` and `.postgres.db == "ensemble_dev"`).
 
-**Leg L1 — data-bearing (auth ON, scoped operator bearer).** Auth ON requires
+**Leg L1 — data-bearing (auth ON, scoped operator bearer).** **THE MINT IS
+A DATABASE WRITE (B1)** — it INSERTs a row into `auth_bearer_tokens`
+(`daemon/repositories/auth_session/models.py:173`) in whichever database it
+resolves — and the mint resolves its engine **independently of the daemon
+boot** (`daemon/auth/cli.py:127 resolve_engine()` →
+`EnsembleConfig.load_or_create(data_dir)`), with the **env winning over the
+file's block** at the factory (`daemon/repositories/factory.py:346-350`) and the
+auto-detect **persisting** a prod-pinned `ensemble.json` when no `data/` dir
+exists (`daemon/ensemble_config.py:81-95`). The lane's **only** write is
+therefore inside the **dev** database, and Phase 9's task **9.3a** proves it
+four ways: the mint runs **inside the scrubbed shell** with
+`ENSEMBLE_DATA_DIR=/tmp/fe-t1-dev-data`; the **resolved** target is proved
+before the mint from **both** resolution inputs (no `POSTGRES_*` in the scrubbed
+env **and** `$.postgres.db == "ensemble_dev"` in the pre-seed) — never from the
+env var alone; the token is read back **from `ensemble_dev`**; and a
+**write-detecting live fence** records the live `ensemble_prod` bearer-row count
+**before and after** the mint and requires it to be **identical** (the lane's
+other fence — symlink / `state.json` / uptime / "0 daemon requests" — **cannot**
+see a DB write, so this assertion is what makes a live write impossible to
+pass as green). The mint uses the **narrower** `--scopes "metrics:read"`.
+
+Auth ON requires
 `client_id` + `client_secret` + `issuer` (https) + non-empty `allowed_origins`
 — else the daemon refuses to boot with exit 78 (`daemon/config.py:3930-3965`,
 `:4009`). The bearer lane **never contacts the IdP** (the middleware verifies a
@@ -541,7 +583,7 @@ D-1 guarantee holds under **both** readings.
 | B1 | **Numeric initial-total delta** vs the **frozen lane-base baseline 5,909,018 B** (the builder's own "Initial total" basis, 36 chunk files) | **\|Δ\| ≤ 2 kB** | Phase 1 (1.9), Phase 4 (4.14), **Phase 5 (5.14)**, Phase 9 (9.8a) — **co-located**, because the leak window spans Phases 1–8 and Phase 5 is the other chunk-graph-changing phase (W-4) |
 | B2 | **No `chart.js` marker in ANY initial chunk** | **0** hits across the 36-file initial set | Phase 1 (1.9), Phase 4 (4.14), Phase 5 (5.14), Phase 9 (9.8b) |
 | B3 | **Import SHAPE + import SITE** (C-1, AM-15) | **every** `chart.js` import is the **dynamic** `await import('chart.js')` form — **0** static `from 'chart.js'` sites anywhere; the wrapper's own home is **under `src/app/pages/metrics/**`** (a named relocation task, 1.7/4.4), so the location rule holds by construction. The **planted variants** are now **both**: an eager import (in the initial set) **and** a static import inside the lazy metrics tree (the case that slips through B1/B2) | Phase 1 (1.2c, 1.7, 1.9), Phase 4 (4.4, 4.14), Phase 5 (5.14), Phase 9 (9.8c) |
-| **B4** | **The new lazy chart chunk's size AND the `/metrics` route FETCH SET's growth** (C-1: B4 had no threshold and no baseline; G4 was an orphan) | the new chart chunk's real **min + gz ≤ 65,536 B (64 KiB)**; **AND** the `/metrics` route fetch set grows by **≤ 65,536 B** vs the **496,338 B** baseline (G4b) | Phase 9 (9.8d) — the comparison leg that G4's "Phase 9's new-chunk comparison" named but that did not exist |
+| **B4** | **The new lazy chart chunk's size AND the `/metrics` route FETCH SET's growth** (C-1: B4 had no threshold and no baseline; G4 was an orphan) | the new chart chunk's real **min + gz ≤ 65,536 B (64 KiB)**; **AND** the `/metrics` route fetch set grows by **≤ 65,536 B** vs the **496,338 B** baseline (G4b). **The route chunk is located by a ROUTE-KEYED locator, never by a content marker (B3)** — the pre-lane tool keyed on `'metrics-empty-panel'` / `'anomaly-marker'`, which Phases 7 and 8 invalidate; the key the lane controls is the **dedicated route-chunk marker constant the metrics shell exports** (Phase 2's task), and the locator asserts the key resolves to **exactly one** chunk, reporting **absent** (never mis-resolved) when it does not | Phase 9 (9.8d) — the comparison leg that G4's "Phase 9's new-chunk comparison" named but that did not exist |
 | B5 | The per-component **`anyComponentStyle`** figures for the new components | each **< 8 kB** (the 24 kB cap is a hard build error) | Phase 4 (4.11), Phase 9 (9.8e) |
 | B6 | The budget **warnings** as a **SET DIFFERENCE** against the baseline set captured **mechanically** from the Phase-1 production build log (C-3) — **never a count ceiling** (a ceiling can be loosened and silently lose detection) | the warning set must equal the captured baseline set **exactly**: **0 added, 0 removed** | Phase 1 (1.9 captures the baseline), Phase 9 (9.8f) |
 | B7 | **Both FE packs green** + the **161/161** prompt-artifact baseline | 2/2 green; 161/161 | Phase 9 (9.9, 9.10) |
@@ -656,19 +698,49 @@ does not run it, and it does not touch the live config. Source:
    Authorization-Code + PKCE. Register the callback URI **byte-for-byte** as
    the daemon derives it: `https://<daemon-host>/api/auth/callback` (derive
    FIRST per runbook §1c, then register that exact value). Issue a client secret.
-2. **Set the daemon environment** (runbook §1b) — `ENSEMBLE_AUTH_ENABLED=true`,
-   `ENSEMBLE_AUTH_CLIENT_ID=…`, `ENSEMBLE_AUTH_CLIENT_SECRET=…` (never in the
-   repo; never logged), `ENSEMBLE_AUTH_DISCOVERY_URL=…`,
-   `ENSEMBLE_AUTH_ALLOWED_ORIGINS=https://<daemon-host>` (**REQUIRED** — with
-   auth ON the CORS posture must replace wildcard+credentials; an empty list
-   refuses the boot with exit 78).
+2. **Set the daemon environment** — **six** vars, and the sixth is the one the
+   cited runbook omits (B4):
+   - `ENSEMBLE_AUTH_ENABLED=true`
+   - `ENSEMBLE_AUTH_CLIENT_ID=…`
+   - `ENSEMBLE_AUTH_CLIENT_SECRET=…` (never in the repo; never logged)
+   - **`ENSEMBLE_AUTH_ISSUER=https://<idp>/`** — **REQUIRED and NOT derivable
+     from the discovery URL**: `AuthConfig.issuer` has **no default**
+     (`daemon/config.py:3736-3741`) and it is the issuer the discovery URL is
+     derived FROM, not the reverse (`discovery_url`'s description:
+     *"Default derives as `<issuer>/.well-known/openid-configuration`"* —
+     `daemon/config.py:3742-3748`); `daemon/config.py:3953-3954` appends
+     `"issuer"` to the `missing` list, so without it the daemon **refuses to
+     boot with exit 78**.
+   - `ENSEMBLE_AUTH_DISCOVERY_URL=https://<idp>/.well-known/openid-configuration`
+     — **origin rule**: the discovery document's origin must equal the issuer's
+     origin (`daemon/config.py:3984-3988` raises otherwise); a same-origin /
+     different-path discovery URL stays legal.
+   - `ENSEMBLE_AUTH_ALLOWED_ORIGINS=https://<daemon-host>` (**REQUIRED** — with
+     auth ON the CORS posture must replace wildcard+credentials; an empty list
+     refuses the boot with exit 78).
+
+   **The cited runbook is env-INCOMPLETE (B4, disclosed — it lives outside the
+   plan dir, so this lane records the gap rather than editing it):**
+   `docs/runbooks/oauth2-auth.md` §1b lists five vars and omits
+   `ENSEMBLE_AUTH_ISSUER`, so a user following the runbook literally would hit
+   the exit-78 refusal. **This §9 is the CANONICAL operator-recipe source**
+   (steps + the restart implication + the narrow scope); the runbook's gap is a
+   routed documentation item (owner: the auth-docs owner) and is recorded in the
+   disclosure set (§0.4).
 3. **Mint the operator token** with a scope the metrics door accepts — the
-   three query routes take `maintenance:read` OR `metrics:read`
-   (`daemon/routers/metrics.py:57-63`). For a browser session, the session lane
+   three query routes take the **ANY-OF** set `maintenance:read` OR
+   `metrics:read` (`daemon/routers/metrics.py:56-63`). **Use the narrower
+   `metrics:read`** (B1e, least privilege): `maintenance:read` ALSO confers the
+   destructive checkpoint-cleanup capability (`daemon/auth/scopes.py:32-39`),
+   which this recipe does not need. For a browser session, the session lane
    grants the OIDC scopes ∪ the operator family; for a machine reader, mint a
-   static bearer: `python -m daemon.auth.cli issue-token --label operator
-   --scopes "metrics:read"` (the plaintext prints ONCE; the row stores only a
-   SHA-256).
+   static bearer with the **pinned interpreter** (W9 — bare `python` does not
+   exist on this host):
+   `/home/nea/ensemble-src/.venv/bin/python -m daemon.auth.cli issue-token
+   --label operator --scopes "metrics:read"` (the plaintext prints ONCE; the row
+   stores only a SHA-256). **The mint IS a database write** — it INSERTs a row
+   into `auth_bearer_tokens` in the database it resolves; run it against the
+   intended database (B1's fence governs the lane's own dev mint).
 4. **RESTART implication (explicit):** auth has **no live toggle in v1** — the
    `auth.enabled` flip and the new env vars require a **daemon restart**
    (`config.yaml:129-152`: "restart required, no live toggle in v1"). The
@@ -703,7 +775,25 @@ summary.**
 >
 > **Also carried in the disclosure set (see §0.4):** the plan-review council's
 > requested model `decision` was **mapped to `coding`** — the known-poisoned
-> upstream alias (D7) — and the **D7 proxy-side repair remains user-owned**. The FE's job in this
+> upstream alias (D7) — and the **D7 proxy-side repair remains user-owned**.
+>
+> **Three disclosed deviations from the commission's literal scope**, so the
+> morning summary is not surprised:
+> 1. **The mini role has NO T1 page surface (W2).** Requirement 4 is delivered
+>    as specified — ONE consolidated house SVG renderer carrying the older
+>    engine's capabilities plus the five mini-tier extensions — but the mini is
+>    **capability-retained**: it is exercised through the **mount-failure
+>    fallback** and the **renderer specs**, not by a user-visible surface
+>    (R-2). Nothing on the 7 tabs renders a mini.
+> 2. **The baseline / previous-window comparison is scoped to the CENTRAL tabs
+>    (W3, AM-14).** On tab 1 (Resources) the baseline toggle is **disabled
+>    with a stated reason** — the resources door serves a fixed
+>    15m/1h/24h/7d vocabulary with **no previous-window offset**, and a
+>    client-side split of one payload would mislabel two half-length windows as
+>    "previous window". This narrows commission scope item 3 for one tab.
+> 3. **The approver's cross-check worker found B4 and B5** (both independently
+>    re-verified by the approver against the tree) — the independent
+>    cold-context check is earning its keep. Both are folded. The FE's job in this
 > state is to be **honest and actionable** — which is exactly what it now does:
 > one panel, the real cause, the runbook, and no dead Retry button.
 

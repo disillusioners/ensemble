@@ -1,5 +1,5 @@
 {
-  "_about": "THE NAMED BASELINE ARTIFACT (review A-8): the single machine-readable source the T1 bundle guards read. A number duplicated across plan prose can drift; this file cannot. It lives in the PLAN DIR (not scripts/, not the shipped tree) and is the evidence re-derivation tool for the lane's own baseline.",
+  "_about": "THE NAMED BASELINE ARTIFACT (review A-8): the single machine-readable source the T1 bundle guards read. A number duplicated across plan prose can drift; this file cannot. It lives in the PLAN DIR (not scripts/, not the shipped tree) and is the evidence re-derivation tool for the lane's own baseline. B3: the route chunk is located by a ROUTE-KEYED locator (the lane-controlled marker constant) with a legacy content-marker fallback used ONLY to reproduce this lane-base baseline, and the whole route section is absent-tolerant.",
   "measured_at": "2026-11-03",
   "tree": "/home/nea/ensemble-src-wt-fe-metrics-dashboard",
   "measured_at_commit": "7961bcb21",
@@ -17,7 +17,8 @@
   "reproduce": {
     "command": "cd frontend && node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser",
     "script": ".agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js",
-    "output": "{\n  \"initial_total_bytes\": 5909018,\n  \"initial_file_count\": 36,\n  \"error_budget_bytes\": 6000000,\n  \"headroom_bytes\": 90982,\n  \"index_html_bytes\": 9257,\n  \"whole_initial_payload_bytes\": 5918275,\n  \"lazy_chunk_count\": 52,\n  \"lazy_bytes_total\": 1702633,\n  \"metrics_route_chunk\": \"chunk-ZA3RV4HY.js\",\n  \"metrics_route_chunk_bytes\": 27672,\n  \"metrics_route_fetch_set_bytes\": 496338,\n  \"largest_lazy\": \"chunk-QS2K3YLH.js\",\n  \"largest_lazy_bytes\": 157141,\n  \"second_largest_lazy\": \"chunk-HNKUMJNH.js\",\n  \"second_largest_lazy_bytes\": 135690,\n  \"resources_route_chunk\": \"chunk-FOLCEMN3.js\",\n  \"resources_route_chunk_bytes\": 38914\n}"
+    "output": "{\n  \"initial_total_bytes\": 5909018,\n  \"initial_file_count\": 36,\n  \"error_budget_bytes\": 6000000,\n  \"headroom_bytes\": 90982,\n  \"index_html_bytes\": 9257,\n  \"whole_initial_payload_bytes\": 5918275,\n  \"lazy_chunk_count\": 52,\n  \"lazy_bytes_total\": 1702633,\n  \"route_chunk_locator\": \"legacy-content-marker\",\n  \"route_chunk_key\": \"ensemble-metrics-route-v1\",\n  \"route_chunk_resolved_to_exactly_one\": true,\n  \"metrics_route_chunk\": \"chunk-ZA3RV4HY.js\",\n  \"metrics_route_chunk_bytes\": 27672,\n  \"metrics_route_fetch_set_bytes\": 496338,\n  \"largest_lazy\": \"chunk-QS2K3YLH.js\",\n  \"largest_lazy_bytes\": 157141,\n  \"second_largest_lazy\": \"chunk-HNKUMJNH.js\",\n  \"second_largest_lazy_bytes\": 135690,\n  \"pre_retirement_resources_route_chunk\": \"chunk-FOLCEMN3.js\",\n  \"pre_retirement_resources_route_chunk_bytes\": 38914\n}",
+    "output_locator_note": "The route chunk resolves via the LEGACY content marker at lane base, because the lane-controlled marker constant (Phase 2's task 2.13) does not exist yet. From Phase 2 onward the tool resolves it by the ROUTE KEY (`route_chunk_locator: 'route-key'`). Both paths are absent-tolerant: if neither resolves, the route fields are null and `route_chunk_resolved_to_exactly_one` is false — the tool never throws and never mis-resolves (B3)."
   },
   "guards": {
     "B1_initial_total_delta": {
@@ -38,7 +39,10 @@
       "baseline_metrics_route_chunk_bytes": 27672,
       "baseline_metrics_route_fetch_set_bytes": 496338,
       "threshold": "the new chart chunk's real min+gz bytes <= 65536 (64 KiB) AND the /metrics route fetch set grows by <= 65536 bytes vs the 496338 B baseline",
-      "note": "The route FETCH SET (route chunk + its DIRECT static deps) is the threshold that actually catches a static-shape leak; the route chunk alone does not (a static import lands in a LAZY-ONLY sibling chunk — proven on the real dist: chunk-6Y6F4JKW.js 43,688 B and chunk-AOZCSBSC.js 1,348 B are both lazy-only and absent from the 36-row initial table)."
+      "note": "The route FETCH SET (route chunk + its DIRECT static deps) is the threshold that actually catches a static-shape leak; the route chunk alone does not (a static import lands in a LAZY-ONLY sibling chunk — proven on the real dist: chunk-6Y6F4JKW.js 43,688 B and chunk-AOZCSBSC.js 1,348 B are both lazy-only and absent from the 36-row initial table).",
+      "route_chunk_locator": "route-key (the marker constant from Phase 2's task 2.13), with the legacy content-marker fallback for the lane-base reproduction; absent-tolerant (null + resolved_to_exactly_one=false when unresolvable)",
+      "pre_retirement_resources_chunk_note": "The /resources route chunk (38,914 B) is a PRE-RETIREMENT baseline only — Phase 7 retires the route, so it does not survive the lane and is NOT a Phase-9 gate (B3).",
+      "baseline_pre_retirement_resources_route_chunk_bytes": 38914
     }
   },
   "anyComponentStyle_baseline": {

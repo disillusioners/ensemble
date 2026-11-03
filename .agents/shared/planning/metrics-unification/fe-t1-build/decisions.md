@@ -652,7 +652,61 @@ AM-6 → W-13, AM-7 → C-2, AM-10 → W-1, AM-11 → W-3, AM-15 → C-1, AM-29 
 carries a **REPAIR** row. **Prose-only landings are not acceptable; a grep for
 "AM-n present" does not count as a fold.**
 
-## Part V — Explicitly NOT decided here (and why)
+## Part V — The APPROVER's verdict of fold #3 (iteration 001) and the fold #4 dispositions
+
+### The verdict
+
+**REJECTED (iteration 001)** — the approver's fresh-eyes independent review
+(`approval.md` @ `e343cb5f6`, cross-check addendum @ `fefa938c5`): **5 BLOCKERS
+(B1–B5) + 11 non-blocking warnings (W1–W11)**.
+
+**What the verdict did NOT change (the approver's own words, §9.6):** *"The
+architectural shape of the plan, the requirement coverage (1–8), the rulings
+(D-1/D-2/D-3) and the FE-only discipline are **not** in question; every blocking
+item is mechanical."* Requirement coverage 1–8 is **DELIVERED** (approval §1);
+the rulings are **RESPECTED** (approval §2); the FE-only discipline, the
+staging-only posture and the routed-out register (14/14) are all confirmed
+(approval §3).
+
+### The five blockers — what each turned out to be
+
+| # | The blocker | The disposition (fold #4) | Lands in |
+|---|---|---|---|
+| **B1** | The bearer-token mint is the lane's only database **WRITE**, and it was **not fenced**: the mint resolves its own engine (`daemon/auth/cli.py:127 resolve_engine()` → `EnsembleConfig.load_or_create`) and `daemon/repositories/factory.py:346-350` resolves host/port/db/user/password from `os.environ` **over** the file's block — so the P4 pre-seed did **not** protect it while `POSTGRES_DB=ensemble_prod` was ambient, and with no worktree `data/` dir `load_or_create` **persists** a prod pin. The lane's live fence (symlink / `state.json` / uptime / "0 daemon requests") **cannot detect a DB write** ⇒ false green | The mint runs **inside the scrubbed shell** with `ENSEMBLE_DATA_DIR=/tmp/fe-t1-dev-data`; its **resolved** target is proved from **both** resolution inputs (no `POSTGRES_*` in the scrubbed env **and** `$.postgres.db == "ensemble_dev"` in the pre-seed) — never from the env var; the token is read back **from `ensemble_dev`**; and a **write-detecting live fence** records the live `ensemble_prod` `auth_bearer_tokens` row count **before and after** and requires **0 delta**. The scope is narrowed to `--scopes "metrics:read"` (least privilege; the door's ANY-OF accepts it) | `phase9` 9.3a (new task) + 9.1 + the exit criterion; `plan-overview` §6.1's L1 leg |
+| **B2** | Phase 9's task graph contradicted its own prose: 9.3's `Depends On` read `9.2`, yet 9.2's boot step had to come **after** the auth exports (auth has no live toggle) | The order is now **in the graph**: 9.1 → **9.3a** (export + fenced mint) → **9.2** (boot) → **9.3b** (Leg L1's assertions); 9.11's self-dependency is gone | `phase9` (task table + exit criterion) |
+| **B3** | The measurement tool located the route chunks by **content markers** (`'metrics-empty-panel'`, `'anomaly-marker'`) that Phases 7 and 8 invalidate ⇒ `read(undefined)` ⇒ the whole JSON is lost ⇒ B1–B4 become **unmeasurable mid-lane** | The tool is **route-keyed** (the lane-controlled marker constant Phase 2 exports) with a legacy fallback used only to reproduce the lane-base baseline, and the whole route section is **absent-tolerant** (null + `resolved_to_exactly_one: false`, never a throw, never a mis-resolution) — **verified** by re-running it against a marker-stripped dist | `bundle-baseline.measure.js` (rewritten) + `bundle-baseline.json`; `phase2` 2.13 (the marker constant); `phase9` 9.8 + the E-1 line ("the surviving route chunk(s)"); `plan-overview` §0.2 G5 + §6.3's B4 row |
+| **B4** | §9's operator recipe **omitted `ENSEMBLE_AUTH_ISSUER`** — `AuthConfig.issuer` has no default and is not derived from `discovery_url` (`daemon/config.py:3736-3748`; `:3953-3954` adds `"issuer"` to `missing`) ⇒ the daemon **refuses to boot** (exit 78). §6.1 stated it correctly; §9 contradicted it | §9 step 2 now lists **six** vars including `ENSEMBLE_AUTH_ISSUER=https://<idp>/` with the **origin rule** (`daemon/config.py:3984-3988`); the cited runbook's env-incompleteness is **disclosed** (it lives outside the plan dir, so the gap is recorded + routed, not edited); **§9 is now the canonical operator-recipe source** | `plan-overview` §9 step 2 (+ §0.4's disclosure) |
+| **B5** | Phase 5's exit ("the old directory is gone") contradicted Phase 7's 7.4 — `pages/resources/` holds `live/`, `timeline/`, `svg-timeline/` **and the page shell**, and the route still lazily imports that shell (`app.routes.ts:74`) | Phase 5's exit now says the **`live/` and `timeline/` subtrees are relocated and the page shell REMAINS until Phase 7**; **7.4 keeps the single statement of the directory's removal** | `phase5` exit; `phase7` 7.4 |
+
+### The eleven warnings — dispositions
+
+| # | Disposition |
+|---|---|
+| **W1** | **Folded** — P8b's mechanism is named: the **STARTUP-LOG read-back** (`daemon/ensemble_config.py:75` logs `Loaded ensemble config: database=postgres`; the daemon prints its resolved DSN) with **no new endpoint** (`daemon/routers/database.py` exposes only `POST /api/database/switch`) — a daemon change would break FE-only. `plan-overview` §6.1 P8b + `phase9` 9.1/9.2 |
+| **W2** | **Folded as a DISCLOSURE** — the mini role has **no T1 page surface** (R-2): the five extensions are capability-retained, exercised via the mount-failure fallback and the renderer specs. `plan-overview` §9.1 + §0.4 |
+| **W3** | **Folded as a DISCLOSURE, stated ONCE** — the baseline comparison is **central-tabs-only**; on tab 1 the toggle is disabled with a stated reason. It goes into the close-out as a disclosed narrowing of commission scope item 3. `plan-overview` §9.1 + §0.4 |
+| **W4** | **Folded, stated ONCE next to the manifest** — "registration-only" means exactly two FE-local typed-table edits: the **family binding** + a **metric→unit vocabulary entry**. `plan-overview` §2 (and removed as a restatement from §4.2) |
+| **W5** | **Folded with B2** — the `9.11` self-dependency is fixed |
+| **W6** | **Folded** — the new import pin is **statement-anchored** (it matches import statements, not prose), so the wrapper's own doc comment — which must name the forbidden static form — cannot redden the phase-1 freeze; a planted leg asserts the doc comment stays GREEN. `phase1` 1.2(c) + its acceptance, `phase4` 4.14, `phase5` 5.14 |
+| **W7** | **Folded — the defect is actually REMOVED** — the per-series min-max normalization is now **removed**, not merely named: every series in a panel is plotted against that panel's single shared domain, with the **numeric threshold 0 independently-rescaled series per panel** and a third planted variant that fails if any series is rescaled inside the memory panel. `phase6` 6.1 |
+| **W8** | **Folded — re-targeted** — 6.6 no longer targets the page shell's subtitle (deleted in Phase 7); it targets the **Live strip's attribution card**, which survives the relocation (and already carries the honest *"attribution is partial by physics"* label); the shell's own per-instance promise dies with the shell in 7.4. `phase6` 6.6, `phase7` 7.4 |
+| **W9** | **Folded — the interpreter is PINNED** — every python command uses `/home/nea/ensemble-src/.venv/bin/python` (Python 3.13.15, uv-managed), run from the worktree cwd: the worktree has **no** `.venv`/`venv` and **bare `python` does not exist on this host**, so `dev.sh`'s fallback chain would resolve to the uncertified system interpreter. `phase9` scope note + 9.2/9.3a + `plan-overview` §9 step 3 |
+| **W10** | **Folded — the teardown is specified** — **DO NOT drop `ensemble_dev`** (it is shared); the teardown deletes **ONLY** the minted bearer row (scoped by the mint's own label) and nothing else, and the live `ensemble_prod` row count is asserted unchanged at teardown too. `phase9` 9.11 + the exit criterion |
+| **W11** | **Folded — the two taxonomies are disambiguated** — LIVE/DARK (availability, the axis the tabs bind): LIVE = F0.3, F4, F5, F8, F9, F10, F11, F12, F13, F17; DARK = F1, F3, F6, F7, F18, F21. FULL/PARTIAL (adjudication coverage, a **different** partition): PARTIAL = F7, F8, F11, F13, F18, F21. **"6 partial" is NOT "6 dark"** — F8/F11/F13 are PARTIAL yet **LIVE**, which is why tabs 5 and 6 must render. `plan-overview` §0.2 G11 |
+
+### What fold #4 did NOT touch (binding)
+
+**No threshold moved and no rule changed.** D-1, D-2, D-3, the per-instance
+top-N routing (routed row (m)) and the AM-14 narrowing are untouched; every
+pre-existing numeric threshold (5,909,018 B · 90,982 B · 496,338 B · ≤ 2 kB ·
+≤ 64 KiB · 27,672 B · 9 paths · 10 door classes · 7 tabs · 3 unit classes ·
+0 files) is byte-identical. **The only numbers ADDED are the ones the
+approver required**: B1(d)'s **0-delta live bearer-row count** and B1's
+resolution proof, B3's **`route_chunk_resolved_to_exactly_one`** flag, W6's
+statement-anchored pin, W7's **0 independently-rescaled series per panel**, and
+W1's startup-log read-back.
+
+## Part VI — Explicitly NOT decided here (and why)
 
 | Item | Why not decided in this plan |
 |---|---|

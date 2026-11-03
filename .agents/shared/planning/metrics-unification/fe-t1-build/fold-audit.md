@@ -154,3 +154,44 @@ review):
 | W-6 — the pins spec's scanned sources | `sed -n '60,95p' frontend/src/app/pages/metrics/metrics.bindings.pins.spec.ts` | **5** sources: `overview-tab.component.ts` (`:25`) · `charts-tab.component.ts` (`:26`) · `metrics.component.ts` (`:75`) · the engine file (`:76-88`) · `metrics.service.ts` (`:89-90`) |
 | A-5 — the cite drift | `grep -n "npm dependency" .agents/shared/planning/central-metrics-v1/phase6-plan.md` | the string is at **`:25`** (task 6.7), not `:23` |
 | G1–G7 — the whole ledger | `cd frontend && node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser` | the JSON in `bundle-baseline.json` → `"reproduce"."output"` — **verbatim output**, one command |
+
+---
+
+## H. FOLD #4 — the APPROVER's iteration-001 verdict (B1–B5 + W1–W11)
+
+The approver returned **REJECTED** with 5 blockers + 11 warnings (`approval.md`
+@ `e343cb5f6` + the cross-check addendum @ `fefa938c5`). The requirement
+coverage (1–8), the rulings (D-1/D-2/D-3) and the FE-only discipline are
+**not** in question (approval §1–§3, §9.6). Every landing below carries the
+same triple as §A–§G: **task-graph entry · fixture/leg · threshold**.
+
+| Finding | T (task-graph entry) | F (fixture / leg) | X (threshold) | § | Status |
+|---|---|---|---|---|---|
+| **B1 (a)** the mint runs in the scrubbed shell | `phase9` **9.3a** (Depends On 9.1) — the mint invocation carries `ENSEMBLE_DATA_DIR=/tmp/fe-t1-dev-data` inside the scrubbed shell | the scrubbed shell's `env \| grep POSTGRES` ⇒ **0 hits** | the ambient prod pin cannot reach the mint | phase9 9.3a, plan-overview §6.1 | **CLOSED** |
+| **B1 (b)** the RESOLVED target is proved, not the env var | `phase9` **9.3a(b–c)** | the resolution is `os.environ.get("POSTGRES_DB", pg.db)` **over** the file's block (`daemon/repositories/factory.py:346-350`), so BOTH inputs are asserted: the scrubbed env carries no `POSTGRES_*` **AND** the scratch file's `$.postgres.db == "ensemble_dev"` (P3 re-asserted for the CLI's own resolution) | resolved database **== `ensemble_dev`**; **0** ambient `POSTGRES_*` hits | phase9 9.3a | **CLOSED** |
+| **B1 (c)** read-back + no prod row | `phase9` **9.3a(f)** | a SELECT against the **dev** DB finds the minted row; the live count is re-read | the minted row exists in `ensemble_dev`; the live `ensemble_prod` count is **unchanged** | phase9 9.3a | **CLOSED** |
+| **B1 (d)** the WRITE-DETECTING live fence | `phase9` **9.3a(d)** — a read-only BEFORE/AFTER count of `auth_bearer_tokens` rows in `ensemble_prod` (`daemon/repositories/auth_session/models.py:173`) | the two read-only counts are recorded in the fence evidence | **0 delta** — the live count is **identical** before and after (the lane's other fence cannot see a DB write) | phase9 9.3a + the exit criterion | **CLOSED** |
+| **B1 (e)** the narrower scope | `phase9` **9.3a(e)** | the door's ANY-OF accepts it (`daemon/routers/metrics.py:56-63`) | `--scopes "metrics:read"` (least privilege; `maintenance:read` also confers checkpoint-cleanup) | phase9 9.3a, plan-overview §9 step 3 | **CLOSED** |
+| **B1 (prose)** "the mint IS a write" | `phase9` scope note + `plan-overview` §6.1's L1 leg | — | the lane's **only** write is inside the dev database | phase9 scope note, §6.1 | **CLOSED** |
+| **B2** the exports precede the boot | `phase9` **9.1 → 9.3a → 9.2 → 9.3b**; 9.11's self-dependency removed | L1's non-emptiness thresholds run only after the boot that followed the export | the graph encodes the order (an executor following `Depends On` boots auth-ON) | phase9 task table | **CLOSED** |
+| **B3** the route-chunk locator | `phase2` **2.13** (the marker constant) + `phase9` **9.8(d)** + the rewritten `bundle-baseline.measure.js` | the tool is **route-keyed** with a legacy fallback; **absent-tolerant** — verified by re-running it against a marker-stripped dist (exit 0, `route_chunk_locator: null`, `route_chunk_resolved_to_exactly_one: false`) | the key resolves to **exactly one** chunk, or the measurement reports **unavailable** (never mis-resolved) | phase2 2.13, phase9 9.8, §0.2 G5, §6.3 B4 | **CLOSED** |
+| **B4** `ENSEMBLE_AUTH_ISSUER` in §9 | `plan-overview` §9 step 2 (six vars + the origin rule) + the runbook's env-incompleteness disclosed | the daemon's own validator: `issuer` has no default (`daemon/config.py:3736-3741`), is not derived from `discovery_url` (`:3742-3748`), and is appended to `missing` (`:3953-3954`) ⇒ exit 78 | the recipe's env list **== the daemon's required set** (6 vars) | plan-overview §9, §0.4 | **CLOSED** |
+| **B5** the two exit criteria on `pages/resources/` | `phase5` exit (restated) + `phase7` **7.4** (the single deletion statement) | — | Phase 5's exit asserts the **shell remains** (the route still imports it); 7.4 is the **only** statement of the removal | phase5 exit, phase7 7.4 | **CLOSED** |
+| **W1** P8b's mechanism | `phase9` **9.1** (P8b) + `plan-overview` §6.1 P8b | the **STARTUP-LOG read-back** (`daemon/ensemble_config.py:75`) | the daemon's resolved database **== `ensemble_dev`**; **no new endpoint** | phase9 9.1, §6.1 | **CLOSED** |
+| **W2** the mini has no T1 surface | `plan-overview` §9.1 + §0.4 (a **disclosure**) | — | the mini renders on **0** T1 surfaces | plan-overview §9.1, §0.4 | **CLOSED** |
+| **W3** the baseline is central-tabs-only | `plan-overview` §9.1 + §0.4 (stated **once**) | — | the custom slot's toggle is **disabled with a reason** | plan-overview §9.1 | **CLOSED** |
+| **W4** "registration-only" stated once | `plan-overview` §2 (and removed as a restatement from §4.2) | — | **2** FE-local typed-table edits (family binding + unit vocabulary entry) | plan-overview §2 | **CLOSED** |
+| **W5** | = B2 | — | — | phase9 task table | **CLOSED** |
+| **W6** the pin is statement-anchored | `phase1` **1.2(c)** + its acceptance; `phase4` 4.14; `phase5` 5.14 | the planted legs: (i) a static import ⇒ red; (iv) the stub's own doc comment naming `from 'chart.js'` ⇒ **GREEN** | **0** static `from 'chart.js'` **statements**; prose is ignored | phase1 1.2c, phase4 4.14, phase5 5.14 | **CLOSED** |
+| **W7** the min-max normalization is REMOVED | `phase6` **6.1** | a third planted variant: a series rescaled **inside** the memory panel | **0** independently-rescaled series per panel | phase6 6.1 | **CLOSED** |
+| **W8** 6.6's target | `phase6` **6.6** (re-targeted to the relocated Live card) + `phase7` **7.4** | the copy assertion on the surviving card | the per-instance promise is **gone** from both the card and the deleted shell | phase6 6.6, phase7 7.4 | **CLOSED** |
+| **W9** the interpreter is pinned | `phase9` scope note + 9.2 + 9.3a; `plan-overview` §9 step 3 | — | **0** bare-`python` invocations; the pinned interpreter is `/home/nea/ensemble-src/.venv/bin/python` (3.13.15) | phase9 scope note, §9 | **CLOSED** |
+| **W10** the dev-DB teardown | `phase9` **9.11** + the exit criterion | the teardown deletes **only** the minted row (scoped by its label) | `ensemble_dev` is **NOT** dropped; the live row count is **unchanged** at teardown | phase9 9.11 | **CLOSED** |
+| **W11** the two taxonomies | `plan-overview` §0.2 **G11** | — | LIVE = F0.3,F4,F5,F8,F9,F10,F11,F12,F13,F17; DARK = F1,F3,F6,F7,F18,F21; PARTIAL = F7,F8,F11,F13,F18,F21 — the two lists are **disjoint in membership** ("6 partial" ≠ "6 dark") | §0.2 G11 | **CLOSED** |
+
+**Thresholds moved in fold #4: NONE.** The only numbers ADDED are the ones the
+approver required (B1's 0-delta live row count; B3's `resolved_to_exactly_one`
+flag; W6's statement-anchored pin; W7's 0 independently-rescaled series per
+panel; W1's startup-log read-back). Every pre-existing numeric threshold and
+every rule (D-1/D-2/D-3, the per-instance top-N routing, the AM-14 narrowing)
+is byte-identical.
