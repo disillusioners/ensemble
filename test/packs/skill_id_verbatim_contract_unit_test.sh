@@ -24,11 +24,16 @@
 #      (the folded W4 pin: the ``— source: db`` suffix additivity and
 #      the knob-OFF byte-shape).
 #   3. The MUTATION MATRIX (M1-M6 + M2b + M7-M9) — pack-level plants:
-#      plant the
-#      defect → the discriminating leg must go RED → restore → the same
-#      leg must go GREEN, with the planted file's sha256 verified
-#      identical after the restore. A pin that cannot fail is worse than
-#      no pin, so a NON-DISCRIMINATING leg fails the pack.
+#      plant the defect → the discriminating leg must go RED → restore
+#      → the same leg must go GREEN. RESTORE SEMANTICS (gate F1 fix):
+#      every mutable file's PRISTINE content+sha256 is captured BEFORE
+#      phase 2 begins (with a fail-loud dirty-tree pre-check — the pack
+#      NEVER baselines contamination), each leg restores to PRISTINE
+#      (not to leg-start), an idempotent EXIT/TERM/INT trap restores
+#      pristine on ANY exit path, and after the final leg every mutable
+#      file's sha is asserted EQUAL to the pristine capture (mismatch
+#      = pack FAIL). A pin that cannot fail is worse than no pin, so a
+#      NON-DISCRIMINATING leg fails the pack.
 #
 # Fences (house):
 #   - Per-variable env scrub (the ``env -u POSTGRES_*`` glob is a SILENT
@@ -39,14 +44,43 @@
 #   - Interpreter: the checkout's own .venv when present, else the
 #     certified main-checkout interpreter (worktrees carry no .venv);
 #     cwd is the checkout root, so ``import daemon`` resolves HERE.
+#   - INTERNAL TIMER (gate F2 fix): the pack asserts its own wall-clock
+#     budget after every phase and every mutation leg; overrun prints
+#     RESULT: TIMEOUT and exits 124. Budget via
+#     SKILL_ID_VERBATIM_BUDGET_S (default 300 = the house cap; the
+#     registered PACKS.md invocation also wraps ``timeout 300``).
+#   - CONCURRENCY FENCE (gate F1 fix): flock keyed on the checkout's
+#     realpath — a second concurrent run against the SAME checkout
+#     fails loud instead of racing plants into a shared tree (the
+#     gate's wave-1 contamination incident was exactly this shape).
+#
+# RED-at-BASE anchoring (gate F3 correction — do NOT "just run this
+#   pack at the base commit"): the pristine pin CANNOT be collected at
+#   BASE c4161335b — it imports the lane-ADDED SOURCE_PROJECT_FILE
+#   from daemon.services.project_skill_source.model; at base that name
+#   lives in daemon.services.skill_search_service, so a pristine-base
+#   run fails at COLLECTION (ImportError, 0 nodes, rc=2) — an
+#   artifact, NOT an assertion red. The real anchor is the DERIVED
+#   base-adapted pin: import redirection + try/except for the
+#   injection-side helper + exactly 3 skipif NOT-APPLICABLE markers on
+#   the parity/single-sourcing legs (lane-added subjects); all 77
+#   assert statements AST-identical between the pristine pin and the
+#   derived variant. MEASURED at base: 7 intended reds / 9 green /
+#   3 N-A = 19 nodes. Procedure + evidence:
+#   .agents/tester/RESULTS/2026-11-03-wi76d89e11-skill-id-functional-gate.md
+#   §L2 (gate finding F3).
 #
 # Usage:
 #   bash test/packs/skill_id_verbatim_contract_unit_test.sh
 #   SKILL_ID_VERBATIM_MUTATIONS=0 bash test/packs/skill_id_verbatim_contract_unit_test.sh
 #     — skip the mutation matrix (the pin only).
+#   SKILL_ID_VERBATIM_BUDGET_S=300 bash test/packs/skill_id_verbatim_contract_unit_test.sh
+#     — override the internal wall-clock budget (seconds).
 #
 # Pack exit: 0 PASS / 1 FAIL / 124 TIMEOUT. The RESULT label always
-# prints — a red leg never kills the pack silently.
+# prints — a red leg never kills the pack silently. On SIGTERM/SIGINT
+# the trap restores pristine before exiting non-zero (SIGKILL cannot be
+# trapped; the outer ``timeout`` fence owns that case).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -54,6 +88,21 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_DIR"
 
 echo "=== Test Pack: skill_id_verbatim_contract_unit_test ==="
+
+# --- internal wall-clock budget (gate F2) ---------------------------------
+# The pack measures its own elapsed wall time from PACK_START and
+# asserts it against BUDGET_S after every phase and every mutation leg.
+PACK_START="$(date +%s)"
+BUDGET_S="${SKILL_ID_VERBATIM_BUDGET_S:-300}"
+elapsed_s() { echo $(( $(date +%s) - PACK_START )); }
+check_budget() {
+  local elapsed label="${1:-}"
+  elapsed="$(elapsed_s)"
+  if [ "$elapsed" -gt "$BUDGET_S" ]; then
+    echo "RESULT: TIMEOUT (internal timer: wall ${elapsed}s > SKILL_ID_VERBATIM_BUDGET_S=${BUDGET_S}s ${label})"
+    exit 124
+  fi
+}
 
 # --- interpreter ----------------------------------------------------------
 if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
@@ -67,25 +116,83 @@ echo "[pack] interpreter: $PY"
 
 # --- fences ---------------------------------------------------------------
 FAKE_HOME="$(mktemp -d /tmp/skill-id-verbatim-pack-XXXXXX)"
-PLANTED_BACKUP_DIR="$FAKE_HOME/backups"
-PLANTED_TARGET_DIR="$FAKE_HOME/targets"
-mkdir -p "$PLANTED_BACKUP_DIR" "$PLANTED_TARGET_DIR"
+PRISTINE_DIR="$FAKE_HOME/pristine"
+mkdir -p "$PRISTINE_DIR"
 
-restore_plants() {
-  local f
-  for f in "$PLANTED_BACKUP_DIR"/*; do
-    [ -e "$f" ] || continue
-    local target
-    target="$(cat "$PLANTED_TARGET_DIR/$(basename "$f").target" 2>/dev/null || true)"
-    [ -n "$target" ] || continue
-    cp "$f" "$target"
+# The COMPLETE plant surface of the mutation matrix. F1: PRISTINE
+# content+sha of each is captured before phase 2; every leg restores to
+# PRISTINE (never leg-start); the exit trap restores pristine on ANY
+# exit path; the final leg asserts sha equality against the capture.
+MUTABLE_FILES=(
+  "daemon/tools/skill_tools.py"
+  "daemon/services/project_skill_source/model.py"
+  "daemon/services/skill_injection_service.py"
+  "daemon/services/project_skill_source/service.py"
+  "daemon/services/skill_search_service.py"
+)
+
+_pristine_key() { printf '%s' "$1" | sha256sum | cut -d' ' -f1 | cut -c1-16; }
+
+restore_pristine() {
+  local meta key path
+  for meta in "$PRISTINE_DIR"/*.meta; do
+    [ -e "$meta" ] || continue
+    key="$(basename "$meta" .meta)"
+    path="$(cat "$meta")"
+    cp "$PRISTINE_DIR/$key.content" "$path"
   done
 }
+
+PACK_CLEANED=0
+PACK_LOCK_HELD=0
 cleanup() {
-  restore_plants
+  # Idempotent (F1(iii)): the TERM/INT traps and the EXIT trap can all
+  # reach this; the second and later invocations are no-ops.
+  [ "$PACK_CLEANED" = 1 ] && return 0
+  PACK_CLEANED=1
+  local meta key path cur want drift=0
+  if [ -d "$PRISTINE_DIR" ]; then
+    # Detect a left-behind plant BEFORE restoring (a restore-then-check
+    # would always pass); then restore unconditionally.
+    for meta in "$PRISTINE_DIR"/*.meta; do
+      [ -e "$meta" ] || continue
+      key="$(basename "$meta" .meta)"
+      path="$(cat "$meta")"
+      cur="$(sha256sum "$path" 2>/dev/null | cut -d' ' -f1)"
+      want="$(cat "$PRISTINE_DIR/$key.sha")"
+      [ "$cur" = "$want" ] || drift=1
+    done
+    restore_pristine
+  fi
   rm -rf "$FAKE_HOME"
+  if [ "$PACK_LOCK_HELD" = 1 ]; then
+    flock -u 8 2>/dev/null || true
+    PACK_LOCK_HELD=0
+  fi
+  if [ "$drift" = 1 ]; then
+    # Never exit green with a plant on disk (even though we just
+    # restored it): the drift itself is a pack failure.
+    echo "RESULT: FAIL (left-behind plant detected on exit — pristine restored)"
+    exit 1
+  fi
 }
+# Trap FIRST, then phase logic (F1(iii)): any non-green exit path — a
+# failing leg, a budget overrun, a verdict FAIL, SIGTERM/SIGINT —
+# restores pristine before the pack dies.
 trap cleanup EXIT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 130' INT
+
+# Concurrency fence (F1): one pack run per checkout. A concurrent run
+# against the SAME tree fails loud instead of racing plants into it.
+LOCK_KEY="$(_pristine_key "$PROJECT_DIR")"
+LOCK_FILE="/tmp/skill-id-verbatim-pack-${LOCK_KEY}.lock"
+exec 8>"$LOCK_FILE"
+if ! flock -n 8; then
+  echo "RESULT: FAIL (another pack run holds this checkout's lock: $LOCK_FILE)"
+  exit 1
+fi
+PACK_LOCK_HELD=1
 
 # Per-variable scrub — NEVER the ``env -u POSTGRES_*`` glob.
 SCRUB=(
@@ -161,6 +268,8 @@ if [ "$IMPORT_GUARD_RC" -ne 0 ]; then
   echo "RESULT: FAIL (phase 0: import guard)"
   exit 1
 fi
+echo "[timer] phase 0 done: $(elapsed_s)s elapsed / budget ${BUDGET_S}s"
+check_budget "after phase 0"
 
 # --- phase 1: the pin + the sibling corpus --------------------------------
 echo "--- phase 1: the contract pin ---"
@@ -168,13 +277,38 @@ PHASE1_LOG="$FAKE_HOME/phase1.log"
 run_pytest "$PIN_FILE" "$SIBLING_FILE" >"$PHASE1_LOG" 2>&1
 PHASE1_RC=$?
 tail -3 "$PHASE1_LOG"
+echo "[timer] phase 1 done: $(elapsed_s)s elapsed / budget ${BUDGET_S}s"
+check_budget "after phase 1"
 
 # --- phase 2: the mutation matrix -----------------------------------------
 MUTATION_FAILURES=0
 run_mutations() {
-  echo "--- phase 2: the mutation matrix (plant → RED → restore → GREEN) ---"
+  echo "--- phase 2: the mutation matrix (plant → RED → pristine-restore → GREEN) ---"
   TSV="$FAKE_HOME/mutation-matrix.tsv"
   : >"$TSV"
+
+  # F1(i): capture PRISTINE content+sha of every mutable file BEFORE the
+  # first plant. Fail-loud dirty pre-check: a mutable file that is not
+  # porcelain-clean at capture time means contamination (or uncommitted
+  # work) — the pack NEVER baselines those bytes as "pristine".
+  echo "--- phase 2 pre-check: pristine capture ---"
+  local f key dirty
+  for f in "${MUTABLE_FILES[@]}"; do
+    if [ ! -f "$f" ]; then
+      echo "RESULT: FAIL (phase 2 pre-check: mutable file missing: $f)"
+      exit 1
+    fi
+    dirty="$(git status --porcelain -- "$f" 2>/dev/null)"
+    if [ -n "$dirty" ]; then
+      echo "RESULT: FAIL (phase 2 pre-check: mutable file DIRTY at pack start — refusing to baseline contamination: $f)"
+      exit 1
+    fi
+    key="$(_pristine_key "$f")"
+    cp "$f" "$PRISTINE_DIR/$key.content"
+    printf '%s' "$f" >"$PRISTINE_DIR/$key.meta"
+    sha256sum "$f" | cut -d' ' -f1 >"$PRISTINE_DIR/$key.sha"
+    echo "[pack] pristine: $f sha=$(cat "$PRISTINE_DIR/$key.sha")"
+  done
 
   plant() {
     "$PY" - "$1" "$2" "$3" <<'PYEOF'
@@ -194,31 +328,39 @@ PYEOF
 
   leg() {
     local id="$1" path="$2" old="$3" new="$4" node="$5"
-    local backup="$PLANTED_BACKUP_DIR/$id.$(basename "$path")"
-    cp "$path" "$backup"
-    printf '%s' "$path" >"$PLANTED_TARGET_DIR/$(basename "$backup").target"
-    local sha_before
+    local key want sha_before sha_after red green
+    key="$(_pristine_key "$path")"
+    want="$(cat "$PRISTINE_DIR/$key.sha")"
     sha_before="$(sha256sum "$path" | cut -d' ' -f1)"
+    # F1: a leg that does not START pristine is contamination (a leaked
+    # plant or a concurrent writer) — fail the leg LOUDLY and restore;
+    # never re-baseline foreign bytes as the comparison baseline.
+    if [ "$sha_before" != "$want" ]; then
+      printf '%s\tLEG-START-CONTAMINATED\t-\t%s\n' "$id" "$sha_before" >>"$TSV"
+      MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+      cp "$PRISTINE_DIR/$key.content" "$path"
+      return
+    fi
 
     if ! plant "$path" "$old" "$new"; then
       printf '%s\tPLANT-FAILED\t-\t%s\n' "$id" "$sha_before" >>"$TSV"
       MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
-      cp "$backup" "$path"
+      cp "$PRISTINE_DIR/$key.content" "$path"
       return
     fi
 
-    local red green
     if run_pytest "$node" >"$FAKE_HOME/$id.red.log" 2>&1; then
       red="NO"
     else
       red="YES"
     fi
 
-    cp "$backup" "$path"
-    local sha_after
+    # F1(ii): restore to PRISTINE after EVERY leg — never to leg-start
+    # (leg-start bytes may themselves be contaminated).
+    cp "$PRISTINE_DIR/$key.content" "$path"
     sha_after="$(sha256sum "$path" | cut -d' ' -f1)"
-    if [ "$sha_before" != "$sha_after" ]; then
-      printf '%s\tRESTORE-MISMATCH\t-\t%s\n' "$id" "$sha_before" >>"$TSV"
+    if [ "$sha_after" != "$want" ]; then
+      printf '%s\tRESTORE-MISMATCH\t-\t%s\n' "$id" "$want" >>"$TSV"
       MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
       return
     fi
@@ -229,10 +371,11 @@ PYEOF
       green="NO"
     fi
 
-    printf '%s\t%s\t%s\t%s\n' "$id" "$red" "$green" "$sha_before" >>"$TSV"
+    printf '%s\t%s\t%s\t%s\n' "$id" "$red" "$green" "$want" >>"$TSV"
     if [ "$red" != "YES" ] || [ "$green" != "YES" ]; then
       MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
     fi
+    check_budget "after leg $id"
   }
 
   # M1 — skill_list's DB bracket token truncated back to 8 chars.
@@ -318,9 +461,24 @@ PYEOF
 ' \
     "$PIN_FILE::TestProjectFileDiscriminatorParity"
 
-  echo "leg	red	green	sha256(planted-file, pre-plant)"
+  echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
   echo "mutation failures: $MUTATION_FAILURES"
+
+  # F1(iv): after the FINAL leg, every mutable file must be sha-equal to
+  # its pristine capture — a left-behind plant fails the pack even if
+  # every leg individually reported green.
+  local cur want
+  for f in "${MUTABLE_FILES[@]}"; do
+    key="$(_pristine_key "$f")"
+    cur="$(sha256sum "$f" | cut -d' ' -f1)"
+    want="$(cat "$PRISTINE_DIR/$key.sha")"
+    if [ "$cur" != "$want" ]; then
+      echo "PRISTINE-DRIFT at final assert: $f ($cur != $want) — restoring"
+      cp "$PRISTINE_DIR/$key.content" "$f"
+      MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+    fi
+  done
 }
 
 MUTATION_RC=0
@@ -332,6 +490,8 @@ else
 fi
 
 # --- verdict --------------------------------------------------------------
+echo "[timer] total wall: $(elapsed_s)s / budget ${BUDGET_S}s"
+check_budget "at verdict"
 if [ "$PHASE1_RC" -eq 124 ]; then
   echo "RESULT: TIMEOUT"
   exit 124
