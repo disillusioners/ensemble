@@ -19,6 +19,16 @@ Make every agent-facing skill id that the skill tools **emit** be one that `skil
 
 Fix is **render-layer only**: no id minting/scheme change, no `skill_view` resolution change, no schema change, no internal-key remap (the pseudo-id stays THE internal key — R3 hard constraint).
 
+**SCOPE QUALIFIER (council A4 fold — the goal is NOT a global invariant).** This lane fixes the
+**skill-tool EMISSION seams** (the 4 sites in §4). It is **NOT** a tree-wide "every agent-facing
+skill id is verbatim-consumable" invariant — three surfaces OUTSIDE the 4 sites still render a
+non-consumable id, and they are **disclosed, not fixed** (see §5 RESIDUAL-DISCLOSURE rows R1–R3):
+the `skill_fix` echo truncation, the `skill_feedback` echo truncation, and the `_render_pf_view`
+pseudo-id line. A reviewer reading §1 as a global invariant would raise a false positive against
+those three; they are **known, named, and routed**, not regressions. The same qualifier applies to
+the commit-message claim in W1 (the ceremony text is the authoritative statement, not the commit
+message).
+
 ## 2. Confirmed root cause (receipts verified at HEAD c4161335b)
 
 **The defect**: `skill_list`'s DB row renderer truncates the store-originated id to 8 chars — `daemon/tools/skill_tools.py:765`:
@@ -50,16 +60,32 @@ Fix is **render-layer only**: no id minting/scheme change, no `skill_view` resol
 | `_pf_skill_payload["id"]` | :141 | **:145** (function def :134, dict :144-160) |
 | `_format_injection` id read/render | :1266-1281 | **read :1262, render :1271-1275** (within `_render_file_skill` :771-795 context) |
 | feedback dual-form predicate | :1457-1465 | comment :1449-1462, **predicate :1463-1466** |
-| `_render_pf_view` address/id lines | :404-405 (ruling receipt) | **:399-400** (A1 fold) |
+| `_render_pf_view` address/id lines | :404-405 (ruling receipt) | **:402** (A1 fold; the pre-lane `:399-400` drifted by the lane's own edits) |
 | `_format_injection` span | — | def at **:1173** (runs to ~:1332); the id segment (:1262 read, :1271-1275 render) sits INSIDE `_format_injection`, which `_render_file_skill` (:771-795) calls for the body — A1 fold |
 | skill_create id ternary | :1119-1125 | :1119-1123 (`created.id[:8]` at :1120), return :1124-1127 |
 | file-row append | :823-826 | append expression :822-827 |
+
+**Post-fix line drift (council round-2 fold, 2026-11-03)**: the receipts in this paragraph were captured at the PRE-lane tree; the lane's own edits (plus the W2 import line) shifted the affected surfaces by +1..+2 — `skill_fix echo` :1258 → **:1260**, `feedback display` :1489 → **:1491**, `_render_pf_view` id line :399-400 → **:402**, the `short_id` local :765/:766 → **:767**. Every citation in §5.1 R1–R7 is the CURRENT number.
 
 All other receipts matched exactly (skill_list :764-771; `[:8]` :765; view :913/:924/:969-971; repo :241; models :161-165; `_json_default` :83-99; fused dumps :670; skill_fix refusal :1211; skill_fix echo :1258; feedback display :1489 + full-id pass-through :1491-1492; mint fns model.py:57/:60/:68-79/:82-84/:87-92; REST routers/skills.py:282-308; REST-search DB-only skill_search_service.py:592-600; duck-type :127-130; `_tag_result_sources` :1056-1075).
 
 ## 4. Fix inventory — R2-IN, per site (exact before → after)
 
-**4 sites (5 code edits + 1 docstring cluster) in 3 files, plus the P1-6 doc-only corrections in the same files. Shipped-code delta target: ~6 changed lines + one new short method + 3 docstring lines. Zero `.sql`, zero minting changes, zero view changes.** *(A6 note: the `short_id` local variable NAME at :765 is retained post-fix per adjudication A-4 — minimal diff; the name is local-scope only.)*
+**4 sites (5 code edits + 1 docstring cluster) in 3 files, plus the P1-6 doc-only corrections in the same files. Zero `.sql`, zero minting changes, zero view changes.**
+
+**⚠️ SHIPPED-CODE DELTA — CORRECTED (council A3 fold).** The "diff-shape expectation stated numerically" that the reviewer checklist used — "**~6 changed lines**" — was **never true** and was uncounted for two reasons: the **N6 local mirror** (the duplicated `_is_project_file_skill` helper + the `SOURCE_PROJECT_FILE` literal, ~16 lines) and the **docstring re-wrap** (the agent-visible docstring rows, ~10 lines). A reviewer checking "~6" against the real delta raises a **false positive**. The **RECOUNT, re-measured after the council folds** (`git diff c4161335b -- daemon/`, worktree at the fold):
+
+| Metric | Value |
+|---|---|
+| Files touched (shipped code) | **4** (`model.py`, `skill_injection_service.py`, `skill_search_service.py`, `skill_tools.py`) — 3 at the pre-fold state; the council-W2 fold added `skill_search_service.py` (the constant's second consumer) |
+| `git diff --numstat` | **+104 / −19** |
+| Total changed lines | **123** |
+| Non-trivia (code + docstring) | **+71 / −19** = **90** |
+| Trivia (blank / comment-only) | **+33 / −0** |
+
+Per-file numstat (post-fold): `model.py` +39/−2 · `skill_injection_service.py` +43/−3 · `skill_search_service.py` +8/−2 · `skill_tools.py` +14/−12. **At the PRE-fold state the same measurement was 3 files / +67 / −10 = 77 changed lines** — the council's A3 figure. The growth is the W2 single-sourcing (a documented constant + its import edges in three consumers) and the W5 import-guard phase in the pack, both of which are documentation-and-wiring rather than behaviour.
+
+*(A6/A7 note: the `short_id` local variable NAME at `skill_tools.py:767` is retained post-fix per adjudication A-4 — minimal diff; the name is local-scope only. It now holds the FULL uuid — see the A7 disclosure row in §5.)*
 
 ### P1-1 — skill_list DB bracket token → full uuid
 `daemon/tools/skill_tools.py:765` (one token; render :769-771 and the `db_suffix` logic :762 byte-unchanged)
@@ -88,7 +114,7 @@ All other receipts matched exactly (skill_list :764-771; `[:8]` :765; view :913/
   "pseudo_id": getattr(file_skill, "id", None),
   ```
 - All other keys untouched; `pseudo_id` is ADDITIVE (house convention: `_tag_result_sources` "additive keys only … consumers that ignore unknown keys keep working", skill_search_service.py:1064-1067).
-- Covers BOTH consumers of the payload builder: the fused-path file entries and the file-only degraded path (`_file_only_bm25_search` builds entries at **:219** — planner observation O-2).
+- Covers BOTH search render paths (the fused seam and the file-only degraded path) — **but the ATTRIBUTION is TWO DIFFERENT builders**: `_pf_skill_payload` (`skill_tools.py:135`, ONE call site at `:221` — the file-only degraded path) serves the file-only path; the FUSED seam is served by `ProjectFileSkill.to_dict()` (`project_skill_source/model.py`) — see P1-4. The COVERAGE claim is TRUE; the single-builder attribution was FALSE (council W3 fold; planner observation O-2).
 - Rendered file-entry JSON before → after: `"id": "pf-6aef39fb305c287e"` → `"id": "pf:tester:whole-tree-base-proven-diff", "pseudo_id": "pf-6aef39fb305c287e"`.
 
 ### P1-4 — fused-path serialization: new `ProjectFileSkill.to_dict()`
@@ -131,21 +157,50 @@ Test-side companion (rides the P2 fold commit, not P1): `tests/tools/test_skill_
 |---|---|---|
 | skill_list file rows | skill_tools.py:822-827 | **NO CHANGE** — already emits `fs.address`; byte-for-byte preserved |
 | skill_view resolution (both branches) | :913-971, repository.py:241 | **NO CHANGE** — exact-PK DB + `lookup_explicit` file branch untouched |
-| skill_fix response echo `[:8]` | skill_tools.py:1258 | **OUT — DEFER** (display hygiene lane): caller-held echo, cannot strand the agent |
-| skill_feedback display echo `[:8]` | skill_tools.py:1489 | **OUT — DEFER** (same class; :1491-1492 already passes the FULL id — function unaffected) |
+| skill_fix response echo `[:8]` | skill_tools.py:1260 | **OUT — DEFER** (display hygiene lane): caller-held echo, cannot strand the agent — **see §5.1 R1 (council-W1 fold: this surface is now NAMED as a residual-disclosure row, with its receipt)** |
+| skill_feedback display echo `[:8]` | skill_tools.py:1491 | **OUT — DEFER** (same class; :1491-1492 already passes the FULL id — function unaffected) — **see §5.1 R2 (council-W1 fold)** |
 | skill_feedback dual-form routing | skill_tools.py:1449-1466 | **NO CHANGE — PRESERVED AS INVARIANT** (R2g): `pf:` OR `pf-` → `_feedback_pf_skill`; W5 fail-closed (:744-770 pins); metrics-only writes keyed by the RESOLVED pseudo-id; compatibility path for pre-fix transcripts. M6 pins it. |
 | skill_fix `pf-` refusal gap | skill_tools.py:1211 | **OUT — ROUTED** (skill-evolution/fix-dispatch lane): prefix test on `ADDRESS_PREFIX` only → a `pf-<hex16>` falls through to `dispatch_fix` as a bogus DB id; harmless today (evolution lane disabled) and LESS reachable after this fix; belongs to the P7-refusal family (siblings :1201-1206: skill_analyze / skill_evolve / skill_get_metrics + REST POST /{id}/fix) which must move together |
 | REST/FE fusion | routers/skills.py:282-308; skill_search_service.py:592-600 | **OUT — REPORT-ONLY** (parked v2): REST shares NOTHING with the tool projection (full uuid via `to_dict()`; REST search DB-only v1 — file corpus invisible at `instance_id=None`) — the dispatcher's "if it shares the projection" premise resolves to: it does not |
-| `_render_pf_view` `- id: <pseudo-id>` line under `- address:` | skill_tools.py:**:399-400** (A1 fold; ruling receipt said :404-405) | **NO CHANGE** (address leads; relabelling = shape churn on a surface the dispatcher did not name) |
-| `ProjectFileSkill.to_summary()` `"id": pseudo-id` | model.py:162-183 | **NO CHANGE — planner observation O-1**: ZERO consumers tree-wide (grep daemon/ + tests/); dead surface, not an emission seam; recorded so future lanes don't mistake it for one |
+| `_render_pf_view` `- id: <pseudo-id>` line under `- address:` | skill_tools.py:**:402** (A1 fold; ruling receipt said :404-405) | **NO CHANGE** (address leads; relabelling = shape churn on a surface the dispatcher did not name) — **see §5.1 R4 (council-A1 fold: NOW NAMED as an agent-facing emission risk, the THIRD residual of the same class)** |
+| `ProjectFileSkill.to_summary()` `"id": pseudo-id` | model.py:199-224 | **NO CHANGE — planner observation O-1**: ZERO consumers tree-wide (grep daemon/ + tests/); dead surface, not an emission seam; recorded so future lanes don't mistake it for one — **see §5.1 R6 (council-A6 fold: ROUTED to the display-hygiene lane with R4)** |
 | id minting/scheme (`uuid4()` PK default; `mint_pseudo_id`; `mint_address`) | models.py:161-165; model.py:68-84 | **NO CHANGE** |
 | schema / migrations | — | **NO CHANGE** — zero `.sql`; migration census delta EMPTY expected at stage (standing rule: delta-empty-legitimate) |
 | v2 loader itself, tool categories | — | **NO CHANGE** — no category registration changes ⇒ no `tool-categories.json` regen (v0.28.9 lesson) |
 
+### 5.1 RESIDUAL-DISCLOSURE rows — the surfaces this lane did NOT make verbatim-consumable
+
+**These are NOT regressions and NOT deferrals-without-a-name.** They are the council-flagged
+surfaces where the "verbatim-consumable id" goal is **not** achieved, each with its own receipt.
+The ceremony text must state them plainly — the commit message is NOT the authoritative record
+(see the W1 row below).
+
+| ID | Surface | Receipt | Disposition |
+|---|---|---|---|
+| **R1** *(W1)* | **`skill_fix` echo truncation** — the recorded-request line renders `skill_id[:8]`. | `daemon/tools/skill_tools.py:1260` (the local `short_id = skill_id[:8] …`), rendered at `:1262` | **DISCLOSE — NOT FIXED.** A caller-held echo of the id the CALLER supplied: the agent already holds the full id it passed in, so the truncation cannot strand it. Belongs to the **display-hygiene lane** (same family as R2). |
+| **R2** *(W1)* | **`skill_feedback` echo truncation** — the "Feedback recorded for skill …" line renders `skill_id[:8]`. | `daemon/tools/skill_tools.py:1491` (the local), rendered at `:1526` / `:1530` | **DISCLOSE — NOT FIXED.** Same class as R1 (caller-held echo). Note `:1491-1492` already passes the **FULL** id to the metrics service — the function itself is unaffected; only the echo line is truncated. |
+| **R3** *(W1 + A1)* | **THE SHAPE HAZARD** — post-change, an echo truncation of an ADDRESS yields `pf:tester:alpha…` → `pf:te…`, whose first 3 characters **superficially resemble the pseudo-id form `pf-<hex16>`**. | the echo truncations at `:1260` / `:1491` (R1/R2) | **DISCLOSE — NOT FIXED.** The truncated address is *display-only* and is never fed back as an id; the risk is a HUMAN/agent misreading `pf:te…` as a pseudo-id and passing it to `skill_view`, which would refuse it (the pseudo-id form is `pf-` + 16 hex, NOT `pf:` + 3 chars) — a confusing refusal, not a wrong resolution. **Named because the council flagged it**: post-change the two id namespaces are visually adjacent in truncated form. |
+| **R4** *(A1)* | **`_render_pf_view` emits a NON-consumable pseudo-id** directly beneath the consumable address — an agent-facing id that `skill_view` REFUSES. | `daemon/tools/skill_tools.py:402` — renders `- id: pf-<hex16>` (the internal pseudo-id) on the line directly under `- address: pf:<ns>:<name>` (`:401`) | **DISCLOSE — NO CHANGE.** **Pre-existing** (not introduced by this lane) and **architect NO-CHANGE** (relabelling = shape churn on a surface the dispatcher did not name). BUT it was **NOT named in this plan's §5 as an agent-facing emission risk** before the A1 fold — it is now, as the **THIRD residual of the same class** as R1/R2 (an agent-visible id that is not verbatim-consumable). Route to the **display-hygiene lane**. |
+| **R5** *(A5)* | **`to_dict()` normalises out-of-contract values**: `manifest=None → {}` and `shadows=None → []`, where the old `__dict__` fallback emitted `None`. | `daemon/services/project_skill_source/model.py:193-194` — `to_dict()` body (`d["manifest"] = dict(d.get("manifest") or {})`, `d["shadows"] = list(d.get("shadows") or [])`) | **DISCLOSE ONLY — no change.** Both fields are typed **non-Optional** (`manifest: dict[str, Any]`, `shadows: list[str]`), so the normalisation fires **only on a type violation** — i.e. it is a defensive coercion, not a behaviour change on any in-contract input. Adjudication A-5 (defensive copies) already required the copy; the `or {}` / `or []` fallback is the same guard. |
+| **R6** *(A6)* | **`ProjectFileSkill.to_summary()` emits `"id": self.id`** — the pseudo-id — and has **ZERO callers** in `daemon/` and `tests/`. | `daemon/services/project_skill_source/model.py:199` (`to_summary()`) | **ROUTE — do not change.** Dead surface today (planner observation O-1). It is a **future** emission risk if someone wires it into a list surface — route to the **display-hygiene lane** with R4 so the two are fixed together. |
+| **R7** *(A7)* | **The local at `skill_tools.py:767` is still NAMED `short_id`** but now holds the **FULL uuid** (the truncation was removed; the name was deliberately retained per A-4/A-8 to avoid diff-widening). | `daemon/tools/skill_tools.py:767` | **DISCLOSE ONLY — no rename.** Local-scope name only. **Named because a future reader may "restore" the truncation** by reading the name as the contract — the value is the full stored uuid and MUST NOT be re-truncated. |
+
+### 5.2 Commit-message honesty (W1 — disclosure, NOT a rewrite)
+
+The pushed commit `0ebd39ef8`'s message over-claims that "no surface teaches the truncated shape
+any more". That claim is **contradicted by the evidence**: four agent-visible docstring rows still
+render `<short_id>` (`daemon/tools/skill_tools.py:1375`, `:1382`, `:1594`, `:1598`) and the two
+echo truncations (R1/R2) are still live.
+
+**House precedent: NO commit rewrite** (a pushed commit's history is not rewritten for a wording
+defect). The correction is therefore made **here** and in `decisions.md`, and **the ceremony text
+is the authoritative statement** — not the commit message. This row, R1–R3, and the A1 row are the
+named corrections the ceremony carries.
+
 ## 6. Planner observations from verification (additions, not redesigns)
 
 - **O-1** — `to_summary()` dead surface (above).
-- **O-2** — `_file_only_bm25_search:219` is the second `_pf_skill_payload` consumer (degraded file-only path) → covered by P1-3; the pin exercises it (adjudication A-6).
+- **O-2** — `_file_only_bm25_search` (builds entries at `:221`) is the **ONLY** `_pf_skill_payload` consumer (degraded file-only path) → covered by P1-3; the pin exercises it (adjudication A-6). The FUSED path is NOT a `_pf_skill_payload` consumer — it is served by `to_dict()` (P1-4). *(ATTRIBUTION CORRECTED — council W3 fold: the earlier wording "the second consumer" implied one shared builder serving two consumers.)*
 - **O-3** — `version` property vs field distinction for the `to_dict()` field-set pin (§4 P1-4).
 
 ## 7. Acceptance criteria — dispatcher clause → plan element

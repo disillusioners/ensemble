@@ -12,14 +12,69 @@
 > id-shape sweep (`implementation-steps.md` §P2b — every id-shape hit adjudicated with a reason)
 > is a SUBSET of this set and is recorded as such; nothing in the sweep points outside it.
 >
+> **DERIVATION FILTER + EXACT COMMAND (council W4 fold — the row's aggregate is now REPRODUCIBLE,
+> not remembered).** The filter is **AST import resolution**: every file under `tests/` whose
+> import graph resolves to one of the lane's THREE touched modules
+> (`daemon.tools.skill_tools` / `daemon.services.project_skill_source.model` /
+> `daemon.services.skill_injection_service`), **MINUS the lane's own new pin file**
+> (`tests/tools/test_skill_id_verbatim_contract.py` — Phase 1 accounts it separately, so it is
+> not double-counted in the blast radius). That filter yields **18 files**. Reproduce with:
+>
+> ```
+> cd $WT && env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST \
+>   -u POSTGRES_PORT -u DATABASE_URL -u PORT -u ENSEMBLE_SELF_ENV \
+>   $PY -m pytest --collect-only -q \
+>   tests/integration/test_skill_cross_phase_flow_a.py \
+>   tests/integration/test_skill_injection_persistence.py \
+>   tests/postgres/test_project_skill_source_pg.py \
+>   tests/services/test_skill_injection_service.py \
+>   tests/services/test_skill_injection_step0.py \
+>   tests/services/test_skill_phase2_integration.py \
+>   tests/services/test_skill_search_fusion.py \
+>   tests/tools/test_skill_feedback_tool.py \
+>   tests/tools/test_skill_search_fusion_guard.py \
+>   tests/tools/test_skill_tools.py \
+>   tests/tools/test_skill_tools_pf_surface.py \
+>   tests/unit/services/test_skill_injection_capability_gate.py \
+>   tests/unit/test_project_skill_source_index.py \
+>   tests/unit/test_project_skill_source_model.py \
+>   tests/unit/test_project_skill_source_phase4_wiring.py \
+>   tests/unit/test_skill_capture_killswitch.py \
+>   tests/unit/test_skill_capture_killswitch_verification.py \
+>   tests/unit/test_skill_evolution_lane_gate.py
+> # → 441/463 tests collected (22 deselected)   ← DEFAULT addopts (deselects integration/postgres/slow/conformance)
+> # → 463 tests collected                      ← with --override-ini="addopts=" (no deselection)
+> ```
+>
+> **18-vs-23 RECONCILIATION (two readings of "importing one of them", both now MEASURED):**
+> the same AST filter read at **package** level (any `daemon.services.project_skill_source.*`
+> submodule — it adds `tests/postgres/test_project_skill_fusion_pg.py`,
+> `tests/postgres/test_project_skill_source_phase4_pg.py`,
+> `tests/unit/test_project_skill_source_manifest.py`,
+> `tests/unit/test_project_skill_source_resolver.py` — 4 files) reaches **23 files** →
+> **526/554 collected (28 deselected)** with default addopts, **554** with no deselection. The
+> **18** figure is the exact-three-modules reading; the **23** figure is the package-level
+> reading. The REGISTERED composition is the **18** one.
+>
+> **DISCREPANCY DISCLOSURE (council W4 — the third figure, and why the row keeps 441/22):** the
+> council's re-derivation reported "**522 collected / 0 deselected**". That figure does **NOT**
+> reproduce under EITHER filter: the 18-file set measures 463 (no deselection) / 441 (default
+> addopts), and the 23-file set measures 554 (no deselection) / 526 (default addopts). An
+> exhaustive subset search found SIX different 18-file subsets of the 23-file set that sum to
+> 522 — i.e. **522 is not uniquely determined by either stated filter** and is therefore not
+> reproducible as stated. The row keeps **441 collected (22 deselected)** because that IS
+> reproducible under the filter + command above (re-measured at the fold, 2026-11-03). The
+> per-file counts below (15 + 37 = 52) were verified exact at registration and are unaffected by
+> the filter question.
+>
 > **No PG row.** The lane adds no DB-touching code and authors NO migration (census delta EMPTY
-> — delta-empty-legitimate under the standing rule). The two `tests/postgres/test_project_skill_*`
+> — delta-empty-legitimate under the standing rule). The `tests/postgres/test_project_skill_*`
 > files inside the derived set carry no id-render assertions (P2b) and are deselected by the
 > default addopts (the postgres marker).
 
 | Pack | Invocation | Scope | Last run | Status |
 |---|---|---|---|---|
-| `skill_id_verbatim_contract` | `cd $WT && timeout 900 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT bash test/packs/skill_id_verbatim_contract_unit_test.sh` (the `POSTGRES_*` GLOB form is a SILENT NO-OP — per-variable only; the pack self-fences with a mktemp FAKE_HOME + its own per-variable scrub; two phases: the contract pin + the sibling corpus, THEN the mutation matrix; `0 PASS / 1 FAIL / 124 TIMEOUT`; `SKILL_ID_VERBATIM_MUTATIONS=0` skips phase 2) | **The skill id-emission CONTRACT** (wi-76d89e11): every agent-facing skill id the skill tools EMIT must be an id `skill_view` accepts VERBATIM — the full uuid4 for DB skills (exact-PK resolution, no prefix fallback), the `pf:<ns>:<name>` ADDRESS for project-file skills (they have no uuid; the sha16 pseudo-id is the INTERNAL key and is REFUSED by `skill_view`). **Phase 1** — `tests/tools/test_skill_id_verbatim_contract.py` (**15 nodes**: list → view → identity per source; value equality per source (STR-EQUAL, not a shape match); BOTH search render paths — the fused seam (`SkillSearchService` with `config=None` ⇒ deterministic `_degraded_select`, no LLM reachable) and the tool-level file-only degraded path; the `skill_create` success line; the injection body segment; the safety invariants — the pseudo-id stays the internal key, the embedding rows stay reachable THROUGH the skill object's id, the `pf:`/`pf-` feedback routing stays intact, the W5 refusals still write nothing) + `tests/tools/test_skill_tools_pf_surface.py` (**37 nodes** — the folded W4 suffix-additivity + knob-OFF byte-shape pin) = **52 nodes**. **Phase 2** — the mutation matrix **M1-M6 + M2b (7 legs)**: each leg plants its defect on the PRODUCTION source, the intended leg must go RED, the file is restored sha256-identically, the same leg must go GREEN again; a NON-DISCRIMINATING leg fails the pack (a pin that cannot fail is worse than no pin). | 2026-11-03 | ✅ registered (implementation lane: phase 1 52/52 PASS; phase 2 7/7 legs RED→GREEN with sha-verified restore; RED-at-BASE proven — 7 legs RED at `c4161335b`, 8 armor legs GREEN) |
+| `skill_id_verbatim_contract` | `cd $WT && timeout 900 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT bash test/packs/skill_id_verbatim_contract_unit_test.sh` (the `POSTGRES_*` GLOB form is a SILENT NO-OP — per-variable only; the pack self-fences with a mktemp FAKE_HOME + its own per-variable scrub; THREE phases: the IMPORT GUARD (phase 0 — proves `import daemon` resolves under THIS checkout; realpath-exact, NOT a `startswith` prefix test, which has a sibling-prefix trap against the shared checkout; the pack exits 1 with `RESULT: FAIL (phase 0: import guard)` when the import resolves elsewhere), THEN the contract pin + the sibling corpus, THEN the mutation matrix; `0 PASS / 1 FAIL / 124 TIMEOUT`; `SKILL_ID_VERBATIM_MUTATIONS=0` skips phase 2) | **The skill id-emission CONTRACT** (wi-76d89e11): every agent-facing skill id the skill tools EMIT must be an id `skill_view` accepts VERBATIM — the full uuid4 for DB skills (exact-PK resolution, no prefix fallback), the `pf:<ns>:<name>` ADDRESS for project-file skills (they have no uuid; the sha16 pseudo-id is the INTERNAL key and is REFUSED by `skill_view`). **Phase 1** — `tests/tools/test_skill_id_verbatim_contract.py` (**19 nodes** — 15 at registration + the 4-node project-file DISCRIMINATOR PARITY battery landed by the council-W2 fold: list → view → identity per source; value equality per source (STR-EQUAL, not a shape match); BOTH search render paths — the fused seam (`SkillSearchService` with `config=None` ⇒ deterministic `_degraded_select`, no LLM reachable) and the tool-level file-only degraded path; the `skill_create` success line; the injection body segment; the two duplicated `_is_project_file_skill` helpers must AGREE on all 12 discriminating shapes; the safety invariants — the pseudo-id stays the internal key, the embedding rows stay reachable THROUGH the skill object's id, the `pf:`/`pf-` feedback routing stays intact, the W5 refusals still write nothing) + `tests/tools/test_skill_tools_pf_surface.py` (**37 nodes** — the folded W4 suffix-additivity + knob-OFF byte-shape pin) = **56 nodes**. **Phase 2** — the mutation matrix **M1-M6 + M2b + M7-M9 (10 legs)**: each leg plants its defect on the PRODUCTION source, the intended leg must go RED, the file is restored sha256-identically, the same leg must go GREEN again; a NON-DISCRIMINATING leg fails the pack (a pin that cannot fail is worse than no pin). M7/M8/M9 are the W2 parity legs — the injection-side helper, the search-side helper, and the address-prefix branch respectively (the constant stays equal under all three, so a constant-equality-only assertion would not catch any of them). | 2026-11-03 | ✅ registered (implementation lane: phase 1 52/52 PASS; phase 2 7/7 legs RED→GREEN with sha-verified restore; RED-at-BASE proven — 7 legs RED at `c4161335b`, 8 armor legs GREEN) — **council-W2/W5 fold re-verified 2026-11-03: phase 1 56/56 PASS (19+37); phase 2 10/10 legs RED→GREEN with sha-verified restore; the import guard (phase 0) PASS, and proven RED against a foreign tree** |
 
 ## Commission central-metrics-v1 — gate packs REGISTERED (2026-11-02, tester functional gate)
 
