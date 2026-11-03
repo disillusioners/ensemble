@@ -1,3 +1,26 @@
+## Commission skill-list-full-uuid (wi-76d89e11) — gate packs REGISTERED (2026-11-03, implementation lane)
+
+> **Why this block exists.** The lane's pack must be runnable BY ID (a leg invokes its D2 set by
+> pack id, so an unregistered id makes the leg unrunnable). The node counts below are MECHANICAL
+> `pytest --collect-only -q` counts, re-derived at registration time — never remembered.
+>
+> **DERIVED blast radius (house convention).** The lane's shipped diff touches THREE modules —
+> `daemon/tools/skill_tools.py`, `daemon/services/project_skill_source/model.py`,
+> `daemon/services/skill_injection_service.py`. The DERIVATION (every test file importing one of
+> them) reaches **18 files / 441 collected nodes (22 deselected)** — WIDER than the plan's
+> declared single-file corpus; the registered composition is the DERIVED one. The plan's P2b
+> id-shape sweep (`implementation-steps.md` §P2b — every id-shape hit adjudicated with a reason)
+> is a SUBSET of this set and is recorded as such; nothing in the sweep points outside it.
+>
+> **No PG row.** The lane adds no DB-touching code and authors NO migration (census delta EMPTY
+> — delta-empty-legitimate under the standing rule). The two `tests/postgres/test_project_skill_*`
+> files inside the derived set carry no id-render assertions (P2b) and are deselected by the
+> default addopts (the postgres marker).
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `skill_id_verbatim_contract` | `cd $WT && timeout 900 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT bash test/packs/skill_id_verbatim_contract_unit_test.sh` (the `POSTGRES_*` GLOB form is a SILENT NO-OP — per-variable only; the pack self-fences with a mktemp FAKE_HOME + its own per-variable scrub; two phases: the contract pin + the sibling corpus, THEN the mutation matrix; `0 PASS / 1 FAIL / 124 TIMEOUT`; `SKILL_ID_VERBATIM_MUTATIONS=0` skips phase 2) | **The skill id-emission CONTRACT** (wi-76d89e11): every agent-facing skill id the skill tools EMIT must be an id `skill_view` accepts VERBATIM — the full uuid4 for DB skills (exact-PK resolution, no prefix fallback), the `pf:<ns>:<name>` ADDRESS for project-file skills (they have no uuid; the sha16 pseudo-id is the INTERNAL key and is REFUSED by `skill_view`). **Phase 1** — `tests/tools/test_skill_id_verbatim_contract.py` (**15 nodes**: list → view → identity per source; value equality per source (STR-EQUAL, not a shape match); BOTH search render paths — the fused seam (`SkillSearchService` with `config=None` ⇒ deterministic `_degraded_select`, no LLM reachable) and the tool-level file-only degraded path; the `skill_create` success line; the injection body segment; the safety invariants — the pseudo-id stays the internal key, the embedding rows stay reachable THROUGH the skill object's id, the `pf:`/`pf-` feedback routing stays intact, the W5 refusals still write nothing) + `tests/tools/test_skill_tools_pf_surface.py` (**37 nodes** — the folded W4 suffix-additivity + knob-OFF byte-shape pin) = **52 nodes**. **Phase 2** — the mutation matrix **M1-M6 + M2b (7 legs)**: each leg plants its defect on the PRODUCTION source, the intended leg must go RED, the file is restored sha256-identically, the same leg must go GREEN again; a NON-DISCRIMINATING leg fails the pack (a pin that cannot fail is worse than no pin). | 2026-11-03 | ✅ registered (implementation lane: phase 1 52/52 PASS; phase 2 7/7 legs RED→GREEN with sha-verified restore; RED-at-BASE proven — 7 legs RED at `c4161335b`, 8 armor legs GREEN) |
+
 ## Commission central-metrics-v1 — gate packs REGISTERED (2026-11-02, tester functional gate)
 
 > **Why this block exists.** The frozen query contract (`docs/architecture/metrics-query-contract.md`)
