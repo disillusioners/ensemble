@@ -769,3 +769,36 @@ new fields are `null` exactly when the route chunk is unresolvable. The recorded
 `git worktree prune`d afterwards, the shared checkout `/home/nea/ensemble-src` never touched).
 The plan's own analytic figure (27,672 + 43,688 + 1,348 = 72,708 B) was NOT needed as a
 fallback — the real build agrees with it digit for digit.
+
+### IMPL-22 — (AM-14, ruling) the baseline toggle renders ONCE, in the frame
+
+**The ruling:** the baseline toggle renders **ONCE**, in the FRAME. When the custom slot
+(the resources module) is active, the frame-level toggle is **disabled with its stated
+reason**. A panel-level duplicate would be a SECOND copy source, which the copy SSOT
+(IMPL-18 / AM-20) forbids.
+
+**Why this satisfies PX-11:** PX-11 asks that "the custom tab's toggle is disabled with its
+reason". The frame-level toggle IS the custom tab's toggle — it is the single owner of the
+baseline state — and it carries the disabled state and the reason. The panel therefore does
+NOT render a second toggle: a duplicate would let two controls edit one value, which is the
+exact failure the single-copy rule exists to prevent.
+
+**Scope:** this ruling is about the FRAME's baseline toggle. The central tabs' panels read
+the frame's `baseline` input (the client-side split of the 2W payload) and never own the
+toggle themselves.
+
+### IMPL-23 — (AM-19, ruling) the frame's range control is INERT on the custom slot
+
+**The ruling:** the frame's range control is **INERT** when the custom slot is active. The
+custom panel's own labelled **"Timeline range"** control is the single LIVE control there.
+
+**Why this satisfies PX-12:** AM-19 makes the range control's scope **per-panel**: the
+central tabs' panels are governed by the frame's control, and the custom slot's panel is
+governed by its own labelled control. Two simultaneously-live controls for ONE value would
+violate single ownership — the operator could set the range in one place and read it in
+another, and the two could disagree.
+
+**Consequence for the phase-4 implementation:** the custom slot's panel carries its own
+labelled control (`resource-range-select`, the "Timeline range" select) and the frame's
+central-sourced control is disabled on that slot. The phase-4 renderer work does not change
+either control; it only composes the panels the controls govern.
