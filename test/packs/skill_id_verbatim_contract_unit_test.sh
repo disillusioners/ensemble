@@ -7,17 +7,24 @@
 # project-file skills.
 #
 # What this pack exercises:
+#   0. PHASE 0 — the IMPORT GUARD (mandatory, pin-spec.md §H): prove
+#      ``import daemon`` resolves to THIS checkout. A run that silently
+#      imported the shared checkout or the live install would report a
+#      green result computed against FOREIGN code. The pack fails LOUDLY.
 #   1. tests/tools/test_skill_id_verbatim_contract.py (NEW) — the pin:
 #      list → view → identity per source, value equality per source,
 #      BOTH search render paths (fused + file-only degraded), the
-#      skill_create success line, the injection body segment, and the
-#      safety invariants (the pseudo-id stays the internal key, the
-#      embedding rows stay reachable, the ``pf:``/``pf-`` feedback
-#      routing stays intact).
+#      skill_create success line, the injection body segment, the
+#      project-file DISCRIMINATOR PARITY battery (W2: the two
+#      duplicated ``_is_project_file_skill`` helpers must agree on
+#      every discriminating shape), and the safety invariants (the
+#      pseudo-id stays the internal key, the embedding rows stay
+#      reachable, the ``pf:``/``pf-`` feedback routing stays intact).
 #   2. tests/tools/test_skill_tools_pf_surface.py — the sibling corpus
 #      (the folded W4 pin: the ``— source: db`` suffix additivity and
 #      the knob-OFF byte-shape).
-#   3. The MUTATION MATRIX (M1-M6 + M2b) — pack-level plants: plant the
+#   3. The MUTATION MATRIX (M1-M6 + M2b + M7-M9) — pack-level plants:
+#      plant the
 #      defect → the discriminating leg must go RED → restore → the same
 #      leg must go GREEN, with the planted file's sha256 verified
 #      identical after the restore. A pin that cannot fail is worse than
@@ -100,6 +107,60 @@ run_pytest() {
 
 PIN_FILE="tests/tools/test_skill_id_verbatim_contract.py"
 SIBLING_FILE="tests/tools/test_skill_tools_pf_surface.py"
+
+# --- phase 0: the IMPORT GUARD (mandatory — pin-spec.md §H, W5) -----------
+# The pack MUST prove that ``import daemon`` resolves to THIS checkout
+# and not to the shared checkout / the live install. Without the guard a
+# run from a worktree can silently import the FOREIGN tree (the
+# ``PYTHONPATH`` prepend is a belt, not a proof — an editable install or
+# a ``.pth`` entry can still win). The pack fails LOUDLY rather than
+# reporting a green result computed against the wrong code.
+#
+# The comparison is an EXACT realpath match of the package directory
+# against ``$PROJECT_DIR/daemon`` — NOT a ``str.startswith`` prefix
+# test. The prefix form has a sibling-prefix trap: the worktree
+# ``/home/nea/ensemble-src-wt-<slug>`` is a STRING PREFIX extension of
+# the shared checkout ``/home/nea/ensemble-src``, so a prefix test
+# would report PASS while the import had resolved from the FOREIGN
+# tree. (Verified: the trap is real — see the fold receipt.)
+echo "--- phase 0: the import guard ---"
+IMPORT_GUARD_LOG="$FAKE_HOME/import-guard.log"
+"${SCRUB[@]}" \
+  HOME="$FAKE_HOME" \
+  XDG_CACHE_HOME="$FAKE_HOME/cache" \
+  PYTHONPATH="$PROJECT_DIR" \
+  "$PY" - "$PROJECT_DIR" >"$IMPORT_GUARD_LOG" 2>&1 <<'GUARDEOF'
+import os
+import sys
+
+project_dir = os.path.realpath(sys.argv[1])
+try:
+    import daemon
+except Exception as exc:  # pragma: no cover — the guard must speak up
+    sys.stderr.write(f"IMPORT GUARD: FAIL — 'import daemon' raised: {exc!r}\n")
+    sys.exit(1)
+
+pkg_dir = os.path.realpath(os.path.dirname(daemon.__file__))
+expected = os.path.join(project_dir, "daemon")
+sys.stderr.write(f"daemon.__file__={daemon.__file__}\n")
+sys.stderr.write(f"expected package dir={expected}\n")
+if pkg_dir != expected:
+    sys.stderr.write(
+        "IMPORT GUARD: FAIL — 'import daemon' did NOT resolve under "
+        f"{project_dir}\n"
+        "  (the run would have tested the FOREIGN tree — shared checkout "
+        "or live install)\n"
+    )
+    sys.exit(1)
+sys.stderr.write("IMPORT GUARD: PASS — import daemon resolved under "
+                 f"{project_dir}\n")
+GUARDEOF
+IMPORT_GUARD_RC=$?
+cat "$IMPORT_GUARD_LOG"
+if [ "$IMPORT_GUARD_RC" -ne 0 ]; then
+  echo "RESULT: FAIL (phase 0: import guard)"
+  exit 1
+fi
 
 # --- phase 1: the pin + the sibling corpus --------------------------------
 echo "--- phase 1: the contract pin ---"
@@ -225,6 +286,37 @@ PYEOF
     '            skill_id.startswith(ADDRESS_PREFIX)
 ' \
     "$PIN_FILE::TestSafetyInvariants::test_feedback_accepts_both_forms_and_keys_by_pseudo_id"
+
+  # M7 — the DISCRIMINATOR PARITY (council W2): the INJECTION-side
+  # helper drops its source-tag fallback. The two helpers are
+  # duplicated on purpose (approver N6) — a one-sided divergence is
+  # exactly the defect class this lane fixed, and it must be caught.
+  leg "M7" "daemon/services/skill_injection_service.py" \
+    '    return getattr(skill, "source", None) == SOURCE_PROJECT_FILE
+' \
+    '    return False  # MUTANT: the source-tag fallback dropped
+' \
+    "$PIN_FILE::TestProjectFileDiscriminatorParity"
+
+  # M8 — the same one-sided divergence on the SEARCH side.
+  leg "M8" "daemon/services/skill_search_service.py" \
+    '    return getattr(skill, "source", None) == SOURCE_PROJECT_FILE
+' \
+    '    return False  # MUTANT: the source-tag fallback dropped
+' \
+    "$PIN_FILE::TestProjectFileDiscriminatorParity"
+
+  # M9 — the address-prefix branch dropped (the OTHER half of the
+  # two-step predicate). The constant stays equal, so a
+  # constant-equality-only assertion would NOT catch this.
+  leg "M9" "daemon/services/skill_injection_service.py" \
+    '    if isinstance(address, str) and address.startswith(ADDRESS_PREFIX):
+        return True
+' \
+    '    if False:  # MUTANT: the address-prefix branch dropped
+        return True
+' \
+    "$PIN_FILE::TestProjectFileDiscriminatorParity"
 
   echo "leg	red	green	sha256(planted-file, pre-plant)"
   cat "$TSV"
