@@ -43,7 +43,7 @@ finding names no threshold).
 | **AM-17** | `phase3` 3.4 · 3.12 | the faked-client-clock-offset leg | the split point is **unchanged** under a faked clock offset | §6.2 | **FULL** |
 | **AM-18** | `phase3` 3.11 (Depends On 3.3) · `phase6` 6.7 | the 2 h spec leg | the printed interval == the **derived** spacing (span ÷ point count) | §6.2 | **FULL** |
 | **AM-19** | `phase2` 2.12 (Depends On 2.2) · `phase3` 3.1 · `phase5` 5.4 | the "one `/history` request, none to `/live`/`/self-cost`" leg | `allowedWindows ⊆ ResourcesWindow` (typed / spec-enforced) | §6.2 | **FULL** |
-| **AM-20** | `phase8` 8.11 (Depends On 8.1) · 8.12 (Depends On 8.1) · `phase2` 2.13 (Depends On 2.1) | the two 403 branches pinned | a 403 **without** `SCOPE_INSUFFICIENT` ⇒ `forbidden_other`, **never** `scope_insufficient` | §6.1 | **FULL** |
+| **AM-20** | `phase8` 8.11 (Depends On 8.1) · 8.12 (Depends On 8.1) · `phase2` 2.14 (Depends On 2.1) | the two 403 branches pinned | a 403 **without** `SCOPE_INSUFFICIENT` ⇒ `forbidden_other`, **never** `scope_insufficient` | §6.1 | **FULL** |
 | **AM-21** | `phase8` 8.5 (Depends On 8.2) | the spec asserting the shell dot class is unchanged by a door failure | the global dot stays bound to `/api/health`; the posture is a **page-scoped chip** | §6.2 | **FULL** |
 | **AM-22** | `phase7` 7.6 (Depends On 7.1, 7.4) · 7.7 · 7.8 | the classified sweep output recorded in full | **0** class-(c) stale-route hits; **0** stale operator instructions | §7 | **FULL** |
 | **AM-23** | `phase2` 2.8 · `phase4` 4.13 · `phase5` 5.13 | the pinned greps (pattern + path set + excludes + allowlist row) | **0** hits outside the allowlist row | §0.3 | **FULL** → **+A-4** (the 4.13 pattern was over-broad → tightened) |

@@ -58,3 +58,96 @@ only: no `frontend/`, no `daemon/`, no dependency, no test.
   MEASURED figure, so nothing is re-derived here. (The rule and the
   gated-figures table live in `plan-overview.md` §0.1; every phase's exit
   section carries its own E-1 line.)
+
+---
+
+## Implementation note (2026-11-03) — the placement contradiction, recorded not silently resolved
+
+**The exit criterion's two-sided placement check is UNSATISFIABLE as written, and
+it was RECORDED rather than silently redesigned.**
+
+- **The contradiction.** The exit criterion above asks for a §8 section that sits
+  **"after §7 and before the evidence index"**, and gives the machine check
+  "`grep -n '^## 8\. What changed and why' <file>` returns a line number greater
+  than §7's and less than the evidence index's". In this document the **evidence
+  index is §5** (line 292), which sits **BEFORE** §6 (line 328) and §7 (line 346)
+  — §7 is the **last** section. **No line number can be simultaneously greater
+  than §7's and less than §5's**, so the two-sided check can never be satisfied.
+- **The implemented placement.** **"After §7, as the document's last `##` section"**
+  — i.e. §8 is appended at the end of the document. This satisfies the plan's
+  **PRIMARY placement clause ("after §7")** and makes §8 the last `##` section.
+- **The "before the evidence index" clause is unsatisfiable as written** and was
+  **recorded, not silently resolved**. The clause appears to carry a mistaken
+  assumption that the evidence index is the LAST section of the document; in
+  fact §5 is the evidence index and §6/§7 follow it. The placement that
+  satisfies the PRIMARY clause was implemented and this note is the disclosure.
+- **The machine-checkable check that was actually run** (and its output):
+
+  ```
+  $ grep -n '^## 8\. What changed and why' .agents/shared/planning/metrics-unification/fe-ui-audit-and-resource-refactor.md
+  350:## 8. What changed and why (2026-11-03 — post-audit rulings)
+  $ grep -n '^## 7\.' .agents/shared/planning/metrics-unification/fe-ui-audit-and-resource-refactor.md
+  346:## 7. Suggested next step
+  $ grep -c '^## ' .agents/shared/planning/metrics-unification/fe-ui-audit-and-resource-refactor.md
+  9
+  ```
+
+  **350 > 346** ⇒ §8 is after §7 ✔ · **§8 is the last `##` section** (9 `##`
+  sections, the 9th being §8) ✔ · the evidence index (§5) is at line 292, so the
+  "less than the evidence index's" half of the original check is **unsatisfiable
+  by construction** — recorded here, not silently dropped.
+- **What this commit (A) changed:** exactly ONE file —
+  `fe-ui-audit-and-resource-refactor.md` (§8 added; §6's heading/lead pointed at
+  §8; §0's "decisions needed" framing line re-worded to "ANSWERED"). §6's three
+  questions and every other substantive claim are **verbatim unchanged**. Zero
+  changes under `frontend/`, `daemon/`, `agents/`, `scripts/`, `test/`.
+
+### Implementation note (2026-11-03) — commit B: the approver's A1–A6 + the §9 clarification
+
+**Commit B** (`docs(fe-t1-build): fold approver advisories A1-A6 +
+operator-recipe clarification (wi-32a99618)`) landed the approver's **six
+advisories** and the commission's operator-recipe clarification, **docs-only**
+(plan dir only — `plan-overview.md`, `phase0-plan.md`, `phase1-plan.md`,
+`phase9-plan.md`, `fold-audit.md`):
+
+- **A1** — §0.2's quoted "verbatim output" JSON block replaced with the
+  artifact's `reproduce.output` **byte-identical** (field names only; every BYTE
+  figure unchanged).
+- **A2** — the live-count fence now **names its exact SELECTs**
+  (`SELECT count(*) FROM auth_bearer_tokens;` and the **label-scoped**
+  `SELECT count(*) FROM auth_bearer_tokens WHERE label = 'fe-t1-operator';`),
+  is **label-scoped** (a concurrent unrelated mint cannot cause a spurious RED),
+  and asserts that **the read itself succeeded** — a raised SELECT **FAILS LOUD
+  (STOP)**; a failed read is never "0 rows". Applied in **both** places:
+  `plan-overview.md` §6.1 Leg L1 and `phase9-plan.md` task 9.3a legs (d) + (f).
+- **A3** — the **B4 runbook gap** (`docs/runbooks/oauth2-auth.md` §1b omits
+  `ENSEMBLE_AUTH_ISSUER`) is now a **§7 register row (`o`)** with an **owner**
+  (the auth-docs owner) and a reason; the register grows **14 → 15** and §10
+  criterion 13 becomes **15/15**. `phase9-plan.md` task 9.11 and the Phase-9 exit
+  criterion were updated to match.
+- **A4** — `fold-audit.md`'s **AM-20** row's stale `phase2 2.13` pointer corrected
+  to **2.14** (2.13 is the B3 marker-constant task). Nothing else in that file
+  changed.
+- **A5** — `phase1-plan.md` task 1.2(c)'s acceptance list's **second "(iv)" leg
+  renumbered to "(v)"**. Cosmetic only.
+- **A6** — an explicit **SCOPE-NOTE** on `pre_retirement_resources_route_chunk`
+  (PRE-RETIREMENT baseline ONLY; EXCLUDED from the Phase-9 gate; must NEVER be
+  mis-resolved as the metrics chunk) in `phase9-plan.md` task 9.8 **and** in
+  `plan-overview.md` §0.2's G5 row. The artifact's own
+  `pre_retirement_resources_chunk_note` agrees; **neither
+  `bundle-baseline.json` nor `bundle-baseline.measure.js` was changed.**
+- **The operator-recipe clarification** — `plan-overview.md` §9 gains a new
+  **§9.0** carrying the runbook's **§1d / §1c / §5** semantics (the one-shot
+  bootstrap lane, the integer-seconds `--ttl` + range, the mandatory
+  `ENSEMBLE_AUTH_ALLOWED_ORIGINS`, the cold Host-recorder trap, and the
+  merge-with-auth-OFF posture), each **re-verified against the tree** with its
+  code sites. §9 **remains the canonical operator-recipe source**, and the
+  runbook's env-incompleteness (B4) stays a routed documentation item owned by
+  the auth-docs owner. §9 step 3's mint command keeps the narrower
+  `metrics:read`; §6.1's Leg-L1 mint line was **aligned** to `metrics:read`
+  (prose-consistency only — the door's ANY-OF set is unchanged and the
+  least-privilege reason stays stated).
+
+**No threshold, rule, ruling, the per-instance top-N routing (register item `m`),
+or the AM-14 narrowing was changed. The ONLY count that changed is the §7
+register count 14 → 15 (A3, explicitly instructed).**

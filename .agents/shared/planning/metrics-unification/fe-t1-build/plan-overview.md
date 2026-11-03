@@ -90,6 +90,9 @@ node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.
   "whole_initial_payload_bytes": 5918275,
   "lazy_chunk_count": 52,
   "lazy_bytes_total": 1702633,
+  "route_chunk_locator": "legacy-content-marker",
+  "route_chunk_key": "ensemble-metrics-route-v1",
+  "route_chunk_resolved_to_exactly_one": true,
   "metrics_route_chunk": "chunk-ZA3RV4HY.js",
   "metrics_route_chunk_bytes": 27672,
   "metrics_route_fetch_set_bytes": 496338,
@@ -97,10 +100,19 @@ node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.
   "largest_lazy_bytes": 157141,
   "second_largest_lazy": "chunk-HNKUMJNH.js",
   "second_largest_lazy_bytes": 135690,
-  "resources_route_chunk": "chunk-FOLCEMN3.js",
-  "resources_route_chunk_bytes": 38914
+  "pre_retirement_resources_route_chunk": "chunk-FOLCEMN3.js",
+  "pre_retirement_resources_route_chunk_bytes": 38914
 }
 ```
+
+**A1 (folded 2026-11-03) — this block is now BYTE-IDENTICAL to the artifact's
+`reproduce.output`** (copied verbatim from `bundle-baseline.json`; every BYTE figure
+is unchanged — only the field names differ: `pre_retirement_resources_route_chunk` /
+`pre_retirement_resources_route_chunk_bytes` replace the old `resources_route_chunk` /
+`resources_route_chunk_bytes`, and the three route-locator fields
+`route_chunk_locator` / `route_chunk_key` / `route_chunk_resolved_to_exactly_one` are
+now present). The artifact is authoritative; this quote satisfies the plan's own E-1
+rule — *"the quoted output must BE the output"*.
 
 **The G10 command (the `anyComponentStyle` census) and its verbatim output:**
 
@@ -130,7 +142,7 @@ src/app/components/chat-interface/chat-interface.scss exceeded maximum budget. B
 | G3 | **Lazy chunk count** | **52** | **(a) re-derived at lane base** — the same command; reproduces the digest **exactly** | Phase 9's B-table (the baseline the new chunk is measured against) |
 | G4 | **`/metrics` lazy route chunk size** | **27,672 B** (`chunk-ZA3RV4HY.js`) | **(a) re-derived at lane base** — the same command; reproduces the digest **exactly**. **No longer an orphan (C-1):** it is now **B4's declared baseline**, and its consumer is Phase 9's 9.8(d) route-fetch-set comparison | Phase 9's B4 (the new-chunk comparison) |
 | **G4b** | **`/metrics` route FETCH SET** (the route chunk + its **direct** static deps) | **496,338 B** | **(a) re-derived at lane base** — the same command (`metrics_route_fetch_set_bytes`). **Newly measured** (neither the digest nor AM-2 carried it). **This is the threshold that actually catches a static-shape leak**: on the real dist the route chunk statically imports `chunk-6Y6F4JKW.js` (43,688 B) and `chunk-AOZCSBSC.js` (1,348 B), **both LAZY-ONLY** — so a static `chart.js` import would land in a lazy-only sibling and the route chunk alone would not grow | Phase 9's B4 (the route fetch set's growth bound) |
-| G5 | **`/resources` lazy route chunk size** (the PRE-retirement route chunk) | **38,914 B** (`chunk-FOLCEMN3.js`) | **(a) re-derived at lane base** — the same command; **newly measured**. **RESTATED (B3):** Phase 7 retires the `/resources` route, so this chunk **does not survive the lane** — G5 is the **pre-retirement baseline** of the retirement's bundle delta, **not** a Phase-9 gate; the Phase-9 re-derivation covers **the surviving route chunk(s)** only (G4/G4b), and the measurement tool is **absent-tolerant** so a retired route is reported as **absent**, never mis-resolved | the retirement's bundle delta (pre-retirement baseline); **not** a Phase-9 exit criterion |
+| G5 | **`/resources` lazy route chunk size** (the PRE-retirement route chunk) | **38,914 B** (`chunk-FOLCEMN3.js`) | **(a) re-derived at lane base** — the same command; **newly measured**. **RESTATED (B3):** Phase 7 retires the `/resources` route, so this chunk **does not survive the lane** — G5 is the **pre-retirement baseline** of the retirement's bundle delta, **not** a Phase-9 gate; the Phase-9 re-derivation covers **the surviving route chunk(s)** only (G4/G4b), and the measurement tool is **absent-tolerant** so a retired route is reported as **absent**, never mis-resolved. **SCOPE-NOTE (A6) — the artifact's field `pre_retirement_resources_route_chunk` (and its `_bytes` twin) is a PRE-RETIREMENT baseline ONLY: it is EXCLUDED from the Phase-9 gate, and it must NEVER be mis-resolved as the metrics chunk** (after the relocation the anomaly-marker string lives in the metrics chunk, so a post-Phase-7 read of a field carrying a pre-retirement name could report the metrics chunk under it — the route-keyed locator plus the absent-tolerance rule are what prevent that). The artifact's own `pre_retirement_resources_chunk_note` states the same thing, so the artifact and this note agree | the retirement's bundle delta (pre-retirement baseline); **not** a Phase-9 exit criterion |
 | G6 | **Lazy bytes total** | **1,702,633 B** (≈1.70 MB) | **(a) re-derived at lane base** — the same command; reproduces the digest | Phase 9 |
 | G7 | **Largest lazy chunk** | **157,141 B** (`chunk-QS2K3YLH.js`); second 135,690 B (`chunk-HNKUMJNH.js`) | **(a) re-derived at lane base** — the same command. The digest's 135,690 B is now the **second** largest — a one-position drift, disclosed | Phase 9's context |
 | G8 | **Per-component `anyComponentStyle` figures** for the new components | *post-implementation* | **(b) re-derivation task** — Phase 4's task 4.11 measures and records them at that phase's freeze (the 8 kB warn / 24 kB ERROR caps are config constants, not measurements) | Phase 4's exit criterion; Phase 9's B5 |
@@ -481,7 +493,24 @@ env var alone; the token is read back **from `ensemble_dev`**; and a
 **before and after** the mint and requires it to be **identical** (the lane's
 other fence — symlink / `state.json` / uptime / "0 daemon requests" — **cannot**
 see a DB write, so this assertion is what makes a live write impossible to
-pass as green). The mint uses the **narrower** `--scopes "metrics:read"`.
+pass as green). **The fence names its exact SELECTs (A2) — a label without a
+COMMAND is not a re-derivation:**
+
+- **total:** `SELECT count(*) FROM auth_bearer_tokens;`
+- **label-scoped:** `SELECT count(*) FROM auth_bearer_tokens WHERE label = 'fe-t1-operator';`
+
+(the table is `auth_bearer_tokens`,
+`daemon/repositories/auth_session/models.py:173`; `label` is a **nullable**
+Text column).
+
+**Semantics:** the **label-scoped** count in `ensemble_prod` must be **0** —
+our mint's label must NEVER appear on the live DB — **and** the **total-count
+delta before/after the mint must be identical**. The **label scope is what
+keeps the fence honest**: a concurrent, unrelated mint on the live DB cannot
+produce a spurious RED. **IF THE SELECT RAISES** (connection error, missing
+table, missing permission) **THE FENCE FAILS LOUD — STOP, do not proceed: an
+unreadable fence is not a fence, and a failed read is NEVER "0 rows".**
+The mint uses the **narrower** `--scopes "metrics:read"`.
 
 Auth ON requires
 `client_id` + `client_secret` + `issuer` (https) + non-empty `allowed_origins`
@@ -492,8 +521,11 @@ static bearer locally — `daemon/middleware/auth.py:358-377`, `_verify_bearer` 
 **placeholder IdP config values** satisfy the validator without a live IdP.
 **Disclosure:** the issuer/discovery URL is a placeholder and the OIDC login
 flow is NOT exercised. Mint: `python -m daemon.auth.cli issue-token --label
-fe-t1-operator --scopes "maintenance:read"` (the door accepts
-`maintenance:read` OR `metrics:read` — `daemon/routers/metrics.py:57-63`; the
+fe-t1-operator --scopes "metrics:read"` (the door accepts
+`maintenance:read` OR `metrics:read` — `daemon/routers/metrics.py:57-63` — and
+`metrics:read` is the **narrower** grant, **least privilege**:
+`maintenance:read` ALSO confers the destructive checkpoint-cleanup capability
+(`daemon/auth/scopes.py:32-39`), which this recipe does not need; the
 plaintext prints ONCE and never enters a repo file). The browser presents it
 via the Playwright context's `extraHTTPHeaders: { Authorization: 'Bearer
 <token>' }` — **no production FE change**. **The auth env vars are exported
@@ -664,6 +696,7 @@ must die with the route it drives).
 | l | **ECharts / ApexCharts / Gridster2** | deferred with triggers | ECharts: (t1) A10/A18 relaxation, (t2) raised `window_s`/`max_points` ceilings, or (t3) a brushing panel class. ApexCharts: needs an aesthetic report surface. Gridster2: dropped. |
 | m | **The per-instance top-N list on tab 1** | follow-up commission | The payload is already fetched, so the deferral is cheap; but rendering it is a NEW capability beyond the commission's scope item 6. |
 | n | **The `/resources` gate pack** (`frontend/playwright.resources-gate.config.ts`, port 14202) | this lane, Phase 7 | It must be retired or re-pointed with the route — recorded so it is not lost. |
+| o | **The `docs/runbooks/oauth2-auth.md` §1b env gap** (it omits `ENSEMBLE_AUTH_ISSUER`) | **auth-docs owner** | The runbook lists five vars; `ENSEMBLE_AUTH_ISSUER` has **no default** (`daemon/config.py:3736-3740`) and `daemon/config.py:3953-3954` appends `"issuer"` to the `missing` list, so a user following the runbook **literally** hits the **exit-78** boot refusal (`daemon/__main__.py:81`, `:354`). **§9 of this plan is the CANONICAL operator-recipe source**; the runbook lives outside this lane's scope, so the gap is **routed, not edited here**. **A3 (folded 2026-11-03) — the register is now 15 items, and the Phase-9 close-out check covers this row.** |
 
 ---
 
@@ -755,6 +788,65 @@ does not run it, and it does not touch the live config. Source:
    fail-**closed** — merging the surfaces under one page forces a conscious
    choice about that posture.
 
+### 9.0 The runbook semantics §9 also carries (verified against the tree, 2026-11-03)
+
+**§9 IS THE CANONICAL OPERATOR-RECIPE SOURCE.** The cited runbook
+(`docs/runbooks/oauth2-auth.md`) is env-INCOMPLETE at §1b — it omits
+`ENSEMBLE_AUTH_ISSUER` (**B4**) — and that env-incompleteness is a **routed
+documentation item, owner: the auth-docs owner**; it is now **also a §7 register
+row (`o`)** so the Phase-9 close-out check covers it (A3). Everything below is
+the runbook's **§1d / §1c / §5** semantics, **re-verified against the tree**;
+where the runbook and this section would differ, **this section wins**.
+
+1. **FIRST TOKEN MINT — the ONE-SHOT BOOTSTRAP LANE.** The FIRST token (before
+   any exists) mints via `issue-token --label <label> --bootstrap`, which reads
+   `ENSEMBLE_AUTH_BOOTSTRAP_TOKEN` (`daemon/auth/cli.py:55` —
+   `BOOTSTRAP_ENV_VAR`). **IF THAT ENV VAR IS EMPTY THE CLI REFUSES (exit 1)**
+   — it prints `AUTH_BOOTSTRAP_TOKEN_REQUIRED_MESSAGE` and returns 1
+   (`daemon/auth/cli.py:316-321`). A `--bootstrap` mint with **NO explicit
+   `--scopes` defaults to `auth:admin` ONLY** (`daemon/auth/cli.py:322-324` →
+   `daemon/auth/scopes.py:132` — `BOOTSTRAP_DEFAULT_SCOPES = ("auth:admin",)`).
+   The **sentinel row** makes the lane **one-shot PER ENV VALUE**: a later
+   `--bootstrap` with the **SAME** env value is **REJECTED** (the sentinel is
+   keyed by the material's hash —
+   `daemon/repositories/auth_bootstrap/repository.py:11-16`, `:150-171`), and
+   **rotating the env var re-arms it**. **After the first successful mint the
+   env var must be REMOVED from the daemon's environment and the unit
+   restarted** — while it stays set it remains a live secret surface. A
+   **NON-bootstrap mint REQUIRES explicit `--scopes`** — nothing is granted
+   implicitly (`daemon/auth/cli.py:326-333` → exit 1 with `--scopes is required
+   for non-bootstrap mints`).
+2. **`--ttl` IS AN INTEGER NUMBER OF SECONDS.** `--ttl 3600` is accepted;
+   `--ttl 1h` is **REJECTED by argparse with exit code 2** (the flag is
+   `type=int` — `daemon/auth/cli.py:95-101`; it is **NOT** a duration string).
+   The accepted range is **60..31536000 seconds**; a value outside that range is
+   **REFUSED with a clear message and a non-zero exit**
+   (`daemon/auth/cli.py:288-301` — validated BEFORE the mint, so a bad value
+   never mints). **Omitting `--ttl` uses the configured default**
+   (`auth.bearer_token_ttl_seconds`, 30 d).
+3. **`ENSEMBLE_AUTH_ALLOWED_ORIGINS` IS MANDATORY with auth ON.** The daemon's
+   CORS posture is `allow_origins=['*'] + allow_credentials=True` **by
+   construction**, and cookie sessions under wildcard CORS is the canonical
+   XSRF recipe — so an **EMPTY** allowed-origins list with auth ON **REFUSES THE
+   BOOT with exit 78** ("`auth.allowed_origins must replace wildcard +
+   credentials …` — set `ENSEMBLE_AUTH_ALLOWED_ORIGINS`";
+   `daemon/config.py:4007-4012`, the `AuthConfig` validator; the exit-78
+   refusal owner is `daemon/__main__.py:81`, `:354`).
+4. **THE COLD HOST-RECORDER TRAP (runbook §1c).** A freshly booted daemon with a
+   **cold Host-recorder cannot derive an absolute redirect base**, so the FIRST
+   login attempt answers **503 `LOGIN_NOT_CONFIGURED`** — it **never mints a
+   relative URL** (`daemon/services/auth_service.py:208-226`, the D3.5
+   redirect-base chain: exact-URI override → `external_redirect_base` → the
+   live-views / Host-capture resolver → `None` ⇒ `LoginNotConfigured`). Either
+   **pre-warm the recorder** (the SPA's first hit on `/` teaches it) or set
+   `ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE` explicitly so login works from the
+   **first** attempt.
+5. **POSTURE (runbook §5).** The rollout posture is **MERGE WITH AUTH OFF**:
+   the release ships `auth.enabled=false` by default and **enables nothing by
+   itself** (`config.yaml:129-130`). **Enabling auth is a pure OPERATOR CONFIG +
+   RESTART act performed AFTER the promote** — **NEVER** a side effect of a
+   merge or a promote.
+
 ### 9.1 E-2 — THE RELEASE NARRATIVE (T1 ships MOSTLY DARK on live until the user-owned auth enablement)
 
 **This text is expected to ride the staged-release disclosures and the morning
@@ -815,7 +907,7 @@ summary.**
 | 10 | Both FE packs are green, with Leg 7 asserting the **expected dependency set** | the packs | 2/2 green; the assertion is by name, not by count |
 | 11 | The prompt-artifact baseline is untouched | `agents/.prompt-artifacts.sha256` | **161/161 clean**; the `agents/` tree has zero diffs |
 | 12 | The lane touches **no live daemon** | the capture log's API census + the boot fence | 0 requests to `:9797`; 0 non-GET anywhere; the live symlink + `state.json` byte-identical; the live uptime **monotone** |
-| 13 | The routed-out register is **closed out** — 14 items, each with an owner | Phase 9's exit criterion | 14/14 recorded with an owner and a reason |
+| 13 | The routed-out register is **closed out** — 15 items, each with an owner | Phase 9's exit criterion | 15/15 recorded with an owner and a reason |
 | 14 | The operator recipe is handed over, not executed, and the **mostly-dark live posture** is narrated as expected | §9 + §9.1 + Phase 9's exit criterion | the recipe exists with the restart implication named; 0 live config writes; the E-2 narrative rides the release disclosure |
 | 15 | **No MEASURED figure gating an exit criterion is un-re-derived** | the §0.2 gated-figures ledger (each (a) row carries its **command + output**) + each phase's "E-1 re-derivation" line | **11/13** rows are (a) or (b); G12 is explicitly **not a gate** and G13 is a **code-fact set** |
 
