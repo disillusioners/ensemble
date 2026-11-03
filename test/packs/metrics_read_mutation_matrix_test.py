@@ -349,6 +349,26 @@ RESPONSE_BYTE_CEILING = 10**9""",
         TOOLS_PACK,
         "test_the_names_bound_caveat_agrees_with_its_hint",
     ),
+    # ── THE SAME CLASS, COMPLETED (the council's rule is GENERAL: a pin
+    #    claimed mutation-verified with no archived leg is a MISSING LEG).
+    #    Two more claims of that class existed in the lane's records and
+    #    are now carried by legs too. ──
+    (
+        "MT-26-shape-projection-lost",
+        "daemon/tools/metrics_read.py",
+        "        items=series_out,",
+        "        items=kept,  # MUTATION: the ceiling was handed the RAW rows again",
+        TOOLS_PACK,
+        "test_the_history_series_shape_is_the_same_on_both_paths",
+    ),
+    (
+        "MT-27-ring-empty-direction-flipped",
+        "daemon/tools/metrics_read.py",
+        "    ring_empty = bool(age == 0.0)",
+        "    ring_empty = bool(age > 0.0)  # MUTATION: the heuristic's direction flipped",
+        TOOLS_PACK,
+        "test_the_ring_empty_flag_is_the_ages_heuristic_not_a_fact",
+    ),
 ]
 
 #: The FOLLOW legs — a mutation whose EXPECTED result is NOT a red but a
