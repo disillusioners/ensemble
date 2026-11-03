@@ -33,7 +33,13 @@ from typing import Any
 
 import pytest
 
+from daemon.services.metrics_query.constants import (
+    MAX_TOTAL_POINTS,
+    RESPONSE_BYTE_CEILING,
+)
 from daemon.tools.metrics_read import (
+    MAX_NAMES_PER_FAMILY,
+    MAX_NAMES_TOTAL,
     METRICS_CATEGORY_KEY,
     METRICS_AUTHORIZED_AGENTS,
     TOKEN_INVALID_LABEL_FILTER,
@@ -161,6 +167,23 @@ async def _call(tool: Any, payload: dict[str, Any] | None = None) -> Any:
         return json.loads(raw)
     except (TypeError, ValueError):
         return raw
+
+
+async def _raw(tool: Any, payload: dict[str, Any] | None = None) -> str:
+    """The RAW returned body (the byte ceiling is measured on it)."""
+    return await tool.ainvoke(payload or {})
+
+
+def _module_source() -> str:
+    """The tool module's source (the static wiring pin)."""
+    from pathlib import Path
+
+    return (
+        Path(__file__).resolve().parents[3]
+        / "daemon"
+        / "tools"
+        / "metrics_read.py"
+    ).read_text(encoding="utf-8")
 
 
 # ── metrics_families ───────────────────────────────────────────────────────
@@ -447,7 +470,11 @@ class TestHistory:
             _tools(provider=provider)["metrics_history"],
             {"names": ["m"], "top_n": 50, "max_points": 240},
         )
-        assert out["query"]["max_points"] <= 12000 // 51
+        # W2 — the bound is read from the SEAM constant, never a
+        # hardcoded literal: a duplicated number is exactly the drift
+        # class (a seam change would leave this pin green while the door
+        # moved).
+        assert out["query"]["max_points"] <= MAX_TOTAL_POINTS // 51
         assert out["query"]["max_points_requested"] == 240
         assert any("clamped" in caveat for caveat in out["caveats"]), (
             "a clamp that reduces the caller's bound must be SURFACED"
@@ -554,3 +581,218 @@ class TestDegradedRead:
         out = await _call(_tools(provider=FakeProvider())["metrics_families"])
         assert out["read_status"]["doctrine"], "the read_status doctrine is stated"
         assert "mutable" in out["read_status"]["doctrine"]
+
+# ── the output budget (AmM-1(c)) — the byte ceiling + the names bound ──
+
+
+def _fat_family(fid: str, *, names: int, help_chars: int) -> dict[str, Any]:
+    """A family whose projection is deliberately FAT (the A3 amplifier)."""
+    return {
+        "id": fid,
+        "role": "stat",
+        "source_idiom": "registry",
+        "durability": "process",
+        "live_series_count": names,
+        "cardinality_contribution": names,
+        "availability": {"state": "live"},
+        "names": [
+            {
+                "name": f"ensemble_{fid}_metric_{i:05d}",
+                "kind": "gauge",
+                "cardinality_class": "none",
+                "labels": None,
+                "monotonic": False,
+                "chart_role": "line",
+                "buckets": None,
+                "help": "h" * help_chars,
+            }
+            for i in range(names)
+        ],
+    }
+
+
+class TestOutputBudget:
+    """AmM-1(c) — the output budget is ENFORCED, not declared.
+
+    The council's finding was that the byte-ceiling helpers were DEAD
+    CODE: the module carried a trim that no body ever called, so the
+    "bounded by clamp + byte ceiling" claim in the fold record was
+    FALSE. These pins make the wiring observable.
+    """
+
+    def test_the_byte_ceiling_trim_is_wired_into_all_three_bodies(self) -> None:
+        """THE STATIC PIN — the trim is not dead code.
+
+        The helper exists in all three builders (one call site each), so
+        a body that stops trimming reds this pin before any behavioural
+        leg can be fooled.
+        """
+        source = _module_source()
+        for builder in ("_build_families", "_build_snapshot", "_build_history"):
+            start = source.index(f"def {builder}(")
+            end = source.find("\ndef ", start + 1)
+            block = source[start:] if end == -1 else source[start:end]
+            assert "_trim_to_byte_ceiling(" in block, (
+                f"{builder} must call the byte-ceiling trim — an unwired "
+                "trim is dead code and the budget claim is false"
+            )
+
+    def test_the_names_projection_is_bounded(self) -> None:
+        """THE STATIC PIN — the names projection carries its own bound."""
+        source = _module_source()
+        assert "MAX_NAMES_PER_FAMILY" in source
+        assert "MAX_NAMES_TOTAL" in source
+
+    async def test_a_fat_catalog_is_trimmed_to_the_byte_ceiling(self) -> None:
+        """A fat catalog MUST come back inside the seam's own ceiling."""
+        provider = FakeProvider(
+            families=[
+                _fat_family(f"F{i}", names=MAX_NAMES_PER_FAMILY, help_chars=2000)
+                for i in range(12)
+            ],
+            snapshot=[],
+        )
+        raw = await _raw(_tools(provider=provider)["metrics_families"], {"details": True})
+        assert len(raw.encode("utf-8")) <= RESPONSE_BYTE_CEILING, (
+            "the returned body must fit the seam's byte ceiling"
+        )
+
+    async def test_the_byte_ceiling_trim_is_never_silent(self) -> None:
+        """The trim surfaces: ``truncated`` + the counts + a caveat."""
+        provider = FakeProvider(
+            families=[
+                _fat_family(f"F{i}", names=MAX_NAMES_PER_FAMILY, help_chars=2000)
+                for i in range(12)
+            ],
+            snapshot=[],
+        )
+        out = await _call(_tools(provider=provider)["metrics_families"], {"details": True})
+        assert out["truncated"] is True
+        assert out["returned_count"] < out["matched_count"]
+        assert out["dropped_count"] == out["matched_count"] - out["returned_count"]
+        assert any("byte ceiling" in caveat for caveat in out["caveats"]), (
+            "the byte-ceiling trim must be NAMED in a caveat"
+        )
+        assert out["narrow_hint"], "the trim must name a concrete next filter"
+
+    async def test_the_names_bound_is_surfaced(self) -> None:
+        """A family whose declared names exceed the projection bound says
+        so — the bound is never silent."""
+        provider = FakeProvider(
+            families=[_fat_family("F1", names=MAX_NAMES_PER_FAMILY + 50, help_chars=4)],
+            snapshot=[],
+        )
+        out = await _call(_tools(provider=provider)["metrics_families"], {"details": True})
+        assert out["truncated"] is True
+        assert any("names" in caveat for caveat in out["caveats"]), (
+            "the names bound must be NAMED in a caveat"
+        )
+        assert out["narrow_hint"], "the names bound must name a concrete next filter"
+        # The TRUE name count is preserved (the field is the family's
+        # declared size) — the PROJECTION is the bounded list.
+        assert out["families"][0]["name_count"] == MAX_NAMES_PER_FAMILY + 50
+        assert len(out["families"][0]["names"]) == MAX_NAMES_PER_FAMILY
+
+    async def test_the_total_names_bound_is_surfaced(self) -> None:
+        """The across-the-response bound fires too (the catalog is
+        runtime-extensible)."""
+        provider = FakeProvider(
+            families=[
+                _fat_family(f"F{i}", names=MAX_NAMES_PER_FAMILY, help_chars=4)
+                for i in range(20)
+            ],
+            snapshot=[],
+        )
+        out = await _call(_tools(provider=provider)["metrics_families"], {"details": True})
+        assert out["truncated"] is True
+        projected = sum(len(f["names"]) for f in out["families"])
+        assert projected <= MAX_NAMES_TOTAL
+
+    async def test_a_fat_snapshot_is_trimmed_to_the_byte_ceiling(self) -> None:
+        """The SNAPSHOT body carries the trim too."""
+        # The tool's own ``top_n`` cap is 50, so a FAT body needs FAT
+        # ROWS — the byte ceiling is the backstop for a pathological
+        # row, not for a large row COUNT.
+        rows = [
+            {
+                "name": f"ensemble_fat_{i:05d}",
+                "labels": {"k": "v" * 60_000},
+                "kind": "gauge",
+                "monotonic": False,
+                "last_publish_age_s": 1.0,
+                "value": i,
+            }
+            for i in range(50)
+        ]
+        provider = FakeProvider(families=[_fat_family("F10", names=1, help_chars=4)], snapshot=rows)
+        raw = await _raw(_tools(provider=provider)["metrics_snapshot"], {"top_n": 50})
+        assert len(raw.encode("utf-8")) <= RESPONSE_BYTE_CEILING
+        out = json.loads(raw)
+        assert out["truncated"] is True
+        assert any("byte ceiling" in caveat for caveat in out["caveats"])
+
+    async def test_a_fat_history_is_trimmed_to_the_byte_ceiling(self) -> None:
+        """The HISTORY body carries the trim too (and its counts stay
+        honest — ``matched_count``/``dropped_count`` stay ``None``)."""
+        rows = [
+            {
+                "name": f"ensemble_fat_{i:05d}",
+                "labels": {"k": "v" * 60_000},
+                "kind": "gauge",
+                "monotonic": False,
+                "points": [[1_700_000_000, float(i)], [1_700_000_015, float(i) + 1]],
+            }
+            for i in range(50)
+        ]
+        provider = FakeProvider(
+            families=[_fat_family("F10", names=1, help_chars=4)], snapshot=[], history=rows
+        )
+        raw = await _raw(
+            _tools(provider=provider)["metrics_history"],
+            {"names": ["m"], "top_n": 50},
+        )
+        assert len(raw.encode("utf-8")) <= RESPONSE_BYTE_CEILING
+        out = json.loads(raw)
+        assert out["truncated"] is True
+        assert out["matched_count"] is None
+        assert out["dropped_count"] is None
+        assert out["more_available"] is True
+        assert any("byte ceiling" in caveat for caveat in out["caveats"])
+
+
+class TestRingStateSignal:
+    """AmM-2ii — the ring-state signal is BEHAVIOURAL, not a field that
+    is always present and always False."""
+
+    async def test_an_empty_ring_reports_the_ring_state(self) -> None:
+        """A provider whose newest sample is 0 s old (the post-restart
+        shape) MUST report ``trend_empty_since_restart``."""
+        provider = FakeProvider(families=[_family("F1")], snapshot=[])
+        provider.last_sample_age_s = 0.0
+        out = await _call(_tools(provider=provider)["metrics_families"])
+        assert out["read_status"]["trend_empty_since_restart"] is True, (
+            "an empty ring must be REPORTED — the agent must never read "
+            "'fresh but empty'"
+        )
+
+    async def test_a_live_ring_does_not_report_the_ring_state(self) -> None:
+        provider = FakeProvider(families=[_family("F1")], snapshot=[])
+        provider.last_sample_age_s = 3.0
+        out = await _call(_tools(provider=provider)["metrics_families"])
+        assert out["read_status"]["trend_empty_since_restart"] is False
+
+    async def test_an_absent_fact_is_UNKNOWN_not_empty(self) -> None:
+        """A provider that does not carry the age fact must NOT be claimed
+        empty — the tool asserts only what it can verify."""
+
+        class _NoAgeProvider(FakeProvider):
+            def __init__(self) -> None:
+                super().__init__(families=[_family("F1")], snapshot=[])
+                del self.__dict__["last_sample_age_s"]
+
+        provider = _NoAgeProvider()
+        out = await _call(_tools(provider=provider)["metrics_families"])
+        assert out["read_status"]["trend_empty_since_restart"] is False, (
+            "an absent age fact is UNKNOWN, not 'the ring is empty'"
+        )
+

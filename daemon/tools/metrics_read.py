@@ -237,6 +237,55 @@ DEFAULT_MAX_POINTS = 120
 MIN_MAX_POINTS = 2
 MAX_MAX_POINTS = 240
 
+#: The ceiling on the PROJECTED names of ONE family (the A3 amplifier).
+#: A family's declared name list is RUNTIME-EXTENSIBLE, so the
+#: projection needs its own bound — the overflow is SURFACED (truncated +
+#: a caveat + a narrow_hint), never silent.
+MAX_NAMES_PER_FAMILY = 200
+
+#: The ceiling on the TOTAL projected names of ONE response. It keeps the
+#: worst-case body inside the byte ceiling so the trim below is a
+#: backstop, not the primary bound.
+MAX_NAMES_TOTAL = 2000
+
+#: The bytes RESERVED for the byte-ceiling caveat + the narrow_hint.
+#: They are written AFTER the trim, so the trim must leave room for them
+#: — otherwise the final body would exceed the ceiling.
+_CAVEAT_HEADROOM_BYTES = 2048
+
+#: The byte-ceiling caveat (count-independent wording — it is written
+#: after the trim, so it cannot quote a count).
+_BYTE_CEILING_CAVEAT = (
+    "The response was trimmed to fit the daemon's byte ceiling — the items "
+    "below are a SUBSET of what matched. Narrow the query (a specific "
+    "`family=`, a `name_prefix=`, or a smaller `top_n`) to read the rest."
+)
+
+#: The names-bound caveat (same rule — count-independent wording).
+_NAMES_BOUND_CAVEAT = (
+    "The catalog carries more metric names than one response projects — the "
+    "names below are a SUBSET of the family's declared names. Ask for one "
+    "family at a time, or use `details=false` for the small projection."
+)
+
+
+def _byte_ceiling_hint() -> str:
+    """The narrow_hint for the byte-ceiling trim (a concrete next filter)."""
+    return (
+        "the response hit the daemon's byte ceiling — narrow the query (a "
+        "specific `family=`, a `name_prefix=`, or a smaller `top_n`) and "
+        "call again."
+    )
+
+
+def _names_bound_hint() -> str:
+    """The narrow_hint for the names bound (a concrete next filter)."""
+    return (
+        "the catalog's name list exceeded the projection bound — ask for one "
+        "`family=` at a time, or use `details=false` for the small "
+        "projection."
+    )
+
 #: The read-status doctrine (AmC-4) — the racy-bool semantics, stated.
 READ_STATUS_DOCTRINE = (
     "registry_read_ok is ONE mutable flag flipped by every reader; it is "
@@ -277,11 +326,17 @@ def _error(msg: str) -> str:
 
 
 def _encoded_size(payload: Any) -> int:
-    """The encoded byte size of a payload (the byte-ceiling probe)."""
+    """The encoded byte size of a payload — in the tool's OWN output form.
+
+    The probe MUST measure the form the tool actually RETURNS
+    (``json.dumps(..., indent=2)``): a compact-separator probe would
+    understate the real body, and a bound measured against a fiction is
+    not a bound.  (The door's probe is compact because FastAPI encodes
+    it compactly — the tool's JSON is indented, so the tool's probe is
+    indented too.)
+    """
     try:
-        return len(
-            json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
-        )
+        return len(json.dumps(payload, indent=2, default=str).encode("utf-8"))
     except (TypeError, ValueError):  # pragma: no cover — defensive
         return 0
 
@@ -293,11 +348,18 @@ def _trim_to_byte_ceiling(
 
     The door's pattern (``routers/metrics.py``) — the trim is a BOUND, and
     the caller MUST surface it (never a silent truncation).
+
+    The target is the seam's own ceiling MINUS the caveat headroom: the
+    caveat + the narrow_hint are written AFTER the trim, so the trim must
+    leave room for them (otherwise the final body would exceed the
+    ceiling by exactly the size of the disclosure that explains the
+    trim).
     """
+    target = RESPONSE_BYTE_CEILING - _CAVEAT_HEADROOM_BYTES
     low, high, best = 0, len(items), 0
     while low <= high:
         mid = (low + high) // 2
-        if _encoded_size({**payload, key: items[:mid]}) <= RESPONSE_BYTE_CEILING:
+        if _encoded_size({**payload, key: items[:mid]}) <= target:
             best = mid
             low = mid + 1
         else:
@@ -315,7 +377,13 @@ def _read_status(provider: Any) -> dict[str, Any]:
     """
     activation = activation_block(provider)
     ok = bool(activation.get("registry_read_ok", True))
-    ring_empty = bool(read_numeric_fact(provider, "last_sample_age_s", 0.0) <= 0.0)
+    # The ring-state signal (AmM-2ii) reads the age with a SENTINEL
+    # default: a provider that does not carry the fact reads as
+    # UNKNOWN (-1), never as "empty" (0.0). The seam's own default is
+    # 0.0 — which would make an absent fact claim the ring is empty,
+    # i.e. assert something the tool cannot verify.
+    age = read_numeric_fact(provider, "last_sample_age_s", -1.0)
+    ring_empty = bool(age == 0.0)
     return {
         "registry_read_ok": ok,
         "mode": "ok" if ok else "degraded",
@@ -460,9 +528,22 @@ def _build_families(
 
     entries: list[dict[str, Any]] = []
     dark_candidates: list[dict[str, Any]] = []
+    dropped_names = 0
+    projected_names = 0
     for entry in selected:
         names_out: list[dict[str, Any]] = []
         for name_entry in entry.get("names") or []:
+            # THE NAMES BOUND (the A3 amplifier): a family's declared name
+            # list is runtime-extensible, so the PROJECTION is bounded —
+            # per family AND across the response. The overflow is
+            # surfaced below (truncated + a caveat + a narrow_hint), never
+            # silent.
+            if (
+                len(names_out) >= MAX_NAMES_PER_FAMILY
+                or projected_names >= MAX_NAMES_TOTAL
+            ):
+                dropped_names += 1
+                continue
             projected = {
                 "name": name_entry.get("name"),
                 "kind": name_entry.get("kind"),
@@ -479,6 +560,7 @@ def _build_families(
                     }
                 )
             names_out.append(projected)
+            projected_names += 1
         live = int(entry.get("live_series_count") or 0)
         availability = entry.get("availability") or {}
         derived = {
@@ -490,7 +572,11 @@ def _build_families(
             "cardinality_contribution": entry.get("cardinality_contribution"),
             "availability": availability,
             "names": names_out,
-            "name_count": len(names_out),
+            # The family's TRUE declared name count — the PROJECTION is
+            # the bounded list, so the difference between the two IS the
+            # visible signal that names were dropped (the caveat names
+            # the bound).
+            "name_count": len(entry.get("names") or []),
             "data_present": live > 0,
             "dark_with_live_series": (
                 str(availability.get("state") or "") == "dark" and live > 0
@@ -537,6 +623,22 @@ def _build_families(
         payload["caveats"].append(caveat)
     if not payload["read_status"]["registry_read_ok"]:
         payload["caveats"].append(_degraded_caveat())
+    if dropped_names:
+        # THE NAMES BOUND IS NEVER SILENT.
+        payload["truncated"] = True
+        payload["caveats"].append(_NAMES_BOUND_CAVEAT)
+        payload["narrow_hint"] = _names_bound_hint()
+
+    # THE BYTE CEILING (AmM-1(c)) — the trim is a BOUND and it is NEVER
+    # SILENT: the count block, a caveat and the narrow_hint all move.
+    kept, byte_trimmed = _trim_to_byte_ceiling(payload, key="families", items=kept)
+    if byte_trimmed:
+        payload["families"] = kept
+        payload["returned_count"] = len(kept)
+        payload["dropped_count"] = matched - len(kept)
+        payload["truncated"] = True
+        payload["caveats"].append(_BYTE_CEILING_CAVEAT)
+        payload["narrow_hint"] = _byte_ceiling_hint()
     return payload
 
 
@@ -628,6 +730,17 @@ def _build_snapshot(
     }
     if not payload["read_status"]["registry_read_ok"]:
         payload["caveats"].append(_degraded_caveat())
+
+    # THE BYTE CEILING (AmM-1(c)) — the trim is a BOUND and it is NEVER
+    # SILENT.
+    kept, byte_trimmed = _trim_to_byte_ceiling(payload, key="series", items=kept)
+    if byte_trimmed:
+        payload["series"] = [_strip_internal(row) for row in kept]
+        payload["returned_count"] = len(kept)
+        payload["dropped_count"] = matched - len(kept)
+        payload["truncated"] = True
+        payload["caveats"].append(_BYTE_CEILING_CAVEAT)
+        payload["narrow_hint"] = _byte_ceiling_hint()
     return payload
 
 
@@ -858,6 +971,21 @@ def _build_history(
         )
     if not payload["read_status"]["registry_read_ok"]:
         payload["caveats"].append(_degraded_caveat())
+
+    # THE BYTE CEILING (AmM-1(c)) — the trim is a BOUND and it is NEVER
+    # SILENT. The history counts stay honest: ``matched_count``/
+    # ``dropped_count`` remain ``None`` (the work bound means the tail was
+    # never materialised), so the trim surfaces as ``truncated`` + a
+    # caveat + a narrow_hint, and ``more_available`` becomes true (the
+    # dropped series DO exist).
+    kept_series, byte_trimmed = _trim_to_byte_ceiling(payload, key="series", items=kept)
+    if byte_trimmed:
+        payload["series"] = kept_series
+        payload["returned_count"] = len(kept_series)
+        payload["more_available"] = True
+        payload["truncated"] = True
+        payload["caveats"].append(_BYTE_CEILING_CAVEAT)
+        payload["narrow_hint"] = _byte_ceiling_hint()
     return payload
 
 

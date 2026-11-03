@@ -339,6 +339,8 @@ def run_matrix() -> int:
             path.write_bytes(original)
             _unjournal(label)
 
+    failures += _run_follow_legs()
+
     mismatches = _verify_manifest(manifest)
     if mismatches:
         print("RESULT: FAIL (post-run manifest mismatch)")
@@ -351,7 +353,10 @@ def run_matrix() -> int:
     if failures:
         print(f"RESULT: FAIL ({failures} leg(s) failed)")
         return 1
-    print(f"RESULT: PASS ({len(MUTATIONS)} legs)")
+    print(
+        f"RESULT: PASS ({len(MUTATIONS)} RED/GREEN legs + "
+        f"{len(FOLLOW_LEGS)} FOLLOW leg(s))"
+    )
     return 0
 
 
