@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.spec.json",
+  "compilerOptions": {
+    "outDir": "./out-tsc/metrics-fe",
+    "types": ["jest", "node"]
+  },
+  "include": [
+    "src/**/*.d.ts",
+    "src/app/models/metrics.model.spec.ts",
+    "src/app/services/metrics.service.spec.ts",
+    "src/app/components/charts/svg-line-chart/svg-line-chart.component.spec.ts",
+    "src/app/pages/metrics/**/*.spec.ts"
+  ]
+}

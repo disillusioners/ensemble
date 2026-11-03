@@ -106,7 +106,16 @@ def mock_plane_env(monkeypatch):
 
     Tests that need the feature enabled pin all three vars; tests that
     exercise the disabled path use ``monkeypatch.delenv`` directly.
+
+    BR-A remediation (lane ``plane-pm-issue-tools``): the environment is
+    pinned to LIVE so the workspace resolution permits the configured
+    slug. Without the pin the resolver classifies the test process as
+    non-live (no marker) and refuses the ``test-ws`` slug — the transport
+    behaviour under test is unchanged on live; the refusal behaviour is
+    pinned in ``tests/unit/test_plane_workspace_enforcement.py``.
     """
+    monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+    monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
     monkeypatch.setenv("PLANE_BASE_URL", "https://plane.example.com")
     monkeypatch.setenv("PLANE_API_KEY", "test-api-key-xyz")
     monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "test-ws")
@@ -511,7 +520,14 @@ class TestPlaneHttpClientFeatureGating:
         assert PlaneHttpClient.is_available() is False
 
     def test_feature_enabled_all_set(self, monkeypatch):
-        """All three env vars set → ``is_available`` True."""
+        """All three env vars set → ``is_available`` True.
+
+        BR-A remediation: the environment is pinned to LIVE so the
+        workspace resolution permits the configured slug (``ws``) — on a
+        non-live environment only ``e2e`` is permitted, and the refusal is
+        pinned in ``tests/unit/test_plane_workspace_enforcement.py``."""
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
         monkeypatch.setenv("PLANE_BASE_URL", "https://x")
         monkeypatch.setenv("PLANE_API_KEY", "k")
         monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "ws")
@@ -644,7 +660,11 @@ class TestPlaneHttpClientHeaders:
         assert len(captured) == 1
         req = captured[0]
         assert req.headers["x-api-key"] == "my-secret-key"
-        assert req.headers["x-workspace-slug"] == "ws-slug"
+        # BR-A remediation (P2-D): the emitted workspace slug is the
+        # RESOLVED one (``mock_plane_env`` pins ``test-ws``) — an explicit
+        # constructor argument is never an authority (the header and the
+        # URL can never disagree).
+        assert req.headers["x-workspace-slug"] == "test-ws"
         assert req.headers["content-type"] == "application/json"
         # Negative assertion: Bearer would be silently wrong (HTTP 401 in
         # production). Pin the absence so a future refactor doesn't
@@ -975,7 +995,15 @@ class TestPlaneSyncServiceSync:
         mock.create_project.assert_not_called()
 
     def test_sync_disabled(self, repo, monkeypatch):
-        """Feature not configured → status="disabled"."""
+        """Feature not configured → status="disabled".
+
+        BR-A remediation: the env is pinned to LIVE so the disabled
+        message reflects the missing REST configuration. On a non-live
+        environment the UNSET-SLUG refusal takes precedence instead (the
+        typed-reason precedence P2-L ships) — that behaviour is pinned in
+        ``tests/unit/test_plane_sync_unavailable_reason.py``."""
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
         monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
@@ -1143,7 +1171,13 @@ class TestPlaneSyncProjectToolIntegration:
     def test_tool_feature_disabled(
         self, repo, monkeypatch, clear_cooldown
     ):
-        """When ``PlaneSyncService.is_available()`` is False → tool returns disabled."""
+        """When ``PlaneSyncService.is_available()`` is False → tool returns disabled.
+
+        BR-A remediation: the env is pinned to LIVE so the disabled
+        message reflects the missing REST configuration (on a non-live
+        environment the unset-slug refusal takes precedence instead)."""
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
         monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)

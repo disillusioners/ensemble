@@ -1,0 +1,46 @@
+=== sweep dir: /tmp/p3-sweep-sharded-20261102T060325Z ===
+=== CPUs: 16 · xdist: 12 · shard size: 2500 ===
+BASE collected: 32450 nodes
+HEAD collected: 32725 nodes
+head-only nodes (the additive lane's own files): 275
+base-only nodes: 0
+
+=== sweep leg: BASE ===
+  BASE/shard-000 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-001 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-002 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-003 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-004 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-005 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-006 nodes=2500 P=0 F=0 E=0 dur=1s rc=126
+  BASE/shard-007 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-008 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-009 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-010 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-011 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  BASE/shard-012 nodes=2450 P=0 F=0 E=0 dur=0s rc=126
+BASE FAILED/ERROR ids: 0
+BASE digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+=== sweep leg: HEAD ===
+  HEAD/shard-000 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-001 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-002 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-003 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-004 nodes=2500 P=0 F=0 E=0 dur=1s rc=126
+  HEAD/shard-005 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-006 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-007 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-008 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-009 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-010 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-011 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-012 nodes=2500 P=0 F=0 E=0 dur=0s rc=126
+  HEAD/shard-013 nodes=225 P=0 F=0 E=0 dur=14s rc=5
+HEAD FAILED/ERROR ids: 0
+HEAD digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+=== SWEEP DIGEST DIFF ===
+DIGEST-EQUAL: the FAILED sets are byte-identical (net-new = EMPTY)
+
+=== sweep dir: /tmp/p3-sweep-sharded-20261102T060325Z ===

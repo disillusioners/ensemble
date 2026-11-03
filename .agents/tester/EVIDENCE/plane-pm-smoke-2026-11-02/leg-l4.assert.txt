@@ -1,0 +1,36 @@
+=== LEG l4  self_env=live slug_mode=nea port=8951 db=ens_smoke_l4_1793660176_11513 ===
+port 8951 bound: LISTEN 0 2048 127.0.0.1:8951 0.0.0.0:* users:(("python",pid=2249868,fd=24)) 
+livez http=200
+readyz http=200
+livez:  {"status":"alive","uptime_seconds":49.53100776672363,"version":"0.28.5"}
+readyz: status=ready components={'database': True, 'queue_freshness': True, 'services': True, 'checkpoint_saver': True} reasons=[]
+mcp-servers http=200
+DB plane row: plane|t|t|3|nea|Bearer <redacted,len=38>|streamable-http|https://mcp.ensem.dev/plane/http/api-key/mcp
+DB plane row count: 1
+scratch ensemble.json: {
+  "database": "postgres",
+  "postgres": {
+    "host": "localhost",
+    "port": 5432,
+    "db": "ensemble",
+    "user": "ensemble",
+    "password": ""
+  },
+  "sqlite": {
+    "instances_db": "./data/instances.db",
+    "checkpoints_db": "./data/checkpoints.db"
+  }
+}
+--- boot log: plane / builtin / workspace lines ---
+    73:22:56:38 - daemon.repositories.mcp_server.repository - INFO - Created MCP server: id=c426d77b-ba20-4e78-bca1-635a430feae7, name=webfetch
+    74:22:56:38 - daemon.manager - INFO - Created built-in MCP server: webfetch
+    76:22:56:38 - daemon.mcp.builtin_servers.plane - INFO - Plane workspace resolution: env=live source=explicit-marker slug=nea
+    77:22:56:38 - daemon.repositories.mcp_server.repository - INFO - Created MCP server: id=fc604ce9-5f3f-4fbb-8861-4f9878c6c2ad, name=plane
+    78:22:56:38 - daemon.manager - INFO - Created built-in MCP server: plane
+--- vacuity tripwire ---
+  env-name census (names only): 25 names
+  PRESENT: PLANE_MCP_URL
+  PRESENT: PLANE_MCP_API_KEY
+  PRESENT: PLANE_MCP_WORKSPACE_SLUG
+  TRIPWIRE CLEAR: no missing-credential skip reason in the log
+=== END LEG l4 ===

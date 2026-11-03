@@ -777,7 +777,15 @@ class TestPreloadBuiltinAvailabilityGate:
         # Plane reads its own env inside its own ``is_available()`` —
         # feed it the URL + API key so the gate sees a
         # healthy-availability builtin (mirrors a real prod workspace).
+        # BR-A-class remediation (lane ``plane-pm-issue-tools``): the env
+        # is pinned to LIVE + a slug so the workspace resolution permits
+        # the lane (on a non-live environment an unset/foreign slug is
+        # refused and the gate WOULD skip — pinned in
+        # tests/unit/test_plane_workspace_enforcement.py).
         monkeypatch.setenv("PLANE_MCP_ENABLED", "true")
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
+        monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "nea")
         monkeypatch.setenv("PLANE_MCP_URL", "https://api.plane.so")
         monkeypatch.setenv("PLANE_MCP_API_KEY", "test-fixture-api-key")
 

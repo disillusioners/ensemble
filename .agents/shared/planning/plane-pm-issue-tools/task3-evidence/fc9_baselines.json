@@ -1,0 +1,176 @@
+{
+  "artifact": "fc9_baselines.json",
+  "gate": "GATE A — FC9 baseline RE-MEASUREMENT (plane-absent boot)",
+  "lane": "plane-pm-issue-tools",
+  "tree": "964778d484650f909fdb84e4e3a9484d97a1c821",
+  "tree_subject": "fix(plane-pm): delta hardening round 2 — presence semantics, scrub widening, escape completion, create-route gate",
+  "measured_at": "2026-11-02T17:38:11Z",
+  "measured_at_note": "Scratch daemon boot 17:31:20Z–17:31:37Z; measurement harness run 1 completed 17:38:11Z; independent repeat run 2 completed 17:41:xxZ (byte-identical results); teardown 17:41:00Z.",
+  "formula": "baseline_tokens = estimate_tokens(PM system prompt) + Σ estimate_tokens(json.dumps(convert_to_openai_tool(t)))  [over PM's RESOLVED toolset]",
+  "formula_source": "gate-i-tools-list-recapture.md §7 table formula (verbatim), executed against the CURRENT tree per §7.3's binding RE-BASELINE INSTRUCTION",
+  "tokeniser": "tiktoken cl100k_base via daemon/loader.py::estimate_tokens",
+  "measurement_point": "llm.bind_tools prompt assembly (graph.py:10531/:10549) + loader.py:704-706 tool-NAME sections — identical to the Phase-1 measurement point",
+  "serialization_form_note": {
+    "finding": "gate-i's RECORDED tool_schema_tokens (12 117) was produced with the sort_keys+compact form that gate-i §6 states for its counting form — NOT with the plain json.dumps of the §7 formula string.",
+    "proof": "plane_sync_project (the tool removed by the W-8 ownership guard) measures 65 schema tokens in the sort_keys+compact form and 84 in the plain form. Historical 12 117 − current 12 052 (46 tools) = 65 EXACTLY ⇒ the historical figure used the sort_keys+compact form. Under the plain form the historical figure would have been 12 117 + 84 = 12 201, which does not match the measured 13 432.",
+    "fc9_comparison_base_form": "sort_keys=True, separators=(',',':') — i.e. estimate_tokens(json.dumps(convert_to_openai_tool(t), sort_keys=True, separators=(',',':')))",
+    "mandate_for_present_leg": "The Phase-5 present-leg gate MUST use the SAME form (sort_keys+compact) as the baseline recorded here, or the growth delta is not a like-for-like comparison. Both forms are recorded below so the present leg can be reconciled either way."
+  },
+  "baseline_tokens": 20468,
+  "system_prompt_tokens": 8416,
+  "tool_schema_tokens": 12052,
+  "resolved_toolset_size": 46,
+  "baseline_tokens_literal_section7_string_form": 21848,
+  "tool_schema_tokens_literal_section7_string_form": 13432,
+  "system_prompt_tokens_note": "Identical under both forms (the system prompt is not JSON-serialised). Loader-returned token count == direct estimate_tokens(system_prompt) == 8416.",
+  "historical_20111_note": {
+    "historical_baseline_tokens": 20111,
+    "historical_system_prompt_tokens": 7994,
+    "historical_tool_schema_tokens": 12117,
+    "historical_resolved_toolset_size": 47,
+    "historical_measured_at": "2026-11-02T08:12Z",
+    "historical_status": "HISTORICAL RECORD ONLY — not the FC9 comparison input (gate-i §7.3). The two FC9 legs must be measured on the same code; the present leg is measured later by a different gate.",
+    "delta_vs_historical_baseline_tokens": 357,
+    "delta_decomposition": {
+      "system_prompt_growth": 422,
+      "system_prompt_attribution": "agents/project-manager/{rule.md,tools_note.md,workflow.md} rewritten by the lane's Phase-4 charter reconciliation (commit 2801a0e02, 11:18Z) — 14 insertions / 14 deletions across the three files, after the 08:12Z measurement. The prompt's tool-NAME sections are otherwise unchanged; the now-empty 'plane' category contributes NO section at all.",
+      "tool_schema_delta": -65,
+      "tool_schema_attribution": "EXACTLY the removed plane_sync_project tool (65 schema tokens, sort_keys+compact form). The W-8 prefix-sweep ownership guard (95e999b20) removed it from PM's resolved toolset — 47 tools → 46."
+    }
+  },
+  "plane_sync_project_absence": {
+    "expected_difference_confirmed": true,
+    "plane_sync_project_present_in_resolved_toolset": false,
+    "resolved_toolset_size_before": 47,
+    "resolved_toolset_size_after": 46,
+    "removed_tool_measured_schema_tokens": {
+      "sort_keys_compact_form": 65,
+      "plain_form": 84
+    },
+    "guard": "daemon/tools/instance.py — the W-8 ownership guard: a tool owned by another registered category ('plane_sync') is never swept into the empty 'plane' category"
+  },
+  "plane_mcp_tool_count": 0,
+  "plane_mcp_server_rows": 0,
+  "plane_absent_condition": "PLANE_MCP_URL, PLANE_MCP_API_KEY, PLANE_MCP_WORKSPACE_SLUG UNSET for the measurement process ONLY (per-process env override; env -i allowlist). ZERO .env writes anywhere.",
+  "boot_skip_line_verbatim": "17:31:30 - daemon.manager - WARNING - Builtin 'plane' skipped — missing environment configuration: PLANE_MCP_URL, PLANE_MCP_API_KEY (see server definition docs); agents with mcp_full_access=['plane']: project-manager",
+  "boot_skip_line_format_note": "Format differs from gate-i's recorded line ('...missing environment configuration (see server definition docs)') — the 2026-11-02 C3 tidier fix added the ': <missing var names>' detail. Same class, same meaning.",
+  "six_assertions": [
+    {
+      "n": 1,
+      "claim": "Scratch daemon boots — /livez 200 alive + /readyz 200 ready, ALL components true, reasons=[], ENSEMBLE_SELF_ENV=sandbox pinned explicitly",
+      "verdict": "PASS",
+      "evidence": "livez {\"status\":\"alive\",\"version\":\"0.28.5\",\"uptime_seconds\":5.90}; readyz {\"status\":\"ready\",\"components\":{\"database\":true,\"queue_freshness\":true,\"services\":true,\"checkpoint_saver\":true},\"detail\":{\"reasons\":[],...},\"draining\":false}; boot log 'Uvicorn running on http://0.0.0.0:8971' + 'Application startup complete.'; ENSEMBLE_SELF_ENV=sandbox pinned in the env -i allowlist"
+    },
+    {
+      "n": 2,
+      "claim": "NO plane mcp_servers row exists in the scratch DB (count(*) where name='plane' = 0); boot log carries the skip line",
+      "verdict": "PASS",
+      "evidence": "select count(*) from mcp_servers where name='plane' = 0; scratch DB held exactly 2 rows — context7 (active, builtin) and webfetch (active, builtin) — identical to gate-i's scratch DB; boot skip line recorded verbatim above"
+    },
+    {
+      "n": 3,
+      "claim": "PM's RESOLVED toolset contains ZERO plane MCP tools (plane_mcp_tool_count = 0); plane_sync_project NOW ABSENT (expected difference vs the 08:12Z run)",
+      "verdict": "PASS",
+      "evidence": "plane_mcp_tool_count = 0; resolved plane_-prefixed tool names = [] ; plane_sync_project_present = false (recorded explicitly as the EXPECTED DIFFERENCE); resolved toolset size 46 = historical 47 − plane_sync_project"
+    },
+    {
+      "n": 4,
+      "claim": "baseline_tokens measured at the prompt-assembly point (number + components)",
+      "verdict": "PASS",
+      "evidence": "baseline_tokens = 20468 = system_prompt_tokens 8416 + tool_schema_tokens 12052 (sort_keys+compact form, the form that reproduces the historical 12 117); literal §7 formula string variant = 21848 (8416 + 13432). Both recorded; determinism re-run byte-identical (same system_prompt sha256 26fb6c6a5e4274095c3fa456ba3850c4459fd7907a267c07a692a3ac21800111)."
+    },
+    {
+      "n": 5,
+      "claim": "Live fence held",
+      "verdict": "PASS",
+      "evidence": "See fences F10 — live state.json sha256 693998100c2ba18cb5848c165f4592fcab2fea2e5664ff29aa3a2ac0d7cc5c4a IDENTICAL pre == mid == post; live daemon pid 643626 unchanged on :9797 (uptime 67 066s → 68 163s, continuous); current -> releases/v0.28.4 untouched"
+    },
+    {
+      "n": 6,
+      "claim": "Teardown SIGTERM-only, no orphans, scratch DB + role dropped, scratch root removed, port freed",
+      "verdict": "PASS",
+      "evidence": "SIGTERM to the scratch daemon pid 1624535 (SIGTERM-only; graceful shutdown observed: 'Graceful shutdown complete.' + 'Application shutdown complete.' + 'Finished server process'); port 8971 freed; ZERO orphan python -m daemon; ZERO orphan MCP stdio children attributable to this gate (the two live context7 trees start 09:23:22Z and 17:20:03Z — both BEFORE the scratch boot at 17:31:30Z — and belong to the demo :7979 and live :9797 daemons); scratch DB + throwaway role DROPPED (verified 0 rows); scratch root + fake HOME removed"
+    }
+  ],
+  "fences": {
+    "F1_scratch_root": "mktemp -d /tmp/plane-pm-fc9.scratch.XXXXXX (6 random chars) — never ~/agents-ensemble, never ~/ensemble-src",
+    "F2_source_run": "SOURCE-RUN from the worktree: cd /home/nea/ensemble-src-wt-plane-pm && /home/nea/ensemble-src/.venv/bin/python -m daemon with PYTHONPATH=<worktree> (no frozen binary, no staged artifact, no release dir)",
+    "F3_self_env": "ENSEMBLE_SELF_ENV=sandbox pinned EXPLICITLY in the env -i allowlist (every boot leg)",
+    "F4_boot_sweep": "ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 pinned EXPLICITLY — never 'env -u' (the sweep kills live processes)",
+    "F5_env_i_allowlist": "env -i with a fully explicit allowlist (nothing ambient inherited; the worker shell is live-poisoned with POSTGRES_DB=ensemble_prod / ENSEMBLE_SELF_ENV=live). POSTGRES_* set EXPLICITLY to the scratch DB on 127.0.0.1:5432. Zero PLANE_* variables present (verified: env | grep -c '^PLANE_' = 0)",
+    "F6_fake_home": "mktemp -d fake HOME + escape guard (both scratch paths asserted NOT under /home/nea/agents-ensemble* nor /home/nea/ensemble-src*); the daemon's promote journal resolved to NO install dir — boot log 'UpgradeJournalSweepService started: ... install_dir=<none — dev/unresolved>' ⇒ the journal never resolved into the live install",
+    "F7_scratch_pg": "throwaway role + scratch DB on the LOCAL cluster 127.0.0.1:5432 (PostgreSQL 16.15); ensemble_prod NEVER addressed (it does not exist on this local cluster — the live prod DB is on the remote 10.44.0.2); role + DB DROPPED at cleanup (verified 0 rows in pg_database / pg_roles)",
+    "F8_port": "8971 — verified free via ss before boot; never 9797 / 7979 / 8079 (all live/live-demo/dev). A hard preflight guard in the boot script refuses 9797/7979/8079 and refuses an already-bound port",
+    "F9_teardown": "SIGTERM-only (no SIGKILL); graceful shutdown observed in the log; no orphan python -m daemon; no orphan MCP stdio children; port 8971 freed",
+    "F10_live_fence": "live state.json sha256 PRE == MID == POST = 693998100c2ba18cb5848c165f4592fcab2fea2e5664ff29aa3a2ac0d7cc5c4a; live daemon pid 643626 unchanged on :9797 (uptime 67 066s → 68 163s, continuous, NRestarts unchanged); current -> releases/v0.28.4 untouched; live :7979 demo pid 525852 untouched",
+    "F11_no_env_mutation": "ZERO writes to any .env (live install / main checkout / worktree / scratch). The plane-absent condition is a per-process env override; the live .env was READ-ONLY, to source credential VALUES into the env -i allowlist. No .env mtime/sha changed."
+  },
+  "deviations_from_gate_i_recipe": [
+    "BOOT-SCRIPT DEFECT (self-caught, fixed before any successful boot): the first boot attempt sourced the live .env into the shell and then read PORT from that shell — the live .env's PORT (9797) CLOBBERED the scratch port, so the scratch daemon tried to bind 0.0.0.0:9797. The bind FAILED (address already in use — the live daemon holds it), the scratch daemon exited cleanly, and the LIVE daemon was verifiably untouched (pid 643626 continuous, state.json sha identical). The script was rewritten with dedicated FC9_/LLM_ variable names and three hard preflight guards (forbidden port / path escape / prod DB). The successful boot ran on port 8971. Recorded because it is a near-miss on the F8 fence, not because it changed any number.",
+    "FORM AMBIGUITY (material, resolved by arithmetic): the §7 formula string implies plain json.dumps; gate-i's own §6 counting form is sort_keys+compact. Both were measured. The historical 12 117 is reproducible ONLY under sort_keys+compact (12 117 − 65 = 12 052 exactly), so baseline_tokens = 20468 uses that form and the present-leg gate must use the same form. The plain-form variant (21 848) is recorded so either can be reconciled.",
+    "SKIP-LINE FORMAT (cosmetic): the 2026-11-02 C3 tidier fix added the ': <missing var names>' detail to the plane skip line — same class, same meaning, different string from gate-i's recorded line.",
+    "PRELOADED MCP NAME COUNT: 3 preloaded MCP tool names (2 context7 + 1 webfetch) vs gate-i's '2 context7' note. NO effect on the measurement: PM denies the 'mcp' category, so no mcp_* tool is bound (resolved mcp_ tool names = []) and no MCP category appears in PM's prompt."
+  ],
+  "no_secrets": true,
+  "env_values_recorded": false,
+  "notes": "NO FC9 verdict is computed here — the present leg (plane tools PRESENT) is measured later by a different gate, which also evaluates the ceiling (growth_tokens <= max(10_000, 0.25 × baseline_tokens) AND growth_pct <= 0.25). This artifact is the baseline leg only.",
+  "gate_b_present_leg": {
+    "artifact": "fc9_baselines.json (EXTENDED by Gate B — the baseline entries are NOT overwritten)",
+    "gate": "B / Phase-5 Step 3 — FC9 present leg + verdict",
+    "tree": "964778d484650f909fdb84e4e3a9484d97a1c821",
+    "measured_at": "2026-11-02T18:36Z (harness run 1) + 18:38Z (determinism repeat run 2)",
+    "serialization_form": "sort_keys+compact — the Gate-A baseline form (json.dumps(convert_to_openai_tool(t), sort_keys=True, separators=(',',':')))",
+    "baseline_tokens": 20468,
+    "baseline_source": "Gate A's re-measured baseline on THIS tree (task3-evidence/fc9_baselines.json → .baseline_tokens) — the FC9 comparison base",
+    "present_tokens": 60635,
+    "growth_tokens": 40167,
+    "growth_pct": 1.962429,
+    "ceiling_absolute_tokens": 10000,
+    "boolean_a": false,
+    "boolean_b": false,
+    "verdict": "BREACH",
+    "components": {
+      "system_prompt_tokens": 9417,
+      "tool_schema_tokens_sorted_form": 51218,
+      "resolved_toolset_size": 223,
+      "plane_tool_count": 177,
+      "system_prompt_sha256": "2bea1148457d8fe58b751c7d87b45ab530f5b24199fed5cfce293e7ac5713328"
+    },
+    "determinism": "two independent harness runs → byte-identical numbers and the same system-prompt sha256",
+    "ceiling_rule": "growth_tokens <= max(10_000, 0.25 x baseline_tokens) AND growth_pct <= 0.25 — the PRE-COMMITTED rule (phase5-plan §5 Step 3 B3). NOT invented or adjusted at execution time.",
+    "pre_narrowing_leg": {
+      "leg": "PRE-narrowing (full 177-verb plane category)",
+      "present_tokens": 60635,
+      "growth_tokens": 40167,
+      "growth_pct": 1.962429,
+      "ceiling_absolute": 10000,
+      "boolean_a": false,
+      "boolean_b": false,
+      "verdict": "BREACH",
+      "plane_tool_count": 177,
+      "resolved_toolset_size": 223,
+      "system_prompt_tokens": 9417,
+      "tool_schema_tokens_sorted_form": 51218,
+      "plane_schema_token_growth": 39166,
+      "system_prompt_sha256": "2bea1148457d8fe58b751c7d87b45ab530f5b24199fed5cfce293e7ac5713328"
+    },
+    "post_narrowing_leg_aprime": {
+      "leg": "POST-narrowing (A' 28-verb keep-set grant)",
+      "present_tokens": 29313,
+      "growth_tokens": 8845,
+      "growth_pct": 0.432138,
+      "ceiling_absolute": 10000,
+      "boolean_a": true,
+      "boolean_b": false,
+      "verdict": "BREACH",
+      "plane_tool_count": 28,
+      "resolved_toolset_size": 74,
+      "system_prompt_tokens": 9380,
+      "tool_schema_tokens_sorted_form": 19933,
+      "plane_schema_token_growth": 7881,
+      "system_prompt_sha256": "04f21884b06380f06c40e8cf47c7be9675576768cccef8e5b94bcccab31928bd"
+    },
+    "aprime_note": "A'.7 — the post-narrowing present_tokens is recorded ALONGSIDE the pre-narrowing value (the comparison is the value of the branch). The FC9 verdict that ROUTES the branch is the PRE-narrowing one (BREACH → A' executes); the post-narrowing leg is a measurement, not a re-ruling. Recorded fact: with the pre-derived 28-verb keep-set the plane schema-token growth is 7881 while condition (b)'s headroom at 25% of the 20468 baseline is 5117 — condition (b) is therefore UNACHIEVABLE by construction for any plane grant, the same structural asymmetry the plan itself recorded for the absolute floor of condition (a). ROUTED BACK to the architect; NOT waived, NOT adjusted here.",
+    "no_secrets": true
+  }
+}

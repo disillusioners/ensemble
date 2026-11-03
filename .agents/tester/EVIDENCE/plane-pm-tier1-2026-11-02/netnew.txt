@@ -1,0 +1,1 @@
+tests/unit/test_project_manager_agent.py::TestConventionCompliance::test_no_forbidden_system_tokens[tools_note.md]

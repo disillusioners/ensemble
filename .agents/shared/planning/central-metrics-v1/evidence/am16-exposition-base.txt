@@ -1,0 +1,81 @@
+Deprecated metric name message_api_checkpoint_list_total is an alias of ensemble_checkpoint_list_total; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name message_api_saver_op_latency_seconds is an alias of ensemble_checkpoint_op_seconds; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name checkpoint_read_ops_total is an alias of ensemble_checkpoint_read_ops_total; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name checkpoint_read_rows_total is an alias of ensemble_checkpoint_read_rows_total; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name checkpoint_read_bytes_total is an alias of ensemble_checkpoint_read_bytes_total; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name checkpoint_read_size_bucket_hits_total is an alias of ensemble_checkpoint_read_size_bucket_hits_total; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name checkpoint_read_measurement_errors_total is an alias of ensemble_checkpoint_read_measurement_errors_total; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name checkpoint_leak_signal_total is an alias of ensemble_checkpoint_leak_signal_total; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name checkpoint_read_size_bytes is an alias of ensemble_checkpoint_read_size_bytes; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name checkpoint_cache_hit_total is an alias of ensemble_checkpoint_cache_hit_total; migrate to the canonical name (the alias is removed one release after the deprecation window).
+Deprecated metric name checkpoint_cache_miss_total is an alias of ensemble_checkpoint_cache_miss_total; migrate to the canonical name (the alias is removed one release after the deprecation window).
+# HELP ensemble_checkpoint_list_total Cumulative number of saver.alist(…) invocations observed on the live message-API path. Expected normal value: 0 (post-PR3 read flip).
+# TYPE ensemble_checkpoint_list_total counter
+ensemble_checkpoint_list_total 0
+# HELP message_api_checkpoint_list_total Cumulative number of saver.alist(…) invocations observed on the live message-API path. Expected normal value: 0 (post-PR3 read flip).
+# TYPE message_api_checkpoint_list_total counter
+message_api_checkpoint_list_total 0
+# HELP ensemble_checkpoint_op_seconds Saver op latency in seconds, labeled by op. Ops: aget, aput, adelete, alist (migration-only). Buckets are Prometheus-style.
+# TYPE ensemble_checkpoint_op_seconds histogram
+# HELP message_api_saver_op_latency_seconds Saver op latency in seconds, labeled by op. Ops: aget, aput, adelete, alist (migration-only). Buckets are Prometheus-style.
+# TYPE message_api_saver_op_latency_seconds histogram
+# HELP ensemble_metrics_cap_rejected_total Observations rejected by the hard cardinality cap, by metric name. The rejection happens inside the metric's own lock (no TOCTOU).
+# TYPE ensemble_metrics_cap_rejected_total counter
+# HELP ensemble_metrics_invalid_label_total Label values folded to the reserved 'other' bucket, by metric name and label key.
+# TYPE ensemble_metrics_invalid_label_total counter
+# HELP ensemble_metrics_registry_measurements Number of registered measurement objects in the canonical registry (NOT the number of series).
+# TYPE ensemble_metrics_registry_measurements gauge
+ensemble_metrics_registry_measurements 15
+# HELP ensemble_metrics_vocabulary_version Frozen label-vocabulary version of this daemon build.
+# TYPE ensemble_metrics_vocabulary_version gauge
+ensemble_metrics_vocabulary_version 1
+# HELP ensemble_checkpoint_read_ops_total Checkpoint read operations observed at the saver retry proxy, labeled by op (aget, aget_tuple). One increment per settled read.
+# TYPE ensemble_checkpoint_read_ops_total counter
+# HELP checkpoint_read_ops_total Checkpoint read operations observed at the saver retry proxy, labeled by op (aget, aget_tuple). One increment per settled read.
+# TYPE checkpoint_read_ops_total counter
+# HELP ensemble_checkpoint_read_rows_total Rows returned by checkpoint reads at the saver retry proxy, labeled by op. DERIVED count: 1 checkpoint row + one blob row per non-primitive channel value + one row per pending write.
+# TYPE ensemble_checkpoint_read_rows_total counter
+# HELP checkpoint_read_rows_total Rows returned by checkpoint reads at the saver retry proxy, labeled by op. DERIVED count: 1 checkpoint row + one blob row per non-primitive channel value + one row per pending write.
+# TYPE checkpoint_read_rows_total counter
+# HELP ensemble_checkpoint_read_bytes_total Decoded payload bytes returned by checkpoint reads at the saver retry proxy, labeled by op. Bounded deep-size estimate (the resource-monitor charge estimator), not the wire size.
+# TYPE ensemble_checkpoint_read_bytes_total counter
+# HELP checkpoint_read_bytes_total Decoded payload bytes returned by checkpoint reads at the saver retry proxy, labeled by op. Bounded deep-size estimate (the resource-monitor charge estimator), not the wire size.
+# TYPE checkpoint_read_bytes_total counter
+# HELP ensemble_checkpoint_read_size_bucket_hits_total Per-observation bucket attribution for checkpoint read sizes, labeled by op and bucket (the bucket's upper bound in bytes, or +Inf). NOT cumulative — one increment per observation, in the bucket the observation fell into.
+# TYPE ensemble_checkpoint_read_size_bucket_hits_total counter
+# HELP checkpoint_read_size_bucket_hits_total Per-observation bucket attribution for checkpoint read sizes, labeled by op and bucket (the bucket's upper bound in bytes, or +Inf). NOT cumulative — one increment per observation, in the bucket the observation fell into.
+# TYPE checkpoint_read_size_bucket_hits_total counter
+# HELP ensemble_checkpoint_read_measurement_errors_total Read-instrumentation failures at the saver retry proxy. The measurement is FAIL-OPEN (a failure never breaks the read), so this counter is the ONLY signal that the instrumentation itself stopped working.
+# TYPE ensemble_checkpoint_read_measurement_errors_total counter
+ensemble_checkpoint_read_measurement_errors_total 0
+# HELP checkpoint_read_measurement_errors_total Read-instrumentation failures at the saver retry proxy. The measurement is FAIL-OPEN (a failure never breaks the read), so this counter is the ONLY signal that the instrumentation itself stopped working.
+# TYPE checkpoint_read_measurement_errors_total counter
+checkpoint_read_measurement_errors_total 0
+# HELP ensemble_checkpoint_leak_signal_total Leak-signal fires consumed from the readiness leak predicate. One increment per readiness tick the predicate reports detected=true. The consumer is FAIL-OPEN: it never affects the emitter (the grace verdict and the /readyz detail).
+# TYPE ensemble_checkpoint_leak_signal_total counter
+ensemble_checkpoint_leak_signal_total 0
+# HELP checkpoint_leak_signal_total Leak-signal fires consumed from the readiness leak predicate. One increment per readiness tick the predicate reports detected=true. The consumer is FAIL-OPEN: it never affects the emitter (the grace verdict and the /readyz detail).
+# TYPE checkpoint_leak_signal_total counter
+checkpoint_leak_signal_total 0
+# HELP ensemble_checkpoint_read_size_bytes Checkpoint read payload size in bytes, labeled by op (aget, aget_tuple). Log2 buckets from 64 KiB to 8 MiB.
+# TYPE ensemble_checkpoint_read_size_bytes histogram
+# HELP checkpoint_read_size_bytes Checkpoint read payload size in bytes, labeled by op (aget, aget_tuple). Log2 buckets from 64 KiB to 8 MiB.
+# TYPE checkpoint_read_size_bytes histogram
+# HELP ensemble_checkpoint_cache_hit_total Checkpoint read-cache HITS served at the saver retry proxy (post-deserialize CheckpointTuple served from the read cache without a saver round trip). Increments only while CHECKPOINT_READ_CACHE_ENABLED is truthy; 0 in the default-OFF substrate state.
+# TYPE ensemble_checkpoint_cache_hit_total counter
+ensemble_checkpoint_cache_hit_total 0
+# HELP checkpoint_cache_hit_total Checkpoint read-cache HITS served at the saver retry proxy (post-deserialize CheckpointTuple served from the read cache without a saver round trip). Increments only while CHECKPOINT_READ_CACHE_ENABLED is truthy; 0 in the default-OFF substrate state.
+# TYPE checkpoint_cache_hit_total counter
+checkpoint_cache_hit_total 0
+# HELP ensemble_checkpoint_cache_miss_total Checkpoint read-cache MISSES at the saver retry proxy. One increment per non-bypass aget/aget_tuple read that was NOT served from the read cache — including EVERY read while CHECKPOINT_READ_CACHE_ENABLED is off (default OFF: all misses, the observable-off contract). cache_bypass=True reads (the readiness sentinel) are excluded.
+# TYPE ensemble_checkpoint_cache_miss_total counter
+ensemble_checkpoint_cache_miss_total 0
+# HELP checkpoint_cache_miss_total Checkpoint read-cache MISSES at the saver retry proxy. One increment per non-bypass aget/aget_tuple read that was NOT served from the read cache — including EVERY read while CHECKPOINT_READ_CACHE_ENABLED is off (default OFF: all misses, the observable-off contract). cache_bypass=True reads (the readiness sentinel) are excluded.
+# TYPE checkpoint_cache_miss_total counter
+checkpoint_cache_miss_total 0
+# frozen vocabulary instance_status: completed,error,failed,idle,paused,queued,running,terminated,waiting,waiting_children
+# frozen vocabulary sweep_lane: rdrs_deferred,rdrs_no_row_backstop,rdrs_pending_age,rdrs_recovery_retry,rdrs_orphan,rdrs_stuck_wake,rdrs_mission_reconciliation,watch_reconcile,eligible_pending,stale_pause,orphan_watcher,job_lock,upgrade_journal
+# frozen vocabulary mcp_roster: context7,plane,webfetch,custom,other
+# frozen vocabulary tool_category: count=57 attestation,bash,blueprint,board,board-link,chart,context,council,critical_notes,db,design,doc_maintenance,dynamic-skill,ens-db,ens-env,filesystem,help,image,image-gen,infra,instance,instance_ops,instance_read,job,knowledge,language,mcp,mcp_rpc,midflight,mission,mother,notify-user,other,plane,plane_sync,proc,project,project_history,question,rag,scheduling,secrets,self,self-alarm,service,settings,shared_meta_kv,skill-evolution,snapshot,system,system-log,system_upgrade,time,todo,view-views,view-write,wedge-capture
+# frozen vocabulary version: 1 (current-release gauge only)
+

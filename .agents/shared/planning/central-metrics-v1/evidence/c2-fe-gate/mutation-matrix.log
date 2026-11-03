@@ -1,0 +1,20 @@
+pre-run manifest: HEAD=cd06d2a0bc78 files=7
+  -> /tmp/metrics-fe-mutations/pre_run_manifest.json
+P5-M1: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+P5-M2: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+P5-M3: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+P5-M4: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+P5-M5: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+P5-M6: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+P5-M7: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+P5-M8: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+P5-M9: PASS — red_exit=2 green_exit=0 restored=True nodes=['src/app/models/metrics.model.spec.ts(193,11): error TS2322: Type \'"a_reason_the_door_has_not_defined_yet"\' is not assignable to type \'MetricsKnownAvailabilityReason\'.', 'src/app/pages/metrics/families/families-tab.component.spec.ts(97,40): error TS2322: Type \'"a_reason_the_door_has_not_defined_yet"\' is not assignable to type \'MetricsKnownAvailabilityReason | undefined\'.']
+P5-M10: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+P5-M11: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+FIX2-W6: PASS — red_exit=2 green_exit=0 restored=True nodes=["src/app/models/metrics.model.spec.ts(373,17): error TS2322: Type 'string[]' is not assignable to type 'string'.", "src/app/models/metrics.model.spec.ts(381,40): error TS2345: Argument of type 'MetricsLabels | null' is not assignable to parameter of type 'MetricsDeclaredLabels | null | undefined'.", "src/app/pages/metrics/families/families-tab.component.spec.ts(21,19): error TS2322: Type 'string[]' is not assignable to type 'string'.", "src/app/pages/metrics/families/families-tab.component.spec.ts(118,23): error TS2322: Type 'string[]' is not assignable to type 'string'."]
+FIX2-A5: PASS — red_exit=1 green_exit=0 restored=True nodes=[]
+
+POST-RUN GUARD: OK — every touched file matches its pre-run sha
+
+MUTATION MATRIX: 13/13 PASS
+summary: /tmp/metrics-fe-mutations/summary.json

@@ -1,0 +1,27 @@
+{
+  "artifact": "mcp_servers_row.json",
+  "lane": "plane-pm-issue-tools",
+  "gate": "B / Phase-5 Step 3 — registration",
+  "tree": "964778d484650f909fdb84e4e3a9484d97a1c821",
+  "observed_on": "the armed dev daemon booted FROM THE WORKTREE on port 8972 (scratch PG DB, LOCAL cluster)",
+  "row": {
+    "name": "plane",
+    "id": "db742a0d-5232-4a8a-8c48-d13fc9d94dfa",
+    "is_active": true,
+    "is_builtin": true,
+    "config_schema_version": "3",
+    "config_url": "https://mcp.ensem.dev/plane/http/api-key/mcp",
+    "config_headers": {
+      "Authorization": "<REDACTED len=49>",
+      "x-workspace-slug": "e2e"
+    }
+  },
+  "assertions": {
+    "plane_row_exists": true,
+    "workspace_slug_header_is_e2e": true,
+    "config_schema_version_is_the_bumped_value_3": true,
+    "bearer_redacted": true
+  },
+  "schema_version_note": "the E4 heal re-materialised the headers from the current env on the ALLOWED boot (P2-H: the heal is conditional on is_available())",
+  "no_secrets": true
+}

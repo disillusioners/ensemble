@@ -1,0 +1,4 @@
+SETUP OK leg=l2 self_env=dev slug=nea port=8951 role=plane_pm_smoke_l2_1793659884_14477 db=ens_smoke_l2_1793659884_7260
+  scratch=/tmp/plane-pm-smoke.l2.scratch.3FY2mT
+  fake_home=/tmp/plane-pm-smoke.l2.home.wdoFus (live install dir resolves to /tmp/plane-pm-smoke.l2.home.wdoFus/agents-ensemble — INSIDE the scratch)
+  public plane url vs armed worktree .env: MATCH

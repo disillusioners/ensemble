@@ -1,0 +1,7 @@
+=== LIVE FENCE mid-l1 (2026-11-02T22:51:12Z) ===
+state.json sha256 : b8d83f27c6c3a1d9fc9871d671a1c0842ae916bb3d30bc1ef249e4d8ead8f0cf
+current symlink   : releases/v0.28.4
+live :9797 pid    : 2065195
+demo :7979 pid    : 525852
+live livez        : {"status":"alive","uptime_seconds":6237.864858388901,"version":"0.28.4"}
+demo livez        : {"status":"alive","uptime_seconds":134868.4786143303,"version":"0.16.3"}

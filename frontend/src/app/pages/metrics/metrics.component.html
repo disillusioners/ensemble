@@ -1,0 +1,54 @@
+<div class="metrics-container">
+  <header class="metrics-header">
+    <h1>Metrics</h1>
+    <p class="metrics-subtitle">
+      Central metrics door — families, current values and trends (UTC)
+    </p>
+  </header>
+
+  @if (catalogError(); as message) {
+    <div class="metrics-banner" data-test="metrics-catalog-error">
+      <span class="metrics-banner-text">{{ message }}</span>
+      <button
+        mat-stroked-button
+        type="button"
+        (click)="loadCatalog()"
+        data-test="metrics-catalog-retry"
+      >
+        Retry
+      </button>
+    </div>
+  }
+
+  @if (catalogStale()) {
+    <span class="stale-badge" data-test="metrics-catalog-stale">STALE — last known catalog</span>
+  }
+
+  @if (catalogTruncated() && !catalogError()) {
+    <span class="metrics-truncated-hint" data-test="metrics-catalog-truncated">
+      the catalog page is bounded — more families remain on the door
+    </span>
+  }
+
+  @if (showEmptyPanel()) {
+    <section class="metrics-empty" data-test="metrics-empty-panel">
+      <h2 class="metrics-empty-title">{{ emptyCopy }}</h2>
+      <p class="metrics-empty-text">
+        The metrics door has not published a live family yet. The Families tab lists every
+        family with the reason it has no observation.
+      </p>
+    </section>
+  }
+
+  <div class="metrics-tabs-host">
+    <mat-tab-group (selectedIndexChange)="onTabChange($event)">
+      @for (section of sections; track section.id) {
+        <mat-tab [label]="section.label">
+          <ng-container
+            *ngComponentOutlet="section.component; inputs: tabInputs()[section.id]"
+          ></ng-container>
+        </mat-tab>
+      }
+    </mat-tab-group>
+  </div>
+</div>

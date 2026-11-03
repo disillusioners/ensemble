@@ -40,6 +40,15 @@ def _registry(_clean_metrics_gate, monkeypatch):
     publish on every render (the cadence provider is the pinned API),
     the F0.1 registration (once per process) and the registry's own
     series reset.
+
+    The providers are PROCESS-GLOBAL (the api lifespan wires the managed
+    keys into them), so this fixture must not LEAK the cadence-0
+    provider into the rest of the session: a later consumer that reads
+    the PUBLISHED snapshot (the trend sampler's identity-dedupe) would
+    see every unpublished change auto-published. The restore is the
+    canonical house pattern — every test leaves behind the module
+    defaults (``tests/unit/persistence/test_checkpoint_metrics_registry.py``
+    ::``_restore_providers``).
     """
     cm.set_publisher_cadence_provider(lambda: 0.0)
     ml.ensure_f0_1_registered()
@@ -48,6 +57,8 @@ def _registry(_clean_metrics_gate, monkeypatch):
     cm.reset_for_tests()
     yield
     cm.reset_for_tests()
+    cm._publisher_cadence_provider = cm._default_publisher_cadence_provider
+    cm._cardinality_cap_provider = cm._default_cardinality_cap_provider
 
 
 def _listener() -> ml.MetricsListener:

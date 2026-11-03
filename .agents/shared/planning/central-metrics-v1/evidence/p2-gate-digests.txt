@@ -1,0 +1,36 @@
+# P2-G1 gate evidence — preserved 2026-11-02 (Phase 6 close-out)
+#
+# The Stage-A P2-G1 dual-side gate's raw artefacts survive on disk and are preserved
+# here so the P2 per-leg FAILED digest is verifiable WITHOUT re-running the gate.
+# The source dir: /tmp/p2-gate-20261102T044124Z/ (copied with cp -p; mtimes preserved).
+#
+# sha256 of every preserved file:
+#   5b3efbf3c492f2d83e9c21d9b91c68ee4003c676f0f2b807d73244618569a0c3  BASE.d2.collect.txt
+#   ec7870e4517edbecd39be14a75bdc6fdffaa27dab28c5ac11ed59acfb1048947  BASE.d2.files.txt
+#   3764c6589879107ac64e7d2fba0e8e20c636cd0608dc92b36eabd895eea3e06b  BASE.d2.out
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  BASE.nodeids.txt
+#   586141f7d29289dc6d561bb2fe6c4fafac4c27afda4c65892ce3bcfd9a45aded  HEAD.d1.out
+#   950178d847bd1943ab66a55ff1e8c142089d2aefb5fe6115848e455bf84fc778  HEAD.d2.collect.txt
+#   ec7870e4517edbecd39be14a75bdc6fdffaa27dab28c5ac11ed59acfb1048947  HEAD.d2.files.txt
+#   38323e4b0012518daba87138bbf3ab1d3a92b43c44e0116d011f65d26be5458b  HEAD.d2.out
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  HEAD.nodeids.txt
+#   6a32d77d224a308c9e98b41f3f5e99640d8d9e9a5443fa23c52668458570477c  HEAD.p1.out
+#   3b2934615318d83c2f18f8842eb9416769c59aaf9ba408e67ded45027173aab6  fence.log
+#   1ee9c376a264de52a9abcaf857ed9df53b0772b077f7ba33de4f61c9d67f9c51  gate.log
+#
+# THE DIGESTS (the same two forms the P4 record uses):
+#   HEAD.d2.out    bare-id d78b09cf2549c371   grep-full d9bff11a731d8ba3
+#   BASE.d2.out    bare-id d78b09cf2549c371   grep-full d9bff11a731d8ba3
+#   -> IDENTICAL on both sides => net-new EMPTY
+#   -> and the SAME digests as the P4 D2 legs (the FAILED set is the one known base red)
+#
+# the leg results:
+#   HEAD.p1.out    21 passed in 0.38s
+#   HEAD.d2.out    1 failed, 280 passed in 8.29s
+#   BASE.d2.out    1 failed, 280 passed in 8.59s
+#
+# the D2 composition (9 files) — the P2-G1 FINDING was that the DECLARED composition
+# does not reach test_checkpoint_perf_logging.py; see the evidence pack §1.2.
+# the FENCE record (the scrubbed env carried no POSTGRES_/DATABASE_URL/PG* variable):
+#   ambient POSTGRES_DB=ensemble_prod POSTGRES_HOST=10.44.0.2 (prod-poisoned by design — the scrub is the fence)
+#   FENCE-OK (ambient): the scrubbed env carries no POSTGRES_/DATABASE_URL/PG* variable

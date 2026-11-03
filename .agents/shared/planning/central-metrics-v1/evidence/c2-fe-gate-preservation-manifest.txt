@@ -1,0 +1,67 @@
+# Fix cycle 2 — the FE gate evidence, preserved 2026-11-02 (Phase 6 close-out).
+#
+# Source: /tmp/c2-fe-gate/ (8 files, copied with cp -p; mtimes preserved).
+# Every file is byte-identical to its source (cmp) — EXCEPT the two
+# type-check logs, which were RE-CAPTURED in the closure round (their exit
+# codes are now captured INTO the artefacts); see their row below.
+#
+# The five digests the cycle-2 dispatch cited are RECOMPUTED here and all five match:
+#
+#   dual-side head cd06d2a0b  29a74f92a37c668a
+#   dual-side base 1dde26faf  e8fd5e396e0b022a
+#   dual-side base 36c46aa1a  8d1a03e0633aa67f
+#   e2e                      492dd44bda9f2625
+#   mutation matrix          cf582ac6096f447d
+#
+# The sha256 of every preserved file:
+#   e8fd5e396e0b022ac7ad494a63ac0a3a57fa923395c39417ff6dae84773cab9d  dual-side-base-1dde26faf.log
+#   8d1a03e0633aa67ff68e7e7d2353ac5a88a7acaaaf3430f3d8a39a25b3926131  dual-side-base-36c46aa1a.log
+#   29a74f92a37c668a7b8a90ca79f7a1c4e07d409e7b18ca7edf18028f10264234  dual-side-head-cd06d2a0b.log
+#   492dd44bda9f2625a8a2064c2a540e1069345b420354b03b6d0eb5b5581dd44b  e2e-metrics-gate.log
+#   cf582ac6096f447d296f2896eee4b6ab8426b717a2aa01c9878124d400e8b26e  mutation-matrix.log
+#   557027eda0b51886443e3f1cdfc74425f9f29fabad482a8d2e560a3935f8d34f  mutation-summary.json
+#   cc642451671c1065e1cb3b9225f684e1c0c8b8e7ab9da539c8916a504cfa07a1  typecheck-scoped-pack-leg4.log
+#   5e73233a4faa1753eb51ef99693ea914be49af754ebc16094ab2de5e6811d3fd  typecheck-scoped-standalone.log
+#
+# ── WHAT EACH FILE PROVES ─────────────────────────────────────────────────────
+#
+# * dual-side-head-cd06d2a0b.log / dual-side-base-1dde26faf.log /
+#   dual-side-base-36c46aa1a.log — the FE dual-side legs.
+#     head  cd06d2a0b : 2 failed · 1799 passed · 1801 total   (RESULT: FAIL, failed legs: 1)
+#     base  1dde26faf : 2 failed · 1799 passed · 1801 total   (RESULT: FAIL, failed legs: 1)
+#     base  36c46aa1a : 3 failed · 1798 passed · 1801 total   (RESULT: FAIL, failed legs: 1)
+#   The two reds on head and base-1dde are IDENTICAL (the timezone-DST pair); base-36c
+#   carries ONE EXTRA base-side red (the JobQueueIndicatorComponent Logic flake) that is
+#   ABSENT at 1dde26faf and at HEAD ⇒ net-new = EMPTY.
+#   The failing node ids on each side are recorded in the evidence pack's FE base-debt rows.
+#
+# * e2e-metrics-gate.log — the Playwright e2e (own proxy config, no daemon):
+#   "2 passed (31.2s)" — the journey (gear menu -> /metrics -> Overview -> Charts ->
+#   Families) and the deep-link.
+#
+# * mutation-matrix.log — the cycle-2 mutation matrix: 13/13 PASS
+#   (P5-M1..P5-M11 + FIX2-W6 + FIX2-A5), every leg red_exit != 0 and green_exit == 0 with
+#   restored=True, plus the "POST-RUN GUARD: OK — every touched file matches its pre-run
+#   sha". It also records the PRE-RUN MANIFEST (HEAD=cd06d2a0bc78, files=7).
+#
+# * mutation-summary.json — the machine-readable form of the same matrix:
+#   mutations=13, failures=0, total=13, with the per-leg manifest.
+#   NOTE: this OVERWRITES the earlier cycle-1 summary at /tmp/metrics-fe-mutations/
+#   summary.json, which is preserved separately as evidence/p5/summary.json (the 11-leg
+#   cycle-1 matrix). The two files are DIFFERENT matrices and are kept apart on purpose.
+#
+# * typecheck-scoped-pack-leg4.log / typecheck-scoped-standalone.log — the SCOPED
+#   type-check legs. RE-CAPTURED (closure round): the earlier captures were 0 BYTES
+#   (the vacuous-digest class — sha256("") = e3b0c442…b855), because `tsc --noEmit`
+#   prints NOTHING on success; the PASS was carried by exit codes that the logs did
+#   not contain, so an empty log was NOT the evidence of a pass.  Both logs are now
+#   re-run with the EXIT CODE CAPTURED INTO THE ARTEFACT (`TYPECHECK_EXIT=0`), plus
+#   the command, the cwd, the git_head and the tsc version.
+#     typecheck-scoped-pack-leg4.log  862 bytes
+#       cc642451671c1065e1cb3b9225f684e1c0c8b8e7ab9da539c8916a504cfa07a1
+#     typecheck-scoped-standalone.log  851 bytes
+#       5e73233a4faa1753eb51ef99693ea914be49af754ebc16094ab2de5e6811d3fd
+#   The command is the cycle-2 pack's scoped leg, run through the frontend's LOCAL
+#   devDependency (never a bare/npx tsc):
+#     cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.metrics-fe.json
+#   Both legs: TYPECHECK_EXIT=0 (tsc 5.9.3, git_head 604d85bd4).

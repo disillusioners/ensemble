@@ -1487,7 +1487,16 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/maintenancer/rule.md": "abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec",
     "agents/planner/rule.md": "4282ce61b58736026b5d2e72b7e2112925e4515bf95ffc88032104b4e4c4b6fb",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
-    "agents/project-manager/workflow.md": "bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad",
+    # agents/project-manager/workflow.md re-pinned 2026-11-02 (plane-pm-
+    # issue-tools Phase 5 A' branch, FC9 BREACH — the narrowed grant): the
+    # charter gained the explicit 28-verb keep-set vocabulary (the A' grant
+    # names the verbs literally, so the prose must name them too — an
+    # upstream rename must not be able to silently drop a verb from PM's
+    # vocabulary). Delta is EXACTLY the A'.2 vocabulary paragraph; no
+    # chart/sealed-segment semantics changed. Prior value
+    # feab3210ebc178835390d0235b0e6b74f30479331017fba1b056999e14b5aaad (the
+    # 2026-11-02 Phase-4 charter-reconciliation re-pin).
+    "agents/project-manager/workflow.md": "357263bd9ce19f2cd264717e9e8054293f89335c8c0ca5ea1ed264bbb951b0d2",
     "agents/reviewer/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
     "agents/reviewer[v2]/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
     "agents/tidier/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",

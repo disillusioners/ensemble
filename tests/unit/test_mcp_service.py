@@ -1336,7 +1336,15 @@ class TestEagerWarmAvailabilityGate:
     @pytest.mark.asyncio
     async def test_switch_on_with_config_plane_warmed(self, service, manager, monkeypatch, caplog):
         """Default switch (unset = enabled) + URL + API key ⇒ the plane
-        row IS warmed, exactly as before the gate for available servers."""
+        row IS warmed, exactly as before the gate for available servers.
+
+        BR-A remediation (lane ``plane-pm-issue-tools``): the environment
+        is pinned to LIVE so the workspace resolution permits the
+        configured slug (on a non-live environment the resolver refuses
+        every non-``e2e`` slug and the row is NOT warmed — pinned in
+        ``tests/unit/test_plane_workspace_enforcement.py``)."""
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
         monkeypatch.delenv("PLANE_MCP_ENABLED", raising=False)
         monkeypatch.setenv("PLANE_MCP_URL", "https://mcp.example.test/plane/http")
         monkeypatch.setenv("PLANE_MCP_API_KEY", "plane_api_test")

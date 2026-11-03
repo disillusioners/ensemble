@@ -1,0 +1,28 @@
+# Stage-A mutation-log provenance — preserved 2026-11-02 (Phase 6 close-out, Q1 resolution)
+#
+# The Stage-A (P1+P2) mutation logs survive on disk and are preserved here so the
+# mutation evidence is verifiable WITHOUT re-running the gate. Each log records, per
+# mutation leg: the planted form, the RED leg (RED-OK + the RED target node), and the
+# final RESTORED leg (expect GREEN across every pack).
+#
+# sha256 (of the preserved copies, byte-identical to the /tmp originals):
+f59dd12b5b22bbef3777761047688c046ae0e3f518608943da1fea7e514e835e  p1-mutations-final.log
+be0fe2e24da1ce20e254dc5c14fa1e584b6bb21e468e5e3435af370b44fd29c1  p2-mutations-final.log
+#
+# source paths + sizes + mtimes (the /tmp originals):
+# /tmp/p1-mutations-final.log  6327 bytes  mtime=2026-11-02 04:44:39.228938682 +0000
+# /tmp/p2-mutations-final.log  31205 bytes  mtime=2026-11-02 04:44:39.242939059 +0000
+#
+# the P2 leg census (16 observed = the declared 15 PLUS the explicitly-named M13b variant):
+=== P2-M1 === P2-M2 === P2-M3 === P2-M4 === P2-M5 === P2-M6 === P2-M7 === P2-M8 === P2-M9 === P2-M10 === P2-M11 === P2-M12 === P2-M13 === P2-M13b === P2-M14 === P2-M15 
+# RED-OK count: 16
+# the P1 leg census (3):
+=== P1-M1 === P1-M2 === P1-M3 
+# RED-OK count: 3
+# the RESTORED legs:
+517:=== RESTORED (expect GREEN across every P2 pack) ===
+521:156 passed in 7.11s
+522:GREEN-OK
+81:=== RESTORED (expect GREEN) ===
+83:21 passed in 0.36s
+84:GREEN-OK

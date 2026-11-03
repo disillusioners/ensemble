@@ -1,0 +1,86 @@
+=== worktrees ===
+Preparing worktree (detached HEAD 941cb6321)
+Updating files:  32% (4589/14224)Updating files:  33% (4694/14224)Updating files:  34% (4837/14224)Updating files:  35% (4979/14224)Updating files:  36% (5121/14224)Updating files:  37% (5263/14224)Updating files:  38% (5406/14224)Updating files:  39% (5548/14224)Updating files:  40% (5690/14224)Updating files:  41% (5832/14224)Updating files:  42% (5975/14224)Updating files:  43% (6117/14224)Updating files:  44% (6259/14224)Updating files:  45% (6401/14224)Updating files:  46% (6544/14224)Updating files:  47% (6686/14224)Updating files:  48% (6828/14224)Updating files:  49% (6970/14224)Updating files:  50% (7112/14224)Updating files:  51% (7255/14224)Updating files:  52% (7397/14224)Updating files:  53% (7539/14224)Updating files:  54% (7681/14224)Updating files:  55% (7824/14224)Updating files:  56% (7966/14224)Updating files:  57% (8108/14224)Updating files:  58% (8250/14224)Updating files:  59% (8393/14224)Updating files:  60% (8535/14224)Updating files:  61% (8677/14224)Updating files:  62% (8819/14224)Updating files:  63% (8962/14224)Updating files:  64% (9104/14224)Updating files:  65% (9246/14224)Updating files:  66% (9388/14224)Updating files:  67% (9531/14224)Updating files:  68% (9673/14224)Updating files:  69% (9815/14224)Updating files:  70% (9957/14224)Updating files:  71% (10100/14224)Updating files:  72% (10242/14224)Updating files:  73% (10384/14224)Updating files:  74% (10526/14224)Updating files:  75% (10668/14224)Updating files:  76% (10811/14224)Updating files:  77% (10953/14224)Updating files:  78% (11095/14224)Updating files:  79% (11237/14224)Updating files:  80% (11380/14224)Updating files:  81% (11522/14224)Updating files:  81% (11551/14224)Updating files:  82% (11664/14224)Updating files:  83% (11806/14224)Updating files:  84% (11949/14224)Updating files:  85% (12091/14224)Updating files:  86% (12233/14224)Updating files:  87% (12375/14224)Updating files:  88% (12518/14224)Updating files:  89% (12660/14224)Updating files:  90% (12802/14224)Updating files:  91% (12944/14224)Updating files:  92% (13087/14224)Updating files:  93% (13229/14224)Updating files:  94% (13371/14224)Updating files:  95% (13513/14224)Updating files:  96% (13656/14224)Updating files:  97% (13798/14224)Updating files:  98% (13940/14224)Updating files:  99% (14082/14224)Updating files: 100% (14224/14224)Updating files: 100% (14224/14224), done.
+HEAD is now at 941cb6321 merge: tester/v0285-staged-verification — staged-verification evidence sweep (wi-1fbee2ec)
+Preparing worktree (detached HEAD 2b838869c)
+Updating files:  36% (5146/14260)Updating files:  37% (5277/14260)Updating files:  38% (5419/14260)Updating files:  39% (5562/14260)Updating files:  40% (5704/14260)Updating files:  41% (5847/14260)Updating files:  42% (5990/14260)Updating files:  43% (6132/14260)Updating files:  44% (6275/14260)Updating files:  45% (6417/14260)Updating files:  46% (6560/14260)Updating files:  47% (6703/14260)Updating files:  48% (6845/14260)Updating files:  49% (6988/14260)Updating files:  50% (7130/14260)Updating files:  51% (7273/14260)Updating files:  52% (7416/14260)Updating files:  53% (7558/14260)Updating files:  54% (7701/14260)Updating files:  55% (7843/14260)Updating files:  56% (7986/14260)Updating files:  57% (8129/14260)Updating files:  58% (8271/14260)Updating files:  59% (8414/14260)Updating files:  60% (8556/14260)Updating files:  61% (8699/14260)Updating files:  62% (8842/14260)Updating files:  63% (8984/14260)Updating files:  64% (9127/14260)Updating files:  65% (9269/14260)Updating files:  66% (9412/14260)Updating files:  67% (9555/14260)Updating files:  68% (9697/14260)Updating files:  69% (9840/14260)Updating files:  70% (9982/14260)Updating files:  71% (10125/14260)Updating files:  72% (10268/14260)Updating files:  73% (10410/14260)Updating files:  74% (10553/14260)Updating files:  75% (10695/14260)Updating files:  76% (10838/14260)Updating files:  77% (10981/14260)Updating files:  78% (11123/14260)Updating files:  79% (11266/14260)Updating files:  80% (11408/14260)Updating files:  81% (11551/14260)Updating files:  81% (11569/14260)Updating files:  82% (11694/14260)Updating files:  83% (11836/14260)Updating files:  84% (11979/14260)Updating files:  85% (12121/14260)Updating files:  86% (12264/14260)Updating files:  87% (12407/14260)Updating files:  88% (12549/14260)Updating files:  89% (12692/14260)Updating files:  90% (12834/14260)Updating files:  91% (12977/14260)Updating files:  92% (13120/14260)Updating files:  93% (13262/14260)Updating files:  94% (13405/14260)Updating files:  95% (13547/14260)Updating files:  96% (13690/14260)Updating files:  97% (13833/14260)Updating files:  98% (13975/14260)Updating files:  99% (14118/14260)Updating files: 100% (14260/14260)Updating files: 100% (14260/14260), done.
+HEAD is now at 2b838869c test(metrics): re-point the two stale saver-op assertions at the narrowed enum
+/home/nea/ensemble-src                                013895287 [latest]
+/home/nea/ens-src-wt-snapshotfix                      1090f308f (detached HEAD)
+/home/nea/ensemble-src-wt-central-metrics-v1          2b838869c [feature/central-metrics-v1]
+/home/nea/ensemble-src-wt-central-metrics-v1-base     941cb6321 (detached HEAD)
+/home/nea/ensemble-src-wt-central-metrics-v1-head     2b838869c (detached HEAD)
+/home/nea/ensemble-src-wt-close-v0280                 cbafcc8d9 [merge/close-v0280]
+/home/nea/ensemble-src-wt-durability                  1e5c80fb7 [feature/durability-f1-f2]
+/home/nea/ensemble-src-wt-eventloop-packs-c836334e87  836334e87 (detached HEAD)
+/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths  0bbb5764c [fix/eventloop-sync-db-hotpaths]
+/home/nea/ensemble-src-wt-evloop-fence-f4fa4cc8b      f4fa4cc8b (detached HEAD)
+/home/nea/ensemble-src-wt-evloop-fence2               09ce9d369 (detached HEAD)
+/home/nea/ensemble-src-wt-evloop-packs-c836334e87     836334e87 (detached HEAD)
+/home/nea/ensemble-src-wt-evloop-packs-f4fa4cc8b      f4fa4cc8b (detached HEAD)
+/home/nea/ensemble-src-wt-gate-base                   b1183a637 (detached HEAD)
+/home/nea/ensemble-src-wt-gate-head                   f636756aa (detached HEAD)
+/home/nea/ensemble-src-wt-gate-head2                  c9eac9747 (detached HEAD)
+/home/nea/ensemble-src-wt-hidenonroot                 5f6d524a1 [feature/hide-question-tool-nonroot]
+/home/nea/ensemble-src-wt-merge-v0281                 a43eab8de [merge/v0281]
+/home/nea/ensemble-src-wt-missed-finalize             823d2ede2 [fix/missed-finalize-zombie-active]
+/home/nea/ensemble-src-wt-plane-pm                    941cb6321 [feature/plane-pm-issue-tools]
+/home/nea/ensemble-src-wt-preflight-hang              22fe83317 (detached HEAD)
+/home/nea/ensemble-src-wt-promote-handback-halt       941cb6321 [fix/promote-handback-halt]
+/home/nea/ensemble-src-wt-qprasym                     fa0f718d2 (detached HEAD)
+/home/nea/ensemble-src-wt-restart-livelock            4be66e44c [fix/restart-arm-livelock]
+/home/nea/ensemble-src-wt-scripts-pin                 22fe83317 (detached HEAD)
+/home/nea/ensemble-src-wt-soak-adj                    0f2d854af (detached HEAD)
+/home/nea/ensemble-src-wt-soak-base                   d5a4e4ad9 (detached HEAD)
+/home/nea/ensemble-src-wt-soak-gate                   05a48f2b8 [feature/soak-gate-mcp-warmup]
+/home/nea/ensemble-src-wt-stage-v02712                9bbef71c1 (detached HEAD)
+/home/nea/ensemble-src-wt-stage-v02713                b1183a637 (detached HEAD)
+/home/nea/ensemble-src-wt-stage-v02714                e48685a74 (detached HEAD)
+/home/nea/ensemble-src-wt-stage-v02715                2f0c613a5 (detached HEAD)
+/home/nea/ensemble-src-wt-stage-v0280                 3e8454052 (detached HEAD)
+/home/nea/ensemble-src-wt-stage-v0282                 0db6e8b67 (detached HEAD)
+/home/nea/ensemble-src-wt-stage-v0283                 a84af3ce1 (detached HEAD)
+/home/nea/ensemble-src-wt-stage-v0284                 62627265f (detached HEAD)
+/home/nea/ensemble-src-wt-stage-v0285                 600057a83 (detached HEAD)
+/home/nea/ensemble-src-wt-trs-a-base                  61574cc8e (detached HEAD)
+/home/nea/ensemble-src-wt-trs-a-head                  c2484bc16 (detached HEAD)
+/home/nea/ensemble-src-wt-trs-b                       c2484bc16 (detached HEAD)
+/home/nea/ensemble-src-wt-trs-base                    61574cc8e (detached HEAD)
+/home/nea/ensemble-src-wt-v0280-sv                    47e7edf48 [tester/v0280-staged-verification]
+/home/nea/ensemble-src-wt-v0283-evidence              b526f0d87 [tester/v0283-staged-verification]
+/home/nea/ensemble-src-wt-wedge-capture               406697a0d [feature/wedge-capture-watchdog]
+=== fence (the scrubbed env) ===
+=== slicing proof: BASE (D2) ===
+BASE D2 collected: 281 tests collected in 0.90s
+BASE D2 files: 9
+=== slicing proof: HEAD (D2) ===
+HEAD D2 collected: 281 tests collected in 0.96s
+HEAD D2 files: 9
+SLICING-OK: the D2 node set is identical on both legs
+=== D2 leg: BASE ===
+BASE rc=1
+=========================== short test summary info ============================
+FAILED tests/unit/persistence/test_checkpoint_metrics_vocabulary.py::TestSweepLaneVocabulary::test_rdrs_lanes_come_from_the_config_kill_switchs
+1 failed, 280 passed in 8.59s
+BASE digest (BARE-ID): d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  nodes=1
+BASE skipped: 
+=== D2 leg: HEAD ===
+HEAD rc=1
+=========================== short test summary info ============================
+FAILED tests/unit/persistence/test_checkpoint_metrics_vocabulary.py::TestSweepLaneVocabulary::test_rdrs_lanes_come_from_the_config_kill_switchs
+1 failed, 280 passed in 8.29s
+HEAD digest (BARE-ID): d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  nodes=1
+HEAD skipped: 
+DIGEST-EQUAL: the FAILED sets are byte-identical (net-new = EMPTY)
+=== D1 leg: HEAD (the five lane-owned P2 packs) ===
+D1 rc=0
+........................................................................ [ 52%]
+.................................................................        [100%]
+137 passed in 7.26s
+D1-PASS
+=== P1-G1 leg: the changed-pack (Tier 0) ===
+P1-G1 rc=0
+.....................                                                    [100%]
+21 passed in 0.38s
+P1-G1-PASS
+worktrees left for central-metrics-v1: 1

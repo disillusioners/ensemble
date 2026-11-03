@@ -828,7 +828,8 @@ class LimitsConfig(BaseSettings):
         le=60,
         description=(
             "/proc-style sampler cadence (seconds) for the host-side "
-            "samplers. Boot-applied. Env LIMITS_METRICS_SAMPLER_INTERVAL_S."
+            "samplers AND the in-RAM trend-history sampler. Boot-applied. "
+            "Env LIMITS_METRICS_SAMPLER_INTERVAL_S."
         ),
     )
     metrics_textfile_dir: str = Field(

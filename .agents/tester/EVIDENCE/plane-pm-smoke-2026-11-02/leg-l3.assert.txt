@@ -1,0 +1,35 @@
+=== LEG l3  self_env=dev slug_mode=unset port=8951 db=ens_smoke_l3_1793660010_6717 ===
+port 8951 bound: LISTEN 0 2048 127.0.0.1:8951 0.0.0.0:* users:(("python",pid=2248277,fd=24)) 
+livez http=200
+readyz http=200
+livez:  {"status":"alive","uptime_seconds":48.15106558799744,"version":"0.28.5"}
+readyz: status=ready components={'database': True, 'queue_freshness': True, 'services': True, 'checkpoint_saver': True} reasons=[]
+mcp-servers http=200
+DB plane row: 
+DB plane row count: 0
+scratch ensemble.json: {
+  "database": "postgres",
+  "postgres": {
+    "host": "localhost",
+    "port": 5432,
+    "db": "ensemble",
+    "user": "ensemble",
+    "password": ""
+  },
+  "sqlite": {
+    "instances_db": "./data/instances.db",
+    "checkpoints_db": "./data/checkpoints.db"
+  }
+}
+--- boot log: plane / builtin / workspace lines ---
+    73:22:53:57 - daemon.repositories.mcp_server.repository - INFO - Created MCP server: id=15bab01c-bf6f-468f-bfd2-d2f4b48d1ef1, name=webfetch
+    74:22:53:57 - daemon.manager - INFO - Created built-in MCP server: webfetch
+    76:22:53:57 - daemon.mcp.builtin_servers.plane - INFO - Plane workspace resolution: env=dev source=explicit-marker slug=(account-default)
+    78:22:53:58 - daemon.manager - WARNING - Builtin 'plane' skipped — workspace refused (POLICY): PLANE_MCP_WORKSPACE_SLUG is unset in a non-production environment; expected 'e2e'; agents with mcp_full_access=['plane']: project-manager
+--- vacuity tripwire ---
+  env-name census (names only): 24 names
+  PRESENT: PLANE_MCP_URL
+  PRESENT: PLANE_MCP_API_KEY
+  ABSENT: PLANE_MCP_WORKSPACE_SLUG (by design for the unset leg)
+  TRIPWIRE CLEAR: no missing-credential skip reason in the log
+=== END LEG l3 ===

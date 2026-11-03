@@ -1,0 +1,234 @@
+[
+  {
+    "label": "P4-M1",
+    "description": "an OUT metric is registered (F11's claim latency)",
+    "path": "daemon/services/metrics_query/wiring/w2.py",
+    "node": "tests/unit/metrics/test_metrics_family_adjudication.py::TestOutMetricAbsence",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "WARNING  daemon.checkpoint_metrics:checkpoint_metrics.py:1756 Deprecated metric name checkpoint_read_measurement_errors_total is an alias of ensemble_checkpoint_read_measurement_errors_total; migrate to the canonical name (the alias is removed one release after the deprecation window).",
+      "2 failed, 2 passed, 1 warning in 0.55s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "4 passed, 1 warning in 0.35s"
+    ]
+  },
+  {
+    "label": "P4-M2",
+    "description": "a producer module grows an edit (a new increment at a producer site)",
+    "path": "daemon/services/wedge_capture/triggers.py",
+    "node": "tests/unit/metrics/test_metrics_family_adjudication.py::TestNoProducerInstrumentation",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E           AssertionError: daemon/services/wedge_capture/triggers.py",
+      "tests/unit/metrics/test_metrics_family_adjudication.py:198: AssertionError",
+      "1 failed, 1 passed, 1 warning in 0.46s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "2 passed, 1 warning in 0.55s"
+    ]
+  },
+  {
+    "label": "P4-M3",
+    "description": "the F12 accumulation is removed (the per-tick value is published raw)",
+    "path": "daemon/services/metrics_query/wiring/w2.py",
+    "node": "tests/unit/metrics/test_metrics_family_w2.py::TestF12Sweeps",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E       AssertionError: assert 3 == 0.0",
+      "tests/unit/metrics/test_metrics_family_w2.py:305: AssertionError",
+      "1 failed, 2 passed, 1 warning in 0.42s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "3 passed, 1 warning in 0.56s"
+    ]
+  },
+  {
+    "label": "P4-M4",
+    "description": "F4's native and F5's derived quantities are collapsed into one family",
+    "path": "daemon/services/metrics_query/wiring/w1.py",
+    "node": "tests/unit/metrics/test_metrics_family_w1.py::TestF4F5Pools",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E       AssertionError: assert 'F4' == 'F5'",
+      "tests/unit/metrics/test_metrics_family_w1.py:313: AssertionError",
+      "1 failed, 2 passed, 1 warning in 0.45s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "3 passed, 1 warning in 0.33s"
+    ]
+  },
+  {
+    "label": "P4-M5",
+    "description": "F6 renders on a non-postgres runtime (a fabricated census)",
+    "path": "daemon/services/metrics_query/wiring/w1.py",
+    "node": "tests/unit/metrics/test_metrics_family_w1.py::TestF6Census",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E       AssertionError: assert [(('state', '...bled'),), ...] == []",
+      "tests/unit/metrics/test_metrics_family_w1.py:402: AssertionError",
+      "1 failed, 1 passed, 1 warning in 0.41s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "2 passed, 1 warning in 0.33s"
+    ]
+  },
+  {
+    "label": "P4-M6",
+    "description": "the F18 timeout outcome is folded into error",
+    "path": "daemon/services/metrics_query/wiring/w3.py",
+    "node": "tests/unit/metrics/test_metrics_family_w3.py::TestF18Gateway",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "tests/unit/metrics/test_metrics_family_w3.py:170: AssertionError",
+      "FAILED tests/unit/metrics/test_metrics_family_w3.py::TestF18Gateway::test_the_timeout_outcome_is_never_folded_into_error",
+      "1 failed, 3 passed, 1 warning in 0.41s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "4 passed, 1 warning in 0.33s"
+    ]
+  },
+  {
+    "label": "P4-M7",
+    "description": "the F21 phase families are registered",
+    "path": "daemon/services/metrics_query/wiring/w3.py",
+    "node": "tests/unit/metrics/test_metrics_family_w3.py::TestF21Journal",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E       AssertionError: assert 'ensemble_upgrade_phase_seconds' not in {'ensemble_checkpoint_blobs_table_bytes', 'ensemble_checkpoint_cache_hit_total', 'ensemble_checkpoint_cache_miss_total', 'ensemble_checkpoint_leak_signal_total', 'ensemble_checkpoint_list_total', 'ensemble_checkpoint_op_bytes', ...}",
+      "tests/unit/metrics/test_metrics_family_w3.py:190: AssertionError",
+      "1 failed, 3 passed, 1 warning in 0.76s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "4 passed, 1 warning in 0.67s"
+    ]
+  },
+  {
+    "label": "P4-M8",
+    "description": "the F7 bytes call site is reverted to 0",
+    "path": "daemon/persistence.py",
+    "node": "tests/unit/metrics/test_metrics_family_w2.py::TestF7Completion",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "tests/unit/metrics/test_metrics_family_w2.py:189: AssertionError",
+      "1 failed, 2 passed, 1 warning in 0.45s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "3 passed, 1 warning in 0.33s"
+    ]
+  },
+  {
+    "label": "P4-M9",
+    "description": "a label key is registered without allowed_values",
+    "path": "daemon/services/metrics_query/wiring/w1.py",
+    "node": "tests/unit/metrics/test_metrics_family_adjudication.py::TestRegistrationStructure",
+    "mutated_rc": 4,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E   ValueError: AM-2: metric 'ensemble_loop_lag_seconds' declares label keys ['stat'] without an allowed_values set \u2014 a key without one is char-checked only and can reach the per-metric cap with raw values.",
+      "ERROR tests/unit/metrics/test_metrics_family_adjudication.py - ValueError: AM...",
+      "1 warning, 1 error in 0.42s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "4 passed, 1 warning in 0.33s"
+    ]
+  },
+  {
+    "label": "P4-M10",
+    "description": "a family is registered without its metadata kwargs",
+    "path": "daemon/services/metrics_query/wiring/w1.py",
+    "node": "tests/unit/metrics/test_metrics_family_adjudication.py::TestRegistrationStructure",
+    "mutated_rc": 4,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E   TypeError: register_family_metric() missing 1 required keyword-only argument: 'source_idiom'",
+      "ERROR tests/unit/metrics/test_metrics_family_adjudication.py - TypeError: reg...",
+      "1 warning, 1 error in 0.41s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "4 passed, 1 warning in 0.34s"
+    ]
+  },
+  {
+    "label": "P4-M11",
+    "description": "a persistent per-adapter DB connection is introduced",
+    "path": "daemon/services/metrics_query/wiring/db.py",
+    "node": "tests/unit/metrics/test_metrics_family_adjudication.py::TestDbPullDiscipline",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E       NameError: name '_PERSISTENT' is not defined",
+      "daemon/services/metrics_query/wiring/db.py:84: NameError",
+      "2 failed, 1 passed, 1 warning in 0.48s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "3 passed, 1 warning in 0.34s"
+    ]
+  },
+  {
+    "label": "P4-M12",
+    "description": "F2 is registered (the value-ruling drop is inverted)",
+    "path": "daemon/services/metrics_query/wiring/w1.py",
+    "node": "tests/unit/metrics/test_metrics_family_adjudication.py::TestOutMetricAbsence",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E       AssertionError: assert 'F2' not in {'F0.3': FamilySpec(family='F0.3', cluster='W1', verdict='IN', seam='daemon/services/resource_monitor/flusher.py:161 +...ble_worker_pool_events_total', 'ensemble_task_heartbeat_age_seconds', 'ensemble_task_heartbeat_cadence_seconds')), ...}",
+      "tests/unit/metrics/test_metrics_family_adjudication.py:119: AssertionError",
+      "3 failed, 1 passed, 1 warning in 0.44s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "4 passed, 1 warning in 0.35s"
+    ]
+  },
+  {
+    "label": "P4-M13",
+    "description": "the WS-A ancestry check is inverted (rc=1 treated as a PASS)",
+    "path": "daemon/services/metrics_query/wiring/ws_a.py",
+    "node": "tests/unit/metrics/test_metrics_family_adjudication.py::TestWsAAncestryVerdict",
+    "mutated_rc": 1,
+    "mutated_red": true,
+    "mutated_summary": [
+      "E       AssertionError: assert 'PASS' == 'DEFER'",
+      "tests/unit/metrics/test_metrics_family_adjudication.py:326: AssertionError",
+      "1 failed, 3 passed, 1 warning in 0.42s"
+    ],
+    "green_rc": 0,
+    "green": true,
+    "green_summary": [
+      "4 passed, 1 warning in 0.35s"
+    ]
+  }
+]

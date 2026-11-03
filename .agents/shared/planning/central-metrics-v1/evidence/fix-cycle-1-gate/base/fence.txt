@@ -1,0 +1,6 @@
+FAKE_HOME=/tmp/gate-home-NWI3Ca
+WT=/home/nea/ensemble-src-wt-central-metrics-v1
+git_head=bfc3a233ad0fe5454ef8e410bd1416bf0eb3682c
+porcelain_before=0
+collect_rc=0
+porcelain_after=0

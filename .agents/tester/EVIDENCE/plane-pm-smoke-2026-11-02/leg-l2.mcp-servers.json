@@ -1,0 +1,68 @@
+{
+ "mcp_servers": [
+  {
+   "id": "2e16e776-2dc3-42c6-9b88-70b2e73f5fbb",
+   "name": "webfetch",
+   "description": "Fetch and read web page content. Allows agents to access web URLs and retrieve readable page content.",
+   "config": {
+    "args": [
+     "mcp-server-fetch",
+     "--user-agent",
+     "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)"
+    ],
+    "command": "uvx",
+    "transport": "stdio"
+   },
+   "is_active": true,
+   "is_builtin": true,
+   "config_schema": [
+    {
+     "key": "user_agent",
+     "label": "User Agent",
+     "type": "text",
+     "description": "Custom User-Agent string for HTTP requests",
+     "default": "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)",
+     "required": false,
+     "options": null,
+     "min": null,
+     "max": null,
+     "section": "args",
+     "arg_format": "key_value"
+    },
+    {
+     "key": "ignore_robots_txt",
+     "label": "Ignore robots.txt",
+     "type": "boolean",
+     "description": "Bypass robots.txt restrictions when fetching pages",
+     "default": false,
+     "required": false,
+     "options": null,
+     "min": null,
+     "max": null,
+     "section": "args",
+     "arg_format": "flag"
+    },
+    {
+     "key": "proxy_url",
+     "label": "Proxy URL",
+     "type": "text",
+     "description": "HTTP proxy URL (must start with http:// or https://)",
+     "default": null,
+     "required": false,
+     "options": null,
+     "min": null,
+     "max": null,
+     "section": "args",
+     "arg_format": "key_value"
+    }
+   ],
+   "config_schema_version": "2",
+   "initial_values": {
+    "user_agent": "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)"
+   },
+   "created_at": "2026-11-02T22:51:48.235209Z",
+   "updated_at": null,
+   "health_state": "degraded"
+  }
+ ]
+}

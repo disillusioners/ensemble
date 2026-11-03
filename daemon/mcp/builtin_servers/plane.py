@@ -33,8 +33,9 @@ Plane opts into the hybrid resilience layer via ``resilience_config``:
 - **Retry** — transient failures (5xx, timeouts, connection resets) get
   retried with exponential backoff (1s/2s/4s + jitter, max 3 attempts).
   Auth and tool errors propagate immediately.
-- **Result caching** — read tools (``list_*``, ``get_*``, ``search_*``)
-  cache results for 5 min (avoids hammering Plane on repeated lookups).
+- **Result caching** — read tools (``list_*``, ``get_*``, ``search_*``,
+  ``retrieve_*``, ``count_*``, ``read_*``) cache results for 5 min
+  (avoids hammering Plane on repeated lookups).
 - **Circuit breaker** — 5 consecutive failures opens the circuit for 60s
   before the next call probes recovery (5s timeout on the probe).
 - **Graceful degradation** — when the circuit is OPEN or all retries
@@ -61,8 +62,18 @@ import logging
 import os
 from typing import Any
 
-from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
+from daemon.mcp.builtin_servers.base import (
+    CAUSE_AVAILABLE,
+    CAUSE_DELIBERATELY_DISABLED,
+    CAUSE_UNAVAILABLE,
+    CAUSE_WORKSPACE_REFUSED,
+    BuiltinServerDefinition,
+)
 from daemon.mcp.config import _sanitize_quoted_url, _strip_wrapping_quotes
+from daemon.plane_workspace import (
+    PlaneWorkspaceResolution,
+    current_plane_workspace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,33 +137,52 @@ class PlaneServerDefinition(BuiltinServerDefinition):
 
     @property
     def schema_version(self) -> str:
-        """Bumped 1 → 2 (2026-09-20): the quote-leak sanitization.
+        """Bumped 1 → 2 (2026-09-20) → **3** (2026-11-02): workspace scoping.
 
-        The live ``mcp_servers`` row carries literal ``"`` characters in
+        **1 → 2** (2026-09-20): the quote-leak sanitization. The live
+        ``mcp_servers`` row carried literal ``"`` characters in
         ``url`` / ``headers`` (persisted 2026-08-13 by a quote-leaking
-        env loader). This bump makes the next bootstrap that runs with
+        env loader). This bump made the next bootstrap that runs with
         the env available rebuild the config from sanitized defaults via
         the existing schema-drift refresh in
         ``InstanceManager._bootstrap_builtin_servers``. Boots WITHOUT
         the env skip plane entirely — those keep being healed at
         session-creation time by the config validators instead.
+
+        **2 → 3** (2026-11-02, ``plane-pm-issue-tools`` E4): workspace
+        scoping. ``get_base_config`` now emits the **resolver's**
+        effective slug (``daemon/plane_workspace.py``) rather than the raw
+        ``PLANE_MCP_WORKSPACE_SLUG`` env value, so a persisted row whose
+        ``headers['x-workspace-slug']`` predates the env-scoping contract
+        has to be re-materialised once. The heal
+        (``_heal_config_preserving_env``) rebuilds ``headers`` from the
+        template (i.e. the current env) while PRESERVING the operator's
+        ``config.env`` axis, so the operator-set env keys and the KMS
+        markers survive the bump.
+
+        The heal runs only on a boot where ``is_available()`` is True (a
+        workspace refusal defers it) — see the heal-conditionality gate in
+        ``InstanceManager._bootstrap_builtin_servers``.
         """
-        return "2"
+        return "3"
 
     @property
     def tool_name_prefix(self) -> str:
         """Override the tool name prefix to drop the standard ``mcp_``.
 
         With this override, Plane's tools are exposed as
-        ``plane_list_issues``, ``plane_create_issue``, etc. instead
-        of ``mcp_plane_list_issues`` — the ``is_mcp_tool()`` check
-        no longer matches them, so they bypass any
-        ``tools.deny: ["mcp"]`` filter and feel native to the
-        project-manager agent.
+        ``plane_list_work_items``, ``plane_create_work_item``, etc.
+        instead of ``mcp_plane_list_work_items`` — the
+        ``is_mcp_tool()`` check no longer matches them, so they
+        bypass any ``tools.deny: ["mcp"]`` filter and feel native to
+        the project-manager agent. (Plane's entity is the *work
+        item*: the upstream 177-verb catalog exposes no ``*_issue``
+        verbs — work-item CRUD, comments, cycles and assignee
+        management are all ``*_work_item`` / ``*_cycle`` verbs.)
 
         The dispatch to the MCP server is unaffected: the lazy
         coroutine in ``create_lazy_mcp_tools`` closes over the
-        ORIGINAL ``original_tool_name`` (e.g. ``list_issues``) and
+        ORIGINAL ``original_tool_name`` (e.g. ``list_work_items``) and
         calls ``session.call_tool(original_tool_name, kwargs)`` —
         only the EXPOSED ``StructuredTool.name`` changes.
         """
@@ -239,25 +269,113 @@ class PlaneServerDefinition(BuiltinServerDefinition):
             # 5 min — avoids hitting Plane API on every tool call when
             # the agent polls the same view repeatedly within a turn.
             stale_threshold=300.0,
+            # P2-K (plane-pm-issue-tools, 2026-11-02): the read/write
+            # patterns are reconciled against the ACTUAL captured catalog
+            # (177 verbs, gate (i) 2026-11-02). The pre-reconciliation set
+            # was written against a vocabulary that does not exist: `add_`,
+            # `edit_` and `assign_` matched ZERO catalog verbs, while 47
+            # verbs (`retrieve_`23 + `count_`1 + `read_`1 + 22 write
+            # families) matched NEITHER tuple — and `is_read_tool` returns
+            # False for an unclassified verb, so the CR-3 strip silently
+            # dropped them from every non-full-access agent (risk R18).
+            #
+            # Read verbs (73): list_ 36, get_ 11, search_ 1, retrieve_ 23,
+            # count_ 1, read_ 1 (`read_work_item_attachment`).
             read_tool_patterns=(
                 "list_",
                 "get_",
                 "search_",
+                "retrieve_",
+                "count_",
+                "read_",
             ),
-            # ``set_`` and ``edit_`` are Plane-specific verb variants
-            # (e.g. ``plane_set_issue_priority``). ``assign_`` covers
-            # the assignee-update tools.
+            # Write verbs (104): create_ 26, update_ 27, delete_ 26,
+            # remove_ 1, set_ 2, manage_ 14 (the real assignee verb is
+            # `manage_work_item_assignee`), transfer_ / complete_ / link_ /
+            # import_ / attach_ / detach_ / upload_ / resolve_ ×1 each.
+            #
+            # `set_` and `remove_` are LIVE patterns (`set_work_item_property_value`,
+            # `set_customer_property_values`, `remove_work_item_relation`) and
+            # are kept deliberately. Write-first precedence in `is_read_tool`
+            # means a verb that matched both tuples stays a write.
             write_tool_patterns=(
                 "create_",
                 "update_",
                 "delete_",
-                "add_",
                 "remove_",
                 "set_",
-                "edit_",
-                "assign_",
+                "manage_",
+                "transfer_",
+                "complete_",
+                "link_",
+                "import_",
+                "attach_",
+                "detach_",
+                "upload_",
+                "resolve_",
             ),
         )
+
+    @classmethod
+    def _env_presence(cls) -> tuple[str, str]:
+        """The sanitized ``(url, api_key)`` pair — PRESENCE only.
+
+        Both env reads pass through the quote-leak sanitizers
+        (``_sanitize_quoted_url`` / ``_strip_wrapping_quotes``) so a
+        shell loader's leftover quote characters never read as a
+        configured value. The values are NEVER logged here — only
+        their presence is.
+        """
+        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
+        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
+        return url, api_key
+
+    @classmethod
+    def _gate_state(
+        cls,
+    ) -> tuple[str, str | None, PlaneWorkspaceResolution | None]:
+        """THE availability ladder — the ONE home for the gate order.
+
+        Returns ``(cause, reason, resolution)``:
+
+        * ``cause`` — one of the fixed cause vocabulary (see
+          :meth:`unavailability_cause`);
+        * ``reason`` — the typed reason string (the manager's skip
+          WARNING interpolates it VERBATIM), or ``None`` when the
+          server is up;
+        * ``resolution`` — the workspace resolution, or ``None`` when
+          the ladder short-circuited BEFORE the policy consult.
+
+        Gate order (the outermost gate first): quarantine/package →
+        kill-switch (deliberate) → missing env vars (unexpected) →
+        workspace refusal (policy).
+
+        The ladder NEVER logs — ``is_available`` owns the two one-shot
+        notices (the kill-switch notice and the envelope notice).
+        """
+        if not super().is_available():
+            return (
+                CAUSE_UNAVAILABLE,
+                "unavailable (quarantined for this boot or package missing)",
+                None,
+            )
+        if not _mcp_kill_switch_enabled():
+            return (
+                CAUSE_DELIBERATELY_DISABLED,
+                "deliberately disabled by kill-switch (PLANE_MCP_ENABLED=false)",
+                None,
+            )
+        url, api_key = cls._env_presence()
+        if not (url and api_key):
+            return (CAUSE_UNAVAILABLE, "missing environment configuration", None)
+        resolution = current_plane_workspace()
+        if not resolution.allowed:
+            return (
+                CAUSE_WORKSPACE_REFUSED,
+                resolution.reason or "workspace resolution refused",
+                resolution,
+            )
+        return (CAUSE_AVAILABLE, None, resolution)
 
     @classmethod
     def is_available(cls) -> bool:
@@ -285,17 +403,35 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         This override bypassed ``super().is_available()`` entirely, so a
         quarantined plane would NOT have been skipped (the W-5
         quarantine hole). The ``super()`` call is therefore the FIRST
-        statement: the base class consults the quarantine registry (and
-        the ``required_package`` check) before the plane-specific gates.
+        gate of the shared ladder (:meth:`_gate_state`): the base class
+        consults the quarantine registry (and the ``required_package``
+        check) before the plane-specific gates.
+
+        E3 (plane-pm-issue-tools, 2026-11-02) — the WORKSPACE gate. After
+        the three pre-existing gates pass, the workspace resolution
+        (``daemon.plane_workspace``) must permit the configured slug. A
+        refused resolution ⇒ ``False`` ⇒ **no row, no tools** — the
+        existing skip machinery applies (Phase 3 makes that skip loud and
+        typed). This single classmethod is the anchor for the whole gate
+        chain: the bootstrap skip, the warmup, the schema warm, and the
+        preload gate all consult it, so a refusal closes all four.
+
+        Live is NEVER refused (ADJ-1 live-exempt: any configured slug is
+        permitted on live, and an unset slug keeps the account-default
+        behavior — byte-identical to the pre-lane daemon).
         """
-        if not super().is_available():
-            return False
-        if not _mcp_kill_switch_enabled():
+        cause, _reason, resolution = cls._gate_state()
+        # The kill-switch notice fires ONLY in the kill-switch branch.
+        if cause == CAUSE_DELIBERATELY_DISABLED:
             cls._log_kill_switch_once()
-            return False
-        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
-        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
-        return bool(url) and bool(api_key)
+        # R-2 (P3-A): the ONE-SHOT envelope notice — label + source +
+        # effective slug, NEVER the reason (the skip WARNING owns that).
+        # It fires only when the ladder REACHED the policy consult
+        # (a resolution exists) — for BOTH the permitted and the
+        # refused outcome, and for neither short-circuit.
+        if resolution is not None:
+            cls._log_envelope_notice_once(resolution)
+        return cause == CAUSE_AVAILABLE
 
     @classmethod
     def _log_kill_switch_once(cls) -> None:
@@ -322,7 +458,80 @@ class PlaneServerDefinition(BuiltinServerDefinition):
             "(PLANE_MCP_ENABLED=false) — builtin skipped at registration"
         )
 
-    def get_base_config(self) -> dict[str, Any]:
+    # One-shot flag for the R-2 envelope notice (see
+    # ``_log_envelope_notice_once``).
+    _envelope_notice_emitted: bool = False
+
+    @classmethod
+    def _log_envelope_notice_once(
+        cls, resolution: PlaneWorkspaceResolution
+    ) -> None:
+        """R-2 (P3-A): ONE process-wide envelope notice — label + source +
+        effective slug. NEVER the reason.
+
+        ``is_available()`` is consulted from five sites (bootstrap skip,
+        warmup, schema warm, preload gate, the REST-adjacent sync lane),
+        so any per-call logging would spam five renderings of the same
+        fact. The envelope names the resolution INPUTS (what the operator
+        can go fix); the typed refusal reason belongs to the manager's
+        skip WARNING (R-3, the only reason interpolator) — interpolating
+        it here would create a second, divergent rendering.
+        """
+        if cls._envelope_notice_emitted:
+            return
+        cls._envelope_notice_emitted = True
+        logger.info(
+            "Plane workspace resolution: env=%s source=%s slug=%s",
+            resolution.env_label or "unclassified",
+            resolution.env_source,
+            resolution.slug or "(account-default)",
+        )
+
+    # ── Layer 1 observability (Phase 3, W-7): say WHY ───────────────────
+
+    @classmethod
+    def unavailable_reason(cls) -> str | None:
+        """The typed unavailability reason, or ``None`` when up.
+
+        The precedence is owned by the shared ladder
+        (:meth:`_gate_state`): quarantine/package → kill-switch
+        (deliberate) → missing env vars (unexpected) → workspace refusal
+        (policy). The manager's skip WARNING interpolates the returned
+        string VERBATIM.
+        """
+        return cls._gate_state()[1]
+
+    @classmethod
+    def missing_env_vars(cls) -> list[str]:
+        """The NAMES of the missing env vars (never values).
+
+        DELIBERATELY INDEPENDENT of the ladder: the names are reported
+        even when the kill-switch is off (the operator still wants to
+        know which vars are unset), so this must NOT be derived from a
+        ladder that short-circuits at the kill-switch.
+        """
+        missing: list[str] = []
+        url, api_key = cls._env_presence()
+        if not url:
+            missing.append("PLANE_MCP_URL")
+        if not api_key:
+            missing.append("PLANE_MCP_API_KEY")
+        return missing
+
+    @classmethod
+    def unavailability_cause(cls) -> str:
+        """One of the fixed cause vocabulary — see the base docstring.
+
+        The precedence is owned by the shared ladder
+        (:meth:`_gate_state`) — this method no longer re-derives it.
+        """
+        return cls._gate_state()[0]
+
+    def get_base_config(
+        self,
+        *,
+        resolution: PlaneWorkspaceResolution | None = None,
+    ) -> dict[str, Any]:
         """Return base configuration for the Plane streamable-http MCP.
 
         Reads all three env vars lazily at call time so the daemon
@@ -338,12 +547,26 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         2026-08-13 and stranded every plane session at
         ``McpError: Connection closed`` until the config-layer
         sanitization landed (tests/unit/test_mcp_quote_sanitization.py).
+
+        E3 (``plane-pm-issue-tools``, 2026-11-02) — the emitted
+        ``x-workspace-slug`` is the **resolver's** effective slug, never
+        the raw env value: one canonical normalization (trim + strip one
+        outer quote pair) shared with the REST lane, and the non-live
+        ``e2e`` substitution. On live an unset slug still means the
+        account-default workspace (``""`` — byte-identical to the
+        pre-lane daemon).
+
+        Args:
+            resolution: An already-computed resolution to thread through
+                (P2-M resolve-once). ``None`` uses the memoized
+                process-wide resolution — which is the SAME object
+                ``is_available()`` returned microseconds earlier.
         """
         url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
         api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
-        workspace_slug = _strip_wrapping_quotes(
-            os.environ.get("PLANE_MCP_WORKSPACE_SLUG", "")
-        )
+        if resolution is None:
+            resolution = current_plane_workspace()
+        workspace_slug = resolution.slug or ""
         return {
             "transport": "streamable-http",
             "url": url,

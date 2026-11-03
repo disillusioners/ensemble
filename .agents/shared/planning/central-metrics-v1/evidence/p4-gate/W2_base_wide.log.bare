@@ -1,0 +1,2 @@
+tests/unit/test_mission_reconciliation_sweep.py::TestTheLaneWiring::test_the_stop_event_is_honored_mid_batch
+tests/unit/tools/test_checkpoint_pool_config.py::TestCheckpointPoolConfigLadder::test_the_field_defaults_mirror_the_constants

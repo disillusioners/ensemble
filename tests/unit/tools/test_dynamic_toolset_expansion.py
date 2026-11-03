@@ -103,7 +103,15 @@ def _production_categories() -> dict[str, list[str]]:
     return dict(list_tools_by_category())
 
 
-PLANE_TOOLS = {"plane_list_issues", "plane_create_issue", "plane_delete_issue"}
+# W-9 (plane-pm-issue-tools Phase 3): the fixture names follow the REAL
+# captured verb vocabulary (gate (i) 2026-11-02 — the entity is
+# ``work_item``; ZERO ``*_issue`` verbs exist upstream). The pre-lane
+# fixture taught the drifted vocabulary.
+PLANE_TOOLS = {
+    "plane_list_work_items",
+    "plane_create_work_item",
+    "plane_delete_work_item",
+}
 MCP_TOOLS = {"mcp_ctx7_get_docs", "mcp_webfetch_fetch"}
 OTHER_TOOLS = {"bash", "read_file", "project_get"}
 

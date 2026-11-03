@@ -34,6 +34,7 @@ if _mock_tool_adapter is not None:
 
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition  # noqa: E402
 from daemon.tools.instance import resolve_tool_filter  # noqa: E402
+from daemon.plane_workspace import reset_resolution_cache  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -82,9 +83,14 @@ class TestPlaneIsAvailable:
         assert PlaneServerDefinition.is_available() is False
 
     def test_available_both_set(self, monkeypatch):
-        """Both URL and API key set → True."""
+        """Both URL and API key set, non-live env on 'e2e' → True."""
         monkeypatch.setenv("PLANE_MCP_URL", "https://mcp.example/plane/mcp")
         monkeypatch.setenv("PLANE_MCP_API_KEY", "secret-key-123")
+        # Resolver doctrine: non-live ⇒ 'e2e'-only permitted (E3 gate).
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "dev")
+        monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "e2e")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_dev")
+        reset_resolution_cache()
         assert PlaneServerDefinition.is_available() is True
 
     def test_not_available_only_url(self, monkeypatch):
@@ -130,6 +136,12 @@ class TestPlaneMcpKillSwitch:
         monkeypatch.setenv("PLANE_MCP_ENABLED", "true")
         monkeypatch.setenv("PLANE_MCP_URL", "https://mcp.example/plane/mcp")
         monkeypatch.setenv("PLANE_MCP_API_KEY", "secret-key-123")
+        # Resolver doctrine: workspace gate sits downstream of the kill
+        # switch (E3) — non-live ⇒ 'e2e'-only permitted.
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "dev")
+        monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "e2e")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_dev")
+        reset_resolution_cache()
         assert PlaneServerDefinition.is_available() is True
 
     def test_switch_off_still_requires_env_when_on(self, monkeypatch):
@@ -643,15 +655,19 @@ class TestPlaneResilienceConfig:
         assert "search_" in cfg.read_tool_patterns
 
     def test_write_tool_patterns(self):
-        """Plane's write patterns include create/update/delete + Plane verbs."""
+        """Plane's write patterns are exactly the reconciled P2-K set."""
         defn = PlaneServerDefinition()
         cfg = defn.resilience_config
-        # Required per the spec.
-        for p in ("create_", "update_", "delete_", "add_", "remove_"):
-            assert p in cfg.write_tool_patterns, f"Missing write pattern: {p}"
-        # Plane-specific verbs.
-        for p in ("set_", "edit_", "assign_"):
-            assert p in cfg.write_tool_patterns, f"Missing write pattern: {p}"
+        # Resolver doctrine: classifier write-pattern set (P2-K) — the
+        # EXPECTED set is a LITERAL (never derived from production: an
+        # equality against production would be tautological);
+        # add_/edit_/assign_ were dropped (0 catalog verbs each).
+        assert set(cfg.write_tool_patterns) == {
+            "create_", "update_", "delete_", "remove_", "set_", "manage_",
+            "transfer_", "complete_", "link_", "import_", "attach_",
+            "detach_", "upload_", "resolve_",
+        }
+        assert len(cfg.write_tool_patterns) == 14
 
     def test_fallback_message_structure(self):
         """Fallback is a valid JSON with status=unavailable + source=plane."""

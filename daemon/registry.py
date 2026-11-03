@@ -1458,6 +1458,55 @@ class AgentRegistry:
 
         return warnings
 
+    def agents_referencing_builtin_mcp(self, server_name: str) -> list[str]:
+        """Agent IDs whose ``mcp_full_access`` names ``server_name``.
+
+        Phase-3 support (lane ``plane-pm-issue-tools``, W-7/lean #3): the
+        manager's loud-skip WARNING and the registry-vs-row cross-check
+        need the agents that EXPECT a given built-in MCP server, so a
+        skipped server is attributed to the agents it costs tools to.
+
+        READ-ONLY; no change to the ``mcp_full_access`` validation
+        semantics (NR5) — this enumerates the same field
+        :meth:`validate_tool_configs` checks.
+
+        Args:
+            server_name: A built-in MCP server name (e.g. ``"plane"``).
+
+        Returns:
+            Sorted agent IDs (file-defined + non-deleted custom agents).
+        """
+        referencing = [
+            meta.id
+            for meta in self.list_all()
+            if server_name in (getattr(meta, "mcp_full_access", None) or [])
+        ]
+        return sorted(referencing)
+
+    def agents_by_mcp_full_access(self) -> dict[str, list[str]]:
+        """Agent IDs per declared ``mcp_full_access`` entry — the BULK form.
+
+        The counterpart of :meth:`agents_referencing_builtin_mcp`: the
+        manager's registry-vs-row cross-check needs EVERY declaration at
+        once (not one server name at a time), so the enumeration lives
+        HERE — one implementation, one field, one contract.
+
+        READ-ONLY; the same field :meth:`validate_tool_configs` checks.
+        Only a NON-EMPTY STRING entry counts — a malformed entry is
+        skipped, never keyed (the per-name helper keys on an exact
+        match instead; both read the same field).
+
+        Returns:
+            ``{server_name: [agent_id, ...]}`` — the agent IDs in
+            declaration order (the caller sorts them).
+        """
+        declarations: dict[str, list[str]] = {}
+        for meta in self.list_all():
+            for entry in getattr(meta, "mcp_full_access", None) or []:
+                if isinstance(entry, str) and entry:
+                    declarations.setdefault(entry, []).append(meta.id)
+        return declarations
+
     def exists(self, agent_id: str) -> bool:
         """Check if agent exists (with alias support).
 

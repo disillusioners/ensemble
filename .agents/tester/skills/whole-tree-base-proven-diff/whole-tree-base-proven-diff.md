@@ -98,3 +98,45 @@ sum(shard summary counts) + (individually-resolved nodes) == collected node coun
 | `tests/packs/g7` sys.exit(0) collection trap | module-level sys.exit aborts collection | packs execute via their own registered scripts (PACKS.md) — never via collection |
 
 Every exclusion MUST name its compensating pin in the gate report.
+
+## 8. Gate-script conventions (HOUSE CANON — R-v adoption, 2026-11-02)
+
+These are non-negotiable for every gate script that compares id sets. They were adopted after the
+central-metrics-v1 P3 whole-tree round recorded **two vacuous "net-new = EMPTY" verdicts** — a
+defect that would have promoted a lane on zero evidence.
+
+1. **`LC_ALL=C` on BOTH `sort` and `comm`.** A collation mismatch lets `comm` silently DROP entries
+   from the diff (an under-count that reads as a smaller net-new). Sorting with one collation and
+   comparing with another is the bug; both tools must agree. This applies to every gate script in
+   the repo that sorts or compares node-id sets, not only the whole-tree sweep.
+2. **Files first, then log.** Diff lists are written to FILES and *then* logged. Never pipe `comm`
+   into a `;`-terminated logging call — `log "..."; comm ... | sed ...` sends `comm`'s output to
+   STDOUT and leaves the log's verdict block EMPTY BY CONSTRUCTION.
+3. **FORM-tagged verdict lines.** GREP-FULL (node ids + the daemon LOG lines that start with
+   `FAILED `/`ERROR `) and BARE-ID (node ids only) are different sets over the same evidence and
+   false-mismatch across forms. Each verdict line carries its form tag; each form is compared only
+   against itself.
+4. **An EMPTY verdict block FAILS LOUD.** `sha256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
+   is the vacuous-verdict signature: two aborted legs produced that digest at `nodes=0` and the
+   "DIGEST-EQUAL … net-new = EMPTY" text that followed was meaningless. A comparison over an empty
+   set is **never** a pass.
+
+**The canonical implementation** is `sweep_digest_verdict.sh` in THIS directory — use it, do not
+re-derive the verdict block inline. It enforces all four conventions and returns:
+
+| exit | meaning |
+|---|---|
+| 0 | net-new EMPTY in both forms (non-vacuous) |
+| 1 | net-new NOT empty in ≥1 form — proceed to per-id adjudication, do NOT report a regression yet |
+| 2 | **VACUOUS** — empty input, empty-string digest, or an empty verdict block. Never a pass. |
+
+```
+.agents/tester/skills/whole-tree-base-proven-diff/sweep_digest_verdict.sh \
+    <base.ids.txt> <head.ids.txt> <out_dir>
+```
+
+**The tool measures; the ladder decides.** A non-empty net-new set is an INPUT to the §6
+classification ladder (each diff id in ISOLATION, 3× per side), never a verdict on its own. The P3
+round proved the sweep-level delta is a parallel-shard COMPOSITION ARTEFACT — the SAME shard on the
+SAME tree produced DIFFERENT red sets across two runs (26 ids differed). Treat shard-level digests
+as non-reproducible instruments and adjudicate at node level.
