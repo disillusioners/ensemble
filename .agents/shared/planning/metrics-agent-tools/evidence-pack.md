@@ -332,6 +332,18 @@ moving ✓): the two vocabulary pins ✓, the exposition's structural-identity a
 carrier — the tool-category vocabulary line ✓) and the lane's BASE artifact re-captured with the
 four-carrier mask (a one-line diff ✓).
 
+**The coverage, by its exact bindings:** the SET ↔ the artifact pack (the committed artifact's
+`categories` + `count` asserted against the live registry —
+`tests/unit/tools/test_tool_category_artifact.py:285` / `:290` ✓); the VALUE `3` ↔ the live code
+constant (pinned at `tests/unit/metrics/test_metrics_vocabulary_amendment.py:26` ✓ and
+`tests/unit/metrics/test_metrics_family_adjudication.py:419` ✓). The artifact's OWN
+`vocabulary_version` FIELD is **documentary-only — NO test binds it** (the drift check compares
+the categories + count only ✓, and the generator fabricates that field equal to the code
+constant — `tests/unit/tools/test_tool_category_artifact.py:205` ✓ — which is why the drift check
+cannot catch a stale value ✓). **Currently consistent: the artifact's field reads 3 and the code
+constant reads 3** ✓. (Binding that field to the constant is a future-lane convention candidate —
+routed as a tester-lane LESSON ✓, NOT added here ✓.)
+
 **F-2:** the "808/809" premise was a DISPATCH-BRIEF premise ✓ — the lane's records never carried
 it ✓ (pickaxe-proven ✓); the real one-red leg is the Phase-3 **493/492/1 vs 421/420/1** ✓, which
 the records already carry ✓.

@@ -743,9 +743,20 @@ of the artifact regeneration / the marker bump — the same discipline as a vers
   identity gate's allowlist gained a **FOURTH carrier** (`tool_category_vocabulary` ✓,
   `tests/helpers/metrics_exposition_baseline.py:52` + the mask at `:92`) and the lane's BASE
   artifact was RE-CAPTURED from the base tree with the four-carrier mask (the diff is EXACTLY the
-  one masked line ✓ — `tests/unit/metrics/baselines/metrics_exposition_baseline.txt` ✓). The
-  artifact pack remains the authority on that set's integrity, so masking its VALUE costs no
-  coverage ✓; the allowlist pin moved with it (`test_the_allowlist_covers_exactly_four_carriers` ✓).
+  one masked line ✓ — `tests/unit/metrics/baselines/metrics_exposition_baseline.txt` ✓); the
+  allowlist pin moved with it (`test_the_allowlist_covers_exactly_four_carriers` ✓).
+
+  **THE COVERAGE, STATED BY ITS EXACT BINDINGS (not by a summary):** the SET is bound by the
+  artifact pack — the committed artifact's `categories` and `count` are asserted against the
+  live registry (`tests/unit/tools/test_tool_category_artifact.py:285` / `:290`) ✓. The
+  artifact's OWN `vocabulary_version` FIELD is **documentary-only: NO test binds it** — the
+  drift check compares the categories and the count only ✓, and the generator fabricates that
+  field equal to the code constant (`tests/unit/tools/test_tool_category_artifact.py:205`) ✓,
+  which is exactly why the drift check cannot catch a stale value ✓. The VALUE `3` is bound to
+  the live code constant by the two version pins
+  (`tests/unit/metrics/test_metrics_vocabulary_amendment.py:26` ✓ and
+  `tests/unit/metrics/test_metrics_family_adjudication.py:419` ✓). **Currently consistent: the
+  artifact's field reads 3 and the code constant reads 3** ✓.
 
 **F-2 — THE "808/809" PREMISE: CORRECTED BY ABSENCE.** The lane's records NEVER carried it ✓
 (the tester pickaxe-proved it: `git log --all -S"808 passed"` → 0 hits ✓) — it was a

@@ -41,7 +41,7 @@ from pathlib import Path
 #: tree's OWN ``daemon`` package is the one that renders).
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: The THREE allowlisted value-delta carriers (AM-16/D-11a).
+#: The FOUR allowlisted value-delta carriers (AM-16/D-11a).
 ALLOWLIST: dict[str, str] = {
     "frozen_vocabulary_version": (
         "the '# frozen vocabulary version: N' footer"
