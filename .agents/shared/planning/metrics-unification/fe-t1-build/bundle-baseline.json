@@ -2,8 +2,11 @@
   "_about": "THE NAMED BASELINE ARTIFACT (review A-8): the single machine-readable source the T1 bundle guards read. A number duplicated across plan prose can drift; this file cannot. It lives in the PLAN DIR (not scripts/, not the shipped tree) and is the evidence re-derivation tool for the lane's own baseline.",
   "measured_at": "2026-11-03",
   "tree": "/home/nea/ensemble-src-wt-fe-metrics-dashboard",
-  "commit": "7961bcb21",
-  "lane_base_equivalence": "The lane's commits (c32029d1c, 3a6bf7ba5, c26cec612, dc55da10f, 7961bcb21) are docs-only, so HEAD's frontend/ tree == the lane base's frontend/ tree. A build at HEAD IS a lane-base measurement.",
+  "measured_at_commit": "7961bcb21",
+  "measured_at_commit_means": "THE REV THE MEASUREMENT WAS TAKEN AT. Every number in this file was measured with the frontend/ tree at this rev.",
+  "reproduces_at_current_tip": true,
+  "reproduces_at_tip_note": "The numbers REPRODUCE at the current branch tip and at any later rev of this branch, because every commit after 7961bcb21 is DOCS-ONLY and the frontend/ tree is byte-identical. VERIFY with: git diff 7961bcb21..HEAD -- frontend/   (must be EMPTY). VERIFIED 2026-11-03: 0 bytes, 0 files changed; the same command over daemon/ agents/ scripts/ test/ is likewise empty (0 files changed). To re-measure at any rev, run the reproduce.command below on that rev's tree.",
+  "lane_base_equivalence": "The lane's commits (c32029d1c, 3a6bf7ba5, c26cec612, dc55da10f, 7961bcb21, 0115f4818, a85abd16e, 418ff5687 and later) are docs-only — plan documents under .agents/shared/planning/ — so HEAD's frontend/ tree == the lane base's frontend/ tree at EVERY rev of this branch. A build at HEAD IS a lane-base measurement.",
   "build": {
     "command": "cd frontend && ./node_modules/.bin/ng build --configuration production",
     "prerequisite": "cd frontend && npm ci   (node_modules was absent in the fresh worktree)",
@@ -14,25 +17,7 @@
   "reproduce": {
     "command": "cd frontend && node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser",
     "script": ".agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js",
-    "output": "{
-  \"initial_total_bytes\": 5909018,
-  \"initial_file_count\": 36,
-  \"error_budget_bytes\": 6000000,
-  \"headroom_bytes\": 90982,
-  \"index_html_bytes\": 9257,
-  \"whole_initial_payload_bytes\": 5918275,
-  \"lazy_chunk_count\": 52,
-  \"lazy_bytes_total\": 1702633,
-  \"metrics_route_chunk\": \"chunk-ZA3RV4HY.js\",
-  \"metrics_route_chunk_bytes\": 27672,
-  \"metrics_route_fetch_set_bytes\": 496338,
-  \"largest_lazy\": \"chunk-QS2K3YLH.js\",
-  \"largest_lazy_bytes\": 157141,
-  \"second_largest_lazy\": \"chunk-HNKUMJNH.js\",
-  \"second_largest_lazy_bytes\": 135690,
-  \"resources_route_chunk\": \"chunk-FOLCEMN3.js\",
-  \"resources_route_chunk_bytes\": 38914
-}"
+    "output": "{\n  \"initial_total_bytes\": 5909018,\n  \"initial_file_count\": 36,\n  \"error_budget_bytes\": 6000000,\n  \"headroom_bytes\": 90982,\n  \"index_html_bytes\": 9257,\n  \"whole_initial_payload_bytes\": 5918275,\n  \"lazy_chunk_count\": 52,\n  \"lazy_bytes_total\": 1702633,\n  \"metrics_route_chunk\": \"chunk-ZA3RV4HY.js\",\n  \"metrics_route_chunk_bytes\": 27672,\n  \"metrics_route_fetch_set_bytes\": 496338,\n  \"largest_lazy\": \"chunk-QS2K3YLH.js\",\n  \"largest_lazy_bytes\": 157141,\n  \"second_largest_lazy\": \"chunk-HNKUMJNH.js\",\n  \"second_largest_lazy_bytes\": 135690,\n  \"resources_route_chunk\": \"chunk-FOLCEMN3.js\",\n  \"resources_route_chunk_bytes\": 38914\n}"
   },
   "guards": {
     "B1_initial_total_delta": {
