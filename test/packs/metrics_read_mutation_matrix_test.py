@@ -201,7 +201,159 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
         CONTRACT_PACK,
         "test_the_availability_set_is_closed_and_exact",
     ),
+    # ── THE COUNCIL FIX CYCLE (2026-11-03): the two BINDING legs the
+    #    first cut silently dropped — the exact legs that would have
+    #    caught C1 (the byte ceiling was dead code) and C2 (the false
+    #    FOLDED record). ──
+    (
+        "MT-13-byte-ceiling-trim-removed",
+        "daemon/tools/metrics_read.py",
+        "    target = RESPONSE_BYTE_CEILING - _CAVEAT_HEADROOM_BYTES",
+        "    target = 10**9  # MUTATION: the byte ceiling was removed",
+        TOOLS_PACK,
+        "test_a_fat_catalog_is_trimmed_to_the_byte_ceiling",
+    ),
+    # ── the legs the first cut dropped that this fix cycle FOLDS (each
+    #    one has an existing behavioural pin to bite). ──
+    (
+        "MT-14-truncated-hardwired-false",
+        "daemon/tools/metrics_read.py",
+        """    truncated = bool(more_available) or (
+        dropped_count is not None and dropped_count > 0
+    )""",
+        """    truncated = False  # MUTATION: the truncated flag is hardwired""",
+        TOOLS_PACK,
+        "test_the_top_n_cut_reports_the_drop",
+    ),
+    (
+        "MT-15-narrow-hint-emptied",
+        "daemon/tools/metrics_read.py",
+        """        narrow_hint = (
+            f"no family with id {family!r}; known ids: {', '.join(known)}"
+        )""",
+        """        narrow_hint = ""  # MUTATION: the hint was emptied""",
+        TOOLS_PACK,
+        "test_an_unknown_family_is_not_an_error",
+    ),
+    (
+        "MT-16-caveat-attribute-token",
+        "daemon/tools/metrics_read.py",
+        '"not an absence of data — the series below are real."',
+        '"not an absence of data (R-ii) — the series below are real."',
+        TOOLS_PACK,
+        "test_the_dark_with_live_caveat_is_generic",
+    ),
+    (
+        "MT-17-multi-family-filter-dropped",
+        "daemon/tools/metrics_read.py",
+        "        if requested_families and row_family not in requested_families:",
+        "        if False:  # MUTATION: the multi-family filter was dropped",
+        TOOLS_PACK,
+        "test_one_provider_call_for_a_multi_family_filter",
+    ),
+    (
+        "MT-18-ring-state-signal-removed",
+        "daemon/tools/metrics_read.py",
+        "    ring_empty = bool(age == 0.0)",
+        "    ring_empty = False  # MUTATION: the ring-state signal was removed",
+        TOOLS_PACK,
+        "test_an_empty_ring_reports_the_ring_state",
+    ),
+    (
+        "MT-19-per-series-freshness-dropped",
+        "daemon/tools/metrics_read.py",
+        '        out["points_span_s"] = _points_span(points)',
+        '        out["points_span_s"] = 0.0  # MUTATION: the freshness was dropped',
+        TOOLS_PACK,
+        "test_the_per_series_freshness_is_present",
+    ),
+    (
+        "MT-20-racy-bool-doctrine-removed",
+        "daemon/tools/metrics_read.py",
+        '        "doctrine": READ_STATUS_DOCTRINE,',
+        '        "doctrine": "",  # MUTATION: the doctrine statement was removed',
+        TOOLS_PACK,
+        "test_the_doctrine_states_the_racy_bool_semantics",
+    ),
+    (
+        "MT-21-clamp-applied-silently",
+        "daemon/tools/metrics_read.py",
+        """        payload["caveats"].append(
+            "max_points was clamped from "
+            f"{int(max_points)} to {effective_max_points} so the returned "
+            "leg stays within the daemon's total-point budget."
+        )""",
+        """        pass  # MUTATION: the clamp is now SILENT""",
+        TOOLS_PACK,
+        "test_the_budget_clamp_is_not_silent",
+    ),
 ]
+
+#: The FOLLOW legs — a mutation whose EXPECTED result is NOT a red but a
+#: VALUE that MOVES with the mutated source (the drift class: a
+#: duplicated literal would keep the consumer green while the producer
+#: moved).  The council's binding AmA-7/PL-3 leg is this shape: the SEAM
+#: constant changes and the TOOL's clamp must FOLLOW it.
+FOLLOW_LEGS: list[tuple[str, str, str, str, str]] = [
+    (
+        "MT-22-seam-constant-single-sourcing",
+        "daemon/services/metrics_query/constants.py",
+        "MAX_TOTAL_POINTS: int = 12_000",
+        "MAX_TOTAL_POINTS: int = 11_000",
+        "daemon/tools/metrics_read.py",
+    ),
+]
+
+#: The probe that reads the tool's effective clamp (the FOLLOW leg's
+#: observation point).
+_CLAMP_PROBE = r"""
+import asyncio, json
+from daemon.tools.metrics_read import create_metrics_read_tools
+
+
+class _P:
+    listener_enabled = True
+    census_enabled = True
+    registry_read_ok = True
+    effective_interval_s = 15.0
+    last_sample_age_s = 3.0
+
+    def families(self):
+        return [{"id": "F1", "role": "stat", "source_idiom": "registry",
+                 "durability": "process", "live_series_count": 1,
+                 "cardinality_contribution": 1, "availability": {"state": "live"},
+                 "names": [{"name": "m", "kind": "gauge",
+                             "cardinality_class": "none", "labels": None,
+                             "monotonic": False, "chart_role": "line",
+                             "buckets": None, "help": "h"}]}]
+
+    def snapshot(self, **kw):
+        return []
+
+    def history(self, **kw):
+        return [{"name": "m", "labels": {}, "kind": "gauge", "monotonic": False,
+                 "points": [[1, 1.0], [2, 2.0]]}]
+
+
+class _M:
+    metrics_query_provider = _P()
+
+
+async def main():
+    tools = create_metrics_read_tools(
+        _M(), current_instance_id="", agent_id="maintenancer", agent_tag=None
+    )
+    by_name = {getattr(x, "name", ""): x for x in tools}
+    out = json.loads(
+        await by_name["metrics_history"].ainvoke(
+            {"names": ["m"], "top_n": 50, "max_points": 240}
+        )
+    )
+    print(out["query"]["max_points"])
+
+
+asyncio.run(main())
+"""
 
 
 def _sha256(path: Path) -> str:
@@ -218,6 +370,9 @@ def _git(*args: str) -> str:
 def _touched_files() -> list[str]:
     seen: list[str] = []
     for _label, rel, *_rest in MUTATIONS:
+        if rel not in seen:
+            seen.append(rel)
+    for _label, rel, *_rest in FOLLOW_LEGS:
         if rel not in seen:
             seen.append(rel)
     return seen
@@ -287,6 +442,62 @@ def _unjournal(label: str) -> None:
             return
         if data.get("label") == label:
             inflight.unlink(missing_ok=True)
+
+
+def _run_probe() -> int:
+    """Run the clamp probe and return the tool's effective max_points."""
+    proc = subprocess.run(
+        [*SCRUB, PYTHON, "-c", _CLAMP_PROBE],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return -1
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if line.isdigit():
+            return int(line)
+    return -1
+
+
+def _run_follow_legs() -> int:
+    """The FOLLOW legs — the consumer's value must MOVE with the source."""
+    failures = 0
+    for label, rel, find, replace, consumer in FOLLOW_LEGS:
+        path = REPO_ROOT / rel
+        original = path.read_bytes()
+        text = original.decode("utf-8")
+        if text.count(find) != 1:
+            print(f"{label}: SKIPPED (the find-string is not unique: {text.count(find)})")
+            failures += 1
+            continue
+        _journal(label, rel, original)
+        try:
+            before = _run_probe()
+            path.write_text(text.replace(find, replace), encoding="utf-8")
+            after = _run_probe()
+            path.write_bytes(original)
+            if before < 0 or after < 0:
+                print(f"{label}: FAIL — the probe did not run")
+                failures += 1
+            elif after == before:
+                print(
+                    f"{label}: FAIL — the consumer's value did NOT follow the "
+                    f"mutated source ({before} -> {after}); a DUPLICATED "
+                    "literal would look exactly like this"
+                )
+                failures += 1
+            else:
+                print(
+                    f"{label}: OK (the consumer followed the source: "
+                    f"{before} -> {after})"
+                )
+        finally:
+            path.write_bytes(original)
+            _unjournal(label)
+    return failures
 
 
 def run_matrix() -> int:
