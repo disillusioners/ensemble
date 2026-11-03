@@ -25,13 +25,28 @@ NO LLM is reachable from this pack. Two degraded seams are pinned BY
 NAME: the tool-level ``_file_only_bm25_search`` (DB store absent) and
 the service-level ``_degraded_select`` (store present, ``config=None``).
 
-RED-at-BASE recipe (approver N9): at BASE ``c4161335b`` the DB legs,
-the search-payload legs, the skill_create leg and the injection-body
-leg are RED — run this pack at the base commit with
-
-    bash test/packs/skill_id_verbatim_contract_unit_test.sh
-
-and the anchor evidence lives in the RESULTS doc named above.
+RED-at-BASE anchor (approver N9; CORRECTED per functional-gate F3
+— this pack itself CANNOT anchor at base): at BASE ``c4161335b``
+this file cannot even be COLLECTED — it imports the lane-ADDED
+``SOURCE_PROJECT_FILE`` from
+``daemon.services.project_skill_source.model`` (at base that name
+lives in ``daemon.services.skill_search_service``), so a pristine-base
+run fails at COLLECTION (ImportError, 0 nodes, rc=2) — an artifact,
+not a red. The REAL anchor is the DERIVED base-adapted pin: import
+redirection + ``try/except`` for the injection-side helper + exactly 3
+``skipif`` NOT-APPLICABLE markers on the parity/single-sourcing legs
+(lane-added subjects); all 77 assert statements AST-identical to this
+file. MEASURED at base: 7 intended reds / 9 green / 3 N-A = 19 nodes.
+The 7 base-red legs: ``test_db_bracket_token_is_the_stored_full_uuid``,
+``test_list_row_shapes_are_preserved``,
+``test_fused_path_file_entry_id_is_consumable``,
+``test_file_only_path_file_entry_id_is_consumable``,
+``test_create_line_id_is_the_stored_uuid_and_resolves``,
+``test_file_injection_body_renders_the_address``,
+``test_injection_attribution_stays_the_pseudo_id``. Derivation
+procedure + evidence:
+``.agents/tester/RESULTS/2026-11-03-wi76d89e11-skill-id-functional-gate.md``
+§L2 (gate finding F3).
 """
 
 from __future__ import annotations

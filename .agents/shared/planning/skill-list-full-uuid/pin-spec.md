@@ -41,20 +41,33 @@ Mirror the repro's REAL production construction (reference: `.agents/tester/RESU
 
 | Leg | Plant (exact) | Goes RED |
 |---|---|---|
-| **M1** | skill_tools.py:765 — re-introduce `[:8]` (`short_id = skill_id[:8] if isinstance(skill_id, str) else "????????"`) | D1 (ii)/(iii)/(iv) DB legs |
-| **M2** | skill_tools.py:145 — revert `"id"` to `getattr(file_skill, "id", None)` | search-payload leg (file-only path) |
+| **M1** | skill_tools.py:767 — re-introduce `[:8]` (`short_id = skill_id[:8] if isinstance(skill_id, str) else "????????"`) | D1 (ii)/(iii)/(iv) DB legs |
+| **M2** | skill_tools.py:146 — revert `"id"` to `getattr(file_skill, "id", None)` | search-payload leg (file-only path) |
 | **M2b** (planner-added, adjudication A-3) | model.py `to_dict()` — revert `d["id"] = self.address` to keep `d["id"] = d["pseudo_id"]`-shape (id = attribute) | search-payload FUSED-path leg (covers the second render seam of R2(d); M2's plant text only reaches :145) |
 | **M3** | skill_injection_service.py — revert the formatter branch (file body renders `getattr(skill, "id")` again) | injection body leg |
-| **M4** | skill_tools.py:1119-1123 — revert to `created.id[:8]` | skill_create leg |
+| **M4** | skill_tools.py:1121-1125 — revert to `created.id[:8]` | skill_create leg |
 | **M5** (safety invariant — R3 hard constraint) | at the CONSTRUCTION site `_to_file_skill` — `daemon/services/project_skill_source/service.py:**:1115** (`id=meta.pseudo_id`; function :1111-1122; A4 fold) — plant the UNSAFE rewrite: `id=meta.address` instead of `id=meta.pseudo_id` | embeddings invariant leg: (a) `ProjectFileSkill.id` keeps `mint_pseudo_id` shape (`pf-`+16hex); **(W2 fold — seed first, else vacuous)** seed ONE embedding row via `ProjectSkillEmbeddingRepository.replace_for_skill(<sha16>, [...])` (receipt: `daemon/repositories/project_skill_file/repository.py:245`) — the harness's embedding REPOSITORY is wired (§H) and holds NO rows until seeded — `file_embeddings_for` reads that repository, NOT `embedding_service` (the N1 rationale correction) — so without the seed this leg cannot distinguish; then assert (b) `file_embeddings_for(<sha16>)` NON-empty at the pseudo-id key and (c) EMPTY at the address key, with the reachability assertion going through the SKILL OBJECT's own id (asserting via the row key alone is INERT under the plant — the N1 fold) — proving the rerank would silently degrade (rows unreachable), the degradation-not-error failure mode |
-| **M6** (safety invariant — R2g) | skill_tools.py:1465 — remove `or skill_id.startswith(PSEUDO_ID_PREFIX)` | legacy-transcript feedback leg: a `pf-<hex16>` input (pre-fix transcript shape) must still record metrics — **W3 fold: the input MUST be the corpus's REAL indexed pseudo-id** (`list_by_project(PROJECT_ID)[0].id`, pf_surface :732-734 idiom); an arbitrary `pf-` string fails closed at the index validation (:538-571) → refusal, which would not discriminate branch-removal |
+| **M6** (safety invariant — R2g) | skill_tools.py:1467 — remove `or skill_id.startswith(PSEUDO_ID_PREFIX)` | legacy-transcript feedback leg: a `pf-<hex16>` input (pre-fix transcript shape) must still record metrics — **W3 fold: the input MUST be the corpus's REAL indexed pseudo-id** (`list_by_project(PROJECT_ID)[0].id`, pf_surface :732-734 idiom); an arbitrary `pf-` string fails closed at the index validation (:538-571) → refusal, which would not discriminate branch-removal |
 
 Mutation legs run as pack-level plants (source edit → run pack → RED → restore → GREEN), digests archived per house convention (the `psl_fix_cycle_mutation_matrix.py` pattern is the in-repo precedent for pack-managed plants).
 
 ## PROC — RED-at-BASE / GREEN-at-HEAD procedure
 
-- **BASE commit: `c4161335b406b884d1de6c8e7bf4b3d1f7fe2abe`** (branch base == origin/latest at lane open). The repro anchor is `.agents/tester/RESULTS/2026-11-03-wi76d89e11-phase0-runtime-repro.md` (verbatim refusal envelope + control leg) — the pin's expected BASE behavior must MATCH it.
-- **Expected RED at BASE**: D1 DB legs (ii)/(iii)/(iv); skill_create leg; search-payload `id`-consumable + `pseudo_id` + field-set legs (both paths); injection body leg.
-- **Expected GREEN at BASE (pinned anyway as regression armor)**: D1 file-row legs (address already emitted — repro §(b)/(c): all 5 RESOLVE); feedback dual-form routing legs (existing armor at pf_surface :744-770); REST-untouched assertions N/A (tool-layer pack).
-- **GREEN-at-HEAD**: all legs green after the P1 diff; the P2a-folded pf_surface W4 pin green in the same run; full skill-test corpus green (the P2b sweep predicts zero other reddens).
+> **CORRECTED (functional-gate F3, 2026-11-03):** the original recipe
+> here said "run this pack at the base commit". That is **NOT runnable
+> as written** — the pack's phase 1 collects the pin, and the pin
+> imports the lane-ADDED `SOURCE_PROJECT_FILE` from
+> `daemon.services.project_skill_source.model`; at BASE `c4161335b`
+> that name lives in `daemon.services.skill_search_service`, so a
+> pristine-base run dies at **COLLECTION** (ImportError, 0 nodes,
+> rc=2) — a collection artifact, **not** an assertion red. The REAL
+> anchor is the **DERIVED base-adapted pin** (gate worker W2; artifacts
+> `/home/nea/rt-verify-skill-id-20261103T203932Z/`, derivation script
+> `make_base_adapted.py`):
+
+- **BASE commit: `c4161335b406b884d1de6c8e7bf4b3d1f7fe2abe`** (branch base == origin/latest at lane open). The runtime-repro anchor `.agents/tester/RESULTS/2026-11-03-wi76d89e11-phase0-runtime-repro.md` (verbatim refusal envelope + control leg) remains the pin's expected BASE behavior.
+- **Derivation (deliberately minimal, asserted afterwards)**: (a) **import redirection ONLY** — `SOURCE_PROJECT_FILE` re-imported from its base home `daemon.services.skill_search_service` (same value, `"project-file"`, in both homes); (b) `try/except ImportError` around the injection-side `_is_project_file_skill` helper (lane-ADDED — absent at base; a fabricated helper would make the parity legs VACUOUS, so the legs are skipped instead); (c) exactly **THREE `@pytest.mark.skipif` NOT-APPLICABLE markers**, on the legs whose SUBJECT is lane-added surface: `test_helpers_agree_on_every_shape`, `test_injection_helper_alone_agrees_on_every_shape` (the injection-side parity helper) and `test_source_literal_is_single_sourced` (the single-sourced constant). The diff is the import block + the 3 markers ONLY; **all 77 assert statements are AST-identical** between the pristine pin and the derived variant (asserted by the derivation script; count re-verified at fix-fold time).
+- **MEASURED RED at BASE** (gate L2, byte-identical pristine tree + derived pin overlaid from git objects): **7 intended-assertion reds / 9 green / 3 N-A = 19 nodes, zero artifacts** — `TestListVerbatimContract::test_db_bracket_token_is_the_stored_full_uuid`, `TestListVerbatimContract::test_list_row_shapes_are_preserved`, `TestSearchPayloadContract::test_fused_path_file_entry_id_is_consumable`, `TestSearchPayloadContract::test_file_only_path_file_entry_id_is_consumable`, `TestSkillCreateContract::test_create_line_id_is_the_stored_uuid_and_resolves`, `TestInjectionBodyContract::test_file_injection_body_renders_the_address`, `TestSafetyInvariants::test_injection_attribution_stays_the_pseudo_id`.
+- **Expected GREEN at BASE (pinned anyway as regression armor)**: D1 file-row legs (address already emitted — repro §(b)/(c): all 5 RESOLVE); feedback dual-form routing legs (existing armor at pf_surface :744-770); the 3 N/A parity/single-sourcing legs above.
+- **GREEN-at-HEAD**: all legs green after the P1 diff (gate-measured: 56 passed in 66.92s — 19 pin + 37 sibling; pack `RESULT: PASS`, wall 198.71s); full skill-test corpus net-new ∅ (gate L6/L6b).
 - **Non-vacuity**: every RED-at-BASE leg has an explicit identity/value assertion (D1-iii/(iv)), so a pin that "passes because it asserts nothing" is structurally impossible; M-legs provide the second direction (planted regression ⇒ RED).
