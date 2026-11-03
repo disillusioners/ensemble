@@ -22,18 +22,18 @@ import {
   TracebackPayload,
   formatUtcLabel,
   parseNaiveUtc,
-} from '../../../models/resources.models';
-import { ResourcesService } from '../../../services/resources.service';
+} from '../../../../models/resources.models';
+import { ResourcesService } from '../../../../services/resources.service';
 import {
   ChartSeries,
   HouseAnomalyMarker,
-} from '../../../components/charts/house-svg-renderer/house-svg-renderer';
-import { createHouseSvgRegistry } from '../../../components/charts/house-svg-renderer/house-svg-renderer.renderer';
+} from '../../../../components/charts/house-svg-renderer/house-svg-renderer';
+import { createHouseSvgRegistry } from '../../../../components/charts/house-svg-renderer/house-svg-renderer.renderer';
 import {
   ChartOutputHandlers,
   ChartRenderData,
   ChartRequest,
-} from '../../../components/charts/renderer-registry';
+} from '../../../../components/charts/renderer-registry';
 import {
   DEFAULT_TIMELINE_SERIES,
   TIMELINE_SERIES_DEFS,

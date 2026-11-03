@@ -495,7 +495,7 @@ describe('house-svg-renderer — the capability checklist (6/6)', () => {
     // Imported lazily here so the spec stays a leaf: the ladder is the
     // SURFACE's vocabulary, the renderer draws what the surface gives it.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { TIMELINE_WINDOWS } = require('../../../pages/resources/timeline/timeline-tab.component');
+    const { TIMELINE_WINDOWS } = require('../../../pages/metrics/resource/timeline/timeline-tab.component');
     expect(TIMELINE_WINDOWS).toEqual(['15m', '1h', '24h', '7d']);
   });
 

@@ -1,14 +1,14 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { Subject, of, throwError } from 'rxjs';
-import { ResourcesService } from '../../../services/resources.service';
+import { ResourcesService } from '../../../../services/resources.service';
 import {
   AnomaliesPayload,
   Anomaly,
   EvidencePayload,
   HistoryPayload,
   TracebackPayload,
-} from '../../../models/resources.models';
+} from '../../../../models/resources.models';
 import {
   DEFAULT_TIMELINE_WINDOW,
   TimelineTabComponent,

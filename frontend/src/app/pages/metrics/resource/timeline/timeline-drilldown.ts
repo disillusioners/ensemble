@@ -1,4 +1,4 @@
-import { Anomaly, parseNaiveUtc } from '../../../models/resources.models';
+import { Anomaly, parseNaiveUtc } from '../../../../models/resources.models';
 
 /**
  * The DRILL-DOWN POLICY (T1 phase 4, task 4.2).

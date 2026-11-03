@@ -4,7 +4,7 @@
 // policy, not geometry) — this is its new home, and this is where its
 // assertion lives (the disposition table's T5 "re-point — MOVED").
 
-import { Anomaly } from '../../../models/resources.models';
+import { Anomaly } from '../../../../models/resources.models';
 import { anomalyDrilldownWindow } from './timeline-drilldown';
 
 function anomaly(overrides: Partial<Anomaly> = {}): Anomaly {

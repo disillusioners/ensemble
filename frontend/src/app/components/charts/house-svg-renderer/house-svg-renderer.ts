@@ -21,7 +21,7 @@
  * The ONE symbol that does NOT live here is `anomalyDrilldownWindow`:
  * it is drill-down POLICY, not geometry (task 4.2), so it moved OUT of
  * the chart into the timeline tab's own policy module
- * (`pages/resources/timeline/timeline-drilldown.ts`). It stays exported
+ * (`pages/metrics/resource/timeline/timeline-drilldown.ts`). It stays exported
  * and unit-asserted — there, not here.
  *
  * ── WHAT THIS MODULE IS NOT ──────────────────────────────────────────────

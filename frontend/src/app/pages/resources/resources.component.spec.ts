@@ -16,8 +16,8 @@ import { By } from '@angular/platform-browser';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { Subject } from 'rxjs';
 import { ResourcesService } from '../../services/resources.service';
-import { LiveTabComponent } from './live/live-tab.component';
-import { TimelineTabComponent } from './timeline/timeline-tab.component';
+import { LiveTabComponent } from '../metrics/resource/live/live-tab.component';
+import { TimelineTabComponent } from '../metrics/resource/timeline/timeline-tab.component';
 import { ResourcesComponent, ResourcesSection } from './resources.component';
 
 const resourcesDir = join(__dirname);

@@ -1,4 +1,4 @@
-import { chartSeriesColor } from '../../../components/charts/chart-theme';
+import { chartSeriesColor } from '../../../../components/charts/chart-theme';
 
 /**
  * The RESOURCE TIMELINE's series vocabulary.

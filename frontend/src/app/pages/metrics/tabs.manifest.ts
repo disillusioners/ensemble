@@ -164,7 +164,7 @@ export interface MetricsCustomTab {
    * switches to a tab that cannot serve the current window (3.2).
    *
    * It matches the retired timeline panel's own default
-   * (`DEFAULT_TIMELINE_WINDOW` in `pages/resources/timeline/`), so the
+   * (`DEFAULT_TIMELINE_WINDOW` in `pages/metrics/resource/timeline/`), so the
    * relocated module opens on the same window it always did.
    */
   readonly defaultWindowS: ResourcesWindow;

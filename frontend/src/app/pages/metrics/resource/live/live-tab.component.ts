@@ -18,8 +18,8 @@ import {
   LivePayload,
   SelfCostPayload,
   parseNaiveUtc,
-} from '../../../models/resources.models';
-import { ResourcesService } from '../../../services/resources.service';
+} from '../../../../models/resources.models';
+import { ResourcesService } from '../../../../services/resources.service';
 
 /**
  * Live tab — gated 8 s poll of `/api/resources/live` + `/self-cost`.

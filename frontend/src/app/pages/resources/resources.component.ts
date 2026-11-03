@@ -1,8 +1,8 @@
 import { Component, Type } from '@angular/core';
 import { NgComponentOutlet } from '@angular/common';
 import { MatTabsModule } from '@angular/material/tabs';
-import { LiveTabComponent } from './live/live-tab.component';
-import { TimelineTabComponent } from './timeline/timeline-tab.component';
+import { LiveTabComponent } from '../metrics/resource/live/live-tab.component';
+import { TimelineTabComponent } from '../metrics/resource/timeline/timeline-tab.component';
 
 /**
  * A single section registered in the Resources page shell's local
