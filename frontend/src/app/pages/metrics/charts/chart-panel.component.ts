@@ -1,19 +1,34 @@
 import {
+  AfterViewInit,
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
   OnDestroy,
+  computed,
+  effect,
   input,
+  signal,
+  viewChild,
 } from '@angular/core';
 
+import { chartSeriesColor } from '../../../components/charts/chart-theme';
+import { chartUtcTicks, formatChartUtcTick, formatChartValue } from '../../../components/charts/house-svg-renderer/house-svg-renderer';
+import {
+  HouseAnomalyMarker,
+  HOUSE_ANOMALY_PLUGIN_ID,
+  createHouseAnomalyOverlayPlugin,
+  houseNearestAnomaly,
+} from './anomaly-overlay-plugin';
+import { HOUSE_CROSSHAIR_PLUGIN_ID, createHouseCrosshairPlugin } from './crosshair-plugin';
+
 /**
- * The Chart.js PANEL WRAPPER — THE CONTRACT (T1 phase 1, task 1.7).
+ * The Chart.js PANEL WRAPPER — the interactive-panel role (T1 phase 4,
+ * task 4.4 / 4.6).
  *
- * This file is a CONTRACT, not an implementation: Phase 4 implements the
- * four clauses below against the real vendor. The scaffold exists so the
- * contract compiles, so the shape is pinned, and so the wrapper's home is
- * fixed at the canonical path.
+ * This file was the CONTRACT (phase 1, task 1.7); phase 4 implements
+ * the four clauses below against the real vendor.
  *
- * ── THE FOUR CONTRACT CLAUSES ─────────────────────────────────────────
+ * ── THE FOUR CONTRACT CLAUSES ───────────────────────────────────────────
  *
  * 1. **The per-series DOM proxy.** Every rendered series carries a DOM
  *    proxy element that preserves the `data-series` and `data-render-mode`
@@ -31,14 +46,14 @@ import {
  *    a ResizeObserver PER TAB SWITCH. The destroy is therefore
  *    mandatory, not a tidy-up.
  *
- * 4. **The zoneless rule.** The app is ZONELESS (`zone.js` is declared
+ * 4. **The ZONELESS rule.** The app is ZONELESS (`zone.js` is declared
  *    but never loaded). Therefore NO Angular-rendered overlay may depend
  *    on a Chart.js redraw: an overlay that is positioned from the canvas
  *    would need the canvas to repaint before Angular can re-render it,
  *    and nothing schedules that repaint. The overlay is rendered from
  *    the panel's own state, never from a Chart.js redraw.
  *
- * ── THE IMPORT SHAPE (AM-15 + C-1) ────────────────────────────────────
+ * ── THE IMPORT SHAPE (AM-15 + C-1) ───────────────────────────────────────
  *
  * The vendor arrives through the DYNAMIC `await import('chart.js')` form
  * and NEVER through a static import statement — the static form
@@ -46,11 +61,11 @@ import {
  *
  * Why the static form is forbidden even inside this lazily-loaded page:
  * a static import inside a lazily-loaded tree is extracted into a
- * LAZY-ONLY sibling chunk, so it satisfies the initial-total budget AND
- * the initial-chunk marker scan AND a location-only rule — the leak is
- * invisible to every one of them. Only the import SHAPE (and the route
- * fetch set) catches it. The dynamic form puts the vendor in its own
- * chunk, loaded on demand.
+ * LAZY-ONLY sibling chunk, so it satisfies the initial-total delta, the
+ * initial-chunk marker scan and a location-only rule, because the vendor
+ * is extracted into a lazy-only sibling chunk. Only the import SHAPE
+ * (and the route fetch set) catches it. The dynamic form puts the vendor
+ * in its own chunk, loaded on demand.
  *
  * The wrapper's home is `src/app/pages/metrics/**` — the import-site rule
  * (the pins spec's positive pin) is satisfied by construction, because
@@ -69,10 +84,81 @@ export interface ChartPanelSeries {
   readonly points: readonly { readonly t: number; readonly v: number }[];
 }
 
+/** The click payload — the drill-down hand-off. */
+export interface ChartPanelPointClick {
+  /** Present only when the click landed on an anomaly marker. */
+  readonly anomalyId?: string;
+  readonly seriesId: string;
+  /** Epoch MILLISECONDS. */
+  readonly tsMs: number;
+}
+
+/**
+ * The Chart.js CONFIGURATION the panel builds — the spec's seam.
+ *
+ * The type is declared here (not imported from the vendor) because the
+ * vendor's types would need a static `from 'chart.js'` import, which
+ * the import-shape rule forbids. The shape below is the panel's own
+ * contract; the vendor accepts it structurally.
+ */
+export interface ChartPanelDataset {
+  readonly label: string;
+  readonly seriesId: string;
+  readonly data: readonly { readonly x: number; readonly y: number }[];
+  readonly stepped: boolean;
+  readonly borderColor: string;
+  readonly backgroundColor: string;
+  readonly pointRadius: number;
+  readonly pointHoverRadius: number;
+  readonly borderWidth: number;
+}
+
+export interface ChartPanelConfig {
+  readonly type: 'line';
+  readonly data: { readonly datasets: readonly ChartPanelDataset[] };
+  readonly options: {
+    readonly responsive: boolean;
+    readonly maintainAspectRatio: boolean;
+    readonly interaction: { readonly mode: 'index'; readonly intersect: false };
+    readonly onClick: (
+      event: unknown,
+      elements: readonly { datasetIndex: number; index: number }[],
+    ) => void;
+    readonly plugins: {
+      readonly legend: {
+        readonly display: boolean;
+        readonly onClick: (
+          event: unknown,
+          item: { hidden?: boolean },
+          legend: { chart?: unknown },
+        ) => void;
+      };
+      readonly tooltip: { readonly enabled: boolean };
+      readonly [HOUSE_ANOMALY_PLUGIN_ID]: { readonly markers: readonly HouseAnomalyMarker[] };
+    };
+    readonly scales: {
+      readonly x: {
+        readonly type: 'linear';
+        readonly ticks: { readonly callback: (value: number | string) => string };
+      };
+      readonly y: {
+        readonly beginAtZero: boolean;
+        readonly ticks: { readonly callback: (value: number | string) => string };
+      };
+    };
+  };
+  readonly plugins: readonly { readonly id: string }[];
+}
+
 /** The minimal Chart.js instance surface the wrapper holds. */
 interface PanelChart {
   destroy(): void;
+  update(): void;
+  data?: unknown;
 }
+
+/** The Chart.js module type — a TYPE-ONLY reference (no runtime import). */
+type ChartJsModule = typeof import('chart.js');
 
 @Component({
   selector: 'app-metrics-chart-panel',
@@ -89,7 +175,13 @@ interface PanelChart {
         ></div>
       }
 
-      <canvas class="chart-panel-canvas" data-test="chart-panel-canvas"></canvas>
+      <canvas #canvas class="chart-panel-canvas" data-test="chart-panel-canvas"></canvas>
+
+      <div class="chart-panel-ticks visually-hidden" data-test="chart-panel-ticks">
+        @for (tick of ticks(); track tick.ms) {
+          <span data-test="chart-panel-tick">{{ tick.label }}</span>
+        }
+      </div>
 
       <table class="chart-panel-data visually-hidden" data-test="chart-panel-data">
         <caption class="visually-hidden">{{ label() }}</caption>
@@ -97,16 +189,16 @@ interface PanelChart {
           <tr>
             <th scope="col">time</th>
             <th scope="col">value</th>
+            <th scope="col">series</th>
           </tr>
         </thead>
         <tbody>
-          @for (series of series(); track series.id) {
-            @for (point of series.points; track point.t) {
-              <tr [attr.data-series]="series.id">
-                <td>{{ point.t }}</td>
-                <td>{{ point.v }}</td>
-              </tr>
-            }
+          @for (row of tableRows(); track row.key) {
+            <tr [attr.data-series]="row.seriesId" data-test="chart-panel-row">
+              <td data-test="chart-panel-time">{{ row.time }}</td>
+              <td data-test="chart-panel-value">{{ row.value }}</td>
+              <td>{{ row.seriesId }}</td>
+            </tr>
           }
         </tbody>
       </table>
@@ -140,7 +232,7 @@ interface PanelChart {
     `,
   ],
 })
-export class ChartPanelComponent implements OnDestroy {
+export class ChartPanelComponent implements AfterViewInit, OnDestroy {
   /** The series to render — the panel is one metric-kind + unit group. */
   readonly series = input<readonly ChartPanelSeries[]>([]);
 
@@ -148,18 +240,45 @@ export class ChartPanelComponent implements OnDestroy {
    * The BASELINE dataset — the previous window's series (T1 phase 3, 3.7).
    *
    * This is the NORMAL path for the baseline (the Chart.js panel); the
-   * house SVG carries the same capability as its fallback. The input is
-   * DECLARED here — the frame→renderer contract — and the DRAWING lands
-   * in phase 4; the baseline never adds a request of its own (it rides
-   * the panel's single series fetch).
+   * house SVG carries the same capability as its fallback. The baseline
+   * never adds a request of its own (it rides the panel's single series
+   * fetch).
    */
   readonly baseline = input<readonly ChartPanelSeries[]>([]);
 
   /** The panel's accessible label. */
   readonly label = input('metrics panel');
 
+  /** The unit suffix of the value axis — 'unit unknown' when unknown. */
+  readonly unit = input('unit unknown');
+
+  /** The anomaly markers the house overlay plugin draws. */
+  readonly anomalies = input<readonly HouseAnomalyMarker[]>([]);
+
   /**
-   * The mounted chart — null until Phase 4 mounts one.
+   * The click hand-off — the drill-down.
+   *
+   * A CALLBACK INPUT, for the same reason as the mount failure: the
+   * consumer mounts this component through `NgComponentOutlet`.
+   */
+  readonly onPointClick = input<((payload: ChartPanelPointClick) => void) | null>(null);
+
+  /**
+   * The MOUNT FAILURE — the runtime fallback's trigger.
+   *
+   * The consumer never downgrades silently: it receives this, renders
+   * the house SVG fallback and SURFACES a badge.
+   *
+   * A CALLBACK INPUT, not an output: the consumer mounts this component
+   * through `NgComponentOutlet`, whose hand-off is input-only in this
+   * Angular version.
+   */
+  readonly onMountFailed = input<((reason: string) => void) | null>(null);
+
+  private readonly canvasRef = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
+
+  /**
+   * The mounted chart — null until the vendor has loaded.
    *
    * The shell destroys the tab bodies via `NgComponentOutlet`; a missing
    * destroy leaks a canvas + a ResizeObserver PER TAB SWITCH. The
@@ -168,9 +287,163 @@ export class ChartPanelComponent implements OnDestroy {
    */
   private chart: PanelChart | null = null;
 
+  /** The mounted state (the DOM proxy + the table read from it). */
+  private readonly mounted = signal(false);
+
+  /** The time domain across every series (the shared x window). */
+  readonly timeDomain = computed(() => {
+    let t0 = Number.POSITIVE_INFINITY;
+    let t1 = Number.NEGATIVE_INFINITY;
+    for (const entry of this.series()) {
+      for (const point of entry.points) {
+        if (!Number.isFinite(point.t)) {
+          continue;
+        }
+        if (point.t < t0) {
+          t0 = point.t;
+        }
+        if (point.t > t1) {
+          t1 = point.t;
+        }
+      }
+    }
+    if (!Number.isFinite(t0) || !Number.isFinite(t1)) {
+      return { t0: 0, t1: 0 };
+    }
+    return { t0, t1 };
+  });
+
+  /** The UTC tick labels — the hidden surface's replacement for the SVG ticks. */
+  readonly ticks = computed(() =>
+    chartUtcTicks(this.timeDomain().t0, this.timeDomain().t1),
+  );
+
+  /** The hidden table's rows — one per sample, per series. */
+  readonly tableRows = computed(() => {
+    const out: { key: string; seriesId: string; time: string; value: string }[] = [];
+    for (const entry of this.series()) {
+      for (const point of entry.points) {
+        out.push({
+          key: `${entry.id}-${point.t}`,
+          seriesId: entry.id,
+          time: formatChartUtcTick(point.t, this.timeDomain().t1 - this.timeDomain().t0),
+          value: formatChartValue(point.v),
+        });
+      }
+    }
+    return out;
+  });
+
+  constructor() {
+    // The panel re-renders when its DATA changes — never on a timer and
+    // never from a Chart.js redraw (the ZONELESS rule).
+    effect(() => {
+      const series = this.series();
+      const unit = this.unit();
+      const anomalies = this.anomalies();
+      const mounted = this.mounted();
+      if (!mounted) {
+        return;
+      }
+      const config = this.buildChartConfig(series, unit, anomalies);
+      const chart = this.chart as unknown as { data?: unknown; update?: () => void } | null;
+      if (!chart) {
+        return;
+      }
+      chart.data = config.data;
+      if (typeof chart.update === 'function') {
+        chart.update();
+      }
+    });
+  }
+
+  ngAfterViewInit(): void {
+    void this.mount();
+  }
+
   ngOnDestroy(): void {
     this.chart?.destroy();
     this.chart = null;
+    this.mounted.set(false);
+  }
+
+  /**
+   * The Chart.js CONFIGURATION — the spec's seam.
+   *
+   * The configuration is built by a pure method so every house rule
+   * (the shared y-axis, the counter `stepped` flag, the UTC tick
+   * callback, the legend's click-toggle, the click hand-off) is
+   * assertable without reading pixels.
+   */
+  buildChartConfig(
+    series: readonly ChartPanelSeries[],
+    unit: string,
+    anomalies: readonly HouseAnomalyMarker[],
+  ): ChartPanelConfig {
+    const { t0, t1 } = this.timeDomain();
+    const spanMs = t1 - t0;
+    const datasets: ChartPanelDataset[] = series.map((entry, index) => ({
+      label: entry.label,
+      seriesId: entry.id,
+      data: entry.points.map((point) => ({ x: point.t, y: point.v })),
+      // The house counter-honesty rule: a COUNTER renders STEP. A linear
+      // interpolation between counter samples would assert values that
+      // were never observed.
+      stepped: entry.mode === 'step' ? true : false,
+      borderColor: chartSeriesColor(index),
+      backgroundColor: chartSeriesColor(index),
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      borderWidth: 1.6,
+    }));
+
+    return {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        // The crosshair + nearest-point snap: the pointer picks the
+        // nearest sample across EVERY dataset (not the point under the
+        // cursor).
+        interaction: { mode: 'index', intersect: false },
+        onClick: (event: unknown, elements: readonly { datasetIndex: number; index: number }[]) => {
+          this.onChartClick(elements);
+        },
+        plugins: {
+          legend: {
+            display: true,
+            onClick: (event: unknown, item: { hidden?: boolean }, legend: { chart?: unknown }) => {
+              item.hidden = !item.hidden;
+              (legend.chart as PanelChart | undefined)?.update?.();
+            },
+          },
+          tooltip: { enabled: true },
+          [HOUSE_ANOMALY_PLUGIN_ID]: { markers: anomalies },
+        },
+        scales: {
+          // The x-axis is LINEAR with a custom UTC tick callback — so NO
+          // date-adapter dependency is needed, and the label is always
+          // UTC (never local).
+          x: {
+            type: 'linear',
+            ticks: {
+              callback: (value: number | string) =>
+                formatChartUtcTick(Number(value), spanMs),
+            },
+          },
+          // ONE y-axis for every dataset — the shared-y rule.
+          y: {
+            beginAtZero: false,
+            ticks: {
+              callback: (value: number | string) =>
+                `${formatChartValue(Number(value))} ${unit}`.trim(),
+            },
+          },
+        },
+      },
+      plugins: [createHouseAnomalyOverlayPlugin(), createHouseCrosshairPlugin()],
+    };
   }
 
   /**
@@ -183,6 +456,82 @@ export class ChartPanelComponent implements OnDestroy {
    */
   protected async loadChartConstructor(): Promise<unknown> {
     const mod = await import('chart.js');
+    // The vendor's tree-shakeable entry ships UNREGISTERED — the pieces
+    // the panel uses are registered here, explicitly, so the lazy chunk
+    // carries the panel's needs and not the whole library.
+    mod.Chart.register(
+      mod.LineController,
+      mod.LineElement,
+      mod.PointElement,
+      mod.LinearScale,
+      mod.CategoryScale,
+      mod.Filler,
+      mod.Tooltip,
+      mod.Legend,
+    );
     return mod.Chart;
+  }
+
+  /** The mount — the dynamic import plus the chart's construction. */
+  private async mount(): Promise<void> {
+    try {
+      const ChartCtor = (await this.loadChartConstructor()) as ChartJsModule['Chart'];
+      const canvas = this.canvasRef().nativeElement;
+      const config = this.buildChartConfig(this.series(), this.unit(), this.anomalies());
+      this.chart = new ChartCtor(
+        canvas,
+        config as unknown as ConstructorParameters<ChartJsModule['Chart']>[1],
+      ) as unknown as PanelChart;
+      this.mounted.set(true);
+    } catch (error) {
+      // A mount failure is SURFACED, never swallowed: the consumer
+      // renders the house SVG fallback and shows a badge.
+      const reason = error instanceof Error ? error.message : String(error);
+      this.onMountFailed()?.(reason);
+    }
+  }
+
+  /**
+   * The click hand-off — `(datasetIndex, index)` → `(seriesId, tsMs)`.
+   *
+   * When the click landed on an anomaly marker, the marker id rides
+   * along; otherwise the payload carries no id (never a fabricated one).
+   */
+  private onChartClick(elements: readonly { datasetIndex: number; index: number }[]): void {
+    const element = elements?.[0];
+    if (!element) {
+      return;
+    }
+    const series = this.series()[element.datasetIndex];
+    if (!series) {
+      return;
+    }
+    const point = series.points[element.index];
+    if (!point) {
+      return;
+    }
+    const marker = houseNearestAnomaly(
+      this.anomalies(),
+      series.id,
+      point.t,
+      this.clickToleranceMs(series),
+    );
+    this.onPointClick()?.({
+      anomalyId: marker?.anomalyId,
+      seriesId: series.id,
+      tsMs: point.t,
+    });
+  }
+
+  /** The click tolerance — one sample spacing of the clicked series. */
+  private clickToleranceMs(series: ChartPanelSeries): number {
+    if (series.points.length < 2) {
+      return Number.POSITIVE_INFINITY;
+    }
+    let total = 0;
+    for (let index = 1; index < series.points.length; index += 1) {
+      total += series.points[index].t - series.points[index - 1].t;
+    }
+    return total / (series.points.length - 1);
   }
 }
