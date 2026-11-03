@@ -139,18 +139,20 @@ The output at the phase-4 freeze (the allowlist row is
 `charts-tab.component.spec.ts`):
 
 ```
+$ grep -rnE "\b3600\b" frontend/src/app/pages/metrics/ frontend/src/app/components/charts/
 frontend/src/app/pages/metrics/charts/charts-tab.component.spec.ts:5://   * the window request — `window_s=3600` ⇒ 240 points at the door's
-frontend/src/app/pages/metrics/charts/charts-tab.component.spec.ts:118:  it('declares the named poll interval (15 s) and the FRAME-owned window', () => {
-frontend/src/app/pages/metrics/charts/charts-tab.component.spec.ts:123:    expect(component.windowS()).toBe(3600);
+frontend/src/app/pages/metrics/charts/charts-tab.component.spec.ts:122:    expect(component.windowS()).toBe(3600);
+frontend/src/app/pages/metrics/charts/charts-tab.component.spec.ts:136:    expect(service.seriesCalls[0].options.windowS).toBe(3600);
 ```
 
-**Three hits, all inside the allowlist row.** The three hits that
-phase 3 reported in `charts-tab.component.ts` (the `WINDOW_S` constant
-and its two comments) and the one hit in `metrics-door.ts` (a comment)
-are GONE — the hardcoded window was replaced by the frame-owned
-`windowS` input, whose default is derived from the central ladder
-(`METRICS_CENTRAL_WINDOW_MINUTES['1h'] * 60`), and the `metrics-door.ts`
-comment no longer names the literal.
+**Three hits, all inside the allowlist row** (`charts-tab.component.spec.ts`
+— the fixture asserting the ladder's own one-hour entry). The three hits
+that phase 3 reported in `charts-tab.component.ts` (the `WINDOW_S`
+constant and its two comments) and the one hit in `metrics-door.ts` (a
+comment) are GONE — the hardcoded window was replaced by the
+frame-owned `windowS` input, whose default is derived from the central
+ladder (`METRICS_CENTRAL_WINDOW_MINUTES['1h'] * 60`), and the
+`metrics-door.ts` comment no longer spells the literal.
 
 ### 4.2 The consumers
 
@@ -346,7 +348,88 @@ asserted by `anomaly-overlay-plugin.spec.ts` ("the dependency set — NO
 second vendor package"), which scans `package.json` and
 `package-lock.json`.
 
-## 12. The deviations
+## 12. The verification sweep (the commands and their actual outputs)
+
+### 12.1 The whole-tree jest (D2)
+
+```
+cd frontend && CI=1 ./node_modules/.bin/jest --ci --silent --runInBand
+```
+
+```
+Test Suites: 4 failed, 144 passed, 148 total
+Tests:       9 failed, 4577 passed, 4586 total
+```
+
+The 9 reds are **BASE-PROVEN**: the identical four specs fail identically
+at the phase-4 base `560dac1ff` (a throwaway detached worktree with a
+symlinked `node_modules`, removed + `git worktree prune`d afterwards):
+
+```
+BASE  (560dac1ff):  Test Suites: 4 failed, 137 passed, 141 total
+                    Tests:       9 failed, 4494 passed, 4503 total
+HEAD  (phase 4):    Test Suites: 4 failed, 144 passed, 148 total
+                    Tests:       9 failed, 4577 passed, 4586 total
+```
+
+The failing-NAME diff base→head is EMPTY (the base carries one EXTRA,
+flaky, base-only failure) → **net-new deterministic reds = 0**.
+
+### 12.2 The phase-4 spec census (the mechanical node counts)
+
+| Spec | nodes |
+|---|---|
+| `components/charts/house-svg-renderer/house-svg-renderer.spec.ts` | 62 |
+| `components/charts/house-svg-renderer/house-svg-engine-uniqueness.spec.ts` | 2 |
+| `components/charts/renderer-registry.spec.ts` | 11 |
+| `pages/metrics/charts/chart-panel.component.spec.ts` | 23 |
+| `pages/metrics/charts/chart-panel.renderer.spec.ts` | 6 |
+| `pages/metrics/charts/anomaly-overlay-plugin.spec.ts` | 9 |
+| `pages/metrics/charts/charts-tab.component.spec.ts` | 9 |
+| `pages/metrics/tabs/central-tab.component.spec.ts` | 33 |
+| `pages/metrics/metrics.tsconfig.spec.ts` | 4 |
+| `pages/metrics/metrics.e2e-retirement.spec.ts` | 8 |
+| `pages/metrics/metrics-units.spec.ts` | 4 |
+| `pages/resources/timeline/timeline-tab.component.spec.ts` | 15 |
+| `pages/resources/timeline/timeline-drilldown.spec.ts` | 1 |
+
+### 12.3 The scoped type-check
+
+```
+cd frontend && ./node_modules/.bin/tsc -p tsconfig.metrics-fe.json --noEmit
+(exit 0 — no output)
+```
+
+### 12.4 The prompt-artifact baseline
+
+```
+/home/nea/ensemble-src/.venv/bin/python scripts/protection/generate_prompt_artifact_baseline.py --check
+PROMPT-BASELINE: OK — 161 versioned artifact(s) match .prompt-artifacts.sha256
+```
+
+### 12.5 The `jest-canvas-mock` planted variant (task 4.5)
+
+The variant = `frontend/setup-jest.ts` with the `import 'jest-canvas-mock';`
+line removed (a TEMPORARY edit — it is not committed). The canvas-rendering
+spec then FAILS, because jsdom's `getContext` returns `null` without the
+mock, so Chart.js never acquires a context and never mounts:
+
+```
+FAIL src/app/pages/metrics/charts/chart-panel.component.spec.ts
+  ● chart-panel — the DOM surface under a canvas › MOUNTS a chart and DESTROYS it on teardown
+
+    TypeError: Cannot read properties of null (reading 'ownerDocument')
+
+      at ownerDocument (node_modules/chart.js/src/helpers/helpers.dom.ts:46:11)
+
+Tests:       1 failed, 22 passed, 23 total
+```
+
+**The mock is load-bearing.** (The variant ALSO needs the
+`ResizeObserver` stub: Chart.js's responsive mode requires one, and
+jsdom ships none — the stub lives in the same setup file.)
+
+## 13. The deviations
 
 | # | The deviation | The reason |
 |---|---|---|
