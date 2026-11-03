@@ -321,3 +321,278 @@ throughout. The D7 proxy-side repair remains a user-owned item.
 **Ready for the APPROVER stage:** NO — READY-WITH-CONDITIONS. C-1…C-4 must fold first; then
 W-1…W-14 and A-1…A-9 fold before implementation; then the set is READY for the approver.
 No re-plan and no new commission is needed.
+
+
+---
+---
+
+# DELTA RE-REVIEW — fold of C-1..C-4 + W-1..W-14 + A-1..A-9
+
+**Date:** 2026-11-03 · **Folds under review:** `0115f4818` (10 plan docs + `fold-audit.md`) and
+`a85abd16e` (`bundle-baseline.json` + `bundle-baseline.measure.js`) · **Branch:** ahead-7 @ `a85abd16e`
+**Method:** closure verification only — no re-plan, no re-opening of settled rulings. Every claim below
+was checked **in the phase files**, not in `fold-audit.md`; the ledger figures were **executed**, not
+re-read.
+
+## VERDICT: **DELTA-CONDITIONS**
+**CRITICAL: 0  WARNING: 1  ADVISORY: 2**
+
+**APPROVER-readiness: READY-WITH-CONDITIONS** — one one-token path fix (§ Delta-W-1) must land before
+implementation starts. Every other condition from the first review is discharged and **independently
+re-verified by execution**. The plan does not need a re-plan, a new commission, or a design change.
+
+---
+
+## 1. The four criticals — closure is REAL (not merely asserted)
+
+| | Required by the review | Present in the phase files? | Evidence |
+|---|---|---|---|
+| **C-1** | wrapper inside `src/app/pages/metrics/**`; **every** chart.js import dynamic `await import('chart.js')`, **0** static sites; B4 = new chunk min+gz **≤ 65,536 B** AND route fetch set growth **≤ 65,536 B** vs **496,338 B**; first paint = app shell | **YES** (one residual — see Delta-W-1) | `phase4-plan.md:25` — 4.4 creates `frontend/src/app/pages/metrics/charts/chart-panel.component.ts`; `phase1-plan.md:31` (1.2c) gates the **shape**: *"every `chart.js` import site … must be the **dynamic** `await import('chart.js')` form — **0** static `from 'chart.js'` sites anywhere"*; `phase1-plan.md:36` (1.7) fixes the shape as *"the stricter of the two readings"*; `phase9-plan.md:31` (9.8d) carries **both** B4 thresholds and names the comparison leg G4 had promised but never had; `plan-overview.md:723` §10 criterion 8 = *"**first paint = the APP SHELL** (LEADER RULING 1)"* |
+| **C-2** | 2.4 split; 2↔4 **TIGHT** in the dependency map **and** both Coupling blocks; phase-2 exit = each of the 6 central tabs **fetches** its families and surfaces availability | **YES** | `phase2-plan.md:23` — 2.4 **SPLIT (C-2)**: the registry hand-off and the per-kind+unit panel composition **MOVE to Phase 4's task 4.15**; `plan-overview.md:347` map row 2 col 4 = **tight** and `:349` row 4 col 2 = **tight**; `phase2-plan.md:45` *"Phase 4 is now **tight**, not independent"*; `phase4-plan.md:45` *"(Phase 2 is now **tight** …)"*; `phase2-plan.md:78`/`:80` phase-2 exit — *"**Each of the 6 central tabs fetches its bound families and surfaces their availability …** **no central tab is an empty shell** (W-10)"* |
+| **C-3** | G10 baseline **9** incl. `blueprint.component.scss`; warning **SET** equality (0 added / 0 removed); count ceiling forbidden | **YES** | `plan-overview.md:138` G10 = *"**9 paths** … **`blueprint` 18.32 (the LARGEST)**"*; `plan-overview.md:546` B6 = *"a **SET DIFFERENCE** … captured **mechanically** … **never a count ceiling** (a ceiling can be loosened and silently lose detection)"*; `phase1-plan.md:38` (1.9d) captures the set by `grep -E "scss exceeded maximum budget" <build-log>`, *"never hand-written"*; `phase9-plan.md:73` *"warning **set difference** (0 added, 0 removed against the 9-path baseline)"*; `phase1-plan.md:86` the phase-1 exit records the captured 9-path set |
+| **C-4** | P1–P9 ordered: scrub → source worktree `.env` → assert `POSTGRES_DB == ensemble_dev` ≠ prod → re-export `PORT=8079` **unconditionally, after** the source → `python -m daemon` (not `dev.sh`) → assert effective port **from `/livez`** + DB read-back + `ensemble.json`; P3/P4 pinned to `.database == "postgres"` **AND** `.postgres.db == "ensemble_dev"`; L1 non-emptiness so a 200-with-empty-catalog **fails** | **YES** | `plan-overview.md:398-407` the P1–P9 table (P7 *"re-exported **AFTER** the `.env` source and **unconditionally** (LEADER RULING 3)"*; P3 the `jq -e '.database == "postgres" and .postgres.db == "ensemble_dev"'` expression; P4 the exact full `postgres` pre-seed); `plan-overview.md:412-421` the **ORDERED** boot sequence, 6 steps, with the order called *"the fix"*; `phase9-plan.md:24` (9.2) carries the same ordered sequence; `plan-overview.md:463-466` L1 — *"≥ 1 registered family **and** ≥ 1 of the 7 bound families … ≥ 1 series … a **non-zero** `daemon_rss_mb`"*; `plan-overview.md:404` P9 — *"a 200-with-empty-catalog from `/api/metrics/families` is a **FAIL**, not a success"* |
+
+**Verdict: C-1, C-2, C-3, C-4 are all closed as specified, in the phase files, as task-graph entry +
+acceptance fixture + numeric threshold.** The C-1 residual is a path-string defect inside the repair,
+not a failure of the repair — see Delta-W-1.
+
+---
+
+## 2. The 7 weak/partial landings — all repaired in the task graph
+
+| Amendment → finding | Repaired as | Evidence |
+|---|---|---|
+| AM-3 → W-2 | **two** end-to-end legs | `phase7-plan.md:17` (7.1) — *"(i) `navigateByUrl('/resources?window=24h&x=1')` … **parsed** `queryParams` … (ii) `navigateByUrl('/resources?tab=charts')` ⇒ the landed URL's **parsed** `queryParams.tab === 'resource'`"*, and *"a raw-string comparison is **not** accepted"* |
+| AM-6 → W-13 | **task-graph edges** | `phase9-plan.md:29` — 9.7a `Depends On: 9.3` (auth ON); `:30` — 9.7b `Depends On: 9.5` (auth OFF); `:25` — 9.3's env exports **precede** 9.2's boot; `:48` the risk row now cites the **task graph**, not the prose |
+| AM-7 → C-2 | the **class** was swept | `plan-overview.md:358` *"**2 ↔ 4 is TIGHT (C-2)**"* + both Coupling blocks amended (`:45` in phase2 and phase4) + map rows 2↔4 both **tight** — the fix is no longer a named-instance patch |
+| AM-10 → W-1 | re-point target + a green-at-freeze criterion | `phase1-plan.md:31` (1.2b) — *"re-pointed to a phase-1-**EXISTING** file that Phase 4 does not delete"*; `phase1-plan.md:74` phase-1 exit — *"**The pins spec is GREEN at the phase-1 freeze** with its re-pointed read path"* — *subject to Delta-W-1* |
+| AM-11 → W-3 | the count corrected | `phase4-plan.md:31` (4.10) — *"**four** canvas-fatal assertions in **three** leg-classes"*; `phase4-plan.md:78` the phase-4 exit repeats *"in **three** leg-classes"* |
+| AM-15 → C-1 | **shape** is now the gate | `phase1-plan.md:31` (1.2c) — the **dynamic** form, **0** static sites, every site inside the metrics tree; `phase1-plan.md:38` (1.9) — **TWO** planted-violation variants: *"(i) an **eager** import (in the initial set) and (ii) a **static import inside the lazy metrics tree** (the case that slips through (a) and (b) — C-1)"* |
+| AM-29 → W-7 | P8 split into two real assertions | `plan-overview.md:405-406` — **P8a** the `config.yaml` **port** stanza (and the disclosure that there is **no** database stanza), **P8b** the running daemon's **actual** database read back |
+
+---
+
+## 3. The ledger is self-proving — I EXECUTED it
+
+**Execution 1 — `bundle-baseline.measure.js` (the named artifact's re-derivation tool):**
+
+```
+cd frontend && node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser
+```
+
+| Figure | Plan value | **My executed value** | |
+|---|---|---|---|
+| G1 initial total | 5,909,018 B | **5,909,018 B** | ✓ |
+| G1 file count | 36 | **36** | ✓ |
+| G2 headroom | 90,982 B | **90,982 B** | ✓ |
+| G3 lazy chunk count | 52 | **52** | ✓ |
+| G6 lazy bytes total | 1,702,633 B | **1,702,633 B** | ✓ |
+| G4 `/metrics` route chunk | 27,672 B | **27,672 B** (`chunk-ZA3RV4HY.js`) | ✓ |
+| G4b route fetch set | 496,338 B | **496,338 B** | ✓ |
+| G5 `/resources` route chunk | 38,914 B | **38,914 B** (`chunk-FOLCEMN3.js`) | ✓ |
+| G7 largest lazy | 157,141 B | **157,141 B** (`chunk-QS2K3YLH.js`) | ✓ |
+| G7 second largest | 135,690 B | **135,690 B** (`chunk-HNKUMJNH.js`) | ✓ |
+
+**Every figure reproduces exactly.** The artifact is real, runnable, and its output is byte-identical to
+the `bundle-baseline.json` `reproduce.output` block.
+
+**Execution 2 — the G10 census command, verbatim from `plan-overview.md:105`:**
+
+```
+grep -E "scss exceeded maximum budget" <build-log> | sed 's/^▲ \[WARNING\] //'
+```
+
+→ **9 paths**, and `diff` against the plan's quoted block is **byte-identical** — including
+`blueprint.component.scss` at 18.32 kB, the ninth the original plan omitted.
+
+**The two provenance discrepancies were recorded, not re-fixed:**
+- the digest's **89,982 B** is labelled a *"1,000 B digit slip"* (`plan-overview.md:129`, `:553`) —
+  with the arithmetic shown (5,909,018 + 89,982 = 5,999,000 ≠ 6,000,000);
+- AM-2's **884,180 B / 5,115,820** is labelled a **basis difference** — *"undercounts by 793,198 B (it
+  summed only the index.html-referenced files, omitting the builder's 23 transitive static-import
+  chunks)"* (`plan-overview.md:554`).
+Neither number was quietly adopted; G2 carries **90,982 B**, derived from G1 by the same command.
+
+---
+
+## 4. W-1..W-14 + A-1..A-9 — all land as claimed, **none deferred**
+
+Every one of the 14 warnings and 9 advisories has a disposition row in `fold-audit.md` §C/§D, each
+marked CLOSED or FOLDED, and each **verified in the plan files** (spot-verified here: W-1 `phase1:31`/`:74`
+· W-2 `phase7:17` · W-3 `phase4:31`/`:78` · W-4 **new task `phase5:34` (5.14) bundle-guard re-run** ·
+W-5 `plan-overview:144`/`:730` — **"11/13"** · W-6 `phase1:31` (1.2a) — *"PER-BAN, not per-file"*, all
+**five** sources retained, four planted-violation legs · W-7 P8a/P8b · W-8 `plan-overview:401` the exact
+pre-seed **and** *"**P3 is re-run after P4**"* · W-9 `plan-overview:400` the `jq` expression ·
+W-10 `phase2:78`/`:80` · W-11 `plan-overview:463-466` · W-12 `phase9:76` *"zero diffs"* · W-13 `phase9:29`/`:30`
+· W-14 `phase2:22` cell now reads `2.1`).
+**A-1..A-9: all nine FOLDED** (verified: A-1 `plan-overview:606` · A-2 `:145` · A-3 `:205` + `phase2:11`
+· A-4 `phase4` 4.13 word-bounded · A-5 cite corrected · A-6 P1 no longer asserts `DAEMON_PORT` ·
+A-7 `phase4:98-99` the ordering is now recorded in phase 4's exit · A-8 the artifact exists and is read
+by the guards · A-9 `phase6`'s exit says five).
+The only "deferred" language in the plan set is the **pre-existing** routed register (b), (l), (m) —
+**no finding of mine was deferred.**
+
+---
+
+## 5. Nothing was weaponed — thresholds compared against the architect's Required clauses
+
+`fold-audit.md` §A restates all 29 amendments as **T** (task-graph) + **F** (fixture/leg) + **X**
+(threshold). I compared each **X** against the architect's own Required clause in
+`architecture-review.md`:
+
+| AM | Architect's Required | Folded threshold | |
+|---|---|---|---|
+| AM-2 | `\|Δ initial-total\| ≤ 2 kB` | the same, verbatim, in `phase1:38`, `phase4:35`, `phase4:94`, `phase9:31` | **unchanged** |
+| AM-4 | add `auth_required`(401), `timeout`, `unknown_family`(404), `bad_request`(400) | **10** classes; the 401 `auth_required` class is present at `phase8:26`/`:62` and `plan-overview:469` | **unchanged** |
+| AM-13 | coverage displayed **verbatim** | *"the rendered coverage == the payload's `coverage_pct` **verbatim**"* | **unchanged** |
+| AM-14 | never `window_s > 7200`; baseline **central tabs only** | `phase3:29` both clauses | **unchanged** |
+| AM-26 | **12** exported symbols by name; checklist **6/6** | *"**12** exported symbols enumerated by name; capability checklist **6/6**"* | **unchanged** |
+| AM-28 | inline styles **< 8 kB** (24 kB = hard error) | *"each new component's inline styles **< 8 kB** (the 24 kB cap is a hard error)"* | **unchanged** |
+| AM-15 | grep pin over resolved import sites | now *"every site inside `src/app/pages/metrics/**`; **any** `import('chart.js')` must be **dynamic**"* | **strengthened** |
+
+A mechanical token sweep across all 29 rows surfaced **no dropped threshold**. The only token the fold
+introduced that the architect did not state is AM-28's explicit **"24 kB cap is a hard error"** — a
+**strengthening** (the architect mentioned the 24 kB cap in its rationale but not in its Required
+clause). **Nothing was loosened to make the fold pass.**
+
+---
+
+## 6. New artifact sanity — `bundle-baseline.json` + `bundle-baseline.measure.js`
+
+- **Real and runnable**: `bundle-baseline.measure.js` (56 L) executes under `node v22.23.2` with no
+  dependency beyond `fs`/`path`, and produces the exact JSON quoted in `bundle-baseline.json`'s
+  `reproduce.output` (§3, Execution 1).
+- **The guards read the artifact, not plan prose**: `phase1-plan.md:38`, `phase4-plan.md:35` and
+  `phase9-plan.md:31` all say *"reading the **named baseline artifact** `bundle-baseline.json`"* and
+  cite **5,909,018 B** *from the artifact* — A-8's *"a number duplicated only in plan prose is not a
+  baseline"* is honoured.
+- **The artifact's provenance is sound and self-declared**: `commit: 7961bcb21` with the equivalence
+  argument (*"the lane's commits … are docs-only, so HEAD's frontend/ tree == the lane base's
+  frontend/ tree"*) — correct; the intervening `a85abd16e` adds only two files inside the plan dir.
+- **Builder semantics are cited to source**: `node_modules/@angular/build/src/utils/bundle-calculator.js:155-167`
+  — *"InitialCalculator sums the chunks flagged `initial` … index.html is an ASSET, not a chunk"* — which
+  is the same basis my independent on-disk sum of the builder's 36 named files reproduced exactly.
+- The artifact lives in the **plan dir**, not `scripts/` and not the shipped tree — consistent with
+  FE-only discipline.
+
+---
+
+## 7. Honesty check — C-4 is closed on CODE-PATH evidence, and the plan says so
+
+- **The plan states it in those words**: `decisions.md:639` — *"**C-4 was closed on CODE-PATH evidence,
+  not on an executed boot**; the three cheap falsification checks are named as implementation-time
+  assertions in Phase 9's task 9.2."* `plan-overview.md:424` — *"**C-4's code-path conclusion,
+  falsifiable at implementation time**"* — and `:438` *"implementation-time assertions that would
+  falsify it (named in Phase 9's task 9.2)"*.
+- **The three checks are named**: `plan-overview.md:439-441` — `env | grep POSTGRES` (expect **nothing**
+  before the `.env` load) · the boot log line `No PostgreSQL ENV vars detected, defaulting to sqlite`
+  (must **not** appear) · `cat $ENSEMBLE_DATA_DIR/ensemble.json` (must show the dev DB).
+- **They are specified as MUST-EXECUTE-AND-EVIDENCE, not as already-done**: `phase9-plan.md:60` — the
+  evidence must carry *"**C-4 falsification checks recorded with their actual outputs**"*; `phase9:23`
+  (9.1) — *"record every assertion's result in the lane evidence"*.
+- **No plan file implies the boot was executed.** A sweep for past-tense execution claims
+  (`we ran/booted/executed`, `the boot was run`, `verified by running`, `the daemon booted`, …) across
+  all 13 plan docs + `fold-audit.md` returns **exactly one hit — inside this review file** (the original
+  W-13 text describing the defect). The plan's own verbs are imperative: *"Run the pre-flight fence"*,
+  *"Boot the dev daemon"*, *"the **observed** effective port"*, *"the **observed** counts are recorded
+  in the evidence"*.
+- The fold author's own §G re-verification is a **separate, independent** pass with real commands and
+  results — and it does **not** claim a boot.
+
+**Verdict on item 7: HONEST.** No wording anywhere implies the three checks were already run.
+
+---
+
+## 8. Remaining findings
+
+### 🟡 [Delta-W-1] `phase1-plan.md:36` (task 1.7, opening clause) — the stub path contradicts every other cell; the relocation is prose, not a task
+
+**The contradiction.** Task 1.7 opens:
+
+> *"Write the **wrapper contract** as a doc comment in a NEW stub
+> `frontend/src/app/components/charts/chart/chart-panel.component.ts` …"*
+
+— the **pre-C-1** path, **outside** `src/app/pages/metrics/**` — and then, later in the same cell,
+states:
+
+> *"**The wrapper's final home is `frontend/src/app/pages/metrics/charts/chart-panel.component.ts`** —
+> under the `src/app/pages/metrics/**` tree (a **NAMED relocation**, so 1.2(c)'s location rule holds by
+> construction; the earlier `components/charts/chart/` home sat **OUTSIDE** it and made the pin
+> unimplementable — C-1)"*
+
+Every other cell in the plan set names only the **new** path: `phase1:31` (1.2b — *"re-pointed to a
+phase-1-EXISTING file … `frontend/src/app/pages/metrics/charts/chart-panel.component.ts` (**the wrapper
+stub 1.7 creates**)"*), `phase1:76`, `phase4:25` (4.4 — *"at its **phase-1 stub's path** (1.7 created it
+there)"*), `phase4:74`, `decisions.md:601`. **A path tally over the whole plan set: 8 mentions, 7 on the
+new path, 1 (this clause) on the old.** 4.4's cross-reference *"1.7 created it there"* is therefore
+**factually false against 1.7's own opening clause**.
+
+**Why it matters.** Taken literally, 1.7 creates the stub at the old path → 1.2(b)'s re-point target does
+not exist at the phase-1 freeze → the pins spec throws `ENOENT` → **the phase-1 freeze is red for
+exactly the reason W-1 was raised** — i.e. the W-1 repair is defeated by the very cell that creates the
+file. And nothing deletes the orphan: 4.12 removes only `components/charts/svg-line-chart/` and
+`pages/resources/svg-timeline/`, so `components/charts/chart/chart-panel.component.ts` would ship.
+The "NAMED relocation" is a **sentence, not a task** — the one thing the fold-quality rule forbids.
+
+**Why this is a WARNING and not a CRITICAL, and why C-1 stays closed.** The load-bearing D-1 guarantee
+does not depend on the stub's path: it is gated by 1.2(c)'s shape+site assertion (**0** static sites,
+four planted-violation legs), 4.4's own spec (*"a static form must fail it"*), 1.9's **two** planted
+guard variants (eager **and** static-inside-lazy-tree), and B4's **two** numeric thresholds (64 KiB
+min+gz; 64 KiB route-fetch-set growth vs 496,338 B). The failure mode is a **loud** phase-1 gate
+failure — not a silent wrong ship. The dominant reading (3 cells vs 1 clause) is also the correct one.
+
+**Required change (one token, plus one clause):**
+1. `phase1-plan.md:36` — change the stub path in 1.7's opening clause from
+   `frontend/src/app/components/charts/chart/chart-panel.component.ts` to
+   `frontend/src/app/pages/metrics/charts/chart-panel.component.ts`; **or** state explicitly that 1.7
+   creates it at the new path and that 4.4 replaces it in place.
+2. Make the relocation a **task-graph entry** rather than a sentence — e.g. 1.7(b) *"the stub is created
+   at its final path; no relocation step exists"* — so the fold-quality rule's (a)/(b)/(c) test applies
+   to it. If any path outside `src/app/pages/metrics/**` is ever created, name the task that removes it.
+
+### 🟢 [Delta-A-1] `fold-audit.md:148` (§G, C-1 row) — stale post-fold evidence row
+§G's C-1 row reads *"3 hits only (1.5 `chart-theme.ts` … 1.7 stub · 4.4 create) — **no relocation
+task**"*. That was **true of the pre-fold plan** and is now **stale**: post-fold, 1.7 *asserts* a
+relocation (in prose). `fold-audit.md` is the fold's own evidence file, and a reader checking the
+current plan against §G will read "no relocation task" as a present-tense finding. **Fix:** amend the
+row to *"the pre-fold plan had no relocation task; the fold adds the relocation as prose in 1.7 — see
+review Delta-W-1"*, or leave §G as a dated pre-fold record and say so in its heading.
+
+### 🟢 [Delta-A-2] `plan-overview.md:95` / `bundle-baseline.json` — the artifact's `commit` field pins `7961bcb21`, one commit behind HEAD
+`bundle-baseline.json` records `"commit": "7961bcb21"` with the equivalence argument. Correct as of
+`a85abd16e` (which adds only two plan-dir files), but the field will read as stale the moment the
+next commit lands, and the equivalence argument is the only thing making it valid. **Fix:** state the
+equivalence rule (docs-only commits ⇒ the `frontend/` tree is unchanged) as the authoritative
+precondition, with the commit field as a convenience, or re-stamp it at the lane's next commit.
+
+---
+
+## 9. What I could NOT verify (unchanged in kind from the first review)
+
+- **The runtime behaviour of the fenced dev daemon** — still un-executed by design (C-4 is closed on
+  code-path evidence, and the plan says so). The three falsification checks are correctly deferred to
+  the functional gate; their execution is the lane's job, not this review's.
+- **The e2e legs under canvas** — the spec text was re-verified (four refs, `phase4:31`), but Playwright
+  was not run.
+- **G8 / G9** — post-implementation by construction; each still carries its named phase-freeze task
+  (4.11, 9.8(e)).
+- **The `bundle-baseline.json` G10 set** — I verified the G10 **census** by executing the command against
+  the lane-base build log; I did not independently re-derive the nine **sizes** recorded in the artifact
+  (the byte/kB figures are transcribed from the same log the command reads).
+
+## 10. APPROVER-stage readiness verdict
+
+**READY-WITH-CONDITIONS — one condition.**
+
+**Blocking (must land before implementation starts):**
+1. **Delta-W-1** — align task 1.7's stub path with the six other cells that name
+   `frontend/src/app/pages/metrics/charts/chart-panel.component.ts`, and state the relocation as a
+   task-graph entry rather than a sentence (with a removal task if any out-of-tree path is ever
+   created).
+
+**Non-blocking (fold before implementation, not gating):** Delta-A-1, Delta-A-2.
+
+**After Delta-W-1: the set is READY for the approver.** All four criticals are closed and
+independently re-verified; all 14 warnings and 9 advisories are landed with no deferrals; no threshold
+was loosened; the ledger is executable and self-proving; and the C-4 honesty posture is explicit and
+correct. **No re-plan, no new commission, no design change.**
