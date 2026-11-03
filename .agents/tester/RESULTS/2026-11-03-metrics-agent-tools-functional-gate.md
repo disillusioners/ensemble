@@ -137,7 +137,53 @@ leg + 113 s BASE leg). Total gate wall-clock ≈ 45 min across 7 workers (3 wave
 
 ## Disposition
 
-Verdict **FAIL** stands until F-1 is dispositioned by the lane owner (fold + re-run the G2 leg,
-or route). Everything else is ceremony-ready: artifact-integrity (G1 zero-drift), the shipped
-surface (G3 144/144 + G4 35/35), the contract amendment (G5), and the FE fold (G6) are all
-green at the final tree with this gate's own evidence.
+Verdict **FAIL** stood until F-1 was dispositioned by the lane owner. Everything else was
+ceremony-ready: artifact-integrity (G1 zero-drift), the shipped surface (G3 144/144 + G4 35/35),
+the contract amendment (G5), and the FE fold (G6) were all green at the final tree with this
+gate's own evidence.
+
+> **SUPERSEDED by the narrow re-verification below — the F-1 axis is CLOSED and the overall
+> verdict is PASS as of 2026-11-03 (later same day). This section stands as the historical
+> first-run record.**
+
+---
+
+# Narrow re-verification — the F-1 fix (2026-11-03, later)
+
+**Fix surface:** `fcfa24225..4930908cd` — four commits: `9bb2b0fa2` (artifact + marker +
+consequence pins, 7 files +80/−23) → `14b077097` (F-2/F-3 records) → `6df486ab9` (archive
+re-run + citations) → `4930908cd` (R-1/R-2 record fold, 3 files +27/−4). Full surface
+12 files +255/−53. Workers: narrowA `ae6ac6d4` (pack legs) · narrowB `46d9451c` (read-only
+git/archival). Logs `/tmp/na-*.log`, `/tmp/nb-*.log`.
+
+## Verdict: **PASS** — the FAIL's single axis is CLOSED; the lane proceeds to giter staging
+
+| Check | Result | Evidence |
+|---|---|---|
+| The blocker flip | ✅ PASS | `test_tool_category_artifact.py` **9/9 PASS** (2.70 s) at `4930908cd` — was 3/3 FAIL ×3 at the pre-fix tree. The pack now carries the four `TestArtifactRegenerationAuthority` legs (ambient flag cannot rewrite; committed path refused as output; drift check genuinely fails with the ambient flag; explicit scratch path receives the payload). |
+| Generator byte-identity ("never hand-edited") | ✅ PASS | `REGENERATE_ENV = "ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT"` (`:57`); regenerate-to-scratch then `diff` vs committed → **exit 0**, sha256 both `1ff31ecc…` — the committed artifact IS the generator's output. |
+| Artifact diff shape | ✅ PASS | exactly **3 changed lines**: sorted insert `"metrics-read"` (`mcp_rpc` < `metrics-read` < `midflight`), `count 56→57`, `vocabulary_version 1→3` (the committed artifact was stale by TWO markers — it predated central-metrics-v1's bump; documentary-only per R-2, which is why the drift check could not see it). |
+| VOCABULARY_VERSION | ✅ PASS | `VOCABULARY_VERSION: int = 3` at `daemon/checkpoint_metrics.py:218` (exactly one occurrence) + the v3 history docstring entry; SEALED set checked — 35 entries, `checkpoint_metrics.py` NOT pinned ⇒ no re-pin owed or performed. |
+| M8 consequence pin bites | ✅ PASS | plant `3→2` → the pin (`tests/unit/metrics/test_metrics_vocabulary_amendment.py::TestVocabularyVersion::test_the_version_is_three`, assert at `:26`) REDs `assert 2 == 3` naming the version → byte-identical restore (sha-verified) → GREEN; porcelain EMPTY after. **Note:** the pin lives in the vocabulary-amendment pack, not the artifact pack — both are inside the union corpus. |
+| Union dual-side net-new (the gate's own 70-file composition) | ✅ **net-new EMPTY** | HEAD `4930908cd` **1659 / 1651 / 8** vs BASE `03a2297c3` **1504 / 1496 / 8** — FAILED sets **identical** (`comm -23` and `comm -13` both EMPTY), 6/8 digests byte-identical, the 2 differing are operand shifts only on base-proven reds (api.py line-count operand 5751→5763 + log offsets — already characterized in the first-run record). Reconciliation vs the gate baseline: 1659/1649/10 → 1659/1651/8 = exactly the 2 net-new reds converted green, **0 new nodes**; BASE reproduces the gate baseline exactly. (The coder's attested 1584/1579/5 vs 1397/1392/5 was a narrower composition; this gate's 70-file superset is the verdict basis.) |
+| Matrix archive currency (coder-attested leg b) | ✅ PASS | NEW archived log sha256 `a627a8fbe4f210e1176788b42c666b0140e7aa49b49f4fd73959e379ae9a8cbf` (4 446 B, 27 legs, FOLLOW 235→215); manifest sha `d33afa53…`; manifest `head_sha` = `14b077097` — SELF-CONSISTENT (the manifest ships inside `6df486ab9` and cannot contain its own sha; the re-run executed at the `14b077097` tree, as the records state); currency proven: all 4 manifest-pinned files byte-identical `14b077097..4930908cd`, and `6df486ab9..4930908cd` = exactly 3 files, none under `daemon/` or `test/packs/`; `metrics_read.py` sha256 `dd6c406f…` unchanged from the archived run through the final tip. Citations re-pointed at the new sha (9 sites); every `eb2423eb` citation sits in the marked SUPERSEDED chain. |
+| Record folds (F-2/F-3/R-1/R-2) | ✅ ALL FOLDED | E-1: "eight lines" + "818→818" in all three records (stale NINE/819 only inside the correction prose that quotes them). F-2: the 808/809 premise corrected-by-absence prose landed in evidence-pack + fold-ledger. R-1: `tests/helpers/metrics_exposition_baseline.py:43` now "The FOUR allowlisted value-delta carriers" with the 4-key ALLOWLIST + the exact-set pin at `test_metrics_query_routes.py:380-396` (the carrier count, NOT the three tool bodies — `metrics_read.py`'s "ALL THREE tool bodies" is correct and correctly untouched). R-2: documentary-only statement + all five exact bindings verified in-tree (`test_tool_category_artifact.py:205/:285/:290`, `test_metrics_vocabulary_amendment.py:26`, `test_metrics_family_adjudication.py:419`); currently consistent 3=3. |
+
+## Residuals routed (not blocking)
+
+1. 🟡 **fold-ledger.md:350** still says the archived manifest records HEAD `d50b95e3d` — stale
+   when `6df486ab9` re-archived (the same sentence's cited manifest actually reads
+   `head_sha 14b077097`). One-token doc fold (`d50b95e3d` → `14b077097`); the token belongs
+   only in the SUPERSEDED chain. Owner: the lane's next docs commit or the giter sweep.
+2. Stays routed (unchanged from the first run): the LESSON-class item to bind the artifact's
+   `vocabulary_version` field to the code constant in the artifact pack; the FE pack debt trio
+   (`LEG_KIND` mislabel, vacuous jest `ERROR_SUMMARY`, shared `METRICS_FE_LOG_DIR`).
+
+## Overall verdict (supersedes the first run's FAIL)
+
+**PASS.** The single FAIL axis (G2 net-new ≠ ∅) is closed with independently re-verified
+evidence at the fixed tip; every other leg was already green and is unaffected by the fix
+surface (which touched no `test/packs/` and no `daemon/` file other than
+`daemon/checkpoint_metrics.py`, whose only change is the marker + docstring — sealed-checked,
+not pinned). The lane proceeds to giter staging.
+
