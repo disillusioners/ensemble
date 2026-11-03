@@ -1,0 +1,14 @@
+=== TEARDOWN leg=s2 db=ens_v0287_s2_1793663324_2972 role=v0287_smoke_s2_1793663324_32445 port=8951 ===
+python -m daemon processes alive now:
+    (none)
+MCP stdio children (context7/npm) alive now:
+2068162 npm exec @upstash/context7-mcp
+2068264 sh -c context7-mcp
+2068265 node /home/nea/.npm/_npx/eea2bd7412d4593b/node_modules/.bin/context7-mcp
+2400396 npm exec @upstash/context7-mcp
+2400459 sh -c context7-mcp
+2400460 node /home/nea/.npm/_npx/eea2bd7412d4593b/node_modules/.bin/context7-mcp
+port 8951 FREE
+scratch DB remaining: 0 (0 = dropped); scratch role remaining: 0 (0 = dropped)
+scratch removed: /tmp/v0287-smoke.s2.scratch.ufPDkR ; fake home removed: /tmp/v0287-smoke.s2.home.iqVEaC
+=== END TEARDOWN s2 ===

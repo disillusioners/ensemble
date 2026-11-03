@@ -1,0 +1,6 @@
+copied staged artifact into scratch: binary=6f652d6bb29239709787bf2f1bcb5a00f26bfbb17d644bc4169d2f873261ef49
+SETUP OK leg=s2 self_env=sandbox slug=e2e port=8951 role=v0287_smoke_s2_1793663324_32445 db=ens_v0287_s2_1793663324_2972
+  scratch=/tmp/v0287-smoke.s2.scratch.ufPDkR
+  fake_home=/tmp/v0287-smoke.s2.home.iqVEaC (live install dir resolves to /tmp/v0287-smoke.s2.home.iqVEaC/agents-ensemble — INSIDE the scratch)
+  public plane url vs live install .env: MATCH
+  staged binary copied to: /tmp/v0287-smoke.s2.scratch.ufPDkR/ensemble-prod
