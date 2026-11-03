@@ -1,9 +1,8 @@
 # Approver Active State
 
-Plan: metrics-agent-tools (agent tool surface over the central metrics system — plan set at .agents/shared/planning/metrics-agent-tools/)
-Slug: metrics-agent-tools
-Status: APPROVED
-Iteration: 002 FINAL
-Started: 2026-11-03T04:15Z
-Last Verdict: APPROVED (iteration 002 FINAL, 2026-11-03 — 2/2 fresh workers APPROVED, 0 blocking, 10 non-blocking notes after dedup; iteration-001 blockers B1/B2/B3 independently verified closed by cold-context workers. Tracking: .agents/approver/metrics-agent-tools-tracking.md)
-Note: superseded-from-active chain preserved in tracking file (db-pool-idle-txn APPROVED 001 FINAL 2026-10-28 → unit-secret-exposure APPROVED 001 FINAL 2026-10-23 → mcps-gateway-interop APPROVED 002 FINAL 2026-10-22 → hard-reboot-recovery APPROVED 001 2026-10-19 → resource-cost-control ESCALATED 003 2026-10-18).
+Plan: fe-t1-build (FE-only T1 metrics dashboard, wi-32a99618 — plan set at .agents/shared/planning/metrics-unification/fe-t1-build/)
+Slug: fe-t1-build
+Status: IN_PROGRESS
+Iteration: 002
+Started: 2026-11-03T19:45Z
+Last Verdict: REJECTED (iteration 001, 2026-11-03 — fresh-eyes independent review: 3 blocking issues, 5 warnings. B1 = the bearer-token mint (the lane's only DB write) is unfenced and its default resolution target IS the live database; B2 = Phase 9's task graph contradicts the required auth-env-before-boot ordering, so the data-bearing leg cannot pass as graphed; B3 = the Phase-9 route-chunk re-derivation is not stable under the lane's own changes, which can break or mis-resolve B4's baseline. Verdict artifact: .agents/shared/planning/metrics-unification/fe-t1-build/approval.md. Tracking: .agents/approver/fe-t1-build-tracking.md)
