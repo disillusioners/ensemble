@@ -107,6 +107,24 @@ residual is owned by the contract owner (fold-ledger §B `contract_RevocationLev
 
 ---
 
+## 4b. The tip drift at hand-over (giter MUST know this)
+
+`origin/latest` has ADVANCED **36 commits** since the lane's base (`03a2297c3`) — the
+`promote-handback-halt` lane landed (including the **v0.28.8** version bump). The lane's base
+is still an **ancestor** of `origin/latest` (a clean fast-forward), and the file overlap
+between the lane's change and the drift is **TWO files**:
+
+| Overlapping file | Nature | Merge handling |
+|---|---|---|
+| `.agents/tester/PACKS.md` | both lanes add rows | **keep-both, newest-first** (the house rule for PACKS.md) |
+| `daemon/api.py` | the drift's hunks are at `:2909`/`:2918`; the lane's are at `:2531`/`:2543`/`:3784` | **no overlap** — the hunks are far apart, so the merge is conflict-free |
+
+**The ten pin files are NOT touched by the drift** ⇒ the ONE-commit cluster (`23695bef3`) cannot
+split across the merge. The AmC-9 post-merge pin re-derivation is still the house rule — run
+the two greps (step 2 of §6) after the merge and record the artefact.
+
+---
+
 ## 5. The two hand-overs
 
 | Hand-over | To | Form |
