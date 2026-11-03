@@ -61,3 +61,36 @@ Per-variable env scrub on every invocation (the `env -u POSTGRES_*` glob form ne
 ## Gaps
 
 None — all 9 legs delivered with measured evidence. The open items above are owner-routed findings (F1-F6), not gaps.
+
+
+---
+
+## Addendum — narrow re-verify of the FIXED pack (2026-11-03, gate owner)
+
+Context: the replacement tidier landed 3 commits on top of this evidence commit `1521a6e04` — `3ca6e633c` (pack fixes F1+F2+F3-header), `004f0a105` (docs + pin-docstring F3+F7+F8), `3effe28fb` (notes). Branch @ `3effe28fb` (4 ahead of origin; stage pushes — lane owner's). **ZERO daemon code touched — PROVEN**: `git diff --name-only 1521a6e04..3effe28fb` = 6 files (3 planning docs, tidier notes, the pack, the pin), none under `daemon/`. Worker: `f50bd56f`. Method: two `git archive HEAD` scratch trees under `/tmp` (`run` + `pristine` reference as the blob authority — an archive tree has no git); the lane worktree was never executed in.
+
+### R1 — fixed pack, ONE run (scratch `run` tree)
+- **exit 0 · wall 202s** (pack's own timer: `[timer] total wall: 202s / budget 300s`).
+- Phase 0 `IMPORT GUARD: PASS` (resolves under the scratch run tree); phase 1 **`56 passed in 70.25s`**; phase 2 **10/10 legs red=YES green=YES** — the TSV header now prints **PRISTINE** shas (the F1 fix: restore target is the captured pristine, not leg-start); `mutation failures: 0`; `RESULT: PASS`.
+- **Independent pristine proof** (not the pack's own claim): 5/5 daemon-file shas `run == pristine`; source-level `diff -r` on `daemon/` **empty**; full-tree diff empty except `__pycache__` byproducts. `MISMATCH_COUNT=0`.
+
+### R2 — safety behaviors, once each
+- **R2a (F1 class) — mid-flight SIGTERM during phase 2**, with a plant verified ON DISK at kill time (`skill_tools.py` sha `1505b098…` ≠ pristine `83d6424b…`; kill ISO 2026-11-03T22:15:17Z, PID 3334418): **pack exit 1 (non-zero ✓)** within 7s of the kill; post-kill **5/5 shas MATCH**, source-level diff empty, no stray processes, 0 leftover FAKE_HOME dirs. **Restore-under-kill PROVEN.** The fixed pack also takes a lock file (fencing concurrent runs in one tree).
+  - Minor open observation (NOT a failure of the required behaviors): the SIGTERM path emitted **no `RESULT:` line** although the pack header claims "The RESULT label always prints". A faithful harness built from the pack's verbatim trap+cleanup block DOES print `RESULT: FAIL (left-behind plant detected on exit — pristine restored)` — so exit 1 matches the cleanup drift branch, but the echo's bytes did not land in the run log; mechanism unresolved (observability nit for the pack owner).
+- **R2b (F2 class) — `SKILL_ID_VERBATIM_BUDGET_S=1`** (env var verified in the pack at :50/:77/:96/:102; outer `timeout 300` retained): **`RESULT: TIMEOUT (internal timer: wall 74s > SKILL_ID_VERBATIM_BUDGET_S=1s after phase 1)` · exit 124** — the internal budget fired BEFORE the outer timeout; tree pristine after. Default budget = 300s == the house cap; the **dual-layer timeout is now real**.
+
+### R3 — F3 doc truth CONFIRMED
+Pin docstring (lines 28–49) and pin-spec §PROC (lines 56–73) both name the **derived base-adapted-pin procedure** and enumerate the **7-leg base-red set** (`test_db_bracket_token_is_the_stored_full_uuid`, `test_list_row_shapes_are_preserved`, `test_fused_path_file_entry_id_is_consumable`, `test_file_only_path_file_entry_id_is_consumable`, `test_create_line_id_is_the_stored_uuid_and_resolves`, `test_file_injection_body_renders_the_address`, `test_injection_attribution_stays_the_pseudo_id`), both stating `7 intended reds / 9 green / 3 N-A = 19 nodes`. **AST assert recount: 77 == documented 77 (MATCH).**
+
+### R4 — residual set CORRECT; withdrawn premise CLEAR everywhere
+Ceremony residuals = exactly **(i)** skill_fix echo `:1260` bare 8-hex token, **(ii)** skill_feedback echo `:1491` bare 8-hex token, **(iii)** `_render_pf_view` `:402` pseudo-id line. The `pf:te…` shape hazard is WITHDRAWN at every site it appears — `decisions.md:61` and `:86` quote-and-withdraw; `plan-overview.md:182` (R3 row) struck-through + corrected with both measured reasons (`[:8]` → `pf:teste`; the truncating echo unreachable for `pf:` inputs — `:1213-1214` refuses `pf:` before the echo, `:1465-1470` routes `pf:`/`pf-` to `_feedback_pf_skill` which renders the address untruncated); `tidier/notes.md:790`. **No doc carries it as a live claim.** All other `pf:te` substring hits are legit address forms, unrelated.
+
+### R6 disclosures (recorded, no action)
+- **P7-family sibling citation at base (`:1201-1206`) not re-verifiable at HEAD** — routed: the display-hygiene lane must re-derive.
+- **bash TERM-deferral caveat + `--kill-after` ruling (gate owner): DO NOT ADOPT `--kill-after`.** Plain `timeout 300` sends TERM which bash defers while a foreground pytest runs — bounded by the current phase, and **the trap still runs, so the pristine restore is preserved**. `--kill-after` escalates to **SIGKILL, which bypasses the exit trap** and would reintroduce the exact F1 plant-leak class the fix just closed. Promptness is now the internal budget's job (proven: exit 124 at 74s ≪ 300s). If a prompt backstop is ever wanted, use a **process-group TERM** (`kill -TERM -<pgid>`) — prompt AND trappable. The PACKS.md invocation stays `timeout 300`.
+
+### Measured wall-time annotation
+Fixed pack measured **202s = 67% of the 300s cap** (~98s headroom) with the internal budget as the first layer — recorded in the PACKS.md row annotation.
+
+### Verdict: **GO (confirmed)**
+Artifacts: `/tmp/wi76d89e11-reverify-artifacts-20261103/` (12 files, 0 empty). Fences: lane worktree untouched (porcelain 0 at HEAD `3effe28fb`); shared checkout never executed in (one self-caught stray file by the worker's diagnostic harness — `daemon/f.py`, 16 B, removed immediately; porcelain restored to its pre-session 84 pre-existing lines; post-cleanup mtime scan count=0); scratch trees removed with proof; zero live contact; no commits by the worker. Worker byproduct: skill `narrow-re-verify-leg` (`93d0453c`) — recorded, not dispatched (evolution lane disabled).
