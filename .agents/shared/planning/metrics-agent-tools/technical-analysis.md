@@ -267,7 +267,7 @@ class MetricsFamiliesInput(BaseModel):
 |---|---|---|
 | `id`, `role`, `source_idiom`, `durability`, `live_series_count`, `cardinality_contribution`, `availability` | **verbatim** from the provider | the frozen shape |
 | `availability` | **verbatim** (`{"state": "live"\|"dark", "reason"?: …}`) | never re-derived, never re-ordered (A.8) |
-| `name_count` | derived | number of metric names in the family |
+| `name_count` | derived | the family's **DECLARED** name count — the TRUE count, even when the `names` projection is bounded (200/family, 2000/response): `name_count` is the DECLARED count, `names` is the BOUNDED projection, and the difference between the two IS the visible signal that names were dropped |
 | `data_present` | derived | `live_series_count > 0` |
 | `dark_with_live_series` | derived | `availability.state == "dark" AND live_series_count > 0` |
 

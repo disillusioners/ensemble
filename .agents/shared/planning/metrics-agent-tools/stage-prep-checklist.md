@@ -101,7 +101,7 @@ residual is owned by the contract owner (fold-ledger §B `contract_RevocationLev
 | the Phase-2 Tier-1 verdict | net-new deterministic reds **0** |
 | the Phase-3 Tier-1 verdict | net-new deterministic reds **0**; the route censuses **111 / 37 / 33** UNCHANGED |
 | the Phase-4 FE verdict | net-new **0**; both builds rc=0; the e2e 3/3; the dependency diff **0 lines** |
-| the Phase-5 mutation matrix | **12/12 PASS** (RED via the intended assertion → byte-identical restore → GREEN) |
+| the Phase-5 mutation matrix | **22/22 PASS** (21 RED/GREEN + 1 FOLLOW) (RED via the intended assertion → byte-identical restore → GREEN) — the ARCHIVED log: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def`) |
 | the prompt-artifact re-stamp | **REQUIRED** — the baseline delta is exactly the 3 `tools_note.md` (§2) |
 | the throwaway base worktree | `/home/nea/ensemble-src-wt-base-metrics` (detached at `03a2297c3`) — **IMPLEMENTER-OWNED** (council A9); it must be **absent (or accounted) at stage time, never orphaned** |
 
@@ -137,7 +137,7 @@ the two greps (step 2 of §6) after the merge and record the artefact.
 ## 6. The stage-time checklist (for giter)
 
 1. `git fetch` + confirm `latest` has NOT moved into the lane's tree in a way that would split
-   the ONE-commit cluster (the cluster is `23695bef3`; a conflict inside any of the 11 pin files
+   the ONE-commit cluster (the cluster is `23695bef3`; a conflict inside any of the 10 pin files
    is the ONE way it splits — re-derive the pin set by grep afterwards, per AmC-9).
 2. Re-derive the pin census by grep (`grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py`
    + `grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/ --include=*.py`) — **never trust a prose count**.

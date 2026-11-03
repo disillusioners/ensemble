@@ -38,9 +38,11 @@ the `instance.py` extend + the three metas + the three `tools_note.md` + the 16-
 | 4 | the scoped type-check | `frontend/./node_modules/.bin/tsc --noEmit -p tsconfig.metrics-fe.json` | rc=0 | — | green (the frontend-local toolchain ONLY) |
 | 4 | both builds | `ng build --configuration development` + `--configuration production` | rc=0 / rc=0 | — | green; the production budget WARNs are RECORDED FINDINGS (none names a file this lane touched) |
 | 4 | the FE e2e | `playwright test --config=playwright.metrics-gate.config.ts` | **3/3 passed** (real Chromium, zero daemon contact) | — | green |
-| 5 | **the mutation matrix** | **21 RED/GREEN + 1 FOLLOW = 22 legs** (12 at the first cut; +10 by the 2026-11-03 council fix cycle) | **22/22 PASS** (RED via the intended assertion → byte-identical restore → GREEN; the FOLLOW leg's consumer value MOVED 235 → 215) | — | green; the post-run manifest confirms every touched file is byte-identical |
-| 5 | the unit shell pack | `test/packs/metrics_read_unit_test.sh` | **PASS (5 legs)** — 30 + 34 + 15 + 20 + 28 = 127 nodes | — | green |
+| 5 | **the mutation matrix** | **21 RED/GREEN + 1 FOLLOW = 22 legs** (12 at the first cut; +10 by the 2026-11-03 council fix cycle) | **22/22 PASS** (RED via the intended assertion → byte-identical restore → GREEN; the FOLLOW leg's consumer value MOVED 235 → 215) — **ARCHIVED**: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def`) + `.../mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `44629b770ab1767c125b038134eb080d4e484f5c93a52d1cbfb49aca088f45ac`) | — | green; the post-run manifest confirms every touched file is byte-identical |
+| 5 | the unit shell pack | `test/packs/metrics_read_unit_test.sh` | **PASS (5 legs)** — 30 + 47 + 15 + 20 + 28 = 140 nodes | — | green |
 | 5 | the mutation shell pack | `test/packs/metrics_read_mutation_legs.sh` | **PASS** (the matrix's own `RESULT: PASS` + the byte-identical-restore assertion) | — | green |
+| 5b/5c | **the two fix cycles' scoped packs** (the six-pack set: tools + personas + registration + docs-surface + the seam pack + the contract-doc pack) | 6 file arguments | **161 passed** (the tools pack **47** — the AST wiring pin + the two SHAPE pins) | — | green; the shell pack's five legs re-run: 30 + 47 + 15 + 20 + 28 = **140 nodes**, `RESULT: PASS (5 legs)` |
+| 5c | the C1 regression's mutation proof (manual, recorded) | the history body handed the RAW rows again (`items=kept`) | the shape pin **RED** (and only that pin) | — | the pin is mutation-meaningful; the source was restored byte-identically |
 
 **The whole-tree collection census** is blocked on BOTH legs by the KNOWN base debt
 (`tests/packs/g7_unique_index_smoke_test.py:121` — a module-level `sys.exit(0)`): **4 855
@@ -185,11 +187,11 @@ today's fit was an ACCIDENT, not an invariant.
 
 | Item | What changed |
 |---|---|
-| **C1** | the trim is wired into ALL THREE bodies with a non-silent surface (`truncated` + the count block + a caveat naming the byte ceiling + a `narrow_hint`); the probe measures the tool's OWN output form (`indent=2` — a compact probe measures a fiction); the trim reserves 2 KiB for the caveat + hint; the **names projection is bounded** (200/family, 2000/response) with its own non-silent surface and `name_count` keeping the family's TRUE declared count; the static wiring pin + the byte-ceiling behavioural pins for all three bodies were added |
+| **C1** | the trim is wired into ALL THREE bodies with a non-silent surface (`truncated` + the count block + a caveat naming the byte ceiling + a `narrow_hint`); the probe measures the tool's OWN output form (`indent=2` — a compact probe measures a fiction); the trim reserves 2 KiB for the caveat + hint; the **names projection is bounded** (200/family, 2000/response) with its own non-silent surface and `name_count` keeping the family's TRUE declared count; the static wiring pin + the byte-ceiling behavioural pins for all three bodies were added. **THE DELTA RE-REVIEW THEN FOUND THE REPAIR INTRODUCED A REGRESSION** (the trim was handed the RAW provider rows while the payload carried the PROJECTION — on the trimmed path every history row lost the nine contract-declared members, a SIZE-DEPENDENT response schema, and the probe measured a different object than the body shipped). The SECOND fix cycle closes it: the ceiling measures the SHIPPED projection, the door's final-envelope re-check is ported, and the series SHAPE is pinned on the trimmed AND the untrimmed path |
 | **C2** | the two false records now say so: the fold-ledger's M-1 row reads "**FOLDED — PARTIALLY, AT THE FIRST CUT**" with the (c) clause marked FALSE-then-remediated, and the architect's R13 risk delta carries the correction (the verdict and the rulings are untouched) |
 | **W1** | the two binding legs are **restored** (the byte-ceiling leg; the AmA-7/PL-3 single-sourcing leg — the latter in a NEW leg shape, a FOLLOW leg) and eight more dropped legs are folded; the FULL planned set's dispositions (24 planned → 23 covered, 1 deferred as an explicit duplicate) are recorded in fold-ledger §H.8 |
 | **W2** | the budget pin imports the seam's `MAX_TOTAL_POINTS` instead of the hardcoded `12000 // 51` |
-| **W3** | the `trend_empty_since_restart` signal is BEHAVIOURAL now — and a provider that does not carry the age fact is UNKNOWN, not "empty" (the seam's `0.0` default would have asserted a fact the tool cannot verify) |
+| **W3** | the `trend_empty_since_restart` signal is BEHAVIOURAL now — the third leg RESTATED (the 2026-11-03 delta re-review's W3 residual) as "an absent fact must NEVER be reported as empty": the age is read with a SENTINEL default (`-1.0`), so a provider that does not carry the fact is never claimed empty (the seam's `0.0` default would have asserted a fact the tool cannot verify). **The UNKNOWN state is INTERNAL — it is NOT observable on the wire**: the field is a BOOL, an absent fact reads as `False` ("not empty"), and the tool never emits null on it. RESIDUAL (recorded, production-unreachable): the real provider exposes `last_sample_age_s` as a property, so the absent-fact path is reachable only with a duck-typed provider that omits it |
 | **W4** | the pin census record corrected: **10 files**, not 11 (the 16th EDIT site lives in a file that is ALREADY one of the ten, and so does the VERIFY-ONLY site — the site count and the one-commit discipline HELD; only the file count was misrecorded) |
 
 **The root cause of the dropped legs (recorded honestly):** the first cut's matrix was written
@@ -197,6 +199,29 @@ against the pins that EXISTED, and the legs whose pin was missing were dropped i
 pin being written — backwards, because the mutation matrix is the instrument that finds a
 missing pin. The fix cycle's rule is now explicit: **a leg with no pin is a MISSING PIN, not a
 leg to drop.**
+
+---
+
+## 8c. The SECOND fix cycle (2026-11-03, the delta re-review — items 1-5)
+
+The delta re-review REJECTED on ONE item (C1 — a FIX-INTRODUCED regression) and CLEARED
+C2/W1/W2/W3/W4. The second cycle's dispositions, with the loci:
+
+| Item | Disposition | Loci |
+|---|---|---|
+| **1 — C1** | **FIXED** — the ceiling measures the SHIPPED projection (the history body hands it `series_out`, the snapshot body its `series_proj`), the door's final-envelope re-check is ported (`_enforce_byte_ceiling`), and the series SHAPE is pinned on the TRIMMED and the UNTRIMMED path (the nine contract-declared members). The shape pin is mutation-verified: reverting `items=series_out` → `items=kept` REDS exactly that pin. | `daemon/tools/metrics_read.py` (`:428` the helper, `:758`/`:871`/`:1131` the call sites) · `tests/unit/metrics/test_metrics_read_tools.py` (the two shape pins) |
+| **2 — W3 residual** | **LEG-RESTATEMENT** — the third leg reads "an absent fact must NEVER be reported as empty" (what is met); the over-claim is corrected (the UNKNOWN state is INTERNAL; the wire value is a BOOL, never null); the residual is recorded (production-unreachable — the real provider carries the fact). | the W3 row above · `tests/unit/metrics/test_metrics_read_tools.py` (`test_an_absent_fact_is_never_reported_as_empty`) |
+| **3 — name_count** | **ACCEPTED IN-SCOPE** — the one doc line paid: `name_count` is the DECLARED count, `names` is the bounded projection (200/family, 2000/response). No new member. | `technical-analysis.md` §A.3 Tool 1 · `phase2-plan.md` task 2.2 |
+| **4 — the stale records** | **ALL FOLDED** — the pin-file count (10), the matrix count (22/22), the node counts (the tools pack 47, the five-pack total 140), the line-citation drift (the CURRENT sites `:758`/`:871`/`:1131`), the §E table's structure (the fix-cycle paragraph moved to §E.1), the R13 fix-cycle marker, and the matrix log CITED + ARCHIVED. | `stage-prep-checklist.md` · `fold-ledger.md` §H.6/§H.9/§H.10/§E.1 · `plan-overview.md` (R13) |
+| **5 — the advisories** | **ALL FOUR FOLDED** — (a) the reservation is guarded by an import-time assertion; (b) the names-bound hint names what works; (c) the static wiring pin walks the AST; (d) the ring-empty signal is DISCLOSED and FLAGGED BACK (the exact signal is not on the consumed Protocol and would need a cleared-surface extension). | `daemon/tools/metrics_read.py` (`:281`/`:308`/`:334`/`:475`) |
+
+**The ARCHIVED matrix log (plan task 5.2's requirement):**
+`.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log`
+(sha256 `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def` — 3 587 bytes;
+the run's own pre-run manifest records the HEAD sha `e5d29e8c6` + the sha256 of every
+touched file) and
+`.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json`
+(sha256 `44629b770ab1767c125b038134eb080d4e484f5c93a52d1cbfb49aca088f45ac`).
 
 ---
 

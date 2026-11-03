@@ -342,12 +342,12 @@ nine-id block is NOT widened):**
 | Pack | Nodes | What it proves |
 |---|---|---|
 | `metrics_read_registration` | **30** | the registration + wiring proof (the AST discovery, the category, the count + the EXACT set, the two name universes, the extend's placement, the decorator order, the A13 attribute pin + the default-deny leg, the holders census, the fail-closed helper, the GATE-ORDERING pin, the literal-name probe, the AmA-3 equality leg, the AmA-2 threaded-`agent_id` leg, the AmRULING-4 callable-shape leg, the AmRULING-1 degraded-boot leg) |
-| `metrics_read_tools` | **34** | the three tools' behaviour (the counts, the VERBATIM availability, the derived members, the ONE provider read, the SORT-before-cut, the derived stale/cardinality, the bound block, the HARD FLOOR, the COMBINED cap, the ANCHORED pair, the `top_n+1` probe, the null-not-zero delta, the per-series freshness, the non-silent clamp, the no-cursor posture, the four-token ladder + its ORDERING, the degraded-read block) |
+| `metrics_read_tools` | **47** | the three tools' behaviour (the counts, the VERBATIM availability, the derived members, the ONE provider read, the SORT-before-cut, the derived stale/cardinality, the bound block, the HARD FLOOR, the COMBINED cap, the ANCHORED pair, the `top_n+1` probe, the null-not-zero delta, the per-series freshness, the non-silent clamp, the no-cursor posture, the four-token ladder + its ORDERING, the degraded-read block) |
 | `metrics_read_personas` | **15** | the design's TWO persona examples as STRUCTURAL assertions (the field sets + the vocabularies; a leg proves the pack pins NO observation) |
 | `metrics_read_docs_surface` | **20** | the agent-visible docs chain (the registry resolves the category, the loader renders the section for the three holders, NOTHING metrics-shaped reaches a non-holder, `tool_help` serves the `_full_doc_`, the three tools_note sections carry the AmC-11 asymmetry) |
 | `metrics_query_protocol_consumer` | **28** | the Phase-1 seam pins (the completeness pin, the identity + lifecycle-triple pins, the reachability leg, the public-reader pin, the no-second-provider pin) |
 
-**The mutation matrix — 12/12 PASS.** Each leg plants a mutation INDEPENDENTLY on the
+**The mutation matrix — 22/22 PASS (21 RED/GREEN + 1 FOLLOW leg).** The ARCHIVED log (plan task 5.2's "the matrix log + digests archived for the evidence pack"): `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def`, 3 587 bytes — the run's own pre-run manifest records the HEAD sha `e5d29e8c6` + the sha256 of every touched file) and `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `44629b770ab1767c125b038134eb080d4e484f5c93a52d1cbfb49aca088f45ac`). Each leg plants a mutation INDEPENDENTLY on the
 production source, requires RED **through the intended assertion** (a per-leg RED marker — the
 marker's absence is a FAIL, so a mutation that reds for an unrelated reason does not pass),
 restores the file BYTE-IDENTICALLY and requires GREEN again. The restore discipline is the
@@ -461,12 +461,53 @@ is INDEPENDENTLY locatable from this table.
 
 | Item | Commit | Locus | What the reviewer reads |
 |---|---|---|---|
-| **C1** — wire the byte ceiling + bound the names projection | `fb48db063` | `daemon/tools/metrics_read.py` — the three `_trim_to_byte_ceiling(payload, …)` call sites (:624 / :726 / :971), the names bound (`MAX_NAMES_PER_FAMILY` / `MAX_NAMES_TOTAL` / the `dropped_names` counter), the `_encoded_size` probe (the tool's own `indent=2` form), the `_CAVEAT_HEADROOM_BYTES` reservation; `tests/unit/metrics/test_metrics_read_tools.py` — `TestOutputBudget` (the static wiring pin + the byte-ceiling pins for all three bodies + the names-bound pins) | the trim is WIRED, the surface is non-silent, the projection is bounded |
+| **C1** — wire the byte ceiling + bound the names projection | `fb48db063` | `daemon/tools/metrics_read.py` — the three `_trim_to_byte_ceiling(payload, …)` call sites at the FIRST cut (:624 / :726 / :971 — the delta re-review's re-derivation read them as :634 / :736 / :981; the SECOND fix cycle's C1 repair moved them again, and the CURRENT sites are **:758 / :871 / :1131** — the call is now `_enforce_byte_ceiling(…)`, the door's whole port), the names bound (`MAX_NAMES_PER_FAMILY` / `MAX_NAMES_TOTAL` / the `dropped_names` counter), the `_encoded_size` probe (the tool's own `indent=2` form), the `_CAVEAT_HEADROOM_BYTES` reservation; `tests/unit/metrics/test_metrics_read_tools.py` — `TestOutputBudget` (the static wiring pin + the byte-ceiling pins for all three bodies + the names-bound pins) | the trim is WIRED, the surface is non-silent, the projection is bounded |
 | **C2** — the false records corrected | `5f8d7a0dc` | `fold-ledger.md` §H.5 (the M-1 row + its fix-cycle history) · `architecture-recommendation.md` §4 (the R13 correction) | the records say what was true, what was false, and what fixed it |
 | **W1** — the two binding mutation legs restored + the dropped set's dispositions | `7363dbac6` | `test/packs/metrics_read_mutation_matrix_test.py` — MT-13 (the byte-ceiling leg), the FOLLOW-leg machinery + MT-22 (the single-sourcing leg), MT-14..MT-21 (the eight folded legs); `fold-ledger.md` §H.8 (the per-leg dispositions for all 24 planned legs) | 21 RED/GREEN + 1 FOLLOW = 22 legs; every planned leg folded or explicitly deferred |
 | **W2** — the budget pin single-sourced | `fb48db063` | `tests/unit/metrics/test_metrics_read_tools.py` — the import of `MAX_TOTAL_POINTS` from the seam + the budget leg's `MAX_TOTAL_POINTS // 51` | the pin reads the PRODUCER's constant (no duplicated literal) |
-| **W3** — the ring-state behavioural pin | `fb48db063` | `daemon/tools/metrics_read.py` — the sentinel read (`read_numeric_fact(provider, "last_sample_age_s", -1.0)`) + `ring_empty = bool(age == 0.0)`; `tests/unit/metrics/test_metrics_read_tools.py` — `TestRingStateSignal` (three legs: empty / live / absent-is-unknown) | the signal is BEHAVIOURAL, and an absent fact is UNKNOWN (not "empty") |
+| **W3** — the ring-state behavioural pin | `fb48db063` | `daemon/tools/metrics_read.py` — the sentinel read (`read_numeric_fact(provider, "last_sample_age_s", -1.0)`) + `ring_empty = bool(age == 0.0)`; `tests/unit/metrics/test_metrics_read_tools.py` — `TestRingStateSignal` (three legs: empty / live / absent-is-NEVER-reported-as-empty — the third leg RENAMED by the 2026-11-03 delta re-review's W3 residual) | the signal is BEHAVIOURAL, and an absent fact is NEVER reported as empty (the UNKNOWN state is internal — the wire value is a BOOL) |
 | **W4** — the census record correction | `5f8d7a0dc` | `fold-ledger.md` §H.3 (the census table + the file-count note) · `evidence-pack.md` §5 | 10 files, not 11 — the site count and the one-commit discipline HELD |
+
+---
+
+### H.10 — The SECOND fix cycle (2026-11-03, the delta re-review — items 1-5)
+
+The delta re-review REJECTED on ONE item (C1 — a FIX-INTRODUCED regression) and CLEARED
+C2/W1/W2/W3/W4 ("do not rework them; keep their state intact"). This section records the
+second cycle's dispositions, one by one, with the loci — the narrow verification reads
+items 1-3 from here.
+
+| Item | Disposition | Locus | What the reviewer reads |
+|---|---|---|---|
+| **1 — C1** (the critical regression) | **FIXED.** The history body hands the ceiling its PROJECTION (`items=series_out`) and assigns the PROJECTED slice back; the snapshot body does the same with its stripped projection (`series_proj`); the door's FINAL-ENVELOPE RE-CHECK is ported (the new `_enforce_byte_ceiling` — measure the body as it will be shipped, trim only when it is over the ceiling, and trim AGAIN with the disclosure attached if the reservation did not cover it). The SHAPE is pinned on BOTH paths. | `daemon/tools/metrics_read.py` — `_enforce_byte_ceiling` (`:428`), the three call sites (`:758` families / `:871` snapshot / `:1131` history); `tests/unit/metrics/test_metrics_read_tools.py` — `test_the_history_series_shape_is_the_same_on_both_paths` + `test_the_snapshot_series_shape_is_the_same_on_both_paths` | the ceiling measures the SHIPPED object; the trimmed body has the SAME schema as the untrimmed one |
+| **2 — W3 residual** | **LEG-RESTATEMENT (a record correction, NOT a wire change).** The third leg now reads "an absent fact must NEVER be reported as empty" — what is actually met. The over-claim in `evidence-pack.md` is corrected: the UNKNOWN state is INTERNAL (the `-1.0` sentinel); the wire value is a BOOL, an absent fact reads `False`, and the tool never emits null on it. | `tests/unit/metrics/test_metrics_read_tools.py` — `test_an_absent_fact_is_never_reported_as_empty`; `evidence-pack.md` §8b's W3 row; `fold-ledger.md` §H.9's W3 row | the record says what is true; the wire never carries null |
+| **3 — name_count** | **ACCEPTED IN-SCOPE; the one doc line is owed and PAID.** `name_count` is the family's DECLARED count; `names` is the bounded projection (200/family, 2000/response). No new member (the field set is unchanged) and no new `names_declared_count`. | `technical-analysis.md` §A.3 Tool 1 (the `name_count` row) · `phase2-plan.md` task 2.2 | the landed semantics match the design table |
+| **4 — the stale records** | **ALL FOLDED IN THIS CYCLE** (the ceremony-fiction class — `stage-prep-checklist.md` is the file giter reads at stage time): the pin-file count reconciled to **10**; the matrix count **12/12 → 22/22** in both records; the node counts re-derived (the tools pack **34 → 47**, the five-pack total **127 → 140**); the §H.9 line-citation drift corrected (and re-corrected for the C1 repair's own line shift — the CURRENT sites are `:758` / `:871` / `:1131`); the §H.5/§E fix-cycle paragraph moved OUT of the GFM table into **§E.1** (it rendered as ~40 header-less pipe rows); the R13 residual row carries a fix-cycle marker; the matrix log is **CITED + ARCHIVED**. | `stage-prep-checklist.md` (:104 + :140) · `fold-ledger.md` (§H.6's counts, §H.9's loci, §E.1) · `evidence-pack.md` (§2's counts, §3's archived log) · `plan-overview.md` §Risk register (R13) | the stage-time file agrees with the tree |
+| **5 — the in-place advisories** | **ALL FOUR FOLDED.** (a) the reservation is GUARDED by an import-time assertion (1 228 bytes needed, 2 048 reserved); (b) the names-bound hint names what ACTUALLY WORKS; (c) the static wiring pin WALKS THE AST; (d) **the ring-empty signal — DISCLOSED and FLAGGED BACK** (see below). | `daemon/tools/metrics_read.py` — `_post_trim_overhead_bytes` + the module-level `assert` (`:308`/`:334`), `_names_bound_hint` (`:281`), the `_read_status` comment (`:475`) | every advisory is either fixed or disclosed — none is silently deferred |
+
+**5(d) — THE RING-EMPTY SIGNAL: DISCLOSED AND FLAGGED BACK (the leader's ruling).**
+The exact signal (`last_sample_timestamp() is None` ⟺ the ring is empty) exists on the seam's
+CONCRETE provider (`daemon/services/metrics_query/provider.py:406`) — but it is **NOT on the
+consumed `MetricsQueryProvider` Protocol**, it is not readable through the seam's public
+`read_numeric_fact` (the fact is optional-typed, and the reader is numeric-only), and
+reading it here would need either a raw `getattr` — which the seam's own convention forbids
+for this door ("never through getattr") — or an extension of the CLEARED seam/Protocol
+surface. **Per the ruling, the signal was NOT extended and the behaviour was NOT changed:**
+the age-based signal stays, and its one known imprecision (an age of exactly `0.0` also
+matches a sample taken at this very instant, not only an empty ring) is **recorded in the
+code** and here. **FLAGGED BACK to the leader for a ruling** — the fix needs either a
+seam-side reader (a cleared-surface decision) or an accepted raw `getattr`.
+
+**THE MATRIX AFTER THE SECOND CYCLE: 22/22 PASS (21 RED/GREEN + 1 FOLLOW).** One leg's
+EXPRESSION was re-cut — MT-13 ("the byte ceiling is ENFORCED"): its first expression (the
+trim's DEFAULT target) no longer bit, because the door's final-envelope re-check still trims
+to the plain ceiling (the leg went GREEN — a vacuous leg, caught by the matrix run). The
+expression now removes the CEILING ITSELF (the module-level binding), and the leg REDS
+again. The leg's INTENT and its id are unchanged. **The ARCHIVED log:**
+`.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log`
+(sha256 `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def`) + the run's own
+pre-run manifest `.../mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256
+`44629b770ab1767c125b038134eb080d4e484f5c93a52d1cbfb49aca088f45ac`).
 
 ---
 
@@ -520,23 +561,7 @@ Source: `architecture-recommendation.md` (READ-ONLY input — verdict SOUND-WITH
 
 | ID | Cluster / class | Disposition | Landing site(s) |
 |---|---|---|---|
-| **M-1** (B-5+C-2) | output-budget enforcement — 🟡 must fold | **FOLDED — PARTIALLY, AT THE FIRST CUT; the (c) half was FALSE and was remediated by the 2026-11-03 council fix cycle (see the row's history below).** (a) returned-leg clamp ≤ MAX_TOTAL_POINTS=12 000 (kills the 12 240 > 12 000 breach) — **TRUE**; (b) compare leg's transient provider work declared separately (22 %-not-11 % framing corrected) — **TRUE**; (c) tool-local byte ceiling with the door's trim + six-member bound block — **WAS FALSE: the helpers were DEAD CODE (no body called them)**; (d) default-call agent-context cost in CATEGORY_DOC — **TRUE**. Amends D-UX-4 (Part 5 AmM-1); design inline pointer at the budget claim | `decisions.md` Part 5 AmM-1 · `phase2-plan.md` tasks 2.2/2.4 · `phase5-plan.md` task 5.2 (clamp/byte-ceiling mutation legs) · `technical-analysis.md` inline pointer (budget claim) |
-
-**M-1's fix-cycle history (2026-11-03, the council's C1/C2 — recorded HONESTLY, not silently backfilled).**
-The first cut recorded this row as a flat **FOLDED**. That was **not true for clause (c)**: the
-implementation carried `_encoded_size` + `_trim_to_byte_ceiling` but **no body ever called
-them** — the byte ceiling was DEAD CODE, so the "bounded by clamp + byte ceiling" claim (here
-and in the architect's risk delta) was FALSE. The council measured the exposure at **1.26× the
-seam's own 1 MiB ceiling** at today's catalog, **6.6 MB** at the legal `MAX_FAMILIES=500` cap,
-and — decisively — **the catalog is runtime-extensible, so today's fit was an ACCIDENT, not an
-invariant.**
-**REMEDIATION (the fix cycle):** the trim is now wired into ALL THREE bodies with a non-silent
-surface (`truncated` + the count block + a caveat naming the byte ceiling + a `narrow_hint`); the
-probe measures the tool's OWN output form (`indent=2`); the trim reserves 2 KiB for the caveat
-+ hint; the **names projection is bounded** (200/family, 2000/response) with its own non-silent
-surface; and the two dropped mutation legs that would have caught this (the byte-ceiling leg
-and the AmA-7/PL-3 single-sourcing leg) are **restored**. The row above now says
-"PARTIALLY, AT THE FIRST CUT" — the history stays visible.
+| **M-1** (B-5+C-2) | output-budget enforcement — 🟡 must fold | **FOLDED — PARTIALLY, AT THE FIRST CUT; the (c) half was FALSE and was remediated by the 2026-11-03 council fix cycle (see §E.1 below).** (a) returned-leg clamp ≤ MAX_TOTAL_POINTS=12 000 (kills the 12 240 > 12 000 breach) — **TRUE**; (b) compare leg's transient provider work declared separately (22 %-not-11 % framing corrected) — **TRUE**; (c) tool-local byte ceiling with the door's trim + six-member bound block — **WAS FALSE: the helpers were DEAD CODE (no body called them)**; (d) default-call agent-context cost in CATEGORY_DOC — **TRUE**. Amends D-UX-4 (Part 5 AmM-1); design inline pointer at the budget claim | `decisions.md` Part 5 AmM-1 · `phase2-plan.md` tasks 2.2/2.4 · `phase5-plan.md` task 5.2 (clamp/byte-ceiling mutation legs) · `technical-analysis.md` inline pointer (budget claim) |
 | **M-2** (B-8+C-5+C-10) | freshness semantics — 🟡 must fold (one root cause, three landing sites) | **FOLDED** — (i) per-series `last_sample_age_s`/`points_span_s` on history rows; (ii) explicit ring-state signal (`trend_empty_since_restart`) in `read_status`; (iii) the outline's §C.2 "Gap: none" cell corrected (design-only) | `decisions.md` Part 5 AmM-2 · `phase2-plan.md` tasks 2.2/2.4 · `phase5-plan.md` task 5.2 (empty-ring + per-series legs) · `phase6-plan.md` task 6.1 (the outline correction) |
 | **M-3** (C-3) | mount/unavailable contradiction — 🟡 must fold, resolved by RULING-1 | **FOLDED** — Option A: tools stay PRESENT on degraded boot; body reads the mount per call; typed `metrics-unavailable` refusal; `_if_available` dropped from the factory name; registration-pack degraded-boot leg; task 1.6(ii) identity pin stands | `decisions.md` Part 5 AmM-3 + RULING-1 · `phase2-plan.md` tasks 2.1/2.6/2.9 · `phase5-plan.md` task 5.3 |
 | **A-1** | citation hygiene | **FOLDED** — D-SCOPE-2's bypass cite corrected to `instance.py:550-560` + `:561-568` (the `_tool_registry.py:559-560` range is a comment) | `decisions.md` Part 5 AmA-1 |
@@ -578,6 +603,24 @@ and the AmA-7/PL-3 single-sourcing leg) are **restored**. The row above now says
 | **ROUTED DEBT** | the tab-poll residual (RULING-2) | `overview-tab.component.ts:284-296` ("No series published yet.") + `charts-tab.component.ts:301-311` ("No samples in the window.") do not read `payload.activation` — ROUTED to the v0.28.6 `fe_registry_read_ok_mirror` FE followup family, joining `fe_registry_read_ok_mirror`'s own family; cost = the same optional-member + `=== false` + distinct-surface pattern per tab poll | this row + `phase4-plan.md` criterion note |
 | **§6 pins** | implementation-time notes | **FOLDED as task notes** — mount-handle reachability leg (phase1 1.6(ii-b)); A-10 decorator literal (phase3 3.2 acceptance); C-1 cost-figure provenance (~3.7 ms is the house AM-12 figure, not a local measurement — recorded in Part 5 AmRULING-4 context; re-measure only if the pack wants a latency leg); custom-agent bare-id registration-path trace note (phase2 2.9) | the named tasks |
 
+
+
+### §E.1 — M-1's fix-cycle history (2026-11-03, the council's C1/C2 — recorded HONESTLY, not silently backfilled)
+
+The first cut recorded this row as a flat **FOLDED**. That was **not true for clause (c)**: the
+implementation carried `_encoded_size` + `_trim_to_byte_ceiling` but **no body ever called
+them** — the byte ceiling was DEAD CODE, so the "bounded by clamp + byte ceiling" claim (here
+and in the architect's risk delta) was FALSE. The council measured the exposure at **1.26× the
+seam's own 1 MiB ceiling** at today's catalog, **6.6 MB** at the legal `MAX_FAMILIES=500` cap,
+and — decisively — **the catalog is runtime-extensible, so today's fit was an ACCIDENT, not an
+invariant.**
+**REMEDIATION (the fix cycle):** the trim is now wired into ALL THREE bodies with a non-silent
+surface (`truncated` + the count block + a caveat naming the byte ceiling + a `narrow_hint`); the
+probe measures the tool's OWN output form (`indent=2`); the trim reserves 2 KiB for the caveat
++ hint; the **names projection is bounded** (200/family, 2000/response) with its own non-silent
+surface; and the two dropped mutation legs that would have caught this (the byte-ceiling leg
+and the AmA-7/PL-3 single-sourcing leg) are **restored**. The row above now says
+"PARTIALLY, AT THE FIRST CUT" — the history stays visible.
 
 ---
 
