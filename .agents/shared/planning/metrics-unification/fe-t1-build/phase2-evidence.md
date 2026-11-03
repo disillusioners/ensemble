@@ -209,12 +209,12 @@ cd /home/nea/ensemble-src-wt-fe-metrics-dashboard/frontend \
 | spec file | nodes | note |
 |---|---|---|
 | `src/app/pages/metrics/tabs.manifest.spec.ts` | **30** | NEW |
-| `src/app/pages/metrics/tabs/central-tab.component.spec.ts` | **11** | NEW |
+| `src/app/pages/metrics/tabs/central-tab.component.spec.ts` | **18** | NEW (6 of them loop over the six central tabs — the W-10 exit criterion) |
 | `src/app/pages/metrics/metrics.component.spec.ts` | **44** | was 26 |
 | `src/app/pages/metrics/families/families-tab.component.spec.ts` | **13** | was 7 |
 | `src/app/services/metrics.service.spec.ts` | **16** | was 9 |
 | `src/app/models/metrics.model.spec.ts` | **32** | was 30 |
-| **the whole metrics FE surface** | **219 over 12 suites** | 0 failed |
+| **the whole metrics FE surface** | **226 over 12 suites** | 0 failed |
 
 The scoped type-check is clean: `tsc --noEmit -p tsconfig.metrics-fe.json` → exit 0, and
 `tsc --noEmit -p tsconfig.app.json` → exit 0.

@@ -29,7 +29,7 @@ import {
 } from '../../../models/metrics.model';
 import { METRICS_SELECTOR_CEILING } from '../metrics-door';
 import { MetricsTabState } from '../metrics-state';
-import { metricsCentralTab } from '../tabs.manifest';
+import { METRICS_CENTRAL_ENTRIES, metricsCentralTab } from '../tabs.manifest';
 import { MetricsCentralTabComponent } from './central-tab.component';
 
 function family(overrides: Partial<MetricsFamily> = {}): MetricsFamily {
@@ -265,6 +265,96 @@ describe('MetricsCentralTabComponent — the availability rendering (ADJ-vi)', (
     expect(hint).not.toBeNull();
     expect((hint.textContent ?? '')).toContain('F9');
   });
+});
+
+describe('MetricsCentralTabComponent — EVERY central tab (the W-10 exit criterion)', () => {
+  let fixture: ComponentFixture<MetricsCentralTabComponent>;
+  let component: MetricsCentralTabComponent;
+  let stub: StubMetricsService;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsCentralTabComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+      ],
+    }).compileComponents();
+    stub = TestBed.inject(MetricsService) as unknown as StubMetricsService;
+    fixture = TestBed.createComponent(MetricsCentralTabComponent);
+    component = fixture.componentInstance;
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('the manifest declares SIX central tabs', () => {
+    expect(METRICS_CENTRAL_ENTRIES).toHaveLength(6);
+  });
+
+  for (const entry of METRICS_CENTRAL_ENTRIES) {
+    it(`the ${entry.id} tab fetches ITS bound families and surfaces a dark family's reason`, () => {
+      fixture.componentRef.setInput('entry', entry);
+
+      // One bound family is LIVE, one is DARK (the false-dark case).
+      const [liveId, darkId] = [entry.familyIds[0], entry.familyIds[1] ?? entry.familyIds[0]];
+      fixture.componentRef.setInput('state', state({
+        families: [
+          family({
+            id: liveId,
+            names: [
+              {
+                name: `ensemble_${entry.id}_live`,
+                kind: 'gauge',
+                labels: null,
+                help: '',
+                buckets: null,
+                cardinality_class: 'closed',
+                monotonic: false,
+                chart_role: 'line',
+              },
+            ],
+          }),
+          family({
+            id: darkId,
+            live_series_count: 0,
+            availability: { state: 'dark', reason: 'capture_off' },
+            names: [
+              {
+                name: `ensemble_${entry.id}_dark`,
+                kind: 'gauge',
+                labels: null,
+                help: '',
+                buckets: null,
+                cardinality_class: 'closed',
+                monotonic: false,
+                chart_role: 'line',
+              },
+            ],
+          }),
+        ],
+      }));
+      fixture.detectChanges();
+
+      // The LIVE family's series are requested from the door.
+      expect(stub.seriesRequests.length).toBe(1);
+      expect(stub.seriesRequests[0].names).toEqual([`ensemble_${entry.id}_live`]);
+
+      // The DARK family is LISTED with its reason — never charted, never dropped.
+      const dark = fixture.nativeElement.querySelector(
+        '[data-test="central-tab-family-dark"]',
+      ) as HTMLElement;
+      expect(dark).not.toBeNull();
+      expect(dark.getAttribute('data-reason')).toBe('capture_off');
+      expect((dark.textContent ?? '')).toContain('the wedge capture is not active');
+
+      // The tab is never an empty shell — it renders its binding.
+      expect(
+        fixture.nativeElement.querySelector('[data-test="central-tab-families"]'),
+      ).not.toBeNull();
+    });
+  }
 });
 
 describe('MetricsCentralTabComponent — the per-source reporting (2.11)', () => {
