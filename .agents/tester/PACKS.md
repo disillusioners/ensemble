@@ -1,3 +1,30 @@
+## Commission FE-only T1 metrics dashboard — Phase-2 packs REGISTERED (2026-11-03, implementation lane `feature/fe-metrics-dashboard`, base `e529d5823`)
+
+> **What this block registers.** The T1 lane's **Phase-2** commit (the tab manifest + the 7-tab
+> shell + `?tab=` deep links + the per-source state model + the family-catalog drawer + the
+> client-side door timeout). The phase is **FE-only** — no daemon, no migration, no
+> `scripts/upgrade` — so its verification is jest + the scoped type-check + a production build.
+>
+> **Keep-both:** the Phase-1 block and the earlier `metrics_fe_dual_side` registration stay as
+> they are — they record THAT phase's pack. This block registers the **phase-2** shape.
+>
+> **Node counts are MECHANICAL** — a per-file jest census re-derived at this phase's freeze
+> (`jest --ci --silent --runInBand <file>` → the `Tests:` line), never a declared number.
+>
+> **KNOWN GAP (routed, not fixed here):** the registered `metrics_fe_dual_side` pack's D1 file
+> list is **hard-coded** inside `test/packs/metrics_fe_dual_side_test.sh`, and this phase's
+> commission is **FE-only** (`frontend/` + `.agents/` — `test/packs/` is outside the fence). The
+> two NEW phase-2 spec files are therefore **not** in that pack's D1 leg; they are registered
+> below as their own pack. The lane owner (giter/leader) owns the one-line list extension.
+>
+> **Fences (unchanged).** No daemon, no database, no live port; a missing `node_modules` is a
+> LOUD FAIL, never a green skip.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `t1_fe_phase2` — the phase-2 FE spec set (the manifest, the 7-tab shell, the tab bodies, the drawer, the door timeout) | `cd $WT/frontend && CI=1 ./node_modules/.bin/jest --ci --runInBand src/app/pages/metrics/tabs.manifest.spec.ts src/app/pages/metrics/tabs/central-tab.component.spec.ts src/app/pages/metrics/metrics.component.spec.ts src/app/pages/metrics/families/families-tab.component.spec.ts src/app/services/metrics.service.spec.ts src/app/models/metrics.model.spec.ts` | **146 nodes over 6 specs** (the per-file census re-derived at the phase-2 freeze): `tabs.manifest` **30 (NEW)** · `tabs/central-tab` **11 (NEW)** · `metrics.component` **44** (was 26) · `families-tab` **13** (was 7) · `metrics.service` **16** (was 9) · `metrics.model` **32** (was 30). The load-bearing pins: the manifest's FOUR dispositions + the no-family variant (no empty-array sentinel) · the 7-tab binding (including the bracketed planned families) · the `?tab=` deep link's four cases with **no navigation storm** · the **per-source** state (a failing central source never blanks the custom tab, and vice versa) · the **error-gated** catalog empty copy (the planted-violation leg) · the sortable/`aria-sort` catalog columns · the pinned **`\bactive\b` residue check** (zero hits) · the ~15 s client-side door timeout → the `timeout` class (a fakeAsync clock test, never a real 15 s wait) | 2026-11-03 | ✅ registered |
+| `t1_bundle_guard` — **RE-RUN at the phase-2 freeze** (the phase-1 row stays as it is) | `cd $WT && node .agents/shared/planning/metrics-unification/fe-t1-build/bundle-guard.js frontend/dist/frontend/browser <production-build-log>` | **GREEN at the phase-2 freeze**: B1 `|Δ| = 35 B` vs the frozen 5,909,018 B (limit 2 kB) · B2 **0** `chart.js` markers in the 36 initial chunks · B3 **1** dynamic import site, **0** static, **0** outside `src/app/pages/metrics/**` · B6 the `anyComponentStyle` warning **SET** 9 == 9 (0 added / 0 removed). The `bundle-baseline.measure.js` route locator now resolves **by the lane's route key** (`route_chunk_locator: "route-key"`, `route_chunk_resolved_to_exactly_one: true`) — the phase-2 task 2.13 marker constant. **Measured caveat (disclosed):** the route fetch set grew 496,498 → 591,467 B, of which **+83,216 B is the Angular router chunk, which is already IN the initial set** (it is downloaded at startup; the deep-link read/write pulls it into the metrics route's static dep list) — the genuine new payload is the route chunk's **+11,718 B**. The B4 threshold wording is a Phase-4/9 decision (see the phase-2 evidence note) | 2026-11-03 | ✅ registered |
+
 ## Commission FE-only T1 metrics dashboard — Phase-1 packs REGISTERED (2026-11-03, implementation lane `feature/fe-metrics-dashboard`, base `c4161335b`)
 
 > **What this block registers.** The T1 lane's **Phase-1** commit carries the **D-1 governance
