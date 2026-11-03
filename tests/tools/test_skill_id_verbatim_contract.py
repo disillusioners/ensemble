@@ -61,12 +61,19 @@ from daemon.repositories.project_skill_file.repository import (
     ProjectSkillUsageRecordRepository,
 )
 from daemon.services.project_skill_source.model import (
+    SOURCE_PROJECT_FILE,
     ProjectFileSkill,
     mint_address,
 )
 from daemon.services.project_skill_source.service import ProjectSkillSourceService
-from daemon.services.skill_injection_service import SkillInjectionService
-from daemon.services.skill_search_service import SkillSearchService
+from daemon.services.skill_injection_service import (
+    SkillInjectionService,
+    _is_project_file_skill as _is_project_file_skill_injection,
+)
+from daemon.services.skill_search_service import (
+    SkillSearchService,
+    _is_project_file_skill as _is_project_file_skill_search,
+)
 from daemon.services.skill_store_service import SkillStoreService
 from daemon.tools.skill_tools import create_skill_tools
 from tests.helpers.project_skill_source_fixtures import write_skill
@@ -676,3 +683,112 @@ class TestSafetyInvariants:
         assert service.get_injected_skill_ids(harness.instance_id, "msg-1") == [
             harness.file_pseudo_id
         ]
+
+
+# ============================================================
+# Project-file discriminator PARITY (council W2 fold, wi-76d89e11)
+# ============================================================
+#
+# ``skill_search_service._is_project_file_skill`` and
+# ``skill_injection_service._is_project_file_skill`` are DUPLICATED
+# helpers — the duplication is deliberate (importing the canonical one
+# would pull ``openai`` into the injection service's import graph —
+# approver note N6) but it was UNPINNED: grep over tests/ found ZERO
+# hits (a prose comment only). A one-sided divergence would have
+# silently re-introduced this lane's exact defect on one path — no
+# error, no test failure.
+#
+# The ``source`` LITERAL is now single-sourced in
+# ``project_skill_source.model.SOURCE_PROJECT_FILE`` (W2 fold (i)).
+# Constant equality alone is INSUFFICIENT: both helpers could diverge
+# in PREDICATE ORDER (e.g. the address test dropped, or the source
+# fallback dropped) while the constant stays equal. This battery
+# therefore asserts BOTH the expected verdict AND the cross-module
+# equality, over a shape set that covers every branch of the
+# two-step predicate.
+
+
+class TestProjectFileDiscriminatorParity:
+    """The two duplicated helpers must agree — and agree on the RIGHT
+    answer — over every discriminating shape."""
+
+    # (shape-name, duck-typed skill, expected verdict)
+    SHAPES = [
+        # (a) DB-shaped: no address, no source tag.
+        ("db_row_no_address_no_source", SimpleNamespace(), False),
+        # (a') DB-shaped with an explicit non-file source tag.
+        ("db_row_source_db", SimpleNamespace(source="db"), False),
+        # (b) file-shaped via the pf: address, NO source tag.
+        ("file_address_only", SimpleNamespace(address="pf:tester:alpha"), True),
+        # (b') file-shaped via a pf: address AND the source tag.
+        ("file_address_and_source", SimpleNamespace(
+            address="pf:tester:alpha", source=SOURCE_PROJECT_FILE
+        ), True),
+        # (c) file-shaped via the source tag only, NO address.
+        ("file_source_tag_only", SimpleNamespace(source=SOURCE_PROJECT_FILE), True),
+        # (d) a NON-pf: address — the prefix test must NOT fire.
+        ("non_pf_address", SimpleNamespace(address="not-a-pf-address"), False),
+        # (d') a non-pf: address WITH the source tag — the fallback fires.
+        ("non_pf_address_with_source", SimpleNamespace(
+            address="not-a-pf-address", source=SOURCE_PROJECT_FILE
+        ), True),
+        # (e) the bare prefix without the colon — NOT a pf: address.
+        ("prefix_without_colon", SimpleNamespace(address="pf"), False),
+        # (f) a non-STRING address — the isinstance() guard must hold.
+        ("non_string_address", SimpleNamespace(address=12345), False),
+        # (g) a None address with the source tag — the fallback fires.
+        ("none_address_with_source", SimpleNamespace(
+            address=None, source=SOURCE_PROJECT_FILE
+        ), True),
+        # (h) a wrong-case source tag — NOT the file source.
+        ("wrong_case_source", SimpleNamespace(source="Project-File"), False),
+        # (i) a near-miss source tag.
+        ("near_miss_source", SimpleNamespace(source="project_files"), False),
+    ]
+
+    def test_helpers_agree_on_every_shape(self):
+        """Every shape: both helpers return the SAME verdict, and that
+        verdict is the EXPECTED one (a shared-wrong answer fails)."""
+        for name, skill, expected in self.SHAPES:
+            search_verdict = _is_project_file_skill_search(skill)
+            injection_verdict = _is_project_file_skill_injection(skill)
+            assert search_verdict == injection_verdict, (
+                f"shape {name!r}: the two helpers DISAGREE — "
+                f"search={search_verdict!r} injection={injection_verdict!r}"
+            )
+            assert search_verdict is expected, (
+                f"shape {name!r}: expected {expected!r}, got {search_verdict!r}"
+            )
+
+    def test_search_helper_alone_agrees_on_every_shape(self):
+        """The search-side helper is the CANONICAL semantics (A-7): the
+        ``pf:`` address test FIRST, then the duck-typed source tag
+        fallback. Pinned independently so the parity leg above cannot
+        be satisfied by both drifting together."""
+        for name, skill, expected in self.SHAPES:
+            assert _is_project_file_skill_search(skill) is expected, (
+                f"shape {name!r}: the search helper returned "
+                f"{_is_project_file_skill_search(skill)!r}, expected {expected!r}"
+            )
+
+    def test_injection_helper_alone_agrees_on_every_shape(self):
+        """The injection-side helper mirrors the canonical semantics."""
+        for name, skill, expected in self.SHAPES:
+            assert _is_project_file_skill_injection(skill) is expected, (
+                f"shape {name!r}: the injection helper returned "
+                f"{_is_project_file_skill_injection(skill)!r}, expected {expected!r}"
+            )
+
+    def test_source_literal_is_single_sourced(self):
+        """W2 fold (i) — the ``project-file`` literal is defined ONCE, in
+        ``project_skill_source.model``, and BOTH consumers reference
+        that single definition (no local re-spelling that could drift
+        one-sided)."""
+        from daemon.services import skill_injection_service, skill_search_service
+        from daemon.services.project_skill_source import model as pf_model
+
+        canonical = pf_model.SOURCE_PROJECT_FILE
+        assert canonical == "project-file"
+        # Both consumers resolve to the SAME object, not equal copies.
+        assert skill_search_service.SOURCE_PROJECT_FILE is canonical
+        assert skill_injection_service.SOURCE_PROJECT_FILE is canonical

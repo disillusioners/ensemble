@@ -47,6 +47,7 @@ from daemon.repositories.project_skill_file.models import (
 from daemon.services.project_skill_source.model import (
     ADDRESS_PREFIX,
     PSEUDO_ID_PREFIX,
+    SOURCE_PROJECT_FILE,
     is_pf_address,
     mint_address,
 )
@@ -157,7 +158,7 @@ def _pf_skill_payload(file_skill: Any) -> dict[str, Any]:
         "body_path": getattr(file_skill, "body_path", ""),
         "digest": getattr(file_skill, "digest", ""),
         "shadows": list(getattr(file_skill, "shadows", []) or []),
-        "source": "project-file",
+        "source": SOURCE_PROJECT_FILE,
     }
 
 
@@ -219,7 +220,7 @@ async def _file_only_bm25_search(
         {
             "skill": _pf_skill_payload(skill),
             "score": score,
-            "source": "project-file",
+            "source": SOURCE_PROJECT_FILE,
         }
         for score, skill in top
     ]
@@ -228,7 +229,7 @@ async def _file_only_bm25_search(
             "name": getattr(skill, "name", ""),
             "score": score,
             "description": getattr(skill, "description", ""),
-            "source": "project-file",
+            "source": SOURCE_PROJECT_FILE,
             "address": getattr(skill, "address", ""),
         }
         for score, skill in scored[max(1, limit):][:3]

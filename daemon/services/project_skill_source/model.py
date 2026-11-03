@@ -59,6 +59,20 @@ PSEUDO_ID_PREFIX = "pf-"
 #: The ``pf:`` address prefix (frozen — D-Q5).
 ADDRESS_PREFIX = "pf:"
 
+#: The ``source`` tag stamped on every fused file-source result entry.
+#: SINGLE DEFINITION (council W2 fold, wi-76d89e11): the literal used to
+#: be spelled out in BOTH ``skill_search_service`` and
+#: ``skill_injection_service`` — a one-sided edit would have silently
+#: re-introduced this lane's defect on one path with no error and no
+#: test failure. The constant now lives HERE (this module is already
+#: imported by both consumers, so the move adds ZERO import edges) and
+#: both consumers import it. The duplicate ``_is_project_file_skill``
+#: HELPER stays duplicated on purpose (importing the canonical helper
+#: would pull ``openai`` into the injection service's import graph —
+#: approver note N6); its BEHAVIOR is pinned by the 4-shape equality
+#: battery in ``tests/tools/test_skill_id_verbatim_contract.py``.
+SOURCE_PROJECT_FILE = "project-file"
+
 
 def valid_component(value: str) -> bool:
     """Return True iff *value* is a legal namespace/skill-dir component."""
@@ -148,7 +162,7 @@ class ProjectFileSkill:
     is_active: bool = True
     generation: int = 0
     ab_test_group: Optional[str] = None
-    source: str = "project-file"
+    source: str = SOURCE_PROJECT_FILE
     body_char_len: int = 0
     manifest: dict[str, Any] = field(default_factory=dict)
     digest: str = ""

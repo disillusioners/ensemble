@@ -86,7 +86,7 @@ from typing import Any
 import openai
 
 from .llm_failover import current_failover_url, invoke_raw_with_failover
-from .project_skill_source.model import ADDRESS_PREFIX
+from .project_skill_source.model import ADDRESS_PREFIX, SOURCE_PROJECT_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,13 @@ FILE_CORPUS_BUDGET = 50
 
 #: ``source`` tag stamped on every fused result entry (additive key).
 SOURCE_DB = "db"
-SOURCE_PROJECT_FILE = "project-file"
+#: ``SOURCE_PROJECT_FILE`` is imported from
+#: ``project_skill_source.model`` — the SINGLE DEFINITION (council W2
+#: fold). It used to be spelled out here AND in
+#: ``skill_search_service``; a one-sided edit would have silently
+#: re-introduced this lane's defect on one path. The module-level
+#: ``skill_search_service.SOURCE_PROJECT_FILE`` name is retained as a
+#: re-export so existing importers keep working.
 
 #: Result-entry keys added by the fusion (additive — consumers that
 #: ignore unknown keys keep working; pinned in the fusion pack).

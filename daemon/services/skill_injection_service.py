@@ -97,6 +97,7 @@ from typing import Any, Callable, Optional
 
 from daemon.services.project_skill_source.model import (
     ADDRESS_PREFIX,
+    SOURCE_PROJECT_FILE,
     ProjectFileSkill,
     is_pf_address,
 )
@@ -105,11 +106,6 @@ from daemon.services.project_skill_source.service import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-#: The file-source discriminator tag — mirrors
-#: ``skill_search_service.SOURCE_PROJECT_FILE``.
-SOURCE_PROJECT_FILE = "project-file"
 
 
 def _is_project_file_skill(skill: Any) -> bool:
@@ -122,8 +118,15 @@ def _is_project_file_skill(skill: Any) -> bool:
 
     Replicated LOCALLY on purpose: importing the canonical helper would
     pull the search service (and with it ``openai``) into this
-    service's import graph (approver note N6). DRIFT-PIN: keep in
-    lockstep with ``daemon/services/skill_search_service.py:118-130``.
+    service's import graph (approver note N6). The ``source`` LITERAL is
+    NOT duplicated — ``SOURCE_PROJECT_FILE`` is imported from
+    ``project_skill_source.model`` (the single definition, council W2
+    fold), so a one-sided edit cannot re-introduce this lane's defect on
+    one path only. DRIFT-PIN: the BEHAVIOR is pinned by the 4-shape
+    equality battery in
+    ``tests/tools/test_skill_id_verbatim_contract.py`` (constant
+    equality alone is insufficient — both helpers could diverge in
+    PREDICATE order while the constant stays equal).
     """
     address = getattr(skill, "address", None)
     if isinstance(address, str) and address.startswith(ADDRESS_PREFIX):
