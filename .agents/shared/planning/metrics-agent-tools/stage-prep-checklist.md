@@ -101,7 +101,7 @@ residual is owned by the contract owner (fold-ledger §B `contract_RevocationLev
 | the Phase-2 Tier-1 verdict | net-new deterministic reds **0** |
 | the Phase-3 Tier-1 verdict | net-new deterministic reds **0**; the route censuses **111 / 37 / 33** UNCHANGED |
 | the Phase-4 FE verdict | net-new **0**; both builds rc=0; the e2e 3/3; the dependency diff **0 lines** |
-| the Phase-5 mutation matrix | **22/22 PASS** (21 RED/GREEN + 1 FOLLOW) (RED via the intended assertion → byte-identical restore → GREEN) — the ARCHIVED log: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `5f030ad43c85902a2d3409b8f5baf887695e8f28764cec53492c03722007f849`) |
+| the Phase-5 mutation matrix | **22/22 PASS** (21 RED/GREEN + 1 FOLLOW) (RED via the intended assertion → byte-identical restore → GREEN) — the ARCHIVED log: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`) |
 | the prompt-artifact re-stamp | **REQUIRED** — the baseline delta is exactly the 3 `tools_note.md` (§2) |
 | the throwaway base worktree | `/home/nea/ensemble-src-wt-base-metrics` (detached at `03a2297c3`) — **IMPLEMENTER-OWNED** (council A9); it must be **absent (or accounted) at stage time, never orphaned** |
 
@@ -139,8 +139,22 @@ the two greps (step 2 of §6) after the merge and record the artefact.
 1. `git fetch` + confirm `latest` has NOT moved into the lane's tree in a way that would split
    the ONE-commit cluster (the cluster is `23695bef3`; a conflict inside any of the 10 pin files
    is the ONE way it splits — re-derive the pin set by grep afterwards, per AmC-9).
-2. Re-derive the pin census by grep (`grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py`
-   + `grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/ --include=*.py`) — **never trust a prose count**.
+2. Re-derive the pin census by grep — **never trust a prose count**. The census's scope is
+   the **TEN pre-existing pin files** (§H.3), and the recipe reproduces that number by
+   excluding the lane's OWN new registration pack (the `:!` pathspec form is a SILENT
+   NO-OP in GNU grep 3.11 — it treats the exclusion as a filename; use `--exclude=`):
+
+   ```
+   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py --exclude=test_metrics_read_registration.py
+   grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/ --include=*.py --exclude=test_metrics_read_registration.py
+   ```
+
+   → **TEN unique files** (the census's number ✓). The UNFILTERED greps return **ELEVEN**:
+   the ten + the lane's own `tests/unit/test_metrics_read_registration.py` (its count pin
+   at `:221`). Both numbers are correct — the census records the pre-existing EDIT set
+   (10), and the unfiltered recipe sees the lane's own pack as well (11). **Check both:**
+   the filtered greps must return 10 unique files, and the unfiltered greps must return 11
+   (the ten + exactly `tests/unit/test_metrics_read_registration.py`).
 3. Run the three prompt-artifact commands in §2 — the baseline delta must be exactly 3 files.
 4. Confirm the EMPTY deltas in §1 (five commands, five zero-line answers).
 5. Confirm the throwaway base worktree is absent (or accounted) — it is implementer-owned.

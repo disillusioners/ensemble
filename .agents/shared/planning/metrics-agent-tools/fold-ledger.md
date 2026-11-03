@@ -195,10 +195,10 @@ not enumerate:
 | # | file | site | kind |
 |---|---|---|---|
 | 1-5 | the five `EXPECTED_PRIVILEGED_SET` constants (`test_board_registration.py:70`, `test_instance_ops_registration.py:88`, `test_notify_user_registration.py:54`, `test_self_alarm_registration.py:76`, `test_wedge_capture_registration.py:70`) | the constant | EDIT |
-| 6-10 | the five inline `frozenset` literals (`test_upgrade_registration.py:149`, `test_attestation_registration.py:192`, `test_secrets_registration.py:226`, `test_maintenancer_spawn_resolves_tools.py:369`, `test_service_tool_flag_off_byte_identical.py:832`) | the literal | EDIT |
-| 11-15 | the five count pins (`:215` / `:203` / `:175` / `:212` / `:172`) | `== 16` → `== 17` | EDIT |
-| **16** | **`test_maintenancer_spawn_resolves_tools.py:141`** — the maintenancer meta's EXACT allow list (the real meta's `tools.allow`) | the literal | **EDIT — NOT IN THE PLAN'S PROSE** |
-| 17 | `test_board_registration.py:249-287` — the ari trailing-entry allow-array pin | VERIFY-ONLY (read, never edited: `metrics-read` is not granted to ari) | — |
+| 6-10 | the five inline `frozenset` literals (`test_upgrade_registration.py:149`, `test_attestation_registration.py:192`, `test_secrets_registration.py:226`, `test_maintenancer_spawn_resolves_tools.py:382`, `test_service_tool_flag_off_byte_identical.py:834`) | the literal | EDIT |
+| 11-15 | the five count pins (`:221` / `:209` / `:181` / `:218` / `:178`) | `== 16` → `== 17` | EDIT |
+| **16** | **`test_maintenancer_spawn_resolves_tools.py:141`** (the docstring that names the entry) **/ `:157`** (the literal entry) — the maintenancer meta's EXACT allow list (the real meta's `tools.allow`) | the literal | **EDIT — NOT IN THE PLAN'S PROSE** |
+| 17 | `test_board_registration.py:255-292` — the ari trailing-entry allow-array pin | VERIFY-ONLY (read, never edited: `metrics-read` is not granted to ari) | — |
 
 **The FILE count is TEN, not eleven (the council fix cycle, W4 — a record
 correction, not a change to the work).** Site 16 lives in
@@ -342,12 +342,12 @@ nine-id block is NOT widened):**
 | Pack | Nodes | What it proves |
 |---|---|---|
 | `metrics_read_registration` | **30** | the registration + wiring proof (the AST discovery, the category, the count + the EXACT set, the two name universes, the extend's placement, the decorator order, the A13 attribute pin + the default-deny leg, the holders census, the fail-closed helper, the GATE-ORDERING pin, the literal-name probe, the AmA-3 equality leg, the AmA-2 threaded-`agent_id` leg, the AmRULING-4 callable-shape leg, the AmRULING-1 degraded-boot leg) |
-| `metrics_read_tools` | **48** | the three tools' behaviour (the counts, the VERBATIM availability, the derived members, the ONE provider read, the SORT-before-cut, the derived stale/cardinality, the bound block, the HARD FLOOR, the COMBINED cap, the ANCHORED pair, the `top_n+1` probe, the null-not-zero delta, the per-series freshness, the non-silent clamp, the no-cursor posture, the four-token ladder + its ORDERING, the degraded-read block) |
+| `metrics_read_tools` | **51** | the three tools' behaviour (the counts, the VERBATIM availability, the derived members, the ONE provider read, the SORT-before-cut, the derived stale/cardinality, the bound block, the HARD FLOOR, the COMBINED cap, the ANCHORED pair, the `top_n+1` probe, the null-not-zero delta, the per-series freshness, the non-silent clamp, the no-cursor posture, the four-token ladder + its ORDERING, the degraded-read block) |
 | `metrics_read_personas` | **15** | the design's TWO persona examples as STRUCTURAL assertions (the field sets + the vocabularies; a leg proves the pack pins NO observation) |
 | `metrics_read_docs_surface` | **20** | the agent-visible docs chain (the registry resolves the category, the loader renders the section for the three holders, NOTHING metrics-shaped reaches a non-holder, `tool_help` serves the `_full_doc_`, the three tools_note sections carry the AmC-11 asymmetry) |
 | `metrics_query_protocol_consumer` | **28** | the Phase-1 seam pins (the completeness pin, the identity + lifecycle-triple pins, the reachability leg, the public-reader pin, the no-second-provider pin) |
 
-**The mutation matrix — 22/22 PASS (21 RED/GREEN + 1 FOLLOW leg).** The ARCHIVED log (plan task 5.2's "the matrix log + digests archived for the evidence pack"): `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `5f030ad43c85902a2d3409b8f5baf887695e8f28764cec53492c03722007f849`, 3 587 bytes — the run's own pre-run manifest records the HEAD sha `04f1c856e` (the RULING-1 commit — the FINAL code) + the sha256 of every touched file) and `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `5c23aa4c929ec304a2f6fc7817c7165124553f81739eb3dafe82b5b6f321c128`). — see §H.10's SUPERSESSION note Each leg plants a mutation INDEPENDENTLY on the
+**The mutation matrix — 22/22 PASS (21 RED/GREEN + 1 FOLLOW leg).** The ARCHIVED log (plan task 5.2's "the matrix log + digests archived for the evidence pack"): `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`, 3 587 bytes — the run's own pre-run manifest records the HEAD sha `035a4cd4b` (the council-fold commit — the FINAL code) + the sha256 of every touched file) and `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `df7dc17b8cb4dc4410a6c51ef1c1f4fc7e9c93edd94c0935ffb43cd98a90b1ad`). — see §H.10's SUPERSESSION note Each leg plants a mutation INDEPENDENTLY on the
 production source, requires RED **through the intended assertion** (a per-leg RED marker — the
 marker's absence is a FAIL, so a mutation that reds for an unrelated reason does not pass),
 restores the file BYTE-IDENTICALLY and requires GREEN again. The restore discipline is the
@@ -461,7 +461,7 @@ is INDEPENDENTLY locatable from this table.
 
 | Item | Commit | Locus | What the reviewer reads |
 |---|---|---|---|
-| **C1** — wire the byte ceiling + bound the names projection | `fb48db063` | `daemon/tools/metrics_read.py` — the three `_trim_to_byte_ceiling(payload, …)` call sites at the FIRST cut (:624 / :726 / :971 — the delta re-review's re-derivation read them as :634 / :736 / :981; the SECOND fix cycle's C1 repair moved them again, and the CURRENT sites are **:792 / :905 / :1165** — the call is now `_enforce_byte_ceiling(…)`, the door's whole port), the names bound (`MAX_NAMES_PER_FAMILY` / `MAX_NAMES_TOTAL` / the `dropped_names` counter), the `_encoded_size` probe (the tool's own `indent=2` form), the `_CAVEAT_HEADROOM_BYTES` reservation; `tests/unit/metrics/test_metrics_read_tools.py` — `TestOutputBudget` (the static wiring pin + the byte-ceiling pins for all three bodies + the names-bound pins) | the trim is WIRED, the surface is non-silent, the projection is bounded |
+| **C1** — wire the byte ceiling + bound the names projection | `fb48db063` | `daemon/tools/metrics_read.py` — the three `_trim_to_byte_ceiling(payload, …)` call sites at the FIRST cut (:624 / :726 / :971 — the delta re-review's re-derivation read them as :634 / :736 / :981; the SECOND fix cycle's C1 repair moved them again, and the CURRENT sites are **:869 / :986 / :1251** — the call is now `_enforce_byte_ceiling(…)`, the door's whole port), the names bound (`MAX_NAMES_PER_FAMILY` / `MAX_NAMES_TOTAL` / the `dropped_names` counter), the `_encoded_size` probe (the tool's own `indent=2` form), the `_CAVEAT_HEADROOM_BYTES` reservation; `tests/unit/metrics/test_metrics_read_tools.py` — `TestOutputBudget` (the static wiring pin + the byte-ceiling pins for all three bodies + the names-bound pins) | the trim is WIRED, the surface is non-silent, the projection is bounded |
 | **C2** — the false records corrected | `5f8d7a0dc` | `fold-ledger.md` §H.5 (the M-1 row + its fix-cycle history) · `architecture-recommendation.md` §4 (the R13 correction) | the records say what was true, what was false, and what fixed it |
 | **W1** — the two binding mutation legs restored + the dropped set's dispositions | `7363dbac6` | `test/packs/metrics_read_mutation_matrix_test.py` — MT-13 (the byte-ceiling leg), the FOLLOW-leg machinery + MT-22 (the single-sourcing leg), MT-14..MT-21 (the eight folded legs); `fold-ledger.md` §H.8 (the per-leg dispositions for all 24 planned legs) | 21 RED/GREEN + 1 FOLLOW = 22 legs; every planned leg folded or explicitly deferred |
 | **W2** — the budget pin single-sourced | `fb48db063` | `tests/unit/metrics/test_metrics_read_tools.py` — the import of `MAX_TOTAL_POINTS` from the seam + the budget leg's `MAX_TOTAL_POINTS // 51` | the pin reads the PRODUCER's constant (no duplicated literal) |
@@ -479,11 +479,11 @@ items 1-3 from here.
 
 | Item | Disposition | Locus | What the reviewer reads |
 |---|---|---|---|
-| **1 — C1** (the critical regression) | **FIXED.** The history body hands the ceiling its PROJECTION (`items=series_out`) and assigns the PROJECTED slice back; the snapshot body does the same with its stripped projection (`series_proj`); the door's FINAL-ENVELOPE RE-CHECK is ported (the new `_enforce_byte_ceiling` — measure the body as it will be shipped, trim only when it is over the ceiling, and trim AGAIN with the disclosure attached if the reservation did not cover it). The SHAPE is pinned on BOTH paths. | `daemon/tools/metrics_read.py` — `_enforce_byte_ceiling` (`:428`), the three call sites (`:792` families / `:905` snapshot / `:1165` history); `tests/unit/metrics/test_metrics_read_tools.py` — `test_the_history_series_shape_is_the_same_on_both_paths` + `test_the_snapshot_series_shape_is_the_same_on_both_paths` | the ceiling measures the SHIPPED object; the trimmed body has the SAME schema as the untrimmed one |
+| **1 — C1** (the critical regression) | **FIXED.** The history body hands the ceiling its PROJECTION (`items=series_out`) and assigns the PROJECTED slice back; the snapshot body does the same with its stripped projection (`series_proj`); the door's FINAL-ENVELOPE RE-CHECK is ported (the new `_enforce_byte_ceiling` — measure the body as it will be shipped, trim only when it is over the ceiling, and trim AGAIN with the disclosure attached if the reservation did not cover it). The SHAPE is pinned on BOTH paths. | `daemon/tools/metrics_read.py` — `_enforce_byte_ceiling` (`:484`), the three call sites (`:869` families / `:986` snapshot / `:1251` history); `tests/unit/metrics/test_metrics_read_tools.py` — `test_the_history_series_shape_is_the_same_on_both_paths` + `test_the_snapshot_series_shape_is_the_same_on_both_paths` | the ceiling measures the SHIPPED object; the trimmed body has the SAME schema as the untrimmed one |
 | **2 — W3 residual** | **LEG-RESTATEMENT (a record correction, NOT a wire change).** The third leg now reads "an absent fact must NEVER be reported as empty" — what is actually met. The over-claim in `evidence-pack.md` is corrected: the UNKNOWN state is INTERNAL (the `-1.0` sentinel); the wire value is a BOOL, an absent fact reads `False`, and the tool never emits null on it. | `tests/unit/metrics/test_metrics_read_tools.py` — `test_an_absent_fact_is_never_reported_as_empty`; `evidence-pack.md` §8b's W3 row; `fold-ledger.md` §H.9's W3 row | the record says what is true; the wire never carries null |
 | **3 — name_count** | **ACCEPTED IN-SCOPE; the one doc line is owed and PAID.** `name_count` is the family's DECLARED count; `names` is the bounded projection (200/family, 2000/response). No new member (the field set is unchanged) and no new `names_declared_count`. | `technical-analysis.md` §A.3 Tool 1 (the `name_count` row) · `phase2-plan.md` task 2.2 | the landed semantics match the design table |
-| **4 — the stale records** | **ALL FOLDED IN THIS CYCLE** (the ceremony-fiction class — `stage-prep-checklist.md` is the file giter reads at stage time): the pin-file count reconciled to **10**; the matrix count **12/12 → 22/22** in both records; the node counts re-derived (the tools pack **34 → 47**, the five-pack total **127 → 140**); the §H.9 line-citation drift corrected (and re-corrected for the C1 repair's own line shift — the CURRENT sites are `:792` / `:905` / `:1165`); the §H.5/§E fix-cycle paragraph moved OUT of the GFM table into **§E.1** (it rendered as ~40 header-less pipe rows); the R13 residual row carries a fix-cycle marker; the matrix log is **CITED + ARCHIVED**. | `stage-prep-checklist.md` (:104 + :140) · `fold-ledger.md` (§H.6's counts, §H.9's loci, §E.1) · `evidence-pack.md` (§2's counts, §3's archived log) · `plan-overview.md` §Risk register (R13) | the stage-time file agrees with the tree |
-| **5 — the in-place advisories** | **ALL FOUR FOLDED.** (a) the reservation is GUARDED by an import-time assertion (1 228 bytes needed, 2 048 reserved); (b) the names-bound hint names what ACTUALLY WORKS; (c) the static wiring pin WALKS THE AST; (d) **the ring-empty signal — DISCLOSED and FLAGGED BACK** (see below). | `daemon/tools/metrics_read.py` — `_post_trim_overhead_bytes` + the module-level `assert` (`:308`/`:334`), `_names_bound_hint` (`:281`), the `_read_status` comment (`:475`) | every advisory is either fixed or disclosed — none is silently deferred |
+| **4 — the stale records** | **ALL FOLDED IN THIS CYCLE** (the ceremony-fiction class — `stage-prep-checklist.md` is the file giter reads at stage time): the pin-file count reconciled to **10**; the matrix count **12/12 → 22/22** in both records; the node counts re-derived (the tools pack **34 → 47**, the five-pack total **127 → 140**); the §H.9 line-citation drift corrected (and re-corrected for the C1 repair's own line shift — the CURRENT sites are `:869` / `:986` / `:1251`); the §H.5/§E fix-cycle paragraph moved OUT of the GFM table into **§E.1** (it rendered as ~40 header-less pipe rows); the R13 residual row carries a fix-cycle marker; the matrix log is **CITED + ARCHIVED**. | `stage-prep-checklist.md` (:104 + :140) · `fold-ledger.md` (§H.6's counts, §H.9's loci, §E.1) · `evidence-pack.md` (§2's counts, §3's archived log) · `plan-overview.md` §Risk register (R13) | the stage-time file agrees with the tree |
+| **5 — the in-place advisories** | **ALL FOUR FOLDED.** (a) the reservation is GUARDED by an import-time assertion (1 228 bytes needed, 2 048 reserved); (b) the names-bound hint names what ACTUALLY WORKS; (c) the static wiring pin WALKS THE AST; (d) **the ring-empty signal — DISCLOSED and FLAGGED BACK** (see below). | `daemon/tools/metrics_read.py` — `_post_trim_overhead_bytes` + the module-level `assert` (`:353`/`:390`), `_names_bound_hint` (`:326`), the `_read_status` comment (`:544`/`:564-610`) | every advisory is either fixed or disclosed — none is silently deferred |
 
 **5(d) — THE RING-EMPTY SIGNAL: RULING 1 APPLIED — BRANCH B (the leader's ruling of
 2026-11-03: NO seam extension, NO raw `getattr`).**
@@ -539,11 +539,66 @@ to the plain ceiling (the leg went GREEN — a vacuous leg, caught by the matrix
 expression now removes the CEILING ITSELF (the module-level binding), and the leg REDS
 again. The leg's INTENT and its id are unchanged. **The ARCHIVED log:**
 `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log`
-(sha256 `5f030ad43c85902a2d3409b8f5baf887695e8f28764cec53492c03722007f849`) + the run's own
+(sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`) + the run's own
 pre-run manifest `.../mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256
-`5c23aa4c929ec304a2f6fc7817c7165124553f81739eb3dafe82b5b6f321c128`).
+`df7dc17b8cb4dc4410a6c51ef1c1f4fc7e9c93edd94c0935ffb43cd98a90b1ad`).
 
-**SUPERSESSION (recorded, never silent):** the log archived BEFORE RULING 1 (sha256 `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def`, the run against the pre-RULING-1 HEAD `e5d29e8c6`; the manifest sha256 `44629b770ab1767c125b038134eb080d4e484f5c93a52d1cbfb49aca088f45ac`) is **SUPERSEDED** by the one above — RULING 1 changed `daemon/tools/metrics_read.py`, so the matrix was REGENERATED against the FINAL code (the current manifest carries the HEAD `04f1c856e` + the new `metrics_read.py` sha `02482cb7491218f83f2d0b102748e4c95b6b6ef70d1207df28f7add0d7f32c27`). The superseded blob remains in the repo history at `c45a7ecb7`.
+**SUPERSESSION CHAIN (recorded, never silent):** the archived log is REGENERATED
+whenever `daemon/tools/metrics_read.py` changes, so the citation always names the run
+against the FINAL code — and every superseded artefact keeps its sha:
+
+* `8fc8da2ade803d08366040397916940549a5c6240c68b57139ca330f87332def` — the pre-RULING-1
+  run (HEAD `e5d29e8c6`; manifest `44629b770ab1767c125b038134eb080d4e484f5c93a52d1cbfb49aca088f45ac`)
+  — SUPERSEDED by RULING 1; the blob stays in the history at `c45a7ecb7`;
+* `5f030ad43c85902a2d3409b8f5baf887695e8f28764cec53492c03722007f849` — the RULING-1 run
+  (HEAD `04f1c856e`; manifest `5c23aa4c929ec304a2f6fc7817c7165124553f81739eb3dafe82b5b6f321c128`)
+  — SUPERSEDED by the council fold (the fold changed `daemon/tools/metrics_read.py`
+  again); the blob stays in the history at `ea2c0768e`/`caee318d9`;
+* the CURRENT log — sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`,
+  the run against HEAD `035a4cd4b` (the fold commit) — the manifest carries that HEAD +
+  the `metrics_read.py` sha `dd6c406f70f4ad1c733ddd9b2c4bc44f2f5d889e2b1db221549b2898fe65130a`
+  (manifest sha256 `df7dc17b8cb4dc4410a6c51ef1c1f4fc7e9c93edd94c0935ffb43cd98a90b1ad`).
+
+**Nothing is cited as if it reflected code that no longer exists.**
+
+---
+
+### H.11 — The council fold (2026-11-03, the narrow verification's remaining items)
+
+The council's narrow verification returned **APPROVE-WITH-ADVISORIES, 0 critical** — the C1
+blocker is CLOSED with executed proof; items 1/2/3/5a/5b/5c are VERIFIED; the archive, the
+scope sweep and the regression guard are VERIFIED. Five items stayed in this lane's hands and
+are folded here.
+
+| Item | Disposition | Locus | What the reviewer reads |
+|---|---|---|---|
+| **F1** (ceremony-facing) | **FOLDED.** The stage-time greps returned ELEVEN unique files (the 11th = the lane's own `tests/unit/test_metrics_read_registration.py:221`) while the census records TEN. The recipe now reproduces the recorded number: the greps carry `--exclude=test_metrics_read_registration.py` (the `:!` pathspec form is a **SILENT NO-OP** in GNU grep 3.11 — it is treated as a filename) and the checklist states BOTH numbers — the filtered greps must return **10**, the unfiltered **11** (the ten + exactly that one file). The two no longer disagree. | `stage-prep-checklist.md` §6.2 |
+| **F2** | **FOLDED.** §H.3's census table's stale citations re-derived against the current tree: the five count pins `:215/:203/:175/:212/:172` → **`:221/:209/:181/:218/:178`**; the two integration literals `:369` → **`:382`** and `:832` → **`:834`**; the VERIFY-ONLY range `:249-287` → **`:255-292`**; site 16 now cites BOTH the docstring (`:141`) and the literal entry (`:157`). | `fold-ledger.md` §H.3's census table |
+| **F3** | **FOLDED.** The same stale citations, propagated into the design, re-derived in ONE grep pass: `test_board_registration.py:70/201/215/249-287` → `70/201/221/255-292`; `test_self_alarm_registration.py:76/209/212` → `76/218/212`; `test_maintenancer_spawn_resolves_tools.py:369` → `:382`; `test_service_tool_flag_off_byte_identical.py:832` → `:834`. | `technical-analysis.md` §A.12's "Tests / pins" |
+| **5b-①** | **FOLDED.** `_NAMES_BOUND_CAVEAT` no longer says "Ask for one family at a time, or use `details=false` for the small projection" — exactly what the corrected hint DISOWNS. The caveat now states the correction ("does NOT lift") and points at the DECLARED count (`name_count`). | `daemon/tools/metrics_read.py:277` |
+| **5b-②** | **FOLDED.** The two bounds now COMPOSE in the ONE `narrow_hint` member (`_compose_hint`) — the byte ceiling no longer overwrites the names-bound hint (the executed shape: 12 families × 250 names). Every bound appends; none erases another's text. | `daemon/tools/metrics_read.py:312` + the three bodies |
+| **5b-③** | **FOLDED.** The byte-ceiling disclosure is PER-BODY (`_BODY_NARROW_LEVERS` + `_byte_ceiling_caveat(body)` / `_byte_ceiling_hint(body)`): the families tool accepts NEITHER `name_prefix` NOR `top_n`, and the history tool accepts NO `name_prefix`. ONE disclosure surface (the caveat + the hint), per-body TEXT — folded in THIS lane, not split to the seam's owner. | `daemon/tools/metrics_read.py:261`/`:286`/`:302` |
+| **in-file (a)** | **FOLDED (comment-only).** `_enforce_byte_ceiling`'s docstring no longer claims to port "the door's FINAL-ENVELOPE RE-CHECK (routers/metrics.py:428)": line 428 is the door's TRIM CONDITION — the door measures ONCE and mints a cursor afterwards; it has no re-check. The docstring now says exactly that and names the tool's SECOND MEASUREMENT as the tool's own belt. | `daemon/tools/metrics_read.py:484` (the docstring) |
+| **in-file (b)** | **FOLDED.** The belt's target is now the SAME reserved bound as the normal path (`RESPONSE_BYTE_CEILING − _CAVEAT_HEADROOM_BYTES`) — it no longer leaves a body looser than the first pass's bound (the "measured against a different object than what ships" family that produced C1). Unreachable today (5a's import-time assertion + the measured headroom), tightened anyway. | `daemon/tools/metrics_read.py:484` |
+| **the evidence-pack citation** | **FOLDED.** The production-unreachable justification now carries its file:line (`daemon/services/metrics_query/provider.py:396-403`). | `evidence-pack.md` §8b's W3 row |
+
+**THE THREE NEW PINS** (each mutation-verified — the planted mutation REDS exactly its pin):
+`test_both_bounds_on_one_response_keep_both_hints` (5b-②),
+`test_the_byte_ceiling_disclosure_names_only_accepted_filters` (5b-③),
+`test_the_names_bound_caveat_agrees_with_its_hint` (5b-①). The tools pack: 48 → **51** nodes
+(re-derived, never remembered).
+
+**THE ARCHIVE WAS REGENERATED** (this fold changed `daemon/tools/metrics_read.py`): the
+CURRENT log is sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`
+(the run against HEAD `035a4cd4b`), and the SUPERSESSION CHAIN records every prior artefact
+with its sha (see §H.10's chain note).
+
+**DISCLOSED RESIDUAL (NOT folded — out of the council's list, recorded so it is not lost):**
+two of the lane's PIN FILES still carry test NAMES that say "sixteen" while the asserted
+count is 17 (`test_board_registration.py:201` `test_the_set_is_exactly_the_sixteen_entries`
++ `test_self_alarm_registration.py:214`/`:217`). The ASSERTIONS are correct; only the names
+are stale. A rename would change the node ids of a registered pack, so it is routed rather
+than done silently here.
 
 ---
 

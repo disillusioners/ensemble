@@ -1,4 +1,4 @@
-pre-run manifest: 04f1c856e09f7090243bcd374cfb632b68c65629 over 4 files
+pre-run manifest: 035a4cd4b2a5428ba77505cbb20adeb6697005f2 over 4 files
 MT-01-count-pin: OK (RED via test_board_is_the_ninth_entry)
 MT-01-count-pin: OK (restored byte-identically, pack GREEN)
 MT-02-availability-re-derived: OK (RED via test_the_availability_block_is_carried_verbatim)
