@@ -1,0 +1,47 @@
+{
+  "file": "04-metrics-families-tab.png",
+  "url": "http://127.0.0.1:9797/metrics",
+  "viewport": {
+    "width": 1600,
+    "height": 1000
+  },
+  "auth_state": "unauthenticated (daemon auth disabled)",
+  "api_responses": [
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "03-families-tab"
+    }
+  ],
+  "console_error_count": 0,
+  "dom_text_excerpt": "AC\nAgents Ensemble\nInstances\nSources\nSchedules\nJobs\nSkills\nPersona\nPlan\nhourglass_top\n1/1\n│\n8\nnotifications\nsettings\nv0.28.9\nMetrics\n\nCentral metrics door — families, current values and trends (UTC)\n\nThe metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics.\nRetry\nOverview\nCharts\nFamilies\n0 families · 0 live · 0 dark\nReload\nFamily\tRole\tAvailability\tSeries\tNames\n\nNo families are registered.",
+  "notes": "Families tab (clicked via role=tab \"Families\"). The catalog is owned by the page shell and was never loaded successfully (503), so the table renders with headers and an EMPTY tbody, plus the families-empty hint.",
+  "extracted_copy": {
+    "families-meta": "0 families · 0 live · 0 dark",
+    "families-empty": "No families are registered.",
+    "families-table": "Family\tRole\tAvailability\tSeries\tNames"
+  },
+  "row_count": 0,
+  "live_pill_count": 0,
+  "dark_pill_count": 0,
+  "rows": []
+}

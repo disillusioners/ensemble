@@ -1,0 +1,205 @@
+{
+  "file": "05c-resources-timeline-tooltip.png",
+  "url": "http://127.0.0.1:9797/resources",
+  "viewport": {
+    "width": 1600,
+    "height": 1000
+  },
+  "auth_state": "unauthenticated (daemon auth disabled)",
+  "fullPage": false,
+  "api_responses": [
+    {
+      "status": 503,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/settings/editor"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/health"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/settings/plane"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/migration/availability"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/notifications/stream"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 503,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/anomalies?window=1h"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/projects"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    }
+  ],
+  "console_error_count": 3,
+  "notes": "Timeline tab, viewport-only (1600x1000). Chart renders (1 svg, 22 path/shape elements, 3 plotted series: Daemon RSS / Cgroup memory / Daemon CPU, plus 4 unlabelled coloured event markers with dashed vertical guides). NO TOOLTIP APPEARS: an 8-position stepped mouse sweep across the plot at mid-height (220ms settle per step, 600ms hold on best candidate) produced ZERO visible numeric overlay. The earlier DOM heuristic reported 'tooltip visible: true' but that was a FALSE POSITIVE - no absolutely/fixed-positioned numeric element rendered inside the viewport. Conclusion: this chart has no per-point hover tooltip; the markers are static event pins. Screenshot taken after the hover sweep, so it shows the chart in its normal (tooltip-less) state.",
+  "captured_at": "2026-11-03T16:16:27.983Z",
+  "console_errors": [
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\". The request has been blocked.\n",
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+  ],
+  "page_errors": [],
+  "total_9797_requests": 72,
+  "non_get_requests": [],
+  "tooltip_probe": {
+    "method": "mouse.move stepped sweep x=width*i/9 (i=1..8) at y=55% of svg box, steps=6, 220ms settle",
+    "svg_box": {
+      "x": 282,
+      "y": 304.34,
+      "width": 1036,
+      "height": 332.88
+    },
+    "visible_numeric_overlay_found": false,
+    "conclusion": "no tooltip implemented on this chart; capture kept as truthful chart-only viewport shot",
+    "retry_requests_total": 72,
+    "retry_non_get": 0
+  },
+  "tmp_image_id": "0c71fb0160654caa981ec3a44fa5a4e1",
+  "tmp_image_ref": "/api/tmp_images/0c71fb0160654caa981ec3a44fa5a4e1",
+  "substrate": {
+    "feature": "fe-ui-audit",
+    "page": "/resources",
+    "version": "v0.28.9",
+    "content_type": "image/png",
+    "byte_exact_roundtrip": true
+  }
+}

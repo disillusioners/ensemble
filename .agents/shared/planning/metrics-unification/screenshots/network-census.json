@@ -1,0 +1,589 @@
+{
+  "url": "http://127.0.0.1:9797/metrics",
+  "viewport": {
+    "width": 1600,
+    "height": 1000
+  },
+  "auth_state": "unauthenticated (daemon auth disabled)",
+  "captured_at": "2026-11-03T16:12:55.053Z",
+  "metrics_api_calls_ordered": [
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/snapshot",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/families",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/snapshot",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/snapshot",
+      "phase": "04-banner-closeup"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/families",
+      "phase": "05-retry-probe"
+    }
+  ],
+  "other_api_calls_ordered": [
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/settings/plane",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/health",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/maintenance/checkpoint-cleanup/availability",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/migration/availability",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/settings/editor",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/notifications/stream",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/projects",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "02-charts-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "04-banner-closeup"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "05-retry-probe"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "05-retry-probe"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "05-retry-probe"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "05-retry-probe"
+    }
+  ],
+  "all_api_responses_ordered": [
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/settings/plane",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/health",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/maintenance/checkpoint-cleanup/availability",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/migration/availability",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/settings/editor",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/notifications/stream",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/snapshot",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/families",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/projects",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/snapshot",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "02-charts-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "03-families-tab"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/snapshot",
+      "phase": "04-banner-closeup"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "04-banner-closeup"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/families",
+      "phase": "05-retry-probe"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "05-retry-probe"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "05-retry-probe"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "05-retry-probe"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "05-retry-probe"
+    }
+  ],
+  "total_requests": 81,
+  "non_get_requests_to_9797": [],
+  "console_errors": [
+    {
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+      "phase": "01-overview-load"
+    },
+    {
+      "text": "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\". The request has been blocked.\n",
+      "phase": "01-overview-load"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+      "phase": "01-overview-load"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+      "phase": "01-overview-load"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+      "phase": "01-overview-load"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+      "phase": "01-overview-load"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+      "phase": "04-banner-closeup"
+    },
+    {
+      "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+      "phase": "05-retry-probe"
+    }
+  ],
+  "page_errors": [],
+  "retry_probe": {
+    "clicked": true,
+    "ui_changed": false,
+    "requests_triggered": [
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:9797/api/metrics/families",
+        "phase": "05-retry-probe",
+        "resourceType": "xhr"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+        "phase": "05-retry-probe",
+        "resourceType": "xhr"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+        "phase": "05-retry-probe",
+        "resourceType": "xhr"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+        "phase": "05-retry-probe",
+        "resourceType": "xhr"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+        "phase": "05-retry-probe",
+        "resourceType": "xhr"
+      },
+      {
+        "method": "GET",
+        "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+        "phase": "05-retry-probe",
+        "resourceType": "xhr"
+      }
+    ],
+    "api_responses_triggered": [
+      {
+        "method": "GET",
+        "status": 503,
+        "url": "http://127.0.0.1:9797/api/metrics/families",
+        "phase": "05-retry-probe"
+      },
+      {
+        "method": "GET",
+        "status": 200,
+        "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+        "phase": "05-retry-probe"
+      },
+      {
+        "method": "GET",
+        "status": 200,
+        "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+        "phase": "05-retry-probe"
+      },
+      {
+        "method": "GET",
+        "status": 200,
+        "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+        "phase": "05-retry-probe"
+      },
+      {
+        "method": "GET",
+        "status": 200,
+        "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+        "phase": "05-retry-probe"
+      }
+    ],
+    "banner_after": "The metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics.\nRetry",
+    "overview_error_after": "The metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics. — the last known values are kept.\nRetry"
+  },
+  "summary": {
+    "any_chart_rendered": false,
+    "any_stat_card_rendered": false,
+    "non_get_violation_count": 0
+  }
+}

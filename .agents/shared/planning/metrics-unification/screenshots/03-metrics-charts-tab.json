@@ -1,0 +1,31 @@
+{
+  "file": "03-metrics-charts-tab.png",
+  "url": "http://127.0.0.1:9797/metrics",
+  "viewport": {
+    "width": 1600,
+    "height": 1000
+  },
+  "auth_state": "unauthenticated (daemon auth disabled)",
+  "api_responses": [
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "02-charts-tab"
+    }
+  ],
+  "console_error_count": 0,
+  "dom_text_excerpt": "AC\nAgents Ensemble\nInstances\nSources\nSchedules\nJobs\nSkills\nPersona\nPlan\nhourglass_top\n1/1\n│\n8\nnotifications\nsettings\nv0.28.9\nMetrics\n\nCentral metrics door — families, current values and trends (UTC)\n\nThe metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics.\nRetry\nOverview\nCharts\nFamilies\n\nWaiting for the family catalog — the chart-primary families drive this tab.",
+  "notes": "Charts tab (clicked via role=tab \"Charts\"). Tab is NOT mounted in the DOM before the click; Material mounts it lazily. With the catalog empty (door fail-closed) chartSpecs() is empty, so the tab never polls /api/metrics/series and renders the no-catalog hint instead.",
+  "extracted_copy": {
+    "charts-error": null,
+    "charts-stale": null,
+    "charts-no-catalog": "Waiting for the family catalog — the chart-primary families drive this tab.",
+    "charts-loading": null,
+    "charts-empty": null,
+    "charts-meta": null
+  },
+  "chart_cell_count": 0,
+  "chart_svg_count_in_grid": 0,
+  "total_svg_count_on_page": 0
+}
