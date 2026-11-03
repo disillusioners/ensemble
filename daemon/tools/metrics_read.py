@@ -163,6 +163,11 @@ real.  A FAILED registry read is likewise not "no data": the
 ``read_status`` block reports ``registry_read_ok=false`` and the empty
 payload must be read as UNKNOWN, not empty.
 
+The caveat is GENERIC on purpose: it asserts only the fact the tool can
+verify at runtime (dark AND live series) and never names a cause — a
+shipped string that names one goes stale the moment the owning lane
+lands.
+
 ``metrics_snapshot`` returns CURRENT published metric values. It is NOT
 the Agent Snapshot artifact — that is ``snapshot_create`` /
 ``snapshot_search`` in the ``snapshot`` category.
@@ -1264,5 +1269,105 @@ def create_metrics_read_tools(
         except Exception as exc:  # noqa: BLE001 — tools never raise
             logger.warning("metrics_history failed: %s", exc)
             return _error(f"metrics_history failed: {exc}")
+
+    # ── the tool_help surface (the ``_full_doc_`` contract) ──────────────
+    # The full docs are keyed by the tool name, so the attribute must be
+    # set on the tool objects themselves (the house pattern — the
+    # ``instance_read`` / ``instance_ops`` precedent).
+    metrics_families._full_doc_ = """The metrics family catalog — what metrics exist and their shape.
+
+    Answers: "which metric families does the daemon publish, what is in
+    each, and is it live?"
+
+    Args:
+      family: Exact family id (e.g. 'F1' event-loop lag, 'F10' job queue).
+        Omit for the whole catalog.
+      details: When true, each metric name also carries its DECLARED
+        label space, buckets, monotonicity, chart_role and help text.
+        Default false = names + kind + cardinality_class only.
+      only_with_data: Keep only families that publish at least one live
+        series (live_series_count > 0). NOT the same as
+        availability.state == 'live' — a family can report dark AND
+        publish (see dark_with_live_series).
+
+    Reads: the family catalog only — no points, no series values.
+
+    Dark is NOT empty: a family can report availability.state='dark' and
+    still publish live series. When that happens the result carries a
+    caveat saying so — the series below are real. A FAILED registry read
+    is likewise not "no data": the read_status block reports
+    registry_read_ok=false and the payload must be read as UNKNOWN.
+
+    An unknown family id is NOT an error: the result is empty and
+    narrow_hint names the known ids.
+    """
+
+    metrics_snapshot._full_doc_ = """The CURRENT published metric values.
+
+    Answers: "what does the metric read RIGHT NOW?"
+
+    Args:
+      family: Exact family id (e.g. 'F10'). Omit for all families.
+      families: Several family ids at once (e.g. ['F10','F13']) — the
+        rows are filtered tool-side over ONE provider read, so a
+        multi-family snapshot costs one round trip instead of one per
+        family.
+      name_prefix: Metric-name prefix filter (e.g. 'ensemble_loop_lag_'
+        matches every loop-lag metric; an exact name is a valid prefix).
+      top_n: Max series rows (1-50, default 20). The order is ascending
+        by (family, name, label key) — deterministic, so the same query
+        always returns the same rows.
+
+    NOT the Agent Snapshot artifact — that is snapshot_create /
+    snapshot_search in the 'snapshot' category.
+
+    Each row carries the frozen fields (name, labels, kind, monotonic,
+    value/histogram, last_publish_age_s) plus the derived `stale` (the
+    3x-interval rule) and `cardinality_class` (so a closed name's
+    declared space is distinguishable from an open name's observed
+    labels).
+
+    A bound that drops rows is never silent: dropped_count is reported
+    and narrow_hint names a concrete next filter.
+    """
+
+    metrics_history._full_doc_ = """The windowed metric TREND, with a comparable-window delta.
+
+    Answers: "is it getting worse, and by how much?"
+
+    Args:
+      family: Exact family id; resolved to that family's metric names
+        from the catalog (a convenience over the name-level selector).
+      series: Label-aware selectors, the contract's canonical form:
+        '<name>{k=v,k2=v2}' — e.g.
+        'ensemble_loop_lag_seconds{stat=p95}'. A bare '<name>' matches
+        every label variant.
+      names: Name-level selectors (every label variant of the named
+        metrics). Prefer 'series' when you know the label values.
+      end_offset_s: Shift the window END back from now (seconds). The
+        anchor stays RELATIVE (no cursor): the window is always "the
+        last N seconds as of now minus this offset".
+      window_s: Window length (60-7200, default 900 = 15 min). The ring
+        holds 2 h; longer windows are clamped.
+      max_points: Max points per series (2-240, default 120). The
+        daemon clamps this further so the returned leg stays within its
+        own total-point budget; the effective value is echoed back and
+        the clamp is named in a caveat.
+      top_n: Max series (1-50, default 10). The provider is asked for
+        top_n+1 internally so the tool can detect that more exist.
+      compare: When true (default), also read the immediately preceding
+        equal-length window and report the delta vs that comparable
+        window. Set false to halve the work.
+
+    Per series: delta (last - first of THIS window), prev_delta (the
+    same over the preceding window), delta_change (delta - prev_delta)
+    and downsampled. A window with fewer than two points yields null +
+    delta_reason 'insufficient_points' — NEVER 0 (a zero delta would
+    assert "nothing changed", which is a different claim).
+
+    NO CURSOR: every call re-anchors itself, and the continuation
+    mechanism is "narrow the selector" (narrow_hint), not "resume a
+    page".
+    """
 
     return [metrics_families, metrics_snapshot, metrics_history]
