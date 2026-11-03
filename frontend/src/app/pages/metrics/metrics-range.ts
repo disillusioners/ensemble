@@ -88,7 +88,8 @@ export const METRICS_RANGE_OPTIONS: readonly MetricsRangeOption[] = (() => {
  * and answers 200 with no marker, so the request builder must never emit a
  * window above it. The value is DERIVED from the ladder (minutes × 60) so
  * no literal window second-count ever appears in the metrics tree (AM-23 —
- * phase 4's residue check greps for the word-bounded `3600`).
+ * phase 4's residue check greps the metrics tree for the word-bounded hour-window
+ * literal, so no phase may carry one here).
  */
 export const METRICS_WINDOW_CEILING_S = METRICS_CENTRAL_WINDOW_MINUTES['2h'] * 60;
 

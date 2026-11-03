@@ -634,7 +634,7 @@ describe('MetricsCentralTabComponent — the baseline split + the refusal (3.4 /
     fixture.detectChanges();
     const published = patches[patches.length - 1];
     expect(published.baselineSeries?.[0].points.length).toBe(2);
-    expect(published.series[0].points.length).toBe(2);
+    expect(published.series?.[0].points.length).toBe(2);
     expect(published.baselineRefusal).toBeNull();
   });
 

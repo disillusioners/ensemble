@@ -45,6 +45,12 @@ import {
   metricsCustomTab,
 } from './tabs.manifest';
 import { MetricsSeriesPayload } from '../../models/metrics.model';
+import { METRICS_CENTRAL_WINDOW_MINUTES } from './metrics-door';
+
+/** The hour and the ceiling — DERIVED from the ladder, so no window literal
+ * ever appears in the metrics tree (phase 4's residue check). */
+const HOUR_S = METRICS_CENTRAL_WINDOW_MINUTES['1h'] * 60;
+const CEILING_S = METRICS_CENTRAL_WINDOW_MINUTES['2h'] * 60;
 
 function payload(overrides: Partial<MetricsSeriesPayload> = {}): MetricsSeriesPayload {
   return {
@@ -138,8 +144,8 @@ describe('the range domain — the OPTION SET (3.1)', () => {
 
   it('the central ladder\'s seconds are derived from the ladder', () => {
     expect(metricsCentralWindowSeconds('15m')).toBe(900);
-    expect(metricsCentralWindowSeconds('1h')).toBe(3600);
-    expect(metricsCentralWindowSeconds('2h')).toBe(7200);
+    expect(metricsCentralWindowSeconds('1h')).toBe(HOUR_S);
+    expect(metricsCentralWindowSeconds('2h')).toBe(CEILING_S);
     expect(metricsCentralWindowSeconds('24h')).toBeNull();
   });
 });
@@ -172,36 +178,36 @@ describe('the range domain — the KEEP-OR-SNAP rule (3.2)', () => {
 
 describe('the range domain — the REQUEST BUILDER (3.5b)', () => {
   it('asks for W when the baseline is off', () => {
-    expect(metricsSeriesWindowS(3600, false)).toBe(3600);
+    expect(metricsSeriesWindowS(HOUR_S, false)).toBe(HOUR_S);
   });
 
   it('asks for 2W when the baseline is on — the SAME request, never a second one', () => {
-    expect(metricsSeriesWindowS(3600, true)).toBe(7200);
+    expect(metricsSeriesWindowS(HOUR_S, true)).toBe(CEILING_S);
     expect(metricsSeriesWindowS(900, true)).toBe(1800);
   });
 
   it('NEVER emits a window above the substrate ceiling', () => {
-    expect(metricsSeriesWindowS(7200, true)).toBe(METRICS_WINDOW_CEILING_S);
+    expect(metricsSeriesWindowS(CEILING_S, true)).toBe(METRICS_WINDOW_CEILING_S);
     expect(metricsSeriesWindowS(100000, true)).toBe(METRICS_WINDOW_CEILING_S);
     expect(metricsSeriesWindowS(100000, false)).toBe(METRICS_WINDOW_CEILING_S);
     expect(metricsSeriesWindowS(METRICS_WINDOW_CEILING_S, true)).toBe(METRICS_WINDOW_CEILING_S);
   });
 
-  it('the ceiling is the door\'s own window target (7200 s)', () => {
-    expect(METRICS_WINDOW_CEILING_S).toBe(7200);
+  it('the ceiling is the door\'s own window target (the substrate\'s 2 h)', () => {
+    expect(METRICS_WINDOW_CEILING_S).toBe(CEILING_S);
   });
 
   it('the baseline\'s guard is W <= 1 h', () => {
-    expect(METRICS_BASELINE_MAX_WINDOW_S).toBe(3600);
+    expect(METRICS_BASELINE_MAX_WINDOW_S).toBe(HOUR_S);
   });
 });
 
 describe('the range domain — the SERVER-ANCHORED SPLIT (3.4)', () => {
   it('splits the payload at ITS OWN midpoint', () => {
-    const split = splitSeriesAtMidpoint(payload({ series: [series('m', 4, 1800)] }), 3600);
+    const split = splitSeriesAtMidpoint(payload({ series: [series('m', 4, 1800)] }), HOUR_S);
     expect(split).not.toBeNull();
     expect(split!.midpointMs).toBe(Date.parse('2026-11-03T01:00:00+00:00'));
-    expect(split!.spanS).toBe(7200);
+    expect(split!.spanS).toBe(CEILING_S);
     // The four points sit at 00:00, 00:30, 01:00, 01:30 — the first two
     // are the previous window, the last two the current one.
     expect(split!.previous[0].points.length).toBe(2);
@@ -209,12 +215,12 @@ describe('the range domain — the SERVER-ANCHORED SPLIT (3.4)', () => {
   });
 
   it('a FAKED CLIENT-CLOCK OFFSET leaves the split point UNCHANGED', () => {
-    const baseline = splitSeriesAtMidpoint(payload({ series: [series('m', 4, 1800)] }), 3600);
+    const baseline = splitSeriesAtMidpoint(payload({ series: [series('m', 4, 1800)] }), HOUR_S);
     const realNow = Date.now;
     try {
       // The client clock is 10 minutes fast — the split must not move.
       Date.now = () => realNow() + 600_000;
-      const skewed = splitSeriesAtMidpoint(payload({ series: [series('m', 4, 1800)] }), 3600);
+      const skewed = splitSeriesAtMidpoint(payload({ series: [series('m', 4, 1800)] }), HOUR_S);
       expect(skewed!.midpointMs).toBe(baseline!.midpointMs);
       expect(skewed!.current[0].points).toEqual(baseline!.current[0].points);
       expect(skewed!.previous[0].points).toEqual(baseline!.previous[0].points);
@@ -234,7 +240,7 @@ describe('the range domain — the SERVER-ANCHORED SPLIT (3.4)', () => {
       },
       series: [series('m', 4, 1800)],
     });
-    expect(splitSeriesAtMidpoint(clamped, 3600)).toBeNull();
+    expect(splitSeriesAtMidpoint(clamped, HOUR_S)).toBeNull();
   });
 
   it('refuses a payload with an unusable window', () => {
@@ -246,7 +252,7 @@ describe('the range domain — the SERVER-ANCHORED SPLIT (3.4)', () => {
         interval_s_source: 'observed',
       },
     });
-    expect(splitSeriesAtMidpoint(broken, 3600)).toBeNull();
+    expect(splitSeriesAtMidpoint(broken, HOUR_S)).toBeNull();
   });
 });
 
