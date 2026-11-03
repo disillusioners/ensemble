@@ -355,3 +355,105 @@ Fold **B1 (with the factory.py env-over-file detail), B2, B3, B4, B5** and
 **W1–W11**, then re-review. The architectural shape of the plan, the requirement
 coverage (1–8), the rulings (D-1/D-2/D-3) and the FE-only discipline are **not** in
 question; every blocking item is mechanical.
+
+---
+
+# 10. APPROVAL — ITERATION 002 (2026-11-03)
+
+**Verdict: APPROVED** (iteration 002 FINAL). Fold commit reviewed: `006281ed6`
+("docs: fold B1..B5 + W1..W11 into fe-t1-build plan set"), 12 plan-dir files,
++347/−82. **Planning-only**: `git show --name-only 006281ed6` touches nothing under
+`frontend/`, `daemon/`, `agents/`, `scripts/`, `test/`; the only non-`.md` edits are
+the two plan-dir artifacts (`bundle-baseline.measure.js`, `bundle-baseline.json`),
+which B3 authorized.
+
+Discharge was verified **against the plan files and the tree**, not against the fold
+report; where a claim was testable, it was tested.
+
+## 10.1 Blocker discharge (5/5 CLOSED)
+
+| # | Discharge — what the fold landed | My independent verification |
+|---|---|---|
+| **B1** | `phase9` **9.3a** (new): Depends On **9.1**; the boot **9.2** depends on 9.3a. The mint runs **inside the scrubbed shell** with `ENSEMBLE_DATA_DIR=/tmp/fe-t1-dev-data`; the **resolved** target is proved from **both** resolution inputs — (i) `env \| grep POSTGRES` ⇒ **0 hits** and (ii) the scratch `ensemble.json`'s `$.postgres.db == "ensemble_dev"` (P3 re-asserted for the CLI's *own* resolution, because `factory.py:346-350` resolves `os.environ` **over** the file); the scope is narrowed to `--scopes "metrics:read"` (ANY-OF at `routers/metrics.py:56-63`); the token is read back **from `ensemble_dev`**; and a **write-detecting live fence** reads the live `ensemble_prod` `auth_bearer_tokens` count **before and after** with **0 delta** required (the symlink/`state.json`/uptime fence provably cannot see a DB write). "The mint IS a database write" is stated in the scope note and §6.1 | **CAPABLE OF TURNING A LIVE WRITE RED — yes.** The resolution chain is closed on both inputs: env scrubbed ⇒ `os.environ.get("POSTGRES_DB", pg.db)` falls back to the file's `ensemble_dev` block; the file is asserted by JSON path; and the live count's delta is a **hard gate** (a prod write ⇒ delta ≠ 0 ⇒ STOP), backed by a read-back that proves the row landed in dev. **Nothing in the mint path can still reach a prod DSN**: the ambient `POSTGRES_DB=ensemble_prod` is provably absent, the file's block is provably `ensemble_dev`, and the auto-detect persistence of a prod-pinned `ensemble.json` cannot occur because the scratch dir is pre-seeded (`load_or_create` returns the existing file and never auto-detects) |
+| **B2** | The graph now reads **9.1 → 9.3a (export + fenced mint) → 9.2 (boot) → 9.3b (L1)**; `9.11`'s self-dependency is gone (now `9.10`); `9.6`/`9.7a` now depend on `9.3b` | **CLOSED** — an executor following `Depends On` now boots **auth-ON**; the task table, the risk row and the exit criterion all state the same order |
+| **B3** | `bundle-baseline.measure.js` rewritten: **route-keyed** primary (`ROUTE_KEY = 'ensemble-metrics-route-v1'`, the lane-controlled constant Phase 2's new task **2.13** exports), **legacy content-marker fallback** (to reproduce the lane-base baseline), **absent-tolerant** (null route fields, never throws), **exactly-one** resolution (`hits.length === 1 ? hits[0] : null`), and the locator reported in the output. G5 restated as a **PRE-retirement baseline, not a Phase-9 gate**; Phase 9's E-1 line now covers "the surviving route chunk(s)" | **CLOSED — and I RAN IT.** (i) On the real dist: `exit 0`, and the output is **byte-identical** to `bundle-baseline.json`'s embedded `reproduce.output` (zero differing keys) — the artifact and the tool are in sync, so B8's "the guard reads the named artifact" holds. (ii) Marker-stripped dist (the post-Phase-7/8 shape): `exit 0`, `route_chunk_locator: null`, `route_chunk_resolved_to_exactly_one: false`, route fields null, **no throw**, and the initial-total/lazy-census measurements still produced. (iii) The route key in exactly one chunk ⇒ `route-key`, resolved. (iv) The route key in **two** chunks ⇒ **null — no mis-resolution**. All four behaviours are as specified |
+| **B4** | §9 step 2 now lists **six** vars including **`ENSEMBLE_AUTH_ISSUER=https://<idp>/`** — REQUIRED, not derivable from the discovery URL (`config.py:3736-3748`), `config.py:3953-3954` puts it in `missing` ⇒ exit 78 — plus the **origin rule** (`config.py:3984-3988`); the cited runbook's env-incompleteness is **disclosed** and routed; §9 is declared the canonical recipe source | **CLOSED.** My ruling on the caller's question: **disclose-and-route is the correct call for this lane** — `docs/` is outside the commission's FE-only scope (`frontend/` + `.agents/`), §9 is now self-sufficient and canonical, and the gap rides the disclosure set with a named owner. See A3 for the one loose end (the runbook item is not a §7 register row) and note that Phase 7's **7.8 already edits `docs/runbooks/`**, so a one-line in-lane amendment was an available alternative — the chosen path is still the defensible one |
+| **B5** | Phase 5's exit now asserts the `live/`+`timeline/` subtrees are relocated and **the page shell REMAINS** in `pages/resources/` until **Phase 7's 7.4** (which stays the single statement of the directory's removal) | **CLOSED** — the two exit criteria no longer contradict; the tree confirms the premise (`pages/resources/` holds `live/`, `timeline/`, `svg-timeline/` **and** the shell, and `app.routes.ts:74` still lazily imports the shell) |
+
+## 10.2 Warning discharge (11/11 CLOSED)
+
+W1 P8b ⇒ the **startup-log read-back** (`ensemble_config.py:75`) with "no new endpoint"
+(verified: only `POST /api/database/switch` exists) · W2 mini-has-no-T1-surface ⇒
+disclosed in §0.4/§9.1 · W3 baseline scoping ⇒ disclosed once · W4 "registration-only"
+⇒ stated once in §2 as **two** FE-local typed-table edits · W5 ⇒ folded into B2 ·
+W6 ⇒ the pin is **statement-anchored** (import statements, prose ignored) with a
+planted leg "the stub's own doc comment naming `from 'chart.js'` ⇒ **GREEN**" ·
+W7 ⇒ **0 independently-rescaled series per panel** with a third planted variant
+(a series rescaled *inside* the memory panel) · W8 ⇒ 6.6 re-targeted at the
+surviving relocated Live card (the shell's subtitle dies with the shell in 7.4) ·
+W9 ⇒ interpreter pinned to `/home/nea/ensemble-src/.venv/bin/python` — **verified
+present, Python 3.13.15**; bare `python` does not exist on this host (only
+`/usr/bin/python3`) · W10 ⇒ teardown deletes **only** the minted row (scoped by
+label), **`ensemble_dev` is NOT dropped**, and the live count is re-asserted at
+teardown · W11 ⇒ G11 now states both taxonomies with their family lists
+(LIVE = F0.3,F4,F5,F8,F9,F10,F11,F12,F13,F17 · DARK = F1,F3,F6,F7,F18,F21 ·
+PARTIAL = F7,F8,F11,F13,F18,F21 — "6 partial" ≠ "6 dark"; F8/F11/F13 are PARTIAL
+yet **LIVE**, so tabs 5 and 6 render).
+
+## 10.3 No weakening — verified by my own census
+
+I diffed **every numeric token** across every `.md` in the plan dir, pre-fold
+(`fefa938c5`) vs post-fold (`006281ed6`): **every threshold figure's occurrence count
+went UP or stayed; no value changed and none was removed** (`2 kB` 17→18, `64 KiB`
+11→12, `5,909,018 B` 36→37, `496,338 B` 16→17, `90,982 B` 17→18, `27,672 B` 12→13;
+`8 kB`, `24 kB`, `161/161`, `7200` unchanged). **D-1, D-2, D-3, ADJ-iv and IMPL-14 are
+byte-identical** (section-level diff), and **`phase3-plan.md` is byte-identical** —
+so the **AM-14 narrowing** and the per-instance top-N routing (**m**) are untouched.
+
+## 10.4 Requirement coverage + FE-only discipline — still intact
+
+Requirements **1–8 remain delivered** (the fold changed only the specific items
+above; §4's surface/tab map is untouched), the rulings stand, the routed-out
+register is still 14/14 with owners, and the fold is planning-only with zero
+changes under `frontend/ daemon/ agents/ scripts/ test/`.
+
+## 10.5 Advisories (non-blocking, for the record)
+
+- **A1 — §0.2's quoted "verbatim output" block is stale.** It still carries the old
+  field names (`resources_route_chunk` / `resources_route_chunk_bytes`), while the
+  artifact and the tool now emit `pre_retirement_resources_route_chunk*` plus
+  `route_chunk_locator` / `route_chunk_key` / `route_chunk_resolved_to_exactly_one`.
+  **Every byte figure in the block is identical** (verified key-by-key) and the
+  artifact is authoritative — so this is prose drift only, it cannot cause a false
+  green. One-line fix; the plan's own E-1 rule ("the quoted output must BE the
+  output") is the only thing it offends.
+- **A2 — the new live-count fence should name its command and be label-scoped.**
+  By the plan's own E-1 rule ("a label without a COMMAND is not a re-derivation"),
+  the read-only live count should carry its exact SELECT. Better: assert the
+  **label-scoped** count (`WHERE label = 'fe-t1-operator'` ⇒ 0 in `ensemble_prod`)
+  *alongside* the total-count delta, so an unrelated concurrent mint on the live DB
+  cannot produce a spurious RED. Also assert that **the read itself succeeded** —
+  a fence that cannot read is not a fence (STOP, do not proceed).
+- **A3 — the B4 runbook gap is disclosed with an owner but is not a §7 register
+  row** (the register is still 14 items and criterion 13 still says 14/14). Add it
+  as a 15th row (or state that §0.4's disclosure set extends the register) so the
+  9.11 close-out check covers it.
+- **A4 — `fold-audit.md:46` still cites "phase2 2.13" for the AM-20 copy-precedence
+  task**, which is now **2.14** (2.13 became the B3 marker-constant task). Stale
+  pointer in the fold record only; the plan files are consistent.
+- **A5 — `phase1`'s 1.2(c) acceptance list has two "(iv)" legs** (i, ii, iv, iii, iv);
+  the new "stub doc comment ⇒ GREEN" leg should be "(v)". Cosmetic.
+- **A6 — `pre_retirement_resources_route_chunk` is only meaningful at/before Phase 7.**
+  After the relocation the anomaly-marker string lives in the metrics chunk, so the
+  field could report the metrics chunk under a pre-retirement name. It is excluded
+  from the Phase-9 gate and documented as pre-retirement-only — the field's label
+  should say so.
+
+## 10.6 Status
+
+**APPROVED (iteration 002 FINAL).** The plan is implementable as written, its exit
+criteria are non-vacuous, its verification route is fenced against live contact
+(with a write-detecting fence that can actually turn a live write RED), the FE-only
+discipline holds, the routed-out items are complete with owners, and no
+pre-existing threshold or ruling was weakened. A1–A6 are advisories for the
+implementation lane, not conditions.

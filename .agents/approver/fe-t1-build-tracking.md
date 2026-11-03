@@ -85,3 +85,60 @@ FE-only discipline across all 107 task rows, the six zero-dep governance sites, 
 the task-graph shape (2 disclosed forward edges + the 9.11 self-loop; no hidden cycle).
 
 **Next:** fold B1–B5 + W1–W11, then iteration 002 re-review.
+
+---
+
+## Iteration 002 FINAL — 2026-11-03 — APPROVED
+
+Fold under review: `006281ed6` ("docs: fold B1..B5 + W1..W11 into fe-t1-build plan set"),
+12 plan-dir files, +347/−82. **Planning-only** — zero changes under
+`frontend/ daemon/ agents/ scripts/ test/`; the two non-`.md` edits are the plan-dir
+artifacts B3 authorized (`bundle-baseline.measure.js`, `bundle-baseline.json`).
+
+**B1–B5: 5/5 CLOSED. W1–W11: 11/11 CLOSED.** No blocker survives.
+
+**Independently verified (not taken on the fold report):**
+- **B1** — `phase9` 9.3a (Depends On 9.1; the boot 9.2 depends on it): the mint runs
+  in the scrubbed shell with the scratch `ENSEMBLE_DATA_DIR`; the resolved target is
+  proved from **both** resolution inputs (`env | grep POSTGRES` ⇒ 0 hits AND the file's
+  `$.postgres.db == "ensemble_dev"`, because `factory.py:346-350` resolves env OVER
+  the file); least-privilege `--scopes "metrics:read"`; read-back from `ensemble_dev`;
+  and a **write-detecting live fence** (live `ensemble_prod` bearer-row count before
+  vs after, **0 delta**) that the symlink/`state.json`/uptime fence provably cannot
+  replace. **A live write now turns the leg RED**; nothing in the mint path can still
+  reach a prod DSN.
+- **B2** — graph order 9.1 → 9.3a → 9.2 → 9.3b; 9.11's self-dependency gone.
+- **B3** — the rewritten tool was **RUN by the approver**: real dist ⇒ exit 0 and the
+  output is **byte-identical** to the artifact's embedded `reproduce.output`; a
+  marker-stripped dist ⇒ exit 0, `route_chunk_locator: null`,
+  `route_chunk_resolved_to_exactly_one: false`, route fields null, no throw; the route
+  key in ONE chunk ⇒ `route-key`, resolved; the route key in TWO chunks ⇒ null, **no
+  mis-resolution**. G5 restated as a pre-retirement baseline, not a Phase-9 gate.
+- **B4** — §9 step 2 now lists six vars incl. `ENSEMBLE_AUTH_ISSUER` with the origin
+  rule and the exit-78 reason; the runbook gap disclosed + routed. **Approver ruling:
+  disclose-and-route is correct** (docs/ is outside the commission's FE-only scope;
+  §9 is canonical); noted that Phase 7's 7.8 already edits `docs/runbooks/`, so a
+  one-line in-lane amendment was available — A3 records the loose end (not a §7
+  register row).
+- **B5** — Phase 5's exit now says the page shell REMAINS until Phase 7's 7.4, which
+  stays the single removal statement.
+- **W9** — the pinned interpreter exists: `/home/nea/ensemble-src/.venv/bin/python` =
+  Python 3.13.15; bare `python` is absent on this host.
+- **No weakening** — the approver's own numeric census over every `.md` in the plan
+  dir, pre- vs post-fold: every threshold figure's count went UP or stayed, **no value
+  changed, none removed**; **D-1/D-2/D-3, ADJ-iv, IMPL-14 byte-identical**;
+  `phase3-plan.md` byte-identical (the AM-14 narrowing and the routed per-instance
+  top-N (m) untouched).
+- Requirement coverage 1–8 intact; FE-only discipline clean; register 14/14.
+
+**Advisories (non-blocking, on the record):** A1 §0.2's quoted verbatim output still
+carries the old field names (all byte figures identical; the artifact is authoritative
+— one-line doc fix) · A2 the live-count fence should name its SELECT, be
+label-scoped (`WHERE label='fe-t1-operator'` ⇒ 0) and assert that the read itself
+succeeded · A3 the B4 runbook gap is not a §7 register row · A4 `fold-audit.md:46`
+still cites `phase2 2.13` for copy precedence (now 2.14) · A5 1.2(c)'s acceptance
+list has two "(iv)" legs · A6 `pre_retirement_resources_route_chunk` is meaningful
+only at/before Phase 7.
+
+**Verdict artifact:** `.agents/shared/planning/metrics-unification/fe-t1-build/approval.md`
+§10. **Status: APPROVED (iteration 002 FINAL).**
