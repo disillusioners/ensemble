@@ -872,12 +872,24 @@ class TestWakeTerminalEventAfter:
         # promote ops) trips it LOUDLY).
         assert "restart" in WAKE_TERMINAL_EVENTS
         assert "restart" not in uj._TERMINAL_EVENTS
-        assert len(uj._TERMINAL_EVENTS) == 9
+        # P-22 (promote-handback-halt Phase 2): the serving-green
+        # commit-close joined the terminal set (9 → 10) — it closes a
+        # pending_op exactly like ``commit`` (the txn is closed; the
+        # pipeline is over).
+        assert len(uj._TERMINAL_EVENTS) == 10
+        # P-21: the commit-close is EXCLUDED from the WAKE set by EXPLICIT
+        # construction (the wake reader is TS-scoped and run_id-blind, so
+        # an unrelated txn's commit-close would otherwise complete a
+        # pending promote-wake). The set equality accounts for the
+        # exclusion explicitly — the excluded names are NOT silently
+        # dropped.
         assert set(WAKE_TERMINAL_EVENTS) == (
-            set(uj._TERMINAL_EVENTS)
+            (set(uj._TERMINAL_EVENTS) - set(uj.WAKE_EXCLUDED_EVENTS))
             | {"restart"}
             | set(uj.RESTART_TERMINAL_EVENTS)
         )
+        assert "serving_green_commit" in uj._TERMINAL_EVENTS
+        assert "serving_green_commit" not in WAKE_TERMINAL_EVENTS
         # Absence pins, verbatim (F-2): the three restart terminals are
         # wake-superset members ONLY — never members of the shared
         # promote-reconcile set (C-3 trap).

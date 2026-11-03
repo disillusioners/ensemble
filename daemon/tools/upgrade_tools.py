@@ -1285,6 +1285,13 @@ _OUTCOME_LABELS: dict[str, str] = {
     # every key in the derived ``_TERMINAL_OUTCOME_EVENTS`` tuple
     # has a label here.)
     "boot_sweep_commit_and_continue": "boot sweep committed txn (continued)",
+    # promote-handback-halt Phase 2 (T12 / P-22) — the serving-green
+    # commit-close (the daemon closer's + the launcher's). The SAME shape
+    # as ``boot_sweep_commit_and_continue``: a verified flip closed and
+    # continued because the target is SERVING GREEN (the owner ruling:
+    # a serving-green release is never rolled back). Terminal for the
+    # promote reconcile (it closes a pending_op exactly like ``commit``).
+    "serving_green_commit": "serving-green commit (stale txn closed — not rolled back)",
     # agent-restart (§3.3/N-2) — the restart lane's event classes. The
     # three RESTART_TERMINAL_EVENTS members + the guard-trip event render
     # human strings on the sweep formatters + status lane (T5 asserts

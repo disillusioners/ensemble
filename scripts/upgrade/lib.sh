@@ -154,12 +154,23 @@ READYZ_BUDGET_S="$(_numeric_knob READYZ_BUDGET_S "${READYZ_BUDGET_S:-}" 120)"
 # behavior is fine — we timed out on ceremony procedures only). The
 # 900s ceiling is the absolute hard cap; all-budgets-max (stop worst
 # 755s + every budget max + adaptive soak squeeze) = 1400s → halt.
-# Per the C-10a reconciled arithmetic (decisions.md (d) §C-10a):
-#   preflight 45 / stop 225 / flip 30 / handback 90 / livez 180 /
-#   readyz 120 / version 30 / soak 120 / commit 30 = 870s non-stop
-#   worst (+30s slack inside the 900s ceiling). The conservative
-#   mode preserves the v0.18-era envelope (soak 300s flat) so
-#   total ≤ 900s + slack remains the conservative floor.
+# C-10a BOUND TABLE (corrected 2026-11-02, promote-handback-halt
+# Phase 1 / D-P1-8 — the previous "handback 90 … = 870s" line was
+# fiction: it mixed measured values with budget ceilings and never
+# described the code): the 900s ceiling is a STOP-LOSS, not a
+# budgets-fit guarantee. Worst-case budget knobs in force:
+#   preflight 300 (PREFLIGHT_PHASE_BUDGET_S) / stop ~225 (derived) /
+#   launcher swap ~0 / atomic flip ~0 /
+#   hand-back verify 300 + one 60s progress-gated grace
+#     (HANDBACK_VERIFY_BUDGET_S — ceremony-clamped:
+#     clamp(remaining−HANDBACK_TAIL_RESERVE_S, FLOOR=180, 300); a
+#     SUB-BUDGET of the ceremony, not an addition to it) /
+#   livez 180 / readyz 120 / version ~5 / soak ≤120 (adaptive,
+#   ceremony-coupled) / commit ~30 ⇒ all-worst ≈1340s > 900s (the
+#   1400s all-budgets-max line above stands). Typical healthy run
+#   ≈330s. Do NOT re-derive a "fits inside 900s" schedule from this
+#   table — it is a bound table; a combined-slow ceremony halts at a
+#   downstream boundary with the daemon up (disclosed, OQ-P1-1).
 PROMOTE_TOTAL_DEADLINE_S="$(_numeric_knob PROMOTE_TOTAL_DEADLINE_S "${PROMOTE_TOTAL_DEADLINE_S:-}" 900)"
 
 # Subprocess-wait budgets (2.2b, upgrade-resilience 2026-10-07). Rationale
@@ -178,6 +189,51 @@ PROMOTE_TOTAL_DEADLINE_S="$(_numeric_knob PROMOTE_TOTAL_DEADLINE_S "${PROMOTE_TO
 # journals every site for forensic correlation.
 STOP_SCRIPT_BUDGET_S="$(_numeric_knob STOP_SCRIPT_BUDGET_S "${STOP_SCRIPT_BUDGET_S:-}" 120)"     # placeholder; effective bound derived at call site (see _derive_parent_stop_budget)
 HANDBACK_START_BUDGET_S="$(_numeric_knob HANDBACK_START_BUDGET_S "${HANDBACK_START_BUDGET_S:-}" 60)"  # unit hand-back start (the §9 culprit)
+# D-P1-1..D-P1-2 (promote-handback-halt Phase 1, 2026-11-02) — the
+# hand-back VERIFY budget family. The verifier `_supervision_unit_serving`
+# previously BORROWED LIVEZ_BUDGET_S (180) — an unrelated knob governing
+# the /livez health GATE (gate_livez, lib.sh:5986) — while the flipped
+# unit takes ~3 min from unit-active to serving (MCP warmup +
+# auto-continue resume; incident r-20261101-212542-8279 missed by
+# seconds at 180s; the v0.28.3 ceremony confirmed at 175/180s). The
+# quartet replaces that borrow:
+#   HANDBACK_VERIFY_BUDGET_S  300  CEILING — the most the verify may wait
+#                                     (~1.6x the measured ~185s worst
+#                                     boot — same headroom shape the
+#                                     house uses for LIVEZ_BUDGET_S)
+#   HANDBACK_VERIFY_FLOOR_S   180  FLOOR — the least it may ever be
+#                                     given (today's effective budget;
+#                                     makes the change monotone-safe —
+#                                     never LESS time than before)
+#   HANDBACK_VERIFY_GRACE_S    60  ONE progress-gated extension at the
+#                                     first expiry (new MainPID ∧ bound
+#                                     port ⇒ the daemon is demonstrably
+#                                     coming up; no progress ⇒ no
+#                                     extension — D-P1-6)
+#   HANDBACK_TAIL_RESERVE_S  120  Downstream room (livez+readyz+version+
+#                                     soak+commit) reserved when the
+#                                     ceremony clock is known.
+# Effective budget: CEILING when no ceremony clock is known (restart.sh /
+# rollback.sh); else clamp(remaining − TAIL_RESERVE, FLOOR, CEILING) —
+# the same deadline-coupling shape as the adaptive soak (D-P3.5). Grace:
+# min(GRACE, max(0, remaining − effective)) when the clock is known
+# (AM-P1-5); the floor-wins bands carry the DISTINCT "ceremony time
+# exhausted" verdict. All four env-overridable via _numeric_knob
+# (garbage ⇒ documented default, loud stderr). Phase-2 coupling
+# (R-P1-15): UPGRADE_CLOSER_BOOT_GRACE_S (daemon-side) must stay ≥
+# HANDBACK_VERIFY_BUDGET_S — both windows cover the same measured boot.
+HANDBACK_VERIFY_BUDGET_S="$(_numeric_knob HANDBACK_VERIFY_BUDGET_S "${HANDBACK_VERIFY_BUDGET_S:-}" 300)"
+# F4 (fix-cycle, code-council W2): EXPORT the knob. The daemon-side closer
+# floors its boot-grace at max(UPGRADE_CLOSER_BOOT_GRACE_S, this value) and
+# reads it from its environment; the transport is (a) here — every child of
+# a lib.sh-sourcing context inherits the RESOLVED value — and (b) the
+# launcher's .env export seam (launcher.sh exports every .env key and the
+# daemon is the launcher's child). Exporting does not change the shell's own
+# reads (the variable is read by name; export only marks it for children).
+export HANDBACK_VERIFY_BUDGET_S
+HANDBACK_VERIFY_FLOOR_S="$(_numeric_knob HANDBACK_VERIFY_FLOOR_S "${HANDBACK_VERIFY_FLOOR_S:-}" 180)"
+HANDBACK_VERIFY_GRACE_S="$(_numeric_knob HANDBACK_VERIFY_GRACE_S "${HANDBACK_VERIFY_GRACE_S:-}" 60)"
+HANDBACK_TAIL_RESERVE_S="$(_numeric_knob HANDBACK_TAIL_RESERVE_S "${HANDBACK_TAIL_RESERVE_S:-}" 120)"
 SYSTEMCTL_PROBE_BUDGET_S="$(_numeric_knob SYSTEMCTL_PROBE_BUDGET_S "${SYSTEMCTL_PROBE_BUDGET_S:-}" 5)"  # reset-failed / is-active probes
 SCOPE_START_BUDGET_S="$(_numeric_knob SCOPE_START_BUDGET_S "${SCOPE_START_BUDGET_S:-}" 10)"      # scope-arm/opt-in launcher start
 # D1 (promote-preflight-hang) — per-tree cap for the stage manifest checksum
@@ -471,6 +527,13 @@ _budget_in_force() {
         STAGE_TREE_BUDGET_S)       printf '%s' "$STAGE_TREE_BUDGET_S" ;;
         SYSTEMCTL_PROBE_BUDGET_S)  printf '%s' "$SYSTEMCTL_PROBE_BUDGET_S" ;;
         JOURNAL_LEGACY_READ_BUDGET_S) printf '%s' "$JOURNAL_LEGACY_READ_BUDGET_S" ;;
+        # D-P1-10 (promote-handback-halt Phase 1) — the hand-back verify
+        # budget family, so any future breach row can NAME the value in
+        # force (unknown names still fail loudly below).
+        HANDBACK_VERIFY_BUDGET_S)  printf '%s' "$HANDBACK_VERIFY_BUDGET_S" ;;
+        HANDBACK_VERIFY_FLOOR_S)   printf '%s' "$HANDBACK_VERIFY_FLOOR_S" ;;
+        HANDBACK_VERIFY_GRACE_S)   printf '%s' "$HANDBACK_VERIFY_GRACE_S" ;;
+        HANDBACK_TAIL_RESERVE_S)   printf '%s' "$HANDBACK_TAIL_RESERVE_S" ;;
         *) return 1 ;;
     esac
 }
@@ -603,6 +666,41 @@ _pipeline_scripts_stamp_verdict() {
     fi
     if [ -n "$floor" ] && [ "$stamp" != "$floor" ]; then
         printf 'PIPELINE_SCRIPTS_REV=%s does not equal PIPELINE_SCRIPTS_FLOOR_COMMIT=%s — D6-8 requires the two to travel together (the same merge commit names both the floor the daemon enforces and the revision the scripts tree declares). Align both and re-stage.' "$stamp" "$floor"
+        return 1
+    fi
+    return 0
+}
+
+# _pipeline_scripts_floor_verdict <floor> <repo_root> — W-2's DAEMON-side
+# twin (T6.15/AC15): the RELEASE-TIME validity check for the
+# `PIPELINE_SCRIPTS_FLOOR_COMMIT` constant in daemon/tools/upgrade_tools.py.
+# Two mechanical conditions, the same ancestry rule the stamp uses:
+#   1. the value is set and looks like a commit sha (the stage-time extract
+#      accepts 7..40 lowercase hex chars — an abbreviated sha is a legal
+#      `git merge-base` argument, so the check MUST NOT be stricter than
+#      the extract or the release would refuse a tree it used to accept);
+#   2. the value RESOLVES and IS AN ANCESTOR of the built tree — the floor
+#      names a commit the release itself contains, so a daemon built from
+#      this tree can never demand a fix commit its own history lacks.
+# CONTRACT: prints "" / returns 0 when valid; prints the human REFUSAL
+# REASON (one line, no trailing newline) / returns 1 when not. It writes
+# nothing and exits nothing, so the caller owns the wording prefix and the
+# halt. Extracted from stage.sh's inline block so the gate is EXECUTABLE in
+# a pack (the real stage.sh cannot run without a full PyInstaller build) —
+# the same discipline as the stamp verdict above (phase3-plan.md P3-D5 /
+# P3-PIN-14).
+_pipeline_scripts_floor_verdict() {
+    local floor="${1:-}" repo="${2:-.}"
+    if [ -z "$floor" ]; then
+        printf 'PIPELINE_SCRIPTS_FLOOR_COMMIT is unset (or not a commit sha) in daemon/tools/upgrade_tools.py — the daemon-side arm-time stale-scripts guard (phase 6) would refuse every explicitly-pinned ceremony. The release bump MUST set it to the merge commit introducing the ceremony-relevant scripts/upgrade semantics (T6.15/AC15, cadence D6-8). No release ships without a provably-valid floor.'
+        return 1
+    fi
+    if ! printf '%s' "$floor" | grep -Eq '^[0-9a-f]{7,40}$'; then
+        printf 'PIPELINE_SCRIPTS_FLOOR_COMMIT="%s" is not a commit sha (T6.15/AC15 — the floor must name a commit this release itself contains).' "$floor"
+        return 1
+    fi
+    if ! git -C "$repo" merge-base --is-ancestor "$floor" HEAD >/dev/null 2>&1; then
+        printf 'PIPELINE_SCRIPTS_FLOOR_COMMIT=%s is unresolvable or NOT an ancestor of the built tree %s (T6.15/AC15 — the floor must name a commit this release itself contains; git merge-base --is-ancestor failed). Fix the constant to the merge commit introducing the ceremony-relevant scripts/upgrade semantics and re-stage.' "$floor" "$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo '?')"
         return 1
     fi
     return 0
@@ -1376,6 +1474,19 @@ journal_init() {
 JOURNAL_SIZE_GUARD_BYTES="${JOURNAL_SIZE_GUARD_BYTES:-98304}"
 JOURNAL_LEGACY_READ_BUDGET_S="$(_numeric_knob JOURNAL_LEGACY_READ_BUDGET_S "${JOURNAL_LEGACY_READ_BUDGET_S:-}" 120)"
 JOURNAL_READ_STRICT="${JOURNAL_READ_STRICT:-0}"
+# D-P1-3 / D-P1-9 (promote-handback-halt Phase 1) — the hand-back
+# verifier's two promote-threaded inputs, on the JOURNAL_READ_STRICT
+# channel: set by promote.sh PER INVOCATION as PLAIN (non-exported)
+# shell variables, never persisted, never in .env, never inherited by
+# the child scripts. Empty = unknown:
+#   PROMOTE_CEREMONY_DEADLINE_EPOCH — the ceremony wall-clock deadline
+#     (epoch seconds). Empty (restart.sh / rollback.sh contexts) ⇒ the
+#     verifier uses its CEILING budget, no squeeze, full grace.
+#   PROMOTE_EXPECTED_VERSION — the manifest binary_version the flipped
+#     release must report on /livez. Empty ⇒ the serving check degrades
+#     to "2xx, no version comparison" (still proves SERVING).
+PROMOTE_CEREMONY_DEADLINE_EPOCH="${PROMOTE_CEREMONY_DEADLINE_EPOCH:-}"
+PROMOTE_EXPECTED_VERSION="${PROMOTE_EXPECTED_VERSION:-}"
 
 # _journal_read_helper_path — absolute path to the read helper. Mirrors
 # `_splice_journal_path`: BASH_SOURCE-anchored so the helper is found even
@@ -1957,6 +2068,149 @@ journal_quarantine_clear() {
     new="$(printf '%s' "$q" | tr -d '[]' | tr ',' '\n' | sed 's/^ *"//;s/" *$//' | grep -v "^$ver\$" | sed 's/^/"/;s/$/"/' | paste -sd, - | sed 's/^/[/;s/$/]/')"
     [ "$new" = "[]" ] || [ "$new" = "[ ]" ] && new="[]"
     journal_update "quarantined" "$new"
+}
+
+# ── Phase 2 (promote-handback-halt): the PER-ENTRY history readers ──────────
+#
+# THE ONE reader contract (phase2-plan.md §D.3's contract box + AM-P2-14):
+# a history row matches an (event, target[, run_id]) triple ONLY when ALL
+# of its parts appear INSIDE ONE history entry. The entry-object boundary
+# is `{"ts":` — the reader splits the history array on it and requires the
+# event kind, the delimiter-anchored `target <VER>` and (when supplied)
+# the `run_id <ID>` to appear in the SAME entry.
+#
+# TWO hazards, BOTH closed by that shape:
+#   (1) PREFIX COLLISION — `target v0.28.5` occurs inside `target
+#       v0.28.55`; the delimiter anchor (a space, or the end of the detail
+#       string) closes it.
+#   (2) CROSS-ENTRY FALSE POSITIVE — a whole-array conjunction matches
+#       "event kind in entry A" AND "target string in entry B". On the
+#       CLEARANCE reader a false positive would UN-QUARANTINE a version
+#       that was never cleared; on the AUTHORIZATION reader it would make
+#       an unauthenticated flip look authorized.
+#
+# The version literal is UNQUOTED in the house detail convention (the
+# promote.sh intent_flip emit is `preflight: intentional promote target
+# $VERSION — …`) — a quote-anchored match would NEVER fire (the
+# §D.3 contract box records that hazard).
+
+# _journal_history_entries <history_array> — split the raw history array
+# into its entries (one per line). The boundary is the entry-object
+# marker `{"ts":`.
+_journal_history_entries() {
+    local rest="$1" entry
+    while :; do
+        case "$rest" in
+            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
+            *) break ;;
+        esac
+        case "$rest" in
+            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
+            *) entry="$rest" ;;
+        esac
+        printf '%s\n' "$entry"
+    done
+}
+
+# _journal_history_has_event <event> <target> [run_id] — the ONE per-entry,
+# delimiter-anchored reader (the shell twin of the daemon's
+# `uj.journal_history_has_event` and of the launcher's
+# `_js_history_has_event_for_target`). Reads the journal itself.
+_journal_history_has_event() {
+    local event="$1" target="$2" run_id="${3:-}"
+    local json hist entry
+    [ -n "$event" ] || return 1
+    [ -n "$target" ] || return 1
+    json="$(journal_read)" || return 1
+    hist="$(_json_sub "$json" "history")" || return 1
+    case "$hist" in
+        ''|null|'[]') return 1 ;;
+    esac
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        # the event-kind literal — the house writers emit the COMPACT form
+        # ("event":"x"); the spaced form ("event": "x") is tolerated too
+        # (a hand-edited journal must not silently change a verdict).
+        case "$entry" in
+            *"\"event\":\"$event\""*|*"\"event\": \"$event\""*) ;;
+            *) continue ;;
+        esac
+        case "$entry" in
+            *"target $target "*|*"target $target\"") ;;
+            *) continue ;;
+        esac
+        if [ -n "$run_id" ]; then
+            case "$entry" in
+                *"run_id $run_id "*|*"run_id $run_id\"") ;;
+                *) continue ;;
+            esac
+        fi
+        return 0
+    done < <(_journal_history_entries "$hist")
+    return 1
+}
+
+# _version_strip_v <ver> — strip ONE leading "v" from a version literal
+# (idempotent; digit-guarded so a non-version string is never mangled).
+# The release dir/target is "v0.28.5"; the daemon reports "0.28.5". A
+# naive compare is ALWAYS false ⇒ every healthy target reads unhealthy ⇒
+# the wrongful rollback returns (R-1). ONE helper per side (the launcher's
+# twin is `_js_serving_version_strip`; the daemon's is
+# `sweep_serving_green_closer`'s inline strip).
+_version_strip_v() {
+    local v="$1"
+    case "$v" in
+        v[0-9]*) printf '%s' "${v#v}" ;;
+        *) printf '%s' "$v" ;;
+    esac
+}
+
+# _journal_txn_identity <in_flight_json> <target> — the txn identity used by
+# the write-once key, the request detail and the readers. The RESTART lane
+# stamps `run_id` into in_flight; the PROMOTE lane does NOT (the promote
+# run_id lives in the pipeline LOCK, gone by the time a stale txn is swept)
+# ⇒ the identity falls back to "<target>@<started_at>". THE LAUNCHER AND THE
+# DAEMON MUST DERIVE THE SAME STRING (launcher.sh's
+# `_js_serving_txn_identity`, upgrade_journal_sweep.py's
+# `_closer_txn_identity`) — the request reader matches on it.
+_journal_txn_identity() {
+    local inf="$1" target="$2" run_id started
+    run_id="$(_json_field "$inf" "run_id" 2>/dev/null)" || run_id=""
+    case "$run_id" in
+        ''|null) run_id="" ;;
+    esac
+    if [ -n "$run_id" ]; then
+        printf '%s' "$run_id"
+        return 0
+    fi
+    started="$(_json_field "$inf" "started_at" 2>/dev/null)" || started=""
+    case "$started" in
+        ''|null) started="" ;;
+    esac
+    if [ -n "$started" ]; then
+        printf '%s@%s' "$target" "$started"
+    else
+        printf '%s' "$target"
+    fi
+}
+
+# journal_history_has_intent_flip <ver> — the AUTHORIZATION reader (the
+# T11 conjunct: a serving-green commit-close fires only when BOTH a
+# positive serving verdict AND an `intent_flip` event naming that same
+# target exist). lib.sh had ZERO intent_flip readers before this lane
+# (it has history WRITERS and the quarantined[] array reader only) ⇒
+# this is NEW work, not a copy of an existing reader.
+journal_history_has_intent_flip() {
+    _journal_history_has_event "intent_flip" "$1"
+}
+
+# journal_quarantine_cleared_serving_green <ver> [<run_id>] — the
+# CLEARANCE reader: the shell gate that refuses a quarantined target
+# accepts it when this event names the version. The frozen rule is
+# EXTENDED ("cleared by re-staging OR by an explicit serving-green
+# clearance event"), never bypassed.
+journal_quarantine_cleared_serving_green() {
+    _journal_history_has_event "quarantine_cleared_serving_green" "$1" "${2:-}"
 }
 
 # journal_is_quarantined <ver>.
@@ -4737,23 +4991,144 @@ _supervision_host_allows_unit() {
     return 0
 }
 
+# _handback_serving_probe — the hand-back's SERVING conjunct
+# (D-P1-4/D-P1-5, promote-handback-halt Phase 1). Called ONLY when PORT
+# is set and curl is available; assumes the port-listener fast condition
+# was already established (or lsof is absent — degraded, serving-only).
+# Reuses the house classifier `_probe_once_classified` VERBATIM
+# (AM-P1-2: taxonomy 0 green / 1 red / 2 transient / 3 suppressed —
+# never derive a second one): 503 + curl rc 7/28 are transient, other
+# 4xx/5xx are red. /livez ONLY — the hand-back deliberately does NOT
+# probe /readyz (D-P1-4 rejected alternative (ii): readyz carries
+# readiness components legitimately not green during the ~3 min boot —
+# demanding ready here would halt-for-human on every slow-but-healthy
+# boot, re-creating the incident class; readiness is the GATE's
+# question at the promote.sh readyz boundary).
+#
+# Return: 0 = serving the expected release (2xx ∧ version==expected —
+#           version compared only when PROMOTE_EXPECTED_VERSION is set);
+#         1 = fail-fast (probe-level): 2xx with the WRONG version, 2xx
+#           with the version field absent/unparseable while the expected
+#           version is KNOWN (AM-P1-1: definitively unverifiable as the
+#           right release), or a house-classifier RED answer. Probe-level
+#           vocabulary ONLY (REV-R-4): "fails fast" says the PROBE stops
+#           probing — it prescribes NO disposition (no rollback, no
+#           quarantine language); the CALLER owns the halt.
+#         2 = transient (keep polling — the daemon is booting).
+_handback_serving_probe() {
+    local running hspc_rc=0
+    _probe_once_classified "/livez" "${PORT:-}" || hspc_rc=$?
+    case "$hspc_rc" in
+        0)
+            # green-class (green or busy-amnesty) — the body is in _PROBE_BODY
+            if [ -n "${PROMOTE_EXPECTED_VERSION:-}" ]; then
+                running="$(_json_field "${_PROBE_BODY:-}" version 2>/dev/null)" || running=""
+                if [ -z "$running" ]; then
+                    _warn "hand-back verify: /livez answered 2xx but the version field is absent/unparseable while the expected version is known (${PROMOTE_EXPECTED_VERSION}) — definitively unverifiable as the right release (probe-level fail-fast); NOT success"
+                    return 1
+                fi
+                if [ "$running" != "$PROMOTE_EXPECTED_VERSION" ]; then
+                    _warn "hand-back verify: /livez reports version=${running} but the flipped release is ${PROMOTE_EXPECTED_VERSION} — the daemon on :${PORT:-?} is NOT serving the right release (probe-level fail-fast: no amount of waiting fixes a wrong version); NOT success"
+                    return 1
+                fi
+            fi
+            return 0
+            ;;
+        1)
+            # house-classifier RED (non-2xx outside the 503/7/28 transient
+            # classes — the daemon answers HTTP but wrongly). Probe-level
+            # fail-fast, mirroring _probe's hard-red handling.
+            _warn "hand-back verify: /livez hard fail (red — non-transient HTTP error, class=${_PROBE_STATUS:-red} code=${_PROBE_CODE:-?}) on :${PORT:-?} (probe-level fail-fast, house classifier); NOT success"
+            return 1
+            ;;
+        *)
+            # 2 = transient (connection refused / timeout / 503), 3 =
+            # boot-grace-suppressed — both are "still booting": poll on.
+            return 2
+            ;;
+    esac
+}
+
 # _supervision_unit_serving <unit> <prestop_pid> — hand-back VERIFIER.
-# Polls (deadline-bounded by LIVEZ_BUDGET_S, lock-heartbeat every
-# iteration — the _probe precedent) until the unit's MainPID is a NEW
-# nonzero pid — ≠ <prestop_pid> whenever one was captured — AND the port
-# is serving (lsof conjunct, PATH-stubbable; lsof absent or PORT unknown
-# → the MainPID check alone decides — never fault on a missing tool,
-# _unit_stopped precedent in stop-ensemble.sh). Prints the new MainPID on
-# success; returns 1 with a loud warn otherwise. A MainPID EQUAL to the
-# pre-stop pid fails FAST (no retry loop can fix it: the old daemon never
-# left — the start no-op'd on an active unit, or the stop
+# Polls (deadline-bounded, lock-heartbeat every iteration — the _probe
+# precedent) until the unit's MainPID is a NEW nonzero pid — ≠
+# <prestop_pid> whenever one was captured — AND the port is serving AND
+# (when the tools allow) the daemon ANSWERS /livez with the expected
+# version (the serving conjunct, D-P1-4). A MainPID EQUAL to the
+# pre-stop pid fails FAST (no retry loop can fix it: the old daemon
+# never left — the start no-op'd on an active unit, or the stop
 # false-succeeded).
+#
+# Budget (D-P1-1/D-P1-2, replacing the LIVEZ_BUDGET_S borrow — the
+# incident r-20261101-212542-8279 race): effective = CEILING
+# (HANDBACK_VERIFY_BUDGET_S=300) when no ceremony clock is known;
+# else clamp(remaining − HANDBACK_TAIL_RESERVE_S, FLOOR, CEILING) with
+# FLOOR=HANDBACK_VERIFY_FLOOR_S=180 — monotone-safe, never less than
+# today's 180s. Grace (D-P1-6 + AM-P1-5, deadline-aware):
+#   grace = min(HANDBACK_VERIFY_GRACE_S, max(0, remaining − effective))
+# when the clock is known (full GRACE otherwise); ONE progress-gated
+# extension at the first expiry, only with a new MainPID ∧ bound port.
+# Floor-wins bands (remaining < FLOOR + TAIL_RESERVE at entry) carry
+# the DISTINCT "ceremony time exhausted" verdict (T-P1-12: the abort is
+# the ceremony's arithmetic, not the release's health — the post-mortem
+# must be able to tell them apart).
+#
+# Degenerate branches preserved (never fault on a missing tool,
+# _unit_stopped precedent): PORT unset → MainPID-alone; lsof+curl both
+# absent → MainPID-alone; lsof absent + curl present → serving-only
+# (the port-listener check is skipped, not failed); lsof present +
+# curl absent → MainPID + port-listener (today's verdict, AM-P1-1).
+# Prints the new MainPID on success; returns 1 with a loud warn
+# otherwise.
+#
+# [7b SUBSTRING TRAP — no success-path log line below may contain the
+# banned systemctl-start literal; every _log/_warn string stays free
+# of it.]
 _supervision_unit_serving() {
-    local unit="$1" prestop="$2" deadline now mp
-    deadline=$(( $(_now_epoch) + LIVEZ_BUDGET_S ))
+    local unit="$1" prestop="$2"
+    local deadline now mp entry_remaining effective grace total
+    local clock_known=0 floor_band=0 budget_source extended=0 progress=0
+    entry_remaining=0
+    if [ -n "${PROMOTE_CEREMONY_DEADLINE_EPOCH:-}" ] \
+       && case "${PROMOTE_CEREMONY_DEADLINE_EPOCH:-}" in *[!0-9]*) false ;; *) true ;; esac; then
+        clock_known=1
+        entry_remaining="$(_effective_ceremony_remaining_s "$PROMOTE_CEREMONY_DEADLINE_EPOCH")"
+    fi
+    if [ "$clock_known" = "1" ]; then
+        effective=$(( entry_remaining - HANDBACK_TAIL_RESERVE_S ))
+        [ "$effective" -lt "$HANDBACK_VERIFY_FLOOR_S" ] && effective="$HANDBACK_VERIFY_FLOOR_S"
+        [ "$effective" -gt "$HANDBACK_VERIFY_BUDGET_S" ] && effective="$HANDBACK_VERIFY_BUDGET_S"
+        # grace (AM-P1-5 ruled form): min(GRACE, max(0, remaining − effective))
+        grace=$(( entry_remaining - effective ))
+        [ "$grace" -lt 0 ] && grace=0
+        [ "$grace" -gt "$HANDBACK_VERIFY_GRACE_S" ] && grace="$HANDBACK_VERIFY_GRACE_S"
+        if [ "$entry_remaining" -lt "$HANDBACK_VERIFY_FLOOR_S" ]; then
+            floor_band=3   # the clock cannot accommodate an honest verify
+            budget_source="ceremony-floor(clock-too-short)"
+        elif [ "$effective" -eq "$HANDBACK_VERIFY_FLOOR_S" ] \
+             && [ "$(( entry_remaining - HANDBACK_TAIL_RESERVE_S ))" -lt "$HANDBACK_VERIFY_FLOOR_S" ]; then
+            floor_band=2   # floor wins, tail reserve unavailable
+            budget_source="ceremony-floor(tail-reserve-unavailable)"
+        else
+            budget_source="ceremony-clamped"
+        fi
+    else
+        effective="$HANDBACK_VERIFY_BUDGET_S"
+        grace="$HANDBACK_VERIFY_GRACE_S"
+        budget_source="handback-ceiling(no-ceremony-clock)"
+    fi
+    total=$(( effective + grace ))
+    deadline=$(( $(_now_epoch) + effective ))
+    # Truthful budget line (T-P1-8): names the EFFECTIVE budget, its
+    # source, the grace, and the total — the post-mortem's arithmetic.
+    # STDERR, NOT _log: this function's stdout is CAPTURED by the caller
+    # (`newpid="$(_supervision_unit_serving ...)"`) — the pid must be the
+    # ONLY thing on stdout (_warn's stderr shape, INFO semantics).
+    printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "hand-back verify: budget effective=${effective}s source=${budget_source} grace=${grace}s total=${total}s$( [ "$clock_known" = "1" ] && printf ' ceremony-remaining=%ss' "$entry_remaining" ) (knobs: HANDBACK_VERIFY_BUDGET_S=${HANDBACK_VERIFY_BUDGET_S} FLOOR=${HANDBACK_VERIFY_FLOOR_S} TAIL=${HANDBACK_TAIL_RESERVE_S} GRACE=${HANDBACK_VERIFY_GRACE_S})" >&2 2>/dev/null
     while :; do
         lock_heartbeat
         mp="$("$SYSTEMCTL_BIN" show "$unit" -p MainPID --value 2>/dev/null || true)"
+        progress=0
         case "$mp" in
             ''|0) ;;  # not up yet — keep polling
             *)
@@ -4763,21 +5138,79 @@ _supervision_unit_serving() {
                 fi
                 if [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
                     if lsof -ti:"$PORT" >/dev/null 2>&1; then
-                        printf '%s\n' "$mp"
-                        return 0
+                        # Port bound (necessary fast condition — it proves
+                        # the socket). The serving conjunct decides below.
+                        if command -v curl >/dev/null 2>&1; then
+                            hsp_rc=0
+                            _handback_serving_probe || hsp_rc=$?
+                            case "$hsp_rc" in
+                                0)
+                                    printf '%s\n' "$mp"
+                                    return 0
+                                    ;;
+                                1) return 1 ;;   # probe-level fail-fast
+                                *) ;;             # transient — poll to the deadline
+                            esac
+                        else
+                            # lsof present, curl absent: today's verdict
+                            # (MainPID + port-listener), unchanged (AM-P1-1).
+                            printf '%s\n' "$mp"
+                            return 0
+                        fi
+                        progress=1   # new MainPID ∧ bound port
                     fi
-                    # port not serving yet — fall through to the deadline
+                    # port not listening yet — transient, fall through
+                elif [ -n "${PORT:-}" ] && command -v curl >/dev/null 2>&1; then
+                    # lsof absent, curl present — degraded: serving-only
+                    # (the port-listener check is skipped, not failed).
+                    hsp_rc=0
+                    _handback_serving_probe || hsp_rc=$?
+                    case "$hsp_rc" in
+                        0)
+                            printf '%s\n' "$mp"
+                            return 0
+                            ;;
+                        1) return 1 ;;
+                        *) ;;
+                    esac
+                    progress=1   # new MainPID; port uncheckable ⇒ not held against it
                 else
+                    # PORT unset, or lsof+curl both absent: MainPID alone
+                    # decides (degenerate branch, unchanged).
                     printf '%s\n' "$mp"
                     return 0
                 fi
                 ;;
         esac
         now="$(_now_epoch)"
-        [ "$now" -lt "$deadline" ] || break
+        if [ "$now" -ge "$deadline" ]; then
+            # ONE progress-gated extension (D-P1-6): only while the daemon
+            # is demonstrably coming up (new MainPID ∧ bound port / port
+            # uncheckable). A dead daemon is never granted extra time.
+            if [ "$extended" = "0" ] && [ "$grace" -gt 0 ] && [ "$progress" = "1" ]; then
+                extended=1
+                deadline=$(( deadline + grace ))
+                _warn "hand-back verify: budget ${effective}s expired with the daemon demonstrably coming up (new MainPID ∧ bound port) — ONE progress-gated grace extension of ${grace}s in force (HANDBACK_VERIFY_GRACE_S; total wait cap ${total}s)"
+                continue
+            fi
+            break
+        fi
         sleep 2
     done
-    _warn "hand-back verify: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving) within ${LIVEZ_BUDGET_S}s"
+    # Distinct floor-wins verdicts (T-P1-12 / AM-P1-5): in these bands the
+    # ceremony clock itself could not accommodate an honest verify — the
+    # abort is the CEREMONY'S arithmetic, not the release's health, and a
+    # post-mortem must be able to tell this apart from an unhealthy daemon
+    # (the ordinary wording would blame a healthy-but-slow release).
+    if [ "$floor_band" = "3" ]; then
+        _warn "hand-back verify: ceremony time exhausted — the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s): the hand-back cannot succeed inside the ceremony budget no matter how healthy the daemon is; deliberate bounded overshoot $(( HANDBACK_VERIFY_FLOOR_S - entry_remaining ))s (FLOOR − remaining), grace 0; unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
+        return 1
+    fi
+    if [ "$floor_band" = "2" ]; then
+        _warn "hand-back verify: ceremony time exhausted — the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s + tail reserve ${HANDBACK_TAIL_RESERVE_S}s): the tail reserve was unavailable so the floor pinned the budget at ${effective}s and the grace was clamped to ${grace}s (total ${total}s ≤ remaining); unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
+        return 1
+    fi
+    _warn "hand-back verify: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving + /livez answering) within ${effective}s (HANDBACK_VERIFY_BUDGET_S effective budget; grace ${grace}s $( [ "$extended" = "1" ] && printf consumed || printf unused ))"
     return 1
 }
 
@@ -6556,9 +6989,23 @@ promote_entry_check() {
         until="$(_json_field "$(journal_read)" cooldown_until)"
         _refuse cooldown "promote refused: rollback cooldown active until $until (ADR-005: 10-min anti-flapping)"
     fi
-    # quarantined target
+    # quarantined target — the frozen "cleared only by re-staging" rule is
+    # EXTENDED, never bypassed (promote-handback-halt Phase 2, §D.3): the
+    # gate now ALSO accepts an explicit `quarantine_cleared_serving_green`
+    # history event naming this version. That event is written ONLY by the
+    # serving-green closer, after a positive serving-green verdict that is
+    # itself gated on intent_flip evidence + txn staleness + owner-deadness
+    # + the health probes — so it is evidence-backed, journaled, and
+    # explicit. Two surfaces carry the clearance (the event AND the array
+    # rewrite) and EITHER satisfies the gate — belt-and-braces against a
+    # half-written clearance. The refusal message is UNCHANGED when neither
+    # signal is present (the frozen vocabulary).
     if journal_is_quarantined "$target_ver"; then
-        _refuse quarantine "promote refused: version '$target_ver' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version"
+        if journal_quarantine_cleared_serving_green "$target_ver"; then
+            _log "promote entry: version '$target_ver' is in quarantined[] BUT the journal carries a quarantine_cleared_serving_green event for it — accepting (the explicit serving-green clearance; the frozen rule is extended, not bypassed)"
+        else
+            _refuse quarantine "promote refused: version '$target_ver' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version"
+        fi
     fi
     # adoption-in-progress marker (commission v0.16.6 component 2, Layer ii).
     # Symmetric refusal: a half-staged adoption (.env staged, unit NOT
@@ -6684,6 +7131,81 @@ adopt_stale_txn() {
         _log "adopt_stale_txn: comp3 audit — heartbeat-stale + owner-dead (hb_stale=$hb_stale, owner_dead=$owner_dead) reclaimed via the standard recovery"
     fi
     if [ "$flipped" = "true" ]; then
+        # ── Phase 2 (T11): the SERVING-GREEN branch ────────────────────────
+        # The promote-entry mirror of the same decision table. lib.sh is NOT
+        # purity-constrained ⇒ the mature classified probe
+        # (`_probe_once_classified`, the house 0/1/2 taxonomy) is REUSED —
+        # never a second taxonomy.
+        #
+        # GREEN (the CANONICAL predicate: /livez 200 ∧ version == the
+        # v-stripped target ∧ /readyz 200 whose body reports ready) ∧
+        # `intent_flip` evidence ⇒ COMMIT-CLOSE (AM-P2-1's
+        # history-before-close order) and the promote CONTINUES — no
+        # quarantine, no counter, no cooldown.
+        #
+        # The GREEN-without-`intent_flip` arm takes the EXISTING chain
+        # BELOW (the documented divergence, §D.4 (a-i)): the launcher
+        # DEFERS and the daemon takes no action this tick, but this
+        # promote-entry path keeps its pre-ruling behaviour — this lane
+        # does not rewrite it. The NOT-GREEN arm ALSO takes the existing
+        # chain UNCHANGED, and that is correct here: this path engages only
+        # a txn already PAST the 600s staleness gate (strictly older than
+        # the 210–360s slow-boot class the daemon-side boot grace covers)
+        # and the operator is present (§D.4 (a-ii)) — no defer, no grace.
+        local _sp_livez_rc _sp_readyz_rc _sp_version _sp_readyz_status _sp_green _sp_displaced
+        _sp_livez_rc=0
+        _probe_once_classified "/livez" "${PORT:-}" || _sp_livez_rc=$?
+        _sp_version=""
+        if [ "$_sp_livez_rc" = "0" ] && [ "$_PROBE_CODE" = "200" ]; then
+            _sp_version="$(_json_field "$_PROBE_BODY" "version" 2>/dev/null)" || _sp_version=""
+        fi
+        _sp_readyz_rc=0
+        _probe_once_classified "/readyz" "${PORT:-}" || _sp_readyz_rc=$?
+        _sp_readyz_status=""
+        if [ "$_sp_readyz_rc" = "0" ] && [ "$_PROBE_CODE" = "200" ]; then
+            _sp_readyz_status="$(_json_field "$_PROBE_BODY" "status" 2>/dev/null)" || _sp_readyz_status=""
+        fi
+        _sp_green=0
+        if [ "$_sp_livez_rc" = "0" ] && [ "$_sp_readyz_rc" = "0" ] \
+           && [ -n "$_sp_version" ] \
+           && [ "$_sp_version" = "$(_version_strip_v "$target")" ] \
+           && [ "$_sp_readyz_status" = "ready" ]; then
+            _sp_green=1
+        fi
+        if [ "$_sp_green" = "1" ] && journal_history_has_intent_flip "$target"; then
+            # ALL conjuncts hold — commit-close (history-before-close) and
+            # let the promote continue.
+            _sp_displaced="$(_json_field "$inf" "displaced_version" 2>/dev/null)" || _sp_displaced=""
+            case "$_sp_displaced" in
+                ''|null)
+                    journal_history_append halt "adopt: stale flipped $kind txn (target=$target) is SERVING GREEN but has no in_flight.displaced_version (old-format txn) — halt-for-human, txn left in place"
+                    _warn "HALT-FOR-HUMAN: serving-green txn (target=$target) has no displaced_version (old-format) — no silent commit; txn left for the sweep/human"
+                    exit 78
+                    ;;
+            esac
+            _log "adopt_stale_txn: target=$target is SERVING GREEN (/livez 200 + version match + /readyz 200 ready) with intent_flip evidence — committing (history-before-close); the promote continues"
+            journal_set_current "$target" || {
+                _warn "adopt: serving-green commit — journal_set_current $target FAILED; txn LEFT OPEN; promote refusing (W3)"
+                exit 78
+            }
+            journal_set_previous "$_sp_displaced" || {
+                _warn "adopt: serving-green commit — journal_set_previous $_sp_displaced FAILED; txn LEFT OPEN; promote refusing (W3)"
+                exit 78
+            }
+            if journal_is_quarantined "$target"; then
+                journal_history_append quarantine_cleared_serving_green \
+                    "target $target run_id $(_journal_txn_identity "$inf" "$target") serving_green_commit prev $_sp_displaced"
+                journal_quarantine_clear "$target" \
+                    || _warn "adopt: quarantined[] rewrite FAILED (the clearance EVENT is the gate's acceptance signal — the array is hygiene)"
+            fi
+            journal_history_append serving_green_commit \
+                "target $target run_id $(_journal_txn_identity "$inf" "$target") prev $_sp_displaced owner pid ${owner:-?} age ${age}s — serving green (adopt-path classified probe: /livez 200 + version match + /readyz 200 ready); committed at promote entry — NOT rolled back, NOT quarantined, counter NOT incremented, no cooldown (intent_flip evidence present)"
+            journal_close_txn || {
+                _warn "adopt: serving-green commit — txn close FAILED; txn LEFT OPEN for the sweep to retry; promote refusing (W3)"
+                exit 78
+            }
+            return 0
+        fi
         # ── stale flipped → adopt via the sweep-rollback recovery ──────────
         # Manifest gate on previous FIRST (halt-for-human, NO repoint, txn
         # left in place — mirrors the sweep's no-previous / missing-dir /

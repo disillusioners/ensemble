@@ -2909,6 +2909,16 @@ async def lifespan(app: FastAPI):
     # existing ``manager.set_upgrade_journal_sweep(upgrade_journal_sweep)``
     # call below (api.py:1514 in the pre-feature version) confirms
     # availability. No-op when manager is not yet constructed.
+    # promote-handback-halt Phase 2 (T6) — the serving-green closer's
+    # health seam. A PROVIDER (callable), never a captured composite:
+    # the readiness composite is refreshed on a cadence and a captured
+    # value would go stale (the closer would judge a long-dead snapshot).
+    # It reads the SAME cached composite /readyz serves (O(1), zero DB).
+    # ``None`` before the first readiness tick ⇒ the closer treats the
+    # composite as missing ⇒ DEFER (never a verdict — AM-P2-8).
+    def _readiness_composite_provider() -> ReadinessComposite | None:
+        return getattr(app.state, "readiness_composite", None)
+
     upgrade_journal_sweep = UpgradeJournalSweepService(
         upgrade_install_dir,
         reconcile_interval_seconds=(
@@ -2918,6 +2928,7 @@ async def lifespan(app: FastAPI):
             config.services.upgrade_journal_reaper_timeout_seconds
         ),
         manager=manager,
+        readiness_provider=_readiness_composite_provider,
     )
     try:
         if upgrade_install_dir is not None:

@@ -171,15 +171,88 @@ reset_stub_state() {
 }
 
 # ── lsof stub (port-serving conjunct) ───────────────────────────────────────
+# make_lsof_stub <dir> <rc> [delay-s] — the optional delay models the
+# incident's shape: the daemon BINDS THE PORT only when it finishes
+# booting (the base verifier polls lsof under the borrowed LIVEZ_BUDGET_S
+# ⇒ a slow bind is what tripped the abort on 2026-11-01).
 make_lsof_stub() {
     local dir="$1" rc="$2"
     mkdir -p "$dir"
     cat > "$dir/lsof" <<STUB
 #!/bin/bash
 echo "lsof \$*" >> "\${LSOF_LOG:-/dev/null}"
+if [ -n "\${LSOF_DELAY_S:-}" ] && [ -n "\${LSOF_START_EPOCH:-}" ]; then
+    now="\$(date +%s)"
+    if [ "\$(( now - LSOF_START_EPOCH ))" -lt "\${LSOF_DELAY_S}" ]; then
+        exit 1
+    fi
+fi
 exit $rc
 STUB
     chmod +x "$dir/lsof"
+}
+
+# ── curl stub (the Phase-1 serving conjunct — promote-handback-halt) ────────
+# lib.sh's hand-back verifier calls bare curl through
+# _probe_once_classified ("curl -sS -o <tmp> -w '%{http_code}' --max-time 5
+# <url>") so a PATH stub controls it exactly like the real binary. Modes via
+# CURL_MODE (default ok); CURL_VERSION sets the body version; CURL_DELAY_S +
+# CURL_START_EPOCH serve ok-mode only after the delay (the slow-boot seam).
+make_curl_stub() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/curl" <<'STUB'
+#!/bin/bash
+out=""; url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        -w) shift 2 ;;
+        --max-time) shift 2 ;;
+        -sS|-s|-S) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+mode="${CURL_MODE:-ok}"
+if [ -n "${CURL_DELAY_S:-}" ] && [ -n "${CURL_START_EPOCH:-}" ]; then
+    now="$(date +%s)"
+    if [ $(( now - CURL_START_EPOCH )) -lt "${CURL_DELAY_S}" ]; then
+        mode="unreachable"
+    fi
+fi
+case "$mode" in
+    ok)
+        [ -n "$out" ] && printf '{"status":"alive","version":"%s"}\n' "${CURL_VERSION:-0.28.5}" > "$out"
+        printf '200'
+        exit 0 ;;
+    wrongver)
+        [ -n "$out" ] && printf '{"status":"alive","version":"0.0.0"}\n' > "$out"
+        printf '200'
+        exit 0 ;;
+    noversion)
+        [ -n "$out" ] && printf '{"status":"alive"}\n' > "$out"
+        printf '200'
+        exit 0 ;;
+    non2xx)
+        [ -n "$out" ] && : > "$out"
+        printf '404'
+        exit 0 ;;
+    busy503)
+        # Phase 3 (P3 consolidated pin, AM-P1-2 behavioural): HTTP 503 with
+        # curl rc 0 — the house classifier's TRANSIENT class (the boot-storm
+        # window). Distinct from `unreachable` (rc 7, connection refused).
+        [ -n "$out" ] && : > "$out"
+        printf '503'
+        exit 0 ;;
+    unreachable)
+        printf '000'
+        exit 7 ;;
+    *)
+        printf '000'
+        exit 7 ;;
+esac
+STUB
+    chmod +x "$dir/curl"
 }
 
 # Fixture install with a stub launcher (comp7 precedent).
@@ -651,12 +724,20 @@ JOURNAL
     SC4="$STUBBIN4/systemctl"
     LSOF_OK="$(mktemp -d -t suphb-lsofok.XXXXXX)";  make_lsof_stub "$LSOF_OK" 0
     LSOF_NO="$(mktemp -d -t suphb-lsofno.XXXXXX)";  make_lsof_stub "$LSOF_NO" 1
+    # Phase 1 (promote-handback-halt): the hand-back verifier's serving
+    # conjunct (/livez 2xx via _probe_once_classified) is satisfied by a
+    # PATH-injected curl stub in ok mode for every pre-existing leg —
+    # PROMOTE_EXPECTED_VERSION is unset in these contexts, so the version
+    # comparison is skipped (the 2xx alone confirms serving), exactly the
+    # restart.sh/rollback.sh degraded contract.
+    CURL_DIR="$(mktemp -d -t suphb-curl.XXXXXX)"
+    make_curl_stub "$CURL_DIR"
 
     # run_rvl <path-extra> <globals-setup> — sources lib.sh, applies the
     # supervision globals (consumed contract), runs restart_via_launcher.
     run_rvl() {
         local path_extra="$1" setup="$2"
-        PATH="$path_extra:$PATH" bash -c '
+        PATH="$path_extra:$CURL_DIR:$PATH" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -703,6 +784,10 @@ JOURNAL
     assert_not_contains "C2 no COMPLETE line on failure" "hand-back COMPLETE" "$C2_OUT"
 
     # C3 stale MainPID (new == prestop): fail FAST, no retry loop.
+    # [Phase 1 / promote-handback-halt: this leg IS leg L5 of
+    # phase1-plan.md §9 — the equal-to-prestop fast-fail is byte-unchanged
+    # under the Phase-1 verifier rewrite (knob quartet + serving conjunct)
+    # and re-pinned here under the new budget; exactly ONE MainPID poll.]
     reset_stub_state "$CFIX/sc4.log"
     SC_START_RC=0; unset SC_START_ERR; export SC_START_RC
     SC_MAINPID=777; export SC_MAINPID
@@ -716,14 +801,20 @@ JOURNAL
     MPN="$(cat "$CFIX/sc4.log.mp.n" 2>/dev/null || echo 0)"
     assert_eq "C3 fail-fast: exactly ONE MainPID poll (no retry loop)" "1" "$MPN"
 
-    # C4 never-appears timeout: MainPID stays 0 → LIVEZ_BUDGET_S-bounded
-    # timeout → rc 1.
+    # C4 never-appears timeout: MainPID stays 0 → budget-bounded timeout
+    # → rc 1. [Phase 1 / promote-handback-halt: the verifier no longer
+    # borrows LIVEZ_BUDGET_S — the leg now pins the timeout against the
+    # NEW knob (HANDBACK_VERIFY_BUDGET_S=2 keeps the wall time bounded);
+    # the warn still says "within 2s" but as the EFFECTIVE hand-back
+    # budget, not the livez gate's borrow.]
     reset_stub_state "$CFIX/sc4.log"
     SC_MAINPID=0; export SC_MAINPID
+    export HANDBACK_VERIFY_BUDGET_S=2
     C4_OUT="$(run_rvl "$LSOF_OK" '
         SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
         SUPERVISION_UNIT=ensemble-c4.service; SUPERVISION_PRESTOP_MAINPID=777
     ')"
+    unset HANDBACK_VERIFY_BUDGET_S
     assert_eq "C4 never-appears: rc 1 (timeout)" "rvl-rc=1" "$(rvl_rc "$C4_OUT")"
     assert_contains "C4 timeout warn names unit + budget" "hand-back verify: unit ensemble-c4.service not confirmed" "$C4_OUT"
     assert_contains "C4 timeout cites the budget" "within 2s" "$C4_OUT"
@@ -911,7 +1002,7 @@ STUB
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
     SC_MAINPID=9999 SC_IS_ACTIVE=inactive SC_START_RC=0
     export SC_MAINPID SC_IS_ACTIVE SC_START_RC
-    C12A_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
+    C12A_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -933,7 +1024,7 @@ STUB
     # C12b: .env rung — pin sourced from INSTALL_DIR/.env (env-var
     # unset). Same convergence contract: hand-back uses the .env pin.
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
+    C12B_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -958,7 +1049,7 @@ STUB
     # that can fire from the executor; the env-var rung is unreachable.
     # Hand-back must still declare the pin.
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B2_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
+    C12B2_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -991,7 +1082,7 @@ STUB
     # C12b absent pin: NO ENSEMBLE_RESTART_UNIT, no .env pin → hand-back
     # declares the cgroup leaf (fallback contract).
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B_ABSENT_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
+    C12B_ABSENT_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -1010,7 +1101,7 @@ STUB
     # C12b invalid pin (non-conforming name): ENSEMBLE_RESTART_UNIT
     # set but not ensemble-*.service → cgroup leaf (with WARN).
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B_INVALID_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
+    C12B_INVALID_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -1031,7 +1122,7 @@ STUB
     # C12b invalid pin (unit file missing): ENSEMBLE_RESTART_UNIT
     # set + conforming name + NO unit file → cgroup leaf (with WARN).
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B_NOF_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
+    C12B_NOF_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -1147,6 +1238,173 @@ RB_N="$(grep -c 'stop: ownership-scoped SINGLE-TERM' "$UPGRADE_DIR/rollback.sh" 
 assert_eq "D2 rollback.sh has no outer announcement" "0" "$RB_N"
 L_N="$(grep -c 'stop: ownership-scoped SINGLE-TERM via' "$UPGRADE_DIR/lib.sh" || true)"
 assert_eq "D2 lib.sh owns exactly ONE announcement site" "1" "$L_N"
+
+# ===========================================================================
+section "D′ — Phase 3 consolidated pins: P3-PIN-09 slow-boot budget + AM-P1-2 probe classification"
+
+# P3-PIN-09 (the gap this file had — NO slow-boot timing pin): a slow
+# unit-active→serving boot INSIDE the dedicated hand-back verify budget
+# must NOT trip the abort predicate. The incident (r-20261101-212542-8279)
+# was exactly this shape: the unit became active, the daemon took ~3 min to
+# answer /livez, and the verifier gave up on a fixed budget.
+#
+# The legs are RED at BASE (the base verifier borrows LIVEZ_BUDGET_S=2 ⇒ it
+# gives up long before the daemon serves) and GREEN at HEAD (the dedicated
+# HANDBACK_VERIFY_BUDGET_S is honoured) — the discrimination the plan
+# demands ("shrink the budget back to the fixed 180 s class ⇒ RED").
+#
+# AM-P1-2 (the Phase-1 residual routed to Phase 3): the probe CLASSIFICATION
+# table must be behavioural, not just structural — /livez 404 ⇒ RED
+# (immediate, fail-fast) vs /livez 503 ⇒ TRANSIENT (keep polling). The
+# house classifier (`_probe_once_classified`) is reused verbatim (never a
+# second taxonomy).
+if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
+    # The lib.sh under test (the base leg points HB_BASE_LIBSH at the BASE
+    # copy; the default is the tree's own).
+    HB_LIBSH="${HB_LIBSH:-$UPGRADE_DIR/lib.sh}"
+    D3FIX="$(mktemp -d -t supslow.XXXXXX)"
+    make_fixture "$D3FIX"
+    mkdir -p "$D3FIX/releases"
+    cat > "$D3FIX/releases/state.json" <<'JOURNAL'
+{"current":"v1","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JOURNAL
+    D3STUB="$(mktemp -d -t supslow-stub.XXXXXX)"
+    make_systemctl_stub "$D3STUB"
+    D3SC="$D3STUB/systemctl"
+    D3LSOF="$(mktemp -d -t supslow-lsof.XXXXXX)"; make_lsof_stub "$D3LSOF" 0
+    # The DELAYED lsof: the daemon binds the port only when it finishes
+    # booting (the incident's shape — the base verifier polls lsof under
+    # the borrowed LIVEZ_BUDGET_S, so a slow bind is what tripped the
+    # abort on 2026-11-01).
+    D3LSOFD="$(mktemp -d -t supslow-lsofd.XXXXXX)"; make_lsof_stub "$D3LSOFD" 0 4
+    D3CURL="$(mktemp -d -t supslow-curl.XXXXXX)"; make_curl_stub "$D3CURL"
+
+    # run_slow <libsh> <verify-budget> <curl-mode> <delay-s> — one hand-back
+    # attempt with the given lib.sh. The unit is active with a NEW MainPID
+    # from the first poll; the PORT binds and /livez answers only after
+    # <delay-s> (the slow boot).
+    run_slow() {
+        local libsh="$1" budget="$2" mode="$3" delay="$4"
+        PATH="$D3LSOFD:$D3CURL:$PATH" bash -c '
+            export INSTALL_DIR="'"$D3FIX"'"
+            export SYSTEMCTL_BIN="'"$D3SC"'"
+            export SC_LOG="'"$D3FIX"'/sc3.log"
+            export PORT=19997
+            export LIVEZ_BUDGET_S=2
+            export HANDBACK_VERIFY_BUDGET_S="'"$budget"'"
+            export HANDBACK_VERIFY_GRACE_S=0
+            export CURL_MODE="'"$mode"'"
+            export CURL_DELAY_S="'"$delay"'"
+            export CURL_START_EPOCH="$(date +%s)"
+            export LSOF_DELAY_S="'"$delay"'"
+            export LSOF_START_EPOCH="$CURL_START_EPOCH"
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+            . "'"$libsh"'" >/dev/null 2>&1
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-d3.service; SUPERVISION_PRESTOP_MAINPID=777
+            restart_via_launcher
+            echo "rvl-rc=$?"
+        ' 2>&1
+    }
+    slow_rc() { printf '%s' "$1" | grep -o 'rvl-rc=[0-9]*' | head -1; }
+
+    # run_probe <libsh> <budget> <curl-mode> — the verifier-level legs (the
+    # port is bound from the start: only the /livez classification differs).
+    run_probe() {
+        local libsh="$1" budget="$2" mode="$3"
+        PATH="$D3LSOF:$D3CURL:$PATH" bash -c '
+            export INSTALL_DIR="'"$D3FIX"'"
+            export SYSTEMCTL_BIN="'"$D3SC"'"
+            export SC_LOG="'"$D3FIX"'/sc3.log"
+            export PORT=19997
+            export LIVEZ_BUDGET_S=2
+            export HANDBACK_VERIFY_BUDGET_S="'"$budget"'"
+            export HANDBACK_VERIFY_GRACE_S=0
+            export CURL_MODE="'"$mode"'"
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+            . "'"$libsh"'" >/dev/null 2>&1
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-d3.service; SUPERVISION_PRESTOP_MAINPID=777
+            restart_via_launcher
+            echo "rvl-rc=$?"
+        ' 2>&1
+    }
+
+    # P3-PIN-09a — the slow boot inside the dedicated budget ⇒ SUCCESS.
+    reset_stub_state "$D3FIX/sc3.log"
+    SC_MAINPID=9999 SC_START_RC=0
+    export SC_MAINPID SC_START_RC
+    D3_T0="$(date +%s)"
+    D3A_OUT="$(run_slow "$HB_LIBSH" 20 ok 4)"
+    D3_T1="$(date +%s)"
+    D3A_ELAPSED=$(( D3_T1 - D3_T0 ))
+    assert_eq "P3-PIN-09a the slow-boot hand-back COMPLETES inside the dedicated budget" "rvl-rc=0" "$(slow_rc "$D3A_OUT")"
+    assert_contains "P3-PIN-09a the hand-back announces the unit return" "hand-back COMPLETE" "$D3A_OUT"
+    if [ "$D3A_ELAPSED" -ge 3 ]; then
+        _pass
+    else
+        _fail "P3-PIN-09a the verifier REALLY WAITED for the slow boot (>= 3s)" ">= 3s" "${D3A_ELAPSED}s"
+    fi
+
+    # P3-PIN-09b — the fail direction (budget expiry): the SAME slow fixture
+    # with a 2s dedicated budget ⇒ a BOUNDED failure, never a hang.
+    reset_stub_state "$D3FIX/sc3.log"
+    D3B_T0="$(date +%s)"
+    D3B_OUT="$(run_slow "$HB_LIBSH" 2 ok 4)"
+    D3B_T1="$(date +%s)"
+    D3B_ELAPSED=$(( D3B_T1 - D3B_T0 ))
+    assert_eq "P3-PIN-09b the budget expiry is a BOUNDED failure" "rvl-rc=1" "$(slow_rc "$D3B_OUT")"
+    if [ "$D3B_ELAPSED" -le 10 ]; then
+        _pass
+    else
+        _fail "P3-PIN-09b the failure is bounded by the budget (<= 10s)" "<= 10s" "${D3B_ELAPSED}s"
+    fi
+
+    # P3-PIN-09-base — the BASE leg: the pre-Phase-1 verifier borrows
+    # LIVEZ_BUDGET_S (2 in this harness) ⇒ the SAME slow fixture fails
+    # there and succeeds at HEAD. This is the red-at-base proof.
+    if [ -n "${HB_BASE_LIBSH:-}" ] && [ -f "${HB_BASE_LIBSH}" ]; then
+        reset_stub_state "$D3FIX/sc3.log"
+        D3C_OUT="$(run_slow "$HB_BASE_LIBSH" 20 ok 4)"
+        assert_eq "P3-PIN-09-base the BASE verifier gives up on the slow boot (the leg is RED at base)" "rvl-rc=1" "$(slow_rc "$D3C_OUT")"
+    else
+        _skip "P3-PIN-09-base the base leg (HB_BASE_LIBSH not supplied — the base lib.sh copy)"
+    fi
+
+    # ── AM-P1-2: the probe CLASSIFICATION table, behaviourally ──────────────
+    # 404 ⇒ RED (immediate fail-fast); 503 ⇒ TRANSIENT (keep polling).
+    probe_class() {
+        local mode="$1"
+        PATH="$D3CURL:$PATH" CURL_MODE="$mode" bash -c '
+            . "'"$HB_LIBSH"'" >/dev/null 2>&1
+            _probe_once_classified "/livez" 19997 >/dev/null 2>&1
+            printf "rc=%s status=%s\n" "$?" "$_PROBE_STATUS"
+        ' 2>/dev/null
+    }
+    PC404="$(probe_class non2xx)"
+    assert_contains "AM-P1-2a /livez 404 classifies RED (fail-fast, not transient)" "rc=1" "$PC404"
+    assert_contains "AM-P1-2a /livez 404 carries the red status" "status=red" "$PC404"
+    PC503="$(probe_class busy503)"
+    assert_contains "AM-P1-2b /livez 503 classifies TRANSIENT (keep polling)" "rc=2" "$PC503"
+    assert_contains "AM-P1-2b /livez 503 carries the transient status" "status=transient" "$PC503"
+    PC200="$(probe_class ok)"
+    assert_contains "AM-P1-2c /livez 200 classifies GREEN" "rc=0" "$PC200"
+    assert_contains "AM-P1-2c /livez 200 carries the green status" "status=green" "$PC200"
+
+    # The VERIFIER-level consequence: 404 fails FAST (the abort predicate
+    # fires immediately — no polling to the budget); 503 keeps polling until
+    # the budget expires.
+    reset_stub_state "$D3FIX/sc3.log"
+    D3R404="$(run_probe "$HB_LIBSH" 20 non2xx)"
+    assert_contains "AM-P1-2d /livez 404 makes the verifier fail FAST (the red class)" "hard fail (red" "$D3R404"
+    reset_stub_state "$D3FIX/sc3.log"
+    D3R503="$(run_probe "$HB_LIBSH" 4 busy503)"
+    assert_not_contains "AM-P1-2d /livez 503 does NOT fail fast (the transient class polls on)" "hard fail (red" "$D3R503"
+
+    rm -rf "$D3FIX" "$D3STUB" "$D3LSOF" "$D3LSOFD" "$D3CURL"
+else
+    _skip "D′ P3-PIN-09 slow-boot + AM-P1-2 classification — FENCE: no /run/systemd/system on this host"
+fi
 
 # ===========================================================================
 section "summary"

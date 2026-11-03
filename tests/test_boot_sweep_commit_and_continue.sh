@@ -30,7 +30,11 @@
 #       missing → halt fires (conservative). NO commit.
 #   C4 rollback_safe missing key — halt fires. NO commit.
 #   C5 rollback_safe TRUE — sweep-rollback path taken (not commit path).
-#   C7 cooldown uname fix (lib.sh:982 BSD/GNU dispatch) — bonus check.
+#   C7 cooldown uname fix (lib.sh:2099-2107 BSD/GNU dispatch; the pre-Phase-3
+#      cite "lib.sh:982" was STALE — corrected promote-handback-halt
+#      Phase 3, OQ-C-20/Q5) — bonus check. The LAUNCHER twin of this
+#      dispatch is pinned by tests/test_launcher_cooldown_arm.sh (the
+#      rider; P3-PIN-01..04).
 #
 # Run:
 #   bash tests/test_boot_sweep_commit_and_continue.sh
@@ -115,6 +119,39 @@ seed_journal_old_format() {
     cat > "$fix/releases/state.json" <<EOF
 {"current":"$prev","previous":"$prev","in_flight":{"kind":"promote","target":"$target","started_at":"2026-10-07T09:00:00Z","flipped":$flipped,"owner_pid":99999,"last_heartbeat":1728000000},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"old-format txn seeded"}$intent]}
 EOF
+}
+
+# _free_port — a free loopback TCP port (never a fixed/privileged one).
+_free_port() {
+    python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()'
+}
+
+# _wait_listener <port> [deadline_s] — DETERMINISTIC poll-for-listener
+# (cycle-2 tidier fold): the fixed `sleep 0.8` settle raced the helper's
+# bind — on a slow host the probe ran BEFORE the listener existed and the
+# C5a/C5b disposition asserts went flaky for the wrong reason. Poll the
+# /dev/tcp connect (bash-native, the same fd-open idiom the launcher's
+# own probe uses) at 0.1s intervals until the socket accepts or the
+# deadline (default 10s — two orders past any observed bind latency)
+# expires. On expiry the leg is NOT skipped: the probe then runs against
+# a genuinely absent listener and the disposition asserts fail LOUDLY
+# (a real defect), never silently.
+_wait_listener() {
+    local port="$1" deadline="${2:-10}" waited=0
+    while [ "$waited" -lt "$(( deadline * 10 ))" ]; do
+        if ( exec 3<>"/dev/tcp/127.0.0.1/$port" ) 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+        waited=$(( waited + 1 ))
+    done
+    printf 'listener on port %s never accepted within %ss\n' \
+        "$port" "$deadline" >&2
+    return 1
 }
 
 # Run the sweep in isolation. Sourcing launcher.sh inside a subshell with
@@ -250,7 +287,13 @@ C3_JOURNAL="$(cat "$C3_FIX/releases/state.json")"
 # SKIPPED. Existing not-rollback_safe gate fires (prev.rollback_safe
 # is empty, NOT false) — the journal gets a halt event.
 assert_not_contains "C3 NO boot_sweep_commit_and_continue (missing manifest)" '"event":"boot_sweep_commit_and_continue"' "$C3_JOURNAL"
-assert_contains "C3 halt event (manifest missing → conservative)" '"event":"halt"' "$C3_JOURNAL"
+# Phase 2 (P-3's re-shape discipline): the pre-ruling expectation was a
+# "halt" event — the manifest gates are reached only when a rollback is
+# actually EXECUTED. With no listener the observation is AMBIGUOUS ⇒ the
+# sweep DEFERS (the txn stays open) and the halt gates are not reached
+# yet; they fire when the bounded ceiling selects the rollback path.
+assert_contains "C3 the ambiguous observation DEFERS (no halt yet)" '"event":"sweep_deferred"' "$C3_JOURNAL"
+assert_not_contains "C3 NO halt event (the rollback path was not selected)" '"event":"halt"' "$C3_JOURNAL"
 
 rm -rf "$C3_FIX"
 
@@ -271,13 +314,89 @@ C4_JOURNAL="$(cat "$C4_FIX/releases/state.json")"
 # Same: rollback_safe key absent → _js_manifest_field returns empty →
 # `grep -q '^false$'` fails → branch SKIPPED. Existing halt fires.
 assert_not_contains "C4 NO boot_sweep_commit_and_continue (rollback_safe absent)" '"event":"boot_sweep_commit_and_continue"' "$C4_JOURNAL"
-assert_contains "C4 halt event (rollback_safe absent → conservative)" '"event":"halt"' "$C4_JOURNAL"
+# Phase 2 (P-3's re-shape discipline): the same polarity split as C3 —
+# the manifest gate is reached only on the EXECUTED rollback path; an
+# ambiguous observation defers first.
+assert_contains "C4 the ambiguous observation DEFERS (no halt yet)" '"event":"sweep_deferred"' "$C4_JOURNAL"
+assert_not_contains "C4 NO halt event (the rollback path was not selected)" '"event":"halt"' "$C4_JOURNAL"
 
 rm -rf "$C4_FIX"
 
 # ===========================================================================
-section "C5 — rollback_safe TRUE → existing sweep-rollback path (commit branch skipped)"
+section "C5 — the POLARITY SPLIT (promote-handback-halt Phase 2, P-3)"
 
+# The pre-ruling C5 asserted "rollback_safe TRUE ⇒ the existing
+# sweep-rollback path" as an UNCONDITIONAL expectation. Under the
+# owner-ratified disposition (serving-green = STAY; rollback only for
+# genuinely unhealthy serving) that expectation is SPLIT on the OBSERVED
+# serving health — RE-SHAPED, not deleted (P-3):
+#
+#   C5a  GREEN      ⇒ commit-close (no rollback / quarantine / counter)
+#   C5b  BROKEN     ⇒ the existing chain fires IMMEDIATELY (the /livez
+#                     endpoint answered and is broken — unambiguous)
+#   C5b  AMBIGUOUS  ⇒ DEFER + count toward the BOUNDED absent-ceiling; the
+#                     chain fires only when the ceiling predicate holds
+#                     (≥3 qualifying observations ∧ owner-dead ∧
+#                     intent_flip ∧ never-green-observed)
+#
+# The pre-ruling fixture (no listener ⇒ AMBIGUOUS) is therefore C5b's
+# AMBIGUOUS arm — the chain does NOT fire on the FIRST observation.
+
+# ── C5a: GREEN ⇒ commit-close ────────────────────────────────────────────
+C5A_FIX="$(mktemp -d -t c5a.XXXXXX)"; _register_fixture "$C5A_FIX"
+make_install_fixture "$C5A_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true"
+seed_journal "$C5A_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
+ln -sfn "releases/v9.9.9-test-target" "$C5A_FIX/current"
+printf 'PORT=19999\n' > "$C5A_FIX/.env"
+C5A_PORT="$(_free_port)"
+python3 "$REPO_ROOT/tests/helpers/serving_probe_fake_listener.py" \
+    --port "$C5A_PORT" --mode green --version "9.9.9-test-target" \
+    >/dev/null 2>&1 &
+C5A_PID=$!
+_wait_listener "$C5A_PORT"
+C5A_OUT="$(INSTALL_DIR="$C5A_FIX" PORT="$C5A_PORT" bash -c '
+    . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+    _journal_sweep "$INSTALL_DIR"
+' 2>&1)"
+kill "$C5A_PID" 2>/dev/null || true
+C5A_JOURNAL="$(cat "$C5A_FIX/releases/state.json")"
+assert_contains "C5a GREEN ⇒ the serving-green commit-close" '"event":"serving_green_commit"' "$C5A_JOURNAL"
+assert_not_contains "C5a GREEN ⇒ NO sweep_rollback" '"event":"sweep_rollback"' "$C5A_JOURNAL"
+assert_not_contains "C5a GREEN ⇒ NO boot_sweep_commit_and_continue (the new path owns it)" '"event":"boot_sweep_commit_and_continue"' "$C5A_JOURNAL"
+C5A_QUAR="$(printf '%s' "$C5A_JOURNAL" | grep -oE '"quarantined": ?\[[^]]*\]')"
+case "$C5A_QUAR" in
+    *"v9.9.9-test-target"*) _fail "C5a GREEN ⇒ NO quarantine" "absent" "$C5A_QUAR" ;;
+    *) _pass "C5a GREEN ⇒ NO quarantine" ;;
+esac
+case "$C5A_JOURNAL" in
+    *'"in_flight":null'*|*"\"in_flight\": null"*) _pass "C5a the txn is closed" ;;
+    *) _fail "C5a the txn is closed" '"in_flight":null' "$(printf '%s' "$C5A_JOURNAL" | grep -oE '"in_flight":[^,}]*')" ;;
+esac
+rm -rf "$C5A_FIX"
+
+# ── C5b-BROKEN: the /livez endpoint answered and is broken ⇒ IMMEDIATE ──
+C5B_FIX="$(mktemp -d -t c5b.XXXXXX)"; _register_fixture "$C5B_FIX"
+make_install_fixture "$C5B_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true"
+seed_journal "$C5B_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
+ln -sfn "releases/v9.9.9-test-target" "$C5B_FIX/current"
+printf 'PORT=19999\n' > "$C5B_FIX/.env"
+C5B_PORT="$(_free_port)"
+python3 "$REPO_ROOT/tests/helpers/serving_probe_fake_listener.py" \
+    --port "$C5B_PORT" --mode livez-non200 --version "9.9.9-test-target" \
+    >/dev/null 2>&1 &
+C5B_PID=$!
+_wait_listener "$C5B_PORT"
+C5B_OUT="$(INSTALL_DIR="$C5B_FIX" PORT="$C5B_PORT" bash -c '
+    . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+    _journal_sweep "$INSTALL_DIR"
+' 2>&1)"
+kill "$C5B_PID" 2>/dev/null || true
+C5B_JOURNAL="$(cat "$C5B_FIX/releases/state.json")"
+assert_contains "C5b BROKEN ⇒ the existing chain fires IMMEDIATELY" '"event":"sweep_rollback"' "$C5B_JOURNAL"
+assert_not_contains "C5b BROKEN ⇒ no serving-green commit" '"event":"serving_green_commit"' "$C5B_JOURNAL"
+rm -rf "$C5B_FIX"
+
+# ── C5b-AMBIGUOUS: no listener ⇒ DEFER first, the chain fires at the ceiling ──
 C5_FIX="$(mktemp -d -t c5.XXXXXX)"; _register_fixture "$C5_FIX"
 make_install_fixture "$C5_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true"
 seed_journal "$C5_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
@@ -289,16 +408,24 @@ chmod +x "$C5_FIX/launcher.sh"
 C5_OUT="$(run_sweep "$C5_FIX")"
 echo "$C5_OUT" | head -20 >&2
 C5_JOURNAL="$(cat "$C5_FIX/releases/state.json")"
-# rollback_safe:true → commit branch skipped (it's only for false) →
-# the existing sweep-rollback path takes over: quarantine + repoint
-# + sweep_rollback event + in_flight cleared.
-assert_contains "C5 sweep_rollback event (existing path)" '"event":"sweep_rollback"' "$C5_JOURNAL"
-assert_not_contains "C5 NO boot_sweep_commit_and_continue (rollback_safe=true)" '"event":"boot_sweep_commit_and_continue"' "$C5_JOURNAL"
+# AMBIGUOUS (no listener) ⇒ DEFER — the chain does NOT fire on the first
+# observation (the bounded absent-ceiling owns that arm).
+assert_contains "C5b AMBIGUOUS ⇒ the observation DEFERS" '"event":"sweep_deferred"' "$C5_JOURNAL"
+assert_not_contains "C5b AMBIGUOUS ⇒ NO sweep_rollback on the first observation" '"event":"sweep_rollback"' "$C5_JOURNAL"
+assert_not_contains "C5b AMBIGUOUS ⇒ NO boot_sweep_commit_and_continue (rollback_safe=true)" '"event":"boot_sweep_commit_and_continue"' "$C5_JOURNAL"
 case "$C5_JOURNAL" in
-    *'"in_flight":null'*|*"\"in_flight\": null"*) _pass "C5 in_flight cleared" ;;
-    *) _fail "C5 in_flight cleared" '"in_flight":null' "$(printf '%s' "$C5_JOURNAL" | grep -oE '"in_flight":[^,}]*')" ;;
+    *'"in_flight":null'*|*"\"in_flight\": null"*) _fail "C5b AMBIGUOUS ⇒ the txn stays OPEN" "in_flight present" "in_flight cleared" ;;
+    *) _pass "C5b AMBIGUOUS ⇒ the txn stays OPEN" ;;
 esac
-
+# the ceiling fires the chain on the third qualifying observation
+run_sweep "$C5_FIX" >/dev/null
+run_sweep "$C5_FIX" >/dev/null
+C5_JOURNAL3="$(cat "$C5_FIX/releases/state.json")"
+assert_contains "C5b AMBIGUOUS ⇒ the bounded ceiling fires the existing chain" '"event":"sweep_rollback"' "$C5_JOURNAL3"
+case "$C5_JOURNAL3" in
+    *'"in_flight":null'*|*"\"in_flight\": null"*) _pass "C5b the ceiling path clears the txn" ;;
+    *) _fail "C5b the ceiling path clears the txn" '"in_flight":null' "$(printf '%s' "$C5_JOURNAL3" | grep -oE '"in_flight":[^,}]*')" ;;
+esac
 rm -rf "$C5_FIX"
 
 # ===========================================================================
@@ -326,7 +453,7 @@ else
 fi
 
 # ===========================================================================
-section "C7 — Cooldown uname dispatch fix (lib.sh:982 — opportunistic)"
+section "C7 — Cooldown uname dispatch fix (lib.sh:2099-2107 — opportunistic; cite corrected OQ-C-20)"
 
 LIB_SH="$REPO_ROOT/scripts/upgrade/lib.sh"
 if grep -q 'Darwin|\*BSD\*|\*bsd\*)' "$LIB_SH" \
