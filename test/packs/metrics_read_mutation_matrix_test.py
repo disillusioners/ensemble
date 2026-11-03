@@ -92,7 +92,7 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
         "assert len(PRIVILEGED_TOOL_CATEGORIES) == 17",
         "assert len(PRIVILEGED_TOOL_CATEGORIES) == 16",
         "tests/unit/test_board_registration.py",
-        "assert len(PRIVILEGED_TOOL_CATEGORIES) == 17",
+        "test_board_is_the_ninth_entry",
     ),
     (
         "MT-02-availability-re-derived",
