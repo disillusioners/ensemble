@@ -142,7 +142,8 @@ def _pf_skill_payload(file_skill: Any) -> dict[str, Any]:
     """
     manifest = getattr(file_skill, "manifest", None) or {}
     return {
-        "id": getattr(file_skill, "id", None),
+        "id": getattr(file_skill, "address", None),
+        "pseudo_id": getattr(file_skill, "id", None),
         "name": getattr(file_skill, "name", ""),
         "description": getattr(file_skill, "description", ""),
         "content": getattr(file_skill, "content", ""),
@@ -762,7 +763,7 @@ Returns:
                 db_suffix = " — source: db" if file_source is not None else ""
                 for it in items:
                     skill_id = it.get("id", "")
-                    short_id = skill_id[:8] if isinstance(skill_id, str) else "????????"
+                    short_id = skill_id if isinstance(skill_id, str) else "????????"
                     name = it.get("name", "")
                     cat = it.get("category", "")
                     status = it.get("status", "")
@@ -901,7 +902,7 @@ Returns:
     Human-readable bullet list formatted as::
 
         Skills (N of TOTAL total):
-        - [<short_id>] <name> — <category> — <status>
+        - [<id>] <name> — <category> — <status>
         - ...
 
     Soft-fails with the ``"Skill store service not yet available..."``
@@ -1117,7 +1118,7 @@ Returns:
                     "(SkillStoreService.create_skill contract violation)."
                 )
             skill_id = (
-                created.id[:8]
+                created.id
                 if getattr(created, "id", None)
                 else "unknown"
             )
@@ -1157,13 +1158,13 @@ Args:
 Returns:
     Confirmation string::
 
-        ✅ Skill '<name>' created with id <short_id>.
+        ✅ Skill '<name>' created with id <id>.
         Use skill_search() to find it.
 
-    Where ``<short_id>`` is the first 8 chars of the skill's UUID4
-    primary key. Returns ``ERROR: skill_create: name, description, and
-    content must be non-empty.`` when any input is blank. Soft-fails
-    with the ``"Skill store service not yet available..."`` message
+    Where ``<id>`` is the skill's full UUID4 primary key. Returns
+    ``ERROR: skill_create: name, description, and content must be
+    non-empty.`` when any input is blank. Soft-fails with the
+    ``"Skill store service not yet available..."`` message
     when ``manager._skill_store_service`` is absent.
 
 Note:

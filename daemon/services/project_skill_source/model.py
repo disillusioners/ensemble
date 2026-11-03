@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
 #: A5 (architect, MUST, CRITICAL): namespace / name path components must
@@ -158,6 +158,29 @@ class ProjectFileSkill:
     def version(self) -> str:
         """The manifest semver string (empty when absent)."""
         return str((self.manifest or {}).get("version", "") or "")
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe dict for the agent-facing render seam.
+
+        ``id`` carries the ADDRESS (``pf:<ns>:<name>``) — the id
+        ``skill_view`` consumes VERBATIM. The stable internal
+        pseudo-id stays available under the ADDITIVE ``pseudo_id``
+        key; the ``.id`` ATTRIBUTE itself is untouched (it remains the
+        internal key the embedding/usage rows are keyed by).
+
+        The field-set equals the dataclass fields + ``pseudo_id`` —
+        every key the ``__dict__`` fallback used to emit is still
+        present. ``version`` is a PROPERTY, not a field, so it is
+        NOT emitted (the ``__dict__`` fallback never carried it
+        either). The mutable fields are copied defensively (mirrors
+        :meth:`to_summary`) — a caller never aliases our state.
+        """
+        d = {f.name: getattr(self, f.name) for f in fields(self)}
+        d["manifest"] = dict(d.get("manifest") or {})
+        d["shadows"] = list(d.get("shadows") or [])
+        d["pseudo_id"] = d["id"]  # the stable internal key (sha16)
+        d["id"] = self.address  # the agent-facing, verbatim-consumable id
+        return d
 
     def to_summary(self) -> dict[str, Any]:
         """JSON-safe summary (no body bytes) for list surfaces."""

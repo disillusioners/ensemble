@@ -96,6 +96,7 @@ import logging
 from typing import Any, Callable, Optional
 
 from daemon.services.project_skill_source.model import (
+    ADDRESS_PREFIX,
     ProjectFileSkill,
     is_pf_address,
 )
@@ -104,6 +105,30 @@ from daemon.services.project_skill_source.service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+#: The file-source discriminator tag — mirrors
+#: ``skill_search_service.SOURCE_PROJECT_FILE``.
+SOURCE_PROJECT_FILE = "project-file"
+
+
+def _is_project_file_skill(skill: Any) -> bool:
+    """True iff *skill* came from the file-backed project source.
+
+    MIRRORS the sanctioned helper
+    ``skill_search_service._is_project_file_skill`` — the SAME two-step
+    semantics: the ``pf:`` address prefix FIRST (a DB row can never
+    carry one), then the duck-typed ``source`` tag fallback.
+
+    Replicated LOCALLY on purpose: importing the canonical helper would
+    pull the search service (and with it ``openai``) into this
+    service's import graph (approver note N6). DRIFT-PIN: keep in
+    lockstep with ``daemon/services/skill_search_service.py:118-130``.
+    """
+    address = getattr(skill, "address", None)
+    if isinstance(address, str) and address.startswith(ADDRESS_PREFIX):
+        return True
+    return getattr(skill, "source", None) == SOURCE_PROJECT_FILE
 
 
 # Status values that mean "this variant can still be picked by A/B
@@ -1260,6 +1285,14 @@ class SkillInjectionService:
                 score_val = 0.0
             content = getattr(skill, "content", "") or ""
             skill_id = getattr(skill, "id", None)
+            if _is_project_file_skill(skill):
+                # wi-76d89e11: a file skill's ``id`` attribute is the
+                # INTERNAL pseudo-id (``pf-<sha16>``) — no
+                # id-consuming tool can route it. Render the ADDRESS
+                # instead so the segment stays verbatim-consumable.
+                # DB rows carry neither an address nor the
+                # ``project-file`` tag ⇒ their segment is unchanged.
+                skill_id = getattr(skill, "address", None) or skill_id
             preflight_block = item.get("preflight_block") or ""
             # Inline the skill ID next to the name + score so the
             # consuming agent has every signal it needs to call
