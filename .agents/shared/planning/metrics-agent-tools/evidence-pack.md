@@ -38,7 +38,7 @@ the `instance.py` extend + the three metas + the three `tools_note.md` + the 16-
 | 4 | the scoped type-check | `frontend/./node_modules/.bin/tsc --noEmit -p tsconfig.metrics-fe.json` | rc=0 | — | green (the frontend-local toolchain ONLY) |
 | 4 | both builds | `ng build --configuration development` + `--configuration production` | rc=0 / rc=0 | — | green; the production budget WARNs are RECORDED FINDINGS (none names a file this lane touched) |
 | 4 | the FE e2e | `playwright test --config=playwright.metrics-gate.config.ts` | **3/3 passed** (real Chromium, zero daemon contact) | — | green |
-| 5 | **the mutation matrix** | **26 RED/GREEN + 1 FOLLOW = 27 legs** (12 at the first cut; +10 by the 2026-11-03 council fix cycle; +5 by the verification's evidence-gap close — MT-23..MT-27) | **27/27 PASS** (RED via the intended assertion → byte-identical restore → GREEN; the FOLLOW leg's consumer value MOVED 235 → 215) — **ARCHIVED**: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`) + `.../mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`) | — | green; the post-run manifest confirms every touched file is byte-identical |
+| 5 | **the mutation matrix** | **26 RED/GREEN + 1 FOLLOW = 27 legs** (12 at the first cut; +10 by the 2026-11-03 council fix cycle; +5 by the verification's evidence-gap close — MT-23..MT-27) | **27/27 PASS** (RED via the intended assertion → byte-identical restore → GREEN; the FOLLOW leg's consumer value MOVED 235 → 215) — **ARCHIVED**: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `a627a8fbe4f210e1176788b42c666b0140e7aa49b49f4fd73959e379ae9a8cbf`) + `.../mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `d33afa53f908b73d8f82039ce5bf9e94781cd5def7fe7a4149ec0fb42eb7a4af`) | — | green; the post-run manifest confirms every touched file is byte-identical |
 | 5 | the unit shell pack | `test/packs/metrics_read_unit_test.sh` | **PASS (5 legs)** — 30 + 51 + 15 + 20 + 28 = 144 nodes | — | green |
 | 5 | the mutation shell pack | `test/packs/metrics_read_mutation_legs.sh` | **PASS** (the matrix's own `RESULT: PASS` + the byte-identical-restore assertion) | — | green |
 | 5b/5c | **the two fix cycles' scoped packs** (the six-pack set: tools + personas + registration + docs-surface + the seam pack + the contract-doc pack) | 6 file arguments | **165 passed** (the tools pack **51** — the AST wiring pin + the two SHAPE pins + the ring-state DISCLOSURE pin + the fold's three disclosure pins) | — | green; the shell pack's five legs re-run: 30 + 51 + 15 + 20 + 28 = **144 nodes**, `RESULT: PASS (5 legs)` |
@@ -225,11 +225,11 @@ C2/W1/W2/W3/W4. The second cycle's dispositions, with the loci:
 
 **The ARCHIVED matrix log (plan task 5.2's requirement):**
 `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log`
-(sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0` — 4 446 bytes;
+(sha256 `a627a8fbe4f210e1176788b42c666b0140e7aa49b49f4fd73959e379ae9a8cbf` — 4 446 bytes;
 the run's own pre-run manifest records the HEAD sha `d50b95e3d` + the sha256 of every
 touched file — the MT-23..MT-27 legs commit, i.e. the FINAL code) and
 `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json`
-(sha256 `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`).
+(sha256 `d33afa53f908b73d8f82039ce5bf9e94781cd5def7fe7a4149ec0fb42eb7a4af`).
 
 **SUPERSESSION CHAIN (recorded, never silent):** the archived log is REGENERATED
 whenever `daemon/tools/metrics_read.py` changes, so the citation always names the run
@@ -248,11 +248,17 @@ against the FINAL code — and every superseded artefact keeps its sha:
   HARNESS (MT-23..MT-27), so the archive had to be regenerated to CARRY them (the source
   `daemon/tools/metrics_read.py` was NOT changed by it — its sha stayed `dd6c406f…`);
   the blob stays in the history at `9dbb2c0c3`;
-* the CURRENT log — sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`
-  (4 446 bytes — 26 RED/GREEN legs + 1 FOLLOW), the run against HEAD `d50b95e3d` (the
-  MT-23..MT-27 legs commit) — the manifest carries that HEAD + the `metrics_read.py` sha
+* `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0` — the MT-23..MT-27 run
+  (HEAD `d50b95e3d`; manifest `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`)
+  — SUPERSEDED by the tester-gate close-out: that close changed `daemon/checkpoint_metrics.py`
+  (the vocabulary marker) and the tool-category artifact, so the archive was regenerated to
+  reflect the FINAL tree (the matrix's own legs and packs are unaffected — the re-run reproduced
+  26/26 + 1 FOLLOW ✓); the blob stays in the history at `a301846ab`;
+* the CURRENT log — sha256 `a627a8fbe4f210e1176788b42c666b0140e7aa49b49f4fd73959e379ae9a8cbf`
+  (4 446 bytes — 26 RED/GREEN legs + 1 FOLLOW), the run against HEAD `14b077097` (the F-2/F-3
+  record commit) — the manifest carries that HEAD + the `metrics_read.py` sha
   `dd6c406f70f4ad1c733ddd9b2c4bc44f2f5d889e2b1db221549b2898fe65130a` (manifest sha256
-  `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`).
+  `d33afa53f908b73d8f82039ce5bf9e94781cd5def7fe7a4149ec0fb42eb7a4af`).
 
 **Nothing is cited as if it reflected code that no longer exists.**
 
@@ -298,8 +304,8 @@ same class the grep found (the C1 shape pin and the RULING-1 disclosure pin):
 
 **The matrix: 27/27 PASS (26 RED/GREEN + 1 FOLLOW), 386 s.** The archive was regenerated to
 carry the new legs and re-archived (sha256
-`eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`; manifest
-`e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`) — the fold's run
+`a627a8fbe4f210e1176788b42c666b0140e7aa49b49f4fd73959e379ae9a8cbf`; manifest
+`d33afa53f908b73d8f82039ce5bf9e94781cd5def7fe7a4149ec0fb42eb7a4af`) — the fold's run
 (`eabbbe42…`) is now a link in the supersession chain (fold-ledger §H.10).
 
 **The deviation, stated:** the council's expectation of 25 legs assumed only the fold's three
