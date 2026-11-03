@@ -121,27 +121,52 @@ something off; in fact the door simply has no observations yet.
 
 ---
 
-## 7. The chart primitive
+## 7. The chart primitives
 
-The charts are drawn by a **hand-rolled SVG primitive**
-(`frontend/src/app/components/charts/svg-line-chart/` — the **shared** primitive, it lives under
-`components/` and not under the page) — the page adds **no new frontend dependency**.
+The page draws **two** chart primitives, and the division is by **ROLE** (D-1, 2026-11-03):
 
-The primitive is **feature-frozen**: it renders **lines, steps, areas, stat cards and tooltips**
-and nothing else. **Zoom, brush, crosshair and gradients are explicitly OUT** — each is a
-feature with its own scale/axis/test surface, and admitting one is a deliberate decision, not an
-increment.
+- the **house SVG primitive** (`frontend/src/app/components/charts/svg-line-chart/` — the **shared**
+  primitive, it lives under `components/` and not under the page) serves the **mini** role and the
+  **never-silent fallback** role;
+- the **Chart.js panel wrapper** (`frontend/src/app/pages/metrics/charts/chart-panel.component.ts`
+  — it lives **under the page**, because every `chart.js` import site must live inside
+  `src/app/pages/metrics/**`) serves the **interactive panel** role.
+
+**The page DOES add a frontend dependency (D-1).** The earlier "the page adds no new frontend
+dependency" claim is **HISTORICAL — it is WITHDRAWN**: it was the pre-D-1 posture, and D-1 changed the product
+position deliberately — Chart.js v4 is the **one** direct dependency (imported ONLY through the
+dynamic `await import('chart.js')` form, so the vendor is its own lazy chunk and never touches the
+first paint), plus `jest-canvas-mock` as a devDependency. The governance amendment landed in the
+**same commit** as the dependency (the pins spec's import-shape pin + the pack's
+expected-dependency-set leg).
+
+The house SVG primitive remains **feature-frozen as the MINI role**: it renders **lines, steps,
+areas, stat cards and tooltips** and nothing else. **Zoom, brush and gradients remain explicitly
+OUT** — each is a feature with its own scale/axis/test surface, and admitting one is a deliberate
+decision, not an increment. **Crosshair and nearest-point hover are NOT out of the page** — they
+belong to the *interactive panel* role (the Chart.js wrapper) and are in scope under D-1; the
+earlier sentence that called crosshair "explicitly OUT" described the mini primitive alone and no
+longer holds for the page.
 
 The primitive exposes **pure** scale and axis functions (unit-assertable, the house
 `svg-timeline` pattern), normalizes per-series min/max, renders native `<title>` tooltips, and
 labels the axes in **UTC**.
+
+The panel wrapper carries its own contract: a per-series **DOM proxy** (the `data-series` /
+`data-render-mode` hooks survive the canvas), a **visually-hidden data table** (a11y + the
+DOM-assertion gate), a **`chart.destroy()` in `ngOnDestroy`** (the shell destroys tab bodies via
+`NgComponentOutlet` — a missing destroy leaks a canvas + a ResizeObserver per tab switch), and the
+**zoneless rule** (no Angular-rendered overlay may depend on a Chart.js redraw — the app is
+zoneless).
 
 ---
 
 ## 8. What the page does not do
 
 - It does **not** poll the exposition listener (`:9798`) — it polls the **query door** only.
-- It does **not** add a charting dependency, a date library, or a state library.
+- It does **not** add a **date** library or a **state** library. It DOES add exactly **one**
+  charting dependency — Chart.js v4, for the interactive-panel role (D-1; see §7) — and nothing
+  else.
 - It does **not** create any server-side state, and it does not change any managed key.
 - It does **not** read the kill-switch: the door is never switch-gated, so the page's states are
   driven by **availability**, not by the switch.

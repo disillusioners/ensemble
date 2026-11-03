@@ -1,3 +1,29 @@
+## Commission FE-only T1 metrics dashboard — Phase-1 packs REGISTERED (2026-11-03, implementation lane `feature/fe-metrics-dashboard`, base `c4161335b`)
+
+> **What this block registers.** The T1 lane's **Phase-1** commit carries the **D-1 governance
+> amendment** (D-1 is FINAL): the `metrics_fe_dual_side` pack's **Leg 7 is re-purposed** from a
+> zero-diff guard into an **EXPECTED-DEPENDENCY-SET** guard (the FE dependency delta must be
+> exactly `chart.js` (dependencies) + `jest-canvas-mock` (devDependencies) — asserted **BY NAME**,
+> never by a raw line count), and the FE's pins spec gains the **positive import-shape pin** (0
+> static `from 'chart.js'` sites anywhere; every site inside `src/app/pages/metrics/**`; every site
+> the dynamic `await import('chart.js')` form).
+>
+> **Keep-both:** the earlier `metrics_fe_dual_side` / `metrics_fe_dual_side_test` registrations
+> (2026-11-02, the central-metrics-v1 lane) stay as they are — they record THAT lane's pack. This
+> block registers the **amended** shape.
+>
+> **Node counts are MECHANICAL** — the pack's own jest census, re-derived at this phase's gate
+> (`--verbose` per-file counts), never a declared number.
+>
+> **Fences (unchanged from the registered pack).** The pack never installs dependencies (a missing
+> `node_modules` is a LOUD FAIL, never a green skip), never starts a daemon, and never touches a
+> live port. The FE has no daemon and no database.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `metrics_fe_dual_side` — **AMENDED (D-1)**: Leg 7 is the expected-dependency-set guard; the D1 file set grew 9 → 11 specs | `cd $WT && EXPECTED_BRANCH=feature/fe-metrics-dashboard BASE_REF=<lane base> timeout 900 bash test/packs/metrics_fe_dual_side_test.sh` (self-capped `PACK_BUDGET_S=900`; legs: D1 jest · D2 declared jest · D2 **derived** jest · scoped type-check · `ng build --configuration development` (AOT) · `ng build --configuration production` (budgets+outputHashing — AM-23) · `package.json` **expected-dependency-set** diff) | **D1 = 174 nodes over 11 specs** (the pack's own census, re-derived 2026-11-03: `metrics.model` 30 · `metrics.service` 9 · `svg-line-chart` 29 · `metrics.component` 26 · `metrics-gear-menu` 9 · `metrics.bindings.pins` 22 · **`metrics.bundle-guard` 11 (NEW)** · `overview-tab` 13 · `charts-tab` 9 · **`charts/chart-panel` 9 (NEW)** · `families-tab` 7). D2 declared **138**; D2 **derived 1801 collected / 1799 passed / 2 failed** — the 2 failures are `settings.component.spec.ts`'s **date-dependent** timezone labels (`America/New_York` is on STANDARD time in November ⇒ `UTC-05:00`, the spec hard-codes the summer `UTC-04:00`) and are **BASE-PROVEN** (identical 2F at the lane base `c4161335b` in a throwaway detached worktree — **zero lane attribution**; a base-debt item, routed, NOT fixed here). **Leg 7 asserts the dependency SET BY NAME**, and it **FAILS** when a third direct dependency is present (planted-violation proof: `zod` planted → `RESULT: FAIL (D-1 DEPENDENCY-SET BREACH)`, `"ok": false`) | 2026-11-03 | ✅ registered |
+| `t1_bundle_guard` — the lane's **bundle guard** (B1 + B2 + B3 + B6), a **node tool in the lane's plan dir** (a production build is not a jest fixture; the phase's constraint forbids a new file under `test/packs/`) | `cd $WT && node .agents/shared/planning/metrics-unification/fe-t1-build/bundle-guard.js frontend/dist/frontend/browser <production-build-log>` | Reads the **named baseline artifact** `bundle-baseline.json` (B8 — it hard-codes no numeric baseline of its own): **(a)** the numeric `|Δ initial-total| ≤ 2 kB` vs the frozen **5,909,018 B**; **(b)** no `chart.js` marker in ANY of the 36 initial chunks; **(c)** the import **shape** + **site** (0 static sites; every site inside `src/app/pages/metrics/**`); **(d)** the `anyComponentStyle` warning **SET** (9 paths, captured mechanically) against the artifact — a set difference, never a count ceiling. **No daemon, no live contact.** GREEN at the phase-1 freeze (Δ = 0 B; 0 marker hits; 1 dynamic site; 0 added / 0 removed); **both** planted variants turn it RED — an **eager** import (Δ = +122,195 B ⇒ RED on B1 + B3) and a **static import inside the lazy metrics tree** (Δ = 0 B, 0 marker hits ⇒ RED on **B3 only** — the C-1 case). Its contract is pinned by `metrics.bundle-guard.spec.ts` (11 nodes) | 2026-11-03 | ✅ registered |
+
 ## Commission central-metrics-v1 — gate packs REGISTERED (2026-11-02, tester functional gate)
 
 > **Why this block exists.** The frozen query contract (`docs/architecture/metrics-query-contract.md`)

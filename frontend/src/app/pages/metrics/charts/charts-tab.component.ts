@@ -26,24 +26,13 @@ import {
   ChartSeries,
   SvgLineChartComponent,
 } from '../../../components/charts/svg-line-chart/svg-line-chart.component';
+import { chartSeriesColor } from '../../../components/charts/chart-theme';
 
 /** The rendering mode of one chart-primary series (from the catalog). */
 export interface MetricsChartSeriesSpec {
   readonly name: string;
   readonly chartRole: MetricsChartRole;
 }
-
-/** The house palette (`styles.scss` / the `svg-timeline` precedent). */
-const CHART_COLORS: readonly string[] = [
-  '#38bdf8',
-  '#a78bfa',
-  '#34d399',
-  '#fbbf24',
-  '#f472b6',
-  '#60a5fa',
-  '#fb923c',
-  '#2dd4bf',
-];
 
 /**
  * Charts tab — the windowed trend (`GET /api/metrics/series`).
@@ -226,7 +215,7 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
       return {
         id: labels ? `${entry.name}{${labels}}` : entry.name,
         label: labels ? `${entry.name} {${labels}}` : entry.name,
-        color: CHART_COLORS[index % CHART_COLORS.length],
+        color: chartSeriesColor(index),
         mode,
         points: entry.points.map((point) => ({ t: point[0] * 1000, v: point[1] })),
       };

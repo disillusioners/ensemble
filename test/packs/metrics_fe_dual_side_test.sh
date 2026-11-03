@@ -34,8 +34,10 @@
 #   6  ng build --configuration production   — the ONLY configuration that
 #      carries `budgets` + `outputHashing` (AM-23). Any budget WARN is a
 #      RECORDED FINDING, never an auto-fix and never a silent pass.
-#   7  package.json dependency diff — the D2 zero-dependency guard: the
-#      diff against BASE_REF must be EMPTY.
+#   7  package.json dependency diff — the D-1 EXPECTED-DEPENDENCY-SET
+#      guard: the dependency delta against BASE_REF must be EXACTLY
+#      `chart.js` (dependencies) + `jest-canvas-mock` (devDependencies),
+#      asserted BY NAME (never by a raw line count).
 #
 # FENCES: the FE has no daemon and no database; the pack never installs
 # dependencies (a missing node_modules is a LOUD FAIL, never a green
@@ -135,8 +137,10 @@ D1_FILES=(
   "src/app/pages/metrics/metrics.component.spec.ts"
   "src/app/pages/metrics/metrics-gear-menu.spec.ts"
   "src/app/pages/metrics/metrics.bindings.pins.spec.ts"
+  "src/app/pages/metrics/metrics.bundle-guard.spec.ts"
   "src/app/pages/metrics/overview/overview-tab.component.spec.ts"
   "src/app/pages/metrics/charts/charts-tab.component.spec.ts"
+  "src/app/pages/metrics/charts/chart-panel.component.spec.ts"
   "src/app/pages/metrics/families/families-tab.component.spec.ts"
 )
 
@@ -272,16 +276,83 @@ else
     echo "build_development / build_production: SKIPPED-BY-CONSTRUCTION (the lane's FE surface does not exist at the base)"
 fi
 
-# ─── Leg 7: the package.json dependency diff (the D2 guard) ───────────────
+# ─── Leg 7: the package.json dependency diff (the D-1 guard) ─────────────
+#
+# The D-1 AMENDMENT: the zero-diff guard is re-purposed as an
+# EXPECTED-DEPENDENCY-SET guard. The FE dependency delta must be EXACTLY
+# `chart.js` (dependencies) + `jest-canvas-mock` (devDependencies) — and
+# the assertion is BY NAME, never by a raw line count (a transitive bump
+# must not break it, and a THIRD direct dependency must break it).
+#
+# The BASE leg predates the lane and therefore carries NO added direct
+# dependency — its expected set is empty.
 echo ""
-echo "--- package_json_dependency_diff (D2 zero-dependency guard) ---"
+echo "--- package_json_dependency_diff (D-1 expected-dependency-set guard) ---"
 DEPDIFF_LOG="$LOG_DIR/package_json_diff.log"
 git -C "$PROJECT_DIR" diff "$BASE_REF" -- frontend/package.json > "$DEPDIFF_LOG" 2>&1 || true
 DEPDIFF_LINES=$(wc -l < "$DEPDIFF_LOG" | tr -d ' ')
 echo "package_json_diff_lines=$DEPDIFF_LINES"
-if [ "$DEPDIFF_LINES" != "0" ]; then
-    cat "$DEPDIFF_LOG"
-    echo "RESULT: FAIL (D2 BREACH — the FE gained a dependency)"
+cat "$DEPDIFF_LOG"
+
+if [ "$IS_HEAD_LEG" = 1 ]; then
+    EXPECTED_DEPS='["chart.js"]'
+    EXPECTED_DEV_DEPS='["jest-canvas-mock"]'
+else
+    EXPECTED_DEPS='[]'
+    EXPECTED_DEV_DEPS='[]'
+fi
+echo "expected_dependencies=$EXPECTED_DEPS"
+echo "expected_devDependencies=$EXPECTED_DEV_DEPS"
+
+DEPSET_EXIT=0
+DEPSET_RESULT=$(node -e '
+const { execFileSync } = require("child_process");
+const fs = require("fs");
+const [projectDir, baseRef, expectedDepsRaw, expectedDevDepsRaw] = process.argv.slice(1);
+const expectedDeps = JSON.parse(expectedDepsRaw);
+const expectedDevDeps = JSON.parse(expectedDevDepsRaw);
+const current = JSON.parse(fs.readFileSync(projectDir + "/frontend/package.json", "utf8"));
+let base = { dependencies: {}, devDependencies: {} };
+try {
+  base = JSON.parse(
+    execFileSync("git", ["-C", projectDir, "show", baseRef + ":frontend/package.json"], {
+      encoding: "utf8",
+    }),
+  );
+} catch (err) {
+  base = { dependencies: {}, devDependencies: {} };
+}
+const delta = (section) => {
+  const now = current[section] || {};
+  const was = base[section] || {};
+  return {
+    added: Object.keys(now).filter((name) => !(name in was)).sort(),
+    removed: Object.keys(was).filter((name) => !(name in now)).sort(),
+    changed: Object.keys(now).filter((name) => name in was && now[name] !== was[name]).sort(),
+  };
+};
+const deps = delta("dependencies");
+const devDeps = delta("devDependencies");
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const ok =
+  same(deps.added, expectedDeps) &&
+  same(devDeps.added, expectedDevDeps) &&
+  deps.removed.length === 0 &&
+  devDeps.removed.length === 0 &&
+  deps.changed.length === 0 &&
+  devDeps.changed.length === 0;
+console.log(
+  JSON.stringify(
+    { dependencies: deps, devDependencies: devDeps, expected: { dependencies: expectedDeps, devDependencies: expectedDevDeps }, ok },
+    null,
+    2,
+  ),
+);
+process.exit(ok ? 0 : 1);
+' "$PROJECT_DIR" "$BASE_REF" "$EXPECTED_DEPS" "$EXPECTED_DEV_DEPS") || DEPSET_EXIT=$?
+echo "package_json_dependency_set=$DEPSET_RESULT"
+if [ "$DEPSET_EXIT" != "0" ]; then
+    echo "RESULT: FAIL (D-1 DEPENDENCY-SET BREACH — the FE dependency delta is not exactly the expected set)"
     FAILURES=$((FAILURES + 1))
 fi
 

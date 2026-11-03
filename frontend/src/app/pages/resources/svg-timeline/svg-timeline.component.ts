@@ -12,6 +12,7 @@ import {
   HistoryPoint,
   parseNaiveUtc,
 } from '../../../models/resources.models';
+import { CHART_SEVERITY_COLORS, chartSeriesColor } from '../../../components/charts/chart-theme';
 
 /**
  * Dependency-free inline SVG timeline primitive (D4 — no chart library
@@ -54,11 +55,11 @@ export const DEFAULT_TIMELINE_SERIES: readonly TimelineSeriesKey[] = [
 ];
 
 export const TIMELINE_SERIES_DEFS: readonly TimelineSeriesDef[] = [
-  { key: 'daemon_rss_mb', label: 'Daemon RSS (MB)', color: '#38bdf8' },
-  { key: 'cgroup_mem_mb', label: 'Cgroup memory (MB)', color: '#a78bfa' },
-  { key: 'daemon_cpu', label: 'Daemon CPU (%)', color: '#34d399' },
-  { key: 'threads', label: 'Threads', color: '#fbbf24' },
-  { key: 'instances_active', label: 'Active instances', color: '#f472b6' },
+  { key: 'daemon_rss_mb', label: 'Daemon RSS (MB)', color: chartSeriesColor(0) },
+  { key: 'cgroup_mem_mb', label: 'Cgroup memory (MB)', color: chartSeriesColor(1) },
+  { key: 'daemon_cpu', label: 'Daemon CPU (%)', color: chartSeriesColor(2) },
+  { key: 'threads', label: 'Threads', color: chartSeriesColor(3) },
+  { key: 'instances_active', label: 'Active instances', color: chartSeriesColor(4) },
 ];
 
 // ── Geometry (fixed viewBox; text never stretched) ──────────────────
@@ -166,11 +167,8 @@ export function formatUtcClock(ms: number): string {
   return new Date(ms).toISOString().slice(11, 16);
 }
 
-const SEVERITY_COLORS: Record<AnomalySeverity, string> = {
-  low: '#38bdf8',
-  medium: '#f59e0b',
-  high: '#ef4444',
-};
+/** The severity palette — the house theme is the single source. */
+const SEVERITY_COLORS: Record<AnomalySeverity, string> = CHART_SEVERITY_COLORS;
 
 @Component({
   selector: 'app-svg-timeline',

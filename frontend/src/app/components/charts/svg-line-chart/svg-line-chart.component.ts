@@ -5,6 +5,7 @@ import {
   input,
 } from '@angular/core';
 import { MetricsChartRole } from '../../../models/metrics.model';
+import { CHART_EMPTY_VALUE } from '../chart-theme';
 
 /**
  * Dependency-free inline SVG chart primitive (P5 task 5.3 · D2 — the
@@ -249,7 +250,7 @@ export function chartUtcTicks(
 /** UTC `HH:MM` label for an epoch-ms tick (never local time). */
 export function formatChartUtc(ms: number): string {
   if (!Number.isFinite(ms)) {
-    return '—';
+    return CHART_EMPTY_VALUE;
   }
   return new Date(ms).toISOString().slice(11, 16);
 }
@@ -257,7 +258,7 @@ export function formatChartUtc(ms: number): string {
 /** A compact value label (integers stay integers). */
 export function formatChartValue(value: number): string {
   if (!Number.isFinite(value)) {
-    return '—';
+    return CHART_EMPTY_VALUE;
   }
   if (Number.isInteger(value)) {
     return String(value);
