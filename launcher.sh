@@ -1079,6 +1079,30 @@ _js_http_request() {
 _js_serving_probe() {
     local port="$1" target="$2"
     local budget="${SWEEP_SERVING_PROBE_BUDGET_S}"
+    # H5 (cycle-2 tidier, COUNCIL-CORRECTED shape) — validate the knob
+    # BEFORE the arithmetic below (`deadline=$(( $(_now) + budget ))`):
+    # a non-numeric value ("0.5", "5x", a stray empty string) is a FATAL
+    # arithmetic-syntax error inside $(( )) — it kills the parent shell
+    # (the systemd ExecStart, pre-daemon) or, inside the F11 subshell
+    # under `set -u`, yields an EMPTY probe class ⇒ rung-0's `*` case
+    # executes the rollback chain WITHOUT any serving observation — the
+    # F3 punishment class. House idiom: the numeric-only case guard of
+    # _js_sweep_probe_port above. Invalid ⇒ loud WARN + the documented
+    # default (5s). Valid-but-out-of-range ⇒ clamped into [1, 300] (a
+    # huge integer is a ~31-year probe budget — same envelope).
+    case "$budget" in
+        ''|*[!0-9]*)
+            _log "WARN: journal sweep: SWEEP_SERVING_PROBE_BUDGET_S='${SWEEP_SERVING_PROBE_BUDGET_S}' is not a plain integer — using the default (5s); fix the .env"
+            budget=5
+            ;;
+    esac
+    if [ "$budget" -lt 1 ]; then
+        _log "WARN: journal sweep: SWEEP_SERVING_PROBE_BUDGET_S=${SWEEP_SERVING_PROBE_BUDGET_S} is below the floor — clamping to 1s; fix the .env"
+        budget=1
+    elif [ "$budget" -gt 300 ]; then
+        _log "WARN: journal sweep: SWEEP_SERVING_PROBE_BUDGET_S=${SWEEP_SERVING_PROBE_BUDGET_S} exceeds the 300s cap — clamping to 300s; fix the .env"
+        budget=300
+    fi
     local v_target deadline status body version rstatus
     v_target="$(_js_serving_version_strip "$target")"
     if [ -z "$v_target" ]; then
@@ -1191,6 +1215,14 @@ _js_quarantine_remove() {
     inner="${inner%\]}"
     local old_ifs="$IFS"
     IFS=','
+    # M7 (cycle-2 tidier) — noglob around this word-split: the unquoted
+    # $inner relies on the IFS=',' split, and an unquoted expansion ALSO
+    # glob-expands — a quarantined[] entry containing glob characters
+    # (*, ?, [) would be rewritten against the working directory's file
+    # names, silently corrupting the array. `set -f` disables pathname
+    # expansion for exactly this loop (quoting $inner would ALSO disable
+    # the comma-split the loop exists for).
+    set -f
     for item in $inner; do
         item="${item//\"/}"
         item="${item// /}"
@@ -1203,6 +1235,8 @@ _js_quarantine_remove() {
             out="$out, \"$item\""
         fi
     done
+    # M7 — restore pathname expansion (paired with the set -f above).
+    set +f
     IFS="$old_ifs"
     _js_journal_update "$jp" "quarantined" "[$out]"
 }
@@ -1577,10 +1611,23 @@ _js_serving_defer() {
 
 # _js_serving_commit_close <install_dir> <journal> <target> <prev>
 # <displaced> <run_id> <age> <owner> <probe_detail> <reason>
-# The serving-green COMMIT-CLOSE — AM-P2-1's HISTORY-BEFORE-CLOSE order
-# (NOT the old close-before-history order at the old launcher.sh:1108-1127
-# — mirroring that would defeat the journal check the crash-prefix pin
-# relies on):
+# The serving-green COMMIT-CLOSE — AM-P2-1's ordering guarantee: the
+# history rows land BEFORE the txn closes (step 3 precedes step 4 — the
+# old launcher.sh:1108-1127 order closed the txn first and appended the
+# history row after, so a crash in that gap left a CLOSED txn with NO
+# history row: an undiscoverable commit). These writes are NOT
+# transactional — five independent atomic file rewrites — and a
+# mid-sequence crash leaves, by crash point:
+#   - after step 1 or 2 — current/previous updated, NO history row, txn
+#     OPEN: the next sweep re-evaluates and re-runs this handler; steps
+#     1-2 are idempotent rewrites of the same values (the P-19 prefix A
+#     shape — converges to the commit, never a rollback);
+#   - after step 3 — history row landed, txn OPEN (the P-19 prefix B
+#     shape): the next sweep converges the same way; the row is exactly
+#     the evidence the crash-prefix pin asserts on;
+#   - after step 4 — txn CLOSED, quarantined[] may still name the
+#     target: hygiene only — the clearance EVENT already landed, and the
+#     amended shell gate accepts the event, not the array.
 #   1. current  → target
 #   2. previous → in_flight.displaced_version (absent/null ⇒ HALT-FOR-HUMAN:
 #      the txn is old-format/ambiguous — no silent commit)
@@ -1604,6 +1651,32 @@ _js_serving_commit_close() {
             "sweep: stale flipped txn (target=$target, run_id=$run_id) has no in_flight.displaced_version (old-format txn) — halt-for-human, txn left in place" \
             || true
         _log "HALT: journal sweep: serving-green commit refused — flipped txn (target=$target) has no in_flight.displaced_version (old-format) — halt-for-human"
+        return 1
+    fi
+    # M6 (cycle-2 tidier, A6 parity, COUNCIL-CORRECTED scope) — confirm
+    # the fields this handler's FIRST TWO writes mutate EXIST in the
+    # journal BEFORE the first write (the daemon twin's
+    # journal_field_missing arm checks current/previous ONLY; the
+    # quarantined[] rewrite below is opportunistic and guarded — the
+    # daemon completes a commit without requiring the field, and the
+    # launcher twin must not refuse a commit the daemon would complete).
+    # `_js_journal_update` REFUSES an absent field (returns 1), so a
+    # journal missing `previous` would take the `current` write and then
+    # fail mid-sequence — a half-applied commit on a malformed journal.
+    # The pre-check refuses the whole commit, loudly, with ZERO writes;
+    # the txn stays open and the next sweep retries. The probe mirrors
+    # `_js_journal_update`'s OWN existence gate (the same substring
+    # test), so it can only refuse what the writer itself would refuse.
+    local pre_json pre_missing="" mfield
+    pre_json="$(_js_journal_read "$journal")" || return 1
+    for mfield in current previous; do
+        case "$pre_json" in
+            *"\"$mfield\""*) ;;
+            *) pre_missing="$pre_missing $mfield" ;;
+        esac
+    done
+    if [ -n "$pre_missing" ]; then
+        _log "WARN: journal sweep: serving-green commit refused — the journal is missing required field(s):$pre_missing (schema drift — a half-applied commit is worse than a defer); the txn is left untouched, boot proceeds on current"
         return 1
     fi
     _js_journal_update "$journal" "current" "\"$target\"" \
@@ -1894,8 +1967,23 @@ _js_sweep_flipped_disposition() {
     run_id="$(_js_serving_txn_identity "$inf" "$target")"
     # ── the launcher-side size guard (AM-P2-5) ──
     jsize="${#json}"
-    if [ "$jsize" -ge "$SWEEP_JOURNAL_SIZE_GUARD_BYTES" ] 2>/dev/null; then
-        _log "WARN: journal sweep: journal is ${jsize}B ≥ ${SWEEP_JOURNAL_SIZE_GUARD_BYTES}B (the launcher-side size guard) — CONSERVATIVE DEFER (never a rollback in this regime; the daemon-side closer parses in-process and is the only automatic rollback path)"
+    # M1 (cycle-2 tidier, COUNCIL-CORRECTED shape) — validate the knob
+    # LOUDLY before the test, and on invalid SUBSTITUTE THE DOCUMENTED
+    # DEFAULT (98304), never skip: the pre-fix `[ ... ] 2>/dev/null`
+    # silenced the whole "integer expression expected" error class, and a
+    # skip-on-invalid shape would DISARM the guard (fail-open — the
+    # never-green protection must stay armed under a poisoned knob; the
+    # ratified composition requirement). With the value substituted the
+    # test below can no longer error, so the silencer is gone too.
+    local jguard="${SWEEP_JOURNAL_SIZE_GUARD_BYTES}"
+    case "$jguard" in
+        ''|*[!0-9]*)
+            _log "WARN: journal sweep: SWEEP_JOURNAL_SIZE_GUARD_BYTES='${SWEEP_JOURNAL_SIZE_GUARD_BYTES}' is not a plain integer — substituting the documented default (98304); fix the .env"
+            jguard=98304
+            ;;
+    esac
+    if [ "$jsize" -ge "$jguard" ]; then
+        _log "WARN: journal sweep: journal is ${jsize}B ≥ ${jguard}B (the launcher-side size guard) — CONSERVATIVE DEFER (never a rollback in this regime; the daemon-side closer parses in-process and is the only automatic rollback path)"
         _js_serving_defer "$journal" "$target" "$run_id" "$age" \
             "journal-size-guard" \
             "the journal exceeds the launcher-side size guard — the launcher never rolls back in this regime"
@@ -2092,15 +2180,30 @@ _js_sweep_flipped_disposition() {
     total=$(( absent + mismatch + unready ))
     _js_defer_counter_write "$counter_path" "$absent" "$mismatch" "$unready" "$broken" \
         || _log "WARN: journal sweep: defer counter write FAILED ($counter_path) — the tally restarts (bounded, not unbounded)"
-    if [ "$total" -ge "$SWEEP_DEFER_CEILING" ]; then
-        _log "journal sweep: the BOUNDED ABSENT-CEILING reached (qualifying observations=$total ≥ ceiling=$SWEEP_DEFER_CEILING; owner-dead ∧ intent_flip ∧ never-green-observed) — the existing auto-rollback chain fires"
+    # M1 (cycle-2 tidier, COUNCIL-CORRECTED shape) — validate the ceiling
+    # knob LOUDLY before the test, and on invalid SUBSTITUTE THE
+    # DOCUMENTED DEFAULT (3), never skip: a non-numeric
+    # SWEEP_DEFER_CEILING made bare `[ -ge ]` print a raw "integer
+    # expression expected" shell error every sweep AND silently never
+    # fire the ceiling (unbounded defers — the W5 shape); a skip-on-
+    # invalid shape would leave the never-green bound DISARMED (fail-open
+    # — violates the ratified composition requirement).
+    local ceiling="${SWEEP_DEFER_CEILING}"
+    case "$ceiling" in
+        ''|*[!0-9]*)
+            _log "WARN: journal sweep: SWEEP_DEFER_CEILING='${SWEEP_DEFER_CEILING}' is not a plain integer — substituting the documented default (3); fix the .env"
+            ceiling=3
+            ;;
+    esac
+    if [ "$total" -ge "$ceiling" ]; then
+        _log "journal sweep: the BOUNDED ABSENT-CEILING reached (qualifying observations=$total ≥ ceiling=$ceiling; owner-dead ∧ intent_flip ∧ never-green-observed) — the existing auto-rollback chain fires"
         _js_sweep_rollback_chain "$install_dir" "$journal" "$json" "$inf" "$target" \
             "$prev" "$age" "$owner" "$kind" "absent-ceiling" "$lock_held"
         return 0
     fi
     _js_serving_defer "$journal" "$target" "$run_id" "$age" \
         "ambiguous-$probe_class" \
-        "qualifying observations=$total of ceiling=$SWEEP_DEFER_CEILING — deferred; the rollback fires only when the ceiling predicate holds"
+        "qualifying observations=$total of ceiling=$ceiling — deferred; the rollback fires only when the ceiling predicate holds"
     _js_sweep_release "$install_dir" "$lock_held"
     return 0
 }

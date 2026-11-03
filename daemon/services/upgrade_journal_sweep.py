@@ -326,6 +326,13 @@ class UpgradeJournalSweepService:
         self._closer_grace_key: str | None = None
         self._closer_grace_armed_at: datetime | None = None
         self._closer_grace_clamp_logged: bool = False
+        # M5 (cycle-2 tidier, COUNCIL-CORRECTED shape) — STATE latch for
+        # the closer's per-tick WARNINGs: maps condition-key → "currently
+        # failing (already WARNED)". A TRANSITION into failure WARNs
+        # exactly once; UNCHANGED repeats drop to DEBUG; a recovery
+        # silently clears the key so the NEXT episode WARNs again — see
+        # _closer_warn_transition.
+        self._closer_warn_active: dict[str, bool] = {}
         self._reaper_queue: asyncio.Queue[ReaperJob] = asyncio.Queue()
         self._sweep_task: asyncio.Task[None] | None = None
         self._reaper_task: asyncio.Task[None] | None = None
@@ -2088,6 +2095,36 @@ class UpgradeJournalSweepService:
         ``rollback_requested`` (the stale txn is left untouched)."""
         return os.environ.get(SERVING_GREEN_CLOSER_ENV, "1") != "0"
 
+    def _closer_warn_transition(
+        self, key: str, active: bool, msg: str, *args: Any
+    ) -> None:
+        """M5 (cycle-2 tidier, COUNCIL-CORRECTED shape) — STATE-latched
+        WARNING for the closer's per-tick conditions.
+
+        A persistent closer condition re-fires every ~90s tick. The
+        TRANSITION into failure logs at WARNING exactly ONCE per episode
+        (the operator backstop); UNCHANGED-state repeats drop to DEBUG
+        (a WARNING per tick is the A5 noise class that buries the
+        operator backstop under identical lines). A recovery
+        (``active=False``) silently clears the latch so the NEXT episode
+        — e.g. the journal healing and tearing again, or a verdict
+        flipping unhealthy↔healthy — WARNs again. Keys carry the episode
+        scope: txn-scoped conditions key by run_id (a NEW txn is a NEW
+        episode); sweep-global conditions (journal unreadable, provider
+        failed, tick failed) clear on their success paths. The journal
+        is never mutated for observability."""
+        if active:
+            if self._closer_warn_active.get(key):
+                logger.debug(
+                    msg + " [unchanged — already WARNED for this episode]",
+                    *args,
+                )
+                return
+            self._closer_warn_active[key] = True
+            logger.warning(msg, *args)
+        else:
+            self._closer_warn_active.pop(key, None)
+
     def _closer_boot_grace_s(self) -> int:
         """The closer's effective boot-grace horizon (seconds).
 
@@ -2116,7 +2153,12 @@ class UpgradeJournalSweepService:
         raw = os.environ.get(UPGRADE_CLOSER_BOOT_GRACE_ENV, "")
         try:
             value = int(float(raw))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # M2 (cycle-2 tidier) — OverflowError joins the catch:
+            # int(float("inf")) overflows (a poisoned env value must
+            # never raise past this parse — pre-fix it killed the closer
+            # EVERY tick, bricking the janitor lane); int(float("nan"))
+            # is already a ValueError. Degradation: the default floor.
             value = UPGRADE_CLOSER_BOOT_GRACE_S
         if value < UPGRADE_CLOSER_BOOT_GRACE_S:
             value = UPGRADE_CLOSER_BOOT_GRACE_S
@@ -2150,7 +2192,9 @@ class UpgradeJournalSweepService:
         raw = os.environ.get(HANDBACK_VERIFY_BUDGET_ENV, "")
         try:
             value = int(float(raw))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # M2 — same bound/guard as the boot-grace parse:
+            # int(float("inf")) overflows; the default applies (0).
             return 0
         return value if value > 0 else 0
 
@@ -2335,9 +2379,15 @@ class UpgradeJournalSweepService:
             return result
         try:
             data = uj.journal_read(install_dir)       # P2
+            # M5 state-latch recovery: a readable journal re-arms the
+            # unreadable WARNING for the NEXT episode.
+            self._closer_warn_transition(
+                "closer-journal-unreadable", False, ""
+            )
         except Exception as read_err:  # noqa: BLE001 — janitor, never gates
             result["reason"] = "journal_unreadable"
-            logger.warning(
+            self._closer_warn_transition(
+                "closer-journal-unreadable", True,
                 "UpgradeJournalSweepService: serving-green closer journal "
                 "read FAILED (%s: %s) — no action this tick",
                 type(read_err).__name__, read_err,
@@ -2412,13 +2462,20 @@ class UpgradeJournalSweepService:
             try:
                 composite = provider()
             except Exception as provider_err:  # noqa: BLE001
-                logger.warning(
+                self._closer_warn_transition(
+                    "closer-provider-failed", True,
                     "UpgradeJournalSweepService: serving-green closer "
                     "readiness_provider FAILED (%s: %s) — treating the "
                     "composite as missing (DEFER, never a verdict)",
                     type(provider_err).__name__, provider_err,
                 )
                 composite = None
+        if composite is not None:
+            # M5 state-latch recovery: a healthy provider read re-arms
+            # the provider-failed WARNING for the NEXT episode.
+            self._closer_warn_transition(
+                "closer-provider-failed", False, ""
+            )
         if composite is None:
             # composite-missing is a CANNOT-TELL, not an unhealthy verdict
             # (AM-P2-8) — the composite is None until the first readiness
@@ -2429,8 +2486,22 @@ class UpgradeJournalSweepService:
             return result
         try:
             from daemon import __version__ as _daemon_version
-        except Exception:  # noqa: BLE001 — fail-closed to "no version"
+            _version_import_failed = False
+        except Exception:  # noqa: BLE001 — CANNOT-TELL, never a verdict
+            # M3 (cycle-2 tidier) — an INTERNAL import failure is NOT a
+            # release fault: pre-fix the empty _daemon_version made
+            # version_match false ⇒ "version-mismatch" ⇒ a rollback
+            # REQUEST — punishing the release for OUR import machinery,
+            # exactly the punishment class this lane exists to end. The
+            # composite-missing arm above is the mirror: DEFER (result
+            # fields; no verdict, no request) — the existing defer
+            # semantics carry it and the next tick retries.
             _daemon_version = ""
+            _version_import_failed = True
+        if _version_import_failed:
+            result["action"] = "deferred"
+            result["reason"] = "version-import-failed"
+            return result
         v_target = target[1:] if target.startswith("v") else target
         version_match = bool(_daemon_version) and _daemon_version == v_target
         try:
@@ -2569,7 +2640,8 @@ class UpgradeJournalSweepService:
                 )
                 result["action"] = "halted"
                 result["reason"] = "no_displaced_version"
-                logger.warning(
+                self._closer_warn_transition(
+                    f"closer-no-displaced-version:{run_id}", True,
                     "UpgradeJournalSweepService: serving-green closer — "
                     "stale flipped txn target=%s has no displaced_version — "
                     "halt-for-human, txn left open", target,
@@ -2589,7 +2661,8 @@ class UpgradeJournalSweepService:
             if missing_fields:
                 result["action"] = "deferred"
                 result["reason"] = "journal_field_missing"
-                logger.warning(
+                self._closer_warn_transition(
+                    f"closer-field-missing:{run_id}", True,
                     "UpgradeJournalSweepService: serving-green closer — "
                     "journal is missing required field(s) %s — refusing to "
                     "commit (a half-applied commit is worse than a defer); "
@@ -2627,13 +2700,22 @@ class UpgradeJournalSweepService:
             except (uj.JournalTorn, OSError, KeyError) as write_err:
                 result["action"] = "deferred"
                 result["reason"] = "journal_write_failed"
-                logger.warning(
+                self._closer_warn_transition(
+                    f"closer-commit-write-failed:{run_id}", True,
                     "UpgradeJournalSweepService: serving-green closer "
                     "commit-close write FAILED (%s: %s) — the txn is left "
                     "as-is; the next tick retries",
                     type(write_err).__name__, write_err,
                 )
                 return result
+            # M5 state-latch recovery: a successful commit-close
+            # re-arms the commit-arm WARNINGs for the NEXT txn episode.
+            self._closer_warn_transition(
+                f"closer-commit-write-failed:{run_id}", False, ""
+            )
+            self._closer_warn_transition(
+                f"closer-field-missing:{run_id}", False, ""
+            )
             result["action"] = "committed"
             result["reason"] = "serving_green"
             logger.info(
@@ -2740,13 +2822,19 @@ class UpgradeJournalSweepService:
             except (uj.JournalTorn, OSError, KeyError) as write_err:
                 result["action"] = "deferred"
                 result["reason"] = "journal_write_failed"
-                logger.warning(
+                self._closer_warn_transition(
+                    f"closer-verdict-write-failed:{run_id}", True,
                     "UpgradeJournalSweepService: serving-green closer "
                     "unhealthy-verdict write FAILED (%s: %s) — next tick "
                     "retries",
                     type(write_err).__name__, write_err,
                 )
                 return result
+            # M5 state-latch recovery: a successful verdict write
+            # re-arms the write-failed WARNING for the NEXT episode.
+            self._closer_warn_transition(
+                f"closer-verdict-write-failed:{run_id}", False, ""
+            )
             result["action"] = "unhealthy"
             # A5 (code-council advisory 5) — log the verdict ONCE: the
             # journal writes above are WRITE-ONCE per (run_id, target), so
@@ -2832,6 +2920,9 @@ class UpgradeJournalSweepService:
         # them, so the closer does not touch them at all.
         try:
             closer = await self.sweep_serving_green_closer()
+            # M5 state-latch recovery: a clean tick re-arms the
+            # tick-failed WARNING for the NEXT episode.
+            self._closer_warn_transition("closer-tick-failed", False, "")
             result["closer"] = closer
             if closer.get("action") in ("committed", "unhealthy", "halted"):
                 logger.info(
@@ -2839,7 +2930,8 @@ class UpgradeJournalSweepService:
                     closer,
                 )
         except Exception as closer_err:  # noqa: BLE001 — never wedge boot
-            logger.warning(
+            self._closer_warn_transition(
+                "closer-tick-failed", True,
                 "UpgradeJournalSweepService: serving-green closer tick "
                 "failed: %s: %s — next tick will retry",
                 type(closer_err).__name__, closer_err,

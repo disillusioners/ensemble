@@ -840,14 +840,23 @@ P31_BASELINE_WGET=0
 P31_BASELINE_NC=0
 P31_BASELINE_LSOF=0
 P31_BASELINE_PY=0
+# CYCLE-2 (council correction #8): `eval` joins the token list — the
+# codebase is eval-conscious (launcher.sh's .env parser is deliberately
+# "NO eval") and this class must never silently regress. BASELINE = 2:
+# the ONE council-adjudicated SAFE-AS-IS site (launcher.sh:1015-1016,
+# _js_http_request's eval tail — interpolates only a static variable
+# NAME; adversary-listener-proven; H4 verdict). The pin therefore
+# asserts ZERO NEW eval sites, not zero total.
+P31_BASELINE_EVAL=2
 P31_STRIPPED="$(sed 's/#.*$//' "$REPO_ROOT/launcher.sh")"
-for tok in curl wget nc lsof python3; do
+for tok in curl wget nc lsof python3 eval; do
     case "$tok" in
         curl) base=$P31_BASELINE_CURL ;;
         wget) base=$P31_BASELINE_WGET ;;
         nc) base=$P31_BASELINE_NC ;;
         lsof) base=$P31_BASELINE_LSOF ;;
         python3) base=$P31_BASELINE_PY ;;
+        eval) base=$P31_BASELINE_EVAL ;;
     esac
     n="$(printf '%s\n' "$P31_STRIPPED" | grep -cE "(^|[^A-Za-z0-9_./-])${tok}([^A-Za-z0-9_.-]|$)" || true)"
     if [ "$n" -gt "$base" ]; then
@@ -1215,6 +1224,59 @@ section "P-9 — the adopt-path polarity (the promote-entry mirror)"
 assert_contains "P-9 the adopt path has the serving-green branch" "_sp_green" "$(cat "$REPO_ROOT/scripts/upgrade/lib.sh")"
 assert_contains "P-9 the adopt path's GREEN arm is gated on intent_flip" 'journal_history_has_intent_flip "$target"' "$(cat "$REPO_ROOT/scripts/upgrade/lib.sh")"
 assert_contains "P-9 the adopt path commits the serving-green txn" 'journal_history_append serving_green_commit' "$(cat "$REPO_ROOT/scripts/upgrade/lib.sh")"
+
+# ===========================================================================
+section "M7 — glob-shaped quarantined[] entries round-trip byte-identically"
+
+# CYCLE-2 M7 (council correction #6, premise-corrected): the quarantined[]
+# rewrite (`_js_quarantine_remove`) is NOT a deletion path — it rewrites
+# one JSON array field — but an unquoted `$inner` in its IFS=',' split
+# ALSO glob-expands: a version entry containing glob characters (*, ?, [)
+# would be rewritten against the working directory's FILE NAMES,
+# corrupting the array. The `set -f` (noglob) fold preserves the split
+# while killing the expansion. THIS LEG makes the hazard REAL: decoy
+# files matching the glob pattern sit in the sweep's CWD — pre-fix the
+# array would rewrite into the decoy names.
+M7_FIX="$(mktemp -d -t m7.XXXXXX)"; _register_fixture "$M7_FIX"
+make_install_fixture "$M7_FIX" "$TARGET" "$PREV" "true"
+# quar: a glob-shaped entry + the target (the commit-close must REMOVE
+# the target and PRESERVE the glob entry byte-identically)
+seed_journal "$M7_FIX" "$TARGET" "$PREV" "true" "1" "" '["v9.9.9-test*","v9.9.9-test-target"]'
+ln -sfn "releases/$TARGET" "$M7_FIX/current"
+printf 'PORT=19999\n' > "$M7_FIX/.env"
+# the decoys: bare `v9.9.9-test*` would expand into these names
+touch "$M7_FIX/v9.9.9-testA" "$M7_FIX/v9.9.9-testB"
+M7_PORT="$(start_listener green 9.9.9-test-target)"
+(
+    cd "$M7_FIX" || exit 1
+    INSTALL_DIR="$M7_FIX" PORT="$M7_PORT" \
+    SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+    SWEEP_DEFER_CEILING=3 \
+    bash -c '
+        . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+        _journal_sweep "$INSTALL_DIR"
+    ' >/dev/null 2>&1
+)
+M7_JOURNAL="$(cat "$M7_FIX/releases/state.json")"
+assert_contains "M7 the commit-close fired (the leg exercised the rewrite)" '"event":"serving_green_commit"' "$M7_JOURNAL"
+M7_QUAR="$(printf '%s' "$M7_JOURNAL" | grep -oE '"quarantined": ?\[[^]]*\]')"
+case "$M7_QUAR" in
+    *'"v9.9.9-test*"'*)
+        _pass "M7 the glob entry survived byte-identically (no expansion)"
+        ;;
+    *)
+        _fail "M7 the glob entry survived byte-identically (no expansion)" '"v9.9.9-test*"' "$M7_QUAR"
+        ;;
+esac
+case "$M7_QUAR" in
+    *v9.9.9-testA*|*v9.9.9-testB*)
+        _fail "M7 no decoy file name leaked into quarantined[]" "no decoys" "$M7_QUAR"
+        ;;
+    *)
+        _pass "M7 no decoy file name leaked into quarantined[]"
+        ;;
+esac
+rm -rf "$M7_FIX"; cleanup_listeners
 
 # ===========================================================================
 section "summary"

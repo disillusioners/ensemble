@@ -951,6 +951,95 @@ def test_a5_the_unhealthy_verdict_logs_once(
     assert len(debugs) == 1, [r.getMessage() for r in caplog.records]
 
 
+# ── CYCLE-2 M3 (council-corrected semantics) — the version twin ────────────
+#
+# The twin asymmetry: the LAUNCHER already treats an absent livez version
+# as CANNOT-TELL (defer, never punitive). The daemon must match: an EMPTY
+# version (import machinery failure — an INTERNAL fault, not a release
+# fault) DEFERS with a distinct reason BEFORE any verdict; a GENUINE
+# wrong version (non-empty, != target) still classifies mismatch and,
+# after grace, takes the request path (never-green armed).
+
+
+def test_m3_empty_version_defers_before_any_verdict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """IMPORT failure (= empty version) must DEFER with the DISTINCT
+    reason ``version-import-failed`` BEFORE any verdict/request — never
+    the punishment class (pre-fix it flowed into version-mismatch => a
+    rollback request for OUR import machinery)."""
+    import builtins
+
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    # healthy composite: WITHOUT the import failure this txn COMMITS
+    # (green) — the pin proves the import fault alone re-routes to DEFER.
+    svc = _service(install, composite=_composite(ready=True))
+
+    real_import = builtins.__import__
+
+    def poisoned_import(name, *args, **kwargs):
+        if name == "daemon":
+            raise ImportError("simulated import machinery failure (M3 pin)")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", poisoned_import)
+    result = _run(svc)
+    monkeypatch.setattr(builtins, "__import__", real_import)
+
+    assert result["action"] == "deferred", result
+    assert result["reason"] == "version-import-failed", result
+    after = _journal(install)
+    events = [e["event"] for e in after["history"]]
+    assert "serving_unhealthy" not in events, events
+    assert "rollback_requested" not in events, events
+    assert "serving_green_commit" not in events, events
+    # the txn stays OPEN and current is UNTOUCHED (zero writes)
+    assert after["in_flight"] is not None
+    assert after["current"] == PREV
+
+
+def test_m3_wrong_version_takes_the_mismatch_request_path(
+    tmp_path: Path,
+) -> None:
+    """A GENUINE wrong version (non-empty, != target) with an otherwise
+    HEALTHY composite still classifies mismatch => after the boot-grace
+    => the verdict + rollback REQUEST path (never-green stays armed) —
+    the mirror direction of the empty-version defer."""
+    import time
+
+    wrong_target = "v0.0.0-genuinely-wrong"
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    # point the OPEN TXN at a genuinely-wrong version (the health read
+    # then sees daemon.__version__ != the v-stripped target)
+    _data = json.loads(state.read_text(encoding="utf-8"))
+    _data["in_flight"]["target"] = wrong_target
+    state.write_text(json.dumps(_data, separators=(",", ":")), encoding="utf-8")
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {wrong_target} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=True, grace_active=False))
+    _run(svc)          # arms the 1s boot-grace
+    time.sleep(1.05)
+    result = _run(svc)  # the first VERDICT-eligible tick
+
+    assert result["action"] == "unhealthy", result
+    assert result["reason"] == "version-mismatch", result
+    events = [e["event"] for e in _journal(install)["history"]]
+    assert "serving_unhealthy" in events, events
+    assert "rollback_requested" in events, events
+    # and the never-green protection STAYS ARMED: no commit row
+    assert "serving_green_commit" not in events, events
+
+
 def test_adv1_daemonconfig_port_premise_init_source_beats_env(monkeypatch) -> None:
     """Council ADV-1 (delta re-review, final fold) — the F9 port premise:
     pydantic gives the INIT (config.yaml) source priority over the

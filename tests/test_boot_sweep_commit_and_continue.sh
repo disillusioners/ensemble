@@ -130,6 +130,30 @@ print(s.getsockname()[1])
 s.close()'
 }
 
+# _wait_listener <port> [deadline_s] — DETERMINISTIC poll-for-listener
+# (cycle-2 tidier fold): the fixed `sleep 0.8` settle raced the helper's
+# bind — on a slow host the probe ran BEFORE the listener existed and the
+# C5a/C5b disposition asserts went flaky for the wrong reason. Poll the
+# /dev/tcp connect (bash-native, the same fd-open idiom the launcher's
+# own probe uses) at 0.1s intervals until the socket accepts or the
+# deadline (default 10s — two orders past any observed bind latency)
+# expires. On expiry the leg is NOT skipped: the probe then runs against
+# a genuinely absent listener and the disposition asserts fail LOUDLY
+# (a real defect), never silently.
+_wait_listener() {
+    local port="$1" deadline="${2:-10}" waited=0
+    while [ "$waited" -lt "$(( deadline * 10 ))" ]; do
+        if ( exec 3<>"/dev/tcp/127.0.0.1/$port" ) 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+        waited=$(( waited + 1 ))
+    done
+    printf 'listener on port %s never accepted within %ss\n' \
+        "$port" "$deadline" >&2
+    return 1
+}
+
 # Run the sweep in isolation. Sourcing launcher.sh inside a subshell with
 # INSTALL_DIR pointing at our fixture gives us access to _journal_sweep
 # + the full _js_* helper family without spawning a daemon.
@@ -329,7 +353,7 @@ python3 "$REPO_ROOT/tests/helpers/serving_probe_fake_listener.py" \
     --port "$C5A_PORT" --mode green --version "9.9.9-test-target" \
     >/dev/null 2>&1 &
 C5A_PID=$!
-sleep 0.8
+_wait_listener "$C5A_PORT"
 C5A_OUT="$(INSTALL_DIR="$C5A_FIX" PORT="$C5A_PORT" bash -c '
     . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
     _journal_sweep "$INSTALL_DIR"
@@ -361,7 +385,7 @@ python3 "$REPO_ROOT/tests/helpers/serving_probe_fake_listener.py" \
     --port "$C5B_PORT" --mode livez-non200 --version "9.9.9-test-target" \
     >/dev/null 2>&1 &
 C5B_PID=$!
-sleep 0.8
+_wait_listener "$C5B_PORT"
 C5B_OUT="$(INSTALL_DIR="$C5B_FIX" PORT="$C5B_PORT" bash -c '
     . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
     _journal_sweep "$INSTALL_DIR"
