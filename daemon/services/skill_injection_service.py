@@ -1208,7 +1208,7 @@ class SkillInjectionService:
 
             [System Inject] Relevant skills loaded:
 
-            📋 **Skill: {name}** (id: {skill.id}, match score: {score:.2f})
+            📋 **Skill: {name}** (id: {rendered_id}, match score: {score:.2f})
             ────────────────────────────
             {full_markdown_content}
 
@@ -1217,13 +1217,17 @@ class SkillInjectionService:
 
             Use `skill_search` tool to find more skills.
 
-        Each skill's UUID4 ``id`` is rendered inline alongside the
+        Each skill's id is rendered inline alongside the
         name and score so the consuming agent can pass it directly
         into ``skill_feedback(skill_id=...)`` /
         ``skill_fix(skill_id=...)`` /
         ``skill_view(skill_id=...)`` without paying for an extra
         ``skill_search`` round-trip just to resolve the name back to
-        its UUID. Low-match candidates get the same ``id`` exposure
+        its id. The id is the FULL stored uuid4 for a DB skill and the
+        ``pf:<ns>:<name>`` ADDRESS for a project-file skill — in both
+        cases an id ``skill_view`` accepts VERBATIM (the file skill's
+        ``pf-<sha16>`` pseudo-id is the INTERNAL key and is refused).
+        Low-match candidates get the same ``id`` exposure
         so they remain one tool-call away if the agent decides to
         promote a low-match skill.
 
