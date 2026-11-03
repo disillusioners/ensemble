@@ -1,3 +1,90 @@
+## Commission skill-list-full-uuid (wi-76d89e11) — gate packs REGISTERED (2026-11-03, implementation lane)
+
+> **TESTER FUNCTIONAL GATE VERIFICATION + CORRECTIONS (2026-11-03, newest-first).** Verdict **GO-WITH-DISCLOSURES** — full evidence: `RESULTS/2026-11-03-wi76d89e11-skill-id-functional-gate.md`. Final measured numbers: phase 1 **56/56 PASS** (19 pin + 37 sibling, `56 passed in 66.92s` on an isolated pristine worktree); phase 2 **10/10 legs RED→GREEN** independently re-verified with pristine-sha capture + `git checkout --` restore + sha asserts (the council's "7F/8P" is stale/unreproducible); phase 0 guard is the **correct exact-realpath form** (the old `startswith` form false-greens in the shared-checkout direction — demonstrated at predicate AND pack level). CORRECTIONS this gate landed on this block:
+> (1) **the shipped diff touches FOUR modules, not three** — the council round-2 W2 fold added `daemon/services/skill_search_service.py` without re-deriving. The registered 18/441 set below is the exact-THREE-module reading and is EXACT/reproducible; the four-module extension (**11 files / 235 selected / 262 collected / 27 deselected**) was measured at HEAD and base: **net-new ∅**, with 4 reds pre-existing at base (3× `test_skill_service_init.py` — the known fresh-SQLite `20260714_000001` blocker — + 1× llm-failover degraded-select).
+> (2) the secondary reconciliation figure "**23 files → 526/554**" below does **NOT reproduce** (measured 22 files → 507/535; a package-level AST filter yields 13 files) — annotated here; the primary figures (18 / 441 / 22) stand.
+> (3) **measured corpus sensitivity**: the registered corpus is BLIND to the M2 defect class — **441/441 PASS with the M2 plant deliberately in place**; only the excluded pin file catches it (1 node). A green corpus run does NOT certify a pristine tree; provenance must be the whole-file sha vs the git blob (a token grep also matches pristine line 147).
+> (4) **PACK DEFECT (owner fix owed)**: the per-leg restore returns to LEG-START, not pristine, and the exit trap re-applies backups lexicographically (last backup per file wins) → under contention the pack LEAVES A PLANT BEHIND (measured 3 independent ways; drift sha `9418fad5…` reproduced byte-exactly). Run the mutation matrix ONLY in a dedicated worktree until fixed. The pack also has **NO internal timer** (measured 221.1s = 73.7% of the 300s cap; 222.4s contended) — the invocation below is corrected from `timeout 900` to `timeout 300`; the owner should add the script-internal timer (dual-layer rule) and consider splitting phase 1 from phase 2.
+> (5) the documented RED-at-BASE recipe is **not runnable at base as written** — the pristine pin cannot be collected there (ImportError on the lane-added `SOURCE_PROJECT_FILE`, rc=2: a collection artifact, NOT an assertion red). The real anchor used a derived base-adapted pin (77 asserts proven AST-identical; diff = import block + 3 skipif markers) → **7 INTENDED-ASSERTION reds / 9 green / 3 not-applicable, zero artifacts**. The pin docstring's stated base-red set (4 categories) understates the measured 7 legs.
+
+> **ADDENDUM — narrow re-verify of the FIXED pack (2026-11-03, gate owner; evidence RESULTS/…-skill-id-functional-gate.md §Addendum).** Fixes landed `3ca6e633c`/`004f0a105`/`3effe28fb` (zero daemon code — diff-proven, 6 files none under `daemon/`). Measured on the fixed pack (git-archive scratch `run` + `pristine` reference trees, ONE run): **exit 0 · wall 202s (67% of cap)**; phase 1 56/56 (`56 passed in 70.25s`); phase 2 **10/10 legs** with the TSV header now printing **PRISTINE** shas; independent 5/5 sha proof vs the pristine reference (source-level `diff -r daemon/` EMPTY). Safety behaviors PROVEN once each: mid-flight SIGTERM with a plant on disk → **exit 1 + pristine restored** (+ pack lock fences concurrent runs); `SKILL_ID_VERBATIM_BUDGET_S=1` → **`RESULT: TIMEOUT` exit 124** (internal budget 300s default = the house cap; dual-layer now real). Item (4) above is CLOSED; item (1)'s guardrail RELAXES to "dedicated worktree still preferred" (restore is trap-protected and kill-proven). Known nit: the SIGTERM path printed no `RESULT:` line (observability only, owner may inspect). **Invocation ruling: stays `timeout 300` — do NOT adopt `--kill-after`** (SIGKILL escalation bypasses the restore trap and would reintroduce the plant-leak class; prompt kill = process-group TERM; promptness = the internal budget's job). R3 wall annotation: 202s measured.
+
+> **Why this block exists.** The lane's pack must be runnable BY ID (a leg invokes its D2 set by
+> pack id, so an unregistered id makes the leg unrunnable). The node counts below are MECHANICAL
+> `pytest --collect-only -q` counts, re-derived at registration time — never remembered.
+>
+> **DERIVED blast radius (house convention).** The lane's shipped diff touches THREE modules —
+> `daemon/tools/skill_tools.py`, `daemon/services/project_skill_source/model.py`,
+> `daemon/services/skill_injection_service.py`. The DERIVATION (every test file importing one of
+> them) reaches **18 files / 441 collected nodes (22 deselected)** — WIDER than the plan's
+> declared single-file corpus; the registered composition is the DERIVED one. The plan's P2b
+> id-shape sweep (`implementation-steps.md` §P2b — every id-shape hit adjudicated with a reason)
+> is a SUBSET of this set and is recorded as such; nothing in the sweep points outside it.
+>
+> **DERIVATION FILTER + EXACT COMMAND (council W4 fold — the row's aggregate is now REPRODUCIBLE,
+> not remembered).** The filter is **AST import resolution**: every file under `tests/` whose
+> import graph resolves to one of the lane's THREE touched modules
+> (`daemon.tools.skill_tools` / `daemon.services.project_skill_source.model` /
+> `daemon.services.skill_injection_service`), **MINUS the lane's own new pin file**
+> (`tests/tools/test_skill_id_verbatim_contract.py` — Phase 1 accounts it separately, so it is
+> not double-counted in the blast radius). That filter yields **18 files**. Reproduce with:
+>
+> ```
+> cd $WT && env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST \
+>   -u POSTGRES_PORT -u DATABASE_URL -u PORT -u ENSEMBLE_SELF_ENV \
+>   $PY -m pytest --collect-only -q \
+>   tests/integration/test_skill_cross_phase_flow_a.py \
+>   tests/integration/test_skill_injection_persistence.py \
+>   tests/postgres/test_project_skill_source_pg.py \
+>   tests/services/test_skill_injection_service.py \
+>   tests/services/test_skill_injection_step0.py \
+>   tests/services/test_skill_phase2_integration.py \
+>   tests/services/test_skill_search_fusion.py \
+>   tests/tools/test_skill_feedback_tool.py \
+>   tests/tools/test_skill_search_fusion_guard.py \
+>   tests/tools/test_skill_tools.py \
+>   tests/tools/test_skill_tools_pf_surface.py \
+>   tests/unit/services/test_skill_injection_capability_gate.py \
+>   tests/unit/test_project_skill_source_index.py \
+>   tests/unit/test_project_skill_source_model.py \
+>   tests/unit/test_project_skill_source_phase4_wiring.py \
+>   tests/unit/test_skill_capture_killswitch.py \
+>   tests/unit/test_skill_capture_killswitch_verification.py \
+>   tests/unit/test_skill_evolution_lane_gate.py
+> # → 441/463 tests collected (22 deselected)   ← DEFAULT addopts (deselects integration/postgres/slow/conformance)
+> # → 463 tests collected                      ← with --override-ini="addopts=" (no deselection)
+> ```
+>
+> **18-vs-23 RECONCILIATION (two readings of "importing one of them", both now MEASURED):**
+> the same AST filter read at **package** level (any `daemon.services.project_skill_source.*`
+> submodule — it adds `tests/postgres/test_project_skill_fusion_pg.py`,
+> `tests/postgres/test_project_skill_source_phase4_pg.py`,
+> `tests/unit/test_project_skill_source_manifest.py`,
+> `tests/unit/test_project_skill_source_resolver.py` — 4 files) reaches **23 files** →
+> **526/554 collected (28 deselected)** with default addopts, **554** with no deselection. The
+> **18** figure is the exact-three-modules reading; the **23** figure is the package-level
+> reading. The REGISTERED composition is the **18** one.
+>
+> **DISCREPANCY DISCLOSURE (council W4 — the third figure, and why the row keeps 441/22):** the
+> council's re-derivation reported "**522 collected / 0 deselected**". That figure does **NOT**
+> reproduce under EITHER filter: the 18-file set measures 463 (no deselection) / 441 (default
+> addopts), and the 23-file set measures 554 (no deselection) / 526 (default addopts). An
+> exhaustive subset search found SIX different 18-file subsets of the 23-file set that sum to
+> 522 — i.e. **522 is not uniquely determined by either stated filter** and is therefore not
+> reproducible as stated. The row keeps **441 collected (22 deselected)** because that IS
+> reproducible under the filter + command above (re-measured at the fold, 2026-11-03). The
+> per-file counts below (15 + 37 = 52) were verified exact at registration and are unaffected by
+> the filter question.
+>
+> **No PG row.** The lane adds no DB-touching code and authors NO migration (census delta EMPTY
+> — delta-empty-legitimate under the standing rule). The `tests/postgres/test_project_skill_*`
+> files inside the derived set carry no id-render assertions (P2b) and are deselected by the
+> default addopts (the postgres marker).
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `skill_id_verbatim_contract` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT bash test/packs/skill_id_verbatim_contract_unit_test.sh` (the `POSTGRES_*` GLOB form is a SILENT NO-OP — per-variable only; the pack self-fences with a mktemp FAKE_HOME + its own per-variable scrub; THREE phases: the IMPORT GUARD (phase 0 — proves `import daemon` resolves under THIS checkout; realpath-exact, NOT a `startswith` prefix test, which has a sibling-prefix trap against the shared checkout; the pack exits 1 with `RESULT: FAIL (phase 0: import guard)` when the import resolves elsewhere), THEN the contract pin + the sibling corpus, THEN the mutation matrix; `0 PASS / 1 FAIL / 124 TIMEOUT`; `SKILL_ID_VERBATIM_MUTATIONS=0` skips phase 2) | **The skill id-emission CONTRACT** (wi-76d89e11): every agent-facing skill id the skill tools EMIT must be an id `skill_view` accepts VERBATIM — the full uuid4 for DB skills (exact-PK resolution, no prefix fallback), the `pf:<ns>:<name>` ADDRESS for project-file skills (they have no uuid; the sha16 pseudo-id is the INTERNAL key and is REFUSED by `skill_view`). **Phase 1** — `tests/tools/test_skill_id_verbatim_contract.py` (**19 nodes** — 15 at registration + the 4-node project-file DISCRIMINATOR PARITY battery landed by the council-W2 fold: list → view → identity per source; value equality per source (STR-EQUAL, not a shape match); BOTH search render paths — the fused seam (`SkillSearchService` with `config=None` ⇒ deterministic `_degraded_select`, no LLM reachable) and the tool-level file-only degraded path; the `skill_create` success line; the injection body segment; the two duplicated `_is_project_file_skill` helpers must AGREE on all 12 discriminating shapes; the safety invariants — the pseudo-id stays the internal key, the embedding rows stay reachable THROUGH the skill object's id, the `pf:`/`pf-` feedback routing stays intact, the W5 refusals still write nothing) + `tests/tools/test_skill_tools_pf_surface.py` (**37 nodes** — the folded W4 suffix-additivity + knob-OFF byte-shape pin) = **56 nodes**. **Phase 2** — the mutation matrix **M1-M6 + M2b + M7-M9 (10 legs)**: each leg plants its defect on the PRODUCTION source, the intended leg must go RED, the file is restored sha256-identically, the same leg must go GREEN again; a NON-DISCRIMINATING leg fails the pack (a pin that cannot fail is worse than no pin). M7/M8/M9 are the W2 parity legs — the injection-side helper, the search-side helper, and the address-prefix branch respectively (the constant stays equal under all three, so a constant-equality-only assertion would not catch any of them). | 2026-11-03 | ✅ registered (implementation lane: phase 1 52/52 PASS; phase 2 7/7 legs RED→GREEN with sha-verified restore; RED-at-BASE proven — 7 legs RED at `c4161335b`, 8 armor legs GREEN) — **council-W2/W5 fold re-verified 2026-11-03: phase 1 56/56 PASS (19+37); phase 2 10/10 legs RED→GREEN with sha-verified restore; the import guard (phase 0) PASS, and proven RED against a foreign tree** · **TESTER FUNCTIONAL GATE 2026-11-03: GO-WITH-DISCLOSURES** — 10/10 mutation legs independently verified (pristine-sha capture + git-checkout restore); net-new ∅ on the 441-node registered AND the 235-node extended corpus; 3 pack defects disclosed (restore-to-leg-start + no internal timer + base recipe) — see the gate block above + `RESULTS/2026-11-03-wi76d89e11-skill-id-functional-gate.md` · **FIXED-PACK RE-VERIFY 2026-11-03: GO CONFIRMED** — exit 0, wall **202s**, 56/56, 10/10 legs (PRISTINE-sha restores, independently verified vs a pristine reference tree), mid-flight-kill restore + budget-TIMEOUT (exit 124) both proven |
+
 ## Commission central-metrics-v1 — gate packs REGISTERED (2026-11-02, tester functional gate)
 
 > **Why this block exists.** The frozen query contract (`docs/architecture/metrics-query-contract.md`)

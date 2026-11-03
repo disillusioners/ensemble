@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
 #: A5 (architect, MUST, CRITICAL): namespace / name path components must
@@ -58,6 +58,20 @@ PSEUDO_ID_PREFIX = "pf-"
 
 #: The ``pf:`` address prefix (frozen — D-Q5).
 ADDRESS_PREFIX = "pf:"
+
+#: The ``source`` tag stamped on every fused file-source result entry.
+#: SINGLE DEFINITION (council W2 fold, wi-76d89e11): the literal used to
+#: be spelled out in BOTH ``skill_search_service`` and
+#: ``skill_injection_service`` — a one-sided edit would have silently
+#: re-introduced this lane's defect on one path with no error and no
+#: test failure. The constant now lives HERE (this module is already
+#: imported by both consumers, so the move adds ZERO import edges) and
+#: both consumers import it. The duplicate ``_is_project_file_skill``
+#: HELPER stays duplicated on purpose (importing the canonical helper
+#: would pull ``openai`` into the injection service's import graph —
+#: approver note N6); its BEHAVIOR is pinned by the 4-shape equality
+#: battery in ``tests/tools/test_skill_id_verbatim_contract.py``.
+SOURCE_PROJECT_FILE = "project-file"
 
 
 def valid_component(value: str) -> bool:
@@ -148,7 +162,7 @@ class ProjectFileSkill:
     is_active: bool = True
     generation: int = 0
     ab_test_group: Optional[str] = None
-    source: str = "project-file"
+    source: str = SOURCE_PROJECT_FILE
     body_char_len: int = 0
     manifest: dict[str, Any] = field(default_factory=dict)
     digest: str = ""
@@ -158,6 +172,29 @@ class ProjectFileSkill:
     def version(self) -> str:
         """The manifest semver string (empty when absent)."""
         return str((self.manifest or {}).get("version", "") or "")
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe dict for the agent-facing render seam.
+
+        ``id`` carries the ADDRESS (``pf:<ns>:<name>``) — the id
+        ``skill_view`` consumes VERBATIM. The stable internal
+        pseudo-id stays available under the ADDITIVE ``pseudo_id``
+        key; the ``.id`` ATTRIBUTE itself is untouched (it remains the
+        internal key the embedding/usage rows are keyed by).
+
+        The field-set equals the dataclass fields + ``pseudo_id`` —
+        every key the ``__dict__`` fallback used to emit is still
+        present. ``version`` is a PROPERTY, not a field, so it is
+        NOT emitted (the ``__dict__`` fallback never carried it
+        either). The mutable fields are copied defensively (mirrors
+        :meth:`to_summary`) — a caller never aliases our state.
+        """
+        d = {f.name: getattr(self, f.name) for f in fields(self)}
+        d["manifest"] = dict(d.get("manifest") or {})
+        d["shadows"] = list(d.get("shadows") or [])
+        d["pseudo_id"] = d["id"]  # the stable internal key (sha16)
+        d["id"] = self.address  # the agent-facing, verbatim-consumable id
+        return d
 
     def to_summary(self) -> dict[str, Any]:
         """JSON-safe summary (no body bytes) for list surfaces."""
