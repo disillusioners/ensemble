@@ -1235,8 +1235,14 @@ section "M7 — glob-shaped quarantined[] entries round-trip byte-identically"
 # would be rewritten against the working directory's FILE NAMES,
 # corrupting the array. The `set -f` (noglob) fold preserves the split
 # while killing the expansion. THIS LEG makes the hazard REAL: decoy
-# files matching the glob pattern sit in the sweep's CWD — pre-fix the
-# array would rewrite into the decoy names.
+# files whose names match the glob pattern sit in the sweep's CWD. The
+# pattern that reaches the shell is the RAW JSON element — its quote
+# characters INCLUDED (quote removal does not apply to an expansion's
+# result) — so the decoys are named WITH those quote characters (see
+# below): without them the pattern can never match, the fixture would
+# be vacuous, and the leg would stay GREEN even with the guard removed.
+# With the guard present the array round-trips byte-identically; with
+# the guard removed the array IS rewritten into the decoy names (RED).
 M7_FIX="$(mktemp -d -t m7.XXXXXX)"; _register_fixture "$M7_FIX"
 make_install_fixture "$M7_FIX" "$TARGET" "$PREV" "true"
 # quar: a glob-shaped entry + the target (the commit-close must REMOVE
@@ -1244,8 +1250,13 @@ make_install_fixture "$M7_FIX" "$TARGET" "$PREV" "true"
 seed_journal "$M7_FIX" "$TARGET" "$PREV" "true" "1" "" '["v9.9.9-test*","v9.9.9-test-target"]'
 ln -sfn "releases/$TARGET" "$M7_FIX/current"
 printf 'PORT=19999\n' > "$M7_FIX/.env"
-# the decoys: bare `v9.9.9-test*` would expand into these names
-touch "$M7_FIX/v9.9.9-testA" "$M7_FIX/v9.9.9-testB"
+# the decoys: the pattern that reaches the shell is the RAW JSON element
+# `"v9.9.9-test*"` — quote characters INCLUDED (quote removal does not
+# apply to an expansion's result) — so the decoy filenames must carry
+# those same literal quote characters to be matchable. A bare
+# `v9.9.9-testA` can NEVER match the quoted pattern: the fixture would
+# be vacuous and this leg would stay GREEN even with the guard removed.
+touch "$M7_FIX/\"v9.9.9-testA\"" "$M7_FIX/\"v9.9.9-testB\""
 M7_PORT="$(start_listener green 9.9.9-test-target)"
 (
     cd "$M7_FIX" || exit 1
