@@ -18,13 +18,32 @@
  *
  * ── Journey ──────────────────────────────────────────────────────────
  *   gear menu → "Metrics" → /metrics → Overview (stat cards) → Charts
- *   (one SVG per series) → Families (a live family + a dark family with
- *   its reason). Zero daemon throughout.
+ *   (one PANEL per returned series) → Families (a live family + a dark
+ *   family with its reason). Zero daemon throughout.
  *
- * The load-bearing assertion is the STEP-RENDERING one (approver B5): a
- * COUNTER series renders as a STEP (horizontal-then-vertical path
- * commands), a GAUGE renders as a LINE. A linear interpolation between
- * counter samples would assert values that were never observed.
+ * ── THE CANVAS-FATAL ASSERTIONS, RE-SPECIFIED (T1 phase 4, task 4.10) ──
+ *
+ * Four assertions in this file were canvas-fatal: under a Chart.js
+ * canvas renderer there is no SVG `d` attribute and no `chart-tick`
+ * element. They are re-specified here in THREE leg-classes, and the
+ * `d`-ATTRIBUTE ASSERTIONS ARE **RETIRED — NOT PRESERVED**:
+ *
+ *   | # | the retired assertion          | the replacement                        |
+ *   |---|---------------------------------|----------------------------------------|
+ *   | 1 | the COUNT on `[data-test="svg-line-chart"]` | the per-series PROXY count (`[data-test="chart-panel-proxy"]`) |
+ *   | 2 | the STEP path's `d` geometry (`H`/`V` present, no diagonal) | the proxy's `data-render-mode="step"` — the GEOMETRY moved to the renderer spec |
+ *   | 3 | the LINE path's `d` mirror (`L` present, no `H`/`V`) | the proxy's `data-render-mode="line"` — the GEOMETRY moved to the renderer spec |
+ *   | 4 | the `[data-test="chart-tick"]` SVG text | the wrapper's UTC TICK TEXT in its hidden surface (`[data-test="chart-panel-tick"]`) |
+ *
+ * Leg-classes 2 and 3 are ONE leg now: the DOM carries the render MODE
+ * and the renderer spec carries the geometry
+ * (`house-svg-renderer.spec.ts` — "a COUNTER renders STEP and a GAUGE
+ * renders LINEAR").
+ *
+ * The e2e's TAB-SHAPE expectations are phase 7's task 7.9 (the shell
+ * rewiring in phase 2 replaced the three tabs with the manifest-driven
+ * seven); this file's chart legs are re-specified HERE, against the
+ * canvas panel.
  */
 import { test, expect, type Page, type Route } from '@playwright/test';
 
@@ -271,31 +290,36 @@ test('[P5] gear menu → /metrics → Overview stat cards → Charts → Familie
     page.locator('[data-test="overview-grid"]').getByText('ensemble_db_pool_native'),
   ).toBeVisible();
 
-  // ── Charts: one SVG per returned series. ──
+  // ── Charts: one PANEL per returned series. ──
   await page.getByRole('tab', { name: 'Charts' }).click();
   await expect(page.locator('[data-test="charts-grid"]')).toBeVisible();
-  await expect(page.locator('[data-test="svg-line-chart"]')).toHaveCount(2);
 
-  // ── THE STEP-RENDERING ASSERTION (approver B5). ──
-  const counterPath = page
-    .locator('[data-test="series-line"][data-render-mode="step"]')
-    .first();
-  await expect(counterPath).toHaveCount(1);
-  const counterD = (await counterPath.getAttribute('d')) ?? '';
-  expect(counterD).toContain('H');
-  expect(counterD).toContain('V');
-  // A STEP path never contains a diagonal segment between two samples.
-  expect(counterD).not.toMatch(/L\d+\.\d+,\d+\.\d+.*L\d+\.\d+,\d+\.\d+/);
+  // ── LEG-CLASS 1 — the per-series PROXY count (the retired
+  // `[data-test="svg-line-chart"]` count). The canvas is not
+  // inspectable; the proxy is the stable per-series handle. ──
+  await expect(page.locator('[data-test="chart-panel-proxy"]')).toHaveCount(2);
 
-  const gaugePath = page.locator('[data-test="series-line"][data-render-mode="line"]').first();
-  await expect(gaugePath).toHaveCount(1);
-  const gaugeD = (await gaugePath.getAttribute('d')) ?? '';
-  expect(gaugeD).toContain('L');
-  expect(gaugeD).not.toContain('H');
-  expect(gaugeD).not.toContain('V');
+  // ── LEG-CLASS 2 — the STEP/LINE distinction, carried by the proxy.
+  //
+  // The `d`-ATTRIBUTE GEOMETRY ASSERTIONS ARE **RETIRED — NOT
+  // PRESERVED**: under a canvas renderer there is no `d` attribute. The
+  // geometric truth (a COUNTER renders horizontal-then-vertical, a GAUGE
+  // renders a diagonal, and a STEP never carries a diagonal) moved to
+  // the renderer spec:
+  // `src/app/components/charts/house-svg-renderer/house-svg-renderer.spec.ts`.
+  await expect(
+    page.locator('[data-test="chart-panel-proxy"][data-render-mode="step"]'),
+  ).toHaveCount(1);
+  await expect(
+    page.locator('[data-test="chart-panel-proxy"][data-render-mode="line"]'),
+  ).toHaveCount(1);
 
-  // The UTC axis labels are present (never local time).
-  await expect(page.locator('[data-test="chart-tick"]').first()).toBeVisible();
+  // ── LEG-CLASS 3 — the UTC tick text (the retired `[data-test="chart-tick"]`
+  // SVG text), read from the wrapper's hidden surface. The label is UTC
+  // in every process timezone (never local). ──
+  const ticks = page.locator('[data-test="chart-panel-tick"]');
+  await expect(ticks).toHaveCount(5);
+  await expect(ticks.first()).toHaveText(/^\d{2}:\d{2}$/);
 
   // ── Families: a live family and a DARK family with its reason. ──
   await page.getByRole('tab', { name: 'Families' }).click();
