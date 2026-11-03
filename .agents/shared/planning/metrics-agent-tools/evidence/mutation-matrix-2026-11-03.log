@@ -1,4 +1,4 @@
-pre-run manifest: 035a4cd4b2a5428ba77505cbb20adeb6697005f2 over 4 files
+pre-run manifest: d50b95e3db582f6dc18dc36501449709099385ad over 4 files
 MT-01-count-pin: OK (RED via test_board_is_the_ninth_entry)
 MT-01-count-pin: OK (restored byte-identically, pack GREEN)
 MT-02-availability-re-derived: OK (RED via test_the_availability_block_is_carried_verbatim)
@@ -41,6 +41,16 @@ MT-20-racy-bool-doctrine-removed: OK (RED via test_the_doctrine_states_the_racy_
 MT-20-racy-bool-doctrine-removed: OK (restored byte-identically, pack GREEN)
 MT-21-clamp-applied-silently: OK (RED via test_the_budget_clamp_is_not_silent)
 MT-21-clamp-applied-silently: OK (restored byte-identically, pack GREEN)
+MT-23-compose-overwrite: OK (RED via test_both_bounds_on_one_response_keep_both_hints)
+MT-23-compose-overwrite: OK (restored byte-identically, pack GREEN)
+MT-24-per-body-disclosure-violated: OK (RED via test_the_byte_ceiling_disclosure_names_only_accepted_filters)
+MT-24-per-body-disclosure-violated: OK (restored byte-identically, pack GREEN)
+MT-25-caveat-disagreement: OK (RED via test_the_names_bound_caveat_agrees_with_its_hint)
+MT-25-caveat-disagreement: OK (restored byte-identically, pack GREEN)
+MT-26-shape-projection-lost: OK (RED via test_the_history_series_shape_is_the_same_on_both_paths)
+MT-26-shape-projection-lost: OK (restored byte-identically, pack GREEN)
+MT-27-ring-empty-direction-flipped: OK (RED via test_the_ring_empty_flag_is_the_ages_heuristic_not_a_fact)
+MT-27-ring-empty-direction-flipped: OK (restored byte-identically, pack GREEN)
 MT-22-seam-constant-single-sourcing: OK (the consumer followed the source: 235 -> 215)
 post-run manifest: every touched file is byte-identical
-RESULT: PASS (21 RED/GREEN legs + 1 FOLLOW leg(s))
+RESULT: PASS (26 RED/GREEN legs + 1 FOLLOW leg(s))

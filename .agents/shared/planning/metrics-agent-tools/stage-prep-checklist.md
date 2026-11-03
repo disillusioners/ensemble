@@ -101,7 +101,7 @@ residual is owned by the contract owner (fold-ledger §B `contract_RevocationLev
 | the Phase-2 Tier-1 verdict | net-new deterministic reds **0** |
 | the Phase-3 Tier-1 verdict | net-new deterministic reds **0**; the route censuses **111 / 37 / 33** UNCHANGED |
 | the Phase-4 FE verdict | net-new **0**; both builds rc=0; the e2e 3/3; the dependency diff **0 lines** |
-| the Phase-5 mutation matrix | **22/22 PASS** (21 RED/GREEN + 1 FOLLOW) (RED via the intended assertion → byte-identical restore → GREEN) — the ARCHIVED log: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`) |
+| the Phase-5 mutation matrix | **27/27 PASS** (26 RED/GREEN + 1 FOLLOW) (RED via the intended assertion → byte-identical restore → GREEN) — the ARCHIVED log: `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`) |
 | the prompt-artifact re-stamp | **REQUIRED** — the baseline delta is exactly the 3 `tools_note.md` (§2) |
 | the throwaway base worktree | `/home/nea/ensemble-src-wt-base-metrics` (detached at `03a2297c3`) — **IMPLEMENTER-OWNED** (council A9); it must be **absent (or accounted) at stage time, never orphaned** |
 

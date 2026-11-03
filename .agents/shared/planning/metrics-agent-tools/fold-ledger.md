@@ -347,7 +347,7 @@ nine-id block is NOT widened):**
 | `metrics_read_docs_surface` | **20** | the agent-visible docs chain (the registry resolves the category, the loader renders the section for the three holders, NOTHING metrics-shaped reaches a non-holder, `tool_help` serves the `_full_doc_`, the three tools_note sections carry the AmC-11 asymmetry) |
 | `metrics_query_protocol_consumer` | **28** | the Phase-1 seam pins (the completeness pin, the identity + lifecycle-triple pins, the reachability leg, the public-reader pin, the no-second-provider pin) |
 
-**The mutation matrix — 22/22 PASS (21 RED/GREEN + 1 FOLLOW leg).** The ARCHIVED log (plan task 5.2's "the matrix log + digests archived for the evidence pack"): `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`, 3 587 bytes — the run's own pre-run manifest records the HEAD sha `035a4cd4b` (the council-fold commit — the FINAL code) + the sha256 of every touched file) and `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `df7dc17b8cb4dc4410a6c51ef1c1f4fc7e9c93edd94c0935ffb43cd98a90b1ad`). — see §H.10's SUPERSESSION note Each leg plants a mutation INDEPENDENTLY on the
+**The mutation matrix — 27/27 PASS (26 RED/GREEN + 1 FOLLOW leg).** The ARCHIVED log (plan task 5.2's "the matrix log + digests archived for the evidence pack"): `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log` (sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`, 3 587 bytes — the run's own pre-run manifest records the HEAD sha `035a4cd4b` (the council-fold commit — the FINAL code) + the sha256 of every touched file) and `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256 `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`). — see §H.10's SUPERSESSION note Each leg plants a mutation INDEPENDENTLY on the
 production source, requires RED **through the intended assertion** (a per-leg RED marker — the
 marker's absence is a FAIL, so a mutation that reds for an unrelated reason does not pass),
 restores the file BYTE-IDENTICALLY and requires GREEN again. The restore discipline is the
@@ -411,6 +411,7 @@ fix cycle restored the two BINDING ones and folded the rest that had a pin to bi
 |---|---|---|---|---|
 | the FIRST cut | ~24 | **12** | 13 (one merge: #2 + #3 → MT-07) | **11 — SILENTLY DROPPED** |
 | the FIX cycle | ~24 | **22** (21 RED/GREEN + 1 FOLLOW) | **23** | **1** (an explicit duplicate) |
+| the EVIDENCE-GAP close | — | **27** (26 RED/GREEN + 1 FOLLOW) — the five mutation-verification claims that had NO archived leg got REAL legs (MT-23..MT-27) | — | — |
 
 **The per-leg dispositions (every planned leg):**
 
@@ -524,8 +525,8 @@ directions — the set did not move).
 **THE NEW DISCLOSURE PIN** (the imprecision is pinned, not just prose):
 `test_the_ring_empty_flag_is_the_ages_heuristic_not_a_fact` exhibits the FALSE POSITIVE — a
 provider whose age reads 0.0 while the call observes a FRESH sample still reports "empty".
-It is **mutation-verified**: flipping the heuristic's direction (`age == 0.0` → `age > 0.0`)
-REDs it. It is a pin of a KNOWN IMPRECISION, not of a desired behaviour — when the seam
+It is **mutation-verified** — and the claim is CARRIED BY AN ARCHIVED LEG (**MT-27**:
+flipping the heuristic's direction (`age == 0.0` → `age > 0.0`) REDs it). It is a pin of a KNOWN IMPRECISION, not of a desired behaviour — when the seam
 reader lands, the pin is updated DELIBERATELY.
 
 **THE W3 LEG IS UNCHANGED** — "an absent fact must NEVER be reported as empty" still holds,
@@ -539,9 +540,9 @@ to the plain ceiling (the leg went GREEN — a vacuous leg, caught by the matrix
 expression now removes the CEILING ITSELF (the module-level binding), and the leg REDS
 again. The leg's INTENT and its id are unchanged. **The ARCHIVED log:**
 `.agents/shared/planning/metrics-agent-tools/evidence/mutation-matrix-2026-11-03.log`
-(sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`) + the run's own
+(sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`) + the run's own
 pre-run manifest `.../mutation-matrix-pre-run-manifest-2026-11-03.json` (sha256
-`df7dc17b8cb4dc4410a6c51ef1c1f4fc7e9c93edd94c0935ffb43cd98a90b1ad`).
+`e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`).
 
 **SUPERSESSION CHAIN (recorded, never silent):** the archived log is REGENERATED
 whenever `daemon/tools/metrics_read.py` changes, so the citation always names the run
@@ -554,10 +555,17 @@ against the FINAL code — and every superseded artefact keeps its sha:
   (HEAD `04f1c856e`; manifest `5c23aa4c929ec304a2f6fc7817c7165124553f81739eb3dafe82b5b6f321c128`)
   — SUPERSEDED by the council fold (the fold changed `daemon/tools/metrics_read.py`
   again); the blob stays in the history at `ea2c0768e`/`caee318d9`;
-* the CURRENT log — sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`,
-  the run against HEAD `035a4cd4b` (the fold commit) — the manifest carries that HEAD +
-  the `metrics_read.py` sha `dd6c406f70f4ad1c733ddd9b2c4bc44f2f5d889e2b1db221549b2898fe65130a`
-  (manifest sha256 `df7dc17b8cb4dc4410a6c51ef1c1f4fc7e9c93edd94c0935ffb43cd98a90b1ad`).
+* `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e` — the council-FOLD run
+  (HEAD `035a4cd4b`; manifest `df7dc17b8cb4dc4410a6c51ef1c1f4fc7e9c93edd94c0935ffb43cd98a90b1ad`)
+  — SUPERSEDED by the verification's EVIDENCE-GAP close: that close added five legs to the
+  HARNESS (MT-23..MT-27), so the archive had to be regenerated to CARRY them (the source
+  `daemon/tools/metrics_read.py` was NOT changed by it — its sha stayed `dd6c406f…`);
+  the blob stays in the history at `9dbb2c0c3`;
+* the CURRENT log — sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`
+  (4 446 bytes — 26 RED/GREEN legs + 1 FOLLOW), the run against HEAD `d50b95e3d` (the
+  MT-23..MT-27 legs commit) — the manifest carries that HEAD + the `metrics_read.py` sha
+  `dd6c406f70f4ad1c733ddd9b2c4bc44f2f5d889e2b1db221549b2898fe65130a` (manifest sha256
+  `e3e50e03acd4baf10e200573750f1b371c5215ba4feed034788541c1c94f925a`).
 
 **Nothing is cited as if it reflected code that no longer exists.**
 
@@ -582,16 +590,17 @@ are folded here.
 | **in-file (b)** | **FOLDED.** The belt's target is now the SAME reserved bound as the normal path (`RESPONSE_BYTE_CEILING − _CAVEAT_HEADROOM_BYTES`) — it no longer leaves a body looser than the first pass's bound (the "measured against a different object than what ships" family that produced C1). Unreachable today (5a's import-time assertion + the measured headroom), tightened anyway. | `daemon/tools/metrics_read.py:484` |
 | **the evidence-pack citation** | **FOLDED.** The production-unreachable justification now carries its file:line (`daemon/services/metrics_query/provider.py:396-403`). | `evidence-pack.md` §8b's W3 row |
 
-**THE THREE NEW PINS** (each mutation-verified — the planted mutation REDS exactly its pin):
+**THE THREE NEW PINS** (each mutation-verified — the planted mutation REDS exactly its pin —
+and the claim is CARRIED BY THE ARCHIVED LEGS **MT-23** / **MT-24** / **MT-25**, see §H.12):
 `test_both_bounds_on_one_response_keep_both_hints` (5b-②),
 `test_the_byte_ceiling_disclosure_names_only_accepted_filters` (5b-③),
 `test_the_names_bound_caveat_agrees_with_its_hint` (5b-①). The tools pack: 48 → **51** nodes
 (re-derived, never remembered).
 
 **THE ARCHIVE WAS REGENERATED** (this fold changed `daemon/tools/metrics_read.py`): the
-CURRENT log is sha256 `eabbbe424ee11a86e4c9f66f791c51b39277c7942d4936b025b4e6e19838ae7e`
-(the run against HEAD `035a4cd4b`), and the SUPERSESSION CHAIN records every prior artefact
-with its sha (see §H.10's chain note).
+CURRENT log is sha256 `eb2423eb1dba861c0a03cfd7059a76bc9665c7c0165ff2281efb2d1a978670a0`
+(the run against HEAD `d50b95e3d` — the MT-23..MT-27 legs commit), and the SUPERSESSION
+CHAIN records every prior artefact with its sha (see §H.10's chain note).
 
 **DISCLOSED RESIDUAL (NOT folded — out of the council's list, recorded so it is not lost):**
 two of the lane's PIN FILES still carry test NAMES that say "sixteen" while the asserted
@@ -599,6 +608,44 @@ count is 17 (`test_board_registration.py:201` `test_the_set_is_exactly_the_sixte
 + `test_self_alarm_registration.py:214`/`:217`). The ASSERTIONS are correct; only the names
 are stale. A rename would change the node ids of a registered pack, so it is routed rather
 than done silently here.
+
+---
+
+### H.12 — The verification's EVIDENCE GAP (closed 2026-11-03 — MT-23..MT-27)
+
+The verification found ONE evidence gap in the fold: §H.11 and `evidence-pack.md` §8d claimed
+the fold's three new pins were "each mutation-verified — the planted mutation REDS exactly
+its pin", but **NO archived artefact carried the claim** — the matrix held exactly MT-01..MT-22
+and the run's pre-run manifest covered only four files. A pin claimed mutation-verified with
+no archived leg is a **MISSING LEG** (the inverse of the W1 rule: a leg whose pin was missing
+was a missing PIN).
+
+**THE PREFERRED DISPOSITION WAS TAKEN — MAKE THE CLAIM TRUE** (not a rewording), and the
+council's rule was applied to the WHOLE class (a grep over the lane's records found two more
+claims of the same class — the C1 shape pin and the RULING-1 disclosure pin — and both CAN be
+expressed as legs, so both got legs rather than a rewording):
+
+| Leg | The planted mutation (on `daemon/tools/metrics_read.py`) | The pin it REDS |
+|---|---|---|
+| **MT-23** `compose-overwrite` | the families body's byte-ceiling hint is assigned DIRECTLY (`payload["narrow_hint"] = byte_hint`) instead of through `_compose_hint` — the 5b-② regression | `test_both_bounds_on_one_response_keep_both_hints` (`:767`) |
+| **MT-24** `per-body-disclosure-violated` | the families lever names a `name_prefix=` — i.e. the per-body disclosure is violated (5b-③) | `test_the_byte_ceiling_disclosure_names_only_accepted_filters` (`:799`) |
+| **MT-25** `caveat-disagreement` | the names-bound caveat is restored to the DISOWNED wording ("Ask for one family at a time, or use `details=false` for the small projection") — the caveat contradicts the corrected hint (5b-①) | `test_the_names_bound_caveat_agrees_with_its_hint` (`:884`) |
+| **MT-26** `shape-projection-lost` | the history body's ceiling is handed the RAW provider rows again (`items=series_out` → `items=kept`) — the C1 regression itself | `test_the_history_series_shape_is_the_same_on_both_paths` (`:818`) |
+| **MT-27** `ring-empty-direction-flipped` | the ring-empty heuristic's direction is flipped (`age == 0.0` → `age > 0.0`) — the false positive the RULING-1 disclosure names is no longer reachable | `test_the_ring_empty_flag_is_the_ages_heuristic_not_a_fact` (`:913`) |
+
+Each find-string is UNIQUELY locatable (verified: exactly 1 occurrence each — the harness
+SKIPs a non-unique find-string, which is how MT-12 was caught), and each mutation REDS its
+intended pin (MT-26 REDs exactly its pin; MT-27 REDs the disclosure pin together with the
+two other ring-state legs — the harness's marker check looks for the INTENDED node, which is
+present).
+
+**THE MATRIX: 27/27 PASS (26 RED/GREEN + 1 FOLLOW), 386 s.** The archive was regenerated (the
+close changed the HARNESS, so the log had to CARRY the new legs) and re-archived with its
+sha; the SUPERSESSION CHAIN in §H.10 now links every prior artefact.
+
+**THE DEVIATION, STATED:** the council's expectation of 25 legs assumed only the fold's three
+pins; the class had two more claims, so the matrix carries **27**. The alternative — leaving
+two more unarchived claims behind for the next verification — would have left the gap open.
 
 ---
 
