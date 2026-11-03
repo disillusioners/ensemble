@@ -1,3 +1,32 @@
+## Commission FE-only T1 metrics dashboard — Phase-3 packs REGISTERED (2026-11-03, implementation lane `feature/fe-metrics-dashboard`, base `1474952fe`)
+
+> **What this block registers.** The T1 lane's **Phase-3** commit (the page frame: the range
+> selector + the previous-window baseline). The phase is **FE-only** — no daemon, no migration, no
+> `scripts/upgrade` — so its verification is jest + the scoped type-check + a production build.
+>
+> **Keep-both:** the Phase-2 and Phase-1 blocks and the earlier `metrics_fe_dual_side`
+> registration stay as they are — they record THOSE phases' packs. This block registers the
+> **phase-3** shape.
+>
+> **Node counts are MECHANICAL** — a per-file jest census re-derived at this phase's freeze
+> (`jest --ci --silent --runInBand <file>` → the `Tests:` line), never a declared number.
+>
+> **KNOWN GAP (unchanged from the phase-2 block):** the registered `metrics_fe_dual_side` pack's
+> D1 file list is **hard-coded** inside `test/packs/metrics_fe_dual_side_test.sh`, and this lane's
+> commission is **FE-only** (`test/packs/` is outside the fence). The phase-3 spec files are
+> therefore registered below as their own pack. The lane owner (giter/leader) owns the one-line
+> list extension.
+>
+> **Fences (unchanged).** No daemon, no database, no live port; a missing `node_modules` is a
+> LOUD FAIL, never a green skip.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `t1_fe_phase3` — the phase-3 FE spec set (the range domain, the frame's range + baseline controls, the central tab's request plumbing, the custom slot's own control, the no-forged-cursor pin) | `cd $WT/frontend && CI=1 ./node_modules/.bin/jest --ci --runInBand src/app/pages/metrics/metrics-range.spec.ts src/app/pages/metrics/metrics.baseline.pins.spec.ts src/app/pages/metrics/metrics.component.spec.ts src/app/pages/metrics/tabs.manifest.spec.ts src/app/pages/metrics/tabs/central-tab.component.spec.ts src/app/pages/metrics/tabs/resource-tab.component.spec.ts src/app/services/metrics.service.spec.ts src/app/models/metrics.model.spec.ts` | **219 nodes over 8 specs** (the per-file census re-derived at the phase-3 freeze): `metrics-range` **30 (NEW)** · `metrics.baseline.pins` **10 (NEW)** · `metrics.component` **58** (was 44) · `tabs.manifest` **33** (was 30) · `tabs/central-tab` **29** (was 18) · `tabs/resource-tab` **11 (NEW)** · `metrics.service` 16 · `metrics.model` 32. The load-bearing pins: the manifest-DERIVED union option set with the visible (disabled) enforcement · the keep-or-snap tab switch **with the announcement** · the 2W baseline over ONE request · the **server-anchored** midpoint split (a faked client-clock offset leaves the split UNCHANGED) · the three request-time guards (the auto-clear with its reason, the 7200 ceiling, the clamped-payload refusal) · the request-generation discipline (an old-generation response is DISCARDED) · the **derived** effective spacing (the 2 h leg asserts `30s` and the ABSENCE of the door's `15s`) · the custom slot's disabled baseline toggle with the plan's exact reason + the mapping refusal · the retention-tier copy (the tiers named, never offered as options) · the **no-forged-cursor negative pin** (mutation-proven: planted → RED → restored → GREEN) | 2026-11-03 | ✅ registered |
+| `t1_fe_phase3_whole_tree` — the whole-tree (D2) leg at the phase-3 freeze | `cd $WT/frontend && CI=1 ./node_modules/.bin/jest --ci --silent --runInBand` | **4503 collected / 4494 passed / 9 failed** — the 9 reds are **BASE-PROVEN**: the identical four specs fail identically at the phase-3 base `1474952fe` in a throwaway detached worktree (`git worktree add --detach` + a symlinked `node_modules`, removed + pruned afterwards). **Net-new deterministic reds = 0** | 2026-11-03 | ✅ registered |
+| `t1_bundle_guard` — **RE-RUN at the phase-3 freeze** (the phase-2 row stays as it is) | `cd $WT && node .agents/shared/planning/metrics-unification/fe-t1-build/bundle-guard.js frontend/dist/frontend/browser <production-build-log>` | **GREEN at the phase-3 freeze**: B1 `|Δ| = 35 B` vs the frozen 5,909,018 B (limit 2 kB) — the phase-3 FE code adds **0 B** to the initial total (it lives in the lazy route chunk) · B2 **0** `chart.js` markers in the 36 initial chunks · B3 **1** dynamic import site, **0** static, **0** outside `src/app/pages/metrics/**` · B6 the `anyComponentStyle` warning **SET** 9 == 9 (0 added / 0 removed). The phase-3 measurement (route chunk 50,872 B · route fetch set 603,420 B) is recorded in the phase-3 evidence; the **B4 lazy-only decomposition is the separate B4 rider** (its own decision entry + baseline field) | 2026-11-03 | ✅ registered |
+
+
 ## Commission FE-only T1 metrics dashboard — Phase-2 packs REGISTERED (2026-11-03, implementation lane `feature/fe-metrics-dashboard`, base `e529d5823`)
 
 > **What this block registers.** The T1 lane's **Phase-2** commit (the tab manifest + the 7-tab
