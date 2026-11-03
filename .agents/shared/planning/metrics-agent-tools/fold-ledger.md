@@ -454,6 +454,20 @@ single-sourcing: if the tool DUPLICATED the seam's constant, every behavioural p
 green while the door's budget moved. The FOLLOW leg mutates the PRODUCER and asserts the
 CONSUMER's value moved with it (235 → 215).
 
+### H.9 — The fix-cycle item map (the delta re-review's index)
+
+The council's six remediation items, each with its commit and its locus — the diff of each item
+is INDEPENDENTLY locatable from this table.
+
+| Item | Commit | Locus | What the reviewer reads |
+|---|---|---|---|
+| **C1** — wire the byte ceiling + bound the names projection | `fb48db063` | `daemon/tools/metrics_read.py` — the three `_trim_to_byte_ceiling(payload, …)` call sites (:624 / :726 / :971), the names bound (`MAX_NAMES_PER_FAMILY` / `MAX_NAMES_TOTAL` / the `dropped_names` counter), the `_encoded_size` probe (the tool's own `indent=2` form), the `_CAVEAT_HEADROOM_BYTES` reservation; `tests/unit/metrics/test_metrics_read_tools.py` — `TestOutputBudget` (the static wiring pin + the byte-ceiling pins for all three bodies + the names-bound pins) | the trim is WIRED, the surface is non-silent, the projection is bounded |
+| **C2** — the false records corrected | `5f8d7a0dc` | `fold-ledger.md` §H.5 (the M-1 row + its fix-cycle history) · `architecture-recommendation.md` §4 (the R13 correction) | the records say what was true, what was false, and what fixed it |
+| **W1** — the two binding mutation legs restored + the dropped set's dispositions | `7363dbac6` | `test/packs/metrics_read_mutation_matrix_test.py` — MT-13 (the byte-ceiling leg), the FOLLOW-leg machinery + MT-22 (the single-sourcing leg), MT-14..MT-21 (the eight folded legs); `fold-ledger.md` §H.8 (the per-leg dispositions for all 24 planned legs) | 21 RED/GREEN + 1 FOLLOW = 22 legs; every planned leg folded or explicitly deferred |
+| **W2** — the budget pin single-sourced | `fb48db063` | `tests/unit/metrics/test_metrics_read_tools.py` — the import of `MAX_TOTAL_POINTS` from the seam + the budget leg's `MAX_TOTAL_POINTS // 51` | the pin reads the PRODUCER's constant (no duplicated literal) |
+| **W3** — the ring-state behavioural pin | `fb48db063` | `daemon/tools/metrics_read.py` — the sentinel read (`read_numeric_fact(provider, "last_sample_age_s", -1.0)`) + `ring_empty = bool(age == 0.0)`; `tests/unit/metrics/test_metrics_read_tools.py` — `TestRingStateSignal` (three legs: empty / live / absent-is-unknown) | the signal is BEHAVIOURAL, and an absent fact is UNKNOWN (not "empty") |
+| **W4** — the census record correction | `5f8d7a0dc` | `fold-ledger.md` §H.3 (the census table + the file-count note) · `evidence-pack.md` §5 | 10 files, not 11 — the site count and the one-commit discipline HELD |
+
 ---
 
 ## §G — The implementation-tidier backfill (placeholder — DO NOT fill before the tidier pass)
