@@ -93,6 +93,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.28.10] — 2026-11-03
+
+### Fixed — skill ids are verbatim-consumable by skill_view (`fix/skill-list-full-uuid`, wi-76d89e11)
+
+- **skill_list / skill_create now emit ids that skill_view consumes verbatim** at the four ruled render seams: db-source skills return the FULL uuid (no shortened/prefix form anywhere), project-file-source skills return the canonical address `pf:<ns>:<name>` in the `id` field — the round-trip `skill_list → skill_view(id)` succeeds byte-exactly for both sources. An additive `pseudo_id` key preserves the legacy short form for any existing consumer without ever replacing the real id. Agent-visible docstrings state the per-source id contract (the id is per-source, not always UUID4).
+- Pin pack: verbatim round-trip + identity assertions, 10 mutation legs (incl. import guard) + a 12-shape discriminator-parity battery (`tests/tools/test_skill_id_verbatim_contract.py`, `test/packs/skill_id_verbatim_contract_unit_test.sh`). Zero `.sql`, zero schema change — migration delta EMPTY vs v0.28.9.
+
 ## [0.28.9] — 2026-11-03
 
 ### Added — the agent tool surface over the central metrics system: the `metrics-read` privileged tool category (`feature/metrics-agent-tools`, item #2 of the ratified metrics sequence; item #1 central-metrics-v1 landed v0.28.6)
