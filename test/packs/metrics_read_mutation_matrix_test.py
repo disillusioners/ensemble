@@ -305,6 +305,50 @@ RESPONSE_BYTE_CEILING = 10**9""",
         TOOLS_PACK,
         "test_the_budget_clamp_is_not_silent",
     ),
+    # ── THE COUNCIL FOLD'S THREE PINS (2026-11-03, the verification's
+    #    evidence gap): the fold's pins were claimed "mutation-verified"
+    #    with NO archived leg — the inverse of the W1 rule (a pin claimed
+    #    mutation-verified with no leg is a MISSING LEG). These three
+    #    legs carry the claim. ──
+    (
+        "MT-23-compose-overwrite",
+        "daemon/tools/metrics_read.py",
+        """        payload["dropped_count"] = matched - len(kept)
+        payload["truncated"] = True
+        payload["caveats"].append(byte_caveat)
+        payload["narrow_hint"] = _compose_hint(payload.get("narrow_hint"), byte_hint)""",
+        """        payload["dropped_count"] = matched - len(kept)
+        payload["truncated"] = True
+        payload["caveats"].append(byte_caveat)
+        payload["narrow_hint"] = byte_hint  # MUTATION: the byte-ceiling hint OVERWRITES the names-bound hint""",
+        TOOLS_PACK,
+        "test_both_bounds_on_one_response_keep_both_hints",
+    ),
+    (
+        "MT-24-per-body-disclosure-violated",
+        "daemon/tools/metrics_read.py",
+        """    "metrics_families": (
+        "a specific `family=`, or `details=false` for the small projection"
+    ),""",
+        """    "metrics_families": (
+        "a specific `family=`, a `name_prefix=`, or a smaller `top_n`"
+    ),""",
+        TOOLS_PACK,
+        "test_the_byte_ceiling_disclosure_names_only_accepted_filters",
+    ),
+    (
+        "MT-25-caveat-disagreement",
+        "daemon/tools/metrics_read.py",
+        """    "declared count is in `name_count`. Asking for one `family=` at a time "
+    "does NOT lift the per-family bound, and `details=false` only shrinks "
+    "each name."
+)""",
+        """    "declared count is in `name_count`. Ask for one family at a time, or "
+    "use `details=false` for the small projection."
+)""",
+        TOOLS_PACK,
+        "test_the_names_bound_caveat_agrees_with_its_hint",
+    ),
 ]
 
 #: The FOLLOW legs — a mutation whose EXPECTED result is NOT a red but a
