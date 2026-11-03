@@ -88,3 +88,32 @@
 .metrics-tabs-host {
   display: block;
 }
+
+.metrics-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.metrics-drawer {
+  margin-top: 0.9rem;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #0b1220;
+  padding: 0.75rem 0.9rem;
+}
+
+.metrics-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.metrics-drawer-title {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #e2e8f0;
+}

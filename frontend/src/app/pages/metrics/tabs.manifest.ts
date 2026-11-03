@@ -213,7 +213,7 @@ export type MetricsModuleEntry =
  * `capture_active`, R-i fixes the census polarity) they appear with
  * ZERO FE change.
  */
-export const METRICS_TABS: readonly MetricsTabEntry[] = [
+export const METRICS_TABS = [
   {
     disposition: 'bound',
     slot: 'custom',
@@ -286,7 +286,7 @@ export const METRICS_TABS: readonly MetricsTabEntry[] = [
     allowedWindows: ['15m', '30m', '1h', '2h'],
     copyVariant: 'auth_not_configured',
   },
-];
+] as const satisfies readonly MetricsTabEntry[];
 
 /** The DEFAULT tab — tab 1 (Resources). */
 export const METRICS_DEFAULT_TAB_ID = 'resource';
@@ -417,6 +417,55 @@ export const METRICS_MODULES: readonly MetricsModuleEntry[] = [
 
 /** The manifest's tab entries — the ONLY entries that render a tab. */
 export const METRICS_TAB_IDS: readonly string[] = METRICS_TABS.map((tab) => tab.id);
+
+/**
+ * The CENTRAL entries — the tab bodies' bindings.
+ *
+ * The filter's inferred type predicate narrows the literal manifest
+ * shape to its central members, so this stays in step with the data
+ * (no hand-maintained second list).
+ */
+export const METRICS_CENTRAL_ENTRIES: readonly MetricsCentralTab[] = METRICS_TABS.filter(
+  (tab) => tab.slot === 'central',
+);
+
+/** The CUSTOM entry — the module's own source (there is exactly one). */
+export const METRICS_CUSTOM_ENTRIES: readonly MetricsCustomTab[] = METRICS_TABS.filter(
+  (tab) => tab.slot === 'custom',
+);
+
+/**
+ * The id of a CENTRAL tab — derived from the manifest's own literal
+ * shape, so a typo in a tab body's entry lookup is a COMPILE error.
+ */
+export type MetricsCentralTabId = Extract<
+  (typeof METRICS_TABS)[number],
+  { readonly slot: 'central' }
+>['id'];
+
+/**
+ * The manifest entry of a CENTRAL tab — the typed lookup a tab body
+ * uses to bind its own module.
+ */
+export function metricsCentralTab(id: MetricsCentralTabId): MetricsCentralTab {
+  const found = METRICS_TABS.find((tab) => tab.id === id && tab.slot === 'central');
+  if (!found || found.slot !== 'central') {
+    throw new Error(`the manifest has no central tab '${id}'`);
+  }
+  return found;
+}
+
+/**
+ * The manifest entry of the CUSTOM tab — the module's own source (there
+ * is exactly one; the resource module is it).
+ */
+export function metricsCustomTab(): MetricsCustomTab {
+  const found = METRICS_TABS.find((tab) => tab.slot === 'custom');
+  if (!found || found.slot !== 'custom') {
+    throw new Error('the manifest has no custom tab');
+  }
+  return found;
+}
 
 /** The manifest entry of a tab id — `null` for an unknown id. */
 export function metricsTabById(id: string | null | undefined): MetricsTabEntry | null {

@@ -24,6 +24,8 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 import {
+  METRICS_CENTRAL_ENTRIES,
+  METRICS_CUSTOM_ENTRIES,
   METRICS_DEFAULT_TAB_ID,
   METRICS_DROPPED_MODULES,
   METRICS_HIDDEN_MODULES,
@@ -31,7 +33,6 @@ import {
   METRICS_PLANNED_MODULES,
   METRICS_TABS,
   MetricsCentralTab,
-  MetricsCustomTab,
   MetricsModuleEntry,
   isMetricsTabId,
   metricsCopyVariantFor,
@@ -61,12 +62,8 @@ function frozenResourcesWindows(): string[] {
   return [...match[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
 }
 
-const CENTRAL_TABS = METRICS_TABS.filter(
-  (tab): tab is MetricsCentralTab => tab.disposition === 'bound' && tab.slot === 'central',
-);
-const CUSTOM_TABS = METRICS_TABS.filter(
-  (tab): tab is MetricsCustomTab => tab.disposition === 'bound' && tab.slot === 'custom',
-);
+const CENTRAL_TABS = METRICS_CENTRAL_ENTRIES;
+const CUSTOM_TABS = METRICS_CUSTOM_ENTRIES;
 
 describe('the tab manifest — the 7 module tabs (2.1 / 2.2)', () => {
   it('carries exactly 7 tabs', () => {
@@ -255,7 +252,7 @@ describe('the tab manifest — the FOUR dispositions (AM-8, 2.1 / 2.3)', () => {
   });
 
   it('no PLANNED / HIDDEN / DROPPED entry contributes a tab, a panel or a route', () => {
-    const tabIds = new Set(METRICS_TABS.map((tab) => tab.id));
+    const tabIds = new Set<string>(METRICS_TABS.map((tab) => tab.id));
     for (const module of [
       ...METRICS_PLANNED_MODULES,
       ...METRICS_HIDDEN_MODULES,

@@ -1,9 +1,21 @@
 <div class="metrics-container">
   <header class="metrics-header">
-    <h1>Metrics</h1>
-    <p class="metrics-subtitle">
-      Central metrics door — families, current values and trends (UTC)
-    </p>
+    <div class="metrics-header-row">
+      <div>
+        <h1>Metrics</h1>
+        <p class="metrics-subtitle">
+          Central metrics door — families, current values and trends (UTC)
+        </p>
+      </div>
+      <button
+        mat-stroked-button
+        type="button"
+        (click)="toggleDrawer()"
+        data-test="metrics-catalog-drawer-toggle"
+      >
+        Families
+      </button>
+    </div>
   </header>
 
   @if (catalogError(); as message) {
@@ -40,21 +52,42 @@
     <section class="metrics-empty" data-test="metrics-empty-panel">
       <h2 class="metrics-empty-title">{{ emptyCopy }}</h2>
       <p class="metrics-empty-text">
-        The metrics door has not published a live family yet. The Families tab lists every
+        The metrics door has not published a live family yet. The family catalog lists every
         family with the reason it has no observation.
       </p>
     </section>
   }
 
   <div class="metrics-tabs-host">
-    <mat-tab-group (selectedIndexChange)="onTabChange($event)">
-      @for (section of sections; track section.id) {
-        <mat-tab [label]="section.label">
+    <mat-tab-group [selectedIndex]="activeIndex()" (selectedIndexChange)="onTabChange($event)">
+      @for (tab of tabs; track tab.entry.id) {
+        <mat-tab [label]="tab.entry.label">
           <ng-container
-            *ngComponentOutlet="section.component; inputs: tabInputs()[section.id]"
+            *ngComponentOutlet="tab.component; inputs: tabInputs()[tab.entry.id]"
           ></ng-container>
         </mat-tab>
       }
     </mat-tab-group>
   </div>
+
+  @if (drawerOpen()) {
+    <aside class="metrics-drawer" data-test="metrics-catalog-drawer">
+      <header class="metrics-drawer-head">
+        <h2 class="metrics-drawer-title">Family catalog</h2>
+        <button
+          mat-stroked-button
+          type="button"
+          (click)="closeDrawer()"
+          data-test="metrics-catalog-drawer-close"
+        >
+          Close
+        </button>
+      </header>
+      <app-metrics-family-catalog
+        [families]="families()"
+        [error]="catalogError()"
+        [onReload]="onReloadCatalog"
+      ></app-metrics-family-catalog>
+    </aside>
+  }
 </div>

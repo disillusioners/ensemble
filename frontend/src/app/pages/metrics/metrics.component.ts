@@ -3,12 +3,12 @@ import {
   Component,
   DestroyRef,
   OnInit,
-  Type,
   computed,
   inject,
   signal,
 } from '@angular/core';
 import { NgComponentOutlet } from '@angular/common';
+import { ActivatedRoute, Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatTabsModule } from '@angular/material/tabs';
@@ -16,28 +16,33 @@ import { MatTabsModule } from '@angular/material/tabs';
 import { MetricsService } from '../../services/metrics.service';
 import {
   METRICS_REGISTRY_DEGRADED_COPY,
-  MetricsChartRole,
   MetricsFamily,
   decodeMetricsDoorError,
-  metricsChartRoleForKind,
 } from '../../models/metrics.model';
-import { OverviewTabComponent } from './overview/overview-tab.component';
-import { ChartsTabComponent, MetricsChartSeriesSpec } from './charts/charts-tab.component';
-import { FamiliesTabComponent } from './families/families-tab.component';
+import { METRICS_DEFAULT_TAB_ID, metricsTabById } from './tabs.manifest';
+import { METRICS_TAB_BINDINGS } from './tabs/tabs.components';
+import {
+  EMPTY_METRICS_TAB_STATE,
+  MetricsTabState,
+  MetricsTabStateReporter,
+} from './metrics-state';
+import { MetricsFamilyCatalogComponent } from './families/families-tab.component';
 
 /**
- * A single section registered in the Metrics page shell's LOCAL section
- * registry — the `resources.component.ts:35-49` house pattern. Adding a
- * tab later is a one-line append here; no template change.
+ * The ROUTE-CHUNK MARKER (T1 phase 2, task 2.13 — B3).
+ *
+ * The bundle-baseline measurement tool locates the metrics route chunk
+ * by THIS KEY — a lane-controlled constant — and never by a content
+ * marker (`'metrics-empty-panel'`, which phase 8's empty-state rewrite
+ * invalidates, or `'anomaly-marker'`, which phase 7's route retirement
+ * moves). The literal is unique to the metrics page, so the route-fetch
+ * set stays measurable across the lane's own edits.
+ *
+ * **NO LATER PHASE MAY CHANGE ITS VALUE.** The measurement tool
+ * resolves it to EXACTLY ONE chunk; an unresolvable key is reported
+ * ABSENT, never mis-resolved.
  */
-export interface MetricsSection {
-  readonly id: string;
-  readonly label: string;
-  readonly component: Type<unknown>;
-}
-
-/** The door's selector ceiling — an over-ceiling request is rejected. */
-export const METRICS_SELECTOR_CEILING = 50;
+export const METRICS_ROUTE_CHUNK_MARKER = 'ensemble-metrics-route-v1';
 
 /**
  * The copy of the availability-driven empty panel (P5 task 5.7).
@@ -50,16 +55,18 @@ export const METRICS_SELECTOR_CEILING = 50;
 export const METRICS_EMPTY_PANEL_COPY = 'No metrics available yet';
 
 /**
- * Metrics page shell — the developer-facing charts surface on the
- * central-metrics query door (P5 task 5.4).
+ * Metrics page shell — the consolidated `/metrics` surface.
  *
- * The shell owns the FAMILY CATALOG (one load, not a poll): the
- * availability projection the empty state depends on lives here, and
- * the Families tab renders the same projection.
+ * The shell owns:
  *
- * The three tab bodies are MOUNTED LAZILY (Material's tab group only
- * instantiates the selected body) and the shell passes each body the
- * `active` flag — a body that is not the selected tab STOPS its poll.
+ *   * the TAB LIST — the manifest drives it (`tabs.manifest.ts`); the
+ *     manifest id is the single slug source, and `?tab=<id>` deep
+ *     links read and write it;
+ *   * the FAMILY CATALOG — one load, not a poll — rendered in a
+ *     FRAME-LEVEL DRAWER (the old Families tab is retired);
+ *   * the PER-TAB STATE — the state is per SOURCE (AM-1): a `custom`
+ *     slot renders its own source's state, a `central` slot renders the
+ *     central door's, so a failing source never blanks another one.
  */
 @Component({
   selector: 'app-metrics',
@@ -68,9 +75,7 @@ export const METRICS_EMPTY_PANEL_COPY = 'No metrics available yet';
     NgComponentOutlet,
     MatButtonModule,
     MatTabsModule,
-    OverviewTabComponent,
-    ChartsTabComponent,
-    FamiliesTabComponent,
+    MetricsFamilyCatalogComponent,
   ],
   templateUrl: './metrics.component.html',
   styleUrl: './metrics.component.scss',
@@ -78,14 +83,12 @@ export const METRICS_EMPTY_PANEL_COPY = 'No metrics available yet';
 })
 export class MetricsComponent implements OnInit {
   private readonly metrics = inject(MetricsService);
+  private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
 
-  /** The LOCAL section registry — a one-line append adds a tab. */
-  readonly sections: readonly MetricsSection[] = [
-    { id: 'overview', label: 'Overview', component: OverviewTabComponent },
-    { id: 'charts', label: 'Charts', component: ChartsTabComponent },
-    { id: 'families', label: 'Families', component: FamiliesTabComponent },
-  ];
+  /** The manifest-driven tab list — the label + id come from the manifest. */
+  readonly tabs = METRICS_TAB_BINDINGS;
 
   /** The catalog — the family projection the door serves. */
   readonly families = signal<readonly MetricsFamily[]>([]);
@@ -103,19 +106,30 @@ export class MetricsComponent implements OnInit {
    *
    * The door answers a failed registry read with a **200 and an EMPTY
    * body** — the byte-identical shape of a legitimately empty registry —
-   * so the failure is visible ONLY through
-   * `activation.registry_read_ok`. The predicate is `=== false` (absent
-   * reads as healthy, mirroring the backend's default-safe
-   * `getattr(provider, "registry_read_ok", True)`), never a truthiness
-   * check.
+   * so the failure is visible ONLY through `activation.registry_read_ok`.
+   * The predicate is `=== false` (absent reads as healthy, mirroring the
+   * backend's default-safe `getattr(provider, "registry_read_ok", True)`),
+   * never a truthiness check.
    *
    * The state is PER-LOAD, never sticky: a subsequent healthy load
    * clears it.
    */
   readonly catalogRegistryDegraded = signal(false);
 
-  /** The selected section — the visibility gate the tab bodies poll on. */
-  readonly activeTabId = signal<string>('overview');
+  /** The selected tab id — the manifest id is the single slug source. */
+  readonly activeTabId = signal<string>(METRICS_DEFAULT_TAB_ID);
+
+  /** The frame-level family catalog drawer. */
+  readonly drawerOpen = signal(false);
+
+  /**
+   * The PER-TAB state (AM-1).
+   *
+   * One entry per tab; each entry is written by that tab's OWN source.
+   * There is deliberately NO global state — a global one is what let a
+   * failing source blank the only lit tab.
+   */
+  readonly tabStates = signal<Record<string, MetricsTabState>>({});
 
   /** The empty panel's copy (never "disabled" — D-8 / AM-19(d)). */
   readonly emptyCopy = METRICS_EMPTY_PANEL_COPY;
@@ -125,6 +139,9 @@ export class MetricsComponent implements OnInit {
 
   /** The monotonic supersede token of the catalog load. */
   private catalogSeq = 0;
+
+  /** The per-tab state reporters — one stable callback per tab. */
+  private readonly reporters = new Map<string, MetricsTabStateReporter>();
 
   readonly liveFamilies = computed(() =>
     this.families().filter((family) => family.availability.state === 'live'),
@@ -136,6 +153,11 @@ export class MetricsComponent implements OnInit {
 
   /** Whether ANY family is live — the empty state's ONLY condition. */
   readonly anyFamilyLive = computed(() => this.liveFamilies().length > 0);
+
+  /** The selected tab's index — the tab group follows the manifest id. */
+  readonly activeIndex = computed(() =>
+    this.tabs.findIndex((tab) => tab.entry.id === this.activeTabId()),
+  );
 
   /**
    * The empty panel appears exactly when no family is live — driven by
@@ -154,58 +176,148 @@ export class MetricsComponent implements OnInit {
       !this.anyFamilyLive(),
   );
 
-  /**
-   * The chart-primary series — the roster's families (the catalog's
-   * `role === 'chart'`) with their rendering mode. The door REJECTS an
-   * over-ceiling selector, so the list is capped at the ceiling.
-   */
-  readonly chartSpecs = computed<readonly MetricsChartSeriesSpec[]>(() => {
-    const out: MetricsChartSeriesSpec[] = [];
-    for (const family of this.families()) {
-      if (family.role !== 'chart') {
-        continue;
-      }
-      for (const name of family.names) {
-        const chartRole: MetricsChartRole =
-          name.chart_role ?? metricsChartRoleForKind(name.kind);
-        out.push({ name: name.name, chartRole });
-      }
-    }
-    return out.slice(0, METRICS_SELECTOR_CEILING);
-  });
-
-  /** The per-section inputs handed to each tab body by the outlet. */
+  /** The per-tab inputs handed to each tab body by the outlet. */
   readonly tabInputs = computed<Record<string, Record<string, unknown>>>(() => {
-    const activeId = this.activeTabId();
-    const specs = this.chartSpecs();
-    const families = this.families();
+    const states = this.tabStates();
     const out: Record<string, Record<string, unknown>> = {};
-    for (const section of this.sections) {
-      if (section.id === 'charts') {
-        out[section.id] = { active: activeId === section.id, chartSpecs: specs };
-      } else if (section.id === 'families') {
-        out[section.id] = {
-          active: activeId === section.id,
-          families,
-          onReload: this.onReloadCatalog,
-        };
-      } else {
-        out[section.id] = { active: activeId === section.id };
-      }
+    for (const tab of this.tabs) {
+      out[tab.entry.id] = {
+        state: states[tab.entry.id] ?? EMPTY_METRICS_TAB_STATE,
+        onState: this.tabStateReporter(tab.entry.id),
+      };
     }
     return out;
   });
 
   ngOnInit(): void {
     this.loadCatalog();
+    // The deep link: the `?tab=` parameter selects the tab. The
+    // subscription is the ONLY reader — the router replays the current
+    // parameter on subscribe, so a separate snapshot read would apply
+    // the same parameter twice (and write the URL twice).
+    this.route.queryParamMap.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((params) => {
+      this.applyDeepLink(params.get('tab'));
+    });
   }
 
-  /** The tab group's selection changed — the visibility gate follows it. */
-  onTabChange(index: number): void {
-    const section = this.sections[index];
-    if (section) {
-      this.activeTabId.set(section.id);
+  /**
+   * Apply the `?tab=` parameter.
+   *
+   * A KNOWN id selects that tab. An UNKNOWN (or legacy — `overview`,
+   * `charts`, `families`) id falls back to the default tab, and the
+   * URL is rewritten ONCE (`replaceUrl`, no history entry) so the URL
+   * and the selected tab never disagree — without a redirect loop: the
+   * rewrite makes the parameter known, and a known parameter writes
+   * nothing.
+   */
+  private applyDeepLink(requested: string | null): void {
+    const known = metricsTabById(requested);
+    if (known) {
+      this.activeTabId.set(known.id);
+      return;
     }
+    this.activeTabId.set(METRICS_DEFAULT_TAB_ID);
+    if (requested !== null && requested !== METRICS_DEFAULT_TAB_ID) {
+      this.writeTabParam(METRICS_DEFAULT_TAB_ID);
+    }
+  }
+
+  /** Write the selected tab back to the URL (the query is preserved). */
+  private writeTabParam(id: string): void {
+    this.router.navigate([], {
+      queryParams: { tab: id },
+      queryParamsHandling: 'merge',
+      replaceUrl: true,
+    });
+  }
+
+  /** The tab group's selection changed — the URL follows it. */
+  onTabChange(index: number): void {
+    const tab = this.tabs[index];
+    if (!tab) {
+      return;
+    }
+    const id = tab.entry.id;
+    if (id === this.activeTabId()) {
+      // Already selected — writing again would be a navigation storm.
+      return;
+    }
+    this.activeTabId.set(id);
+    this.writeTabParam(id);
+  }
+
+  /** Open or close the family-catalog drawer. */
+  toggleDrawer(): void {
+    this.drawerOpen.update((open) => !open);
+  }
+
+  /** Close the family-catalog drawer. */
+  closeDrawer(): void {
+    this.drawerOpen.set(false);
+  }
+
+  /**
+   * Apply a state patch to ONE tab.
+   *
+   * A tab body can therefore never write another tab's state — the
+   * per-source isolation is structural, not a convention.
+   */
+  applyTabState(tabId: string, patch: Partial<MetricsTabState>): void {
+    this.tabStates.update((states) => ({
+      ...states,
+      [tabId]: { ...EMPTY_METRICS_TAB_STATE, ...states[tabId], ...patch },
+    }));
+  }
+
+  /** The stable per-tab state reporter. */
+  private tabStateReporter(tabId: string): MetricsTabStateReporter {
+    let reporter = this.reporters.get(tabId);
+    if (!reporter) {
+      reporter = (patch: Partial<MetricsTabState>) => this.applyTabState(tabId, patch);
+      this.reporters.set(tabId, reporter);
+    }
+    return reporter;
+  }
+
+  /**
+   * Publish the CENTRAL door's outcome to the central tabs ONLY.
+   *
+   * The custom slot is never touched here — that is the AM-1 seam: a
+   * failing central source cannot blank the custom tab's state.
+   */
+  private publishCentralSource(patch: {
+    doorState: MetricsTabState['doorState'];
+    errorClass: MetricsTabState['errorClass'];
+    families?: Record<string, readonly MetricsFamily[]>;
+  }): void {
+    for (const tab of this.tabs) {
+      const entry = tab.entry;
+      if (entry.disposition !== 'bound' || entry.slot !== 'central') {
+        continue;
+      }
+      this.applyTabState(entry.id, {
+        doorState: patch.doorState,
+        errorClass: patch.errorClass,
+        ...(patch.families ? { families: patch.families[entry.id] ?? [] } : {}),
+      });
+    }
+  }
+
+  /** The bound families of every central tab, projected from the catalog. */
+  private boundFamiliesFor(
+    all: readonly MetricsFamily[],
+  ): Record<string, readonly MetricsFamily[]> {
+    const out: Record<string, readonly MetricsFamily[]> = {};
+    for (const tab of this.tabs) {
+      const entry = tab.entry;
+      if (entry.disposition !== 'bound' || entry.slot !== 'central') {
+        continue;
+      }
+      out[entry.id] = entry.familyIds
+        .map((id) => all.find((family) => family.id === id))
+        .filter((family): family is MetricsFamily => family !== undefined);
+    }
+    return out;
   }
 
   /** Load (or reload) the family catalog. */
@@ -234,6 +346,11 @@ export class MetricsComponent implements OnInit {
           // The door may serve a BOUNDED page (W-4) — surfaced, never
           // silently dropped.
           this.catalogTruncated.set(payload.truncated === true);
+          this.publishCentralSource({
+            doorState: 'ok',
+            errorClass: null,
+            families: this.boundFamiliesFor(payload.families),
+          });
         },
         error: (err: unknown) => {
           if (token !== this.catalogSeq) {
@@ -242,14 +359,18 @@ export class MetricsComponent implements OnInit {
           // A-5: decode the BODY and branch the copy — a 403 scope miss
           // or a 503 fail-closed door is NOT an unreachable door. The
           // last-good catalog is retained in EVERY branch.
-          this.catalogError.set(decodeMetricsDoorError(err).copy);
+          const decoded = decodeMetricsDoorError(err);
+          this.catalogError.set(decoded.copy);
           this.catalogStale.set(this.families().length > 0);
           this.catalogLoaded.set(true);
+          // The bound families are NOT cleared — the last-good catalog
+          // is retained in every branch.
+          this.publishCentralSource({ doorState: decoded.code, errorClass: decoded.code });
         },
       });
   }
 
-  /** The Families tab asked for a fresh catalog. */
+  /** The catalog drawer asked for a fresh catalog. */
   readonly onReloadCatalog = (): void => {
     this.loadCatalog();
   };
