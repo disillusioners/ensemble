@@ -764,6 +764,162 @@ class TestOutputBudget:
         projected = sum(len(f["names"]) for f in out["families"])
         assert projected <= MAX_NAMES_TOTAL
 
+    async def test_both_bounds_on_one_response_keep_both_hints(self) -> None:
+        """THE COMBINED-CASE PIN — two bounds on ONE response must not
+        erase each other's actionable text.
+
+        5b-②: the names bound AND the byte ceiling can fire on the SAME
+        families body, and they share ONE ``narrow_hint`` member. The
+        second bound used to OVERWRITE the first one's text, so the
+        agent lost the lever it could actually use (the names-bound
+        hint) — executed shape: 12 families × 250 names.
+        """
+        provider = FakeProvider(
+            families=[
+                _fat_family(f"F{i}", names=250, help_chars=4000)
+                for i in range(12)
+            ],
+            snapshot=[],
+        )
+        out = await _call(
+            _tools(provider=provider)["metrics_families"], {"details": True}
+        )
+        assert out["truncated"] is True
+        hint = out["narrow_hint"]
+        assert "projection bound" in hint, (
+            "the names-bound hint must SURVIVE the byte-ceiling bound — "
+            "one member carries both, so the second must not erase the "
+            "first"
+        )
+        assert "byte ceiling" in hint, "the byte-ceiling hint must be present too"
+        caveats = " ".join(out["caveats"])
+        assert "more metric names than one response projects" in caveats
+        assert "byte ceiling" in caveats
+
+    async def test_the_byte_ceiling_disclosure_names_only_accepted_filters(self) -> None:
+        """THE PER-BODY DISCLOSURE PIN (5b-③) — the byte-ceiling text
+        must name filters the CALLING BODY accepts.
+
+        The families tool accepts NEITHER ``name_prefix=`` NOR ``top_n=``,
+        and the history tool accepts NO ``name_prefix=``. A disclosure
+        that names an unaccepted filter is an instruction the agent
+        cannot act on.
+        """
+        fat_families = [
+            _fat_family(f"F{i}", names=MAX_NAMES_PER_FAMILY, help_chars=2000)
+            for i in range(12)
+        ]
+        # the FAMILIES body — its levers are `family=` + `details=`
+        out = await _call(
+            _tools(provider=FakeProvider(families=fat_families, snapshot=[]))[
+                "metrics_families"
+            ],
+            {"details": True},
+        )
+        families_caveat = next(c for c in out["caveats"] if "byte ceiling" in c)
+        assert "name_prefix" not in families_caveat, (
+            "metrics_families accepts no `name_prefix` — the disclosure "
+            "must not name a filter the caller cannot pass"
+        )
+        assert "top_n" not in families_caveat, (
+            "metrics_families accepts no `top_n` — same rule"
+        )
+        assert "family" in families_caveat
+
+        # the HISTORY body — its levers are `names=`/`series=`,
+        # `window_s=` and `top_n=` (NO `name_prefix=`)
+        history_rows = [
+            {
+                "name": f"ensemble_fat_{i:05d}",
+                "labels": {"k": "v" * 60_000},
+                "kind": "gauge",
+                "monotonic": False,
+                "points": [[1_700_000_000, float(i)], [1_700_000_015, float(i) + 1]],
+            }
+            for i in range(50)
+        ]
+        out = await _call(
+            _tools(
+                provider=FakeProvider(
+                    families=[_fat_family("F10", names=1, help_chars=4)],
+                    snapshot=[],
+                    history=history_rows,
+                )
+            )["metrics_history"],
+            {"names": ["m"], "top_n": 50},
+        )
+        history_caveat = next(c for c in out["caveats"] if "byte ceiling" in c)
+        assert "name_prefix" not in history_caveat, (
+            "metrics_history accepts no `name_prefix` — same rule"
+        )
+        assert "window_s" in history_caveat and "top_n" in history_caveat
+
+        # the SNAPSHOT body — it DOES accept `name_prefix=` + `top_n=`
+        snapshot_rows = [
+            {
+                "name": f"ensemble_fat_{i:05d}",
+                "labels": {"k": "v" * 60_000},
+                "kind": "gauge",
+                "monotonic": False,
+                "last_publish_age_s": 1.0,
+                "value": i,
+            }
+            for i in range(50)
+        ]
+        out = await _call(
+            _tools(
+                provider=FakeProvider(
+                    families=[_fat_family("F10", names=1, help_chars=4)],
+                    snapshot=snapshot_rows,
+                )
+            )["metrics_snapshot"],
+            {"top_n": 50},
+        )
+        snapshot_caveat = next(c for c in out["caveats"] if "byte ceiling" in c)
+        assert "name_prefix" in snapshot_caveat, (
+            "metrics_snapshot DOES accept `name_prefix` — its disclosure "
+            "must name it"
+        )
+
+    async def test_the_names_bound_caveat_agrees_with_its_hint(self) -> None:
+        """THE AGREEMENT PIN (5b-①) — the names-bound CAVEAT must not
+        contradict the narrow_hint.
+
+        The caveat used to say "Ask for one family at a time, or use
+        `details=false` for the small projection" — exactly what the
+        corrected hint DISOWNS (neither lifts the per-family bound). A
+        caveat that contradicts the hint is a SECOND, wrong instruction.
+        """
+        provider = FakeProvider(
+            families=[_fat_family("F1", names=MAX_NAMES_PER_FAMILY + 50, help_chars=4)],
+            snapshot=[],
+        )
+        out = await _call(
+            _tools(provider=provider)["metrics_families"], {"details": True}
+        )
+        names_caveat = next(
+            c
+            for c in out["caveats"]
+            if "more metric names than one response projects" in c
+        )
+        assert "Ask for one family at a time" not in names_caveat, (
+            "the caveat must not present the disowned advice — asking for "
+            "one family at a time does NOT lift the per-family bound"
+        )
+        assert "for the small projection" not in names_caveat, (
+            "the caveat must not present `details=false` as the lever — it "
+            "only shrinks each name"
+        )
+        assert "does NOT lift" in names_caveat, (
+            "the caveat must state the correction, not the old advice"
+        )
+        assert "name_count" in names_caveat, (
+            "the caveat must point at the family's DECLARED count"
+        )
+        assert "name_prefix=" in out["narrow_hint"], (
+            "the hint must name the lever that actually works"
+        )
+
     async def test_a_fat_snapshot_is_trimmed_to_the_byte_ceiling(self) -> None:
         """The SNAPSHOT body carries the trim too."""
         # The tool's own ``top_n`` cap is 50, so a FAT body needs FAT

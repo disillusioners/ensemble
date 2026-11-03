@@ -253,29 +253,74 @@ MAX_NAMES_TOTAL = 2000
 #: — otherwise the final body would exceed the ceiling.
 _CAVEAT_HEADROOM_BYTES = 2048
 
-#: The byte-ceiling caveat (count-independent wording — it is written
-#: after the trim, so it cannot quote a count).
-_BYTE_CEILING_CAVEAT = (
-    "The response was trimmed to fit the daemon's byte ceiling — the items "
-    "below are a SUBSET of what matched. Narrow the query (a specific "
-    "`family=`, a `name_prefix=`, or a smaller `top_n`) to read the rest."
-)
+#: The narrowing filters EACH body actually accepts — a disclosure that
+#: names a filter the CALLER cannot pass is a disclosure the agent
+#: cannot act on. The byte-ceiling text is therefore PER-BODY (5b-③):
+#: ``metrics_families`` accepts NEITHER ``name_prefix=`` NOR ``top_n=``,
+#: and ``metrics_history`` accepts NO ``name_prefix=``.
+_BODY_NARROW_LEVERS: dict[str, str] = {
+    "metrics_families": (
+        "a specific `family=`, or `details=false` for the small projection"
+    ),
+    "metrics_snapshot": (
+        "a specific `family=`, a `name_prefix=`, or a smaller `top_n`"
+    ),
+    "metrics_history": (
+        "a specific `names=`/`series=` selector, a smaller `window_s=`, or "
+        "a smaller `top_n`"
+    ),
+}
 
-#: The names-bound caveat (same rule — count-independent wording).
+#: The names-bound caveat (same rule — count-independent wording, AND it
+#: must AGREE with the narrow_hint below: a caveat that contradicts the
+#: hint is a second, wrong instruction — 5b-①).
 _NAMES_BOUND_CAVEAT = (
     "The catalog carries more metric names than one response projects — the "
-    "names below are a SUBSET of the family's declared names. Ask for one "
-    "family at a time, or use `details=false` for the small projection."
+    "names below are the family's FIRST declared names, and its true "
+    "declared count is in `name_count`. Asking for one `family=` at a time "
+    "does NOT lift the per-family bound, and `details=false` only shrinks "
+    "each name."
 )
 
 
-def _byte_ceiling_hint() -> str:
-    """The narrow_hint for the byte-ceiling trim (a concrete next filter)."""
+def _byte_ceiling_caveat(body: str) -> str:
+    """The byte-ceiling caveat for THIS body (count-independent wording).
+
+    The levers named are the ones the CALLING BODY accepts — the
+    families tool takes neither ``name_prefix=`` nor ``top_n=``, and the
+    history tool takes no ``name_prefix=`` (5b-③).
+    """
+    levers = _BODY_NARROW_LEVERS.get(body, "a narrower query")
     return (
-        "the response hit the daemon's byte ceiling — narrow the query (a "
-        "specific `family=`, a `name_prefix=`, or a smaller `top_n`) and "
-        "call again."
+        "The response was trimmed to fit the daemon's byte ceiling — the "
+        "items below are a SUBSET of what matched. Narrow the query ("
+        + levers
+        + ") to read the rest."
     )
+
+
+def _byte_ceiling_hint(body: str) -> str:
+    """The narrow_hint for the byte-ceiling trim (a concrete next filter)."""
+    levers = _BODY_NARROW_LEVERS.get(body, "a narrower query")
+    return (
+        "the response hit the daemon's byte ceiling — narrow the query ("
+        + levers
+        + ") and call again."
+    )
+
+
+def _compose_hint(*hints: str | None) -> str | None:
+    """Compose the narrow_hints that are in play.
+
+    ONE member carries the hint, and two bounds can fire on the SAME
+    response (the names bound AND the byte ceiling). A later bound must
+    NOT overwrite an earlier bound's actionable text — the agent then
+    loses the lever it can actually use (5b-②).
+    """
+    parts = [h.strip() for h in hints if h and h.strip()]
+    if not parts:
+        return None
+    return " ".join(parts)
 
 
 def _names_bound_hint() -> str:
@@ -310,13 +355,24 @@ def _post_trim_overhead_bytes() -> int:
 
     The trim's target subtracts the reservation, so the reservation MUST
     cover every byte the body gains afterwards: the disclosure (the
-    caveat + the narrow_hint) and the ``agent_id`` the wrapper inserts
-    into the query block AFTER the body was built.
+    caveat + the narrow_hint — the per-body byte-ceiling ones, taken at
+    their LONGEST) and the ``agent_id`` the wrapper inserts into the
+    query block AFTER the body was built.
+
+    The names-bound caveat + hint are counted too: they are written
+    BEFORE the trim (so the probe already measures them), which makes
+    this count conservative — a reservation that over-counts is safe.
     """
     return (
-        len(json.dumps(_BYTE_CEILING_CAVEAT, indent=2).encode("utf-8"))
+        max(
+            len(json.dumps(_byte_ceiling_caveat(body), indent=2).encode("utf-8"))
+            for body in _BODY_NARROW_LEVERS
+        )
         + len(json.dumps(_NAMES_BOUND_CAVEAT, indent=2).encode("utf-8"))
-        + len(json.dumps(_byte_ceiling_hint(), indent=2).encode("utf-8"))
+        + max(
+            len(json.dumps(_byte_ceiling_hint(body), indent=2).encode("utf-8"))
+            for body in _BODY_NARROW_LEVERS
+        )
         + len(json.dumps(_names_bound_hint(), indent=2).encode("utf-8"))
         + len(
             json.dumps(
@@ -434,24 +490,30 @@ def _enforce_byte_ceiling(
 ) -> tuple[list[Any], bool]:
     """The door's byte ceiling, ported WHOLE (AmM-1(c)).
 
-    THE DOOR'S ORDER (``daemon/routers/metrics.py:417-436``):
+    THE DOOR'S SHAPE (``daemon/routers/metrics.py:417-436``):
 
     1. the TRIM — the door measures the envelope and trims ONLY when it
-       is over the ceiling. The trim's probe measures the envelope AS
-       IT WILL BE SHIPPED (the payload with the shipped items), with the
-       reservation subtracted (the disclosure is written after the trim,
-       so the trim must leave room for it).
-    2. the FINAL-ENVELOPE RE-CHECK (``routers/metrics.py:428``) — the
-       body is measured ONCE MORE with the disclosure attached, i.e.
-       exactly as it will be shipped. The reservation covers the
-       disclosure; the re-check PROVES it did. If it did not (the
-       disclosure prose outgrew the reservation), the trim runs AGAIN
-       with the disclosure in place — the probe then measures the TRUE
-       final form.
+       is over the ceiling. **``routers/metrics.py:428`` is that
+       CONDITION** (``if _encoded_size(envelope) > RESPONSE_BYTE_CEILING``)
+       — NOT a re-check: the door measures ONCE, and what it mints
+       afterwards is a CURSOR, not a disclosure. The trim's probe
+       measures the envelope AS IT WILL BE SHIPPED (the payload with the
+       shipped items), with the reservation subtracted (the disclosure is
+       written after the trim, so the trim must leave room for it).
+    2. the TOOL'S OWN SECOND MEASUREMENT — the tool has no cursor, it
+       writes a DISCLOSURE (the caveat + the narrow_hint) after the trim,
+       so the first measurement cannot see the bytes the disclosure
+       adds. The second measurement is therefore the tool's own belt:
+       it measures the body WITH the disclosure attached and trims again
+       if it is still over. That belt catches the one case the first
+       pass cannot — the disclosure outgrew the reservation — and its
+       target is the SAME reserved bound as the first pass (the
+       reservation covers the post-trim additions, and 5a's import-time
+       assertion keeps the reservation honest).
 
     ``disclosure`` is the member dict the caller attaches WHEN the trim
-    fires (the caveat + the narrow_hint). It is part of the re-check's
-    probe, so the re-check measures the true final form.
+    fires (the caveat + the narrow_hint). It is part of the second
+    measurement's probe, so that measurement sees the true final form.
 
     Returns the KEPT ITEMS (the shipped projection) and whether the
     trim fired — the caller must surface the trim (never silent).
@@ -465,8 +527,15 @@ def _enforce_byte_ceiling(
     trimmed = len(kept) < len(items)
     final = {**payload, **disclosure, key: kept}
     if _encoded_size(final) > RESPONSE_BYTE_CEILING:
+        # THE BELT'S TARGET IS THE SAME RESERVED BOUND AS THE NORMAL
+        # PATH (the in-file advisory) — the belt must not leave a body
+        # that is looser than the first pass's bound, or the post-trim
+        # additions (the agent_id) would have no room left.
         kept = _trim_to_byte_ceiling(
-            final, key=key, items=kept, target=RESPONSE_BYTE_CEILING
+            final,
+            key=key,
+            items=kept,
+            target=RESPONSE_BYTE_CEILING - _CAVEAT_HEADROOM_BYTES,
         )
         trimmed = trimmed or len(kept) < len(items)
     return kept, trimmed
@@ -783,19 +852,27 @@ def _build_families(
         # THE NAMES BOUND IS NEVER SILENT.
         payload["truncated"] = True
         payload["caveats"].append(_NAMES_BOUND_CAVEAT)
-        payload["narrow_hint"] = _names_bound_hint()
+        # THE HINT IS COMPOSED (5b-②) — one member carries the hint, and
+        # two bounds can fire on the same response.
+        payload["narrow_hint"] = _compose_hint(
+            payload.get("narrow_hint"), _names_bound_hint()
+        )
 
     # THE BYTE CEILING (AmM-1(c)) — the trim is a BOUND and it is NEVER
     # SILENT: the count block, a caveat and the narrow_hint all move.
     # The items handed to the ceiling are the SHIPPED items (the families
     # the payload carries) — the door's shape, ported whole.
+    # The disclosure is PER-BODY (5b-③): the families tool accepts
+    # NEITHER `name_prefix=` NOR `top_n=`.
+    byte_caveat = _byte_ceiling_caveat("metrics_families")
+    byte_hint = _byte_ceiling_hint("metrics_families")
     kept, byte_trimmed = _enforce_byte_ceiling(
         payload,
         key="families",
         items=kept,
         disclosure={
-            "caveats": [*payload["caveats"], _BYTE_CEILING_CAVEAT],
-            "narrow_hint": _byte_ceiling_hint(),
+            "caveats": [*payload["caveats"], byte_caveat],
+            "narrow_hint": _compose_hint(payload.get("narrow_hint"), byte_hint),
         },
     )
     if byte_trimmed:
@@ -803,8 +880,8 @@ def _build_families(
         payload["returned_count"] = len(kept)
         payload["dropped_count"] = matched - len(kept)
         payload["truncated"] = True
-        payload["caveats"].append(_BYTE_CEILING_CAVEAT)
-        payload["narrow_hint"] = _byte_ceiling_hint()
+        payload["caveats"].append(byte_caveat)
+        payload["narrow_hint"] = _compose_hint(payload.get("narrow_hint"), byte_hint)
     return payload
 
 
@@ -902,13 +979,17 @@ def _build_snapshot(
     # SILENT. The items handed to the ceiling are the SHIPPED items (the
     # stripped projection the payload carries) — the probe must measure
     # the object the body ships, not the raw provider rows.
+    # The disclosure is PER-BODY (5b-③): the snapshot tool DOES accept
+    # `name_prefix=` and `top_n=`.
+    byte_caveat = _byte_ceiling_caveat("metrics_snapshot")
+    byte_hint = _byte_ceiling_hint("metrics_snapshot")
     kept_proj, byte_trimmed = _enforce_byte_ceiling(
         payload,
         key="series",
         items=series_proj,
         disclosure={
-            "caveats": [*payload["caveats"], _BYTE_CEILING_CAVEAT],
-            "narrow_hint": _byte_ceiling_hint(),
+            "caveats": [*payload["caveats"], byte_caveat],
+            "narrow_hint": _compose_hint(payload.get("narrow_hint"), byte_hint),
         },
     )
     if byte_trimmed:
@@ -916,8 +997,8 @@ def _build_snapshot(
         payload["returned_count"] = len(kept_proj)
         payload["dropped_count"] = matched - len(kept_proj)
         payload["truncated"] = True
-        payload["caveats"].append(_BYTE_CEILING_CAVEAT)
-        payload["narrow_hint"] = _byte_ceiling_hint()
+        payload["caveats"].append(byte_caveat)
+        payload["narrow_hint"] = _compose_hint(payload.get("narrow_hint"), byte_hint)
     return payload
 
 
@@ -1162,13 +1243,18 @@ def _build_history(
     # projection: the probe then measured a different object than the
     # body shipped, and on the trimmed path every row LOST the nine
     # contract-declared members — a size-dependent response schema.
+    # The disclosure is PER-BODY (5b-③): the history tool accepts NO
+    # `name_prefix=` (its levers are `names=`/`series=`, `window_s=`
+    # and `top_n=`).
+    byte_caveat = _byte_ceiling_caveat("metrics_history")
+    byte_hint = _byte_ceiling_hint("metrics_history")
     kept_series, byte_trimmed = _enforce_byte_ceiling(
         payload,
         key="series",
         items=series_out,
         disclosure={
-            "caveats": [*payload["caveats"], _BYTE_CEILING_CAVEAT],
-            "narrow_hint": _byte_ceiling_hint(),
+            "caveats": [*payload["caveats"], byte_caveat],
+            "narrow_hint": _compose_hint(payload.get("narrow_hint"), byte_hint),
         },
     )
     if byte_trimmed:
@@ -1176,8 +1262,8 @@ def _build_history(
         payload["returned_count"] = len(kept_series)
         payload["more_available"] = True
         payload["truncated"] = True
-        payload["caveats"].append(_BYTE_CEILING_CAVEAT)
-        payload["narrow_hint"] = _byte_ceiling_hint()
+        payload["caveats"].append(byte_caveat)
+        payload["narrow_hint"] = _compose_hint(payload.get("narrow_hint"), byte_hint)
     return payload
 
 
