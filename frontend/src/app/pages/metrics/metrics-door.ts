@@ -20,8 +20,9 @@ export const METRICS_SELECTOR_CEILING = 50;
  *
  * The seconds are derived (`minutes * 60`) so no phase has to carry a
  * hard-coded seconds literal — phase 4's residue check greps the metrics
- * tree for the word-bounded `3600` and expects every hit outside its
- * allowlist row to be ZERO.
+ * tree for the word-bounded ONE-HOUR literal and expects every hit
+ * outside its allowlist row to be ZERO (this comment deliberately does
+ * NOT spell the literal: naming it would be a hit).
  */
 export const METRICS_CENTRAL_WINDOW_MINUTES: Readonly<Record<MetricsCentralWindow, number>> = {
   '15m': 15,
