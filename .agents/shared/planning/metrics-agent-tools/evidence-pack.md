@@ -98,10 +98,10 @@ verification's evidence-gap close — the full leg descriptions are in §8e and 
 
 **The amendment is the PRIMARY variant** (P-1 / E-1, adjudicated 2026-11-03 + amendment-2).
 
-* **The changed lines: NINE**, all inside the FIVE canonical ranges — `:31`, `:32` (§1.13 matrix
+* **The changed lines: EIGHT**, all inside the FIVE canonical ranges — `:31`, `:32` (§1.13 matrix
   rows 2-3) · `:318`, `:319`, `:322` (§6 truth table) · `:380` (§7 door disclosure) · `:387`
   (§7 the emergency-off lever) · `:405` (the AM-20 over-grant disclosure).
-* **The line count is UNCHANGED (819 → 819)** — no line was added, removed or shifted, so the
+* **The line count is UNCHANGED (818 → 818)** — no line was added, removed or shifted, so the
   "line-scoped" assertion holds trivially.
 * **The contract-doc pack is GREEN WITH THE AMENDMENT APPLIED** — 21/21, expectations UNTOUCHED,
   **never re-pinned**.
@@ -305,6 +305,36 @@ carry the new legs and re-archived (sha256
 **The deviation, stated:** the council's expectation of 25 legs assumed only the fold's three
 pins; the class had two more claims, so the matrix carries 27 — the alternative would have
 left two more unarchived claims behind.
+
+---
+
+## 8f. The tester gate's F-1 (closed) + F-2/F-3 (corrected) — 2026-11-03
+
+The tester gate (`fcfa24225`, ridden on the branch, untouched) returned FAIL on ONE axis (G2
+net-new = 2); the rest was green. The blocker was folded into this lane:
+
+| what | how | result |
+|---|---|---|
+| the tool-category artifact | **REGENERATED WITH THE HOUSE GENERATOR** — the artifact pack's OWN generator mode (`ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=<scratch>` + the pack's pytest invocation ✓); never hand-edited ✓ | `metrics-read` added; `count` 56 → **57**; `vocabulary_version` 1 → **3** (the committed artifact was stale by TWO markers ✓) |
+| the vocabulary marker | `daemon/checkpoint_metrics.py` — `VOCABULARY_VERSION` 2 → **3** (`:218`) + the version-history docstring | the F7 op annex unchanged ✓ (the bump rides the tool-category axis ✓) |
+| the SEALED set | `SEALED_SHA_BASELINES` (`tests/test_chart_image_delivery_e2e.py:1425`) | `daemon/checkpoint_metrics.py` is **NOT pinned** ✓ ⇒ no re-pin ceremony needed ✓, none performed ✓ |
+| the two reds | the artifact pack | **9 passed** ✓ (both nodes were 3/3 FAIL at HEAD ×3 / 3/3 PASS at BASE ×3 before this cycle ✓) |
+| the G2 union leg | the three recorded compositions' UNION (71 HEAD files / 64 BASE ✓ — a reconstruction, disclosed ✓) | HEAD **1 584 collected / 1 579 passed / 5 failed** vs BASE **1 397 / 1 392 / 5** ⇒ the FAILED lists are IDENTICAL ⇒ **net-new = ∅** ✓, fixed = ∅ ✓ (5 base-proven residuals ✓) |
+
+The direct consequences of the ordered edits moved with it (the same discipline as a version pin
+moving ✓): the two vocabulary pins ✓, the exposition's structural-identity allowlist (a FOURTH
+carrier — the tool-category vocabulary line ✓) and the lane's BASE artifact re-captured with the
+four-carrier mask (a one-line diff ✓).
+
+**F-2:** the "808/809" premise was a DISPATCH-BRIEF premise ✓ — the lane's records never carried
+it ✓ (pickaxe-proven ✓); the real one-red leg is the Phase-3 **493/492/1 vs 421/420/1** ✓, which
+the records already carry ✓.
+**F-3:** the E-1 prose counts corrected — "NINE" → **EIGHT** changed lines ✓ and "819 → 819" →
+**"818 → 818"** ✓ (the invariants held ✓; only the prose counts did not ✓) — in §4 ✓, fold-ledger
+§H.4 ✓ and stage-prep §3 ✓.
+
+**The wire contract shows ZERO DIFF** ✓ (the query door's contract is a different surface from
+the tool-category vocabulary ✓). F-4/F-6/F-7 are NOT absorbed (routed ✓).
 
 ---
 

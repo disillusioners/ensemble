@@ -255,8 +255,8 @@ Site 3 also gained a NEW leg: the text-exposition route keeps `maintenance:read`
 
 **The E-1 amendment — EXECUTED (guardrail (b)-as-restated satisfied).**
 The amendment is the PRIMARY variant (P-1 / E-1, ADJUDICATED 2026-11-03 + amendment-2). It
-touches **EXACTLY nine lines**, all inside the FIVE canonical ranges, and the line count is
-UNCHANGED (819 → 819) — so the diff is line-scoped by construction:
+touches **EXACTLY eight lines**, all inside the FIVE canonical ranges, and the line count is
+UNCHANGED (818 → 818) — so the diff is line-scoped by construction:
 
 | range | changed lines |
 |---|---|
@@ -684,6 +684,85 @@ the lane's five-leg unit shell pack re-run green (the tools/personas/registratio
 seam packs); the mutation-matrix pack NOT re-run — its harness binds markers by the METRICS
 pack node names (grep-proven zero references to the renamed ids; MT-01's marker
 `test_board_is_the_ninth_entry` is not among them).
+
+---
+
+### H.13 — The tester gate's F-1 (closed 2026-11-03) + F-2/F-3 (corrected)
+
+The tester gate (`.agents/tester/RESULTS/2026-11-03-metrics-agent-tools-functional-gate.md`,
+commit `fcfa24225` — LOCAL-ONLY, ridden on the branch, untouched) returned **FAIL on ONE axis**
+(G2 net-new = 2); every other leg was green. The blocker was folded into this lane.
+
+**F-1 — THE TOOL-CATEGORY ARTIFACT + THE VOCABULARY MARKER (both were missed by the lane).**
+Phase 2 registered the `metrics-read` privileged category; the DERIVED artifact
+(`.agents/shared/metrics/tool-categories.json`) was never regenerated and the vocabulary marker
+was never bumped — the house's registration convention ✓.
+
+| what | how | result |
+|---|---|---|
+| the artifact | **REGENERATED WITH THE HOUSE GENERATOR** — the artifact pack's OWN generator mode: `ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=/tmp/tool-categories.json .venv/bin/python -m pytest tests/unit/tools/test_tool_category_artifact.py -q` (found in the pack's own docstring + `REGENERATE_ENV`; the pack REFUSES to write the committed artifact from a test run ✓ — the env var names a SCRATCH path ✓). **NEVER hand-edited** ✓ | the derived set gained `metrics-read`; `count` 56 → **57**; `vocabulary_version` 1 → **3** (the committed artifact was stale by TWO markers ✓) — a three-line diff ✓ |
+| the marker | `daemon/checkpoint_metrics.py` — `VOCABULARY_VERSION: int = 2` → **`3`** (`:218`), with the version-history docstring amended (the house convention: the constant carries its history ✓) | the F7 op-enum annex is UNCHANGED ✓ (the bump rides the TOOL-CATEGORY axis ✓) |
+| the SEALED-SET check | `SEALED_SHA_BASELINES` (`tests/test_chart_image_delivery_e2e.py:1425`) | **`daemon/checkpoint_metrics.py` is NOT in the sealed set** ✓ (the set covers `daemon/constants.py` + the five source adapters + the agents' prompt files ✓) ⇒ **no re-pin ceremony was needed** ✓ and none was performed ✓ |
+
+**THE TWO REDS FLIPPED** ✓ — `tests/unit/tools/test_tool_category_artifact.py`:
+**9 passed** (the two nodes — `test_artifact_covers_every_registered_category` +
+`test_artifact_is_generated_from_the_tool_registry` — were 3/3 FAIL at HEAD ×3 and 3/3 PASS at
+BASE ×3 before this cycle ✓).
+
+**THE SCOPED G2 UNION LEG AT THE NEW TIP — net-new = ∅** ✓ (the three recorded compositions'
+UNION, reconstructed from §H.2 + §H.3 + §H.4 + the PACKS.md rows: **71 HEAD file arguments /
+64 BASE** — the recorded rows elide some members of the p4 21-file set, so the composition is a
+faithful reconstruction and is recorded as such ✓):
+
+| leg | collected | passed | failed |
+|---|---|---|---|
+| **HEAD** | 1 584 | 1 579 | 5 |
+| **BASE** (`03a2297c3`, throwaway detached worktree `/tmp/metrics-gate-base-py`, HEAD venv interpreter, cwd=base ✓) | 1 397 | 1 392 | 5 |
+
+**The FAILED node-id lists are IDENTICAL** (5 common, **net-new = ∅**, fixed = ∅) ✓ — every
+residual is base-proven: the lane-#1 daemon-diff confinement pin, the RDRS lane-count drift,
+the phase-4 facade delegation, and the two project-manager prompt-composition pins ✓.
+
+**THE CONSEQUENCES OF THE ORDERED EDITS, FOLDED IN THE SAME CYCLE** (each is a DIRECT consequence
+of the artifact regeneration / the marker bump — the same discipline as a version pin moving):
+
+* the two version pins moved with the marker ✓ — `test_metrics_vocabulary_amendment.py`'s
+  `test_the_version_is_two` → `test_the_version_is_three` (`:16`, the P2-M8 mutation — the marker
+  left at 1 — still REDs ✓) and `test_metrics_family_adjudication.py`'s
+  `test_the_vocabulary_version_is_not_double_bumped` →
+  `test_the_vocabulary_version_moved_only_for_the_tool_category_axis` (`:401`, its rationale
+  amended honestly: the marker moved on the TOOL-CATEGORY axis, the F7 op annex did NOT ✓);
+* the exposition's frozen vocabulary line carries the tool-category set ✓ — so the structural-
+  identity gate's allowlist gained a **FOURTH carrier** (`tool_category_vocabulary` ✓,
+  `tests/helpers/metrics_exposition_baseline.py:52` + the mask at `:92`) and the lane's BASE
+  artifact was RE-CAPTURED from the base tree with the four-carrier mask (the diff is EXACTLY the
+  one masked line ✓ — `tests/unit/metrics/baselines/metrics_exposition_baseline.txt` ✓). The
+  artifact pack remains the authority on that set's integrity, so masking its VALUE costs no
+  coverage ✓; the allowlist pin moved with it (`test_the_allowlist_covers_exactly_four_carriers` ✓).
+
+**F-2 — THE "808/809" PREMISE: CORRECTED BY ABSENCE.** The lane's records NEVER carried it ✓
+(the tester pickaxe-proved it: `git log --all -S"808 passed"` → 0 hits ✓) — it was a
+DISPATCH-BRIEF premise ✓. The real one-red leg IS the Phase-3 Tier-1 **493 collected / 492 passed
+/ 1 failed** vs BASE **421 / 420 / 1** ✓ — which is what `fold-ledger.md` §H.4 and
+`evidence-pack.md` §2 already carry ✓ (no change needed ✓). The lane's own reports had cited the
+"807-node net-new regression" as tester-deferred ✓ — that phrase is superseded by this union leg
+(71/64 files ✓) recorded above ✓.
+
+**F-3 — THE E-1 RECORD OFF-BY-ONES: CORRECTED.** The invariants HELD (the confinement ✓, the
+unchanged line count ✓, never-re-pinned ✓, green-with-amendment ✓); the PROSE counts did not ✓:
+"NINE changed lines" → **EIGHT** ✓ (measured: 16 diff lines = 8 removed + 8 added ✓) and
+"819 → 819" → **"818 → 818"** ✓ (measured: `wc -l` on both revisions ✓) — in `evidence-pack.md`
+§4 ✓, `fold-ledger.md` §H.4 ✓ and `stage-prep-checklist.md` §3 ✓.
+
+**THE WIRE CONTRACT SHOWS ZERO DIFF** ✓ — `docs/architecture/metrics-query-contract.md` is
+untouched by this cycle ✓ (the leader's fence clarification ✓: the query door's wire contract is a
+different surface from the tool-category vocabulary ✓). Its four historical "2" mentions stay as
+the central-metrics-v1 lane recorded them ✓ — DISCLOSED, not silently rewritten ✓.
+
+**THE F-3/F-4/F-6/F-7 FINDINGS ARE NOT ABSORBED** (routed, non-gating ✓): the FE pack debt trio ✓,
+the standing-coverage suggestion ✓ (make the artifact pack a D1 leg for every category
+registration ✓ — a convention change for future lanes ✓, already recorded as the tester's LESSON ✓),
+and the archived-manifest 3-of-4 note ✓.
 
 ---
 

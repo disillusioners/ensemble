@@ -76,8 +76,8 @@ delta stays 6.
 **The EXECUTED variant: the description-only contract-prose amendment** (P-1 / E-1, adjudicated
 2026-11-03 + amendment-2) — **NOT** the 3.6a debt-record fallback.
 
-* Nine lines changed, all inside the FIVE canonical ranges; the line count is UNCHANGED
-  (819 → 819).
+* Eight lines changed, all inside the FIVE canonical ranges; the line count is UNCHANGED
+  (818 → 818).
 * The `central_metrics_contract_doc` pack is **GREEN WITH THE AMENDMENT APPLIED** — 21/21,
   expectations untouched, **never re-pinned**. All SIX fenced blocks and all NINETEEN prose
   literals are byte-identical before/after.
