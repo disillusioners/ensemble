@@ -7,15 +7,38 @@
 # (mktemp). No daemon, no network, no real ports. Pure shell-side assertions
 # against the lib.sh constants and the per-phase budget arithmetic.
 #
-# Run:
-#   bash tests/test_ceremony_wallclock.sh
+# Run (per-variable env scrub — the glob form `env -u POSTGRES_*` is a
+# SILENT NO-OP):
+#   timeout 300 env -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_USER \
+#       -u POSTGRES_PASSWORD -u DATABASE_URL -u PGHOST -u PGPORT \
+#       -u PGDATABASE -u PGUSER -u PGPASSWORD \
+#       bash tests/test_ceremony_wallclock.sh
 #
 # Coverage (test-strategy.md §1 + phase3-plan.md T3.10 + T-G1b):
-#   - T3.10 — per-phase budget reconciliation (9-row C-10a breakdown)
+#   - T3.10 — per-phase budget reconciliation (the C-10a BOUND-TABLE form,
+#             lib.sh:157-173 / Phase 1 D-P1-8)
 #   - T-G1b — deadline-breach routing (sleep-injected phase overrun)
 #   - AC2b — checked-in identity table (FAILS if any future change
 #            raises a phase budget without the table being consciously
 #            updated)
+#
+# FIX (2026-11-03, tester/phh-handback-halt-gate-evidence — PB-2 finding F1):
+# the AC2b identity table was TAUTOLOGICAL + STALE — it hardcoded
+# EXPECTED_* literals and asserted them against themselves (e.g. the old
+# `assert_eq "phase[handback]" "90" "$EXPECTED_HANDBACK_S"`), pinned the
+# START knob (HANDBACK_START_BUDGET_S) with ZERO occurrences of the VERIFY
+# knob lib.sh actually ships (HANDBACK_VERIFY_BUDGET_S, default 300), and
+# its "handback 90 / non-stop worst 870 / slack 30" row encoded exactly the
+# fiction lib.sh:157-173 (Phase 1 / D-P1-8) declares "was fiction" (real
+# all-worst ≈1340 s > the 900 s stop-loss ceiling). The AC was therefore
+# FALSE — the pack could never fail on a budget change. The table is now
+# checked AGAINST THE CODE: every shipped row is extracted from lib.sh at
+# run time (source-text grep of the shipped default + a pristine-subshell
+# resolved value) and asserted to equal the documented table, so a shipped
+# budget change makes the pack FAIL until the table is consciously updated.
+# The handback row is re-derived to the shipped reality (VERIFY 300 + one
+# progress-gated grace 60) and the pack asserts the TRUTHFUL conflict
+# (all-worst EXCEEDS the ceiling) instead of the fictional "30 s slack".
 # ============================================================================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,83 +73,142 @@ section() { printf '\n== %s ==\n' "$1"; }
 . "$UPGRADE_DIR/lib.sh"
 
 # ============================================================================
-# T3.10 — Per-phase budget reconciliation (the 9-row C-10a breakdown)
+# T3.10 — Per-phase budget reconciliation (the C-10a BOUND-TABLE form)
 # ============================================================================
-section "T3.10 — per-phase budget identity (the 9-row C-10a breakdown)"
+section "T3.10 — per-phase budget identity (the C-10a bound table, lib.sh-derived)"
 
-# The C-10a 9-row breakdown, single source of truth, is referenced
-# from decisions.md (d) §C-10a, plan-overview §4, phase3-plan AC2b,
-# test-strategy §1 row T-AC2b, and risk-register R-10. The identity
-# table below MUST match the values shipped in lib.sh's
-# PROMOTE_TOTAL_DEADLINE_S = 900 (and the derived per-phase values).
+# The documented C-10a bound table (lib.sh:157-173, corrected 2026-11-02 by
+# Phase 1 / D-P1-8; referenced from decisions.md (d) §C-10a, plan-overview §4,
+# phase3-plan AC2b, test-strategy §1 row T-AC2b, risk-register R-10).
 #
-# Phase | Budget (s) | Today cite
-# preflight + integrity | 45 | (no current budget; measured ~35s)
-# stop ensemble | 225 (default eff) | _derive_parent_stop_budget lib.sh:2756
-# atomic flip | 30 | (1s typical)
-# restart / handback | 90 | HANDBACK_START_BUDGET_S=60 + 30s slack
-# livez | 180 | LIVEZ_BUDGET_S=180 lib.sh:90
-# readyz | 120 | READYZ_BUDGET_S=120 lib.sh:91
-# version | 30 | (5s typical)
-# adaptive soak | 60-120 (cap) | ADAPTIVE_SOAK_CAP_S=120 (new P3 constant)
-# commit | 30 | (2-4s today)
+# AC2b MECHANISM (this is the point of the pack): the TABLE constants below
+# are the DOCUMENTED values; every row that corresponds to a shipped lib.sh
+# budget is asserted to equal the value EXTRACTED FROM lib.sh AT RUN TIME —
+# once from the SOURCE TEXT (the shipped default literal, immune to ambient
+# env) and once as lib.sh RESOLVES it in a pristine subshell (the
+# _numeric_knob wiring). If a shipped budget changes without this table
+# being consciously updated, the pack FAILS. The table is checked against
+# the CODE — never against itself.
+#
+# Bound table (NOT a fits-inside-900 schedule — lib.sh:157-173: "the 900s
+# ceiling is a STOP-LOSS, not a budgets-fit guarantee"):
+LIBSH="$UPGRADE_DIR/lib.sh"
 
-# The hard-coded per-phase values used in the identity assertion:
-EXPECTED_PREFLIGHT_S=45
-EXPECTED_STOP_S=225
-EXPECTED_FLIP_S=30
-EXPECTED_HANDBACK_S=90
-EXPECTED_LIVEZ_S=180
-EXPECTED_READYZ_S=120
-EXPECTED_VERSION_S=30
-EXPECTED_SOAK_CAP_S=120
-EXPECTED_COMMIT_S=30
-EXPECTED_TOTAL_CEILING_S=900
-EXPECTED_NON_STOP_WORST_S=870  # 45+225+30+90+180+120+30+120+30
-EXPECTED_ALL_MAX_S=1400        # 45+755+30+90+180+120+30+120+30 (stop worst 755)
-EXPECTED_SLACK_S=30           # 900 - 870
+# --- the documented table (the thing under test) ----------------------------
+# Named TABLE_<lib.sh knob name> so the shipped-vs-table loop below can bind
+# each row to its knob by name.
+TABLE_PREFLIGHT_PHASE_BUDGET_S=300   # PREFLIGHT_PHASE_BUDGET_S (shipped default)
+TABLE_HANDBACK_VERIFY_BUDGET_S=300   # HANDBACK_VERIFY_BUDGET_S (the VERIFY ceiling —
+                                     # the knob the verifier actually waits under)
+TABLE_HANDBACK_VERIFY_FLOOR_S=180    # HANDBACK_VERIFY_FLOOR_S (never LESS time than
+                                     # before — the monotone-safe floor, D-P1-1)
+TABLE_HANDBACK_VERIFY_GRACE_S=60     # HANDBACK_VERIFY_GRACE_S (one progress-gated
+                                     # extension, D-P1-6)
+TABLE_HANDBACK_TAIL_RESERVE_S=120    # HANDBACK_TAIL_RESERVE_S (downstream room)
+TABLE_HANDBACK_START_BUDGET_S=60     # HANDBACK_START_BUDGET_S (the unit start bound)
+TABLE_LIVEZ_BUDGET_S=180             # LIVEZ_BUDGET_S
+TABLE_READYZ_BUDGET_S=120            # READYZ_BUDGET_S
+TABLE_ADAPTIVE_SOAK_CAP_S=120        # ADAPTIVE_SOAK_CAP_S (adaptive, ceremony-coupled)
+TABLE_PROMOTE_TOTAL_DEADLINE_S=900   # PROMOTE_TOTAL_DEADLINE_S (the stop-loss ceiling)
+TABLE_DEFAULT_WAIT_S=70              # DEFAULT_WAIT_S (feeds the derived stop budget)
+# Non-shipped rows (measured — no lib.sh constant binds them; they feed the
+# all-worst arithmetic and are part of the documented bound table):
+TABLE_FLIP_S=0                       # atomic flip — MEASURED (~0s)
+TABLE_VERSION_S=5                    # version check — MEASURED (~5s)
+TABLE_COMMIT_S=30                    # commit — MEASURED budget (~2-4s today)
+TABLE_STOP_S=225                     # _derive_parent_stop_budget DERIVED default
+                                     # (STOP_SCRIPT_BUDGET_S 120 + DEFAULT_WAIT_S 70
+                                     # + kill-grace 10 + term-grace 5 + margin 20)
 
-# Per-phase budget identity
-assert_eq "phase[preflight]" "45" "$EXPECTED_PREFLIGHT_S"
-assert_eq "phase[stop default eff]" "225" "$EXPECTED_STOP_S"
-assert_eq "phase[flip]" "30" "$EXPECTED_FLIP_S"
-assert_eq "phase[handback]" "90" "$EXPECTED_HANDBACK_S"
-assert_eq "phase[livez]" "180" "$EXPECTED_LIVEZ_S"
-assert_eq "phase[readyz]" "120" "$EXPECTED_READYZ_S"
-assert_eq "phase[version]" "30" "$EXPECTED_VERSION_S"
-assert_eq "phase[soak cap]" "120" "$EXPECTED_SOAK_CAP_S"
-assert_eq "phase[commit]" "30" "$EXPECTED_COMMIT_S"
+# --- extraction helpers -----------------------------------------------------
+# _shipped_default NAME — the SHIPPED default literal for NAME, extracted from
+# the lib.sh SOURCE TEXT. Styles: (A) NAME="$(_numeric_knob NAME "${NAME:-}"
+# NNN)" [optional trailing comment]; (B) NAME="${NAME:-NNN}"; (C) NAME=NNN.
+_shipped_default() {
+    local name="$1"
+    awk -v n="$name" '
+        index($0, n "=") == 1 {
+            line = $0
+            patA = "\"\\$\\{" n ":-\\}\" [0-9]+\\)"
+            if (match(line, patA)) {
+                s = substr(line, RSTART, RLENGTH)
+                sub(/.*\}" /, "", s); sub(/\)$/, "", s)
+                print s; exit
+            }
+            patB = "\\$\\{" n ":-[0-9]+\\}"
+            if (match(line, patB)) {
+                s = substr(line, RSTART, RLENGTH)
+                gsub(/[^0-9]/, "", s)
+                print s; exit
+            }
+            if (line ~ /^[A-Za-z_][-A-Za-z_0-9]*=[0-9]+$/) {
+                sub(/^[^=]+=/, "", line)
+                print line; exit
+            }
+        }
+    ' "$LIBSH"
+}
 
-# C-10a 9-row sum (non-stop worst)
-non_stop_worst=$((EXPECTED_PREFLIGHT_S + EXPECTED_STOP_S + EXPECTED_FLIP_S + \
-    EXPECTED_HANDBACK_S + EXPECTED_LIVEZ_S + EXPECTED_READYZ_S + \
-    EXPECTED_VERSION_S + EXPECTED_SOAK_CAP_S + EXPECTED_COMMIT_S))
-assert_eq "C-10a non-stop worst sum (870 s)" "870" "$non_stop_worst"
-assert_eq "C-10a non-stop worst == \$non_stop_worst" "$EXPECTED_NON_STOP_WORST_S" "$non_stop_worst"
+# _resolved_default NAME — the value lib.sh RESOLVES for NAME in a pristine
+# subshell with that knob unset (pins the _numeric_knob / default wiring).
+_resolved_default() {
+    local name="$1"
+    env -u "$name" bash -c ". '$LIBSH' >/dev/null 2>&1; printf '%s' "\${$name-__UNSET__}""
+}
 
-# C-10a 30 s slack inside the 900 s ceiling
-slack=$((EXPECTED_TOTAL_CEILING_S - EXPECTED_NON_STOP_WORST_S))
-assert_eq "C-10a slack inside 900 s ceiling (30 s)" "30" "$slack"
-assert_eq "C-10a slack == \$slack" "$EXPECTED_SLACK_S" "$slack"
+# --- the shipped-vs-table bindings (the AC2b load-bearing asserts) ----------
+for _knob_name in PREFLIGHT_PHASE_BUDGET_S HANDBACK_VERIFY_BUDGET_S \
+                  HANDBACK_VERIFY_FLOOR_S HANDBACK_VERIFY_GRACE_S \
+                  HANDBACK_TAIL_RESERVE_S HANDBACK_START_BUDGET_S \
+                  LIVEZ_BUDGET_S READYZ_BUDGET_S ADAPTIVE_SOAK_CAP_S \
+                  PROMOTE_TOTAL_DEADLINE_S DEFAULT_WAIT_S; do
+    eval "table_val=\$TABLE_${_knob_name}"
+    shipped_val="$(_shipped_default "$_knob_name")"
+    resolved_val="$(_resolved_default "$_knob_name")"
+    assert_eq "T3.10 shipped[${_knob_name}] present in lib.sh source" "absent" "$([ -n "$shipped_val" ] && printf absent || printf MISSING)"
+    assert_eq "T3.10 table[${_knob_name}] == lib.sh SHIPPED default" "$shipped_val" "$table_val"
+    assert_eq "T3.10 lib.sh RESOLVED[${_knob_name}] == shipped default (knob wiring)" "$shipped_val" "$resolved_val"
+done
+unset _knob_name table_val shipped_val resolved_val
 
-# C-10a all-budgets-max (stop worst 755 s)
-all_max=$((EXPECTED_PREFLIGHT_S + 755 + EXPECTED_FLIP_S + \
-    EXPECTED_HANDBACK_S + EXPECTED_LIVEZ_S + EXPECTED_READYZ_S + \
-    EXPECTED_VERSION_S + EXPECTED_SOAK_CAP_S + EXPECTED_COMMIT_S))
-assert_eq "C-10a all-budgets-max (1400 s abort-path ceiling)" "1400" "$all_max"
-assert_eq "C-10a all-budgets-max == \$all_max" "$EXPECTED_ALL_MAX_S" "$all_max"
+# Monotone-safety: the verify FLOOR may never exceed the verify CEILING
+# (D-P1-1: "never LESS time than before" — a floor>ceiling inversion would
+# make the clamp formula undefined).
+assert_eq "T3.10 HANDBACK_VERIFY_FLOOR_S <= HANDBACK_VERIFY_BUDGET_S (monotone)" "ok"     "$([ "$TABLE_HANDBACK_VERIFY_FLOOR_S" -le "$TABLE_HANDBACK_VERIFY_BUDGET_S" ] && printf ok || printf inverted)"
 
-# Cross-check: the constants ship in lib.sh
-assert_eq "lib.sh PROMOTE_TOTAL_DEADLINE_S" "900" "$PROMOTE_TOTAL_DEADLINE_S"
-assert_eq "lib.sh LIVEZ_BUDGET_S" "180" "$LIVEZ_BUDGET_S"
-assert_eq "lib.sh READYZ_BUDGET_S" "120" "$READYZ_BUDGET_S"
-assert_eq "lib.sh HANDBACK_START_BUDGET_S" "60" "$HANDBACK_START_BUDGET_S"
-assert_eq "lib.sh ADAPTIVE_SOAK_FLOOR_S" "60" "$ADAPTIVE_SOAK_FLOOR_S"
-assert_eq "lib.sh ADAPTIVE_SOAK_CAP_S" "120" "$ADAPTIVE_SOAK_CAP_S"
-assert_eq "lib.sh ADAPTIVE_SOAK_CONSECUTIVE" "3" "$ADAPTIVE_SOAK_CONSECUTIVE"
-assert_eq "lib.sh ADAPTIVE_SOAK_CADENCE_S" "15" "$ADAPTIVE_SOAK_CADENCE_S"
-assert_eq "lib.sh BOOT_GRACE_S" "60" "$BOOT_GRACE_S"
-assert_eq "lib.sh BUSY_INFLIGHT_BOUND" "5" "$BUSY_INFLIGHT_BOUND"
+# The hand-back row: START knob + VERIFY knob + grace, all present. The old
+# pack pinned ONLY the START knob and never mentioned the VERIFY knob (PB-2
+# F1) — this structural pin keeps the verify family in the pack: if the pack
+# is ever reverted to a verify-less table, the count drops and this fails.
+verify_refs="$(grep -c 'HANDBACK_VERIFY_BUDGET_S' "$0" 2>/dev/null || printf 0)"
+assert_eq "T3.10 the pack itself pins HANDBACK_VERIFY_BUDGET_S (>=6 refs; the F1 gap cannot silently return)" "yes"     "$([ "${verify_refs:-0}" -ge 6 ] && printf yes || printf "no($verify_refs)")"
+
+# The stop row is DERIVED, not shipped: re-derive it the way lib.sh does
+# (sandbox: no INSTALL_DIR, no .env → _resolve_wait_s_mirror falls back to
+# DEFAULT_WAIT_S). A change to any input of the derivation moves this pin.
+DERIVED_STOP_S="$(_derive_parent_stop_budget "${REPO_ROOT}/tests/fixtures/__nonexistent_env_for_stop_derivation__" 2>/dev/null || printf ERR)"
+assert_eq "T3.10 table[stop] == the DERIVED parent stop budget (120+70+10+5+20)" "$TABLE_STOP_S" "$DERIVED_STOP_S"
+
+# --- the truthful all-worst arithmetic (the D-P1-8 bound table) -------------
+# preflight + stop + flip(~0) + (verify + grace) + livez + readyz + version
+# + soak cap + commit  —  per lib.sh:157-173 the shipped all-worst ≈1340 s.
+ALL_WORST_S=$(( TABLE_PREFLIGHT_PHASE_BUDGET_S + TABLE_STOP_S + TABLE_FLIP_S + 0 \
+              + TABLE_HANDBACK_VERIFY_BUDGET_S + TABLE_HANDBACK_VERIFY_GRACE_S \
+              + TABLE_LIVEZ_BUDGET_S + TABLE_READYZ_BUDGET_S + TABLE_VERSION_S \
+              + TABLE_ADAPTIVE_SOAK_CAP_S + TABLE_COMMIT_S ))
+assert_eq "T3.10 all-worst sum (shipped bound table, D-P1-8)" "1340" "$ALL_WORST_S"
+
+# The CONFLICT — asserted TRUTHFULLY. The old pack claimed "slack 30"
+# (900 - 870); that row was the fiction Phase 1 / D-P1-8 retracted. The
+# shipped reality is that all-worst EXCEEDS the 900 s stop-loss ceiling:
+# the slack is NEGATIVE. If any shipped budget rises, the sum moves and
+# this row moves with it (the conflict deepens) — the pack fails at the
+# table-vs-shipped asserts above, and this disclosure stays true.
+CONFLICT_S=$(( TABLE_PROMOTE_TOTAL_DEADLINE_S - ALL_WORST_S ))
+assert_eq "T3.10 all-worst EXCEEDS the 900 s stop-loss ceiling (the shipped conflict — NOT the retracted 'slack 30' fiction)" "-440" "$CONFLICT_S"
+assert_eq "T3.10 the conflict sign is NEGATIVE (all-worst > ceiling ⇒ stop-loss, not budgets-fit)" "negative"     "$([ "$CONFLICT_S" -lt 0 ] && printf negative || printf nonnegative)"
+printf 'DISCLOSURE (C-10a bound table, lib.sh:157-173): all-worst %ss > ceiling %ss by %ss — the 900s ceiling is a STOP-LOSS; a combined-slow ceremony halts at a downstream boundary with the daemon up (disclosed, OQ-P1-1). Do NOT re-derive a "fits inside 900s" schedule from this table.\n' \
+    "$ALL_WORST_S" "$TABLE_PROMOTE_TOTAL_DEADLINE_S" "$(( -CONFLICT_S ))"
 
 # ============================================================================
 # T-G1b — deadline-breach routing (sleep-injected phase overrun)

@@ -671,6 +671,134 @@ def test_p38_kill_switch_is_read_per_tick(tmp_path: Path) -> None:
     assert second["action"] == "committed", second
 
 
+# ── G9-1: the kill-switch INERT surface (P3-PIN-30 / P2 P-38 closure) ──────
+# PB-3 (mutation pass) proved the gate behaviorally (knob=0 ⇒ the closer
+# returns BEFORE the journal read — upgrade_journal_sweep.py:2376-2380,
+# action="disabled"/reason="kill_switch") but the shipped P-38 pins above
+# covered only a SLICE of the inert surface (GREEN arm, in_flight, one
+# event). These four pins close the rest: the FULL inert surface on the
+# GREEN arm, the NOT-green arm's inertness, the non-vacuity control (the
+# knob is the ONLY variable that changes the outcome), and the per-tick
+# 0 → absent-default flip.
+
+
+def test_g9_1_knob_zero_green_arm_is_fully_inert(tmp_path: Path, monkeypatch) -> None:
+    """knob=0 ⇒ the GREEN arm is FULLY inert.
+
+    No serving_green_commit / serving_unhealthy / rollback_requested; the
+    stale txn left untouched; quarantined / the 24h counter / the cooldown
+    all unpunished; the refusal names its reason (kill_switch).
+    """
+    monkeypatch.setenv(svm.SERVING_GREEN_CLOSER_ENV, "0")
+
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=True, grace_active=False))
+    result = _run(svc)
+
+    assert result["action"] == "disabled", result
+    assert result["reason"] == "kill_switch", result
+    events = _events(install)
+    assert "serving_green_commit" not in events, events
+    assert "serving_unhealthy" not in events, events
+    assert "rollback_requested" not in events, events
+    data = _journal(install)
+    assert data["in_flight"] is not None, "the stale txn must be left untouched"
+    assert data["quarantined"] == [], data
+    assert data["rollback_window_count"]["24h"] == 0, data
+    assert data["cooldown_until"] is None, data
+
+
+def test_g9_1_knob_zero_not_green_arm_is_inert_too(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """knob=0 ⇒ the NOT-GREEN arm is inert as well.
+
+    An UNREADY composite under a disabled lane must produce NO verdict and
+    NO rollback request — the never-green protection is the one path that
+    must stay knob-gated alongside the commit path.
+    """
+    monkeypatch.setenv(svm.SERVING_GREEN_CLOSER_ENV, "0")
+
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=False, grace_active=False))
+    result = _run(svc)
+
+    assert result["action"] == "disabled", result
+    assert result["reason"] == "kill_switch", result
+    events = _events(install)
+    assert "serving_unhealthy" not in events, events
+    assert "rollback_requested" not in events, events
+    assert "serving_green_commit" not in events, events
+    assert _journal(install)["in_flight"] is not None
+
+
+def test_g9_1_non_vacuity_knob_is_what_changes_the_outcome(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """knob ABSENT (the default-arm) ⇒ the SAME fixture commit-closes.
+
+    Proves the inert assertions above are discriminating: the seam is live
+    and the knob is the ONLY variable that differs — without this control
+    the inert legs could pass vacuously (a broken fixture would go
+    'disabled' for the wrong reason).
+    """
+    monkeypatch.delenv(svm.SERVING_GREEN_CLOSER_ENV, raising=False)
+
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=True, grace_active=False))
+    result = _run(svc)
+
+    assert result["action"] == "committed", result
+    assert "serving_green_commit" in _events(install), _events(install)
+
+
+def test_g9_1_knob_flip_0_to_absent_is_read_per_tick(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """knob=0 then knob ABSENT, same service object ⇒ the second tick is LIVE.
+
+    The switch is read PER TICK (never cached) so an operator flip takes
+    effect without a rebuild — the disabled first tick proves the flip is
+    what armed the lane, not service construction order.
+    """
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=True, grace_active=False))
+
+    monkeypatch.setenv(svm.SERVING_GREEN_CLOSER_ENV, "0")
+    first = _run(svc)
+    assert first["action"] == "disabled", first
+    assert "serving_green_commit" not in _events(install)
+
+    monkeypatch.delenv(svm.SERVING_GREEN_CLOSER_ENV, raising=False)
+    second = _run(svc)
+    assert second["action"] == "committed", second
+    assert "serving_green_commit" in _events(install), _events(install)
+
+
 # ── the per-entry reader contract (the daemon's half) ─────────────────────
 
 
