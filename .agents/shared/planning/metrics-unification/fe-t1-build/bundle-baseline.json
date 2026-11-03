@@ -1,0 +1,77 @@
+{
+  "_about": "THE NAMED BASELINE ARTIFACT (review A-8): the single machine-readable source the T1 bundle guards read. A number duplicated across plan prose can drift; this file cannot. It lives in the PLAN DIR (not scripts/, not the shipped tree) and is the evidence re-derivation tool for the lane's own baseline.",
+  "measured_at": "2026-11-03",
+  "tree": "/home/nea/ensemble-src-wt-fe-metrics-dashboard",
+  "commit": "7961bcb21",
+  "lane_base_equivalence": "The lane's commits (c32029d1c, 3a6bf7ba5, c26cec612, dc55da10f, 7961bcb21) are docs-only, so HEAD's frontend/ tree == the lane base's frontend/ tree. A build at HEAD IS a lane-base measurement.",
+  "build": {
+    "command": "cd frontend && ./node_modules/.bin/ng build --configuration production",
+    "prerequisite": "cd frontend && npm ci   (node_modules was absent in the fresh worktree)",
+    "output": "frontend/dist/frontend/browser/",
+    "toolchain": "node v22.23.2 / npm 10.9.8; local devDependency only (never a bare tsc/npx tsc outside frontend/)",
+    "builder_budget_semantics": "node_modules/@angular/build/src/utils/bundle-calculator.js:155-167 — InitialCalculator sums the chunks flagged `initial` (entry points + transitive STATIC imports). index.html is an ASSET, not a chunk, so it is NOT in the budget total. Lazy chunks are counted by NO budget type."
+  },
+  "reproduce": {
+    "command": "cd frontend && node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser",
+    "script": ".agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js",
+    "output": "{
+  \"initial_total_bytes\": 5909018,
+  \"initial_file_count\": 36,
+  \"error_budget_bytes\": 6000000,
+  \"headroom_bytes\": 90982,
+  \"index_html_bytes\": 9257,
+  \"whole_initial_payload_bytes\": 5918275,
+  \"lazy_chunk_count\": 52,
+  \"lazy_bytes_total\": 1702633,
+  \"metrics_route_chunk\": \"chunk-ZA3RV4HY.js\",
+  \"metrics_route_chunk_bytes\": 27672,
+  \"metrics_route_fetch_set_bytes\": 496338,
+  \"largest_lazy\": \"chunk-QS2K3YLH.js\",
+  \"largest_lazy_bytes\": 157141,
+  \"second_largest_lazy\": \"chunk-HNKUMJNH.js\",
+  \"second_largest_lazy_bytes\": 135690,
+  \"resources_route_chunk\": \"chunk-FOLCEMN3.js\",
+  \"resources_route_chunk_bytes\": 38914
+}"
+  },
+  "guards": {
+    "B1_initial_total_delta": {
+      "baseline_bytes": 5909018,
+      "threshold": "|delta| <= 2048 bytes vs the frozen lane-base baseline",
+      "note": "A LAZY chart.js leak does NOT move this number (lazy chunks are counted by no budget) — hence B2/B3/B4 below."
+    },
+    "B2_no_chartjs_marker_in_any_initial_chunk": {
+      "method": "string scan of every file in the 36-file initial set for the marker `chart.js`",
+      "threshold": "0 hits"
+    },
+    "B3_import_shape_and_site": {
+      "method": "grep the resolved import sites for `from 'chart.js'` / `import('chart.js')`",
+      "threshold": "0 static `from 'chart.js'` sites anywhere; every `chart.js` import is the DYNAMIC `await import('chart.js')` form; the wrapper's own home is under src/app/pages/metrics/**",
+      "note": "The DYNAMIC form is what keeps the vendor out of the route fetch set — see C-1."
+    },
+    "B4_new_chart_chunk_size": {
+      "baseline_metrics_route_chunk_bytes": 27672,
+      "baseline_metrics_route_fetch_set_bytes": 496338,
+      "threshold": "the new chart chunk's real min+gz bytes <= 65536 (64 KiB) AND the /metrics route fetch set grows by <= 65536 bytes vs the 496338 B baseline",
+      "note": "The route FETCH SET (route chunk + its DIRECT static deps) is the threshold that actually catches a static-shape leak; the route chunk alone does not (a static import lands in a LAZY-ONLY sibling chunk — proven on the real dist: chunk-6Y6F4JKW.js 43,688 B and chunk-AOZCSBSC.js 1,348 B are both lazy-only and absent from the 36-row initial table)."
+    }
+  },
+  "anyComponentStyle_baseline": {
+    "_about": "C-3: the census is 9, NOT 8. blueprint.component.scss (18.32 kB — the LARGEST offender) was omitted. Captured MECHANICALLY from the Phase-1 production build log; the guard is a SET DIFFERENCE against this set, never a count ceiling (a ceiling can be loosened and silently lose detection).",
+    "capture_command": "grep -E 'scss exceeded maximum budget' <build-log> | sed 's/^▲ \\[WARNING\\] //'",
+    "count": 9,
+    "entries": [
+      "src/app/components/agent-selector/agent-selector.scss — 8.77 kB",
+      "src/app/pages/snapshots/snapshots.component.scss — 12.29 kB",
+      "src/app/pages/jobs/jobs.component.scss — 14.77 kB",
+      "src/app/components/add-source-modal/add-source-modal.scss — 8.32 kB",
+      "src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.scss — 8.70 kB",
+      "src/app/pages/blueprint/blueprint.component.scss — 18.32 kB",
+      "src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.scss — 8.70 kB",
+      "src/app/components/instance-list/instance-list.scss — 10.17 kB",
+      "src/app/components/chat-interface/chat-interface.scss — 16.15 kB"
+    ],
+    "also_pre_existing": "bundle initial exceeded maximum budget. Budget 1.00 MB was not met by 4.91 MB with a total of 5.91 MB.",
+    "guard": "SET DIFFERENCE: the Phase-9 warning set must equal this baseline set exactly (0 added, 0 removed). A count ceiling is FORBIDDEN."
+  }
+}
