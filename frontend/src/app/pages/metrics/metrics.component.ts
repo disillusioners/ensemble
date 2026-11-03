@@ -15,6 +15,7 @@ import { MatTabsModule } from '@angular/material/tabs';
 
 import { MetricsService } from '../../services/metrics.service';
 import {
+  METRICS_REGISTRY_DEGRADED_COPY,
   MetricsChartRole,
   MetricsFamily,
   decodeMetricsDoorError,
@@ -97,12 +98,30 @@ export class MetricsComponent implements OnInit {
    * silently dropped.
    */
   readonly catalogTruncated = signal(false);
+  /**
+   * Whether the LAST catalog load came from a FAILED registry read.
+   *
+   * The door answers a failed registry read with a **200 and an EMPTY
+   * body** — the byte-identical shape of a legitimately empty registry —
+   * so the failure is visible ONLY through
+   * `activation.registry_read_ok`. The predicate is `=== false` (absent
+   * reads as healthy, mirroring the backend's default-safe
+   * `getattr(provider, "registry_read_ok", True)`), never a truthiness
+   * check.
+   *
+   * The state is PER-LOAD, never sticky: a subsequent healthy load
+   * clears it.
+   */
+  readonly catalogRegistryDegraded = signal(false);
 
   /** The selected section — the visibility gate the tab bodies poll on. */
   readonly activeTabId = signal<string>('overview');
 
   /** The empty panel's copy (never "disabled" — D-8 / AM-19(d)). */
   readonly emptyCopy = METRICS_EMPTY_PANEL_COPY;
+
+  /** The degraded-registry badge's copy (the fact, never a cause). */
+  readonly registryDegradedCopy = METRICS_REGISTRY_DEGRADED_COPY;
 
   /** The monotonic supersede token of the catalog load. */
   private catalogSeq = 0;
@@ -125,7 +144,14 @@ export class MetricsComponent implements OnInit {
    * unreachable is an error, and the error banner says so.
    */
   readonly showEmptyPanel = computed(
-    () => this.catalogLoaded() && this.catalogError() === null && !this.anyFamilyLive(),
+    () =>
+      this.catalogLoaded() &&
+      this.catalogError() === null &&
+      // A FAILED registry read is NOT an empty state: the payload is
+      // UNKNOWN, not empty, so the empty panel must not fire (the
+      // degraded badge carries the fact instead).
+      !this.catalogRegistryDegraded() &&
+      !this.anyFamilyLive(),
   );
 
   /**
@@ -193,9 +219,17 @@ export class MetricsComponent implements OnInit {
           if (token !== this.catalogSeq) {
             return;
           }
+          const hadPreviousCatalog = this.families().length > 0;
           this.families.set(payload.families);
           this.catalogError.set(null);
-          this.catalogStale.set(false);
+          // A FAILED registry read answers 200 with an EMPTY body — the
+          // degraded flag is the ONLY way to tell it from an empty
+          // registry. The predicate is `=== false` (absent = healthy).
+          const degraded = payload.activation?.registry_read_ok === false;
+          this.catalogRegistryDegraded.set(degraded);
+          // The stale badge means "last known catalog" — it fires only
+          // when a PREVIOUS good catalog exists.
+          this.catalogStale.set(degraded && hadPreviousCatalog);
           this.catalogLoaded.set(true);
           // The door may serve a BOUNDED page (W-4) — surfaced, never
           // silently dropped.

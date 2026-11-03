@@ -24,6 +24,12 @@
     <span class="stale-badge" data-test="metrics-catalog-stale">STALE — last known catalog</span>
   }
 
+  @if (catalogRegistryDegraded()) {
+    <span class="metrics-registry-degraded-badge" data-test="metrics-registry-degraded">
+      {{ registryDegradedCopy }}
+    </span>
+  }
+
   @if (catalogTruncated() && !catalogError()) {
     <span class="metrics-truncated-hint" data-test="metrics-catalog-truncated">
       the catalog page is bounded — more families remain on the door

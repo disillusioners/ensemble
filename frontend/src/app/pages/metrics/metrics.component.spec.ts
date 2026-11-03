@@ -44,7 +44,7 @@ class MetricsShellMirror {
   ];
 }
 
-function envelope() {
+function envelope(activationOverrides: Record<string, unknown> = {}) {
   return {
     schema_version: 1,
     vocabulary_version: 2,
@@ -54,6 +54,7 @@ function envelope() {
       listener_enabled: false,
       census_enabled: true,
       query_api: 'auth-gated-always-on',
+      ...activationOverrides,
     },
   };
 }
@@ -83,8 +84,11 @@ function family(overrides: Partial<MetricsFamily> = {}): MetricsFamily {
   };
 }
 
-function payload(families: readonly MetricsFamily[]): MetricsFamiliesPayload {
-  return { ...envelope(), families, truncated: false };
+function payload(
+  families: readonly MetricsFamily[],
+  activationOverrides: Record<string, unknown> = {},
+): MetricsFamiliesPayload {
+  return { ...envelope(activationOverrides), families, truncated: false };
 }
 
 /** A stub service whose calls never resolve (no HTTP in this spec). */
@@ -389,5 +393,127 @@ describe('MetricsComponent — the runtime render', () => {
     expect(labels.some((label) => label.includes('Overview'))).toBe(true);
     expect(labels.some((label) => label.includes('Charts'))).toBe(true);
     expect(labels.some((label) => label.includes('Families'))).toBe(true);
+  });
+});
+
+describe('MetricsComponent — the DEGRADED registry read (the registry_read_ok mirror)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+  let stub: StubMetricsService;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+      ],
+    }).compileComponents();
+    stub = TestBed.inject(MetricsService) as unknown as StubMetricsService;
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('a FAILED registry read renders the DISTINCT degraded badge', () => {
+    component.loadCatalog();
+    stub.families$.next(payload([], { registry_read_ok: false }));
+    fixture.detectChanges();
+    expect(component.catalogRegistryDegraded()).toBe(true);
+    const badge = fixture.nativeElement.querySelector(
+      '[data-test="metrics-registry-degraded"]',
+    );
+    expect(badge).not.toBeNull();
+    expect((badge.textContent ?? '').toLowerCase()).toContain('incomplete');
+  });
+
+  it('a degraded read renders NEITHER the error banner NOR the empty panel', () => {
+    component.loadCatalog();
+    stub.families$.next(payload([], { registry_read_ok: false }));
+    fixture.detectChanges();
+    expect(component.showEmptyPanel()).toBe(false);
+    expect(
+      fixture.nativeElement.querySelector('[data-test="metrics-empty-panel"]'),
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-test="metrics-catalog-error"]'),
+    ).toBeNull();
+  });
+
+  it('a HEALTHY 200-empty payload renders NEITHER the badge NOR the banner', () => {
+    // The 200-EMPTY pin (the house's "never the error banner" rule) — the
+    // degraded surface must not disturb it.
+    component.loadCatalog();
+    stub.families$.next(payload([]));
+    fixture.detectChanges();
+    expect(component.catalogRegistryDegraded()).toBe(false);
+    expect(
+      fixture.nativeElement.querySelector('[data-test="metrics-registry-degraded"]'),
+    ).toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-test="metrics-catalog-error"]'),
+    ).toBeNull();
+    expect(component.showEmptyPanel()).toBe(true);
+    expect(
+      fixture.nativeElement.querySelector('[data-test="metrics-empty-panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('an ABSENT registry_read_ok reads as HEALTHY (the default-safe predicate)', () => {
+    component.loadCatalog();
+    stub.families$.next(payload([], {}));
+    fixture.detectChanges();
+    expect(component.catalogRegistryDegraded()).toBe(false);
+    expect(
+      fixture.nativeElement.querySelector('[data-test="metrics-registry-degraded"]'),
+    ).toBeNull();
+  });
+
+  it('the degraded state is PER-LOAD — a subsequent healthy load clears it', () => {
+    component.loadCatalog();
+    stub.families$.next(payload([], { registry_read_ok: false }));
+    fixture.detectChanges();
+    expect(component.catalogRegistryDegraded()).toBe(true);
+
+    component.loadCatalog();
+    stub.families$.next(payload([family()]));
+    fixture.detectChanges();
+    expect(component.catalogRegistryDegraded()).toBe(false);
+    expect(
+      fixture.nativeElement.querySelector('[data-test="metrics-registry-degraded"]'),
+    ).toBeNull();
+  });
+
+  it('the source carries the degraded guard on showEmptyPanel', () => {
+    // The production-source pin: the guard must live on the computed
+    // itself, not only in the template.
+    const guard = componentSrc.slice(componentSrc.indexOf('readonly showEmptyPanel'));
+    const block = guard.slice(0, guard.indexOf(');'));
+    expect(block).toContain('catalogRegistryDegraded');
+  });
+
+  it('the degraded badge never reuses the transport-failure banner element', () => {
+    // The DISTINCT surface is the whole point: the error banner carries
+    // transport-failure semantics the 200-EMPTY pin reserves.
+    const template = templateSrc;
+    expect(template).toContain('data-test="metrics-registry-degraded"');
+    const degradedBlock = template.slice(
+      template.indexOf('metrics-registry-degraded'),
+    );
+    const block = degradedBlock.slice(0, degradedBlock.indexOf('}'));
+    expect(block).not.toContain('metrics-catalog-error');
+  });
+
+  it('the degraded copy asserts the FACT and never attributes a cause', () => {
+    const copy = component.registryDegradedCopy.toLowerCase();
+    expect(copy).toContain('incomplete');
+    expect(copy).toContain('unknown');
+    for (const token of ['r-i', 'r-ii', 'capture_active', 'census inverted']) {
+      expect(copy).not.toContain(token);
+    }
   });
 });

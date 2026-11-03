@@ -271,6 +271,58 @@ switch-invariance pack + the API-wiring pack + the contract-doc pack + the whole
 1** — the FAILED list is IDENTICAL on both legs (the base-proven lane-#1 daemon-diff pin) ⇒
 **net-new deterministic reds = 0**.
 
+### H.5 — Phase 4 (the FE `registry_read_ok` mirror)
+
+**The toolchain was provisioned first (advisory i2-N4).** The worktree shipped NO
+`frontend/node_modules`; `npm ci` ran inside `frontend/` (the lockfile-pinned install) in
+BOTH the HEAD worktree and the throwaway BASE worktree — the house FE pack refuses to
+install dependencies (a missing tree is a LOUD FAIL, never a green skip). `package.json`
+and `package-lock.json` are **byte-unchanged** (`package_json_diff_lines=0`).
+
+**The fold (P-3's binding shape).**
+* `frontend/src/app/models/metrics.model.ts` — the OPTIONAL 4th activation member
+  (`registry_read_ok?: boolean`) + the page-local copy constant
+  `METRICS_REGISTRY_DEGRADED_COPY` (the FACT, never a cause — it is deliberately NOT
+  `registry_unavailable`, which means "no provider wired", the 503 case).
+* `frontend/src/app/pages/metrics/metrics.component.ts` — the `catalogRegistryDegraded`
+  signal, set PER LOAD from `payload.activation?.registry_read_ok === false` (the
+  `=== false` predicate, mirroring the backend's default-safe
+  `getattr(provider, "registry_read_ok", True)`), and the `showEmptyPanel` guard.
+* `frontend/src/app/pages/metrics/metrics.component.html` — the **DISTINCT** badge
+  (`data-test="metrics-registry-degraded"`). It NEVER reuses the transport-failure
+  banner (`data-test="metrics-catalog-error"`), so the house's "a 200-EMPTY response
+  never renders the error banner" pin stays true.
+* `frontend/src/app/pages/metrics/metrics.component.scss` — the badge's style.
+* `frontend/src/app/pages/metrics/metrics.component.spec.ts` — EIGHT new legs (the
+  positive degraded leg, the NEGATIVE healthy-200-empty leg, the ABSENT-flag leg, the
+  per-load reset leg, the production-source guard pin, the distinct-surface pin, and the
+  copy-genericity pin).
+* `frontend/e2e/metrics-gate.spec.ts` — the real-Chromium degraded journey leg.
+
+**The gate (task 4.8) — the FE dual-side pack.**
+* **D1** (the lane's FE specs): HEAD **149 passed** vs BASE **141 passed** — the +8
+  delta is EXACTLY the eight new legs.
+* **D2 declared**: HEAD **138 passed** == BASE **138 passed**.
+* **D2 derived** (38 files, derived at run time by the pack's own recipe): HEAD
+  **1801 collected / 1799 passed / 2 failed** == BASE **1801 / 1799 / 2** — the SAME
+  two failures on both legs ⇒ **net-new = 0**. The two are the DST-DEPENDENT timezone
+  assertions in `settings.component.spec.ts` (`America/New_York (UTC-04:00)` vs the
+  November `UTC-05:00`) — a host/season artefact, base-proven, unrelated to this lane.
+* **type-check** (`frontend/`-local `./node_modules/.bin/tsc --noEmit -p
+  tsconfig.metrics-fe.json`): rc=0. **NEVER bare `tsc` / `npx tsc` outside
+  `frontend/`.**
+* **builds**: the AOT development build and the production build (the only configuration
+  carrying `budgets` + `outputHashing`) both rc=0. The production budget WARNs are
+  **RECORDED FINDINGS** (the initial bundle + ten component SCSS budgets) — none of them
+  names a file this lane touched (`src/app/pages/metrics/metrics.component.scss` is NOT
+  among them), and none was auto-fixed.
+* **the e2e leg**: `playwright test --config=playwright.metrics-gate.config.ts` —
+  **3/3 passed** in real Chromium (the two existing journeys + the new degraded
+  journey), zero daemon contact (every door route is stubbed pre-network).
+* **the FE payload delta**: exactly **6 files** (the model, the shell, the template, the
+  SCSS, the spec, the e2e spec). `frontend/package.json` + `frontend/package-lock.json`
+  are byte-identical.
+
 ---
 
 ## §G — The implementation-tidier backfill (placeholder — DO NOT fill before the tidier pass)
