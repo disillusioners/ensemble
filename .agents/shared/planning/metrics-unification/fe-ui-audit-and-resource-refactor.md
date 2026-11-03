@@ -8,7 +8,7 @@ Final user-facing report for the FE-metrics + resource-tab audit commission. Cov
 - **Resource tab needs refactor: YES** — verdicts (a)+(c)+(d) confirmed, (b) partial (§2).
 - **Recommended refactor:** consolidate BOTH pages into one `/metrics` module with a tab manifest; resource becomes tab 1 on its existing endpoints; retire the standalone route (§3).
 - **Charting:** reduced set behind the owner's seam instinct — Chart.js v4 as sole vendor for interactive panels (lazy-chunk-only), one consolidated house-SVG renderer for minis/fallback; ECharts/ApexCharts deferred with written triggers; Gridster2 dropped (§3e).
-- **Two decisions needed from the owner: §6** (charting posture; live auth posture).
+- **The owner's decisions are ANSWERED (2026-11-03)** — the three rulings are recorded in **§8**, which supersedes §6 (**D-1** charting posture · **D-2** live auth posture · **D-3** route fate).
 
 ## 1. Honest UI/chart quality assessment (Deliverable 1)
 
@@ -325,9 +325,11 @@ All paths relative to `.agents/shared/planning/metrics-unification/`. Suggested 
 
 All 12 are also persisted to the daemon tmp-image substrate: `feature=fe-ui-audit`, `version=v0.28.9`, per-route `page` tags — the 12 image_ids are tabulated in live-capture-log.md §5.
 
-## 6. Decisions needed from the owner
+## 6. Decisions needed from the owner — ANSWERED 2026-11-03 (the rulings are recorded in §8)
 
 Everything else in §3 is adjudicated and proceeds on ratification; only these need a ruling.
+
+**ANSWERED 2026-11-03 — the three rulings (D-1, D-2, D-3) are recorded in §8, which supersedes this section; the three questions below stand VERBATIM as the record of what was asked.**
 
 1. **CHARTING POSTURE (§3e).**
    - (i) Ratify Chart.js-as-sole-vendor + the same-commit governance amendment (pins spec + pack Leg 7 + the doc sites) — **LEADER RECOMMENDS**.
@@ -344,3 +346,100 @@ Everything else in §3 is adjudicated and proceeds on ratification; only these n
 ## 7. Suggested next step
 
 If the owner ratifies §6, the natural next commission is the **T1 build lane**: tab manifest + page frame + tab-1 consolidation + renderer seam with Chart.js-in-lazy-chunk (or SVG-only per §6.1) + copy/empty-state fixes + route retirement — FE-only, no migration delta, one staged release. The metrics-lane items (per-instance series decision, Tier-3 families, durable events) stay separate commissions in dependency order.
+
+## 8. What changed and why (2026-11-03 — post-audit rulings)
+
+The document's §6 decisions were **answered by the owner on 2026-11-03**, and **this
+section (§8) supersedes §6**. It records the three rulings it settles — **D-1** (the
+charting posture), **D-2** (the live auth posture) and **D-3** (the route fate) — together
+with the supersession chain that produced D-1 and the counter-option that was considered
+and rejected. §6's three questions remain above, verbatim, as the record of what was
+asked.
+
+### 8.1 D-1 — the charting supersession chain
+
+The chain, leg by leg — **not** a summary:
+
+**(i) The original 4-engine proposal** (§3e): ECharts + ApexCharts + Gridster2 +
+Chart.js, with Chart.js assigned the MINI role and a separate engine per role.
+
+**(ii) The two independent measured evaluations** — `charting-engine-decision.md` and
+`charting-engine-decision-independent.md` — measured that proposal against our real
+workload and found: the **ECharts tier is EMPTY at our volumes** (the query door's clamps
+— 240 pts/series, 12,000 pts/response, 7,200 s window — make the thousands-of-series
+panels the proposal assumed impossible); **no ApexCharts surface exists** for it to
+serve; and **Gridster2 is a different product** (drag/resize composable dashboards, not
+the ratified fixed-tab direction). Chart.js in the MINI role measured as its **worst**
+fit — SVG already wins minis at ~30 lines.
+
+**(iii) The adoption** — **Chart.js v4 as the SOLE vendor** for the interactive-panel role
+(imported exclusively from the lazy `/metrics` chunk), plus **ONE consolidated house SVG
+renderer** for minis/fallback, both behind the chart-INTENT + renderer-registry seam.
+
+**(iv) The owner's D-1 ruling (2026-11-03)** — which:
+
+- **(a) fixes the vendor set** — Chart.js v4 (sole vendor, interactive trend panels only)
+  + the one house SVG renderer (minis + never-silent fallback). ECharts and ApexCharts
+  stay deferred with their written triggers; Gridster2 stays dropped;
+- **(b) VOIDS the flip-condition** — §3e's *"if T1 ships single-series shape views with
+  interaction deferred, DROP Chart.js too and ship pure SVG; register it when interaction
+  lands"* is **VOID** as of 2026-11-03. **Reason: interaction IS in scope**, so the
+  condition's antecedent never fires — the condition is unreachable, not merely
+  unfavourable. Chart.js is therefore **not** droppable under this lane;
+- **(c) requires the governance amendment in the SAME COMMIT as the dependency** — the
+  pins-spec ban (`metrics.bindings.pins.spec.ts:94`), the pack Leg-7 guard and the 5
+  doc/checklist sites move together with the `package.json` diff. The seam ships either
+  way; the engine fill is reversible later.
+
+### 8.2 The zero-dep counter-option — NOT CHOSEN (2026-11-03)
+
+**Considered and NOT CHOSEN on 2026-11-03.** It is on the record so that a future lane
+does not re-litigate it as if it had been overlooked.
+
+**The counter-option.** Ratify zero-npm-deps as a **standing FE product position** ⇒ the
+**panel role goes to the extended house-SVG renderer** at ~**+400–700 L** (the crosshair
++ nearest-snap is the expensive item) ⇒ the `metrics.bindings.pins.spec.ts:94` ban and
+the **pack Leg-7 guard stay untouched**, and the test-enforced zero-dep posture is
+preserved ⇒ the governance amendment is **avoided** (pack Leg 7 hard-fails ANY
+`package.json` diff, plus the 5 doc/checklist sites that would otherwise have to move
+same-commit).
+
+**Its COST:** the interactive panel role must be hand-built (crosshair + nearest-snap +
+multi-series semantics) at roughly twice the wrapper effort of the vendor path, and the
+house renderer carries a capability burden the vendor would have supplied.
+
+**Its PRESERVED BENEFIT:** the zero-npm-deps posture, the untouched pins-spec ban, the
+untouched Leg-7 guard, and no governance amendment — no `package.json` diff to defend and
+no 5-site same-commit edit to land.
+
+**NOT CHOSEN** because the owner adopted D-1: the seam is the durable part, and the
+vendor's cost is confined to a lazy chunk.
+
+### 8.3 D-2 — the auth posture: the fail-closed door STAYS
+
+The central door's **fail-closed posture STAYS — there is no weakening.** `/api/metrics/*`
+continues to answer **503 `AUTH_NOT_CONFIGURED`** for everyone while auth is
+unconfigured; the door is NOT opened, and the lane's own verification does not weaken it.
+
+**Consequences:**
+
+- The FE gains a **distinct, actionable `AUTH_NOT_CONFIGURED` empty state** on the
+  **central surfaces only** (the catalog drawer + the 6 central tab bodies) — the real
+  cause, the runbook pointer, and **no dead Retry button**. Tab 1 (Resources) keeps its
+  own fail-open door and stays lit; the two doors keep their opposite postures by design
+  (§3f).
+- **Enabling auth is a USER MORNING ITEM**, with the **operator recipe handed over and
+  never executed by the lane**: `plan-overview.md` §9 of the T1 plan is the canonical
+  operator-recipe source, and the lane records **0 live config writes** and **0 live
+  daemon requests**.
+
+### 8.4 D-3 — the route fate: `/resources` retires, same release
+
+**Consequences:**
+
+- **Retire `/resources`** with a **SAME-RELEASE, param-preserving redirect** to
+  `/metrics?tab=resource` — every non-`tab` query param is preserved; `tab` is
+  overridden by the redirect.
+- The **predefined-tab direction stands** — the composable-dashboards door stays closed.
+- The **Gridster2 door stays closed** (no committed composable-dashboards roadmap item
+  exists; revisit only at an Angular-major boundary).
