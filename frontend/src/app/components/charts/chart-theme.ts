@@ -1,21 +1,27 @@
 // The house chart THEME — the single palette + the format vocabulary.
 //
 // ONE source (T1 phase 1, task 1.5): the series palette was duplicated
-// across `pages/metrics/charts/charts-tab.component.ts` and
-// `pages/resources/svg-timeline/svg-timeline.component.ts`, and the
-// "no value" token was duplicated across the chart sites. This module is
-// the SSOT; the consumers import from it.
+// across the charts tab and the resources timeline, and the "no value"
+// token was duplicated across the chart sites. This module is the SSOT;
+// the consumers import from it.
+//
+// The consumers are now the CONSOLIDATED house engine
+// (`components/charts/house-svg-renderer/`) and the Chart.js panel
+// (`pages/metrics/charts/chart-panel.component.ts`).
 //
 // BEHAVIOUR-NEUTRAL at this phase: the extraction is a MOVE, never a
 // change. Every value here is byte-identical to the value it replaces.
 //
-// SCOPE NOTE — the chart sites do NOT share one UTC/value formatter: the
-// SVG primitive's `formatChartUtc` guards a non-finite input ('—'), the
-// timeline's `formatUtcClock` does not (it throws on an invalid date).
-// Merging them would be a behaviour change, which this phase forbids, so
-// the formatters stay where they are. The metric-kind → render-mode /
-// unit-group vocabulary is Phase-4 material (IMPL-10) and does not exist
-// yet — there is nothing to extract.
+// SCOPE NOTE — the consolidation (phase 4) MERGED the two UTC/value
+// formatters: the house engine's `formatChartUtc` guards a non-finite
+// input ('—'), and the retired timeline's `formatUtcClock` did not (it
+// threw on an invalid date). The house (guarded) behaviour is the one
+// that survives, so a broken sample can no longer take the whole chart
+// down. The `formatUtcClock` NAME survives as an alias in the house
+// engine, so every ported assertion keeps a named home.
+//
+// The metric-kind → render-mode / unit-group vocabulary is the metrics
+// page's own module (`pages/metrics/metrics-units.ts`).
 
 /**
  * The house series palette — the colour of the Nth series.

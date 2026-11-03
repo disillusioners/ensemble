@@ -1,4 +1,4 @@
-import { CommonModule } from '@angular/common';
+import { CommonModule, NgComponentOutlet } from '@angular/common';
 import {
   ChangeDetectionStrategy,
   Component,
@@ -21,16 +21,25 @@ import {
   ResourcesWindow,
   TracebackPayload,
   formatUtcLabel,
+  parseNaiveUtc,
 } from '../../../models/resources.models';
 import { ResourcesService } from '../../../services/resources.service';
 import {
+  ChartSeries,
+  HouseAnomalyMarker,
+} from '../../../components/charts/house-svg-renderer/house-svg-renderer';
+import { createHouseSvgRegistry } from '../../../components/charts/house-svg-renderer/house-svg-renderer.renderer';
+import {
+  ChartOutputHandlers,
+  ChartRenderData,
+  ChartRequest,
+} from '../../../components/charts/renderer-registry';
+import {
   DEFAULT_TIMELINE_SERIES,
-  SvgTimelineComponent,
   TIMELINE_SERIES_DEFS,
-  TimelineMarkerClick,
   TimelineSeriesKey,
-  anomalyDrilldownWindow,
-} from '../svg-timeline/svg-timeline.component';
+} from './timeline-series';
+import { TimelineMarkerClick, anomalyDrilldownWindow } from './timeline-drilldown';
 
 /**
  * Timeline tab — history SVG + anomaly markers + marker-click drill-down.
@@ -71,7 +80,7 @@ export const DEFAULT_TIMELINE_WINDOW: ResourcesWindow = '1h';
     MatButtonToggleModule,
     MatIconModule,
     MatTooltipModule,
-    SvgTimelineComponent,
+    NgComponentOutlet,
   ],
   templateUrl: './timeline-tab.component.html',
   styleUrl: './timeline-tab.component.scss',
@@ -165,6 +174,102 @@ export class TimelineTabComponent implements OnInit {
           console.warn('[ResourcesTimeline] timeline load failed:', err);
         },
       });
+  }
+
+  // ── The RENDERER REGISTRY (task 4.13) ─────────────────────────────
+
+  /**
+   * The STATIC registry — the house SVG only.
+   *
+   * The resources route never reaches the interactive vendor: its
+   * timeline is a static shape, so the registry it uses carries no
+   * Chart.js renderer at all.
+   */
+  private readonly registry = createHouseSvgRegistry();
+
+  /** The render request — the static trend shape with the markers + drill-down. */
+  private readonly request: ChartRequest = {
+    intent: 'trend',
+    flags: ['markers', 'drill'],
+    surface: 'static',
+  };
+
+  /** The renderer plan — the house SVG. */
+  readonly plan = computed(() =>
+    this.registry.plan(this.request, { series: [], anomalies: [] }),
+  );
+
+  /**
+   * The timeline's series — the house shape.
+   *
+   * The series toggle stays here (the PARENT owns the state): the
+   * renderer draws exactly the series it is given.
+   */
+  readonly houseSeries = computed<ChartSeries[]>(() => {
+    const points = this.points();
+    const enabled = this.series();
+    return TIMELINE_SERIES_DEFS.filter((def) => enabled.includes(def.key)).map((def) => ({
+      id: def.key,
+      label: def.label,
+      color: def.color,
+      mode: 'line' as const,
+      points: points
+        .map((point) => ({
+          t: parseNaiveUtc(point.t).getTime(),
+          v: point[def.key],
+        }))
+        .filter(
+          (sample): sample is { t: number; v: number } =>
+            Number.isFinite(sample.t) && Number.isFinite(sample.v),
+        ),
+    }));
+  });
+
+  /** The anomaly markers — the house shape (the wire anomaly rides along as the id). */
+  readonly houseAnomalies = computed<HouseAnomalyMarker[]>(() =>
+    this.anomalies().map((anomaly) => ({
+      anomalyId: anomaly.id,
+      seriesId: anomaly.series_key,
+      tsMs: parseNaiveUtc(anomaly.t_start).getTime(),
+      severity: anomaly.severity,
+      title: `${anomaly.kind} · ${anomaly.shape} · ${anomaly.severity} · peak ${anomaly.peak}`,
+    })),
+  );
+
+  /** The render data of the timeline. */
+  timelineData(): ChartRenderData {
+    return {
+      series: this.houseSeries(),
+      anomalies: this.houseAnomalies(),
+      baseline: [],
+      label: 'Resource history timeline (UTC)',
+    };
+  }
+
+  /** The output handlers — the marker's click hands the anomaly over. */
+  readonly timelineHandlers: ChartOutputHandlers = {
+    anomalyClick: (marker: HouseAnomalyMarker) => this.onHouseMarkerClick(marker),
+  };
+
+  /** The `NgComponentOutlet` inputs for the resolved plan. */
+  timelineInputs(): Record<string, unknown> {
+    return this.plan().inputs(this.timelineData(), this.timelineHandlers);
+  }
+
+  /**
+   * The marker click → the drill-down.
+   *
+   * The renderer hands over the MARKER; the wire anomaly behind it is
+   * looked up by id, and the padded window comes from the drill-down
+   * POLICY (which moved out of the chart engine in task 4.2).
+   */
+  onHouseMarkerClick(marker: HouseAnomalyMarker): void {
+    const anomaly = this.anomalies().find((candidate) => candidate.id === marker.anomalyId);
+    if (!anomaly) {
+      return;
+    }
+    const { t0, t1 } = anomalyDrilldownWindow(anomaly);
+    this.onMarkerClick({ anomaly, t0, t1 });
   }
 
   // ── Series toggles ───────────────────────────────────────────────

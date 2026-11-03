@@ -66,12 +66,9 @@
 
   @if (history(); as payload) {
     <div class="timeline-chart-host" data-test="timeline-chart">
-      <app-svg-timeline
-        [points]="points()"
-        [anomalies]="anomalies()"
-        [series]="series()"
-        (markerClick)="onMarkerClick($event)"
-      ></app-svg-timeline>
+      <ng-container
+        *ngComponentOutlet="plan().component; inputs: timelineInputs()"
+      ></ng-container>
     </div>
   }
 

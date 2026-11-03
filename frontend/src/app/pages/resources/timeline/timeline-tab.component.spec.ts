@@ -141,11 +141,11 @@ describe('TimelineTabComponent', () => {
     expect(resourcesMock.getAnomalies).toHaveBeenCalledWith('1h');
   });
 
-  it('renders the svg-timeline with non-empty series paths', () => {
+  it('renders the house SVG timeline with non-empty series paths', () => {
     startHappyPath();
 
     expect(query('[data-test="timeline-chart"]')).not.toBeNull();
-    const lines = queryAll('[data-test="series-line"]');
+    const lines = queryAll('[data-test="house-series-line"]');
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
       expect((line.nativeElement.getAttribute('d') ?? '').length).toBeGreaterThan(0);
@@ -245,7 +245,7 @@ describe('TimelineTabComponent', () => {
     resourcesMock.getEvidence.mockReturnValue(of(makeEvidence()));
     resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
 
-    const marker = query('[data-test="anomaly-marker"]');
+    const marker = query('[data-test="house-anomaly-marker"]');
     expect(marker).not.toBeNull();
     marker.triggerEventHandler('click', null);
     fixture.detectChanges();
@@ -266,7 +266,7 @@ describe('TimelineTabComponent', () => {
     resourcesMock.getEvidence.mockReturnValue(of(makeEvidence()));
     resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
 
-    query('[data-test="anomaly-marker"]').triggerEventHandler('click', null);
+    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
     fixture.detectChanges();
 
     const panel = query('[data-test="drilldown-panel"]');
@@ -301,7 +301,7 @@ describe('TimelineTabComponent', () => {
     resourcesMock.getEvidence.mockReturnValue(throwError(() => new Error('boom')));
     resourcesMock.getTraceback.mockReturnValue(throwError(() => new Error('boom')));
 
-    query('[data-test="anomaly-marker"]').triggerEventHandler('click', null);
+    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
     fixture.detectChanges();
 
     expect(query('[data-test="drilldown-error"]')).not.toBeNull();
@@ -318,15 +318,15 @@ describe('TimelineTabComponent', () => {
 
   it('toggles a series on and off (parent owns series state)', () => {
     startHappyPath();
-    const before = queryAll('[data-test="series-line"]').length;
+    const before = queryAll('[data-test="house-series-line"]').length;
 
     component.toggleSeries('threads');
     fixture.detectChanges();
-    expect(queryAll('[data-test="series-line"]').length).toBe(before + 1);
+    expect(queryAll('[data-test="house-series-line"]').length).toBe(before + 1);
 
     component.toggleSeries('threads');
     fixture.detectChanges();
-    expect(queryAll('[data-test="series-line"]').length).toBe(before);
+    expect(queryAll('[data-test="house-series-line"]').length).toBe(before);
   });
 
   // ── Stale-response supersede (hardening pass) ──────────────────────
@@ -394,7 +394,7 @@ describe('TimelineTabComponent', () => {
     const tracebackA = new Subject<TracebackPayload>();
     resourcesMock.getEvidence.mockReturnValueOnce(evidenceA.asObservable());
     resourcesMock.getTraceback.mockReturnValueOnce(tracebackA.asObservable());
-    query('[data-test="anomaly-marker"]').triggerEventHandler('click', null);
+    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
     fixture.detectChanges();
     expect(component.drilldownLoading()).toBe(true);
     expect(component.evidence()).toBeNull();
@@ -405,7 +405,7 @@ describe('TimelineTabComponent', () => {
     });
     resourcesMock.getEvidence.mockReturnValueOnce(of(evidenceB));
     resourcesMock.getTraceback.mockReturnValueOnce(of(makeTraceback()));
-    query('[data-test="anomaly-marker"]').triggerEventHandler('click', null);
+    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
     fixture.detectChanges();
     expect(component.drilldownLoading()).toBe(false);
     expect(component.evidence()).toBe(evidenceB);
@@ -429,7 +429,7 @@ describe('TimelineTabComponent', () => {
     const tracebackA = new Subject<TracebackPayload>();
     resourcesMock.getEvidence.mockReturnValueOnce(evidenceA.asObservable());
     resourcesMock.getTraceback.mockReturnValueOnce(tracebackA.asObservable());
-    query('[data-test="anomaly-marker"]').triggerEventHandler('click', null);
+    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
     fixture.detectChanges();
     expect(query('[data-test="drilldown-panel"]')).not.toBeNull();
 

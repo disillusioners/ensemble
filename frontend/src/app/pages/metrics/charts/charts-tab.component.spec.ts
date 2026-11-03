@@ -115,9 +115,11 @@ describe('ChartsTabComponent — the request + the rendering mode', () => {
     jest.useRealTimers();
   });
 
-  it('declares the named poll interval (15 s) and the 3600 s window', () => {
+  it('declares the named poll interval (15 s) and the FRAME-owned window', () => {
     expect(component.POLL_INTERVAL_MS).toBe(15_000);
-    expect(component.WINDOW_S).toBe(3600);
+    // The hardcoded window is GONE (task 4.13) — the frame owns the
+    // range, and the tab's default is the central ladder's own 1h entry.
+    expect(component.windowS()).toBe(3600);
   });
 
   it('does NOT poll until the catalog names the chart-primary series', () => {
@@ -127,7 +129,7 @@ describe('ChartsTabComponent — the request + the rendering mode', () => {
     expect(service.seriesCalls).toHaveLength(0);
   });
 
-  it('requests the chart-primary names over a 3600 s window', () => {
+  it('requests the chart-primary names over the frame-owned window', () => {
     fixture.componentRef.setInput('active', true);
     fixture.detectChanges();
     expect(service.seriesCalls).toHaveLength(1);

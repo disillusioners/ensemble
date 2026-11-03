@@ -12,6 +12,7 @@ import {
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { DecimalPipe } from '@angular/common';
+import { NgComponentOutlet } from '@angular/common';
 
 import { MetricsService } from '../../../services/metrics.service';
 import {
@@ -29,9 +30,22 @@ import {
 } from '../../../models/metrics.model';
 import {
   ChartSeries,
-  SvgLineChartComponent,
-} from '../../../components/charts/svg-line-chart/svg-line-chart.component';
+} from '../../../components/charts/house-svg-renderer/house-svg-renderer';
 import { chartSeriesColor } from '../../../components/charts/chart-theme';
+import {
+  ChartMountFallback,
+  ChartOutputHandlers,
+  ChartRenderData,
+  ChartRendererPlan,
+  ChartRequest,
+  chartMountFallback,
+} from '../../../components/charts/renderer-registry';
+import { createDefaultChartRegistry } from '../charts/chart-panel.renderer';
+import {
+  METRICS_UNIT_UNKNOWN,
+  metricsPanelGroupKey,
+  metricsUnitFor,
+} from '../metrics-units';
 import {
   METRICS_CENTRAL_WINDOW_MINUTES,
   METRICS_SELECTOR_CEILING,
@@ -64,6 +78,35 @@ export interface MetricsCentralSeriesSpec {
 }
 
 /**
+ * One PANEL — a metric-kind + unit group of one family's series.
+ *
+ * A panel is never mixed-kind and never mixed-unit: the kind comes from
+ * the wire and the unit from the vocabulary (IMPL-10).
+ */
+export interface MetricsPanelGroup {
+  /** The group key — the kind + unit pair. */
+  readonly id: string;
+  readonly familyId: string;
+  /** The wire's rendering mode — `step` for a counter, `line` for a gauge. */
+  readonly kind: MetricsChartRole;
+  /** The unit of the group (`unit unknown` when the vocabulary has none). */
+  readonly unit: string;
+  readonly label: string;
+  readonly series: ChartSeries[];
+}
+
+/**
+ * The RENDERER REQUEST the central panels carry.
+ *
+ * The flags name the capabilities the panels need: the shared y-axis
+ * (one panel, several series), the anomaly markers and the drill-down.
+ */
+const PANEL_REQUEST: ChartRequest = {
+  intent: 'trend',
+  flags: ['shared-y', 'markers', 'drill'],
+};
+
+/**
  * The CENTRAL tab body — the shared implementation of the six central
  * module tabs (T1 phase 2, task 2.4).
  *
@@ -76,10 +119,12 @@ export interface MetricsCentralSeriesSpec {
  *     family is LISTED with the reason the door gave (ADJ-vi). A dark
  *     family is never charted and never silently dropped.
  *
- * The renderer-registry hand-off and the per-kind+unit-group PANEL
- * COMPOSITION are NOT here — they are phase 4's task 4.15 (the registry
- * is created at 4.8). This body therefore renders one trend per series
- * through the house SVG engine, which phase 4 re-points to the registry.
+ * The PANEL COMPOSITION (task 4.15) IS here: the body groups its live
+ * chart-primary series per METRIC-KIND + UNIT group and hands each
+ * group to the RENDERER REGISTRY, which says which engine draws it.
+ * The body renders THROUGH the registry — the resolved component is
+ * mounted with `NgComponentOutlet`, never hard-coded — so adding an
+ * engine later is one registry line and no change here.
  *
  * The state is PER SOURCE (AM-1): the body reports its own source's
  * outcome to the frame through `onState`, and it never writes another
@@ -88,7 +133,7 @@ export interface MetricsCentralSeriesSpec {
 @Component({
   selector: 'app-metrics-central-tab',
   standalone: true,
-  imports: [DecimalPipe, MatButtonModule, SvgLineChartComponent],
+  imports: [DecimalPipe, MatButtonModule, NgComponentOutlet],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="central-tab">
@@ -152,12 +197,32 @@ export interface MetricsCentralSeriesSpec {
                 <span class="family-id">{{ family.id }}</span>
                 <span class="pill pill-live" data-test="family-live">live</span>
               </header>
-              @for (panel of panelsOf(family.id); track panel.id) {
-                <div class="chart-cell" [attr.data-series]="panel.id">
-                  <app-svg-line-chart
-                    [series]="[panel]"
-                    [ariaLabel]="panel.label + ' (UTC)'"
-                  ></app-svg-line-chart>
+              @for (group of groupsOf(family.id); track group.id) {
+                <div
+                  class="chart-cell"
+                  [attr.data-panel]="group.id"
+                  [attr.data-kind]="group.kind"
+                  [attr.data-unit]="group.unit"
+                  data-test="central-tab-panel"
+                >
+                  @if (fallbacks().get(group.id); as fallback) {
+                    <span class="panel-fallback-badge" data-test="panel-fallback-badge">
+                      {{ fallback.badge }}
+                    </span>
+                    <ng-container
+                      *ngComponentOutlet="
+                        fallback.plan.component;
+                        inputs: fallback.plan.inputs(panelData(group))
+                      "
+                    ></ng-container>
+                  } @else if (planFor(group.id); as plan) {
+                    <ng-container
+                      *ngComponentOutlet="
+                        plan.component;
+                        inputs: plan.inputs(panelData(group), handlersFor(group.id))
+                      "
+                    ></ng-container>
+                  }
                 </div>
               } @empty {
                 <p class="tab-hint" data-test="central-tab-no-samples">
@@ -295,6 +360,16 @@ export interface MetricsCentralSeriesSpec {
 
       .chart-cell {
         min-width: 0;
+      }
+
+      .panel-fallback-badge {
+        display: inline-block;
+        margin-bottom: 0.35rem;
+        padding: 0.15rem 0.45rem;
+        border: 1px solid #92400e;
+        border-radius: 4px;
+        color: #fbbf24;
+        font-size: 0.7rem;
       }
 
       .stat-grid {
@@ -558,31 +633,157 @@ export class MetricsCentralTabComponent {
   /** The bound families as a readable list. */
   readonly familySummary = computed(() => this.entry().familyIds.join(', '));
 
-  /** The rendered panels of one family (its live series). */
-  panelsOf(familyId: string): readonly ChartSeries[] {
-    // The state's `series` is the CURRENT half: with the baseline on, the
-    // payload covers 2W and the panels must show the recent window only.
+  /**
+   * The PANEL GROUPS of one family — one per metric-kind + unit group.
+   *
+   * The KIND comes from the WIRE (`chart_role` per metric — never an
+   * FE table), so a family that registers both a gauge and a counter
+   * yields TWO panels: a mixed-kind panel would break counter-honesty
+   * (a counter rendered LINEAR asserts values that were never
+   * observed) and a mixed-unit panel would falsify the unit label.
+   *
+   * The UNIT comes from the FE-local vocabulary, keyed on the metric
+   * name (IMPL-10) — an unknown metric renders `unit unknown`, never a
+   * borrowed unit.
+   */
+  readonly groupsByFamily = computed(() => {
+    // The state's `series` is the CURRENT half: with the baseline on,
+    // the payload covers 2W and the panels must show the recent window
+    // only.
     const entries = this.state().series;
+    const byFamily = new Map<string, Map<string, MetricsPanelGroup>>();
     if (!entries.length) {
-      return [];
+      return byFamily;
     }
-    const specs = this.chartSpecs().filter((spec) => spec.familyId === familyId);
-    const out: ChartSeries[] = [];
+    const specs = this.chartSpecs();
     specs.forEach((spec, index) => {
       const entry = entries.find((candidate) => candidate.name === spec.name);
       if (!entry) {
         return;
       }
       const labels = formatMetricsLabels(entry.labels);
-      out.push({
+      const unit = metricsUnitFor(spec.name);
+      const key = metricsPanelGroupKey(spec.chartRole, unit);
+      const series: ChartSeries = {
         id: labels ? `${entry.name}{${labels}}` : entry.name,
         label: labels ? `${entry.name} {${labels}}` : entry.name,
         color: chartSeriesColor(index),
         mode: spec.chartRole,
         points: entry.points.map((point) => ({ t: point[0] * 1000, v: point[1] })),
+      };
+      let groups = byFamily.get(spec.familyId);
+      if (!groups) {
+        groups = new Map<string, MetricsPanelGroup>();
+        byFamily.set(spec.familyId, groups);
+      }
+      const existing = groups.get(key);
+      if (existing) {
+        existing.series.push(series);
+        return;
+      }
+      groups.set(key, {
+        id: key,
+        familyId: spec.familyId,
+        kind: spec.chartRole,
+        unit,
+        label: `${spec.familyId} · ${spec.chartRole === 'step' ? 'counter' : 'gauge'}`,
+        series: [series],
       });
     });
+    return byFamily;
+  });
+
+  /** The panel groups of one family. */
+  groupsOf(familyId: string): readonly MetricsPanelGroup[] {
+    return [...(this.groupsByFamily().get(familyId)?.values() ?? [])];
+  }
+
+  /** The render data of one group — what the renderer draws. */
+  panelData(group: MetricsPanelGroup): ChartRenderData {
+    return {
+      series: group.series,
+      anomalies: [],
+      baseline: [],
+      unit: group.unit === METRICS_UNIT_UNKNOWN ? METRICS_UNIT_UNKNOWN : group.unit,
+      label: group.label,
+    };
+  }
+
+  /** The REGISTRY — the body renders THROUGH it, never around it. */
+  private readonly registry = createDefaultChartRegistry();
+
+  /**
+   * The RENDERER PLAN of one group.
+   *
+   * The request is the INTERACTIVE panel: a unit-labeled value axis, the
+   * crosshair + nearest-point snap, the legend's click-toggle and the
+   * shared y-axis. The registry owns WHICH engine answers it.
+   */
+  private readonly planByGroup = computed(() => {
+    const out = new Map<string, ChartRendererPlan>();
+    for (const groups of this.groupsByFamily().values()) {
+      for (const group of groups.values()) {
+        out.set(group.id, this.registry.plan(PANEL_REQUEST, this.panelData(group)));
+      }
+    }
     return out;
+  });
+
+  /** The plan of one group (the template's lookup). */
+  planFor(groupId: string): ChartRendererPlan | null {
+    return this.planByGroup().get(groupId) ?? null;
+  }
+
+  /**
+   * The MOUNT FAILURES — the runtime fallback's state.
+   *
+   * A panel that failed to MOUNT is replaced by the house SVG and the
+   * downgrade is BADGED. A silent downgrade is the failure mode the
+   * house forbids.
+   */
+  readonly fallbacks = signal<ReadonlyMap<string, ChartMountFallback>>(new Map());
+
+  /** The handlers of one group (the mount-failure hand-off). */
+  private readonly handlerCache = new Map<string, ChartOutputHandlers>();
+
+  handlersFor(groupId: string): ChartOutputHandlers {
+    const cached = this.handlerCache.get(groupId);
+    if (cached) {
+      return cached;
+    }
+    const handlers: ChartOutputHandlers = {
+      mountFailed: (reason: string) => this.onMountFailed(groupId, reason),
+    };
+    this.handlerCache.set(groupId, handlers);
+    return handlers;
+  }
+
+  /**
+   * The mount failure → the house SVG fallback + the badge.
+   *
+   * The registry hands back the fallback plan and the badge text; the
+   * body renders both. When there is NO fallback the registry THROWS —
+   * a missing fallback is a defect, never a quiet degradation.
+   */
+  onMountFailed(groupId: string, reason: string): void {
+    const groups = this.groupsByFamily();
+    const group = [...groups.values()]
+      .flatMap((entries) => [...entries.values()])
+      .find((candidate) => candidate.id === groupId);
+    if (!group) {
+      return;
+    }
+    const fallback = chartMountFallback(
+      this.registry,
+      PANEL_REQUEST,
+      this.panelData(group),
+      reason,
+    );
+    this.fallbacks.update((current) => {
+      const next = new Map(current);
+      next.set(groupId, fallback);
+      return next;
+    });
   }
 
   private fetchTrend(requestWindowS: number, baseline: boolean): void {

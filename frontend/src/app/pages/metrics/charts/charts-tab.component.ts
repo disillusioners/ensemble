@@ -13,6 +13,7 @@ import {
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { DecimalPipe } from '@angular/common';
+import { NgComponentOutlet } from '@angular/common';
 
 import { MetricsService } from '../../../services/metrics.service';
 import {
@@ -22,11 +23,14 @@ import {
   formatMetricsLabels,
   metricsChartRoleForKind,
 } from '../../../models/metrics.model';
-import {
-  ChartSeries,
-  SvgLineChartComponent,
-} from '../../../components/charts/svg-line-chart/svg-line-chart.component';
+import { ChartSeries } from '../../../components/charts/house-svg-renderer/house-svg-renderer';
 import { chartSeriesColor } from '../../../components/charts/chart-theme';
+import {
+  ChartRenderData,
+  ChartRequest,
+} from '../../../components/charts/renderer-registry';
+import { createDefaultChartRegistry } from './chart-panel.renderer';
+import { METRICS_CENTRAL_WINDOW_MINUTES } from '../metrics-door';
 
 /** The rendering mode of one chart-primary series (from the catalog). */
 export interface MetricsChartSeriesSpec {
@@ -38,9 +42,9 @@ export interface MetricsChartSeriesSpec {
  * Charts tab — the windowed trend (`GET /api/metrics/series`).
  *
  * The tab renders the roster's CHART-PRIMARY families (the catalog's
- * `role === 'chart'` families) and asks for a 3600 s window ⇒ 240
- * points at the door's `max_points` default of 240 (15 s effective
- * resolution out of the box).
+ * `role === 'chart'` families) over the FRAME's window ⇒ 240 points at
+ * the door's `max_points` default of 240 (15 s effective resolution
+ * out of the box).
  *
  * Rendering: COUNTER series render STEP, GAUGE series render LINEAR —
  * the mode comes from the family metadata `chart_role` (contract
@@ -55,7 +59,7 @@ export interface MetricsChartSeriesSpec {
 @Component({
   selector: 'app-metrics-charts',
   standalone: true,
-  imports: [DecimalPipe, MatButtonModule, SvgLineChartComponent],
+  imports: [DecimalPipe, MatButtonModule, NgComponentOutlet],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="charts">
@@ -97,10 +101,9 @@ export interface MetricsChartSeriesSpec {
       <div class="chart-grid" data-test="charts-grid">
         @for (chart of charts(); track chart.id) {
           <div class="chart-cell" [attr.data-series]="chart.id">
-            <app-svg-line-chart
-              [series]="[chart]"
-              [ariaLabel]="chart.label + ' (UTC)'"
-            ></app-svg-line-chart>
+            <ng-container
+              *ngComponentOutlet="plan().component; inputs: plan().inputs(chartData(chart))"
+            ></ng-container>
           </div>
         }
       </div>
@@ -180,8 +183,15 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
   /** The poll cadence, in milliseconds (15 s — the door's cadence). */
   readonly POLL_INTERVAL_MS = 15_000;
 
-  /** The window the tab asks for — 3600 s ⇒ 240 points at max_points 240. */
-  readonly WINDOW_S = 3600;
+  /**
+   * The window the tab asks for — the FRAME's value (task 4.13).
+   *
+   * The hardcoded window is GONE: the frame owns the range, and this
+   * tab's ladder is the central one. The default is the central
+   * ladder's own `1h` entry (in MINUTES, so no phase carries a
+   * hardcoded seconds literal).
+   */
+  readonly windowS = input<number>(METRICS_CENTRAL_WINDOW_MINUTES['1h'] * 60);
 
   /** Whether THIS tab is the selected one (the shell's visibility gate). */
   readonly active = input(false);
@@ -221,6 +231,26 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
       };
     });
   });
+
+  /** The RENDERER REGISTRY — the tab renders THROUGH it, never around it. */
+  private readonly registry = createDefaultChartRegistry();
+
+  /**
+   * The render request — the interactive panel with the shared y-axis,
+   * the markers and the drill-down.
+   */
+  private readonly request: ChartRequest = {
+    intent: 'trend',
+    flags: ['shared-y', 'markers', 'drill'],
+  };
+
+  /** The renderer plan of the tab's panels. */
+  readonly plan = computed(() => this.registry.plan(this.request, { series: [] }));
+
+  /** The render data of one chart. */
+  chartData(chart: ChartSeries): ChartRenderData {
+    return { series: [chart], anomalies: [], baseline: [], label: chart.label };
+  }
 
   constructor() {
     effect(() => {
@@ -277,7 +307,7 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
     this.metrics
       .getSeries({
         names: this.chartSpecs().map((spec) => spec.name),
-        windowS: this.WINDOW_S,
+        windowS: this.windowS(),
       })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({

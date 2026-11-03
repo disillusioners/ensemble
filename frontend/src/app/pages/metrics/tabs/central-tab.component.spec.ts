@@ -709,3 +709,152 @@ describe('MetricsCentralTabComponent — the effective-interval meta (3.11 / AM-
     expect((meta.textContent ?? '')).toContain('no points yet');
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 4 (task 4.15) — the per-kind+unit PANEL COMPOSITION
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('MetricsCentralTabComponent — the panel composition (4.15)', () => {
+  let fixture: ComponentFixture<MetricsCentralTabComponent>;
+  let component: MetricsCentralTabComponent;
+
+  /**
+   * A MIXED-KIND family — the wire registers a gauge AND a counter.
+   *
+   * This is the shape the plan names (F4 `w1.py:194-228`; F9
+   * `w2.py:120-150`): a mixed-kind panel would break counter-honesty
+   * and falsify the unit label, so the family must yield TWO panels.
+   */
+  const MIXED_KIND_FAMILY: MetricsFamily = {
+    id: 'F4',
+    names: [
+      {
+        name: 'ensemble_db_pool_checked_out',
+        kind: 'gauge',
+        labels: null,
+        help: '',
+        buckets: null,
+        cardinality_class: 'closed',
+        monotonic: false,
+        chart_role: 'line',
+      },
+      {
+        name: 'ensemble_db_pool_requests_errors_total',
+        kind: 'counter',
+        labels: null,
+        help: '',
+        buckets: null,
+        cardinality_class: 'closed',
+        monotonic: true,
+        chart_role: 'step',
+      },
+    ],
+    live_series_count: 2,
+    availability: { state: 'live' },
+    role: 'chart',
+    source_idiom: 'registry',
+    durability: 'process',
+    cardinality_contribution: 1,
+  };
+
+  function mixedState(): MetricsTabState {
+    return state({
+      families: [MIXED_KIND_FAMILY],
+      series: [
+        {
+          name: 'ensemble_db_pool_checked_out',
+          labels: {},
+          kind: 'gauge',
+          monotonic: false,
+          points: [
+            [1_700_000_000, 3],
+            [1_700_000_015, 5],
+          ],
+        },
+        {
+          name: 'ensemble_db_pool_requests_errors_total',
+          labels: {},
+          kind: 'counter',
+          monotonic: true,
+          points: [
+            [1_700_000_000, 4],
+            [1_700_000_015, 9],
+          ],
+        },
+      ],
+    });
+  }
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsCentralTabComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsCentralTabComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('entry', metricsCentralTab('db-pool'));
+  });
+
+  afterEach(() => fixture.destroy());
+
+  it('a MIXED-KIND family yields TWO panels — one per kind', () => {
+    fixture.componentRef.setInput('state', mixedState());
+    fixture.detectChanges();
+
+    const panels = fixture.nativeElement.querySelectorAll(
+      '[data-test="central-tab-panel"]',
+    ) as NodeListOf<HTMLElement>;
+    expect(panels.length).toBe(2);
+    const kinds = Array.from(panels).map((panel) => panel.getAttribute('data-kind'));
+    expect(kinds.sort()).toEqual(['line', 'step']);
+  });
+
+  it('the kind came from the WIRE (chart_role), never from an FE table', () => {
+    fixture.componentRef.setInput('state', mixedState());
+    fixture.detectChanges();
+
+    const groups = component.groupsOf('F4');
+    const counter = groups.find((group) =>
+      group.series.some((series) => series.id === 'ensemble_db_pool_requests_errors_total'),
+    );
+    // The wire's `chart_role: 'step'` — the KIND (`counter`) alone would
+    // have derived the same answer, so the pin is on the ROLE the wire
+    // carried: a name whose kind says 'gauge' but whose chart_role says
+    // 'step' must render STEP.
+    expect(counter?.kind).toBe('step');
+    expect(counter?.series.find((series) => series.id === 'ensemble_db_pool_requests_errors_total')?.mode).toBe(
+      'step',
+    );
+  });
+
+  it('renders THROUGH the registry (the resolved panel is mounted, not a hard-coded one)', () => {
+    fixture.componentRef.setInput('state', mixedState());
+    fixture.detectChanges();
+
+    const proxies = fixture.nativeElement.querySelectorAll(
+      '[data-test="chart-panel-proxy"]',
+    ) as NodeListOf<HTMLElement>;
+    expect(proxies.length).toBe(2);
+    // The panel's own render modes survive the composition.
+    const modes = Array.from(proxies).map((proxy) => proxy.getAttribute('data-render-mode'));
+    expect(modes.sort()).toEqual(['line', 'step']);
+  });
+
+  it('a MOUNT FAILURE falls back to the house SVG and BADGES the downgrade', () => {
+    fixture.componentRef.setInput('state', mixedState());
+    fixture.detectChanges();
+
+    const group = component.groupsOf('F4')[0];
+    component.onMountFailed(group.id, 'vendor unavailable');
+    fixture.detectChanges();
+
+    const badge = fixture.nativeElement.querySelector('[data-test="panel-fallback-badge"]');
+    expect(badge).not.toBeNull();
+    expect((badge.textContent ?? '')).toContain('vendor unavailable');
+    // The house SVG fallback is rendered.
+    expect(fixture.nativeElement.querySelector('[data-test="house-svg"]')).not.toBeNull();
+  });
+});
