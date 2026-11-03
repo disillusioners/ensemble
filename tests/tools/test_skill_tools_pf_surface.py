@@ -477,7 +477,7 @@ class TestSkillListFiles:
         manager._skill_store_service.list_skills = AsyncMock(
             return_value=(
                 [{
-                    "id": "abcdef0123456789",
+                    "id": "abcdef01-2345-6789-abcd-ef0123456789",
                     "name": "code-review",
                     "category": "workflow",
                     "status": "active",
@@ -485,7 +485,7 @@ class TestSkillListFiles:
                 1,
             )
         )
-        legacy_line = "- [abcdef01] code-review — workflow — active"
+        legacy_line = "- [abcdef01-2345-6789-abcd-ef0123456789] code-review — workflow — active"
 
         # Knob ON: the tag is present (cross-source disambiguation).
         on_out = await _tools(manager)["skill_list"].ainvoke({})
@@ -724,9 +724,9 @@ class TestSkillFeedbackPf:
         assert len(rows) == 1
 
     async def test_pseudo_id_form_accepted(self, tmp_path, engine, canon):
-        """The ``pf-<hex16>`` pseudo-id the injection path renders is
-        accepted directly — but only when it is a REAL indexed file skill
-        of this project (W5)."""
+        """The ``pf-<hex16>`` pseudo-id form REMAINS accepted — legacy
+        transcript compatibility (R2g/M6) — but only when it is a REAL
+        indexed file skill of this project (W5)."""
         manager, fs, usage_repo = _make_manager(tmp_path, engine, canon)
         await fs.ensure_index(canon, PROJECT_ID)
         pseudo = manager._project_skill_file_repository.list_by_project(
