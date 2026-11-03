@@ -279,12 +279,63 @@ def _byte_ceiling_hint() -> str:
 
 
 def _names_bound_hint() -> str:
-    """The narrow_hint for the names bound (a concrete next filter)."""
+    """The narrow_hint for the names bound (a concrete next filter).
+
+    THE HINT MUST NAME WHAT ACTUALLY WORKS. Asking for one family at a
+    time does NOT lift the per-family bound (a single family can declare
+    more names than the projection carries), and ``details=false`` only
+    shrinks each name's payload — it does not raise the COUNT bound
+    either. What reduces the matched set is the name-prefix filter, and
+    it lives on ``metrics_snapshot`` (the families catalog carries no
+    name filter).
+    """
     return (
-        "the catalog's name list exceeded the projection bound — ask for one "
-        "`family=` at a time, or use `details=false` for the small "
-        "projection."
+        "the catalog's name list exceeded the projection bound — the names "
+        "below are the family's FIRST declared names, and its true declared "
+        "count is in `name_count`. Asking for one `family=` at a time does "
+        "not lift the per-family bound, and `details=false` only shrinks "
+        "each name; to narrow the MATCHED set, call `metrics_snapshot` "
+        "with a `family=` and a `name_prefix=`."
     )
+
+
+#: The longest agent id that can reach a metrics body — the
+#: authorization gate admits exactly these three, so the post-trim
+#: insertion's cost is bounded.
+_MAX_AUTHORIZED_AGENT_ID_BYTES = max(len(a) for a in METRICS_AUTHORIZED_AGENTS)
+
+
+def _post_trim_overhead_bytes() -> int:
+    """The bytes the body can GAIN after the trim (the reservation floor).
+
+    The trim's target subtracts the reservation, so the reservation MUST
+    cover every byte the body gains afterwards: the disclosure (the
+    caveat + the narrow_hint) and the ``agent_id`` the wrapper inserts
+    into the query block AFTER the body was built.
+    """
+    return (
+        len(json.dumps(_BYTE_CEILING_CAVEAT, indent=2).encode("utf-8"))
+        + len(json.dumps(_NAMES_BOUND_CAVEAT, indent=2).encode("utf-8"))
+        + len(json.dumps(_byte_ceiling_hint(), indent=2).encode("utf-8"))
+        + len(json.dumps(_names_bound_hint(), indent=2).encode("utf-8"))
+        + len(
+            json.dumps(
+                {"agent_id": "x" * _MAX_AUTHORIZED_AGENT_ID_BYTES}, indent=2
+            ).encode("utf-8")
+        )
+        + 256  # the JSON separators, the indentation and the list commas
+    )
+
+
+# THE RESERVATION IS GUARDED (AmM-1(c)) — an unguarded reservation is a
+# guess that silently rots when the caveat prose grows or the agent_id
+# insertion gets longer. The assertion fires at IMPORT time, so a rot is
+# a loud boot-time failure instead of a silently over-sized body.
+assert _CAVEAT_HEADROOM_BYTES >= _post_trim_overhead_bytes(), (
+    "the byte-ceiling reservation must cover every byte the body gains "
+    f"after the trim: {_post_trim_overhead_bytes()} bytes needed, "
+    f"{_CAVEAT_HEADROOM_BYTES} reserved"
+)
 
 #: The read-status doctrine (AmC-4) — the racy-bool semantics, stated.
 READ_STATUS_DOCTRINE = (
@@ -342,20 +393,27 @@ def _encoded_size(payload: Any) -> int:
 
 
 def _trim_to_byte_ceiling(
-    payload: dict[str, Any], *, key: str, items: list[Any]
-) -> tuple[list[Any], bool]:
-    """Trim ``items`` until the encoded body fits the byte ceiling.
+    payload: dict[str, Any],
+    *,
+    key: str,
+    items: list[Any],
+    target: int | None = None,
+) -> list[Any]:
+    """Trim ``items`` until the encoded body fits ``target``.
 
-    The door's pattern (``routers/metrics.py``) — the trim is a BOUND, and
-    the caller MUST surface it (never a silent truncation).
+    THE ITEMS MUST BE THE SHIPPED ITEMS — the payload's OWN projection.
+    A trim measured against a different object than the body ships is
+    not a bound: the C1 regression handed this helper the RAW provider
+    rows while the payload carried the PROJECTION, so the probe measured
+    a fiction AND the trimmed path lost the projection's members.
 
-    The target is the seam's own ceiling MINUS the caveat headroom: the
-    caveat + the narrow_hint are written AFTER the trim, so the trim must
-    leave room for them (otherwise the final body would exceed the
-    ceiling by exactly the size of the disclosure that explains the
-    trim).
+    The default target is the seam's ceiling MINUS the reservation (the
+    disclosure is written after the trim, so the trim must leave room
+    for it). A caller that has ALREADY attached the disclosure passes
+    the plain ceiling — the probe then measures the TRUE final form.
     """
-    target = RESPONSE_BYTE_CEILING - _CAVEAT_HEADROOM_BYTES
+    if target is None:
+        target = RESPONSE_BYTE_CEILING - _CAVEAT_HEADROOM_BYTES
     low, high, best = 0, len(items), 0
     while low <= high:
         mid = (low + high) // 2
@@ -364,7 +422,54 @@ def _trim_to_byte_ceiling(
             low = mid + 1
         else:
             high = mid - 1
-    return items[:best], best < len(items)
+    return items[:best]
+
+
+def _enforce_byte_ceiling(
+    payload: dict[str, Any],
+    *,
+    key: str,
+    items: list[Any],
+    disclosure: dict[str, Any],
+) -> tuple[list[Any], bool]:
+    """The door's byte ceiling, ported WHOLE (AmM-1(c)).
+
+    THE DOOR'S ORDER (``daemon/routers/metrics.py:417-436``):
+
+    1. the TRIM — the door measures the envelope and trims ONLY when it
+       is over the ceiling. The trim's probe measures the envelope AS
+       IT WILL BE SHIPPED (the payload with the shipped items), with the
+       reservation subtracted (the disclosure is written after the trim,
+       so the trim must leave room for it).
+    2. the FINAL-ENVELOPE RE-CHECK (``routers/metrics.py:428``) — the
+       body is measured ONCE MORE with the disclosure attached, i.e.
+       exactly as it will be shipped. The reservation covers the
+       disclosure; the re-check PROVES it did. If it did not (the
+       disclosure prose outgrew the reservation), the trim runs AGAIN
+       with the disclosure in place — the probe then measures the TRUE
+       final form.
+
+    ``disclosure`` is the member dict the caller attaches WHEN the trim
+    fires (the caveat + the narrow_hint). It is part of the re-check's
+    probe, so the re-check measures the true final form.
+
+    Returns the KEPT ITEMS (the shipped projection) and whether the
+    trim fired — the caller must surface the trim (never silent).
+    """
+    kept = list(items)
+    if (
+        _encoded_size({**payload, key: kept})
+        > RESPONSE_BYTE_CEILING - _CAVEAT_HEADROOM_BYTES
+    ):
+        kept = _trim_to_byte_ceiling(payload, key=key, items=kept)
+    trimmed = len(kept) < len(items)
+    final = {**payload, **disclosure, key: kept}
+    if _encoded_size(final) > RESPONSE_BYTE_CEILING:
+        kept = _trim_to_byte_ceiling(
+            final, key=key, items=kept, target=RESPONSE_BYTE_CEILING
+        )
+        trimmed = trimmed or len(kept) < len(items)
+    return kept, trimmed
 
 
 def _read_status(provider: Any) -> dict[str, Any]:
@@ -382,6 +487,23 @@ def _read_status(provider: Any) -> dict[str, Any]:
     # UNKNOWN (-1), never as "empty" (0.0). The seam's own default is
     # 0.0 — which would make an absent fact claim the ring is empty,
     # i.e. assert something the tool cannot verify.
+    #
+    # THE WIRE VALUE IS A BOOL — the UNKNOWN state is INTERNAL (the
+    # -1.0 sentinel). An absent fact reads as False ("not empty"), and
+    # the tool never emits null on this field.
+    #
+    # THE EXACT SIGNAL IS NOT REACHABLE FROM HERE (disclosed, flagged
+    # back to the leader — the delta re-review's advisory 5(d)): the
+    # seam's concrete provider exposes ``last_sample_timestamp()``
+    # (``None`` exactly when the ring is empty), but that member is NOT
+    # on the consumed ``MetricsQueryProvider`` Protocol, it is not a
+    # numeric fact (the seam's public ``read_numeric_fact`` cannot carry
+    # an optional), and reading it here would need either a raw
+    # ``getattr`` — which the seam's own convention forbids for this
+    # door ("never through getattr") — or an extension of the CLEARED
+    # seam/Protocol surface. The age-based signal therefore STAYS, and
+    # its one known imprecision (an age of exactly 0.0 also matches a
+    # sample taken at this very instant) is recorded, not hidden.
     age = read_numeric_fact(provider, "last_sample_age_s", -1.0)
     ring_empty = bool(age == 0.0)
     return {
@@ -631,7 +753,17 @@ def _build_families(
 
     # THE BYTE CEILING (AmM-1(c)) — the trim is a BOUND and it is NEVER
     # SILENT: the count block, a caveat and the narrow_hint all move.
-    kept, byte_trimmed = _trim_to_byte_ceiling(payload, key="families", items=kept)
+    # The items handed to the ceiling are the SHIPPED items (the families
+    # the payload carries) — the door's shape, ported whole.
+    kept, byte_trimmed = _enforce_byte_ceiling(
+        payload,
+        key="families",
+        items=kept,
+        disclosure={
+            "caveats": [*payload["caveats"], _BYTE_CEILING_CAVEAT],
+            "narrow_hint": _byte_ceiling_hint(),
+        },
+    )
     if byte_trimmed:
         payload["families"] = kept
         payload["returned_count"] = len(kept)
@@ -707,6 +839,7 @@ def _build_snapshot(
             f"{MAX_TOP_N})."
         )
 
+    series_proj = [_strip_internal(row) for row in kept]
     payload: dict[str, Any] = {
         "tool": "metrics_snapshot",
         "read_status": _read_status(provider),
@@ -726,18 +859,28 @@ def _build_snapshot(
             narrow_hint=narrow_hint,
         ),
         "caveats": [],
-        "series": [_strip_internal(row) for row in kept],
+        "series": series_proj,
     }
     if not payload["read_status"]["registry_read_ok"]:
         payload["caveats"].append(_degraded_caveat())
 
     # THE BYTE CEILING (AmM-1(c)) — the trim is a BOUND and it is NEVER
-    # SILENT.
-    kept, byte_trimmed = _trim_to_byte_ceiling(payload, key="series", items=kept)
+    # SILENT. The items handed to the ceiling are the SHIPPED items (the
+    # stripped projection the payload carries) — the probe must measure
+    # the object the body ships, not the raw provider rows.
+    kept_proj, byte_trimmed = _enforce_byte_ceiling(
+        payload,
+        key="series",
+        items=series_proj,
+        disclosure={
+            "caveats": [*payload["caveats"], _BYTE_CEILING_CAVEAT],
+            "narrow_hint": _byte_ceiling_hint(),
+        },
+    )
     if byte_trimmed:
-        payload["series"] = [_strip_internal(row) for row in kept]
-        payload["returned_count"] = len(kept)
-        payload["dropped_count"] = matched - len(kept)
+        payload["series"] = kept_proj
+        payload["returned_count"] = len(kept_proj)
+        payload["dropped_count"] = matched - len(kept_proj)
         payload["truncated"] = True
         payload["caveats"].append(_BYTE_CEILING_CAVEAT)
         payload["narrow_hint"] = _byte_ceiling_hint()
@@ -978,7 +1121,22 @@ def _build_history(
     # never materialised), so the trim surfaces as ``truncated`` + a
     # caveat + a narrow_hint, and ``more_available`` becomes true (the
     # dropped series DO exist).
-    kept_series, byte_trimmed = _trim_to_byte_ceiling(payload, key="series", items=kept)
+    #
+    # THE ITEMS HANDED TO THE CEILING ARE THE PROJECTION (``series_out``)
+    # — the rows the payload actually ships. The C1 regression handed
+    # the trim the RAW provider rows while the payload carried the
+    # projection: the probe then measured a different object than the
+    # body shipped, and on the trimmed path every row LOST the nine
+    # contract-declared members — a size-dependent response schema.
+    kept_series, byte_trimmed = _enforce_byte_ceiling(
+        payload,
+        key="series",
+        items=series_out,
+        disclosure={
+            "caveats": [*payload["caveats"], _BYTE_CEILING_CAVEAT],
+            "narrow_hint": _byte_ceiling_hint(),
+        },
+    )
     if byte_trimmed:
         payload["series"] = kept_series
         payload["returned_count"] = len(kept_series)

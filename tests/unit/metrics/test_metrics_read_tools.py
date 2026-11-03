@@ -27,6 +27,7 @@ The rules under test (the design's binding clauses):
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 from typing import Any
@@ -50,6 +51,21 @@ from daemon.tools.metrics_read import (
 )
 
 CATEGORY = METRICS_CATEGORY_KEY
+
+#: The nine contract-declared members EVERY history series row carries
+#: (phase 2 task 2.4 — they are REQUIRED, not optional). A response
+#: schema that depends on the body's SIZE is not a schema.
+HISTORY_SERIES_MEMBERS: tuple[str, ...] = (
+    "cardinality_class",
+    "delta",
+    "prev_delta",
+    "delta_change",
+    "delta_reason",
+    "prev_delta_reason",
+    "downsampled",
+    "last_sample_age_s",
+    "points_span_s",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -611,6 +627,25 @@ def _fat_family(fid: str, *, names: int, help_chars: int) -> dict[str, Any]:
     }
 
 
+def _history_rows(count: int, *, fat: bool = False) -> list[dict[str, Any]]:
+    """History rows for the shape pins — ``fat`` makes each row huge.
+
+    The fat shape is what trips the byte ceiling, so the SAME body is
+    exercised on both the trimmed and the untrimmed path.
+    """
+    labels = {"k": "v" * 60_000} if fat else {"k": "v"}
+    return [
+        {
+            "name": f"ensemble_shape_{i:05d}",
+            "labels": dict(labels),
+            "kind": "gauge",
+            "monotonic": False,
+            "points": [[1_700_000_000, float(i)], [1_700_000_015, float(i) + 1]],
+        }
+        for i in range(count)
+    ]
+
+
 class TestOutputBudget:
     """AmM-1(c) — the output budget is ENFORCED, not declared.
 
@@ -626,15 +661,36 @@ class TestOutputBudget:
         The helper exists in all three builders (one call site each), so
         a body that stops trimming reds this pin before any behavioural
         leg can be fooled.
+
+        THE PIN WALKS THE AST — a source-substring check is satisfied by
+        a COMMENT that merely contains the literal (the delta re-review's
+        advisory 5(c): the previous form of this pin would have stayed
+        green with the call site commented out).
         """
-        source = _module_source()
+        tree = ast.parse(_module_source())
+        builders = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+        }
         for builder in ("_build_families", "_build_snapshot", "_build_history"):
-            start = source.index(f"def {builder}(")
-            end = source.find("\ndef ", start + 1)
-            block = source[start:] if end == -1 else source[start:end]
-            assert "_trim_to_byte_ceiling(" in block, (
-                f"{builder} must call the byte-ceiling trim — an unwired "
-                "trim is dead code and the budget claim is false"
+            calls = [
+                node
+                for node in ast.walk(builders[builder])
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_enforce_byte_ceiling"
+            ]
+            assert len(calls) == 1, (
+                f"{builder} must call the byte-ceiling enforcement exactly "
+                f"once (found {len(calls)}) — an unwired trim is dead code "
+                "and the budget claim is false"
+            )
+            keywords = {kw.arg for kw in calls[0].keywords}
+            assert "items" in keywords, (
+                f"{builder} must hand the ceiling its SHIPPED items "
+                "(`items=`) — a trim measured against a different object "
+                "than the body ships is not a bound"
             )
 
     def test_the_names_projection_is_bounded(self) -> None:
@@ -759,6 +815,79 @@ class TestOutputBudget:
         assert out["more_available"] is True
         assert any("byte ceiling" in caveat for caveat in out["caveats"])
 
+    async def test_the_history_series_shape_is_the_same_on_both_paths(self) -> None:
+        """THE SHAPE PIN — the trimmed path carries the SAME series shape
+        as the untrimmed path.
+
+        The C1 regression: the trim was handed the RAW provider rows
+        while the payload carried the PROJECTION, so on the trimmed path
+        every history row LOST the nine contract-declared members (phase
+        2 task 2.4 declares them REQUIRED) — a SIZE-DEPENDENT response
+        schema, where the same call answered two different shapes
+        depending on how fat the answer was.
+
+        The fat-history pin above asserted the size, the truncated flag
+        and the caveat — but NOT the shape, which is exactly why the
+        regression slipped through it.
+        """
+        # the UNTRIMMED path
+        provider = FakeProvider(
+            families=[_family("F10")], snapshot=[], history=_history_rows(3)
+        )
+        out = await _call(
+            _tools(provider=provider)["metrics_history"], {"names": ["m"], "top_n": 3}
+        )
+        assert out["truncated"] is False
+        assert out["series"]
+        for row in out["series"]:
+            missing = [m for m in HISTORY_SERIES_MEMBERS if m not in row]
+            assert not missing, f"the untrimmed history row is missing {missing}"
+
+        # the TRIMMED path — the same body, fat enough to trip the ceiling
+        provider = FakeProvider(
+            families=[_family("F10")], snapshot=[], history=_history_rows(50, fat=True)
+        )
+        out = await _call(
+            _tools(provider=provider)["metrics_history"], {"names": ["m"], "top_n": 50}
+        )
+        assert out["truncated"] is True, "the fat body must trip the ceiling"
+        assert out["series"], "the trimmed body must still carry rows"
+        for row in out["series"]:
+            missing = [m for m in HISTORY_SERIES_MEMBERS if m not in row]
+            assert not missing, (
+                f"the TRIMMED history row is missing {missing} — the trim "
+                "must not change the response schema"
+            )
+
+    async def test_the_snapshot_series_shape_is_the_same_on_both_paths(self) -> None:
+        """THE SHAPE PIN — the snapshot's trimmed path keeps its rows."""
+        provider = FakeProvider(
+            families=[_family("F10", names=[])],
+            snapshot=[
+                {
+                    "name": f"ensemble_shape_{i:05d}",
+                    "labels": {"k": "v" * 60_000},
+                    "kind": "gauge",
+                    "monotonic": False,
+                    "last_publish_age_s": 1.0,
+                    "value": i,
+                }
+                for i in range(50)
+            ],
+        )
+        out = await _call(
+            _tools(provider=provider)["metrics_snapshot"], {"top_n": 50}
+        )
+        assert out["truncated"] is True
+        assert out["series"]
+        for row in out["series"]:
+            assert "name" in row and "labels" in row, (
+                "the trimmed snapshot row must keep the row's own members"
+            )
+            assert "__family__" not in row, (
+                "the internal family marker must stay stripped on BOTH paths"
+            )
+
 
 class TestRingStateSignal:
     """AmM-2ii — the ring-state signal is BEHAVIOURAL, not a field that
@@ -781,9 +910,18 @@ class TestRingStateSignal:
         out = await _call(_tools(provider=provider)["metrics_families"])
         assert out["read_status"]["trend_empty_since_restart"] is False
 
-    async def test_an_absent_fact_is_UNKNOWN_not_empty(self) -> None:
-        """A provider that does not carry the age fact must NOT be claimed
-        empty — the tool asserts only what it can verify."""
+    async def test_an_absent_fact_is_never_reported_as_empty(self) -> None:
+        """An absent age fact must NEVER be reported as "the ring is
+        empty" — the tool asserts only what it can verify.
+
+        THE LEG, RESTATED (the delta re-review's W3 residual — a
+        LEG-RESTATEMENT, not a wire change): the wire value is a BOOL,
+        so the UNKNOWN state is INTERNAL (the -1.0 sentinel) and is NOT
+        observable on the wire. What IS observable — and what this pin
+        asserts — is that an absent fact reads as False ("not empty"),
+        never as True ("the ring is empty"). The tool never emits null
+        on this field.
+        """
 
         class _NoAgeProvider(FakeProvider):
             def __init__(self) -> None:
@@ -793,6 +931,10 @@ class TestRingStateSignal:
         provider = _NoAgeProvider()
         out = await _call(_tools(provider=provider)["metrics_families"])
         assert out["read_status"]["trend_empty_since_restart"] is False, (
-            "an absent age fact is UNKNOWN, not 'the ring is empty'"
+            "an absent age fact must never be reported as 'the ring is "
+            "empty' — the tool asserts only what it can verify"
+        )
+        assert isinstance(out["read_status"]["trend_empty_since_restart"], bool), (
+            "the field is a BOOL — an unknown state is never put on the wire"
         )
 

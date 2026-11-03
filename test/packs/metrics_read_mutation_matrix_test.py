@@ -208,11 +208,29 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
     (
         "MT-13-byte-ceiling-trim-removed",
         "daemon/tools/metrics_read.py",
-        "    target = RESPONSE_BYTE_CEILING - _CAVEAT_HEADROOM_BYTES",
-        "    target = 10**9  # MUTATION: the byte ceiling was removed",
+        """from daemon.services.metrics_query.selectors import (
+    InvalidLabelFilter,
+    parse_series_selector,
+)""",
+        """from daemon.services.metrics_query.selectors import (
+    InvalidLabelFilter,
+    parse_series_selector,
+)
+
+# MUTATION: the byte ceiling was removed
+RESPONSE_BYTE_CEILING = 10**9""",
         TOOLS_PACK,
         "test_a_fat_catalog_is_trimmed_to_the_byte_ceiling",
     ),
+    # ── MT-13's EXPRESSION was re-cut by the C1 fix (the delta
+    #    re-review, 2026-11-03). The leg's INTENT is unchanged — "the
+    #    byte ceiling is ENFORCED" — but the first expression (the
+    #    trim's default target) no longer bites: the door's
+    #    final-envelope re-check (the second pass) trims to the plain
+    #    ceiling, so removing the DEFAULT target alone left the ceiling
+    #    enforced (the leg went GREEN — a vacuous leg, caught by the
+    #    matrix run). The expression now removes the CEILING ITSELF
+    #    (the module-level binding), which is what the leg claims. ──
     # ── the legs the first cut dropped that this fix cycle FOLDS (each
     #    one has an existing behavioural pin to bite). ──
     (
