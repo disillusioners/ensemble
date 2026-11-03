@@ -334,3 +334,54 @@ describes.)
 naming the ruling, the date and the derivation path. **No existing value was altered**, and the
 bundle guard still reads the artifact and reports **GREEN** (§4.3).
 
+---
+
+## 9. The residue check this phase must not redden (phase 4's task 4.13)
+
+Phase 4 pins `grep -rnE "\b3600\b" frontend/src/app/pages/metrics/ frontend/src/app/components/charts/`
+and requires **zero hits** outside its allowlist row (`charts-tab.component.spec.ts`).
+
+**This phase contributes ZERO hits.** The window seconds are DERIVED from the ladder
+(`METRICS_CENTRAL_WINDOW_MINUTES['1h'] * 60`) — in the production code AND in the specs (the
+phase-3 fix commit `dc58b5b6a` replaced the spec's literal with the same derived form).
+
+```
+$ grep -rnE "\b3600\b" frontend/src/app/pages/metrics/ frontend/src/app/components/charts/
+  frontend/src/app/pages/metrics/charts/charts-tab.component.spec.ts:5,118,120,130,134   ← the allowlist row
+  frontend/src/app/pages/metrics/charts/charts-tab.component.ts:41,183,184              ← PRE-EXISTING
+  frontend/src/app/pages/metrics/metrics-door.ts:23                                      ← PRE-EXISTING
+```
+
+The four remaining non-allowlist hits are **phase-2's / pre-lane's** (the retired charts tab's
+hardcoded window and its two comments, plus one comment in `metrics-door.ts`) — **not this
+phase's**. Phase 4's own task 4.13 removes the hardcoded `WINDOW_S = 3600`; the three comments
+ride with it. **Routed to phase 4, not fixed here** (they are outside this phase's diff).
+
+---
+
+## 10. The freeze state
+
+```
+$ git log --oneline -6
+dc58b5b6a fix: derive the window literals so phase 4's residue check stays clean (wi-32a99618)
+cfe8d9553 docs: measure the B4 route fetch set on its lazy-only portion (wi-32a99618)
+451f6282f docs: record the phase-3 evidence and register the phase-3 FE packs (wi-32a99618)
+b0b1a1bcb feat: add the metrics range control and the server-anchored baseline (wi-32a99618)
+1474952fe test: assert every central tab fetches its bound families (wi-32a99618)
+
+$ git status --short
+→ (empty)
+
+$ git diff --stat 1474952fe HEAD -- agents/
+→ (empty — the agents/ tree is byte-identical)
+
+$ git diff --stat 1474952fe HEAD
+→ 28 files changed, 2919 insertions(+), 30 deletions(-)
+```
+
+The whole-tree jest at the freeze: **141 suites · 4503 collected · 4494 passed · 9 failed** —
+the same 9 base-proven reds (§4.5), **net-new = 0**. The polling-hygiene legs of the retired
+tabs are green (`charts-tab` + `overview-tab` 22/22 — the visibility gate, the supersede token,
+the skip-if-in-flight guard).
+
+
