@@ -91,8 +91,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
         "tests/unit/test_board_registration.py",
         "assert len(PRIVILEGED_TOOL_CATEGORIES) == 17",
         "assert len(PRIVILEGED_TOOL_CATEGORIES) == 16",
-        REGISTRATION_PACK,
-        "test_the_set_has_seventeen_members",
+        "tests/unit/test_board_registration.py",
+        "assert len(PRIVILEGED_TOOL_CATEGORIES) == 17",
     ),
     (
         "MT-02-availability-re-derived",
@@ -184,20 +184,20 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
         "test_no_cursor_is_accepted_or_returned",
     ),
     (
-        "MT-11-hard-floor-removed",
+        "MT-11-floor-recheck-removed",
         "daemon/tools/metrics_read.py",
-        """    if not family and not requested_names and not requested_series:
-        known = _known_family_ids(list(provider.families()))""",
-        """    if False:  # MUTATION: the hard floor was removed
-        known = _known_family_ids(list(provider.families()))""",
+        """    if not resolved_names and not requested_series:
+        raise InvalidLabelFilter(""",
+        """    if False:  # MUTATION: the floor RE-CHECK was removed
+        raise InvalidLabelFilter(""",
         TOOLS_PACK,
-        "test_the_hard_floor_refuses_an_unbounded_match",
+        "test_an_unknown_family_is_refused_not_unbounded",
     ),
     (
         "MT-12-contract-substring-perturbed",
         "docs/architecture/metrics-query-contract.md",
-        "capture_off",
-        "capture_offX  # MUTATION: a pinned substring was perturbed",
+        "\ncapture_off\n",
+        "\ncapture_offX  # MUTATION: a pinned substring was perturbed\n",
         CONTRACT_PACK,
         "test_the_availability_set_is_closed_and_exact",
     ),

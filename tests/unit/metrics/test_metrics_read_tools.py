@@ -348,6 +348,19 @@ class TestHistory:
             "family ids)"
         )
 
+    async def test_an_unknown_family_is_refused_not_unbounded(self) -> None:
+        """An UNKNOWN family resolves to no names — it must NOT become an
+        unbounded match (the floor is RE-CHECKED after the family
+        resolution)."""
+        provider = FakeProvider(families=[_family("F1")])
+        raw = await _tools(provider=provider)["metrics_history"].ainvoke(
+            {"family": "F99x"}
+        )
+        assert "invalid_label_filter" in raw
+        assert "history" not in provider.reads, (
+            "an unknown family must never reach the history read"
+        )
+
     async def test_the_combined_selector_cap_is_enforced(self) -> None:
         provider = FakeProvider(families=[_family("F1")])
         raw = await _tools(provider=provider)["metrics_history"].ainvoke(
