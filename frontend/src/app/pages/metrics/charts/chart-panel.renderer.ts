@@ -12,6 +12,7 @@ import {
   createHouseSvgTrendRenderer,
 } from '../../../components/charts/house-svg-renderer/house-svg-renderer.renderer';
 import { ChartPanelComponent } from './chart-panel.component';
+import { METRICS_UNIT_UNKNOWN } from '../metrics-units';
 
 /**
  * The CHART.JS PANEL's REGISTRATION (T1 phase 4, task 4.8).
@@ -55,7 +56,7 @@ export function createChartJsPanelRenderer(): ChartRenderer {
         series: values.series,
         anomalies: values.anomalies ?? [],
         baseline: values.baseline ?? [],
-        unit: values.unit ?? 'unit unknown',
+        unit: values.unit ?? METRICS_UNIT_UNKNOWN,
         label: values.label ?? 'metrics panel',
         // The DATA-END marker (8.10): where the panel's data stops.
         dataEnd: values.dataEnd ?? null,

@@ -1,6 +1,6 @@
 import { Type } from '@angular/core';
 
-import { METRICS_TABS, MetricsTabEntry } from '../tabs.manifest';
+import { METRICS_TABS, MetricsTabEntry, MetricsTabId } from '../tabs.manifest';
 import { ResourceTabComponent } from './resource-tab.component';
 import { RuntimeTabComponent } from './runtime-tab.component';
 import { DbPoolTabComponent } from './db-pool-tab.component';
@@ -20,7 +20,7 @@ import { McpTabComponent } from './mcp-tab.component';
  * added to the manifest without a body therefore fails the spec rather
  * than rendering an empty tab.
  */
-export const METRICS_TAB_COMPONENTS: Readonly<Record<string, Type<unknown>>> = {
+export const METRICS_TAB_COMPONENTS: Readonly<Record<MetricsTabId, Type<unknown>>> = {
   resource: ResourceTabComponent,
   runtime: RuntimeTabComponent,
   'db-pool': DbPoolTabComponent,

@@ -476,6 +476,15 @@ export const METRICS_CUSTOM_ENTRIES: readonly MetricsCustomTab[] = METRICS_TABS.
 );
 
 /**
+ * The id of ANY manifest tab (central or custom) — derived from the
+ * manifest's own literal shape (the same derivation as
+ * `MetricsCentralTabId` below), so the shell's component map can key
+ * itself on the REAL vocabulary: a missing or extra map entry is a
+ * COMPILE error, never a runtime `undefined` component.
+ */
+export type MetricsTabId = (typeof METRICS_TABS)[number]['id'];
+
+/**
  * The id of a CENTRAL tab — derived from the manifest's own literal
  * shape, so a typo in a tab body's entry lookup is a COMPILE error.
  */

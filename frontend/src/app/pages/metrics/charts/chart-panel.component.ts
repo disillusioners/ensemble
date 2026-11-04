@@ -28,6 +28,7 @@ import {
   createHouseDataEndOverlayPlugin,
 } from './data-end-overlay-plugin';
 import { createHouseCrosshairPlugin } from './crosshair-plugin';
+import { METRICS_UNIT_UNKNOWN } from '../metrics-units';
 
 /**
  * The Chart.js PANEL WRAPPER — the interactive-panel role (T1 phase 4,
@@ -252,8 +253,8 @@ export class ChartPanelComponent implements AfterViewInit, OnDestroy {
   /** The panel's accessible label. */
   readonly label = input('metrics panel');
 
-  /** The unit suffix of the value axis — 'unit unknown' when unknown. */
-  readonly unit = input('unit unknown');
+  /** The unit suffix of the value axis — the vocabulary's placeholder when unknown. */
+  readonly unit = input(METRICS_UNIT_UNKNOWN);
 
   /** The anomaly markers the house overlay plugin draws. */
   readonly anomalies = input<readonly HouseAnomalyMarker[]>([]);
