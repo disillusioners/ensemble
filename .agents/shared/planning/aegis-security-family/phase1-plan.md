@@ -87,7 +87,7 @@ python3 -c "import json;m=json.load(open('agents/aegis/meta.json'));assert isins
 # guide §3 closure grep over the new agent dir — every survivor must be on the exemption list
 grep -rn '\.md\|workflow\.md\|rule\.md\|soul\.md\|tools_note\.md\|memory\.md' agents/aegis/ || true
 
-# W6 (plan council) + D5 (delta re-gate): the SECOND closure class — bare agents/-prefix
+# W6 (plan council) + council-D5 (delta re-gate): the SECOND closure class — bare agents/-prefix
 # cross-reference tokens. The character class matches the canonical BARE_AGENTS_PREFIX_RE
 # (tests/unit/tools/test_prompt_section_reference_integrity.py:251) INCLUDING the trailing `*`
 # (added upstream 2026-09-08 for bold-wrapped shapes — test comment :245-249); guide §10 :254.

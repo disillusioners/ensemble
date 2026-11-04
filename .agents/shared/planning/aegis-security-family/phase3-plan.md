@@ -109,14 +109,21 @@ done
 # per-tool content OUT). The author-side check extracts the bullet list from each .md and asserts
 # a single distinct block. The .lib.sh headers are checked ONLY for keyword presence (secondary,
 # explicitly NOT byte-identity vs the .md block).
+# N1 (council, delta-3): PER-BODY FINGERPRINT form. The previous `done | sort -u | wc -l`
+# counted DISTINCT LINES across all three bodies concatenated — fixture-dependent (~5+), never 1.
+# The discriminating form fingerprints each body, then counts distinct fingerprints.
+# N6 (council): the comparison is BYTE-IDENTICAL MODULO BLANK LINES (blank lines are dropped by
+# the continuation filter — an unstated normalization is a gate-runner trap, so it is stated);
+# and `### ` does NOT terminate the section (only `/^## /` does) — any interleaved `### `
+# content is captured, which can only false-RED, never false-green.
 for f in agents/hacker/skills-template/fuzzing-toolchain.md \
          agents/cracker/skills-template/credential-bench.md \
          agents/sweeper/skills-template/sast-toolchain.md; do
-  # D4 (delta re-gate): the byte-identical unit INCLUDES wrapped continuation lines —
+  # council-D4 (delta re-gate): the byte-identical unit INCLUDES wrapped continuation lines —
   # a bullets-heads-only filter (7 of 23 lines on the charter exemplar) would false-green
   # bodies with identical heads but divergent continuations.
-  awk '/^## Fences/{f=1;next} /^## /{f=0} f && (/^- / || /^[[:space:]]+[^[:space:]]/)' "$f"
-done | sort -u | wc -l     # PRIMARY: expect 1 (one distinct bullet list incl. continuations, across the three .md bodies)
+  awk '/^## Fences/{f=1;next} /^## /{f=0} f && (/^- / || /^[[:space:]]+[^[:space:]]/)' "$f" | sha256sum
+done | awk '{print $1}' | sort -u | wc -l    # PRIMARY: expect 1 (identical bodies → 1; a perturbed continuation line → 2)
 for f in agents/hacker/skills-template/fuzzing-toolchain.lib.sh \
          agents/cracker/skills-template/credential-bench.lib.sh \
          agents/sweeper/skills-template/sast-toolchain.lib.sh; do

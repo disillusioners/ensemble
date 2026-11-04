@@ -79,7 +79,7 @@ citation resolves there; several facts superseded — see its dated amendment no
 | `agents/leader/meta.json` | **modified** | one line — `"aegis"` added to `team_members` |
 | `agents/.prompt-artifacts.sha256` | **regenerated** | 161 → 177 rows |
 | `tests/unit/agents/test_aegis_security_family.py` | new | T1–T28 |
-| `tests/unit/test_maintenancer_agent.py` | **modified** | the C1(b) 16→17 pin fold: `test_leader_team_members_length_16` assertion + docstring (D3 completeness — the fifth sanctioned element of the one-commit set) |
+| `tests/unit/test_maintenancer_agent.py` | **modified** | the C1(b) 16→17 pin fold: `test_leader_team_members_length_16` assertion + docstring (council-D3 completeness — the fifth sanctioned element of the one-commit set) |
 
 **Arithmetic rules (re-derive at P4, never trust a frozen number):**
 
