@@ -41,6 +41,7 @@ Design notes that matter to every leg:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -1544,6 +1545,553 @@ class TestCorpusContainmentExecuted:
             f"options (before={match.group('before')!r} "
             f"after={match.group('after')!r}) — the library's strict mode "
             "leaks into the caller"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Round 3 (code-council fix) — C-1 compound containment, C-2 wired sweeper
+# guard, W/W folds + ride-alongs
+# ---------------------------------------------------------------------------
+
+# The shells the compound class must be exercised under (the council
+# reproduced the bypass under BOTH; /bin/sh is dash on this host).
+COMPOUND_SHELLS = ("/bin/dash", "/bin/bash")
+
+
+def _run_probe(
+    shell: str,
+    lib: Path,
+    tmp_path: Path,
+    body: str,
+    env_extra: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run `body` under `shell` with `lib` SOURCED (shell-parameterized
+    variant of ``_run_lib_probe``).
+
+    HOME is redirected into the scratch tree, POSTGRES_* is scrubbed
+    PER-VARIABLE (``env -u POSTGRES_*`` is a silent no-op — bash does not
+    glob env names), and the boot-sweep guard is pinned explicitly.
+    """
+    probe = tmp_path / f"probe_{Path(shell).name}.sh"
+    probe.write_text(f'. "$1"\n{body}\n', encoding="utf-8")
+    scratch_home = tmp_path / "home"
+    scratch_home.mkdir(exist_ok=True)
+    env = dict(os.environ)
+    env["HOME"] = str(scratch_home)
+    env["ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"] = "0"
+    for _k in [k for k in env if k.startswith("POSTGRES_")]:
+        env.pop(_k, None)
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        [shell, str(probe), str(lib)],
+        capture_output=True, text=True, timeout=60, env=env, cwd=str(tmp_path),
+    )
+
+
+def _compound_fixture(tmp_path: Path) -> dict[str, Path]:
+    """The scratch tree for the compound (symlink-then-``..``) class.
+
+    Layout: ``sandbox/{builds,corpora}`` (the engagement root),
+    ``sandbox/evil`` a symlink to ``outside`` (a sibling of the root), a
+    DECOY ``corpora`` directory OUTSIDE the root (so the raw kernel
+    resolution of ``sandbox/evil/../corpora/x`` — which climbs out of the
+    symlink's target and back down — finds an existing parent there), and
+    an attacker generator at the scratch root.
+    """
+    sandbox = tmp_path / "sandbox"
+    (sandbox / "builds").mkdir(parents=True)
+    (sandbox / "corpora").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    decoy = tmp_path / "corpora"  # OUTSIDE the engagement root
+    decoy.mkdir()
+    (sandbox / "evil").symlink_to(outside, target_is_directory=True)
+    generator = sandbox / "builds" / "gen_corpus.sh"
+    generator.write_text("#!/bin/sh\nprintf 'synthetic-hash\\n'\n", encoding="utf-8")
+    attacker = tmp_path / "gen_atk.sh"  # outside the engagement root
+    attacker.write_text("#!/bin/sh\nprintf 'ESCAPED-GEN-RAN\\n'\n", encoding="utf-8")
+    return {
+        "sandbox": sandbox,
+        "outside": outside,
+        "decoy": decoy,
+        "generator": generator,
+        "attacker": attacker,
+    }
+
+
+_COMPOUND_WRITE_PROBE = _CORPUS_WRITE_PROBE
+
+
+class TestCompoundContainmentMatrix:
+    """C-1(c) — the compound symlink-then-``..`` class, corpus AND generator,
+    under dash AND bash, against the committed library.
+
+    The round-2 matrix enumerated SINGLE primitives (traversal, symlink,
+    prefix); a symlinked parent followed by ``..`` escaped BOTH the
+    lexical ``cd`` of the resolver and the raw-path write (measured at
+    HEAD: corpus row ACCEPTED rc=0 with the file created OUTSIDE the
+    root; generator row rc=0 with the outside generator EXECUTED — under
+    both shells). These legs FAIL against that code and PASS against the
+    kernel-faithful (``cd -P``) resolver acting on canonical paths.
+    """
+
+    @pytest.mark.parametrize("shell", COMPOUND_SHELLS, ids=["dash", "bash"])
+    def test_compound_corpus_escape_is_refused(self, tmp_path, shell):
+        """``sandbox/evil/../corpora/x`` with evil a symlink outside:
+        lexically the ``..`` cancels to sandbox (inside); the KERNEL
+        climbs out of the symlink's target, so the raw path writes the
+        DECOY corpora dir OUTSIDE the root. Must be refused with NOTHING
+        created at the physical escape location."""
+        fx = _compound_fixture(tmp_path)
+        corpus = fx["sandbox"] / "evil" / ".." / "corpora" / "x.hashes"
+        result = _run_probe(
+            shell, _lib_path("cracker"), tmp_path, _COMPOUND_WRITE_PROBE,
+            {
+                "CORPUS": str(corpus),
+                "ROOT": str(fx["sandbox"]),
+                "GEN": str(fx["generator"]),
+            },
+        )
+        assert not re.search(r"RC=0\b", result.stdout), (
+            f"compound corpus path was ACCEPTED under {shell} — the lexical-"
+            f"resolution bypass is live: stdout={result.stdout!r}"
+        )
+        assert re.search(r"RC=[1-9]\d*", result.stdout), (
+            f"compound corpus refusal reported rc=0 under {shell}: "
+            f"stdout={result.stdout!r}"
+        )
+        assert "HARD_BLOCKER" in result.stdout, (
+            f"compound corpus refusal did not emit HARD_BLOCKER under "
+            f"{shell}: stdout={result.stdout!r}"
+        )
+        assert not (fx["decoy"] / "x.hashes").exists(), (
+            f"a file was created at the PHYSICAL escape location "
+            f"{fx['decoy'] / 'x.hashes'} (outside the engagement sandbox) "
+            f"under {shell} — the compound escape was not held"
+        )
+        assert not (fx["sandbox"] / "corpora" / "x.hashes").exists(), (
+            f"a corpus was written for a refused compound path under {shell}"
+        )
+
+    @pytest.mark.parametrize("shell", COMPOUND_SHELLS, ids=["dash", "bash"])
+    def test_compound_generator_escape_is_refused_and_never_runs(self, tmp_path, shell):
+        """The GENERATOR reached through the compound shape
+        (``sandbox/evil/../gen_atk.sh`` — lexically inside, physically the
+        attacker script at the scratch root) must be refused BEFORE it
+        can execute: no corpus is produced, so the outside generator
+        never runs (its output marker never lands anywhere)."""
+        fx = _compound_fixture(tmp_path)
+        corpus = fx["sandbox"] / "corpora" / "x.hashes"
+        evil_gen = fx["sandbox"] / "evil" / ".." / "gen_atk.sh"
+        result = _run_probe(
+            shell, _lib_path("cracker"), tmp_path, _COMPOUND_WRITE_PROBE,
+            {
+                "CORPUS": str(corpus),
+                "ROOT": str(fx["sandbox"]),
+                "GEN": str(evil_gen),
+            },
+        )
+        assert not re.search(r"RC=0\b", result.stdout), (
+            f"compound generator was ACCEPTED under {shell} — the outside "
+            f"generator executes through the lexical bypass: "
+            f"stdout={result.stdout!r}"
+        )
+        assert re.search(r"RC=[1-9]\d*", result.stdout), (
+            f"compound generator refusal reported rc=0 under {shell}: "
+            f"stdout={result.stdout!r}"
+        )
+        assert "HARD_BLOCKER" in result.stdout, (
+            f"compound generator refusal did not emit HARD_BLOCKER under "
+            f"{shell}: stdout={result.stdout!r}"
+        )
+        assert not corpus.exists(), (
+            f"the bench ran with a generator from outside the sandbox under "
+            f"{shell} — the corpus exists, so the attacker generator EXECUTED"
+        )
+        corpus_text = corpus.read_text(encoding="utf-8") if corpus.exists() else ""
+        assert "ESCAPED-GEN-RAN" not in corpus_text, (
+            "the attacker generator's output marker is in the corpus — it ran"
+        )
+
+    def test_effectful_site_acts_on_canonical_paths(self):
+        """C-1(a): the corpus-write effectful site acts on the CANONICAL
+        paths — ``sh "$_wc_canon_gen" > "$_wc_canon_path"`` — never on the
+        raw caller paths. Kernel-faithful checking alone leaves the write
+        re-resolving the raw string independently of the check; this pin
+        is what reds when that substitution is reverted (the executed
+        legs cannot discriminate it deterministically — a correctly
+        resolved raw path and its canonical form name the same file at
+        check time)."""
+        lib = _lib_path("cracker").read_text(encoding="utf-8")
+        assert 'sh "$_wc_canon_gen" > "$_wc_canon_path"' in lib, (
+            "the corpus-write effectful site no longer acts on the canonical "
+            "paths — the raw caller path is re-resolved by the kernel at the "
+            "write (the check-then-act window is re-opened)"
+        )
+        assert 'sh "$_wc_gen" > "$_wc_path"' not in lib, (
+            "a raw-path corpus write shape is present in the library"
+        )
+        # the resolver itself must be kernel-faithful: cd -P, never bare cd
+        code = "\n".join(
+            ln for ln in lib.splitlines() if not ln.lstrip().startswith("#")
+        )
+        assert re.search(r"cd -P \"\$", code), "cd -P resolution core absent"
+        assert not re.search(r"(?<!-P )cd \"\$", code), (
+            "a bare (lexical) cd survives in the containment core — the "
+            "compound symlink-then-'..' class resolves lexically there"
+        )
+
+
+# --- C-2 — the sweeper's scanner-output guard, wired and canonical ---------
+
+
+def _extract_function(text: str, name: str) -> str:
+    """Extract a POSIX-sh function body (def line through its closing
+    ``}`` at column 0) — used for the shared-core byte-identity pin."""
+    lines = text.splitlines()
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.startswith(f"{name}() "):
+            start = i
+            break
+    assert start is not None, f"function {name} not found"
+    out = [lines[start]]
+    for ln in lines[start + 1:]:
+        out.append(ln)
+        if ln == "}":
+            return "\n".join(out) + "\n"
+    pytest.fail(f"function {name} has no closing brace at column 0")
+
+
+class TestScannerOutputGuardWired:
+    """C-2 — ``aegis_scanner_output_ok`` was a dead, raw string-prefix
+    check (zero call sites, zero tests, plain ``..`` accepted). It is now
+    the canonicalizing core, byte-identical with the cracker library, and
+    WIRED at every scanner-output effectful site of the sweep surface."""
+
+    def test_shared_core_byte_identical_between_cracker_and_sweeper(self):
+        """The canonicalizing resolution core is one implementation: both
+        core functions are byte-identical between the two libraries (a
+        sweeper-side drift re-opens the escape class there)."""
+        cracker = _lib_path("cracker").read_text(encoding="utf-8")
+        sweeper = _lib_path("sweeper").read_text(encoding="utf-8")
+        for fn in ("_aegis_resolve_path", "_aegis_path_in_root"):
+            assert _extract_function(cracker, fn) == _extract_function(sweeper, fn), (
+                f"shared containment core {fn} diverged between the cracker "
+                "and sweeper libraries"
+            )
+
+    def test_sweep_surface_guards_every_scanner_destination(self):
+        """Call-site leg: every scanner-output destination token in the
+        sweeper sweep surface is guarded by a PRECEDING
+        ``aegis_scanner_output_ok "<dest>"`` call — a definition with zero
+        call sites is dead code and the advertised runtime gate would not
+        exist."""
+        body = _skill_body_path("sweeper").read_text(encoding="utf-8")
+        blocks = re.findall(r"```sh\n(.*?)```", body, re.DOTALL)
+        sweep = [b for b in blocks if "$SANDBOX_ROOT/out/" in b]
+        assert len(sweep) == 1, "sweep surface sh-block not found (or duplicated)"
+        lines = sweep[0].splitlines()
+        dest_re = re.compile(r"\$SANDBOX_ROOT/out/[A-Za-z0-9._-]+")
+        guard_re = re.compile(r"aegis_scanner_output_ok")
+        guarded: dict[str, int] = {}
+        used: dict[str, int] = {}
+        for i, ln in enumerate(lines):
+            dests = dest_re.findall(ln)
+            if not dests:
+                continue
+            if guard_re.search(ln):
+                for d in dests:
+                    guarded[d] = i
+            else:
+                for d in dests:
+                    used.setdefault(d, i)
+        assert used, "no scanner-output destinations found in the sweep block"
+        unguarded = sorted(set(used) - set(guarded))
+        assert unguarded == [], (
+            f"scanner-output destinations with NO aegis_scanner_output_ok "
+            f"guard: {unguarded} — the write is ungated"
+        )
+        stale = sorted(set(guarded) - set(used))
+        assert stale == [], f"guards for destinations that no scanner uses: {stale}"
+        for dest, use_line in used.items():
+            assert guarded[dest] < use_line, (
+                f"destination {dest} is written (line {use_line + 1}) BEFORE "
+                f"its guard (line {guarded[dest] + 1}) — the check must "
+                "precede the effectful site"
+            )
+
+
+# The scanner-guard containment matrix (C-2). Same single-primitive +
+# compound classes as the corpus guard, executed against the sweeper
+# library's own guard under BOTH shells.
+_SCANNER_MATRIX = (
+    ("in-root", "out/semgrep.json", True),
+    ("traversal-out", "../outside/semgrep.json", False),
+    ("symlinked-dir", "evil/semgrep.json", False),
+    ("compound-evil-dotdot", "evil/../semgrep.json", False),
+    ("prefix-collision", None, False),  # sandbox-evil sibling dir
+    ("root-itself", "", None),          # the root passed AS the destination
+    ("empty-path", "\0empty", False),
+    ("missing-root", "out/semgrep.json", None),  # root does not exist
+    ("missing-parent", "no-such/semgrep.json", False),
+)
+
+
+class TestScannerOutputGuardExecuted:
+    """Containment legs for ``aegis_scanner_output_ok`` — really executed
+    against the sweeper library under dash AND bash. These legs FAIL
+    against the raw string-prefix form (it accepts traversal-out,
+    symlinked-dir and the compound shape) and PASS against the
+    canonicalizing core."""
+
+    @pytest.mark.parametrize("shell", COMPOUND_SHELLS, ids=["dash", "bash"])
+    @pytest.mark.parametrize(
+        "row,dst_rel,expect_ok",
+        _SCANNER_MATRIX,
+        ids=[r[0] for r in _SCANNER_MATRIX],
+    )
+    def test_scanner_output_matrix(self, tmp_path, shell, row, dst_rel, expect_ok):
+        sandbox = tmp_path / "sandbox"
+        (sandbox / "out").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (sandbox / "evil").symlink_to(outside, target_is_directory=True)
+        (tmp_path / "sandbox-evil").mkdir()
+        if row == "prefix-collision":
+            dst = tmp_path / "sandbox-evil" / "semgrep.json"
+        elif row == "empty-path":
+            dst = ""
+        elif row == "root-itself":
+            dst = sandbox
+        else:
+            dst = sandbox / dst_rel
+        root = tmp_path / "no-such-root" if row == "missing-root" else sandbox
+        probe = (
+            'if aegis_scanner_output_ok "$DST" "$ROOT"; then echo "RC=0"; '
+            'else echo "RC=$?"; fi\n'
+        )
+        result = _run_probe(
+            shell, _lib_path("sweeper"), tmp_path, probe,
+            {"DST": str(dst) if dst else "", "ROOT": str(root)},
+        )
+        if expect_ok:
+            assert "RC=0" in result.stdout, (
+                f"{row}: in-sandbox destination refused under {shell} — the "
+                f"guard over-refuses: stdout={result.stdout!r}"
+            )
+        else:
+            assert not re.search(r"RC=0\b", result.stdout), (
+                f"{row}: destination outside the sandbox ACCEPTED under "
+                f"{shell} — the scanner-output guard did not hold: "
+                f"stdout={result.stdout!r}"
+            )
+            assert re.search(r"RC=[1-9]\d*", result.stdout), (
+                f"{row}: refusal did not report a non-zero rc under {shell}: "
+                f"stdout={result.stdout!r}"
+            )
+            assert "HARD_BLOCKER" in result.stdout, (
+                f"{row}: refusal did not emit HARD_BLOCKER under {shell}: "
+                f"stdout={result.stdout!r}"
+            )
+        # nothing is created anywhere on any probe (guard or refusal)
+        assert not (outside / "semgrep.json").exists()
+        assert not list((tmp_path / "sandbox-evil").iterdir())
+
+
+class TestRound3WarningFolds:
+    """The W/W folds, pinned so a revert reds here."""
+
+    @pytest.mark.parametrize("agent", CHILDREN)
+    def test_lib_stages_config_inside_mktemp_d_staging_root(self, agent):
+        """W-4: no bare ``mktemp`` config file in /tmp — the staged config
+        lives inside the ``mktemp -d`` staging root (a class-(i) path); a
+        /tmp file is a class-(iii) write, contradicting the pinned
+        FENCES bullet ('never written, at any time, by any path')."""
+        lib = _lib_path(agent).read_text(encoding="utf-8")
+        assert '_in_tmpcfg="$(mktemp)"' not in lib, (
+            f"{agent} library stages its config with a bare mktemp in /tmp "
+            "(a class-(iii) write)"
+        )
+        assert re.search(r'_in_tmpcfg="\$_in_stage/', lib), (
+            f"{agent} staged config does not live inside the mktemp -d "
+            "staging root"
+        )
+
+    @pytest.mark.parametrize("agent", CHILDREN)
+    def test_md_recipe_uses_env_overridable_roots(self, agent):
+        """W-1: the recipe roots are the env-overridable forms the library
+        uses, and every root is CREATED before any write lands in it —
+        the recipe must not hard-code $HOME paths the library would
+        resolve differently under an env override."""
+        body = _skill_body_path(agent).read_text(encoding="utf-8")
+        for var in ("AEGIS_TOOLBENCH_ROOT", "AEGIS_STATE_HOME", "AEGIS_CONFIG_HOME"):
+            assert f'{var}="${{{var}:-' in body, (
+                f"{agent} recipe does not resolve {var} env-overridably"
+            )
+        assert 'mkdir -p "$AEGIS_TOOLBENCH_ROOT"' in body, (
+            f"{agent} recipe does not create its toolbench root"
+        )
+        assert '"$AEGIS_STATE_HOME" "$AEGIS_CONFIG_HOME"' in body, (
+            f"{agent} recipe does not create its state and config roots"
+        )
+
+    @pytest.mark.parametrize("agent", CHILDREN)
+    def test_md_config_promote_is_guarded_and_unhardcoded(self, agent):
+        """W-1: the config promote is a GUARDED mv into the env-overridable
+        config root — no hard-coded $HOME/.config or $HOME/.cache recipe
+        paths remain, and a failed promote removes the staged file and
+        stops instead of leaving it behind."""
+        body = _skill_body_path(agent).read_text(encoding="utf-8")
+        assert 'mv "$TMPCFG" "$AEGIS_CONFIG_HOME/' in body, (
+            f"{agent} config promote does not target the env-overridable "
+            "config root"
+        )
+        assert 'mv "$TMPCFG" "$HOME/.config/' not in body, (
+            f"{agent} config promote still hard-codes the $HOME config path"
+        )
+        assert '"$HOME/.cache/aegis-toolbench' not in body, (
+            f"{agent} recipe still hard-codes the $HOME state path"
+        )
+        # the guarded shape: the mv carries a failure handler that removes
+        # the staged config and stops
+        m = re.search(
+            r'mv "\$TMPCFG" "\$AEGIS_CONFIG_HOME/[^"]+" \|\| \{\n\s*rm -f "\$TMPCFG"',
+            body,
+        )
+        assert m, (
+            f"{agent} config promote is an unguarded mv — a failed promote "
+            "leaves the staged file behind"
+        )
+
+    def test_bench_surface_creates_run_time_roots(self):
+        """W-2: the cracker bench surface creates the run-time roots
+        BEFORE the guarded write, so a fresh sandbox executes the recipe
+        and a missing parent can never be misdiagnosed as an
+        out-of-sandbox refusal."""
+        body = _skill_body_path("cracker").read_text(encoding="utf-8")
+        mkdir_line = 'mkdir -p "$SANDBOX_ROOT/corpora" "$SANDBOX_ROOT/out"'
+        assert mkdir_line in body, (
+            "the bench surface does not create the corpora/out roots — the "
+            "guarded write hard-fails on a fresh sandbox"
+        )
+        mkdir_at = body.index(mkdir_line)
+        write_at = body.index("aegis_write_synthetic_corpus")
+        assert mkdir_at < write_at, (
+            "root creation must PRECEDE the guarded corpus write"
+        )
+
+    def test_gitleaks_recipe_redacts_secret_values(self):
+        """W1: the gitleaks detect invocation carries --redact (a
+        documented gitleaks flag — persistent, applied to the findings
+        before the report is written) so secret VALUES never enter the
+        JSON report, per the no-plaintext fence."""
+        body = _skill_body_path("sweeper").read_text(encoding="utf-8")
+        gitleaks_lines = [
+            ln for ln in body.splitlines() if "$GITLEAKS_BIN" in ln and "detect" in ln
+        ]
+        assert gitleaks_lines, "gitleaks detect invocation not found in the recipe"
+        for ln in gitleaks_lines:
+            assert "--redact" in ln, (
+                f"gitleaks detect without --redact — secret values land in "
+                f"the JSON report: {ln!r}"
+            )
+
+    def test_trivy_recipe_invents_no_redaction_flag(self):
+        """W1 (the honest half): trivy has NO secret-redaction flag at the
+        pinned major (verified against its documented flag set) — the
+        recipe must NOT pass an invented one, and must state the
+        quarantine handling instead."""
+        body = _skill_body_path("sweeper").read_text(encoding="utf-8")
+        trivy_lines = [
+            ln for ln in body.splitlines() if "$TRIVY_BIN" in ln
+        ]
+        assert trivy_lines, "trivy invocation not found in the recipe"
+        for ln in trivy_lines:
+            assert "--redact" not in ln, (
+                f"trivy invocation carries --redact — no such trivy flag "
+                f"exists; do not invent one: {ln!r}"
+            )
+        assert "NO secret-redaction flag" in body, (
+            "the trivy quarantine note (no redaction flag exists at the "
+            "pinned major) is absent from the sweep surface"
+        )
+
+    def test_hacker_recipe_uses_the_librarys_aflpp_name(self):
+        """W2: AFLPP_BIN (the library's recorded config key, exported by
+        the warm probe) is the ONE name every hacker surface uses — the
+        AFLPLUS_BIN alias fails under set -u on the warm fast path."""
+        body = _skill_body_path("hacker").read_text(encoding="utf-8")
+        assert "AFLPLUS_BIN" not in body, (
+            "the AFLPLUS_BIN alias survives in the hacker recipe — the warm "
+            "fast path fails under set -u"
+        )
+        assert re.search(r'^AFLPP_BIN="\$AEGIS_TOOLBENCH_ROOT/bin/afl-fuzz"', body, re.M), (
+            "the AFLPP_BIN assignment is absent from Step 1"
+        )
+        assert '"$AFLPP_BIN" -i ' in body, (
+            "the campaign surface does not invoke AFLPP_BIN"
+        )
+
+    def test_hacker_afl_log_redirection_order(self):
+        """W3: ``> file 2>&1`` (both streams into the log) — the reversed
+        ``2>&1 > file`` sends stderr to the log and stdout to the
+        terminal, dropping the primary evidence stream."""
+        body = _skill_body_path("hacker").read_text(encoding="utf-8")
+        assert '2>&1 > "$SANDBOX_ROOT/logs/afl.log"' not in body, (
+            "the reversed redirection order survives — stdout bypasses the "
+            "evidence log"
+        )
+        assert '> "$SANDBOX_ROOT/logs/afl.log" 2>&1' in body, (
+            "the corrected redirection order is absent from the campaign "
+            "surface"
+        )
+
+
+class TestRound3RideAlongs:
+    """R2 — the executed checksum-mismatch leg (the existing legs cover
+    the unset-pin refusal; this one really runs the verify path with a
+    WRONG pin and asserts the mismatch refusal)."""
+
+    @pytest.mark.parametrize("agent", CHILDREN)
+    def test_checksum_mismatch_refuses_and_promotes_nothing(self, agent, tmp_path):
+        """A WRONG (but set, non-placeholder) pin must refuse with
+        rc=1 + the CHECKSUM MISMATCH refusal — a present-but-dead verify
+        call that only checked the placeholder would pass the static
+        legs while accepting every tampered asset."""
+        lib = _lib_path(agent)
+        asset = tmp_path / "asset.bin"
+        asset.write_bytes(b"tampered-release-asset\n")
+        # the WRONG pin: the digest of different content, same length class
+        wrong_pin = hashlib.sha256(b"other-content-entirely\n").hexdigest()
+        probe = tmp_path / "mismatch_probe.sh"
+        probe.write_text(
+            '. "$1"\n'
+            'aegis_verify_sha256 "$2" "$3"\n',
+            encoding="utf-8",
+        )
+        scratch_home = tmp_path / "home"
+        scratch_home.mkdir()
+        env = dict(os.environ)
+        env["HOME"] = str(scratch_home)
+        env["ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"] = "0"
+        for _k in [k for k in env if k.startswith("POSTGRES_")]:
+            env.pop(_k, None)
+        result = subprocess.run(
+            ["/bin/sh", str(probe), str(lib), str(asset), wrong_pin],
+            capture_output=True, text=True, timeout=60, env=env, cwd=str(tmp_path),
+        )
+        assert result.returncode == 1, (
+            f"{agent} aegis_verify_sha256 accepted a WRONG pin "
+            f"(rc={result.returncode}); stdout={result.stdout!r}"
+        )
+        assert "CHECKSUM MISMATCH" in result.stdout, (
+            f"{agent} wrong-pin refusal did not emit the mismatch message: "
+            f"stdout={result.stdout!r}"
+        )
+        assert asset.read_bytes() == b"tampered-release-asset\n", (
+            "the verified asset was mutated by the verify path"
         )
 
 

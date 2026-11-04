@@ -171,18 +171,93 @@ _aegis_clear_attempts() {
     rm -f "$(_aegis_attempts_file)" 2>/dev/null || true
 }
 
+# --- Shared containment core (byte-identical with the cracker library) ---
+# The containment check CANONICALIZES both sides before comparing. A raw
+# string-prefix test is not a containment test: it accepts every path that
+# merely STARTS with the root string, so ".."-traversal,
+# symlinked-directory AND compound symlink-then-".." escapes all pass it.
+#
+# PRECONDITION (fail-closed): the root and the TARGET'S PARENT must both
+# exist — an unresolvable path is refused, never guessed.
+_aegis_resolve_path() {
+    # usage: _aegis_resolve_path <path>   -> canonical path on stdout
+    # Resolves "..", "." and symlinks KERNEL-FAITHFULLY, in the final
+    # component and in every parent component: "cd -P" hands the whole
+    # parent path to the kernel, so a symlinked parent followed by ".."
+    # lands where the KERNEL lands it (one level above the symlink's
+    # target) — never where a lexical ".." cancellation would put it.
+    # Returns non-zero when the path cannot be resolved (never guesses).
+    _rp_path="${1:-}"
+    _rp_hops=0
+    while [ -n "$_rp_path" ]; do
+        case "$_rp_path" in
+            */*) : ;;
+            *) return 1 ;;
+        esac
+        _rp_dir="${_rp_path%/*}"
+        _rp_base="${_rp_path##*/}"
+        [ -n "$_rp_dir" ] || _rp_dir=/
+        _rp_canon=$(cd -P "$_rp_dir" 2>/dev/null && pwd -P) || return 1
+        if [ "$_rp_canon" = "/" ]; then
+            _rp_full="/$_rp_base"
+        else
+            _rp_full="$_rp_canon/$_rp_base"
+        fi
+        if [ ! -L "$_rp_full" ]; then
+            printf '%s\n' "$_rp_full"
+            return 0
+        fi
+        # the final component is a symlink: follow it (bounded) and resolve
+        # the target the same way, so writing THROUGH it cannot escape
+        _rp_hops=$(( _rp_hops + 1 ))
+        [ "$_rp_hops" -le 8 ] || return 1
+        _rp_link=$(readlink "$_rp_full" 2>/dev/null) || return 1
+        case "$_rp_link" in
+            /*) _rp_path="$_rp_link" ;;
+            *)  _rp_path="$_rp_canon/$_rp_link" ;;
+        esac
+    done
+    return 1
+}
+
+_aegis_path_in_root() {
+    # usage: _aegis_path_in_root <path> <root>   (0 inside / 1 outside)
+    # The comparison is made between the CANONICAL target and the
+    # CANONICAL root — never between raw strings — and both sides resolve
+    # KERNEL-FAITHFULLY: "cd" without -P processes ".." lexically, so a
+    # symlinked parent followed by ".." is never traversed by the check
+    # while the kernel resolves it physically at the write (the compound
+    # symlink-then-".." escape class).
+    [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 1
+    _pir_root=$(cd -P "$2" 2>/dev/null && pwd -P) || return 1
+    _pir_target=$(_aegis_resolve_path "$1") || return 1
+    case "$_pir_target" in
+        "$_pir_root"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # --- Scanner-output discipline (sandbox-relative destinations only) -------
 aegis_scanner_output_ok() {
     # usage: aegis_scanner_output_ok <path> <sandbox-root>
     # Scanner output lands inside the engagement sandbox via script
-    # redirection; a destination outside the sandbox is refused.
-    _so_path="$1"
-    _so_root="$2"
-    [ -n "$_so_path" ] && [ -n "$_so_root" ] || return 1
-    case "$_so_path" in
-        "$_so_root"/*) return 0 ;;
-        *) echo "HARD_BLOCKER: scanner output destination outside the engagement sandbox"; return 1 ;;
-    esac
+    # redirection; a destination outside the sandbox is refused. Both the
+    # destination AND the sandbox root are resolved kernel-faithfully and
+    # compared canonically through the shared core — a raw string-prefix
+    # test accepts every path that merely STARTS with the root string
+    # (".."-traversal, symlinked-parent and compound symlink-then-".."
+    # escapes included).
+    _so_path="${1:-}"
+    _so_root="${2:-}"
+    if [ -z "$_so_path" ] || [ -z "$_so_root" ]; then
+        echo "HARD_BLOCKER: scanner output destination and engagement sandbox root are both required — scanner output lands in the sandbox only"
+        return 1
+    fi
+    if _aegis_path_in_root "$_so_path" "$_so_root"; then
+        return 0
+    fi
+    echo "HARD_BLOCKER: scanner output destination outside the engagement sandbox — scanner output lands in the sandbox only"
+    return 1
 }
 
 # --- Tool-specific evidence queries (existence is not evidence) -----------
@@ -318,8 +393,12 @@ aegis_install_all() {
         exit 1
     fi
 
-    # staged config -> verify -> promote (probe-visible config LAST)
-    _in_tmpcfg="$(mktemp)"
+    # staged config -> verify -> promote (probe-visible config LAST).
+    # The staged config lives INSIDE the mktemp -d staging root (a
+    # class-(i) path) — a bare `mktemp` in /tmp would be a class-(iii)
+    # write, which the FENCES contract forbids ("never written, at any
+    # time, by any path").
+    _in_tmpcfg="$_in_stage/staged-config"
     : > "$_in_tmpcfg"
     [ "$_in_semgrep"  -eq 1 ] && printf 'SEMGREP_BIN=%s\nSEMGREP_VERSION=%s\n'   "$AEGIS_TOOLBENCH_ROOT/bin/semgrep"  "$SEMGREP_VERSION"  >> "$_in_tmpcfg" || true
     [ "$_in_gitleaks" -eq 1 ] && printf 'GITLEAKS_BIN=%s\nGITLEAKS_VERSION=%s\n' "$AEGIS_TOOLBENCH_ROOT/bin/gitleaks" "$GITLEAKS_VERSION" >> "$_in_tmpcfg" || true

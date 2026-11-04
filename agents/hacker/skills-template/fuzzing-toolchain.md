@@ -61,11 +61,19 @@ fi
 
 ```sh
 AEGIS_TOOLBENCH_ROOT="${AEGIS_TOOLBENCH_ROOT:-$HOME/.local/opt/aegis-toolbench}"
-mkdir -p "$AEGIS_TOOLBENCH_ROOT"/{bin,lib,share}
+AEGIS_STATE_HOME="${AEGIS_STATE_HOME:-$HOME/.cache/aegis-toolbench}"
+AEGIS_CONFIG_HOME="${AEGIS_CONFIG_HOME:-$HOME/.config/aegis-toolbench}"
+# every class-(i) root is env-overridable and created before any write
+# lands in it — a config promote into a missing root is a failure, never
+# a surprise directory elsewhere
+mkdir -p "$AEGIS_TOOLBENCH_ROOT"/{bin,lib,share} "$AEGIS_STATE_HOME" "$AEGIS_CONFIG_HOME"
 # Non-interactive shells do not source ~/.bashrc — capture absolute
 # paths explicitly, never rely on PATH lookups.
 CLANG_BIN="$(command -v clang)"
-AFLPLUS_BIN="$AEGIS_TOOLBENCH_ROOT/bin/afl-fuzz"
+# AFLPP_BIN is the LIBRARY'S recorded config key (the probe exports it on
+# the warm path) — every surface uses that one name, so the warm fast
+# path never trips on an unset alias under `set -u`
+AFLPP_BIN="$AEGIS_TOOLBENCH_ROOT/bin/afl-fuzz"
 ```
 
 ### Step 2 — Fetch the pinned release asset (AFL++, major-pinned)
@@ -99,12 +107,20 @@ When the vendor ships source-only for a release, the pre-built binary is unavail
 ### Step 4 — Staged config → verify → promote (probe-visible config LAST)
 
 ```sh
-TMPCFG="$(mktemp)"
+# staged config lives INSIDE the staging root (a class-(i) path) — never
+# a bare mktemp in /tmp (that would be a class-(iii) write)
+TMPCFG="$STAGE/staged-config"
 printf 'AFLPP_BIN=%s\nAFLPP_VERSION=%s\nCLANG_BIN=%s\n' \
-    "$AFLPLUS_BIN" "$AFLPP_VERSION" "$CLANG_BIN" > "$TMPCFG"
+    "$AFLPP_BIN" "$AFLPP_VERSION" "$CLANG_BIN" > "$TMPCFG"
 # verify: the probe answers with real evidence before the config is promoted
 aegis_verify_install "$TMPCFG" || { echo "VERIFY FAILED — config discarded"; exit 1; }
-mv "$TMPCFG" "$HOME/.config/aegis-toolbench/fuzzing.env"
+# the mv is GUARDED: a failed promote removes the staged config and stops
+# — it never leaves a stray file and never writes the probe-visible path
+mv "$TMPCFG" "$AEGIS_CONFIG_HOME/fuzzing.env" || {
+    rm -f "$TMPCFG"
+    echo "HARD_BLOCKER: config promote failed — probe stays cold"
+    exit 1
+}
 trap - EXIT
 aegis_release_install_lock
 ```
@@ -124,9 +140,10 @@ Self-heal runs at most **TWICE per session**; beyond the cap the cold path stops
 # bounded campaign as a tracked background process; parallel mode OFF
 "$SANDBOX_ROOT/builds/fuzz_keystroke" "$SANDBOX_ROOT/corpus/" \
     -max_total_time=3600 -artifact_prefix="$SANDBOX_ROOT/out/"
-# AFL++ secondary: single-core, no fork-server children beyond the harness
-"$AFLPLUS_BIN" -i "$SANDBOX_ROOT/corpus/" -o "$SANDBOX_ROOT/out/afl" \
-    -- "$SANDBOX_ROOT/builds/target" 2>&1 > "$SANDBOX_ROOT/logs/afl.log"
+# AFL++ secondary: single-core, no fork-server children beyond the harness;
+# stdout FIRST then stderr — "2>&1 > file" would drop the primary stream
+"$AFLPP_BIN" -i "$SANDBOX_ROOT/corpus/" -o "$SANDBOX_ROOT/out/afl" \
+    -- "$SANDBOX_ROOT/builds/target" > "$SANDBOX_ROOT/logs/afl.log" 2>&1
 ```
 
 Fuzzer parallel mode stays **off** — a detached child that outlives the harness escapes both the ten-process cap and the explicit teardown (a known residual of the process lane).
@@ -139,11 +156,11 @@ On ANY failure exit — `HARD_BLOCKER` prereq, checksum mismatch, install error,
 
 ```sh
 # 1. Remove the toolchain pieces this skill installed
-rm -f "$HOME/.config/aegis-toolbench/fuzzing.env"
+rm -f "$AEGIS_CONFIG_HOME/fuzzing.env"
 rm -f "$AEGIS_TOOLBENCH_ROOT/bin/afl-fuzz"
 # 2. Remove the session state + lock residue
-rm -f "$HOME/.cache/aegis-toolbench/fuzzing-session-state"
-rm -rf "$HOME/.cache/aegis-toolbench/fuzzing-install.lock"
+rm -f "$AEGIS_STATE_HOME/fuzzing-session-state"
+rm -rf "$AEGIS_STATE_HOME/fuzzing-install.lock"
 # 3. The system clang/clang++ were prerequisites — untouched, left in place
 # 4. The library itself stays with the agent tree it ships in
 ```

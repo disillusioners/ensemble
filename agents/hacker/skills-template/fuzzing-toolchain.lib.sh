@@ -268,8 +268,12 @@ aegis_install_all() {
         exit 1
     fi
 
-    # staged config -> verify -> promote (probe-visible config LAST)
-    _in_tmpcfg="$(mktemp)"
+    # staged config -> verify -> promote (probe-visible config LAST).
+    # The staged config lives INSIDE the mktemp -d staging root (a
+    # class-(i) path) — a bare `mktemp` in /tmp would be a class-(iii)
+    # write, which the FENCES contract forbids ("never written, at any
+    # time, by any path").
+    _in_tmpcfg="$_in_stage/staged-config"
     printf 'CLANG_BIN=%s\nCLANGXX_BIN=%s\nAFLPP_BIN=%s\nAFLPP_VERSION=%s\n' \
         "$(command -v clang)" "$(command -v clang++)" \
         "$AEGIS_TOOLBENCH_ROOT/bin/afl-fuzz" "$AFLPP_VERSION" > "$_in_tmpcfg"

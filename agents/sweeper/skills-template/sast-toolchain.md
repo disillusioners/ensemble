@@ -61,7 +61,12 @@ fi
 
 ```sh
 AEGIS_TOOLBENCH_ROOT="${AEGIS_TOOLBENCH_ROOT:-$HOME/.local/opt/aegis-toolbench}"
-mkdir -p "$AEGIS_TOOLBENCH_ROOT"/{bin,share}
+AEGIS_STATE_HOME="${AEGIS_STATE_HOME:-$HOME/.cache/aegis-toolbench}"
+AEGIS_CONFIG_HOME="${AEGIS_CONFIG_HOME:-$HOME/.config/aegis-toolbench}"
+# every class-(i) root is env-overridable and created before any write
+# lands in it — a config promote into a missing root is a failure, never
+# a surprise directory elsewhere
+mkdir -p "$AEGIS_TOOLBENCH_ROOT"/{bin,share} "$AEGIS_STATE_HOME" "$AEGIS_CONFIG_HOME"
 # Non-interactive shells do not source ~/.bashrc — capture absolute
 # paths explicitly, never rely on PATH lookups.
 SEMGREP_BIN="$AEGIS_TOOLBENCH_ROOT/bin/semgrep"
@@ -115,12 +120,20 @@ chmod 0755 "$GITLEAKS_BIN"
 ### Step 4 — Staged config → verify → promote (probe-visible config LAST)
 
 ```sh
-TMPCFG="$(mktemp)"
+# staged config lives INSIDE the staging root (a class-(i) path) — never
+# a bare mktemp in /tmp (that would be a class-(iii) write)
+TMPCFG="$STAGE/staged-config"
 printf 'SEMGREP_BIN=%s\nGITLEAKS_BIN=%s\nCPPCHECK_BIN=%s\nCLANG_TIDY_BIN=%s\nTRIVY_BIN=%s\n' \
     "$SEMGREP_BIN" "$GITLEAKS_BIN" "$CPPCHECK_BIN" "$CLANG_TIDY_BIN" "$TRIVY_BIN" > "$TMPCFG"
 # verify: every recorded binary answers a version/evidence query before promotion
 aegis_verify_install "$TMPCFG" || { echo "VERIFY FAILED — config discarded"; exit 1; }
-mv "$TMPCFG" "$HOME/.config/aegis-toolbench/sast.env"
+# the mv is GUARDED: a failed promote removes the staged config and stops
+# — it never leaves a stray file and never writes the probe-visible path
+mv "$TMPCFG" "$AEGIS_CONFIG_HOME/sast.env" || {
+    rm -f "$TMPCFG"
+    echo "HARD_BLOCKER: config promote failed — probe stays cold"
+    exit 1
+}
 trap - EXIT
 aegis_release_install_lock
 ```
@@ -135,18 +148,53 @@ Self-heal runs at most **TWICE per session**; beyond the cap the cold path stops
 
 ```sh
 # scanners run against the COPIED tree in the sandbox; output via script
-# redirection into the sandbox out directory — never the target tree
+# redirection into the sandbox out directory — never the target tree.
+# EVERY output destination is guarded by aegis_scanner_output_ok BEFORE
+# its scanner runs: an out-of-sandbox destination (".."-traversal, a
+# symlinked parent, or a compound symlink-then-".." path) is a
+# HARD_BLOCKER and the sweep does not run. The out root is created
+# first so a missing parent is never misread as an out-of-sandbox
+# refusal.
+mkdir -p "$SANDBOX_ROOT/out"
+aegis_scanner_output_ok "$SANDBOX_ROOT/out/semgrep.json" "$SANDBOX_ROOT" || {
+    echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+    exit 1
+}
 "$SEMGREP_BIN" scan --config <pinned-pack> --json \
     "$SANDBOX_ROOT/builds/src" > "$SANDBOX_ROOT/out/semgrep.json" 2>&1
-"$GITLEAKS_BIN" detect --source "$SANDBOX_ROOT/builds/src" \
+aegis_scanner_output_ok "$SANDBOX_ROOT/out/gitleaks.json" "$SANDBOX_ROOT" || {
+    echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+    exit 1
+}
+# --redact: secret VALUES never enter the JSON report (the no-plaintext
+# fence) — the finding names the rule and the location only
+"$GITLEAKS_BIN" detect --redact --source "$SANDBOX_ROOT/builds/src" \
     --report-format json --report-path "$SANDBOX_ROOT/out/gitleaks.json"
+aegis_scanner_output_ok "$SANDBOX_ROOT/out/cppcheck.xml" "$SANDBOX_ROOT" || {
+    echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+    exit 1
+}
 "$CPPCHECK_BIN" --enable=all --xml \
     "$SANDBOX_ROOT/builds/src" 2> "$SANDBOX_ROOT/out/cppcheck.xml"
 # clang-tidy leg runs ONLY when the build's compile database is present:
-[ -f "$SANDBOX_ROOT/builds/compile_commands.json" ] && \
+if [ -f "$SANDBOX_ROOT/builds/compile_commands.json" ]; then
+    aegis_scanner_output_ok "$SANDBOX_ROOT/out/clang-tidy.txt" "$SANDBOX_ROOT" || {
+        echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+        exit 1
+    }
     "$CLANG_TIDY_BIN" -p "$SANDBOX_ROOT/builds" "$SANDBOX_ROOT/builds/src"/* \
-        > "$SANDBOX_ROOT/out/clang-tidy.txt" 2>&1 || \
+        > "$SANDBOX_ROOT/out/clang-tidy.txt" 2>&1
+else
     echo "clang-tidy: no compile database in scope — reported, not generated"
+fi
+aegis_scanner_output_ok "$SANDBOX_ROOT/out/trivy.txt" "$SANDBOX_ROOT" || {
+    echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+    exit 1
+}
+# trivy has NO secret-redaction flag at the pinned major (verified against
+# its documented flag set — secret findings embed the matched line), so
+# the trivy report is quarantined sandbox material: never transcribed,
+# never quoted; findings cite location and type only.
 "$TRIVY_BIN" fs --scanners vuln,secret,misconfig \
     "$SANDBOX_ROOT/builds" > "$SANDBOX_ROOT/out/trivy.txt" 2>&1
 ```
@@ -161,11 +209,11 @@ On ANY failure exit — `HARD_BLOCKER` prereq, checksum mismatch, install error,
 
 ```sh
 # 1. Remove the toolchain pieces this skill installed
-rm -f "$HOME/.config/aegis-toolbench/sast.env"
+rm -f "$AEGIS_CONFIG_HOME/sast.env"
 rm -f "$SEMGREP_BIN" "$GITLEAKS_BIN" "$CPPCHECK_BIN" "$TRIVY_BIN"
 # 2. Remove the session state + lock residue
-rm -f "$HOME/.cache/aegis-toolbench/sast-session-state"
-rm -rf "$HOME/.cache/aegis-toolbench/sast-install.lock"
+rm -f "$AEGIS_STATE_HOME/sast-session-state"
+rm -rf "$AEGIS_STATE_HOME/sast-install.lock"
 # 3. The system clang-tidy was a prerequisite — untouched, left in place
 # 4. The library itself stays with the agent tree it ships in
 ```

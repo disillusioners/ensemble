@@ -45,7 +45,7 @@ Every library write lands in exactly one of three classes; the FENCES contract o
 | **(ii) PER-ENGAGEMENT SANDBOX ROOT** | the scratch dirs the lane spawns (`$SANDBOX_ROOT/…`) | **RUN time** — artifacts, corpora, builds, scanner output | **copy-then-build per AM-13** — the target tree is never a write target; the sandbox-ownership prefix assertion gates every write |
 | **(iii) EVERY OTHER USER PATH** | **the target codebase included** | **NEVER** | **never written, at any time, by any path**; any write outside (i)/(ii) is a containment failure |
 
-*Write-target classes amended 2026-11-04, leader-adjudicated: shipped definitions authoritative (survived the 35-shape escape verification; see decisions.md §F).*
+*Write-target classes amended 2026-11-04, leader-adjudicated: shipped definitions authoritative (claim corrected in fix round 3: the original "35-shape escape verification" enumerated SINGLE primitives only — traversal, symlink, prefix — not compound shapes; the compound symlink-then-`..` class escaped it and was closed by the round-3 compound matrix, corpus and generator legs under dash AND bash; see decisions.md §F).*
 
 > **Shipped definition (verbatim — the FENCES `Write-target classes` bullet, byte-identical in the three installer skill bodies; the extraction source for the amended rows above and the G3.8 gate):**
 >
@@ -208,7 +208,7 @@ Phase 3 is done when **all eleven gates (G3.1–G3.11) are green**:
 5. the attempt counter caps self-heal at 2;
 6. each library carries a mandatory reversal section;
 7. `sh -n` passes on all three and no GNU-only construct is present;
-8. every write lands in the class-(i) toolchain root (install-time) or the class-(ii) sandbox root (run-time); nothing outside either class is ever written, and each FENCES contract cites the class (Blocker 3);
+8. every write lands in the class-(i) toolchain roots (install-time) or the class-(ii) sandbox root (run-time); nothing outside either class is ever written, and each FENCES contract cites the class (Blocker 3);
 9. the credential bench has no path to fetch a wordlist or real hash corpus;
 10. `git status --porcelain` shows changes only under the three `skills-template/` directories;
 11. the Phase-0 checklist rows for the three skill bodies still hold, and the closure grep over the

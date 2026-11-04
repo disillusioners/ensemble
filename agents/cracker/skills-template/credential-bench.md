@@ -59,7 +59,12 @@ fi
 
 ```sh
 AEGIS_TOOLBENCH_ROOT="${AEGIS_TOOLBENCH_ROOT:-$HOME/.local/opt/aegis-toolbench}"
-mkdir -p "$AEGIS_TOOLBENCH_ROOT"/{bin,share}
+AEGIS_STATE_HOME="${AEGIS_STATE_HOME:-$HOME/.cache/aegis-toolbench}"
+AEGIS_CONFIG_HOME="${AEGIS_CONFIG_HOME:-$HOME/.config/aegis-toolbench}"
+# every class-(i) root is env-overridable and created before any write
+# lands in it — a config promote into a missing root is a failure, never
+# a surprise directory elsewhere
+mkdir -p "$AEGIS_TOOLBENCH_ROOT"/{bin,share} "$AEGIS_STATE_HOME" "$AEGIS_CONFIG_HOME"
 # Non-interactive shells do not source ~/.bashrc — capture absolute
 # paths explicitly, never rely on PATH lookups.
 HASHCAT_BIN="$AEGIS_TOOLBENCH_ROOT/bin/hashcat"
@@ -103,12 +108,20 @@ chmod 0755 "$HASHCAT_BIN"
 ### Step 4 — Staged config → verify → promote (probe-visible config LAST)
 
 ```sh
-TMPCFG="$(mktemp)"
+# staged config lives INSIDE the staging root (a class-(i) path) — never
+# a bare mktemp in /tmp (that would be a class-(iii) write)
+TMPCFG="$STAGE/staged-config"
 printf 'HASHCAT_BIN=%s\nHASHCAT_VERSION=%s\nJOHN_BIN=%s\nJOHN_VERSION=%s\n' \
     "$HASHCAT_BIN" "$HASHCAT_VERSION" "$JOHN_BIN" "$JOHN_VERSION" > "$TMPCFG"
 # verify: the binaries answer a version/evidence query before promotion
 aegis_verify_install "$TMPCFG" || { echo "VERIFY FAILED — config discarded"; exit 1; }
-mv "$TMPCFG" "$HOME/.config/aegis-toolbench/credential-bench.env"
+# the mv is GUARDED: a failed promote removes the staged config and stops
+# — it never leaves a stray file and never writes the probe-visible path
+mv "$TMPCFG" "$AEGIS_CONFIG_HOME/credential-bench.env" || {
+    rm -f "$TMPCFG"
+    echo "HARD_BLOCKER: config promote failed — probe stays cold"
+    exit 1
+}
 trap - EXIT
 aegis_release_install_lock
 ```
@@ -123,6 +136,10 @@ Self-heal runs at most **TWICE per session**; beyond the cap the cold path stops
 
 ```sh
 # The corpus comes from the sandbox generator — NEVER a download.
+# The bench surface is executable on a FRESH sandbox: the run-time roots
+# are created FIRST, so the guarded write can never misreport a missing
+# parent as an out-of-sandbox refusal.
+mkdir -p "$SANDBOX_ROOT/corpora" "$SANDBOX_ROOT/out" "$SANDBOX_ROOT/builds"
 # The guarded write is the ONLY sanctioned corpus path: the corpus path AND
 # the generator are checked against the engagement sandbox root before
 # anything is written, so an out-of-sandbox path is a HARD_BLOCKER and
@@ -150,12 +167,12 @@ On ANY failure exit — `HARD_BLOCKER` prereq, checksum mismatch, unpack error, 
 
 ```sh
 # 1. Remove the toolchain pieces this skill installed
-rm -f "$HOME/.config/aegis-toolbench/credential-bench.env"
+rm -f "$AEGIS_CONFIG_HOME/credential-bench.env"
 rm -f "$AEGIS_TOOLBENCH_ROOT/bin/hashcat" "$AEGIS_TOOLBENCH_ROOT/bin/hashcat.bin"
 rm -f "$AEGIS_TOOLBENCH_ROOT/bin/john" "$AEGIS_TOOLBENCH_ROOT/bin/john.bin"
 # 2. Remove the session state + lock residue
-rm -f "$HOME/.cache/aegis-toolbench/credential-bench-session-state"
-rm -rf "$HOME/.cache/aegis-toolbench/credential-bench-install.lock"
+rm -f "$AEGIS_STATE_HOME/credential-bench-session-state"
+rm -rf "$AEGIS_STATE_HOME/credential-bench-install.lock"
 # 3. The library itself stays with the agent tree it ships in
 ```
 

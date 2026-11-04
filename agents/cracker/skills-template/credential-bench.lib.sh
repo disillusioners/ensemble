@@ -183,8 +183,12 @@ _aegis_clear_attempts() {
 # exist — an unresolvable path is refused, never guessed.
 _aegis_resolve_path() {
     # usage: _aegis_resolve_path <path>   -> canonical path on stdout
-    # Resolves "..", "." and symlinks in the final component; returns
-    # non-zero when the path cannot be resolved (never guesses).
+    # Resolves "..", "." and symlinks KERNEL-FAITHFULLY, in the final
+    # component and in every parent component: "cd -P" hands the whole
+    # parent path to the kernel, so a symlinked parent followed by ".."
+    # lands where the KERNEL lands it (one level above the symlink's
+    # target) — never where a lexical ".." cancellation would put it.
+    # Returns non-zero when the path cannot be resolved (never guesses).
     _rp_path="${1:-}"
     _rp_hops=0
     while [ -n "$_rp_path" ]; do
@@ -195,7 +199,7 @@ _aegis_resolve_path() {
         _rp_dir="${_rp_path%/*}"
         _rp_base="${_rp_path##*/}"
         [ -n "$_rp_dir" ] || _rp_dir=/
-        _rp_canon=$(cd "$_rp_dir" 2>/dev/null && pwd -P) || return 1
+        _rp_canon=$(cd -P "$_rp_dir" 2>/dev/null && pwd -P) || return 1
         if [ "$_rp_canon" = "/" ]; then
             _rp_full="/$_rp_base"
         else
@@ -221,9 +225,13 @@ _aegis_resolve_path() {
 _aegis_path_in_root() {
     # usage: _aegis_path_in_root <path> <root>   (0 inside / 1 outside)
     # The comparison is made between the CANONICAL target and the
-    # CANONICAL root — never between raw strings.
+    # CANONICAL root — never between raw strings — and both sides resolve
+    # KERNEL-FAITHFULLY: "cd" without -P processes ".." lexically, so a
+    # symlinked parent followed by ".." is never traversed by the check
+    # while the kernel resolves it physically at the write (the compound
+    # symlink-then-".." escape class).
     [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 1
-    _pir_root=$(cd "$2" 2>/dev/null && pwd -P) || return 1
+    _pir_root=$(cd -P "$2" 2>/dev/null && pwd -P) || return 1
     _pir_target=$(_aegis_resolve_path "$1") || return 1
     case "$_pir_target" in
         "$_pir_root"/*) return 0 ;;
@@ -235,16 +243,27 @@ aegis_corpus_path_ok() {
     # usage: aegis_corpus_path_ok <path> <sandbox-root>
     # The corpus input must live INSIDE the engagement sandbox — the
     # library never creates corpora from anywhere else, and nothing is
-    # ever fetched. A corpus path outside the sandbox is refused.
+    # ever fetched. A corpus path outside the sandbox is refused. An
+    # UNRESOLVABLE path (root or corpus parent missing) is refused with
+    # the precondition NAMED — never misdiagnosed as "outside the
+    # sandbox".
     _cp_path="${1:-}"
     _cp_root="${2:-}"
     if [ -z "$_cp_path" ] || [ -z "$_cp_root" ]; then
         echo "HARD_BLOCKER: corpus path and engagement sandbox root are both required — synthetic benches read sandbox inputs only"
         return 1
     fi
-    if _aegis_path_in_root "$_cp_path" "$_cp_root"; then
-        return 0
-    fi
+    _cp_canon_root=$(cd -P "$_cp_root" 2>/dev/null && pwd -P) || {
+        echo "HARD_BLOCKER: engagement sandbox root unresolvable — the root must exist before the corpus write"
+        return 1
+    }
+    _cp_canon_path=$(_aegis_resolve_path "$_cp_path") || {
+        echo "HARD_BLOCKER: corpus path unresolvable — the sandbox root and the corpus path's parent directory must both exist before the corpus write"
+        return 1
+    }
+    case "$_cp_canon_path" in
+        "$_cp_canon_root"/*) return 0 ;;
+    esac
     echo "HARD_BLOCKER: corpus path outside the engagement sandbox — synthetic benches read sandbox inputs only"
     return 1
 }
@@ -262,6 +281,16 @@ aegis_write_synthetic_corpus() {
     #
     # A missing argument is REFUSED, never fatal: the caller's shell must
     # survive so the refusal can be reported.
+    #
+    # C-1 (round 3): every path is resolved KERNEL-FAITHFULLY exactly
+    # once, up front, and the CANONICAL forms are what the checks compare
+    # AND what the write acts on — the raw caller path is never handed
+    # back to the kernel at the effectful site. A lexical check and a
+    # kernel write disagree exactly on the compound class (symlinked
+    # parent + ".."): lexically the ".." cancels the symlink, physically
+    # the kernel climbs out of the symlink's TARGET — one level outward.
+    # Acting on the canonical path also closes the check-then-act window:
+    # there is no second, independent resolution between check and write.
     _wc_path="${1:-}"
     _wc_root="${2:-}"
     _wc_gen="${3:-}"
@@ -269,16 +298,28 @@ aegis_write_synthetic_corpus() {
         echo "HARD_BLOCKER: corpus path, engagement sandbox root and generator are all required — refusing the corpus write"
         return 1
     fi
-    aegis_corpus_path_ok "$_wc_path" "$_wc_root" || return 1
-    if ! _aegis_path_in_root "$_wc_gen" "$_wc_root"; then
+    _wc_canon_root=$(cd -P "$_wc_root" 2>/dev/null && pwd -P) || {
+        echo "HARD_BLOCKER: engagement sandbox root unresolvable — the root must exist before the corpus write; refusing the corpus write"
+        return 1
+    }
+    _wc_canon_path=$(_aegis_resolve_path "$_wc_path") || {
+        echo "HARD_BLOCKER: corpus path unresolvable — the sandbox root and the corpus path's parent directory must both exist before the corpus write"
+        return 1
+    }
+    _wc_canon_gen=$(_aegis_resolve_path "$_wc_gen") || {
+        echo "HARD_BLOCKER: corpus generator unresolvable — the generator's parent directory must exist inside the sandbox; refusing the corpus write"
+        return 1
+    }
+    aegis_corpus_path_ok "$_wc_canon_path" "$_wc_canon_root" || return 1
+    if ! _aegis_path_in_root "$_wc_canon_gen" "$_wc_canon_root"; then
         echo "HARD_BLOCKER: corpus generator outside the engagement sandbox — only generator-produced material enters the bench"
         return 1
     fi
-    [ -f "$_wc_gen" ] || {
+    [ -f "$_wc_canon_gen" ] || {
         echo "HARD_BLOCKER: corpus generator not found — never source a corpus from elsewhere"
         return 1
     }
-    sh "$_wc_gen" > "$_wc_path"
+    sh "$_wc_canon_gen" > "$_wc_canon_path"
 }
 
 # --- Tool-specific evidence queries (existence is not evidence) -----------
@@ -407,8 +448,12 @@ aegis_install_all() {
         echo "HARD_BLOCKER: no verified release binary for john@$JOHN_VERSION — bench degrades to hashcat only; never source-build"
     fi
 
-    # staged config -> verify -> promote (probe-visible config LAST)
-    _in_tmpcfg="$(mktemp)"
+    # staged config -> verify -> promote (probe-visible config LAST).
+    # The staged config lives INSIDE the mktemp -d staging root (a
+    # class-(i) path) — a bare `mktemp` in /tmp would be a class-(iii)
+    # write, which the FENCES contract forbids ("never written, at any
+    # time, by any path").
+    _in_tmpcfg="$_in_stage/staged-config"
     printf 'HASHCAT_BIN=%s\nHASHCAT_VERSION=%s\n' \
         "$AEGIS_TOOLBENCH_ROOT/bin/hashcat" "$HASHCAT_VERSION" > "$_in_tmpcfg"
     if [ "$_in_john_ok" -eq 1 ]; then
