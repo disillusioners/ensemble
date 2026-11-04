@@ -160,6 +160,51 @@ export class LiveTabComponent implements OnInit, OnDestroy {
     return selfCost === null ? '' : (selfCost.buffers_bytes / 1_048_576).toFixed(1);
   });
 
+  // ── The attribution card's honesty helpers (phase 6, 6.4 / 6.5 / 6.6) ──
+
+  /**
+   * The payload's ``coverage_pct`` VERBATIM (phase 6, task 6.5 / AM-13).
+   *
+   * **THE FE COMPUTES NO COVERAGE PERCENTAGE.** The daemon computes
+   * ``coverage_pct = min(1.0, attributed / anon_bytes)`` against the
+   * ANON POOL (``snap.daemon.anon_kb``) — a basis the card's displayed
+   * components (attributed + unattributed) do NOT sum to — so any
+   * FE-side recomputation, rescaling (×100) or rounding would be an
+   * invented basis, not a display. The card therefore renders the wire
+   * value AS SERVED: a string conversion only, no arithmetic, and '—'
+   * for a non-finite wire (the §2.8 degraded-shape guard, same as
+   * ``fmt``). The old ``fmt(coverage_pct, 0) + '%'`` rounded a 0–1
+   * fraction to "0 %" — the false statement the audit caught.
+   */
+  readonly coverageVerbatim = computed(() => {
+    const coverage = this.live()?.attribution.coverage_pct;
+    return coverage === null || coverage === undefined || !Number.isFinite(coverage)
+      ? '—'
+      : String(coverage);
+  });
+
+  /**
+   * Whether the payload's own fields DISAGREE (phase 6, task 6.4).
+   *
+   * The card shows the aggregate split (attributed + unattributed); the
+   * daemon's RSS reading sits on the SAME strip. The split is the anon
+   * pool's partition, so a sum EXCEEDING the daemon's own RSS reading
+   * is impossible under sane physics — that is the audit's exact shape
+   * (71 + 1,119 = 1,190 MB against an RSS of 633 MB). The check is a
+   * COMPARISON of payload fields (allowed); it never computes a
+   * coverage figure (banned). A 2 MB slack covers the card's own
+   * integer-MB renders. Either field missing ⇒ no claim.
+   */
+  readonly attributionDiscrepancy = computed(() => {
+    const attribution = this.live()?.attribution;
+    const rssMb = this.live()?.daemon.rss_mb;
+    if (!attribution || rssMb === null || rssMb === undefined || !Number.isFinite(rssMb)) {
+      return false;
+    }
+    const displayedSum = attribution.attributed_mb + attribution.unattributed_mb;
+    return displayedSum > rssMb + 2;
+  });
+
   /** Naive-UTC wire `ts` → explicit UTC label (D10). */
   tsLabel(ts: string): string {
     const date = parseNaiveUtc(ts);

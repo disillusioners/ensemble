@@ -230,4 +230,14 @@ $error: #ef4444;
     color: $text-secondary;
     font-style: normal;
   }
+
+  // The non-reconciliation statement (phase 6, task 6.4): a FACT about
+  // the payload's own fields, surfaced loudly enough to be read.
+  &.discrepancy {
+    margin-top: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid rgba($accent-cyan, 0.4);
+    border-radius: 4px;
+    color: $text-secondary;
+  }
 }

@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
+import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { Subject, of, throwError } from 'rxjs';
 import { ResourcesService } from '../../../../services/resources.service';
 import {
@@ -36,7 +37,7 @@ function makeLive(overrides: Partial<LivePayload> = {}): LivePayload {
     },
     children: [],
     instances: [],
-    attribution: { attributed_mb: 240, unattributed_mb: 60, coverage_pct: 80 },
+    attribution: { attributed_mb: 240, unattributed_mb: 60, coverage_pct: 0.8 },
     overruns: { count: 0, last_ts: null },
     self_cost: makeSelfCost(),
     ...overrides,
@@ -263,7 +264,11 @@ describe('LiveTabComponent', () => {
       '3.1%',
     );
     expect(query('[data-test="stat-attribution"]')).not.toBeNull();
-    expect(query('[data-test="stat-coverage"]').nativeElement.textContent).toContain('80%');
+    // PHASE 6 (6.5): the coverage is the payload's value VERBATIM —
+    // the wire serves a 0–1 fraction, so the card shows `0.8`, and
+    // the '%' glyph (the old rounding's false statement) is gone.
+    expect(query('[data-test="stat-coverage"]').nativeElement.textContent).toContain('0.8');
+    expect(query('[data-test="stat-coverage"]').nativeElement.textContent).not.toContain('%');
     expect(query('[data-test="stat-overruns"]').nativeElement.textContent).toContain(
       'never',
     );
@@ -451,5 +456,126 @@ describe('LiveTabComponent', () => {
     // The freshest tick's wire shape is what the user sees — a
     // degraded 200 supersedes the last-good populated snapshot.
     expect(query('[data-test="stat-daemon-rss"]').nativeElement.textContent).toContain('—');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 6 (tasks 6.4 / 6.5 / 6.6) — the attribution card's honesty
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('LiveTabComponent — the attribution card (phase 6)', () => {
+  let fixture: ComponentFixture<LiveTabComponent>;
+  const resourcesMock: { getLive: jest.Mock; getSelfCost: jest.Mock } = {
+    getLive: jest.fn(),
+    getSelfCost: jest.fn(),
+  };
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [LiveTabComponent],
+      providers: [provideNoopAnimations(), { provide: ResourcesService, useValue: resourcesMock }],
+    }).compileComponents();
+    fixture = TestBed.createComponent(LiveTabComponent);
+  });
+
+  function query(selector: string) {
+    return fixture.debugElement.query(By.css(selector));
+  }
+
+  beforeEach(() => {
+    resourcesMock.getLive.mockReturnValue(of(makeLive()));
+    resourcesMock.getSelfCost.mockReturnValue(of(makeSelfCost()));
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    (console.warn as jest.Mock).mockRestore();
+    jest.useRealTimers();
+    fixture.destroy();
+  });
+
+  /** Start one fetch + flush it (the happy path without timers). */
+  function renderLive(live: LivePayload): void {
+    resourcesMock.getLive.mockReturnValue(of(live));
+    fixture.detectChanges();
+  }
+
+  it('the AUDIT-shaped payload renders the coverage VERBATIM and says the figures do not reconcile (6.4 + 6.5)', () => {
+    // The audit's exact shape: 71 + 1,119 = 1,190 MB against an RSS of
+    // 633 MB, coverage 0.0600 — the pixel's old "0 %" was the false
+    // statement.
+    renderLive(
+      makeLive({
+        daemon: { pid: 4242, cpu_pct: 3.1, rss_mb: 633, threads: 44, fds: 34, uptime_s: 90_000 },
+        attribution: { attributed_mb: 71, unattributed_mb: 1119, coverage_pct: 0.06 },
+      }),
+    );
+
+    // VERBATIM: the fraction as served — no rounding to "0", no '%'.
+    const coverage = query('[data-test="stat-coverage"]').nativeElement.textContent ?? '';
+    expect(coverage.trim()).toBe('0.06');
+    expect(coverage).not.toContain('%');
+
+    // THE NON-RECONCILIATION SENTENCE — in words, present.
+    const discrepancy = query('[data-test="attribution-discrepancy"]');
+    expect(discrepancy).not.toBeNull();
+    const text = discrepancy!.nativeElement.textContent ?? '';
+    expect(text).toContain('do not reconcile');
+    expect(text).toContain('the daemon process is not the whole cgroup');
+  });
+
+  it('a RECONCILING payload renders no non-reconciliation claim (6.4)', () => {
+    // The default fixture: 240 + 60 = 300 ≤ 1,720 — the anon pool
+    // sitting inside the RSS is the honest steady state.
+    renderLive(makeLive());
+    expect(query('[data-test="attribution-discrepancy"]')).toBeNull();
+  });
+
+  it('a MISSING RSS reading makes NO reconciliation claim at all (6.4)', () => {
+    // The degraded shape: no RSS ⇒ no comparison ⇒ no sentence (the FE
+    // never claims a reconciliation it cannot see).
+    renderLive(makeDegradedLive());
+    expect(query('[data-test="attribution-discrepancy"]')).toBeNull();
+  });
+
+  it('a non-finite coverage renders the em-dash placeholder, never a guess (6.5)', () => {
+    renderLive(makeLive({ attribution: { attributed_mb: 1, unattributed_mb: 1, coverage_pct: Number.NaN } }));
+    expect((query('[data-test="stat-coverage"]').nativeElement.textContent ?? '').trim()).toBe('—');
+  });
+
+  it('the card names the AGGREGATE split and promises NO per-instance attribution (6.6)', () => {
+    renderLive(makeLive());
+    const card = query('[data-test="stat-attribution"]').nativeElement;
+    const text = card.textContent ?? '';
+    // The honesty label survives the relocation...
+    expect(text).toContain('estimated');
+    expect(text).toContain('aggregate');
+    // ...and NO per-instance promise survives with it. The old note
+    // ("Per-instance RAM is a sample-time estimate…") named a surface
+    // the card does not deliver.
+    expect(text).not.toContain('Per-instance');
+    expect(text).not.toContain('per-instance');
+  });
+
+  it('THE FE COMPUTES NO COVERAGE PERCENTAGE — the computation is ABSENT from the code (6.5, the absence pin)', () => {
+    // The static read of the component's OWN sources: the coverage value
+    // must reach the template through the verbatim passthrough ONLY.
+    const { readFileSync } = require('node:fs');
+    const ts = readFileSync(__dirname + '/live-tab.component.ts', 'utf8');
+    const html = readFileSync(__dirname + '/live-tab.component.html', 'utf8');
+
+    // The template renders the passthrough computed — never fmt() on the
+    // coverage, never a ' %' suffix on it.
+    expect(html).toContain('coverageVerbatim()');
+    expect(html).not.toMatch(/fmt\([^)]*coverage_pct/);
+    expect(html).not.toMatch(/coverage_pct[^}]*%/);
+
+    // The component reads the field ONCE and stringifies it — no ×100,
+    // no toFixed, no division, no recomputed basis.
+    const verbatimBlock = ts.slice(ts.indexOf('coverageVerbatim'), ts.indexOf('attributionDiscrepancy'));
+    expect(verbatimBlock).toContain('String(coverage)');
+    expect(verbatimBlock).not.toMatch(/\*\s*100/);
+    expect(verbatimBlock).not.toContain('toFixed');
+    expect(verbatimBlock).not.toMatch(/attributed.*\/.*anon|\/\s*anon/);
   });
 });

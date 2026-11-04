@@ -142,7 +142,11 @@
         </section>
 
         <section class="stat-card" data-test="stat-attribution">
-          <!-- Honesty labels (§2.2): attribution is partial by physics. -->
+          <!-- Honesty labels (§2.2): attribution is partial by physics.
+               The card names the AGGREGATE split only — it promises no
+               per-instance attribution, which it does not deliver
+               (phase 6, task 6.6; the per-instance list is routed out
+               of this lane). -->
           <h3>Attribution <span class="honesty-tag">estimated</span></h3>
           <div class="stat-row">
             <span class="stat-label">Attributed</span>
@@ -153,12 +157,25 @@
             <span class="stat-value">{{ fmt(payload.attribution.unattributed_mb, 0) }} MB</span>
           </div>
           <div class="stat-row">
-            <span class="stat-label">Coverage</span>
-            <span class="stat-value" data-test="stat-coverage">{{ fmt(payload.attribution.coverage_pct, 0) }}%</span>
+            <span class="stat-label">Coverage (as served)</span>
+            <!-- The payload's value VERBATIM (6.5): a 0–1 fraction as the
+                 daemon computes it — no FE rounding, no ×100, no invented
+                 basis. The '%' glyph of the old pixel was the false
+                 statement. -->
+            <span class="stat-value" data-test="stat-coverage" [attr.title]="'the coverage figure exactly as the monitor serves it — a fraction of the anon pool'">{{
+              coverageVerbatim()
+            }}</span>
           </div>
+          @if (attributionDiscrepancy()) {
+            <p class="honesty-note discrepancy" data-test="attribution-discrepancy" role="status">
+              These figures do not reconcile against the daemon RSS reading — the
+              daemon process is not the whole cgroup.
+            </p>
+          }
           <p class="honesty-note">
-            Per-instance RAM is a sample-time estimate; the remainder is
-            reported as <em>unattributed</em>, never hidden.
+            Memory attribution is a sample-time estimate of this aggregate
+            split; the remainder is reported as <em>unattributed</em>, never
+            hidden.
           </p>
         </section>
 
