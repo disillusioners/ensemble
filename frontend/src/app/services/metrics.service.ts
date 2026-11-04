@@ -1,7 +1,8 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable } from 'rxjs';
+import { Observable, TimeoutError, catchError, throwError, timeout } from 'rxjs';
 import {
+  MetricsDoorTimeoutError,
   MetricsFamiliesPayload,
   MetricsSeriesPayload,
   MetricsSnapshotPayload,
@@ -44,18 +45,66 @@ export class MetricsService {
    */
   static readonly JSON_HEADERS: { readonly Accept: string } = { Accept: 'application/json' };
 
-  /** `GET /api/metrics/families` — the family catalog. */
-  getFamilies(): Observable<MetricsFamiliesPayload> {
-    return this.http.get<MetricsFamiliesPayload>(MetricsService.FAMILIES_URL, {
-      headers: MetricsService.JSON_HEADERS,
-    });
+  /**
+   * The CLIENT-SIDE door deadline (T1 phase 2, task 2.10 — AM-4).
+   *
+   * The door has NO server-side read deadline of its own, so a hung
+   * read left the page in the loading state with NO state at all — the
+   * worst possible outcome for an operator ("is it broken, or is it
+   * empty?"). The client therefore gives up after ~15 s and reports the
+   * `timeout` class.
+   *
+   * NO Retry: the read may still be in flight server-side, so an
+   * automatic retry would pile a second request onto a door that is
+   * already slow.
+   */
+  static readonly DOOR_TIMEOUT_MS = 15_000;
+
+  /**
+   * The house timeout pattern (`api.service.ts:366-367`): the rxjs
+   * `timeout` operator + a typed failure. The rxjs `TimeoutError` is
+   * mapped to the typed `MetricsDoorTimeoutError` so the decoder can
+   * name the class; every other failure is rethrown UNCHANGED.
+   */
+  private withDoorTimeout<T>(source: Observable<T>): Observable<T> {
+    return source.pipe(
+      timeout(MetricsService.DOOR_TIMEOUT_MS),
+      catchError((err: unknown) => {
+        if (err instanceof TimeoutError) {
+          return throwError(() => new MetricsDoorTimeoutError());
+        }
+        return throwError(() => err);
+      }),
+    );
   }
 
-  /** `GET /api/metrics/snapshot` — the current published values. */
-  getSnapshot(): Observable<MetricsSnapshotPayload> {
-    return this.http.get<MetricsSnapshotPayload>(MetricsService.SNAPSHOT_URL, {
-      headers: MetricsService.JSON_HEADERS,
-    });
+  /** `GET /api/metrics/families` — the family catalog. */
+  getFamilies(): Observable<MetricsFamiliesPayload> {
+    return this.withDoorTimeout(
+      this.http.get<MetricsFamiliesPayload>(MetricsService.FAMILIES_URL, {
+        headers: MetricsService.JSON_HEADERS,
+      }),
+    );
+  }
+
+  /**
+   * `GET /api/metrics/snapshot` — the current published values.
+   *
+   * `family` narrows the page to ONE family (the door accepts it —
+   * `daemon/routers/metrics.py:661-668`); the per-tab stat strip uses
+   * it to ask for exactly the families it renders.
+   */
+  getSnapshot(options: { family?: string } = {}): Observable<MetricsSnapshotPayload> {
+    let params = new HttpParams();
+    if (options.family) {
+      params = params.set('family', options.family);
+    }
+    return this.withDoorTimeout(
+      this.http.get<MetricsSnapshotPayload>(MetricsService.SNAPSHOT_URL, {
+        params,
+        headers: MetricsService.JSON_HEADERS,
+      }),
+    );
   }
 
   /**
@@ -80,9 +129,11 @@ export class MetricsService {
     if (options.maxPoints !== undefined) {
       params = params.set('max_points', String(options.maxPoints));
     }
-    return this.http.get<MetricsSeriesPayload>(MetricsService.SERIES_URL, {
-      params,
-      headers: MetricsService.JSON_HEADERS,
-    });
+    return this.withDoorTimeout(
+      this.http.get<MetricsSeriesPayload>(MetricsService.SERIES_URL, {
+        params,
+        headers: MetricsService.JSON_HEADERS,
+      }),
+    );
   }
 }

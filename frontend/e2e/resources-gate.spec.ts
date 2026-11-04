@@ -1,8 +1,20 @@
 /**
- * Resources page merge gate — real-browser web-automation harness.
+ * Resources MODULE merge gate — real-browser web-automation harness.
  *
- * NEW test artifact only (FE /resources observability page, P5 T7).
  * jsdom does NOT count — this spec runs REAL Chromium via Playwright.
+ *
+ * ── THE RE-POINT (T1 phase 7, task 7.7) ────────────────────────────────
+ *
+ * The standalone `/resources` page is RETIRED (D-3). The resource
+ * module is now TAB 1 of the metrics page, so this gate drives
+ * `/metrics?tab=resource` — the SAME module, at its NEW home. The
+ * gear-menu leg is re-pointed too: the retired `Resources` gear entry
+ * is gone and `Metrics` is the single entry for these surfaces.
+ *
+ * This spec NEVER navigates to the retired route: the redirect leg
+ * lives in `metrics-gate.spec.ts` (the metrics page's own gate), and
+ * the "no Playwright spec drives the retired route" pin is asserted in
+ * `src/app/app.resources-retirement.spec.ts`.
  *
  * ── Stub architecture (cloned from snapshots-v2-gate) ─────────────
  * Every API request (URL prefix "api/") is intercepted by `page.route`
@@ -11,8 +23,8 @@
  * precedence in Playwright's LIFO matching) guarantees NOTHING leaks to
  * a real backend; the specific stubs below shadow it.
  *
- * Six GET endpoints are stubbed with fixture JSON mirroring the FROZEN
- * §2.8 payload shapes:
+ * SIX resources endpoints are stubbed with fixture JSON mirroring the
+ * FROZEN §2.8 payload shapes:
  *   /api/resources/live
  *   /api/resources/history
  *   /api/resources/anomalies
@@ -20,10 +32,14 @@
  *   /api/resources/traceback
  *   /api/resources/self-cost
  *
+ * The THREE metrics-door routes are stubbed too (the page that hosts
+ * the module needs its own door): /api/metrics/families, /snapshot and
+ * /series — with the frozen envelope shapes and an EMPTY family list,
+ * so the central door is quiet while the resource tab stays lit.
+ *
  * ── Journey ──
- *   gear menu → "Resources" → /resources → two tabs → Live shows the
- *   stubbed RSS + self-cost chip → Timeline renders ≥1 SVG path + an
- *   anomaly marker → marker click shows the evidence + traceback panel.
+ *   gear menu → "Metrics" → /metrics → the resource tab → Live shows
+ *   the stubbed RSS + self-cost chip → the timeline panel renders.
  *   Zero daemon throughout.
  */
 import { test, expect, type Page, type Route } from '@playwright/test';
@@ -68,15 +84,27 @@ const HISTORY_PAYLOAD = {
   truncated: false,
 };
 
+// ── The anomaly fixture carries the REAL dual-vocabulary shape (B-1) ──
+//
+// The daemon's /api/resources/anomalies serves the ENGINE series keys
+// verbatim (`daemon.rss_kb` — KB values), NOT the history endpoint's
+// FE-style keys (`daemon_rss_mb` — MB). The fixture previously used the
+// FE key for the anomaly, which was exactly the synthesized shape the
+// tester gate called out (BLOCKER B-1: "the prior leg passed on the
+// synthesized shape") — the marker vocabulary the REAL daemon serves
+// was never exercised. This fixture now mirrors the real wire: the
+// engine key + the KB-scale peak/baseline (1900 MB × 1024 = 1,945,600
+// KB), verbatim, no conversion — the FE's compatibility shim resolves
+// the join, and every displayed word stays the API's.
 const ANOMALY = {
   id: 'anom-1',
   kind: 'memory',
   t_start: '2026-10-18T16:30:00',
   t_end: '2026-10-18T16:40:00',
-  peak: 1900,
-  baseline: 1700,
+  peak: 1_945_600,
+  baseline: 1_740_800,
   severity: 'high',
-  series_key: 'daemon_rss_mb',
+  series_key: 'daemon.rss_kb',
   shape: 'ramp',
 };
 
@@ -107,6 +135,41 @@ const TRACEBACK_PAYLOAD = {
 };
 
 const SELF_COST_PAYLOAD = LIVE_PAYLOAD.self_cost;
+
+// ── The metrics DOOR envelope (the page that now hosts the module) ───
+//
+// The resource module is tab 1 of `/metrics`; the page's own central
+// door must answer too, or the catch-all's `{}` body would drive the
+// shell into its error branch. An EMPTY family list keeps the central
+// door quiet while the resource tab stays lit (AM-1: the custom slot
+// renders its OWN source's state, never the door's).
+const DOOR_ENVELOPE = {
+  schema_version: 1,
+  vocabulary_version: 2,
+  generated_at_utc: '2026-11-02T09:00:00+00:00',
+  restart_epoch: 'boot-abc123',
+  activation: {
+    listener_enabled: false,
+    census_enabled: true,
+    query_api: 'auth-gated-always-on',
+  },
+};
+
+const DOOR_FAMILIES_PAYLOAD = { ...DOOR_ENVELOPE, truncated: false, families: [] };
+const DOOR_SNAPSHOT_PAYLOAD = { ...DOOR_ENVELOPE, truncated: false, series: [] };
+const DOOR_SERIES_PAYLOAD = {
+  ...DOOR_ENVELOPE,
+  window: {
+    from_utc: '2026-11-02T08:00:00+00:00',
+    to_utc: '2026-11-02T09:00:00+00:00',
+    interval_s: 15,
+    interval_s_source: 'observed',
+  },
+  last_sample_age_s: 2,
+  stale: false,
+  truncated: false,
+  series: [],
+};
 
 function jsonRoute(route: Route, body: unknown, status = 200): Promise<void> {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
@@ -158,6 +221,11 @@ async function installStubs(page: Page): Promise<void> {
     jsonRoute(route, EVIDENCE_PAYLOAD),
   );
   await page.route(/\/api\/resources\/anomalies(\?|$)/, (route) => jsonRoute(route, ANOMALIES_PAYLOAD));
+
+  // ── The metrics door — the page that hosts the resource module ──
+  await page.route(/\/api\/metrics\/families/, (route) => jsonRoute(route, DOOR_FAMILIES_PAYLOAD));
+  await page.route(/\/api\/metrics\/snapshot/, (route) => jsonRoute(route, DOOR_SNAPSHOT_PAYLOAD));
+  await page.route(/\/api\/metrics\/series/, (route) => jsonRoute(route, DOOR_SERIES_PAYLOAD));
 }
 
 test.beforeEach(async ({ page }) => {
@@ -174,27 +242,38 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test('[AC8] gear menu → /resources → two tabs → live + self-cost → timeline + marker drill-down', async ({
+test('[AC8] gear menu → Metrics → the resource tab → live + self-cost → the timeline panel', async ({
   page,
 }) => {
-  // ── Boot at '/' and open the gear menu (D2 — the ONLY entry point). ──
+  // ── Boot at '/' and open the gear menu (the only entry point). ──
   await page.goto('/');
   await expect(page.locator('[data-test="gear-menu"]')).toBeVisible();
   await page.locator('[data-test="gear-menu"]').click();
 
-  const resourcesItem = page.locator('a[mat-menu-item]').filter({ hasText: 'Resources' });
-  await expect(resourcesItem).toBeVisible();
-  await resourcesItem.click();
+  // ── The retired `Resources` gear entry is GONE (D-3) and `Metrics`
+  //    is the single entry for these surfaces. ──
+  await expect(page.locator('a[mat-menu-item]').filter({ hasText: 'Resources' })).toHaveCount(0);
 
-  await expect(page).toHaveURL(/\/resources/);
+  const metricsItem = page.locator('a[mat-menu-item]').filter({ hasText: 'Metrics' });
+  await expect(metricsItem).toBeVisible();
+  await metricsItem.click();
 
-  // ── Two registry-driven tabs. ──
+  await expect(page).toHaveURL(/\/metrics/);
+
+  // ── The manifest-driven tab list; the RESOURCE module is tab 1 and
+  //    is the DEFAULT selection (the metrics page's default tab id). ──
   const tabs = page.locator('[role="tab"]');
-  await expect(tabs).toHaveCount(2);
-  await expect(page.getByRole('tab', { name: 'Live' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'Timeline' })).toBeVisible();
+  await expect(tabs).toHaveCount(7);
+  await expect(page.getByRole('tab', { name: 'Resources' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Runtime' })).toBeVisible();
 
-  // ── Live tab: stubbed RSS + self-cost chip (AC6/AC8). ──
+  // ── The resource module's own column: the live strip, the timeline
+  //    panel and the anomalies panel (the flat three-section body). ──
+  await expect(page.locator('[data-test="resource-live-strip"]')).toBeVisible();
+  await expect(page.locator('[data-test="resource-timeline-panel"]')).toBeVisible();
+  await expect(page.locator('[data-test="resource-anomalies-panel"]')).toBeVisible();
+
+  // ── Live strip: stubbed RSS + self-cost chip (AC6/AC8). ──
   await expect(page.locator('[data-test="live-content"]')).toBeVisible();
   await expect(page.locator('[data-test="stat-daemon-rss"]')).toContainText('1720');
   const chip = page.locator('[data-test="self-cost-chip"]');
@@ -202,53 +281,139 @@ test('[AC8] gear menu → /resources → two tabs → live + self-cost → timel
   await expect(chip).toContainText('0.42%');
   await expect(chip).toContainText('320');
 
-  // ── Timeline tab: ≥1 SVG path + an anomaly marker. ──
-  await page.getByRole('tab', { name: 'Timeline' }).click();
-  await expect(page.locator('[data-test="timeline-chart"]')).toBeVisible();
-
-  const lines = page.locator('[data-test="series-line"]');
-  await expect(lines.first()).toBeVisible();
-  const lineCount = await lines.count();
-  expect(lineCount).toBeGreaterThanOrEqual(1);
-  const firstD = await lines.first().getAttribute('d');
-  expect((firstD ?? '').length).toBeGreaterThan(0);
-
-  const marker = page.locator('[data-test="anomaly-marker"]').first();
-  await expect(marker).toBeVisible();
-
-  // ── Marker click → evidence + traceback drill-down panel. ──
-  // Click the marker's dedicated hit-circle: the <g>'s bbox center sits
-  // mid-plot where a grid line intercepts pointer events, while the hit
-  // circle (transparent fill, pointer-events: all) is centered on the dot.
-  await marker.locator('.marker-hit').click();
-  const panel = page.locator('[data-test="drilldown-panel"]');
-  await expect(panel).toBeVisible();
-
-  await expect(page.locator('[data-test="anomaly-kind"]')).toContainText('memory');
-  await expect(page.locator('[data-test="anomaly-severity"]')).toContainText('high');
-  await expect(page.locator('[data-test="anomaly-observed"]')).toContainText('1900');
-  await expect(page.locator('[data-test="anomaly-baseline"]')).toContainText('1700');
-
-  // Contributors (evidence) incl. the unattributed honesty row.
-  const contributors = page.locator('[data-test="contributors"]');
-  await expect(contributors).toBeVisible();
-  await expect(contributors).toContainText('62.5');
-  await expect(contributors).toContainText('unattributed');
-
-  // Traceback children incl. the chart_render hot signal.
-  const children = page.locator('[data-test="traceback-children"]');
-  await expect(children).toBeVisible();
-  await expect(children).toContainText('chart_render');
-  await expect(children.locator('.child-row.hot')).toHaveCount(1);
+  // ── The module's OWN range control (T1 phase 5, task 5.4): the
+  //    timeline window belongs to the tab body, not to the page frame.
+  //    The retired per-panel `window-selector` stays GONE. ──
+  await expect(page.locator('[data-test="resource-range-select"]')).toHaveCount(1);
+  await expect(page.locator('[data-test="window-selector"]')).toHaveCount(0);
 });
 
-test('[AC8] deep-link /resources renders without a daemon', async ({ page }) => {
-  await page.goto('/resources');
+test('[AC8] deep-link /metrics?tab=resource renders without a daemon', async ({ page }) => {
+  await page.goto('/metrics?tab=resource');
   await expect(page.locator('[data-test="live-content"]')).toBeVisible();
   await expect(page.locator('[data-test="stat-daemon-rss"]')).toContainText('1720');
   // Everything above came from page.route stubs — assert the catch-all
   // swallowed nothing unexpected beyond known boot calls.
   expect(unstubbedCalls.some((u) => u.includes('/api/resources/'))).toBe(false);
+});
+
+// ── C-1 (council fold): THE REAL-POINTER LEG ON THE FALLBACK PATH ─────
+//
+// The house SVG is the FALLBACK surface: a failed Chart.js mount drops to
+// it (with a badge) and the panel's "drill-down capability is present"
+// claim is about THIS surface. The unit leg dispatches a click straight at
+// the marker element, and jsdom performs no SVG hit-testing — so it cannot
+// see that the full-plot hover overlay (`pointer-events: all`) was painted
+// ON TOP of the marker group, shadowing every marker click.
+//
+// This leg drives a REAL Chromium pointer at the RENDERED geometry
+// (`page.mouse.click` at the marker's bounding-box centre). No
+// `dispatchEvent`: hit-testing is the thing under test.
+//
+// The mount failure is forced the way the product's own failure mode is
+// reached — the canvas cannot acquire a 2D context, so the Chart.js
+// constructor throws, `mount()` catches and the consumer records the mount
+// failure → house SVG + badge. Nothing is stubbed in the chart layer.
+test('[C-1] a REAL pointer reaches an anomaly marker on the house-SVG fallback and opens the drill-down', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // Force the Chart.js mount failure: the 2D context cannot be
+    // acquired (Chart.js 4.6.1's `platform.acquireContext` calls
+    // `canvas.getContext('2d')` INSIDE the constructor, so a throw there
+    // propagates out of `new Chart(...)`), which the panel's `mount()`
+    // catches → `onMountFailed` → the house SVG + the badge. This is a
+    // real browser-level mount failure, not a stubbed chart layer.
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (
+      this: HTMLCanvasElement,
+      contextId: string,
+      ...rest: unknown[]
+    ) {
+      if (contextId === '2d') {
+        throw new Error('forced mount failure: the 2D context cannot be acquired');
+      }
+      return (original as unknown as (...args: unknown[]) => unknown).call(
+        this,
+        contextId,
+        ...rest,
+      );
+    } as typeof HTMLCanvasElement.prototype.getContext;
+  });
+
+  // A tall viewport keeps the whole timeline panel (plot + marker lane)
+  // inside the visual viewport — raw mouse coordinates are VIEWPORT
+  // coordinates, so an element below the fold would make
+  // `page.mouse.move/click` miss (and `elementFromPoint` answer null).
+  await page.setViewportSize({ width: 1600, height: 1200 });
+
+  await page.goto('/metrics?tab=resource');
+
+  // ── The FALLBACK is entered and BADGED (never a silent downgrade) ──
+  await expect(page.locator('[data-test="panel-fallback-badge"]').first()).toBeVisible();
+  await expect(page.locator('[data-test="resource-timeline-panel"]')).toBeVisible();
+
+  const markers = page.locator('[data-test="house-anomaly-marker"]');
+  await expect(markers.first()).toBeVisible();
+  // ONE anomaly in the fixture, in the memory panel.
+  await expect(markers).toHaveCount(1);
+
+  // Bring the panel on screen and let layout settle before geometry.
+  await markers.first().scrollIntoViewIfNeeded();
+  const viewport = page.viewportSize()!;
+
+  // ── (a) The hover extension SURVIVES the reorder ──────────────────
+  // An empty patch of the plot (¼ width, 60% height — clear of the lone
+  // marker's stem at the window midpoint) must still reach the overlay
+  // and publish the nearest-point hover.
+  const overlayBox = await page.locator('[data-test="house-hover-overlay"]').first().boundingBox();
+  expect(overlayBox).not.toBeNull();
+  const hoverTop = Math.max(overlayBox!.y, 0);
+  const hoverBottom = Math.min(overlayBox!.y + overlayBox!.height, viewport.height - 24);
+  expect(hoverBottom).toBeGreaterThan(hoverTop);
+  const hoverX = overlayBox!.x + overlayBox!.width * 0.25;
+  const hoverY = hoverTop + (hoverBottom - hoverTop) * 0.6;
+  await page.mouse.move(hoverX, hoverY);
+  await expect(page.locator('[data-test="house-hover-point"]')).toHaveCount(1);
+
+  // ── (b) A REAL pointer at the marker's RENDERED centre ───────────
+  // The `.house-marker-hit` circle (r=12, transparent, pointer-events:
+  // all) is the marker's hit target; its bounding box centre is the
+  // marker's rendered centre.
+  const hitBox = await markers.first().locator('.house-marker-hit').boundingBox();
+  expect(hitBox).not.toBeNull();
+  const clickX = hitBox!.x + hitBox!.width / 2;
+  const clickY = hitBox!.y + hitBox!.height / 2;
+  // The click point must be on screen for a REAL pointer to hit it.
+  expect(clickX).toBeGreaterThanOrEqual(0);
+  expect(clickX).toBeLessThanOrEqual(viewport.width);
+  expect(clickY).toBeGreaterThanOrEqual(0);
+  expect(clickY).toBeLessThanOrEqual(viewport.height);
+
+  // What does the browser's OWN hit-testing say is on top at that point?
+  // This is the exact regression signature (the overlay used to be the
+  // answer): assert the marker wins, and never the overlay.
+  const topmost = await page.evaluate(
+    ({ x, y }) => {
+      const element = document.elementFromPoint(x, y);
+      if (!element) {
+        return 'none';
+      }
+      return `${element.tagName}.${element.getAttribute('class') ?? ''}`;
+    },
+    { x: clickX, y: clickY },
+  );
+  expect(topmost).not.toContain('house-overlay');
+  expect(topmost).toContain('house-marker');
+
+  await page.mouse.click(clickX, clickY);
+
+  // ── The drill-down the marker click opens ────────────────────────
+  await expect(page.locator('[data-test="drilldown-panel"]')).toBeVisible();
+  await expect(page.locator('[data-test="anomaly-kind"]')).toContainText('memory');
+  await expect(page.locator('[data-test="anomaly-severity"]')).toContainText('high');
+  // …and the evidence round-trip the click triggered (the stub answered).
+  await expect(page.locator('[data-test="contributors"]')).toBeVisible();
 });
 
 // ── Degraded-wire resilience (merge-blocking defect fix) ──────────────
@@ -260,7 +425,7 @@ test('[AC8] deep-link /resources renders without a daemon', async ({ page }) => 
 // show "—" not `null`) without throwing during change detection.
 // The beforeEach instruments `pageerror` + console-error — a TypeError
 // or `Cannot read properties of null` would surface as one or both.
-test('[AC8] /resources survives a degraded 200 body (cgroup null + daemon scalars null) with no pageerror', async ({
+test('[AC8] the resource module survives a degraded 200 body (cgroup null + daemon scalars null) with no pageerror', async ({
   page,
 }) => {
   const consoleErrors: string[] = [];
@@ -298,7 +463,7 @@ test('[AC8] /resources survives a degraded 200 body (cgroup null + daemon scalar
   await page.route('**/api/resources/live', (route) => jsonRoute(route, degraded));
   await page.route('**/api/resources/self-cost', (route) => jsonRoute(route, degraded.self_cost));
 
-  await page.goto('/resources');
+  await page.goto('/metrics?tab=resource');
 
   // Page renders. Live content card mounts.
   await expect(page.locator('[data-test="live-content"]')).toBeVisible();

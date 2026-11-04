@@ -1,3 +1,17 @@
+// The shared tab-surface partial (the A-5 consolidation) supplies the
+// `.stale-badge` rule via @use — the shell no longer carries its own
+// copy. Palette + geometry authority: metrics-door-state.component.ts
+// (see the partial's header).
+@use 'shared/tab-surface';
+
+// The banner palette — the door-state SSOT's colours, named once here
+// so the shell's badge/chip variants can never drift from each other.
+$banner-error-border: #7f1d1d;
+$banner-error-bg: #2a1414;
+$banner-error-fg: #fca5a5;
+$stale-warn-border: #92400e;
+$stale-warn-fg: #fbbf24;
+
 :host {
   display: block;
   padding: 1rem 1.25rem;
@@ -19,38 +33,13 @@
   font-size: 0.8rem;
 }
 
-.metrics-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.5rem 0.75rem;
-  margin-bottom: 0.6rem;
-  border: 1px solid #7f1d1d;
-  border-radius: 6px;
-  background: #2a1414;
-  color: #fca5a5;
-  font-size: 0.8rem;
-}
-
-.stale-badge {
-  display: inline-block;
-  margin-bottom: 0.5rem;
-  padding: 0.15rem 0.45rem;
-  border: 1px solid #92400e;
-  border-radius: 4px;
-  color: #fbbf24;
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
-}
-
 .metrics-registry-degraded-badge {
   display: inline-block;
   margin-bottom: 0.5rem;
   padding: 0.15rem 0.45rem;
-  border: 1px solid #7f1d1d;
+  border: 1px solid $banner-error-border;
   border-radius: 4px;
-  color: #fca5a5;
+  color: $banner-error-fg;
   font-size: 0.72rem;
   letter-spacing: 0.04em;
 }
@@ -87,4 +76,123 @@
 
 .metrics-tabs-host {
   display: block;
+}
+
+.metrics-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.6rem;
+  border: 1px solid #1e293b;
+  border-radius: 6px;
+  background: #0f172a;
+}
+
+.metrics-range,
+.metrics-baseline {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.metrics-range-label,
+.metrics-baseline-label {
+  color: #cbd5e1;
+  font-size: 0.78rem;
+}
+
+.metrics-range-select {
+  background: #0b1220;
+  color: #e2e8f0;
+  border: 1px solid #1e293b;
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.78rem;
+}
+
+.metrics-range-note,
+.metrics-baseline-note,
+.metrics-baseline-disclosure {
+  color: #64748b;
+  font-size: 0.72rem;
+}
+
+.metrics-baseline-disclosure {
+  max-width: 34rem;
+}
+
+.metrics-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/*
+ * THE PAGE-SCOPED DOOR-POSTURE CHIP (task 8.5 — AM-21).
+ *
+ * The door's posture is a PAGE-LOCAL fact: the daemon is HEALTHY when
+ * the metrics door is deliberately fail-closed, so this chip NEVER
+ * stands in for the app shell's GLOBAL status dot (that dot is bound
+ * to `/api/health` and says nothing about this page).
+ */
+.metrics-door-chip {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #1e293b;
+  border-radius: 4px;
+  background: #0f172a;
+  color: #64748b;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.metrics-door-chip[data-door-posture='ok'] {
+  border-color: #14532d;
+  background: #052e16;
+  color: #4ade80;
+}
+
+.metrics-door-chip[data-door-posture='fail-closed'] {
+  border-color: $stale-warn-border;
+  background: $banner-error-bg;
+  color: $stale-warn-fg;
+}
+
+.metrics-door-chip[data-door-posture='failed'] {
+  border-color: $banner-error-border;
+  background: $banner-error-bg;
+  color: $banner-error-fg;
+}
+
+.metrics-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.metrics-drawer {
+  margin-top: 0.9rem;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #0b1220;
+  padding: 0.75rem 0.9rem;
+}
+
+.metrics-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.metrics-drawer-title {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #e2e8f0;
 }

@@ -1,0 +1,82 @@
+{
+  "_about": "THE NAMED BASELINE ARTIFACT (review A-8): the single machine-readable source the T1 bundle guards read. A number duplicated across plan prose can drift; this file cannot. It lives in the PLAN DIR (not scripts/, not the shipped tree) and is the evidence re-derivation tool for the lane's own baseline. B3: the route chunk is located by a ROUTE-KEYED locator (the lane-controlled marker constant) with a legacy content-marker fallback used ONLY to reproduce this lane-base baseline, and the whole route section is absent-tolerant.",
+  "measured_at": "2026-11-03",
+  "tree": "/home/nea/ensemble-src-wt-fe-metrics-dashboard",
+  "measured_at_commit": "7961bcb21",
+  "measured_at_commit_means": "THE REV THE MEASUREMENT WAS TAKEN AT. Every number in this file was measured with the frontend/ tree at this rev.",
+  "reproduces_at_current_tip": true,
+  "reproduces_at_tip_note": "MEASUREMENT-REV SEMANTICS UNCHANGED: every frozen number in this artifact was measured with frontend/ AT 7961bcb21 (the lane's planning-only base). WHAT CHANGED IS THE DOCS-ONLY EQUIVALENCE the previous version of this note asserted: it HELD ONLY THROUGH THE PLANNING PHASE. The lane's LATER FOLDS ARE CODE-BEARING frontend/ CHANGES (the earlier council/tidier/pack folds and the R1/R2 fold), so git diff 7961bcb21..HEAD -- frontend/ is NOT EMPTY (105 files, +19,014/-3,299) and will NEVER be empty again on this branch — A BUILD AT THE TIP IS NOT A LANE-BASE MEASUREMENT. THE NUMBERS ARE NEVERTHELESS VALID AT THE LANE TIP, because they were RE-MEASURED GREEN there by BOTH the developer and the tester: at tip 1af481a78 the developer's run measured initial_total_bytes 5,907,717 (B1 Δ −1,301 vs the frozen 5,909,018, inside the ±2,048 bound), B4b route-fetch-set lazy-only 170,177 (≤ 185,000), the vendor invariant clean and the guard exit 0 (evidence: .agents/shared/planning/metrics-unification/fe-t1-build/r1-r2-fold-evidence.md §5); the tester's final register independently confirms the same B1/B4b figures and B4a chunk-TXUCW6LI.js 206,857 min / 71,054 gz (≤ 82,000, headroom 10,946) (evidence: .agents/tester/RESULTS/2026-11-04-fe-t1-metrics-functional-gate.md, the Guard register). OPERATIVE WARNING FOR FUTURE WORKERS: any future re-measure MUST COMPARE AGAINST THE FROZEN NUMBERS IN THIS ARTIFACT — never assume a docs-only equivalence premise, and never overwrite the frozen baseline on that premise; the staged-verification lane must treat these values as the FROZEN REFERENCE, not re-derive them from the tip tree.",
+  "lane_base_equivalence": "The lane's PLANNING-phase commits (c32029d1c, 3a6bf7ba5, c26cec612, dc55da10f, 7961bcb21, 0115f4818, a85abd16e, 418ff5687) WERE docs-only — plan documents under .agents/shared/planning/ — so DURING THE PLANNING PHASE HEAD's frontend/ tree == the lane base's frontend/ tree. THAT EQUIVALENCE ENDED WITH THE FOLDS: the lane's later council/tidier/pack folds and the R1/R2 fold are CODE-BEARING frontend/ CHANGES, so git diff 7961bcb21..HEAD -- frontend/ is NOT EMPTY (105 files, +19,014/-3,299) and never will be again on this branch — A BUILD AT THE TIP IS NOT A LANE-BASE MEASUREMENT. THE FROZEN NUMBERS STAND ANYWAY because they were RE-MEASURED GREEN AT THE TIP (1af481a78) BY BOTH the developer and the tester — B1 5,907,717 (Δ −1,301 vs the frozen 5,909,018, inside the ±2,048 bound), B4b route-fetch-set lazy-only 170,177 (≤ 185,000), B4a chunk-TXUCW6LI.js 206,857 min / 71,054 gz (≤ 82,000, headroom 10,946), vendor invariant clean, guard exit 0 — every movement stays INSIDE its gate's bound. FUTURE RE-MEASURES MUST COMPARE AGAINST THE FROZEN NUMBERS IN THIS ARTIFACT; the staged-verification lane treats them as the FROZEN REFERENCE values and must NOT re-derive them from the tip tree.",
+  "build": {
+    "command": "cd frontend && ./node_modules/.bin/ng build --configuration production",
+    "prerequisite": "cd frontend && npm ci   (node_modules was absent in the fresh worktree)",
+    "output": "frontend/dist/frontend/browser/",
+    "toolchain": "node v22.23.2 / npm 10.9.8; local devDependency only (never a bare tsc/npx tsc outside frontend/)",
+    "builder_budget_semantics": "node_modules/@angular/build/src/utils/bundle-calculator.js:155-167 — InitialCalculator sums the chunks flagged `initial` (entry points + transitive STATIC imports). index.html is an ASSET, not a chunk, so it is NOT in the budget total. Lazy chunks are counted by NO budget type."
+  },
+  "reproduce": {
+    "command": "cd frontend && node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser",
+    "script": ".agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js",
+    "output": "{\n  \"initial_total_bytes\": 5909018,\n  \"initial_file_count\": 36,\n  \"error_budget_bytes\": 6000000,\n  \"headroom_bytes\": 90982,\n  \"index_html_bytes\": 9257,\n  \"whole_initial_payload_bytes\": 5918275,\n  \"lazy_chunk_count\": 52,\n  \"lazy_bytes_total\": 1702633,\n  \"route_chunk_locator\": \"legacy-content-marker\",\n  \"route_chunk_key\": \"ensemble-metrics-route-v1\",\n  \"route_chunk_resolved_to_exactly_one\": true,\n  \"metrics_route_chunk\": \"chunk-ZA3RV4HY.js\",\n  \"metrics_route_chunk_bytes\": 27672,\n  \"metrics_route_fetch_set_bytes\": 496338,\n  \"largest_lazy\": \"chunk-QS2K3YLH.js\",\n  \"largest_lazy_bytes\": 157141,\n  \"second_largest_lazy\": \"chunk-HNKUMJNH.js\",\n  \"second_largest_lazy_bytes\": 135690,\n  \"pre_retirement_resources_route_chunk\": \"chunk-FOLCEMN3.js\",\n  \"pre_retirement_resources_route_chunk_bytes\": 38914\n}",
+    "output_locator_note": "The route chunk resolves via the LEGACY content marker at lane base, because the lane-controlled marker constant (Phase 2's task 2.13) does not exist yet. From Phase 2 onward the tool resolves it by the ROUTE KEY (`route_chunk_locator: 'route-key'`). Both paths are absent-tolerant: if neither resolves, the route fields are null and `route_chunk_resolved_to_exactly_one` is false — the tool never throws and never mis-resolves (B3)."
+  },
+  "guards": {
+    "B1_initial_total_delta": {
+      "baseline_bytes": 5909018,
+      "threshold": "|delta| <= 2048 bytes vs the frozen lane-base baseline",
+      "note": "A LAZY chart.js leak does NOT move this number (lazy chunks are counted by no budget) — hence B2/B3/B4 below."
+    },
+    "B2_no_chartjs_marker_in_any_initial_chunk": {
+      "method": "string scan of every file in the 36-file initial set for the marker `chart.js`",
+      "threshold": "0 hits"
+    },
+    "B3_import_shape_and_site": {
+      "method": "grep the resolved import sites for `from 'chart.js'` / `import('chart.js')`",
+      "threshold": "0 static `from 'chart.js'` sites anywhere; every `chart.js` import is the DYNAMIC `await import('chart.js')` form; the wrapper's own home is under src/app/pages/metrics/**",
+      "note": "The DYNAMIC form is what keeps the vendor out of the route fetch set — see C-1."
+    },
+    "B4_new_chart_chunk_size": {
+      "baseline_metrics_route_chunk_bytes": 27672,
+      "baseline_metrics_route_fetch_set_bytes": 496338,
+      "threshold": "SUPERSEDED BASIS (leader ruling IMPL-24, 2026-11-04 — a leader-AUTHORIZED threshold change with a documented rationale, NOT a silent weakening; the code council and the tester re-verify it in the open): (B4a) the new chart chunk's real min+gz bytes <= 82000 (was 65536) — the 65536 figure was G9's ESTIMATE of chart.js alone; the MEASURED barrel-mandatory composition is 71054 B gz; the new pin is measured + ~15% margin for wrapper/plugin/theme growth. (B4b) the /metrics route fetch set's LAZY-ONLY portion <= 185000 bytes on the POST-RELOCATION basis (was: growth <= 65536 vs the 72708 pre-relocation baseline) — the measured post-relocation lazy-only set is 165185 B; the growth is the RELOCATED RESOURCES MODULE (the lane's own D-3 deliverable, NOT vendor leakage); the vendor bytes appear only via dynamic import and are NOT in the fetch set.",
+      "threshold_B4a_chart_chunk_min_gz_bytes": 82000,
+      "threshold_B4b_route_fetch_set_lazy_only_bytes": 185000,
+      "note": "The route FETCH SET (route chunk + its DIRECT static deps) is the threshold that actually catches a static-shape leak; the route chunk alone does not (a static import lands in a LAZY-ONLY sibling chunk — proven on the real dist). The vendor-static-edge invariant below is the LOAD-BEARING catch: the vendor chunk must appear in ZERO static-import edges anywhere in the dist (asserted by the tool; fails loud, exit 4).",
+      "route_chunk_locator": "route-key (the marker constant from Phase 2's task 2.13), with the legacy content-marker fallback for the lane-base reproduction; absent-tolerant (null + resolved_to_exactly_one=false when unresolvable)",
+      "pre_retirement_resources_chunk_note": "The /resources route chunk (38,914 B) is a PRE-RETIREMENT baseline only — Phase 7 retires the route, so it does not survive the lane and is NOT a Phase-9 gate (B3).",
+      "baseline_pre_retirement_resources_route_chunk_bytes": 38914,
+      "baseline_metrics_route_fetch_set_lazy_only_bytes": 165185,
+      "baseline_metrics_route_fetch_set_lazy_only_bytes_PRE_RELOCATION_SUPERSEDED": 72708,
+      "baseline_metrics_route_fetch_set_shared_with_initial_bytes": 517214,
+      "post_relocation_route_fetch_set_total_bytes": 682399,
+      "post_relocation_metrics_route_chunk_bytes": 120154,
+      "supersession": "ESTIMATE -> MEASURED (the E-1 discipline applied in reverse, leader-authorized): G9 estimated chart.js at ~65 kB; the real D-1-mandated dynamic-barrel import (`await import('chart.js')`) materializes the WHOLE namespace object, so tree-shaking is STRUCTURALLY IMPOSSIBLE under the mandated form — all controllers ship in the chunk (Bar/Doughnut/Pie/Radar/Bubble/Scatter all present despite the explicit Chart.register(...) of only the used set; verified on the dist in Phase 4 and re-verified at Phase 9). The measured chunk is 206857 B min / 71054 B gz. Separately, Phase 5/7 RELOCATED the resources module INTO the metrics route (the route chunk grew 27672 -> 120154 B; the lazy-only fetch set 72708 -> 165185 B) — the lane's own D-3 deliverable, not leakage. The old 65536 thresholds modeled a pure charting add-on and neither the barrel impossibility nor the relocation; the new pins are the measured reality + margin (B4a ~15%; B4b 165185 -> 185000).",
+      "D1_enforcement_statement": "D-1 IS UNCHANGED AND GREEN: D-1's binding contract is first paint = the app shell (the builder's initial set); B1 (Δ −1,301 B vs the ±2,048 bound) + B2 (0 `chart.js` markers in the initial set) + B3 (0 static import sites, statement-anchored, mutation-proven) remain THE D-1 enforcement — B4 was always second-order.",
+      "provenance": "IMPLEMENTATION-TIME RULING (2026-11-03, lane B4 — the leader's ruling on evidence; the threshold is UNCHANGED). B4 part (2) measures the growth of the LAZY-ONLY portion of the /metrics route fetch set — the route chunk + its direct static deps, RESTRICTED to the members that are NOT in the initial set (index.html's refs + the transitive static-import closure). The total is still reported for transparency but is NOT the gate. DERIVATION PATH: a REAL BUILD of the lane-base frontend tree (a throwaway detached worktree at the artifact's measured_at_commit 7961bcb21, node_modules symlinked from the lane worktree; the worktree was removed + pruned afterwards and the shared checkout was never touched) measured with the EXTENDED bundle-baseline.measure.js — `metrics_route_fetch_set_lazy_only_bytes` = 72708 and `metrics_route_fetch_set_shared_with_initial_bytes` = 423630 (72708 + 423630 = 496338 = the frozen total). The build reproduced the artifact's lane-base figures EXACTLY (initial_total_bytes 5909018, route chunk 27672 B, route fetch set 496338 B, pre-retirement /resources chunk 38914 B). The plan's own G4b text (lane-base route chunk 27,672 B + exactly two lazy-only deps 43,688 B + 1,348 B) predicts the same 72,708 B — the real build and the plan's derivation AGREE. The tool's new fields are ADDITIVE (no existing field's semantics changed), stay route-keyed and absent-tolerant, and are null exactly when the route chunk is unresolvable. SUPERSEDED-BASIS RIDER (2026-11-04, IMPL-24): the 72708 lazy-only figure remains the PRE-relocation provenance record (the _PRE_RELOCATION_SUPERSEDED twin field retains it); the OPERATIVE gate is the post-relocation basis in threshold_B4b_route_fetch_set_lazy_only_bytes."
+    },
+    "B4_vendor_static_edge_invariant": {
+      "statement": "chart.js vendor bytes in ANY static (non-dynamic) fetch set == 0",
+      "method": "the vendor chunk is identified from the ROUTE-KEYED route chunk's DYNAMIC-import targets (import(\"chunk-….js\")) — exactly one on the Phase-9 dist (chunk-TXUCW6LI.js); if a future build carries several dynamic targets, the assertion covers ALL of them; then the tool scans EVERY .js chunk in the dist for static-import edges (from \"…\" / import \"…\") targeting the vendor id(s), and also asserts the vendor is not in the initial set. FAILS LOUD: stderr RED line + exit 4 (the JSON still prints).",
+      "threshold": "vendor_static_edge_count == 0 AND vendor_in_initial_set == false",
+      "why_this_is_load_bearing": "the re-baselined byte thresholds (B4a/B4b) are sized to the measured reality; the INVARIANT is the structural catch that survives any future growth — a planted static edge reddens the tool regardless of the byte numbers."
+    }
+  },
+  "anyComponentStyle_baseline": {
+    "_about": "C-3: the census is 9, NOT 8. blueprint.component.scss (18.32 kB — the LARGEST offender) was omitted. Captured MECHANICALLY from the Phase-1 production build log; the guard is a SET DIFFERENCE against this set, never a count ceiling (a ceiling can be loosened and silently lose detection).",
+    "capture_command": "grep -E 'scss exceeded maximum budget' <build-log> | sed 's/^▲ \\[WARNING\\] //'",
+    "count": 9,
+    "entries": [
+      "src/app/components/agent-selector/agent-selector.scss — 8.77 kB",
+      "src/app/pages/snapshots/snapshots.component.scss — 12.29 kB",
+      "src/app/pages/jobs/jobs.component.scss — 14.77 kB",
+      "src/app/components/add-source-modal/add-source-modal.scss — 8.32 kB",
+      "src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.scss — 8.70 kB",
+      "src/app/pages/blueprint/blueprint.component.scss — 18.32 kB",
+      "src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.scss — 8.70 kB",
+      "src/app/components/instance-list/instance-list.scss — 10.17 kB",
+      "src/app/components/chat-interface/chat-interface.scss — 16.15 kB"
+    ],
+    "also_pre_existing": "bundle initial exceeded maximum budget. Budget 1.00 MB was not met by 4.91 MB with a total of 5.91 MB.",
+    "guard": "SET DIFFERENCE: the Phase-9 warning set must equal this baseline set exactly (0 added, 0 removed). A count ceiling is FORBIDDEN."
+  }
+}

@@ -13,19 +13,26 @@ import {
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { DecimalPipe } from '@angular/common';
+import { NgComponentOutlet } from '@angular/common';
 
 import { MetricsService } from '../../../services/metrics.service';
 import {
+  METRICS_NO_LAST_GOOD_SUFFIX,
+  METRICS_STALE_SUFFIX_TREND,
   MetricsChartRole,
   MetricsSeriesPayload,
   decodeMetricsDoorError,
   formatMetricsLabels,
   metricsChartRoleForKind,
 } from '../../../models/metrics.model';
+import { ChartSeries } from '../../../components/charts/house-svg-renderer/house-svg-renderer';
+import { chartSeriesColor } from '../../../components/charts/chart-theme';
 import {
-  ChartSeries,
-  SvgLineChartComponent,
-} from '../../../components/charts/svg-line-chart/svg-line-chart.component';
+  ChartRenderData,
+  ChartRequest,
+} from '../../../components/charts/renderer-registry';
+import { createDefaultChartRegistry } from './chart-panel.renderer';
+import { METRICS_CENTRAL_WINDOW_MINUTES } from '../metrics-door';
 
 /** The rendering mode of one chart-primary series (from the catalog). */
 export interface MetricsChartSeriesSpec {
@@ -33,25 +40,13 @@ export interface MetricsChartSeriesSpec {
   readonly chartRole: MetricsChartRole;
 }
 
-/** The house palette (`styles.scss` / the `svg-timeline` precedent). */
-const CHART_COLORS: readonly string[] = [
-  '#38bdf8',
-  '#a78bfa',
-  '#34d399',
-  '#fbbf24',
-  '#f472b6',
-  '#60a5fa',
-  '#fb923c',
-  '#2dd4bf',
-];
-
 /**
  * Charts tab — the windowed trend (`GET /api/metrics/series`).
  *
  * The tab renders the roster's CHART-PRIMARY families (the catalog's
- * `role === 'chart'` families) and asks for a 3600 s window ⇒ 240
- * points at the door's `max_points` default of 240 (15 s effective
- * resolution out of the box).
+ * `role === 'chart'` families) over the FRAME's window ⇒ 240 points at
+ * the door's `max_points` default of 240 (15 s effective resolution
+ * out of the box).
  *
  * Rendering: COUNTER series render STEP, GAUGE series render LINEAR —
  * the mode comes from the family metadata `chart_role` (contract
@@ -66,8 +61,13 @@ const CHART_COLORS: readonly string[] = [
 @Component({
   selector: 'app-metrics-charts',
   standalone: true,
-  imports: [DecimalPipe, MatButtonModule, SvgLineChartComponent],
+  imports: [DecimalPipe, MatButtonModule, NgComponentOutlet],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  // The shared tab-surface styles (banner/badge/hint/meta) live in the
+  // shared partial — the A-5 consolidation; the palette/geometry
+  // authority is metrics-door-state.component.ts (see the partial's
+  // header). Only this tab's OWN rules stay inline below.
+  styleUrls: ['../shared/tab-surface.scss'],
   template: `
     <div class="charts">
       @if (error(); as message) {
@@ -108,10 +108,9 @@ const CHART_COLORS: readonly string[] = [
       <div class="chart-grid" data-test="charts-grid">
         @for (chart of charts(); track chart.id) {
           <div class="chart-cell" [attr.data-series]="chart.id">
-            <app-svg-line-chart
-              [series]="[chart]"
-              [ariaLabel]="chart.label + ' (UTC)'"
-            ></app-svg-line-chart>
+            <ng-container
+              *ngComponentOutlet="plan().component; inputs: plan().inputs(chartData(chart))"
+            ></ng-container>
           </div>
         }
       </div>
@@ -130,42 +129,6 @@ const CHART_COLORS: readonly string[] = [
       .charts {
         display: block;
         padding: 0.75rem 0;
-      }
-
-      .tab-banner {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.75rem;
-        padding: 0.5rem 0.75rem;
-        margin-bottom: 0.6rem;
-        border: 1px solid #7f1d1d;
-        border-radius: 6px;
-        background: #2a1414;
-        color: #fca5a5;
-        font-size: 0.8rem;
-      }
-
-      .stale-badge {
-        display: inline-block;
-        margin-bottom: 0.5rem;
-        padding: 0.15rem 0.45rem;
-        border: 1px solid #92400e;
-        border-radius: 4px;
-        color: #fbbf24;
-        font-size: 0.72rem;
-        letter-spacing: 0.04em;
-      }
-
-      .tab-hint {
-        color: #64748b;
-        font-size: 0.8rem;
-      }
-
-      .tab-meta {
-        color: #64748b;
-        font-size: 0.72rem;
-        margin: 0 0 0.5rem;
       }
 
       .chart-grid {
@@ -191,8 +154,15 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
   /** The poll cadence, in milliseconds (15 s — the door's cadence). */
   readonly POLL_INTERVAL_MS = 15_000;
 
-  /** The window the tab asks for — 3600 s ⇒ 240 points at max_points 240. */
-  readonly WINDOW_S = 3600;
+  /**
+   * The window the tab asks for — the FRAME's value (task 4.13).
+   *
+   * The hardcoded window is GONE: the frame owns the range, and this
+   * tab's ladder is the central one. The default is the central
+   * ladder's own `1h` entry (in MINUTES, so no phase carries a
+   * hardcoded seconds literal).
+   */
+  readonly windowS = input<number>(METRICS_CENTRAL_WINDOW_MINUTES['1h'] * 60);
 
   /** Whether THIS tab is the selected one (the shell's visibility gate). */
   readonly active = input(false);
@@ -226,12 +196,32 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
       return {
         id: labels ? `${entry.name}{${labels}}` : entry.name,
         label: labels ? `${entry.name} {${labels}}` : entry.name,
-        color: CHART_COLORS[index % CHART_COLORS.length],
+        color: chartSeriesColor(index),
         mode,
         points: entry.points.map((point) => ({ t: point[0] * 1000, v: point[1] })),
       };
     });
   });
+
+  /** The RENDERER REGISTRY — the tab renders THROUGH it, never around it. */
+  private readonly registry = createDefaultChartRegistry();
+
+  /**
+   * The render request — the interactive panel with the shared y-axis,
+   * the markers and the drill-down.
+   */
+  private readonly request: ChartRequest = {
+    intent: 'trend',
+    flags: ['shared-y', 'markers', 'drill'],
+  };
+
+  /** The renderer plan of the tab's panels. */
+  readonly plan = computed(() => this.registry.plan(this.request, { series: [] }));
+
+  /** The render data of one chart. */
+  chartData(chart: ChartSeries): ChartRenderData {
+    return { series: [chart], anomalies: [], baseline: [], label: chart.label };
+  }
 
   constructor() {
     effect(() => {
@@ -288,7 +278,7 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
     this.metrics
       .getSeries({
         names: this.chartSpecs().map((spec) => spec.name),
-        windowS: this.WINDOW_S,
+        windowS: this.windowS(),
       })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
@@ -306,9 +296,18 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
           if (token !== this.requestSeq) {
             return;
           }
-          // A-5: the copy branches on the decoded failure class; the
-          // last-known trend is kept in EVERY branch.
-          this.error.set(`${decodeMetricsDoorError(err).copy} — the last known trend is kept.`);
+          // A-5: the copy branches on the decoded failure class.
+          //
+          // 8.4 — the same truthful rule as the overview tab: the
+          // suffix is chosen by the FACT (a last-good exists or not),
+          // never appended unconditionally.
+          const decoded = decodeMetricsDoorError(err);
+          const hasLastGood = this.payload() !== null;
+          this.error.set(
+            `${decoded.copy} — ${
+              hasLastGood ? METRICS_STALE_SUFFIX_TREND : METRICS_NO_LAST_GOOD_SUFFIX
+            }.`,
+          );
           this.stale.set(this.payload() !== null);
         },
       });

@@ -349,19 +349,69 @@ export function formatMetricsDeclaredLabels(
 // ── The door's error vocabulary → human copy (A-5, contract §5) ─────────
 
 /**
- * The decoded shape of a failed metrics-door read (A-5). The door's
- * error vocabulary is CLOSED and frozen (contract §5): 401 / 403
- * scope / 400 invalid_label_filter | invalid_cursor / 404
- * unknown_family / 503 AUTH_NOT_CONFIGURED | registry_unavailable.
- * The shipped 403 body token is UPPERCASE `SCOPE_INSUFFICIENT` (D-c:
- * the doc gets amended, never the wire).
+ * The decoded shape of a failed metrics-door read (A-5), as a CLOSED
+ * UNION of TEN classes (T1 phase 8, task 8.1 — AM-4).
+ *
+ * The door's error vocabulary is CLOSED and frozen (contract §5): 401 /
+ * 403 scope / 400 invalid_label_filter | invalid_cursor / 404
+ * unknown_family / 503 AUTH_NOT_CONFIGURED | registry_unavailable. The
+ * shipped 403 body token is UPPERCASE `SCOPE_INSUFFICIENT` (D-c: the
+ * doc gets amended, never the wire).
+ *
+ * **WHY THE TABLE IS A CLOSED UNION (8.1).** Before this phase the FE
+ * had FIVE classes, and the FIRST state every real operator meets — 401
+ * `AUTH_REQUIRED` — decoded to `unexpected` with a live Retry button.
+ * A Retry that can never succeed is a false affordance, and a 401
+ * labelled "an unexpected error" is a false statement about the
+ * operator's session.
+ *
+ * The union is CLOSED: every status the door can answer maps to exactly
+ * one class, and an unhandled status is a SPEC FAILURE (the class table
+ * is asserted exhaustively), never a silent fall-through.
+ *
+ * | class                 | status | Retry |
+ * |-----------------------|--------|-------|
+ * | `auth_required`       | 401    | NO    |
+ * | `auth_not_configured` | 503    | NO    |
+ * | `scope_insufficient`  | 403 + `SCOPE_INSUFFICIENT` | YES |
+ * | `forbidden_other`     | 403 (any other body)      | YES |
+ * | `unknown_family`      | 404    | NO    |
+ * | `bad_request`         | 400    | NO    |
+ * | `timeout`             | client deadline | NO    |
+ * | `registry_unavailable`| 503 + `registry_unavailable` | YES |
+ * | `network`             | 0 (transport) | YES      |
+ * | `unexpected`          | the closed fallback | YES |
  */
 export type MetricsDoorErrorCode =
-  | 'scope_insufficient'
+  | 'auth_required'
   | 'auth_not_configured'
+  | 'scope_insufficient'
+  | 'forbidden_other'
+  | 'unknown_family'
+  | 'bad_request'
   | 'registry_unavailable'
   | 'network'
+  | 'timeout'
   | 'unexpected';
+
+/**
+ * The typed CLIENT-SIDE deadline failure (T1 phase 2, task 2.10).
+ *
+ * The rxjs `timeout` operator throws a plain `TimeoutError` on expiry;
+ * the service maps it to THIS typed error so the decoder can name the
+ * class honestly (`timeout`) instead of letting it fall through to
+ * `unexpected` (or worse — to `network`, which claims the door is
+ * unreachable when the truth is that the CLIENT gave up).
+ *
+ * NO Retry: the read may still be in flight server-side, so a retry
+ * would double the load on a door that is already slow.
+ */
+export class MetricsDoorTimeoutError extends Error {
+  constructor(message = 'the metrics door read timed out') {
+    super(message);
+    this.name = 'MetricsDoorTimeoutError';
+  }
+}
 
 /**
  * The copy for a DEGRADED registry read (`activation.registry_read_ok`
@@ -380,17 +430,186 @@ export type MetricsDoorErrorCode =
 export const METRICS_REGISTRY_DEGRADED_COPY =
   'The metrics registry read failed — the catalog below is INCOMPLETE or UNKNOWN, not "no data".';
 
-/** The copy the page banners for each decoded failure class (A-5). */
-export const METRICS_DOOR_ERROR_COPY: Readonly<Record<MetricsDoorErrorCode, string>> = {
-  scope_insufficient:
-    'The metrics door rejected this session — the signed-in token lacks the maintenance:read scope.',
-  auth_not_configured:
-    'The metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics.',
-  registry_unavailable:
-    'The metrics door has no provider wired — the metrics service is unavailable on this daemon.',
-  network: 'The metrics door is unreachable.',
-  unexpected: 'The metrics door returned an unexpected error.',
+/**
+ * The STRUCTURED copy of one door-state class (T1 phase 8, task 8.11 —
+ * IMPL-18 / AM-20).
+ *
+ * A flat `Record<code, string>` cannot carry an ACTIONABLE state: the
+ * fail-closed auth state needs a CAUSE, what it MEANS, what an operator
+ * can DO about it and WHERE the runbook is — four facts, not one
+ * sentence. The flat map that used to carry the copy was the reason the
+ * actionable state could not be rendered honestly.
+ *
+ * The four members are the whole contract:
+ *
+ *   * `cause`   — WHAT happened (one sentence, the banner's headline);
+ *   * `meaning` — WHAT IT MEANS for the operator (the consequence);
+ *   * `action`  — WHAT CAN BE DONE (the operator's next step);
+ *   * `pointer` — WHERE the procedure lives (a repo-relative runbook
+ *                 path, or `null` when there is no procedure to point
+ *                 at).
+ *
+ * `retryable` is the RETRY POLICY of the class (8.1): a configuration
+ * error is not transient, so a Retry button on it would be an affordance
+ * that can never succeed.
+ *
+ * **NO ENVIRONMENT-VARIABLE NAME APPEARS IN THIS COPY (the plan's risk
+ * row).** The UI states the FACT and points at the RUNBOOK; the
+ * variable names live in the runbook, not in the operator's face.
+ */
+export interface MetricsDoorStateCopy {
+  /** WHAT HAPPENED — the banner's headline. */
+  readonly cause: string;
+  /** WHAT IT MEANS for the operator — the consequence. */
+  readonly meaning: string;
+  /** WHAT CAN BE DONE — the operator's next step. */
+  readonly action: string;
+  /** WHERE the procedure lives — a repo-relative runbook path, or `null`. */
+  readonly pointer: string | null;
+  /** Whether a Retry button is honest for this class (8.1). */
+  readonly retryable: boolean;
+}
+
+/**
+ * The COPY SSOT — one structured entry per door-state class
+ * (T1 phase 8, task 8.11 — IMPL-18 / AM-20).
+ *
+ * **This is the ONLY place the door-state copy lives.** Every surface —
+ * the frame's central panel, the catalog drawer, the tab bodies, the
+ * manifest's per-tab VARIANTS — reads its copy from here. A second
+ * source of truth for the same sentence is the defect the audit found
+ * (the two degraded-registry suffixes that lived in two tab bodies), so
+ * the suffixes moved HERE (see `METRICS_STALE_*` below).
+ *
+ * The class set is the CLOSED union of `MetricsDoorErrorCode` — the
+ * table is asserted exhaustively by the spec, so a class added to the
+ * union without a copy (or a copy without a class) breaks the build.
+ */
+export const METRICS_DOOR_STATE_COPY: Readonly<
+  Record<MetricsDoorErrorCode, MetricsDoorStateCopy>
+> = {
+  auth_required: {
+    cause: 'The metrics door requires authentication — this session is not signed in.',
+    meaning: 'The door serves metrics only to an authenticated session, so nothing was read.',
+    action: 'Sign in, or present a token that is scoped for the metrics read.',
+    pointer: null,
+    retryable: false,
+  },
+  auth_not_configured: {
+    cause: 'The metrics door is fail-closed — auth is not configured on the daemon.',
+    meaning:
+      'No credential can fix this — it is daemon configuration, so the door serves no metrics.',
+    action: 'An operator must configure auth on the daemon and restart it.',
+    pointer: 'docs/runbooks/oauth2-auth.md',
+    retryable: false,
+  },
+  scope_insufficient: {
+    cause:
+      'The metrics door rejected this session — the signed-in token lacks the maintenance:read scope.',
+    meaning: 'The session is valid, but it is not permitted to read the metrics door.',
+    action: 'Obtain a token that carries the metrics read scope.',
+    pointer: null,
+    retryable: true,
+  },
+  forbidden_other: {
+    cause: 'The metrics door rejected this request before the scope check.',
+    meaning:
+      'The refusal did not come from the token scope — another guard answered the request.',
+    action: 'Retry the read; a request that stays refused needs its response body.',
+    pointer: null,
+    retryable: true,
+  },
+  unknown_family: {
+    cause: 'The metrics door does not know this family — this page is ahead of the daemon.',
+    meaning: 'The request named a family the daemon does not serve, so no series can be read.',
+    action: 'Reload the page; a family that stays unknown means the two sides are out of step.',
+    pointer: null,
+    retryable: false,
+  },
+  bad_request: {
+    cause: 'The metrics door rejected the request parameters.',
+    meaning: 'The read was refused before it reached the data — the request itself is wrong.',
+    action: 'Reload the page; a request that stays refused is a defect in this page.',
+    pointer: null,
+    retryable: false,
+  },
+  timeout: {
+    cause: 'The metrics door did not answer in time — the read may still be running on the daemon.',
+    meaning: 'The client gave up; the daemon may still be serving the request.',
+    action: 'Wait for the next refresh — the door may answer on its own.',
+    pointer: null,
+    retryable: false,
+  },
+  registry_unavailable: {
+    cause:
+      'The metrics door has no provider wired — the metrics service is unavailable on this daemon.',
+    meaning: 'The registry answered with a service failure, so no family could be listed.',
+    action: 'Retry the read; a service that stays unwired needs an operator.',
+    pointer: null,
+    retryable: true,
+  },
+  network: {
+    cause: 'The metrics door is unreachable.',
+    meaning: 'The request never reached the daemon, so no metrics could be read.',
+    action: 'Retry the read once the daemon is reachable.',
+    pointer: null,
+    retryable: true,
+  },
+  unexpected: {
+    cause: 'The metrics door returned an unexpected error.',
+    meaning: 'The failure does not match any class the door documents.',
+    action: 'Retry the read; a repeated failure needs the response body.',
+    pointer: null,
+    retryable: true,
+  },
 };
+
+/**
+ * The ONE-LINE banner copy per class — DERIVED from the copy SSOT.
+ *
+ * It is a PROJECTION (`cause`), never a second source of truth: the
+ * structured entry owns the sentence, and this map only projects its
+ * headline for the surfaces that render a single line. A spec asserts
+ * the derivation, so a copy edited in one place and forgotten in the
+ * other breaks the build.
+ */
+export const METRICS_DOOR_ERROR_COPY: Readonly<Record<MetricsDoorErrorCode, string>> =
+  Object.freeze(
+    Object.fromEntries(
+      (Object.keys(METRICS_DOOR_STATE_COPY) as MetricsDoorErrorCode[]).map((code) => [
+        code,
+        METRICS_DOOR_STATE_COPY[code].cause,
+      ]),
+    ),
+  ) as Readonly<Record<MetricsDoorErrorCode, string>>;
+
+/**
+ * The STALE suffix — the retained last-good IS shown (8.4).
+ *
+ * The two tab bodies used to carry this sentence INLINE, which is how
+ * the self-contradictory copy got in: the sentence was appended
+ * unconditionally, so a failure with NO last-good still claimed that
+ * "the last known values are kept" while the page rendered none. The
+ * sentence now lives in ONE place and is appended ONLY when a last-good
+ * actually exists.
+ */
+export const METRICS_STALE_SUFFIX_VALUES = 'the last known values are kept';
+
+/**
+ * The STALE suffix for a TREND surface — the same fact, the same
+ * one-place rule (8.4 / 8.11).
+ */
+export const METRICS_STALE_SUFFIX_TREND = 'the last known trend is kept';
+
+/**
+ * The NO-LAST-GOOD suffix — the truth for the case that is happening
+ * (8.4).
+ *
+ * When NO last-good exists there is nothing to keep, and the copy must
+ * say so instead of promising a retention that never happened. The
+ * STALE badge carries the opposite case (a last-good DOES exist).
+ */
+export const METRICS_NO_LAST_GOOD_SUFFIX = 'no values have been received yet';
 
 /** Structural read of an `HttpErrorResponse`-like value (no Angular import — the model stays dependency-free). */
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -410,21 +629,60 @@ function asString(value: unknown): string | null {
  * guard, reverse proxy) must NOT wear that label. `503` branches on
  * the body code (`AUTH_NOT_CONFIGURED` vs `registry_unavailable`).
  * `status === 0` is the transport never answering (network/timeout).
- * Everything else — 401, 400, 404, a proxied HTML page — is the
- * honest fallback, never the "unreachable" claim.
+ *
+ * **THE CLASS TABLE IS EXHAUSTIVE (T1 phase 8, task 8.1 — AM-4).**
+ * Every status the door can answer lands on exactly one class:
+ *
+ *   | status | class                                            |
+ *   |--------|--------------------------------------------------|
+ *   | 401    | `auth_required`                                  |
+ *   | 403 + `SCOPE_INSUFFICIENT` | `scope_insufficient`   |
+ *   | 403 (any other body)        | `forbidden_other`      |
+ *   | 404    | `unknown_family`                                 |
+ *   | 400    | `bad_request`                                    |
+ *   | 503 + `AUTH_NOT_CONFIGURED` | `auth_not_configured`  |
+ *   | 503 + `registry_unavailable`| `registry_unavailable`|
+ *   | 0      | `network`                                        |
+ *   | client deadline | `timeout`                             |
+ *   | anything else   | `unexpected`                           |
+ *
+ * The 403 predicate is NARROWED (8.12 / AM-20): `scope_insufficient`
+ * is `SCOPE_INSUFFICIENT` and NOTHING else. The previous predicate
+ * labelled ANY 403-with-a-code as a scope failure — a false statement
+ * about the operator's session, and a contradiction of this function's
+ * own doc comment.
  */
 export function decodeMetricsDoorError(err: unknown): {
   code: MetricsDoorErrorCode;
   copy: string;
 } {
+  // The CLIENT-SIDE deadline is checked FIRST: it is not an HTTP
+  // failure at all, and the transport-shaped reads below would call it
+  // `network` (a false claim — the door may be perfectly reachable).
+  if (err instanceof MetricsDoorTimeoutError) {
+    return { code: 'timeout', copy: METRICS_DOOR_ERROR_COPY.timeout };
+  }
   const response = asRecord(err);
   const status = typeof response?.['status'] === 'number' ? (response['status'] as number) : 0;
   const body = asRecord(response?.['error']);
   const detail = asRecord(body?.['detail']) ?? body ?? {};
   const rawCode = asString(detail['error']) ?? asString(body?.['error']);
 
-  if (rawCode === 'SCOPE_INSUFFICIENT' || (status === 403 && rawCode !== null)) {
-    return { code: 'scope_insufficient', copy: METRICS_DOOR_ERROR_COPY.scope_insufficient };
+  // The body token is matched CASE-INSENSITIVELY (the shipped token is
+  // UPPERCASE, but a proxy may lower-case it) — and ONLY that token.
+  if (status === 403) {
+    const isScope = rawCode !== null && rawCode.toUpperCase() === 'SCOPE_INSUFFICIENT';
+    const code: MetricsDoorErrorCode = isScope ? 'scope_insufficient' : 'forbidden_other';
+    return { code, copy: METRICS_DOOR_ERROR_COPY[code] };
+  }
+  if (status === 401) {
+    return { code: 'auth_required', copy: METRICS_DOOR_ERROR_COPY.auth_required };
+  }
+  if (status === 404) {
+    return { code: 'unknown_family', copy: METRICS_DOOR_ERROR_COPY.unknown_family };
+  }
+  if (status === 400) {
+    return { code: 'bad_request', copy: METRICS_DOOR_ERROR_COPY.bad_request };
   }
   if (status === 503) {
     if (rawCode === 'AUTH_NOT_CONFIGURED') {

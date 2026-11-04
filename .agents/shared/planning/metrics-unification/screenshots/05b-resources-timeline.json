@@ -1,0 +1,192 @@
+{
+  "file": "05b-resources-timeline.png",
+  "url": "http://127.0.0.1:9797/resources",
+  "viewport": {
+    "width": 1600,
+    "height": 1000
+  },
+  "auth_state": "unauthenticated (daemon auth disabled)",
+  "fullPage": true,
+  "api_responses": [
+    {
+      "status": 503,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/settings/editor"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/health"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/settings/plane"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/migration/availability"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/notifications/stream"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 503,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/anomalies?window=1h"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/projects"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    }
+  ],
+  "console_error_count": 3,
+  "notes": "Timeline tab after tab-switch click (GET-only). Chart renders: 1 svg, 22 path/shape elements. Series: Daemon memory, CPU and per-instance attribution \u2014 live snapshot and history | Daemon RSS (MB) | Cgroup memory (MB) | Daemon CPU (%) | Threads | Active instances | Daemon RSS (MB) | Cgroup memory (MB) ",
+  "captured_at": "2026-11-03T16:16:27.200Z",
+  "console_errors": [
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\". The request has been blocked.\n",
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+  ],
+  "page_errors": [],
+  "total_9797_requests": 72,
+  "non_get_requests": [],
+  "tmp_image_id": "69e214bb17864d49b81f0220a4bea02b",
+  "tmp_image_ref": "/api/tmp_images/69e214bb17864d49b81f0220a4bea02b",
+  "substrate": {
+    "feature": "fe-ui-audit",
+    "page": "/resources",
+    "version": "v0.28.9",
+    "content_type": "image/png",
+    "byte_exact_roundtrip": true
+  }
+}

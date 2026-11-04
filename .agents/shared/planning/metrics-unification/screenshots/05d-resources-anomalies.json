@@ -1,0 +1,222 @@
+{
+  "file": "05d-resources-anomalies.png",
+  "url": "http://127.0.0.1:9797/resources",
+  "viewport": {
+    "width": 1600,
+    "height": 1000
+  },
+  "auth_state": "unauthenticated (daemon auth disabled)",
+  "fullPage": true,
+  "api_responses": [
+    {
+      "status": 503,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/settings/editor"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/health"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/settings/plane"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/migration/availability"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/notifications/stream"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 503,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/anomalies?window=1h"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/projects"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/live"
+    },
+    {
+      "status": 200,
+      "method": "GET",
+      "url": "http://127.0.0.1:9797/api/resources/self-cost"
+    }
+  ],
+  "console_error_count": 3,
+  "notes": "NO ANOMALIES SECTION IN THE FE - expander step skipped (nothing to expand). Checked BOTH tabs: on Timeline (`bodyHas 'anomal'` = false) and on Live (false). The /api/resources/anomalies endpoint returns 200 with rows (anom-000003 cpu, anom-000004 fds, ...), but the /resources page renders no Anomalies table/accordion on either tab; on the Timeline tab anomalies surface only as unlabelled coloured event markers on the chart (no expandable rows). Captured state = Live tab, 4 cards (Daemon process / Cgroup memory / Attribution ESTIMATED / Self-cost overruns). TIMING NOTE: at this instant the Daemon-process and Cgroup-memory scalars render as em-dash placeholders while the sample line shows a real timestamp and 63 samples - consistent with the documented /api/resources/live ring-drain transient (~30s refill vs 60s drain); the 05-resources.png capture ~2s earlier shows the same fields fully populated. Not a defect, reported as observed.",
+  "captured_at": "2026-11-03T16:16:30.751Z",
+  "console_errors": [
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\". The request has been blocked.\n",
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+  ],
+  "page_errors": [],
+  "total_9797_requests": 79,
+  "non_get_requests": [],
+  "tmp_image_id": "259e5e6ebe4c4c6e94a243504fe58b44",
+  "tmp_image_ref": "/api/tmp_images/259e5e6ebe4c4c6e94a243504fe58b44",
+  "substrate": {
+    "feature": "fe-ui-audit",
+    "page": "/resources",
+    "version": "v0.28.9",
+    "content_type": "image/png",
+    "byte_exact_roundtrip": true
+  }
+}

@@ -1,24 +1,46 @@
 <div class="metrics-container">
   <header class="metrics-header">
-    <h1>Metrics</h1>
-    <p class="metrics-subtitle">
-      Central metrics door — families, current values and trends (UTC)
-    </p>
+    <div class="metrics-header-row">
+      <div>
+        <h1>Metrics</h1>
+        <p class="metrics-subtitle">
+          Central metrics door — families, current values and trends (UTC)
+        </p>
+      </div>
+      <div class="metrics-header-actions">
+        <span
+          class="metrics-door-chip"
+          [attr.data-test]="'metrics-door-chip'"
+          [attr.data-door-posture]="doorPosture()"
+        >
+          {{ doorPostureLabel() }}
+        </span>
+        <button
+          mat-stroked-button
+          type="button"
+          (click)="toggleDrawer()"
+          data-test="metrics-catalog-drawer-toggle"
+        >
+          Families
+        </button>
+      </div>
+    </div>
   </header>
 
-  @if (catalogError(); as message) {
-    <div class="metrics-banner" data-test="metrics-catalog-error">
-      <span class="metrics-banner-text">{{ message }}</span>
-      <button
-        mat-stroked-button
-        type="button"
-        (click)="loadCatalog()"
-        data-test="metrics-catalog-retry"
-      >
-        Retry
-      </button>
-    </div>
-  }
+  <!--
+    THE CENTRAL DOOR'S STATE — rendered ONCE, here (task 8.3).
+
+    The tab bodies do NOT each re-render it: the state is per SOURCE
+    (AM-1), so a `central` slot shows this state and the `custom` slot
+    (tab 1) shows its own — which is why tab 1 stays lit under a
+    central-door failure.
+  -->
+  <app-metrics-door-state
+    [code]="catalogErrorCode()"
+    [onRetry]="onReloadCatalog"
+    testId="metrics-catalog-error"
+    retryTestId="metrics-catalog-retry"
+  ></app-metrics-door-state>
 
   @if (catalogStale()) {
     <span class="stale-badge" data-test="metrics-catalog-stale">STALE — last known catalog</span>
@@ -40,21 +62,99 @@
     <section class="metrics-empty" data-test="metrics-empty-panel">
       <h2 class="metrics-empty-title">{{ emptyCopy }}</h2>
       <p class="metrics-empty-text">
-        The metrics door has not published a live family yet. The Families tab lists every
+        The metrics door has not published a live family yet. The family catalog lists every
         family with the reason it has no observation.
       </p>
     </section>
   }
 
+  <div class="metrics-toolbar" data-test="metrics-toolbar">
+    <div class="metrics-range" role="group" aria-label="Time range">
+      <label class="metrics-range-label" for="metrics-range-select">Range</label>
+      <select
+        id="metrics-range-select"
+        class="metrics-range-select"
+        data-test="metrics-range-select"
+        [value]="window()"
+        [disabled]="rangeControlDisabled()"
+        [attr.aria-label]="'Select the metrics time range'"
+        (change)="onRangeChange($any($event.target).value)"
+      >
+        @for (option of rangeOptions; track option) {
+          <option
+            [value]="option"
+            [selected]="option === window()"
+            [disabled]="!rangeOptionEnabled(option)"
+            [attr.data-test]="'metrics-range-option-' + option"
+          >
+            {{ option }}
+          </option>
+        }
+      </select>
+      @if (rangeControlReason(); as reason) {
+        <span class="metrics-range-note" data-test="metrics-range-control-note">{{ reason }}</span>
+      }
+    </div>
+
+    <div class="metrics-baseline" role="group" aria-label="Previous-window comparison">
+      <label class="metrics-baseline-label" for="metrics-baseline-toggle">Baseline</label>
+      <input
+        id="metrics-baseline-toggle"
+        class="metrics-baseline-toggle"
+        type="checkbox"
+        data-test="metrics-baseline-toggle"
+        [checked]="baselineOn()"
+        [disabled]="!activeIsCentral()"
+        (change)="onBaselineChange($any($event.target).checked)"
+      />
+      @if (baselineDisabledReason(); as reason) {
+        <span class="metrics-baseline-note" data-test="metrics-baseline-disabled-reason">{{ reason }}</span>
+      }
+      @if (baselineNote(); as note) {
+        <span class="metrics-baseline-note" data-test="metrics-baseline-note">{{ note }}</span>
+      }
+      @if (baselineOn()) {
+        <span class="metrics-baseline-disclosure" data-test="metrics-baseline-disclosure">{{
+          baselineDisclosure
+        }}</span>
+      }
+    </div>
+
+    @if (rangeNote(); as note) {
+      <span class="metrics-range-note" data-test="metrics-range-note">{{ note }}</span>
+    }
+  </div>
+
   <div class="metrics-tabs-host">
-    <mat-tab-group (selectedIndexChange)="onTabChange($event)">
-      @for (section of sections; track section.id) {
-        <mat-tab [label]="section.label">
+    <mat-tab-group [selectedIndex]="activeIndex()" (selectedIndexChange)="onTabChange($event)">
+      @for (tab of tabs; track tab.entry.id) {
+        <mat-tab [label]="tab.entry.label">
           <ng-container
-            *ngComponentOutlet="section.component; inputs: tabInputs()[section.id]"
+            *ngComponentOutlet="tab.component; inputs: tabInputs()[tab.entry.id]"
           ></ng-container>
         </mat-tab>
       }
     </mat-tab-group>
   </div>
+
+  @if (drawerOpen()) {
+    <aside class="metrics-drawer" data-test="metrics-catalog-drawer">
+      <header class="metrics-drawer-head">
+        <h2 class="metrics-drawer-title">Family catalog</h2>
+        <button
+          mat-stroked-button
+          type="button"
+          (click)="closeDrawer()"
+          data-test="metrics-catalog-drawer-close"
+        >
+          Close
+        </button>
+      </header>
+      <app-metrics-family-catalog
+        [families]="families()"
+        [error]="catalogError()"
+        [onReload]="onReloadCatalog"
+      ></app-metrics-family-catalog>
+    </aside>
+  }
 </div>

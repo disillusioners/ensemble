@@ -303,3 +303,24 @@ export function formatUtcLabel(value: string): string {
   }
   return d.toISOString().slice(11, 16);
 }
+
+/**
+ * The RETENTION-TIER copy for the resources ladder (T1 phase 3, task 3.12).
+ *
+ * The ladder's 24 h and 7 d options are served from the PostgreSQL rollup
+ * ladder, whose RETENTION TIERS are a DIFFERENT axis: the raw tier keeps
+ * 30 s samples for 48 h, the minute tier keeps 60 s samples for 14 d, and
+ * the hour tier keeps hourly samples for 180 d (`daemon/config.py` — the
+ * resource monitor's `retention_raw_minutes` / `retention_minute_hours` /
+ * `retention_hour_days` knobs). The tiers BACK the ladder — they are never
+ * range options, and the UI must never offer them as such.
+ *
+ * The copy lives HERE — the resources wire contract's home — rather than in
+ * the metrics tree: the word-bounded `3600` literal is FORBIDDEN under
+ * `frontend/src/app/pages/metrics/` (phase 4's residue check, AM-23), and
+ * this copy names that tier's cadence.
+ */
+export const RESOURCES_LADDER_RETENTION_TIERS_COPY =
+  'the 24 h and 7 d options are served from the PostgreSQL ladder, whose retention tiers are ' +
+  'raw 30 s / 48 h, minute 60 s / 14 d and hour 3600 s / 180 d — the tiers back the ladder, ' +
+  'they are not range options';

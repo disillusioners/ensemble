@@ -17,14 +17,38 @@
  *   /api/metrics/series
  *
  * ── Journey ──────────────────────────────────────────────────────────
- *   gear menu → "Metrics" → /metrics → Overview (stat cards) → Charts
- *   (one SVG per series) → Families (a live family + a dark family with
- *   its reason). Zero daemon throughout.
+ *   gear menu → "Metrics" → /metrics → the manifest-driven tab list
+ *   (7 tabs) → the resource module (tab 1) → a central tab's panels →
+ *   the dark-family listing with its reason. Zero daemon throughout.
  *
- * The load-bearing assertion is the STEP-RENDERING one (approver B5): a
- * COUNTER series renders as a STEP (horizontal-then-vertical path
- * commands), a GAUGE renders as a LINE. A linear interpolation between
- * counter samples would assert values that were never observed.
+ * ── THE CANVAS-FATAL ASSERTIONS, RE-SPECIFIED (T1 phase 4, task 4.10) ──
+ *
+ * Four assertions in this file were canvas-fatal: under a Chart.js
+ * canvas renderer there is no SVG `d` attribute and no `chart-tick`
+ * element. They are re-specified here in THREE leg-classes, and the
+ * `d`-ATTRIBUTE ASSERTIONS ARE **RETIRED — NOT PRESERVED**:
+ *
+ *   | # | the retired assertion          | the replacement                        |
+ *   |---|---------------------------------|----------------------------------------|
+ *   | 1 | the COUNT on `[data-test="svg-line-chart"]` | the per-series PROXY count (`[data-test="chart-panel-proxy"]`) |
+ *   | 2 | the STEP path's `d` geometry (`H`/`V` present, no diagonal) | the proxy's `data-render-mode="step"` — the GEOMETRY moved to the renderer spec |
+ *   | 3 | the LINE path's `d` mirror (`L` present, no `H`/`V`) | the proxy's `data-render-mode="line"` — the GEOMETRY moved to the renderer spec |
+ *   | 4 | the `[data-test="chart-tick"]` SVG text | the wrapper's UTC TICK TEXT in its hidden surface (`[data-test="chart-panel-tick"]`) |
+ *
+ * Leg-classes 2 and 3 are ONE leg now: the DOM carries the render MODE
+ * and the renderer spec carries the geometry
+ * (`house-svg-renderer.spec.ts` — "a COUNTER renders STEP and a GAUGE
+ * renders LINEAR").
+ *
+ * ── THE TAB-SHAPE RE-POINT (T1 phase 7, task 7.9) ────────────────────
+ *
+ * The shell is MANIFEST-driven since T1 phase 2: the retired
+ * Overview/Charts/Families tabs are GONE and the manifest's SEVEN tabs
+ * (Resources, Runtime, DB Pool, Jobs / Queue, Instances, Checkpoint, MCP)
+ * stand. This file's tab expectations are re-pointed at that shape, and
+ * the REDIRECT LEG (the retired resources URL) is added here — it is the
+ * Playwright home of D-3's param-preserving redirect (PX-9's capture is
+ * Phase 9's).
  */
 import { test, expect, type Page, type Route } from '@playwright/test';
 
@@ -190,6 +214,70 @@ const DEGRADED_FAMILIES_PAYLOAD = {
   families: [],
 };
 
+// ── The RESOURCE MODULE's own endpoints (T1 phase 7, task 7.9) ─────────
+//
+// The resource module is tab 1 of `/metrics` — and it is the DEFAULT
+// tab, so the page renders it on every visit. Its three request classes
+// (`/live` + `/self-cost`, `/history`, `/anomalies`) must be stubbed
+// with CONTRACT-SHAPED bodies: the catch-all's `{}` is not a shape the
+// resources door ever serves, and the live strip's template reads
+// `payload.daemon.*` unguarded — an out-of-contract body makes it throw
+// during change detection (it does NOT fail an assertion, which is
+// exactly why the stub set has to be right).
+const RESOURCE_LIVE_PAYLOAD = {
+  ts: '2026-10-18T17:00:00',
+  sample_level: 'full',
+  daemon: { pid: 4242, cpu_pct: 3.1, rss_mb: 1720, threads: 44, fds: 34, uptime_s: 90_000 },
+  cgroup: {
+    memory: { current_mb: 5900, peak_mb: 6331, anon_mb: 1900, file_mb: 3400, slab_mb: 350 },
+    cpu: { usage_usec: 123_456_789, throttled_usec: 100, nr_throttled: 3 },
+  },
+  children: [],
+  instances: [],
+  attribution: { attributed_mb: 240, unattributed_mb: 60, coverage_pct: 80 },
+  overruns: { count: 0, last_ts: null },
+  self_cost: {
+    cpu_pct: 0.42,
+    cumulative_cpu_s: 12.5,
+    buffers_bytes: 2_097_152,
+    rss_budget_mb: 50,
+    threads: 1,
+    samples: 320,
+    ticks_skipped: 2,
+    flush: { batches: 5, bytes: 4096, errors: 0 },
+    profiling: { active: false, capabilities: [] },
+  },
+};
+
+const RESOURCE_HISTORY_PAYLOAD = {
+  points: [
+    { t: '2026-10-18T16:00:00', daemon_cpu: 1, daemon_rss_mb: 1700, cgroup_mem_mb: 5800, threads: 40, instances_active: 5 },
+    { t: '2026-10-18T16:15:00', daemon_cpu: 2, daemon_rss_mb: 1750, cgroup_mem_mb: 5850, threads: 42, instances_active: 5 },
+    { t: '2026-10-18T16:30:00', daemon_cpu: 3, daemon_rss_mb: 1800, cgroup_mem_mb: 5900, threads: 44, instances_active: 6 },
+    { t: '2026-10-18T16:45:00', daemon_cpu: 2, daemon_rss_mb: 1850, cgroup_mem_mb: 5950, threads: 44, instances_active: 5 },
+    { t: '2026-10-18T17:00:00', daemon_cpu: 4, daemon_rss_mb: 1900, cgroup_mem_mb: 6000, threads: 46, instances_active: 5 },
+  ],
+  resolution_used: 'raw',
+  rollup: 'none',
+  truncated: false,
+};
+
+const RESOURCE_ANOMALIES_PAYLOAD = {
+  anomalies: [
+    {
+      id: 'anom-1',
+      kind: 'memory',
+      t_start: '2026-10-18T16:30:00',
+      t_end: '2026-10-18T16:40:00',
+      peak: 1900,
+      baseline: 1700,
+      severity: 'high',
+      series_key: 'daemon_rss_mb',
+      shape: 'ramp',
+    },
+  ],
+};
+
 /** Install ALL stubs. Catch-all FIRST (lowest precedence), specifics after. */
 async function installStubs(page: Page): Promise<void> {
   await page.route('**/api/**', (route) => {
@@ -233,6 +321,18 @@ async function installStubs(page: Page): Promise<void> {
     doorCalls.push(route.request().url());
     return jsonRoute(route, SERIES_PAYLOAD);
   });
+
+  // ── The RESOURCE MODULE (tab 1 — the page's default tab) ──
+  await page.route(/\/api\/resources\/live/, (route) => jsonRoute(route, RESOURCE_LIVE_PAYLOAD));
+  await page.route(/\/api\/resources\/self-cost/, (route) =>
+    jsonRoute(route, RESOURCE_LIVE_PAYLOAD.self_cost),
+  );
+  await page.route(/\/api\/resources\/history/, (route) =>
+    jsonRoute(route, RESOURCE_HISTORY_PAYLOAD),
+  );
+  await page.route(/\/api\/resources\/anomalies(\?|$)/, (route) =>
+    jsonRoute(route, RESOURCE_ANOMALIES_PAYLOAD),
+  );
 }
 
 test.beforeEach(async ({ page }) => {
@@ -245,11 +345,17 @@ test.beforeEach(async ({ page }) => {
   page.on('pageerror', (err) => console.log(`[pageerror] ${err.message}`));
 });
 
-test('[P5] gear menu → /metrics → Overview stat cards → Charts → Families', async ({ page }) => {
+test('[P5] gear menu → /metrics → the manifest tab list → the resource module → a central tab → the family drawer', async ({
+  page,
+}) => {
   // ── Boot at '/' and open the gear menu (the only entry point). ──
   await page.goto('/');
   await expect(page.locator('[data-test="gear-menu"]')).toBeVisible();
   await page.locator('[data-test="gear-menu"]').click();
+
+  // ── The retired `Resources` gear entry is GONE (D-3): `Metrics` is
+  //    the single entry for the resource surfaces. ──
+  await expect(page.locator('a[mat-menu-item]').filter({ hasText: 'Resources' })).toHaveCount(0);
 
   const metricsItem = page.locator('a[mat-menu-item]').filter({ hasText: 'Metrics' });
   await expect(metricsItem).toBeVisible();
@@ -257,52 +363,71 @@ test('[P5] gear menu → /metrics → Overview stat cards → Charts → Familie
 
   await expect(page).toHaveURL(/\/metrics/);
 
-  // ── Three registry-driven tabs. ──
+  // ── The MANIFEST-driven tab list (T1 phase 2 replaced the retired
+  //    Overview/Charts/Families trio with the manifest's SEVEN tabs). ──
   const tabs = page.locator('[role="tab"]');
-  await expect(tabs).toHaveCount(3);
-  await expect(page.getByRole('tab', { name: 'Overview' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'Charts' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'Families' })).toBeVisible();
+  await expect(tabs).toHaveCount(7);
+  for (const label of ['Resources', 'Runtime', 'DB Pool', 'Jobs / Queue', 'Instances', 'Checkpoint', 'MCP']) {
+    await expect(page.getByRole('tab', { name: label })).toBeVisible();
+  }
 
-  // ── Overview: the stat cards of the CURRENT values. ──
-  await expect(page.locator('[data-test="overview-grid"]')).toBeVisible();
-  await expect(page.locator('[data-test="overview-grid"] .stat-card')).toHaveCount(2);
+  // ── The resource module is tab 1 and is the DEFAULT selection. ──
+  await expect(page.locator('[data-test="resource-live-strip"]')).toBeVisible();
+  await expect(page.locator('[data-test="resource-timeline-panel"]')).toBeVisible();
+
+  // ── A CENTRAL tab: the DB Pool tab binds F4 (live) + F6 (dark). ──
+  await page.getByRole('tab', { name: 'DB Pool' }).click();
+  await expect(page.locator('[data-test="central-tab-families"]')).toBeVisible();
+  await expect(page.locator('[data-test="central-tab-family-live"]')).toHaveCount(1);
+
+  // ── LEG-CLASS 1 — the per-series PROXY count (the retired
+  // `[data-test="svg-line-chart"]` count). The canvas is not
+  // inspectable; the proxy is the stable per-series handle. ──
+  await expect(page.locator('[data-test="chart-panel-proxy"]')).toHaveCount(2);
+
+  // ── LEG-CLASS 2 — the STEP/LINE distinction, carried by the proxy.
+  //
+  // The `d`-ATTRIBUTE GEOMETRY ASSERTIONS ARE **RETIRED — NOT
+  // PRESERVED**: under a canvas renderer there is no `d` attribute. The
+  // geometric truth (a COUNTER renders horizontal-then-vertical, a GAUGE
+  // renders a diagonal, and a STEP never carries a diagonal) moved to
+  // the renderer spec:
+  // `src/app/components/charts/house-svg-renderer/house-svg-renderer.spec.ts`.
   await expect(
-    page.locator('[data-test="overview-grid"]').getByText('ensemble_db_pool_native'),
-  ).toBeVisible();
+    page.locator('[data-test="chart-panel-proxy"][data-render-mode="step"]'),
+  ).toHaveCount(1);
+  await expect(
+    page.locator('[data-test="chart-panel-proxy"][data-render-mode="line"]'),
+  ).toHaveCount(1);
 
-  // ── Charts: one SVG per returned series. ──
-  await page.getByRole('tab', { name: 'Charts' }).click();
-  await expect(page.locator('[data-test="charts-grid"]')).toBeVisible();
-  await expect(page.locator('[data-test="svg-line-chart"]')).toHaveCount(2);
+  // ── LEG-CLASS 3 — the UTC tick text (the retired `[data-test="chart-tick"]`
+  // SVG text), read from the wrapper's hidden surface. The label is UTC
+  // in every process timezone (never local).
+  //
+  // The count is PER PANEL: the DB Pool tab renders ONE panel per series
+  // of its bound family (F4 → 2 names → 2 panels), and each panel carries
+  // its own tick surface. The retired Charts grid asserted 5 ticks for the
+  // whole grid; the central tab asserts the STRUCTURE (one tick group per
+  // panel) and the total (2 × 5 = 10).
+  const tickGroups = page.locator('[data-test="chart-panel-ticks"]');
+  await expect(tickGroups).toHaveCount(2);
+  const ticks = page.locator('[data-test="chart-panel-tick"]');
+  await expect(ticks).toHaveCount(10);
+  await expect(ticks.first()).toHaveText(/^\d{2}:\d{2}$/);
 
-  // ── THE STEP-RENDERING ASSERTION (approver B5). ──
-  const counterPath = page
-    .locator('[data-test="series-line"][data-render-mode="step"]')
-    .first();
-  await expect(counterPath).toHaveCount(1);
-  const counterD = (await counterPath.getAttribute('d')) ?? '';
-  expect(counterD).toContain('H');
-  expect(counterD).toContain('V');
-  // A STEP path never contains a diagonal segment between two samples.
-  expect(counterD).not.toMatch(/L\d+\.\d+,\d+\.\d+.*L\d+\.\d+,\d+\.\d+/);
-
-  const gaugePath = page.locator('[data-test="series-line"][data-render-mode="line"]').first();
-  await expect(gaugePath).toHaveCount(1);
-  const gaugeD = (await gaugePath.getAttribute('d')) ?? '';
-  expect(gaugeD).toContain('L');
-  expect(gaugeD).not.toContain('H');
-  expect(gaugeD).not.toContain('V');
-
-  // The UTC axis labels are present (never local time).
-  await expect(page.locator('[data-test="chart-tick"]').first()).toBeVisible();
-
-  // ── Families: a live family and a DARK family with its reason. ──
-  await page.getByRole('tab', { name: 'Families' }).click();
+  // ── The FAMILY CATALOG is a DRAWER now (the retired Families tab is
+  //    gone): a live family and a DARK family with its reason. ──
+  await page.locator('[data-test="metrics-catalog-drawer-toggle"]').click();
+  await expect(page.locator('[data-test="metrics-catalog-drawer"]')).toBeVisible();
   await expect(page.locator('[data-test="families-table"]')).toBeVisible();
-  await expect(page.locator('[data-test="family-live"]').first()).toBeVisible();
-  await expect(page.locator('[data-test="family-dark"]').first()).toBeVisible();
-  await expect(page.locator('[data-reason="census_gated"]')).toContainText(
+  // The pills and the reason are scoped to the DRAWER's own table — the
+  // central tab behind the drawer renders the same `data-test` pills and
+  // the same `data-reason` attribute, so an unscoped locator is a strict
+  // -mode violation (or a false positive on the wrong surface).
+  const catalog = page.locator('[data-test="families-table"]');
+  await expect(catalog.locator('[data-test="family-live"]').first()).toBeVisible();
+  await expect(catalog.locator('[data-test="family-dark"]').first()).toBeVisible();
+  await expect(catalog.locator('[data-reason="census_gated"]')).toContainText(
     'the census sampler is gated',
   );
 
@@ -322,13 +447,36 @@ test('[P5] gear menu → /metrics → Overview stat cards → Charts → Familie
   expect(doorCalls.some((url) => url.includes('9798'))).toBe(false);
 });
 
-test('[P5] deep-link /metrics renders without a daemon', async ({ page }) => {
-  await page.goto('/metrics');
-  await expect(page.locator('[data-test="overview-grid"]')).toBeVisible();
-  // The Families body is mounted lazily — the table exists once its tab
-  // is selected.
-  await page.getByRole('tab', { name: 'Families' }).click();
-  await expect(page.locator('[data-test="families-table"]')).toBeVisible();
+test('[P5] deep-link /metrics?tab=resource renders without a daemon', async ({ page }) => {
+  await page.goto('/metrics?tab=resource');
+  // The resource module is tab 1 — the deep link selects it explicitly.
+  await expect(page.locator('[data-test="resource-live-strip"]')).toBeVisible();
+  await expect(page.locator('[data-test="resource-timeline-panel"]')).toBeVisible();
+});
+
+// ── THE REDIRECT LEG (D-3 · T1 phase 7, task 7.9) ──────────────────────
+//
+// The retired resources URL is the ONE place a Playwright spec may name
+// it: as the redirect's INPUT. This leg asserts the LANDING, so it does
+// not "drive the retired route" — the retirement pin in
+// `src/app/app.resources-retirement.spec.ts` asserts exactly that
+// (no config targets the route; no spec drives it as a PAGE).
+//
+// The claim is asserted on the PARSED params, never on a raw URL string
+// (the raw string is order-brittle).
+test('[D-3] the retired resources URL lands on /metrics?tab=resource with its params preserved', async ({
+  page,
+}) => {
+  await page.goto('/resources?window=24h&x=1');
+
+  const landed = new URL(page.url());
+  expect(landed.pathname).toBe('/metrics');
+  expect(landed.searchParams.get('tab')).toBe('resource');
+  expect(landed.searchParams.get('window')).toBe('24h');
+  expect(landed.searchParams.get('x')).toBe('1');
+
+  // The redirect's target actually rendered the resource module.
+  await expect(page.locator('[data-test="resource-live-strip"]')).toBeVisible();
 });
 
 test('[P5] a FAILED registry read renders the DISTINCT degraded badge (never the empty panel, never the error banner)', async ({ page }) => {

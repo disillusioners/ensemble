@@ -16,6 +16,8 @@ import { DecimalPipe } from '@angular/common';
 
 import { MetricsService } from '../../../services/metrics.service';
 import {
+  METRICS_NO_LAST_GOOD_SUFFIX,
+  METRICS_STALE_SUFFIX_VALUES,
   MetricsSnapshotPayload,
   MetricsSnapshotSeries,
   decodeMetricsDoorError,
@@ -46,6 +48,11 @@ import {
   standalone: true,
   imports: [DecimalPipe, MatButtonModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  // The shared tab-surface styles (banner/badge/hint/meta) live in the
+  // shared partial — the A-5 consolidation; the palette/geometry
+  // authority is metrics-door-state.component.ts (see the partial's
+  // header). Only this tab's OWN rules stay inline below.
+  styleUrls: ['../shared/tab-surface.scss'],
   template: `
     <div class="overview">
       @if (error(); as message) {
@@ -102,42 +109,6 @@ import {
       .overview {
         display: block;
         padding: 0.75rem 0;
-      }
-
-      .tab-banner {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.75rem;
-        padding: 0.5rem 0.75rem;
-        margin-bottom: 0.6rem;
-        border: 1px solid #7f1d1d;
-        border-radius: 6px;
-        background: #2a1414;
-        color: #fca5a5;
-        font-size: 0.8rem;
-      }
-
-      .stale-badge {
-        display: inline-block;
-        margin-bottom: 0.5rem;
-        padding: 0.15rem 0.45rem;
-        border: 1px solid #92400e;
-        border-radius: 4px;
-        color: #fbbf24;
-        font-size: 0.72rem;
-        letter-spacing: 0.04em;
-      }
-
-      .tab-hint {
-        color: #64748b;
-        font-size: 0.8rem;
-      }
-
-      .tab-meta {
-        color: #64748b;
-        font-size: 0.72rem;
-        margin: 0 0 0.5rem;
       }
 
       .stat-grid {
@@ -290,9 +261,22 @@ export class OverviewTabComponent implements OnInit, OnDestroy {
           if (token !== this.requestSeq) {
             return;
           }
-          // A-5: the copy branches on the decoded failure class; the
-          // last-known values are kept in EVERY branch.
-          this.error.set(`${decodeMetricsDoorError(err).copy} — the last known values are kept.`);
+          // A-5: the copy branches on the decoded failure class.
+          //
+          // 8.4 — THE COPY STATES THE TRUTH FOR THE CASE THAT IS
+          // HAPPENING: the old sentence claimed "the last known values
+          // are kept" UNCONDITIONALLY, so a failure with NO last-good
+          // promised a retention that never happened while the page
+          // rendered no values at all. The suffix is now chosen by the
+          // FACT: a last-good exists ⇒ the STALE badge carries it; no
+          // last-good ⇒ the copy says so.
+          const decoded = decodeMetricsDoorError(err);
+          const hasLastGood = this.snapshot() !== null;
+          this.error.set(
+            `${decoded.copy} — ${
+              hasLastGood ? METRICS_STALE_SUFFIX_VALUES : METRICS_NO_LAST_GOOD_SUFFIX
+            }.`,
+          );
           this.stale.set(this.snapshot() !== null);
         },
       });

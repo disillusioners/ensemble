@@ -5,23 +5,36 @@ Plan: `.agents/shared/planning/resource-cost-control/plan-overview.md`.
 
 ---
 
-## 1. Reading `/resources`
+## 1. Reading the resource surface
 
-The FE page lives at the **`/resources`** route — a **lazy gear-menu entry**
-(`frontend/src/app/app.ts` settings-menu `Resources` item; lazy
-`loadComponent` route in `frontend/src/app/app.routes.ts`; landed P5). It has two
-tabs plus a self-cost chip:
+> **ROUTE CHANGE (T1 phase 7, D-3 — 2026-11-04).** The standalone
+> **`/resources`** page is **RETIRED**. The resource surface now lives at
+> **`/metrics?tab=resource`** — the metrics page's **tab 1**, reached through the
+> gear menu's **`Metrics`** entry. The old URL still works: it redirects to
+> `/metrics?tab=resource` and **carries the query params over** (e.g.
+> `/resources?window=24h` ⇒ `/metrics?window=24h&tab=resource`).
 
-- **Live tab** — one request-time sample of the monitor, polled on a gated 8 s
+The FE page lives at the **`/metrics?tab=resource`** route — the metrics page's
+**first tab** (a **gear-menu entry**: `frontend/src/app/app.ts` settings-menu
+`Metrics` item; the manifest-driven tab list in
+`frontend/src/app/pages/metrics/tabs.manifest.ts`; the lazy `loadComponent`
+route in `frontend/src/app/app.routes.ts`). It is ONE flat column — the live
+strip, the timeline panel and the anomalies panel — plus a self-cost chip:
+
+- **Live strip** — one request-time sample of the monitor, polled on a gated 8 s
   interval (skeleton on first fetch, retain-last-data on poll failure, single
   error branch). Shows the daemon block (pid/cpu/rss/threads/fds/uptime), the
   cgroup block, children, instances, the attribution summary, and overruns.
-- **Timeline tab** — history as a dependency-free inline SVG with anomaly
-  markers and click→window drill-down. Default window is **`1h`**
-  (`DEFAULT_TIMELINE_WINDOW`, `timeline-tab.component.ts`); drill-down sends
-  **Z-suffixed ISO** timestamps (UTC, `toISOString()` —
-  `svg-timeline.component.ts`) to the traceback endpoint.
+- **Timeline panel** — history as a dependency-free inline SVG with anomaly
+  markers and click→window drill-down. Default window is **`1h`**; the window
+  is the tab body's own labelled control (`Timeline range`,
+  `resource-range-select`), NOT the page frame's `Range` control. The
+  drill-down sends **Z-suffixed ISO** timestamps (UTC, `toISOString()`) to the
+  traceback endpoint.
 - **Self-cost chip** — reads `/api/resources/self-cost` (P1).
+
+The `/api/resources/*` endpoints below are **UNCHANGED** — only the FE route
+moved.
 
 ### The `/api/resources/*` surface (8 endpoints)
 
@@ -186,7 +199,8 @@ bounds for `ensemble-main.service`: **`MemoryHigh=7G`** (soft throttle; 1 G
 headroom over the 5.3–6.0 G steady cgroup band incl. reclaimable page cache) /
 **`MemoryMax=8G`** (hard cap; converts box-death into a unit-scoped kill —
 figures are approximate working values, tunable once real headroom is observed
-via `/api/resources`). **Exact commands: hygiene checklist item (a)**
+in the resource tab (`/metrics?tab=resource`) or via `GET /api/resources/history`).
+**Exact commands: hygiene checklist item (a)**
 (`docs/runbooks/resource-hygiene-operator-checklist.md`).
 
 **Swap = USER DECISION** — zero swap turns any transient spike into a direct

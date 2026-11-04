@@ -1,7 +1,7 @@
 // McpsGatewayComponent — the READ-ONLY operator page (Phase C).
 //
 // TestBed with a MOCK SERVICE (the house style — the precedent is
-// `pages/resources/resources.component.spec.ts`): the real template
+// `pages/metrics/metrics.component.spec.ts`): the real template
 // renders against a mock service whose signals the test drives. The
 // template bindings this page relies on (the three sections, the
 // degraded states, the pager, the timestamp formatting) are therefore

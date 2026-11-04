@@ -113,13 +113,19 @@
 >
 > **Zero migrations, zero new backend dependencies, zero new npm dependencies. No live promote in
 > this lane** — the user's 3-factor nonce ceremony owns it.
+>
+> **HISTORICAL (this lane) — the FE dependency posture changed LATER, deliberately.** D-1
+> (2026-11-03) adopted Chart.js v4 as the sole vendor for the interactive-panel role: the later
+> T1 metrics-dashboard lane added `chart.js` (one direct dependency) + `jest-canvas-mock` (a
+> devDependency), with the governance amendment in the SAME commit. The statements above describe
+> **the central-metrics-v1 lane's** promote, not the current tree.
 
 ### 1.1 The eight cross-cutting disclosure items, verified
 
 | # | Item | The shipped fact | Verified against |
 |---|---|---|---|
 | 1 | **Query-API posture** | auth-gated only (`maintenance:read`); **503 `AUTH_NOT_CONFIGURED`** fail-closed **before any provider read**; the door never consults the switch; the listener's default-OFF is **body-level** (socket bound, empty 200); the door's emergency-off lever is **token revocation** | `daemon/routers/metrics.py:121` (`_require_auth_on`), `:585` (the gate runs before `_query_provider`); `daemon/services/metrics_query/` reads the switch **nowhere**; `daemon/config.py:785-793` (`metrics_enabled` default `False`) |
-| 2 | **Zero FE deps** | the FE adds **no** npm dependency — the charts are a hand-rolled SVG primitive | `git diff 941cb6321..HEAD -- frontend/package.json` ⇒ **0 lines changed** |
+| 2 | **Zero FE deps** — **HISTORICAL (this lane)** | at the central-metrics-v1 promote the FE added **no** npm dependency — the charts were a hand-rolled SVG primitive. **The posture changed LATER, deliberately (D-1, 2026-11-03):** the T1 metrics-dashboard lane added `chart.js` v4 (one direct dependency, dynamically imported) + `jest-canvas-mock` (a devDependency), with the governance amendment in the SAME commit | `git diff 941cb6321..HEAD -- frontend/package.json` ⇒ **0 lines changed** at that lane's promote; the later T1 delta is asserted **by name** (`chart.js`, `jest-canvas-mock`) by the pack's expected-dependency-set leg |
 | 3 | **In-RAM buffer envelope** | array-backed ring, **16 B/point**, `POINT_BUDGET = 750 000` ⇒ **11.4 MiB** worst case; window **2 h**; lost on restart by design | `daemon/services/metrics_query/constants.py` — `POINT_BUDGET: int = 750_000`, `WINDOW_SECONDS: int = 7200` |
 | 4 | **Route/cage arithmetic** | the three routes **extend** the existing `/api/metrics` mount: the **declared-route** census **108 → 111**, the **mount** census stays **37**, the **class-manifest** family count stays **33**; all three carry `maintenance:read` | `tests/unit/metrics/test_metrics_query_scope_cage.py:37-40` (`DECLARED_ROUTE_CENSUS = 111`, `MOUNT_CENSUS = 37`, `CLASS_MANIFEST_FAMILIES = 33`); the lane's diff adds **exactly 3** scope-decorated `@router.get` routes (`git diff 941cb6321..HEAD -- daemon/routers/metrics.py`) ⇒ the pre-lane census was 108 |
 | 5 | **Extension subset + `VOCABULARY_VERSION` 2** | **16 of 26** families (10 full + 6 partial); the exclusions and each excluded metric's named seam are published in [`docs/architecture/metrics-query-api.md`](metrics-query-api.md) §6; `VOCABULARY_VERSION` = **2** (F7's op set → `{aget, other}`; F18's audit outcome → `{ok, error, timeout}`); the catalog's §14 F7c reconciliation to **582**. **The 363 is a CATALOG LIVE-ESTIMATE PROJECTION, not an enforced budget** — the shipped constant is `adjudication.CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION = 363` (renamed from `BUDGET_SERIES` by A-6, because the old name read like an enforced budget; the value is unchanged and the constant has **zero consumers**). It must **never** be compared with the **measured closed label space** (336 ⇒ 425) — the two are **different conventions** (a live estimate vs a ceiling) | `daemon/services/metrics_query/wiring/adjudication.py` — `BASELINE_SERIES = 89`, `CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION = 363`, `GLOBAL_SERIES_CAP = 2000`, `REGISTERED_FAMILIES` (16); `daemon/checkpoint_metrics.py` — `VOCABULARY_VERSION` |
@@ -150,7 +156,9 @@ findings below are **additional** and are carried in the ceremony text of §1 as
 - [ ] **The migration delta is EMPTY.** No new `.sql` ships — the catalog and the plan set amend
       **no** schema. (`daemon/migrations/versions/` is unchanged.)
 - [ ] **The backend dependency delta is EMPTY** and **the npm dependency delta is EMPTY**
-      (`frontend/package.json` — 0 lines changed).
+      (`frontend/package.json` — 0 lines changed). — **HISTORICAL (this lane):** this checklist
+      describes the central-metrics-v1 promote; the later T1 lane's FE dependency delta is
+      `chart.js` + `jest-canvas-mock` (D-1), asserted by name.
 - [ ] **The FE-manifest delta is declared**, not silent — the frontend manifest gained the
       metrics lazy chunk (and its per-file hash cascade). The tester lane's staged verification
       re-hashes the whole payload.

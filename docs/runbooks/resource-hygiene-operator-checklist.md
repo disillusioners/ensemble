@@ -26,6 +26,13 @@ Plan: `.agents/shared/planning/resource-cost-control/plan-overview.md` (runbook:
    re-reading the why.
 4. **Rollback is listed per item.** Read it BEFORE running the forward command.
 
+> **WHERE THE FIGURES ARE READ (T1 phase 7, D-3 — 2026-11-04).** The standalone
+> **`/resources`** page is **RETIRED**. The resource surface now lives at
+> **`/metrics?tab=resource`** — the metrics page's **tab 1** (gear menu →
+> `Metrics`). The old URL redirects there and carries its query params over.
+> The **`/api/resources/*` endpoints are UNCHANGED** — every `curl` below still
+> works exactly as written.
+
 ---
 
 ## (a) systemd memory bounds for `ensemble-main.service`
@@ -36,8 +43,9 @@ DEMONSTRATED mechanism, not a hypothetical: 3 kernel OOM deaths the night of Oct
 **6.7 GB** at recovery.
 
 **Derivation of the starting values** *(approximate working values for bound-setting,
-not calibrated measurements — tunable once real headroom is observed via
-`/api/resources`)*:
+not calibrated measurements — tunable once real headroom is observed in the
+resource tab (`/metrics?tab=resource`; the same figures come from
+`GET /api/resources/history`)*:
 
 - `MemoryHigh=7G` — soft throttle where reclaim pressure begins; 1 G headroom over the
   5.3–6.0 G steady cgroup band (which includes reclaimable page cache).
@@ -71,7 +79,8 @@ sudo systemctl daemon-reload
 sudo systemctl restart ensemble-main.service
 ```
 
-**Tuning.** Once `/api/resources` shows real post-bound headroom, adjust the two values
+**Tuning.** Once the resource tab (`/metrics?tab=resource`) shows real post-bound
+headroom, adjust the two values
 in the drop-in and re-run daemon-reload + restart. Note: a restart is a daemon restart —
 pick a quiet window.
 
@@ -260,7 +269,8 @@ sudo systemctl restart ensemble-main.service
 
 **Verification.** After restart:
 `systemctl show ensemble-main.service -p Environment | tr ' ' '\n' | grep MALLOC`
-and confirm the daemon's RSS trend via `/api/resources` (see (g)).
+and confirm the daemon's RSS trend in the resource tab (`/metrics?tab=resource`)
+or via `GET /api/resources/history` (see (g)).
 
 **Rollback.** Remove the drop-in file + daemon-reload + restart (same shape as (a)'s
 rollback).

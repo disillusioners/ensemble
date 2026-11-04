@@ -1,15 +1,15 @@
 // MCP Gateway — the route + gear-menu pins (Phase C).
 //
 // Source-grep pins (the house pattern — the precedent is
-// `pages/resources/resources-gear-menu.spec.ts`):
+// `pages/metrics/metrics-gear-menu.spec.ts`):
 //
 // * the page is reachable ONLY through the gear menu (there is NO
 //   top-level header link — the header nav is for the primary
 //   destinations, the gear menu is where the operator pages live);
 // * the route is LAZY (`loadComponent`) and titled;
-// * the gear-menu entry is seeded AFTER Resources and BEFORE the
+// * the gear-menu entry is seeded AFTER Snapshots and BEFORE the
 //   conditional Database/Maintenance appends, so those appends still
-//   land at the menu tail (the `resources-gear-menu.spec.ts` ordering
+//   land at the menu tail (the `metrics-gear-menu.spec.ts` ordering
 //   pin must stay green);
 // * the service is GET-only — no write verb anywhere in it.
 //
@@ -64,17 +64,22 @@ describe('MCP Gateway — gear menu entry', () => {
     expect(itemMatch).not.toBeNull();
   });
 
-  it('places MCP Gateway AFTER Resources and BEFORE the conditional appends', () => {
-    const resourcesIdx = appTs.indexOf("{ label: 'Resources'");
+  it('places MCP Gateway AFTER Snapshots and BEFORE the conditional appends', () => {
+    const snapshotsIdx = appTs.indexOf("{ label: 'Snapshots'");
     const gatewayIdx = appTs.indexOf("{ label: 'MCP Gateway'");
     const dbUpdateIdx = appTs.indexOf('settingsMenuItems.update(items => [');
 
-    expect(resourcesIdx).toBeGreaterThan(-1);
+    expect(snapshotsIdx).toBeGreaterThan(-1);
     expect(gatewayIdx).toBeGreaterThan(-1);
     expect(dbUpdateIdx).toBeGreaterThan(-1);
 
-    // Resources → MCP Gateway → (conditional Database/Maintenance appends).
-    expect(resourcesIdx).toBeLessThan(gatewayIdx);
+    // Snapshots → MCP Gateway → (conditional Database/Maintenance appends).
+    // The former anchor was `Resources`; that entry is GONE (D-3 — T1
+    // phase 7, task 7.3 retired the standalone resources page, so the
+    // surface is tab 1 of Metrics). The nearest SURVIVING anchor is
+    // `Snapshots` — the assertion is re-pointed, not weakened: it still
+    // pins the gateway BEFORE the conditional appends.
+    expect(snapshotsIdx).toBeLessThan(gatewayIdx);
     expect(gatewayIdx).toBeLessThan(dbUpdateIdx);
   });
 

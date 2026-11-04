@@ -101,6 +101,13 @@ The full verification is in `inventory-vendor/PROVENANCE.md` (§"Verification ro
 > dependency) — they are **diff-based**, not figure-based, and the fix cycles added no `.sql`, no
 > backend dependency and no npm dependency. Re-confirm them at stage time by the same diff, but
 > they are not affected by the FE change.
+>
+> **HISTORICAL (the central-metrics-v1 lane) — the npm-dependency delta is no longer empty against
+> a LATER base.** The FE dependency posture changed deliberately (D-1, 2026-11-03): the T1
+> metrics-dashboard lane added `chart.js` v4 (one direct dependency) + `jest-canvas-mock` (a
+> devDependency), with the governance amendment in the SAME commit. The claim above still describes
+> THIS lane's own delta (the diff must be taken against THIS lane's base, not against a later
+> tree); a diff taken against a post-D-1 base is NOT empty.
 
 **The build legs.** dev AOT **exit 0**; production **exit 0** with **10 budget WARNINGS** — every
 one **pre-existing** and in **another component's SCSS**; **none** of the lane's own components is

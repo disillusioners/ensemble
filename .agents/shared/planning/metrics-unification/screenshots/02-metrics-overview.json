@@ -1,0 +1,181 @@
+{
+  "file": "02-metrics-overview.png",
+  "url": "http://127.0.0.1:9797/metrics",
+  "viewport": {
+    "width": 1600,
+    "height": 1000
+  },
+  "auth_state": "unauthenticated (daemon auth disabled)",
+  "api_responses": [
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/settings/plane",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/health",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/maintenance/checkpoint-cleanup/availability",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/migration/availability",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/settings/editor",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/notifications/stream",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/prompts/pending-count",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/snapshot",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/families",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/projects",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:9797/api/metrics/snapshot",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/missions?liveness=processing,pending,paused&limit=20",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/queues/defer-blocked",
+      "phase": "01-overview-load"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:9797/api/jobs?status=queued,active",
+      "phase": "01-overview-load"
+    }
+  ],
+  "console_error_count": 6,
+  "dom_text_excerpt": "AC\nAgents Ensemble\nInstances\nSources\nSchedules\nJobs\nSkills\nPersona\nPlan\nhourglass_top\n1/1\n│\n8\nnotifications\nsettings\nv0.28.9\nMetrics\n\nCentral metrics door — families, current values and trends (UTC)\n\nThe metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics.\nRetry\nOverview\nCharts\nFamilies\nThe metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics. — the last known values are kept.\nRetry",
+  "notes": "Landing state — Overview tab (default). Shell banner + Overview tab error banner. Both error states render because the door is fail-closed (503 AUTH_NOT_CONFIGURED).",
+  "extracted_copy": {
+    "metrics-catalog-error": "The metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics.\nRetry",
+    "overview-error": "The metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics. — the last known values are kept.\nRetry",
+    "overview-stale": null,
+    "metrics-catalog-stale": null,
+    "metrics-registry-degraded": null,
+    "metrics-empty-panel": null,
+    "overview-meta": null,
+    "overview-empty": null
+  },
+  "stat_card_count": 0
+}

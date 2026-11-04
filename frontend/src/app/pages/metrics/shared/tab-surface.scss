@@ -1,0 +1,51 @@
+// The METRICS TAB SURFACE — the shared tab-body banner/badge/hint styles
+// (the A-5 consolidation).
+//
+// PALETTE + GEOMETRY AUTHORITY: `pages/metrics/metrics-door-state.component.ts`
+// — the door-state SSOT (IMPL-18 / AM-20). Its inline `.metrics-banner`
+// styles are the semantic reference for the error-banner look
+// (border #7f1d1d / background #2a1414 / text #fca5a5) and the narrow-width
+// stacking geometry. The blocks below are the tab-surface rules the charts,
+// overview and families tabs each carried inline before the consolidation —
+// moved here byte-identical, never re-authored.
+//
+// Consumers: `styleUrls` in charts-tab / overview-tab / families-tab, and
+// `@use` in the shell's metrics.component.scss (for `.stale-badge`).
+// Selectors here are DISJOINT from every consumer's component-specific
+// inline rules, so style order never decides an outcome.
+
+.tab-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.6rem;
+  border: 1px solid #7f1d1d;
+  border-radius: 6px;
+  background: #2a1414;
+  color: #fca5a5;
+  font-size: 0.8rem;
+}
+
+.stale-badge {
+  display: inline-block;
+  margin-bottom: 0.5rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #92400e;
+  border-radius: 4px;
+  color: #fbbf24;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
+.tab-hint {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.tab-meta {
+  color: #64748b;
+  font-size: 0.72rem;
+  margin: 0 0 0.5rem;
+}

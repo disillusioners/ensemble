@@ -412,6 +412,12 @@ registered family with no observation ⇒ `series_absent`.
 >
 > **Zero migrations, zero new backend dependencies, zero new npm dependencies. No live promote in
 > this lane** — the user's 3-factor nonce ceremony owns it.
+>
+> **HISTORICAL (the central-metrics-v1 lane) — the FE dependency posture changed LATER, deliberately.**
+> D-1 (2026-11-03) adopted Chart.js v4 for the interactive-panel role; the later T1
+> metrics-dashboard lane added `chart.js` + `jest-canvas-mock` with the governance amendment in the
+> SAME commit. This section is the superseded Phase-1 draft — the final text lives in
+> [`metrics-promote-disclosure.md`](metrics-promote-disclosure.md).
 
 ## 8. Gate-pack declaration (approver N-a registration obligation)
 

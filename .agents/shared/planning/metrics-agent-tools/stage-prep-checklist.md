@@ -25,8 +25,8 @@ hand-overs (the version slot → giter; the promote → the user's 3-factor nonc
 |---|---|---|---|
 | `daemon/migrations/versions/` | **EMPTY** (the lane adds NO table — P-5/D-UX-14) | `git diff --name-only <BASE> <HEAD> -- daemon/migrations/versions/` | **0 files** |
 | `pyproject.toml` | **EMPTY** (no backend dependency) | `git diff --name-only <BASE> <HEAD> -- pyproject.toml` | **0 files** |
-| `frontend/package.json` | **EMPTY** (no npm dependency) | `git diff --name-only <BASE> <HEAD> -- frontend/package.json` | **0 files** |
-| `frontend/package-lock.json` | **EMPTY** (the `npm ci` provisioning does not touch the lockfile) | `git diff --name-only <BASE> <HEAD> -- frontend/package-lock.json` | **0 files** |
+| `frontend/package.json` | **EMPTY** (no npm dependency) — **HISTORICAL (this lane)**: the metrics-agent-tools lane added none. The FE dependency posture changed LATER, deliberately (D-1, 2026-11-03): the T1 metrics-dashboard lane added `chart.js` v4 (one direct dependency) + `jest-canvas-mock` (a devDependency), with the governance amendment in the SAME commit — so a diff taken against THIS lane's base is no longer empty | `git diff --name-only <BASE> <HEAD> -- frontend/package.json` | **0 files** |
+| `frontend/package-lock.json` | **EMPTY** (the `npm ci` provisioning does not touch the lockfile) — **HISTORICAL (this lane)**: the provisioning statement still holds, but the later T1 lane's `npm install` DID change the lockfile (the D-1 dependency closure: `@kurkle/color`, `cssfontparser`, `moo-color`) | `git diff --name-only <BASE> <HEAD> -- frontend/package-lock.json` | **0 files** |
 | `config.yaml` / `daemon/config.py` | **EMPTY** (no new knob — D-UX-15) | `git diff --name-only <BASE> <HEAD> -- config.yaml daemon/config.py` | **0 files** |
 
 ---

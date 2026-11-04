@@ -1,0 +1,118 @@
+{
+  "live_version": "v0.28.9",
+  "captured_at": "2026-11-03",
+  "captures": [
+    {
+      "file": "01-metrics-unauth.png",
+      "image_id": "abe2f63055cb478da81c3ec602176948",
+      "url": "http://127.0.0.1:9797/metrics",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "fullPage": true,
+      "api_count": 27,
+      "console_errors": 6,
+      "non_get": 0,
+      "note": "Unauthenticated /metrics. Default active tab: Overview. Fail-closed AUTH_NOT_CONFIGURED state (metrics door 503). No action buttons clicked."
+    },
+    {
+      "file": "01b-metrics-unauth-narrow.png",
+      "image_id": "a6fc9fa55a634654b526356b75c5185f",
+      "url": "http://127.0.0.1:9797/metrics",
+      "viewport": {
+        "width": 900,
+        "height": 1000
+      },
+      "fullPage": true,
+      "api_count": 27,
+      "console_errors": 6,
+      "non_get": 0,
+      "note": "Same /metrics fail-closed state at narrow 900px viewport \u2014 narrow-layout behavior."
+    },
+    {
+      "file": "05-resources.png",
+      "image_id": "621efc276dde4495b7657768c4fc5127",
+      "url": "http://127.0.0.1:9797/resources",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "fullPage": true,
+      "api_count": 32,
+      "console_errors": 3,
+      "non_get": 0,
+      "note": "Unauthenticated /resources, default active tab: Live. Fully populated live data at sample time '2026-11-03 16:16:21 UTC - level full': PID 3175933, CPU 68.9%, R"
+    },
+    {
+      "file": "05b-resources-timeline.png",
+      "image_id": "69e214bb17864d49b81f0220a4bea02b",
+      "url": "http://127.0.0.1:9797/resources",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "fullPage": true,
+      "api_count": 32,
+      "console_errors": 3,
+      "non_get": 0,
+      "note": "Timeline tab after tab-switch click (GET-only). Chart renders: 1 svg, 22 path/shape elements. Series: Daemon memory, CPU and per-instance attribution \u2014 live sna"
+    },
+    {
+      "file": "05c-resources-timeline-tooltip.png",
+      "image_id": "0c71fb0160654caa981ec3a44fa5a4e1",
+      "url": "http://127.0.0.1:9797/resources",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "fullPage": false,
+      "api_count": 32,
+      "console_errors": 3,
+      "non_get": 0,
+      "note": "Timeline tab, viewport-only (1600x1000). Chart renders (1 svg, 22 path/shape elements, 3 plotted series: Daemon RSS / Cgroup memory / Daemon CPU, plus 4 unlabel"
+    },
+    {
+      "file": "05d-resources-anomalies.png",
+      "image_id": "259e5e6ebe4c4c6e94a243504fe58b44",
+      "url": "http://127.0.0.1:9797/resources",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "fullPage": true,
+      "api_count": 38,
+      "console_errors": 3,
+      "non_get": 0,
+      "note": "NO ANOMALIES SECTION IN THE FE - expander step skipped (nothing to expand). Checked BOTH tabs: on Timeline (`bodyHas 'anomal'` = false) and on Live (false). The"
+    },
+    {
+      "file": "06-app-shell.png",
+      "image_id": "97139be19f8148a1b0b46e8c23a33bb4",
+      "url": "http://127.0.0.1:9797/",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "fullPage": true,
+      "api_count": 28,
+      "console_errors": 3,
+      "non_get": 0,
+      "note": "App root shell: header nav (Instances, Sources, Schedules, Jobs, Skills, Persona, Plan), job-queue badge, notifications, gear settings menu trigger. Version bad"
+    },
+    {
+      "file": "06b-nav-gear-menu.png",
+      "image_id": "6ba90ca39f4e40298ff534ad564d85bd",
+      "url": "http://127.0.0.1:9797/",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "fullPage": false,
+      "api_count": 29,
+      "console_errors": 3,
+      "non_get": 0,
+      "note": "gear menu opened (aria-label \"Settings menu\"). Visible items: [\"architecture Blueprints\",\"Blueprints\",\"settings_input_hdmi MCP Servers\",\"MCP Servers\",\"language "
+    }
+  ]
+}

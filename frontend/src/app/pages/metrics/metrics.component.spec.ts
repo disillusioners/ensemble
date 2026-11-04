@@ -1,5 +1,5 @@
 // The METRICS PAGE SHELL spec (P5 task 5.4/5.7/5.8 · D1 pack
-// `metrics-fe-page`).
+// `metrics-fe-page`; T1 phase 2 re-points it at the 7-tab shell).
 //
 // House pattern (mirrors `resources.component.spec.ts`): a logic-mirror
 // class + production source pins + a light TestBed render.
@@ -13,35 +13,47 @@
 //   * the panel COPY (P5-M10 / AM-19(d)): it never says "disabled" and
 //     never says "error" — the door is never switch-gated;
 //   * a 200-EMPTY response never renders the error banner.
+//
+// ── THE PHASE-2 RE-POINTING (2.9) ──────────────────────────────────────
+//
+// Every assertion that still applies is PRESERVED. The assertions that
+// described the retired 3-tab shape are RE-POINTED, never deleted:
+//
+//   | was                              | now                                   |
+//   |----------------------------------|---------------------------------------|
+//   | the 3-entry section registry      | the manifest-driven 7-tab list      |
+//   | the production registry declared 3| the production source drives the list |
+//   | the template iterated `sections` | the template iterates `tabs`         |
+//   | one tab label per registry entry  | one tab label per manifest entry (7) |
+//   | the chart-primary projection      | the same projection, in the TAB BODY |
+//
+// The chart-primary projection MOVED to the tab body (each tab projects
+// ITS OWN bound families); its three assertions are preserved there, in
+// `tabs/central-tab.component.spec.ts`.
 
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
-import { Subject } from 'rxjs';
+import { ActivatedRoute, ParamMap, Router, convertToParamMap } from '@angular/router';
+import { BehaviorSubject, Subject } from 'rxjs';
 
 import { MetricsService } from '../../services/metrics.service';
 import {
   MetricsFamiliesPayload,
   MetricsFamily,
 } from '../../models/metrics.model';
-import { MetricsComponent, MetricsSection } from './metrics.component';
-import { OverviewTabComponent } from './overview/overview-tab.component';
-import { ChartsTabComponent } from './charts/charts-tab.component';
-import { FamiliesTabComponent } from './families/families-tab.component';
+import { METRICS_ROUTE_CHUNK_MARKER, MetricsComponent } from './metrics.component';
+import { METRICS_TABS } from './tabs.manifest';
 
 const metricsDir = join(__dirname);
 const componentSrc = readFileSync(join(metricsDir, 'metrics.component.ts'), 'utf-8');
 const templateSrc = readFileSync(join(metricsDir, 'metrics.component.html'), 'utf-8');
 
-/** Mirror of the production section registry — verbatim. */
+/** Mirror of the production tab list — verbatim, from the manifest. */
 class MetricsShellMirror {
-  readonly sections: readonly MetricsSection[] = [
-    { id: 'overview', label: 'Overview', component: OverviewTabComponent },
-    { id: 'charts', label: 'Charts', component: ChartsTabComponent },
-    { id: 'families', label: 'Families', component: FamiliesTabComponent },
-  ];
+  readonly tabs = METRICS_TABS;
 }
 
 function envelope(activationOverrides: Record<string, unknown> = {}) {
@@ -108,31 +120,73 @@ class StubMetricsService {
   }
 }
 
-describe('MetricsComponent — the section registry', () => {
-  it('carries exactly the three tabs, in order', () => {
+/** The router stub — it replays the parameter back, like the real one. */
+class StubRouter {
+  route: StubRoute | null = null;
+  readonly navigations: { commands: unknown; extras: unknown }[] = [];
+
+  navigate(commands: unknown, extras: unknown): Promise<boolean> {
+    this.navigations.push({ commands, extras });
+    const queryParams =
+      (extras as { queryParams?: Record<string, string | null> }).queryParams ?? {};
+    const next: Record<string, string> = {};
+    for (const [key, value] of Object.entries(queryParams)) {
+      if (value !== null && value !== undefined) {
+        next[key] = String(value);
+      }
+    }
+    this.route?.params.next(convertToParamMap(next));
+    return Promise.resolve(true);
+  }
+}
+
+/** The route stub — its parameter map is a replaying subject. */
+class StubRoute {
+  readonly params = new BehaviorSubject<ParamMap>(convertToParamMap({}));
+
+  get queryParamMap() {
+    return this.params.asObservable();
+  }
+
+  get snapshot() {
+    return { queryParamMap: this.params.value };
+  }
+}
+
+describe('MetricsComponent — the manifest-driven tab list', () => {
+  it('carries exactly the seven tabs, in the manifest order', () => {
     const shell = new MetricsShellMirror();
-    expect(shell.sections).toHaveLength(3);
-    expect(shell.sections.map((section) => section.id)).toEqual([
-      'overview',
-      'charts',
-      'families',
+    expect(shell.tabs).toHaveLength(7);
+    expect(shell.tabs.map((tab) => tab.id)).toEqual([
+      'resource',
+      'runtime',
+      'db-pool',
+      'jobs',
+      'instances',
+      'checkpoint',
+      'mcp',
     ]);
-    expect(shell.sections.map((section) => section.label)).toEqual([
-      'Overview',
-      'Charts',
-      'Families',
+    expect(shell.tabs.map((tab) => tab.label)).toEqual([
+      'Resources',
+      'Runtime',
+      'DB Pool',
+      'Jobs / Queue',
+      'Instances',
+      'Checkpoint',
+      'MCP',
     ]);
   });
 
-  it('the production registry declares exactly three entries', () => {
-    const registryBlock = componentSrc.slice(componentSrc.indexOf('readonly sections'));
-    const entryMatches =
-      registryBlock.match(/\{\s*id:\s*'(overview|charts|families)'/g) ?? [];
-    expect(entryMatches).toHaveLength(3);
+  it('the production shell drives the list from the manifest (no local registry)', () => {
+    // The old 3-entry local registry is gone — the manifest is the only
+    // tab source.
+    expect(componentSrc).toContain('METRICS_TAB_BINDINGS');
+    expect(componentSrc).not.toMatch(/readonly sections\b/);
+    expect(componentSrc).not.toMatch(/\{\s*id:\s*'(overview|charts|families)'/);
   });
 
-  it('the template iterates the registry (a hard-coded tab would silently die)', () => {
-    expect(templateSrc).toMatch(/@for\s*\(\s*section\s+of\s+sections\s*;/);
+  it('the template iterates the manifest-driven list (a hard-coded tab would silently die)', () => {
+    expect(templateSrc).toMatch(/@for\s*\(\s*tab\s+of\s+tabs\s*;/);
     expect(templateSrc).toContain('ngComponentOutlet');
     expect(templateSrc).toContain('mat-tab-group');
   });
@@ -140,6 +194,45 @@ describe('MetricsComponent — the section registry', () => {
   it('the shell imports the tab module and the dynamic outlet', () => {
     expect(componentSrc).toContain('MatTabsModule');
     expect(componentSrc).toContain('NgComponentOutlet');
+  });
+
+  it('the shell exports the ROUTE-CHUNK MARKER constant (2.13 / B3)', () => {
+    expect(METRICS_ROUTE_CHUNK_MARKER).toBe('ensemble-metrics-route-v1');
+    expect(componentSrc).toContain("export const METRICS_ROUTE_CHUNK_MARKER = 'ensemble-metrics-route-v1'");
+  });
+});
+
+describe('MetricsComponent — the dead `active` input is GONE (2.8 / AM-23)', () => {
+  it('the pinned residue check returns ZERO hits', () => {
+    // The pinned command's scope, executed in-process: the families
+    // directory + the shell source. The house command is
+    //   grep -rn "\bactive\b" frontend/src/app/pages/metrics/families/ \
+    //     frontend/src/app/pages/metrics/metrics.component.ts
+    const files = [
+      join(metricsDir, 'metrics.component.ts'),
+      ...readdirSync(join(metricsDir, 'families')).map((name) =>
+        join(metricsDir, 'families', name),
+      ),
+    ];
+    const hits: string[] = [];
+    for (const file of files) {
+      const source = readFileSync(file, 'utf-8');
+      source.split('\n').forEach((line, index) => {
+        if (/\bactive\b/.test(line)) {
+          hits.push(`${file}:${index + 1}:${line.trim()}`);
+        }
+      });
+    }
+    expect(hits).toEqual([]);
+  });
+
+  it('the catalog component declares no `active` input', () => {
+    const catalogSrc = readFileSync(
+      join(metricsDir, 'families', 'families-tab.component.ts'),
+      'utf-8',
+    );
+    expect(catalogSrc).not.toMatch(/readonly active\s*=/);
+    expect(catalogSrc).not.toMatch(/input\(false\)/);
   });
 });
 
@@ -154,6 +247,8 @@ describe('MetricsComponent — the availability-driven empty state (P5-M4 / P5-M
       providers: [
         provideNoopAnimations(),
         { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
       ],
     }).compileComponents();
     stub = TestBed.inject(MetricsService) as unknown as StubMetricsService;
@@ -214,7 +309,13 @@ describe('MetricsComponent — the availability-driven empty state (P5-M4 / P5-M
   });
 
   it('a failed catalog load is an ERROR state, not an empty state', () => {
+    // ── RE-POINTED BY PHASE 8 (task 8.2) ───────────────────────────
+    // The panel is CLASS-driven (the class selects the copy SSOT entry
+    // and the Retry policy), so the failure is set as a class. The leg
+    // keeps its intent: a failed load is an ERROR state, never the
+    // empty panel.
     component.catalogError.set('The metrics door is unreachable.');
+    component.catalogErrorCode.set('network');
     component.catalogLoaded.set(true);
     fixture.detectChanges();
     expect(component.showEmptyPanel()).toBe(false);
@@ -282,90 +383,6 @@ describe('MetricsComponent — the availability-driven empty state (P5-M4 / P5-M
   });
 });
 
-describe('MetricsComponent — the chart-primary projection', () => {
-  let fixture: ComponentFixture<MetricsComponent>;
-  let component: MetricsComponent;
-
-  beforeEach(async () => {
-    await TestBed.configureTestingModule({
-      imports: [MetricsComponent],
-      providers: [
-        provideNoopAnimations(),
-        { provide: MetricsService, useClass: StubMetricsService },
-      ],
-    }).compileComponents();
-    fixture = TestBed.createComponent(MetricsComponent);
-    component = fixture.componentInstance;
-    fixture.detectChanges();
-  });
-
-  afterEach(() => {
-    fixture.destroy();
-  });
-
-  it('projects ONLY the chart-primary families', () => {
-    component.families.set([
-      family({ id: 'F1', role: 'chart' }),
-      family({
-        id: 'F9',
-        role: 'stat',
-        names: [
-          {
-            name: 'ensemble_readiness_component_state',
-            kind: 'gauge',
-            labels: null,
-            help: '',
-            buckets: null,
-            cardinality_class: 'closed',
-            monotonic: false,
-            chart_role: 'line',
-          },
-        ],
-      }),
-    ]);
-    expect(component.chartSpecs().map((spec) => spec.name)).toEqual([
-      'ensemble_loop_lag_seconds',
-    ]);
-  });
-
-  it('carries the rendering mode of each series (a counter renders STEP)', () => {
-    component.families.set([
-      family({
-        id: 'F4',
-        role: 'chart',
-        names: [
-          {
-            name: 'ensemble_db_pool_requests_errors_total',
-            kind: 'counter',
-            labels: null,
-            help: '',
-            buckets: null,
-            cardinality_class: 'open',
-            monotonic: true,
-            chart_role: 'step',
-          },
-        ],
-      }),
-    ]);
-    expect(component.chartSpecs()[0].chartRole).toBe('step');
-  });
-
-  it('caps the selector list at the door\'s ceiling (an over-ceiling request is rejected)', () => {
-    const names = Array.from({ length: 80 }, (_unused, index) => ({
-      name: `metric_${index}`,
-      kind: 'gauge' as const,
-      labels: null,
-      help: '',
-      buckets: null,
-      cardinality_class: 'closed' as const,
-      monotonic: false,
-      chart_role: 'line' as const,
-    }));
-    component.families.set([family({ id: 'F1', role: 'chart', names })]);
-    expect(component.chartSpecs().length).toBeLessThanOrEqual(50);
-  });
-});
-
 describe('MetricsComponent — the runtime render', () => {
   let fixture: ComponentFixture<MetricsComponent>;
 
@@ -375,6 +392,8 @@ describe('MetricsComponent — the runtime render', () => {
       providers: [
         provideNoopAnimations(),
         { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
       ],
     }).compileComponents();
     fixture = TestBed.createComponent(MetricsComponent);
@@ -385,14 +404,23 @@ describe('MetricsComponent — the runtime render', () => {
     fixture.destroy();
   });
 
-  it('renders one tab label per registry entry', () => {
+  it('renders one tab label per manifest entry', () => {
     const labels = fixture.debugElement
       .queryAll(By.css('[role="tab"]'))
       .map((tab) => (tab.nativeElement.textContent ?? '').trim());
-    expect(labels.length).toBe(3);
-    expect(labels.some((label) => label.includes('Overview'))).toBe(true);
-    expect(labels.some((label) => label.includes('Charts'))).toBe(true);
-    expect(labels.some((label) => label.includes('Families'))).toBe(true);
+    expect(labels.length).toBe(7);
+    for (const tab of METRICS_TABS) {
+      expect(labels.some((label) => label.includes(tab.label))).toBe(true);
+    }
+  });
+
+  it('the old 3-tab shape is GONE (no Overview / Charts / Families tab)', () => {
+    const labels = fixture.debugElement
+      .queryAll(By.css('[role="tab"]'))
+      .map((tab) => (tab.nativeElement.textContent ?? '').trim());
+    expect(labels.some((label) => label.includes('Overview'))).toBe(false);
+    expect(labels.some((label) => label.includes('Charts'))).toBe(false);
+    expect(labels.some((label) => label.includes('Families'))).toBe(false);
   });
 });
 
@@ -407,6 +435,8 @@ describe('MetricsComponent — the DEGRADED registry read (the registry_read_ok 
       providers: [
         provideNoopAnimations(),
         { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
       ],
     }).compileComponents();
     stub = TestBed.inject(MetricsService) as unknown as StubMetricsService;
@@ -515,5 +545,506 @@ describe('MetricsComponent — the DEGRADED registry read (the registry_read_ok 
     for (const token of ['r-i', 'r-ii', 'capture_active', 'census inverted']) {
       expect(copy).not.toContain(token);
     }
+  });
+});
+
+describe('MetricsComponent — the `?tab=` deep link (2.6)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+  let route: StubRoute;
+  let router: StubRouter;
+
+  async function build(initial: Record<string, string>): Promise<void> {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
+      ],
+    }).compileComponents();
+    route = TestBed.inject(ActivatedRoute) as unknown as StubRoute;
+    router = TestBed.inject(Router) as unknown as StubRouter;
+    router.route = route;
+    route.params.next(convertToParamMap(initial));
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  }
+
+  afterEach(() => {
+    fixture?.destroy();
+  });
+
+  it('a KNOWN id selects that tab', async () => {
+    await build({ tab: 'mcp' });
+    expect(component.activeTabId()).toBe('mcp');
+    expect(component.activeIndex()).toBe(6);
+  });
+
+  it('an UNKNOWN id falls back to the default tab (tab 1)', async () => {
+    await build({ tab: 'no-such-tab' });
+    expect(component.activeTabId()).toBe('resource');
+    expect(component.activeIndex()).toBe(0);
+  });
+
+  it('the LEGACY id `overview` falls back to tab 1', async () => {
+    await build({ tab: 'overview' });
+    expect(component.activeTabId()).toBe('resource');
+  });
+
+  it('the LEGACY id `charts` falls back to tab 1', async () => {
+    await build({ tab: 'charts' });
+    expect(component.activeTabId()).toBe('resource');
+  });
+
+  it('the LEGACY id `families` falls back to tab 1', async () => {
+    await build({ tab: 'families' });
+    expect(component.activeTabId()).toBe('resource');
+  });
+
+  it('an ABSENT parameter selects the default tab (tab 1)', async () => {
+    await build({});
+    expect(component.activeTabId()).toBe('resource');
+  });
+
+  it('a legacy `?tab=overview` lands on tab 1 with NO navigation storm', async () => {
+    await build({ tab: 'overview' });
+    expect(component.activeTabId()).toBe('resource');
+    // ONE rewrite — the parameter becomes known, and a known parameter
+    // writes nothing (no loop, no history spam).
+    expect(router.navigations.length).toBe(1);
+    const extras = router.navigations[0].extras as {
+      queryParams: Record<string, string>;
+      queryParamsHandling: string;
+      replaceUrl: boolean;
+    };
+    expect(extras.queryParams).toEqual({ tab: 'resource' });
+    expect(extras.queryParamsHandling).toBe('merge');
+    expect(extras.replaceUrl).toBe(true);
+  });
+
+  it('an ABSENT parameter writes nothing', async () => {
+    await build({});
+    expect(router.navigations.length).toBe(0);
+  });
+
+  it('the tab change writes the parameter back to the URL', async () => {
+    await build({});
+    component.onTabChange(2);
+    expect(component.activeTabId()).toBe('db-pool');
+    expect(router.navigations.length).toBe(1);
+    const extras = router.navigations[0].extras as { queryParams: Record<string, string> };
+    expect(extras.queryParams).toEqual({ tab: 'db-pool' });
+  });
+
+  it('re-selecting the SAME tab writes nothing (no storm)', async () => {
+    await build({});
+    component.onTabChange(0);
+    expect(router.navigations.length).toBe(0);
+  });
+});
+
+describe('MetricsComponent — the PER-SOURCE state model (2.11 / AM-1)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+  let stub: StubMetricsService;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
+      ],
+    }).compileComponents();
+    stub = TestBed.inject(MetricsService) as unknown as StubMetricsService;
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('a failing CENTRAL source does NOT blank the custom tab\'s state', () => {
+    // The custom tab has its own state (its own source).
+    component.applyTabState('resource', {
+      doorState: 'ok',
+      families: [family({ id: 'F0.3' })],
+    });
+
+    // The central door fails.
+    component.loadCatalog();
+    stub.families$.error({
+      status: 503,
+      error: { detail: { error: 'AUTH_NOT_CONFIGURED', message: 'fail-closed' } },
+    });
+    fixture.detectChanges();
+
+    // The custom tab is untouched.
+    expect(component.tabStates()['resource'].doorState).toBe('ok');
+    expect(component.tabStates()['resource'].families.length).toBe(1);
+    // ── RE-POINTED BY PHASE 8 (task 8.3) ───────────────────────────
+    // The central tabs carry the failure as their POSTURE, and the
+    // FAILURE CLASS lives on the frame — the central state is rendered
+    // ONCE, so it is no longer published into every central tab's
+    // error class (that was the duplicate banner). The leg keeps its
+    // intent — the central failure reaches the central tabs — and now
+    // asserts the posture plus the frame's class.
+    expect(component.tabStates()['runtime'].doorState).toBe('auth_not_configured');
+    expect(component.tabStates()['runtime'].errorClass).toBeNull();
+    expect(component.catalogErrorCode()).toBe('auth_not_configured');
+  });
+
+  it('a failing CUSTOM source does NOT blank a central tab\'s state', () => {
+    component.loadCatalog();
+    stub.families$.next(payload([family({ id: 'F9' })]));
+    fixture.detectChanges();
+    expect(component.tabStates()['runtime'].families.length).toBe(1);
+
+    // The custom source fails.
+    component.applyTabState('resource', { doorState: 'network', errorClass: 'network' });
+
+    expect(component.tabStates()['runtime'].doorState).toBe('ok');
+    expect(component.tabStates()['runtime'].errorClass).toBeNull();
+    expect(component.tabStates()['runtime'].families.length).toBe(1);
+    expect(component.tabStates()['resource'].errorClass).toBe('network');
+  });
+
+  it('a tab body can write ONLY its own tab\'s state', () => {
+    const reporter = component.tabInputs()['runtime']['onState'] as (
+      patch: Record<string, unknown>,
+    ) => void;
+    reporter({ doorState: 'ok', errorClass: null });
+    expect(component.tabStates()['runtime'].doorState).toBe('ok');
+    // The custom tab's state was never written by the central tab.
+    expect(component.tabStates()['resource']).toBeUndefined();
+  });
+
+  it('the last-good families are RETAINED when the door fails', () => {
+    component.loadCatalog();
+    stub.families$.next(payload([family({ id: 'F9' })]));
+    fixture.detectChanges();
+    component.loadCatalog();
+    stub.families$.error({ status: 0 });
+    fixture.detectChanges();
+    expect(component.tabStates()['runtime'].families.length).toBe(1);
+  });
+});
+
+describe('MetricsComponent — the family-catalog drawer (2.7)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('the drawer is CLOSED by default and opens from the frame toolbar', () => {
+    expect(fixture.nativeElement.querySelector('[data-test="metrics-catalog-drawer"]')).toBeNull();
+    const toggle = fixture.nativeElement.querySelector(
+      '[data-test="metrics-catalog-drawer-toggle"]',
+    ) as HTMLElement;
+    expect(toggle).not.toBeNull();
+    toggle.click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-test="metrics-catalog-drawer"]')).not.toBeNull();
+  });
+
+  it('the drawer carries the catalog (the families tab is retired)', () => {
+    component.families.set([family({ id: 'F1' })]);
+    component.toggleDrawer();
+    fixture.detectChanges();
+    const drawer = fixture.nativeElement.querySelector(
+      '[data-test="metrics-catalog-drawer"]',
+    ) as HTMLElement;
+    expect(drawer).not.toBeNull();
+    expect(drawer.querySelector('[data-test="families-table"]')).not.toBeNull();
+    expect(drawer.querySelector('[data-family="F1"]')).not.toBeNull();
+  });
+
+  it('the drawer closes again', () => {
+    component.toggleDrawer();
+    fixture.detectChanges();
+    component.closeDrawer();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-test="metrics-catalog-drawer"]')).toBeNull();
+  });
+});
+
+// ── THE PHASE-3 FRAME SURFACE (the range control + the baseline) ────────
+//
+// The load-bearing pins:
+//
+//   * the range control's OPTION SET is the union of the manifest's
+//     ladders, and the options the ACTIVE tab cannot serve are DISABLED
+//     (the visible enforcement — the door would clamp silently);
+//   * the tab switch KEEPS the window when the new tab serves it and
+//     SNAPS to that tab's default otherwise — and the snap is ANNOUNCED
+//     (a silent snap is a lie);
+//   * the baseline toggle is scoped to the central tabs and DISABLED with
+//     its reason on the custom slot;
+//   * crossing the 1 h guard AUTO-CLEARS the baseline WITH its reason;
+//   * the fidelity disclosure is VISIBLE next to the baseline control.
+describe('MetricsComponent — the range control (3.1)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  /** The rendered options of the frame's control, with their disabled flag. */
+  function renderedOptions(): { value: string; disabled: boolean }[] {
+    const select = fixture.nativeElement.querySelector(
+      '[data-test="metrics-range-select"]',
+    ) as HTMLSelectElement;
+    expect(select).not.toBeNull();
+    return Array.from(select.options).map((option) => ({
+      value: option.value,
+      disabled: option.disabled,
+    }));
+  }
+
+  it('carries the UNION of the manifest\'s ladders', () => {
+    expect(renderedOptions().map((option) => option.value)).toEqual([
+      '15m',
+      '30m',
+      '1h',
+      '2h',
+      '24h',
+      '7d',
+    ]);
+  });
+
+  it('a CENTRAL tab shows 15m/30m/1h/2h with 24h/7d DISABLED', () => {
+    component.onTabChange(1); // runtime — a central tab
+    fixture.detectChanges();
+    const options = renderedOptions();
+    expect(options.filter((option) => !option.disabled).map((option) => option.value)).toEqual([
+      '15m',
+      '30m',
+      '1h',
+      '2h',
+    ]);
+    expect(options.find((option) => option.value === '24h')?.disabled).toBe(true);
+    expect(options.find((option) => option.value === '7d')?.disabled).toBe(true);
+  });
+
+  it('the CUSTOM tab shows 15m/1h/24h/7d with 30m/2h DISABLED', () => {
+    component.onTabChange(0); // resource — the custom slot
+    fixture.detectChanges();
+    const options = renderedOptions();
+    expect(options.filter((option) => !option.disabled).map((option) => option.value)).toEqual([
+      '15m',
+      '1h',
+      '24h',
+      '7d',
+    ]);
+    expect(options.find((option) => option.value === '30m')?.disabled).toBe(true);
+    expect(options.find((option) => option.value === '2h')?.disabled).toBe(true);
+  });
+
+  it('the frame\'s control is INERT on the custom slot, and says why (AM-19)', () => {
+    component.onTabChange(0);
+    fixture.detectChanges();
+    const select = fixture.nativeElement.querySelector(
+      '[data-test="metrics-range-select"]',
+    ) as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    const note = fixture.nativeElement.querySelector('[data-test="metrics-range-control-note"]');
+    expect(note).not.toBeNull();
+    expect((note.textContent ?? '')).toContain('own range control');
+  });
+
+  it('an option the SELECTED tab cannot serve is NEVER applied', () => {
+    component.onTabChange(1); // a central tab
+    component.selectWindow('24h');
+    expect(component.window()).not.toBe('24h');
+  });
+});
+
+describe('MetricsComponent — the tab switch (3.2)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('KEEPS the window when the new tab serves it, and says NOTHING', () => {
+    component.onTabChange(1); // runtime
+    component.selectWindow('2h');
+    component.onTabChange(2); // db-pool
+    fixture.detectChanges();
+    expect(component.window()).toBe('2h');
+    expect(fixture.nativeElement.querySelector('[data-test="metrics-range-note"]')).toBeNull();
+  });
+
+  it('SNAPS to the new tab\'s default and ANNOUNCES the snap', () => {
+    component.onTabChange(1); // runtime — a central tab
+    component.selectWindow('2h');
+    component.onTabChange(0); // resource — the custom slot
+    fixture.detectChanges();
+    expect(component.window()).toBe('1h');
+    const note = fixture.nativeElement.querySelector('[data-test="metrics-range-note"]');
+    expect(note).not.toBeNull();
+    expect((note.textContent ?? '')).toContain('snapped');
+    expect((note.textContent ?? '')).toContain('Resources');
+  });
+
+  it('a resources-only window SNAPS back onto the central default', () => {
+    component.onTabChange(0); // resource — the custom slot
+    component.selectWindow('24h');
+    component.onTabChange(1); // runtime
+    fixture.detectChanges();
+    expect(component.window()).toBe('1h');
+    expect(fixture.nativeElement.querySelector('[data-test="metrics-range-note"]')).not.toBeNull();
+  });
+});
+
+describe('MetricsComponent — the baseline toggle (3.4 / 3.5 / 3.6)', () => {
+  let fixture: ComponentFixture<MetricsComponent>;
+  let component: MetricsComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+        { provide: ActivatedRoute, useClass: StubRoute },
+        { provide: Router, useClass: StubRouter },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('the toggle is LIVE on a central tab', () => {
+    component.onTabChange(1);
+    fixture.detectChanges();
+    const toggle = fixture.nativeElement.querySelector(
+      '[data-test="metrics-baseline-toggle"]',
+    ) as HTMLInputElement;
+    expect(toggle.disabled).toBe(false);
+    component.setBaseline(true);
+    fixture.detectChanges();
+    expect(component.baselineOn()).toBe(true);
+  });
+
+  it('the CUSTOM slot renders the toggle DISABLED with its reason (3.6)', () => {
+    component.onTabChange(0);
+    fixture.detectChanges();
+    const toggle = fixture.nativeElement.querySelector(
+      '[data-test="metrics-baseline-toggle"]',
+    ) as HTMLInputElement;
+    expect(toggle.disabled).toBe(true);
+    const reason = fixture.nativeElement.querySelector(
+      '[data-test="metrics-baseline-disabled-reason"]',
+    );
+    expect(reason).not.toBeNull();
+    expect((reason.textContent ?? '')).toContain(
+      'the resources door serves a fixed 15m/1h/24h/7d vocabulary with no previous-window offset',
+    );
+  });
+
+  it('crossing 1 h AUTO-CLEARS the baseline WITH its reason (3.5a)', () => {
+    component.onTabChange(1);
+    component.setBaseline(true);
+    expect(component.baselineOn()).toBe(true);
+    component.selectWindow('2h');
+    fixture.detectChanges();
+    expect(component.baselineOn()).toBe(false);
+    const note = fixture.nativeElement.querySelector('[data-test="metrics-baseline-note"]');
+    expect(note).not.toBeNull();
+    expect((note.textContent ?? '')).toContain('1 h or less');
+  });
+
+  it('the baseline is REFUSED beyond 1 h, with the reason', () => {
+    component.onTabChange(1);
+    component.selectWindow('2h');
+    component.setBaseline(true);
+    expect(component.baselineOn()).toBe(false);
+    expect(component.baselineNote()).toContain('1 h or less');
+  });
+
+  it('the FIDELITY DISCLOSURE is visible while the baseline is on (3.8)', () => {
+    component.onTabChange(1);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-test="metrics-baseline-disclosure"]')).toBeNull();
+    component.setBaseline(true);
+    fixture.detectChanges();
+    const disclosure = fixture.nativeElement.querySelector(
+      '[data-test="metrics-baseline-disclosure"]',
+    );
+    expect(disclosure).not.toBeNull();
+    expect((disclosure.textContent ?? '')).toContain('bucket can straddle the split');
+  });
+
+  it('the tab inputs carry the window, the baseline and the range reporter (3.3)', () => {
+    component.onTabChange(1);
+    component.selectWindow('30m');
+    component.setBaseline(true);
+    fixture.detectChanges();
+    const inputs = component.tabInputs()['runtime'];
+    expect(inputs['window']).toBe('30m');
+    expect(inputs['baseline']).toBe(true);
+    expect(typeof inputs['onRangeChange']).toBe('function');
   });
 });
