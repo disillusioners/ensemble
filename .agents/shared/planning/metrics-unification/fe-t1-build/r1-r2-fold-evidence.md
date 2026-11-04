@@ -38,7 +38,7 @@ path), not merely asserted on an options bag.
 |---|---|---|
 | the ORDER — the markers reach the chart's plugin options when the anomalies arrive AFTER the mount | **RED** — `markers.length` 0 (the list stayed frozen at the mount-time snapshot) | **GREEN** — 1 marker, fields read back through the vendor's resolved proxy |
 | the NORMAL path — the mount-time markers survive a rebuild | GREEN (unchanged) | GREEN (unchanged) |
-| the VENDOR's draw path paints the late marker (`chart.resize` + `chart.draw`, the canvas mock's `arc` events) | **RED** — **0 arcs** (the marker was NEVER painted — the exact symptom) | **GREEN** — 1 arc, at the marker's own scale pixel |
+| the VENDOR's draw path paints the late marker (the post-fix repaint is driven by `chart.update()` — the fix assigns `chart.options` and calls `update()`, and ONLY `update()` re-resolves the plugin options; `resize()` merely gives the 0×0 jsdom canvas a chart area and `draw()` runs the overlay's draw path — the canvas mock's `arc` events) | **RED** — **0 arcs** (the marker was NEVER painted — the exact symptom) | **GREEN** — 1 arc, at the marker's own scale pixel |
 
 The RED state was captured by reverting ONLY the component change
 (`git checkout -- frontend/src/app/pages/metrics/charts/chart-panel.component.ts`)

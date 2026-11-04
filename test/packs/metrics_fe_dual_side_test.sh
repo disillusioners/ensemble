@@ -79,8 +79,10 @@ PACK_BUDGET_S=900
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # The dual-side BASE leg runs THIS script (the HEAD tree's copy) against a
-# throwaway DETACHED base worktree — the base tree does not carry the
-# script, so the project dir is overridable.
+# throwaway DETACHED base worktree — the base tree DOES carry the script
+# (it landed in a33943bd7), but that copy PREDATES this lane's amendments
+# to the pack (+214/-33 across the lane), so ONE script — this HEAD copy —
+# must run against BOTH trees; hence the project dir is overridable.
 if [ -n "${METRICS_FE_PROJECT_DIR:-}" ]; then
     PROJECT_DIR="$METRICS_FE_PROJECT_DIR"
 fi
