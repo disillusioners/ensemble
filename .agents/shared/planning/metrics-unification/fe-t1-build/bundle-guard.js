@@ -11,7 +11,7 @@
 // are therefore numeric + import-graph, and they live in the phase that
 // can break it.
 //
-// THE FOUR PARTS (the named baseline artifact is the single source —
+// THE FIVE PARTS (the named baseline artifact is the single source —
 // B8: a number duplicated only in plan prose is NOT a baseline):
 //
 //   (a) B1 — the numeric initial-total delta vs the frozen baseline
@@ -21,7 +21,16 @@
 //       sites anywhere, every site inside `src/app/pages/metrics/**`,
 //       every site the DYNAMIC `await import('chart.js')` form;
 //   (d) B6 — the `anyComponentStyle` warning SET (not a count) against
-//       the 9 paths captured mechanically from the phase-1 build log.
+//       the 9 paths captured mechanically from the phase-1 build log;
+//   (e) THE VENDOR-STATIC-EDGE INVARIANT (N5 enforcement, 2026-11-04) —
+//       `vendor_static_edge_count > 0` OR `vendor_in_initial_set == true`
+//       is RED. The measurement tool asserts the invariant itself and
+//       exits 4 on violation; this guard USED TO SWALLOW that exit
+//       (rendering `measurement_tool = (unavailable)` on a green run) —
+//       a false-green seam. The tool's exit status is now PROPAGATED:
+//       any non-zero measure-tool exit fails the guard, and the tool's
+//       JSON (printed even on its exit-4 path) is re-read so the
+//       invariant is enforced here too (defense in depth, IMPL-24).
 //
 // THE INITIAL SET: the guard computes it with the SAME basis as the
 // measurement tool (index.html's referenced files + the transitive
@@ -117,17 +126,52 @@ try {
 const delta = initialTotal - BASELINE_BYTES;
 
 // ── the cross-check against the measurement tool (one measurement, two readers)
+//
+// N5 (2026-11-04, tester gate): the tool's own vendor-invariant RED is a
+// NON-ZERO EXIT (4) — this block used to swallow it and render
+// `measurement_tool = (unavailable)` while the guard stayed GREEN: a
+// false-green seam. The exit status is now PROPAGATED (any non-zero tool
+// exit fails the guard), and the tool's JSON is still parsed — from
+// stdout, which the tool prints even on its exit-4 path — so the vendor
+// invariant is enforced HERE too (defense in depth, IMPL-24).
 let measureTotal = null;
+let measureJson = null;
+let measureFailure = null;
 try {
-  const measured = JSON.parse(
+  measureJson = JSON.parse(
     execFileSync(process.execPath, [MEASURE_PATH, DIST], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }),
   );
-  measureTotal = measured.initial_total_bytes;
+  measureTotal = measureJson.initial_total_bytes;
 } catch (err) {
   measureTotal = null;
+  measureJson = null;
+  // err.status = the tool's exit code (execFileSync); err.stderr = its stderr.
+  const status = typeof err?.status === 'number' ? err.status : null;
+  const stderrTail = String(err?.stderr ?? '')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .slice(-1)[0];
+  measureFailure = `the measurement tool exited ${
+    status === null ? 'with a non-zero status' : status
+  }${stderrTail ? ` — ${stderrTail}` : ''}`;
+  // N5: the tool prints its JSON even on its exit-4 invariant path —
+  // parse that stdout so the invariant below is enforced even when the
+  // tool failed (the failure and the evidence are not mutually exclusive).
+  const stdoutText = typeof err?.stdout === 'string' ? err.stdout : '';
+  if (stdoutText.trim()) {
+    try {
+      measureJson = JSON.parse(stdoutText);
+      if (typeof measureJson?.initial_total_bytes === 'number') {
+        measureTotal = measureJson.initial_total_bytes;
+      }
+    } catch {
+      measureJson = null; // non-JSON stdout — the failure line already carries the seam
+    }
+  }
 }
 
 // ── (b) the `chart.js` marker scan over the initial set ──────────────────
@@ -190,6 +234,22 @@ const warningPaths = new Set(
 const addedWarnings = [...warningPaths].filter((p) => !WARNING_BASELINE.has(p)).sort();
 const removedWarnings = [...WARNING_BASELINE].filter((p) => !warningPaths.has(p)).sort();
 
+// ── (e) the vendor-static-edge invariant (N5 enforcement, 2026-11-04) ────
+// The measurement tool fails loud on its own (exit 4), but the guard used
+// to SWALLOW that exit; the invariant is now enforced HERE, from the
+// tool's own JSON — RED on `vendor_static_edge_count > 0` OR
+// `vendor_in_initial_set == true`. When the tool never answered (the
+// MEASURE failure), the fields are unavailable and the tool failure
+// itself is the violation — the guard is fail-closed, never silent-green.
+const vendorStaticEdgeCount =
+  measureJson && typeof measureJson.vendor_static_edge_count === 'number'
+    ? measureJson.vendor_static_edge_count
+    : null;
+const vendorInInitialSet =
+  measureJson && typeof measureJson.vendor_in_initial_set === 'boolean'
+    ? measureJson.vendor_in_initial_set
+    : null;
+
 // ── The verdict ───────────────────────────────────────────────────────────
 const failures = [];
 if (distError !== null) {
@@ -229,6 +289,26 @@ if (addedWarnings.length > 0) {
 if (removedWarnings.length > 0) {
   failures.push(`B6 warning set REMOVED ${removedWarnings.length}: ${removedWarnings.join(', ')}`);
 }
+if (measureFailure !== null) {
+  failures.push(
+    `MEASURE ${measureFailure} — a swallowed non-zero measure-tool exit is a false-green seam (N5)`,
+  );
+}
+if (vendorStaticEdgeCount !== null && vendorStaticEdgeCount > 0) {
+  const sites =
+    Array.isArray(measureJson?.vendor_static_edge_sites) &&
+    measureJson.vendor_static_edge_sites.length > 0
+      ? measureJson.vendor_static_edge_sites.join('; ')
+      : 'sites unknown';
+  failures.push(
+    `VENDOR-INVARIANT RED — vendor_static_edge_count ${vendorStaticEdgeCount} > 0: ${sites}`,
+  );
+}
+if (vendorInInitialSet === true) {
+  failures.push(
+    'VENDOR-INVARIANT RED — a vendor chunk is in the initial set (vendor_in_initial_set = true)',
+  );
+}
 
 // ── The report ────────────────────────────────────────────────────────────
 console.log('=== T1 bundle guard (phase 1, task 1.9) ===');
@@ -240,6 +320,19 @@ console.log(`    baseline_bytes      = ${BASELINE_BYTES}`);
 console.log(`    delta               = ${delta} B (limit |${DELTA_LIMIT}| B)`);
 console.log(`    initial_file_count  = ${initialFiles.length}`);
 console.log(`    measurement_tool    = ${measureTotal === null ? '(unavailable)' : measureTotal} (cross-check)`);
+console.log('');
+console.log('(e) the vendor-static-edge invariant (N5 enforcement)');
+console.log(
+  `    vendor_static_edge_count = ${
+    vendorStaticEdgeCount === null ? '(unavailable)' : vendorStaticEdgeCount
+  } (invariant: 0)`,
+);
+console.log(
+  `    vendor_in_initial_set    = ${
+    vendorInInitialSet === null ? '(unavailable)' : vendorInInitialSet
+  } (invariant: false)`,
+);
+console.log(`    measurement_tool_rc      = ${measureFailure === null ? '0' : 'NON-ZERO — failed loud (see MEASURE failure)'}`);
 console.log('');
 console.log('(b) B2 — the chart.js marker scan over the initial set');
 console.log(`    initial_chunks_scanned = ${initialFiles.length}`);
@@ -271,7 +364,7 @@ for (const entry of [...WARNING_BASELINE].sort()) {
 }
 console.log('');
 if (failures.length === 0) {
-  console.log('RESULT: GREEN (B1 + B2 + B3 + B6)');
+  console.log('RESULT: GREEN (B1 + B2 + B3 + B6 + vendor-invariant + measure-propagation)');
   process.exit(0);
 }
 console.log(`RESULT: RED (${failures.length} violation(s))`);
