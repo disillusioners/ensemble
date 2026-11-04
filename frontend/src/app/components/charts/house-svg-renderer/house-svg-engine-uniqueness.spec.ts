@@ -12,14 +12,33 @@ const SRC_ROOT = join(__dirname, '..', '..', '..', '..');
 
 describe('the house SVG engine — the single-engine gate (task 4.12)', () => {
   it('is the ONLY SVG chart engine in the tree', () => {
+    // ── Council fold (agentic-1): the offender pattern is BASENAME-anchored
+    // over the WHOLE `src/app` tree, not gated on a `charts` path segment.
+    // The path-scoped form could only see a resurrection that also landed
+    // under a directory named `charts` — yet one of the two retired engines
+    // lived at `pages/resources/svg-timeline/`, so a resurrected engine in
+    // a pages-shaped path would have escaped while this spec's title
+    // claimed "the ONLY SVG chart engine in the tree".
+    //
+    // The retired engine FILES are the identity, wherever they sit:
+    //   * `svg-line-chart.{ts,html,scss,spec.ts}`  (the newer engine)
+    //   * `svg-timeline.{ts,html,scss,spec.ts}`    (the older engine)
+    // Any extension, any directory under `src/app` — the module stem is
+    // what must never come back. (The gate is deliberately extension-
+    // agnostic: a resurrection could ship as an inline template plus a
+    // companion stylesheet, so `.ts`-only scanning is too narrow.)
     const offenders: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
         if (entry.isDirectory()) {
           walk(full);
-        } else if (entry.name.endsWith('.ts') && full.includes('charts')) {
-          if (statSync(full).isFile() && /svg-(line-chart|timeline)/.test(full)) {
+        } else if (statSync(full).isFile()) {
+          const file = entry.name;
+          if (
+            /^svg-line-chart(\.|$)/.test(file) ||
+            /^svg-timeline(\.|$)/.test(file)
+          ) {
             offenders.push(full.replace(SRC_ROOT, 'frontend/src'));
           }
         }
