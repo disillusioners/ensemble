@@ -1,0 +1,159 @@
+# Phase 4: The One-Commit Pin Ceremony + the T1–T28 Test File + the Leader One-Liner
+
+## Objective
+
+Land the lane's entire payload in **exactly one commit**: the four agent trees (28 new files), the
+`agents/leader/meta.json` one-liner, the regenerated prompt-artifact baseline (161 → 177), and the new
+lane test file — with **no** content change under `agents/**` after the baseline re-stamp.
+
+The one-commit rule is house doctrine (B2): agent files and the regenerated baseline ship together, so
+no window exists in which the baseline is stale against the tree.
+
+---
+
+## Entry Criteria
+
+- **Phases 1, 2 and 3 have exited** — all 28 agent files exist and are final; the guide-compliance
+  checklist is satisfied for every authored file.
+- The test-file pattern exemplars are read: `tests/unit/agents/test_sketcher_agent.py` (the rich
+  exemplar — `test_allow_set_exact`, `test_closed_allow_is_the_fence`, `test_rule_md_at_most_seven_cardinals`,
+  `test_tone_block_in_soul`, `test_no_md_path_tokens_in_prose`, `test_no_system_internals_in_prose`,
+  `test_skill_set_entries_have_templates_and_match_versions`, `test_agent_registry_scan`) and
+  `tests/unit/test_maintenancer_team_members_within_team.py` (the pure-file-parsing org-chart test —
+  the shape for the aegis team-topology pin). **Note:** the brief's reference to
+  `tests/unit/agents/test_maintenancer_agent.py` is stale — that file does not exist (B8).
+- **A venv is required for the registry-scan leg** (T28): `tests/unit/agents/test_sketcher_agent.py:610-630`
+  spawns a probe with `sys.executable` because the system `python3` lacks `pydantic` (D9). The
+  **baseline re-stamp itself is venv-free** (B2) and is run with the bare host `python3`.
+
+---
+
+## Tasks
+
+| # | Task | Depends On | Acceptance |
+|---|------|------------|------------|
+| 1 | **Author `tests/unit/agents/test_aegis_security_family.py`** — pure file parsing wherever possible (no daemon import, no DB, no LLM) so the file runs on bare `python3`; the single exception is T28, which is venv-bound. Implement **T1–T28** exactly as enumerated in `technical-analysis.md` §DP7 (the table is the contract): T1–T4 aegis's allow/deny/`deny_spawn`/roster; T5–T7 the children's leaf teams, non-empty allow, write fence; T8–T11 no privileged category / no `job` / no `instance_read`/`instance_ops` / no `mcp_full_access`; T12–T13 the report-scrutiny fold and the children's exemption; T14–T18 the prose hygiene set (system internals, `.md` path tokens with the **enumerated exemptions**, cardinal count, tone block, adapted-from provenance); T19 the org-chart rule for the strategy skill; T20 the leader one-liner; T21–T22 the seeded-skill discipline and version match; T23 the identical FENCES block; T24 the taxonomy + every named finding-record field; T25 `worker` byte-untouched; T26–T27 the queue and model assignments; T28 the venv-bound registry scan. | Phases 1–3 exited | The file exists; `pytest tests/unit/agents/test_aegis_security_family.py` is green; **every** T-number has at least one assertion (no vacuous test). |
+| 2 | **Add the fail-open guard** — an assertion that each of the four metas' `tools` block **round-trips through the registry's parser**, because a parse failure sets the filter to "all tools allowed" (A9/R2). This is the guard that turns a lint issue into a privilege-escalation detector. | 1 | The assertion fails when a `tools` block is malformed (mutation-verified: break one meta's block, watch the test go red, restore). |
+| 3 | **Add the baseline-count assertion** — the lane test asserts the prompt-artifact baseline has **exactly 177 rows** and that the four new agents contribute exactly four rows each, so a fifth prompt file (`memory.md`/`growth.md`) or a missing one is caught **pre-stage** rather than at the stage-time leg (R4). | 1 | The assertion is red at the base commit (161 rows) and green after the re-stamp (177). |
+| 4 | **Apply the leader one-liner** — add `"aegis"` to `agents/leader/meta.json` `team_members`. `leader` holds `instance` but **no** `job` category, so `team_members` is its only agent-reach path (A4). `meta.json` is **not** in the baseline's artifact set ⇒ this edit contributes **zero** baseline rows and does not move 177. | 1 | `python3 -c "…"` shows `"aegis"` in the list; the list otherwise is unchanged; the diff is exactly one line. |
+| 5 | **Re-stamp the baseline — LAST.** Run the venv-free generator: `python3 scripts/protection/generate_prompt_artifact_baseline.py`. It writes `agents/.prompt-artifacts.sha256` atomically (tmp + rename) and prints `PROMPT-BASELINE: GENERATED — <path> (177 artifact(s))`. **No `agents/**` content change may follow this step.** | 1–4 | `wc -l agents/.prompt-artifacts.sha256` ⇒ **177**; `python3 scripts/protection/generate_prompt_artifact_baseline.py --check` ⇒ **exit 0**. |
+| 6 | **Verify the check mode** — `--check` is read-only: exit 0 clean, exit 1 drift, exit 2 no tree. Run it and confirm exit 0. Confirm the file has **no** added/missing rows (the check prints them). | 5 | Exit 0; no drift lines. |
+| 7 | **Prove the `worker` no-touch** — `agents/worker/**` is byte-identical to the base commit. T25 automates this; the author-side check is `git diff --stat 1f6898ae2 -- agents/worker/` ⇒ **empty**. | 1–4 | Empty diff for `agents/worker/`. |
+| 8 | **Prove the lane's scope** — the working tree contains **only** `agents/**` and `tests/**` changes. | 1–4 | `git status --porcelain` shows nothing under `daemon/`, `docs/`, `scripts/`, or `.agents/` (except the planning dir, which is committed separately). |
+| 9 | **Make the one commit** — stage exactly `agents/` and `tests/unit/agents/test_aegis_security_family.py`, then commit with the house commit form: `feat(aegis): add aegis security family (orchestrator + hacker/cracker/sweeper) with one-commit pin ceremony`. **Never `git add -A`** (the house hazard: a scoped add is required). Then `git show --stat HEAD` to prove the composition. | 1–8 | The commit contains: 28 new agent files, the modified `agents/leader/meta.json`, the regenerated `agents/.prompt-artifacts.sha256`, and the new test file — **and nothing else**. `git status --porcelain` is clean afterwards. |
+
+---
+
+## Gates
+
+| Gate | Requirement | How it is checked |
+|---|---|---|
+| **G4.1 — the test file is green** | `pytest tests/unit/agents/test_aegis_security_family.py` | all T1–T28 pass; no vacuous test |
+| **G4.2 — the fail-open guard bites** | Breaking one meta's `tools` block turns the lane test red | mutation check (task 2) |
+| **G4.3 — the baseline is exactly 177** | `wc -l` + the generator's own count + the lane test's assertion | 177 rows, `--check` exit 0 |
+| **G4.4 — the re-stamp was last** | No `agents/**` content change after the re-stamp | `git show --stat HEAD` ordering + the `--check` exit 0 run **after** the commit |
+| **G4.5 — one commit** | The whole payload is in a single commit | `git show --stat HEAD` — 28 new agent files + `agents/leader/meta.json` + `agents/.prompt-artifacts.sha256` + the test file |
+| **G4.6 — worker untouched** | `git diff --stat 1f6898ae2 -- agents/worker/` | empty (T25) |
+| **G4.7 — lane scope** | The diff touches only `agents/**` and `tests/**` | `git diff --stat 1f6898ae2` path list |
+| **G4.8 — clean tree** | Nothing uncommitted after the commit | `git status --porcelain` ⇒ empty |
+| **G4.9 — guide §10 pre-commit checklist** | The guide's own pre-commit checklist passes for the whole lane before the commit: no system internals; one canonical home per repeated artifact; no false "stated once" claims; ≤7 cardinals per `rule.md`; cross-references resolve (the §3 closure grep's survivors are enumerated); the tone directive present in each `soul.md`; the fan-in escape valve defined in aegis's `workflow.md`; skill versions consistent; fallbacks stay within `team_members`; no adapted-from / migrated-from / verified-from provenance; **tests pass**. | The Phase-0 checklist (all rows) + the green lane test |
+
+---
+
+## Verification Commands
+
+```bash
+cd /home/nea/ensemble-src-wt-aegis-security-family
+
+# 0) venv (needed for the lane test and the registry-scan leg T28; the baseline re-stamp does NOT need it)
+uv sync                     # creates .venv from uv.lock; requires-python >=3.13
+
+# 1) the lane test — file-parsing legs run on bare python3 too; T28 needs the venv
+.venv/bin/python -m pytest tests/unit/agents/test_aegis_security_family.py -q
+# bare-python subset (the file-parsing legs only):
+python3 -m pytest tests/unit/agents/test_aegis_security_family.py -q -k "not registry_scan"
+
+# 2) the leader one-liner is in place
+python3 -c "import json;m=json.load(open('agents/leader/meta.json'));assert 'aegis' in m['team_members'];print('leader -> aegis OK')"
+
+# 3) THE RE-STAMP (venv-free, bare host python3) — RUN THIS LAST, after every agents/** edit
+python3 scripts/protection/generate_prompt_artifact_baseline.py
+# expect: PROMPT-BASELINE: GENERATED — .../agents/.prompt-artifacts.sha256 (177 artifact(s))
+
+# 4) verify (read-only; exit 0 clean / 1 drift / 2 no tree)
+python3 scripts/protection/generate_prompt_artifact_baseline.py --check; echo "exit=$?"
+wc -l agents/.prompt-artifacts.sha256      # expect 177
+
+# 5) the composition proof
+git add agents/ tests/unit/agents/test_aegis_security_family.py
+git status --porcelain                     # inspect the staged set BEFORE committing
+git commit -m "feat(aegis): add aegis security family (orchestrator + hacker/cracker/sweeper) with one-commit pin ceremony"
+git show --stat HEAD
+git status --porcelain                     # expect empty
+
+# 6) the scope + no-touch proofs
+git diff --stat 1f6898ae2 -- agents/worker/          # expect EMPTY
+git diff --stat 1f6898ae2 --name-only | grep -v -E '^(agents/|tests/)'   # expect EMPTY
+
+# 7) the baseline is still clean AFTER the commit (proves the re-stamp was last)
+python3 scripts/protection/generate_prompt_artifact_baseline.py --check; echo "exit=$?"
+```
+
+**House notes for this phase:**
+
+- **`git add` is scoped, never `-A`.** The house hazard is real (a prior bump script's `git add -A`
+  swept unrelated files into a release commit).
+- **`uv sync` is lazy** — it is not needed before the baseline re-stamp, only before the pytest runs.
+- **`pytest -q` buffers tracebacks to the end of the session**; for a noisy run, use
+  `… | tee /tmp/aegis-lane.log >/dev/null && tail -2 /tmp/aegis-lane.log`.
+- The default pytest addopts deselect `integration` / `postgres` / `slow` / `conformance`; the lane
+  test lives in `tests/unit/`, so it is collected by default.
+
+---
+
+## Coupling
+
+- **Tight with:** P1, P2, P3 — this phase consumes their content wholesale; the commit payload **is**
+  their output. Any change to their files after the re-stamp breaks the baseline.
+- **Tight with:** P5 — P5 verifies the artifact this phase produces.
+- **Tight with:** P6 — P6 stages the tree this phase commits.
+- **Independent of:** P0 — P0 was read-only.
+
+---
+
+## Risks
+
+| # | Risk | Impact | Likelihood | Mitigation |
+|---|------|--------|------------|------------|
+| **P4-R1** | A prompt file is edited **after** the re-stamp (a review fix, a wording tweak) ⇒ the baseline drifts and the stage-time leg goes red. | Medium | Medium | Task ordering (re-stamp is task 5, the commit is task 9) + the post-commit `--check` (verification step 7) + the lane test's exact-177 assertion. Any post-stamp edit ⇒ re-stamp and amend **before** the commit is finalised. |
+| **P4-R2** | The commit accidentally carries unrelated files (a stray plan file, another lane's WIP). | Medium | Medium | Scoped `git add` only; `git status --porcelain` inspected **before** committing; `git show --stat HEAD` proves the composition afterwards. Never `git add -A`. |
+| **P4-R3** | A test is vacuous (asserts nothing, or asserts a tautology) ⇒ the lane "passes" without pinning. | High | Medium | Every T-number must have a real assertion; the file is reviewed for vacuity before the commit; the mutation checks (task 2, and the task-1 mutation legs) prove the assertions bite. |
+| **P4-R4** | The registry-scan leg (T28) fails on this host for an environment reason (no venv, missing `pydantic`) and is skipped rather than fixed. | Medium | Low | `uv sync` is a task-0 prerequisite; the leg runs under `.venv/bin/python`; a **skip** is not an acceptable outcome for T28 — the registry scan is the boot-scan proof (S3). |
+| **P4-R5** | The children end up with a `skill-set.yaml` (each would add a manifest and break the file-invoked discipline). | Medium | Low | T21 asserts that the family's only manifest is aegis's, with exactly one entry; the file set is enumerated in the phase-0 manifest. |
+| **P4-R6** | The baseline count is not 177 because a new agent gained a `memory.md` or a fifth prompt file. | Medium | Low | The count is asserted in the lane test (task 3) and re-derived at stage time; the plan states the derivation rule, and Phase 0 froze the exact file set. |
+
+---
+
+## Effort
+
+**≈ 0.5 working day** — the T1–T28 test file is the bulk (28 assertions, several of them per-agent
+parameterisations), plus the leader edit, the re-stamp and the commit.
+
+---
+
+## Exit Criterion
+
+Phase 4 is done when **all nine gates (G4.1–G4.9) are green**:
+
+1. the lane test file is green (T1–T28), with no vacuous test;
+2. the fail-open guard demonstrably bites on a broken `tools` block;
+3. the baseline has exactly **177** rows and `--check` exits 0;
+4. the re-stamp was the **last** `agents/**` content change (proved by a post-commit `--check` at exit 0);
+5. the whole payload is in **one** commit whose `git show --stat` shows exactly the 28 agent files + the
+   leader edit + the baseline + the test file;
+6. `agents/worker/**` is byte-identical to the base;
+7. the lane diff touches only `agents/**` and `tests/**`;
+8. the working tree is clean;
+9. the guide's §10 pre-commit checklist passes for the whole lane.
+
+Phase 5 then runs the full verification arc (Gates A–H) against this commit.
