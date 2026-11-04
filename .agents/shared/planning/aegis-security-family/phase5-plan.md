@@ -35,7 +35,7 @@ Eight gates, **A–H**.
 | 5 | **Gate E — the boot-scan.** Run the T28 registry-scan leg under the venv, then the tester's isolated boot-scan leg. | 1 | The registry resolves all four ids (`aegis`, `hacker`, `cracker`, `sweeper`); the isolated boot scan is clean — no new agent appears in the census, no agent fails to register, and no `tools` block parses fail-open. |
 | 6 | **Gate F — the tool-categories proof.** Confirm `.agents/shared/metrics/tool-categories.json` is **byte-unchanged** in the lane diff, and run `tests/unit/tools/test_tool_category_artifact.py`. | 1 | The artifact is byte-identical to the base and the test is green — the **F-1 trap class** (a stale committed artifact reddening a whole lane) is avoided because this lane registers **no** new category. |
 | 7 | **Gate G — the manifest delta re-derivation.** Re-derive the agents-tree file count from the **actual tree** and compare against the plan's derivation rule (338 + 28 = 366). | 1 | The re-derived count matches the rule; if it does not, the reason is identified (an extra or missing file) and the plan's arithmetic is corrected **before** staging — the number is re-derived, never trusted. |
-| 8 | **Gate H — the scope and privacy assertions.** Confirm the lane diff touches only `agents/**`, `tests/**`, **and the lane's own committed planning set `.agents/shared/planning/aegis-security-family/`** (house doctrine commits planning docs — W4); confirm no finding artifact, corpus, crash dump or secret was committed; confirm `agents/worker/**` is byte-identical. | 1 | The complement of {`agents/`, `tests/`} **equals EXACTLY the planning-dir path list** (any extra path — genuine creep — still reds); a secret scan over the diff returns zero hits; `git diff --stat <base> -- agents/worker/` is empty. |
+| 8 | **Gate H — the scope and privacy assertions over the LANE-OWN diff (Blocker 1+2).** Confirm the **lane-own diff** (this branch's own commits, pre-merge — the merge/bump/tag/giter choreography are OUTSIDE the gated set, owned by P6's giter sequence and asserted by G6.1a) touches only `agents/**`, `tests/**`, **and the lane's own committed planning set `.agents/shared/planning/aegis-security-family/`** (house doctrine commits planning docs — W4); confirm no finding artifact, corpus, crash dump or secret was committed; confirm `agents/worker/**` is byte-identical. **Blocker 1+2 separate giter-set leg (runs in P6 as G6.1a):** merge parents correct, bump = exactly the 4 house files, tag exists and is pushed. | 1 | The complement of {`agents/`, `tests/`} over the lane-own diff **equals EXACTLY the planning-dir path list** (any extra path — genuine creep — still reds); a secret scan over the diff returns zero hits; `git diff --stat <base> -- agents/worker/` is empty. |
 | 9 | **Record the evidence.** Write the verification report into the lane's evidence location with the gate-by-gate result, the exact commands, the base-vs-HEAD failure-list diff, and every disclosed pre-existing red. | 1–8 | The report is complete enough that a reviewer can re-run every gate without re-deriving it, and every disclosed deviation is named. |
 
 ---
@@ -48,10 +48,10 @@ Eight gates, **A–H**.
 | **B** | `SEALED_SHA_BASELINES` untouched (35 entries) | `TestPhaseDDoesNotModifySealedArtifacts` green on the branch |
 | **C** | The plane read-holder census is unchanged | census test green; `DISCLOSED_READ_HOLDERS` == `{"watcher"}` |
 | **D** | The report-integrity fold + the repo-wide prompt-surface sweep landed (W5, two named legs) | `test_report_integrity_prompts.py` green (D-1); `test_prompt_section_reference_integrity.py` green over the lane's 16 prompt + 4 skill-body files (D-2) |
-| **E** | Boot-scan clean on the new agent set | T28 registry scan finds all four ids; the isolated boot scan is clean |
+| **E** | Boot-scan clean on the new agent set + **the T29 legality-cardinal matrix (Blocker 4)** | T28 registry scan finds all four ids; the isolated boot scan is clean; **the T29 20-assertion matrix green — including the approver acceptance test (hacker "no external targets, ever" deletion ⇒ RED)** |
 | **F** | No tool-category drift | the artifact is byte-unchanged; `test_tool_category_artifact.py` green |
 | **G** | The manifest delta is re-derived from the real tree | `find agents -type f \| wc -l` matches the derivation rule |
-| **H** | Scope + privacy | the diff touches only `agents/**` + `tests/**` + the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/` — W4); no committed finding/corpus/secret; `worker` byte-identical |
+| **H** | Scope + privacy (LANE-OWN diff, Blocker 1+2) | the lane-own diff touches only `agents/**` + `tests/**` + the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/` — W4); the giter set is outside this gate (G6.1a owns it); no committed finding/corpus/secret; `worker` byte-identical |
 
 ---
 
@@ -78,6 +78,10 @@ grep -n 'DISCLOSED_READ_HOLDERS' tests/unit/tools/test_plane_agent_surface_censu
 # --- Gate D: the report-integrity dynamic check --------------------------
 .venv/bin/python -m pytest tests/unit/test_report_integrity_prompts.py -q
 
+# --- Gate A supplementary leg: the T29 legality-cardinal pin matrix (Blocker 4) ----------
+.venv/bin/python -m pytest tests/unit/agents/test_aegis_security_family.py -q -k legality
+# approver acceptance test: delete hacker's "no external targets, ever" cardinal → this leg REDS
+
 # --- Gate E: the boot-scan / registry scan -------------------------------
 .venv/bin/python -m pytest tests/unit/agents/test_aegis_security_family.py -q -k registry
 
@@ -94,10 +98,13 @@ git diff --name-status $BASE -- agents/ | awk '$1=="A"' | wc -l           # expe
 # the complement of {agents/, tests/} equals the planning set. POSIX-safe form — /bin/sh is dash
 # and `diff <(...)` is a PARSE error there (exit 2 before any || fallback can fire). Write both
 # sides to temp files, then plain diff:
+# BLOCKER 1+2: this gate runs over the LANE-OWN diff (the feature branch's own commits, pre-merge).
+# The merge commit, bump commit, tag and giter choreography are OUTSIDE the gated set (P6 G6.1a
+# asserts them separately: merge parents correct, bump = exactly the 4 house files, tag pushed).
 git diff --name-only $BASE | grep -v -E '^(agents/|tests/)' | sort > /tmp/aegis-scope-complement.txt
 git diff --name-only $BASE | grep '^\.agents/shared/planning/aegis-security-family/' | sort > /tmp/aegis-scope-planning.txt
 if diff /tmp/aegis-scope-complement.txt /tmp/aegis-scope-planning.txt; then
-  echo "Gate H scope OK: complement == exactly the planning set"
+  echo "Gate H scope OK (lane-own diff): complement == exactly the planning set"
 else
   echo "Gate H FAIL: out-of-scope paths beyond the planning set (both temp files retained for inspection)"; exit 1
 fi
@@ -166,10 +173,10 @@ Phase 5 is done when **all eight gates (A–H) are green** and the evidence repo
 - **B** — `TestPhaseDDoesNotModifySealedArtifacts` green; the 35 sealed entries unchanged;
 - **C** — the plane census green with `DISCLOSED_READ_HOLDERS` still `{"watcher"}`;
 - **D** — the report-integrity dynamic check green **and** the repo-wide prompt-section-reference sweep green over the lane's 20 files (W5, two named legs);
-- **E** — the registry scan finds all four agents; the isolated boot scan is clean;
+- **E** — the registry scan finds all four agents; the isolated boot scan is clean; **the T29 legality-cardinal matrix (20 assertions) green, approver acceptance test exercised**;
 - **F** — the tool-categories artifact byte-unchanged; its test green;
 - **G** — the agents-tree count re-derived from the real tree matches the derivation rule;
-- **H** — the diff touches only `agents/**`, `tests/**` and the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/`, W4); no committed finding/corpus/secret;
+- **H** — the **lane-own diff** touches only `agents/**`, `tests/**` and the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/`, W4); the merge/bump/tag/giter set is outside the gate (G6.1a, Blocker 1+2); no committed finding/corpus/secret;
   `worker` byte-identical;
 
 **and** the evidence report names every disclosed pre-existing red, every timeout gap with its replay

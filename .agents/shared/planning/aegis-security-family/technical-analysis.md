@@ -642,7 +642,7 @@ open ──▶ in-remediation ──▶ re-verify-pending ──▶ resolved
    reference, exactly as the maintenancer org-chart test treats *"ask the leader"* (B8). aegis also
    does **not** use the critical-notes channel: it is leader-curated with leader-only verbs (D11).
 2. **leader → developer** (leader's decision, leader's dispatch).
-3. **developer → aegis (re-verify request)**: *"fix landed for F-003, F-007 — re-verify."* Reachable
+3. **leader → aegis (re-verify request, relayed from developer)** *(label corrected — n2, approver iter-001: the pre-fix label "developer → aegis" named an **unreachable peer**: `developer` is not in aegis's `team_members` and its own team list does not name aegis, so developer cannot message aegis directly — the request routes **through `leader`**)*: *"fix landed for F-003, F-007 — re-verify."* Reachable
    because `aegis` is in leader's `team_members` (DP1's one-liner, A4) and leader can message aegis.
 4. **aegis → its own children (re-verify)**: aegis re-dispatches **sweeper** (re-scan) or **hacker**
    (re-fuzz) — the lanes that produced the original finding — with the specific finding as the scope.
@@ -873,6 +873,7 @@ exception is the registry-scan leg, which needs the venv interpreter.
 | T26 | `test_default_queue_parallel` ×4 | all four declare `system_parallel_queue` | DP5 |
 | T27 | `test_model_assignments` | aegis = `agentic`; children = `coding` | DP6 |
 | T28 | `test_registry_scan_aegis_family` | subprocess probe asserting `get_registry().exists()` for all four ids — **venv-bound** (D9) | boot-scan leg |
+| **T29** *(Blocker 4, approver iter-001)* | **`test_legality_cardinal_pin_matrix` — the legality-cardinal pin matrix: 5 guardrail lines × 4 personas = 20 verbatim-grep assertions** (AM-6 α/β mechanism generalised). Each pin greps the cardinal text **VERBATIM** in the persona file and reds on deletion/mutation: (1) read-only-on-targets; (2) self-owned-sandbox-only / zero-external-targets; (3) synthetic-sample-data-only (cracker; aegis/hacker/sweeper assert its ABSENCE as a non-applicable family, so the matrix stays 5×4 with per-agent applicability recorded); (4) findings-private; (5) white-hat-ethos. **Approver acceptance test: deleting the "no external targets, ever" cardinal from `hacker/rule.md` must RED.** Registered as a discrete T29 BLOCK — T1–T28 references are cross-cited across five files; renumbering would destabilise them (planner registration decision, recorded) | legality-line enforcement (Blocker 4) |
 
 ### Existing tests this lane must not break — and the leg that proves it
 
