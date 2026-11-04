@@ -29,7 +29,7 @@
  * The order is load-bearing: the timeline's five series take the FIRST
  * five entries, so a palette change moves both consumers together.
  */
-export const CHART_SERIES_COLORS: readonly string[] = [
+const CHART_SERIES_COLORS: readonly string[] = [
   '#38bdf8',
   '#a78bfa',
   '#34d399',

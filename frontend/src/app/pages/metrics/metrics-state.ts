@@ -32,12 +32,6 @@ import {
 } from '../../models/metrics.model';
 
 /**
- * The SOURCE seam — the manifest's `central | custom` slot. The two
- * values are the two sources the metrics page reads from.
- */
-export type MetricsSourceSlot = 'central' | 'custom';
-
-/**
  * The door-state class of a source.
  *
  * `ok` — the source answered; `loading` — it has not answered yet; every

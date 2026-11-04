@@ -86,12 +86,8 @@ export const CHART_POINT_RADIUS = 2.2;
  */
 export const CHART_STROKE_WIDTH = 1.6;
 
-/** The anomaly marker's lane (the dot row above the plot). */
-export const TIMELINE_MARKER_LANE_Y = 24;
 /** The anomaly marker's dot radius. */
 export const TIMELINE_MARKER_RADIUS = 6;
-/** The anomaly marker's invisible hit radius (the touch target). */
-export const TIMELINE_MARKER_HIT_RADIUS = 12;
 
 /**
  * The house GEOMETRY — the coordinate system the helpers project into.
@@ -601,21 +597,12 @@ export function formatUtcClock(ms: number): string {
   return formatChartUtc(ms);
 }
 
-/** The ported alias of the house viewBox width (one geometry). */
-export const TIMELINE_VIEW_WIDTH = CHART_VIEW_WIDTH;
-/** The ported alias of the house viewBox height (one geometry). */
-export const TIMELINE_VIEW_HEIGHT = CHART_VIEW_HEIGHT;
+// The three ported aliases that remain are the REFERENCED ones (their
+// consumers are the renderer specs and the timeline geometry); the six
+// zero-reference siblings were removed with the consolidation sweep.
 /** The ported alias of the house plot left edge (one geometry). */
 export const TIMELINE_PLOT_LEFT = CHART_PLOT_LEFT;
 /** The ported alias of the house plot right edge (one geometry). */
 export const TIMELINE_PLOT_RIGHT = CHART_PLOT_RIGHT;
-/** The ported alias of the house plot top edge (one geometry). */
-export const TIMELINE_PLOT_TOP = CHART_PLOT_TOP;
-/** The ported alias of the house plot bottom edge (one geometry). */
-export const TIMELINE_PLOT_BOTTOM = CHART_PLOT_BOTTOM;
-/** The ported alias of the house plot width (one geometry). */
-export const TIMELINE_PLOT_WIDTH = CHART_PLOT_WIDTH;
-/** The ported alias of the house plot height (one geometry). */
-export const TIMELINE_PLOT_HEIGHT = CHART_PLOT_HEIGHT;
 /** The ported alias of the house tick count (one geometry). */
 export const TIMELINE_TICK_COUNT = CHART_TICK_COUNT;

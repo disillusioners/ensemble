@@ -27,16 +27,6 @@
  * know how a renderer draws anything.
  */
 
-/** One baseline series — the shape a renderer draws as its second dataset. */
-export interface MetricsBaselineSeries {
-  /** The stable identity of the series (the `data-series` hook). */
-  readonly id: string;
-  /** The human label — the renderer draws it in the legend. */
-  readonly label: string;
-  /** The samples — epoch-ms `t`, numeric `v`. */
-  readonly points: readonly { readonly t: number; readonly v: number }[];
-}
-
 /**
  * The CONTRACT — the declared wiring, in one place.
  *
@@ -59,28 +49,3 @@ export const METRICS_BASELINE_CONTRACT = {
   /** The split is anchored on the RESPONSE's window, never the client clock. */
   splitAnchor: 'response-window',
 } as const;
-
-/**
- * The frame's baseline dataset for one panel — the previous window's
- * series, ready for a renderer.
- *
- * The frame hands the renderer SERIES, never pixels: the renderer owns the
- * drawing, the frame owns the data.
- */
-export function metricsBaselineDataset(
-  series: readonly { readonly name: string; readonly labels: Record<string, string>; readonly points: readonly (readonly [number, number])[] }[],
-  labelSuffix = 'previous window',
-): MetricsBaselineSeries[] {
-  return series.map((entry) => {
-    const label = Object.keys(entry.labels).length
-      ? `${entry.name} {${Object.entries(entry.labels)
-          .map(([key, value]) => `${key}=${value}`)
-          .join(',')}}`
-      : entry.name;
-    return {
-      id: `${label} — ${labelSuffix}`,
-      label: `${label} (${labelSuffix})`,
-      points: entry.points.map((point) => ({ t: point[0] * 1000, v: point[1] })),
-    };
-  });
-}

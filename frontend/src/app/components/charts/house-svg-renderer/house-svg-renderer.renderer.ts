@@ -29,9 +29,6 @@ import { HouseSvgRendererComponent } from './house-svg-renderer.component';
  * direction stays `pages → components`.
  */
 
-/** The house SVG renderer's id. */
-export const HOUSE_SVG_RENDERER_ID = 'house-svg';
-
 /** The mini role's renderer id. */
 export const HOUSE_SVG_MINI_RENDERER_ID = 'house-svg-mini';
 

@@ -27,7 +27,7 @@ import {
   HouseDataEnd,
   createHouseDataEndOverlayPlugin,
 } from './data-end-overlay-plugin';
-import { HOUSE_CROSSHAIR_PLUGIN_ID, createHouseCrosshairPlugin } from './crosshair-plugin';
+import { createHouseCrosshairPlugin } from './crosshair-plugin';
 
 /**
  * The Chart.js PANEL WRAPPER — the interactive-panel role (T1 phase 4,

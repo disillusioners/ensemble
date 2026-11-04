@@ -290,19 +290,6 @@ export function metricsPayloadPointCount(payload: MetricsSeriesPayload | null): 
   return points;
 }
 
-/** The window's own span in seconds — derived from the RESPONSE's anchors. */
-export function metricsPayloadSpanS(payload: MetricsSeriesPayload | null): number | null {
-  if (!payload) {
-    return null;
-  }
-  const fromMs = parseNaiveUtc(payload.window.from_utc).getTime();
-  const toMs = parseNaiveUtc(payload.window.to_utc).getTime();
-  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
-    return null;
-  }
-  return (toMs - fromMs) / 1000;
-}
-
 // ── THE COPY (the frame's states) ───────────────────────────────────────
 
 /**
