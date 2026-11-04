@@ -20,10 +20,20 @@ Design notes that matter to every leg:
   cells, every cell positive with its per-persona form** (R1 leader ruling
   2026-11-04). Anchors are CASE-SENSITIVE verbatim substrings of the
   persona cardinals; deleting or mutating the cardinal reds its cell.
+  Every anchor is SINGLE-SITE by construction — it occurs exactly ONCE in
+  its persona's ``rule.md`` — so the plan's own named acceptance mutation
+  (deleting the anchored clause) reds the cell instead of leaving a second
+  occurrence behind.
 * **T30 closes the B9 false-green class**: uniform deletion of a FENCES
   bullet across all three bodies keeps cross-body byte-identity (T23 green)
   — the per-bullet presence pin reds anyway because it checks each bullet
   against a FIXED expected list, not against the sibling bodies.
+* **T30's static and executed legs are separate.** The static leg proves the
+  checksum compare is DEFINED and CALL-SITED; the executed leg sources the
+  library and really runs the verify function (unset pin => rc=1 +
+  ``HARD_BLOCKER``). The same split holds for the corpus-path guard: a
+  static call-site leg plus an executed leg that really refuses an
+  out-of-sandbox path.
 * **The baseline leg asserts file-exists + exactly-177 rows** (AM-11): the
   generator's ``--check`` exits 0 both when clean AND when the file is
   absent, so ``rc=0`` alone proves nothing.
@@ -32,6 +42,7 @@ Design notes that matter to every leg:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -137,7 +148,13 @@ _LEGALITY_MATRIX: dict[tuple[str, str], tuple[str, ...]] = {
     ("sweeper", "read-only-on-targets"): ("the target tree is read, never written",),
     # family 2 — self-owned sandbox / zero external targets
     ("aegis", "sandbox-zero-external"): ("prefix-match of the engagement sandbox root",),
-    ("hacker", "sandbox-zero-external"): ("external targets, ever",),
+    # The anchor is SINGLE-SITE by construction: every anchor string below
+    # must occur exactly ONCE in its persona's rule.md, so the plan's own
+    # named acceptance mutation (delete the anchor's clause) REDS the cell.
+    # ("No external targets, ever" — the body clause of cardinal 2 — is
+    # single-site; the shorter "external targets, ever" occurs twice, in the
+    # cardinal TITLE and in the body clause, and therefore does NOT bite.)
+    ("hacker", "sandbox-zero-external"): ("No external targets, ever",),
     ("cracker", "sandbox-zero-external"): ("prefix-match of the engagement sandbox root",),
     ("sweeper", "sandbox-zero-external"): ("prefix-match of the engagement sandbox root",),
     # family 3 — sample-data-only, per-persona form (R1 ruling):
@@ -168,7 +185,7 @@ LEGALITY_CELLS = sorted(_LEGALITY_MATRIX.keys())
 # cross-body byte-identity survives).
 # ---------------------------------------------------------------------------
 EXPECTED_FENCES_BULLETS = (
-    "class (iii) everything else — target codebases included — is never written, at any time, by any path",
+    "class (iii) every other user path — the target codebase included — is never written, at any time, by any path",
     "Docker is absent from this host and must never be installed or used",
     "every dependency resolves user-space, and a missing prerequisite is a stop, never an install",
     "a fetched asset is downloaded, sha256-verified, and only then promoted",
@@ -744,14 +761,27 @@ class TestLegalityCardinalPinMatrix:
 
     def test_hacker_external_targets_anchor_deletion_reds(self):
         """Self-proof the matrix bites: the hacker f2 anchor really is inside
-        a numbered cardinal (so cardinal deletion removes it)."""
-        rule = _read("hacker", "rule.md")
-        cardinal = next(
-            block for block in rule.split("\n\n")
-            if "external targets, ever" in block
+        a numbered cardinal (so cardinal deletion removes it).
+
+        The assertion is on the anchor's OWN LINE — the earlier form matched
+        the FIRST line of the anchor's *block*, and the hacker's cardinals 1
+        and 2 share one block (they are consecutive lines with no blank line
+        between them), so the match landed on cardinal 1 and the mutation
+        "2. **...**" -> "XX. **...**" left the leg green.
+
+        The anchor is read from the matrix itself, so the self-proof cannot
+        drift away from the cell it is proving.
+        """
+        anchor = _LEGALITY_MATRIX[("hacker", "sandbox-zero-external")][0]
+        lines = [
+            ln for ln in _read("hacker", "rule.md").splitlines() if anchor in ln
+        ]
+        assert len(lines) == 1, (
+            f"hacker f2 anchor {anchor!r} must occur on exactly ONE line "
+            f"(deletion of that line must red the cell), got {len(lines)}"
         )
-        assert re.match(r"^\d+\.\s\*\*", cardinal), (
-            "hacker f2 anchor not inside a numbered cardinal — deletion would not red"
+        assert re.match(r"^\d+\.\s\*\*", lines[0]), (
+            "hacker f2 anchor not on a numbered cardinal line — deletion would not red"
         )
 
 
@@ -777,16 +807,203 @@ class TestInstallerFencesAndLibraryContract:
         )
 
     @pytest.mark.parametrize("agent", CHILDREN)
-    def test_checksum_compare_is_executed(self, agent):  # T30(b)
-        """The sha256 compare is EXECUTED in the install flow — the verify
-        function is defined AND invoked with the staged asset + pinned digest
-        (a definition alone would be dead code)."""
+    def test_checksum_compare_is_invoked(self, agent):  # T30(b)
+        """The sha256 compare is WIRED into the install flow: the verify
+        function is defined, and EVERY promotion of a fetched asset into the
+        toolchain bin is preceded by a verify call.
+
+        A generic "some call site exists" check cannot tell a gated promotion
+        from an ungated one — a library with two assets and one verify call
+        passes it — so the check is PER-PROMOTION: the checksum-compare must
+        precede every promotion.
+
+        This leg is STATIC (source order). The EXECUTED behaviour is pinned
+        separately by ``test_checksum_compare_refuses_unset_pin`` below, so
+        neither leg over-claims the other's evidence."""
         lib = _lib_path(agent).read_text(encoding="utf-8")
         assert re.search(r"^aegis_verify_sha256\(\)", lib, re.MULTILINE), (
             "aegis_verify_sha256 not defined"
         )
-        call_sites = re.findall(r"aegis_verify_sha256\s+\"\$[^\"]*\"[^)]*", lib)
-        assert call_sites, "aegis_verify_sha256 defined but never invoked (not executed)"
+        code = [
+            (i, ln) for i, ln in enumerate(lib.splitlines())
+            if not ln.lstrip().startswith("#")
+        ]
+        verifies = [
+            i for i, ln in code if re.search(r"\baegis_verify_sha256\s+\"", ln)
+        ]
+        assert verifies, "aegis_verify_sha256 is never called (not executed)"
+        promotions = [
+            i for i, ln in code
+            if re.search(r"\b(cp|chmod)\s+\S+.*AEGIS_TOOLBENCH_ROOT/bin/", ln)
+        ]
+        assert promotions, (
+            f"{agent} library promotes no fetched asset — the promotion shape changed"
+        )
+        ungated = [i for i in promotions if not any(v < i for v in verifies)]
+        assert not ungated, (
+            f"{agent} promotes an asset with no preceding aegis_verify_sha256 "
+            f"call (line(s) {sorted(u + 1 for u in ungated)}) — the checksum "
+            "gate does not cover every promotion"
+        )
+
+    @pytest.mark.parametrize("agent", CHILDREN)
+    def test_checksum_compare_refuses_unset_pin(self, agent, tmp_path):
+        """T30(b) EXECUTED leg: the verify function really runs — sourcing the
+        library and calling it with the placeholder pin the library itself
+        ships returns rc=1 and emits the HARD_BLOCKER refusal.
+
+        Nothing is downloaded, no install runs, and no release asset is
+        involved: the only command executed is the verify function against a
+        scratch file. HOME is redirected into the sandbox so the library's
+        env-overridable roots resolve there and nothing touches the real
+        user tree.
+        """
+        lib = _lib_path(agent)
+        asset = tmp_path / "asset.bin"
+        asset.write_bytes(b"not-a-release-asset\n")
+        probe = tmp_path / "verify_probe.sh"
+        probe.write_text(
+            '. "$1"\n'
+            'aegis_verify_sha256 "$2" "pin-before-first-install"\n',
+            encoding="utf-8",
+        )
+        scratch_home = tmp_path / "home"
+        scratch_home.mkdir()
+        env = dict(os.environ)
+        env["HOME"] = str(scratch_home)
+        for _k in [k for k in env if k.startswith("POSTGRES_")]:
+            env.pop(_k, None)
+        result = subprocess.run(
+            ["/bin/sh", str(probe), str(lib), str(asset)],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert result.returncode == 1, (
+            f"{agent} aegis_verify_sha256 did not refuse the unset pin "
+            f"(rc={result.returncode}); stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
+        assert "HARD_BLOCKER" in result.stdout and "missing sha256 pin" in result.stdout, (
+            f"{agent} unset-pin refusal did not emit the HARD_BLOCKER message: "
+            f"stdout={result.stdout!r}"
+        )
+
+    def test_corpus_path_guard_is_invoked(self):
+        """The corpus-path guard is ENFORCED, not merely defined: the
+        library's only sanctioned corpus write calls it. A definition with
+        zero call sites is dead code, and the skill body's corpus prose would
+        then be claiming a runtime gate that does not exist."""
+        lib = _lib_path("cracker").read_text(encoding="utf-8")
+        assert re.search(r"^aegis_write_synthetic_corpus\(\)", lib, re.MULTILINE), (
+            "aegis_write_synthetic_corpus not defined"
+        )
+        code_lines = [
+            ln for ln in lib.splitlines() if not ln.lstrip().startswith("#")
+        ]
+        call_sites = [
+            ln for ln in code_lines
+            if re.search(r"aegis_corpus_path_ok\s+\"\$", ln)
+        ]
+        assert call_sites, (
+            "aegis_corpus_path_ok is defined but never invoked — the corpus "
+            "write path is ungated"
+        )
+
+    def test_corpus_write_is_gated_by_the_sandbox_root(self, tmp_path):
+        """The guarded corpus write really refuses an out-of-sandbox path
+        (rc=1, HARD_BLOCKER, nothing created) and really writes an
+        in-sandbox path.
+
+        The library is SOURCED in a scratch HOME; the only command executed
+        is the lane's own scratch generator — no network, no install, no
+        release asset. An out-of-sandbox GENERATOR is refused too: a corpus
+        path alone cannot smuggle in material that did not come from the
+        lane's own generator.
+        """
+        lib = _lib_path("cracker")
+        sandbox = tmp_path / "sandbox"
+        (sandbox / "builds").mkdir(parents=True)
+        (sandbox / "corpora").mkdir(parents=True)
+        generator = sandbox / "builds" / "gen_corpus.sh"
+        generator.write_text(
+            "#!/bin/sh\nprintf 'synthetic-hash\\n'\n", encoding="utf-8"
+        )
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        outside_generator = outside / "gen_corpus.sh"
+        outside_generator.write_text(
+            "#!/bin/sh\nprintf 'real-world-hash\\n'\n", encoding="utf-8"
+        )
+        probe = tmp_path / "corpus_probe.sh"
+        probe.write_text(
+            '. "$1"\n'
+            'echo "CASE=inside"\n'
+            'if aegis_write_synthetic_corpus "$CORPUS_IN" "$SANDBOX" "$GEN_IN"; '
+            'then echo "RC=0"; else echo "RC=$?"; fi\n'
+            'echo "CASE=outside"\n'
+            'if aegis_write_synthetic_corpus "$CORPUS_OUT" "$SANDBOX" "$GEN_IN"; '
+            'then echo "RC=0"; else echo "RC=$?"; fi\n'
+            'echo "CASE=badgen"\n'
+            'if aegis_write_synthetic_corpus "$CORPUS_BADGEN" "$SANDBOX" "$GEN_OUT"; '
+            'then echo "RC=0"; else echo "RC=$?"; fi\n',
+            encoding="utf-8",
+        )
+        scratch_home = tmp_path / "home"
+        scratch_home.mkdir()
+        corpus_in = sandbox / "corpora" / "synth.hashes"
+        corpus_out = outside / "synth.hashes"
+        corpus_badgen = sandbox / "corpora" / "badgen.hashes"
+        env = dict(os.environ)
+        env["HOME"] = str(scratch_home)
+        env["SANDBOX"] = str(sandbox)
+        env["GEN_IN"] = str(generator)
+        env["GEN_OUT"] = str(outside_generator)
+        env["CORPUS_IN"] = str(corpus_in)
+        env["CORPUS_OUT"] = str(corpus_out)
+        env["CORPUS_BADGEN"] = str(corpus_badgen)
+        for _k in [k for k in env if k.startswith("POSTGRES_")]:
+            env.pop(_k, None)
+        result = subprocess.run(
+            ["/bin/sh", str(probe), str(lib)],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        # split the probe output PER CASE — a refusal's HARD_BLOCKER must be
+        # the one that refused THAT case, not some other case's message
+        sections: dict[str, list[str]] = {}
+        current: str | None = None
+        for line in result.stdout.splitlines():
+            if line.startswith("CASE="):
+                current = line[len("CASE="):]
+                sections[current] = []
+            elif current is not None:
+                sections[current].append(line)
+        assert set(sections) == {"inside", "outside", "badgen"}, (
+            f"corpus probe produced no per-case output: {result.stdout!r} {result.stderr!r}"
+        )
+        assert "RC=0" in sections["inside"], (
+            f"in-sandbox corpus write was refused: {sections['inside']!r}"
+        )
+        assert "RC=1" in sections["outside"], (
+            f"out-of-sandbox corpus path was NOT refused: {sections['outside']!r}"
+        )
+        assert "RC=1" in sections["badgen"], (
+            f"out-of-sandbox corpus generator was NOT refused: {sections['badgen']!r}"
+        )
+        assert "HARD_BLOCKER" in "\n".join(sections["outside"]), (
+            f"out-of-sandbox corpus refusal did not emit HARD_BLOCKER: "
+            f"{sections['outside']!r}"
+        )
+        assert "HARD_BLOCKER" in "\n".join(sections["badgen"]), (
+            f"out-of-sandbox generator refusal did not emit HARD_BLOCKER: "
+            f"{sections['badgen']!r}"
+        )
+        assert corpus_in.is_file(), "in-sandbox corpus was not written"
+        assert "synthetic-hash" in corpus_in.read_text(encoding="utf-8")
+        assert not corpus_out.exists(), (
+            "out-of-sandbox corpus file was created — the gate did not hold"
+        )
+        assert not corpus_badgen.exists(), (
+            "corpus was written by an out-of-sandbox generator — the gate did not hold"
+        )
 
     @pytest.mark.parametrize("agent", CHILDREN)
     def test_no_docker_apt_sudo_invocations(self, agent):  # T30(b)

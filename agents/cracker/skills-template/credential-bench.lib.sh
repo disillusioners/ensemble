@@ -26,7 +26,9 @@
 #   aegis_acquire_install_lock                0 acquired / 1 contended
 #   aegis_release_install_lock                always succeeds
 #   aegis_attempt_allowed / _bump_ / _clear_  self-heal cap of 2 per session
-#   aegis_corpus_path_ok <path>               0 inside-sandbox / 1 refused
+#   aegis_corpus_path_ok <path> <root>        0 inside-root / 1 refused
+#   aegis_write_synthetic_corpus <path> <root> <generator>
+#                                            0 written / 1 refused (HARD_BLOCKER)
 #
 # Companion: credential-bench.md (the installer skill body, same directory)
 
@@ -152,6 +154,15 @@ _aegis_clear_attempts() {
 }
 
 # --- Synthetic-corpus discipline (no fetch, sandbox-only inputs) ----------
+_aegis_path_in_root() {
+    # usage: _aegis_path_in_root <path> <root>   (0 inside / 1 outside)
+    [ -n "$1" ] && [ -n "$2" ] || return 1
+    case "$1" in
+        "$2"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 aegis_corpus_path_ok() {
     # usage: aegis_corpus_path_ok <path> <sandbox-root>
     # The corpus input must live INSIDE the engagement sandbox — the
@@ -159,11 +170,36 @@ aegis_corpus_path_ok() {
     # ever fetched. A corpus path outside the sandbox is refused.
     _cp_path="$1"
     _cp_root="$2"
-    [ -n "$_cp_path" ] && [ -n "$_cp_root" ] || return 1
-    case "$_cp_path" in
-        "$_cp_root"/*) return 0 ;;
-        *) echo "HARD_BLOCKER: corpus path outside the engagement sandbox — synthetic benches read sandbox inputs only"; return 1 ;;
-    esac
+    if _aegis_path_in_root "$_cp_path" "$_cp_root"; then
+        return 0
+    fi
+    echo "HARD_BLOCKER: corpus path outside the engagement sandbox — synthetic benches read sandbox inputs only"
+    return 1
+}
+
+aegis_write_synthetic_corpus() {
+    # usage: aegis_write_synthetic_corpus <corpus-path> <sandbox-root> <generator>
+    # The ONLY sanctioned corpus write. Both the corpus path AND the
+    # generator that produces it are checked against the engagement sandbox
+    # root BEFORE anything is written: an out-of-sandbox path (or a
+    # generator from outside the sandbox) is a HARD_BLOCKER — nothing is
+    # created and the bench does not run. This is what makes "the corpus
+    # input path is always inside the sandbox" an enforced rule rather than
+    # a promise; a corpus path alone cannot smuggle in material that did
+    # not come from the lane's own generator.
+    _wc_path="$1"
+    _wc_root="$2"
+    _wc_gen="$3"
+    aegis_corpus_path_ok "$_wc_path" "$_wc_root" || return 1
+    if ! _aegis_path_in_root "$_wc_gen" "$_wc_root"; then
+        echo "HARD_BLOCKER: corpus generator outside the engagement sandbox — only generator-produced material enters the bench"
+        return 1
+    fi
+    [ -f "$_wc_gen" ] || {
+        echo "HARD_BLOCKER: corpus generator not found — never source a corpus from elsewhere"
+        return 1
+    }
+    sh "$_wc_gen" > "$_wc_path"
 }
 
 # --- Tool-specific evidence queries (existence is not evidence) -----------

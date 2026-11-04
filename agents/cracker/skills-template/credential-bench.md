@@ -12,7 +12,7 @@ This skill is **file-invoked**: it is read from its owning lane's skill director
 
 ## Fences
 
-- **Write-target classes.** Every write lands in exactly one class: class (i) the persistent user-space toolchain root (`~/.local/opt/aegis-toolbench`) at install time — idempotent, checksum-verified; class (ii) the per-engagement sandbox root at run time — copy-then-build, the target tree is never a write target; class (iii) everything else — target codebases included — is never written, at any time, by any path.
+- **Write-target classes.** Every write lands in exactly one class: class (i) the persistent user-space toolchain roots at install time — the toolbench root (`~/.local/opt/aegis-toolbench`) plus its state root (`~/.cache/aegis-toolbench`), its config root (`~/.config/aegis-toolbench`) and its staging root (a private `mktemp -d` scratch dir); every one of those roots is env-overridable, and every one of them is a class-(i) path — idempotent, checksum-verified; class (ii) the per-engagement sandbox root at run time — copy-then-build, the target tree is never a write target; class (iii) every other user path — the target codebase included — is never written, at any time, by any path.
 - **NO Docker.** Docker is absent from this host and must never be installed or used; the toolchain is user-space only.
 - **NO system packages.** No `apt`, no `sudo`, no system-prefix installs, no system Node touch; every dependency resolves user-space, and a missing prerequisite is a stop, never an install.
 - **NO remote fetch-and-execute.** No unpinned fetch-and-run calls of any kind: a fetched asset is downloaded, sha256-verified, and only then promoted; `npx --no-install` is the only sanctioned package-runner form (it resolves an installed copy or refuses loudly — it never fetches).
@@ -122,8 +122,17 @@ Self-heal runs at most **TWICE per session**; beyond the cap the cold path stops
 ## Bench surface (run time — class (ii) only, synthetic corpora only)
 
 ```sh
-# The corpus comes from the sandbox generator — NEVER a download
-sh "$SANDBOX_ROOT/builds/gen_corpus.sh" > "$SANDBOX_ROOT/corpora/synth.hashes"
+# The corpus comes from the sandbox generator — NEVER a download.
+# The guarded write is the ONLY sanctioned corpus path: the corpus path AND
+# the generator are checked against the engagement sandbox root before
+# anything is written, so an out-of-sandbox path is a HARD_BLOCKER and
+# nothing is created.
+aegis_write_synthetic_corpus \
+    "$SANDBOX_ROOT/corpora/synth.hashes" "$SANDBOX_ROOT" \
+    "$SANDBOX_ROOT/builds/gen_corpus.sh" || {
+    echo "HARD_BLOCKER: corpus write refused — the bench does not run"
+    exit 1
+}
 # strength bench, bounded, tracked; --benchmark measures scheme cost safely
 "$HASHCAT_BIN" --benchmark -m <mode-from-target-scheme> \
     > "$SANDBOX_ROOT/out/hashcat-bench.txt" 2>&1
@@ -131,7 +140,7 @@ sh "$SANDBOX_ROOT/builds/gen_corpus.sh" > "$SANDBOX_ROOT/corpora/synth.hashes"
     > "$SANDBOX_ROOT/out/john-bench.txt" 2>&1
 ```
 
-There is **no** code path in this library that fetches a wordlist, rule set, or real-world hash corpus: the corpus input path is always inside the sandbox, and only generator-produced material enters the bench.
+There is **no** code path in this library that fetches a wordlist, rule set, or real-world hash corpus: the corpus input path is checked against the engagement sandbox root by `aegis_corpus_path_ok` before anything is written — an out-of-sandbox path (or a generator from outside the sandbox) is refused with `HARD_BLOCKER` and nothing is created — so only generator-produced material enters the bench.
 
 ## Failure path (lock release is mandatory)
 
