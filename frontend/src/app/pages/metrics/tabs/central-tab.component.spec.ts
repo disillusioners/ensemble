@@ -321,6 +321,102 @@ describe('MetricsCentralTabComponent — the availability rendering (ADJ-vi)', (
     expect(stub.snapshotRequests.map((request) => request.family)).toEqual(['F3']);
   });
 
+  // ── THE PHASE-8 HONESTY LEGS (tasks 8.7 / 8.8) ─────────────────────
+
+  it('a tab whose families are ALL dark renders EVERY family reason (8.7)', () => {
+    // The "enabled-but-empty" defect the audit named: a tab that is
+    // enabled, binds families, and shows NOTHING. A tab whose families
+    // are all dark shows each family's OWN reason (ADJ-vi).
+    fixture.componentRef.setInput('state', state({
+      families: [
+        family({
+          id: 'F1',
+          live_series_count: 0,
+          availability: { state: 'dark', reason: 'capture_off' },
+        }),
+        family({
+          id: 'F2',
+          live_series_count: 0,
+          availability: { state: 'dark', reason: 'census_gated' },
+        }),
+      ],
+    }));
+    fixture.detectChanges();
+    const darks = fixture.nativeElement.querySelectorAll('[data-test="central-tab-family-dark"]');
+    expect(darks.length).toBe(2);
+    const reasons = Array.from(darks).map((node) => node.getAttribute('data-reason'));
+    expect(reasons).toEqual(['capture_off', 'census_gated']);
+    // The reasons are rendered as TEXT, not only as an attribute.
+    expect(fixture.nativeElement.textContent ?? '').toContain('the wedge capture is not active');
+  });
+
+  it('a DARK family does NOT consume the selector ceiling (8.8 / ADJ-vi)', () => {
+    // The FE slices the LIVE series at the ceiling. A dark family has
+    // no series to plot, so it must not eat a slot — otherwise the live
+    // families that follow are cut SILENTLY.
+    const liveNames = Array.from({ length: 60 }, (_unused, index) => ({
+      name: `live_metric_${index}`,
+      kind: 'gauge' as const,
+      labels: null,
+      help: '',
+      buckets: null,
+      cardinality_class: 'closed' as const,
+      monotonic: false,
+      chart_role: 'line' as const,
+    }));
+    const darkNames = Array.from({ length: 10 }, (_unused, index) => ({
+      name: `dark_metric_${index}`,
+      kind: 'gauge' as const,
+      labels: null,
+      help: '',
+      buckets: null,
+      cardinality_class: 'closed' as const,
+      monotonic: false,
+      chart_role: 'line' as const,
+    }));
+    fixture.componentRef.setInput('state', state({
+      families: [
+        family({ id: 'F1', names: liveNames }),
+        family({
+          id: 'F2',
+          names: darkNames,
+          live_series_count: 0,
+          availability: { state: 'dark', reason: 'capture_off' },
+        }),
+      ],
+    }));
+    fixture.detectChanges();
+    // The slice is FULL of the LIVE family's series — the dark family
+    // contributed nothing.
+    expect(component.chartSpecs().length).toBe(METRICS_SELECTOR_CEILING);
+    expect(component.chartSpecs().every((spec) => spec.familyId === 'F1')).toBe(true);
+    // And the dropped count counts the LIVE series only.
+    expect(component.droppedSeriesCount()).toBe(10);
+  });
+
+  it('the FE\'s own truncation is SURFACED with a count and no phantom page (8.8)', () => {
+    const names = Array.from({ length: 80 }, (_unused, index) => ({
+      name: `metric_${index}`,
+      kind: 'gauge' as const,
+      labels: null,
+      help: '',
+      buckets: null,
+      cardinality_class: 'closed' as const,
+      monotonic: false,
+      chart_role: 'line' as const,
+    }));
+    fixture.componentRef.setInput('state', state({ families: [family({ id: 'F1', names })] }));
+    fixture.detectChanges();
+    const hint = fixture.nativeElement.querySelector('[data-test="central-tab-selector-slice"]');
+    expect(hint).not.toBeNull();
+    // The COUNT is stated.
+    expect(hint?.textContent ?? '').toContain('30 series are not shown');
+    // The copy names this page's OWN slice — and NEVER promises a
+    // "next page" that does not exist (the FE drops them).
+    expect(hint?.textContent ?? '').toContain("this page's own selector slice");
+    expect(hint?.textContent ?? '').not.toContain('next page');
+  });
+
   it('the tab is NEVER an empty shell — it names its binding while the catalog loads', () => {
     fixture.detectChanges();
     const hint = fixture.nativeElement.querySelector('[data-test="central-tab-no-catalog"]');

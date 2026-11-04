@@ -247,10 +247,19 @@ const PANEL_REQUEST: ChartRequest = {
         }
       </div>
 
-      @if (selectorSliced()) {
+      @if (droppedSeriesCount() > 0) {
+        <!--
+          THE FE'S OWN TRUNCATION (task 8.8 — ADJ-vi).
+
+          The FE slices the live series at the ceiling, so the series it
+          drops are gone — there is NO "next page" to fetch them from.
+          The old copy claimed one, which is a false statement about a
+          page that does not exist. The count is stated, and the slice is
+          named as this page's OWN.
+        -->
         <p class="tab-hint" data-test="central-tab-selector-slice">
-          The door's selector ceiling is {{ ceiling }} series — the rest are on the next
-          page.
+          {{ droppedSeriesCount() }} series are not shown — this page's own selector slice is
+          {{ ceiling }}.
         </p>
       }
 
@@ -532,16 +541,26 @@ export class MetricsCentralTabComponent {
       .join(','),
   );
 
-  /** Whether the FE's own selector slice dropped series (never silent). */
-  readonly selectorSliced = computed(() => {
+  /**
+   * The number of LIVE series the FE's OWN slice dropped (task 8.8 —
+   * ADJ-vi).
+   *
+   * Only LIVE families count: a DARK family is filtered out BEFORE the
+   * slice, so it never consumes a slot (a dark family has no series to
+   * plot). The count is the number of series the page is NOT showing.
+   */
+  readonly droppedSeriesCount = computed(() => {
     let total = 0;
     for (const family of this.families()) {
       if (family.availability.state === 'live') {
         total += family.names.length;
       }
     }
-    return total > METRICS_SELECTOR_CEILING;
+    return Math.max(0, total - METRICS_SELECTOR_CEILING);
   });
+
+  /** Whether the FE's own selector slice dropped series (never silent). */
+  readonly selectorSliced = computed(() => this.droppedSeriesCount() > 0);
 
   /** The stat strip — one card per published stat series. */
   readonly statCards = computed(() => {
