@@ -858,3 +858,173 @@ describe('MetricsCentralTabComponent — the panel composition (4.15)', () => {
     expect(fixture.nativeElement.querySelector('[data-test="house-svg"]')).not.toBeNull();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 6 (tasks 6.2 / 6.3) — the per-unit panel AXES
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('MetricsCentralTabComponent — the per-unit panel axes (phase 6, 6.2/6.3)', () => {
+  let fixture: ComponentFixture<MetricsCentralTabComponent>;
+  let component: MetricsCentralTabComponent;
+
+  /**
+   * The F9 shape from the WIRE (w2.py:120-150): a counter AND a 0/1
+   * gauge. Unlike the F4 fixture above (two counts), this family's two
+   * metrics carry DIFFERENT UNITS after the vocabulary is populated —
+   * so the family's two panels must differ in unit as well as kind.
+   */
+  const F9_MIXED_FAMILY: MetricsFamily = {
+    id: 'F9',
+    names: [
+      {
+        name: 'ensemble_readiness_probe_total',
+        kind: 'counter',
+        labels: null,
+        help: '',
+        buckets: null,
+        cardinality_class: 'closed',
+        monotonic: true,
+        chart_role: 'step',
+      },
+      {
+        name: 'ensemble_readiness_grace_active',
+        kind: 'gauge',
+        labels: null,
+        help: '',
+        buckets: null,
+        cardinality_class: 'closed',
+        monotonic: false,
+        chart_role: 'line',
+      },
+    ],
+    live_series_count: 2,
+    availability: { state: 'live' },
+    role: 'chart',
+    source_idiom: 'registry',
+    durability: 'process',
+    cardinality_contribution: 1,
+  };
+
+  function f9State(): MetricsTabState {
+    return state({
+      families: [F9_MIXED_FAMILY],
+      series: [
+        {
+          name: 'ensemble_readiness_probe_total',
+          labels: {},
+          kind: 'counter',
+          monotonic: true,
+          points: [
+            [1_700_000_000, 1],
+            [1_700_000_015, 2],
+          ],
+        },
+        {
+          name: 'ensemble_readiness_grace_active',
+          labels: {},
+          kind: 'gauge',
+          monotonic: false,
+          points: [
+            [1_700_000_000, 0],
+            [1_700_000_015, 1],
+          ],
+        },
+      ],
+    });
+  }
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsCentralTabComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsCentralTabComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('entry', metricsCentralTab('runtime'));
+  });
+
+  afterEach(() => fixture.destroy());
+
+  it('the F9 counter + 0/1 gauge yield TWO panels with DIFFERENT UNITS (6.3)', () => {
+    fixture.componentRef.setInput('state', f9State());
+    fixture.detectChanges();
+
+    const panels = fixture.nativeElement.querySelectorAll(
+      '[data-test="central-tab-panel"]',
+    ) as NodeListOf<HTMLElement>;
+    expect(panels.length).toBe(2);
+    const units = Array.from(panels).map((panel) => panel.getAttribute('data-unit'));
+    expect(units.sort()).toEqual(['count', 'flag']);
+    const kinds = Array.from(panels).map((panel) => panel.getAttribute('data-kind'));
+    expect(kinds.sort()).toEqual(['line', 'step']);
+    // The two panels' units DIFFER — the mixed-kind family never shares
+    // one unit axis.
+    expect(new Set(units).size).toBe(2);
+  });
+
+  it('each F9 panel hands its unit to the renderer (the unit-labeled value axis, 6.2)', () => {
+    fixture.componentRef.setInput('state', f9State());
+    fixture.detectChanges();
+
+    const units = component.groupsOf('F9').map((group) => group.unit);
+    expect(units.sort()).toEqual(['count', 'flag']);
+    for (const group of component.groupsOf('F9')) {
+      const data = component.panelData(group);
+      // The render data's unit is the panel's — the Chart.js wrapper
+      // suffixes it onto the value axis ticks (its own spec pins the
+      // callback shape); 'unit unknown' is never silently substituted.
+      expect(data.unit).toBe(group.unit);
+      expect(data.unit).not.toBe('unit unknown');
+    }
+  });
+
+  it('an UNMAPPED metric renders `unit unknown` on its panel — never a guess (6.3)', () => {
+    const unmapped: MetricsFamily = {
+      ...F9_MIXED_FAMILY,
+      id: 'F99',
+      names: [
+        {
+          name: 'ensemble_metric_the_lane_never_mapped',
+          kind: 'gauge',
+          labels: null,
+          help: '',
+          buckets: null,
+          cardinality_class: 'closed',
+          monotonic: false,
+          chart_role: 'line',
+        },
+      ],
+    };
+    fixture.componentRef.setInput('entry', metricsCentralTab('runtime'));
+    fixture.componentRef.setInput(
+      'state',
+      state({
+        families: [unmapped],
+        series: [
+          {
+            name: 'ensemble_metric_the_lane_never_mapped',
+            labels: {},
+            kind: 'gauge',
+            monotonic: false,
+            points: [
+              [1_700_000_000, 1],
+              [1_700_000_015, 2],
+            ],
+          },
+        ],
+      }),
+    );
+    fixture.detectChanges();
+
+    const panels = fixture.nativeElement.querySelectorAll(
+      '[data-test="central-tab-panel"]',
+    ) as NodeListOf<HTMLElement>;
+    expect(panels.length).toBe(1);
+    // The honest placeholder — the spec FORBIDS inference, so an
+    // unmapped name renders `unit unknown` on the axis.
+    expect(panels[0].getAttribute('data-unit')).toBe('unit unknown');
+  });
+});
