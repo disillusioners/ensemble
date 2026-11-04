@@ -121,10 +121,12 @@ export interface MetricsCentralTab {
    * The families whose STAT-role series feed this module's stat strip.
    *
    * ABSENT means "this module has no stat-role family" — there is no
-   * empty-array sentinel. The strip is fed by
+   * empty-array sentinel (council fold coding-A-2: the member is typed
+   * `NonEmpty` like `familyIds`, so `statFamilyIds: []` is not
+   * expressible either). The strip is fed by
    * `GET /api/metrics/snapshot?family=<F>`.
    */
-  readonly statFamilyIds?: readonly MetricsRegisteredFamilyId[];
+  readonly statFamilyIds?: NonEmpty<MetricsRegisteredFamilyId>;
   /** The window vocabulary this module may serve. */
   readonly allowedWindows: NonEmpty<MetricsCentralWindow>;
   /**
