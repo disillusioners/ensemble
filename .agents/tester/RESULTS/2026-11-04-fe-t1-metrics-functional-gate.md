@@ -238,3 +238,203 @@ Base worktree `/home/ensemble-src-wt-fe-gate-base` removed post-gate (`git workt
 - **Verdict: FAIL** — the lane is not ceremony-ready until B-1 is adjudicated (the marker feature is
   a headline deliverable of the timeline work and it cannot function against the real daemon payload).
 - All fences held; live untouched; no fixes applied (FIX NOTHING held); evidence committed on-branch.
+
+
+---
+
+# SCOPED RE-VERIFICATION (2026-11-04, tip `cf4e4fd14`) — supersedes the first-gate verdict
+
+Fold under test: `52e7a9dfb` (B-1 compat shim) · `0798d6f3e` (real-shape specs + e2e fixture) ·
+`33abc3ae6` (N5 guard enforcement) · `cf4e4fd14` (docs), on top of `ff064658c` (= this gate's own
+first-gate evidence commit; `2c63a70a1` is its parent — 5 commits, linear, no merges). Only the
+routes the fix touched were re-verified; routes 1/2/3/5/6/7/8 evidence from the first gate stands at
+`2c63a70a1`. The developer's claims were treated as INPUT, not evidence; every worker drove its own
+runs. Four independent workers: route-4 (`058faa90`, e2e-test) · guard (`2719d705`) · suites+fence
+(`1cb4bd35`) · pack (`563c79f6`, test-pack-execution).
+
+## LANE VERDICT: **PASS-WITH-NOTES** — ceremony-ready; the first-gate FAIL on B-1 is superseded.
+
+| re-verified route | verdict | one-line basis |
+|---|---|---|
+| Route 4 (C-1 real pointer) | **PASS 3/3** | all three engine keys re-proven live, independently, with real pointer clicks |
+| Guard at tip (B1/B4a/B4b/warnings + the 2 new enforcement legs) | **PASS** | numbers re-measured; one mutation re-proved RED→GREEN; the old false-green seam proven real |
+| Suites + fence | **PASS** | 151/151 reconciled; fence = 8 `frontend/` + 6 `.agents/`, **zero `daemon/`**; baseline 161/161 |
+| Pack at tip (dual-side) | **PASS (expected posture)** | FAIL(1 leg) = the same 2 settings TZ reds; d1 585/585 over 30 files; both-revs rule honored |
+
+## Route 4 re-proof — PASS 3/3 (worker `058faa90`)
+
+**Fix read first** (`52e7a9dfb`): `timeline-series.ts` = typed `ENGINE_SERIES_COMPAT` (7 exact engine
+keys + an instance pattern) with `anchorKey` / `unitClass` / `engineUnit` / `factorToAnchorUnit`
+(documented, never consumed) + `resolveTimelineSeriesJoin()` (FE pass-through → engine table →
+instance pattern → **null**, fail-closed) + `markerAnchorKey()` (enabled-aware anchor).
+`daemon.rss_kb`→`daemon_rss_mb` (memory, dataset 0) · `cgroup.anon_kb`→`cgroup_mem_mb` (memory,
+**dataset 1**) · `daemon.cpu_pct`→`daemon_cpu` (cpu, dataset 0). The two dead seams:
+**DRAW** = `anomaly-overlay-plugin.ts::beforeDatasetsDraw`→`houseDatasetIndex` (marker.seriesId now
+the FE anchor id, not the raw engine key — pre-fold it matched no dataset ⇒ nothing drawn);
+**CLICK** = `chart-panel.component.ts::onChartClick` (chart is `interaction:{mode:'index',
+intersect:false}` ⇒ `elements` carries one entry PER DATASET; pre-fold it read `elements[0]` only ⇒
+a dataset-1 anchor was unreachable; post-fold it scans every element and the first marker-bearing
+one wins, else the first element's plain payload).
+
+**Boot fences (verbatim, boot script's own stdout capture — NOT a re-boot):**
+```
+BOOT_TS=2026-11-04T08:57:48Z
+FENCE1 postgres_hits_after_scrub=0
+FENCE1b ambient PORT=<unset> ENSEMBLE_SELF_ENV=<unset> RAG_IS_REQUIRED=<unset>
+FENCE2 sourced POSTGRES_DB=ensemble_dev POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432
+FENCE3 ensemble_json_pin=true
+BOOT-EXEC port=8079 datadir=/tmp/fe-t1-rere-dev-data sweep=0
+```
+Boot-time daemon captures (08:57–08:58Z): banner `Starting Ensemble v0.28.9` (×2) ·
+`Creating PostgreSQL engine: 127.0.0.1:5432/ensemble_dev` · `No PostgreSQL ENV vars detected,
+defaulting to sqlite` → **count 0** · `maintenance boot sweep: 0 interrupted run(s)`.
+Live re-capture (09:10Z, no restart): `/livez` uptime 746.15 v0.28.9 · `/readyz` all components true,
+reasons [] · `ss` → :8079 owned by pid 3574404 · jq ensemble.json pin true · `/proc/3574404/environ`
+→ `POSTGRES_DB=ensemble_dev`, `PORT=8079`, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`,
+`ENSEMBLE_DATA_DIR=/tmp/fe-t1-rere-dev-data`, no `OPENAI_API_KEY`/`PLANE_MCP_API_KEY`/`RAG_IS_REQUIRED`.
+**Prod fence:** zero contact with :9797 / ensemble_prod / the live daemon (no mint — auth-OFF
+posture; no SELECTs). **GET-only census: 0 non-GET**; the only anomalies were the house fail-closed
+`503 AUTH_NOT_CONFIGURED` on `/api/metrics/*` and one CSP-blocked external iframe (nothing sent).
+
+**Live anomaly coverage (real engine, real payload; warm-up honoured — first read at t+10 min,
+`anomaly_interval_s=600`, `anomaly_min_baseline_points=12`):**
+
+| engine key | anomaly | sev/shape | peak / baseline | first seen | induced by |
+|---|---|---|---|---|---|
+| `daemon.rss_kb` | anom-000003 | high/ramp | 345996.0 / 304172.0 KB | 09:08:22Z | boot churn |
+| `cgroup.anon_kb` | anom-000001 | high/ramp | 10359808.0 / 1585664.0 KB | 09:08:22Z | boot churn |
+| `daemon.cpu_pct` | anom-000007 | high/spike | 58.2 % / 6.2417 % | 09:39:17Z | burst 2+3 (GET-only) |
+| `daemon.rss_kb` | anom-000012 | low/leak | 317932 / 307952 KB | 09:39:17Z | leak-shaped drift |
+
+Bursts (GET-only, localhost, PID-killed): burst 2 (09:15–09:17Z, 8×3 endpoints) → daemon CPU 6 %→46–48 %
+(**not** enough to clear the robust-z bar); burst 3 (09:28–09:32Z, 24×4 endpoints) → CPU ~116 % → the
+CPU key emitted by the 09:38 pass. Coverage window 41.5 min from boot.
+
+**Per-key pointer verdicts (real `page.mouse`, real payload).** Geometry method (no DOM marker
+exists — markers are canvas arcs): rendered bitmap read via `getImageData`, marker discs located by
+EXACT severity-palette colour (`low #38bdf8`, `medium #f59e0b`, `high #ef4444`), classified by shape
+(filled disc ≈10–12 px vs 1–3 px series lines), confined to the marker lane (rows 28–48 of 150).
+
+| key | marker | elementFromPoint chain | click (viewport) | clicks→open | drilldown `series` |
+|---|---|---|---|---|---|
+| `daemon.rss_kb` (low) | memory, disc x=505.24 y=37.5 | canvas[chart-panel-canvas] > div[chart-panel] > app-metrics-chart-panel > div[timeline-chart] > div[timeline-panel-memory] > … | (533.37, 339.5) | **1** | `daemon.rss_kb` (observed 317932) |
+| `daemon.cpu_pct` (high) | cpu, disc x=412.54 y=37.5 | … > div[timeline-panel-cpu] > … | (440.64, 546.41) | **1** | `daemon.cpu_pct` (observed 58.2) |
+| `cgroup.anon_kb` (high) | memory **dataset 1**, disc x=89.24 y=37.5 | … > div[timeline-panel-memory] > … | (117.26, 887.5) | **1** | `cgroup.anon_kb` (observed 10359808) |
+
+Every drilldown's series field equals the WIRE engine key (never an FE-style rename).
+
+**Seam confirmations.** (i) OVERLAY DRAW — pixel census of the marker lane: memory 89 severity px in
+a 10–11 px band vs **0 px** in the adjacent marker-free band (x511–1188); cpu 89 px vs 0 px
+(x534–1188) ⇒ markers are genuinely drawn at the probe coordinates. (ii) WRAPPER CLICK — proven by
+the 3/3 first-click drilldowns; code anchors `onChartClick`→`houseNearestAnomaly`→
+`onPanelPointClick`→`openDrilldown` match live behaviour.
+**Second-dataset / widening case exercised:** `cgroup.anon_kb` anchors to the memory panel's SECOND
+dataset — pre-fold (elements[0]-only) this click would have yielded a plain payload with no
+drilldown; post-fold it opens on the FIRST click. Strongest single evidence for the widening.
+
+**Teardown:** SIGTERM (port-verified pid 3574404) → exited 1 s → `/livez` refused → :8079 empty → no
+inducer orphans; swept its own `/tmp/fe-t1-rere4/` + `/tmp/fe-t1-rere-dev-data/`; live :9797 untouched
+(pid 3547471). Worktree porcelain 0, HEAD `cf4e4fd14`.
+
+## Guard at tip — PASS (worker `2719d705`)
+
+`33abc3ae6` = `bundle-guard.js` only (+98/−5); thresholds unchanged. New legs: the vendor invariant is
+now ENFORCED from the measure tool's JSON (`vendor_static_edge_count > 0` → RED naming the leak
+sites; `vendor_in_initial_set === true` → RED; fail-closed when the tool never answered) and the
+measure tool's exit status PROPAGATES (the old `catch { measureTotal = null }` → `measurement_tool =
+(unavailable)` on a green run — the false-green seam). GREEN banner now
+`GREEN (B1 + B2 + B3 + B6 + vendor-invariant + measure-propagation)`.
+
+| guard | measured | threshold | verdict |
+|---|---|---|---|
+| B1 initial total | 5,907,717 B (Δ **−1,301**) | ±2,048 vs 5,909,018 | PASS |
+| B2 | 0 hits / 36 chunks | 0 | PASS |
+| B3 | 1 site / **0 static** / 0 outside metrics | 0 static | PASS |
+| B4a | `chunk-TXUCW6LI.js` 206,857 min / **71,054 gz** (independent gzip-9 equal) | ≤82,000 | PASS (headroom 10,946) |
+| B4b | route chunk 125,063 · fetch set 687,308 · **lazy-only 170,094** | ≤185,000 | PASS (headroom 14,906) |
+| B6 warnings | 9 == baseline 9, 0 added / 0 removed | set-diff | PASS |
+| vendor invariant | 0 / false / tool rc 0 | — | CLEAN |
+| guard exit | GREEN (both new legs present) | — | **0** |
+
+**Mutation re-proof (independent):** /tmp copy of the dist + tooling (5-level depth; a REAL
+`frontend/src` copy — symlinks are not traversed by the B3 walk, else the guard reports VACUOUS):
+append a static import of the route's dynamic target to an initial chunk ⇒ measure tool **rc 4**
+(`TOOL: VENDOR-INVARIANT RED — vendor chunk(s) [chunk-TXUCW6LI.js] carry 1 static-import edge(s)`)
+and the guard copy **rc 1 with 4 named violations** (B1 delta + `MEASURE the measurement tool exited
+4 …` + both VENDOR-INVARIANT RED lines) ⇒ restore ⇒ **exit 0 GREEN**. Supplementary legs prove the
+OLD seam was real: a lazy-chunk plant made the OLD guard exit **0 GREEN** with
+`measurement_tool = (unavailable)` on a dist carrying a genuine static vendor edge, while the NEW
+guard exits **1 RED** naming both legs.
+
+## Suites + fence — PASS (worker `1cb4bd35`)
+
+| suite | kind | nodes |
+|---|---|---|
+| `timeline-series-compat.spec.ts` (NEW) | vocabulary/shim | 21 ✅ |
+| `timeline-tab.component.spec.ts` | timeline | 26 ✅ |
+| `chart-panel.component.spec.ts` | renderer | 25 ✅ |
+| `anomalies-panel.component.spec.ts` | anomalies | 8 ✅ |
+| `house-svg-renderer.spec.ts` | renderer | 71 ✅ |
+
+**151 = 80 (the 4 changed/added) + 71 (renderer) — the claim reconciles exactly; 151/151 PASS.**
+`frontend/e2e/resources-gate.spec.ts` is the **corrected FIXTURE** (Playwright; jest ignores
+`<rootDir>/e2e/`) carrying the real engine shape (`series_key:'daemon.rss_kb'`, KB-scale
+peak/baseline) — it is NOT a jest suite and its 4/4 was not re-run here (disclosed). Whole-tree
+census: 154 suites / 4739 tests, the same **9 base-proven reds** (4 suites, blob-identical base↔HEAD,
+zero lane attribution). **Fence:** `git diff --name-only 2c63a70a1..cf4e4fd14` = 14 files = **8
+`frontend/` + 6 `.agents/`** — `daemon/` 0, `scripts/` 0, `tests/` 0, `test/` 0, `agents/` 0,
+migrations 0; 5 commits, linear; `PROMPT-BASELINE: OK — 161 versioned artifact(s) match` (rc 0),
+`agents/` diff empty.
+
+## Pack at tip — expected posture CONFIRMED (worker `563c79f6`)
+
+Base worktree re-created (`git worktree add --detach … c4161335b`, `npm ci` rc 0/29 s; `chart.js` +
+`jest-canvas-mock` ABSENT at base) and removed after (`git worktree remove --force`).
+
+- HEAD leg: `RESULT: FAIL (failed legs: 1)` exit 1 — d1 **585/585 over 30 declared files** (first gate
+  578: +7 from the fold's three MODIFIED D1 members) · d2_declared 131/131 · d2_derived
+  `2 failed, 1832 passed, 1834 total` (39 files) · typecheck_scoped/dev build/prod build exit 0.
+- BASE leg: `RESULT: FAIL (failed legs: 1)` exit 1 — d1 SKIPPED-BY-CONSTRUCTION · d2_declared 131/131 ·
+  d2_derived `2 failed, 1799 passed, 1801 total` (38 files).
+- The single failing leg carries the **same two** reds on both sides:
+  `src/app/pages/settings/settings.component.spec.ts` lines **1506** / **1741**, DST cause
+  (`Expected "America/New_York (UTC-04:00)" / Received "… (UTC-05:00)"`), file untouched by the fold.
+  **No new failing legs, no new reds.**
+- **Membership rule HONORED:** the fold's ONE new spec (`timeline-series-compat.spec.ts`) is in
+  **none** of D1_FILES / D2_DECLARED / the d2_derived grep; every D2_DECLARED entry exists at BOTH
+  revs (base-verified + asserted by the pack on both legs) ⇒ no HEAD-only file sits in a both-revs
+  set. The pack script itself was NOT modified by the fold.
+
+## Residual notes (non-blocking) — with owners
+
+| id | note | owner |
+|---|---|---|
+| **R1** | **Latent race, code-reading only:** the wrapper's rebuild effect assigns `chart.data` but NEVER `chart.options` ⇒ the overlay plugin's marker list is frozen at chart-mount time. If the chart mounts before `/api/resources/anomalies` resolves, markers are silently absent — the first gate's symptom shape. Not reproduced (charts mounted after the anomalies here). | lane (chart-panel rebuild effect; assign `chart.options.plugins[HOUSE_ANOMALY_PLUGIN_ID].markers` too) |
+| **R2** | One leading-edge instance (`anom-000003`, `daemon.rss_kb`, 08:55→09:05) rendered a marker but **25 real clicks at/around its exact centre opened no drilldown**, while a neighbouring marker 25 px away opened fine and the same key is click-through on a later instance. Mechanism not isolated (production build, no chart introspection). The vocabulary/shim join is proven; this instance's click path is not. | lane (follow-up leg) |
+| **R3** | Count-class engine keys (`daemon.fds`, `daemon.threads`) resolve to a unit class with **no enabled series** ⇒ no panel is rendered ⇒ no marker can exist. Scope fact, not a shim defect. | metrics lane (series enablement) |
+| **R4** | The fold's new compat spec is in NO declared set ⇒ the gate pack will not catch a future regression in it (covered today only by the scoped suite run). | lane/pack owner (add to `D1_FILES`) |
+| **R5** | `${leg}_ERROR_SUMMARY` greps `^(FAILED\|ERROR) ` — jest prints `FAIL <path>` ⇒ the summary reads `(none)` on a failing leg (verdict unaffected: exit code + `Tests:` counts are correct). | pack owner (one-line grep) |
+| **R6** | Fold-evidence count drift: its "12 suites / 133 tests" scope measures **149** at the tip (133 matches no natural scope). Documentation only. | lane (re-derive the row) |
+| **R7** | B4b arithmetic: the brief's "+4,039" uses the first-gate 166,055; the artifact's own prior baseline is 165,185 ⇒ measured Δ-vs-artifact **+4,909** (both under 185,000). | lane (artifact/evidence alignment) |
+| **R8** | The amended guard discards the measure tool's stderr ⇒ the operator-facing reason line lacks the tool's own `TOOL: VENDOR-INVARIANT RED — …` tail (the invariant is still enforced from stdout JSON). | lane tooling |
+| **R9** | Route-4 chart-theme note (dev): `CHART_SERIES_COLORS[0]` is byte-identical to `CHART_SEVERITY_COLORS.low` ⇒ a colour-based marker probe can confuse a low-severity marker with the series-0 line (it bit the independent prober twice). | chart-theme owning lane |
+
+## Tester-process disclosure (mine, not the lane's)
+
+**Orchestration error:** I gave two parallel workers the same `/tmp/fe-t1-rere` prefix; the pack
+worker's sweep (~09:02Z) deleted the route-4 worker's `boot.sh`, `daemon.log` and `induce.sh`
+(collateral), and the suites worker's census artifacts (it re-ran them). Consequences handled without
+falsification: the route-4 daemon was **not** restarted (warm-up + detected anomalies preserved), its
+boot-fence evidence was recovered from the boot script's own stdout capture plus a live re-capture
+(banner/engine-line/sqlite-line were captured at 08:57–08:58Z before the deletion), and inducer burst
+1 never ran (recorded). Lesson: **unique /tmp prefixes per parallel worker** — added to
+`LESSONS/2026-11-04-fe-t1-gate-protocol-lessons.md`.
+
+## Ceremony readiness
+
+**PASS-WITH-NOTES.** B-1 is closed as re-verified (both dead seams now resolve engine keys against
+the real payload; the second-dataset widening case proven on the first click); N5 is closed (both
+enforcement legs live; the old false-green seam proven real and now closed); the guard, suites,
+fence and pack posture all re-verified green. Residual items R1–R9 are non-blocking with owners —
+**R1 (frozen plugin options) is the one to route first**, since it is the only residual that could
+reproduce the original symptom shape under a different arrival order.
