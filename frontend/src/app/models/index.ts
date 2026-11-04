@@ -1,3 +1,9 @@
+// The MODELS BARREL — one import site for the FE's wire-mirror types.
+// The metrics mirror is re-exported TYPE-ONLY (see the tail note at the
+// `export type * from './metrics.model'` line for the lazy-chunk
+// rationale); runtime values from the mirrors are imported from the
+// model files directly by the modules that use them.
+//
 // Instance types
 export type InstanceStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error' | 'terminated' | 'queued' | 'waiting_children' | 'failed';
 

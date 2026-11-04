@@ -906,8 +906,11 @@ export class MetricsCentralTabComponent {
             this.statByFamily.update((current) => ({ ...current, [family]: payload.series }));
           },
           error: () => {
-            // A failed stat read never blanks the tab — the strip simply
-            // stays empty and the door's own banner carries the fact.
+            // A failed stat read never blanks the tab — the error is
+            // swallowed and the strip keeps its last-known cards (a
+            // family with no successful read yet simply stays absent).
+            // The door's banner carries CATALOG-path failures only; it
+            // does NOT speak for this snapshot-path failure.
             if (token !== this.statSeq) {
               return;
             }
