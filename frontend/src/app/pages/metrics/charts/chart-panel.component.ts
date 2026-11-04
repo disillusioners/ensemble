@@ -14,6 +14,9 @@ import {
 import { chartSeriesColor } from '../../../components/charts/chart-theme';
 import { chartUtcTicks, formatChartUtcTick, formatChartValue } from '../../../components/charts/house-svg-renderer/house-svg-renderer';
 import {
+  ChartPointClick,
+} from '../../../components/charts/renderer-registry';
+import {
   HouseAnomalyMarker,
   HOUSE_ANOMALY_PLUGIN_ID,
   createHouseAnomalyOverlayPlugin,
@@ -84,14 +87,8 @@ export interface ChartPanelSeries {
   readonly points: readonly { readonly t: number; readonly v: number }[];
 }
 
-/** The click payload — the drill-down hand-off. */
-export interface ChartPanelPointClick {
-  /** Present only when the click landed on an anomaly marker. */
-  readonly anomalyId?: string;
-  readonly seriesId: string;
-  /** Epoch MILLISECONDS. */
-  readonly tsMs: number;
-}
+/** The click payload — the drill-down hand-off (the registry's shape). */
+export type ChartPanelPointClick = ChartPointClick;
 
 /**
  * The Chart.js CONFIGURATION the panel builds — the spec's seam.

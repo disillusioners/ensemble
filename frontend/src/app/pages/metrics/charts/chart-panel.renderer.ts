@@ -58,6 +58,10 @@ export function createChartJsPanelRenderer(): ChartRenderer {
         unit: values.unit ?? 'unit unknown',
         label: values.label ?? 'metrics panel',
         onMountFailed: handlers?.mountFailed ?? null,
+        // The drill-down hand-off (5.9): the wrapper's pointClick — with
+        // the anomalyId when the click landed on a marker — reaches the
+        // consumer through this input.
+        onPointClick: handlers?.pointClick ?? null,
       }),
       capabilities: CAPABILITIES,
     }),

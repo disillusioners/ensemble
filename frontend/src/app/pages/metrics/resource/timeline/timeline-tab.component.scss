@@ -326,3 +326,33 @@ $warn: #f59e0b;
     font-style: normal;
   }
 }
+
+// 5.9 — the unit-class panels (memory / CPU / counts) + the mount
+// fallback badge (a failed Chart.js mount is never a silent downgrade).
+.timeline-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.timeline-panel-unit {
+  display: block;
+}
+
+.timeline-panel-title {
+  margin: 0 0 0.3rem;
+  color: $text-secondary;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.panel-fallback-badge {
+  display: inline-block;
+  margin-bottom: 0.3rem;
+  background: rgba($warn, 0.1);
+  border: 1px solid rgba($warn, 0.45);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  color: $warn;
+  font-size: 0.72rem;
+}

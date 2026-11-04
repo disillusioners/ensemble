@@ -66,10 +66,34 @@
   }
 
   @if (history()) {
-    <div class="timeline-chart-host" data-test="timeline-chart">
-      <ng-container
-        *ngComponentOutlet="plan().component; inputs: timelineInputs()"
-      ></ng-container>
+    <!-- 5.9 — the SECOND RE-POINT: up to THREE unit-class panels
+         (memory / CPU / counts, plan-overview §4.2), each rendered
+         through the Chart.js panel role; a mount failure drops to the
+         house SVG WITH A BADGE (never a silent downgrade). -->
+    <div class="timeline-panels">
+      @for (panel of panels(); track panel.unitClass) {
+        <div class="timeline-panel-unit" [attr.data-test]="'timeline-panel-' + panel.unitClass">
+          <h4 class="timeline-panel-title" [attr.data-test]="'timeline-panel-title-' + panel.unitClass">
+            {{ panel.title }}
+          </h4>
+          @if (fallbacks().get(panel.unitClass); as fallback) {
+            <span class="panel-fallback-badge" data-test="panel-fallback-badge">{{
+              fallback.badge
+            }}</span>
+            <div class="timeline-chart-host" data-test="timeline-chart">
+              <ng-container
+                *ngComponentOutlet="fallback.plan.component; inputs: fallback.plan.inputs(panelData(panel.unitClass), panelHandlers(panel.unitClass))"
+              ></ng-container>
+            </div>
+          } @else {
+            <div class="timeline-chart-host" data-test="timeline-chart">
+              <ng-container
+                *ngComponentOutlet="panel.plan.component; inputs: panel.plan.inputs(panelData(panel.unitClass), panelHandlers(panel.unitClass))"
+              ></ng-container>
+            </div>
+          }
+        </div>
+      }
     </div>
   }
 

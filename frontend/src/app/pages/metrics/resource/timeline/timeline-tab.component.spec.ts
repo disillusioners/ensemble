@@ -11,7 +11,11 @@
 //   * the drill-down's "a window change closes the panel" leg is
 //     DISPOSITIONED: in phase 5 the drill-down is WINDOW-INDEPENDENT
 //     (5.4), so a window change neither fetches nor closes it;
-//   * everything the panel still owns (series toggles, truncated
+//   * the RENDERER was RE-POINTED onto the Chart.js panel role (5.9 —
+//     the AM-27 second re-point): the phase-4 "house SVG paths" leg was
+//     re-specified to the panel proxies + hidden table, and the house
+//     SVG is now asserted on the MOUNT-FALLBACK path (badge + fallback);
+//   * everything else the panel still owns (series toggles, truncated
 //     banner, the drill-down + its supersede token, the data-gap
 //     strip, the skeleton/error branches driven by the body's inputs)
 //     is asserted HERE.
@@ -172,14 +176,61 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     expect(query('[data-test="timeline-chart"]')).toBeNull();
   });
 
-  it('renders the house SVG timeline with non-empty series paths from the body\'s payload', () => {
+  it('renders through the CHART.JS PANEL role — the unit-class panels with proxies + the hidden table (5.9)', async () => {
     feedData();
     expect(query('[data-test="timeline-chart"]')).not.toBeNull();
-    const lines = queryAll('[data-test="house-series-line"]');
-    expect(lines.length).toBeGreaterThan(0);
-    for (const line of lines) {
-      expect((line.nativeElement.getAttribute('d') ?? '').length).toBeGreaterThan(0);
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The enabled series (memory both + CPU) yield TWO panels: memory + CPU.
+    expect(query('[data-test="timeline-panel-memory"]')).not.toBeNull();
+    expect(query('[data-test="timeline-panel-cpu"]')).not.toBeNull();
+    expect(query('[data-test="timeline-panel-count"]')).toBeNull(); // counts disabled by default
+    expect((query('[data-test="timeline-panel-title-memory"]').nativeElement.textContent ?? '').trim()).toBe('Memory (MB)');
+    expect((query('[data-test="timeline-panel-title-cpu"]').nativeElement.textContent ?? '').trim()).toBe('CPU (%)');
+
+    // The per-series DOM proxies — the wrapper's contract hooks.
+    const proxies = queryAll('[data-test="chart-panel-proxy"]');
+    const ids = proxies.map((proxy) => proxy.nativeElement.getAttribute('data-series'));
+    expect(ids).toEqual(['daemon_rss_mb', 'cgroup_mem_mb', 'daemon_cpu']);
+    for (const proxy of proxies) {
+      expect(proxy.nativeElement.getAttribute('data-render-mode')).toBe('line');
     }
+    // The visually-hidden data tables render the samples (the a11y
+    // surface): 5 points × (2 memory series + 1 cpu series) = 15 rows
+    // across the two panels' tables.
+    const tables = queryAll('[data-test="chart-panel-data"]');
+    expect(tables.length).toBe(2);
+    const rows = tables.reduce(
+      (total, table) => total + table.nativeElement.querySelectorAll('tbody tr').length,
+      0,
+    );
+    expect(rows).toBe(15);
+  });
+
+  it('enabling a COUNT series adds the counts panel (the unit class travels with the series)', async () => {
+    feedData();
+    component.toggleSeries('threads');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(query('[data-test="timeline-panel-count"]')).not.toBeNull();
+    expect((query('[data-test="timeline-panel-title-count"]').nativeElement.textContent ?? '').trim()).toBe('Counts');
+  });
+
+  it('the markers ride the house plugin with the VISIBLE label composed per anomaly (5.7)', () => {
+    feedData();
+    const memoryPanel = component.panels().find((panel) => panel.unitClass === 'memory');
+    expect(memoryPanel).toBeDefined();
+    const inputs = memoryPanel!.plan.inputs(component.panelData('memory'), component.panelHandlers('memory'));
+    const anomalies = inputs['anomalies'] as readonly { anomalyId: string; title: string }[];
+    expect(anomalies.length).toBe(1);
+    expect(anomalies[0].anomalyId).toBe('anom-1');
+    // The FOUR API words — visible, never hover-only (ADJ-iv shape 1).
+    expect(anomalies[0].title).toContain('memory');
+    expect(anomalies[0].title).toContain('severity high');
+    expect(anomalies[0].title).toContain('series daemon_rss_mb');
+    expect(anomalies[0].title).toContain('peak 1900');
   });
 
   it('renders the truncated banner strictly from the frozen payload flag (D9)', () => {
@@ -233,14 +284,14 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     expect(query('[data-test="data-gaps"]')).toBeNull();
   });
 
-  it('clicking an anomaly marker fetches evidence + traceback with the padded window (AC5)', () => {
+  it('clicking an anomaly marker (the wrapper\'s pointClick) fetches evidence + traceback with the padded window (AC5)', () => {
     feedData();
     resourcesMock.getEvidence.mockReturnValue(of(makeEvidence()));
     resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
 
-    const marker = query('[data-test="house-anomaly-marker"]');
-    expect(marker).not.toBeNull();
-    marker.triggerEventHandler('click', null);
+    // The Chart.js panel's pointClick hand-off (5.9): the anomalyId rides
+    // only when the click landed on a marker.
+    component.onPanelPointClick({ anomalyId: 'anom-1', seriesId: 'daemon_rss_mb', tsMs: 1760790600000 });
     fixture.detectChanges();
 
     expect(resourcesMock.getEvidence).toHaveBeenCalledTimes(1);
@@ -274,7 +325,7 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     resourcesMock.getEvidence.mockReturnValue(of(makeEvidence()));
     resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
 
-    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
+    component.onPanelPointClick({ anomalyId: 'anom-1', seriesId: 'daemon_rss_mb', tsMs: 1760790600000 });
     fixture.detectChanges();
 
     const panel = query('[data-test="drilldown-panel"]');
@@ -305,7 +356,7 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     resourcesMock.getEvidence.mockReturnValue(throwError(() => new Error('boom')));
     resourcesMock.getTraceback.mockReturnValue(throwError(() => new Error('boom')));
 
-    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
+    component.onPanelPointClick({ anomalyId: 'anom-1', seriesId: 'daemon_rss_mb', tsMs: 1760790600000 });
     fixture.detectChanges();
 
     expect(query('[data-test="drilldown-error"]')).not.toBeNull();
@@ -320,17 +371,23 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     expect(query('[data-test="contributors"]')).not.toBeNull();
   });
 
-  it('toggles a series on and off (the panel owns the toggles)', () => {
+  it('toggles a series on and off (the panel owns the toggles)', async () => {
     feedData();
-    const before = queryAll('[data-test="house-series-line"]').length;
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const before = queryAll('[data-test="chart-panel-proxy"]').length;
 
     component.toggleSeries('threads');
     fixture.detectChanges();
-    expect(queryAll('[data-test="house-series-line"]').length).toBe(before + 1);
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(queryAll('[data-test="chart-panel-proxy"]').length).toBe(before + 1);
 
     component.toggleSeries('threads');
     fixture.detectChanges();
-    expect(queryAll('[data-test="house-series-line"]').length).toBe(before);
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(queryAll('[data-test="chart-panel-proxy"]').length).toBe(before);
   });
 
   // ── Stale-response supersede (the drill-down keeps its own token) ──
@@ -342,7 +399,7 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     const tracebackA = new Subject<TracebackPayload>();
     resourcesMock.getEvidence.mockReturnValueOnce(evidenceA.asObservable());
     resourcesMock.getTraceback.mockReturnValueOnce(tracebackA.asObservable());
-    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
+    component.onPanelPointClick({ anomalyId: 'anom-1', seriesId: 'daemon_rss_mb', tsMs: 1760790600000 });
     fixture.detectChanges();
     expect(component.drilldownLoading()).toBe(true);
     expect(component.evidence()).toBeNull();
@@ -352,7 +409,7 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     });
     resourcesMock.getEvidence.mockReturnValueOnce(of(evidenceB));
     resourcesMock.getTraceback.mockReturnValueOnce(of(makeTraceback()));
-    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
+    component.onPanelPointClick({ anomalyId: 'anom-1', seriesId: 'daemon_rss_mb', tsMs: 1760790600000 });
     fixture.detectChanges();
     expect(component.drilldownLoading()).toBe(false);
     expect(component.evidence()).toBe(evidenceB);
@@ -368,6 +425,47 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     expect(query('[data-test="contributors"]').nativeElement.textContent).toContain('99');
   });
 
+  it('a plain sample click carries NO anomalyId and opens NO drill-down', () => {
+    feedData();
+    resourcesMock.getEvidence.mockReturnValue(of(makeEvidence()));
+    resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
+
+    component.onPanelPointClick({ seriesId: 'daemon_cpu', tsMs: 1760790600000 });
+    fixture.detectChanges();
+
+    expect(query('[data-test="drilldown-panel"]')).toBeNull();
+    expect(resourcesMock.getEvidence).not.toHaveBeenCalled();
+  });
+
+  it('a MOUNT FAILURE drops the panel to the house SVG WITH A BADGE — and the fallback still drills down (5.9)', async () => {
+    feedData();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The Chart.js mount fails on the memory panel — the runtime fallback.
+    component.onMountFailed('memory', 'canvas unreachable');
+    fixture.detectChanges();
+
+    // The badge is SURFACED — never a silent downgrade.
+    expect(queryAll('[data-test="panel-fallback-badge"]').length).toBe(1);
+    const badge = query('[data-test="panel-fallback-badge"]').nativeElement.textContent as string;
+    expect(badge).toContain('canvas unreachable');
+
+    // The fallback renders the house SVG for the memory panel's series.
+    const lines = queryAll('[data-test="house-series-line"]');
+    expect(lines.length).toBeGreaterThanOrEqual(2); // the two memory series
+
+    // The fallback's marker click still opens the drill-down (anomalyClick).
+    resourcesMock.getEvidence.mockReturnValue(of(makeEvidence()));
+    resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
+    const marker = query('[data-test="house-anomaly-marker"]');
+    expect(marker).not.toBeNull();
+    marker.triggerEventHandler('click', null);
+    fixture.detectChanges();
+    expect(query('[data-test="drilldown-panel"]')).not.toBeNull();
+    expect(resourcesMock.getEvidence).toHaveBeenCalledWith('anom-1');
+  });
+
   it('a late failed drill-down never flips the panel when a newer one already succeeded', () => {
     feedData();
 
@@ -375,7 +473,7 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     const tracebackA = new Subject<TracebackPayload>();
     resourcesMock.getEvidence.mockReturnValueOnce(evidenceA.asObservable());
     resourcesMock.getTraceback.mockReturnValueOnce(tracebackA.asObservable());
-    query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
+    component.onPanelPointClick({ anomalyId: 'anom-1', seriesId: 'daemon_rss_mb', tsMs: 1760790600000 });
     fixture.detectChanges();
 
     resourcesMock.getEvidence.mockReturnValueOnce(of(makeEvidence()));

@@ -105,6 +105,14 @@ export function houseNearestAnomaly(
  *
  * The marker lane sits at the TOP of the chart area, so the markers
  * never cover the plotted samples.
+ *
+ * **The marker's label is VISIBLE (T1 phase 5, task 5.7 — ADJ-iv shape
+ * 1).** The API words the endpoint already serves — `kind`, `severity`,
+ * `series_key`, `peak` — are drawn as text beside the marker (ADJ-iv:
+ * they must not exist only in a hover-only `<title>`). The words are
+ * composed by the surface's label composer (`anomalyMarkerLabel`) and
+ * travel on the marker's `title`; the plugin draws that title text
+ * verbatim, so the marker itself carries the words.
  */
 export function createHouseAnomalyOverlayPlugin(): HouseAnomalyPlugin {
   return {
@@ -138,8 +146,22 @@ export function createHouseAnomalyOverlayPlugin(): HouseAnomalyPlugin {
         ctx.beginPath();
         ctx.arc(x, laneY, HOUSE_ANOMALY_MARKER_RADIUS, 0, Math.PI * 2);
         ctx.fill();
+
+        // 5.7 — the VISIBLE label: the marker's composed words, drawn
+        // beside the dot in the marker lane (never over the samples).
+        if (marker.title) {
+          ctx.fillStyle = HOUSE_ANOMALY_LABEL_COLOR;
+          ctx.font = HOUSE_ANOMALY_LABEL_FONT;
+          ctx.fillText(marker.title, x + HOUSE_ANOMALY_MARKER_RADIUS + 4, laneY + 3);
+        }
       }
       ctx.restore();
     },
   };
 }
+
+/** The visible label's muted slate colour (the house D5 text-secondary). */
+export const HOUSE_ANOMALY_LABEL_COLOR = '#94a3b8';
+
+/** The visible label's font — small, legible, canvas-pixel scale. */
+export const HOUSE_ANOMALY_LABEL_FONT = '10px system-ui, sans-serif';

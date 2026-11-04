@@ -93,6 +93,19 @@ export interface ChartRenderData {
 }
 
 /**
+ * The point-click payload — the Chart.js panel's drill-down hand-off
+ * (defined in the COMPONENTS layer so a renderer's `inputs()` can carry
+ * it; pages import it from here).
+ */
+export interface ChartPointClick {
+  /** Present only when the click landed on an anomaly marker. */
+  readonly anomalyId?: string;
+  readonly seriesId: string;
+  /** Epoch MILLISECONDS. */
+  readonly tsMs: number;
+}
+
+/**
  * The handlers a consumer offers to a renderer.
  *
  * A renderer takes the handler it needs as an INPUT and calls it; a
@@ -104,6 +117,12 @@ export interface ChartOutputHandlers {
   readonly anomalyClick?: (marker: HouseAnomalyMarker) => void;
   /** The Chart.js panel's mount failure. */
   readonly mountFailed?: (reason: string) => void;
+  /**
+   * The Chart.js panel's point click — the drill-down hand-off (T1
+   * phase 5, task 5.9: the resource timeline's marker click rides the
+   * wrapper's `pointClick`).
+   */
+  readonly pointClick?: (payload: ChartPointClick) => void;
 }
 
 /**

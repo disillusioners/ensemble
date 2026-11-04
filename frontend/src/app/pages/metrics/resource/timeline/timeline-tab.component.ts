@@ -26,12 +26,16 @@ import {
   ChartSeries,
   HouseAnomalyMarker,
 } from '../../../../components/charts/house-svg-renderer/house-svg-renderer';
-import { createHouseSvgRegistry } from '../../../../components/charts/house-svg-renderer/house-svg-renderer.renderer';
 import {
   ChartOutputHandlers,
+  ChartPointClick,
   ChartRenderData,
+  ChartRendererPlan,
   ChartRequest,
+  ChartMountFallback,
+  chartMountFallback,
 } from '../../../../components/charts/renderer-registry';
+import { createDefaultChartRegistry } from '../../charts/chart-panel.renderer';
 import {
   DEFAULT_TIMELINE_SERIES,
   TIMELINE_SERIES_DEFS,
@@ -39,6 +43,7 @@ import {
 } from './timeline-series';
 import { TimelineMarkerClick, anomalyDrilldownWindow } from './timeline-drilldown';
 import { detectResourceDataGaps } from './data-gaps';
+import { anomalyMarkerLabel } from './marker-label';
 
 /**
  * Timeline PANEL — the history chart + anomaly markers + drill-down
@@ -61,12 +66,46 @@ import { detectResourceDataGaps } from './data-gaps';
  *  - the truncated banner (strictly from the frozen payload flag, D9);
  *  - the data-gap annotation strip (5.8 — derived from the history
  *    payload, never worded as restart/deploy/promote);
- *  - the DRILL-DOWN (D10): a marker click — or the anomalies panel's
- *    row click handed down through `openDrilldown` — runs
- *    `forkJoin({ evidence, traceback })` with the padded window and
- *    renders the panel below the chart. A monotonic supersede token
- *    (D-hardening) drops a stale drill-down response.
+ *  - the DRILL-DOWN (D10): a marker click — via the Chart.js panel's
+ *    `pointClick` (5.9) or the house SVG fallback's `anomalyClick`, or
+ *    the anomalies panel's row click handed down through
+ *    `openDrilldown` — runs `forkJoin({ evidence, traceback })` with the
+ *    padded window and renders the panel below the chart. A monotonic
+ *    supersede token (D-hardening) drops a stale drill-down response.
+ *
+ * ── THE SECOND RE-POINT (5.9 / AM-27) ─────────────────────────────────
+ *
+ * The timeline renders through the **PANEL ROLE** — the Chart.js wrapper
+ * with the house anomaly overlay plugin — per plan-overview §4.2: the
+ * enabled series split by their UNIT CLASS into up to THREE panels
+ * (memory MB on a shared scale, CPU %, counts), each with a unit-labeled
+ * y-axis. The anomaly markers ride as the house plugin (with the VISIBLE
+ * API-word labels, 5.7) and the drill-down click rides the wrapper's
+ * `pointClick`. A panel mount failure drops to the house SVG with a
+ * BADGE — never a silent downgrade (the three-layer fallback).
  */
+
+/** One unit-class panel of the timeline (plan-overview §4.2). */
+interface TimelineUnitClassPanelSpec {
+  readonly unitClass: 'memory' | 'cpu' | 'count';
+  readonly unit: string;
+  readonly title: string;
+}
+
+/** The three unit classes → three panels, in display order. */
+const TIMELINE_UNIT_CLASS_PANELS: readonly TimelineUnitClassPanelSpec[] = [
+  { unitClass: 'memory', unit: 'MB', title: 'Memory (MB)' },
+  { unitClass: 'cpu', unit: '%', title: 'CPU (%)' },
+  { unitClass: 'count', unit: 'count', title: 'Counts' },
+];
+
+/** One rendered panel view — the plan the template mounts. */
+export interface TimelinePanelView {
+  readonly unitClass: string;
+  readonly title: string;
+  readonly plan: ChartRendererPlan;
+}
+
 
 @Component({
   selector: 'app-resources-timeline',
@@ -126,39 +165,54 @@ export class TimelineTabComponent {
     this.retry.emit();
   }
 
-  // ── The RENDERER REGISTRY (task 4.13) ─────────────────────────────
+  // ── The RENDERER REGISTRY — the SECOND RE-POINT (5.9 / AM-27) ─────
 
   /**
-   * The STATIC registry — the house SVG only.
-   *
-   * Phase 5's 5.9 re-points this plan onto the Chart.js panel role in
-   * its own commit (the AM-27 second re-point); this is the registry
-   * Phase 4 left behind.
+   * The DEFAULT registry — the Chart.js PANEL first, the house SVG
+   * (mini + trend fallback) behind it. Phase 4 left this module on the
+   * static registry; phase 5's 5.9 re-points the plan onto the panel
+   * role: the resource timeline is the lane's first real interactive
+   * panel (the anomaly overlay + the drill-down click + the baseline
+   * capability).
    */
-  private readonly registry = createHouseSvgRegistry();
+  private readonly registry = createDefaultChartRegistry();
 
-  /** The render request — the static trend shape with the markers + drill-down. */
+  /**
+   * The render request — the INTERACTIVE panel shape: the shared y-axis
+   * (one panel per unit class, several series), the anomaly markers and
+   * the drill-down.
+   */
   private readonly request: ChartRequest = {
     intent: 'trend',
-    flags: ['markers', 'drill'],
-    surface: 'static',
+    flags: ['shared-y', 'markers', 'drill'],
+    surface: 'interactive',
   };
 
-  /** The renderer plan — the house SVG. */
-  readonly plan = computed(() =>
-    this.registry.plan(this.request, { series: [], anomalies: [] }),
-  );
-
   /**
-   * The timeline's series — the house shape.
-   *
-   * The series toggle stays here (the PARENT owns the state): the
-   * renderer draws exactly the series it is given.
+   * The unit-class spec of a series key (the class travels with the
+   * series). The key comes from the WIRE (`anomaly.series_key`), so an
+   * unknown key resolves to `null` and the marker joins NO panel.
    */
-  readonly houseSeries = computed<ChartSeries[]>(() => {
+  private unitClassOf(key: string): 'memory' | 'cpu' | 'count' | null {
+    const def = TIMELINE_SERIES_DEFS.find(
+      (candidate) => candidate.key === (key as TimelineSeriesKey),
+    );
+    return def ? def.unitClass : null;
+  }
+
+  /** Whether a unit-class panel has any enabled series to draw. */
+  private hasEnabledSeries(unitClass: string): boolean {
+    return TIMELINE_SERIES_DEFS.some(
+      (def) => def.unitClass === unitClass && this.series().includes(def.key),
+    );
+  }
+
+  /** The series of ONE unit-class panel — the panel wrapper's shape. */
+  private panelSeries(unitClass: string): ChartSeries[] {
     const points = this.points();
-    const enabled = this.series();
-    return TIMELINE_SERIES_DEFS.filter((def) => enabled.includes(def.key)).map((def) => ({
+    return TIMELINE_SERIES_DEFS.filter(
+      (def) => def.unitClass === unitClass && this.series().includes(def.key),
+    ).map((def) => ({
       id: def.key,
       label: def.label,
       color: def.color,
@@ -173,45 +227,131 @@ export class TimelineTabComponent {
             Number.isFinite(sample.t) && Number.isFinite(sample.v),
         ),
     }));
-  });
-
-  /** The anomaly markers — the house shape (the wire anomaly rides along as the id). */
-  readonly houseAnomalies = computed<HouseAnomalyMarker[]>(() =>
-    this.anomalies().map((anomaly) => ({
-      anomalyId: anomaly.id,
-      seriesId: anomaly.series_key,
-      tsMs: parseNaiveUtc(anomaly.t_start).getTime(),
-      severity: anomaly.severity,
-      title: `${anomaly.kind} · ${anomaly.shape} · ${anomaly.severity} · peak ${anomaly.peak}`,
-    })),
-  );
-
-  /** The render data of the timeline. */
-  timelineData(): ChartRenderData {
-    return {
-      series: this.houseSeries(),
-      anomalies: this.houseAnomalies(),
-      baseline: [],
-      label: 'Resource history timeline (UTC)',
-    };
-  }
-
-  /** The output handlers — the marker's click hands the anomaly over. */
-  readonly timelineHandlers: ChartOutputHandlers = {
-    anomalyClick: (marker: HouseAnomalyMarker) => this.onHouseMarkerClick(marker),
-  };
-
-  /** The `NgComponentOutlet` inputs for the resolved plan. */
-  timelineInputs(): Record<string, unknown> {
-    return this.plan().inputs(this.timelineData(), this.timelineHandlers);
   }
 
   /**
-   * The marker click → the drill-down.
-   *
-   * The renderer hands over the MARKER; the wire anomaly behind it is
-   * looked up by id, and the padded window comes from the drill-down
-   * POLICY (which moved out of the chart engine in task 4.2).
+   * The anomaly markers of ONE unit-class panel — the house plugin's
+   * shape, with the VISIBLE API-word label composed per anomaly (5.7).
+   */
+  private panelAnomalies(unitClass: string): HouseAnomalyMarker[] {
+    return this.anomalies()
+      .filter((anomaly) => this.unitClassOf(anomaly.series_key) === unitClass)
+      .map((anomaly) => ({
+        anomalyId: anomaly.id,
+        seriesId: anomaly.series_key,
+        tsMs: parseNaiveUtc(anomaly.t_start).getTime(),
+        severity: anomaly.severity,
+        title: anomalyMarkerLabel(anomaly),
+      }));
+  }
+
+  /** The render data of ONE unit-class panel. */
+  panelData(unitClass: string): ChartRenderData {
+    const spec = TIMELINE_UNIT_CLASS_PANELS.find((entry) => entry.unitClass === unitClass);
+    return {
+      series: this.panelSeries(unitClass),
+      anomalies: this.panelAnomalies(unitClass),
+      baseline: [],
+      unit: spec?.unit ?? 'unit unknown',
+      label: `${spec?.title ?? unitClass} — resource history (UTC)`,
+    };
+  }
+
+  /**
+   * The handlers of ONE unit-class panel: the wrapper's `pointClick`
+   * (the drill-down hand-off, 5.9), the house SVG fallback's
+   * `anomalyClick`, and the mount failure (the badge + fallback).
+   */
+  panelHandlers(unitClass: string): ChartOutputHandlers {
+    return {
+      pointClick: (payload: ChartPointClick) => this.onPanelPointClick(payload),
+      anomalyClick: (marker: HouseAnomalyMarker) => this.onHouseMarkerClick(marker),
+      mountFailed: (reason: string) => this.onMountFailed(unitClass, reason),
+    };
+  }
+
+  /**
+   * The rendered panels — the enabled unit classes, in display order,
+   * resolved through the registry (the Chart.js panel wins a
+   * `trend`+`interactive` request; the house SVG carries the fallback).
+   */
+  readonly panels = computed<readonly TimelinePanelView[]>(() => {
+    const views: TimelinePanelView[] = [];
+    for (const spec of TIMELINE_UNIT_CLASS_PANELS) {
+      if (!this.hasEnabledSeries(spec.unitClass)) {
+        continue;
+      }
+      views.push({
+        unitClass: spec.unitClass,
+        title: spec.title,
+        plan: this.registry.plan(this.request, this.panelData(spec.unitClass)),
+      });
+    }
+    return views;
+  });
+
+  /**
+   * The MOUNT FAILURES — the runtime fallback's state, per unit class.
+   * A failed Chart.js mount renders the house SVG with a BADGE (never a
+   * silent downgrade); the registry THROWS when no fallback exists.
+   */
+  readonly fallbacks = signal<ReadonlyMap<string, ChartMountFallback>>(new Map());
+
+  /** The mount failure → the house SVG fallback + the badge (5.9). */
+  onMountFailed(unitClass: string, reason: string): void {
+    const fallback = chartMountFallback(
+      this.registry,
+      this.request,
+      this.panelData(unitClass),
+      reason,
+    );
+    this.fallbacks.update((current) => {
+      const next = new Map(current);
+      next.set(unitClass, fallback);
+      return next;
+    });
+  }
+
+  /**
+   * The timeline's series — the house shape of ALL enabled series
+   * (kept for the fallback renderer's callers and the markers' labels).
+   */
+  readonly houseSeries = computed<ChartSeries[]>(() =>
+    this.panelSeries('memory')
+      .concat(this.panelSeries('cpu'))
+      .concat(this.panelSeries('count')),
+  );
+
+  /**
+   * The anomaly markers — the house shape with the VISIBLE label (5.7),
+   * for ALL panels' worth of anomalies.
+   */
+  readonly houseAnomalies = computed<HouseAnomalyMarker[]>(() => [
+    ...this.panelAnomalies('memory'),
+    ...this.panelAnomalies('cpu'),
+    ...this.panelAnomalies('count'),
+  ]);
+
+  /**
+   * The wrapper's `pointClick` → the drill-down (5.9). Only a click that
+   * landed on an anomaly marker opens the drill-down — a plain sample
+   * click carries no id and is ignored (never a fabricated one).
+   */
+  onPanelPointClick(payload: ChartPointClick): void {
+    if (!payload.anomalyId) {
+      return;
+    }
+    const anomaly = this.anomalies().find((candidate) => candidate.id === payload.anomalyId);
+    if (!anomaly) {
+      return;
+    }
+    this.openDrilldown(anomaly);
+  }
+
+  /**
+   * The house SVG fallback's marker click → the drill-down (the wire
+   * anomaly is looked up by the marker's id; the padded window comes
+   * from the drill-down POLICY, task 4.2).
    */
   onHouseMarkerClick(marker: HouseAnomalyMarker): void {
     const anomaly = this.anomalies().find((candidate) => candidate.id === marker.anomalyId);

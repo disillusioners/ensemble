@@ -163,8 +163,9 @@ export interface MetricsCustomTab {
    * The window this module opens on — the snap target when the operator
    * switches to a tab that cannot serve the current window (3.2).
    *
-   * It matches the retired timeline panel's own default
-   * (`DEFAULT_TIMELINE_WINDOW` in `pages/metrics/resource/timeline/`), so the
+   * It matches the retired timeline panel's own default (the panel's
+   * window-ladder constant was retired with the picker in T1 phase 5;
+   * the manifest entry is now that default's only home), so the
    * relocated module opens on the same window it always did.
    */
   readonly defaultWindowS: ResourcesWindow;

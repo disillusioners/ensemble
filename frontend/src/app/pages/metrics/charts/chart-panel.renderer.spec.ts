@@ -64,6 +64,29 @@ describe('the default chart registry', () => {
     expect(outcome.badge).toContain('vendor unavailable');
   });
 
+  it('the panel plan carries the pointClick hand-off (5.9 — the drill-down rides the wrapper)', () => {
+    const registry = createDefaultChartRegistry();
+    const plan = registry.plan({ intent: 'trend', flags: [] }, DATA);
+    let seen: { anomalyId?: string; seriesId: string; tsMs: number } | null = null;
+    const inputs = plan.inputs(DATA, {
+      pointClick: (payload) => {
+        seen = payload;
+      },
+    });
+    // The handler travels as the wrapper's onPointClick INPUT.
+    expect(typeof inputs['onPointClick']).toBe('function');
+    (inputs['onPointClick'] as (payload: { anomalyId?: string; seriesId: string; tsMs: number }) => void)({
+      anomalyId: 'a1',
+      seriesId: 's',
+      tsMs: 1,
+    });
+    expect(seen).toEqual({ anomalyId: 'a1', seriesId: 's', tsMs: 1 });
+
+    // No handler → the input binds null (the wrapper never fabricates one).
+    const bare = plan.inputs(DATA);
+    expect(bare['onPointClick']).toBeNull();
+  });
+
   it('the panel plan binds the unit, the series and the anomalies', () => {
     const registry = createDefaultChartRegistry();
     const plan = registry.plan({ intent: 'trend', flags: [] }, DATA);
