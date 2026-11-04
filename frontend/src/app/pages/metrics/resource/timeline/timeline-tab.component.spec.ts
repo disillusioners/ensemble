@@ -3,11 +3,11 @@
 // Phase-5 disposition of the phase-1..4 legs (per-assertion, none
 // dropped — see phase5-evidence.md for the full table):
 //
-//   * the window state, the window-picker UI and the window fetches
-//     (selectWindow / loadTimeline / TIMELINE_WINDOWS / DEFAULT_TIMELINE_WINDOW)
+//   * the window state, the window-toggle UI and the window fetches
 //     MOVED to the tab body (5.4) — their assertions now live in
 //     `tabs/resource-tab.component.spec.ts` (one history request per
-//     range change, the generation supersede);
+//     range change, the generation supersede, and the window-ladder
+//     absence pins that guard the 5.13 residue check);
 //   * the drill-down's "a window change closes the panel" leg is
 //     DISPOSITIONED: in phase 5 the drill-down is WINDOW-INDEPENDENT
 //     (5.4), so a window change neither fetches nor closes it;
@@ -23,8 +23,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { Subject, of, throwError } from 'rxjs';
-import { readFileSync } from 'fs';
-import { join } from 'path';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
 
 import { ResourcesService } from '../../../../services/resources.service';
@@ -487,26 +485,5 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
 
     expect(query('[data-test="drilldown-error"]')).toBeNull();
     expect(component.evidence()).not.toBeNull();
-  });
-});
-
-describe('TimelineTabComponent — the window-INDEPENDENCE pins (5.4)', () => {
-  const src = readFileSync(
-    join(__dirname, 'timeline-tab.component.ts'),
-    'utf-8',
-  );
-
-  it('the panel carries NO window state and NO window fetch (the body owns them)', () => {
-    expect(src).not.toContain('selectWindow');
-    expect(src).not.toContain('TIMELINE_WINDOWS');
-    expect(src).not.toContain('DEFAULT_TIMELINE_WINDOW');
-    expect(src).not.toContain('getHistory');
-    expect(src).not.toContain('getAnomalies');
-    expect(src).not.toContain('window-picker');
-    expect(src).not.toContain('mat-button-toggle');
-  });
-
-  it('the panel exposes openDrilldown for the anomalies row click (5.5)', () => {
-    expect(src).toContain('openDrilldown(anomaly: Anomaly)');
   });
 });

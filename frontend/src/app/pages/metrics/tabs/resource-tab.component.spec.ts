@@ -580,3 +580,41 @@ describe('ResourceTabComponent — the PER-SOURCE state (AM-1 / 5.10)', () => {
     expect(src).not.toContain('/api/metrics');
   });
 });
+
+describe('ResourceTabComponent — the 5.13 residue-check pins (the panel\'s tree is clean)', () => {
+  // The pinned residue check (5.13) greps pages/metrics/resource/ for the
+  // OLD PICKER's tokens and demands ZERO hits — so these absence pins
+  // deliberately live OUTSIDE that tree (this file is in pages/metrics/
+  // tabs/), reading the panel's source across the directory boundary.
+  // The pinned command itself:
+  //   grep -rn "TIMELINE_WINDOWS\|window-picker" frontend/src/app/pages/metrics/resource/
+  // …whose only allowlisted row is the frozen union at
+  // frontend/src/app/models/resources.models.ts:16 (OUTSIDE the tree).
+  const timelineSrc = readFileSync(
+    join(__dirname, '..', 'resource', 'timeline', 'timeline-tab.component.ts'),
+    'utf-8',
+  );
+  const timelineHtml = readFileSync(
+    join(__dirname, '..', 'resource', 'timeline', 'timeline-tab.component.html'),
+    'utf-8',
+  );
+
+  it('the timeline panel carries NO window-ladder constant and NO picker token', () => {
+    expect(timelineSrc).not.toContain('TIMELINE_WINDOWS');
+    expect(timelineSrc).not.toContain('window-picker');
+    expect(timelineHtml).not.toContain('TIMELINE_WINDOWS');
+    expect(timelineHtml).not.toContain('window-picker');
+  });
+
+  it('the panel carries NO window state and NO window fetch (the body owns them)', () => {
+    expect(timelineSrc).not.toContain('selectWindow');
+    expect(timelineSrc).not.toContain('DEFAULT_TIMELINE_WINDOW');
+    expect(timelineSrc).not.toContain('getHistory');
+    expect(timelineSrc).not.toContain('getAnomalies');
+    expect(timelineSrc).not.toContain('mat-button-toggle');
+  });
+
+  it('the panel exposes openDrilldown for the anomalies row click (5.5)', () => {
+    expect(timelineSrc).toContain('openDrilldown(anomaly: Anomaly)');
+  });
+});
