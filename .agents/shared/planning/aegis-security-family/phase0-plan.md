@@ -5,8 +5,9 @@
 > amendments AM-1…AM-15 BINDING and folded into this plan set (see `decisions.md` §C2). **Phase 0 is
 > NOT cleared** — the plan council + approver legs remain PENDING; this fold is not a self-approval.
 > **Gate condition (review §6):** P1 must not begin until AM-1, AM-2, AM-3, AM-5, AM-6, AM-7, AM-9 and
-> AM-13 are reflected in the plan set — **they now ARE** (decisions.md §C2 is the reflection the
-> review names as the natural home) — and AM-4, AM-8, AM-10, AM-11, AM-12, AM-14 and AM-15 are
+> AM-13 are reflected in the plan set — **they now ARE** (the review named the deviations table —
+> `decisions.md` §C — as the natural home; the fold is recorded in the adjacent §C2 amendments table)
+> — and AM-4, AM-8, AM-10, AM-11, AM-12, AM-14 and AM-15 are
 > recorded as phase-bound deltas (carried in the phase plans: AM-4 → P1/P2, AM-8 → P2/P3, AM-10 →
 > P2/P3/P4, AM-11 → P4/P5/P6, AM-12 → P1/P2/P3, AM-14 → P6, AM-15 → decisions.md §H).
 

@@ -118,7 +118,9 @@ citation resolves there; several facts superseded — see its dated amendment no
 
 **AM-1 consequence:** with `chart` dropped, aegis's effective team is exactly
 `[hacker, cracker, sweeper, worker]` — **no implied member**; the pre-review "implied `charter`"
-deviation disappears (T1/T3/T8 pin the corrected set; the aegis `tools_note.md` has no chart row).
+deviation disappears (T1/T3 pin the corrected set; T8 — the privileged-category intersection — is
+unaffected by the chart drop and asserting it against the corrected set is harmless; the aegis
+`tools_note.md` has no chart row).
 **AM-1 v2 re-entry path (documented, not built):** `allow "chart"` + `deny_spawn ["chart"]`
 (`daemon/registry.py:96-105` names this exact case) keeps the tool with no spawn right; the
 transitive charter child per call must still be disclosed. **AM-1 mitigation:** `aegis-strategy`'s
@@ -381,6 +383,6 @@ with cost/benefit and status so the leader can revisit without re-deriving.
 | # | Follow-up | Cost | Benefit | Status |
 |---|---|---|---|---|
 | **(a)** | **Daemon-side supervision of backgrounded `proc_run` campaigns.** The long-tool nudge cannot see them (`proc_tools.py:2031-2041`) and the mission strand healer covers mission roots only. | A daemon change — a supervision signal for non-graph processes. | Real, but v1's answer (aegis polls `proc_status`/`proc_logs`, records every `process_id`, tears down explicitly) is adequate for a supervised engagement. | **DEFERRED.** |
-| **(b)** | **A scoped read-only web/CVE tool category.** The 3-step registration seam + `tool-categories.json` regeneration (the F-1 trap class) — a lane of its own. | Marginal in v1: `zai-web-search` already reaches `aegis` through the existing `mcp` grant on live (AM-3). | A real CVE-database API surface without the dynamic `mcp` sweep. | **DEFERRED TO V2**, and only if the deployment-conditional surface proves inadequate in practice. |
+| **(b)** | **A scoped read-only web/CVE tool category** — a real CVE-database API surface without the dynamic `mcp` sweep. | The 3-step registration seam + `tool-categories.json` regeneration (the F-1 trap class) — a lane of its own. | Marginal in v1: `zai-web-search` already reaches `aegis` through the existing `mcp` grant on live (AM-3). | **DEFERRED TO V2**, and only if the deployment-conditional surface proves inadequate in practice. |
 | **(c)** | **A per-agent supervision knob in `meta.json`.** The existing key is inert for every agent except `watcher` (AM-5); the honest daemon fix would be a per-agent `long_tool_call_threshold_seconds` **default**, not a `watchover` block. | A small daemon change (a new default + its config wiring). | A real per-agent threshold for the long-tool nudge — the only automatic supervisor that exists. | **ROUTED AS A CORRECTED PROPOSAL** — rejected in principle as originally shaped (a `watchover` block would be a false-confidence knob); the corrected shape is recorded here for the follow-up lane. |
 | **(d)** | **A real boundary for findings storage** — path confinement for agent filesystem tools (`filesystem.py:197-215` trusts absolute paths by design). | A daemon change (confinement policy in the tool layer). | Would convert AM-4's doctrinal privacy into a mechanism. | **DEFERRED deliberately** — the v1 commission forbids `daemon/` changes, and the report format already requires that a finding's location be readable. |

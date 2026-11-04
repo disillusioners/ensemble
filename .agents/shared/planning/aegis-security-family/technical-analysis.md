@@ -72,9 +72,12 @@ bare host `python3` that `stage.sh` runs under can use it (B2).
 
 Three findings shape the design more than any other. First, **`worker` cannot make charts** — the
 commission assigns worker "report charts", but worker's 21-category allow contains no `chart` and the
-commission forbids touching worker (D4). Second, **the per-agent `watchover` meta key is inert** —
+commission forbids touching worker (D4) **[context superseded by AM-1 — 2026-11-04: `chart` is
+DROPPED for v1; see §DP1]**. Second, **the per-agent `watchover` meta key is inert** —
 `AgentMetadata` has no such field, its `model_config` is `extra="ignore"`, and no daemon code reads
-one; the real lever is the per-instance REST API (D7). Third, **`bash` runs through `/bin/sh`** for
+one; the real lever is the per-instance REST API (D7) **[SUPERSEDED by AM-5 — see the §DP5 rewrite:
+the key is inert for every agent except `watcher`; the per-instance API is an operator-only
+tool-call gate, not a supervision lever]**. Third, **`bash` runs through `/bin/sh`** for
 string commands, so the commission's "loops go through script files" constraint is a code fact, not a
 style preference (D10).
 
@@ -133,7 +136,8 @@ style preference (D10).
 - `aegis → worker` **is** a spawn and is structurally permitted (A10 — the gate reads only the
   caller's meta; worker needs no change).
 - `aegis → charter` (chart) would be an **implied** member, not a declared one (A1) — this is the
-  Q1 deviation (D4).
+  Q1 deviation (D4). **[RETIRED by AM-1 — deviation resolved]** `chart` is dropped for v1, so there
+  is no implied member; the row is retained as the record of the rejected alternative.
 
 ---
 
@@ -852,7 +856,7 @@ exception is the registry-scan leg, which needs the venv interpreter.
 | T10 | `test_no_instance_read_or_ops` | no agent requests `instance_read` / `instance_ops` | the B6 no-touch condition |
 | T11 | `test_no_mcp_full_access` | no aegis-family meta sets `mcp_full_access` | **the E4 fold** (B3) |
 | T12 | `test_aegis_carries_report_scrutiny_guidance` | aegis's surface contains `"[REPORT SANITY:"`, `"interim, not completion"`, `"send_message"` — **AM-9: asserted over the UNION of `{rule.md, workflow.md, soul.md}` ∪ `{skills-template/*.md}` (mirroring test_report_integrity_prompts.py:250-265); the snippets live in `rule.md`; `aegis-strategy.md` carries NO report-delivery boilerplate** | **the B4 fold** |
-| T13 | `test_children_exempt_from_scrutiny_guidance` | children (empty teams) carry neither — mirrors sketcher's Section-7 exemption test (B8) | B4 exemption |
+| T13 | `test_children_exempt_from_scrutiny_guidance` | children (empty teams) carry neither — **[SHAPED by AM-9 — 2026-11-04]** a NEW, stricter house pin modelled on the sketcher precedent (`test_sketcher_agent.py:195`), **not a copy** of an existing generic test; the children are exempt via the **empty-team skip** (`test_report_integrity_prompts.py:240-241`), **NOT** `GRANDFATHERED_PARENTS` | B4 exemption |
 | T14 | `test_no_system_internals_in_prose` ×4 | the §10 forbidden-token list over each agent's prompt surface | guide §1/§10 |
 | T15 | `test_no_md_path_tokens_in_prose` ×4 | zero `.md` hits, **with the operational-path exemptions enumerated** (the `.lib.sh` read targets, the engagement-folder paths) | guide §3 closure |
 | T16 | `test_rule_md_at_most_seven_cardinals` ×4 | 1 ≤ cardinals ≤ 7 | guide §3 |
@@ -860,7 +864,7 @@ exception is the registry-scan leg, which needs the venv interpreter.
 | T18 | `test_no_adapted_from_provenance` ×4 | no "adapted from" / "migrated from" / "verified from" — **AM-8: the token list is EXTENDED to also refuse `preserved verbatim from` and the `per <agent> pattern, job <id>` shape (charter's own heading/header violate guide §10 but escape the original 3-token list)** | guide §10 |
 | T19 | `test_aegis_skills_name_no_out_of_team_fallback` | aegis's `skills-template/*.md` name **no** out-of-team peer as a spawn fallback; *"hand the report to the leader"* is an allowed caller reference | **guide §8 org-chart rule** (B8) |
 | T20 | `test_leader_team_includes_aegis` | `"aegis" ∈ leader.meta.team_members` | the A4 one-liner |
-| T21 | `test_seeded_skill_is_methodology_only` | the **only** `skill-set.yaml` entry in the family is `aegis-strategy`; the three installer skills appear in **no** manifest | file-invoked mode (C2/C6) |
+| T21 | `test_seeded_skill_is_methodology_only` | the **only** `skill-set.yaml` entry in the family is `aegis-strategy`; the three installer skills appear in **no** manifest — **[EXTENDED by AM-7 — 2026-11-04]** AND `include` ∉ `aegis-strategy`'s frontmatter (the include resolver's cross-agent by-name fallback would inline another agent's bank row — `skill_include_resolver.py:434-437`) | file-invoked mode (C2/C6) |
 | T22 | `test_skill_set_entries_have_templates_and_match_versions` | each seeded skill has a template file and matching frontmatter/manifest versions | guide §6 |
 | T23 | `test_installer_fences_block_identical` | ~~the three `.lib.sh` files carry an **identical** FENCES block~~ **[DEFINED by AM-10 — 2026-11-04]** PRIMARY: the three **`.md` FENCES bullet lists** byte-identical, scope = THE FENCES BULLET LIST ONLY (MUST include the C3 checksum bullet; MUST exclude per-tool content); SECONDARY: each `.lib.sh` carries a FENCES header mentioning the tool-agnostic keywords — explicitly NOT byte-identity vs the `.md` block | **the drift mitigation for DP2** |
 | T24 | `test_severity_taxonomy_declared` | `aegis-strategy` declares the 5 levels + the named finding-record fields (the printed list has **ten** — T24 pins the NAMES, not the count; corrected 2026-11-04 per D-6) | DP4 canonical home |
