@@ -217,3 +217,108 @@ including phase 6's unit-vocabulary legs (6.3) *and* phase 8's 8.2–8.5 /
 **Thresholds: unchanged** (B1 ±2,048 vs 5,909,018; B2 0; B3 0 static; B4a
 82,000; B4b 185,000). `bundle-baseline.json` has no diff. D-1/D-2/D-3 are
 untouched by this fold.
+---
+
+## 6. FIX ORDER #2 routed register
+
+This pass folded the tidier's **H-2** escalation (the false-green pack class)
+plus one coupled correctness correction it uncovered, in ONE pack commit:
+
+- **H-2** — `D1_FILES` re-pointed to the lane's ACTUAL current specs (the
+  `svg-line-chart` entry was a Phase-4 deletion; 20 replacement suites
+  entered the list), `D2_DECLARED` trimmed of the Phase-7
+  `resources-gear-menu` deletion, and a **per-declared-file existence
+  assertion** added — D1 on the HEAD leg, D2 on BOTH legs (that list's
+  membership invariant). The pack header (`:12`/`:22`) was refreshed in the
+  same commit, and the L-13 `set +e` no-ops were swept (errexit is now
+  asserted explicitly OFF at the top of the script, which is what makes
+  those no-ops provably dead).
+- **Coupled correction (found by running the BASE leg, not by reading):**
+  the pack's `D1_MARKER` was `src/app/models/metrics.model.spec.ts` — a
+  file the **v0.28.6 central-metrics-v1 lane had already shipped**, so it
+  EXISTS at this lane's base (`c4161335b`). The BASE leg therefore
+  mis-discriminated as HEAD: it ran `d1` against a MIXED set (8 inherited
+  files present, the lane's own absent → jest silently dropped the absent
+  ones) and forced Leg 7's expected dependency set to the HEAD's
+  `["chart.js"]`/`["jest-canvas-mock"]` while the base tree's
+  `package.json` delta against `BASE_REF` is EMPTY → a false
+  "D-1 DEPENDENCY-SET BREACH". The marker is re-pointed to
+  `src/app/app.resources-retirement.spec.ts` (this lane's Phase-7 artifact
+  — PROVEN absent at the base, present at the head).
+
+**Product code was NOT changed by this pass** — the pack file and this
+record only.
+
+The items below are **routed, not folded**. Each carries its owner.
+
+### 6.1 — `fetchStatStrip` `console.warn` + the `ResourcesService` missing deadline
+
+| Item | Source | Why it is routed, not folded | Owner |
+|---|---|---|---|
+| `fetchStatStrip` empty catch with no console output (the snapshot-path failure is invisible; the banner only fires on the catalog path — `central-tab.component.ts:901-908`) | tidier **M-9** (SPLIT: the FALSE comment was folded zero-behavior in `c003d6e3e`; the `console.warn` addition was ESCALATED) | observable console output is a **behavior change** — out of this lane's pre-stage window | **the metrics-lane follow-up** |
+| The Resources reads carry **no client deadline** — the hung-read class AM-4 eliminated for the central tabs survives in tab 1 (`live-tab.component.ts:101-105`; the service side is pre-existing and outside the delta) | tidier **M-10** | a deadline is behavior by definition and spans service + consumers | **the metrics-lane follow-up** |
+
+### 6.2 — `central-tab` 918-line pure-move extraction
+
+| Item | Source | Why it is routed, not folded | Owner |
+|---|---|---|---|
+| `central-tab.component.ts` is 918 lines with three concerns (fetch loop / pure projection / renderer plumbing) | tidier **M-11** | within the acceptable band (<1000); a pure-move extraction is recorded (sibling `central-tab.panels.ts`; precedent = the house renderer engine/component split) but was NOT executed, to avoid late-lane byte churn against the frozen guard numbers | **the next FE lane** |
+
+### 6.3 — The tidier's frozen / left items (as the tidier recorded them)
+
+| ID | Item | Disposition as recorded | Owner |
+|---|---|---|---|
+| L-5 | `CHART_FLAGS` vocabulary const unreferenced (`renderer-registry.ts:61`) | **LEFT** — documented vocabulary for the next engine; the flags-coverage assert is **ROUTED** | semantics lane |
+| L-7 | `'unit unknown'` literals at the `components/charts` sites (`house-svg-renderer.component.ts:439`, `.renderer.ts:66`) | **LEFT** — the documented `components ↛ metrics` decoupling per `chart-theme.ts`; the mirror class is accepted there | — (accepted, no owner) |
+| L-8 | e2e gate stub-bootstrap scaffolding duplicated between the two Playwright gates | **LEFT** — the weakest finding; adjacent to the frozen D-guards; a third gate is the trigger to dedup | — (accepted, no owner) |
+| L-9 | "showing the last known window/list" copy is unconditional on first-load failure (`resource-tab.component.ts:293-296,324-327`; the string is spec-pinned) | **ESCALATED** — branch changes render copy = behavior | future copy fold |
+| L-10 | 503 branch exact-match vs 403's case-insensitive body match (`metrics.model.ts:667-670`) | **ESCALATED** — widening reclassifies lower-cased bodies | semantics lane |
+| L-11 | `EXPECTED_BRANCH` default names the parent lane's branch (`metrics_fe_dual_side_test.sh:63`) | **ESCALATED** — it flips unexported-run verdicts; **NOT changed by this pass** (out of the H-2 scope: it is a drift-gate semantic, not a declared-composition defect) | pack maintenance |
+| L-12 | The D-1 node guard swallows the git failure and misattributes the verdict (`:316-324`) | **ESCALATED (report-only)** — frozen guard surface | pack maintenance |
+| L-13 | Orphaned `set +e` no-ops after the L/M-8 fold | **LEFT by scope → FOLDED in THIS pass** (swept, with errexit asserted explicitly OFF at the top of the script) | — (closed here) |
+| §5 | The tidier's "Deferred to Reviewer" observations (source-scanning retirement assertions; the deliberate `RESOURCES_REDIRECT_TAB_ID` literal; the `central-tab.fetchTrend` skip-vs-replace window; the `chart-panel.renderer.ts` self-registration side-effect; the `live-tab` error-surface visual language; the `export type *` barrel watch; the jest-canvas-mock + ResizeObserver stub adequacy; `check_cap` at 4 checkpoints vs the 900 s budget) | **frozen** — observed, out of the tidier's scope | reviewer / future FE lane |
+
+Also frozen and untouched by this pass: the **D-1 / D-2 / D-3** guard
+surfaces, the **bundle-guard thresholds** (B1 ±2,048 vs 5,909,018; B2 0;
+B3 0 static; B4a 82,000; B4b 185,000) and `bundle-baseline.json`.
+
+### 6.4 — The 2 `d2_derived` settings / DST season-rot fails
+
+| Item | Source | Why it is routed, not folded | Owner |
+|---|---|---|---|
+| `src/app/pages/settings/settings.component.spec.ts › Timezone preference (user-timezone-setting)` — **2** fails: *"renders the timezone section with the native picker when Intl.supportedValuesOf is available"* + *"uses the API list when the GET /api/settings/timezones response is non-empty"* | tidier's **new base-proven evidence** (`tidier-report.md` §2, "Pack (full hermetic run)": `d2_derived 39 files, 1,832 pass / 2 fail` — "2 fails **proven pre-existing at base** (re-run @21075e1cf: identical 2F/117P — `settings.component.spec.ts` season-dependent DST fixture; new evidence, routed)"), itself riding the phase-1 base proof (`phase1-evidence.md` §"BASE-PROVEN" — the identical failures occur at the lane base `c4161335b` in a throwaway detached worktree) | the cause is the **calendar**: in November `America/New_York` is on STANDARD time (UTC−05:00) while the specs hard-code the summer offset (UTC−04:00). The FE convention "use relative dates" already documents the class | **the settings/timezone debt lane** |
+
+**This pass's independent base proof** (re-run in the throwaway detached base
+worktree at `c4161335b`, this lane's changes absent): the base leg's
+`d2_derived` sweep is **38 files / 1,801 tests / 2 failed / 1,799 passed**
+with the **same two** `settings.component.spec.ts` names, and
+`frontend/src/app/pages/settings/{settings.component.spec.ts,settings.component.ts}`
+are **blob-identical** base↔HEAD (`80576cbe…` / `fb6d2e8e…`). The failure is
+therefore structural base debt, not this lane's.
+
+### 6.5 — NEW in this pass: the `job-queue-indicator` equal-timestamp tie-break flake
+
+A **third** `d2_derived` failure appeared in one of the five HEAD-leg sweeps
+of this pass, and did not appear in the other four:
+
+```
+● JobQueueIndicatorComponent Logic › recentJobs (public computed) ›
+  should filter out pending, processing, and paused jobs (terminal only via isTerminalStatus)
+  expect(ids).toEqual(['c1','f1','d1','x1','s1'])   →  received ['s1','c1','f1','d1','x1']
+```
+
+**Classification — a load-sensitive, base-proven flake; NOT a lane
+regression and NOT a deterministic break:**
+
+| Evidence | Result |
+|---|---|
+| Same tree, same composition, 5 HEAD sweeps | **4× `2 failed`, 1× `3 failed`** ⇒ nondeterministic |
+| The spec in isolation, 5 runs at HEAD | **5/5 green** (134/134) |
+| The spec in isolation, 5 runs at the base worktree | **5/5 green** (134/134) |
+| `frontend/src/app/components/job-queue-indicator/job-queue-indicator.component.spec.ts` base↔HEAD | **blob-identical** |
+| `frontend/src/app/testing/job-test-helpers.ts` (the mock factory) base↔HEAD | **blob-identical**; `git diff base..HEAD -- frontend/src/app/testing/` and `-- .../job-queue-indicator/` are both **empty** (this lane touches neither) |
+| Mechanism | `createMockJob` stamps `created_at`/`completed_at` with `new Date().toISOString()` — **millisecond** resolution. The assertion is an **equal-timestamp stable-sort tie-break**: if the 8 mock creations land inside one millisecond the order is `c1,f1,d1,x1,s1` (pass); if the clock ticks between them, `s1` carries the newest stamp and a desc sort puts it **first** (fail). Under the full 39-file sweep the tick is likelier than in an isolated run |
+
+**Owner: the `job-queue-indicator` spec's owning lane.** The fix is a
+timestamp-independent fixture (inject a fixed clock or distinct stamps) —
+out of this lane's scope, and product code was not touched here.
