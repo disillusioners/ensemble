@@ -573,27 +573,26 @@ export class App implements OnInit {
     // via settingsMenuItems.update(...)) stay at the tail of the menu
     // (snapshot-uiux §1.1 / amendment #7).
     { label: 'Snapshots', icon: 'bookmarks', route: '/snapshots' },
-    // Resources — resource-observability page. Appended AFTER Snapshots
-    // so the conditional Database/Maintenance appends still land at the
-    // menu tail. Static (not conditional): the endpoint ships in the
-    // same promote train and degrades to empty shapes, never 503 (D2).
-    { label: 'Resources', icon: 'insights', route: '/resources' },
     // MCP Gateway — the Remote Hands / MCP gateway operator page
     // (Phase C). GEAR MENU ONLY (no top-level header link — the header
     // nav carries the primary destinations only) and READ-ONLY v1:
     // the page reports the machine roster, the live sessions and the
-    // audit tail; it never drives the gateway. Placed AFTER Resources
-    // and BEFORE the conditional Database/Maintenance appends so those
-    // appends still land at the menu tail (the resources ordering pin
-    // in resources-gear-menu.spec.ts must stay green).
+    // audit tail; it never drives the gateway. Placed BEFORE the
+    // conditional Database/Maintenance appends so those appends still
+    // land at the menu tail (the gateway ordering pin in
+    // mcps-gateway.pins.spec.ts must stay green).
     { label: 'MCP Gateway', icon: 'computer', route: '/mcps-gateway' },
     // Metrics — the central-metrics charts page (Phase 5 of the
     // central-metrics-v1 lane). Appended AFTER MCP Gateway and BEFORE
     // the conditional Database/Maintenance appends so those appends
-    // still land at the menu tail (the resources ordering pin in
-    // resources-gear-menu.spec.ts and the gateway ordering pin in
+    // still land at the menu tail (the gateway ordering pin in
     // mcps-gateway.pins.spec.ts must stay green). Static: the query
     // door is never switch-gated, so the entry is always reachable.
+    //
+    // The resource-observability surface is NO LONGER A SEPARATE ENTRY
+    // (D-3 — T1 phase 7, task 7.3): the standalone `/resources` route
+    // is retired and the resource module is tab 1 of this page. This
+    // entry is therefore the SINGLE gear-menu entry for those surfaces.
     { label: 'Metrics', icon: 'query_stats', route: '/metrics' }
   ]);
 
