@@ -12,12 +12,19 @@
 #   - HONEST-STOP: a missing prerequisite emits HARD_BLOCKER and stops
 #   - Idempotent: a warm host takes the verify-only fast path (the
 #     install is idempotent — no install call, no state write)
-#   - Write-target classes: (i) the persistent user-space toolchain root
-#     at install time; (ii) the per-engagement sandbox root at run time;
-#     (iii) everything else — target codebases included — never written
+#   - Write-target classes: (i) the persistent user-space toolchain ROOTS
+#     at install time — the toolbench root, its state root, its config
+#     root and its staging root (a private mktemp -d scratch dir), every
+#     one of them env-overridable; (ii) the per-engagement sandbox root
+#     at run time — copy-then-build, the target tree is never a write
+#     target; (iii) every other user path — the target codebase included
+#     — is never written, at any time, by any path
 #   - Synthetic corpora only: no network fetch of any wordlist or hash
-#     corpus is possible from this library; corpus inputs live inside the
-#     engagement sandbox and come only from the supplied generator
+#     corpus is possible from this library; the corpus path AND the
+#     generator are both RESOLVED (canonicalized) and must land inside
+#     the engagement sandbox root — the root and the corpus path's parent
+#     directory must exist, and a traversing, symlinked or unresolvable
+#     path is refused with HARD_BLOCKER before anything is created
 #
 # Export contract:
 #   aegis_readiness_probe                     0 warm / 1 cold / 2 in-progress-other
@@ -26,12 +33,23 @@
 #   aegis_acquire_install_lock                0 acquired / 1 contended
 #   aegis_release_install_lock                always succeeds
 #   aegis_attempt_allowed / _bump_ / _clear_  self-heal cap of 2 per session
-#   aegis_corpus_path_ok <path> <root>        0 inside-root / 1 refused
+#   aegis_corpus_path_ok <path> <root>        0 resolved-inside-root / 1 refused
 #   aegis_write_synthetic_corpus <path> <root> <generator>
 #                                            0 written / 1 refused (HARD_BLOCKER)
 #
 # Companion: credential-bench.md (the installer skill body, same directory)
 
+# --- Shell-option discipline ----------------------------------------------
+# Sourcing this library must not change the OPTIONS of the calling shell: a
+# file-scope `set -eu` leaks -e/-u into the caller (the installer skill body
+# sources this file) and turns a missing argument into a CALLER-shell kill —
+# the promised HARD_BLOCKER refusal never runs. So the caller's own -e/-u
+# flags are captured here, the library's body runs strict, and the caller's
+# flags are restored EXACTLY before the file ends.
+_aegis_caller_errexit=0
+_aegis_caller_nounset=0
+case "$-" in *e*) _aegis_caller_errexit=1 ;; esac
+case "$-" in *u*) _aegis_caller_nounset=1 ;; esac
 set -eu
 
 # --- Config (class-(i) install-time locations) ---------------------------
@@ -154,11 +172,61 @@ _aegis_clear_attempts() {
 }
 
 # --- Synthetic-corpus discipline (no fetch, sandbox-only inputs) ----------
+# The containment check CANONICALIZES both sides before comparing. A raw
+# string-prefix test is not a containment test: it accepts every path that
+# merely STARTS with the root string, so ".."-traversal and
+# symlinked-directory escapes pass it (measured: "$ROOT/../outside/x" was
+# accepted and the file landed outside the root; "$ROOT/evil/x" with
+# $ROOT/evil a symlink to an outside dir likewise).
+#
+# PRECONDITION (fail-closed): the root and the TARGET'S PARENT must both
+# exist — an unresolvable path is refused, never guessed.
+_aegis_resolve_path() {
+    # usage: _aegis_resolve_path <path>   -> canonical path on stdout
+    # Resolves "..", "." and symlinks in the final component; returns
+    # non-zero when the path cannot be resolved (never guesses).
+    _rp_path="${1:-}"
+    _rp_hops=0
+    while [ -n "$_rp_path" ]; do
+        case "$_rp_path" in
+            */*) : ;;
+            *) return 1 ;;
+        esac
+        _rp_dir="${_rp_path%/*}"
+        _rp_base="${_rp_path##*/}"
+        [ -n "$_rp_dir" ] || _rp_dir=/
+        _rp_canon=$(cd "$_rp_dir" 2>/dev/null && pwd -P) || return 1
+        if [ "$_rp_canon" = "/" ]; then
+            _rp_full="/$_rp_base"
+        else
+            _rp_full="$_rp_canon/$_rp_base"
+        fi
+        if [ ! -L "$_rp_full" ]; then
+            printf '%s\n' "$_rp_full"
+            return 0
+        fi
+        # the final component is a symlink: follow it (bounded) and resolve
+        # the target the same way, so writing THROUGH it cannot escape
+        _rp_hops=$(( _rp_hops + 1 ))
+        [ "$_rp_hops" -le 8 ] || return 1
+        _rp_link=$(readlink "$_rp_full" 2>/dev/null) || return 1
+        case "$_rp_link" in
+            /*) _rp_path="$_rp_link" ;;
+            *)  _rp_path="$_rp_canon/$_rp_link" ;;
+        esac
+    done
+    return 1
+}
+
 _aegis_path_in_root() {
     # usage: _aegis_path_in_root <path> <root>   (0 inside / 1 outside)
-    [ -n "$1" ] && [ -n "$2" ] || return 1
-    case "$1" in
-        "$2"/*) return 0 ;;
+    # The comparison is made between the CANONICAL target and the
+    # CANONICAL root — never between raw strings.
+    [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 1
+    _pir_root=$(cd "$2" 2>/dev/null && pwd -P) || return 1
+    _pir_target=$(_aegis_resolve_path "$1") || return 1
+    case "$_pir_target" in
+        "$_pir_root"/*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -168,8 +236,12 @@ aegis_corpus_path_ok() {
     # The corpus input must live INSIDE the engagement sandbox — the
     # library never creates corpora from anywhere else, and nothing is
     # ever fetched. A corpus path outside the sandbox is refused.
-    _cp_path="$1"
-    _cp_root="$2"
+    _cp_path="${1:-}"
+    _cp_root="${2:-}"
+    if [ -z "$_cp_path" ] || [ -z "$_cp_root" ]; then
+        echo "HARD_BLOCKER: corpus path and engagement sandbox root are both required — synthetic benches read sandbox inputs only"
+        return 1
+    fi
     if _aegis_path_in_root "$_cp_path" "$_cp_root"; then
         return 0
     fi
@@ -180,16 +252,23 @@ aegis_corpus_path_ok() {
 aegis_write_synthetic_corpus() {
     # usage: aegis_write_synthetic_corpus <corpus-path> <sandbox-root> <generator>
     # The ONLY sanctioned corpus write. Both the corpus path AND the
-    # generator that produces it are checked against the engagement sandbox
-    # root BEFORE anything is written: an out-of-sandbox path (or a
-    # generator from outside the sandbox) is a HARD_BLOCKER — nothing is
-    # created and the bench does not run. This is what makes "the corpus
-    # input path is always inside the sandbox" an enforced rule rather than
-    # a promise; a corpus path alone cannot smuggle in material that did
-    # not come from the lane's own generator.
-    _wc_path="$1"
-    _wc_root="$2"
-    _wc_gen="$3"
+    # generator that produces it are RESOLVED and checked against the
+    # engagement sandbox root BEFORE anything is written: an out-of-sandbox
+    # path (or a generator from outside the sandbox) is a HARD_BLOCKER —
+    # nothing is created and the bench does not run. This is what makes
+    # "the corpus input path is always inside the sandbox" an enforced rule
+    # rather than a promise; a corpus path alone cannot smuggle in material
+    # that did not come from the lane's own generator.
+    #
+    # A missing argument is REFUSED, never fatal: the caller's shell must
+    # survive so the refusal can be reported.
+    _wc_path="${1:-}"
+    _wc_root="${2:-}"
+    _wc_gen="${3:-}"
+    if [ -z "$_wc_path" ] || [ -z "$_wc_root" ] || [ -z "$_wc_gen" ]; then
+        echo "HARD_BLOCKER: corpus path, engagement sandbox root and generator are all required — refusing the corpus write"
+        return 1
+    fi
     aegis_corpus_path_ok "$_wc_path" "$_wc_root" || return 1
     if ! _aegis_path_in_root "$_wc_gen" "$_wc_root"; then
         echo "HARD_BLOCKER: corpus generator outside the engagement sandbox — only generator-produced material enters the bench"
@@ -361,9 +440,18 @@ aegis_reversal() {
     echo "credential-bench: reversed"
 }
 
+# --- Restore the sourcing shell's options (exactly) -----------------------
+# The library's strict mode is scoped to this file: a shell that SOURCED it
+# keeps its own -e/-u flags and gains none. Direct execution re-enables
+# strict mode in the dispatch block below.
+if [ "$_aegis_caller_errexit" = 1 ]; then set -e; else set +e; fi
+if [ "$_aegis_caller_nounset" = 1 ]; then set -u; else set +u; fi
+unset _aegis_caller_errexit _aegis_caller_nounset
+
 # --- Dispatch when executed directly (sourcing defines functions only) ----
 case "$0" in
     *credential-bench.lib.sh)
+        set -eu
         case "${1:-}" in
             probe)    aegis_readiness_probe; exit $? ;;
             install)  aegis_install_all ;;

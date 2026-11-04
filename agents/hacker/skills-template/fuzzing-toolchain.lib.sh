@@ -12,9 +12,13 @@
 #   - HONEST-STOP: a missing prerequisite emits HARD_BLOCKER and stops
 #   - Idempotent: a warm host takes the verify-only fast path (the
 #     install is idempotent — no install call, no state write)
-#   - Write-target classes: (i) the persistent user-space toolchain root
-#     at install time; (ii) the per-engagement sandbox root at run time;
-#     (iii) everything else — target codebases included — never written
+#   - Write-target classes: (i) the persistent user-space toolchain ROOTS
+#     at install time — the toolbench root, its state root, its config
+#     root and its staging root (a private mktemp -d scratch dir), every
+#     one of them env-overridable; (ii) the per-engagement sandbox root
+#     at run time — copy-then-build, the target tree is never a write
+#     target; (iii) every other user path — the target codebase included
+#     — is never written, at any time, by any path
 #
 # Export contract:
 #   aegis_readiness_probe                     0 warm / 1 cold / 2 in-progress-other
@@ -26,6 +30,17 @@
 #
 # Companion: fuzzing-toolchain.md (the installer skill body, same directory)
 
+# --- Shell-option discipline ----------------------------------------------
+# Sourcing this library must not change the OPTIONS of the calling shell: a
+# file-scope `set -eu` leaks -e/-u into the caller (the installer skill body
+# sources this file) and turns a missing argument into a CALLER-shell kill —
+# the promised HARD_BLOCKER refusal never runs. So the caller's own -e/-u
+# flags are captured here, the library's body runs strict, and the caller's
+# flags are restored EXACTLY before the file ends.
+_aegis_caller_errexit=0
+_aegis_caller_nounset=0
+case "$-" in *e*) _aegis_caller_errexit=1 ;; esac
+case "$-" in *u*) _aegis_caller_nounset=1 ;; esac
 set -eu
 
 # --- Config (class-(i) install-time locations) ---------------------------
@@ -282,9 +297,18 @@ aegis_reversal() {
     echo "fuzzing-toolchain: reversed (system clang/clang++ were prerequisites — untouched)"
 }
 
+# --- Restore the sourcing shell's options (exactly) -----------------------
+# The library's strict mode is scoped to this file: a shell that SOURCED it
+# keeps its own -e/-u flags and gains none. Direct execution re-enables
+# strict mode in the dispatch block below.
+if [ "$_aegis_caller_errexit" = 1 ]; then set -e; else set +e; fi
+if [ "$_aegis_caller_nounset" = 1 ]; then set -u; else set +u; fi
+unset _aegis_caller_errexit _aegis_caller_nounset
+
 # --- Dispatch when executed directly (sourcing defines functions only) ----
 case "$0" in
     *fuzzing-toolchain.lib.sh)
+        set -eu
         case "${1:-}" in
             probe)    aegis_readiness_probe; exit $? ;;
             install)  aegis_install_all ;;

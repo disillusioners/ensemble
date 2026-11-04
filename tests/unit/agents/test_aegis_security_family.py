@@ -588,12 +588,24 @@ class TestInstallerFencesBlockIdentical:
     def test_md_fences_bullet_lists_byte_identical(self):  # T23 PRIMARY
         """The three .md FENCES bullet lists are byte-identical MODULO BLANK
         LINES (N6), bullet list + wrapped continuations (council-D4),
-        checksum bullet IN, per-tool content OUT (AM-10)."""
+        checksum bullet IN, per-tool content OUT (AM-10).
+
+        The COUNT is asserted too (A-7): the identity check alone only
+        proves the three lists are the same — a tenth bullet added to ONE
+        body, or two expected fragments collapsed into one bullet, keeps
+        the lists identical across the bodies while the body drifts away
+        from the pinned nine-bullet contract."""
         lists = [_fences_bullet_list(_skill_body_path(a)) for a in CHILDREN]
         assert all(len(lst) > 0 for lst in lists), "empty FENCES bullet list"
         assert lists[0] == lists[1] == lists[2], (
             "FENCES bullet lists diverge across the three installer bodies"
         )
+        for agent, lst in zip(CHILDREN, lists):
+            assert len(lst) == len(EXPECTED_FENCES_BULLETS), (
+                f"{agent} FENCES bullet list has {len(lst)} entries, expected "
+                f"{len(EXPECTED_FENCES_BULLETS)} — a bullet was added or "
+                "removed (the count is part of the contract)"
+            )
 
     def test_fences_checksum_bullet_present(self):
         """The C3 checksum bullet is inside the byte-identical set."""
@@ -791,6 +803,27 @@ class TestLegalityCardinalPinMatrix:
 
 _NO_INVOCATION_RE = re.compile(r"\b(docker|apt|apt-get|sudo)\b", re.IGNORECASE)
 
+# A promotion of a fetched asset into the toolchain bin. The SOURCE is the
+# staged file that is copied; the DESTINATION is the promoted binary. The
+# `chmod` of an already-promoted binary is the same promotion (same
+# destination) and is de-duplicated away.
+_PROMOTION_RE = re.compile(
+    r"\b(?:cp|chmod)\s+(?P<src>\S+)\s+(?P<dest>\S*AEGIS_TOOLBENCH_ROOT/bin/\S+)"
+)
+# The staged asset a verify call checks: its first argument.
+_VERIFY_ASSET_RE = re.compile(r"aegis_verify_sha256\s+\"([^\"]+)\"")
+
+
+def _first_path_component(path: str) -> str:
+    """The staging-root component of a (possibly quoted) path literal.
+
+    ``"$_in_stage"/hashcat/hashcat`` and ``"$_in_stage/hashcat.7z"`` share
+    the staging root ``$_in_stage`` — that shared root is what ties a
+    verify call to the promotion of the file it staged.
+    """
+    cleaned = path.replace('"', "").replace("'", "")
+    return cleaned.split("/")[0] if cleaned else ""
+
 
 class TestInstallerFencesAndLibraryContract:
     @pytest.mark.parametrize("agent", CHILDREN)
@@ -810,12 +843,25 @@ class TestInstallerFencesAndLibraryContract:
     def test_checksum_compare_is_invoked(self, agent):  # T30(b)
         """The sha256 compare is WIRED into the install flow: the verify
         function is defined, and EVERY promotion of a fetched asset into the
-        toolchain bin is preceded by a verify call.
+        toolchain bin is preceded by a verify call FOR THAT SAME ASSET.
 
         A generic "some call site exists" check cannot tell a gated promotion
         from an ungated one — a library with two assets and one verify call
-        passes it — so the check is PER-PROMOTION: the checksum-compare must
-        precede every promotion.
+        passes it — so the check is PER-PROMOTION and PER-ASSET:
+
+        * promotions are de-duplicated by their DESTINATION (the ``cp`` and
+          the ``chmod`` of the same binary are one promotion), so the number
+          of promotions equals the number of distinct promoted assets;
+        * the k-th promotion is gated by the k-th verify call — a verify
+          call may gate exactly ONE promotion, so deleting one asset's
+          verify call leaves that asset's promotion ungated (measured: with
+          the per-line-order rule, deleting john's verify left all six
+          checksum legs GREEN because hashcat's earlier verify still
+          "preceded" john's promotion);
+        * the gating verify call must PRECEDE its promotion in the file, and
+          the asset path it verifies must live in the SAME STAGING ROOT as
+          the promoted file — the comparison is on the staged-asset path,
+          not on line order alone.
 
         This leg is STATIC (source order). The EXECUTED behaviour is pinned
         separately by ``test_checksum_compare_refuses_unset_pin`` below, so
@@ -829,22 +875,78 @@ class TestInstallerFencesAndLibraryContract:
             if not ln.lstrip().startswith("#")
         ]
         verifies = [
-            i for i, ln in code if re.search(r"\baegis_verify_sha256\s+\"", ln)
+            (i, ln) for i, ln in code
+            if re.search(r"\baegis_verify_sha256\s+\"", ln)
         ]
         assert verifies, "aegis_verify_sha256 is never called (not executed)"
-        promotions = [
-            i for i, ln in code
-            if re.search(r"\b(cp|chmod)\s+\S+.*AEGIS_TOOLBENCH_ROOT/bin/", ln)
-        ]
+        # promotions, de-duplicated by destination (first occurrence wins)
+        promotions: list[tuple[int, str, str]] = []
+        seen_dest: set[str] = set()
+        for i, ln in code:
+            m = _PROMOTION_RE.search(ln)
+            if not m:
+                continue
+            dest = m.group("dest")
+            if dest in seen_dest:
+                continue
+            seen_dest.add(dest)
+            promotions.append((i, dest, m.group("src")))
         assert promotions, (
             f"{agent} library promotes no fetched asset — the promotion shape changed"
         )
-        ungated = [i for i in promotions if not any(v < i for v in verifies)]
-        assert not ungated, (
-            f"{agent} promotes an asset with no preceding aegis_verify_sha256 "
-            f"call (line(s) {sorted(u + 1 for u in ungated)}) — the checksum "
-            "gate does not cover every promotion"
+        for k, (pline, dest, src) in enumerate(promotions):
+            assert k < len(verifies), (
+                f"{agent} promotion #{k} ({dest}) has no verify call of its own — "
+                f"{len(verifies)} verify call(s) for {len(promotions)} promoted "
+                "asset(s): deleting one asset's verify call leaves that asset "
+                "ungated (the checksum gate does not cover every promotion)"
+            )
+            vline, vln = verifies[k]
+            assert vline < pline, (
+                f"{agent} promotion #{k} ({dest}) is not preceded by its own "
+                f"verify call (verify at line {vline + 1}, promotion at line "
+                f"{pline + 1})"
+            )
+            asset = _VERIFY_ASSET_RE.search(vln)
+            assert asset, (
+                f"{agent} verify call at line {vline + 1} has no readable asset "
+                "path — the per-asset gate cannot be checked"
+            )
+            if "/" in src:
+                assert _first_path_component(asset.group(1)) == _first_path_component(src), (
+                    f"{agent} promotion #{k} ({dest}) is gated by a verify call "
+                    f"for a DIFFERENT staged asset (verified "
+                    f"{asset.group(1)!r}, promoted from {src!r}) — the checksum "
+                    "gate does not cover this promotion's own asset"
+                )
+
+    def test_class_i_write_target_roots_are_pinned(self):
+        """W-4: the class-(i) half of the write-target bullet is pinned by
+        its OWN leg.
+
+        The per-bullet presence pin (T30(a)) only carries the class-(iii)
+        fragment of bullet 1 — the class-(i) half (the toolchain ROOTS at
+        install time, including the staging root) is the part that was
+        factually wrong and was corrected, and it had NO expected fragment:
+        reverting it in all three bodies kept every FENCES leg GREEN.
+
+        This leg is deliberately NOT a tenth entry in
+        ``EXPECTED_FENCES_BULLETS`` — that tuple is the nine-bullet list and
+        a tenth entry would distort the byte-identity semantics — it is a
+        separate assertion over the class-(i) fragments."""
+        fragments = (
+            "the persistent user-space toolchain roots at install time",
+            "its staging root",
         )
+        for agent in CHILDREN:
+            body = _skill_body_path(agent).read_text(encoding="utf-8")
+            for fragment in fragments:
+                assert fragment in body, (
+                    f"{agent} skill body lost the class-(i) fragment "
+                    f"{fragment!r} — the write-target class-(i) definition "
+                    "(toolchain roots at install time, staging root included) "
+                    "is unpinned content again"
+                )
 
     @pytest.mark.parametrize("agent", CHILDREN)
     def test_checksum_compare_refuses_unset_pin(self, agent, tmp_path):
@@ -891,7 +993,14 @@ class TestInstallerFencesAndLibraryContract:
         """The corpus-path guard is ENFORCED, not merely defined: the
         library's only sanctioned corpus write calls it. A definition with
         zero call sites is dead code, and the skill body's corpus prose would
-        then be claiming a runtime gate that does not exist."""
+        then be claiming a runtime gate that does not exist.
+
+        A-8: the call-site match is a NAME-BOUNDARY match, not a
+        ``name "$`` shape match — the old pattern false-redded on a benign
+        refactor that passes the path through a variable. The definition
+        line is excluded so the leg still proves a CALL SITE exists (the
+        definition alone would make it vacuous); the executed behaviour is
+        pinned separately by the containment legs below."""
         lib = _lib_path("cracker").read_text(encoding="utf-8")
         assert re.search(r"^aegis_write_synthetic_corpus\(\)", lib, re.MULTILINE), (
             "aegis_write_synthetic_corpus not defined"
@@ -901,7 +1010,8 @@ class TestInstallerFencesAndLibraryContract:
         ]
         call_sites = [
             ln for ln in code_lines
-            if re.search(r"aegis_corpus_path_ok\s+\"\$", ln)
+            if re.search(r"\baegis_corpus_path_ok\b", ln)
+            and not re.match(r"\s*aegis_corpus_path_ok\s*\(\)\s*\{", ln)
         ]
         assert call_sites, (
             "aegis_corpus_path_ok is defined but never invoked — the corpus "
@@ -1040,6 +1150,401 @@ class TestInstallerFencesAndLibraryContract:
     def test_reversal_section_present(self, agent):
         lib = _lib_path(agent).read_text(encoding="utf-8")
         assert "aegis_reversal()" in lib
+
+
+# ---------------------------------------------------------------------------
+# Round-2 (C-1/W-2) — the corpus-containment guard, EXECUTED
+# ---------------------------------------------------------------------------
+
+
+def _abs_under(root: Path, rel: str) -> Path:
+    """Resolve a matrix path template against the scratch root.
+
+    ``{abs}`` expands to the scratch root; a relative template is joined
+    onto it; an absolute template is used as-is.
+    """
+    candidate = Path(rel.replace("{abs}", str(root)))
+    return candidate if candidate.is_absolute() else root / candidate
+
+
+# The containment matrix (round-2 C-1). Every row was MEASURED against the
+# shipped library under /bin/sh (dash), not asserted from prose:
+#
+#   row                    corpus path                 root        verdict
+#   in-root                sandbox/corpora/x.hashes    sandbox     ACCEPT
+#   traversal-out          sandbox/../outside/PWNED    sandbox     REFUSE
+#   symlinked-dir          sandbox/evil/PWNED          sandbox     REFUSE
+#   deep-traversal         sandbox/../../etc/PWNED     sandbox     REFUSE
+#   traversal-from-subdir  sandbox/corpora/../../../PWNED sandbox   REFUSE
+#   absolute-generator     sandbox/corpora/x.hashes    sandbox     REFUSE
+#   traversal-generator    sandbox/corpora/x.hashes    sandbox     REFUSE
+#   prefix-collision       sandbox-evil/x.hashes       sandbox     REFUSE
+#   root-itself            sandbox                     sandbox     REFUSE
+#   root-slash             {abs}/abs/PWNED             /           REFUSE
+#   empty-path             (empty)                     sandbox     REFUSE
+#   relative-no-slash      x.hashes                    sandbox     REFUSE
+#   trailing-slash-root    sandbox/corpora/x.hashes    sandbox/    ACCEPT
+#   missing-root           sandbox/corpora/x.hashes    missing     REFUSE
+#   missing-parent-dir     sandbox/no-such-dir/x.hashes sandbox    REFUSE
+#
+# The generator column is the staged generator the corpus is produced from
+# (inside the sandbox) unless the row says otherwise.
+_CORPUS_CONTAINMENT_MATRIX = (
+    ("in-root", "sandbox/corpora/x.hashes", "sandbox",
+     "sandbox/builds/gen_corpus.sh", True, None),
+    ("traversal-out", "sandbox/../outside/PWNED", "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("symlinked-dir", "sandbox/evil/PWNED", "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, "evil-symlink"),
+    ("deep-traversal", "sandbox/../../etc/PWNED", "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("traversal-from-subdir", "sandbox/corpora/../../../PWNED", "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("absolute-generator", "sandbox/corpora/x.hashes", "sandbox",
+     "outside/gen_corpus.sh", False, None),
+    ("traversal-generator", "sandbox/corpora/x.hashes", "sandbox",
+     "sandbox/../outside/gen_corpus.sh", False, None),
+    ("prefix-collision", "sandbox-evil/x.hashes", "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("root-itself", "sandbox", "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("root-slash", "{abs}/abs/PWNED", "/",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("empty-path", "", "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("relative-no-slash", "x.hashes", "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("trailing-slash-root", "sandbox/corpora/x.hashes", "sandbox/",
+     "sandbox/builds/gen_corpus.sh", True, None),
+    ("missing-root", "sandbox/corpora/x.hashes", "missing-root",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("missing-parent-dir", "sandbox/no-such-dir/x.hashes", "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+)
+
+_CORPUS_WRITE_PROBE = (
+    'if aegis_write_synthetic_corpus "$CORPUS" "$ROOT" "$GEN"; then\n'
+    '    echo "RC=0"\n'
+    'else\n'
+    '    echo "RC=$?"\n'
+    'fi\n'
+)
+
+
+def _run_lib_probe(
+    tmp_path: Path,
+    body: str,
+    env_extra: dict[str, str] | None = None,
+    prelude: str = "",
+) -> subprocess.CompletedProcess:
+    """Run `body` under /bin/sh with the cracker library SOURCED.
+
+    HOME is redirected into the scratch tree so the library's
+    env-overridable roots resolve there, POSTGRES_* is scrubbed
+    PER-VARIABLE (``env -u POSTGRES_*`` is a silent no-op — bash does not
+    glob env names), and the boot-sweep guard is pinned explicitly. Nothing
+    is fetched and no release asset is involved: the only command that can
+    run is the lane's own scratch generator.
+    """
+    probe = tmp_path / "probe.sh"
+    probe.write_text(f'{prelude}. "$1"\n{body}\n', encoding="utf-8")
+    scratch_home = tmp_path / "home"
+    scratch_home.mkdir(exist_ok=True)
+    env = dict(os.environ)
+    env["HOME"] = str(scratch_home)
+    env["ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"] = "0"
+    for _k in [k for k in env if k.startswith("POSTGRES_")]:
+        env.pop(_k, None)
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        ["/bin/sh", str(probe), str(_lib_path("cracker"))],
+        capture_output=True, text=True, timeout=60, env=env, cwd=str(tmp_path),
+    )
+
+
+def _sandbox_fixture(tmp_path: Path) -> dict[str, Path]:
+    """The scratch tree the containment legs run against."""
+    sandbox = tmp_path / "sandbox"
+    (sandbox / "builds").mkdir(parents=True)
+    (sandbox / "corpora").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "sandbox-evil").mkdir()
+    (tmp_path / "abs").mkdir()
+    generator = sandbox / "builds" / "gen_corpus.sh"
+    generator.write_text(
+        "#!/bin/sh\nprintf 'synthetic-hash\\n'\n", encoding="utf-8"
+    )
+    outside_generator = outside / "gen_corpus.sh"
+    outside_generator.write_text(
+        "#!/bin/sh\nprintf 'real-world-hash\\n'\n", encoding="utf-8"
+    )
+    return {
+        "sandbox": sandbox,
+        "outside": outside,
+        "generator": generator,
+        "outside_generator": outside_generator,
+    }
+
+
+class TestCorpusContainmentExecuted:
+    """Round-2 C-1/W-2 — the sandbox containment guard, really executed.
+
+    The suite was GREEN (235 legs) while a ``..``-traversal corpus path
+    wrote a file OUTSIDE the engagement sandbox — the guard was a raw
+    string-prefix test, so every path that merely STARTED with the root
+    string was accepted. These legs are behavioural (executed under
+    /bin/sh), so they FAIL against that code and PASS against the
+    canonicalizing guard.
+    """
+
+    @pytest.mark.parametrize(
+        "row,corpus_rel,root_rel,gen_rel,expect_accept,setup",
+        _CORPUS_CONTAINMENT_MATRIX,
+        ids=[row[0] for row in _CORPUS_CONTAINMENT_MATRIX],
+    )
+    def test_corpus_containment_matrix(
+        self, tmp_path, row, corpus_rel, root_rel, gen_rel, expect_accept, setup
+    ):
+        """Every row of the containment matrix, measured against the shipped
+        library: an escaping path is refused with HARD_BLOCKER and creates
+        NOTHING outside the root; an in-root path is accepted and written
+        (the guard must not over-refuse)."""
+        fixture = _sandbox_fixture(tmp_path)
+        if setup == "evil-symlink":
+            (fixture["sandbox"] / "evil").symlink_to(
+                fixture["outside"], target_is_directory=True
+            )
+        corpus = _abs_under(tmp_path, corpus_rel)
+        root = _abs_under(tmp_path, root_rel)
+        generator = _abs_under(tmp_path, gen_rel)
+        result = _run_lib_probe(
+            tmp_path,
+            _CORPUS_WRITE_PROBE,
+            {
+                "CORPUS": str(corpus),
+                "ROOT": str(root),
+                "GEN": str(generator),
+            },
+        )
+        stdout = result.stdout
+        if expect_accept:
+            assert "RC=0" in stdout, (
+                f"{row}: in-root corpus write was refused — the guard "
+                f"over-refuses: stdout={stdout!r} stderr={result.stderr!r}"
+            )
+            assert corpus.is_file(), f"{row}: in-root corpus was not written"
+            assert "synthetic-hash" in corpus.read_text(encoding="utf-8")
+        else:
+            assert not re.search(r"RC=0\b", stdout), (
+                f"{row}: escaping corpus/generator was ACCEPTED — the "
+                f"containment guard did not hold: stdout={stdout!r}"
+            )
+            assert re.search(r"RC=[1-9]\d*", stdout), (
+                f"{row}: refusal did not report a non-zero rc: stdout={stdout!r}"
+            )
+            assert "HARD_BLOCKER" in stdout, (
+                f"{row}: refusal did not emit HARD_BLOCKER: stdout={stdout!r}"
+            )
+            assert not corpus.is_file(), (
+                f"{row}: a file was created at the refused path {corpus} — "
+                "nothing may be created on a refusal"
+            )
+
+    def test_corpus_traversal_path_is_refused_and_creates_nothing(self, tmp_path):
+        """(a) A ".."-traversal corpus path is refused: non-zero rc,
+        HARD_BLOCKER, and NO file created outside the root."""
+        fixture = _sandbox_fixture(tmp_path)
+        escape = fixture["sandbox"] / ".." / "outside" / "PWNED_A"
+        result = _run_lib_probe(
+            tmp_path,
+            _CORPUS_WRITE_PROBE,
+            {
+                "CORPUS": str(escape),
+                "ROOT": str(fixture["sandbox"]),
+                "GEN": str(fixture["generator"]),
+            },
+        )
+        assert not re.search(r"RC=0\b", result.stdout), (
+            f"traversal corpus path was ACCEPTED: stdout={result.stdout!r}"
+        )
+        assert re.search(r"RC=[1-9]\d*", result.stdout), (
+            f"traversal refusal reported rc=0: stdout={result.stdout!r}"
+        )
+        assert "HARD_BLOCKER" in result.stdout, (
+            f"traversal refusal did not emit HARD_BLOCKER: stdout={result.stdout!r}"
+        )
+        assert not (fixture["outside"] / "PWNED_A").exists(), (
+            "a file was created OUTSIDE the engagement sandbox — the traversal "
+            "escape was not held"
+        )
+
+    def test_corpus_symlinked_directory_escape_is_refused(self, tmp_path):
+        """(b) A corpus path whose PARENT is a symlink to an outside
+        directory is refused: non-zero rc, HARD_BLOCKER, nothing created
+        outside."""
+        fixture = _sandbox_fixture(tmp_path)
+        (fixture["sandbox"] / "evil").symlink_to(
+            fixture["outside"], target_is_directory=True
+        )
+        escape = fixture["sandbox"] / "evil" / "PWNED_C"
+        result = _run_lib_probe(
+            tmp_path,
+            _CORPUS_WRITE_PROBE,
+            {
+                "CORPUS": str(escape),
+                "ROOT": str(fixture["sandbox"]),
+                "GEN": str(fixture["generator"]),
+            },
+        )
+        assert not re.search(r"RC=0\b", result.stdout), (
+            f"symlinked-directory escape was ACCEPTED: stdout={result.stdout!r}"
+        )
+        assert re.search(r"RC=[1-9]\d*", result.stdout), (
+            f"symlink refusal reported rc=0: stdout={result.stdout!r}"
+        )
+        assert "HARD_BLOCKER" in result.stdout, (
+            f"symlink refusal did not emit HARD_BLOCKER: stdout={result.stdout!r}"
+        )
+        assert not (fixture["outside"] / "PWNED_C").exists(), (
+            "a file was created OUTSIDE the engagement sandbox through the "
+            "symlinked directory — the escape was not held"
+        )
+
+    def test_corpus_traversal_generator_is_refused_and_no_bench_runs(
+        self, tmp_path
+    ):
+        """(c) A GENERATOR reached through a ".."-traversal (it really
+        exists outside the root) is refused — and the bench does not run:
+        no corpus file is produced at all."""
+        fixture = _sandbox_fixture(tmp_path)
+        corpus = fixture["sandbox"] / "corpora" / "smuggled.hashes"
+        traversal_generator = fixture["sandbox"] / ".." / "outside" / "gen_corpus.sh"
+        result = _run_lib_probe(
+            tmp_path,
+            _CORPUS_WRITE_PROBE,
+            {
+                "CORPUS": str(corpus),
+                "ROOT": str(fixture["sandbox"]),
+                "GEN": str(traversal_generator),
+            },
+        )
+        assert not re.search(r"RC=0\b", result.stdout), (
+            f"traversal generator was ACCEPTED: stdout={result.stdout!r}"
+        )
+        assert re.search(r"RC=[1-9]\d*", result.stdout), (
+            f"traversal-generator refusal reported rc=0: stdout={result.stdout!r}"
+        )
+        assert "HARD_BLOCKER" in result.stdout, (
+            f"traversal-generator refusal did not emit HARD_BLOCKER: "
+            f"stdout={result.stdout!r}"
+        )
+        assert not corpus.exists(), (
+            "the bench ran with a generator from outside the sandbox — a "
+            "corpus file was produced"
+        )
+
+    def test_corpus_in_root_path_is_accepted_and_written(self, tmp_path):
+        """(d) An in-root corpus path is ACCEPTED and the file is written —
+        the containment guard must not over-refuse (a guard that refuses
+        everything passes every refusal leg and is useless)."""
+        fixture = _sandbox_fixture(tmp_path)
+        corpus = fixture["sandbox"] / "corpora" / "synth.hashes"
+        result = _run_lib_probe(
+            tmp_path,
+            _CORPUS_WRITE_PROBE,
+            {
+                "CORPUS": str(corpus),
+                "ROOT": str(fixture["sandbox"]),
+                "GEN": str(fixture["generator"]),
+            },
+        )
+        assert "RC=0" in result.stdout, (
+            f"in-root corpus write was refused: stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
+        assert corpus.is_file(), "in-root corpus was not written"
+        assert "synthetic-hash" in corpus.read_text(encoding="utf-8")
+
+    def test_missing_argument_refuses_without_killing_the_caller_shell(
+        self, tmp_path
+    ):
+        """(e) A missing argument is REFUSED with HARD_BLOCKER and a
+        non-zero rc — and the CALLER's shell survives and keeps running.
+
+        The caller here runs with ``set -u``: the library's own strict mode
+        must not be able to turn a missing argument into a caller-shell kill
+        (the promised refusal never ran; the shell died with "parameter not
+        set")."""
+        fixture = _sandbox_fixture(tmp_path)
+        corpus = fixture["sandbox"] / "corpora" / "synth.hashes"
+        result = _run_lib_probe(
+            tmp_path,
+            'aegis_write_synthetic_corpus "$P1" "$P2"\n'
+            'echo "RC=$?"\n'
+            'echo "CALLER-ALIVE"\n',
+            {"P1": str(corpus), "P2": str(fixture["sandbox"])},
+            prelude="set -u\n",
+        )
+        assert "HARD_BLOCKER" in result.stdout, (
+            f"missing argument did not emit HARD_BLOCKER: stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
+        assert re.search(r"RC=[1-9]\d*", result.stdout), (
+            f"missing argument did not report a non-zero rc: stdout={result.stdout!r}"
+        )
+        assert "CALLER-ALIVE" in result.stdout, (
+            f"the CALLER shell died on the missing argument — the refusal "
+            f"never ran: stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert result.returncode == 0, (
+            f"the caller shell exited with rc={result.returncode} — it was "
+            "killed by the library instead of receiving a refusal"
+        )
+        assert not corpus.exists(), (
+            "a corpus file was created by a refused (argument-less) write"
+        )
+
+    @pytest.mark.parametrize("agent", CHILDREN)
+    @pytest.mark.parametrize("caller_flags", ["", "set -eu\n"], ids=["plain", "strict"])
+    def test_sourcing_does_not_change_the_callers_shell_options(
+        self, agent, caller_flags, tmp_path
+    ):
+        """The library must not change the OPTIONS of the shell that sources
+        it (W-2): a file-scope ``set -eu`` leaks -e/-u into the caller and
+        the installer skill body sources this file.
+
+        The caller's ``$-`` is captured before the source and compared after
+        it — both for a plain caller and for one that already runs strict."""
+        probe = tmp_path / "opts_probe.sh"
+        probe.write_text(
+            f'{caller_flags}before="$-"\n. "$1"\nafter="$-"\n'
+            'echo "BEFORE=[$before] AFTER=[$after]"\n',
+            encoding="utf-8",
+        )
+        scratch_home = tmp_path / "home"
+        scratch_home.mkdir(exist_ok=True)
+        env = dict(os.environ)
+        env["HOME"] = str(scratch_home)
+        env["ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"] = "0"
+        for _k in [k for k in env if k.startswith("POSTGRES_")]:
+            env.pop(_k, None)
+        result = subprocess.run(
+            ["/bin/sh", str(probe), str(_lib_path(agent))],
+            capture_output=True, text=True, timeout=60, env=env, cwd=str(tmp_path),
+        )
+        match = re.search(r"BEFORE=\[(?P<before>.*)\] AFTER=\[(?P<after>.*)\]", result.stdout)
+        assert match, (
+            f"{agent}: the options probe produced no result: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert match.group("before") == match.group("after"), (
+            f"{agent}: sourcing the library changed the caller's shell "
+            f"options (before={match.group('before')!r} "
+            f"after={match.group('after')!r}) — the library's strict mode "
+            "leaks into the caller"
+        )
 
 
 # ---------------------------------------------------------------------------
