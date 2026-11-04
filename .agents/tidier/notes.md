@@ -1,5 +1,15 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-11-04 — FE T1 metrics dashboard tidy pass (worktree feature/fe-metrics-dashboard, reviewed c4161335b..21075e1cf 103 files +18053/−3215, folded 21075e1cf..770528084 7 commits 23 files +164/−199), Iteration 001
+- Commission: tidy pass with FOLD authority, zero-behavior rule (behavior fixes ESCALATE not fold); pack assertions frozen; D-1/D-2/D-3 final.
+- Dispatch: 3 parallel read-only workers (readable 65d2b0b8, hygiene a1e9c224, robustness f567fd6f; model_tier=high per proxy-alias workaround) → aggregate → apply phase REVIVING the readable worker (context intact — best pattern yet: the A-5 fold plan author executed its own plan).
+- Verdict: PASS with escalations. 26 findings post-dedup (4 merges; 2 conflicts adjudicated: pack dead-entry removal → escalated per assertion-freeze + BASE-side effect; components/charts unit literals → left, documented decoupling). 13 folded / 7 escalated / 6 routed-left.
+- Headline: A-5 banner style forks (6 sites) folded via shared SCSS partial — initial_total BYTE-IDENTICAL, +848 lazy bytes disclosed within threshold. High ESCALATED: pack declared composition silently false (D1 :136 + D2_DECLARED :150 name files the lane itself deleted; jest silently drops unmatched positionals — empirically proven --listTests; replacement specs in NO leg; existence-assert alone flips HEAD to FAIL → coupled owner decision).
+- Key escalations: fetchStatStrip empty catch (comment fixed zero-behavior; console.warn escalated); ResourcesService no deadline (AM-4 class survives in tab 1); spec-pinned copy, 503 case-match, EXPECTED_BRANCH default, D-1 err swallow (frozen).
+- Routed: central-tab 918-line pure-move extraction (within band; plan recorded); crosshair-plugin spec; CHART_FLAGS assert; NEW season-rot evidence — settings.component.spec DST fixture fails in November, BASE-PROVEN 2F/117P identical (routed to settings/timezone debt lane).
+- Learnings: (a) revived-worker apply phase works cleanly for fold execution; (b) bundle-guard B1 initial_total can stay byte-identical across an SCSS partial consolidation while lazy bytes legitimately shift — disclose both; (c) dev-AOT build pass after template-touching selector renames covers the NG8001/NG8002 tsc+jest blind spot (blueprint GAP rule — apply worker did this unprompted); (d) todo-store child-clobber quirk hit again (graph showed stale pending node after done-marking ×3 — factual report-in-hand governed, not pixels).
+- Deliverable: .agents/shared/planning/metrics-unification/fe-t1-build/tidier-report.md + this note, docs(tidy) commit, targeted adds, no push.
+
 ## 2026-11-01 — report-obligation visibility tidy pass (worktree fix/report-obligation-visibility @ aa5f2cd6c, reviewed range f7039c3ff..17d45fd5c, 17 files +2799/−54), Iteration 001
 - Commission: quality-only pass post-reviewer-APPROVE; polarity-sensitive gate aggregate → behavior findings REPORT-ONLY; two developer-routed items (b)/(d) with text-only fix authority.
 - Dispatch: 2 parallel read-only workers (readable e406e8fb, hygiene 5d53921a) + apply phase reusing worker A (revived, context intact). All reported fully, no gaps.
