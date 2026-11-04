@@ -48,7 +48,7 @@ Eight gates, **A–H**.
 | **B** | `SEALED_SHA_BASELINES` untouched (35 entries) | `TestPhaseDDoesNotModifySealedArtifacts` green on the branch |
 | **C** | The plane read-holder census is unchanged | census test green; `DISCLOSED_READ_HOLDERS` == `{"watcher"}` |
 | **D** | The report-integrity fold + the repo-wide prompt-surface sweep landed (W5, two named legs) | `test_report_integrity_prompts.py` green (D-1); `test_prompt_section_reference_integrity.py` green over the lane's 16 prompt + 4 skill-body files (D-2) |
-| **E** | Boot-scan clean on the new agent set + **the T29 legality-cardinal matrix (Blocker 4)** + **the T30 installer-guard pin pack (Blocker 9)** | T28 registry scan finds all four ids; the isolated boot scan is clean; **the T29 20-assertion matrix green — including the approver acceptance test (hacker "no external targets, ever" deletion ⇒ RED)**; **the T30 pack green — per-bullet presence across the three bodies + library-contract assertions (checksum EXECUTED, no docker/apt/sudo, trap-based lock release, attempt cap)** |
+| **E** | Boot-scan clean on the new agent set + **the T29 legality-cardinal matrix (Blocker 4)** + **the T30 installer-guard pin pack (Blocker 9)** | T28 registry scan finds all four ids; the isolated boot scan is clean; **the T29 20-ASSERTED matrix green (5×4, every cell positive — family 3 per-persona forms per the R1 leader ruling: cracker = synthetic benches; aegis/hacker/sweeper = no real-credential ingestion/transcription) — including the approver acceptance test (hacker "no external targets, ever" deletion ⇒ RED)**; **the T30 pack green — per-bullet presence across the three bodies + library-contract assertions (checksum EXECUTED, no docker/apt/sudo, trap-based lock release, attempt cap)** |
 | **F** | No tool-category drift | the artifact is byte-unchanged; `test_tool_category_artifact.py` green |
 | **G** | The manifest delta is re-derived from the real tree | `find agents -type f \| wc -l` matches the derivation rule |
 | **H** | Scope + privacy (LANE-OWN diff, Blocker 1+2, B7-amended) | the lane-own diff touches only `agents/**` + `tests/**` + the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/` — W4) **+ the approver bookkeeping `.agents/approver/**` (B7 — house-tracked review-loop artifacts)**; the giter set is outside this gate (G6.1a owns it); no committed finding/corpus/secret; `worker` byte-identical |
@@ -65,7 +65,8 @@ HEAD_SHA=$(git rev-parse HEAD)
 
 # --- Gate A: net-new reds -------------------------------------------------
 # The house method: net-new = the FAILED-list DIFF vs the true base, same commands.
-.venv/bin/python -m pytest -q --timeout=30 2>&1 | tail -40 > /tmp/aegis-head.txt || true
+.venv/bin/python -m pytest -q --timeout=30 2>&1 | tee /tmp/aegis-head-full.log | grep -E "^(FAILED|ERROR)" | sort > /tmp/aegis-head.txt || true
+# (e): the FULL log is captured via tee — no truncation; the FAILED list is derived from it
 # (run the same on the base in a separate worktree/checkout, then diff the FAILED lists)
 
 # --- Gate B: the sealed-artifacts proof leg ------------------------------
@@ -116,7 +117,15 @@ else
   echo "Gate H FAIL: out-of-scope paths beyond the planning set + approver bookkeeping (temp files retained)"; exit 1
 fi
 git diff --stat $BASE -- agents/worker/                                  # expect EMPTY
-git diff $BASE | grep -nE 'sk-(proj|ant)-|BEGIN [A-Z ]*PRIVATE KEY' ; echo "secret hits above (expect none)"
+# R5 (leader disposition — FAIL-CLOSED form; the `; echo` idiom DISCARDED grep's exit status so
+# the scan could not fail). Paste-executed verification of this fixed form:
+#   printf 'sk-proj-abc\n' | { grep -nE 'sk-(proj|ant)-' && echo FAIL && exit 1 || echo OK; }  ⇒ FAIL path fires
+#   printf 'clean\n' | { grep -nE 'sk-(proj|ant)-' && echo FAIL && exit 1 || echo OK; }        ⇒ OK
+if git diff $BASE | grep -nE 'sk-(proj|ant)-|BEGIN [A-Z ]*PRIVATE KEY'; then
+  echo "FAIL: secret-shaped content in the lane diff (R5 fail-closed)"; exit 1
+else
+  echo "OK: secret scan clean"
+fi
 
 # --- the baseline is still clean on the committed tree --------------------
 python3 scripts/protection/generate_prompt_artifact_baseline.py --check; echo "exit=$?"   # expect 0

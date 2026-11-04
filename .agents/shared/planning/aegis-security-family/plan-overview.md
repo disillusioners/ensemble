@@ -36,7 +36,7 @@ gate in §Success Criteria is green — the flip to live remains the user's nonc
   installer skills (`fuzzing-toolchain`, `credential-bench`, `sast-toolchain`) each with a `.lib.sh`.
 - **One line in `agents/leader/meta.json`** — add `"aegis"` to `team_members` (the only agent-reach
   path `leader` has, A4).
-- **One new test file** — `tests/unit/agents/test_aegis_security_family.py` (tests T1–T28, DP7).
+- **One new test file** — `tests/unit/agents/test_aegis_security_family.py` (tests T1–T28 + the T29/T30 blocks, DP7).
 - **One regenerated prompt-artifact baseline** — `agents/.prompt-artifacts.sha256`, **161 → 177 rows**,
   re-stamped in the **same commit** as the agent files (B2 doctrine).
 - **A staged release** with full provenance (P6). **NO promote.**
@@ -257,7 +257,7 @@ See `decisions.md` §C-1 for the cut rationale (why there is no `phase7-plan.md`
 | [`phase1-plan.md`](./phase1-plan.md) | The `aegis` orchestrator — 7 files. |
 | [`phase2-plan.md`](./phase2-plan.md) | `hacker`, `cracker`, `sweeper` — 18 files land in P2; the three `.lib.sh` complete the children's 21 in P3. |
 | [`phase3-plan.md`](./phase3-plan.md) | The three installer `.lib.sh` libraries. |
-| [`phase4-plan.md`](./phase4-plan.md) | The one-commit pin ceremony + the T1–T28 test file + the leader one-liner. |
+| [`phase4-plan.md`](./phase4-plan.md) | The one-commit pin ceremony + the T1–T28 (+ T29/T30) test file + the leader one-liner. |
 | [`phase5-plan.md`](./phase5-plan.md) | Verification — gates A–H. |
 | [`phase6-plan.md`](./phase6-plan.md) | Staging handoff — version derivation, stage, provenance, the recorded (not executed) promote command. |
 | [`decisions.md`](./decisions.md) | The decision record — DP1–DP8 summarised, the leader one-liner, Q1–Q4 **RESOLVED** (architect rulings + consequences), the flagged deviations from `technical-analysis.md`, and §C2 — the architect amendments AM-1…AM-15 applied to this plan set. |

@@ -3,8 +3,9 @@
 **Date:** 2026-11-04 (amended same day — architect deltas AM-1…AM-15 folded)
 **Author:** planner[v2] via plan-creation worker
 **Status:** Draft amended — **Q1–Q4 are RESOLVED** (architect rulings, `architecture-recommendation.md`
-@ `f7204bd9d`) and **AM-1…AM-15 are applied to this record** (§C2). The plan council + approver legs of
-Phase 0 remain PENDING — this record is not yet cleared.
+@ `f7204bd9d`); **AM-1…AM-15 applied** (§C2); **council leg CLEARED; approver 001 REJECT → 002 REJECT →
+003 REJECT (cap exhausted) → LEADER DISPOSITION 2026-11-04** (fourth fold authorized, reviewer
+spot-check verification, TrueAuto proceed) — the full trail is §F (single source; R2).
 **Companion records:** [`architecture-recommendation.md`](./architecture-recommendation.md) (the
 BINDING architect review — rulings Q1–Q4 + amendments AM-1…AM-15) ·
 [`technical-analysis.md`](./technical-analysis.md) (the design resolution this record summarises;
@@ -52,7 +53,7 @@ citation resolves there; several facts superseded — see its dated amendment no
 | **DP4a** | **On a failed re-verify** the finding returns to `open` at its **original** severity — re-verify never downgrades severity on its own. | §DP4 "On a failed re-verify" | — |
 | **DP5** | **Peer posture.** `ari` reaches aegis through `job_create` with **zero** ari changes; `leader` reaches it through **one** `team_members` line; all four agents use `default_queue: system_parallel_queue`; **no `watchover` block** in any meta. **AM-5 corrects the supervision characterisation:** the per-instance watchover API is an operator-only **tool-call gate, not a supervisor**; the key is inert for every agent except `watcher`; v1's primary supervisor is **aegis itself**. | §DP5 (lines 596–654) **+ AM-5 (§C2 governs)** | A3, A4, A10, D7 |
 | **DP6** | **Models.** `aegis` = `agentic`; `hacker`/`cracker`/`sweeper` = `coding`. No `vision`, no `img-gen`, no `decision`, no `coding2`. All inside the shipped default — no config change is owed. | §DP6 (lines 657–698) | A8 |
-| **DP7** | **Test/pin fold.** One new test file with **T1–T28**; **one commit** carrying the four agent trees + the leader one-liner + the regenerated baseline (161 → 177) + the test file **+ the C1(b) 16→17 leader-length pin fold in `tests/unit/test_maintenancer_agent.py` (D3 completeness)**; the re-stamp is the **last** `agents/**` content change. | §DP7 (lines 702–804) | B1, B2, B4, B8, D9 |
+| **DP7** | **Test/pin fold.** One new test file with **T1–T28 plus the discrete T29 + T30 blocks** (Blockers 4/9); **one commit** carrying the four agent trees + the leader one-liner + the regenerated baseline (161 → 177) + the test file **+ the C1(b) 16→17 leader-length pin fold in `tests/unit/test_maintenancer_agent.py` (D3 completeness)**; the re-stamp is the **last** `agents/**` content change. | §DP7 (lines 702–804) | B1, B2, B4, B8, D9 |
 | **DP8** | **Phase structure.** Seven phases, P0–P6, standard lane flow (plan → councils → implement → verify → **STAGE**; never promote), each with an independently checkable gate. | §DP8 (lines 808–845) | E7 |
 
 ---
@@ -78,7 +79,7 @@ citation resolves there; several facts superseded — see its dated amendment no
 | `agents/sweeper/skills-template/sast-toolchain.{md,lib.sh}` | new (2) | **file-invoked** |
 | `agents/leader/meta.json` | **modified** | one line — `"aegis"` added to `team_members` |
 | `agents/.prompt-artifacts.sha256` | **regenerated** | 161 → 177 rows |
-| `tests/unit/agents/test_aegis_security_family.py` | new | T1–T28 |
+| `tests/unit/agents/test_aegis_security_family.py` | new | T1–T28 + the T29/T30 blocks |
 | `tests/unit/test_maintenancer_agent.py` | **modified** | the C1(b) 16→17 pin fold: `test_leader_team_members_length_16` assertion + docstring (council-D3 completeness — the fifth sanctioned element of the one-commit set) |
 
 **Arithmetic rules (re-derive at P4, never trust a frozen number):**
@@ -143,34 +144,45 @@ disclosed in the Phase-6 handoff.
 
 ### B.3 The FINAL per-agent cardinal sets (Blocker 5, leader ruling merge-don't-cap-widen — authoritative)
 
-Every persona carries **ALL FIVE guardrail families as cardinals**; where the T16 cap binds, privacy
-is **MERGED into the existing findings-handling cardinal**, never added as an 8th (the leader ruling).
+Every persona carries **ALL FIVE guardrail families as cardinals — each WITH its per-persona form
+(R1 leader ruling 2026-11-04: family 3 is universally owned; see the ruling block below)**; where
+the T16 cap binds, privacy and the family-3 form are **MERGED into existing cardinals**, never
+added as new ones (the leader rulings).
 The five families: (1) read-only-on-targets · (2) self-owned-sandbox-only / zero-external-targets ·
 (3) synthetic-sample-data-only · (4) findings-private · (5) white-hat-ethos.
 
-**aegis — 7 cardinals** (T16: 7):
-1. white-hat ethos; 2. read-only on the target — copy-then-build (the honest limit stated); 3. the
-legality line (prefix-match, loopback, no egress); 4. sole-lane doctrine; 5. report scrutiny;
-6. END TURN; **7. findings are private + the report is not the fix** *(privacy MERGED here —
-Blocker 5)*: project-scoped off-repo store, never committed, remediation via leader.
+**R1 (LEADER RULING 2026-11-04) — family 3 (sample-data-only) is UNIVERSALLY OWNED with
+per-persona forms; T29 is 20 ASSERTED (5×4), every cell positive.** Per-persona family-3 forms:
+**cracker = synthetic-sample benches only; aegis/hacker/sweeper = NEVER ingest or transcribe real
+credential/secret material into any tool, bench, or finding — findings reference LOCATION + TYPE,
+never content** (sweeper's gitleaks DETECTS real secrets by design; it must never transcribe them
+into reports). The forms are MERGED into the existing data-flow/honesty cardinals (T16 caps
+respected — never an 8th cardinal).
 
-**hacker — 7 cardinals** (T16: 7): 1. white-hat authorisation; **2. self-owned sandbox + zero
-external targets** *(the Blocker-5 collapse — ONE legality cardinal)*; 3. read-only on the target —
-copy-then-build; **4. findings are private** (off-repo, never committed); 5. my lane is fuzzing;
-6. end turn after I report; 7. the honesty rule. *(synthetic-data: absent-by-applicability.)*
+**aegis — 7 cardinals** (T16: 7) — all five families: 1. white-hat ethos *(f5)*; 2. read-only on
+the target — copy-then-build *(f1)*; 3. the legality line *(f2, aegis form)*; 4. sole-lane
+doctrine; 5. report scrutiny; 6. END TURN; **7. findings-private + the-report-is-not-the-fix +
+the family-3 aegis form (never ingest/transcribe real credentials — findings cite LOCATION + TYPE,
+never content)** *(f4 + f3 merged here — Blocker 5 + R1)*.
 
-**cracker — 6 content cardinals + 1 standing prohibition** (T16: 7): 1. white-hat authorisation;
-2. synthetic-data-only; 3. the merged data-flow cardinal (sandbox + copy-then-build + prefix
-assertion); 4. my lane is crypto/credential/protocol strength; 5. end turn after I report;
-**6. the honesty rule + findings-privacy** *(privacy MERGED here — Blocker 5)*: inferred vs
-reproduced, and findings are private/off-repo/never committed; 7. standing prohibition (nothing
-else numbered at cardinal level).
+**hacker — 7 cardinals** (T16: 7) — all five families: 1. white-hat authorisation *(f5)*;
+**2. self-owned sandbox + zero external targets** *(f2, the Blocker-5 collapse)*; 3. read-only on
+the target — copy-then-build *(f1)*; **4. findings-private** *(f4, off-repo, never committed)*;
+5. my lane is fuzzing; 6. end turn after I report; **7. the honesty rule + the family-3 hacker
+form (never ingest/transcribe real credentials)** *(f3 merged here — R1)*.
 
-**sweeper — 6 content cardinals + 1 standing prohibition** (T16: 7): 1. white-hat authorisation;
-2. the merged data-flow cardinal; 3. my lane is static analysis + triage; 4. I never attempt
-exploitation; 5. end turn after I report; **6. the honesty rule + findings-privacy** *(privacy
-MERGED here — Blocker 5)*: raw hits ≠ findings, and findings are private/off-repo/never committed;
-7. standing prohibition.
+**cracker — 6 content cardinals + 1 standing prohibition** (T16: 7) — all five families:
+1. white-hat authorisation *(f5)*; **2. synthetic-data-only** *(f3, the CRACKER form: synthetic-
+sample benches only)*; 3. the merged data-flow cardinal *(f1/f2)*; 4. my lane is
+crypto/credential/protocol strength; 5. end turn after I report; **6. the honesty rule +
+findings-privacy** *(f4 merged here — Blocker 5)*; 7. standing prohibition.
+
+**sweeper — 6 content cardinals + 1 standing prohibition** (T16: 7) — all five families:
+1. white-hat authorisation *(f5)*; 2. the merged data-flow cardinal *(f1/f2)*; 3. my lane is
+static analysis + triage; 4. I never attempt exploitation; 5. end turn after I report;
+**6. the honesty rule + findings-privacy + the family-3 sweeper form (gitleaks DETECTS real
+secrets by design — NEVER transcribe them into reports; findings cite LOCATION + TYPE, never
+content)** *(f4 + f3 merged here — Blocker 5 + R1)*; 7. standing prohibition.
 
 ---
 
@@ -212,7 +224,7 @@ privacy cardinals in §B.3 and the T29 findings-private pins.
 | **D-1** | **T23's pin target.** | §DP7 T23: *"the three `.lib.sh` files carry an **identical** FENCES block"* (line 766); §DP8 P3 gate: *"T23 (identical FENCES blocks) passes"* (line 820). | **T23 pins the FENCES block in the three installer skill `.md` bodies** (byte-identical across all three), **and** asserts the corresponding FENCES comment block in the three `.lib.sh` headers as a secondary consistency check. | Verified against the charter precedent: the normative FENCES bullet list lives in `agents/charter/skills-template/install-mermaid-cli.md` (the skill body); the `.lib.sh` carries only a short header comment. Pinning the `.lib.sh` alone would pin a *comment*, not the contract, and would let the body and the library disagree. | Low — a test-target correction, not a design change. The contract itself is unchanged. **AM-10 refines the scope (ratified):** the byte-identical set is **the FENCES bullet list ONLY** — it MUST include the C3 checksum bullet (charter has none ⇒ byte-identity with charter is impossible and not required) and MUST exclude all per-tool content (release-asset URLs, checksum sources, tool flags); the SECONDARY check is each `.lib.sh` carrying a FENCES header mentioning the tool-agnostic keywords — explicitly **not** byte-identity vs the `.md` block. **n3 (approver iter-001): the byte-identity is MODULO BLANK LINES** (the extraction drops blank lines — the normalization is stated at every T23 definition site). |
 | **D-2** | **The plan-review gate is inside Phase 0.** | §DP8 P0's gate is *"The checklist exists and every rule has a named target artifact; the architect signs it off before P1"* (line 817). | P0 additionally carries **task 1: route the plan set through architect → council → approver**, and the Phase-0 exit criterion makes the plan-review clearance a **precondition for P1**. | The house lane discipline is plan → councils → implement. The technical-analysis assumed the plan was already through review; the plan set now exists, so the review arc is a Phase-0 task rather than an assumption. | Low — additive. |
 | **D-3** | **The vkey first engagement is not a gated phase.** | §E9 / the commission name vkey as the first real case; DP8's phase structure ends at P6 (staging). | No `phase7-plan.md`. The engagement is documented in `plan-overview.md` §Post-lane, with its prerequisites, its trigger (the user's promote ceremony) and its expected shape. | The engagement requires a **live** family ⇒ the user's promote ceremony, which this lane does not perform. It is an operational run against a real target, not a code artifact with a commit to gate. Making it a gated phase would create a phase that cannot start inside the lane. | Low — the commission's first-case requirement is honoured and made explicit rather than dropped. |
-| **D-4** | **Two extra test assertions.** | §DP7 enumerates T1–T28. | The lane test additionally asserts (a) each meta's `tools` block **round-trips through the registry's parser** (the fail-open guard — A9) and (b) the baseline has **exactly 177 rows**. | A malformed `tools` block is fail-OPEN (all tools allowed) — on a security agent that is a privilege escalation, not a lint error. And the 177-row count is the artifact that the whole pin ceremony exists to protect; asserting it pre-stage catches a missing/extra prompt file before the stage-time leg. Both are mechanical, and both map to risks already in `plan-overview.md` (R2, R4). | Low — additive tests, no design change. |
+| **D-4** | **Two extra test assertions.** | §DP7 enumerates T1–T28 (+ the T29/T30 blocks). | The lane test additionally asserts (a) each meta's `tools` block **round-trips through the registry's parser** (the fail-open guard — A9) and (b) the baseline has **exactly 177 rows**. | A malformed `tools` block is fail-OPEN (all tools allowed) — on a security agent that is a privilege escalation, not a lint error. And the 177-row count is the artifact that the whole pin ceremony exists to protect; asserting it pre-stage catches a missing/extra prompt file before the stage-time leg. Both are mechanical, and both map to risks already in `plan-overview.md` (R2, R4). | Low — additive tests, no design change. |
 | **D-5** | **The finding-record field list is quoted by pointer, not restated.** | §DP4 prints the field list (lines 479–490). | This record names the fields in §B.4 but states explicitly that the canonical list is the one printed in `technical-analysis.md`, and that the implementation follows that list exactly. | A summary that silently re-writes a field list is how a canonical artefact gets two homes — the failure mode guide §2 exists to prevent. | None — the pointer is stricter than a copy. |
 | **D-6** | **The finding-record field COUNT is inconsistent upstream.** | §DP4 says *"nine required fields"* in three places (the summary at line 458, the heading at line 477, and the storage layout at line 507), but the printed list at lines 479–490 enumerates **ten** fields (`id, title, severity, confidence, category, location, description, evidence, impact, fix`). T24 repeats the "9" label. | The implementation follows the **printed list** (ten named fields), and **T24 pins the field NAMES rather than the count** — so the assertion is correct whichever label the upstream prose carries. `decisions.md` §B.4 names all ten. | A printed enumeration is more specific than a header count, and a test that pins names is robust to the label. This is a genuine defect in the upstream resolution, **flagged rather than silently changed**. | Low — the field set is unchanged; only the label differs, and no test asserts a bare number. |
 
@@ -232,8 +244,13 @@ verified in the lane worktree by the architect's own workers. **Gate condition (
 not begin until **AM-1, AM-2, AM-3, AM-5, AM-6, AM-7, AM-9 and AM-13** are reflected in the plan set
 (this table is that reflection) and **AM-4, AM-8, AM-10, AM-11, AM-12, AM-14, AM-15** are recorded as
 phase-bound deltas (the phase plans carry them). The Phase-0 guide-compliance checklist binds the
-AM-9/T12-union + AM-8/T18 token extension and the AM-10/T23 definition. **Phase 0 remains uncleared
-until the plan council + approver pass — this table is a fold, not a self-approval.**
+AM-9/T12-union + AM-8/T18 token extension and the AM-10/T23 definition. **(g) DATED NOTE
+(2026-11-04, leader-disposition fold): the review's own §6 gate text carries a transposition — it
+says "the AM-9/T18 token extension" where the operative pairing is AM-8 = the T18 token extension
+and AM-9 = the T12 union; the architect file is read-only and stays as written; this record's
+pairing above is the corrected form and governs.** *(The §C2 gate-condition record is complete —
+council + approver verdicts are in §F; this paragraph's "not a self-approval" caveat is retained
+as the historical fold-time statement.)*
 
 | AM | Ruling / correction | Plan delta applied (where) |
 |---|---|---|
@@ -358,9 +375,12 @@ PENDING)*
 
 | Stage | Verdict | Findings | Folded / routed | Date |
 |---|---|---|---|---|
-| Architect | **SOUND-WITH-AMENDMENTS** (`architecture-recommendation.md` @ `f7204bd9d`; read-only enrichment, every file:line re-verified in the lane worktree by three dispatched verification workers) | Rulings Q1–Q4 CLOSED (Q1: drop `chart`; Q2: off-repo ratified; Q3: upheld with premise corrected; Q4: upheld with characterisation corrected) + amendments AM-1…AM-15 BINDING + 12 adjudicated plan claims (table §4 of the review) + 3 scope escalations considered and REFUSED (review §5) | **All fifteen amendments folded into this plan set** in this commit (§C2); **no `daemon/`/`scripts/` change required by any amendment** — no scope escalation granted. Phase 0 is NOT cleared by this fold: the plan council + approver legs remain PENDING. | 2026-11-04 |
-| Council | **APPROVE-WITH-ADVISORIES** (2026-11-04, two legs: the council pass + the delta re-gate on the AM/audit folds) | Fold-list/doc defects only — no design defects ("substance exceptionally strong"); C1 + W1–W7 + A-a…A-h (leg 1) and D1–D7 + N1–N7 (leg 2) | **All folded**: leg 1 @ `0d89b1644` (C1 test-fold + false-claim correction, POSIX scope gates, T23/T18/composition completeness); leg 2 @ `9f372d104` (fingerprint form, ledger signature, namespace + normalization hygiene) | 2026-11-04 |
-| Approver (iteration) | **001 — REJECT (6 execution-layer blockers; strategy layer APPROVED)** + leader rulings embedded (B5 merge-don't-cap-widen; Q2 confirmation; B1+2 giter-ownership framing) | B1+2 release lifecycle owned by no phase → P6 becomes the giter-owned release-mechanics phase; B3 G3.8 unsatisfiable → three-class write-target classification; B4 no mechanical legality pin → the T29 matrix (20 assertions); B5 privacy not cardinalized → merged per the leader ruling; B6 cleanup destroys provenance → staging worktree kept until ceremony | **All six + non-blockers n1–n6 folded in one commit** (this one); approver iteration 002 follows | 2026-11-04 |
+| Architect | **SOUND-WITH-AMENDMENTS** (`architecture-recommendation.md` @ `f7204bd9d`; read-only enrichment, every file:line re-verified in the lane worktree by three dispatched verification workers) | Rulings Q1–Q4 CLOSED (Q1: drop `chart`; Q2: off-repo ratified; Q3: upheld with premise corrected; Q4: upheld with characterisation corrected) + amendments AM-1…AM-15 BINDING + 12 adjudicated plan claims (table §4 of the review) + 3 scope escalations considered and REFUSED (review §5) | **All fifteen amendments folded into this plan set** (§C2); **no `daemon/`/`scripts/` change required by any amendment** — no scope escalation granted. *(Status note, R2: at fold time the council + approver legs were pending; the trail rows below record their completion — §F is the single source.)* | 2026-11-04 |
+| Council | **APPROVE-WITH-ADVISORIES** (2026-11-04 — **CLEARED** after three fold rounds: the C1+W+A round → the D round → the N round, all mechanical) | Fold-list/doc defects only — no design defects ("substance exceptionally strong"); C1 + W1–W7 + A-a…A-h (leg 1), D1–D7 (leg 2), N1–N7 (leg 3) | **All folded**: leg 1 @ `0d89b1644`; leg 2 @ `9f372d104`; leg 3 @ `948be899b` | 2026-11-04 |
+| Approver (iteration) | **001 — REJECT (6 execution-layer blockers; strategy layer APPROVED)** + leader rulings embedded (B5 merge-don't-cap-widen; Q2 confirmation; B1+2 giter-ownership framing) | B1+2 release lifecycle owned by no phase → P6 giter-owned; B3 G3.8 unsatisfiable → three-class write-target classification; B4 no mechanical legality pin → T29; B5 privacy not cardinalized → merged per the leader ruling; B6 cleanup destroys provenance → staging worktree kept until ceremony | **Folded @ `d0fea922a`** + non-blockers n1–n6 | 2026-11-04 |
+| Approver (iteration) | **002 — REJECT (10 mechanical blockers, content layer verified fixed)** — the approver's execution worker TRACED THE REAL SCRIPTS; citations treated as ground truth | B1 stage `live` target argument; B2 park/advance recipe; B3 detached staging worktree at the tag; B4 ENSEMBLE_ROLLBACK_SAFE env bind; B5 FE build owner; B6 promote-field fence; B7 approver-bookkeeping scope tolerance; B8 the P2 exception leg; B9 the T30 installer-guard pins; B10 §F single-source status | **All ten + n1–n9 folded @ `9969bb0d3`** | 2026-11-04 |
+| Approver (iteration) | **003 — REJECT (5 surgical residuals; approver cap EXHAUSTED at 3× REJECT)** | R1 cardinal-voice contradiction (family-3 universal ownership) → **LEADER RULING**; R2 §F single-source contradiction → this trail; R3 sidecar path wrong → `dist/` sibling + exit semantics; R4 fence premise factually wrong + too weak → **LEADER RULING both-fences**; R5 secret scan cannot fail → fail-closed form | **Folded in the leader-disposition commit (this one)** — verification is a plan-council reviewer spot-check, NOT a fourth approver call | 2026-11-04 |
+| **Leader disposition** | **TrueAuto proceed after cap exhaustion (3× REJECT) — FOURTH fold authorized (2026-11-04)** | five surgical residuals (R1/R4 carry LEADER RULINGS as the resolution) + material execution non-blockers (a)–(h) | **This fold**; after it the plan **LOCKS for implementation** with the disposition disclosed; verification = plan-council reviewer spot-check | 2026-11-04 |
 
 ---
 
@@ -420,9 +440,9 @@ PENDING)*
 face-value "18 files land in P2" arithmetic and the 28-file manifest remain the derivation rules;
 (b) the leader one-liner's 16→17 pin fold is IN-COMMIT by adjudication (C1 disposition); (c) the
 giter-owned phase-6 sequence encodes house choreography verbatim — any drift at execution is a
-giter-lane concern, not a plan defect; (d) the T29 matrix's per-agent applicability column
-(synthetic-data absent-by-applicability for aegis/hacker/sweeper) is recorded, not asserted as a
-positive pin; (e) phase-6's promote command remains RECORDED-NOT-EXECUTED regardless of the
+giter-lane concern, not a plan defect; (d) the T29 matrix's per-agent applicability question was RESOLVED by the R1 leader ruling
+(2026-11-04): family 3 is UNIVERSALLY OWNED with per-persona forms and **T29 is 20 ASSERTED
+(5×4), every cell positive** — the earlier "recorded, not asserted = 17+3" note is superseded; (e) phase-6's promote command remains RECORDED-NOT-EXECUTED regardless of the
 giter-ownership rewrite (the user's nonce ceremony owns the flip); (f) **child-bash egress residual
 (n6, approver iter-002): children hold `bash` ⇒ `curl` is TECHNICALLY possible on a child — the
 "egress-free" claim is about TOOL grants (no `mcp` category), not about bash capability; the
