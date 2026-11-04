@@ -51,7 +51,7 @@
  *     timezone.
  */
 
-import { CHART_EMPTY_VALUE } from '../chart-theme';
+import { ANOMALY_MARKER_RADIUS, CHART_EMPTY_VALUE } from '../chart-theme';
 
 // ── Geometry (ONE viewBox; the text is never stretched) ─────────────────
 
@@ -86,8 +86,13 @@ export const CHART_POINT_RADIUS = 2.2;
  */
 export const CHART_STROKE_WIDTH = 1.6;
 
-/** The anomaly marker's dot radius. */
-export const TIMELINE_MARKER_RADIUS = 6;
+/**
+ * The anomaly marker's dot radius — VALUE-sourced from the shared
+ * `ANOMALY_MARKER_RADIUS` (chart-theme) so the house SVG timeline and
+ * the Chart.js overlay plugin draw the SAME marker dot. The name stays:
+ * the renderer specs assert against it.
+ */
+export const TIMELINE_MARKER_RADIUS = ANOMALY_MARKER_RADIUS;
 
 /**
  * The house GEOMETRY — the coordinate system the helpers project into.

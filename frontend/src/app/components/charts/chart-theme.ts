@@ -58,6 +58,14 @@ export const CHART_SEVERITY_COLORS: Readonly<Record<'low' | 'medium' | 'high', s
 };
 
 /**
+ * The anomaly-marker radius — ONE shared value so the Chart.js overlay
+ * plugin and the house SVG timeline draw the SAME marker dot (cross-stack
+ * visual parity is a VALUE coupling, not a coincidence). Both consumers
+ * import this; neither carries its own copy.
+ */
+export const ANOMALY_MARKER_RADIUS = 6;
+
+/**
  * The placeholder a value-less sample renders as — the chart sites' own
  * "no value" token (the metrics model's `METRICS_EMPTY_VALUE` is the
  * same glyph; the chart primitive does not depend on the model barrel).

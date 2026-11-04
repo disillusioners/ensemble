@@ -1,4 +1,7 @@
-import { CHART_SEVERITY_COLORS } from '../../../components/charts/chart-theme';
+import {
+  ANOMALY_MARKER_RADIUS,
+  CHART_SEVERITY_COLORS,
+} from '../../../components/charts/chart-theme';
 import { HouseAnomalyMarker } from '../../../components/charts/house-svg-renderer/house-svg-renderer';
 
 /**
@@ -26,8 +29,13 @@ import { HouseAnomalyMarker } from '../../../components/charts/house-svg-rendere
 /** The plugin's registration id (Chart.js keys its options by it). */
 export const HOUSE_ANOMALY_PLUGIN_ID = 'house-anomaly-overlay';
 
-/** The marker radius, in canvas pixels. */
-export const HOUSE_ANOMALY_MARKER_RADIUS = 6;
+/**
+ * The marker radius, in canvas pixels — VALUE-sourced from the shared
+ * `ANOMALY_MARKER_RADIUS` (chart-theme, the cross-stack parity token).
+ * This name remains exported because the plugin's spec asserts against
+ * it; the plugin body below reads the shared constant directly.
+ */
+export const HOUSE_ANOMALY_MARKER_RADIUS = ANOMALY_MARKER_RADIUS;
 
 export type { HouseAnomalyMarker } from '../../../components/charts/house-svg-renderer/house-svg-renderer';
 
@@ -131,7 +139,7 @@ export function createHouseAnomalyOverlayPlugin(): HouseAnomalyPlugin {
         return;
       }
       const ctx = chart.ctx;
-      const laneY = chart.chartArea.top + HOUSE_ANOMALY_MARKER_RADIUS;
+      const laneY = chart.chartArea.top + ANOMALY_MARKER_RADIUS;
       ctx.save();
       for (const marker of markers) {
         const index = houseDatasetIndex(chart.data.datasets, marker.seriesId);
@@ -144,7 +152,7 @@ export function createHouseAnomalyOverlayPlugin(): HouseAnomalyPlugin {
         }
         ctx.fillStyle = houseAnomalyColor(marker.severity);
         ctx.beginPath();
-        ctx.arc(x, laneY, HOUSE_ANOMALY_MARKER_RADIUS, 0, Math.PI * 2);
+        ctx.arc(x, laneY, ANOMALY_MARKER_RADIUS, 0, Math.PI * 2);
         ctx.fill();
 
         // 5.7 — the VISIBLE label: the marker's composed words, drawn
@@ -152,7 +160,7 @@ export function createHouseAnomalyOverlayPlugin(): HouseAnomalyPlugin {
         if (marker.title) {
           ctx.fillStyle = HOUSE_ANOMALY_LABEL_COLOR;
           ctx.font = HOUSE_ANOMALY_LABEL_FONT;
-          ctx.fillText(marker.title, x + HOUSE_ANOMALY_MARKER_RADIUS + 4, laneY + 3);
+          ctx.fillText(marker.title, x + ANOMALY_MARKER_RADIUS + 4, laneY + 3);
         }
       }
       ctx.restore();
