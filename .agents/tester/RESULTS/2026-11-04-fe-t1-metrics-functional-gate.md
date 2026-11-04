@@ -438,3 +438,158 @@ enforcement legs live; the old false-green seam proven real and now closed); the
 fence and pack posture all re-verified green. Residual items R1–R9 are non-blocking with owners —
 **R1 (frozen plugin options) is the one to route first**, since it is the only residual that could
 reproduce the original symptom shape under a different arrival order.
+
+
+---
+
+# SECOND SCOPED RE-VERIFICATION (2026-11-04, tip `1af481a78`) — R1/R2 fold; FINAL LANE VERDICT
+
+Fold under test: `8c344a6da` (R1 `chart.options` refresh on rebuild + R2 clicked-sample local
+tolerance + pack D1 expansion + specs) · `1af481a78` (live before/after evidence), on top of
+`7c36835c0` (this gate's re-verification #1 evidence). Six workers, each with a UNIQUE /tmp prefix
+and its own worktree/port where it touched the FE (the prior round's shared-prefix lesson applied;
+the pack ran in its own tip worktree because the lane worktree's `frontend/dist` was being served
+live by the R1 leg). Every developer claim was treated as INPUT; all legs re-run independently.
+
+## FINAL LANE VERDICT: **PASS-WITH-NOTES** — ceremony-ready.
+
+| leg | verdict | one-line basis |
+|---|---|---|
+| R1 arrival-order | **PASS** | pre-fix shape ⇒ 0 marker arcs / no disc; tip ⇒ 2 marker-lane arcs + visible disc when the chart mounts BEFORE the anomalies payload; source-level served-bytes patch reproduces the freeze end-to-end |
+| R2 geometry/tolerance | **PASS** | hole pin RED@pre-fix-copy → GREEN@tip; OWN hole (1197 s row gap) ⇒ marker 73.0 s from nearest sample vs 38.1 s mean ⇒ drills on the FIRST click; both on-grid controls unchanged (1 click each) |
+| Guard at tip | **PASS** | B1 −1,301 · B4a 71,054 gz · B4b lazy-only 170,177 (≤185,000) · warnings 9==9 · invariant clean · **R8 closed** (tool stderr surfaced in RED, both mutation legs) |
+| Pack at tip | **PASS (expected posture)** | both legs FAIL(1 leg) = the same 2 settings TZ reds byte-identical; **D1 = 32 files / 610 tests** (**R4 closed**); error-summary now names the failing suite (**R5 closed**); membership rule honored |
+| Suites + census | **PASS** | **153/153** (13-suite scope; the correct arithmetic is 149+4, not 151+2) · whole-FE BASE 134/4318 · HEAD 155/4743 · failed diff base-only 0 / head-only 0 / shared 9 (all blob-identical) · **net-new deterministic reds = 0** |
+| Fence + live baseline | **PASS** | live moved v0.28.9→**v0.28.10** by ANOTHER lane's ceremony (run_id `r-20261104-073151-e436`, committed 07:35:57Z); our lane made no live change (journal + git-diff proof); one /livez request total |
+
+## R1 — PASS (worker `b847074c`)
+
+Fix read: the rebuild effect now does `chart.data = config.data; chart.options = config.options;
+chart.update();` (`chart-panel.component.ts` ~L391) — pre-fix, the options bag (and the plugin's
+marker list inside it) was never refreshed. Mechanism: the marker list lives at
+`options.plugins['house-anomaly-overlay'].markers`; the overlay paints
+`ctx.arc(x, chartArea.top + 6, 6, …)`.
+
+- Arrival-order scenario (anomalies response delayed +25 s ⇒ chart mounts first): at mount
+  `markers=[0,0]`, **arcs 0**; after the payload lands: marker list **2**, cumulative **2 arcs at
+  y=38 = chartArea.top(32)+6, r=6**; disc centre pixel **#38bdf8**, 127 palette pixels in 14×14.
+- Mechanism table (same live chart instance): TIP `options=freshBag; update(); resize(); draw()` →
+  **2 arcs** · PRE-FIX `options=mountBag; data=…; update(); resize(); draw()` → **0 arcs** ·
+  RESTORED control → **2 arcs**. Pre-fix at the same coordinates: centre **#000000**, 0 palette
+  pixels.
+- Source-level cross-check (served bytes only: `c.data=d.data,c.options=d.options,` →
+  `c.data=d.data,`): marker lists frozen at 0 and arcs 0 for the whole session — the defect
+  reproduced in the real product.
+- Dev's jest pin `chart-panel.anomaly-order.spec.ts` → 3/3 PASS. Boot fences: scrub hits 0,
+  sqlite-line 0, engine DSN `127.0.0.1:5432/ensemble_dev`, jq pin true, sweep pin 0, PORT=8079
+  re-exported post-source. API census 0 non-GET. Live :9797 uptime continuous, zero prod contact.
+
+## R2 — PASS (worker `df96922a`)
+
+Fix read: `clickToleranceMs(series, element.index)` — the tolerance is now the clicked sample's
+LOCAL neighbourhood (`max(dist to prev, dist to next)`; "the sample that borders a hole OWNS the
+hole"; on a uniform grid this equals the old mean). The pinned `houseNearestAnomaly` is unchanged.
+
+- **(a) Hole pin mutation-proven:** at tip 26/26 (the pin = exactly 1 node); in a /tmp pre-fix copy
+  (diff = ONLY the R2 revert, verified before running; node_modules symlinked): the pin RED verbatim
+  (`Expected: "anom-000003" / Received: undefined` at `:369`) while the other 25 legs stayed green.
+- **(b) OWN hole case:** fenced daemon on **:8081** (own worktree/dist; five boot fences green both
+  boots); warm + first engine pass 11:56:58Z; port-verified SIGTERM at **12:22:06Z**; idle
+  **18.7 min**; restart **12:40:59Z** ⇒ raw-grid **GAP 12:21:16→12:41:13 = 1197 s**. The
+  post-restart pass emitted **`anom-000005 daemon.rss_kb low/ramp t_start=12:40:00` — INSIDE the
+  hole; nearestSampleDelta 73.0 s vs meanSpacing 38.1 s ⇒ unreachable by the old mean rule** (same
+  shape as the dev's 129.0/39.4). Real pointer at the pixel-located disc (elementFromPoint =
+  CANVAS[chart-panel-canvas]): **drilldown opened on the FIRST click**, `series daemon.rss_kb`,
+  window 12:40–12:50, observed 324068 / baseline 304352.
+- **(c) Normal path unchanged:** `anom-000002 daemon.anon_kb` (delta 14.0 s) and `anom-000003
+  daemon.cpu_pct` (13.0 s) — both **clicks→open = 1**, correct series chips. A control click on a
+  steep series-line run (the R9 colour collision) correctly opened **nothing** (no fabricated id).
+- **(d) Refutations adjudicated — both stand:** z-order is structurally impossible
+  (`interaction:{mode:'index',intersect:false}` ⇒ nearest-x lookup ignores y; nothing painted can
+  block the hit) and key handling resolves by FE dataset-id string equality (never the engine key) —
+  the same engine keys drill when geometry allows. Correctly refuted.
+
+## Guard — PASS (worker `9f5cc6a9`)
+
+Numbers byte-identical to the fold's row: **B1 5,907,717 (Δ −1,301)** · B2 0/36 · B3 non-vacuous
+(dynamic 2 / static 0 / 0 outside metrics) · **B4a `chunk-TXUCW6LI.js` 206,857 min / 71,054 gz**
+(independent gzip-9 equal; headroom 10,946) · **B4b lazy-only 170,177** (route chunk 125,146; fetch
+set 687,391; headroom 14,823) · B6 **9==9, 0 added/0 removed** · vendor invariant 0/false ·
+measure-propagation rc 0 · guard **exit 0 GREEN** with the new `measurement_tool_stderr` row.
+**R8 closed:** both mutation legs (route-chunk + initial-set static edges) produce RED naming the
+leak site **with the tool's own `TOOL: VENDOR-INVARIANT RED — …` stderr tail** in the guard output;
+restores return exit 0. Thresholds unchanged by the fold (read from the artifact; `bundle-guard.js`
+diff = stderr plumbing only). Build isolated (`--output-path /tmp/fe-t1-v2-guard-dist`); worktree
+dist digests byte-identical pre/post.
+
+## Pack — PASS, expected posture (worker `6393dbd5`, own tip+base worktrees)
+
+- HEAD leg: `RESULT: FAIL (failed legs: 1)` — **d1 = 32 declared files / 610 passed, 610 total**
+  (both new entries running: `chart-panel.anomaly-order` + `timeline-series-compat` — **R4
+  closed**); d2_declared 131/131; d2_derived `2 failed, 1832 passed, 1834` (39 files);
+  typecheck/dev/prod builds exit 0; `package_json_dependency_set ok:true`.
+- BASE leg: `RESULT: FAIL (failed legs: 1)` — d1 SKIPPED-BY-CONSTRUCTION; d2_declared 131/131;
+  d2_derived `2 failed, 1799 passed, 1801` (38 files).
+- The 2 reds identical both sides: `settings.component.spec.ts:1506/:1741`, DST cause,
+  byte-identical Expected/Received ⇒ base-proven, zero lane attribution. **R5 closed:** the
+  error-summary now prints `FAIL src/app/pages/settings/settings.component.spec.ts`.
+- Membership HONORED on all three sets (24/32 D1 files literally HEAD-only incl. both new ones; all
+  4 D2_DECLARED exist at both revs; d2_derived re-derived 38/39 matched the pack's own counts).
+- **Base-only 3rd red in base observation 1** = the known `job-queue-indicator` millisecond-tie
+  flake (mock `created_at` straddling a ms boundary): NOT lane-attributable (spec + helpers
+  blob-identical base↔tip; the only lane change in the import chain is a TYPE-ONLY re-export) and
+  **did not reproduce** on the confirming base re-run (obs 2 = exactly 2 reds). HEAD side showed no
+  extra reds in two runs.
+
+## Suites + census — PASS (worker `5aea5b18`, own base worktree `-v2`)
+
+- **13-suite scope = the four `pages/metrics/` sub-dirs ⇒ 153/153, rc 0.** Correct reconciliation:
+  **149 + 4 = 153** (+1 suite/3 nodes `chart-panel.anomaly-order`; +1 node = the R2 gap leg in
+  `chart-panel.component.spec` 25→26) — the prior round's "151" was a different 5-suite scope
+  (incl. `house-svg-renderer`, 71 nodes, outside these dirs).
+- Whole-FE: BASE **134 suites/4318 tests** · HEAD **155/4743** (+21/+425 = the lane's new FE
+  surface). Path-normalized FAILED diff: **base-only 0 · HEAD-only 0 · shared 9** — the exact
+  expected family (settings ×2, schedule-create-dialog ×3, jobs-grouping ×3, jobs-filter-state ×1),
+  **all 9 blob-identical** (sha over worktree-root-normalized failureMessages); the four failing
+  spec files AND their sources are 0-changed across the lane. The jq-indicator flake did not fire
+  (3× isolated green). **Net-new deterministic reds = 0.**
+
+## Fence + live baseline — PASS (worker `3342f5cd`)
+
+**The live baseline a staged artifact is measured against (captured 11:39–11:40Z):**
+
+| field | value |
+|---|---|
+| version / http | **0.28.10** / 200 · `{"status":"alive","uptime_seconds":14701.6,…}` |
+| pid / cwd / exe | 3547471 · `/home/nea/agents-ensemble` · `releases/v0.28.10/ensemble-prod` |
+| epoch | **2026-11-04T07:34:23Z** (uptime RESET — the first gate's 55,055 s baseline is not comparable) |
+| symlink / state.json sha | `releases/v0.28.10` / **`d0ddfb363db46ad2209f7a894f7e1945fc3140e34ffd4ccb89a0afbe9c71f6be`** |
+| live binary sha256 | `50d8610c1233f05cb896bb7ed6ac8970b059c946e64702171c29dbc713ab5342` |
+
+The v0.28.10 move is **another lane's operator-initiated scripted promote** (journal:
+`run_id r-20261104-073151-e436`, nonce 07:32:29Z → commit 07:35:57Z "gate+soak green;
+previous=v0.28.9"). **Our lane made no live change**: the branch diff touches only
+`frontend/src/**`, `test/packs/**`, `.agents/**` (no daemon/, scripts/, .env); exactly ONE live
+request (GET /livez); zero writes to the install; dev plane clean (only the foreign demo :7979).
+
+## Residual notes (non-blocking, with owners) — this round
+
+| id | note | owner |
+|---|---|---|
+| **W1** | **Product (small):** `onChartClick` iterates datasets IN ORDER and returns the FIRST dataset with a matching marker — not the marker nearest the click. Observed live: a click on the `cgroup.anon_kb` marker opened a drill-down naming `daemon.rss_kb` (a sibling marker within the same clicked sample's local tolerance). Reachability is restored (R2 works) but the payload can name a sibling anomaly; the B-1 comment's "scans the marker-bearing element first" is not what the code does. | metrics/FE lane |
+| **W2** | `bundle-baseline.json`'s `reproduces_at_tip_note` is STALE (claims every commit after `7961bcb21` is docs-only and `git diff 7961bcb21..HEAD -- frontend/` must be empty; at the tip that diff is 105 files, +19,014/−3,299 — the R1/R2 fold is code-bearing). The artifact's NUMBERS remain valid (re-measured green; the fold is lazy-only); only the note is stale, and it could mislead a future worker into overwriting a frozen artifact. | FE T1 lane |
+| **W3** | The R1 fix's correctness depends on `buildChartConfig()` returning a NEW options object each rebuild (the vendor's option-scope cache is keyed by object identity; an in-place-mutated cached bag would silently reinstate the freeze). True today (fresh object literal); worth a code comment + pin. | FE T1 lane |
+| **W4** | The dev's claim that the R1 closure also fixes the data-end marker's freeze is INFERENCE (same options bag), not evidence — untested this round. | FE T1 lane / next gate |
+| **W5** | `job-queue-indicator` equal-timestamp tie-break flake: did not fire here (3× isolated green; the pack's base obs-1 firing did not reproduce in obs-2), but the fixture still stamps `new Date().toISOString()` per mock — a standing routed item. | job-queue-indicator owning lane |
+| **W6** | Doc nits: the pack's comment "the base tree does not carry the script" is inaccurate (the script exists at base via `a33943bd7`); the dev's R1 mechanism wording ("resize+draw repaints") is imprecise (only `update()` invalidates the descriptor cache — `resize()/draw()` alone do not re-resolve plugin options). | FE T1 lane |
+| **W7** | Probe-side (recorded for future pointer gates): two markers sharing `t_start` draw at the same pixel (2 arcs, 1 disc — do not read arc-count as disc-count); the R9 colour collision (`CHART_SERIES_COLORS[0]` ≡ `CHART_SEVERITY_COLORS.low`) still admits steep-line blobs into colour scans (shape filtering required); the `data-gap-chip` DOM row can occlude a marker under viewport-top scroll (use `scrollIntoView({block:'center'})`). | tester tooling |
+| **W8** | Prior-round residuals still open: R3 (count-class engine keys have no enabled series ⇒ no panel ⇒ no marker — scope) and R9 (the chart-theme colour collision — product-side). | metrics lane / chart-theme lane |
+
+## Ceremony readiness
+
+**PASS-WITH-NOTES.** R1 and R2 are independently re-proven closed at the product level (mechanism +
+live behavior, both directions); R4/R5/R8 also closed this round; guard, pack posture, suites,
+census, fence all green; the live baseline for any staged-artifact measurement is recorded above.
+The residual register (W1–W8, plus the carried R3/R9) is non-blocking with owners — **W1
+(sibling-anomaly payload naming) and W2 (stale artifact provenance note) are the two to route
+first.**
