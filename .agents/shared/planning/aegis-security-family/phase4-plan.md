@@ -43,7 +43,7 @@ no window exists in which the baseline is stale against the tree.
 | 5 | **Re-stamp the baseline — LAST.** Run the venv-free generator: `python3 scripts/protection/generate_prompt_artifact_baseline.py`. It writes `agents/.prompt-artifacts.sha256` atomically (tmp + rename) and prints `PROMPT-BASELINE: GENERATED — <path> (177 artifact(s))`. **No `agents/**` content change may follow this step.** | 1–4 | `wc -l agents/.prompt-artifacts.sha256` ⇒ **177**; `python3 scripts/protection/generate_prompt_artifact_baseline.py --check` ⇒ **exit 0**. |
 | 6 | **Verify the check mode** — `--check` is read-only: exit 0 clean, exit 1 drift, exit 2 no tree. Run it and confirm exit 0. Confirm the file has **no** added/missing rows (the check prints them). | 5 | Exit 0; no drift lines. |
 | 7 | **Prove the `worker` no-touch** — `agents/worker/**` is byte-identical to the base commit. T25 automates this; the author-side check is `git diff --stat 1f6898ae2 -- agents/worker/` ⇒ **empty**. | 1–4 | Empty diff for `agents/worker/`. |
-| 8 | **Prove the lane's scope** — the working tree contains **only** `agents/**` and `tests/**` changes. | 1–4 | `git status --porcelain` shows nothing under `daemon/`, `docs/`, `scripts/`, or `.agents/` (except the planning dir, which is committed separately). |
+| 8 | **Prove the lane's scope (F5: lane-pathspec-scoped)** — the working tree contains **only** `agents/**` and `tests/**` changes. | 1–4 | `git status --porcelain -- agents/ tests/ .agents/shared/planning/aegis-security-family/ .agents/approver/` shows nothing under `daemon/`, `docs/`, or `scripts/` — the planning dir is committed separately and the approver residue is the F5-named exception (committed in the bookkeeping commit right after). |
 | 9 | **Make the one commit** — stage exactly `agents/`, `tests/unit/agents/test_aegis_security_family.py`, **and the leader-length pin fold in `tests/unit/test_maintenancer_agent.py` (C1(b): the 16→17 assertion + docstring)**, then commit with the house commit form: `feat(aegis): add aegis security family (orchestrator + hacker/cracker/sweeper) with one-commit pin ceremony`. **Never `git add -A`** (the house hazard: a scoped add is required). Then `git show --stat HEAD` to prove the composition. | 1–8 | **The atomic pin-ceremony commit sanctions EXACTLY this set (C1(c)):** the 28 new agent files + `agents/leader/meta.json` (1 line) + the regenerated `agents/.prompt-artifacts.sha256` + the new lane test file + **the 16→17 pin fold in `tests/unit/test_maintenancer_agent.py`** — and **nothing outside this enumerated set**. `git status --porcelain` is clean afterwards. |
 
 ---
@@ -105,10 +105,14 @@ git status --porcelain                     # expect empty
 #    and the giter choreography are explicitly OUTSIDE the lane-own scope-gated set — they are
 #    owned by the giter's standard sequence (phase 6) and get their own assertion leg there.
 #    POSIX-safe form — /bin/sh is dash and process substitution is a PARSE error there (council-D2).
-#    B7 (approver iter-002, VERIFIED): the lane-own complement is 13 paths vs the planning set's 12 —
-#    the extra is .agents/approver/active.md (approver bookkeeping committed in d0fea922a;
-#    .agents/approver/aegis-security-family-tracking.md follows) — house-tracked approver
-#    artifacts of THIS lane's own review loop, TOLERATED via the grep:
+#    B7 (approver iter-002, VERIFIED) + F5 CORRECTION (final micro-fold, git-verified): the
+#    lane-own complement is 13 paths vs the planning set's 12 — the extra is
+#    .agents/approver/active.md — approver-lane WORKING-FILE RESIDUE, **UNCOMMITTED** in the
+#    lane commits (git-verified: d0fea922a contains 9 planning files ONLY — the earlier
+#    "committed in d0fea922a" claim was FALSE); the residue is committed separately in the
+#    approver-bookkeeping commit immediately after the plan-side fold (NAMED OWNER: the approver
+#    lane, files authored by approver ce82a383) — house-tracked approver artifacts of THIS lane's
+#    own review loop, TOLERATED via the grep:
 git diff --stat 1f6898ae2 -- agents/worker/          # expect EMPTY
 git diff --name-only 1f6898ae2 | grep -v -E '^(agents/|tests/|\.agents/approver/)' | sort > /tmp/aegis-p4-complement.txt
 git diff --name-only 1f6898ae2 | grep '^\.agents/shared/planning/aegis-security-family/' | sort > /tmp/aegis-p4-planning.txt
@@ -159,7 +163,7 @@ python3 scripts/protection/generate_prompt_artifact_baseline.py --check; echo "e
 
 ## Effort
 
-**≈ 0.5 working day** — the T1–T28 + T29 (20) + T30 test blocks are the bulk (several of them per-agent
+**≈ 0.5 working day** — the T1–T28 (28 assertions) + T29 (20) + T30 test blocks are the bulk (several of them per-agent
 parameterisations), plus the leader edit, the re-stamp and the commit.
 
 ---

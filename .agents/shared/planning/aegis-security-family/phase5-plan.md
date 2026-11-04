@@ -58,7 +58,8 @@ Eight gates, **A–H**.
 ## Verification Commands
 
 ```bash
-cd /home/nea/ensemble-src-wt-aegis-security-family
+cd /home/nea/ensemble-src-wt-aegis-security-family || { echo "FAIL: worktree dir missing"; exit 1; }
+set -o pipefail
 
 BASE=1f6898ae2889ff002b4656486f6be3ee1048b649
 HEAD_SHA=$(git rev-parse HEAD)
@@ -107,8 +108,10 @@ git diff --name-status $BASE -- agents/ | awk '$1=="A"' | wc -l           # expe
 # BLOCKER 1+2: this gate runs over the LANE-OWN diff (the feature branch's own commits, pre-merge).
 # The merge commit, bump commit, tag and giter choreography are OUTSIDE the gated set (P6 G6.1a
 # asserts them separately: merge parents correct, bump = exactly the 4 house files, tag pushed).
-# B7 (approver iter-002, VERIFIED): .agents/approver/** (active.md + tracking.md) is house-tracked
-# approver bookkeeping of this lane's own review loop — tolerated in the complement.
+# B7 (approver iter-002, VERIFIED) + F5 (final micro-fold): .agents/approver/** (active.md +
+# tracking.md) is house-tracked approver-lane WORKING-FILE residue of this lane's own review loop
+# (NAMED OWNER: the approver lane, files authored by approver ce82a383; UNCOMMITTED in the lane
+# commits — committed separately in the bookkeeping commit) — tolerated in the complement.
 git diff --name-only $BASE | grep -v -E '^(agents/|tests/|\.agents/approver/)' | sort > /tmp/aegis-scope-complement.txt
 git diff --name-only $BASE | grep '^\.agents/shared/planning/aegis-security-family/' | sort > /tmp/aegis-scope-planning.txt
 if diff /tmp/aegis-scope-complement.txt /tmp/aegis-scope-planning.txt; then
@@ -117,11 +120,12 @@ else
   echo "Gate H FAIL: out-of-scope paths beyond the planning set + approver bookkeeping (temp files retained)"; exit 1
 fi
 git diff --stat $BASE -- agents/worker/                                  # expect EMPTY
-# R5 (leader disposition — FAIL-CLOSED form; the `; echo` idiom DISCARDED grep's exit status so
-# the scan could not fail). Paste-executed verification of this fixed form:
-#   printf 'sk-proj-abc\n' | { grep -nE 'sk-(proj|ant)-' && echo FAIL && exit 1 || echo OK; }  ⇒ FAIL path fires
-#   printf 'clean\n' | { grep -nE 'sk-(proj|ant)-' && echo FAIL && exit 1 || echo OK; }        ⇒ OK
-if git diff $BASE | grep -nE 'sk-(proj|ant)-|BEGIN [A-Z ]*PRIVATE KEY'; then
+# R5 (leader disposition — FAIL-CLOSED form) + F1 (execution-proven form, reviewer spot-check):
+# the `if git diff | grep` form treats GIT'S OWN FAILURE as "no match" ⇒ prints OK having
+# scanned NOTHING. Materialize the diff to a file FIRST (git failure ⇒ INCONCLUSIVE, exit 1),
+# then grep the FILE (not the pipe); `set -o pipefail` is set at the block head.
+git diff $BASE > /tmp/aegis-diff.txt || { echo "FAIL: git diff failed (bad BASE / not a repo) — scan INCONCLUSIVE"; exit 1; }
+if grep -nE 'sk-(proj|ant)-|BEGIN [A-Z ]*PRIVATE KEY' /tmp/aegis-diff.txt; then
   echo "FAIL: secret-shaped content in the lane diff (R5 fail-closed)"; exit 1
 else
   echo "OK: secret scan clean"

@@ -370,8 +370,10 @@ otherwise" branches are retired — the rulings above are final and the plan has
 
 ## F. Review trail
 
-*(populated by Phase 0 — task 1; the architect leg is filled — the council and approver legs are
-PENDING)*
+*(populated by Phase 0 — task 1. **F2, final micro-fold 2026-11-04 — the true state:** council leg
+**CLEARED**; approver 001/002/003 REJECT — cap exhausted; **LEADER DISPOSITION** authorized the
+fourth fold; the plan-council reviewer spot-check returned **APPROVE-WITH-ADVISORIES conditional on
+the final micro-fold** — see the trail below.)*
 
 | Stage | Verdict | Findings | Folded / routed | Date |
 |---|---|---|---|---|
@@ -381,6 +383,16 @@ PENDING)*
 | Approver (iteration) | **002 — REJECT (10 mechanical blockers, content layer verified fixed)** — the approver's execution worker TRACED THE REAL SCRIPTS; citations treated as ground truth | B1 stage `live` target argument; B2 park/advance recipe; B3 detached staging worktree at the tag; B4 ENSEMBLE_ROLLBACK_SAFE env bind; B5 FE build owner; B6 promote-field fence; B7 approver-bookkeeping scope tolerance; B8 the P2 exception leg; B9 the T30 installer-guard pins; B10 §F single-source status | **All ten + n1–n9 folded @ `9969bb0d3`** | 2026-11-04 |
 | Approver (iteration) | **003 — REJECT (5 surgical residuals; approver cap EXHAUSTED at 3× REJECT)** | R1 cardinal-voice contradiction (family-3 universal ownership) → **LEADER RULING**; R2 §F single-source contradiction → this trail; R3 sidecar path wrong → `dist/` sibling + exit semantics; R4 fence premise factually wrong + too weak → **LEADER RULING both-fences**; R5 secret scan cannot fail → fail-closed form | **Folded in the leader-disposition commit (this one)** — verification is a plan-council reviewer spot-check, NOT a fourth approver call | 2026-11-04 |
 | **Leader disposition** | **TrueAuto proceed after cap exhaustion (3× REJECT) — FOURTH fold authorized (2026-11-04)** | five surgical residuals (R1/R4 carry LEADER RULINGS as the resolution) + material execution non-blockers (a)–(h) | **This fold**; after it the plan **LOCKS for implementation** with the disposition disclosed; verification = plan-council reviewer spot-check | 2026-11-04 |
+| Reviewer spot-check | **APPROVE-WITH-ADVISORIES** — conditional on the final micro-fold (F1–F7) | ~15 lines, 5 files; F5's factual basis git-verified (d0fea922a = 9 planning files only) | Commit 1 (plan-side fixes) + commit 2 (approver bookkeeping, files authored by approver ce82a383) | 2026-11-04 |
+
+**F6 — N-fold subject→site index** (the seven N-round artifacts carry commit SUBJECTS, not labels;
+this index maps them): `docs(aegis): fold plan-council findings C1 + W1-W7 + A-a..A-h` → `0d89b1644`;
+`docs(aegis): fold touch-up — AM-7/9/12/13 consistency fixes from conformance audit` → `91e66882b`;
+`docs(aegis): delta re-gate touch-up D1-D7 (POSIX scope commands, ledger signature, composition completeness)` → `9f372d104`;
+`docs(aegis): council fold N1-N7 (fingerprint form, fifth-element staging token, namespace + normalization hygiene)` → `948be899b`;
+`docs(aegis): approver iter-001 fold — giter-owned release phase, write-target classes, legality pin matrix T29, privacy cardinalized (leader rulings)` → `d0fea922a`;
+`docs(aegis): approver iter-002 fold — verified release recipe (live target, staging worktree, rollback-safe env, promote-field fence), T30 fences pins, scope/fence corrections` → `9969bb0d3`;
+`docs(aegis): leader-disposition fold — R1-R5 surgical residuals + execution non-blockers (final planning pass)` → `2dd1df30a`.
 
 ---
 

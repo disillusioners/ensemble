@@ -102,7 +102,7 @@ git tag -a vX.Y.Z -m "<rollback adjudication + no-promote disclosure>" && git pu
 # (b) POST-MERGE CLEANUP: the latest-advance worktree is REMOVED after the merge+bump+tag
 #     (its purpose is spent); the shared checkout is RESTORED per the park convention:
 git worktree remove /home/nea/ensemble-src-wt-latest-advance
-git -C /home/nea/ensemble-src checkout latest   # restore the shared checkout to `latest` (now = post-bump tip)
+git -C /home/nea/ensemble-src checkout latest   # restore the shared checkout to `latest` (now = post-bump tip; the park existed because git 2.43 REFUSES the same branch in two worktrees — the restore releases that lock)
 
 # 1y) GITER-OWNED detached STAGING WORKTREE AT THE TAG (B3 — VERIFIED: a stage from the lane
 #     worktree fails THREE exit-78 guards: exact-tag stage.sh:146-149, tip-identity
@@ -121,11 +121,13 @@ cd /home/nea/ensemble-src-wt-stage-aegis && npm ci && bash scripts/upgrade/_buil
 #    and quarantine_clear no-ops for a fresh version ⇒ the whole-file sha WOULD have held.
 #    PRIMARY (fail-closed): whole-file state.json sha. Defense-in-depth: promote fields +
 #    .env sha + symlink + livez/PID, each with exit semantics.
-readlink -f /home/nea/agents-ensemble/releases/current 2>/dev/null || true
+readlink -f /home/nea/agents-ensemble/releases/current > /tmp/aegis-fence-symlink-pre.txt
 sha256sum /home/nea/agents-ensemble/releases/state.json                       # PRIMARY (fail-closed)
 python3 -c "import json;d=json.load(open('/home/nea/agents-ensemble/releases/state.json'));print({k:d.get(k) for k in ('current','previous','in_flight','pending_op','quarantined')})" > /tmp/aegis-fence-promote-pre.txt
-sha256sum /home/nea/agents-ensemble/.env 2>/dev/null || true
-curl -s localhost:9797/livez | head -c 300; echo
+sha256sum /home/nea/agents-ensemble/.env | awk '{print $1}' > /tmp/aegis-fence-env-pre.txt
+curl -s localhost:9797/livez | head -c 300 > /tmp/aegis-fence-livez-pre.txt; echo
+# F4: PID capture (the fourth defense-in-depth leg — previously print-only, no PID)
+pgrep -f 'ensemble.*ensemble-prod|ensemble-prod' | sort > /tmp/aegis-fence-pid-pre.txt 2>/dev/null || pgrep -f ensemble > /tmp/aegis-fence-pid-pre.txt
 
 # 3) stage — VERIFIED canonical form (B1: the `live` TARGET argument is MANDATORY — stage.sh:133
 #    resolves a bare invocation to demo → /home/nea/agents-ensemble-demo, a fence/gate mismatch;
@@ -147,7 +149,8 @@ python3 -c "import json;print(json.load(open('/home/nea/agents-ensemble/releases
 SIDECAR=/home/nea/ensemble-src-wt-stage-aegis/dist/ensemble-prod.build-provenance.json
 test -f "$SIDECAR" || { echo "FAIL: binary provenance sidecar MISSING at $SIDECAR"; exit 1; }
 cat "$SIDECAR" | python3 -c "import json,sys;print(json.load(sys.stdin).get('artifact_sha256'))" || { echo "FAIL: sidecar unreadable"; exit 1; }
-python3 -c "import json;d=json.load(open('$SIDECAR'));assert d.get('git_dirty')==False, 'git_dirty must be false';print('sidecar git_head:', d.get('git_head'), '(must equal the tag target)')"
+TAG_SHA=$(git rev-parse vX.Y.Z^{commit})
+python3 -c "import json,sys;d=json.load(open('$SIDECAR'));gh=d.get('git_head','');assert d.get('git_dirty')==False, 'git_dirty must be false';assert gh.startswith(sys.argv[1]), f'git_head {gh!r} != tag target {sys.argv[1]!r}';print('sidecar git_head == tag target OK:', gh)" "$TAG_SHA" || { echo "FAIL: sidecar git_head mismatch"; exit 1; }
 
 # 5) the migration delta — EXPECT EMPTY (no daemon/ change)
 #    (compare the embedded-.sql census of the staged binary vs the live release)
@@ -161,15 +164,24 @@ wc -l /home/nea/agents-ensemble/releases/vX.Y.Z/agents/.prompt-artifacts.sha256 
 # n3: failure semantics — a MISSING file or a count != 177 exits 1 and FAILS the payload leg
 # (AM-11: --check alone exits 0 even when the file is absent; this assertion is the real gate).
 
-# 7) the live fence — snapshot AFTER the stage (R4 form)
-readlink -f /home/nea/agents-ensemble/releases/current 2>/dev/null || true
+# 7) the live fence — snapshot AFTER the stage (R4 form + F4 machine-diff ALL legs)
+readlink -f /home/nea/agents-ensemble/releases/current > /tmp/aegis-fence-symlink-post.txt
 sha256sum /home/nea/agents-ensemble/releases/state.json                       # PRIMARY — must equal step 2
 python3 -c "import json;d=json.load(open('/home/nea/agents-ensemble/releases/state.json'));print({k:d.get(k) for k in ('current','previous','in_flight','pending_op','quarantined')})" > /tmp/aegis-fence-promote-post.txt
+sha256sum /home/nea/agents-ensemble/.env | awk '{print $1}' > /tmp/aegis-fence-env-post.txt
+curl -s localhost:9797/livez | head -c 300 > /tmp/aegis-fence-livez-post.txt; echo
+pgrep -f 'ensemble.*ensemble-prod|ensemble-prod' | sort > /tmp/aegis-fence-pid-post.txt 2>/dev/null || pgrep -f ensemble > /tmp/aegis-fence-pid-post.txt
+
+# F4: MACHINE-DIFF every defense-in-depth leg (the template is the promote-field diff below);
+# "each with exit semantics" is now TRUE for all four legs:
 if ! diff -q /tmp/aegis-fence-promote-pre.txt /tmp/aegis-fence-promote-post.txt; then echo "FAIL: promote fields moved"; exit 1; fi
-sha256sum /home/nea/agents-ensemble/.env 2>/dev/null || true
+if ! diff -q /tmp/aegis-fence-env-pre.txt /tmp/aegis-fence-env-post.txt; then echo "FAIL: install .env sha moved"; exit 1; fi
+if ! diff -q /tmp/aegis-fence-symlink-pre.txt /tmp/aegis-fence-symlink-post.txt; then echo "FAIL: current symlink moved"; exit 1; fi
+if ! diff -q /tmp/aegis-fence-livez-pre.txt /tmp/aegis-fence-livez-post.txt; then echo "FAIL: livez response changed"; exit 1; fi
+if ! diff -q /tmp/aegis-fence-pid-pre.txt /tmp/aegis-fence-pid-post.txt; then echo "FAIL: live PID changed"; exit 1; fi
+echo "defense-in-depth legs OK: promote fields + .env sha + symlink + livez + PID all identical"
 # If the PRIMARY sha TRIPPED: the attribution leg investigates the delta rows and the gate
 # FAILS unless every delta row is PROVEN inert (halt/warn/supervision_boot class) — NO auto-pass.
-curl -s localhost:9797/livez | head -c 300; echo
 
 # 8) the promote command is RECORDED, NOT RUN
 #    ENSEMBLE_UPGRADE_LIVE=1 VERSION=vX.Y.Z bash scripts/upgrade/promote.sh live --f2-verified-closed

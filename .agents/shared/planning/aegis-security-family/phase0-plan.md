@@ -29,7 +29,12 @@ record. It is read-only with respect to `agents/` and `tests/`.
 - The plan set exists: `plan-overview.md`, `phase0-plan.md` … `phase6-plan.md`, `decisions.md`, plus
   the two upstream inputs `research-findings.md` and `technical-analysis.md`.
 - The branch `feature/aegis-security-family` is at base `1f6898ae2889ff002b4656486f6be3ee1048b649`
-  (= `origin/latest` at lane start) and the worktree is clean apart from the planning dir.
+  (= `origin/latest` at lane start) and the worktree is clean apart from the planning dir
+  **and the APPROVER-LANE RESIDUE (F5, final micro-fold 2026-11-04): `.agents/approver/active.md`
+  + `.agents/approver/aegis-security-family-tracking.md` are expected working-file residue of THIS
+  lane's own review loop — NAMED OWNER: the approver lane (files authored by approver ce82a383);
+  they are committed separately in the bookkeeping commit immediately after the plan-side fold** —
+  they are not lane scope creep and are excluded from every lane-pathspec-scoped assertion.
 - The worktree fence holds: every command runs with CWD inside
   `/home/nea/ensemble-src-wt-aegis-security-family`; `/home/nea/ensemble-src` (stale main checkout) and
   `/home/nea/agents-ensemble` (live install) are **read-only at most** and are not written to.
@@ -59,7 +64,7 @@ record. It is read-only with respect to `agents/` and `tests/`.
 | **G0.3 — Checklist complete** | Every guide rule has a named target artifact; every authored file has at least one checklist row. | The checklist file's row counts (no empty columns). |
 | **G0.4 — Exemptions enumerated** | The §3 closure-grep survivors are listed and justified as operational. | The exemption list. |
 | **G0.5 — Manifest frozen** | 28 new + 2 modified files (leader one-liner + the C1(b) pin fold — D3 completeness); the 177-row and 366-file derivations recorded with re-derivation commands. | The manifest + the derivation rules. |
-| **G0.6 — Nothing written outside the planning dir** | `git status --porcelain` shows only the planning dir. | `git -C /home/nea/ensemble-src-wt-aegis-security-family status --porcelain`. |
+| **G0.6 — Nothing written outside the planning dir (F5: lane-pathspec-scoped)** | `git status --porcelain` shows only the planning dir **+ the approver-lane residue (`.agents/approver/**` — F5 entry above; the assertion is scoped to the lane's own pathspecs so the approver residue cannot false-red it)**. | `git -C /home/nea/ensemble-src-wt-aegis-security-family status --porcelain -- .agents/shared/planning/aegis-security-family/ .agents/approver/` — expect only those two pathspecs. |
 
 ---
 
