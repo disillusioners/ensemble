@@ -1,28 +1,49 @@
 #!/usr/bin/env bash
 # Test Pack: metrics_fe_dual_side_test
-# The central-metrics-v1 Phase 5 (FE charts page) gate — Tier 1.
+# The FE-only T1 metrics dashboard (wi-32a99618) gate — Tier 1.
 #
 # DUAL-SIDE: the pack runs in the BASE worktree and in the HEAD worktree
 # with the IDENTICAL command shape; only the file LIST differs by
 # construction (the two-class declaration of the blast-radius recipe):
 #
-#   D1 (lane-owned, HEAD-only) — the lane's own FE specs:
+#   D1 (lane-owned, HEAD-only) — the lane's own FE specs, 30 declared:
 #       src/app/models/metrics.model.spec.ts              (metrics-fe-models)
 #       src/app/services/metrics.service.spec.ts         (metrics-fe-service)
-#       src/app/components/charts/svg-line-chart/*.spec.ts(metrics-fe-svg-chart)
+#       src/app/components/charts/house-svg-renderer/*.spec.ts
+#                                                          (metrics-fe-house-svg-renderer)
+#       src/app/components/charts/renderer-registry.spec.ts
+#                                                          (metrics-fe-renderer-registry)
 #       src/app/pages/metrics/**/*.spec.ts                (metrics-fe-page)
 #       src/app/pages/metrics/metrics.bindings.pins.spec.ts(metrics-fe-bindings-pins)
+#       src/app/app.resources-retirement.spec.ts           (metrics-fe-route-retirement)
 #     A base-side run of these is IMPOSSIBLE BY CONSTRUCTION (the files do
 #     not exist at the base) — the absence is recorded as
 #     SKIPPED-BY-CONSTRUCTION, never as a pass and never as a failure.
 #
-#   D2 (dual-side comparable) — the route-table + gear-menu + models-barrel
-#     blast radius, DERIVED at run time (never hand-maintained):
-#       the specs that import the MODELS BARREL (the barrel gained an
-#         `export * from './metrics.model'` — a name collision would break
-#         any of them), plus the specs that READ the route table / the gear
-#         menu. The declared composition (the resources-gear-menu ordering
-#         pin + the route-table-affected FE pack) is run as its own leg.
+#   D2 (dual-side comparable) — the route-table + models-barrel blast
+#     radius, 4 declared (both revs) + the DERIVED set (run time, never
+#     hand-maintained): the specs that import the MODELS BARREL (the
+#     barrel gained an `export * from './metrics.model'` — a name
+#     collision would break any of them), plus the specs that READ the
+#     route table.
+#
+# MEMBERSHIP RULE (the H-2 closure): D2_DECLARED admits ONLY files that
+# exist at BOTH revs — a HEAD-only suite belongs to D1 (or to the derived
+# D2_DERIVED set, which is resolved per rev). Adding a HEAD-only file to
+# D2_DECLARED would make jest SILENTLY DROP it at the base rev and
+# reintroduce exactly the false-green class this pack now closes. The
+# route-table replacement coverage (app.resources-retirement.spec.ts)
+# rides D1 and is ALSO picked up by the D2_DERIVED grep at HEAD.
+#
+# DECLARED-FILE EXISTENCE ASSERT: jest SILENTLY DROPS a positional that
+# does not resolve to a test file, so a stale declared path made a leg
+# pass while the suite it names never ran anywhere. Every declared file
+# is now asserted to exist BEFORE its leg runs — D1_FILES on the HEAD
+# leg, D2_DECLARED on BOTH legs (that is the list's membership
+# invariant). A missing file is reported BY NAME and becomes a FAILURES
+# increment — never a silent pass. (D2_DERIVED needs no assertion: its
+# entries are grep hits over existing files, so they exist by
+# construction.)
 #
 # Legs (each one prints its EXIT CODE and an error summary):
 #   1  D1 jest            (HEAD-only)
@@ -46,7 +67,11 @@
 # Exit codes: 0 = PASS, 1 = FAIL, 124 = TIMEOUT (the self-cap).
 set -uo pipefail
 # errexit is deliberately OFF: each leg captures its own exit code and
-# failures accumulate in FAILURES (the pack never dies mid-run).
+# failures accumulate in FAILURES (the pack never dies mid-run). The OFF
+# state is asserted EXPLICITLY here rather than inherited from the
+# caller's shell — that is what makes the mid-script `set +e` no-ops
+# provably dead (L-13) and safe to sweep.
+set +e
 
 PACK_START=${SECONDS:-0}
 PACK_BUDGET_S=900
@@ -65,7 +90,7 @@ LOG_DIR="${METRICS_FE_LOG_DIR:-/tmp/metrics-fe-gate}"
 EXPECTED_BRANCH="${EXPECTED_BRANCH:-feature/central-metrics-v1}"
 BASE_REF="${BASE_REF:-origin/latest}"
 
-D1_MARKER="src/app/models/metrics.model.spec.ts"
+D1_MARKER="src/app/app.resources-retirement.spec.ts"
 
 mkdir -p "$LOG_DIR"
 
@@ -124,6 +149,20 @@ cd "$FRONTEND_DIR"
 export CI=1
 
 # The D1 marker decides whether this is the HEAD leg or the BASE leg.
+# The marker MUST be a file this lane CREATED — it must be ABSENT at every
+# base rev and PRESENT at the head. It used to be
+# `src/app/models/metrics.model.spec.ts`, which the v0.28.6
+# central-metrics-v1 lane had already shipped: it EXISTS at this lane's
+# base (c4161335b), so the BASE leg mis-discriminated as HEAD. Two
+# consequences, both now closed: (1) the base leg ran d1 against a MIXED
+# set (8 inherited files present, the lane's own absent → jest silently
+# dropped the absent ones — the very false-green class this pack exists to
+# kill, and the existence assert turned it loud); (2) Leg 7's expected
+# dependency set was forced to the HEAD's `["chart.js"]`/`["jest-canvas-mock"]`
+# while the base tree's package.json delta against BASE_REF is EMPTY → a
+# false "D-1 DEPENDENCY-SET BREACH".
+# `src/app/app.resources-retirement.spec.ts` (this lane's Phase-7 artifact)
+# is PROVEN absent at the base and present at the head.
 if [ -f "$FRONTEND_DIR/$D1_MARKER" ]; then
     IS_HEAD_LEG=1
 else
@@ -132,10 +171,13 @@ fi
 echo "LEG_KIND=$([ "$IS_HEAD_LEG" = 1 ] && echo HEAD || echo BASE)"
 
 # ─── The file lists ───────────────────────────────────────────────────────
+# D1_FILES — the lane-owned suites (30 declared). Every entry MUST exist on
+# the HEAD leg (asserted below). The svg-line-chart entry was REMOVED here:
+# Phase 4 deleted that spec, and jest silently drops an unresolvable
+# positional — the list kept naming a file that no longer ran anywhere.
 D1_FILES=(
   "src/app/models/metrics.model.spec.ts"
   "src/app/services/metrics.service.spec.ts"
-  "src/app/components/charts/svg-line-chart/svg-line-chart.component.spec.ts"
   "src/app/pages/metrics/metrics.component.spec.ts"
   "src/app/pages/metrics/metrics-gear-menu.spec.ts"
   "src/app/pages/metrics/metrics.bindings.pins.spec.ts"
@@ -144,12 +186,36 @@ D1_FILES=(
   "src/app/pages/metrics/charts/charts-tab.component.spec.ts"
   "src/app/pages/metrics/charts/chart-panel.component.spec.ts"
   "src/app/pages/metrics/families/families-tab.component.spec.ts"
+  "src/app/components/charts/house-svg-renderer/house-svg-renderer.spec.ts"
+  "src/app/components/charts/house-svg-renderer/house-svg-engine-uniqueness.spec.ts"
+  "src/app/components/charts/renderer-registry.spec.ts"
+  "src/app/pages/metrics/metrics-units.spec.ts"
+  "src/app/pages/metrics/metrics-range.spec.ts"
+  "src/app/pages/metrics/metrics.banner-geometry.spec.ts"
+  "src/app/pages/metrics/metrics.baseline.pins.spec.ts"
+  "src/app/pages/metrics/metrics.door-state.spec.ts"
+  "src/app/pages/metrics/metrics.tsconfig.spec.ts"
+  "src/app/pages/metrics/metrics.e2e-retirement.spec.ts"
+  "src/app/pages/metrics/tabs.manifest.spec.ts"
+  "src/app/pages/metrics/tabs/central-tab.component.spec.ts"
+  "src/app/pages/metrics/tabs/resource-tab.component.spec.ts"
+  "src/app/pages/metrics/resource/anomalies/anomalies-panel.component.spec.ts"
+  "src/app/pages/metrics/resource/live/live-tab.component.spec.ts"
+  "src/app/pages/metrics/resource/timeline/data-gaps.spec.ts"
+  "src/app/pages/metrics/resource/timeline/marker-label.spec.ts"
+  "src/app/pages/metrics/resource/timeline/timeline-drilldown.spec.ts"
+  "src/app/pages/metrics/resource/timeline/timeline-tab.component.spec.ts"
+  "src/app/app.resources-retirement.spec.ts"
 )
 
+# D2_DECLARED — the both-revs composition (4 declared). Every entry MUST
+# exist at BOTH revs (asserted on each leg). The resources-gear-menu entry
+# was REMOVED here: Phase 7 deleted that spec, so at HEAD it was silently
+# dropped while the base leg still ran it — the dual-side "identical
+# command shape" was eroding asymmetrically.
 D2_DECLARED=(
   "src/app/app.routes.spec.ts"
   "src/app/app.component.spec.ts"
-  "src/app/pages/resources/resources-gear-menu.spec.ts"
   "src/app/pages/mcps-gateway/mcps-gateway.pins.spec.ts"
   "src/app/pages/maintenance/maintenance.bindings.pins.spec.ts"
 )
@@ -166,6 +232,31 @@ done < <(
   } | sort -u
 )
 
+# ─── The declared-file existence assertion (the false-green closure) ─────
+# jest SILENTLY DROPS a positional that does not resolve to a test file.
+# A stale declared path therefore produced a GREEN leg whose named suite
+# never executed — the defect the H-2 escalation named. Every declared
+# file is asserted to exist BEFORE the leg runs; a missing file is
+# reported BY NAME and becomes a FAILURES increment — never a silent pass.
+assert_declared_files() {
+    local leg_name="$1"
+    shift
+    local missing=0
+    local f
+    for f in "$@"; do
+        if [ ! -f "$FRONTEND_DIR/$f" ]; then
+            echo "${leg_name}: MISSING DECLARED SPEC ${f}"
+            missing=1
+        fi
+    done
+    echo "${leg_name}_DECLARED_FILE_COUNT=$#"
+    if [ "$missing" -ne 0 ]; then
+        echo "${leg_name}: FAILED (declared-file existence assertion — a declared spec does not exist)"
+        return 1
+    fi
+    return 0
+}
+
 run_jest_leg() {
     local leg_name="$1"
     shift
@@ -177,7 +268,6 @@ run_jest_leg() {
         echo "${leg_name}: SKIPPED-BY-CONSTRUCTION (no files on this leg)"
         return 0
     fi
-    set +e
     timeout 600 ./node_modules/.bin/jest --ci --silent --runInBand "$@" 2>&1 | tee "$log"
     exit_code=${PIPESTATUS[0]}
     echo "${leg_name}_EXIT=$exit_code"
@@ -195,7 +285,11 @@ FAILURES=0
 
 # ─── Leg 1: D1 (lane-owned) ───────────────────────────────────────────────
 if [ "$IS_HEAD_LEG" = 1 ]; then
-    run_jest_leg "d1" "${D1_FILES[@]}" || FAILURES=$((FAILURES + 1))
+    if assert_declared_files "d1" "${D1_FILES[@]}"; then
+        run_jest_leg "d1" "${D1_FILES[@]}" || FAILURES=$((FAILURES + 1))
+    else
+        FAILURES=$((FAILURES + 1))
+    fi
 else
     echo ""
     echo "--- d1 ---"
@@ -203,7 +297,13 @@ else
 fi
 
 # ─── Leg 2: D2 (declared composition) ─────────────────────────────────────
-run_jest_leg "d2_declared" "${D2_DECLARED[@]}" || FAILURES=$((FAILURES + 1))
+# The membership invariant: a D2_DECLARED file missing at EITHER rev is a
+# composition error — asserted on both legs.
+if assert_declared_files "d2_declared" "${D2_DECLARED[@]}"; then
+    run_jest_leg "d2_declared" "${D2_DECLARED[@]}" || FAILURES=$((FAILURES + 1))
+else
+    FAILURES=$((FAILURES + 1))
+fi
 
 # ─── Leg 3: D2 (derived composition — the widened supplementary leg) ──────
 run_jest_leg "d2_derived" "${D2_DERIVED[@]}" || FAILURES=$((FAILURES + 1))
@@ -215,7 +315,6 @@ echo "--- typecheck_scoped ---"
 if [ "$IS_HEAD_LEG" = 1 ]; then
     TSC_LOG="$LOG_DIR/typecheck_scoped.log"
     TSC_EXIT=0
-    set +e
     timeout 300 ./node_modules/.bin/tsc --noEmit -p tsconfig.metrics-fe.json 2>&1 | tee "$TSC_LOG"
     TSC_EXIT=${PIPESTATUS[0]}
     echo "typecheck_scoped_EXIT=$TSC_EXIT"
@@ -238,7 +337,6 @@ if [ "$IS_HEAD_LEG" = 1 ]; then
     echo "--- build_development (the AOT leg) ---"
     BUILD_DEV_LOG="$LOG_DIR/build_development.log"
     BUILD_DEV_EXIT=0
-    set +e
     timeout 600 ./node_modules/.bin/ng build --configuration development 2>&1 | tee "$BUILD_DEV_LOG"
     BUILD_DEV_EXIT=${PIPESTATUS[0]}
     echo "build_development_EXIT=$BUILD_DEV_EXIT"
@@ -257,7 +355,6 @@ if [ "$IS_HEAD_LEG" = 1 ]; then
     echo "--- build_production (the budgets leg — AM-23) ---"
     BUILD_PROD_LOG="$LOG_DIR/build_production.log"
     BUILD_PROD_EXIT=0
-    set +e
     timeout 900 ./node_modules/.bin/ng build --configuration production 2>&1 | tee "$BUILD_PROD_LOG"
     BUILD_PROD_EXIT=${PIPESTATUS[0]}
     echo "build_production_EXIT=$BUILD_PROD_EXIT"
