@@ -204,6 +204,27 @@ separates them from the real discs (a 12-row vertical line run vs the
 **⇒ The gate's instance now drills down on a real pointer click, and the
 control instance is unchanged.**
 
+### 2.5 The driver's VERBATIM output (the post-fix run)
+
+```
+PAYLOAD anomalies=4 history_points=86
+GRID gaps(>120s)=[{"from":1793790169000,"to":1793790570000,"seconds":401},{"from":1793790630000,"to":1793791029000,"seconds":399}]
+ANOMALY anom-000002 key=daemon.cpu_pct sev=high shape=ramp t_start=2026-11-04 11:15:00 nearestSampleDelta=129.0s meanSpacing=39.0s reachable_by_mean_rule=false
+ANOMALY anom-000003 key=daemon.rss_kb sev=low shape=ramp t_start=2026-11-04 11:15:00 nearestSampleDelta=129.0s meanSpacing=39.0s reachable_by_mean_rule=false
+ANOMALY anom-000001 key=daemon.anon_kb sev=high shape=ramp t_start=2026-11-04 11:25:00 nearestSampleDelta=10.0s meanSpacing=39.0s reachable_by_mean_rule=true
+ANOMALY anom-000004 key=daemon.threads sev=high shape=ramp t_start=2026-11-04 11:25:00 nearestSampleDelta=10.0s meanSpacing=39.0s reachable_by_mean_rule=true
+CANVASES=2
+CANVAS[0] discs=3 [{"severity":"low","x":575.5,"y":10,"rows":12},{"severity":"low","x":990.814453125,"y":33,"rows":10},{"severity":"high","x":1221.4375,"y":33,"rows":10}]
+CLICK canvas=0 severity=low at=(604,951) topmost=CANVAS[chart-panel-canvas] -> NO-DRILLDOWN
+CLICK canvas=0 severity=low at=(1019,974) topmost=CANVAS[chart-panel-canvas] -> DRILLDOWN-OPEN summary="Anomaly drill-down close kind memory shape ramp severity low series daemon.rss_kb window 11:15–11:25 UTC observed 317676 baseline 304204 CONTRIBUTORS unattributed 100% Attribution is a sample-time estimate; the unattribu"
+CLICK canvas=0 severity=high at=(1249,974) topmost=CANVAS[chart-panel-canvas] -> DRILLDOWN-OPEN summary="Anomaly drill-down close kind threads shape ramp severity high series daemon.threads window 11:25–11:25 UTC observed 62 baseline 39.5 CONTRIBUTORS unattributed 100% Attribution is a sample-time estimate; the unattributed"
+CANVAS[1] discs=2 [{"severity":"low","x":664.5,"y":10,"rows":12},{"severity":"high","x":982.185546875,"y":33,"rows":10}]
+CLICK canvas=1 severity=low at=(693,640) topmost=CANVAS[chart-panel-canvas] -> NO-DRILLDOWN
+CLICK canvas=1 severity=high at=(1010,663) topmost=CANVAS[chart-panel-canvas] -> DRILLDOWN-OPEN summary="Anomaly drill-down close kind cpu shape ramp severity high series daemon.cpu_pct window 11:15–11:25 UTC observed 116.5667 baseline 6.5833 CONTRIBUTORS unattributed 100% Attribution is a sample-time estimate; the unattrib"
+API-CENSUS calls=42 nonGET=0
+C1-VERDICT: at least one marker drilled
+```
+
 ---
 
 ## 3. The small folds
@@ -239,3 +260,13 @@ control instance is unchanged.**
 | `tsc --noEmit -p tsconfig.metrics-fe.json` (the pack's scoped gate) | **rc 0** |
 | The guard (B1 / B4a / B4b / the vendor invariant / the warning set) | **GREEN, exit 0** — B1 5,907,717 (Δ −1,301 vs 5,909,018, limit ±2,048); B4a 206,857 min / **71,054 gz** (≤ 82,000); B4b lazy-only **170,177** (≤ 185,000; +83 B vs the gate's 170,094 — the R1/R2 code, lazy-only); vendor 0 / false; the warning set 9 == 9; `measurement_tool_stderr = (none)` (the R8 row) |
 | Prompt baseline | **PROMPT-BASELINE: OK — 161 versioned artifact(s) match** |
+
+## 6. The fence + the teardown
+
+| fence | evidence |
+|---|---|
+| The dev boot | per-variable scrub (never `env -u POSTGRES_*`) → the worktree `.env` → `POSTGRES_DB=ensemble_dev` asserted → `PORT=8079` re-exported unconditionally → `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` PINNED (the frozen binary's path derivation resolves the LIVE install root, so the sweep must not run) → the scratch `ENSEMBLE_DATA_DIR` with the exact pre-seeded `ensemble.json` (the pin re-asserted `true`) → the pinned interpreter (`/home/nea/ensemble-src/.venv/bin/python -m daemon`) |
+| The boot's own receipts | `Starting Ensemble v0.28.9`; `Loaded ensemble config: database=postgres`; `Creating PostgreSQL engine: 127.0.0.1:5432/ensemble_dev`; the "No PostgreSQL ENV vars detected, defaulting to sqlite" line **0 hits** |
+| The prod fence | **ZERO live contact.** The live daemon answered `/livez` 200 `version 0.28.10` with an uptime continuous since ~07:31Z (BEFORE this lane); the live `state.json` (mtime 07:36Z, current `v0.28.10`, previous `v0.28.9`, `in_flight: null`, `pending_op: null`) predates the lane; the live symlink and the journal were never written by this lane. The `anom-*` ids are process-local (the daemon's own contract) |
+| The dev DB | `ensemble_dev` only; the dev daemon's own resource rows were written by the dev daemon; no DROP, no schema change; the sweep guard pinned off |
+| The teardown | the dev daemon SIGTERM'd (port-verified PID; :8079 free), the `ng serve` dev server stopped (:4199 free), and **every `/tmp` artifact this fold created swept** (the boot script, the daemon logs, the probe driver + its output, the isolated dist, the build/guard/measure logs, the jest cache + JSON, the payload captures, the scratch data dir, the fix patches). The worktree's own `frontend/dist` (08:57, the lane's earlier build) was NOT touched — this fold's production build went to the isolated `/tmp` path |
