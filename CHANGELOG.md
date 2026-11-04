@@ -93,6 +93,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.28.11] — 2026-11-04
+
+### Added — the FE-only T1 metrics dashboard (`feature/fe-metrics-dashboard`, wi-32a99618)
+
+- **The `/metrics` page is rebuilt as the T1 dashboard** — lazy tab bodies (charts / families / overview) over the frozen metrics query door, driven by the single FE↔BE surface `metrics.service.ts`; the Charts tab renders real series through a chart-panel with anomaly overlays (anomaly-overlay + data-end overlay + crosshair plugins) and a shared range/binding vocabulary (`metrics.bindings.pins`).
+- **Chart.js is the sole charting vendor, behind an intent+renderer seam** — `renderer-registry` resolves render intents; the house SVG renderer stays as a compat implementation (single-engine pin anchored on engine basenames). Dependency delta is exactly `chart.js` (dependencies) + `jest-canvas-mock` (devDependencies), asserted BY NAME by the gate pack's leg 7 (any third direct dependency fails the gate).
+- **The `/resources` route is RETIRED** (`app.resources-retirement`) — its panels are superseded by the metrics surface; resource selectors renamed to the `app-metrics-` prefix; operator runbooks for resource cost-control and hygiene amended.
+- **Bundle posture is measured, not asserted** — `fe-t1-build/bundle-baseline.measure.js` is the single source for the T1 bundle guards: initial payload 5.91 MB < 6.0 MB budget, the metrics route chunk located by the lane-controlled route key (`ensemble-metrics-route-v1`, never a content marker), and a fail-loud vendor invariant (chart.js ships LAZY — a static edge into the initial set is a guard failure).
+- **FE-ONLY release:** zero daemon code, zero `scripts/upgrade` changes, ZERO `.sql` — migration delta EMPTY vs v0.28.10. Dual-side gate `metrics_fe_dual_side_test.sh`: D1 610/610 at the tip, D2 declared 131/131 both sides, D2 derived 1834 collected / 1832 passed / 2 failed — the 2 failures are the pre-existing `settings.component.spec.ts` timezone pair, base-proven blob-identical, zero lane attribution.
+
 ## [0.28.10] — 2026-11-03
 
 ### Fixed — skill ids are verbatim-consumable by skill_view (`fix/skill-list-full-uuid`, wi-76d89e11)
