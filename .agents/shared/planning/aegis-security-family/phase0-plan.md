@@ -3,7 +3,7 @@
 > **Status (2026-11-04, after the architect leg):** the **architect review is DONE** — verdict
 > **SOUND-WITH-AMENDMENTS** (`architecture-recommendation.md` @ `f7204bd9d`), rulings Q1–Q4 CLOSED,
 > amendments AM-1…AM-15 BINDING and folded into this plan set (see `decisions.md` §C2). **Phase 0 is
-> NOT cleared** — the council leg is CLEARED; the approver arc is at 001 REJECT → 002 REJECT → iteration 003 pending (single source: `decisions.md` §F — B10).
+> **RESOLVED (N2, close-condition 2026-11-04)** — council CLEARED; approver cap-exhausted (001/002/003 REJECT); leader disposition (fourth fold authorized); reviewer spot-check APPROVE-WITH-ADVISORIES — conditional SATISFIED by the micro-fold commits (2026-11-04; single source: decisions §F) (single source: `decisions.md` §F).
 > **Gate condition (review §6):** P1 must not begin until AM-1, AM-2, AM-3, AM-5, AM-6, AM-7, AM-9 and
 > AM-13 are reflected in the plan set — **they now ARE** (the review named the deviations table —
 > `decisions.md` §C — as the natural home; the fold is recorded in the adjacent §C2 amendments table)
@@ -59,7 +59,7 @@ record. It is read-only with respect to `agents/` and `tests/`.
 
 | Gate | Requirement | How it is checked |
 |---|---|---|
-| **G0.1 — Plan approved** | The architect, council and approver have each ruled, and every council finding is folded or explicitly routed with an owner. **Architect leg DONE** (SOUND-WITH-AMENDMENTS @ `f7204bd9d`; AM-1…AM-15 folded — `decisions.md` §F/§C2). **Council leg CLEARED (APPROVE-WITH-ADVISORIES ×2 legs, folded); approver 001 REJECT → 002 REJECT → iteration 003 pending — see §F (B10 single source).** | The recorded verdicts in `decisions.md` §Review trail. |
+| **G0.1 — Plan approved** | The architect, council and approver have each ruled, and every council finding is folded or explicitly routed with an owner. **Architect leg DONE** (SOUND-WITH-AMENDMENTS @ `f7204bd9d`; AM-1…AM-15 folded — `decisions.md` §F/§C2). **RESOLVED (N2): council CLEARED; approver cap-exhausted (001/002/003 REJECT); leader disposition (fourth fold authorized); reviewer spot-check APPROVE-WITH-ADVISORIES — conditional SATISFIED by the micro-fold commits (2026-11-04; single source: decisions §F) — see §F.** | The recorded verdicts in `decisions.md` §Review trail. |
 | **G0.2 — Q1–Q4 ruled** | Each of the four questions has a ruling with its plan consequence written out. ✅ **DONE** — rulings recorded in `decisions.md` §E; amendment deltas in §C2. | `decisions.md` §E + §C2. |
 | **G0.3 — Checklist complete** | Every guide rule has a named target artifact; every authored file has at least one checklist row. | The checklist file's row counts (no empty columns). |
 | **G0.4 — Exemptions enumerated** | The §3 closure-grep survivors are listed and justified as operational. | The exemption list. |
@@ -130,7 +130,7 @@ is not the planner's to compress), the exemplar read, the checklist authoring, a
 Phase 0 is done when **all six gates (G0.1–G0.6) are green**:
 
 1. the plan set has cleared architect → council → approver, with every finding folded or routed
-   *(architect leg done; council + approver pending)*;
+   *(architect leg done; council + approver RESOLVED — N2, see §F)*;
 2. Q1–Q4 are ruled and recorded in `decisions.md` §E with their plan consequences *(✅ done — §C2
    carries the amendment deltas)*;
 3. the guide-compliance checklist exists with a named target artifact per (rule × artifact), plus the

@@ -59,7 +59,9 @@ Eight gates, **A–H**.
 
 ```bash
 cd /home/nea/ensemble-src-wt-aegis-security-family || { echo "FAIL: worktree dir missing"; exit 1; }
-set -o pipefail
+# N3 (close-condition): NO `set -o pipefail` — it ABORTS the whole block under /bin/sh (dash:
+# "Illegal option", rc=2, before any gate runs); it is also unnecessary — the R5/F1 scan greps
+# a FILE, not a pipe.
 
 BASE=1f6898ae2889ff002b4656486f6be3ee1048b649
 HEAD_SHA=$(git rev-parse HEAD)
@@ -123,7 +125,7 @@ git diff --stat $BASE -- agents/worker/                                  # expec
 # R5 (leader disposition — FAIL-CLOSED form) + F1 (execution-proven form, reviewer spot-check):
 # the `if git diff | grep` form treats GIT'S OWN FAILURE as "no match" ⇒ prints OK having
 # scanned NOTHING. Materialize the diff to a file FIRST (git failure ⇒ INCONCLUSIVE, exit 1),
-# then grep the FILE (not the pipe); `set -o pipefail` is set at the block head.
+# then grep the FILE (not the pipe; no pipefail — N3: it aborts dash and is unnecessary here).
 git diff $BASE > /tmp/aegis-diff.txt || { echo "FAIL: git diff failed (bad BASE / not a repo) — scan INCONCLUSIVE"; exit 1; }
 if grep -nE 'sk-(proj|ant)-|BEGIN [A-Z ]*PRIVATE KEY' /tmp/aegis-diff.txt; then
   echo "FAIL: secret-shaped content in the lane diff (R5 fail-closed)"; exit 1

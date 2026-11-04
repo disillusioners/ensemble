@@ -30,7 +30,7 @@ citation resolves there; several facts superseded — see its dated amendment no
   gate-condition home the review's §6 verdict names.
 - **§D — the leader one-liner**, quoted verbatim.
 - **§E — Q1–Q4**: RESOLVED — each ruling + rationale + consequence recorded (was: carried OPEN).
-- **§F — the review trail** (architect leg filled; council + approver pending).
+- **§F — the review trail** (complete: council CLEARED; approver cap-exhausted (001/002/003 REJECT); leader disposition (fourth fold authorized); reviewer spot-check APPROVE-WITH-ADVISORIES — conditional SATISFIED by the micro-fold commits (2026-11-04; single source: decisions §F)).
 - **§G — standing disclosures** carried into the implementation arc (corrected + extended by AM-14).
 - **§H — the AM-15 routed follow-ups** — four daemon-touching commissions explicitly OUT of v1.
 
@@ -385,14 +385,15 @@ the final micro-fold** — see the trail below.)*
 | **Leader disposition** | **TrueAuto proceed after cap exhaustion (3× REJECT) — FOURTH fold authorized (2026-11-04)** | five surgical residuals (R1/R4 carry LEADER RULINGS as the resolution) + material execution non-blockers (a)–(h) | **This fold**; after it the plan **LOCKS for implementation** with the disposition disclosed; verification = plan-council reviewer spot-check | 2026-11-04 |
 | Reviewer spot-check | **APPROVE-WITH-ADVISORIES** — conditional on the final micro-fold (F1–F7) | ~15 lines, 5 files; F5's factual basis git-verified (d0fea922a = 9 planning files only) | Commit 1 (plan-side fixes) + commit 2 (approver bookkeeping, files authored by approver ce82a383) | 2026-11-04 |
 
-**F6 — N-fold subject→site index** (the seven N-round artifacts carry commit SUBJECTS, not labels;
-this index maps them): `docs(aegis): fold plan-council findings C1 + W1-W7 + A-a..A-h` → `0d89b1644`;
+**F6 — fold-commit subject→site index** (the EIGHT fold-round artifacts carry commit SUBJECTS,
+not labels; this index maps them — the final micro-fold added 2026-11-04): `docs(aegis): fold plan-council findings C1 + W1-W7 + A-a..A-h` → `0d89b1644`;
 `docs(aegis): fold touch-up — AM-7/9/12/13 consistency fixes from conformance audit` → `91e66882b`;
 `docs(aegis): delta re-gate touch-up D1-D7 (POSIX scope commands, ledger signature, composition completeness)` → `9f372d104`;
 `docs(aegis): council fold N1-N7 (fingerprint form, fifth-element staging token, namespace + normalization hygiene)` → `948be899b`;
 `docs(aegis): approver iter-001 fold — giter-owned release phase, write-target classes, legality pin matrix T29, privacy cardinalized (leader rulings)` → `d0fea922a`;
 `docs(aegis): approver iter-002 fold — verified release recipe (live target, staging worktree, rollback-safe env, promote-field fence), T30 fences pins, scope/fence corrections` → `9969bb0d3`;
 `docs(aegis): leader-disposition fold — R1-R5 surgical residuals + execution non-blockers (final planning pass)` → `2dd1df30a`.
+`docs(aegis): final micro-fold F1-F7 (fail-closed scan, fence exit semantics, approver-residue truth)` → `465446ded`.
 
 ---
 

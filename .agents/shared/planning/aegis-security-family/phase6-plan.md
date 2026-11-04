@@ -121,11 +121,16 @@ cd /home/nea/ensemble-src-wt-stage-aegis && npm ci && bash scripts/upgrade/_buil
 #    and quarantine_clear no-ops for a fresh version ⇒ the whole-file sha WOULD have held.
 #    PRIMARY (fail-closed): whole-file state.json sha. Defense-in-depth: promote fields +
 #    .env sha + symlink + livez/PID, each with exit semantics.
+test -f /home/nea/agents-ensemble/releases/state.json || { echo "FAIL: state.json missing"; exit 1; }
+sha256sum /home/nea/agents-ensemble/releases/state.json | awk '{print $1}' > /tmp/aegis-fence-state-pre.txt   # N4: PRIMARY captured to file — machine-diff, not human eye
 readlink -f /home/nea/agents-ensemble/releases/current > /tmp/aegis-fence-symlink-pre.txt
-sha256sum /home/nea/agents-ensemble/releases/state.json                       # PRIMARY (fail-closed)
-python3 -c "import json;d=json.load(open('/home/nea/agents-ensemble/releases/state.json'));print({k:d.get(k) for k in ('current','previous','in_flight','pending_op','quarantined')})" > /tmp/aegis-fence-promote-pre.txt
+python3 -c "import json;d=json.load(open('/home/nea/agents-ensemble/releases/state.json'));print({k:d.get(k) for k in ('current','previous','in_flight','pending_op','quarantined')})" > /tmp/aegis-fence-promote-pre.txt || { echo "FAIL: promote-fields capture failed"; exit 1; }
+test -f /home/nea/agents-ensemble/.env || { echo "FAIL: install .env missing"; exit 1; }
 sha256sum /home/nea/agents-ensemble/.env | awk '{print $1}' > /tmp/aegis-fence-env-pre.txt
-curl -s localhost:9797/livez | head -c 300 > /tmp/aegis-fence-livez-pre.txt; echo
+# N1 (close-condition): the livez fence compares a STABLE PROJECTION (status + version) —
+# the raw body's uptime_seconds advances every request, so a raw-body diff -q is UNSATISFIABLE
+# (deterministic exit 1). 5) test -f capture guards: fail-closed on a missing file.
+curl -s localhost:9797/livez | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('status'),d.get('version'))" > /tmp/aegis-fence-livez-pre.txt || { echo "FAIL: livez capture failed"; exit 1; }
 # F4: PID capture (the fourth defense-in-depth leg — previously print-only, no PID)
 pgrep -f 'ensemble.*ensemble-prod|ensemble-prod' | sort > /tmp/aegis-fence-pid-pre.txt 2>/dev/null || pgrep -f ensemble > /tmp/aegis-fence-pid-pre.txt
 
@@ -150,7 +155,9 @@ SIDECAR=/home/nea/ensemble-src-wt-stage-aegis/dist/ensemble-prod.build-provenanc
 test -f "$SIDECAR" || { echo "FAIL: binary provenance sidecar MISSING at $SIDECAR"; exit 1; }
 cat "$SIDECAR" | python3 -c "import json,sys;print(json.load(sys.stdin).get('artifact_sha256'))" || { echo "FAIL: sidecar unreadable"; exit 1; }
 TAG_SHA=$(git rev-parse vX.Y.Z^{commit})
-python3 -c "import json,sys;d=json.load(open('$SIDECAR'));gh=d.get('git_head','');assert d.get('git_dirty')==False, 'git_dirty must be false';assert gh.startswith(sys.argv[1]), f'git_head {gh!r} != tag target {sys.argv[1]!r}';print('sidecar git_head == tag target OK:', gh)" "$TAG_SHA" || { echo "FAIL: sidecar git_head mismatch"; exit 1; }
+# N8 (close-condition): BIDIRECTIONAL check — annotated-tag peel shapes mean the sidecar
+# git_head may be the TAG object sha or the COMMIT sha; accept either direction.
+python3 -c "import json,sys;d=json.load(open('$SIDECAR'));gh=d.get('git_head','');assert d.get('git_dirty')==False, 'git_dirty must be false';assert gh==sys.argv[1] or sys.argv[1].startswith(gh), f'git_head {gh!r} != tag target {sys.argv[1]!r} (either direction)';print('sidecar git_head == tag target OK:', gh)" "$TAG_SHA" || { echo "FAIL: sidecar git_head mismatch"; exit 1; }
 
 # 5) the migration delta — EXPECT EMPTY (no daemon/ change)
 #    (compare the embedded-.sql census of the staged binary vs the live release)
@@ -165,15 +172,20 @@ wc -l /home/nea/agents-ensemble/releases/vX.Y.Z/agents/.prompt-artifacts.sha256 
 # (AM-11: --check alone exits 0 even when the file is absent; this assertion is the real gate).
 
 # 7) the live fence — snapshot AFTER the stage (R4 form + F4 machine-diff ALL legs)
+sha256sum /home/nea/agents-ensemble/releases/state.json | awk '{print $1}' > /tmp/aegis-fence-state-post.txt   # N4: PRIMARY machine-diffed below
 readlink -f /home/nea/agents-ensemble/releases/current > /tmp/aegis-fence-symlink-post.txt
-sha256sum /home/nea/agents-ensemble/releases/state.json                       # PRIMARY — must equal step 2
 python3 -c "import json;d=json.load(open('/home/nea/agents-ensemble/releases/state.json'));print({k:d.get(k) for k in ('current','previous','in_flight','pending_op','quarantined')})" > /tmp/aegis-fence-promote-post.txt
 sha256sum /home/nea/agents-ensemble/.env | awk '{print $1}' > /tmp/aegis-fence-env-post.txt
-curl -s localhost:9797/livez | head -c 300 > /tmp/aegis-fence-livez-post.txt; echo
+curl -s localhost:9797/livez | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('status'),d.get('version'))" > /tmp/aegis-fence-livez-post.txt || { echo "FAIL: livez capture failed"; exit 1; }
 pgrep -f 'ensemble.*ensemble-prod|ensemble-prod' | sort > /tmp/aegis-fence-pid-post.txt 2>/dev/null || pgrep -f ensemble > /tmp/aegis-fence-pid-post.txt
 
-# F4: MACHINE-DIFF every defense-in-depth leg (the template is the promote-field diff below);
-# "each with exit semantics" is now TRUE for all four legs:
+# F4 + N4: MACHINE-DIFF every leg — PRIMARY FIRST, then the defense-in-depth set;
+# "each with exit semantics" is now TRUE for all of them:
+if ! diff -q /tmp/aegis-fence-state-pre.txt /tmp/aegis-fence-state-post.txt; then
+  # N4/R4: a PRIMARY trip invokes the attribution leg — the gate FAILS unless every delta row
+  # is PROVEN inert (halt/warn/supervision_boot class) — NO auto-pass.
+  echo "FAIL: state.json WHOLE-FILE sha moved — attribution leg required"; exit 1
+fi
 if ! diff -q /tmp/aegis-fence-promote-pre.txt /tmp/aegis-fence-promote-post.txt; then echo "FAIL: promote fields moved"; exit 1; fi
 if ! diff -q /tmp/aegis-fence-env-pre.txt /tmp/aegis-fence-env-post.txt; then echo "FAIL: install .env sha moved"; exit 1; fi
 if ! diff -q /tmp/aegis-fence-symlink-pre.txt /tmp/aegis-fence-symlink-post.txt; then echo "FAIL: current symlink moved"; exit 1; fi
@@ -260,7 +272,7 @@ Phase 6 is done when **all eight gates (G6.1, G6.1a, G6.2–G6.7) are green**:
 2. the 4-way sha match holds on a **re-hash** (read from the LIVE install dir);
 3. the migration delta is **EMPTY** (and any inherited drift is separated and stated);
 4. the payload is source-less, its prompt baseline is clean, and its agents count matches;
-5. the live fence holds under the R4 both-fences form — **whole-file state.json sha identical pre/mid/post (PRIMARY, fail-closed)** — plus promote fields, `.env` sha, symlink, PID and `livez` each with exit semantics; any sha trip is attributed and the gate FAILS unless proven inert;
+5. the live fence holds under the R4 both-fences form (final form: N1 stable livez projection + N4 machine-diffed PRIMARY, 2026-11-04) — **whole-file state.json sha identical pre/mid/post (PRIMARY, fail-closed)** — plus promote fields, `.env` sha, symlink, PID and `livez` each with exit semantics; any sha trip is attributed and the gate FAILS unless proven inert;
 6. `promote.sh` was **never run**; the promote command is recorded with its ceremony preconditions;
 7. the handoff report carries the version, the sha, the deltas, the Phase-5 gate results, the
    disclosures, and the recorded promote command;

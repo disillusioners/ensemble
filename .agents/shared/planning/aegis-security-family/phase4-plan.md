@@ -58,7 +58,7 @@ no window exists in which the baseline is stale against the tree.
 | **G4.4 — the re-stamp was last** | No `agents/**` content change after the re-stamp | `git show --stat HEAD` ordering + the `--check` exit 0 run **after** the commit |
 | **G4.5 — one commit** | The whole payload is in a single commit | `git show --stat HEAD` — 28 new agent files + `agents/leader/meta.json` + `agents/.prompt-artifacts.sha256` + the lane test file **+ the C1(b) 16→17 pin fold in `tests/unit/test_maintenancer_agent.py` (the sanctioned fifth element — nothing outside the enumerated set)** |
 | **G4.6 — worker untouched** | `git diff --stat 1f6898ae2 -- agents/worker/` | empty (T25) |
-| **G4.7 — LANE-OWN scope (Blocker 1+2, B7-amended)** | The **lane-own diff** (this branch's own commits, pre-merge) touches only `agents/**`, `tests/**`, the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/` — W4) **and the approver bookkeeping `.agents/approver/**` (`active.md` + `aegis-security-family-tracking.md` — house-tracked artifacts of this lane's own review loop; verified: the lane-own complement is 13 paths vs the planning set's 12 without this tolerance)**. **The merge commit, the bump commit, the tag and the giter choreography are OUTSIDE this gate** — owned by the giter's standard sequence (P6), asserted separately by P6's G6.1a. | the complement diff assertion in the commands (lane-own diff) |
+| **G4.7 — LANE-OWN scope (Blocker 1+2, B7-amended)** | The **lane-own diff** (this branch's own commits, pre-merge) touches only `agents/**`, `tests/**`, the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/` — W4) **and the approver bookkeeping `.agents/approver/**` (`active.md` + `aegis-security-family-tracking.md` — house-tracked artifacts of this lane's own review loop; N7-corrected: the lane-own complement is 14 paths vs the planning set's 12 — TWO extras, both covered by the tolerance)**. **The merge commit, the bump commit, the tag and the giter choreography are OUTSIDE this gate** — owned by the giter's standard sequence (P6), asserted separately by P6's G6.1a. | the complement diff assertion in the commands (lane-own diff) |
 | **G4.8 — clean tree** | Nothing uncommitted after the commit | `git status --porcelain` ⇒ empty |
 | **G4.9 — guide §10 pre-commit checklist** | The guide's own pre-commit checklist passes for the whole lane before the commit: no system internals; one canonical home per repeated artifact; no false "stated once" claims; ≤7 cardinals per `rule.md`; cross-references resolve (the §3 closure grep's survivors are enumerated); the tone directive present in each `soul.md`; the fan-in escape valve defined in aegis's `workflow.md`; skill versions consistent; fallbacks stay within `team_members`; no adapted-from / migrated-from / verified-from provenance; **tests pass**. | The Phase-0 checklist (all rows) + the green lane test |
 
@@ -105,14 +105,15 @@ git status --porcelain                     # expect empty
 #    and the giter choreography are explicitly OUTSIDE the lane-own scope-gated set — they are
 #    owned by the giter's standard sequence (phase 6) and get their own assertion leg there.
 #    POSIX-safe form — /bin/sh is dash and process substitution is a PARSE error there (council-D2).
-#    B7 (approver iter-002, VERIFIED) + F5 CORRECTION (final micro-fold, git-verified): the
-#    lane-own complement is 13 paths vs the planning set's 12 — the extra is
-#    .agents/approver/active.md — approver-lane WORKING-FILE RESIDUE, **UNCOMMITTED** in the
+#    B7 (approver iter-002, VERIFIED) + F5 CORRECTION + N7 (close-condition, post-bookkeeping
+#    arithmetic): the lane-own complement is **14 paths vs the planning set's 12 — TWO extras**
+#    (.agents/approver/active.md AND .agents/approver/aegis-security-family-tracking.md) —
+#    approver-lane WORKING-FILE RESIDUE, **UNCOMMITTED** in the
 #    lane commits (git-verified: d0fea922a contains 9 planning files ONLY — the earlier
 #    "committed in d0fea922a" claim was FALSE); the residue is committed separately in the
 #    approver-bookkeeping commit immediately after the plan-side fold (NAMED OWNER: the approver
 #    lane, files authored by approver ce82a383) — house-tracked approver artifacts of THIS lane's
-#    own review loop, TOLERATED via the grep:
+#    own review loop, TOLERATED via the grep (both extras covered by the .agents/approver/ class).
 git diff --stat 1f6898ae2 -- agents/worker/          # expect EMPTY
 git diff --name-only 1f6898ae2 | grep -v -E '^(agents/|tests/|\.agents/approver/)' | sort > /tmp/aegis-p4-complement.txt
 git diff --name-only 1f6898ae2 | grep '^\.agents/shared/planning/aegis-security-family/' | sort > /tmp/aegis-p4-planning.txt

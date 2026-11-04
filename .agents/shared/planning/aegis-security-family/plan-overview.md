@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-04 (amended same day — architect deltas folded)
 **Author:** planner[v2] via plan-creation worker
-**Status:** Ready for Review — **architect gate CLEARED** (`SOUND-WITH-AMENDMENTS`, architecture-recommendation.md @ `f7204bd9d`; rulings Q1–Q4 CLOSED; amendments AM-1…AM-15 binding and applied). **Phase 0 status (B10, approver iter-002 — single-sourced in decisions §F, not restated here): council leg CLEARED; approver 001 REJECT → 002 REJECT → iteration 003 pending at fold time — see `decisions.md` §F.**
+**Status:** Ready for Review — **architect gate CLEARED** (`SOUND-WITH-AMENDMENTS`, architecture-recommendation.md @ `f7204bd9d`; rulings Q1–Q4 CLOSED; amendments AM-1…AM-15 binding and applied). **Phase 0 status (N2, close-condition 2026-11-04 — single-sourced in decisions §F, not restated here): council CLEARED; approver cap-exhausted (001/002/003 REJECT); leader disposition (fourth fold authorized); reviewer spot-check APPROVE-WITH-ADVISORIES — conditional SATISFIED by the micro-fold commits (2026-11-04; single source: decisions §F).**
 **Commission:** `aegis-security-family` (user-ratified design, Discord 2026-11-04)
 **Worktree / branch:** `/home/nea/ensemble-src-wt-aegis-security-family` @ `feature/aegis-security-family` (base `1f6898ae2889ff002b4656486f6be3ee1048b649` = `origin/latest` at lane start)
 
@@ -62,7 +62,7 @@ gate in §Success Criteria is green — the flip to live remains the user's nonc
 
 | Phase | Name | Objective | Tasks | Coupling | Gate (independently checkable) | Owner | Status |
 |-------|------|-----------|-------|----------|-------------------------------|-------|--------|
-| 0 | [Plan review + exemplar read + compliance checklist](phase0-plan.md) | Clear the plan-review gate and produce the guide-compliance checklist every later phase is audited against | 7 | independent (read-only) | Council + approver sign-off (the **architect leg is DONE** — SOUND-WITH-AMENDMENTS @ `f7204bd9d`, AM-1…AM-15 folded) **AND** the checklist exists with a named target artifact per guide rule **AND** Q1–Q4 recorded RESOLVED (their rulings closed by the architect) | planner | in progress — council leg CLEARED; approver 001 REJECT → 002 REJECT → iteration 003 pending (single source: decisions §F — B10) |
+| 0 | [Plan review + exemplar read + compliance checklist](phase0-plan.md) | Clear the plan-review gate and produce the guide-compliance checklist every later phase is audited against | 7 | independent (read-only) | Council + approver sign-off (the **architect leg is DONE** — SOUND-WITH-AMENDMENTS @ `f7204bd9d`, AM-1…AM-15 folded) **AND** the checklist exists with a named target artifact per guide rule **AND** Q1–Q4 recorded RESOLVED (their rulings closed by the architect) | planner | COMPLETE (N2) — council CLEARED; approver cap-exhausted (001/002/003 REJECT); leader disposition (fourth fold authorized); reviewer spot-check APPROVE-WITH-ADVISORIES — conditional SATISFIED by the micro-fold commits (2026-11-04; single source: decisions §F) |
 | 1 | [The `aegis` orchestrator](phase1-plan.md) | Author `aegis` — the orchestrator persona, the methodology skill (taxonomy + finding record), the dispatch/fan-in/re-verify doctrine | 9 | tight w/ P2 (shared legality language), tight w/ P3 (skill-body FENCES) | Guide checklist satisfied **for `aegis` alone**; T1–T4, T12, T14–T18, T24, T26, T27 green; strategy-skill frontmatter version == manifest version | dev (coder lane) | pending |
 | 2 | [The three analysis children](phase2-plan.md) | Author `hacker`, `cracker`, `sweeper` — three leaf lanes with explicit white-hat legality in **each** persona | 10 | tight w/ P1, tight w/ P3 | T5–T7, T13–T18, T26, T27 green for all three; each child's own legality language present | dev (coder lane) | pending |
 | 3 | [The three installer libraries](phase3-plan.md) | Author the three `.lib.sh` installer libraries — the charter skeleton, hardened with sha256 release-asset verification | 10 | tight w/ P2 (skill bodies) | T23 green (**AM-10 definition:** primary = the three `.md` FENCES bullet lists byte-identical, scoped to the bullet list only and including the C3 checksum bullet; secondary = each `.lib.sh` carries a FENCES header naming the tool-agnostic keywords — explicitly NOT byte-identity vs the `.md` block); each library has a checksum step, a readiness probe returning 0/1/2, and a mandatory reversal section | dev (coder lane) | pending |
@@ -357,8 +357,9 @@ plan (this set)  →  architect  →  council  →  approver  →  IMPLEMENT (P1
   "craft the full plan and implement" authorises the plan *and* the implementation, but house
   discipline requires the review arc to complete first. **Status (B10 single source: decisions §F):**
   the architect review is DONE and folded; the **council leg is CLEARED**; the **approver arc is at
-  001 REJECT → 002 REJECT → iteration 003 pending** — Phase 0 is not cleared until the approver
-  passes.
+  complete: council CLEARED; approver cap-exhausted; leader disposition; reviewer spot-check
+  APPROVE-WITH-ADVISORIES (N2, conditional SATISFIED by the micro-fold commits) — Phase 0 is
+  cleared.
 - **The four architect questions (Q1–Q4) are RESOLVED** — ruled by the architect in Phase 0 (task 2)
   and recorded with their consequences in `decisions.md` §E + §C2, so Phase 1 authors against a
   settled tool matrix (the AM-1/AM-2-corrected one).
