@@ -98,8 +98,18 @@ const metricsRouteFetchSetSharedWithInitialBytes = routeChunk
   : null;
 
 // the PRE-RETIREMENT /resources route chunk (Phase 7 retires the route, so it
-// does not survive the lane — absent-tolerant, never mis-resolved)
-const resourcesRouteChunk = uniqueChunkByKey(LEGACY_RESOURCES_MARKER);
+// does not survive the lane — absent-tolerant, never mis-resolved).
+//
+// A6 FIX (2026-11-04, Phase 9): after the Phase-5 relocation the legacy
+// `anomaly-marker` string LIVES IN THE METRICS ROUTE CHUNK, so a bare legacy
+// lookup mis-resolves and would report the metrics chunk under a
+// pre-retirement field name. Per the artifact's "refuse to mis-resolve" rule:
+// when the legacy marker resolves to the SAME chunk as the route key, the
+// field reports null (absent).
+let resourcesRouteChunk = uniqueChunkByKey(LEGACY_RESOURCES_MARKER);
+if (resourcesRouteChunk && routeChunk && resourcesRouteChunk === routeChunk) {
+  resourcesRouteChunk = null; // the legacy marker is the metrics chunk now — ABSENT, never mis-resolved
+}
 
 const out = {
   initial_total_bytes: initialTotal,
