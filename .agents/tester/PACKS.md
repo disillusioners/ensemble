@@ -1,3 +1,36 @@
+## Commission FE-only T1 metrics dashboard — Phase-6 packs REGISTERED (2026-11-04, implementation lane `feature/fe-metrics-dashboard`, base `4e0c82b8b`, freeze `fd6322639`)
+
+> **What this block registers.** The T1 lane's **Phase-6** commits (chart
+> correctness — units, shared scale, attribution math: the METRIC-NAME unit
+> vocabulary POPULATED from the wiring files (6.3), the shared panel domain —
+> the per-series min-max normalisation actually REMOVED (6.1/W7), the
+> unit-labeled value axis on the Chart.js panels AND the house trend fallback
+> with the mini exemption (6.2/AM-12), the attribution card's verbatim
+> coverage + non-reconciliation sentence + no per-instance promise
+> (6.4/6.5/6.6, AM-13/W8), and the derived-spacing meta VERIFIED with its
+> mutation leg (6.7/AM-18)). FE-only — jest verification.
+>
+> **Keep-both:** the Phase-5 / Phase-4 / Phase-3 / Phase-2 / Phase-1 blocks
+> stay as they are — they record THOSE phases' packs.
+>
+> **CONCURRENT-LANE DISCLOSURE:** a phase-8 lane committed on the SAME branch
+> during this phase (8.1-8.10 interleaved between the phase-6 commits). The
+> mutation legs ran in a THROWAWAY detached worktree at the freeze
+> (`/tmp/wt-phase6-mutations`, symlinked `node_modules` — the phase-5 base-leg
+> pattern) so the plant/restore cycle never touched the live tree. Two tsc
+> errors in the tree belong to THAT lane (`metrics.model.spec.ts:462`,
+> `data-end-overlay-plugin.spec.ts` ×4) — not this phase's surface.
+>
+> **Node counts are MECHANICAL** — a per-file jest census re-derived at this
+> phase's freeze (`jest --ci --silent --runInBand <file>` → the `Tests:` line).
+
+| Pack | Invocation | Scope | Result |
+|---|---|---|---|
+| `t1_fe_phase6` — the phase-6 FE spec set (the populated unit vocabulary + its central-tab per-unit-axes legs, the timeline's shared-scale + toggle-path + unit-axis legs, the house shared-domain + W7 numeric + unit-axis + mini-exemption legs, the attribution card's verbatim + non-reconciliation + no-per-instance + absence legs) | `cd $WT/frontend && CI=1 ./node_modules/.bin/jest --ci --runInBand src/app/pages/metrics/metrics-units.spec.ts src/app/pages/metrics/tabs/central-tab.component.spec.ts src/app/pages/metrics/resource/timeline/timeline-tab.component.spec.ts src/app/pages/metrics/resource/live/live-tab.component.spec.ts src/app/components/charts/house-svg-renderer/house-svg-renderer.spec.ts src/app/pages/metrics/charts/chart-panel.component.spec.ts` | **191 nodes over 6 specs** (the per-file census at the freeze): `metrics-units` **8** (was 4 — the populated-table legs + the F4 per-member pins + the F9 two-units leg + the closed unit census) · `tabs/central-tab` **44** (was 33 — +3 phase-6 legs: the F9 mixed-kind family's two panels with DIFFERENT data-units, the unit handed to the renderer, the unmapped metric's `unit unknown`; +8 of the 8.7/8.8 lane) · `resource/timeline-tab` **22** (was 18 — the vocabulary-derived panel units, the TOGGLE path landing `threads` on the counts panel only, the rendered config suffixing `1800 MB`/`3 %` with ONE shared y-scale, the class-internal vocabulary agreement) · `resource/live` **24** (was 18 — the audit payload verbatim `0.06` + the non-reconciliation sentence, the reconciling/missing-RSS/no-claim polarities, the aggregate-only card copy, the NO-COVERAGE-ARITHMETIC absence pin) · `house-svg-renderer` **70** (was 62 — `chartSharedDomain` + the W7 NUMERIC leg (< 5% vs > 95% plot-height bounds) + the same-domain hover + the baseline + the trend's unit axis + the mini's no-axis R-2 exemption) · `chart-panel.component` **23** (untouched). Full detail: `phase6-evidence.md` §3/§5 | ✅ 191/191 green at `fd6322639` |
+| `t1_fe_phase6_mutations` — the A-9 mutation matrix (8 planted legs, throwaway worktree at the freeze) | plants per `phase6-evidence.md` §4 (exact-string replace + `git checkout --` restore per leg) | A1 one-mixed-axis → 3 RED · A2 count-on-memory-panel → 3 RED · A3 per-series-rescale (W7 revert) → 22 RED · B1 wrong-unit entry → 1 RED (**after the vacuity closure `fd6322639`** — the first plant ran GREEN and the gap was closed, recorded) · B2 constant group key (the mixed-kind panel) → 4 RED · C1 silent-non-reconciliation → 1 RED · D1 coverage-rounding (the audit's false `0 %`) → 3 RED · E1 door-cadence-in-the-meta (AM-18) → 1 RED; EVERY leg restored → GREEN (22/22, 70/70, 8/8, 44/44, 24/24) | ✅ 8/8 RED→GREEN |
+| `t1_fe_phase6_whole_tree` — the whole-tree (D2) leg at the freeze | `cd /tmp/wt-phase6-mutations/frontend && CI=1 ./node_modules/.bin/jest --ci --silent --runInBand` (the throwaway detached worktree at `fd6322639` — the branch history to the freeze, NO foreign WIP) | **4698 collected / 4689 passed / 9 failed** — the 9 reds are the SAME FOUR suites phase 5 base-proved (`schedule-create-dialog`, `jobs-filter-state.model`, `jobs-grouping.model`, `settings`); their sources are UNTOUCHED between the phase-5 base `e78fa0ef8` and the freeze (`git diff --stat 4e0c82b8b..fd6322639 -- <the four paths>` EMPTY) ⇒ the base-proof carries verbatim. **Net-new deterministic reds = 0** (+75 nodes over phase 5's 4623) | ✅ registered |
+| `t1_fe_phase6_baseline` — the prompt-artifact baseline at the freeze | `/home/nea/ensemble-src/.venv/bin/python scripts/protection/generate_prompt_artifact_baseline.py --check` + `sha256sum -c agents/.prompt-artifacts.sha256 \| grep -c ": OK"` | `PROMPT-BASELINE: OK — 161 versioned artifact(s) match` → **161/161** (`agents/` byte-identical) | ✅ 161/161 |
+
 ## Commission FE-only T1 metrics dashboard — Phase-5 packs REGISTERED (2026-11-03, implementation lane `feature/fe-metrics-dashboard`, base `e78fa0ef8`, freeze `fb70eb038`)
 
 > **What this block registers.** The T1 lane's **Phase-5** commits (tab 1 — Resources on the
