@@ -45,7 +45,7 @@ citation resolves there; several facts superseded — see its dated amendment no
 | **DP1b** | **Implied members.** `knowledge` ⇒ `explorer`/`kb-writer` is **trimmed** via `deny_spawn: ["knowledge"]`; ~~`chart` ⇒ `charter` is **accepted**~~ **[SUPERSEDED by AM-1]** — `chart` is dropped entirely, so the implied `charter` member **disappears** and the commission's roster is restored exactly. | §DP1 "Implied-member side effects" (lines 247–265) **+ AM-1 (§C2 governs)** | A1, D4, D5 |
 | **DP1c** | **The write fence.** `allow filesystem` + `deny ["write_file","edit_file"]` on all four agents. It removes the easiest accidental mutation; **`bash` remains an unconstrained write path** ⇒ read-only-on-target is **doctrinal** for the whole family. | §DP1 "The write fence" (lines 206–226) | A6, D5 |
 | **DP2** | **Skill architecture.** One family, four homes: **one seeded** skill (`aegis-strategy` — methodology, severity taxonomy, finding record) and **three file-invoked** installer skills (their procedure text never enters the global skill bank). **AM-7 restates the invariant:** the mechanism is **manifest-gating** (seeding enumerates only `skill-set.yaml` entries; no directory scan of `skills-template/` exists; the project-skill loader indexes only `.agents/<ns>/skills/<name>/skill.json` ⇒ double gate), not "the bank is global". | §DP2 (lines 281–358) **+ AM-7 (§C2 governs)** | C2, C6, C5 |
-| **DP2a** | **The checksum amendment.** The charter installer does not checksum its artifacts — insufficient for scanners. Every installer in this family **sha256-verifies its fetched release asset before promotion**, combining the hex `SHA256SUMS` + W3C-SRI precedent. | §DP2 "The checksum gap" (lines 326–331) | C3 |
+| **DP2a** | **The checksum amendment.** The charter installer does not checksum its artifacts — insufficient for scanners. Every installer in this family **sha256-verifies its fetched release asset before promotion**, combining the hex `SHA256SUMS` + W3C-SRI precedent. (amended 2026-11-04 — pin provisioning per §B.6) | §DP2 "The checksum gap" (lines 326–331) | C3 |
 | **DP2b** | **Three self-contained libraries + a test that pins the FENCES block identically** — not one shared library (a shared library would need a path reference: fragile across worktree vs installed tree, and a prompt-prose hazard). | §DP2 (lines 309–324), alternatives table | C1 §3, C3 |
 | **DP3** | **Sandbox model.** One engagement-scoped sandbox root, created once with `mktemp -d`, owned by aegis, inherited by every lane; the "self-owned" check is a **mechanical prefix assertion** performed before any active technique. No Docker; plain directories + user-space processes. | §DP3 (lines 362–451) | C3, D10 |
 | **DP3a** | **Process discipline.** Every process is launched from the sandbox root, tracked via `proc`, and stopped at lane teardown — never left running past END TURN. | §DP3 "Self-owned process discipline" | C1 §7 |
@@ -214,6 +214,25 @@ this machine, NEVER committed to git history.** The off-repo root
 `$HOME/.local/state/aegis/engagements/<id>/` **stands** (architect AM-4 framing: reachable, not
 confined; discovery by recorded path, never glob). This confirmation is the authority behind the
 privacy cardinals in §B.3 and the T29 findings-private pins.
+
+### B.6 LEADER-CONFIRMED INTENT — pin trust anchor (D4), 2026-11-04
+
+**LEADER-CONFIRMED, named and dated — the pin trust anchor is ruled, not defaulted.**
+
+- The sha256 pins for the three installer toolchains are **OPERATOR-ARMED, never auto-fetched**: the
+  trust anchor is the **OPERATING USER**, not the network.
+- Pins land at install time from a user pre-seeded pins file (`~/.local/opt/aegis-toolbench/pins.env`
+  or the documented equivalent) OR an operator-supplied digest recorded at pin time with its SOURCE
+  (official release/checksum channel) logged in the engagement provenance.
+- The shipped refusal contract (`pin-before-first-install` ⇒ `HARD_BLOCKER`, unbypassable —
+  independently verified 2026-11-04) stays exactly as-is.
+- **Rationale (leader, 2026-11-04):** baked-in upstream digests would go stale and hard-block installs
+  (a worse failure mode); auto-fetching digests at install time would move the trust anchor onto the
+  network — the opposite of what this family is FOR; a pre-seeded pins file keeps installs fully
+  autonomous once the user has armed them.
+
+This confirmation is the authority behind the DP2a pin provisioning (§A) and the installers'
+`pin-before-first-install` refusal contract.
 
 ---
 
@@ -384,8 +403,9 @@ the final micro-fold** — see the trail below.)*
 | Approver (iteration) | **003 — REJECT (5 surgical residuals; approver cap EXHAUSTED at 3× REJECT)** | R1 cardinal-voice contradiction (family-3 universal ownership) → **LEADER RULING**; R2 §F single-source contradiction → this trail; R3 sidecar path wrong → `dist/` sibling + exit semantics; R4 fence premise factually wrong + too weak → **LEADER RULING both-fences**; R5 secret scan cannot fail → fail-closed form | **Folded in the leader-disposition commit (this one)** — verification is a plan-council reviewer spot-check, NOT a fourth approver call | 2026-11-04 |
 | **Leader disposition** | **TrueAuto proceed after cap exhaustion (3× REJECT) — FOURTH fold authorized (2026-11-04)** | five surgical residuals (R1/R4 carry LEADER RULINGS as the resolution) + material execution non-blockers (a)–(h) | **This fold**; after it the plan **LOCKS for implementation** with the disposition disclosed; verification = plan-council reviewer spot-check | 2026-11-04 |
 | Reviewer spot-check | **APPROVE-WITH-ADVISORIES** — conditional on the final micro-fold (F1–F7) | ~15 lines, 5 files; F5's factual basis git-verified (d0fea922a = 9 planning files only) | Commit 1 (plan-side fixes) + commit 2 (approver bookkeeping, files authored by approver ce82a383) | 2026-11-04 |
+| Leader adjudication (post-implementation) | **D4 pin trust anchor + G3.8 shipped-definitions — both ruled 2026-11-04** | D4: operator-armed pins, trust anchor = operating user (§B.6); G3.8: plan class-(i)/(iii) definitions amended to the shipped form at all five sites — implementation reality supersedes stale plan text (survived 35-shape escape verification) | This commit — must land BEFORE the Phase 5 gate evaluates G3.8 | 2026-11-04 |
 
-**F6 — fold-commit subject→site index** (the EIGHT fold-round artifacts carry commit SUBJECTS,
+**F6 — fold-commit subject→site index** (the NINE fold-round artifacts carry commit SUBJECTS,
 not labels; this index maps them — the final micro-fold added 2026-11-04): `docs(aegis): fold plan-council findings C1 + W1-W7 + A-a..A-h` → `0d89b1644`;
 `docs(aegis): fold touch-up — AM-7/9/12/13 consistency fixes from conformance audit` → `91e66882b`;
 `docs(aegis): delta re-gate touch-up D1-D7 (POSIX scope commands, ledger signature, composition completeness)` → `9f372d104`;
@@ -393,7 +413,8 @@ not labels; this index maps them — the final micro-fold added 2026-11-04): `do
 `docs(aegis): approver iter-001 fold — giter-owned release phase, write-target classes, legality pin matrix T29, privacy cardinalized (leader rulings)` → `d0fea922a`;
 `docs(aegis): approver iter-002 fold — verified release recipe (live target, staging worktree, rollback-safe env, promote-field fence), T30 fences pins, scope/fence corrections` → `9969bb0d3`;
 `docs(aegis): leader-disposition fold — R1-R5 surgical residuals + execution non-blockers (final planning pass)` → `2dd1df30a`.
-`docs(aegis): final micro-fold F1-F7 (fail-closed scan, fence exit semantics, approver-residue truth)` → `465446ded`.
+`docs(aegis): final micro-fold F1-F7 (fail-closed scan, fence exit semantics, approver-residue truth)` → `465446ded`;
+`docs(aegis): leader adjudications 2026-11-04 — D4 pin trust anchor (B.6) + G3.8 shipped class definitions` → `this commit (self-referential; sha in git log)`.
 
 ---
 
