@@ -13,8 +13,9 @@ Eight gates, **A–H**.
 
 ## Entry Criteria
 
-- **Phase 4 exited** — the one commit exists, the baseline is at 177 rows and clean, the lane test is
-  green, and the working tree is clean.
+- **Phase 4 exited** — the one commit exists, the baseline **file exists at exactly 177 rows** and is
+  clean (**AM-11: existence + count are asserted explicitly — the `--check` exit code alone proves
+  nothing**), the lane test is green, and the working tree is clean.
 - The **true pre-fix base** for the net-new comparison is known: the base commit
   `1f6898ae2889ff002b4656486f6be3ee1048b649` (= `origin/latest` at lane start). Net-new reds are
   computed as the **FAILED-list diff** of the same commands on the base and on HEAD — not a raw
@@ -95,6 +96,10 @@ git diff $BASE | grep -nE 'sk-(proj|ant)-|BEGIN [A-Z ]*PRIVATE KEY' ; echo "secr
 
 # --- the baseline is still clean on the committed tree --------------------
 python3 scripts/protection/generate_prompt_artifact_baseline.py --check; echo "exit=$?"   # expect 0
+# AM-11: --check exits 0 BOTH when clean AND when the baseline file is ABSENT
+# (generate_prompt_artifact_baseline.py:127-133) — rc=0 alone proves nothing:
+test -f agents/.prompt-artifacts.sha256 || { echo "FAIL: baseline file MISSING"; exit 1; }
+wc -l agents/.prompt-artifacts.sha256    # expect exactly 177
 ```
 
 **House notes for this phase:**

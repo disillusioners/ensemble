@@ -1,9 +1,26 @@
 # Technical Analysis: Aegis Security Family
 
+> **ARCHITECT AMENDMENT NOTE (2026-11-04).** The Phase-0 architect review
+> ([`architecture-recommendation.md`](./architecture-recommendation.md) @ `f7204bd9d`) ruled Q1–Q4 and
+> issued binding amendments **AM-1…AM-15**; they are folded into the plan set
+> ([`decisions.md`](./decisions.md) §C2 is the authoritative delta table). Several claims in THIS
+> record are superseded and are marked inline with `[SUPERSEDED by AM-x]` — the record is annotated,
+> not rewritten, for traceability. **The superseded claims, in brief:** the `chart` grant and the
+> implied `charter` member (AM-1 — chart is DROPPED); the `project` grant + `project_create` deny
+> (AM-2 — project is DROPPED, 21 tools with ~15 mutators); the "CVE-lookup capability is the builtin
+> `webfetch`" premise and "no web-search capability exists" (AM-3 — webfetch is operator-disabled
+> live; the live inventory is context7 + plane + zai-web-reader/web-search/zread); the off-repo
+> findings store as effectively private (AM-4 — reachable, not confined; never glob); the
+> per-instance watchover API as a supervision lever and "no daemon code reads one" (AM-5 — it is an
+> operator-only tool-call gate; the key is inert except for `watcher`); the "bank is global ⇒
+> searchable by worker" invariant (AM-7 — the true invariant is manifest-gating). The "nine fields"
+> label vs the printed ten-field list is corrected with a dated note (the plan's D-6 disposition was
+> ratified).
+
 **Date:** 2026-11-04 (lane start 2026-11-04T14:47:59Z)
 **Author:** planner[v2] via technical-analysis worker
 **Analysis depth:** deep-dive (design-point resolution; the downstream plan worker consumes this verbatim)
-**Status:** Ready for Review — DP1–DP8 resolved; Q1–Q4 flagged for the architect
+**Status:** Ready for Review — DP1–DP8 resolved; Q1–Q4 flagged for the architect *(SUPERSEDED 2026-11-04: Q1–Q4 are ruled and AM-1…AM-15 are binding — see the amendment note above; the superseded claims are marked inline)*
 
 **Worktree:** `/home/nea/ensemble-src-wt-aegis-security-family` @ `1f6898ae2889ff002b4656486f6be3ee1048b649`
 **Companion record:** [`research-findings.md`](./research-findings.md) — every citation below resolves to a
@@ -138,8 +155,8 @@ exemplar says exactly this — *"the closed allow is the fence; a deny list woul
 
 | axis | value | why |
 |---|---|---|
-| `tools.allow` | `instance`, `bash`, `proc`, `filesystem`, `time`, `self`, `help`, `context`, `shared_meta_kv`, `knowledge`, `mcp`, `chart`, `question`, `project`, `midflight`, `dynamic-skill`, `todo` | see per-row rationale below |
-| `tools.deny` | `write_file`, `edit_file`, `terminate_instance`, `pause_instance`, `resume_instance`, `set_instance_tunable`, `project_create` | 5 are intra-category subtractions (D5), 1 is a project-row write (D2) |
+| `tools.allow` | `instance`, `bash`, `proc`, `filesystem`, `time`, `self`, `help`, `context`, `shared_meta_kv`, `knowledge`, `mcp`, ~~`chart`~~, `question`, ~~`project`~~, `midflight`, `dynamic-skill`, `todo` | see per-row rationale below. **[SUPERSEDED by AM-1/AM-2 — 2026-11-04]** `chart` and `project` are DROPPED: the authoritative matrix is `decisions.md` §B.2 (15 categories) |
+| `tools.deny` | `write_file`, `edit_file`, `terminate_instance`, `pause_instance`, `resume_instance`, `set_instance_tunable`, ~~`project_create`~~ | 5 are intra-category subtractions (D5), 1 is a project-row write (D2). **[SUPERSEDED by AM-2 — 2026-11-04]** `project_create` is retracted along with the whole `project` category — the deny is exactly 6 entries |
 | `tools.deny_spawn` | `knowledge` | keeps `explore`/`experience`, removes `explorer`/`kb-writer` from the effective team (A1) |
 | `team_members` | `["hacker","cracker","sweeper","worker"]` | commission roster, verbatim |
 | `innate_skills` | `["dynamic-skill","todo"]` | and **both** categories appear in `tools.allow`, so the innate expansion (D3) is a no-op and the effective surface equals the pinned allow exactly |
@@ -153,12 +170,24 @@ Per-category rationale for `aegis`:
 - `bash` + `proc` — provision/verify the sandbox, run the verification commands, drive long scans.
 - `knowledge` — query the project KB for prior audits and architecture context. **Trimmed** with
   `deny_spawn` so the direct spawn right for `explorer`/`kb-writer` never materialises.
-- `mcp` — the CVE-lookup surface: `webfetch` is a **builtin** server (D8) and `context7` rides along.
-  The `plane_*` tools are excluded by the ownership guard (D12) ⇒ no E3 census impact (B3).
-- `chart` — **the Q1 deviation**: worker cannot make charts (D4), so aegis holds `chart` and the chart
-  specialist produces the artifact.
+- `mcp` — the CVE-lookup surface: **[SUPERSEDED by AM-3 — 2026-11-04]** ~~`webfetch` is a **builtin**
+  server (D8) and `context7` rides along~~ — `webfetch` is **operator-disabled on live**
+  (`MCP_DISABLE_BUILT_IN_WEBFETCH=true`; no `webfetch` row live or dev). Verified live inventory:
+  `context7` + `plane` (owned by the dynamic `plane_` category, not the `mcp` sweep) +
+  `zai-web-reader`/`zai-web-search`/`zai-zread`; dev = `context7` + `plane`. Web-fetch/search is
+  deployment-conditional; `bash curl` is the universal fallback. No `mcp_rpc` deny entries (three
+  independent gates make exposure structurally impossible).
+- ~~`chart` — **the Q1 deviation**: worker cannot make charts (D4), so aegis holds `chart` and the chart
+  specialist produces the artifact.~~ **[SUPERSEDED by AM-1 — 2026-11-04]** `chart` is **DROPPED from
+  v1**: the grant widens three separate surfaces (the tool, the implied `charter` spawn right, the
+  transitive charter child's write side-effect). Reports use fenced **mermaid text blocks** instead;
+  v2 re-entry path: `allow "chart"` + `deny_spawn ["chart"]` (`registry.py:96-105`).
 - `question` — scope clarification ("which directories are in scope?"). No implied member.
-- `project` — project metadata for engagement scoping. `project_create` denied (D2).
+- ~~`project` — project metadata for engagement scoping. `project_create` denied (D2).~~
+  **[SUPERSEDED by AM-2 — 2026-11-04]** `project` is **DROPPED**: it is **21 tools** with ~15
+  mutators — denying only `project_create` left ~20 live, so the "read-only engagement scoping" intent
+  was not achieved; the target tree is external (`~/Code/vkey`, not an ensemble project) so project
+  metadata carries no scoping value.
 - `midflight` — observe in-flight child state while waiting on lanes (leader holds it).
 - `context` / `shared_meta_kv` / `self` / `time` / `help` / `dynamic-skill` / `todo` — engagement
   state, memory, timestamps, tool discovery, skill feedback, multi-lane tracking.
@@ -217,6 +246,12 @@ LLM calling `write_file`/`edit_file` directly on a source file — and leaves on
 commission anticipated. The design consequence is that the fence must be paired with (a) a persona
 cardinal naming the legality line, (b) a sandbox-ownership check before any active technique
 (DP3), and (c) an explicit statement in the plan that the fence is a *speed bump*, not a boundary.
+**[STRENGTHENED by AM-13 — 2026-11-04]** read-only-on-target becomes a property of the workflow's
+**DATA FLOW**, not only a prohibition: lanes **COPY the inputs they need into the sandbox build
+tree**; the target tree is NEVER a write target. The honest limitation sentence ("the lane holds an
+unconstrained shell") appears in `aegis`'s persona AND in the report template's provenance note, so a
+reader of a findings report knows the analysis was produced by a shell-capable lane. R1's honesty
+posture stays.
 
 A second consequence, and it is a **feature**: because aegis cannot write, **the report document is
 written by `worker`** — which the commission already assigns "drafting findings documents" to. The
@@ -228,9 +263,14 @@ sandbox rather than with `write_file` (D10: `/bin/sh` string commands ⇒ loops 
 
 Three routes exist (A7); the recommendation is **route 1 + route 2 together, on `aegis` only**:
 
-- **Route 1 — `mcp`**: `webfetch` is a **builtin** server (`daemon/mcp/builtin_servers/webfetch.py:17-40`),
-  i.e. the fetch capability the commission wants exists — but MCP servers are enabled *per deployment*,
-  so the prompt must treat "a web-fetch capability" as **conditional**.
+- **Route 1 — `mcp`**: **[SUPERSEDED by AM-3 — 2026-11-04]** ~~`webfetch` is a **builtin** server
+  (`daemon/mcp/builtin_servers/webfetch.py:17-40`), i.e. the fetch capability the commission wants
+  exists~~ — `webfetch` is **operator-disabled on live** (`MCP_DISABLE_BUILT_IN_WEBFETCH=true`; no
+  `webfetch` row live or dev). The verified **live** inventory is `context7` + `plane` (owned by the
+  dynamic `plane_` category) + `zai-web-reader`/`zai-web-search`/`zai-zread`; **dev** = `context7` +
+  `plane` only. `zai-web-search` **is** a web-search capability on live — the "no web-search
+  capability exists" premise below is corrected. The prompt must still treat web-fetch/search as
+  **deployment-conditional**, with `bash curl` as the universal fallback.
 - **Route 2 — `bash curl`**: always available wherever `bash` is granted; the universal fallback.
 - **Route 3 — `mcp_rpc`**: privileged, `ari`-only ⇒ **not available** to the children, and not to
   aegis.
@@ -243,16 +283,19 @@ children is an offensive-capable lane; the `"mcp"` grant sweeps in *every* live 
 CVE-database API (NVD/CVE JSON over HTTPS) would be a **new category** ⇒ the 3-step registration
 seam + `tool-categories.json` regeneration ⇒ **the F-1 trap class** (B3) ⇒ out of scope for this
 lane. v1 ships `mcp`+`curl` and treats structured CVE lookup as a v2 item.
+**[CORRECTED by AM-3 — 2026-11-04]** the underlying premise ("no web-search capability exists") is
+**false on live** — `zai-web-search` *is* that capability, reached through the `mcp` grant. Q3's gap
+is smaller than believed; the v1 no-new-category decision is unchanged and now better justified.
 
 ### Implied-member side effects — the `deny_spawn` decision
 
 | category aegis holds | implied member(s) | decision |
 |---|---|---|
 | `knowledge` | `explorer`, `kb-writer` | **trim** — `deny_spawn: ["knowledge"]`. The KB lookup is wanted; the *direct spawn right* over those two agents is not, and they are not in the commission's roster |
-| `chart` | `charter` | **accept** — the chart artifact is wanted and cannot be produced any other way (D4). **This is the Q1 deviation.** |
+| ~~`chart`~~ | ~~`charter`~~ | ~~**accept** — the chart artifact is wanted and cannot be produced any other way (D4). **This is the Q1 deviation.**~~ **[SUPERSEDED by AM-1 — 2026-11-04]** `chart` is **DROPPED** — the implied member disappears; aegis's effective team is exactly `[hacker, cracker, sweeper, worker]`. The `registry.py:96-105` `deny_spawn` case is the documented v2 re-entry path (tool functional, no spawn right; the transitive charter child per call still disclosed). |
 | `mcp` | none | — the sweep is dynamic; `plane_*` is excluded by the ownership guard (D12) |
 | `instance` | none | — `instance` is not in `TOOL_REQUIRED_AGENTS` (A1) |
-| `question`, `project`, `midflight`, `context`, `shared_meta_kv`, `self`, `time`, `help`, `dynamic-skill`, `todo`, `bash`, `proc`, `filesystem` | none | — none appear in `TOOL_REQUIRED_AGENTS` (A1) |
+| `question`, ~~`project`~~ [SUPERSEDED by AM-2 — dropped], `midflight`, `context`, `shared_meta_kv`, `self`, `time`, `help`, `dynamic-skill`, `todo`, `bash`, `proc`, `filesystem` | none | — none appear in `TOOL_REQUIRED_AGENTS` (A1) |
 
 **Honest caveat on the `knowledge` trim (must reach the plan):** `deny_spawn` closes the *direct*
 spawn path only. `explore()` spawns an `explorer` instance internally
@@ -298,6 +341,18 @@ all three installer families file-invoked so their procedure text never enters t
 boundary *"worker does NOT run offensive tools or scanners"* would otherwise be prose against a
 searchable global index containing hashcat/john/AFL++ procedures. Charter is the proven precedent for
 mode (ii): `agents/charter/` has **no `skill-set.yaml`** and its installer is never seeded (C2).
+**[RESTATED by AM-7 — 2026-11-04]** the stated invariant ("bank is global ⇒ searchable by `worker`")
+is **overstated** — an ownership filter drops bank-cloned skills owned by another agent
+(`skill_search_service.py:718-822`). The TRUE invariant is **manifest-gating**: seeding enumerates
+**only** `skill-set.yaml` entries (`skill_seed_service.py:274-283, :340, :348-352`; **no directory
+scan of `skills-template/` exists anywhere**), so the three installer skills are never banked ⇒
+unreachable by every path; the v0.28.3 project-skill loader indexes only
+`.agents/<ns>/skills/<name>/skill.json` ⇒ double gate. **Disclosed:** the installer `.md` bodies ship
+in the release payload under `agents/<agent>/skills-template/` and are readable on disk by any agent
+with `bash`/`filesystem` on the install tree — the boundary is the SEARCH INDEX, not the filesystem
+(charter exposure class — accepted, stated). Any agent may also materialise `aegis-strategy` into its
+own scope by name (`skill_clone_service.py:195-199`) — benign for a methodology skill; the installers
+are never in the bank. New obligation: `aegis-strategy` declares **no `include:`** (T21 pins it).
 
 **Why the methodology skill IS seeded:** it is aegis's own operating doctrine (the designer's
 `design-strategy` precedent — `agents/designer/skill-set.yaml`, `auto_load: true`). It is harmless to
@@ -407,6 +462,19 @@ status-checked, and (c) stopped during that lane's teardown — never left runni
 (`daemon/tools/proc_tools.py`), and `proc_run` accepts a `workdir` and a `timeout`
 (`daemon/tools/proc_tools.py:1970-1982`) — which is what a fuzzing campaign needs. (The daemon's
 bash-tool orphan reaper exists as a backstop; the agent's own discipline is the primary control.)
+**[NAMED CAPS per AM-12 — 2026-11-04]** `bash` has a **hard max of 1800 s** and `timeout=0` means an
+unbounded block (`bash.py:800-801`) ⇒ a multi-hour campaign **cannot** be one bash call; `proc_run`
+`timeout=0` = never auto-killed with **no upper bound** (`proc_tools.py:1998-2001`) and **returns
+immediately** (`:2031-2041`); **max 10 tracked processes per instance** (`proc_tools.py:98`); the
+proc log buffer spills to a temp file and grows unbounded for a multi-hour fuzzer; `proc_stop` =
+SIGTERM → SIGKILL after 5 s; **detached/setsid grandchildren are a known residual**
+(`proc_tools.py:1680-1690`) ⇒ **AFL++ parallel mode MUST be OFF** (or the harness traps and kills its
+children on exit). The engagement record must carry **every `process_id`** (it appears only in the
+tool's text result) so teardown can `proc_stop` them; **teardown must NOT depend on instance
+terminate** — pause does **not** reap processes (cleanup lives only in `terminate_instance`,
+`instance_lifecycle.py:2775, :2793`) and **pause cascades to the tree root by default**
+(`:3577-3586`), so pausing one wedged child pauses aegis and every sibling — the family never uses
+pause as a child-supervision lever.
 
 **The "self-owned" check — mechanical, before every active technique.** The legality line must not be
 a vibe. Before any active/dynamic step, the agent asserts:
@@ -455,9 +523,13 @@ only (no arrays, no `[[ ]]`, no process substitution), and `set -eu` at the top.
 
 ### Recommendation
 
-**A five-level severity taxonomy with C++-relevant definitions; a fixed finding record with nine
-required fields; storage OUTSIDE the ensemble repo and OUTSIDE the target repo; the remediation
-hand-off is a message to `leader`; re-verify is narrow, per-finding, and severity-gated at 3 rounds.**
+**A five-level severity taxonomy with C++-relevant definitions; a fixed finding record with ten
+named fields *(corrected 2026-11-04: this text said "nine required fields", but the printed list
+below enumerates TEN — `id, title, severity, confidence, category, location, description, evidence,
+impact, fix`. The plan's D-6 disposition — follow the printed list, pin the names not the count —
+was ratified by the architect)*; storage OUTSIDE the ensemble repo and OUTSIDE the target repo; the
+remediation hand-off is a message to `leader`; re-verify is narrow, per-finding, and severity-gated
+at 3 rounds.**
 
 ### Severity taxonomy (canonical home: the `aegis-strategy` skill)
 
@@ -474,7 +546,7 @@ Severity is **not** CVSS and **not** exploitability-verified-only: a finding who
 **confidence** recorded separately (below). This keeps "confirmed crash" from being the only path to
 the top severity, which matters for a static SAST-heavy workflow.
 
-### Finding record — nine required fields
+### Finding record — ten named fields *(heading corrected 2026-11-04; the original said "nine" while the printed list enumerates ten — see D-6)*
 
 ```
 id                 stable within the engagement (F-001, F-002, …)
@@ -504,7 +576,7 @@ concerns and the guide separates them.
 
 ```
 $HOME/.local/state/aegis/engagements/<engagement-id>/
-  findings.json      # the machine-readable record (nine fields per finding)
+  findings.json      # the machine-readable record (ten named fields per finding — corrected 2026-11-04, see D-6)
   report.md          # the human report
   evidence/          # scanner output, crash artifacts, bench results
   engagement.json    # target root, scope, sandbox path, dates, toolchain versions
@@ -518,11 +590,21 @@ asked for. Storing off-repo keeps findings at the same privacy class as the targ
 
 **Cost of this choice:** the engagement artifacts are not reviewable in a PR and not visible to a
 teammate without filesystem access to the host. For a white-hat engagement on a fork the user owns,
-that is the right default. **Mitigation:** the findings **summary** travels with the hand-off message
+that is the right default. **[CORRECTED by AM-4 — 2026-11-04]** the off-repo root is **REACHABLE, NOT
+CONFINED**: absolute paths are trusted by design (`filesystem.py:197-215` — "for absolute paths the
+boundary check is intentionally skipped"; `workspace_guard.py:52-60`; `write_file` creates parents),
+and `bash` is unconstrained — so ANY agent holding `filesystem` or `bash` can read or write it. It
+CANNOT be globbed (`glob_files`/`grep_files` refuse absolute roots outside the workdir/temp —
+`filesystem.py:254-280`), so **discovery is by recorded path, never by glob** — the absolute
+engagement root is stored in `engagement.json` and passed in every child dispatch prompt. Reads are
+absolute-path only. **The honest sentence, required in the plan:** *the privacy of the findings is
+discipline, not a boundary.* Writer split: `aegis` writes `findings.json` + `engagement.json` via
+`bash` (its only write route); `worker` writes `report.md` via `write_file` on an absolute path.
+**Mitigation:** the findings **summary** travels with the hand-off message
 to `leader` (severity counts + the critical/high items in full), so the decision-maker is never blocked
 by file access.
 
-**Architect flag — Q2:** in-repo storage under `.agents/shared/security/<engagement-id>/` is the
+**Architect flag — Q2** *(RESOLVED 2026-11-04 — OFF-REPO ratified; see `architecture-recommendation.md` §2/Q2 and the AM-4 correction above)*:** in-repo storage under `.agents/shared/security/<engagement-id>/` is the
 natural alternative and would make findings diffable and reviewable. It requires (a) a `.gitignore`
 change — **outside** the `agents/` + `tests/` scope — and (b) acceptance that findings land in git
 history. If the architect prefers in-repo storage, the `.gitignore` edit must be authorized explicitly
@@ -620,7 +702,7 @@ baseline rows (B1), so the 161 → 177 count is unaffected.
 | `ari` | ✅ | `job_create(agent_id="aegis")` — ungated (A3) | none |
 | `leader` | ✅ | `spawn_instance` / `send_message` via `team_members` (A4) | **one line** in `agents/leader/meta.json` |
 | `aegis` | → `hacker`/`cracker`/`sweeper`/`worker` | `spawn_instance` via `team_members` (A1) | aegis's own meta |
-| `aegis` | → `charter` | implied member of the `"chart"` grant (A1) | **Q1 deviation** |
+| `aegis` | → `charter` | ~~implied member of the `"chart"` grant (A1)~~ | ~~**Q1 deviation**~~ **[RETIRED by AM-1 — 2026-11-04]** `chart` is dropped ⇒ NO implied member; the row survives only as the record of the rejected alternative |
 | `aegis` | → `explorer`/`kb-writer` | **blocked** by `deny_spawn: ["knowledge"]` (A1) | none |
 | `aegis` | → `developer`/`reviewer` | ❌ refused — not in team_members (A1) | hand off to `leader` instead (DP4) |
 
@@ -635,6 +717,10 @@ meta key is **inert**: `AgentMetadata` has no such field, its `model_config` is 
 sketcher block (`"watchover": {"timeout_seconds": 90}`) is copied precedent, not a working mechanism.
 Copying it into the aegis metas would create a **false-confidence knob** — an operator would believe
 the family has a supervision timeout when it has none.
+**[CORRECTED by AM-5 — 2026-11-04]** the blanket "no daemon code reads one" is imprecise: the key is
+**inert for EVERY AGENT EXCEPT `watcher`** — `daemon/graph.py:10998` reads `meta.get("watchover")`
+inside `_load_watcher_meta_config()`, serving the watcher agent's own evaluator config. The family's
+conclusion (omit the block) stands and is strengthened.
 
 **What actually supervises a long-running lane, given no watchover block:** the family's own
 mechanisms — the END TURN contract (guide §7, C1), the fan-in escape-valve ladder with a
@@ -642,6 +728,19 @@ mechanisms — the END TURN contract (guide §7, C1), the fan-in escape-valve la
 per-instance watchover API `POST /api/instances/{id}/watchover`
 (`daemon/routers/instances.py:140-200`) if an operator wants it. **Architect flag — Q4:** confirm the
 family relies on the instance-level API rather than a meta block.
+**[REWRITTEN by AM-5 — 2026-11-04]** the per-instance watchover API is **an operator-only TOOL-CALL
+GATE, not a supervisor**: it inserts a `watchover_check` node between `agent` and `tools` — one
+lightweight watcher-LLM call per tool-call batch parsing `Allow|Deny|Mistake` verdicts
+(`graph.py:10845-10856`; 3 denials in a turn ⇒ terminate node); arming it **pauses and resumes the
+instance** (`watchover_service.py:854-930`) and would route every campaign tool call through the
+watcher LLM — likely `Deny` on fuzz/bench commands. It is operator-only (no agent-reachable tool can
+set it) and is **unsuitable for supervising campaign children**. The v1 supervision posture is:
+**AEGIS IS THE PRIMARY SUPERVISOR** — it polls `proc_status`/`proc_logs`, records every `process_id`
+in the engagement record, and tears down explicitly; the daemon-side long-tool nudge is a **secondary
+signal only** and **cannot see a backgrounded `proc_run` campaign** (`proc_tools.py:2031-2041`); the
+mission strand healer covers **mission roots only**. `set_instance_tunable` stays **denied** —
+unblocking it would buy a threshold on a supervisor that cannot observe the campaign (a
+false-confidence trade); instance lifecycle stays with `leader`.
 
 ### Alternatives considered
 
@@ -752,19 +851,19 @@ exception is the registry-scan leg, which needs the venv interpreter.
 | T9 | `test_no_job_category_anywhere` | no aegis-family agent holds `"job"` | the ungated dispatch path (A3) |
 | T10 | `test_no_instance_read_or_ops` | no agent requests `instance_read` / `instance_ops` | the B6 no-touch condition |
 | T11 | `test_no_mcp_full_access` | no aegis-family meta sets `mcp_full_access` | **the E4 fold** (B3) |
-| T12 | `test_aegis_carries_report_scrutiny_guidance` | aegis's surface contains `"[REPORT SANITY:"`, `"interim, not completion"`, `"send_message"` | **the B4 fold** |
+| T12 | `test_aegis_carries_report_scrutiny_guidance` | aegis's surface contains `"[REPORT SANITY:"`, `"interim, not completion"`, `"send_message"` — **AM-9: asserted over the UNION of `{rule.md, workflow.md, soul.md}` ∪ `{skills-template/*.md}` (mirroring test_report_integrity_prompts.py:250-265); the snippets live in `rule.md`; `aegis-strategy.md` carries NO report-delivery boilerplate** | **the B4 fold** |
 | T13 | `test_children_exempt_from_scrutiny_guidance` | children (empty teams) carry neither — mirrors sketcher's Section-7 exemption test (B8) | B4 exemption |
 | T14 | `test_no_system_internals_in_prose` ×4 | the §10 forbidden-token list over each agent's prompt surface | guide §1/§10 |
 | T15 | `test_no_md_path_tokens_in_prose` ×4 | zero `.md` hits, **with the operational-path exemptions enumerated** (the `.lib.sh` read targets, the engagement-folder paths) | guide §3 closure |
 | T16 | `test_rule_md_at_most_seven_cardinals` ×4 | 1 ≤ cardinals ≤ 7 | guide §3 |
 | T17 | `test_tone_block_in_soul` ×4 | the voice-to-caller + dispatch-voice + per-severity-framing block is present | guide §5 |
-| T18 | `test_no_adapted_from_provenance` ×4 | no "adapted from" / "migrated from" / "verified from" | guide §10 |
+| T18 | `test_no_adapted_from_provenance` ×4 | no "adapted from" / "migrated from" / "verified from" — **AM-8: the token list is EXTENDED to also refuse `preserved verbatim from` and the `per <agent> pattern, job <id>` shape (charter's own heading/header violate guide §10 but escape the original 3-token list)** | guide §10 |
 | T19 | `test_aegis_skills_name_no_out_of_team_fallback` | aegis's `skills-template/*.md` name **no** out-of-team peer as a spawn fallback; *"hand the report to the leader"* is an allowed caller reference | **guide §8 org-chart rule** (B8) |
 | T20 | `test_leader_team_includes_aegis` | `"aegis" ∈ leader.meta.team_members` | the A4 one-liner |
 | T21 | `test_seeded_skill_is_methodology_only` | the **only** `skill-set.yaml` entry in the family is `aegis-strategy`; the three installer skills appear in **no** manifest | file-invoked mode (C2/C6) |
 | T22 | `test_skill_set_entries_have_templates_and_match_versions` | each seeded skill has a template file and matching frontmatter/manifest versions | guide §6 |
-| T23 | `test_installer_fences_block_identical` | the three `.lib.sh` files carry an **identical** FENCES block | **the drift mitigation for DP2** |
-| T24 | `test_severity_taxonomy_declared` | `aegis-strategy` declares the 5 levels + the 9 finding fields | DP4 canonical home |
+| T23 | `test_installer_fences_block_identical` | ~~the three `.lib.sh` files carry an **identical** FENCES block~~ **[DEFINED by AM-10 — 2026-11-04]** PRIMARY: the three **`.md` FENCES bullet lists** byte-identical, scope = THE FENCES BULLET LIST ONLY (MUST include the C3 checksum bullet; MUST exclude per-tool content); SECONDARY: each `.lib.sh` carries a FENCES header mentioning the tool-agnostic keywords — explicitly NOT byte-identity vs the `.md` block | **the drift mitigation for DP2** |
+| T24 | `test_severity_taxonomy_declared` | `aegis-strategy` declares the 5 levels + the named finding-record fields (the printed list has **ten** — T24 pins the NAMES, not the count; corrected 2026-11-04 per D-6) | DP4 canonical home |
 | T25 | `test_worker_untouched` | `agents/worker/**` is byte-identical to the base commit | **mechanical proof of "ZERO changes to worker"** (A10) |
 | T26 | `test_default_queue_parallel` ×4 | all four declare `system_parallel_queue` | DP5 |
 | T27 | `test_model_assignments` | aegis = `agentic`; children = `coding` | DP6 |
@@ -817,7 +916,7 @@ promote**). Every phase ends with a gate that is independently checkable.
 | **P0 — Exemplar read + compliance checklist** | Read `agents/designer/{rule,workflow}.md`, `agents/sketcher/`, `agents/critic/`, `agents/charter/skills-template/install-mermaid-cli.*`, `docs/agent-prompt-writing-guide.md`; produce a checklist binding every guide §1/§2/§3/§4/§5/§6/§7/§8/§10 rule to the four agents | The checklist exists and every rule has a named target artifact; the architect signs it off before P1 |
 | **P1 — `aegis` agent** | `meta.json` (the DP1 matrix), `soul.md` (identity + tone block + per-severity framing), `rule.md` (≤7 cardinals: white-hat ethos, read-only, legality line, no-self-offensive-tools, sole-lane, report-scrutiny, END TURN), `workflow.md` (dispatch doctrine, fan-in ladder, END TURN, report→fix→re-verify), `tools_note.md` (allow table), `skill-set.yaml` + `skills-template/aegis-strategy.md` (the seeded methodology — canonical home for taxonomy + report format) | The guide-compliance checklist is satisfied **for aegis alone**; T1–T4, T12, T14–T18, T24, T26, T27 pass; the strategy skill's frontmatter version matches the manifest |
 | **P2 — the three children** | `hacker` (attack-surface mapping, fuzz-harness construction, self-owned sandbox discipline), `cracker` (crypto/credential/protocol audit, synthetic-corpus discipline, the hard "never real data" rule), `sweeper` (scanner suite + triage). Each: `meta.json` + 4 prompt files + `skills-template/<family>.md` | T5–T7, T13–T18, T26, T27 pass for all three; each child's prompt carries its **own** legality language — the commission's "white-hat ethos explicit in **every** persona" |
-| **P3 — the three installer libraries** | `fuzzing-toolchain.lib.sh`, `credential-bench.lib.sh`, `sast-toolchain.lib.sh`: the charter skeleton (fences → pre-flight → user-space install → **sha256-verify the release asset** → staged config → readiness probe → release lock → reversal) | T23 (identical FENCES blocks) passes; each library exposes a readiness probe with **exit 0 warm / 1 cold / 2 in-progress** and a mandatory reversal section; the checksum step is present in all three (the C3 gap, closed) |
+| **P3 — the three installer libraries** | `fuzzing-toolchain.lib.sh`, `credential-bench.lib.sh`, `sast-toolchain.lib.sh`: the charter skeleton (fences → pre-flight → user-space install → **sha256-verify the release asset** → staged config → readiness probe → release lock → reversal) | T23 (identical FENCES **bullet lists** in the three `.md` bodies, AM-10 scope; `.lib.sh` keyword headers as secondary) passes; each library exposes a readiness probe with **exit 0 warm / 1 cold / 2 in-progress** and a mandatory reversal section; the checksum step is present in all three (the C3 gap, closed) |
 | **P4 — pin ceremony + tests + the leader one-liner** | The **one commit**: 4 agent trees + `agents/leader/meta.json` one line + the regenerated baseline (161 → 177) + the new test file | `python3 scripts/protection/generate_prompt_artifact_baseline.py --check` ⇒ **exit 0**; the file has **exactly 177 rows**; `git show --stat` proves the commit contains the agent files, the leader edit, the baseline, and the test file together; the **baseline re-stamp is the last `agents/**` content change** in the lane |
 | **P5 — verification** | Full suite (net-new reds = 0 vs the base), the sealed leg, the census leg, the report-integrity leg, the boot-scan leg | **Gate A** the full suite: net-new deterministic reds **0**; **Gate B** `TestPhaseDDoesNotModifySealedArtifacts` green (the 35 sealed entries untouched); **Gate C** the plane census green with `DISCLOSED_READ_HOLDERS` unchanged at `{"watcher"}`; **Gate D** the report-integrity dynamic test green (aegis's scrutiny guidance found); **Gate E** the registry scan finds all four agents; **Gate F** the tool-categories artifact is byte-unchanged (the F-1 proof); **Gate G** the agents-tree manifest delta re-derived from the actual tree |
 | **P6 — staging handoff** | giter derives the next free version **W9-style**, stages the release; **migration delta expected EMPTY** (no `daemon/` change); full provenance sidecars; **NO promote** | The staged artifact verifies (4-way sha, sidecars clean, prompt baseline clean at 161/177-equivalent in the payload); the promote command is **recorded for the user's nonce ceremony and NOT executed**; the live daemon is untouched throughout |
@@ -852,7 +951,7 @@ promote**). Every phase ends with a gate that is independently checkable.
 |---|---|---|---|
 | T1 | Structural fence (deny) vs doctrinal fence (prose) | **Both** — deny removes the easy path; prose holds the hard path (A6) | The write-deny is *not* a boundary; `bash` remains unconstrained. The plan must say so plainly rather than implying containment |
 | T2 | Narrow allow vs usable allow | **Narrow but complete** — 17 categories for aegis, 6 for each child | `aegis` cannot read the DB, the env, or the service registry — deliberately |
-| T3 | Implied-member convenience vs roster fidelity | **Trim `knowledge`; accept `chart`** | The roster is `[hacker, cracker, sweeper, worker]` **plus** an implied `charter` (Q1) |
+| T3 | Implied-member convenience vs roster fidelity | ~~**Trim `knowledge`; accept `chart`**~~ **[SUPERSEDED by AM-1 — 2026-11-04]: trim `knowledge`; DROP `chart`** | The roster is exactly `[hacker, cracker, sweeper, worker]` — **no** implied member (the Q1 deviation is gone) |
 | T4 | Bank-seeded vs file-invoked skills | **Split** — methodology seeded, installers file-invoked | The install skeleton exists in three copies; T23 mitigates the drift |
 | T5 | In-repo vs off-repo findings | **Off-repo** | Findings are not PR-reviewable; the summary must travel with the hand-off (Q2) |
 | T6 | Broad capability vs bounded capability for children | **Bounded** — children get 6 categories and no `mcp` | Children cannot look up CVEs themselves; aegis supplies context in the dispatch prompt |
@@ -941,6 +1040,12 @@ promote**). Every phase ends with a gate that is independently checkable.
 ---
 
 ## Open Questions (architect)
+
+> **RESOLVED 2026-11-04** — all four questions below were ruled by the architect
+> (`architecture-recommendation.md` §2 @ `f7204bd9d`). Q1: **drop `chart`** (AM-1). Q2: **off-repo
+> ratified** (AM-4 corrections). Q3: **upheld with the premise corrected** — the live inventory
+> includes `zai-web-search` (AM-3). Q4: **omit the block; the watchover API is a tool-call gate, not a
+> supervisor** (AM-5). The question text below is retained as the historical record.
 
 **Q1 — the `chart` grant and the widened roster (DP1/DP5).** The commission assigns "report charts"
 to `worker`, but worker has no `chart` category and worker must not change (D4). The recommendation is

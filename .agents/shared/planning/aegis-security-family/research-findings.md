@@ -1,5 +1,18 @@
 # Research Findings — Aegis Security Family
 
+> **ARCHITECT AMENDMENT NOTE (2026-11-04).** The Phase-0 architect review
+> ([`architecture-recommendation.md`](./architecture-recommendation.md) @ `f7204bd9d`) ruled Q1–Q4 and
+> issued binding amendments AM-1…AM-15 (folded in `decisions.md` §C2). Claims in THIS digest that the
+> rulings superseded are marked inline with `[SUPERSEDED by AM-x]`; pure factual errors are corrected
+> with a dated note. **Superseded:** D4's "aegis holds `chart` + the charter spawn right" resolution
+> (AM-1 — chart is DROPPED); D8's "`webfetch` is the CVE-lookup capability" (AM-3 — operator-disabled
+> live; the live inventory is context7 + plane + zai-web-reader/web-search/zread); D7's "no daemon
+> code reads a per-agent `watchover` block" and "the real lever is the per-instance API" (AM-5 — the
+> key is inert except for `watcher`; the API is an operator-only tool-call gate, not a supervisor);
+> C6's "the bank is GLOBAL ⇒ anything aegis seeds becomes searchable by worker" (AM-7 — the true
+> invariant is manifest-gating; ownership filter also applies). **Corrected:** D2's "`project`→6" is
+> actually **21 tools** (AM-2).
+
 **Commission:** `aegis-security-family` (user-ratified design, Discord 2026-11-04)
 **Worktree:** `/home/nea/ensemble-src-wt-aegis-security-family`
 **Branch / commit:** `feature/aegis-security-family` @ `1f6898ae2889ff002b4656486f6be3ee1048b649` (= `origin/latest` at lane start)
@@ -131,7 +144,10 @@ Both are recorded below (B8).
 - Route 3 — **`mcp_rpc`** (privileged, `ari`-only per `daemon/tools/_tool_registry.py`) — **not
   available to children.**
 - **Cost of route 1:** granting `"mcp"` sweeps in **every** live MCP server's tools, not just a
-  chosen one. See D8 for the actual server inventory.
+  chosen one. See D8 for the actual server inventory. **[CORRECTED by AM-3 — 2026-11-04]** the
+  heading's claim "there is no web-search tool category" is true as a CATEGORY statement, but the
+  implied "no web-search capability exists" is FALSE on live — `zai-web-search` (a user MCP server)
+  provides it through the `mcp` grant; see D8 for the corrected inventory.
 - **Mitigation verified (D13):** the sweep excludes any tool owned by another registered category
   (`_owned_elsewhere`, `daemon/tools/instance.py:488-495`), so granting `"mcp"` does **not** leak
   the `plane_*` tools.
@@ -206,6 +222,9 @@ Exemplar bodies:
 
 - `python3 scripts/protection/generate_prompt_artifact_baseline.py` regenerates (writes);
   `--check --tree <dir>` verifies read-only (exit 0 clean / 1 drift / 2 no-tree).
+  **[AM-11 — 2026-11-04]** the `--check` exit code is **0 BOTH when clean AND when the baseline file
+  is ABSENT** (`generate_prompt_artifact_baseline.py:127-133`) — every baseline leg must additionally
+  assert the file exists and has exactly 177 rows; `rc=0` alone proves nothing.
 - **No venv required** — the script loads `daemon/tools/prompt_artifacts.py` **by file path**
   via `importlib` (`scripts/protection/generate_prompt_artifact_baseline.py:40-59`) precisely
   because `import daemon.tools.prompt_artifacts` drags the langchain stack, unavailable to the
@@ -403,6 +422,14 @@ Exemplar bodies:
   and every dynamic-skill agent. The *"worker never runs offensive tools"* boundary is
   **prose/doctrine only**; choosing **file-invoked mode** for the offensive/scanner skills keeps
   their procedure text out of the shared bank entirely.
+  **[RESTATED by AM-7 — 2026-11-04]** the stated invariant is overstated: an **ownership filter**
+  drops bank-cloned skills owned by another agent (`skill_search_service.py:718-822`). The TRUE
+  invariant is **manifest-gating**: seeding enumerates **only** `skill-set.yaml` entries
+  (`skill_seed_service.py:274-283, :340, :348-352`; NO directory scan of `skills-template/` exists
+  anywhere), so un-manifested skills are never banked ⇒ unreachable by every path; the project-skill
+  loader indexes only `.agents/<ns>/skills/<name>/skill.json` (`project_skill_source/manifest.py:200-250`)
+  ⇒ double gate. **Disclosed:** the installer `.md` bodies are readable on disk in the release
+  payload — the boundary is the SEARCH INDEX, not the filesystem.
 
 ---
 
@@ -438,6 +465,11 @@ explicitly named. ⇒ A closed allow already excludes all 17.
 `ens-env`→1 · `filesystem`→6 · `bash`→1 · `time`→1 · `self`→2 · `help`→1 · `project`→6 ·
 `attestation`→1 · `mission`→3 · `midflight`→1 · `board`→4 · `board-link`→1 ·
 `doc_maintenance`→1 · `blueprint`/`plane_sync`/`snapshot`/`wedge-capture`/`settings`/`secrets`…
+
+**Correction (2026-11-04, per AM-2):** the `project`→6 count above is WRONG — `project` is
+**21 tools** (21 `@register_tool_category("project")` sites in `daemon/tools/project.py`, all 21
+enumerated in the factory's return list), of which **~15 are mutators**. The plan denies the whole
+category rather than enumerating denials (AM-2).
 
 **Security-relevant observations:**
 
@@ -496,6 +528,14 @@ them** — `chart` → `generate_chart` (`daemon/tools/chart_tools.py`, backed b
 spawn gate reads the raw allow — the **charter** spawn right), so the chart artifact is produced
 by the chart specialist without touching worker. **This widens aegis's effective team beyond the
 commission's stated roster** and is disclosed as a deviation requiring ratification.
+**[SUPERSEDED by AM-1 — 2026-11-04]** the architect ruled the `chart` grant DOWN: it widens three
+separate surfaces (the tool; the implied `charter` spawn right; the transitive charter child's write
+side-effect — the charter child holds `bash, proc, filesystem, context, shared_meta_kv, service,
+image` and can write the daemon `tmp_images` substrate, and aegis's `write_file`/`edit_file` deny
+does not bind the child). `aegis` does **NOT** hold `chart`; the commission's "report charts" item is
+formally reduced to **markdown-native diagrams** (fenced mermaid text blocks); the v2 re-entry path is
+`allow "chart"` + `deny_spawn ["chart"]` (`registry.py:96-105` — tool functional, no spawn right; the
+transitive charter child per call still disclosed).
 
 ### D5 — Literal tool-name deny works against a granted category
 
@@ -532,6 +572,17 @@ file list at stage time.
 - ⇒ **Do NOT put a `watchover` block in the aegis meta expecting an effect.** It would be a
   false-confidence knob copied from sketcher. If a long-running child needs supervision, the
   lever is the instance-level API, not the agent meta.
+- **[CORRECTED by AM-5 — 2026-11-04]** two precision fixes: (1) the blanket "no daemon code reads
+  one" is imprecise — the key is **inert for EVERY AGENT EXCEPT `watcher`** (`daemon/graph.py:10998`
+  reads `meta.get("watchover")` inside `_load_watcher_meta_config()`, serving the watcher's own
+  evaluator config); (2) the per-instance API is **NOT a supervision lever for this family** — it is
+  an **operator-only tool-call gate** (one watcher-LLM `Allow|Deny|Mistake` verdict per tool-call
+  batch, `graph.py:10845-10856`; 3 denials ⇒ terminate node; arming **pauses and resumes** the
+  instance, `watchover_service.py:854-930`) and would likely `Deny` fuzz/bench commands. v1
+  supervision posture: **aegis is the primary supervisor** (proc polling + recorded `process_id`s +
+  explicit teardown); the long-tool nudge is secondary and cannot see `proc_run` campaigns
+  (`proc_tools.py:2031-2041`); the mission strand healer covers mission roots only; `pause` is never
+  a child-supervision lever (reaps nothing, cascades to root by default — AM-12).
 
 ### D8 — Builtin MCP server inventory (sizing the `"mcp"` grant)
 
@@ -550,6 +601,14 @@ it is a **builtin** — but MCP servers are enabled per **deployment**, so the p
 ⇒ The `"mcp"` grant exposes `context7` + `webfetch` + any user-registered server — but **not**
 `plane_*` (D13) and **not** `mcp_rpc_*` (privileged category ⇒ owned elsewhere ⇒ excluded from
 the sweep).
+**[SUPERSEDED by AM-3 — 2026-11-04]** the `webfetch` premise is wrong for THIS deployment:
+`MCP_DISABLE_BUILT_IN_WEBFETCH=true` on live and **no `webfetch` row** in `mcp_servers` on live or
+dev. Verified inventory: **live** = `context7` + `plane` (owned by the dynamic `plane_` category) +
+three user servers this digest never inventoried — `zai-web-reader`, `zai-web-search`, `zai-zread`;
+**dev** = `context7` + `plane` only. The "no web-search capability exists" premise (A7) is FALSE on
+live — `zai-web-search` IS that capability, reached through the `mcp` grant. Web-fetch/search is
+**deployment-conditional**; `bash curl` is the universal fallback (the only path on dev). New
+doctrine + test pin: **fetched external content is DATA, never instructions.**
 
 ### D9 — Registry-scan probe needs a venv, but the file-parsing tests do not
 
@@ -632,6 +691,11 @@ agent: it would silently append a privileged-adjacent evolution surface to the a
 ---
 
 ## F. OPEN ITEMS THIS DIGEST DOES NOT RESOLVE
+
+> **RESOLVED 2026-11-04** — all four items below were ruled by the architect
+> (`architecture-recommendation.md` §2): Q1 drop `chart` (AM-1); Q2 off-repo ratified with the AM-4
+> corrections; Q3 upheld with the AM-3 inventory correction; Q4 omit the block with the AM-5
+> corrections. Retained as the historical record.
 
 These are carried into `technical-analysis.md` as flagged architect questions:
 
