@@ -10,6 +10,7 @@
     "src/app/services/metrics.service.spec.ts",
     "src/app/components/charts/house-svg-renderer/house-svg-renderer.spec.ts",
     "src/app/components/charts/renderer-registry.spec.ts",
+    "src/app/app.resources-retirement.spec.ts",
     "src/app/pages/metrics/**/*.spec.ts"
   ]
 }

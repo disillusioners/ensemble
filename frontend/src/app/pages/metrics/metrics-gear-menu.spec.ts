@@ -1,15 +1,32 @@
 // The METRICS route + gear-menu pins (P5 task 5.6/5.8 · D1 pack
 // `metrics-fe-page`).
 //
-// House pattern (mirrors `pages/resources/resources-gear-menu.spec.ts`
-// and `pages/mcps-gateway/mcps-gateway.pins.spec.ts`): source-grep
-// pins over the production sources.
+// House pattern (mirrors `pages/mcps-gateway/mcps-gateway.pins.spec.ts`):
+// source-grep pins over the production sources.
 //
 // The load-bearing pin is P5-M7: the gear-menu entry's EXPECTED
 // POSITION. The Metrics entry is appended AFTER MCP Gateway and BEFORE
 // the conditional Database/Maintenance appends — those appends must
-// stay at the menu tail (the resources ordering pin and the gateway
-// ordering pin both depend on it).
+// stay at the menu tail (the gateway ordering pin depends on it).
+//
+// ── THE PHASE-7 RE-POINTING (T1 phase 7, task 7.5) ─────────────────────
+//
+// The standalone `Resources` gear entry is GONE (D-3): the resource
+// module is now tab 1 of this page and the `/resources` route is
+// retired. Two assertions are therefore DROPPED, each with its reason:
+//
+//   | the dropped assertion                                  | reason |
+//   |--------------------------------------------------------|--------|
+//   | `resourcesIdx` (the Resources entry EXISTS)             | the entry no longer exists — the surface is tab 1 of Metrics |
+//   | "Resources stays before the appends" (the ordering pin) | the entry is gone, so the pin has no subject |
+//
+// Both are REPLACED, not merely dropped: the "no Resources entry" and
+// "the Metrics entry remains" assertions below are STRONGER — they pin
+// the ABSENCE of the retired entry (so it cannot come back silently)
+// and the presence of the surviving one.
+//
+// The `Metrics` entry's own ordering assertion is UNCHANGED and still
+// pins `MCP Gateway → Metrics → (conditional appends)`.
 
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -28,28 +45,25 @@ describe('Metrics — the gear menu entry', () => {
   });
 
   it('places Metrics AFTER MCP Gateway and BEFORE the conditional appends (P5-M7)', () => {
-    const resourcesIdx = appTs.indexOf("{ label: 'Resources'");
     const gatewayIdx = appTs.indexOf("{ label: 'MCP Gateway'");
     const metricsIdx = appTs.indexOf("{ label: 'Metrics'");
     const dbUpdateIdx = appTs.indexOf('settingsMenuItems.update(items => [');
 
-    expect(resourcesIdx).toBeGreaterThan(-1);
     expect(gatewayIdx).toBeGreaterThan(-1);
     expect(metricsIdx).toBeGreaterThan(-1);
     expect(dbUpdateIdx).toBeGreaterThan(-1);
 
-    // Resources → MCP Gateway → Metrics → (conditional appends).
-    expect(resourcesIdx).toBeLessThan(gatewayIdx);
+    // MCP Gateway → Metrics → (conditional appends).
     expect(gatewayIdx).toBeLessThan(metricsIdx);
     expect(metricsIdx).toBeLessThan(dbUpdateIdx);
   });
 
-  it('keeps the Resources ordering pin intact (Resources stays before the appends)', () => {
-    const resourcesIdx = appTs.indexOf("{ label: 'Resources'");
-    const dbUpdateIdx = appTs.indexOf('settingsMenuItems.update(items => [');
-    expect(resourcesIdx).toBeGreaterThan(-1);
-    expect(dbUpdateIdx).toBeGreaterThan(-1);
-    expect(resourcesIdx).toBeLessThan(dbUpdateIdx);
+  it('has NO Resources gear entry (the surface is tab 1 of Metrics — D-3)', () => {
+    // The REPLACEMENT for the dropped `resourcesIdx` assertion: the
+    // retired entry must not come back, and the menu must not carry a
+    // second route to the same surfaces.
+    expect(appTs).not.toContain("{ label: 'Resources'");
+    expect(appTs).not.toContain("route: '/resources'");
   });
 
   it('does NOT add a top-level header link for /metrics', () => {
