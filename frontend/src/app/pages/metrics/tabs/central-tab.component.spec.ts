@@ -347,7 +347,9 @@ describe('MetricsCentralTabComponent — the availability rendering (ADJ-vi)', (
     fixture.detectChanges();
     const darks = fixture.nativeElement.querySelectorAll('[data-test="central-tab-family-dark"]');
     expect(darks.length).toBe(2);
-    const reasons = Array.from(darks).map((node) => node.getAttribute('data-reason'));
+    const reasons = Array.from(darks as NodeListOf<HTMLElement>).map((node) =>
+      node.getAttribute('data-reason'),
+    );
     expect(reasons).toEqual(['capture_off', 'census_gated']);
     // The reasons are rendered as TEXT, not only as an attribute.
     expect(fixture.nativeElement.textContent ?? '').toContain('the wedge capture is not active');
@@ -815,7 +817,9 @@ describe('MetricsCentralTabComponent — the DATA-END marker (T1 phase 8, task 8
       series: [
         {
           name: 'ensemble_readiness_component_state',
-          labels: null,
+          labels: {},
+          kind: 'gauge',
+          monotonic: false,
           points: [
             [T0 / 1000, 1],
             [T1 / 1000, 2],
@@ -848,7 +852,9 @@ describe('MetricsCentralTabComponent — the DATA-END marker (T1 phase 8, task 8
       series: [
         {
           name: 'ensemble_readiness_component_state',
-          labels: null,
+          labels: {},
+          kind: 'gauge',
+          monotonic: false,
           points: [[T0 / 1000, 1]],
         },
       ],
@@ -882,7 +888,7 @@ describe('MetricsCentralTabComponent — the DATA-END marker (T1 phase 8, task 8
           last_publish_age_s: 42.5,
         },
       ],
-    } as MetricsSnapshotPayload);
+    } as unknown as MetricsSnapshotPayload);
     fixture.detectChanges();
     const strip = fixture.nativeElement.querySelector('[data-test="central-tab-stat-strip"]');
     expect(strip).not.toBeNull();

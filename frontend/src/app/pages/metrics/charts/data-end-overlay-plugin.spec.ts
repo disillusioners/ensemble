@@ -52,7 +52,9 @@ function fakeChart(pixelFor: (value: number) => number = () => 120) {
     },
   };
   const chart = {
-    ctx,
+    // The house pattern (the anomaly overlay's spec does the same): the
+    // fake context is cast, never a full canvas implementation.
+    ctx: ctx as unknown as CanvasRenderingContext2D,
     chartArea: { top: 10, left: 20, right: 400, bottom: 300 },
     scales: { x: { getPixelForValue: pixelFor } },
   };

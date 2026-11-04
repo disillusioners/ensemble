@@ -133,6 +133,7 @@ describe('the banner GEOMETRY at 900 px (T1 phase 8, task 8.6)', () => {
   async function measure(
     code: keyof typeof METRICS_DOOR_STATE_COPY,
   ): Promise<{
+    body: { x: number; y: number; width: number; height: number };
     text: { x: number; y: number; width: number; height: number };
     button: { x: number; y: number; width: number; height: number };
     textContent: string;
@@ -141,7 +142,12 @@ describe('the banner GEOMETRY at 900 px (T1 phase 8, task 8.6)', () => {
       viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
     });
     await page.setContent(harness(METRICS_DOOR_STATE_COPY[code]));
-    const measured = await page.evaluate(() => {
+    const measured: {
+      body: { x: number; y: number; width: number; height: number } | null;
+      text: { x: number; y: number; width: number; height: number } | null;
+      button: { x: number; y: number; width: number; height: number } | null;
+      textContent: string;
+    } = await page.evaluate(() => {
       const rect = (selector: string) => {
         const node = document.querySelector(selector);
         const box = node?.getBoundingClientRect();
@@ -162,7 +168,12 @@ describe('the banner GEOMETRY at 900 px (T1 phase 8, task 8.6)', () => {
     if (!measured.text || !measured.button || !measured.body) {
       throw new Error('the harness rendered no banner');
     }
-    return measured;
+    return {
+      body: measured.body,
+      text: measured.text,
+      button: measured.button,
+      textContent: measured.textContent,
+    };
   }
 
   it('the banner text and the Retry button do NOT overlap at 900 px', async () => {

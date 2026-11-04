@@ -31,6 +31,7 @@ import {
   METRICS_DOOR_ERROR_COPY,
   METRICS_DOOR_STATE_COPY,
   METRICS_NO_LAST_GOOD_SUFFIX,
+  MetricsDoorErrorCode,
   MetricsDoorTimeoutError,
   decodeMetricsDoorError,
   formatAvailabilityReason,
@@ -459,7 +460,7 @@ describe('metrics model mirror — the door error decode (A-5, contract §5)', (
     for (const shape of mapped) {
       const decoded = decodeMetricsDoorError(shape);
       expect(decoded.code).toBe(shape.code);
-      expect(decoded.copy).toBe(METRICS_DOOR_ERROR_COPY[shape.code]);
+      expect(decoded.copy).toBe(METRICS_DOOR_ERROR_COPY[shape.code as MetricsDoorErrorCode]);
       expect(decoded.copy).not.toBe(METRICS_DOOR_ERROR_COPY.network);
     }
     // A status the door does NOT document still falls back — to the

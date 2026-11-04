@@ -328,7 +328,7 @@ describe('MetricsFamilyCatalogComponent — the drawer affordances (T1 phase 8, 
   it('every column header carries `aria-sort` and a click handler', () => {
     const headers = fixture.nativeElement.querySelectorAll('th');
     expect(headers.length).toBe(5);
-    for (const header of Array.from(headers)) {
+    for (const header of Array.from(headers) as HTMLElement[]) {
       expect(header.getAttribute('aria-sort')).toBeTruthy();
     }
     // The sort is WIRED, not inert: a click re-orders the rows.
@@ -342,7 +342,7 @@ describe('MetricsFamilyCatalogComponent — the drawer affordances (T1 phase 8, 
   it('the dark families are FINDABLE (a filter narrows the rows)', () => {
     const input = fixture.nativeElement.querySelector('[data-test="families-filter"]');
     expect(input).not.toBeNull();
-    component.onFilter({ target: { value: 'F2' } });
+    component.onFilter({ target: { value: 'F2' } } as unknown as Event);
     fixture.detectChanges();
     expect(component.visibleFamilies().map((entry) => entry.id)).toEqual(['F2']);
     expect(fixture.nativeElement.querySelector('[data-test="families-no-match"]')).toBeNull();
