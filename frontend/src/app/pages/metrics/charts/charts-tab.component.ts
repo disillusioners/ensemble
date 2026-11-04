@@ -17,6 +17,8 @@ import { NgComponentOutlet } from '@angular/common';
 
 import { MetricsService } from '../../../services/metrics.service';
 import {
+  METRICS_NO_LAST_GOOD_SUFFIX,
+  METRICS_STALE_SUFFIX_TREND,
   MetricsChartRole,
   MetricsSeriesPayload,
   decodeMetricsDoorError,
@@ -325,9 +327,18 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
           if (token !== this.requestSeq) {
             return;
           }
-          // A-5: the copy branches on the decoded failure class; the
-          // last-known trend is kept in EVERY branch.
-          this.error.set(`${decodeMetricsDoorError(err).copy} — the last known trend is kept.`);
+          // A-5: the copy branches on the decoded failure class.
+          //
+          // 8.4 — the same truthful rule as the overview tab: the
+          // suffix is chosen by the FACT (a last-good exists or not),
+          // never appended unconditionally.
+          const decoded = decodeMetricsDoorError(err);
+          const hasLastGood = this.payload() !== null;
+          this.error.set(
+            `${decoded.copy} — ${
+              hasLastGood ? METRICS_STALE_SUFFIX_TREND : METRICS_NO_LAST_GOOD_SUFFIX
+            }.`,
+          );
           this.stale.set(this.payload() !== null);
         },
       });

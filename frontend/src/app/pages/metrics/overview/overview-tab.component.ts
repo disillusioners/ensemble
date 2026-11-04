@@ -16,6 +16,8 @@ import { DecimalPipe } from '@angular/common';
 
 import { MetricsService } from '../../../services/metrics.service';
 import {
+  METRICS_NO_LAST_GOOD_SUFFIX,
+  METRICS_STALE_SUFFIX_VALUES,
   MetricsSnapshotPayload,
   MetricsSnapshotSeries,
   decodeMetricsDoorError,
@@ -290,9 +292,22 @@ export class OverviewTabComponent implements OnInit, OnDestroy {
           if (token !== this.requestSeq) {
             return;
           }
-          // A-5: the copy branches on the decoded failure class; the
-          // last-known values are kept in EVERY branch.
-          this.error.set(`${decodeMetricsDoorError(err).copy} — the last known values are kept.`);
+          // A-5: the copy branches on the decoded failure class.
+          //
+          // 8.4 — THE COPY STATES THE TRUTH FOR THE CASE THAT IS
+          // HAPPENING: the old sentence claimed "the last known values
+          // are kept" UNCONDITIONALLY, so a failure with NO last-good
+          // promised a retention that never happened while the page
+          // rendered no values at all. The suffix is now chosen by the
+          // FACT: a last-good exists ⇒ the STALE badge carries it; no
+          // last-good ⇒ the copy says so.
+          const decoded = decodeMetricsDoorError(err);
+          const hasLastGood = this.snapshot() !== null;
+          this.error.set(
+            `${decoded.copy} — ${
+              hasLastGood ? METRICS_STALE_SUFFIX_VALUES : METRICS_NO_LAST_GOOD_SUFFIX
+            }.`,
+          );
           this.stale.set(this.snapshot() !== null);
         },
       });

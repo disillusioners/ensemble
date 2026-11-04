@@ -15,7 +15,7 @@
 //    closed literal set breaks the FE type-check leg
 //    (`tsc --noEmit -p tsconfig.metrics-fe.json`).
 
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 
 import {
@@ -29,6 +29,8 @@ import {
   MetricsSnapshotPayload,
   MetricsSeriesPayload,
   METRICS_DOOR_ERROR_COPY,
+  METRICS_DOOR_STATE_COPY,
+  METRICS_NO_LAST_GOOD_SUFFIX,
   MetricsDoorTimeoutError,
   decodeMetricsDoorError,
   formatAvailabilityReason,
@@ -429,17 +431,43 @@ describe('metrics model mirror — the door error decode (A-5, contract §5)', (
   });
 
   it('falls back honestly for every other failure — never the unreachable claim', () => {
-    for (const shape of [
-      { status: 401, error: { detail: { error: 'AUTH_REQUIRED', message: 'auth required' } } },
-      { status: 404, error: { detail: { error: 'unknown_family', message: 'no such family' } } },
-      { status: 400, error: { detail: { error: 'invalid_cursor', message: 'bad cursor' } } },
-      { status: 500 },
-    ]) {
+    // ── RE-POINTED BY PHASE 8 (task 8.1 / AM-4) ──────────────────────
+    // This leg used to assert that 401, 404 and 400 all decode to
+    // `unexpected`. That WAS the defect: the FIRST state every real
+    // operator meets (401) wore the "unexpected error" copy and a live
+    // Retry button. The three statuses now carry their OWN classes, so
+    // the leg asserts the NEW mapping and keeps its original intent —
+    // a status the door does not document never wears the
+    // "unreachable" claim.
+    const mapped = [
+      {
+        status: 401,
+        error: { detail: { error: 'AUTH_REQUIRED', message: 'auth required' } },
+        code: 'auth_required',
+      },
+      {
+        status: 404,
+        error: { detail: { error: 'unknown_family', message: 'no such family' } },
+        code: 'unknown_family',
+      },
+      {
+        status: 400,
+        error: { detail: { error: 'invalid_cursor', message: 'bad cursor' } },
+        code: 'bad_request',
+      },
+    ];
+    for (const shape of mapped) {
       const decoded = decodeMetricsDoorError(shape);
-      expect(decoded.code).toBe('unexpected');
-      expect(decoded.copy).toBe(METRICS_DOOR_ERROR_COPY.unexpected);
+      expect(decoded.code).toBe(shape.code);
+      expect(decoded.copy).toBe(METRICS_DOOR_ERROR_COPY[shape.code]);
       expect(decoded.copy).not.toBe(METRICS_DOOR_ERROR_COPY.network);
     }
+    // A status the door does NOT document still falls back — to the
+    // honest fallback, never to the unreachable claim.
+    const undocumented = decodeMetricsDoorError({ status: 500 });
+    expect(undocumented.code).toBe('unexpected');
+    expect(undocumented.copy).toBe(METRICS_DOOR_ERROR_COPY.unexpected);
+    expect(undocumented.copy).not.toBe(METRICS_DOOR_ERROR_COPY.network);
   });
 
   it('the flat body shape decodes too (the auth-middleware shape)', () => {
@@ -488,5 +516,220 @@ describe('metrics model mirror — the door error decode (A-5, contract §5)', (
       }
       expect(METRICS_DOOR_ERROR_COPY.timeout).not.toBe(copy);
     }
+  });
+});
+
+// ── THE PHASE-8 DOOR-STATE TABLE (task 8.1 / 8.11 / 8.12) ────────────────
+//
+// The table is a CLOSED UNION of TEN classes with a per-class copy,
+// action and RETRY POLICY. Three pins carry the weight:
+//
+//   1. EXHAUSTIVE — every class in the union has a copy entry, and
+//      every copy entry names a class. A class added to the union
+//      without a copy breaks the build (the table is the SSOT).
+//   2. THE 403 BRANCHES — `SCOPE_INSUFFICIENT` ⇒ `scope_insufficient`;
+//      ANY other 403 ⇒ `forbidden_other`. The OLD predicate labelled
+//      every 403-with-a-code as a scope failure — a false statement
+//      about the operator's session (8.12 / AM-20).
+//   3. THE COPY SSOT — the flat banner map is DERIVED from the
+//      structured one, and the two duplicated suffixes that lived in
+//      two tab bodies now live HERE (8.11 / AM-20).
+
+/** The TEN classes of the closed union — the table's own census. */
+const TEN_CLASSES = [
+  'auth_required',
+  'auth_not_configured',
+  'scope_insufficient',
+  'forbidden_other',
+  'unknown_family',
+  'bad_request',
+  'timeout',
+  'registry_unavailable',
+  'network',
+  'unexpected',
+] as const;
+
+/** The classes the plan names as NOT retryable (8.1). */
+const NO_RETRY_CLASSES = [
+  'auth_required',
+  'auth_not_configured',
+  'unknown_family',
+  'bad_request',
+  'timeout',
+] as const;
+
+describe('metrics model — the CLOSED door-state table (T1 phase 8, task 8.1 / AM-4)', () => {
+  it('is a CLOSED union of exactly the TEN classes', () => {
+    expect(Object.keys(METRICS_DOOR_STATE_COPY).sort()).toEqual([...TEN_CLASSES].sort());
+    expect(Object.keys(METRICS_DOOR_ERROR_COPY).sort()).toEqual([...TEN_CLASSES].sort());
+    expect(TEN_CLASSES).toHaveLength(10);
+  });
+
+  it('gives EVERY class a cause, a meaning, an action and a pointer slot', () => {
+    for (const code of TEN_CLASSES) {
+      const copy = METRICS_DOOR_STATE_COPY[code];
+      expect(copy).toBeDefined();
+      expect(copy.cause.length).toBeGreaterThan(0);
+      expect(copy.meaning.length).toBeGreaterThan(0);
+      expect(copy.action.length).toBeGreaterThan(0);
+      // The pointer slot is ALWAYS present (null when there is no
+      // procedure to point at) — never an absent member.
+      expect('pointer' in copy).toBe(true);
+    }
+  });
+
+  it('carries a per-class RETRY POLICY, and the plan\'s five classes are NO-Retry', () => {
+    for (const code of TEN_CLASSES) {
+      expect(typeof METRICS_DOOR_STATE_COPY[code].retryable).toBe('boolean');
+    }
+    for (const code of NO_RETRY_CLASSES) {
+      expect(METRICS_DOOR_STATE_COPY[code].retryable).toBe(false);
+    }
+    // The actionable state is a CONFIGURATION error — a Retry on it can
+    // never succeed.
+    expect(METRICS_DOOR_STATE_COPY.auth_not_configured.retryable).toBe(false);
+    expect(METRICS_DOOR_STATE_COPY.auth_required.retryable).toBe(false);
+  });
+
+  it('the auth_not_configured copy is ACTIONABLE — cause, meaning, action and the RUNBOOK', () => {
+    const copy = METRICS_DOOR_STATE_COPY.auth_not_configured;
+    expect(copy.cause).toContain('fail-closed');
+    expect(copy.meaning).toContain('daemon configuration');
+    expect(copy.pointer).toBe('docs/runbooks/oauth2-auth.md');
+    expect(copy.action.length).toBeGreaterThan(0);
+  });
+
+  it('NO environment-variable name appears in ANY door-state copy (the plan\'s risk row)', () => {
+    for (const code of TEN_CLASSES) {
+      const copy = METRICS_DOOR_STATE_COPY[code];
+      const blob = `${copy.cause} ${copy.meaning} ${copy.action} ${copy.pointer ?? ''}`;
+      expect(blob).not.toContain('ENSEMBLE_');
+      expect(blob).not.toContain('POSTGRES_');
+      expect(blob).not.toContain('OPENAI_');
+    }
+  });
+
+  it('decodes a 401 to the FIRST-CLASS sign-in state (never `unexpected`)', () => {
+    const decoded = decodeMetricsDoorError({
+      status: 401,
+      error: { detail: { error: 'AUTH_REQUIRED', message: 'authentication required' } },
+    });
+    expect(decoded.code).toBe('auth_required');
+    expect(decoded.copy).toBe(METRICS_DOOR_ERROR_COPY.auth_required);
+  });
+
+  it('decodes a 404 to `unknown_family` and a 400 to `bad_request`', () => {
+    expect(
+      decodeMetricsDoorError({ status: 404, error: { detail: { error: 'unknown_family' } } }).code,
+    ).toBe('unknown_family');
+    expect(
+      decodeMetricsDoorError({ status: 400, error: { detail: { error: 'invalid_cursor' } } }).code,
+    ).toBe('bad_request');
+    expect(
+      decodeMetricsDoorError({ status: 400, error: { detail: { error: 'invalid_label_filter' } } })
+        .code,
+    ).toBe('bad_request');
+  });
+
+  it('THE 403 BRANCHES ARE BOTH PINNED (task 8.12 / AM-20)', () => {
+    // Branch A — the scope token ⇒ the scope class.
+    const scoped = decodeMetricsDoorError({
+      status: 403,
+      error: { detail: { error: 'SCOPE_INSUFFICIENT', message: 'Token lacks required scope' } },
+    });
+    expect(scoped.code).toBe('scope_insufficient');
+    // Branch B — ANY other 403 ⇒ the NEW class, NEVER the scope one.
+    const other = decodeMetricsDoorError({
+      status: 403,
+      error: { detail: { error: 'CSRF_FAILED', message: 'csrf guard' } },
+    });
+    expect(other.code).toBe('forbidden_other');
+    expect(other.code).not.toBe('scope_insufficient');
+    expect(other.copy).toBe(METRICS_DOOR_ERROR_COPY.forbidden_other);
+    // A 403 with NO body code at all is also `forbidden_other`.
+    expect(decodeMetricsDoorError({ status: 403 }).code).toBe('forbidden_other');
+  });
+
+  it('the scope token is matched CASE-INSENSITIVELY (and only that token)', () => {
+    expect(
+      decodeMetricsDoorError({ status: 403, error: { detail: { error: 'scope_insufficient' } } })
+        .code,
+    ).toBe('scope_insufficient');
+    expect(
+      decodeMetricsDoorError({ status: 403, error: { detail: { error: 'SCOPE_OTHER' } } }).code,
+    ).toBe('forbidden_other');
+  });
+
+  it('the 503 branches stay distinct — the fail-closed auth and the unwired provider', () => {
+    expect(
+      decodeMetricsDoorError({ status: 503, error: { detail: { error: 'AUTH_NOT_CONFIGURED' } } })
+        .code,
+    ).toBe('auth_not_configured');
+    expect(
+      decodeMetricsDoorError({ status: 503, error: { detail: { error: 'registry_unavailable' } } })
+        .code,
+    ).toBe('registry_unavailable');
+  });
+});
+
+describe('metrics model — the COPY SSOT (T1 phase 8, task 8.11 / IMPL-18 / AM-20)', () => {
+  it('the flat banner map is DERIVED from the structured one (never a second source)', () => {
+    for (const code of TEN_CLASSES) {
+      expect(METRICS_DOOR_ERROR_COPY[code]).toBe(METRICS_DOOR_STATE_COPY[code].cause);
+    }
+  });
+
+  it('the flat map carries NO literal copy of its own (the source has one home)', () => {
+    // The flat map is a PROJECTION — the sentences live in the
+    // structured table. A second literal table would be the defect the
+    // audit found.
+    const flatStart = modelSource.indexOf('export const METRICS_DOOR_ERROR_COPY');
+    const flatEnd = modelSource.indexOf('};', flatStart);
+    const flatBlock = modelSource.slice(flatStart, flatEnd);
+    expect(flatBlock).not.toMatch(/scope_insufficient:\s*'/);
+    expect(flatBlock).not.toMatch(/auth_not_configured:\s*'/);
+    expect(flatBlock).not.toMatch(/network:\s*'/);
+  });
+
+  it('the two DUPLICATED suffixes live in the SSOT and nowhere else', () => {
+    // The suffixes used to be inlined in the overview and charts tab
+    // bodies — the same sentence in two files (8.11).
+    const repoFrontend = join(repoRoot, 'frontend', 'src', 'app');
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!entry.name.endsWith('.ts') || entry.name.endsWith('.spec.ts')) {
+          continue;
+        }
+        const text = readFileSync(full, 'utf-8');
+        for (const phrase of ['the last known values are kept', 'the last known trend is kept']) {
+          if (text.includes(phrase)) {
+            offenders.push(`${full}: ${phrase}`);
+          }
+        }
+      }
+    };
+    walk(repoFrontend);
+    // Exactly ONE home: the model's SSOT. The SSOT itself is under
+    // `models/`, so the count is 1 per phrase.
+    expect(offenders.filter((line) => line.includes('the last known values are kept'))).toHaveLength(
+      1,
+    );
+    expect(offenders.filter((line) => line.includes('the last known trend is kept'))).toHaveLength(
+      1,
+    );
+    expect(offenders.every((line) => line.includes(`${join('models', 'metrics.model.ts')}`))).toBe(
+      true,
+    );
+  });
+
+  it('the SSOT also carries the NO-LAST-GOOD suffix (8.4 — the truthful case)', () => {
+    expect(METRICS_NO_LAST_GOOD_SUFFIX.length).toBeGreaterThan(0);
+    expect(METRICS_NO_LAST_GOOD_SUFFIX).not.toContain('are kept');
   });
 });
