@@ -377,15 +377,18 @@ describe('MetricsCentralTabComponent — the availability rendering (ADJ-vi)', (
       monotonic: false,
       chart_role: 'line' as const,
     }));
+    // The DARK family comes FIRST — that is the order that matters: a
+    // slice taken BEFORE the availability filter would spend the first
+    // slots on the dark family's names and cut the live ones.
     fixture.componentRef.setInput('state', state({
       families: [
-        family({ id: 'F1', names: liveNames }),
         family({
           id: 'F2',
           names: darkNames,
           live_series_count: 0,
           availability: { state: 'dark', reason: 'capture_off' },
         }),
+        family({ id: 'F1', names: liveNames }),
       ],
     }));
     fixture.detectChanges();
