@@ -40,6 +40,9 @@ import {
   DEFAULT_TIMELINE_SERIES,
   TIMELINE_SERIES_DEFS,
   TimelineSeriesKey,
+  resolveTimelineSeriesJoin,
+  markerAnchorKey,
+  TimelineSeriesJoin,
 } from './timeline-series';
 import { METRICS_UNIT_UNKNOWN, metricsUnitFor } from '../../metrics-units';
 import { TimelineMarkerClick, anomalyDrilldownWindow } from './timeline-drilldown';
@@ -203,14 +206,18 @@ export class TimelineTabComponent {
 
   /**
    * The unit-class spec of a series key (the class travels with the
-   * series). The key comes from the WIRE (`anomaly.series_key`), so an
-   * unknown key resolves to `null` and the marker joins NO panel.
+   * series).
+   *
+   * The key comes from the WIRE (`anomaly.series_key`), and the wire
+   * carries TWO vocabularies (B-1): the history endpoint's FE-style
+   * keys AND the anomalies endpoint's ENGINE keys (`daemon.rss_kb`,
+   * …). The lookup therefore goes through the B-1 COMPATIBILITY SHIM
+   * (`resolveTimelineSeriesJoin` — the typed table in
+   * `timeline-series.ts`), which resolves both; an unknown key still
+   * resolves to `null` and the marker joins NO panel (never a guess).
    */
   private unitClassOf(key: string): 'memory' | 'cpu' | 'count' | null {
-    const def = TIMELINE_SERIES_DEFS.find(
-      (candidate) => candidate.key === (key as TimelineSeriesKey),
-    );
-    return def ? def.unitClass : null;
+    return resolveTimelineSeriesJoin(key)?.unitClass ?? null;
   }
 
   /** Whether a unit-class panel has any enabled series to draw. */
@@ -245,13 +252,25 @@ export class TimelineTabComponent {
   /**
    * The anomaly markers of ONE unit-class panel — the house plugin's
    * shape, with the VISIBLE API-word label composed per anomaly (5.7).
+   *
+   * B-1: the marker's `seriesId` is the FE DATASET id the overlay's
+   * draw join (`houseDatasetIndex`) and the click join
+   * (`houseNearestAnomaly`) both match on — so an ENGINE-keyed marker
+   * resolves through the compatibility shim to its panel's dataset
+   * (`markerAnchorKey`), while its LABEL keeps the API's engine words
+   * verbatim (`anomalyMarkerLabel` reads the anomaly, never the join).
    */
   private panelAnomalies(unitClass: string): HouseAnomalyMarker[] {
+    const enabled = this.series();
     return this.anomalies()
-      .filter((anomaly) => this.unitClassOf(anomaly.series_key) === unitClass)
-      .map((anomaly) => ({
+      .map((anomaly) => ({ anomaly, join: resolveTimelineSeriesJoin(anomaly.series_key) }))
+      .filter(
+        (entry): entry is { anomaly: Anomaly; join: TimelineSeriesJoin } =>
+          entry.join !== null && entry.join.unitClass === unitClass,
+      )
+      .map(({ anomaly, join }) => ({
         anomalyId: anomaly.id,
-        seriesId: anomaly.series_key,
+        seriesId: markerAnchorKey(join.unitClass, enabled, join.anchorKey),
         tsMs: parseNaiveUtc(anomaly.t_start).getTime(),
         severity: anomaly.severity,
         title: anomalyMarkerLabel(anomaly),

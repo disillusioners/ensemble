@@ -516,31 +516,50 @@ export class ChartPanelComponent implements AfterViewInit, OnDestroy {
    *
    * When the click landed on an anomaly marker, the marker id rides
    * along; otherwise the payload carries no id (never a fabricated one).
+   *
+   * B-1 (2026-11-04): the interaction is `mode: 'index'`, so the
+   * elements list carries ONE ENTRY PER DATASET at the clicked index —
+   * and an anomaly marker may be anchored to ANY dataset of the panel
+   * (the vocabulary shim anchors engine-keyed markers to their panel's
+   * dataset, which need not be the first). Resolution therefore scans
+   * the marker-bearing element first and falls back to the FIRST
+   * element's plain payload — a click on a plain sample behaves exactly
+   * as before, while every anchored marker is pointer-reachable.
    */
   private onChartClick(elements: readonly { datasetIndex: number; index: number }[]): void {
-    const element = elements?.[0];
-    if (!element) {
+    if (!elements?.length) {
       return;
     }
-    const series = this.series()[element.datasetIndex];
-    if (!series) {
-      return;
+    let plainPayload: ChartPointClick | null = null;
+    for (const element of elements) {
+      const series = this.series()[element.datasetIndex];
+      if (!series) {
+        continue;
+      }
+      const point = series.points[element.index];
+      if (!point) {
+        continue;
+      }
+      const marker = houseNearestAnomaly(
+        this.anomalies(),
+        series.id,
+        point.t,
+        this.clickToleranceMs(series),
+      );
+      const payload: ChartPointClick = {
+        anomalyId: marker?.anomalyId,
+        seriesId: series.id,
+        tsMs: point.t,
+      };
+      if (marker) {
+        this.onPointClick()?.(payload);
+        return;
+      }
+      plainPayload ??= payload;
     }
-    const point = series.points[element.index];
-    if (!point) {
-      return;
+    if (plainPayload) {
+      this.onPointClick()?.(plainPayload);
     }
-    const marker = houseNearestAnomaly(
-      this.anomalies(),
-      series.id,
-      point.t,
-      this.clickToleranceMs(series),
-    );
-    this.onPointClick()?.({
-      anomalyId: marker?.anomalyId,
-      seriesId: series.id,
-      tsMs: point.t,
-    });
   }
 
   /** The click tolerance — one sample spacing of the clicked series. */
