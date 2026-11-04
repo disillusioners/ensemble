@@ -102,6 +102,18 @@ import {
         min-width: 0;
       }
 
+      /*
+       * The Retry button NEVER shrinks (task 8.6).
+       *
+       * The text takes the free space and wraps; the button keeps its
+       * size and MOVES to its own line when the line runs out. A
+       * shrinking button is a squashed button — and a squashed button
+       * is one more way for the text and the button to collide.
+       */
+      .metrics-banner button {
+        flex: 0 0 auto;
+      }
+
       .metrics-banner-text,
       .metrics-banner-meaning,
       .metrics-banner-action,
@@ -126,10 +138,28 @@ import {
         font-family: monospace;
       }
 
+      /*
+       * THE NARROW-WIDTH STACK (task 8.6).
+       *
+       * Below the audit's 900 px the banner STACKS: the copy block
+       * takes the full width and the button moves UNDER it, so the two
+       * can never share a line.
+       *
+       * The copy block's flex MUST be reset here: in a COLUMN flex
+       * container the flex-basis is the HEIGHT, so the inherited
+       * 1 1 18rem basis would pin the block to an 18rem box — and a
+       * longer copy would OVERFLOW that box straight into the button
+       * below it. (The 900 px geometry spec caught exactly that.)
+       */
       @media (max-width: 900px) {
         .metrics-banner {
           flex-direction: column;
           align-items: flex-start;
+        }
+
+        .metrics-banner-body {
+          flex: 0 0 auto;
+          width: 100%;
         }
       }
     `,
