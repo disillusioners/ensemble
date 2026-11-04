@@ -1056,4 +1056,20 @@ export * from './mcps-gateway.model';
 // the FROZEN envelope + the three route payloads. The door is
 // `docs/architecture/metrics-query-contract.md`; the mirror is
 // `models/metrics.model.ts` (its own spec is the field-set pin).
-export * from './metrics.model';
+// The metrics mirror is re-exported TYPE-ONLY.
+//
+// The barrel is imported by EAGER modules (the app shell and several
+// pages), so a VALUE re-export puts the whole metrics mirror — the
+// payload shapes, the formatters and the door-state copy table — into
+// the INITIAL bundle: every operator downloads the /metrics vocabulary
+// at startup, whether or not they ever open /metrics.
+//
+// The type-only re-export keeps the barrel's public surface IDENTICAL
+// for types (every `import { Agent } from '../../models'` still works)
+// while leaving the mirror's RUNTIME values to the modules that use
+// them — the metrics page's own tree, which is LAZY.
+//
+// (Phase 8, task 8.1/8.11: the door-state copy table grew the eager
+// chunk past the B1 allowance; this is the house's own answer — the
+// new bytes must be lazy.)
+export type * from './metrics.model';
