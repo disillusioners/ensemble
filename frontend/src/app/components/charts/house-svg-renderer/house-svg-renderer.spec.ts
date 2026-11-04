@@ -27,6 +27,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 
 import { CHART_SEVERITY_COLORS } from '../chart-theme';
+import { metricsCustomTab } from '../../../pages/metrics/tabs.manifest';
 import {
   CHART_PLOT_BOTTOM,
   CHART_PLOT_LEFT,
@@ -492,11 +493,11 @@ describe('HouseSvgRendererComponent — the rewritten component assertions', () 
 
 describe('house-svg-renderer — the capability checklist (6/6)', () => {
   it('(1) the window ladder is present (the resource timeline owns 4 windows)', () => {
-    // Imported lazily here so the spec stays a leaf: the ladder is the
-    // SURFACE's vocabulary, the renderer draws what the surface gives it.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { TIMELINE_WINDOWS } = require('../../../pages/metrics/resource/timeline/timeline-tab.component');
-    expect(TIMELINE_WINDOWS).toEqual(['15m', '1h', '24h', '7d']);
+    // T1 phase 5 (task 5.13): the ladder's SSOT moved to the manifest's
+    // CUSTOM entry (the frozen `ResourcesWindow` union) — the relocated
+    // timeline panel carries no window-ladder constant of its own. The
+    // capability is re-read from the manifest, the same 4 windows.
+    expect(metricsCustomTab().allowedWindows).toEqual(['15m', '1h', '24h', '7d']);
   });
 
   it('(2) the series toggle capability is present (the renderer draws what it is given)', async () => {

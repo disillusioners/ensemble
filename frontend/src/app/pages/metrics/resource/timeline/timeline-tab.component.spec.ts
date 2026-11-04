@@ -1,6 +1,28 @@
+// The TIMELINE PANEL spec (T1 phase 5 — the panel is PRESENTATIONAL).
+//
+// Phase-5 disposition of the phase-1..4 legs (per-assertion, none
+// dropped — see phase5-evidence.md for the full table):
+//
+//   * the window state, the window-picker UI and the window fetches
+//     (selectWindow / loadTimeline / TIMELINE_WINDOWS / DEFAULT_TIMELINE_WINDOW)
+//     MOVED to the tab body (5.4) — their assertions now live in
+//     `tabs/resource-tab.component.spec.ts` (one history request per
+//     range change, the generation supersede);
+//   * the drill-down's "a window change closes the panel" leg is
+//     DISPOSITIONED: in phase 5 the drill-down is WINDOW-INDEPENDENT
+//     (5.4), so a window change neither fetches nor closes it;
+//   * everything the panel still owns (series toggles, truncated
+//     banner, the drill-down + its supersede token, the data-gap
+//     strip, the skeleton/error branches driven by the body's inputs)
+//     is asserted HERE.
+
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { Subject, of, throwError } from 'rxjs';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { provideNoopAnimations } from '@angular/platform-browser/animations';
+
 import { ResourcesService } from '../../../../services/resources.service';
 import {
   AnomaliesPayload,
@@ -9,10 +31,7 @@ import {
   HistoryPayload,
   TracebackPayload,
 } from '../../../../models/resources.models';
-import {
-  DEFAULT_TIMELINE_WINDOW,
-  TimelineTabComponent,
-} from './timeline-tab.component';
+import { TimelineTabComponent } from './timeline-tab.component';
 
 // ── Fixtures — naive-UTC wire strings (D10) ─────────────────────────
 
@@ -81,17 +100,13 @@ function makeTraceback(overrides: Partial<TracebackPayload> = {}): TracebackPayl
   };
 }
 
-describe('TimelineTabComponent', () => {
+describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
   let fixture: ComponentFixture<TimelineTabComponent>;
   let component: TimelineTabComponent;
   const resourcesMock: {
-    getHistory: jest.Mock;
-    getAnomalies: jest.Mock;
     getEvidence: jest.Mock;
     getTraceback: jest.Mock;
   } = {
-    getHistory: jest.fn(),
-    getAnomalies: jest.fn(),
     getEvidence: jest.fn(),
     getTraceback: jest.fn(),
   };
@@ -107,15 +122,13 @@ describe('TimelineTabComponent', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [TimelineTabComponent],
-      providers: [{ provide: ResourcesService, useValue: resourcesMock }],
+      providers: [provideNoopAnimations(), { provide: ResourcesService, useValue: resourcesMock }],
     }).compileComponents();
     fixture = TestBed.createComponent(TimelineTabComponent);
     component = fixture.componentInstance;
   });
 
   beforeEach(() => {
-    resourcesMock.getHistory.mockReset();
-    resourcesMock.getAnomalies.mockReset();
     resourcesMock.getEvidence.mockReset();
     resourcesMock.getTraceback.mockReset();
     jest.spyOn(console, 'warn').mockImplementation(() => {});
@@ -123,27 +136,44 @@ describe('TimelineTabComponent', () => {
 
   afterEach(() => {
     (console.warn as jest.Mock).mockRestore();
+    fixture.destroy();
   });
 
-  function startHappyPath(): void {
-    resourcesMock.getHistory.mockReturnValue(of(makeHistory()));
-    resourcesMock.getAnomalies.mockReturnValue(of(makeAnomalies()));
-    fixture.detectChanges(); // ngOnInit → loadTimeline
+  /** Feed the panel the body-owned inputs (as the tab body does). */
+  function feedData(
+    history: HistoryPayload = makeHistory(),
+    anomalies: readonly Anomaly[] = [makeAnomaly()],
+  ): void {
+    fixture.componentRef.setInput('history', history);
+    fixture.componentRef.setInput('anomalies', anomalies);
+    fixture.componentRef.setInput('loading', false);
+    fixture.componentRef.setInput('error', null);
+    fixture.detectChanges();
   }
 
-  it('defaults to the 1h window and fetches history + anomalies with it', () => {
-    expect(DEFAULT_TIMELINE_WINDOW).toBe('1h');
-    startHappyPath();
+  it('renders the skeleton ONLY from the body\'s loading input (5.4 — the body owns the fetch)', () => {
+    fixture.componentRef.setInput('history', null);
+    fixture.componentRef.setInput('loading', true);
+    fixture.componentRef.setInput('error', null);
+    fixture.detectChanges();
+    expect(query('[data-test="timeline-skeleton"]')).not.toBeNull();
+    expect(query('[data-test="timeline-chart"]')).toBeNull();
 
-    expect(resourcesMock.getHistory).toHaveBeenCalledTimes(1);
-    expect(resourcesMock.getHistory).toHaveBeenCalledWith('1h');
-    expect(resourcesMock.getAnomalies).toHaveBeenCalledTimes(1);
-    expect(resourcesMock.getAnomalies).toHaveBeenCalledWith('1h');
+    // The first good fetch clears it — the body feeds the payload.
+    feedData();
+    expect(query('[data-test="timeline-skeleton"]')).toBeNull();
+    expect(query('[data-test="timeline-chart"]')).not.toBeNull();
   });
 
-  it('renders the house SVG timeline with non-empty series paths', () => {
-    startHappyPath();
+  it('renders NO chart and NO skeleton when the body has neither data nor a load in flight', () => {
+    // The transitional shell state: inputs untouched (loading defaults false).
+    fixture.detectChanges();
+    expect(query('[data-test="timeline-skeleton"]')).toBeNull();
+    expect(query('[data-test="timeline-chart"]')).toBeNull();
+  });
 
+  it('renders the house SVG timeline with non-empty series paths from the body\'s payload', () => {
+    feedData();
     expect(query('[data-test="timeline-chart"]')).not.toBeNull();
     const lines = queryAll('[data-test="house-series-line"]');
     expect(lines.length).toBeGreaterThan(0);
@@ -153,95 +183,58 @@ describe('TimelineTabComponent', () => {
   });
 
   it('renders the truncated banner strictly from the frozen payload flag (D9)', () => {
-    resourcesMock.getHistory.mockReturnValue(
-      of(makeHistory({ resolution_used: 'minute', truncated: true })),
-    );
-    resourcesMock.getAnomalies.mockReturnValue(of(makeAnomalies()));
-    fixture.detectChanges();
-
+    feedData(makeHistory({ resolution_used: 'minute', truncated: true }));
     expect(query('[data-test="truncated-banner"]')).not.toBeNull();
 
-    // A non-truncated payload hides it — no FE fallback logic.
-    resourcesMock.getHistory.mockReturnValue(of(makeHistory({ truncated: false })));
-    resourcesMock.getAnomalies.mockReturnValue(of(makeAnomalies()));
-    component.selectWindow('24h');
-    fixture.detectChanges();
-
+    feedData(makeHistory({ truncated: false }));
     expect(query('[data-test="truncated-banner"]')).toBeNull();
   });
 
-  it('re-fetches both series on a window change', () => {
-    startHappyPath();
-    expect(resourcesMock.getHistory).toHaveBeenCalledTimes(1);
-
-    resourcesMock.getHistory.mockReturnValue(of(makeHistory()));
-    resourcesMock.getAnomalies.mockReturnValue(of(makeAnomalies()));
-    component.selectWindow('24h');
-    fixture.detectChanges();
-
-    expect(resourcesMock.getHistory).toHaveBeenCalledTimes(2);
-    expect(resourcesMock.getHistory).toHaveBeenLastCalledWith('24h');
-    expect(resourcesMock.getAnomalies).toHaveBeenLastCalledWith('24h');
-  });
-
-  it('does not re-fetch when selecting the already-active window', () => {
-    startHappyPath();
-    component.selectWindow('1h');
-    expect(resourcesMock.getHistory).toHaveBeenCalledTimes(1);
-  });
-
-  it('shows the skeleton only before the first successful fetch', () => {
-    const pending = new Subject<HistoryPayload>();
-    resourcesMock.getHistory.mockReturnValue(pending.asObservable());
-    resourcesMock.getAnomalies.mockReturnValue(of(makeAnomalies()));
-
-    fixture.detectChanges();
-    expect(query('[data-test="timeline-skeleton"]')).not.toBeNull();
-    expect(query('[data-test="timeline-chart"]')).toBeNull();
-
-    pending.next(makeHistory());
-    pending.complete(); // forkJoin emits only when every source completes
-    fixture.detectChanges();
-
-    expect(query('[data-test="timeline-skeleton"]')).toBeNull();
-    expect(query('[data-test="timeline-chart"]')).not.toBeNull();
-
-    // A background window change must NOT re-flash the skeleton.
-    resourcesMock.getHistory.mockReturnValue(new Subject<HistoryPayload>().asObservable());
-    resourcesMock.getAnomalies.mockReturnValue(new Subject<AnomaliesPayload>().asObservable());
-    component.selectWindow('24h');
-    fixture.detectChanges();
-
-    expect(query('[data-test="timeline-skeleton"]')).toBeNull();
-    expect(query('[data-test="timeline-chart"]')).not.toBeNull();
-  });
-
-  it('retains last-good data and shows exactly one error branch with retry', () => {
-    startHappyPath();
-
-    resourcesMock.getHistory.mockReturnValue(throwError(() => new Error('boom')));
-    resourcesMock.getAnomalies.mockReturnValue(throwError(() => new Error('boom')));
-    component.selectWindow('24h');
+  it('shows exactly ONE error branch from the body\'s error input, and Retry emits to the owner', () => {
+    feedData(); // last-good chart first
+    fixture.componentRef.setInput('error', 'Unable to load resource history — showing the last known window.');
     fixture.detectChanges();
 
     expect(queryAll('[data-test="timeline-error"]').length).toBe(1);
     expect(query('[data-test="timeline-retry"]')).not.toBeNull();
-    // Retained chart still renders underneath.
+    // The retained chart still renders underneath.
     expect(query('[data-test="timeline-chart"]')).not.toBeNull();
 
-    // Retry re-kicks the load.
-    resourcesMock.getHistory.mockReturnValue(of(makeHistory()));
-    resourcesMock.getAnomalies.mockReturnValue(of(makeAnomalies()));
+    // Retry hands back to the BODY (the fetch owner) — it never fetches itself.
+    const retried: number[] = [];
+    component.retry.subscribe(() => retried.push(1));
     query('[data-test="timeline-retry"]').nativeElement.click();
     fixture.detectChanges();
+    expect(retried).toEqual([1]); // the panel holds no history fetcher — the source pin below
+  });
 
-    expect(query('[data-test="timeline-error"]')).toBeNull();
-    expect(query('[data-test="timeline-chart"]')).not.toBeNull();
+  it('renders the data-gap chips derived from the payload, worded as a DATA GAP only (5.8)', () => {
+    // daemon_cpu drops to 0 then regrows; cgroup_mem_mb goes null then regrows.
+    const gapped = makeHistory({
+      points: [
+        { t: '2026-10-18T16:00:00', daemon_cpu: 1, daemon_rss_mb: 1700, cgroup_mem_mb: 5800, threads: 40, instances_active: 5 },
+        { t: '2026-10-18T16:15:00', daemon_cpu: 0, daemon_rss_mb: 1750, cgroup_mem_mb: null, threads: 42, instances_active: 5 },
+        { t: '2026-10-18T16:30:00', daemon_cpu: 3, daemon_rss_mb: 1800, cgroup_mem_mb: 5900, threads: 44, instances_active: 6 },
+      ],
+    });
+    feedData(gapped);
+
+    const chips = queryAll('[data-test="data-gap-chip"]');
+    expect(chips.length).toBe(2);
+    const text = chips.map((chip) => chip.nativeElement.textContent as string).join('\n');
+    expect(text).toContain('DATA GAP — series unavailable in this interval');
+    expect(/restart/i.test(text)).toBe(false);
+    expect(/deploy/i.test(text)).toBe(false);
+    expect(/promote/i.test(text)).toBe(false);
+  });
+
+  it('renders NO data-gap strip for an uninterrupted payload', () => {
+    feedData();
+    expect(query('[data-test="data-gaps"]')).toBeNull();
   });
 
   it('clicking an anomaly marker fetches evidence + traceback with the padded window (AC5)', () => {
-    startHappyPath();
-
+    feedData();
     resourcesMock.getEvidence.mockReturnValue(of(makeEvidence()));
     resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
 
@@ -250,10 +243,9 @@ describe('TimelineTabComponent', () => {
     marker.triggerEventHandler('click', null);
     fixture.detectChanges();
 
-    // Exactly one evidence call for the clicked anomaly id.
     expect(resourcesMock.getEvidence).toHaveBeenCalledTimes(1);
     expect(resourcesMock.getEvidence).toHaveBeenCalledWith('anom-1');
-    // Exactly one traceback call, with the pad rule window (max(60s, 10% span)).
+    // The pad rule window (max(60s, 10% span)) — the ported policy (4.2).
     expect(resourcesMock.getTraceback).toHaveBeenCalledTimes(1);
     expect(resourcesMock.getTraceback).toHaveBeenCalledWith(
       '2026-10-18T16:29:00.000Z',
@@ -261,8 +253,24 @@ describe('TimelineTabComponent', () => {
     );
   });
 
+  it('openDrilldown(anomaly) — the anomalies panel\'s row-click path (5.5) — runs the SAME drill-down', () => {
+    feedData();
+    resourcesMock.getEvidence.mockReturnValue(of(makeEvidence()));
+    resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
+
+    component.openDrilldown(makeAnomaly());
+    fixture.detectChanges();
+
+    expect(query('[data-test="drilldown-panel"]')).not.toBeNull();
+    expect(resourcesMock.getEvidence).toHaveBeenCalledWith('anom-1');
+    expect(resourcesMock.getTraceback).toHaveBeenCalledWith(
+      '2026-10-18T16:29:00.000Z',
+      '2026-10-18T16:41:00.000Z',
+    );
+  });
+
   it('renders the drill-down panel: anomaly summary, contributors, traceback children', () => {
-    startHappyPath();
+    feedData();
     resourcesMock.getEvidence.mockReturnValue(of(makeEvidence()));
     resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
 
@@ -272,32 +280,28 @@ describe('TimelineTabComponent', () => {
     const panel = query('[data-test="drilldown-panel"]');
     expect(panel).not.toBeNull();
 
-    // Anomaly summary: kind / shape / severity / observed vs baseline.
     expect(query('[data-test="anomaly-kind"]').nativeElement.textContent).toContain('memory');
     expect(query('[data-test="anomaly-shape"]').nativeElement.textContent).toContain('ramp');
     expect(query('[data-test="anomaly-severity"]').nativeElement.textContent).toContain('high');
     expect(query('[data-test="anomaly-observed"]').nativeElement.textContent).toContain('1900');
     expect(query('[data-test="anomaly-baseline"]').nativeElement.textContent).toContain('1700');
 
-    // Contributors with share_pct + the unattributed honesty row.
     const contributors = query('[data-test="contributors"]').nativeElement.textContent as string;
     expect(contributors).toContain('62.5');
     expect(contributors).toContain('unattributed');
 
-    // Traceback children, incl. the chart_render hot signal.
     const children = query('[data-test="traceback-children"]');
     expect(children.nativeElement.textContent).toContain('chart_render');
     const hot = children.queryAll(By.css('.child-row.hot'));
     expect(hot.length).toBe(1);
     expect(hot[0].nativeElement.getAttribute('data-hot')).toBe('true');
 
-    // Alive instances + in-flight tasks surfaced.
     expect(query('[data-test="traceback-alive"]').nativeElement.textContent).toContain('worker');
     expect(query('[data-test="traceback-inflight"]').nativeElement.textContent).toContain('work-9');
   });
 
   it('shows the drill-down error branch with retry on a failed drill-down fetch', () => {
-    startHappyPath();
+    feedData();
     resourcesMock.getEvidence.mockReturnValue(throwError(() => new Error('boom')));
     resourcesMock.getTraceback.mockReturnValue(throwError(() => new Error('boom')));
 
@@ -316,8 +320,8 @@ describe('TimelineTabComponent', () => {
     expect(query('[data-test="contributors"]')).not.toBeNull();
   });
 
-  it('toggles a series on and off (parent owns series state)', () => {
-    startHappyPath();
+  it('toggles a series on and off (the panel owns the toggles)', () => {
+    feedData();
     const before = queryAll('[data-test="house-series-line"]').length;
 
     component.toggleSeries('threads');
@@ -329,67 +333,11 @@ describe('TimelineTabComponent', () => {
     expect(queryAll('[data-test="house-series-line"]').length).toBe(before);
   });
 
-  // ── Stale-response supersede (hardening pass) ──────────────────────
-
-  it('drops an out-of-order window response — the newer window wins', () => {
-    // Window A ('1h' via ngOnInit) hangs in flight.
-    const historyA = new Subject<HistoryPayload>();
-    const anomaliesA = new Subject<AnomaliesPayload>();
-    resourcesMock.getHistory.mockReturnValueOnce(historyA.asObservable());
-    resourcesMock.getAnomalies.mockReturnValueOnce(anomaliesA.asObservable());
-    fixture.detectChanges(); // ngOnInit → loadTimeline('1h')
-
-    // Switch to window B — resolves immediately.
-    const historyB = makeHistory({ resolution_used: 'minute', truncated: true });
-    resourcesMock.getHistory.mockReturnValueOnce(of(historyB));
-    resourcesMock.getAnomalies.mockReturnValueOnce(of(makeAnomalies()));
-    component.selectWindow('24h');
-    fixture.detectChanges();
-
-    expect(resourcesMock.getHistory).toHaveBeenCalledTimes(2);
-    expect(resourcesMock.getHistory).toHaveBeenLastCalledWith('24h');
-    expect(component.history()).toBe(historyB); // B landed
-    expect(query('[data-test="truncated-banner"]')).not.toBeNull();
-
-    // A's slower response arrives LATE — it must be discarded.
-    historyA.next(makeHistory({ truncated: false }));
-    historyA.complete();
-    anomaliesA.next(makeAnomalies());
-    anomaliesA.complete();
-    fixture.detectChanges();
-
-    // UI/state still reflects B — A's stale payload never landed.
-    expect(component.window()).toBe('24h');
-    expect(component.history()).toBe(historyB);
-    expect(query('[data-test="truncated-banner"]')).not.toBeNull();
-  });
-
-  it('drops an out-of-order window ERROR — a stale failure never flips the banner', () => {
-    const historyA = new Subject<HistoryPayload>();
-    const anomaliesA = new Subject<AnomaliesPayload>();
-    resourcesMock.getHistory.mockReturnValueOnce(historyA.asObservable());
-    resourcesMock.getAnomalies.mockReturnValueOnce(anomaliesA.asObservable());
-    fixture.detectChanges(); // window A in flight
-
-    const historyB = makeHistory();
-    resourcesMock.getHistory.mockReturnValueOnce(of(historyB));
-    resourcesMock.getAnomalies.mockReturnValueOnce(of(makeAnomalies()));
-    component.selectWindow('24h');
-    fixture.detectChanges();
-    expect(query('[data-test="timeline-error"]')).toBeNull();
-
-    // A fails late, AFTER B already succeeded — no stale error branch.
-    historyA.error(new Error('late boom'));
-    fixture.detectChanges();
-
-    expect(query('[data-test="timeline-error"]')).toBeNull();
-    expect(component.history()).toBe(historyB);
-  });
+  // ── Stale-response supersede (the drill-down keeps its own token) ──
 
   it('drops an out-of-order drill-down response — the newer marker click wins', () => {
-    startHappyPath();
+    feedData();
 
-    // First marker click hangs in flight.
     const evidenceA = new Subject<EvidencePayload>();
     const tracebackA = new Subject<TracebackPayload>();
     resourcesMock.getEvidence.mockReturnValueOnce(evidenceA.asObservable());
@@ -399,7 +347,6 @@ describe('TimelineTabComponent', () => {
     expect(component.drilldownLoading()).toBe(true);
     expect(component.evidence()).toBeNull();
 
-    // Second click on the marker supersedes it and resolves immediately.
     const evidenceB = makeEvidence({
       contributors: [{ instance_id: 'inst-9', agent_id: 'leader', share_pct: 99 }],
     });
@@ -410,7 +357,6 @@ describe('TimelineTabComponent', () => {
     expect(component.drilldownLoading()).toBe(false);
     expect(component.evidence()).toBe(evidenceB);
 
-    // A's slower drill-down arrives LATE — discarded.
     evidenceA.next(makeEvidence());
     evidenceA.complete();
     tracebackA.next(makeTraceback());
@@ -422,8 +368,8 @@ describe('TimelineTabComponent', () => {
     expect(query('[data-test="contributors"]').nativeElement.textContent).toContain('99');
   });
 
-  it('drops an in-flight drill-down response after a window change closes the panel', () => {
-    startHappyPath();
+  it('a late failed drill-down never flips the panel when a newer one already succeeded', () => {
+    feedData();
 
     const evidenceA = new Subject<EvidencePayload>();
     const tracebackA = new Subject<TracebackPayload>();
@@ -431,24 +377,38 @@ describe('TimelineTabComponent', () => {
     resourcesMock.getTraceback.mockReturnValueOnce(tracebackA.asObservable());
     query('[data-test="house-anomaly-marker"]').triggerEventHandler('click', null);
     fixture.detectChanges();
-    expect(query('[data-test="drilldown-panel"]')).not.toBeNull();
 
-    // Window change closes the drill-down while its fetch is in flight.
-    resourcesMock.getHistory.mockReturnValue(of(makeHistory()));
-    resourcesMock.getAnomalies.mockReturnValue(of(makeAnomalies()));
-    component.selectWindow('24h');
+    resourcesMock.getEvidence.mockReturnValueOnce(of(makeEvidence()));
+    resourcesMock.getTraceback.mockReturnValueOnce(of(makeTraceback()));
+    component.openDrilldown(makeAnomaly());
     fixture.detectChanges();
-    expect(query('[data-test="drilldown-panel"]')).toBeNull();
+    expect(query('[data-test="drilldown-error"]')).toBeNull();
 
-    // The late drill-down response must NOT repopulate the closed panel.
-    evidenceA.next(makeEvidence());
-    evidenceA.complete();
-    tracebackA.next(makeTraceback());
-    tracebackA.complete();
+    evidenceA.error(new Error('late boom'));
     fixture.detectChanges();
 
-    expect(query('[data-test="drilldown-panel"]')).toBeNull();
-    expect(component.evidence()).toBeNull();
-    expect(component.traceback()).toBeNull();
+    expect(query('[data-test="drilldown-error"]')).toBeNull();
+    expect(component.evidence()).not.toBeNull();
+  });
+});
+
+describe('TimelineTabComponent — the window-INDEPENDENCE pins (5.4)', () => {
+  const src = readFileSync(
+    join(__dirname, 'timeline-tab.component.ts'),
+    'utf-8',
+  );
+
+  it('the panel carries NO window state and NO window fetch (the body owns them)', () => {
+    expect(src).not.toContain('selectWindow');
+    expect(src).not.toContain('TIMELINE_WINDOWS');
+    expect(src).not.toContain('DEFAULT_TIMELINE_WINDOW');
+    expect(src).not.toContain('getHistory');
+    expect(src).not.toContain('getAnomalies');
+    expect(src).not.toContain('window-picker');
+    expect(src).not.toContain('mat-button-toggle');
+  });
+
+  it('the panel exposes openDrilldown for the anomalies row click (5.5)', () => {
+    expect(src).toContain('openDrilldown(anomaly: Anomaly)');
   });
 });

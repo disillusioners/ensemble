@@ -3,22 +3,20 @@ import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
-  OnInit,
   computed,
   inject,
+  input,
+  output,
   signal,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
-import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
-import { MatTooltipModule } from '@angular/material/tooltip';
 import { forkJoin } from 'rxjs';
 import {
   Anomaly,
   EvidencePayload,
   HistoryPayload,
-  ResourcesWindow,
   TracebackPayload,
   formatUtcLabel,
   parseNaiveUtc,
@@ -40,65 +38,64 @@ import {
   TimelineSeriesKey,
 } from './timeline-series';
 import { TimelineMarkerClick, anomalyDrilldownWindow } from './timeline-drilldown';
+import { detectResourceDataGaps } from './data-gaps';
 
 /**
- * Timeline tab — history SVG + anomaly markers + marker-click drill-down.
+ * Timeline PANEL — the history chart + anomaly markers + drill-down
+ * (T1 phase 5, tasks 5.2/5.4: the panel is PRESENTATIONAL).
  *
- * Semantics (D7 / D10, proven by `timeline-tab.component.spec.ts`):
- *  - `forkJoin({ history, anomalies })` on mount and on every window
- *    change — the two series stay for the SAME window (no skew).
- *  - Skeleton fires ONLY before the first successful fetch; a later
- *    window change retains the last-good chart while the new window
- *    loads (never a blank flash).
- *  - A failed load flips the SINGLE error branch (retry CTA).
- *  - A marker click runs `forkJoin({ evidence, traceback })` with the
- *    primitive's padded `t0`/`t1` (D10) and renders the drill-down
- *    panel below the chart.
- *  - Stale-response supersede (hardening pass): every fetch captures a
- *    monotonically increasing sequence token at start; a response that
- *    resolves after a NEWER fetch on the same path is DISCARDED, never
- *    allowed to overwrite newer state (window loads and drill-down
- *    each own a token — they run concurrently, so a marker click must
- *    not drop an in-flight window load and vice versa). A window
- *    change invalidates any open drill-down via `clearDrilldown()`.
- *  - The `truncated` banner is rendered strictly from the frozen
- *    payload flag — NO FE fallback logic (D9).
+ * ── WHAT CHANGED IN PHASE 5 (5.4) ─────────────────────────────────────
+ *
+ * The panel's own window-toggle UI is REMOVED. The window belongs to the
+ * tab body (the module's own labelled "Timeline range" control — AM-19);
+ * the body fetches the window's history + anomalies and hands BOTH down
+ * here as inputs. The panel no longer fetches on its own, owns no window
+ * state, and carries no window-ladder constant (the ladder's SSOT
+ * is the frozen `ResourcesWindow` union + the manifest's custom entry —
+ * the pinned residue check 5.13 greps this tree for exactly that
+ * absence).
+ *
+ * What the panel STILL owns:
+ *  - the series toggles (the parent-of-the-chart owns the toggles — the
+ *    renderer draws exactly the series it is given);
+ *  - the truncated banner (strictly from the frozen payload flag, D9);
+ *  - the data-gap annotation strip (5.8 — derived from the history
+ *    payload, never worded as restart/deploy/promote);
+ *  - the DRILL-DOWN (D10): a marker click — or the anomalies panel's
+ *    row click handed down through `openDrilldown` — runs
+ *    `forkJoin({ evidence, traceback })` with the padded window and
+ *    renders the panel below the chart. A monotonic supersede token
+ *    (D-hardening) drops a stale drill-down response.
  */
-
-/** Window selector order — frozen wire values (§2.8). */
-export const TIMELINE_WINDOWS: readonly ResourcesWindow[] = ['15m', '1h', '24h', '7d'];
-
-/** Plan T4 default. (The leader's dispatch mentioned 24h; the plan rules 1h.) */
-export const DEFAULT_TIMELINE_WINDOW: ResourcesWindow = '1h';
 
 @Component({
   selector: 'app-resources-timeline',
   standalone: true,
-  imports: [
-    CommonModule,
-    MatButtonModule,
-    MatButtonToggleModule,
-    MatIconModule,
-    MatTooltipModule,
-    NgComponentOutlet,
-  ],
+  imports: [CommonModule, MatButtonModule, MatIconModule, NgComponentOutlet],
   templateUrl: './timeline-tab.component.html',
   styleUrl: './timeline-tab.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class TimelineTabComponent implements OnInit {
+export class TimelineTabComponent {
   private readonly resources = inject(ResourcesService);
   private readonly destroyRef = inject(DestroyRef);
 
-  readonly windows = TIMELINE_WINDOWS;
+  // ── The body-owned data (5.4: the panel is presentational) ────────
+  /** The window's history payload — `null` until the first good fetch. */
+  readonly history = input<HistoryPayload | null>(null);
+  /** The window's anomalies — the markers + the anomalies panel's rows. */
+  readonly anomalies = input<readonly Anomaly[]>([]);
+  /** True while the body is waiting for the FIRST good history fetch. */
+  readonly loading = input(false);
+  /** The body's history error branch — one line, last-good retained. */
+  readonly error = input<string | null>(null);
+
+  /** The body's retry — the panel's Retry CTA hands back to the owner. */
+  readonly retry = output<void>();
+
   readonly seriesDefs = TIMELINE_SERIES_DEFS;
 
-  readonly window = signal<ResourcesWindow>(DEFAULT_TIMELINE_WINDOW);
-  readonly history = signal<HistoryPayload | null>(null);
-  readonly anomalies = signal<readonly Anomaly[]>([]);
-  readonly error = signal<string | null>(null);
-
-  /** Enabled series (the primitive is presentational — parent owns state). */
+  /** Enabled series (the renderer is presentational — the panel owns the toggles). */
   readonly series = signal<readonly TimelineSeriesKey[]>(DEFAULT_TIMELINE_SERIES);
 
   // ── Drill-down state ─────────────────────────────────────────────
@@ -109,71 +106,24 @@ export class TimelineTabComponent implements OnInit {
   readonly drilldownError = signal<string | null>(null);
 
   /**
-   * Stale-response supersede tokens (one per fetch path). Monotonic;
-   * a response whose captured token is no longer current is dropped.
-   * Window loads and drill-downs each own a token because they run
-   * concurrently — superseding one path must not drop the other.
+   * Stale-response supersede token of the drill-down path. The window +
+   * anomalies loads each own a token at the BODY (three request classes,
+   * 5.11); the drill-down keeps its own token here because it runs
+   * concurrently with the window loads.
    */
-  private timelineSeq = 0;
   private drilldownSeq = 0;
 
-  /** Skeleton renders only before the first successful fetch (D7). */
-  readonly showSkeleton = computed(
-    () => this.history() === null && this.error() === null,
-  );
   readonly showError = computed(() => this.error() !== null);
   readonly points = computed(() => this.history()?.points ?? []);
   /** Render the banner strictly from the frozen payload flag (D9). */
   readonly truncated = computed(() => this.history()?.truncated === true);
   readonly resolutionUsed = computed(() => this.history()?.resolution_used ?? null);
 
-  ngOnInit(): void {
-    this.loadTimeline();
-  }
-
-  selectWindow(window: ResourcesWindow): void {
-    if (window === this.window()) {
-      return;
-    }
-    this.window.set(window);
-    // A window change invalidates any open drill-down.
-    this.clearDrilldown();
-    this.loadTimeline();
-  }
+  /** The data-gap annotations derived from the history payload (5.8). */
+  readonly dataGaps = computed(() => detectResourceDataGaps(this.points()));
 
   onRetry(): void {
-    this.loadTimeline();
-  }
-
-  /** `forkJoin({ history, anomalies })` for the active window (D6 shape). */
-  private loadTimeline(): void {
-    const window = this.window();
-    const token = ++this.timelineSeq;
-    this.error.set(null);
-    forkJoin({
-      history: this.resources.getHistory(window),
-      anomalies: this.resources.getAnomalies(window),
-    })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: ({ history, anomalies }) => {
-          if (token !== this.timelineSeq) {
-            return; // superseded by a newer load — stale payload never lands
-          }
-          this.history.set(history);
-          this.anomalies.set(anomalies.anomalies);
-        },
-        error: (err) => {
-          if (token !== this.timelineSeq) {
-            return; // a newer load owns the outcome — no stale error flip
-          }
-          // Retain last-good chart; only the error branch flips.
-          this.error.set(
-            'Unable to load resource history — showing the last known window.',
-          );
-          console.warn('[ResourcesTimeline] timeline load failed:', err);
-        },
-      });
+    this.retry.emit();
   }
 
   // ── The RENDERER REGISTRY (task 4.13) ─────────────────────────────
@@ -181,9 +131,9 @@ export class TimelineTabComponent implements OnInit {
   /**
    * The STATIC registry — the house SVG only.
    *
-   * The resources route never reaches the interactive vendor: its
-   * timeline is a static shape, so the registry it uses carries no
-   * Chart.js renderer at all.
+   * Phase 5's 5.9 re-points this plan onto the Chart.js panel role in
+   * its own commit (the AM-27 second re-point); this is the registry
+   * Phase 4 left behind.
    */
   private readonly registry = createHouseSvgRegistry();
 
@@ -268,8 +218,7 @@ export class TimelineTabComponent implements OnInit {
     if (!anomaly) {
       return;
     }
-    const { t0, t1 } = anomalyDrilldownWindow(anomaly);
-    this.onMarkerClick({ anomaly, t0, t1 });
+    this.openDrilldown(anomaly);
   }
 
   // ── Series toggles ───────────────────────────────────────────────
@@ -285,9 +234,19 @@ export class TimelineTabComponent implements OnInit {
     );
   }
 
-  // ── Marker click → drill-down (D10 padded window from the primitive) ─
+  // ── Drill-down (D10 padded window from the primitive) ─────────────
 
-  onMarkerClick(click: TimelineMarkerClick): void {
+  /**
+   * Open the drill-down for an anomaly — the marker click's path AND
+   * the anomalies panel's row click (5.5: the row click opens the
+   * EXISTING drill-down; the body forwards the row here).
+   */
+  openDrilldown(anomaly: Anomaly): void {
+    const { t0, t1 } = anomalyDrilldownWindow(anomaly);
+    this.runDrilldown({ anomaly, t0, t1 });
+  }
+
+  private runDrilldown(click: TimelineMarkerClick): void {
     const token = ++this.drilldownSeq;
     this.selectedAnomaly.set(click.anomaly);
     this.evidence.set(null);
@@ -337,8 +296,7 @@ export class TimelineTabComponent implements OnInit {
     if (anomaly === null) {
       return;
     }
-    const { t0, t1 } = anomalyDrilldownWindow(anomaly);
-    this.onMarkerClick({ anomaly, t0, t1 });
+    this.openDrilldown(anomaly);
   }
 
   // ── Display helpers ──────────────────────────────────────────────

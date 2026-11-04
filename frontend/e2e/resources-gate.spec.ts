@@ -202,44 +202,22 @@ test('[AC8] gear menu → /resources → two tabs → live + self-cost → timel
   await expect(chip).toContainText('0.42%');
   await expect(chip).toContainText('320');
 
-  // ── Timeline tab: ≥1 SVG path + an anomaly marker. ──
+  // ── The Timeline tab's surface MOVED to /metrics tab 1 (T1 phase 5,
+  //    tasks 5.1/5.2). The /resources shell still hosts the section, but
+  //    the timeline PANEL is now body-driven (its window + data come from
+  //    the flat tab-1 column's own control + fetches), so this retired
+  //    route renders it in the transitional empty state until phase 7's
+  //    7.4 deletes the route (the plan accepts the retired-route specs
+  //    breaking mid-phase). The SVG-path + marker drill-down legs above
+  //    are DISPOSITIONED to the metrics page: the same assertions run as
+  //    jest specs at the new home (resource-tab.component.spec.ts + the
+  //    moved timeline-tab.component.spec.ts, which assert the chart, the
+  //    marker click → padded drill-down, the flat three-section order and
+  //    the panel's own range control). This leg asserts the transitional
+  //    state honestly instead of pretending the old UI is still here.
   await page.getByRole('tab', { name: 'Timeline' }).click();
-  await expect(page.locator('[data-test="timeline-chart"]')).toBeVisible();
-
-  const lines = page.locator('[data-test="series-line"]');
-  await expect(lines.first()).toBeVisible();
-  const lineCount = await lines.count();
-  expect(lineCount).toBeGreaterThanOrEqual(1);
-  const firstD = await lines.first().getAttribute('d');
-  expect((firstD ?? '').length).toBeGreaterThan(0);
-
-  const marker = page.locator('[data-test="anomaly-marker"]').first();
-  await expect(marker).toBeVisible();
-
-  // ── Marker click → evidence + traceback drill-down panel. ──
-  // Click the marker's dedicated hit-circle: the <g>'s bbox center sits
-  // mid-plot where a grid line intercepts pointer events, while the hit
-  // circle (transparent fill, pointer-events: all) is centered on the dot.
-  await marker.locator('.marker-hit').click();
-  const panel = page.locator('[data-test="drilldown-panel"]');
-  await expect(panel).toBeVisible();
-
-  await expect(page.locator('[data-test="anomaly-kind"]')).toContainText('memory');
-  await expect(page.locator('[data-test="anomaly-severity"]')).toContainText('high');
-  await expect(page.locator('[data-test="anomaly-observed"]')).toContainText('1900');
-  await expect(page.locator('[data-test="anomaly-baseline"]')).toContainText('1700');
-
-  // Contributors (evidence) incl. the unattributed honesty row.
-  const contributors = page.locator('[data-test="contributors"]');
-  await expect(contributors).toBeVisible();
-  await expect(contributors).toContainText('62.5');
-  await expect(contributors).toContainText('unattributed');
-
-  // Traceback children incl. the chart_render hot signal.
-  const children = page.locator('[data-test="traceback-children"]');
-  await expect(children).toBeVisible();
-  await expect(children).toContainText('chart_render');
-  await expect(children.locator('.child-row.hot')).toHaveCount(1);
+  await expect(page.locator('[data-test="timeline-tab"]')).toBeVisible();
+  await expect(page.locator('[data-test="window-selector"]')).toHaveCount(0);
 });
 
 test('[AC8] deep-link /resources renders without a daemon', async ({ page }) => {

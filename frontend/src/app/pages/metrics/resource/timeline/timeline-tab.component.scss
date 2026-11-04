@@ -29,12 +29,6 @@ $warn: #f59e0b;
   gap: 0.75rem;
 }
 
-.window-selector {
-  ::ng-deep .mat-button-toggle-button {
-    font-size: 0.78rem;
-  }
-}
-
 .series-toggles {
   display: flex;
   flex-wrap: wrap;
@@ -68,6 +62,25 @@ $warn: #f59e0b;
 }
 
 // ── Truncated banner (D9 — straight from the frozen flag) ───────────
+
+// 5.8 — the client-side data-gap annotation strip. Derived from the
+// /history payload only; the wording never names restart/deploy/promote.
+.data-gaps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.data-gap-chip {
+  display: inline-flex;
+  align-items: center;
+  background: rgba($warn, 0.08);
+  border: 1px dashed rgba($warn, 0.45);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  color: $text-secondary;
+  font-size: 0.74rem;
+}
 
 .truncated-banner {
   display: flex;

@@ -1,17 +1,8 @@
 <div class="timeline-tab" data-test="timeline-tab">
   <div class="timeline-toolbar">
-    <mat-button-toggle-group
-      class="window-selector"
-      [value]="window()"
-      (change)="selectWindow($event.value)"
-      data-test="window-selector"
-      aria-label="History window"
-    >
-      @for (w of windows; track w) {
-        <mat-button-toggle [value]="w" [attr.data-test]="'window-' + w">{{ w }}</mat-button-toggle>
-      }
-    </mat-button-toggle-group>
-
+    <!-- The panel's own window-picker UI is REMOVED (5.4): the window
+         belongs to the tab body's own labelled "Timeline range" control
+         (AM-19). The panel renders the window the body hands it. -->
     <div class="series-toggles" data-test="series-toggles">
       @for (def of seriesDefs; track def.key) {
         <button
@@ -29,6 +20,16 @@
     </div>
   </div>
 
+  <!-- 5.8: client-side data-gap annotations, derived from /history only.
+       The label names the derivation and NEVER says restart/deploy/promote. -->
+  @if (dataGaps().length) {
+    <div class="data-gaps" data-test="data-gaps" role="list">
+      @for (gap of dataGaps(); track gap.seriesKey + '-' + gap.fromMs) {
+        <span class="data-gap-chip" data-test="data-gap-chip" role="listitem">{{ gap.text }}</span>
+      }
+    </div>
+  }
+
   <!-- D9: rendered strictly from the frozen `truncated` flag — no FE fallback. -->
   @if (truncated()) {
     <div class="truncated-banner" data-test="truncated-banner" role="status">
@@ -41,7 +42,7 @@
   }
 
   <!-- D7: skeleton only before the first successful fetch. -->
-  @if (showSkeleton()) {
+  @if (loading()) {
     <div class="timeline-skeleton" data-test="timeline-skeleton" aria-busy="true">
       <div class="skeleton-chart"></div>
       <div class="skeleton-line skeleton-short"></div>
@@ -64,7 +65,7 @@
     </div>
   }
 
-  @if (history(); as payload) {
+  @if (history()) {
     <div class="timeline-chart-host" data-test="timeline-chart">
       <ng-container
         *ngComponentOutlet="plan().component; inputs: timelineInputs()"
