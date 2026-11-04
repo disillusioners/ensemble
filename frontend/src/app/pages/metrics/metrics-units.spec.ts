@@ -63,9 +63,13 @@ describe('the metric → unit vocabulary', () => {
     // w1.py:194-228 — F4 registers `ensemble_db_pool_native` (gauge) AND
     // `ensemble_db_pool_requests_errors_total` (counter). A family-keyed
     // unit would be false for one of them; the per-name table is how
-    // both stay honest.
+    // both stay honest. The B1 mutation (planted `checked_out: 'MB'`)
+    // proved the pin must name EACH member — a family-level count
+    // assertion would have stayed green on the planted MB.
     expect(metricsUnitFor('ensemble_db_pool_native')).toBe('count');
     expect(metricsUnitFor('ensemble_db_pool_requests_errors_total')).toBe('count');
+    expect(metricsUnitFor('ensemble_db_pool_checked_out')).toBe('count');
+    expect(metricsUnitFor('ensemble_db_pool_waiting_clients')).toBe('count');
   });
 
   it('the F9 family yields TWO DIFFERENT units — the counter and the 0/1 gauge', () => {
