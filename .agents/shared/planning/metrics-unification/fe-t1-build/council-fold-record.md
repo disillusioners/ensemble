@@ -322,3 +322,18 @@ regression and NOT a deterministic break:**
 **Owner: the `job-queue-indicator` spec's owning lane.** The fix is a
 timestamp-independent fixture (inject a fixed clock or distinct stamps) —
 out of this lane's scope, and product code was not touched here.
+
+---
+
+## 7. FIX ORDER #3 routed register (the B-1 + N5 fold, 2026-11-04)
+
+This pass folded the tester gate's **BLOCKER B-1** (FE-side dual-vocabulary
+mapping — the leader ruling FE-only stands) and **N5** (guard enforcement).
+Full evidence: `b1-n5-fold-evidence.md` beside this record. The items below
+are **routed, not folded**; each carries its owner.
+
+| Item | Source | Why it is routed, not folded | Owner |
+|---|---|---|---|
+| **Daemon-side one-vocabulary normalization** — `/api/resources/anomalies` serves the ENGINE `series_key` verbatim (`daemon/routers/resources.py:820`, `ResourceAnomaly.series_key`) while `/api/resources/history` synthesizes FE-style keys (`:675`); the intersection is `[]`. The durable fix normalizes the anomaly door's keys at the `:820` serialization site (or derives both doors from one vocabulary), with the KB→MB unit question settled in the same change (`daemon.rss_kb` peak 345996 KB ≈ `daemon_rss_mb` ÷1024 — the scale table in `timeline-series.ts` carries the derivation). | tester gate **B-1** + this fold | daemon code is READ-ONLY in this lane (FE-only ruling); the FE shim (`ENGINE_SERIES_COMPAT` + the instance pattern in `timeline-series.ts`) is the documented COMPATIBILITY layer until the daemon speaks one vocabulary — when that lands, the shim becomes deletable in the same lane | **the metrics lane** |
+| `tsconfig.spec.json` fails `tsc --noEmit` at `src/app/app.component.spec.ts:2127` (a duplicated `});` — 2× TS1128) | this fold's `tsc` run | the file is **byte-identical to the lane tip received** (`git status`/`git diff` empty; the tester's evidence commit `ff064658c`) — pre-existing tip debt outside this fold's scope; the pack's scoped tsconfig (`tsconfig.metrics-fe.json`) does not include the file, which is why the gate's typecheck leg stayed green | **the app-shell spec's owning lane** |
+| `CHART_SERIES_COLORS[0]` (`#38bdf8`) is byte-identical to `CHART_SEVERITY_COLORS.low` — a canvas-pixel probe cannot distinguish a `low` marker dot from the first series' line/legend colour | this fold's C-1 driver (first probe iteration matched the RSS LINE, not the marker) | widening either palette is a design change with cross-stack parity implications (`chart-theme.ts` is the shared token); the driver now probes only severities present in the payload | **the chart-theme owning lane** (next palette touch) |
