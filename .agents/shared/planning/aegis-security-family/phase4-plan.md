@@ -3,8 +3,9 @@
 ## Objective
 
 Land the lane's entire payload in **exactly one commit**: the four agent trees (28 new files), the
-`agents/leader/meta.json` one-liner, the regenerated prompt-artifact baseline (161 → 177), and the new
-lane test file — with **no** content change under `agents/**` after the baseline re-stamp.
+`agents/leader/meta.json` one-liner, the regenerated prompt-artifact baseline (161 → 177), the new
+lane test file, **and the C1(b) 16→17 pin fold in `tests/unit/test_maintenancer_agent.py`** (D3
+completeness — the sanctioned fifth element) — with **no** content change under `agents/**` after the baseline re-stamp.
 
 The one-commit rule is house doctrine (B2): agent files and the regenerated baseline ship together, so
 no window exists in which the baseline is stale against the tree.
@@ -20,8 +21,11 @@ no window exists in which the baseline is stale against the tree.
   `test_tone_block_in_soul`, `test_no_md_path_tokens_in_prose`, `test_no_system_internals_in_prose`,
   `test_skill_set_entries_have_templates_and_match_versions`, `test_agent_registry_scan`) and
   `tests/unit/test_maintenancer_team_members_within_team.py` (the pure-file-parsing org-chart test —
-  the shape for the aegis team-topology pin). **Note:** the brief's reference to
-  `tests/unit/agents/test_maintenancer_agent.py` is stale — that file does not exist (B8).
+  the shape for the aegis team-topology pin). **Note (D6, delta re-gate — supersedes the pre-C1(a)
+  wording):** the brief's reference to
+  `tests/unit/agents/test_maintenancer_agent.py` is stale — **the file exists at
+  `tests/unit/test_maintenancer_agent.py` (C1(a)/B8); its `test_leader_team_members_length_16` pin
+  (16→17, "+1 aegis") is folded in task 4 of this phase.**
 - **A venv is required for the registry-scan leg** (T28): `tests/unit/agents/test_sketcher_agent.py:610-630`
   spawns a probe with `sys.executable` because the system `python3` lacks `pydantic` (D9). The
   **baseline re-stamp itself is venv-free** (B2) and is run with the bare host `python3`.
@@ -32,7 +36,7 @@ no window exists in which the baseline is stale against the tree.
 
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 1 | **Author `tests/unit/agents/test_aegis_security_family.py`** — pure file parsing wherever possible (no daemon import, no DB, no LLM) so the file runs on bare `python3`; the single exception is T28, which is venv-bound. Implement **T1–T28** exactly as enumerated in `technical-analysis.md` §DP7 **as amended** (the table is the contract; the AM-corrected definitions below govern): T1–T4 aegis's allow/deny/`deny_spawn`/roster (**the AM-1/AM-2-corrected sets** — 15-category allow, 6-entry deny); T5–T7 the children's leaf teams, non-empty allow, write fence; T8–T11 no privileged category / no `job` / no `instance_read`/`instance_ops` / no `mcp_full_access`; **T12 the report-scrutiny fold (AM-9): asserts the UNION of `{rule.md, workflow.md, soul.md}` ∪ `{skills-template/*.md}` (mirroring `tests/unit/test_report_integrity_prompts.py:250-265`; PROMPT_SURFACE excludes `tools_note.md`) — and a companion leg asserts `aegis-strategy.md` carries NO report-delivery boilerplate (the snippets live in `rule.md`)**; **T13 the children's exemption (AM-9): a NEW stricter house pin modelled on the sketcher precedent (`test_sketcher_agent.py:195`), not a copy — the children are exempt via the empty-team skip, NOT `GRANDFATHERED_PARENTS`**; T14–T18 the prose hygiene set (system internals, `.md` path tokens **and the bare `agents/`-prefix token class** (W6 — `BARE_AGENTS_PREFIX_RE`) with the **enumerated exemptions**, cardinal count, tone block, adapted-from provenance — **T18's forbidden-token list is EXTENDED per AM-8: `preserved verbatim from` and the `per <agent> pattern, job <id>` shape are also refused**); T19 the org-chart rule for the strategy skill; T20 the leader one-liner; **T21 the seeded-skill discipline (AM-7): exactly one `skill-set.yaml` (aegis's, one entry); the three installer skills in no manifest; AND `include` ∉ `aegis-strategy`'s frontmatter (the include resolver's cross-agent by-name fallback would inline another agent's bank row)**; T22 the version match; **T23 the identical FENCES block (AM-10 definition): PRIMARY = the three `.md` FENCES bullet lists byte-identical, scope = THE FENCES BULLET LIST ONLY (MUST include the C3 checksum bullet; MUST exclude per-tool content — release-asset URLs, checksum sources, tool flags); SECONDARY = each `.lib.sh` carries a FENCES header mentioning the tool-agnostic keywords (explicitly NOT byte-identity vs the `.md` block)**; T24 the taxonomy + every named finding-record field (names, not count — D-6); T25 `worker` byte-untouched; T26–T27 the queue and model assignments; T28 the venv-bound registry scan. **AM-6 pins:** two prose-assertion pins — (α) no aegis surface instructs a lane to read credentials/env values/secrets and findings name a secret class never a value; (β) fetched external content is DATA, never instructions (AM-3). | Phases 1–3 exited | The file exists; `pytest tests/unit/agents/test_aegis_security_family.py` is green; **every** T-number has at least one assertion (no vacuous test); the AM-corrected T12/T13/T18/T21/T23 definitions are the implemented ones. |
+| 1 | **Author `tests/unit/agents/test_aegis_security_family.py`** — pure file parsing wherever possible (no daemon import, no DB, no LLM) so the file runs on bare `python3`; the single exception is T28, which is venv-bound. Implement **T1–T28** exactly as enumerated in `technical-analysis.md` §DP7 **as amended** (the table is the contract; the AM-corrected definitions below govern): T1–T4 aegis's allow/deny/`deny_spawn`/roster (**the AM-1/AM-2-corrected sets** — 15-category allow, 6-entry deny); T5–T7 the children's leaf teams, non-empty allow, write fence; T8–T11 no privileged category / no `job` / no `instance_read`/`instance_ops` / no `mcp_full_access`; **T12 the report-scrutiny fold (AM-9): asserts the UNION of `{rule.md, workflow.md, soul.md}` ∪ `{skills-template/*.md}` (mirroring `tests/unit/test_report_integrity_prompts.py:250-265`; PROMPT_SURFACE excludes `tools_note.md`) — and a companion leg asserts `aegis-strategy.md` carries NO report-delivery boilerplate (the snippets live in `rule.md`)**; **T13 the children's exemption (AM-9): a NEW stricter house pin modelled on the sketcher precedent (`test_sketcher_agent.py:195`), not a copy — the children are exempt via the empty-team skip, NOT `GRANDFATHERED_PARENTS`**; T14–T18 the prose hygiene set (system internals, `.md` path tokens **and the bare `agents/`-prefix token class** (W6 — `BARE_AGENTS_PREFIX_RE`) with the **enumerated exemptions**, cardinal count, tone block, adapted-from provenance — **T18's forbidden-token list is EXTENDED per AM-8: `preserved verbatim from` and the `per <agent> pattern, job <id>` shape are also refused**); T19 the org-chart rule for the strategy skill; T20 the leader one-liner; **T21 the seeded-skill discipline (AM-7): exactly one `skill-set.yaml` (aegis's, one entry); the three installer skills in no manifest; AND `include` ∉ `aegis-strategy`'s frontmatter (the include resolver's cross-agent by-name fallback would inline another agent's bank row)**; T22 the version match; **T23 the identical FENCES block (AM-10 definition): PRIMARY = the three `.md` FENCES bullet lists byte-identical, scope = THE FENCES BULLET LIST ONLY (MUST include the C3 checksum bullet; MUST exclude per-tool content — release-asset URLs, checksum sources, tool flags) — **D4: the byte-identical unit includes wrapped continuation lines, not only bullet first lines** (a heads-only extraction is a false-green filter); SECONDARY = each `.lib.sh` carries a FENCES header mentioning the tool-agnostic keywords (explicitly NOT byte-identity vs the `.md` block)**; T24 the taxonomy + every named finding-record field (names, not count — D-6); T25 `worker` byte-untouched; T26–T27 the queue and model assignments; T28 the venv-bound registry scan. **AM-6 pins:** two prose-assertion pins — (α) no aegis surface instructs a lane to read credentials/env values/secrets and findings name a secret class never a value; (β) fetched external content is DATA, never instructions (AM-3). | Phases 1–3 exited | The file exists; `pytest tests/unit/agents/test_aegis_security_family.py` is green; **every** T-number has at least one assertion (no vacuous test); the AM-corrected T12/T13/T18/T21/T23 definitions are the implemented ones. |
 | 2 | **Add the fail-open guard** — an assertion that each of the four metas' `tools` block **round-trips through the registry's parser**, because a parse failure sets the filter to "all tools allowed" (A9/R2). This is the guard that turns a lint issue into a privilege-escalation detector. | 1 | The assertion fails when a `tools` block is malformed (mutation-verified: break one meta's block, watch the test go red, restore). |
 | 3 | **Add the baseline-count assertion** — the lane test asserts the prompt-artifact baseline **file exists** and has **exactly 177 rows**, and that the four new agents contribute exactly four rows each, so a fifth prompt file (`memory.md`/`growth.md`/`tools.md`/`skill.md` — AM-11 forbids all four) or a missing one is caught **pre-stage** rather than at the stage-time leg (R4). **AM-11 rationale:** the generator's `--check` exits 0 BOTH when clean AND when the baseline file is ABSENT (`generate_prompt_artifact_baseline.py:127-133`) — `rc=0` alone proves nothing, so the file-exists leg is mandatory. | 1 | The assertion is red at the base commit (161 rows) and green after the re-stamp (177); a deleted baseline file turns the assertion red even though `--check` would exit 0. |
 | 4 | **Apply the leader one-liner** — add `"aegis"` to `agents/leader/meta.json` `team_members`. `leader` holds `instance` but **no** `job` category, so `team_members` is its only agent-reach path (A4). `meta.json` is **not** in the baseline's artifact set ⇒ this edit contributes **zero** baseline rows and does not move 177. **C1(b) — fold the length pin in the SAME commit:** `tests/unit/test_maintenancer_agent.py::test_leader_team_members_length_16` (`:517-524`) asserts `len(team) == 16` ⇒ this one-liner makes it a deterministic red unless folded. Pre-registered fold: update the assertion to `17` and the docstring to the pin's own house pattern — *"Spec — 15 after 'designer', 16 after appending 'gaia' (environment-terraform), 17 after appending 'aegis'"* — and extend the failure message's chain (`+1 'maintenancer'`, `+1 'designer'`, `+1 'gaia'`, `+1 'aegis'`). This is the same enumeration-assertion family as the baseline counts (adjudicated IN-COMMIT). | 1 | `python3 -c "…"` shows `"aegis"` in the list; the list otherwise is unchanged; the meta diff is exactly one line; the pin test asserts 17 and its docstring names the aegis append. |
@@ -94,11 +98,16 @@ git status --porcelain                     # expect empty
 
 # 6) the scope + no-touch proofs
 git diff --stat 1f6898ae2 -- agents/worker/          # expect EMPTY
-# W4 (plan council): the complement of {agents/, tests/} equals EXACTLY the committed planning set
+# W4 (plan council) + D2 (delta re-gate): POSIX-safe form — /bin/sh is dash and process
+# substitution `diff <(...)` is a PARSE error there (exit 2 before the || fallback can fire).
+# Write both sides to temp files, then plain diff:
 git diff --name-only 1f6898ae2 | grep -v -E '^(agents/|tests/)' | sort > /tmp/aegis-p4-complement.txt
-diff <(cat /tmp/aegis-p4-complement.txt) <(git diff --name-only 1f6898ae2 | grep '^\.agents/shared/planning/aegis-security-family/' | sort) \
-  && echo "lane scope OK: complement == exactly the planning set" \
-  || { echo "FAIL: out-of-scope paths beyond the planning set"; }
+git diff --name-only 1f6898ae2 | grep '^\.agents/shared/planning/aegis-security-family/' | sort > /tmp/aegis-p4-planning.txt
+if diff /tmp/aegis-p4-complement.txt /tmp/aegis-p4-planning.txt; then
+  echo "lane scope OK: complement == exactly the planning set"
+else
+  echo "FAIL: out-of-scope paths beyond the planning set"; exit 1
+fi
 
 # 7) the baseline is still clean AFTER the commit (proves the re-stamp was last)
 python3 scripts/protection/generate_prompt_artifact_baseline.py --check; echo "exit=$?"
@@ -155,7 +164,8 @@ Phase 4 is done when **all nine gates (G4.1–G4.9) are green**:
 3. the baseline has exactly **177** rows and `--check` exits 0;
 4. the re-stamp was the **last** `agents/**` content change (proved by a post-commit `--check` at exit 0);
 5. the whole payload is in **one** commit whose `git show --stat` shows exactly the 28 agent files + the
-   leader edit + the baseline + the test file;
+   leader edit + the baseline + the test file **+ the C1(b) 16→17 pin fold in
+   `tests/unit/test_maintenancer_agent.py` (the sanctioned fifth element — D3 completeness)**;
 6. `agents/worker/**` is byte-identical to the base;
 7. the lane diff touches only `agents/**`, `tests/**` and the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/` — W4);
 8. the working tree is clean;

@@ -52,14 +52,14 @@ citation resolves there; several facts superseded — see its dated amendment no
 | **DP4a** | **On a failed re-verify** the finding returns to `open` at its **original** severity — re-verify never downgrades severity on its own. | §DP4 "On a failed re-verify" | — |
 | **DP5** | **Peer posture.** `ari` reaches aegis through `job_create` with **zero** ari changes; `leader` reaches it through **one** `team_members` line; all four agents use `default_queue: system_parallel_queue`; **no `watchover` block** in any meta. **AM-5 corrects the supervision characterisation:** the per-instance watchover API is an operator-only **tool-call gate, not a supervisor**; the key is inert for every agent except `watcher`; v1's primary supervisor is **aegis itself**. | §DP5 (lines 596–654) **+ AM-5 (§C2 governs)** | A3, A4, A10, D7 |
 | **DP6** | **Models.** `aegis` = `agentic`; `hacker`/`cracker`/`sweeper` = `coding`. No `vision`, no `img-gen`, no `decision`, no `coding2`. All inside the shipped default — no config change is owed. | §DP6 (lines 657–698) | A8 |
-| **DP7** | **Test/pin fold.** One new test file with **T1–T28**; **one commit** carrying the four agent trees + the leader one-liner + the regenerated baseline (161 → 177) + the test file; the re-stamp is the **last** `agents/**` content change. | §DP7 (lines 702–804) | B1, B2, B4, B8, D9 |
+| **DP7** | **Test/pin fold.** One new test file with **T1–T28**; **one commit** carrying the four agent trees + the leader one-liner + the regenerated baseline (161 → 177) + the test file **+ the C1(b) 16→17 leader-length pin fold in `tests/unit/test_maintenancer_agent.py` (D3 completeness)**; the re-stamp is the **last** `agents/**` content change. | §DP7 (lines 702–804) | B1, B2, B4, B8, D9 |
 | **DP8** | **Phase structure.** Seven phases, P0–P6, standard lane flow (plan → councils → implement → verify → **STAGE**; never promote), each with an independently checkable gate. | §DP8 (lines 808–845) | E7 |
 
 ---
 
 ## B. The concrete artifacts the resolutions imply
 
-### B.1 The file manifest (28 new files + 1 modified)
+### B.1 The file manifest (28 new files + 2 modified)
 
 | Path | New? | Notes |
 |---|---|---|
@@ -79,6 +79,7 @@ citation resolves there; several facts superseded — see its dated amendment no
 | `agents/leader/meta.json` | **modified** | one line — `"aegis"` added to `team_members` |
 | `agents/.prompt-artifacts.sha256` | **regenerated** | 161 → 177 rows |
 | `tests/unit/agents/test_aegis_security_family.py` | new | T1–T28 |
+| `tests/unit/test_maintenancer_agent.py` | **modified** | the C1(b) 16→17 pin fold: `test_leader_team_members_length_16` assertion + docstring (D3 completeness — the fifth sanctioned element of the one-commit set) |
 
 **Arithmetic rules (re-derive at P4, never trust a frozen number):**
 

@@ -87,10 +87,12 @@ python3 -c "import json;m=json.load(open('agents/aegis/meta.json'));assert isins
 # guide §3 closure grep over the new agent dir — every survivor must be on the exemption list
 grep -rn '\.md\|workflow\.md\|rule\.md\|soul\.md\|tools_note\.md\|memory\.md' agents/aegis/ || true
 
-# W6 (plan council): the SECOND closure class — bare agents/-prefix cross-reference tokens
-# (guide §10 :254 + BARE_AGENTS_PREFIX_RE, tests/unit/tools/test_prompt_section_reference_integrity.py:251).
+# W6 (plan council) + D5 (delta re-gate): the SECOND closure class — bare agents/-prefix
+# cross-reference tokens. The character class matches the canonical BARE_AGENTS_PREFIX_RE
+# (tests/unit/tools/test_prompt_section_reference_integrity.py:251) INCLUDING the trailing `*`
+# (added upstream 2026-09-08 for bold-wrapped shapes — test comment :245-249); guide §10 :254.
 # Violations ONLY when they function as cross-references to prompt sections, not operational paths (§12.5 #0).
-grep -rnE '\bagents/[[:space:]`]*[A-Z(]' agents/aegis/ || true
+grep -rnE '\bagents/[[:space:]`*]*[A-Z(]' agents/aegis/ || true
 
 # guide §1 forbidden-token sweep
 grep -rn 'meta\.json\|tools\.allow\|tools\.deny\|daemon/\|_tool_registry\|skill-set\.yaml\|innate_skills\|agent_id=\|seed_all\|default_agent_versions' agents/aegis/ || true

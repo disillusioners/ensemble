@@ -28,7 +28,7 @@ Eight gates, **A–H**.
 
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 1 | **Gate A — the full-suite net-new comparison.** Run the whole collectable suite on **HEAD** and on the **base** with the *same* commands and the *same* environment; diff the FAILED lists. **C1(d) expected-red note:** `tests/unit/test_maintenancer_agent.py::test_leader_team_members_length_16` appears in the diff as base-RED/HEAD-green — the pre-registered 16→17 fold (C1(b)) landed IN the pin-ceremony commit, so the ledger records it as **FOLDED, not discovered**. | Phase 4 exited | **Net-new deterministic reds = 0.** Any red that is red at the base too is pre-existing debt and is **disclosed**, not fixed. The leader-length pin's base-red/HEAD-green flip is the expected FOLDED shape. Any red that is *only* at HEAD (other than the disclosed fold shape) is a lane regression and blocks the phase. |
+| 1 | **Gate A — the full-suite net-new comparison.** Run the whole collectable suite on **HEAD** and on the **base** with the *same* commands and the *same* environment; diff the FAILED lists. **C1(d) expected-red note (D1, delta re-gate — true signature):** `tests/unit/test_maintenancer_agent.py::test_leader_team_members_length_16` is **green at base (the base roster is 16 and the pin asserts ==16)** and **green at HEAD only via the in-commit fold (C1(b)); absent the fold it would be the single HEAD-only red** — post-fold it appears in NEITHER FAILED list, and the ledger records the fold; no flip signature appears. | Phase 4 exited | **Net-new deterministic reds = 0.** Any red that is red at the base too is pre-existing debt and is **disclosed**, not fixed. The leader-length pin is green on BOTH legs when the fold landed (the true D1 signature); a HEAD-only red at this pin means the fold was skipped and blocks the phase. Any other red that is *only* at HEAD is a lane regression and blocks the phase. |
 | 2 | **Gate B — the sealed-artifacts proof.** Run `tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts` on the branch. | 1 | Green. The 35 `SEALED_SHA_BASELINES` entries are unchanged — none of them references a not-yet-existing aegis path, so adding agent directories cannot redden them. This is the commission's **explicit** proof leg (S6). |
 | 3 | **Gate C — the plane census.** Run `tests/unit/tools/test_plane_agent_surface_census.py`. | 1 | Green, with `DISCLOSED_READ_HOLDERS` **still `{"watcher"}`** — the aegis family is **not** added to the frozen read-holder set. The E3 fold (explicit non-empty allow on every new meta) removes the exposure rather than whitelisting it. The E4 fold (no `mcp_full_access`) likewise. |
 | 4 | **Gate D — the report-integrity fold + the repo-wide prompt-section-reference sweep (two named legs, W5).** (D-1) Run `tests/unit/test_report_integrity_prompts.py`. (D-2) Run `tests/unit/tools/test_prompt_section_reference_integrity.py` — the only repo-wide prompt-surface sweep (all `agents/*/{soul,rule,tools_note,workflow,memory}.md` + every `skills-template/*.md`, exactly the 16+4 files this lane lands; enforces the bare-`agents/`-prefix closure class via `BARE_AGENTS_PREFIX_RE`). | 1 | Both green. D-1: the dynamic check finds `aegis`'s scrutiny guidance (its non-empty team makes the guidance mandatory; the three children are exempt because their teams are empty). D-2: the lane's 20 files pass the repo-wide section-reference sweep — both closure classes clean or on the enumerated exemption list. |
@@ -44,7 +44,7 @@ Eight gates, **A–H**.
 
 | Gate | Requirement | How it is checked |
 |---|---|---|
-| **A** | No behaviour regression | Full suite, net-new deterministic reds **0** vs the true pre-fix base. **C1(d):** the `test_leader_team_members_length_16` base-red→HEAD-green flip is the PRE-REGISTERED FOLDED shape (C1(b)) — accounted, not discovered |
+| **A** | No behaviour regression | Full suite, net-new deterministic reds **0** vs the true pre-fix base. **C1(d) + D1:** `test_leader_team_members_length_16` is green at base (16==16) and green at HEAD only via the in-commit fold — absent the fold it would be the single HEAD-only red; the ledger records the fold, **no flip signature appears** |
 | **B** | `SEALED_SHA_BASELINES` untouched (35 entries) | `TestPhaseDDoesNotModifySealedArtifacts` green on the branch |
 | **C** | The plane read-holder census is unchanged | census test green; `DISCLOSED_READ_HOLDERS` == `{"watcher"}` |
 | **D** | The report-integrity fold + the repo-wide prompt-surface sweep landed (W5, two named legs) | `test_report_integrity_prompts.py` green (D-1); `test_prompt_section_reference_integrity.py` green over the lane's 16 prompt + 4 skill-body files (D-2) |
@@ -90,13 +90,17 @@ find agents -type f | wc -l                                              # 338 +
 git diff --name-status $BASE -- agents/ | awk '$1=="A"' | wc -l           # expect 28 additions
 
 # --- Gate H: scope + privacy --------------------------------------------
-# W4 (plan council): the lane COMMITS its planning docs (house doctrine), so the complement of
-# {agents/, tests/} is NOT empty — it equals the planning set. The gate asserts the complement
-# EQUALS EXACTLY the planning dir; any extra path (genuine creep) still reds.
-git diff --name-only $BASE | grep -v -E '^(agents/|tests/)' > /tmp/aegis-scope-complement.txt
-diff <(sort /tmp/aegis-scope-complement.txt) <(git diff --name-only $BASE | grep '^\.agents/shared/planning/aegis-security-family/' | sort) \
-  && echo "Gate H scope OK: complement == exactly the planning set" \
-  || { echo "Gate H FAIL: out-of-scope paths beyond the planning set (listed above)"; }
+# W4 (plan council) + D2 (delta re-gate): the lane COMMITS its planning docs (house doctrine), so
+# the complement of {agents/, tests/} equals the planning set. POSIX-safe form — /bin/sh is dash
+# and `diff <(...)` is a PARSE error there (exit 2 before any || fallback can fire). Write both
+# sides to temp files, then plain diff:
+git diff --name-only $BASE | grep -v -E '^(agents/|tests/)' | sort > /tmp/aegis-scope-complement.txt
+git diff --name-only $BASE | grep '^\.agents/shared/planning/aegis-security-family/' | sort > /tmp/aegis-scope-planning.txt
+if diff /tmp/aegis-scope-complement.txt /tmp/aegis-scope-planning.txt; then
+  echo "Gate H scope OK: complement == exactly the planning set"
+else
+  echo "Gate H FAIL: out-of-scope paths beyond the planning set (both temp files retained for inspection)"; exit 1
+fi
 git diff --stat $BASE -- agents/worker/                                  # expect EMPTY
 git diff $BASE | grep -nE 'sk-(proj|ant)-|BEGIN [A-Z ]*PRIVATE KEY' ; echo "secret hits above (expect none)"
 
@@ -158,7 +162,7 @@ seven gates themselves are minutes each.
 
 Phase 5 is done when **all eight gates (A–H) are green** and the evidence report is written:
 
-- **A** — net-new deterministic reds **0** (every base-red disclosed by name; the `test_leader_team_members_length_16` base-red→HEAD-green flip is the C1(b) pre-registered FOLD, recorded in the ledger as such);
+- **A** — net-new deterministic reds **0** (every base-red disclosed by name; `test_leader_team_members_length_16` is green at base (16==16) and green at HEAD only via the in-commit fold — the C1(b) FOLD is recorded in the ledger, no flip signature appears);
 - **B** — `TestPhaseDDoesNotModifySealedArtifacts` green; the 35 sealed entries unchanged;
 - **C** — the plane census green with `DISCLOSED_READ_HOLDERS` still `{"watcher"}`;
 - **D** — the report-integrity dynamic check green **and** the repo-wide prompt-section-reference sweep green over the lane's 20 files (W5, two named legs);

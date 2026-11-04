@@ -112,8 +112,11 @@ done
 for f in agents/hacker/skills-template/fuzzing-toolchain.md \
          agents/cracker/skills-template/credential-bench.md \
          agents/sweeper/skills-template/sast-toolchain.md; do
-  awk '/^## Fences/{f=1;next} /^## /{f=0} f && /^- /' "$f"   # extract the FENCES bullet list per .md
-done | sort -u | wc -l     # PRIMARY: expect 1 (one distinct bullet list across the three .md bodies)
+  # D4 (delta re-gate): the byte-identical unit INCLUDES wrapped continuation lines —
+  # a bullets-heads-only filter (7 of 23 lines on the charter exemplar) would false-green
+  # bodies with identical heads but divergent continuations.
+  awk '/^## Fences/{f=1;next} /^## /{f=0} f && (/^- / || /^[[:space:]]+[^[:space:]]/)' "$f"
+done | sort -u | wc -l     # PRIMARY: expect 1 (one distinct bullet list incl. continuations, across the three .md bodies)
 for f in agents/hacker/skills-template/fuzzing-toolchain.lib.sh \
          agents/cracker/skills-template/credential-bench.lib.sh \
          agents/sweeper/skills-template/sast-toolchain.lib.sh; do
