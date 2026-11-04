@@ -1,3 +1,28 @@
+## Commission FE-only T1 metrics dashboard — TESTER FUNCTIONAL GATE re-derivation (2026-11-04, verification @ tip `2c63a70a1`, base `c4161335b`; RESULTS/2026-11-04-fe-t1-metrics-functional-gate.md)
+
+> **What this block registers.** The independent tester functional gate's re-derived pack census +
+> last-run rows. **Keep-both:** the phase blocks below and the AMENDED registration at the
+> `metrics_fe_dual_side` rows stay as-is — their figures were correct at THEIR freeze; this block
+> records the CURRENT composition (the phase-9-era figures 174/11 (D1) and 138 (D2-declared) are
+> STALE vs the script's declared sets — the stale-census wrinkle is finding N7 of the gate report).
+>
+> **Gate outcome (for the record):** pack raw result FAIL(1 leg) = the EXPECTED posture (the 2
+> settings timezone base-debt reds, blob-identical base↔HEAD); d1 full declared set confirmed;
+> existence-assert mutation guard proven ALIVE (planted missing file → loud named FAIL before the
+> jest leg, 143 s); census net-new deterministic reds = 0; guard GREEN. Lane verdict: FAIL on
+> blocker B-1 (C-1 real-pointer dead — cross-layer series vocabulary break; see RESULTS §4).
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `metrics_fe_dual_side_test.sh` — GATE re-derivation (dual-side; per-side invocations, HEAD then BASE via the base worktree; `METRICS_FE_LOG_DIR` split per side so legs cannot clobber) | HEAD: `cd $WT && EXPECTED_BRANCH=feature/fe-metrics-dashboard BASE_REF=c4161335b… METRICS_FE_LOG_DIR=/tmp/fe-t1-gate/head timeout 900 bash test/packs/metrics_fe_dual_side_test.sh` · BASE: same + `ALLOW_DETACHED=1 METRICS_FE_PROJECT_DIR=/home/nea/ensemble-src-wt-fe-gate-base METRICS_FE_LOG_DIR=/tmp/fe-t1-gate/base` | **CURRENT composition (re-derived 2026-11-04):** d1 **30 declared files / 578 nodes, 578/578 PASS** (was 174/11 at the phase-7 registration; 224 at phase-9 — both earlier compositions) · d2_declared **131/131 PASS on BOTH sides** (was 138) · d2_derived HEAD **1834 total / 1832 P / 2 F** (39 files); BASE **1801 / 1799 P / 2 F** (38 files) — the 2 F = the settings timezone pair, base-proven blob-identical (failureMessages sha-equal after worktree-root normalization), ZERO lane attribution · typecheck_scoped + both builds PASS at HEAD; SKIPPED-BY-CONSTRUCTION at BASE (correct) · Leg-7 dependency set `ok:true` by name (chart.js / jest-canvas-mock) | 2026-11-04 (tester gate, both legs) | **FAIL(1 leg) — EXPECTED posture** (routed base debt; adjudicated PASS-with-preexisting per phase-9 precedent, zero lane attribution) |
+| `metrics_fe_dual_side_test.sh` — existence-assert mutation proof | plant ONE d2_declared file aside (e.g. `app.routes.spec.ts`) → re-run the HEAD invocation → expect early loud named FAIL → restore byte-exact | Guard ALIVE: `MISSING DECLARED SPEC src/app/app.routes.spec.ts` printed BEFORE the d2_declared jest leg; `RESULT: FAIL (failed legs: 2)` exit 1 @143 s; restore sha-matched, porcelain clean | 2026-11-04 (tester gate) | **PASS (guard proven)** |
+
+> **Known non-blockers recorded at this freeze:** (a) `${leg}_ERROR_SUMMARY` greps `^(FAILED|ERROR) `
+> which never matches jest's `FAIL ` summary — read the tee'd leg log for failure names; (b) the
+> prod-build leg's own timeout (900 s) EQUALS the pack self-cap (900 s) — a slow build alone can
+> produce exit 124; (c) mutation proofs MUST be serialized against concurrent census/guard legs
+> (see LESSONS/2026-11-04-fe-t1-gate-protocol-lessons.md #3).
+
 ## Commission FE-only T1 metrics dashboard — Phase-7 packs REGISTERED (2026-11-04, implementation lane `feature/fe-metrics-dashboard`, base `a4f58db50`, freeze the phase-7 commits)
 
 > **What this block registers.** The T1 lane's **Phase-7** commits (route fate, D-3: the
