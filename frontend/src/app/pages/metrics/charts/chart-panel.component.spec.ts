@@ -272,6 +272,68 @@ describe('chart-panel — the configuration (the house rendering rules)', () => 
     expect(emitted.length).toBe(1);
     expect(emitted[0].anomalyId).toBeUndefined();
   });
+
+  // ── B-1 (2026-11-04): the interaction is mode 'index', so the click
+  // elements carry ONE ENTRY PER DATASET — and an anomaly marker may be
+  // anchored to any dataset of the panel (the engine-key shim anchors
+  // markers to their panel's dataset, which need not be the first).
+  // Scanning only elements[0] stranded those markers; the resolution
+  // now prefers the marker-bearing element and falls back to the first
+  // element's plain payload.
+  it('resolves a click on a marker ANCHORED TO A NON-FIRST dataset (the mode-index elements list)', () => {
+    const markers = [
+      {
+        anomalyId: 'a-gauge',
+        seriesId: 'gauge', // the SECOND dataset — the engine-key anchor shape
+        tsMs: T1,
+        severity: 'medium' as const,
+        title: 'anomaly',
+      },
+    ];
+    fixture.componentRef.setInput('anomalies', markers);
+    const config = component.buildChartConfig([COUNTER, GAUGE], 'MB', markers);
+    const onClick = config.options.onClick;
+    const emitted: { anomalyId?: string; seriesId: string; tsMs: number }[] = [];
+    fixture.componentRef.setInput('onPointClick', (event: { anomalyId?: string }) =>
+      emitted.push(event as { anomalyId?: string; seriesId: string; tsMs: number }),
+    );
+
+    // The mode-'index' shape: BOTH datasets' elements at the clicked index.
+    onClick(null, [
+      { datasetIndex: 0, index: 1 }, // counter — first, carries NO marker at this tolerance
+      { datasetIndex: 1, index: 1 }, // gauge — carries the anchored marker
+    ]);
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].anomalyId).toBe('a-gauge');
+    expect(emitted[0].seriesId).toBe('gauge');
+  });
+
+  it('a click that matches NO marker still reports the FIRST element\'s plain payload (unchanged)', () => {
+    const markers = [
+      {
+        anomalyId: 'a-gauge',
+        seriesId: 'gauge',
+        tsMs: T1 + 10 * 60 * 1000, // far outside every sample's tolerance
+        severity: 'medium' as const,
+        title: 'anomaly',
+      },
+    ];
+    fixture.componentRef.setInput('anomalies', markers);
+    const config = component.buildChartConfig([COUNTER, GAUGE], 'MB', markers);
+    const onClick = config.options.onClick;
+    const emitted: { anomalyId?: string; seriesId: string }[] = [];
+    fixture.componentRef.setInput('onPointClick', (event: { anomalyId?: string }) =>
+      emitted.push(event as { anomalyId?: string; seriesId: string }),
+    );
+
+    onClick(null, [
+      { datasetIndex: 0, index: 0 },
+      { datasetIndex: 1, index: 0 },
+    ]);
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].anomalyId).toBeUndefined();
+    expect(emitted[0].seriesId).toBe('counter'); // the FIRST element's plain payload
+  });
 });
 
 describe('chart-panel — the DOM surface under a canvas', () => {

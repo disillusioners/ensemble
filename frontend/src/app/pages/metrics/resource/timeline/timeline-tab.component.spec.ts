@@ -32,8 +32,10 @@ import {
   EvidencePayload,
   HistoryPayload,
   TracebackPayload,
+  parseNaiveUtc,
 } from '../../../../models/resources.models';
 import { metricsUnitFor } from '../../metrics-units';
+import { houseNearestAnomaly } from '../../charts/anomaly-overlay-plugin';
 import { ChartPanelComponent, ChartPanelSeries } from '../../charts/chart-panel.component';
 import { TimelineTabComponent } from './timeline-tab.component';
 
@@ -231,6 +233,122 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
     expect(anomalies[0].title).toContain('severity high');
     expect(anomalies[0].title).toContain('series daemon_rss_mb');
     expect(anomalies[0].title).toContain('peak 1900');
+  });
+
+  // ── BLOCKER B-1 fold (tester gate 2026-11-04): the wire carries TWO
+  // vocabularies — /history speaks FE-style keys, /anomalies speaks the
+  // ENGINE keys (`daemon.rss_kb`, …). The engine keyspace below is the
+  // producer's enumerated keyspace (resource_anomaly.py:1252-1311); the
+  // markers must join their panel AND anchor to a rendered DATASET, or
+  // the Chart.js overlay draws nothing and the pointer path is dead
+  // (the gate's 148 real clicks, 0 openings).
+
+  it('an ENGINE-keyed anomaly joins the memory panel and anchors to a rendered DATASET (series_key "daemon.rss_kb")', () => {
+    feedData(makeHistory(), [
+      makeAnomaly({ series_key: 'daemon.rss_kb', peak: 1_945_600, baseline: 1_740_800 }),
+    ]);
+    const memoryPanel = component.panels().find((panel) => panel.unitClass === 'memory');
+    expect(memoryPanel).toBeDefined();
+    const inputs = memoryPanel!.plan.inputs(component.panelData('memory'), component.panelHandlers('memory'));
+    const anomalies = inputs['anomalies'] as readonly {
+      anomalyId: string;
+      seriesId: string;
+      title: string;
+    }[];
+    expect(anomalies.length).toBe(1);
+    // The DRAW + CLICK join: the marker's seriesId is the FE DATASET id
+    // (houseDatasetIndex / houseNearestAnomaly match on it) — not the
+    // engine key, which no dataset carries.
+    expect(anomalies[0].seriesId).toBe('daemon_rss_mb');
+    // The LABEL keeps the API's engine words VERBATIM (5.7) — the shim
+    // never renames what the endpoint serves.
+    expect(anomalies[0].title).toContain('series daemon.rss_kb');
+    expect(anomalies[0].title).toContain('peak 1945600');
+  });
+
+  it('the FULL engine vocabulary joins through the shim: every producer key lands on its panel anchor', () => {
+    const engineFixtures: readonly { series_key: string; unitClass: string; anchor: string }[] = [
+      { series_key: 'daemon.rss_kb', unitClass: 'memory', anchor: 'daemon_rss_mb' },
+      { series_key: 'daemon.anon_kb', unitClass: 'memory', anchor: 'daemon_rss_mb' },
+      { series_key: 'cgroup.anon_kb', unitClass: 'memory', anchor: 'cgroup_mem_mb' },
+      { series_key: 'cgroup.current_kb', unitClass: 'memory', anchor: 'cgroup_mem_mb' },
+      { series_key: 'daemon.cpu_pct', unitClass: 'cpu', anchor: 'daemon_cpu' },
+      { series_key: 'daemon.threads', unitClass: 'count', anchor: 'threads' },
+      { series_key: 'daemon.fds', unitClass: 'count', anchor: 'threads' },
+      { series_key: 'instance.i-9f2.child_rss_kb', unitClass: 'memory', anchor: 'daemon_rss_mb' },
+      { series_key: 'instance.i-9f2.charged_kb', unitClass: 'memory', anchor: 'daemon_rss_mb' },
+    ];
+    feedData(
+      makeHistory(),
+      engineFixtures.map((fixture, index) =>
+        makeAnomaly({ id: `anom-b1-${index}`, series_key: fixture.series_key }),
+      ),
+    );
+    // The count panel needs a count series enabled to EXIST; the markers
+    // are readable from panelData regardless.
+    component.toggleSeries('threads');
+    for (const fixture of engineFixtures) {
+      const joins = (component.panelData(fixture.unitClass).anomalies ?? []).filter(
+        (candidate) =>
+          typeof candidate.anomalyId === 'string' && candidate.anomalyId.startsWith('anom-b1-'),
+      );
+      expect(joins.length).toBeGreaterThan(0);
+      expect(joins.map((candidate) => candidate.seriesId)).toContain(fixture.anchor);
+    }
+  });
+
+  it('an UNKNOWN series key STILL joins no panel (fail-closed, never a guess)', () => {
+    feedData(makeHistory(), [makeAnomaly({ id: 'anom-x', series_key: 'bogus.metric' })]);
+    for (const unitClass of ['memory', 'cpu', 'count']) {
+      expect((component.panelData(unitClass).anomalies ?? []).length).toBe(0);
+    }
+  });
+
+  it('an engine-keyed marker DRILLS DOWN through the anchored click join (B-1 end-to-end)', () => {
+    const engineAnomaly = makeAnomaly({
+      id: 'anom-eng',
+      series_key: 'cgroup.anon_kb',
+      peak: 2_882_048,
+      baseline: 2_869_708,
+    });
+    feedData(makeHistory(), [engineAnomaly]);
+    resourcesMock.getEvidence.mockReturnValue(of(makeEvidence({ anomaly: engineAnomaly })));
+    resourcesMock.getTraceback.mockReturnValue(of(makeTraceback()));
+
+    // The chain the real pointer drives, unit-by-unit: the marker joins
+    // the memory panel ANCHORED to the rendered `cgroup_mem_mb` dataset,
+    // the wrapper's nearest-marker lookup matches on that anchor, and
+    // the payload's id opens the drill-down.
+    const memoryPanel = component.panels().find((panel) => panel.unitClass === 'memory');
+    expect(memoryPanel).toBeDefined();
+    const markers = memoryPanel!.plan.inputs(
+      component.panelData('memory'),
+      component.panelHandlers('memory'),
+    )['anomalies'] as readonly {
+      anomalyId: string;
+      seriesId: string;
+      tsMs: number;
+      severity: 'low' | 'medium' | 'high';
+      title: string;
+    }[];
+    expect(markers.length).toBe(1);
+    expect(markers[0].seriesId).toBe('cgroup_mem_mb');
+
+    const tsMs = parseNaiveUtc(engineAnomaly.t_start).getTime();
+    const matched = houseNearestAnomaly(markers, 'cgroup_mem_mb', tsMs, Number.POSITIVE_INFINITY);
+    expect(matched?.anomalyId).toBe('anom-eng');
+
+    component.onPanelPointClick({ anomalyId: matched!.anomalyId, seriesId: markers[0].seriesId, tsMs });
+    fixture.detectChanges();
+
+    expect(query('[data-test="drilldown-panel"]')).not.toBeNull();
+    expect(resourcesMock.getEvidence).toHaveBeenCalledWith('anom-eng');
+    // The drill-down carries the API's ENGINE words verbatim.
+    expect(
+      (query('[data-test="anomaly-summary"]').nativeElement.textContent as string).includes(
+        'series cgroup.anon_kb',
+      ),
+    ).toBe(true);
   });
 
   it('renders the truncated banner strictly from the frozen payload flag (D9)', () => {

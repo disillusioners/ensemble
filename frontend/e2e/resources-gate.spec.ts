@@ -84,15 +84,27 @@ const HISTORY_PAYLOAD = {
   truncated: false,
 };
 
+// ── The anomaly fixture carries the REAL dual-vocabulary shape (B-1) ──
+//
+// The daemon's /api/resources/anomalies serves the ENGINE series keys
+// verbatim (`daemon.rss_kb` — KB values), NOT the history endpoint's
+// FE-style keys (`daemon_rss_mb` — MB). The fixture previously used the
+// FE key for the anomaly, which was exactly the synthesized shape the
+// tester gate called out (BLOCKER B-1: "the prior leg passed on the
+// synthesized shape") — the marker vocabulary the REAL daemon serves
+// was never exercised. This fixture now mirrors the real wire: the
+// engine key + the KB-scale peak/baseline (1900 MB × 1024 = 1,945,600
+// KB), verbatim, no conversion — the FE's compatibility shim resolves
+// the join, and every displayed word stays the API's.
 const ANOMALY = {
   id: 'anom-1',
   kind: 'memory',
   t_start: '2026-10-18T16:30:00',
   t_end: '2026-10-18T16:40:00',
-  peak: 1900,
-  baseline: 1700,
+  peak: 1_945_600,
+  baseline: 1_740_800,
   severity: 'high',
-  series_key: 'daemon_rss_mb',
+  series_key: 'daemon.rss_kb',
   shape: 'ramp',
 };
 

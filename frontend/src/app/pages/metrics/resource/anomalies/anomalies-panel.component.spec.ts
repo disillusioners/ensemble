@@ -48,6 +48,19 @@ describe('AnomaliesPanelComponent — the anomalies table (5.5)', () => {
     fixture.componentRef.setInput('anomalies', [
       makeAnomaly(),
       makeAnomaly({ id: 'anom-000004', kind: 'fds', severity: 'high', peak: 900 }),
+      // The ENGINE vocabulary row (B-1): the real wire serves engine
+      // series keys + KB-scale values verbatim (tester gate 2026-11-04
+      // §4 receipt: series daemon.rss_kb · observed 345996) — the panel
+      // renders the wire words verbatim, never renamed.
+      makeAnomaly({
+        id: 'anom-000005',
+        kind: 'memory',
+        severity: 'low',
+        peak: 345996,
+        baseline: 306028,
+        series_key: 'daemon.rss_kb',
+        shape: 'ramp',
+      }),
     ]);
     fixture.detectChanges();
   });
@@ -56,7 +69,7 @@ describe('AnomaliesPanelComponent — the anomalies table (5.5)', () => {
 
   it('renders one row per anomaly with the API\'s facts', () => {
     const rows = fixture.debugElement.queryAll(By.css('[data-test^="anomaly-row-"]'));
-    expect(rows.length).toBe(2);
+    expect(rows.length).toBe(3);
 
     const text = fixture.nativeElement.textContent as string;
     expect(text).toContain('anom-000003');
@@ -69,6 +82,22 @@ describe('AnomaliesPanelComponent — the anomalies table (5.5)', () => {
 
     const high = fixture.debugElement.query(By.css('[data-test="anomaly-row-anom-000004"]'));
     expect(high.nativeElement.getAttribute('data-severity')).toBe('high');
+  });
+
+  it('an ENGINE-keyed row renders + emits the wire anomaly VERBATIM (B-1: series_key "daemon.rss_kb")', () => {
+    const row = fixture.debugElement.query(By.css('[data-test="anomaly-row-anom-000005"]'));
+    expect(row).not.toBeNull();
+
+    const seen: Anomaly[] = [];
+    component.rowClick.subscribe((anomaly) => seen.push(anomaly));
+    row.triggerEventHandler('click', null);
+
+    expect(seen.length).toBe(1);
+    // The wire anomaly is passed through UNTOUCHED — the engine key and
+    // the KB-scale values stay exactly what the endpoint served.
+    expect(seen[0].series_key).toBe('daemon.rss_kb');
+    expect(seen[0].peak).toBe(345996);
+    expect(seen[0].kind).toBe('memory');
   });
 
   it('a row click emits the WIRE anomaly (the body opens the existing drill-down)', () => {
