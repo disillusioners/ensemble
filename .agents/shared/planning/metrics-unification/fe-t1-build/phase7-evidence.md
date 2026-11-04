@@ -326,6 +326,62 @@ expectations were re-pointed:
   `tab === 'resource'`, `window === '24h'`, `x === '1'`) and the resource
   module is visible.
 
+### 9.1 TWO defects the REAL run exposed (both FIXED here)
+
+The Playwright gates were **executed** in this phase (they are Phase 9's
+*release* run, but running them here is what proved the re-point). The first
+metrics-gate run was **3 passed / 1 failed** and the failure was REAL, not
+cosmetic:
+
+1. **The metrics gate's stub set was missing the RESOURCE module's own
+   endpoints.** The resource module is tab 1 — the page's DEFAULT tab — so the
+   page renders it on every visit, and the catch-all's `{}` body (not a shape
+   the resources door ever serves) made the live strip throw
+   `TypeError: Cannot read properties of undefined (reading 'pid')` during
+   change detection. **It did not fail an assertion** — which is exactly why
+   the stub set has to be right. **FIX:** the four resource request classes
+   (`/live` + `/self-cost`, `/history`, `/anomalies`) are now stubbed with
+   contract-shaped bodies. The re-run logs **0** browser-console ERRORs, **0**
+   pageerrors, **0** requestfailed.
+2. **The tick count was a PER-GRID figure in the retired Charts tab and a
+   PER-PANEL figure in a central tab.** The first run measured **10** (2
+   panels × 5 ticks) where the retired grid asserted 5. **FIX:** the
+   assertion now states the STRUCTURE (one `[data-test="chart-panel-ticks"]`
+   group per panel ⇒ 2) and the total (10), so the number is explained rather
+   than merely moved.
+3. A third fix fell out of the same run: the drawer's `family-live` /
+   `family-dark` / `data-reason` assertions were **unscoped** and hit the
+   central tab BEHIND the drawer (a strict-mode violation on the reason
+   locator). **FIX:** they are scoped to the drawer's own table — stronger, and
+   no longer able to pass on the wrong surface.
+
+**Disclosed for the lane's owner (NOT a phase-7 fix):** the live strip's
+template reads `payload.daemon.pid` UNGUARDED, while its sibling block
+(`payload.cgroup?.memory?…`) IS optional-chained. The §2.8 contract always
+serves the `daemon` block (with nullable SCALARS), so this is not reachable
+through the real door — but it is a robustness asymmetry worth the owner's
+attention. It was NOT changed here (out of this phase's scope; a drive-by
+product edit is not this lane's business).
+
+### 9.2 THE GATES, RUN
+
+```
+$ cd $WT/frontend && ./node_modules/.bin/playwright test --config=playwright.resources-gate.config.ts
+Running 3 tests using 1 worker
+  3 passed (35.2s)
+PW_RC=0
+
+$ cd $WT/frontend && ./node_modules/.bin/playwright test --config=playwright.metrics-gate.config.ts
+Running 4 tests using 1 worker
+  4 passed (38.1s)
+PW_RC=0
+```
+
+Real Chromium, the FE dev server started/stopped by Playwright's own
+`webServer` lifecycle, **every** API call stubbed by `page.route` — **zero
+daemon, zero DB, zero live port** (the dev server's proxy target `:8079` was
+never reached; the live daemon on `:9797` was never contacted).
+
 ---
 
 ## 10. The Exit Criterion, bullet by bullet
@@ -338,7 +394,7 @@ expectations were re-pointed:
 | the gear menu has no `Resources` entry; the metrics entry remains | §3 — pinned by the acceptance AND by `metrics-gear-menu.spec.ts` |
 | the repo-wide sweep recorded with a per-hit classification; ZERO stale-route references and ZERO stale operator instructions | §6 — 137 hits, all classified, **0** class-(c) |
 | no Playwright config OR spec drives the retired route; the gear-menu leg re-pointed | §7 — the config scan (0 hits), the `toHaveURL` scan (0 hits), the gear-menu leg re-pointed to `Metrics` |
-| the e2e specs are green against the stubbed server; the stubbed-server gate still passes | §11 — the jest suites over the e2e SOURCES are green; the Playwright gates are Phase 9's run (disclosed) |
+| the e2e specs are green against the stubbed server; the stubbed-server gate still passes | §9.2 — **BOTH** Playwright gates RUN and PASS: the resources gate **3 passed (35.2s)** and the metrics gate **4 passed (38.1s)** (real Chromium, every API call stubbed, zero daemon/DB/live port) |
 | the bundle guard re-runs GREEN at the freeze | §12 |
 | E-1 — no MEASURED figure gates this phase; the structural inputs re-verified at lane base and re-read at the freeze | §13 |
 | `agents/` 161/161; branch clean; nothing pushed/merged/tagged/staged | §14 |
@@ -579,12 +635,13 @@ $ git diff --stat HEAD -- agents/
    e2e spec; the exit bullet's "no Playwright spec drives the retired route"
    is read as "drives it AS A PAGE". The probe is pinned to assert the
    `/metrics` landing, and the `toHaveURL` scan is 0.
-3. **The Playwright gates were NOT executed in this phase.** The plan assigns
-   the full Playwright run to Phase 9 ("the full Playwright run is Phase 9's;
-   yours is the spec source + the stubbed-server gate"). What this phase
-   proves about them is STATIC (the source re-pointed, the retired route
-   absent from every config and from every spec's landing assertion) plus the
-   jest specs that read those sources. Phase 9 runs them for real.
+3. **The Playwright gates WERE executed in this phase** (§9.2) — they are
+   Phase 9's *release* run, but running them here is what proved the
+   re-point, and it exposed THREE real defects in the metrics gate's stub
+   set and assertions (§9.1), all FIXED here. The first run was 3 passed / 1
+   failed; the final run is 4 passed. The live strip's unguarded
+   `payload.daemon.*` reads are DISCLOSED to the lane's owner (not reachable
+   through the real door — the §2.8 contract always serves the block).
 4. **Two assertions were removed** from `metrics-gear-menu.spec.ts` and
    **one** from `mcps-gateway.pins.spec.ts` — each with its reason recorded in
    the file's own header (§5, and the gateway's re-point in the same table).
