@@ -214,6 +214,70 @@ const DEGRADED_FAMILIES_PAYLOAD = {
   families: [],
 };
 
+// ── The RESOURCE MODULE's own endpoints (T1 phase 7, task 7.9) ─────────
+//
+// The resource module is tab 1 of `/metrics` — and it is the DEFAULT
+// tab, so the page renders it on every visit. Its three request classes
+// (`/live` + `/self-cost`, `/history`, `/anomalies`) must be stubbed
+// with CONTRACT-SHAPED bodies: the catch-all's `{}` is not a shape the
+// resources door ever serves, and the live strip's template reads
+// `payload.daemon.*` unguarded — an out-of-contract body makes it throw
+// during change detection (it does NOT fail an assertion, which is
+// exactly why the stub set has to be right).
+const RESOURCE_LIVE_PAYLOAD = {
+  ts: '2026-10-18T17:00:00',
+  sample_level: 'full',
+  daemon: { pid: 4242, cpu_pct: 3.1, rss_mb: 1720, threads: 44, fds: 34, uptime_s: 90_000 },
+  cgroup: {
+    memory: { current_mb: 5900, peak_mb: 6331, anon_mb: 1900, file_mb: 3400, slab_mb: 350 },
+    cpu: { usage_usec: 123_456_789, throttled_usec: 100, nr_throttled: 3 },
+  },
+  children: [],
+  instances: [],
+  attribution: { attributed_mb: 240, unattributed_mb: 60, coverage_pct: 80 },
+  overruns: { count: 0, last_ts: null },
+  self_cost: {
+    cpu_pct: 0.42,
+    cumulative_cpu_s: 12.5,
+    buffers_bytes: 2_097_152,
+    rss_budget_mb: 50,
+    threads: 1,
+    samples: 320,
+    ticks_skipped: 2,
+    flush: { batches: 5, bytes: 4096, errors: 0 },
+    profiling: { active: false, capabilities: [] },
+  },
+};
+
+const RESOURCE_HISTORY_PAYLOAD = {
+  points: [
+    { t: '2026-10-18T16:00:00', daemon_cpu: 1, daemon_rss_mb: 1700, cgroup_mem_mb: 5800, threads: 40, instances_active: 5 },
+    { t: '2026-10-18T16:15:00', daemon_cpu: 2, daemon_rss_mb: 1750, cgroup_mem_mb: 5850, threads: 42, instances_active: 5 },
+    { t: '2026-10-18T16:30:00', daemon_cpu: 3, daemon_rss_mb: 1800, cgroup_mem_mb: 5900, threads: 44, instances_active: 6 },
+    { t: '2026-10-18T16:45:00', daemon_cpu: 2, daemon_rss_mb: 1850, cgroup_mem_mb: 5950, threads: 44, instances_active: 5 },
+    { t: '2026-10-18T17:00:00', daemon_cpu: 4, daemon_rss_mb: 1900, cgroup_mem_mb: 6000, threads: 46, instances_active: 5 },
+  ],
+  resolution_used: 'raw',
+  rollup: 'none',
+  truncated: false,
+};
+
+const RESOURCE_ANOMALIES_PAYLOAD = {
+  anomalies: [
+    {
+      id: 'anom-1',
+      kind: 'memory',
+      t_start: '2026-10-18T16:30:00',
+      t_end: '2026-10-18T16:40:00',
+      peak: 1900,
+      baseline: 1700,
+      severity: 'high',
+      series_key: 'daemon_rss_mb',
+      shape: 'ramp',
+    },
+  ],
+};
+
 /** Install ALL stubs. Catch-all FIRST (lowest precedence), specifics after. */
 async function installStubs(page: Page): Promise<void> {
   await page.route('**/api/**', (route) => {
@@ -257,6 +321,18 @@ async function installStubs(page: Page): Promise<void> {
     doorCalls.push(route.request().url());
     return jsonRoute(route, SERIES_PAYLOAD);
   });
+
+  // ── The RESOURCE MODULE (tab 1 — the page's default tab) ──
+  await page.route(/\/api\/resources\/live/, (route) => jsonRoute(route, RESOURCE_LIVE_PAYLOAD));
+  await page.route(/\/api\/resources\/self-cost/, (route) =>
+    jsonRoute(route, RESOURCE_LIVE_PAYLOAD.self_cost),
+  );
+  await page.route(/\/api\/resources\/history/, (route) =>
+    jsonRoute(route, RESOURCE_HISTORY_PAYLOAD),
+  );
+  await page.route(/\/api\/resources\/anomalies(\?|$)/, (route) =>
+    jsonRoute(route, RESOURCE_ANOMALIES_PAYLOAD),
+  );
 }
 
 test.beforeEach(async ({ page }) => {
@@ -326,9 +402,17 @@ test('[P5] gear menu → /metrics → the manifest tab list → the resource mod
 
   // ── LEG-CLASS 3 — the UTC tick text (the retired `[data-test="chart-tick"]`
   // SVG text), read from the wrapper's hidden surface. The label is UTC
-  // in every process timezone (never local). ──
+  // in every process timezone (never local).
+  //
+  // The count is PER PANEL: the DB Pool tab renders ONE panel per series
+  // of its bound family (F4 → 2 names → 2 panels), and each panel carries
+  // its own tick surface. The retired Charts grid asserted 5 ticks for the
+  // whole grid; the central tab asserts the STRUCTURE (one tick group per
+  // panel) and the total (2 × 5 = 10).
+  const tickGroups = page.locator('[data-test="chart-panel-ticks"]');
+  await expect(tickGroups).toHaveCount(2);
   const ticks = page.locator('[data-test="chart-panel-tick"]');
-  await expect(ticks).toHaveCount(5);
+  await expect(ticks).toHaveCount(10);
   await expect(ticks.first()).toHaveText(/^\d{2}:\d{2}$/);
 
   // ── The FAMILY CATALOG is a DRAWER now (the retired Families tab is
@@ -336,9 +420,14 @@ test('[P5] gear menu → /metrics → the manifest tab list → the resource mod
   await page.locator('[data-test="metrics-catalog-drawer-toggle"]').click();
   await expect(page.locator('[data-test="metrics-catalog-drawer"]')).toBeVisible();
   await expect(page.locator('[data-test="families-table"]')).toBeVisible();
-  await expect(page.locator('[data-test="family-live"]').first()).toBeVisible();
-  await expect(page.locator('[data-test="family-dark"]').first()).toBeVisible();
-  await expect(page.locator('[data-reason="census_gated"]')).toContainText(
+  // The pills and the reason are scoped to the DRAWER's own table — the
+  // central tab behind the drawer renders the same `data-test` pills and
+  // the same `data-reason` attribute, so an unscoped locator is a strict
+  // -mode violation (or a false positive on the wrong surface).
+  const catalog = page.locator('[data-test="families-table"]');
+  await expect(catalog.locator('[data-test="family-live"]').first()).toBeVisible();
+  await expect(catalog.locator('[data-test="family-dark"]').first()).toBeVisible();
+  await expect(catalog.locator('[data-reason="census_gated"]')).toContainText(
     'the census sampler is gated',
   );
 
