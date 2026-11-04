@@ -873,7 +873,8 @@ exception is the registry-scan leg, which needs the venv interpreter.
 | T26 | `test_default_queue_parallel` ×4 | all four declare `system_parallel_queue` | DP5 |
 | T27 | `test_model_assignments` | aegis = `agentic`; children = `coding` | DP6 |
 | T28 | `test_registry_scan_aegis_family` | subprocess probe asserting `get_registry().exists()` for all four ids — **venv-bound** (D9) | boot-scan leg |
-| **T29** *(Blocker 4, approver iter-001)* | **`test_legality_cardinal_pin_matrix` — the legality-cardinal pin matrix: 5 guardrail lines × 4 personas = 20 verbatim-grep assertions** (AM-6 α/β mechanism generalised). Each pin greps the cardinal text **VERBATIM** in the persona file and reds on deletion/mutation: (1) read-only-on-targets; (2) self-owned-sandbox-only / zero-external-targets; (3) synthetic-sample-data-only (cracker; aegis/hacker/sweeper assert its ABSENCE as a non-applicable family, so the matrix stays 5×4 with per-agent applicability recorded); (4) findings-private; (5) white-hat-ethos. **Approver acceptance test: deleting the "no external targets, ever" cardinal from `hacker/rule.md` must RED.** Registered as a discrete T29 BLOCK — T1–T28 references are cross-cited across five files; renumbering would destabilise them (planner registration decision, recorded) | legality-line enforcement (Blocker 4) |
+| **T29** *(Blocker 4, approver iter-001)* | **`test_legality_cardinal_pin_matrix` — the legality-cardinal pin matrix: 5 guardrail lines × 4 personas = 20 verbatim-grep assertions** (AM-6 α/β mechanism generalised). Each pin greps the cardinal text **VERBATIM** in the persona file and reds on deletion/mutation: (1) read-only-on-targets; (2) self-owned-sandbox-only / zero-external-targets; (3) synthetic-sample-data-only (cracker; for aegis/hacker/sweeper the matrix **ASSERTS NON-APPLICABILITY as a positive per-agent assertion** — absence is asserted, not merely not-asserted — so the matrix stays 5×4 with per-agent applicability recorded); (4) findings-private; (5) white-hat-ethos. **Approver acceptance test: deleting the "no external targets, ever" cardinal from `hacker/rule.md` must RED.** Registered as a discrete T29 BLOCK — T1–T28 references are cross-cited across five files; renumbering would destabilise them (planner registration decision, recorded) | legality-line enforcement (Blocker 4) |
+| **T30** *(Blocker 9, approver iter-002)* | **`test_installer_fences_and_library_contract` — the installer-guard pin pack (registered as a discrete BLOCK, same rationale as T29 — planner registration decision, recorded). The pre-iter-002 gap (VERIFIED): the FENCES guardrails were NOT red-able — uniform deletion of the NO-Docker/no-system-packages/no-fetch-and-execute/no-plaintext bullets from all three bodies KEEPS cross-body byte-identity, the `.lib.sh` pin was any-one-keyword, and G3.2–G3.6 were inspection-only.** Two legs: **(a) PER-BULLET PRESENCE PIN** — each FENCES bullet (incl. the C3 checksum bullet) is verbatim-grepped in **EACH** of the three `.md` bodies; deletion or mutation of any bullet REDS even when cross-body byte-identity survives; **(b) LIBRARY-CONTRACT TEST PACK** — the three `.lib.sh` contract tests assert: the checksum-compare is **EXECUTED** (not merely present), **no `docker`/`apt`/`sudo` tokens** anywhere, the lock release is **trap-based**, the attempt cap is present. This is what T29 did for the personas, done for the skills | installer-guard enforcement (Blocker 9) |
 
 ### Existing tests this lane must not break — and the leg that proves it
 
@@ -914,8 +915,7 @@ prompt set.
 
 ### Recommendation
 
-Six phases, with the standard lane flow (**plan → councils → implement → verify → STAGE**; **never
-promote**). Every phase ends with a gate that is independently checkable.
+**[SUPERSEDED in the count only — AM-era folds kept the six-phase shape; the phase count stated here predates the P2/P3 file-count corrections (W3) and the P6 giter-ownership rewrite (Blocker 1+2) — the authoritative phase table is `plan-overview.md` §Phases]** Six phases, with the standard lane flow (**plan → councils → implement → verify → STAGE**; **never promote**). Every phase ends with a gate that is independently checkable.
 
 | Phase | Content | Gate (independently checkable) |
 |---|---|---|
@@ -983,7 +983,7 @@ promote**). Every phase ends with a gate that is independently checkable.
   minutes**; `hacker`'s fuzzing campaign is **minutes to hours**; `cracker`'s bench is **seconds to
   minutes**. ⇒ This is the one place where the **no-watchover-block** decision (DP5/D7) has an
   operational cost: a long campaign is supervised by the family's own END TURN + `proc` tracking +
-  the per-instance watchover API, not by an agent-meta timeout.
+  the per-instance watchover API, not by an agent-meta timeout. **[SUPERSEDED in part by AM-5 — 2026-11-04: the per-instance watchover API is an operator-only tool-call gate, not a supervisor; the v1 supervisor is aegis itself — see the §DP5 rewrite]**
 
 ### Current bottlenecks
 
@@ -1019,7 +1019,7 @@ promote**). Every phase ends with a gate that is independently checkable.
 | 4 | **`tools` parse failure ⇒ all tools allowed** | a malformed `tools` block on a security agent is a privilege escalation, not a lint error | **High** | `daemon/registry.py:656-662` / A9 |
 | 5 | **The `watchover` meta key is inert** | copied precedent would create a false-confidence supervision guarantee | Medium | `daemon/registry.py` `AgentMetadata` / D7 |
 | 6 | **`explore`/`experience` spawn outside the team gate** | a `deny_spawn` trim cannot close the facade spawn | Medium | `daemon/tools/knowledge_tools.py:386,754` |
-| 7 | **No web-search tool category** | CVE lookup is `mcp` (deployment-conditional) + `curl` | Medium | A7/D2 |
+| 7 | **No web-search tool category** | CVE lookup is `mcp` (deployment-conditional) + `curl` — **[SUPERSEDED in part by AM-3 — 2026-11-04: on live, `zai-web-search` already delivers web search through the `mcp` grant; the deployment-conditional framing stands]** | Medium | A7/D2 |
 | 8 | **The prompt-artifact seal does not cover new agents** | the seal tripwire is blind to aegis-family drift; only the baseline covers it | Low | B5 |
 | 9 | **The `mcp` sweep is deployment-dependent** | aegis's CVE capability varies by deployment; the prompt must treat it as conditional | Low | D8 |
 

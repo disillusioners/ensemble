@@ -288,7 +288,7 @@ Exemplar bodies:
 
 ### B7 — Implement environment
 
-- `cd <worktree> && uv sync` creates `.venv` from `uv.lock` (`README.md:45-50`); `dev.sh`
+- `cd /home/nea/ensemble-src-wt-aegis-security-family && uv sync` creates `.venv` from `uv.lock` (`README.md:45-50`); `dev.sh`
   auto-picks `.venv/bin/python`. `requires-python >=3.13`.
 - Default pytest addopts deselect `integration` / `postgres` / `slow` / `conformance`.
 - **The baseline re-stamp is venv-free** (B2) — it can run before the venv exists.

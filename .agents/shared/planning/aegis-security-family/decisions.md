@@ -423,7 +423,13 @@ giter-owned phase-6 sequence encodes house choreography verbatim — any drift a
 giter-lane concern, not a plan defect; (d) the T29 matrix's per-agent applicability column
 (synthetic-data absent-by-applicability for aegis/hacker/sweeper) is recorded, not asserted as a
 positive pin; (e) phase-6's promote command remains RECORDED-NOT-EXECUTED regardless of the
-giter-ownership rewrite (the user's nonce ceremony owns the flip).
+giter-ownership rewrite (the user's nonce ceremony owns the flip); (f) **child-bash egress residual
+(n6, approver iter-002): children hold `bash` ⇒ `curl` is TECHNICALLY possible on a child — the
+"egress-free" claim is about TOOL grants (no `mcp` category), not about bash capability; the
+class-(iii) no-outbound-egress sandbox rule is the operational control; (g) the `.md` read-target
+exemption gap (n8): the guide §3 exemption list and the repo test's exact match classes are not
+1:1 — the lane's T15 exemption enumeration is the reconciling artifact; (h) owners live in the
+overview phase table (n9).
 
 ---
 
