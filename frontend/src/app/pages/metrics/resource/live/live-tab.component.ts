@@ -42,7 +42,7 @@ import { ResourcesService } from '../../../../services/resources.service';
  *    interval — no polling while the tab is inactive.
  */
 @Component({
-  selector: 'app-resources-live',
+  selector: 'app-metrics-live',
   standalone: true,
   imports: [CommonModule, MatButtonModule, MatIconModule, MatTooltipModule],
   templateUrl: './live-tab.component.html',

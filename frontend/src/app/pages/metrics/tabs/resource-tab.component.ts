@@ -112,11 +112,11 @@ import { AnomaliesPanelComponent } from '../resource/anomalies/anomalies-panel.c
       </div>
 
       <section class="resource-live-section" data-test="resource-live-strip">
-        <app-resources-live />
+        <app-metrics-live />
       </section>
 
       <section class="resource-timeline-section" data-test="resource-timeline-panel">
-        <app-resources-timeline
+        <app-metrics-timeline
           [history]="history()"
           [anomalies]="anomalies() ?? []"
           [loading]="timelineLoading()"
@@ -126,7 +126,7 @@ import { AnomaliesPanelComponent } from '../resource/anomalies/anomalies-panel.c
       </section>
 
       <section class="resource-anomalies-section" data-test="resource-anomalies-panel">
-        <app-resource-anomalies
+        <app-metrics-anomalies
           [anomalies]="anomalies() ?? []"
           [loading]="anomaliesLoading()"
           [error]="anomaliesError()"

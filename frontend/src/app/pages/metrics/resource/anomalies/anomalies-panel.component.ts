@@ -34,7 +34,7 @@ export const ANOMALIES_PROCESS_LOCAL_DISCLOSURE =
  * and the error branch down here.
  */
 @Component({
-  selector: 'app-resource-anomalies',
+  selector: 'app-metrics-anomalies',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `

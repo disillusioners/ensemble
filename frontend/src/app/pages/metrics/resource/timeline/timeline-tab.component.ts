@@ -121,7 +121,7 @@ export interface TimelinePanelView {
 
 
 @Component({
-  selector: 'app-resources-timeline',
+  selector: 'app-metrics-timeline',
   standalone: true,
   imports: [CommonModule, MatButtonModule, MatIconModule, NgComponentOutlet],
   templateUrl: './timeline-tab.component.html',
