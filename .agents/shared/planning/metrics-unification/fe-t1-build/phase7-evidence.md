@@ -225,8 +225,8 @@ $ cd $WT && grep -rn "/resources" frontend/ docs/ --exclude-dir=node_modules --e
 
 **141 hits** (the base sweep was 139; the +2 net are the metrics gate's four
 new `/api/resources/*` stubs and the removed resources-page hits). **EVERY hit
-is classified** — the full per-hit table is `/tmp/p7-sweep-classified.txt`
-(141 lines, one per hit, each with its class):
+is classified** — the FULL per-hit output is embedded in **§6.1** below (141
+lines, one per hit, each with its class):
 
 | class | count | what it is |
 |---|---|---|
@@ -249,6 +249,152 @@ and live in the acceptance:
 The class-(c)/(d) boundary is what the plan drew: the runbooks' three hits are
 NOT operator instructions pointing at the retired route — they are the notices
 that say the route is retired and name the NEW one.
+
+### 6.1 THE FULL SWEEP OUTPUT — every hit, with its class
+
+```
+frontend/e2e/metrics-gate.spec.ts:326 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/metrics-gate.spec.ts:327 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/metrics-gate.spec.ts:330 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/metrics-gate.spec.ts:333 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/metrics-gate.spec.ts:470 — (a) the REDIRECT PROBE (the retired route as the redirect INPUT)
+frontend/e2e/resources-gate.spec.ts:8 — (a) a PROSE notice about the retirement (a comment)
+frontend/e2e/resources-gate.spec.ts:28 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:29 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:30 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:31 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:32 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:33 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:199 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:200 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:201 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:202 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:208 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:211 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:285 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:332 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/e2e/resources-gate.spec.ts:333 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/playwright.resources-gate.config.ts:36 — (b) the gate's own IDENTITY (its testMatch + its output dir) — STAYS
+frontend/playwright.resources-gate.config.ts:43 — (b) the gate's own IDENTITY (its testMatch + its output dir) — STAYS
+frontend/playwright.resources-gate.config.ts:46 — (b) the gate's own IDENTITY (its testMatch + its output dir) — STAYS
+frontend/src/app/pages/metrics/tabs.manifest.ts:63 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/tabs.manifest.ts:152 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/metrics-state.ts:9 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/metrics-range.ts:43 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/metrics-range.ts:311 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/resource/timeline/timeline-drilldown.spec.ts:7 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/timeline/marker-label.ts:1 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/timeline/data-gaps.spec.ts:14 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/timeline/marker-label.spec.ts:7 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/timeline/timeline-tab.component.ts:23 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/timeline/timeline-tab.component.ts:24 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/timeline/data-gaps.ts:1 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/timeline/data-gaps.ts:9 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/resource/timeline/timeline-tab.component.spec.ts:28 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/timeline/timeline-tab.component.spec.ts:35 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/timeline/timeline-drilldown.ts:1 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/live/live-tab.component.ts:21 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/live/live-tab.component.ts:22 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/live/live-tab.component.ts:25 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/resource/live/live-tab.component.spec.ts:5 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/live/live-tab.component.spec.ts:9 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/anomalies/anomalies-panel.component.ts:6 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/resource/anomalies/anomalies-panel.component.ts:12 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/resource/anomalies/anomalies-panel.component.ts:25 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/resource/anomalies/anomalies-panel.component.spec.ts:17 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/tabs/resource-tab.component.spec.ts:12 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/tabs/resource-tab.component.spec.ts:36 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/tabs/resource-tab.component.spec.ts:39 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/tabs/resource-tab.component.spec.ts:592 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/tabs/resource-tab.component.ts:25 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/tabs/resource-tab.component.ts:29 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/tabs/resource-tab.component.ts:30 — (b) the relocated module's own file names — STAY
+frontend/src/app/pages/metrics/tabs/resource-tab.component.ts:65 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/tabs/resource-tab.component.ts:67 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/tabs/resource-tab.component.ts:77 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/tabs/resource-tab.component.ts:228 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/pages/metrics/metrics-gear-menu.spec.ts:15 — (a) a PROSE notice about the retirement (a comment)
+frontend/src/app/pages/metrics/metrics-gear-menu.spec.ts:66 — (a) a NEGATIVE guard (the string IS the absence assertion)
+frontend/src/app/app.resources-retirement.spec.ts:2 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:4 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:52 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:55 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:56 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:57 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:58 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:60 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:62 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:99 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:117 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:132 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:140 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:179 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:218 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:232 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:351 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:360 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:380 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.resources-retirement.spec.ts:382 — (a) the ACCEPTANCE (its own probes + its needles)
+frontend/src/app/app.ts:593 — (a) a PROSE notice about the retirement (a comment)
+frontend/src/app/models/resources.models.ts:30 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/models/resources.models.ts:110 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/models/resources.models.ts:150 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/models/resources.models.ts:180 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/models/resources.models.ts:199 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/models/resources.models.ts:236 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/models/metrics.model.ts:31 — (b) the relocated module's own file names — STAY
+frontend/src/app/app.routes.ts:32 — (a) the REDIRECT itself (its route + its doc)
+frontend/src/app/app.routes.ts:34 — (a) the REDIRECT itself (its route + its doc)
+frontend/src/app/app.routes.ts:36 — (a) the REDIRECT itself (its route + its doc)
+frontend/src/app/app.routes.ts:43 — (a) the REDIRECT itself (its route + its doc)
+frontend/src/app/app.routes.ts:109 — (a) the REDIRECT itself (its route + its doc)
+frontend/src/app/services/resources.service.ts:13 — (b) the relocated module's own file names — STAY
+frontend/src/app/services/resources.service.ts:17 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:35 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:36 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:37 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:38 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:39 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:41 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:47 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:60 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:72 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:79 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.ts:85 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:7 — (b) the relocated module's own file names — STAY
+frontend/src/app/services/resources.service.spec.ts:15 — (b) the relocated module's own file names — STAY
+frontend/src/app/services/resources.service.spec.ts:136 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:142 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:156 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:167 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:177 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:188 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:199 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:213 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:221 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+frontend/src/app/services/resources.service.spec.ts:225 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:11 — (d) an operator doc — a RETIREMENT notice (it points at the NEW route)
+docs/runbooks/resource-cost-control.md:15 — (d) an operator doc — a RETIREMENT notice (it points at the NEW route)
+docs/runbooks/resource-cost-control.md:34 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:36 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:39 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:41 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:46 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:47 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:48 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:56 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:57 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:58 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:59 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:60 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:152 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-cost-control.md:202 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-hygiene-operator-checklist.md:30 — (d) an operator doc — a RETIREMENT notice (it points at the NEW route)
+docs/runbooks/resource-hygiene-operator-checklist.md:33 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-hygiene-operator-checklist.md:48 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-hygiene-operator-checklist.md:273 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+docs/runbooks/resource-hygiene-operator-checklist.md:290 — (b) the /api/resources/* API surface (incl. the backend router path) — STAYS
+```
 
 ## 7. Task 7.7 — the Playwright gate
 
