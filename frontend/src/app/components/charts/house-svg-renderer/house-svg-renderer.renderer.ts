@@ -60,6 +60,10 @@ function plan(variant: 'mini' | 'trend', rendererId: string): (data: ChartRender
       anomalies: values.anomalies ?? [],
       baseline: values.baseline ?? [],
       variant,
+      // The panel's unit — the trend role's value-axis suffix (phase 6,
+      // task 6.2). 'unit unknown' renders verbatim; the mini ignores it
+      // (it renders no axis).
+      unit: values.unit ?? 'unit unknown',
       ariaLabel: values.label ?? 'Metric trend (UTC)',
       onAnomalyClick: handlers?.anomalyClick ?? null,
     }),

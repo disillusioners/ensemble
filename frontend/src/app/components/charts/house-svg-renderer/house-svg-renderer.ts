@@ -33,10 +33,16 @@
  *
  * ── THE HOUSE RULES THE GEOMETRY HONOURS ─────────────────────────────────
  *
- *   * **PER-SERIES NORMALISATION** (P5-M6) — a value maps to `y`
- *     against the SERIES' OWN observed [min,max]. A shared axis across
- *     series with different units would be a lie; the legend prints
- *     each series' own range instead.
+ *   * **THE SHARED PANEL DOMAIN** (phase 6, task 6.1 / W7 — replaces the
+ *     old per-series normalisation) — every series handed to the engine
+ *     is ONE panel's worth (a panel is a metric-kind + unit group), and
+ *     every series is plotted against THAT PANEL'S single shared
+ *     [min,max] (`chartSharedDomain`). **No series is ever
+ *     independently rescaled within a panel** — a per-series rescale
+ *     would let a small-magnitude series fake a full-height swing inside
+ *     a panel whose axis says otherwise. The legend still prints each
+ *     series' OWN observed range (the values are per-series facts; the
+ *     AXIS is the panel's).
  *   * **COUNTER-HONESTY** — a counter renders STEP (`H`/`V`), never a
  *     diagonal: a linear interpolation between counter samples would
  *     assert values that were never observed.
@@ -262,10 +268,11 @@ export function chartXScale(
 }
 
 /**
- * Value → viewBox y (inverted), NORMALISED against the series' own
- * observed [min,max]. A value below `min` clamps to the floor and a
- * value above `max` clamps to the ceiling — the axis never shows a
- * value that was not observed.
+ * Value → viewBox y (inverted), NORMALISED against the range the caller
+ * passes — for the house engine that range is ALWAYS the panel's shared
+ * domain (W7: no series is rescaled inside a panel). A value below
+ * `min` clamps to the floor and a value above `max` clamps to the
+ * ceiling — the axis never shows a value that was not observed.
  */
 export function chartYScale(
   value: number,
@@ -283,7 +290,7 @@ export function chartYScale(
   return geometry.plotBottom - clamp01((value - min) / (max - min)) * height;
 }
 
-/** The observed [min,max] of a series (the per-series normalisation). */
+/** The observed [min,max] of a series (the per-series VALUES fact). */
 export function chartSeriesDomain(points: readonly ChartPoint[]): {
   min: number;
   max: number;
@@ -299,6 +306,40 @@ export function chartSeriesDomain(points: readonly ChartPoint[]): {
     }
     if (point.v > max) {
       max = point.v;
+    }
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return { min: 0, max: 0 };
+  }
+  return { min, max };
+}
+
+/**
+ * The SHARED PANEL DOMAIN (phase 6, task 6.1 / W7) — the observed
+ * [min,max] across EVERY series of one panel (and its baseline).
+ *
+ * A panel is a metric-kind + unit group, so its series are commensurate
+ * by construction and ONE domain is the honest axis: every series in
+ * the panel is plotted against this single domain, and NO series is
+ * independently rescaled. An empty panel degenerates to the zero range
+ * (the caller renders the empty state, not the axis).
+ */
+export function chartSharedDomain(
+  seriesList: readonly { readonly points: readonly ChartPoint[] }[],
+): { min: number; max: number } {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const entry of seriesList) {
+    for (const point of entry.points) {
+      if (!Number.isFinite(point.v)) {
+        continue;
+      }
+      if (point.v < min) {
+        min = point.v;
+      }
+      if (point.v > max) {
+        max = point.v;
+      }
     }
   }
   if (!Number.isFinite(min) || !Number.isFinite(max)) {

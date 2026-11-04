@@ -41,6 +41,7 @@ import {
   TIMELINE_SERIES_DEFS,
   TimelineSeriesKey,
 } from './timeline-series';
+import { METRICS_UNIT_UNKNOWN, metricsUnitFor } from '../../metrics-units';
 import { TimelineMarkerClick, anomalyDrilldownWindow } from './timeline-drilldown';
 import { detectResourceDataGaps } from './data-gaps';
 import { anomalyMarkerLabel } from './marker-label';
@@ -88,16 +89,28 @@ import { anomalyMarkerLabel } from './marker-label';
 /** One unit-class panel of the timeline (plan-overview §4.2). */
 interface TimelineUnitClassPanelSpec {
   readonly unitClass: 'memory' | 'cpu' | 'count';
-  readonly unit: string;
   readonly title: string;
 }
 
 /** The three unit classes → three panels, in display order. */
 const TIMELINE_UNIT_CLASS_PANELS: readonly TimelineUnitClassPanelSpec[] = [
-  { unitClass: 'memory', unit: 'MB', title: 'Memory (MB)' },
-  { unitClass: 'cpu', unit: '%', title: 'CPU (%)' },
-  { unitClass: 'count', unit: 'count', title: 'Counts' },
+  { unitClass: 'memory', title: 'Memory (MB)' },
+  { unitClass: 'cpu', title: 'CPU (%)' },
+  { unitClass: 'count', title: 'Counts' },
 ];
+
+/**
+ * The AXIS UNIT of a unit-class panel — read from the METRIC-NAME
+ * vocabulary (phase 6, task 6.3 / IMPL-10), never from the class and
+ * never guessed from the name shape. The class's FIRST series def is
+ * the lookup key; every def in the class must map to the same unit
+ * (the spec pins the agreement), and an unmapped class renders
+ * `unit unknown` — never a guess.
+ */
+function timelinePanelUnit(unitClass: string): string {
+  const def = TIMELINE_SERIES_DEFS.find((candidate) => candidate.unitClass === unitClass);
+  return def ? metricsUnitFor(def.key) : METRICS_UNIT_UNKNOWN;
+}
 
 /** One rendered panel view — the plan the template mounts. */
 export interface TimelinePanelView {
@@ -252,7 +265,10 @@ export class TimelineTabComponent {
       series: this.panelSeries(unitClass),
       anomalies: this.panelAnomalies(unitClass),
       baseline: [],
-      unit: spec?.unit ?? 'unit unknown',
+      // The axis unit comes from the METRIC-NAME vocabulary (6.3) — the
+      // Chart.js wrapper suffixes it onto the shared value axis; the
+      // house fallback labels its own axis with it.
+      unit: timelinePanelUnit(unitClass),
       label: `${spec?.title ?? unitClass} — resource history (UTC)`,
     };
   }

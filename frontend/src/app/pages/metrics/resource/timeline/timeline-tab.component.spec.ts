@@ -33,6 +33,8 @@ import {
   HistoryPayload,
   TracebackPayload,
 } from '../../../../models/resources.models';
+import { metricsUnitFor } from '../../metrics-units';
+import { ChartPanelComponent, ChartPanelSeries } from '../../charts/chart-panel.component';
 import { TimelineTabComponent } from './timeline-tab.component';
 
 // ── Fixtures — naive-UTC wire strings (D10) ─────────────────────────
@@ -485,5 +487,131 @@ describe('TimelineTabComponent — the presentational panel (phase 5)', () => {
 
     expect(query('[data-test="drilldown-error"]')).toBeNull();
     expect(component.evidence()).not.toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 6 (tasks 6.1 / 6.2) — the per-unit panels' axes + scales
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('TimelineTabComponent — the per-unit panels (phase 6)', () => {
+  let fixture: ComponentFixture<TimelineTabComponent>;
+  let component: TimelineTabComponent;
+  const resourcesMock: {
+    getEvidence: jest.Mock;
+    getTraceback: jest.Mock;
+  } = {
+    getEvidence: jest.fn(),
+    getTraceback: jest.fn(),
+  };
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [TimelineTabComponent],
+      providers: [provideNoopAnimations(), { provide: ResourcesService, useValue: resourcesMock }],
+    }).compileComponents();
+    fixture = TestBed.createComponent(TimelineTabComponent);
+    component = fixture.componentInstance;
+  });
+
+  beforeEach(() => {
+    resourcesMock.getEvidence.mockReset();
+    resourcesMock.getTraceback.mockReset();
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    (console.warn as jest.Mock).mockRestore();
+    fixture.destroy();
+  });
+
+  function feedData(): void {
+    fixture.componentRef.setInput('history', makeHistory());
+    fixture.componentRef.setInput('anomalies', []);
+    fixture.componentRef.setInput('loading', false);
+    fixture.componentRef.setInput('error', null);
+    fixture.detectChanges();
+  }
+
+  /** The wrapper inputs of one unit-class panel (the plan's hand-off). */
+  function inputsOf(unitClass: string): Record<string, unknown> {
+    const panel = component.panels().find((candidate) => candidate.unitClass === unitClass);
+    expect(panel).toBeDefined();
+    return panel!.plan.inputs(
+      component.panelData(unitClass),
+      component.panelHandlers(unitClass),
+    ) as Record<string, unknown>;
+  }
+
+  it('each panel carries its unit — read from the METRIC-NAME vocabulary (6.3)', () => {
+    feedData();
+    // memory → the vocabulary's daemon_rss_mb entry is MB; cpu → %.
+    expect(inputsOf('memory')['unit']).toBe('MB');
+    expect(inputsOf('cpu')['unit']).toBe('%');
+  });
+
+  it('the TOGGLE path lands a count series on the COUNTS panel with its own unit (AM-12)', async () => {
+    feedData();
+    component.toggleSeries('threads');
+    fixture.detectChanges();
+
+    // The counts panel exists and carries ONLY the count series...
+    const countInputs = inputsOf('count');
+    const countSeries = countInputs['series'] as readonly { id: string }[];
+    expect(countSeries.map((entry) => entry.id)).toEqual(['threads']);
+    expect(countInputs['unit']).toBe('count');
+
+    // ...and NEITHER the memory NOR the cpu panel carries it.
+    const memoryIds = (inputsOf('memory')['series'] as readonly { id: string }[]).map(
+      (entry) => entry.id,
+    );
+    const cpuIds = (inputsOf('cpu')['series'] as readonly { id: string }[]).map(
+      (entry) => entry.id,
+    );
+    expect(memoryIds).toEqual(['daemon_rss_mb', 'cgroup_mem_mb']);
+    expect(cpuIds).toEqual(['daemon_cpu']);
+    expect(memoryIds).not.toContain('threads');
+    expect(cpuIds).not.toContain('threads');
+  });
+
+  it('the rendered Chart.js panel suffixes the axis ticks with the panel unit (6.2)', () => {
+    feedData();
+    const panelFixture = TestBed.createComponent(ChartPanelComponent);
+    const panel = panelFixture.componentInstance;
+    // The EXACT render data the timeline hands the memory panel.
+    const inputs = inputsOf('memory');
+    const config = panel.buildChartConfig(
+      inputs['series'] as readonly ChartPanelSeries[],
+      inputs['unit'] as string,
+      [],
+    );
+    // ONE shared value axis, suffixed with the vocabulary unit.
+    expect(Array.isArray(config.options.scales.y)).toBe(false);
+    expect(config.options.scales.y.ticks.callback(1800)).toBe('1800 MB');
+    // The CPU panel's axis carries the OTHER unit — the two panels do
+    // not share one axis.
+    const cpuInputs = inputsOf('cpu');
+    const cpuConfig = panel.buildChartConfig(
+      cpuInputs['series'] as readonly ChartPanelSeries[],
+      cpuInputs['unit'] as string,
+      [],
+    );
+    expect(cpuConfig.options.scales.y.ticks.callback(3)).toBe('3 %');
+    panelFixture.destroy();
+  });
+
+  it('the vocabulary agrees WITHIN each unit class (the class-internal unit census)', () => {
+    // Every def of a class maps to the SAME unit — a disagreement would
+    // put two units under one panel axis.
+    const classes = ['memory', 'cpu', 'count'] as const;
+    for (const unitClass of classes) {
+      const units = component.seriesDefs
+        .filter((def) => def.unitClass === unitClass)
+        .map((def) => metricsUnitFor(def.key));
+      expect(new Set(units).size).toBe(1);
+    }
+    expect(metricsUnitFor('daemon_rss_mb')).toBe('MB');
+    expect(metricsUnitFor('daemon_cpu')).toBe('%');
+    expect(metricsUnitFor('threads')).toBe('count');
   });
 });

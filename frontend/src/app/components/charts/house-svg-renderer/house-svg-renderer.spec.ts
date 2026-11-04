@@ -50,6 +50,7 @@ import {
   chartCoords,
   chartPointTooltip,
   chartSeriesDomain,
+  chartSharedDomain,
   chartUtcTicks,
   chartXScale,
   chartYScale,
@@ -775,5 +776,203 @@ describe('house-svg-renderer — the UTC tick disambiguates days', () => {
     const dayStart = Date.UTC(2026, 10, 2, 9, 0, 0);
     expect(formatChartUtcTick(dayStart, 24 * 60 * 60 * 1000)).toBe('11-02 09:00');
     expect(formatChartUtcTick(dayStart, 7 * 24 * 60 * 60 * 1000)).toBe('11-02 09:00');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 6 (tasks 6.1 / 6.2) — the SHARED PANEL DOMAIN + the unit axis
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('house-svg-renderer — the shared panel domain (phase 6, W7)', () => {
+  let fixture: ComponentFixture<HouseSvgRendererComponent>;
+  let component: HouseSvgRendererComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [HouseSvgRendererComponent],
+    }).compileComponents();
+    fixture = TestBed.createComponent(HouseSvgRendererComponent);
+    component = fixture.componentInstance;
+  });
+
+  afterEach(() => fixture.destroy());
+
+  it('chartSharedDomain reads the [min,max] across EVERY series', () => {
+    const domain = chartSharedDomain([
+      { points: [{ t: 0, v: 10 }, { t: 1, v: 20 }] },
+      { points: [{ t: 0, v: 1000 }, { t: 1, v: 2000 }] },
+    ]);
+    expect(domain.min).toBe(10);
+    expect(domain.max).toBe(2000);
+  });
+
+  it('chartSharedDomain includes an empty series without poisoning the range', () => {
+    const domain = chartSharedDomain([
+      { points: [{ t: 0, v: 5 }] },
+      { points: [] },
+    ]);
+    expect(domain.min).toBe(5);
+    expect(domain.max).toBe(5);
+    expect(chartSharedDomain([])).toEqual({ min: 0, max: 0 });
+    expect(chartSharedDomain([{ points: [{ t: 0, v: Number.NaN }] }])).toEqual({ min: 0, max: 0 });
+  });
+
+  it('plots BOTH series against the ONE shared domain — no per-series rescale (the W7 numeric assertion)', async () => {
+    // Two magnitudes an order apart: a 10–20 series and a 1000–2000
+    // series. Under the OLD per-series normalisation BOTH filled the
+    // plot; under the shared panel domain the small series must sit in
+    // the bottom sliver of the SAME range.
+    const small = {
+      id: 'small',
+      label: 'small',
+      color: '#38bdf8',
+      mode: 'line' as const,
+      points: [
+        { t: T0, v: 10 },
+        { t: T1, v: 20 },
+      ],
+    };
+    const large = {
+      id: 'large',
+      label: 'large',
+      color: '#f59e0b',
+      mode: 'line' as const,
+      points: [
+        { t: T0, v: 1000 },
+        { t: T1, v: 2000 },
+      ],
+    };
+    fixture.componentRef.setInput('series', [small, large]);
+    fixture.componentRef.setInput('variant', 'trend');
+    fixture.detectChanges();
+
+    // The panel domain is the JOINT range — asserted on the component.
+    expect(component.panelDomain()).toEqual({ min: 10, max: 2000 });
+
+    // THE NUMERIC ASSERTION: a series is independently rescaled iff its
+    // points span the FULL plot height while the panel range is wider.
+    // The small series' first point (10 = the panel floor) sits at the
+    // floor — correct; its SECOND point (20, ~0.5% up the panel range)
+    // must sit essentially AT the floor too, NOT at the ceiling.
+    const floor = component.geometry().plotBottom;
+    const ceiling = component.geometry().plotTop;
+    const height = floor - ceiling;
+    const smallSecondY = component.rendered().find((entry) => entry.id === 'small')!
+      .markers[1].y;
+    const heightUsed = (floor - smallSecondY) / height;
+    // 20 against the 10–2000 domain ⇒ ~0.5% of the plot — a per-series
+    // rescale would put it at 100% (the ceiling). A generous 5% bound
+    // still separates the two worlds by an order of magnitude.
+    expect(heightUsed).toBeLessThan(0.05);
+    // And the large series' max DOES reach the ceiling (the shared
+    // domain is not a clamp that flattens everything).
+    const largeSecondY = component.rendered().find((entry) => entry.id === 'large')!
+      .markers[1].y;
+    expect((floor - largeSecondY) / height).toBeGreaterThan(0.95);
+  });
+
+  it('the hover projection uses the SAME shared domain (no third rescale path)', async () => {
+    const small = {
+      id: 'small',
+      label: 'small',
+      color: '#38bdf8',
+      mode: 'line' as const,
+      points: [
+        { t: T0, v: 10 },
+        { t: T1, v: 20 },
+      ],
+    };
+    fixture.componentRef.setInput('series', [small]);
+    fixture.componentRef.setInput('variant', 'trend');
+    fixture.detectChanges();
+    // jsdom reports zero rects — stub the SVG's rect so the bisect runs.
+    const svg = fixture.debugElement.query(By.css('svg')).nativeElement as HTMLElement;
+    const rect = { left: 0, top: 0, width: 900, height: 260 } as DOMRect;
+    jest.spyOn(svg, 'getBoundingClientRect').mockReturnValue(rect);
+    // Hover over the FIRST sample's x position (plot-fraction → client).
+    const firstX = component.rendered()[0].markers[0].x;
+    const fraction = (firstX - component.geometry().plotLeft) / component.plotWidth();
+    const clientX = rect.left + fraction * rect.width;
+    const clientY =
+      rect.top + (rect.height * (component.geometry().plotTop + 4)) / component.geometry().viewHeight;
+    // The handler binds on the OVERLAY (a child of the svg) — dispatch
+    // there; the handler itself reads the SVG's rect (stubbed above).
+    const overlay = fixture.debugElement.query(By.css('[data-test="house-hover-overlay"]'))
+      .nativeElement as HTMLElement;
+    overlay.dispatchEvent(new MouseEvent('pointermove', { clientX, clientY, bubbles: true }));
+    const hover = component.hovered();
+    expect(hover).not.toBeNull();
+    expect(hover!.seriesId).toBe('small');
+    // The hover's y equals the rendered marker's y — the SAME shared
+    // domain produced both (a per-series rescale in the hover path
+    // would drift them apart).
+    expect(hover!.y).toBeCloseTo(component.rendered()[0].markers[0].y, 5);
+  });
+
+  it('the baseline rides the SAME shared domain (never its own rescale)', async () => {
+    const main = series('main');
+    const baseline = {
+      ...series('prev'),
+      points: [
+        { t: T0, v: 100 },
+        { t: T1, v: 900 },
+      ],
+    };
+    fixture.componentRef.setInput('series', [main]);
+    fixture.componentRef.setInput('baseline', [baseline]);
+    fixture.componentRef.setInput('variant', 'trend');
+    fixture.detectChanges();
+    // The panel domain spans BOTH the series and the baseline.
+    expect(component.panelDomain()).toEqual({ min: 1, max: 900 });
+  });
+});
+
+describe('HouseSvgRendererComponent — the unit-labeled value axis (phase 6, 6.2)', () => {
+  let fixture: ComponentFixture<HouseSvgRendererComponent>;
+  let component: HouseSvgRendererComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [HouseSvgRendererComponent],
+    }).compileComponents();
+    fixture = TestBed.createComponent(HouseSvgRendererComponent);
+    component = fixture.componentInstance;
+  });
+
+  afterEach(() => fixture.destroy());
+
+  it('the TREND role renders the shared domain suffixed with the panel unit', () => {
+    fixture.componentRef.setInput('series', [series('a')]);
+    fixture.componentRef.setInput('variant', 'trend');
+    fixture.componentRef.setInput('unit', 'MB');
+    fixture.detectChanges();
+
+    const ticks = fixture.debugElement.queryAll(By.css('[data-test="house-y-tick"]'));
+    expect(ticks.length).toBe(3);
+    const texts = ticks.map((tick) => (tick.nativeElement.textContent ?? '').trim());
+    // The shared domain of the fixture series is 1–4: floor 1, mid 2.5,
+    // ceiling 4 — each with the unit suffix.
+    expect(texts).toContain('4 MB');
+    expect(texts).toContain('1 MB');
+    expect(texts.some((text) => text.endsWith('MB'))).toBe(true);
+  });
+
+  it('an unmapped unit renders `unit unknown` — never a guess', () => {
+    fixture.componentRef.setInput('series', [series('a')]);
+    fixture.componentRef.setInput('variant', 'trend');
+    fixture.detectChanges(); // the default unit input is 'unit unknown'
+    const texts = fixture.debugElement
+      .queryAll(By.css('[data-test="house-y-tick"]'))
+      .map((tick) => (tick.nativeElement.textContent ?? '').trim());
+    expect(texts.some((text) => text.endsWith('unit unknown'))).toBe(true);
+  });
+
+  it('the MINI role renders NO value axis (the R-2 exemption, asserted)', () => {
+    fixture.componentRef.setInput('series', [series('a')]);
+    fixture.componentRef.setInput('variant', 'mini');
+    fixture.componentRef.setInput('unit', 'MB');
+    fixture.detectChanges();
+    expect(fixture.debugElement.queryAll(By.css('[data-test="house-y-tick"]')).length).toBe(0);
+    expect(component.yAxisLabels()).toEqual([]);
   });
 });

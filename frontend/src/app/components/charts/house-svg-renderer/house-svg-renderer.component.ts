@@ -22,6 +22,7 @@ import {
   chartCoords,
   chartPointTooltip,
   chartSeriesDomain,
+  chartSharedDomain,
   chartUtcTicks,
   chartXScale,
   chartYScale,
@@ -128,6 +129,22 @@ function readDevicePixelRatio(): number {
               data-test="house-tick"
             >
               {{ tick.label }}
+            </text>
+          }
+
+          <!-- The unit-labeled VALUE axis (phase 6, task 6.2): the
+               panel's SHARED domain read at floor/middle/ceiling, each
+               suffixed with the panel's unit. The mini renders no axis
+               (R-2) — this block is trend-only. -->
+          @for (label of yAxisLabels(); track label.key) {
+            <text
+              class="house-tick-label"
+              [attr.x]="geometry().plotLeft - 6"
+              [attr.y]="label.y"
+              text-anchor="end"
+              data-test="house-y-tick"
+            >
+              {{ label.value }}
             </text>
           }
         }
@@ -399,6 +416,14 @@ export class HouseSvgRendererComponent implements AfterViewInit, OnDestroy {
   /** The role this instance plays — the mini shape or the fallback shape. */
   readonly variant = input<HouseSvgVariant>('mini');
 
+  /**
+   * The panel's unit — the suffix of the value-axis labels (the trend
+   * role; phase 6, task 6.2). The mini renders no axis at all (R-2),
+   * so it ignores this. `unit unknown` renders verbatim — never a
+   * guess.
+   */
+  readonly unit = input<string>('unit unknown');
+
   /** The accessible name of the chart. */
   readonly ariaLabel = input<string>('Metric trend (UTC)');
 
@@ -490,12 +515,32 @@ export class HouseSvgRendererComponent implements AfterViewInit, OnDestroy {
     return { t0, t1 };
   });
 
-  /** The per-series projection (paths, ranges, tooltip markers). */
+  /**
+   * The PANEL'S SHARED DOMAIN (phase 6, task 6.1 / W7).
+   *
+   * ONE [min,max] across every series handed to this engine (plus the
+   * baseline) — the panel is a metric-kind + unit group, so its series
+   * are commensurate by construction. EVERY series is plotted against
+   * THIS domain; no series is ever independently rescaled inside the
+   * panel. The pure helper is exported so the W7 numeric assertion can
+   * be planted against (a per-series rescale here fails the spec).
+   */
+  readonly panelDomain = computed(() =>
+    chartSharedDomain([...this.series(), ...this.baseline()]),
+  );
+
+  /**
+   * The per-series projection (paths, ranges, tooltip markers) — every
+   * series against the PANEL'S single shared domain (W7). The legend's
+   * min–max labels stay the series' OWN observed values (a per-series
+   * FACT — the legend annotates values, the AXIS is the panel's).
+   */
   readonly rendered = computed<readonly ChartSeriesRender[]>(() => {
     const { t0, t1 } = this.timeDomain();
     const geometry = this.geometry();
+    const domain = this.panelDomain();
     return this.series().map((entry) => {
-      const domain = chartSeriesDomain(entry.points);
+      const own = chartSeriesDomain(entry.points);
       const coords = chartCoords(entry.points, t0, t1, domain.min, domain.max, geometry);
       const markers: ChartSeriesRender['markers'][number][] = [];
       let index = 0;
@@ -518,10 +563,10 @@ export class HouseSvgRendererComponent implements AfterViewInit, OnDestroy {
         mode: entry.mode,
         path: buildChartPath(coords, entry.mode),
         areaPath: buildChartAreaPath(coords, entry.mode, geometry),
-        min: domain.min,
-        max: domain.max,
-        minLabel: formatChartValue(domain.min),
-        maxLabel: formatChartValue(domain.max),
+        min: own.min,
+        max: own.max,
+        minLabel: formatChartValue(own.min),
+        maxLabel: formatChartValue(own.max),
         sampleCount: coords.length,
         markers,
       };
@@ -532,11 +577,36 @@ export class HouseSvgRendererComponent implements AfterViewInit, OnDestroy {
   readonly baselinePaths = computed(() => {
     const { t0, t1 } = this.timeDomain();
     const geometry = this.geometry();
+    const domain = this.panelDomain();
     return this.baseline().map((entry) => {
-      const domain = chartSeriesDomain(entry.points);
       const coords = chartCoords(entry.points, t0, t1, domain.min, domain.max, geometry);
       return { id: entry.id, color: entry.color, path: buildChartPath(coords, entry.mode) };
     });
+  });
+
+  /**
+   * The value-axis labels (the trend role ONLY — phase 6, task 6.2).
+   *
+   * The panel's SHARED domain read at three heights (floor / middle /
+   * ceiling), each suffixed with the panel's unit. The mini renders no
+   * axis at all (R-2) — the exemption is asserted in the renderer spec.
+   */
+  readonly yAxisLabels = computed(() => {
+    if (this.variant() !== 'trend') {
+      return [];
+    }
+    const { min, max } = this.panelDomain();
+    if (!Number.isFinite(min) || !Number.isFinite(max) || this.series().length === 0) {
+      return [];
+    }
+    const mid = min + (max - min) / 2;
+    const suffix = this.unit();
+    const label = (value: number) => `${formatChartValue(value)} ${suffix}`.trim();
+    return [
+      { key: 'max', value: label(max), y: this.geometry().plotTop + 3 },
+      { key: 'mid', value: label(mid), y: this.plotMidY() + 3 },
+      { key: 'min', value: label(min), y: this.geometry().plotBottom + 3 },
+    ];
   });
 
   /** The UTC ticks (the TREND variant only — the mini renders no axis). */
@@ -625,6 +695,7 @@ export class HouseSvgRendererComponent implements AfterViewInit, OnDestroy {
     const ms = t0 + fraction * (t1 - t0);
 
     let best: (HouseHover & { distance: number }) | null = null;
+    const domain = this.panelDomain();
     for (const entry of this.series()) {
       const samples = entry.points.filter(
         (point) => Number.isFinite(point.t) && Number.isFinite(point.v),
@@ -635,7 +706,6 @@ export class HouseSvgRendererComponent implements AfterViewInit, OnDestroy {
         continue;
       }
       const point = samples[index];
-      const domain = chartSeriesDomain(entry.points);
       const distance = Math.abs(point.t - ms);
       if (best && distance >= best.distance) {
         continue;
