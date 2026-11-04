@@ -45,6 +45,8 @@
 #
 # Exit codes: 0 = PASS, 1 = FAIL, 124 = TIMEOUT (the self-cap).
 set -uo pipefail
+# errexit is deliberately OFF: each leg captures its own exit code and
+# failures accumulate in FAILURES (the pack never dies mid-run).
 
 PACK_START=${SECONDS:-0}
 PACK_BUDGET_S=900
@@ -154,11 +156,14 @@ D2_DECLARED=(
 
 # The DERIVED dual-side set: the specs that import the models barrel plus
 # the specs that read the route table / the gear menu.
-mapfile -t D2_DERIVED < <(
+D2_DERIVED=()
+while IFS= read -r spec_path; do
+    D2_DERIVED+=("$FRONTEND_DIR/$spec_path")
+done < <(
   {
     grep -rlE "from '[^']*/models'" src --include='*.spec.ts' 2>/dev/null || true
     grep -rlE "app\.routes|app\.ts'|app\.html'" src --include='*.spec.ts' 2>/dev/null || true
-  } | sort -u | sed "s#^#$FRONTEND_DIR/#"
+  } | sort -u
 )
 
 run_jest_leg() {
@@ -175,7 +180,6 @@ run_jest_leg() {
     set +e
     timeout 600 ./node_modules/.bin/jest --ci --silent --runInBand "$@" 2>&1 | tee "$log"
     exit_code=${PIPESTATUS[0]}
-    set -e
     echo "${leg_name}_EXIT=$exit_code"
     echo "${leg_name}_COUNTS: $(grep -E '^[[:space:]]*Tests:' "$log" | tail -1 || true)"
     echo "${leg_name}_ERROR_SUMMARY:"
@@ -214,7 +218,6 @@ if [ "$IS_HEAD_LEG" = 1 ]; then
     set +e
     timeout 300 ./node_modules/.bin/tsc --noEmit -p tsconfig.metrics-fe.json 2>&1 | tee "$TSC_LOG"
     TSC_EXIT=${PIPESTATUS[0]}
-    set -e
     echo "typecheck_scoped_EXIT=$TSC_EXIT"
     echo "typecheck_scoped_ERROR_SUMMARY:"
     grep -E 'error TS' "$TSC_LOG" | sed 's/^/  /' || echo "  (none)"
@@ -238,7 +241,6 @@ if [ "$IS_HEAD_LEG" = 1 ]; then
     set +e
     timeout 600 ./node_modules/.bin/ng build --configuration development 2>&1 | tee "$BUILD_DEV_LOG"
     BUILD_DEV_EXIT=${PIPESTATUS[0]}
-    set -e
     echo "build_development_EXIT=$BUILD_DEV_EXIT"
     echo "build_development_ERROR_SUMMARY:"
     grep -E '^✘|ERROR|error' "$BUILD_DEV_LOG" | head -20 | sed 's/^/  /' || echo "  (none)"
@@ -258,7 +260,6 @@ if [ "$IS_HEAD_LEG" = 1 ]; then
     set +e
     timeout 900 ./node_modules/.bin/ng build --configuration production 2>&1 | tee "$BUILD_PROD_LOG"
     BUILD_PROD_EXIT=${PIPESTATUS[0]}
-    set -e
     echo "build_production_EXIT=$BUILD_PROD_EXIT"
     echo "build_production_ERROR_SUMMARY:"
     grep -E '^✘|ERROR|error' "$BUILD_PROD_LOG" | head -20 | sed 's/^/  /' || echo "  (none)"
