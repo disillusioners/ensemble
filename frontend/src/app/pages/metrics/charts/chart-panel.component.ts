@@ -22,6 +22,11 @@ import {
   createHouseAnomalyOverlayPlugin,
   houseNearestAnomaly,
 } from './anomaly-overlay-plugin';
+import {
+  HOUSE_DATA_END_PLUGIN_ID,
+  HouseDataEnd,
+  createHouseDataEndOverlayPlugin,
+} from './data-end-overlay-plugin';
 import { HOUSE_CROSSHAIR_PLUGIN_ID, createHouseCrosshairPlugin } from './crosshair-plugin';
 
 /**
@@ -132,6 +137,7 @@ export interface ChartPanelConfig {
       };
       readonly tooltip: { readonly enabled: boolean };
       readonly [HOUSE_ANOMALY_PLUGIN_ID]: { readonly markers: readonly HouseAnomalyMarker[] };
+      readonly [HOUSE_DATA_END_PLUGIN_ID]: { readonly dataEnd: HouseDataEnd | null };
     };
     readonly scales: {
       readonly x: {
@@ -251,6 +257,16 @@ export class ChartPanelComponent implements AfterViewInit, OnDestroy {
 
   /** The anomaly markers the house overlay plugin draws. */
   readonly anomalies = input<readonly HouseAnomalyMarker[]>([]);
+
+  /**
+   * WHERE THE PANEL'S DATA ENDS (T1 phase 8, task 8.10).
+   *
+   * The audit found a stale panel whose line simply STOPPED, with
+   * nothing saying where it stopped — a reader cannot tell "the value
+   * fell to zero" from "the data ends here". The marker names the
+   * difference, ON the chart.
+   */
+  readonly dataEnd = input<HouseDataEnd | null>(null);
 
   /**
    * The click hand-off — the drill-down.
@@ -417,6 +433,8 @@ export class ChartPanelComponent implements AfterViewInit, OnDestroy {
           },
           tooltip: { enabled: true },
           [HOUSE_ANOMALY_PLUGIN_ID]: { markers: anomalies },
+          // The data-end marker (8.10): where the panel's data stops.
+          [HOUSE_DATA_END_PLUGIN_ID]: { dataEnd: this.dataEnd() },
         },
         scales: {
           // The x-axis is LINEAR with a custom UTC tick callback — so NO
@@ -439,7 +457,11 @@ export class ChartPanelComponent implements AfterViewInit, OnDestroy {
           },
         },
       },
-      plugins: [createHouseAnomalyOverlayPlugin(), createHouseCrosshairPlugin()],
+      plugins: [
+        createHouseAnomalyOverlayPlugin(),
+        createHouseDataEndOverlayPlugin(),
+        createHouseCrosshairPlugin(),
+      ],
     };
   }
 

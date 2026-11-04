@@ -287,3 +287,78 @@ describe('MetricsFamilyCatalogComponent — the drawer affordances (2.7)', () =>
     expect(fixture.nativeElement.querySelector('[data-test="families-empty"]')).not.toBeNull();
   });
 });
+
+// ── THE PHASE-8 DISPOSITION (task 8.9) ───────────────────────────────────
+//
+// 8.9 asked for the INERT CATALOG TABLE to be fixed: the `<th>` cells
+// get `aria-sort` + click sorting, the dark families become findable
+// (a filter), and the empty copy is ERROR-GATED.
+//
+// **DISPOSITION: DELIVERED IN PHASE 2 (task 2.7)** — the affordances
+// exist and each one is pinned (the legs above). The four legs below
+// re-assert them TOGETHER so this phase's evidence carries the claim
+// in one place, and they fail if any affordance is removed.
+
+describe('MetricsFamilyCatalogComponent — the drawer affordances (T1 phase 8, task 8.9)', () => {
+  let fixture: ComponentFixture<MetricsFamilyCatalogComponent>;
+  let component: MetricsFamilyCatalogComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsFamilyCatalogComponent],
+      providers: [provideNoopAnimations()],
+    }).compileComponents();
+    fixture = TestBed.createComponent(MetricsFamilyCatalogComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('families', [
+      family({ id: 'F1' }),
+      family({
+        id: 'F2',
+        live_series_count: 0,
+        availability: { state: 'dark', reason: 'capture_off' },
+      }),
+    ]);
+    fixture.detectChanges();
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('every column header carries `aria-sort` and a click handler', () => {
+    const headers = fixture.nativeElement.querySelectorAll('th');
+    expect(headers.length).toBe(5);
+    for (const header of Array.from(headers)) {
+      expect(header.getAttribute('aria-sort')).toBeTruthy();
+    }
+    // The sort is WIRED, not inert: a click re-orders the rows.
+    const before = component.visibleFamilies().map((entry) => entry.id);
+    fixture.nativeElement.querySelector('[data-test="families-th-id"]')?.click();
+    fixture.detectChanges();
+    const after = component.visibleFamilies().map((entry) => entry.id);
+    expect(after).not.toEqual(before);
+  });
+
+  it('the dark families are FINDABLE (a filter narrows the rows)', () => {
+    const input = fixture.nativeElement.querySelector('[data-test="families-filter"]');
+    expect(input).not.toBeNull();
+    component.onFilter({ target: { value: 'F2' } });
+    fixture.detectChanges();
+    expect(component.visibleFamilies().map((entry) => entry.id)).toEqual(['F2']);
+    expect(fixture.nativeElement.querySelector('[data-test="families-no-match"]')).toBeNull();
+  });
+
+  it('the empty copy is ERROR-GATED (a failed load never says "No families are registered.")', () => {
+    fixture.componentRef.setInput('error', 'The metrics door is unreachable.');
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-test="families-error"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-test="families-empty"]')).toBeNull();
+  });
+
+  it('the empty copy renders only under a HEALTHY, genuinely empty load', () => {
+    fixture.componentRef.setInput('families', []);
+    fixture.componentRef.setInput('error', null);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-test="families-empty"]')).not.toBeNull();
+  });
+});

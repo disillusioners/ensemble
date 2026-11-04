@@ -90,6 +90,15 @@ export interface ChartRenderData {
   readonly baseline?: readonly ChartSeries[];
   readonly unit?: string;
   readonly label?: string;
+  /**
+   * WHERE THE PANEL'S DATA ENDS (T1 phase 8, task 8.10).
+   *
+   * OPTIONAL and ADDITIVE — a renderer that does not draw a data-end
+   * marker ignores it. The surface composes the marker (the house never
+   * formats a time twice): `ms` is the epoch milliseconds of the LAST
+   * plotted sample and `label` is the visible text beside the line.
+   */
+  readonly dataEnd?: { readonly ms: number; readonly label: string } | null;
 }
 
 /**

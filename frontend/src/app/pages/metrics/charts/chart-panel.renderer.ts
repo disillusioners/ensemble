@@ -57,6 +57,8 @@ export function createChartJsPanelRenderer(): ChartRenderer {
         baseline: values.baseline ?? [],
         unit: values.unit ?? 'unit unknown',
         label: values.label ?? 'metrics panel',
+        // The DATA-END marker (8.10): where the panel's data stops.
+        dataEnd: values.dataEnd ?? null,
         onMountFailed: handlers?.mountFailed ?? null,
         // The drill-down hand-off (5.9): the wrapper's pointClick — with
         // the anomalyId when the click landed on a marker — reaches the

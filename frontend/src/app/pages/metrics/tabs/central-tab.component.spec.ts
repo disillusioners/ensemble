@@ -16,6 +16,9 @@
 //   * the per-source reporting — the body reports its OWN source's
 //     outcome and never writes another tab's state.
 
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { Subject } from 'rxjs';
@@ -775,6 +778,114 @@ describe('MetricsCentralTabComponent — the baseline split + the refusal (3.4 /
     const refusal = fixture.nativeElement.querySelector('[data-test="central-tab-baseline-refused"]');
     expect(refusal).not.toBeNull();
     expect((refusal.textContent ?? '')).toContain('clamped');
+  });
+});
+
+describe('MetricsCentralTabComponent — the DATA-END marker (T1 phase 8, task 8.10)', () => {
+  let fixture: ComponentFixture<MetricsCentralTabComponent>;
+  let component: MetricsCentralTabComponent;
+  let stub: StubMetricsService;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [MetricsCentralTabComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: MetricsService, useClass: StubMetricsService },
+      ],
+    }).compileComponents();
+    stub = TestBed.inject(MetricsService) as unknown as StubMetricsService;
+    fixture = TestBed.createComponent(MetricsCentralTabComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('entry', metricsCentralTab('runtime'));
+  });
+
+  afterEach(() => {
+    fixture.destroy();
+  });
+
+  it('the panel carries WHERE ITS DATA ENDS (the last plotted sample)', () => {
+    const T0 = Date.UTC(2026, 10, 2, 9, 0, 0);
+    const T1 = Date.UTC(2026, 10, 2, 9, 1, 0);
+    fixture.componentRef.setInput('state', state({
+      families: [family({ id: 'F9' })],
+      series: [
+        {
+          name: 'ensemble_readiness_component_state',
+          labels: null,
+          points: [
+            [T0 / 1000, 1],
+            [T1 / 1000, 2],
+          ],
+        },
+      ],
+    }));
+    fixture.detectChanges();
+    const groups = component.groupsOf('F9');
+    expect(groups.length).toBe(1);
+    const end = component.dataEndOf(groups[0]);
+    expect(end).not.toBeNull();
+    expect(end?.ms).toBe(T1);
+    // The VISIBLE words ride the marker.
+    expect(end?.label ?? '').toContain('data ends');
+  });
+
+  it('a panel with NO points carries NO data end (never a bogus marker)', () => {
+    fixture.componentRef.setInput('state', state({ families: [family({ id: 'F9' })] }));
+    fixture.detectChanges();
+    const groups = component.groupsOf('F9');
+    // No series → no group → nothing to mark.
+    expect(groups.length).toBe(0);
+  });
+
+  it('the render data carries the data end (the renderer passes it to the panel)', () => {
+    const T0 = Date.UTC(2026, 10, 2, 9, 0, 0);
+    fixture.componentRef.setInput('state', state({
+      families: [family({ id: 'F9' })],
+      series: [
+        {
+          name: 'ensemble_readiness_component_state',
+          labels: null,
+          points: [[T0 / 1000, 1]],
+        },
+      ],
+    }));
+    fixture.detectChanges();
+    const group = component.groupsOf('F9')[0];
+    expect(component.panelData(group).dataEnd?.ms).toBe(T0);
+  });
+
+  it('the STAT STRIP shows the sample age (the audit found no age on the cards)', () => {
+    // The data-end marker is ON THE CHART; the age is ON THE CARD.
+    // A stat family publishes a snapshot whose series carry
+    // `last_publish_age_s` — the card must state it.
+    // The first detectChanges arms the stat-strip request (the effect
+    // subscribes on it) — the payload must arrive AFTER the
+    // subscription, or it is dropped.
+    fixture.detectChanges();
+    stub.snapshot$.next({
+      schema_version: 1,
+      vocabulary_version: 2,
+      generated_at_utc: '2026-11-04T00:00:00+00:00',
+      restart_epoch: 'abc123',
+      truncated: false,
+      series: [
+        {
+          name: 'ensemble_db_pool_requests_errors_total',
+          kind: 'counter',
+          monotonic: true,
+          value: 0,
+          labels: null,
+          last_publish_age_s: 42.5,
+        },
+      ],
+    } as MetricsSnapshotPayload);
+    fixture.detectChanges();
+    const strip = fixture.nativeElement.querySelector('[data-test="central-tab-stat-strip"]');
+    expect(strip).not.toBeNull();
+    // The age is rendered — "published 42.5s ago".
+    expect(strip.textContent ?? '').toContain('42.5');
+    expect(strip.textContent ?? '').toContain('published');
   });
 });
 

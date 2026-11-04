@@ -29,6 +29,7 @@ import {
 } from '../../../models/metrics.model';
 import {
   ChartSeries,
+  formatChartUtcTick,
 } from '../../../components/charts/house-svg-renderer/house-svg-renderer';
 import { chartSeriesColor } from '../../../components/charts/chart-theme';
 import {
@@ -700,6 +701,28 @@ export class MetricsCentralTabComponent {
     return [...(this.groupsByFamily().get(familyId)?.values() ?? [])];
   }
 
+  /**
+   * WHERE THE PANEL'S DATA ENDS (T1 phase 8, task 8.10).
+   *
+   * The LAST plotted sample of the panel — the newest point any of its
+   * series carries. The marker is what tells a reader that a line which
+   * STOPS is a line whose data ENDS, not a line that fell to zero.
+   */
+  readonly dataEndOf = (group: MetricsPanelGroup): { ms: number; label: string } | null => {
+    let newest = Number.NEGATIVE_INFINITY;
+    for (const series of group.series) {
+      for (const point of series.points) {
+        if (point.t > newest) {
+          newest = point.t;
+        }
+      }
+    }
+    if (!Number.isFinite(newest)) {
+      return null;
+    }
+    return { ms: newest, label: `data ends ${formatChartUtcTick(newest, 60_000)}` };
+  };
+
   /** The render data of one group — what the renderer draws. */
   panelData(group: MetricsPanelGroup): ChartRenderData {
     return {
@@ -708,6 +731,8 @@ export class MetricsCentralTabComponent {
       baseline: [],
       unit: group.unit === METRICS_UNIT_UNKNOWN ? METRICS_UNIT_UNKNOWN : group.unit,
       label: group.label,
+      // The data-end marker (8.10).
+      dataEnd: this.dataEndOf(group),
     };
   }
 
