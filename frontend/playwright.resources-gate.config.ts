@@ -1,7 +1,12 @@
 /**
- * Playwright config — Resources page merge gate (real-browser, stubbed API).
+ * Playwright config — Resources MODULE merge gate (real-browser, stubbed API).
  *
- * NEW test artifact only (FE /resources observability page, P5 T7).
+ * The gate drives the RESOURCE MODULE at its new home — the metrics
+ * page's tab 1 (`/metrics?tab=resource`). The standalone page's route
+ * was retired in T1 phase 7 (D-3) and this gate was re-pointed with
+ * it (task 7.7); the config's identity (name + port) is kept so the
+ * lane's routed-out register item (n) closes against a named artifact.
+ *
  * Product code frozen behind the gate.
  *
  * Mechanism (cloned from `playwright.snapshots-v2stub.config.ts`, D8):

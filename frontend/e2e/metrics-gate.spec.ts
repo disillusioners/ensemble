@@ -17,9 +17,9 @@
  *   /api/metrics/series
  *
  * ── Journey ──────────────────────────────────────────────────────────
- *   gear menu → "Metrics" → /metrics → Overview (stat cards) → Charts
- *   (one PANEL per returned series) → Families (a live family + a dark
- *   family with its reason). Zero daemon throughout.
+ *   gear menu → "Metrics" → /metrics → the manifest-driven tab list
+ *   (7 tabs) → the resource module (tab 1) → a central tab's panels →
+ *   the dark-family listing with its reason. Zero daemon throughout.
  *
  * ── THE CANVAS-FATAL ASSERTIONS, RE-SPECIFIED (T1 phase 4, task 4.10) ──
  *
@@ -40,10 +40,15 @@
  * (`house-svg-renderer.spec.ts` — "a COUNTER renders STEP and a GAUGE
  * renders LINEAR").
  *
- * The e2e's TAB-SHAPE expectations are phase 7's task 7.9 (the shell
- * rewiring in phase 2 replaced the three tabs with the manifest-driven
- * seven); this file's chart legs are re-specified HERE, against the
- * canvas panel.
+ * ── THE TAB-SHAPE RE-POINT (T1 phase 7, task 7.9) ────────────────────
+ *
+ * The shell is MANIFEST-driven since T1 phase 2: the retired
+ * Overview/Charts/Families tabs are GONE and the manifest's SEVEN tabs
+ * (Resources, Runtime, DB Pool, Jobs / Queue, Instances, Checkpoint, MCP)
+ * stand. This file's tab expectations are re-pointed at that shape, and
+ * the REDIRECT LEG (the retired resources URL) is added here — it is the
+ * Playwright home of D-3's param-preserving redirect (PX-9's capture is
+ * Phase 9's).
  */
 import { test, expect, type Page, type Route } from '@playwright/test';
 
@@ -264,11 +269,17 @@ test.beforeEach(async ({ page }) => {
   page.on('pageerror', (err) => console.log(`[pageerror] ${err.message}`));
 });
 
-test('[P5] gear menu → /metrics → Overview stat cards → Charts → Families', async ({ page }) => {
+test('[P5] gear menu → /metrics → the manifest tab list → the resource module → a central tab → the family drawer', async ({
+  page,
+}) => {
   // ── Boot at '/' and open the gear menu (the only entry point). ──
   await page.goto('/');
   await expect(page.locator('[data-test="gear-menu"]')).toBeVisible();
   await page.locator('[data-test="gear-menu"]').click();
+
+  // ── The retired `Resources` gear entry is GONE (D-3): `Metrics` is
+  //    the single entry for the resource surfaces. ──
+  await expect(page.locator('a[mat-menu-item]').filter({ hasText: 'Resources' })).toHaveCount(0);
 
   const metricsItem = page.locator('a[mat-menu-item]').filter({ hasText: 'Metrics' });
   await expect(metricsItem).toBeVisible();
@@ -276,23 +287,22 @@ test('[P5] gear menu → /metrics → Overview stat cards → Charts → Familie
 
   await expect(page).toHaveURL(/\/metrics/);
 
-  // ── Three registry-driven tabs. ──
+  // ── The MANIFEST-driven tab list (T1 phase 2 replaced the retired
+  //    Overview/Charts/Families trio with the manifest's SEVEN tabs). ──
   const tabs = page.locator('[role="tab"]');
-  await expect(tabs).toHaveCount(3);
-  await expect(page.getByRole('tab', { name: 'Overview' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'Charts' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'Families' })).toBeVisible();
+  await expect(tabs).toHaveCount(7);
+  for (const label of ['Resources', 'Runtime', 'DB Pool', 'Jobs / Queue', 'Instances', 'Checkpoint', 'MCP']) {
+    await expect(page.getByRole('tab', { name: label })).toBeVisible();
+  }
 
-  // ── Overview: the stat cards of the CURRENT values. ──
-  await expect(page.locator('[data-test="overview-grid"]')).toBeVisible();
-  await expect(page.locator('[data-test="overview-grid"] .stat-card')).toHaveCount(2);
-  await expect(
-    page.locator('[data-test="overview-grid"]').getByText('ensemble_db_pool_native'),
-  ).toBeVisible();
+  // ── The resource module is tab 1 and is the DEFAULT selection. ──
+  await expect(page.locator('[data-test="resource-live-strip"]')).toBeVisible();
+  await expect(page.locator('[data-test="resource-timeline-panel"]')).toBeVisible();
 
-  // ── Charts: one PANEL per returned series. ──
-  await page.getByRole('tab', { name: 'Charts' }).click();
-  await expect(page.locator('[data-test="charts-grid"]')).toBeVisible();
+  // ── A CENTRAL tab: the DB Pool tab binds F4 (live) + F6 (dark). ──
+  await page.getByRole('tab', { name: 'DB Pool' }).click();
+  await expect(page.locator('[data-test="central-tab-families"]')).toBeVisible();
+  await expect(page.locator('[data-test="central-tab-family-live"]')).toHaveCount(1);
 
   // ── LEG-CLASS 1 — the per-series PROXY count (the retired
   // `[data-test="svg-line-chart"]` count). The canvas is not
@@ -321,8 +331,10 @@ test('[P5] gear menu → /metrics → Overview stat cards → Charts → Familie
   await expect(ticks).toHaveCount(5);
   await expect(ticks.first()).toHaveText(/^\d{2}:\d{2}$/);
 
-  // ── Families: a live family and a DARK family with its reason. ──
-  await page.getByRole('tab', { name: 'Families' }).click();
+  // ── The FAMILY CATALOG is a DRAWER now (the retired Families tab is
+  //    gone): a live family and a DARK family with its reason. ──
+  await page.locator('[data-test="metrics-catalog-drawer-toggle"]').click();
+  await expect(page.locator('[data-test="metrics-catalog-drawer"]')).toBeVisible();
   await expect(page.locator('[data-test="families-table"]')).toBeVisible();
   await expect(page.locator('[data-test="family-live"]').first()).toBeVisible();
   await expect(page.locator('[data-test="family-dark"]').first()).toBeVisible();
@@ -346,13 +358,36 @@ test('[P5] gear menu → /metrics → Overview stat cards → Charts → Familie
   expect(doorCalls.some((url) => url.includes('9798'))).toBe(false);
 });
 
-test('[P5] deep-link /metrics renders without a daemon', async ({ page }) => {
-  await page.goto('/metrics');
-  await expect(page.locator('[data-test="overview-grid"]')).toBeVisible();
-  // The Families body is mounted lazily — the table exists once its tab
-  // is selected.
-  await page.getByRole('tab', { name: 'Families' }).click();
-  await expect(page.locator('[data-test="families-table"]')).toBeVisible();
+test('[P5] deep-link /metrics?tab=resource renders without a daemon', async ({ page }) => {
+  await page.goto('/metrics?tab=resource');
+  // The resource module is tab 1 — the deep link selects it explicitly.
+  await expect(page.locator('[data-test="resource-live-strip"]')).toBeVisible();
+  await expect(page.locator('[data-test="resource-timeline-panel"]')).toBeVisible();
+});
+
+// ── THE REDIRECT LEG (D-3 · T1 phase 7, task 7.9) ──────────────────────
+//
+// The retired resources URL is the ONE place a Playwright spec may name
+// it: as the redirect's INPUT. This leg asserts the LANDING, so it does
+// not "drive the retired route" — the retirement pin in
+// `src/app/app.resources-retirement.spec.ts` asserts exactly that
+// (no config targets the route; no spec drives it as a PAGE).
+//
+// The claim is asserted on the PARSED params, never on a raw URL string
+// (the raw string is order-brittle).
+test('[D-3] the retired resources URL lands on /metrics?tab=resource with its params preserved', async ({
+  page,
+}) => {
+  await page.goto('/resources?window=24h&x=1');
+
+  const landed = new URL(page.url());
+  expect(landed.pathname).toBe('/metrics');
+  expect(landed.searchParams.get('tab')).toBe('resource');
+  expect(landed.searchParams.get('window')).toBe('24h');
+  expect(landed.searchParams.get('x')).toBe('1');
+
+  // The redirect's target actually rendered the resource module.
+  await expect(page.locator('[data-test="resource-live-strip"]')).toBeVisible();
 });
 
 test('[P5] a FAILED registry read renders the DISTINCT degraded badge (never the empty panel, never the error banner)', async ({ page }) => {

@@ -1,8 +1,20 @@
 /**
- * Resources page merge gate — real-browser web-automation harness.
+ * Resources MODULE merge gate — real-browser web-automation harness.
  *
- * NEW test artifact only (FE /resources observability page, P5 T7).
  * jsdom does NOT count — this spec runs REAL Chromium via Playwright.
+ *
+ * ── THE RE-POINT (T1 phase 7, task 7.7) ────────────────────────────────
+ *
+ * The standalone `/resources` page is RETIRED (D-3). The resource
+ * module is now TAB 1 of the metrics page, so this gate drives
+ * `/metrics?tab=resource` — the SAME module, at its NEW home. The
+ * gear-menu leg is re-pointed too: the retired `Resources` gear entry
+ * is gone and `Metrics` is the single entry for these surfaces.
+ *
+ * This spec NEVER navigates to the retired route: the redirect leg
+ * lives in `metrics-gate.spec.ts` (the metrics page's own gate), and
+ * the "no Playwright spec drives the retired route" pin is asserted in
+ * `src/app/app.resources-retirement.spec.ts`.
  *
  * ── Stub architecture (cloned from snapshots-v2-gate) ─────────────
  * Every API request (URL prefix "api/") is intercepted by `page.route`
@@ -11,8 +23,8 @@
  * precedence in Playwright's LIFO matching) guarantees NOTHING leaks to
  * a real backend; the specific stubs below shadow it.
  *
- * Six GET endpoints are stubbed with fixture JSON mirroring the FROZEN
- * §2.8 payload shapes:
+ * SIX resources endpoints are stubbed with fixture JSON mirroring the
+ * FROZEN §2.8 payload shapes:
  *   /api/resources/live
  *   /api/resources/history
  *   /api/resources/anomalies
@@ -20,10 +32,14 @@
  *   /api/resources/traceback
  *   /api/resources/self-cost
  *
+ * The THREE metrics-door routes are stubbed too (the page that hosts
+ * the module needs its own door): /api/metrics/families, /snapshot and
+ * /series — with the frozen envelope shapes and an EMPTY family list,
+ * so the central door is quiet while the resource tab stays lit.
+ *
  * ── Journey ──
- *   gear menu → "Resources" → /resources → two tabs → Live shows the
- *   stubbed RSS + self-cost chip → Timeline renders ≥1 SVG path + an
- *   anomaly marker → marker click shows the evidence + traceback panel.
+ *   gear menu → "Metrics" → /metrics → the resource tab → Live shows
+ *   the stubbed RSS + self-cost chip → the timeline panel renders.
  *   Zero daemon throughout.
  */
 import { test, expect, type Page, type Route } from '@playwright/test';
@@ -108,6 +124,41 @@ const TRACEBACK_PAYLOAD = {
 
 const SELF_COST_PAYLOAD = LIVE_PAYLOAD.self_cost;
 
+// ── The metrics DOOR envelope (the page that now hosts the module) ───
+//
+// The resource module is tab 1 of `/metrics`; the page's own central
+// door must answer too, or the catch-all's `{}` body would drive the
+// shell into its error branch. An EMPTY family list keeps the central
+// door quiet while the resource tab stays lit (AM-1: the custom slot
+// renders its OWN source's state, never the door's).
+const DOOR_ENVELOPE = {
+  schema_version: 1,
+  vocabulary_version: 2,
+  generated_at_utc: '2026-11-02T09:00:00+00:00',
+  restart_epoch: 'boot-abc123',
+  activation: {
+    listener_enabled: false,
+    census_enabled: true,
+    query_api: 'auth-gated-always-on',
+  },
+};
+
+const DOOR_FAMILIES_PAYLOAD = { ...DOOR_ENVELOPE, truncated: false, families: [] };
+const DOOR_SNAPSHOT_PAYLOAD = { ...DOOR_ENVELOPE, truncated: false, series: [] };
+const DOOR_SERIES_PAYLOAD = {
+  ...DOOR_ENVELOPE,
+  window: {
+    from_utc: '2026-11-02T08:00:00+00:00',
+    to_utc: '2026-11-02T09:00:00+00:00',
+    interval_s: 15,
+    interval_s_source: 'observed',
+  },
+  last_sample_age_s: 2,
+  stale: false,
+  truncated: false,
+  series: [],
+};
+
 function jsonRoute(route: Route, body: unknown, status = 200): Promise<void> {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 }
@@ -158,6 +209,11 @@ async function installStubs(page: Page): Promise<void> {
     jsonRoute(route, EVIDENCE_PAYLOAD),
   );
   await page.route(/\/api\/resources\/anomalies(\?|$)/, (route) => jsonRoute(route, ANOMALIES_PAYLOAD));
+
+  // ── The metrics door — the page that hosts the resource module ──
+  await page.route(/\/api\/metrics\/families/, (route) => jsonRoute(route, DOOR_FAMILIES_PAYLOAD));
+  await page.route(/\/api\/metrics\/snapshot/, (route) => jsonRoute(route, DOOR_SNAPSHOT_PAYLOAD));
+  await page.route(/\/api\/metrics\/series/, (route) => jsonRoute(route, DOOR_SERIES_PAYLOAD));
 }
 
 test.beforeEach(async ({ page }) => {
@@ -174,27 +230,38 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test('[AC8] gear menu → /resources → two tabs → live + self-cost → timeline + marker drill-down', async ({
+test('[AC8] gear menu → Metrics → the resource tab → live + self-cost → the timeline panel', async ({
   page,
 }) => {
-  // ── Boot at '/' and open the gear menu (D2 — the ONLY entry point). ──
+  // ── Boot at '/' and open the gear menu (the only entry point). ──
   await page.goto('/');
   await expect(page.locator('[data-test="gear-menu"]')).toBeVisible();
   await page.locator('[data-test="gear-menu"]').click();
 
-  const resourcesItem = page.locator('a[mat-menu-item]').filter({ hasText: 'Resources' });
-  await expect(resourcesItem).toBeVisible();
-  await resourcesItem.click();
+  // ── The retired `Resources` gear entry is GONE (D-3) and `Metrics`
+  //    is the single entry for these surfaces. ──
+  await expect(page.locator('a[mat-menu-item]').filter({ hasText: 'Resources' })).toHaveCount(0);
 
-  await expect(page).toHaveURL(/\/resources/);
+  const metricsItem = page.locator('a[mat-menu-item]').filter({ hasText: 'Metrics' });
+  await expect(metricsItem).toBeVisible();
+  await metricsItem.click();
 
-  // ── Two registry-driven tabs. ──
+  await expect(page).toHaveURL(/\/metrics/);
+
+  // ── The manifest-driven tab list; the RESOURCE module is tab 1 and
+  //    is the DEFAULT selection (the metrics page's default tab id). ──
   const tabs = page.locator('[role="tab"]');
-  await expect(tabs).toHaveCount(2);
-  await expect(page.getByRole('tab', { name: 'Live' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'Timeline' })).toBeVisible();
+  await expect(tabs).toHaveCount(7);
+  await expect(page.getByRole('tab', { name: 'Resources' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Runtime' })).toBeVisible();
 
-  // ── Live tab: stubbed RSS + self-cost chip (AC6/AC8). ──
+  // ── The resource module's own column: the live strip, the timeline
+  //    panel and the anomalies panel (the flat three-section body). ──
+  await expect(page.locator('[data-test="resource-live-strip"]')).toBeVisible();
+  await expect(page.locator('[data-test="resource-timeline-panel"]')).toBeVisible();
+  await expect(page.locator('[data-test="resource-anomalies-panel"]')).toBeVisible();
+
+  // ── Live strip: stubbed RSS + self-cost chip (AC6/AC8). ──
   await expect(page.locator('[data-test="live-content"]')).toBeVisible();
   await expect(page.locator('[data-test="stat-daemon-rss"]')).toContainText('1720');
   const chip = page.locator('[data-test="self-cost-chip"]');
@@ -202,26 +269,15 @@ test('[AC8] gear menu → /resources → two tabs → live + self-cost → timel
   await expect(chip).toContainText('0.42%');
   await expect(chip).toContainText('320');
 
-  // ── The Timeline tab's surface MOVED to /metrics tab 1 (T1 phase 5,
-  //    tasks 5.1/5.2). The /resources shell still hosts the section, but
-  //    the timeline PANEL is now body-driven (its window + data come from
-  //    the flat tab-1 column's own control + fetches), so this retired
-  //    route renders it in the transitional empty state until phase 7's
-  //    7.4 deletes the route (the plan accepts the retired-route specs
-  //    breaking mid-phase). The SVG-path + marker drill-down legs above
-  //    are DISPOSITIONED to the metrics page: the same assertions run as
-  //    jest specs at the new home (resource-tab.component.spec.ts + the
-  //    moved timeline-tab.component.spec.ts, which assert the chart, the
-  //    marker click → padded drill-down, the flat three-section order and
-  //    the panel's own range control). This leg asserts the transitional
-  //    state honestly instead of pretending the old UI is still here.
-  await page.getByRole('tab', { name: 'Timeline' }).click();
-  await expect(page.locator('[data-test="timeline-tab"]')).toBeVisible();
+  // ── The module's OWN range control (T1 phase 5, task 5.4): the
+  //    timeline window belongs to the tab body, not to the page frame.
+  //    The retired per-panel `window-selector` stays GONE. ──
+  await expect(page.locator('[data-test="resource-range-select"]')).toHaveCount(1);
   await expect(page.locator('[data-test="window-selector"]')).toHaveCount(0);
 });
 
-test('[AC8] deep-link /resources renders without a daemon', async ({ page }) => {
-  await page.goto('/resources');
+test('[AC8] deep-link /metrics?tab=resource renders without a daemon', async ({ page }) => {
+  await page.goto('/metrics?tab=resource');
   await expect(page.locator('[data-test="live-content"]')).toBeVisible();
   await expect(page.locator('[data-test="stat-daemon-rss"]')).toContainText('1720');
   // Everything above came from page.route stubs — assert the catch-all
@@ -238,7 +294,7 @@ test('[AC8] deep-link /resources renders without a daemon', async ({ page }) => 
 // show "—" not `null`) without throwing during change detection.
 // The beforeEach instruments `pageerror` + console-error — a TypeError
 // or `Cannot read properties of null` would surface as one or both.
-test('[AC8] /resources survives a degraded 200 body (cgroup null + daemon scalars null) with no pageerror', async ({
+test('[AC8] the resource module survives a degraded 200 body (cgroup null + daemon scalars null) with no pageerror', async ({
   page,
 }) => {
   const consoleErrors: string[] = [];
@@ -276,7 +332,7 @@ test('[AC8] /resources survives a degraded 200 body (cgroup null + daemon scalar
   await page.route('**/api/resources/live', (route) => jsonRoute(route, degraded));
   await page.route('**/api/resources/self-cost', (route) => jsonRoute(route, degraded.self_cost));
 
-  await page.goto('/resources');
+  await page.goto('/metrics?tab=resource');
 
   // Page renders. Live content card mounts.
   await expect(page.locator('[data-test="live-content"]')).toBeVisible();

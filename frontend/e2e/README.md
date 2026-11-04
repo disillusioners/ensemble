@@ -39,7 +39,7 @@ npx playwright show-report
 
 ### Daemon-free page gates
 
-`npx playwright test --config=playwright.resources-gate.config.ts` runs the `/resources` page gate with ALL APIs stubbed via `page.route` — zero daemon, zero DB (same pattern as `playwright.snapshots-v2stub.config.ts`; port 14202, override via `RESOURCES_GATE_PORT`).
+`npx playwright test --config=playwright.resources-gate.config.ts` runs the **resource module** gate — the metrics page's tab 1 (`/metrics?tab=resource`) — with ALL APIs stubbed via `page.route` — zero daemon, zero DB (same pattern as `playwright.snapshots-v2stub.config.ts`; port 14202, override via `RESOURCES_GATE_PORT`). The standalone resources page was retired in T1 phase 7 (D-3); the gate was re-pointed to the module's new home.
 
 ## Test Configuration
 
