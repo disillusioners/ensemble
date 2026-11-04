@@ -423,3 +423,44 @@ staged-release disclosures** — reproduced in the final report.
 `--ttl`, the mandatory allowed-origins, the cold Host-recorder trap, and the
 MERGE-WITH-AUTH-OFF posture — carry in plan-overview.md §9.0 verbatim; this
 evidence defers to that section rather than duplicating it.)
+
+---
+
+## POST-RULING RIDER (2026-11-04) — leader ruling IMPL-24 (the B4 re-baseline)
+
+The leader re-baselined B4 on the measured reality (B4a 65,536 → 82,000 B min+gz;
+B4b → 185,000 B lazy-only on the POST-RELOCATION basis) with the supersession
+recorded in `bundle-baseline.json` guards.B4, `plan-overview.md` §0.2 (G4b, G9) +
+§6.3 (row B4), and `decisions.md` IMPL-24. Full before/after tables, the planted
+static-edge proof (plant → exit 4 RED → restore → exit 0 green), and the re-run
+guard outputs live in the lane's final report and in the artifact itself. The tool
+gained the load-bearing VENDOR-STATIC-EDGE INVARIANT (vendor bytes in ANY static
+fetch set == 0; identification = the route-keyed route chunk's dynamic-import
+targets, exactly one on this dist, all-targets coverage as the fallback).
+
+## A PLAN-REFERENCED-ARTIFACT GAP — the data-end marker (recorded as its own defect class)
+
+**The gap:** the plan called the data-end overlay a "Phase 4 contract" — Phase 8's
+task 8.10 (`The data-end marker … Depends On: Phase 4, Phase 6` in
+`phase9-plan.md`'s dependency framing) presumes a Phase-4-frozen contract and
+capability for the data-end marker. **No such contract or capability existed at the
+Phase-4 freeze** — the plan's Phase 4 scoped the chart-panel wrapper, the renderer
+registry, the port, and the house SVG renderer; a data-end marker is named in NO
+Phase-4 task, no Phase-4 exit bullet, and no IMPL ruling before Phase 8.
+**Phase 8 therefore built it from scratch as a house plugin**
+(`charts/data-end-overlay-plugin.ts` + `data-end-overlay-plugin.spec.ts`, a
+Chart.js plugin drawn on the panel canvas), not as a port of a planned contract.
+
+**Why this is recorded as a DISTINCT defect class:** a stale number (the class
+IMPL-24 closes) is a measured figure that reality outran — the artifact existed and
+was corrected. A **plan-referenced artifact that does not exist** is different: the
+plan's dependency graph cites a deliverable that was never planned, so the citing
+phase's work could not "implement the contract" — it had to invent one. The
+dependency edge was unverifiable at planning time and silently dangling at
+execution time. The cost was real (Phase 8 designed the marker's semantics — the
+end-of-data tick and its honesty rule — with no frozen contract to conform to), and
+the risk is real for any future reader who assumes a Phase-4 authority exists.
+**Disposition:** the shipped plugin is the de-facto contract now (its spec is the
+frozen surface); this record prevents the phantom-authority citation from
+propagating — future plans should verify that a referenced artifact EXISTS at its
+cited freeze, not merely that it is named.

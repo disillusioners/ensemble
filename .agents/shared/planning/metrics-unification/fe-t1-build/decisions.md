@@ -802,3 +802,51 @@ another, and the two could disagree.
 labelled control (`resource-range-select`, the "Timeline range" select) and the frame's
 central-sourced control is disabled on that slot. The phase-4 renderer work does not change
 either control; it only composes the panels the controls govern.
+
+### IMPL-24 — (LEADER RULING, 2026-11-04) B4 re-baseline to the measured reality — an AUTHORIZED threshold change, not a silent weakening
+
+**The ruling:** the Phase-9 measurement proved both B4 sub-thresholds were written against
+estimates that reality outruns. The leader re-baselined them on the MEASURED numbers,
+with the supersession documented in every ledger the numbers live in
+(`bundle-baseline.json` guards.B4, `plan-overview.md` §0.2 rows G4b + G9, §6.3 row B4,
+and this section). **The code council and the tester will both see this change in the
+open and re-verify it independently.**
+
+**(1) D-1 IS UNCHANGED AND GREEN.** D-1's binding contract is first paint = the app shell
+(the builder's initial set); **B1 (Δ −1,301 B vs the ±2,048 bound) + B2 (0 `chart.js`
+markers in the initial set) + B3 (0 static import sites, statement-anchored,
+mutation-proven) remain THE D-1 enforcement — B4 was always second-order.** Nothing in
+this ruling touches the initial set.
+
+**(2) B4a (chart chunk) 65,536 → 82,000 B min+gz.** The 65,536 figure was G9's ESTIMATE
+of chart.js alone. The MEASURED barrel-mandatory composition is **71,054 B gz**
+(206,857 B min, `chunk-TXUCW6LI.js`). **Tree-shaking is structurally impossible under
+the mandated dynamic-barrel form:** the D-1-mandated `await import('chart.js')`
+materializes the WHOLE namespace object, so all controllers ship in the chunk —
+Bar/Doughnut/Pie/Radar/Bubble/Scatter are all present despite the explicit
+`Chart.register(...)` of only the used set (verified on the dist in Phase 4, re-verified
+at Phase 9). The new pin is measured + ~15% margin for wrapper/plugin/theme growth.
+
+**(3) B4b (route fetch set, lazy-only) 65,536-growth → 185,000 B on the POST-RELOCATION
+basis.** Phase 5/7 RELOCATED the resources module INTO the metrics route — the route
+chunk grew 27,672 → 120,154 B and the lazy-only fetch set 72,708 → **165,185 B**. That
+growth is the lane's OWN D-3 deliverable, NOT vendor leakage; the vendor bytes reach the
+page only via dynamic import and are NOT in the fetch set. Measured 165,185 → pin
+185,000. The pre-relocation 72,708 B is retained in the artifact as
+`baseline_metrics_route_fetch_set_lazy_only_bytes_PRE_RELOCATION_SUPERSEDED`
+(provenance, not the gate).
+
+**(4) THE LOAD-BEARING INVARIANT (new tool assertion, fails loud — exit 4):**
+**`chart.js` vendor bytes in ANY static (non-dynamic) fetch set == 0.** The vendor chunk
+is identified deterministically from the ROUTE-KEYED route chunk's dynamic-import
+targets (exactly one on the Phase-9 dist — `chunk-TXUCW6LI.js`; if a future build
+carries several, the assertion covers ALL of them), and the tool scans EVERY chunk for
+static-import edges (`from "…"` / `import "…"`) targeting it — plus the initial-set
+membership check. **Plant→red→restore→green proven** on the Phase-9 dist: a planted
+`import"chunk-TXUCW6LI.js";` edge reddens the tool (exit 4, RED stderr, count 1),
+restoring greens it (exit 0, count 0). The byte thresholds are sized to measured
+reality; the INVARIANT is the structural catch that survives any future growth.
+
+**Ledger discipline:** every changed row carries old value → new value and why — the
+E-1 discipline (a label without a command is not a re-derivation) applied in reverse
+(an estimate without a supersession record is not a correction).

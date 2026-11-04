@@ -111,6 +111,38 @@ if (resourcesRouteChunk && routeChunk && resourcesRouteChunk === routeChunk) {
   resourcesRouteChunk = null; // the legacy marker is the metrics chunk now — ABSENT, never mis-resolved
 }
 
+// ── THE VENDOR-STATIC-EDGE INVARIANT (the B4b rider — leader ruling IMPL-24,
+//    2026-11-04) ─────────────────────────────────────────────────────────
+// chart.js vendor bytes may reach the /metrics page ONLY via dynamic import.
+// The invariant: **the vendor chunk appears in ZERO static-import edges
+// (`from "…"` / `import "…"`) across ALL chunks in the dist** — a chunk that
+// is BOTH a lazy dynamic target AND statically imported somewhere is exactly
+// the static-leak defect class (the builder hoists truly-shared chunks into
+// the initial set, so a static edge on a lazy chunk means a static-shaped
+// leak). IDENTIFICATION (deterministic, cheap): the ROUTE-KEYED route
+// chunk's dynamic-import targets (`import("chunk-….js")`). On the Phase-9
+// dist there is EXACTLY ONE (the chart.js barrel); if a future build carries
+// several, the assertion covers ALL of them (each must remain
+// dynamic-only). This probe FAILS LOUD: on a violation the tool prints a RED
+// line to stderr and exits 4 (the JSON still prints — the absent-tolerance
+// "never throws" contract governs MIS-RESOLUTION, not invariant violations).
+const vendorDynTargets = routeChunk
+  ? [...read(routeChunk).matchAll(/import\s*\(\s*["']([^"']+\.js)["']\s*\)/g)].map((m) => path.basename(m[1]))
+  : [];
+let vendorStaticEdges = null;
+const vendorStaticEdgeSites = [];
+if (vendorDynTargets.length) {
+  for (const f of allJs) {
+    const s = read(f);
+    for (const m of s.matchAll(/(?:from|import)\s*["']([^"']+\.js)["']/g)) {
+      const d = path.basename(m[1]);
+      if (vendorDynTargets.includes(d)) vendorStaticEdgeSites.push(`${f} -> ${d}`);
+    }
+  }
+  vendorStaticEdges = vendorStaticEdgeSites.length;
+}
+const vendorInvariantOk = vendorDynTargets.length > 0 ? vendorStaticEdges === 0 && !vendorDynTargets.some((t) => initial.has(t)) : null;
+
 const out = {
   initial_total_bytes: initialTotal,
   initial_file_count: initialFiles.length,
@@ -135,5 +167,17 @@ const out = {
   second_largest_lazy: bySize[1], second_largest_lazy_bytes: size(bySize[1]),
   pre_retirement_resources_route_chunk: resourcesRouteChunk,          // null after Phase 7
   pre_retirement_resources_route_chunk_bytes: resourcesRouteChunk ? size(resourcesRouteChunk) : null,
+  // the vendor-static-edge invariant (leader ruling IMPL-24): the vendor may
+  // be reached ONLY by dynamic import — zero static edges anywhere, and never
+  // in the initial set. Fails loud (stderr RED + exit 4) on violation.
+  vendor_chunks: vendorDynTargets,                        // the route chunk's dynamic-import targets
+  vendor_static_edge_count: vendorStaticEdges,            // invariant: 0
+  vendor_static_edge_sites: vendorStaticEdgeSites,        // non-empty = the leak sites
+  vendor_in_initial_set: vendorDynTargets.some((t) => initial.has(t)), // invariant: false
+  vendor_invariant_ok: vendorInvariantOk,                 // true | false | null (unresolvable route)
 };
+if (vendorInvariantOk === false) {
+  console.error(`TOOL: VENDOR-INVARIANT RED — vendor chunk(s) [${vendorDynTargets.join(', ')}] carry ${vendorStaticEdges} static-import edge(s): ${vendorStaticEdgeSites.join('; ')}`);
+  process.exitCode = 4;
+}
 console.log(JSON.stringify(out, null, 2));
