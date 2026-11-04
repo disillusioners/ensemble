@@ -145,13 +145,13 @@ exit 0.
 
 | check | result |
 |---|---|
-| Unit-vocabulary + renderer suites (jest, scoped) | **12 suites / 133 tests / 0 failed** (the fold adds 21 compat + 4 timeline-tab + 2 chart-panel + 1 anomalies-panel = 28 tests) |
+| Unit-vocabulary + renderer suites (jest, scoped) | **13 suites / 153 tests / 0 failed** — the scope is the FOUR metrics sub-directories (`charts/`, `resource/timeline/`, `resource/anomalies/`, `resource/live/`), re-derived on 2026-11-04 because the row's original "12 suites / 133 tests" matched NO natural scope (the tester gate measured 12 suites / **149** tests at the fold's tip `cf4e4fd14`; the R1 order spec (+1 suite / 3 tests) and the R2 gap leg (+1 test) take it to 13 / 153). The fold's own additions at the time were 21 compat + 4 timeline-tab + 2 chart-panel + 1 anomalies-panel = 28 tests |
 | The committed e2e gate (`resources-gate.spec.ts`, engine-key fixture) | **4/4 passed** (12.9 s) — including the C-1 house-SVG fallback leg now exercising the REAL `daemon.rss_kb` shape |
 | The C-1 LIVE leg | **PASS 3/3** (§4) |
 | `tsc --noEmit -p tsconfig.app.json` | **rc 0** |
 | `tsc --noEmit -p tsconfig.metrics-fe.json` (the pack's scoped gate) | **rc 0** |
 | `tsc --noEmit -p tsconfig.spec.json` | 2 errors, BOTH pre-existing at the tip in `src/app/app.component.spec.ts:2127` (a duplicated `});`; the file is byte-identical to the received tip — `git status`/`git diff` empty). Outside this fold's scope; routed (council-fold-record §7) |
-| The guard (byte delta DISCLOSED) | B1 initial total **5,907,717 → 5,907,717 (+0; delta −1,301 vs baseline 5,909,018, limit ±2,048) — the fold is lazy-only**; B4a chart chunk **71,054 → 71,054 gz (+0; ≤82,000)**; B4b route fetch set lazy-only **166,055 → 170,094 (+4,039 — the shim + wrapper widening; ≤185,000, headroom 14,906)**; vendor invariant 0/false ENFORCED → **GREEN exit 0** |
+| The guard (byte delta DISCLOSED) | B1 initial total **5,907,717 → 5,907,717 (+0; delta −1,301 vs baseline 5,909,018, limit ±2,048) — the fold is lazy-only**; B4a chart chunk **71,054 → 71,054 gz (+0; ≤82,000)**; B4b route fetch set lazy-only **166,055 → 170,094 (+4,039 vs the FIRST GATE's own 166,055 measurement; +4,909 vs the ARTIFACT's own post-relocation baseline of 165,185 — the artifact's number is the baseline of record, and BOTH are under the 185,000 limit, headroom 14,906)**; vendor invariant 0/false ENFORCED → **GREEN exit 0** |
 | Prompt baseline | **PROMPT-BASELINE: OK — 161 versioned artifact(s) match** |
 
 ## 7. Teardown

@@ -308,6 +308,67 @@ describe('chart-panel — the configuration (the house rendering rules)', () => 
     expect(emitted[0].seriesId).toBe('gauge');
   });
 
+  // ── R2 (2026-11-04): the click's time resolution must be LOCAL, not the
+  // series' MEAN spacing.
+  //
+  // THE REAL SHAPE (fenced dev daemon, 2026-11-04): the timeline's grid is
+  // the raw 30-second tier, and a daemon RESTART leaves a HOLE in it — the
+  // last pre-restart sample, then the first post-restart one, ~18 minutes
+  // apart. The anomaly engine buckets its series on a 5-minute stride
+  // (`STATE_BUCKET_S`), so an anomaly whose DETECTION bucket lands inside
+  // that hole is DRAWN (its time is inside the plotted window) but sits
+  // minutes away from every sample — further than the mean spacing — so
+  // the click could never match it and the drill-down stayed dead (the
+  // gate's residual: the marker rendered, 25 real clicks opened nothing).
+  //
+  // The tolerance is now the clicked sample's own neighbourhood, so the
+  // sample that borders the hole OWNS the hole.
+  it('resolves a marker that falls inside a GAP in the sample grid (the restart hole)', () => {
+    const STEP = 30_000;
+    const points: { t: number; v: number }[] = [];
+    // 30 dense pre-restart samples (15 minutes of the raw tier).
+    for (let index = 0; index < 30; index += 1) {
+      points.push({ t: T0 + index * STEP, v: 300 + index });
+    }
+    // The restart hole: 18.5 minutes with NO sample at all.
+    const postRestart = points[points.length - 1].t + 18.5 * 60_000;
+    for (let index = 0; index < 30; index += 1) {
+      points.push({ t: postRestart + index * STEP, v: 340 + index });
+    }
+    // The anomaly's detection bucket: 10 minutes INTO the hole (the
+    // engine's 5-minute stride, landing between the two sample runs).
+    const markerTs = points[29].t + 10 * 60_000;
+    const markers = [
+      {
+        anomalyId: 'anom-000003',
+        seriesId: 'rss',
+        tsMs: markerTs,
+        severity: 'high' as const,
+        title: 'memory · ramp · high · daemon.rss_kb',
+      },
+    ];
+    const series: ChartPanelSeries = {
+      id: 'rss',
+      label: 'Daemon RSS (MB)',
+      mode: 'line',
+      points,
+    };
+    fixture.componentRef.setInput('anomalies', markers);
+    fixture.componentRef.setInput('series', [series]);
+    const config = component.buildChartConfig([series], 'MB', markers);
+    const onClick = config.options.onClick;
+    const emitted: { anomalyId?: string; seriesId: string; tsMs: number }[] = [];
+    fixture.componentRef.setInput('onPointClick', (event: { anomalyId?: string }) =>
+      emitted.push(event as { anomalyId?: string; seriesId: string; tsMs: number }),
+    );
+
+    // The pointer sits ON the marker; the vendor resolves it to the
+    // NEAREST sample — the first post-restart one (index 30).
+    onClick(null, [{ datasetIndex: 0, index: 30 }]);
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].anomalyId).toBe('anom-000003');
+  });
+
   it('a click that matches NO marker still reports the FIRST element\'s plain payload (unchanged)', () => {
     const markers = [
       {

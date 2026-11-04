@@ -159,6 +159,7 @@ interface PanelChart {
   destroy(): void;
   update(): void;
   data?: unknown;
+  options?: unknown;
 }
 
 /** The Chart.js module type — a TYPE-ONLY reference (no runtime import). */
@@ -360,11 +361,34 @@ export class ChartPanelComponent implements AfterViewInit, OnDestroy {
         return;
       }
       const config = this.buildChartConfig(series, unit, anomalies);
-      const chart = this.chart as unknown as { data?: unknown; update?: () => void } | null;
+      const chart = this.chart as unknown as {
+        data?: unknown;
+        options?: unknown;
+        update?: () => void;
+      } | null;
       if (!chart) {
         return;
       }
       chart.data = config.data;
+      // R1 (2026-11-04): the OPTIONS must be refreshed too, not only the
+      // data.
+      //
+      // The house overlay's marker list lives in the chart's OPTIONS
+      // (`options.plugins[HOUSE_ANOMALY_PLUGIN_ID].markers`) and the
+      // chart's options are a MOUNT-TIME snapshot: the vendor resolves
+      // the plugin's options from the config it was constructed with and
+      // only rebuilds them when the chart is updated. Assigning only
+      // `chart.data` therefore FROZE the marker list at mount time — an
+      // anomalies payload that resolved AFTER the chart mounted was
+      // never drawn (the panel rendered bare, with no marker and no
+      // drill-down pointer). The same freeze applied to the data-end
+      // marker, which travels in the same options bag.
+      //
+      // The assignment is the vendor's own update shape (`chart.data` +
+      // `chart.options` + `chart.update()`): the options object is
+      // rebuilt from the current inputs on every rebuild, so the plugin
+      // reads the CURRENT marker list at draw time.
+      chart.options = config.options;
       if (typeof chart.update === 'function') {
         chart.update();
       }
@@ -544,7 +568,7 @@ export class ChartPanelComponent implements AfterViewInit, OnDestroy {
         this.anomalies(),
         series.id,
         point.t,
-        this.clickToleranceMs(series),
+        this.clickToleranceMs(series, element.index),
       );
       const payload: ChartPointClick = {
         anomalyId: marker?.anomalyId,
@@ -562,15 +586,45 @@ export class ChartPanelComponent implements AfterViewInit, OnDestroy {
     }
   }
 
-  /** The click tolerance — one sample spacing of the clicked series. */
-  private clickToleranceMs(series: ChartPanelSeries): number {
-    if (series.points.length < 2) {
+  /**
+   * The click tolerance — the clicked sample's LOCAL time neighbourhood.
+   *
+   * The tolerance used to be the series' MEAN sample spacing — one global
+   * number for the whole series. That rule cannot see a grid with a HOLE:
+   * the anomaly engine buckets its series on a 5-minute stride
+   * (`STATE_BUCKET_S`), while the timeline's grid is the raw 30-second
+   * tier, and a daemon RESTART leaves the grid with a gap (the last
+   * pre-restart sample, then the first post-restart one — ~18 minutes
+   * apart in the reproduced shape).
+   *
+   * An anomaly whose detection bucket lands INSIDE that gap is DRAWN (its
+   * time is inside the plotted window) but sits minutes away from every
+   * sample — further than the mean spacing — so the click could never
+   * match it and the drill-down stayed dead (the 2026-11-04 R2 residual:
+   * the marker rendered, 25 clicks opened nothing).
+   *
+   * The tolerance is now the clicked sample's OWN neighbourhood: the
+   * distance to its farther neighbour. The grid's own shape decides what
+   * "near" means, and the sample that borders a gap OWNS the gap. On a
+   * uniform grid this is exactly the old mean (one spacing), so the
+   * normal path is unchanged.
+   */
+  private clickToleranceMs(series: ChartPanelSeries, index: number): number {
+    const points = series.points;
+    if (points.length < 2) {
       return Number.POSITIVE_INFINITY;
     }
-    let total = 0;
-    for (let index = 1; index < series.points.length; index += 1) {
-      total += series.points[index].t - series.points[index - 1].t;
+    const here = points[index]?.t;
+    if (here === undefined) {
+      return Number.POSITIVE_INFINITY;
     }
-    return total / (series.points.length - 1);
+    let tolerance = 0;
+    if (index > 0) {
+      tolerance = Math.max(tolerance, here - points[index - 1].t);
+    }
+    if (index + 1 < points.length) {
+      tolerance = Math.max(tolerance, points[index + 1].t - here);
+    }
+    return tolerance;
   }
 }

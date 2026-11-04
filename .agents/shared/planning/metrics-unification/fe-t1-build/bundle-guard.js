@@ -137,11 +137,18 @@ const delta = initialTotal - BASELINE_BYTES;
 let measureTotal = null;
 let measureJson = null;
 let measureFailure = null;
+let measureStderr = '';
 try {
   measureJson = JSON.parse(
     execFileSync(process.execPath, [MEASURE_PATH, DIST], {
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
+      // R8 (2026-11-04): the tool's stderr was DISCARDED (`'ignore'`),
+      // so the operator-facing reason line could never carry the tool's
+      // own tail (`TOOL: VENDOR-INVARIANT RED — …`). The invariant was
+      // still enforced from the stdout JSON, but the RED line a human
+      // reads named only the guard's own summary. The stderr is now
+      // PIPED and surfaced on failure.
+      stdio: ['ignore', 'pipe', 'pipe'],
     }),
   );
   measureTotal = measureJson.initial_total_bytes;
@@ -150,8 +157,8 @@ try {
   measureJson = null;
   // err.status = the tool's exit code (execFileSync); err.stderr = its stderr.
   const status = typeof err?.status === 'number' ? err.status : null;
-  const stderrTail = String(err?.stderr ?? '')
-    .trim()
+  measureStderr = String(err?.stderr ?? '').trim();
+  const stderrTail = measureStderr
     .split('\n')
     .filter(Boolean)
     .slice(-1)[0];
@@ -333,6 +340,13 @@ console.log(
   } (invariant: false)`,
 );
 console.log(`    measurement_tool_rc      = ${measureFailure === null ? '0' : 'NON-ZERO — failed loud (see MEASURE failure)'}`);
+console.log(
+  `    measurement_tool_stderr  = ${
+    measureStderr
+      ? measureStderr.split('\n').filter(Boolean).slice(-1)[0]
+      : '(none)'
+  }`,
+);
 console.log('');
 console.log('(b) B2 — the chart.js marker scan over the initial set');
 console.log(`    initial_chunks_scanned = ${initialFiles.length}`);

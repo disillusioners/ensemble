@@ -6,7 +6,7 @@
 # with the IDENTICAL command shape; only the file LIST differs by
 # construction (the two-class declaration of the blast-radius recipe):
 #
-#   D1 (lane-owned, HEAD-only) — the lane's own FE specs, 30 declared:
+#   D1 (lane-owned, HEAD-only) — the lane's own FE specs, 32 declared:
 #       src/app/models/metrics.model.spec.ts              (metrics-fe-models)
 #       src/app/services/metrics.service.spec.ts         (metrics-fe-service)
 #       src/app/components/charts/house-svg-renderer/*.spec.ts
@@ -171,8 +171,13 @@ fi
 echo "LEG_KIND=$([ "$IS_HEAD_LEG" = 1 ] && echo HEAD || echo BASE)"
 
 # ─── The file lists ───────────────────────────────────────────────────────
-# D1_FILES — the lane-owned suites (30 declared). Every entry MUST exist on
-# the HEAD leg (asserted below). The svg-line-chart entry was REMOVED here:
+# D1_FILES — the lane-owned suites (32 declared). Every entry MUST exist on
+# the HEAD leg (asserted below). TWO entries were ADDED on 2026-11-04 (the
+# R4 closure): `timeline-series-compat.spec.ts` (the B-1 vocabulary shim's
+# own spec — it sat in NO declared set, so the pack never ran it) and
+# `chart-panel.anomaly-order.spec.ts` (the R1 arrival-order contract). Both
+# are HEAD-only lane specs, which is exactly D1's membership rule.
+# The svg-line-chart entry was REMOVED here:
 # Phase 4 deleted that spec, and jest silently drops an unresolvable
 # positional — the list kept naming a file that no longer ran anywhere.
 D1_FILES=(
@@ -185,6 +190,7 @@ D1_FILES=(
   "src/app/pages/metrics/overview/overview-tab.component.spec.ts"
   "src/app/pages/metrics/charts/charts-tab.component.spec.ts"
   "src/app/pages/metrics/charts/chart-panel.component.spec.ts"
+  "src/app/pages/metrics/charts/chart-panel.anomaly-order.spec.ts"
   "src/app/pages/metrics/families/families-tab.component.spec.ts"
   "src/app/components/charts/house-svg-renderer/house-svg-renderer.spec.ts"
   "src/app/components/charts/house-svg-renderer/house-svg-engine-uniqueness.spec.ts"
@@ -204,6 +210,7 @@ D1_FILES=(
   "src/app/pages/metrics/resource/timeline/data-gaps.spec.ts"
   "src/app/pages/metrics/resource/timeline/marker-label.spec.ts"
   "src/app/pages/metrics/resource/timeline/timeline-drilldown.spec.ts"
+  "src/app/pages/metrics/resource/timeline/timeline-series-compat.spec.ts"
   "src/app/pages/metrics/resource/timeline/timeline-tab.component.spec.ts"
   "src/app/app.resources-retirement.spec.ts"
 )
@@ -273,7 +280,12 @@ run_jest_leg() {
     echo "${leg_name}_EXIT=$exit_code"
     echo "${leg_name}_COUNTS: $(grep -E '^[[:space:]]*Tests:' "$log" | tail -1 || true)"
     echo "${leg_name}_ERROR_SUMMARY:"
-    grep -E '^(FAILED|ERROR) ' "$log" | sed 's/^/  /' || echo "  (none)"
+    # jest prints a failing suite as `FAIL <path>` (and `FAILED <path>` for
+    # a failed test) — the OLD grep (`^(FAILED|ERROR) `) matched NEITHER,
+    # so a failing leg's summary read `(none)` (the verdict itself was
+    # never affected: the exit code and the `Tests:` counts are correct).
+    # Both forms are matched now.
+    grep -E '^(FAILED|ERROR) |^FAIL ' "$log" | sed 's/^/  /' || echo "  (none)"
     if [ ! -s "$log" ]; then
         echo "${leg_name}: FAILED (the leg produced NO artifact — a leg that never ran is not green)"
         return 1
