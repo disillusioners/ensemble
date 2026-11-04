@@ -285,6 +285,125 @@ test('[AC8] deep-link /metrics?tab=resource renders without a daemon', async ({ 
   expect(unstubbedCalls.some((u) => u.includes('/api/resources/'))).toBe(false);
 });
 
+// ── C-1 (council fold): THE REAL-POINTER LEG ON THE FALLBACK PATH ─────
+//
+// The house SVG is the FALLBACK surface: a failed Chart.js mount drops to
+// it (with a badge) and the panel's "drill-down capability is present"
+// claim is about THIS surface. The unit leg dispatches a click straight at
+// the marker element, and jsdom performs no SVG hit-testing — so it cannot
+// see that the full-plot hover overlay (`pointer-events: all`) was painted
+// ON TOP of the marker group, shadowing every marker click.
+//
+// This leg drives a REAL Chromium pointer at the RENDERED geometry
+// (`page.mouse.click` at the marker's bounding-box centre). No
+// `dispatchEvent`: hit-testing is the thing under test.
+//
+// The mount failure is forced the way the product's own failure mode is
+// reached — the canvas cannot acquire a 2D context, so the Chart.js
+// constructor throws, `mount()` catches and the consumer records the mount
+// failure → house SVG + badge. Nothing is stubbed in the chart layer.
+test('[C-1] a REAL pointer reaches an anomaly marker on the house-SVG fallback and opens the drill-down', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // Force the Chart.js mount failure: the 2D context cannot be
+    // acquired (Chart.js 4.6.1's `platform.acquireContext` calls
+    // `canvas.getContext('2d')` INSIDE the constructor, so a throw there
+    // propagates out of `new Chart(...)`), which the panel's `mount()`
+    // catches → `onMountFailed` → the house SVG + the badge. This is a
+    // real browser-level mount failure, not a stubbed chart layer.
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (
+      this: HTMLCanvasElement,
+      contextId: string,
+      ...rest: unknown[]
+    ) {
+      if (contextId === '2d') {
+        throw new Error('forced mount failure: the 2D context cannot be acquired');
+      }
+      return (original as unknown as (...args: unknown[]) => unknown).call(
+        this,
+        contextId,
+        ...rest,
+      );
+    } as typeof HTMLCanvasElement.prototype.getContext;
+  });
+
+  // A tall viewport keeps the whole timeline panel (plot + marker lane)
+  // inside the visual viewport — raw mouse coordinates are VIEWPORT
+  // coordinates, so an element below the fold would make
+  // `page.mouse.move/click` miss (and `elementFromPoint` answer null).
+  await page.setViewportSize({ width: 1600, height: 1200 });
+
+  await page.goto('/metrics?tab=resource');
+
+  // ── The FALLBACK is entered and BADGED (never a silent downgrade) ──
+  await expect(page.locator('[data-test="panel-fallback-badge"]').first()).toBeVisible();
+  await expect(page.locator('[data-test="resource-timeline-panel"]')).toBeVisible();
+
+  const markers = page.locator('[data-test="house-anomaly-marker"]');
+  await expect(markers.first()).toBeVisible();
+  // ONE anomaly in the fixture, in the memory panel.
+  await expect(markers).toHaveCount(1);
+
+  // Bring the panel on screen and let layout settle before geometry.
+  await markers.first().scrollIntoViewIfNeeded();
+  const viewport = page.viewportSize()!;
+
+  // ── (a) The hover extension SURVIVES the reorder ──────────────────
+  // An empty patch of the plot (¼ width, 60% height — clear of the lone
+  // marker's stem at the window midpoint) must still reach the overlay
+  // and publish the nearest-point hover.
+  const overlayBox = await page.locator('[data-test="house-hover-overlay"]').first().boundingBox();
+  expect(overlayBox).not.toBeNull();
+  const hoverTop = Math.max(overlayBox!.y, 0);
+  const hoverBottom = Math.min(overlayBox!.y + overlayBox!.height, viewport.height - 24);
+  expect(hoverBottom).toBeGreaterThan(hoverTop);
+  const hoverX = overlayBox!.x + overlayBox!.width * 0.25;
+  const hoverY = hoverTop + (hoverBottom - hoverTop) * 0.6;
+  await page.mouse.move(hoverX, hoverY);
+  await expect(page.locator('[data-test="house-hover-point"]')).toHaveCount(1);
+
+  // ── (b) A REAL pointer at the marker's RENDERED centre ───────────
+  // The `.house-marker-hit` circle (r=12, transparent, pointer-events:
+  // all) is the marker's hit target; its bounding box centre is the
+  // marker's rendered centre.
+  const hitBox = await markers.first().locator('.house-marker-hit').boundingBox();
+  expect(hitBox).not.toBeNull();
+  const clickX = hitBox!.x + hitBox!.width / 2;
+  const clickY = hitBox!.y + hitBox!.height / 2;
+  // The click point must be on screen for a REAL pointer to hit it.
+  expect(clickX).toBeGreaterThanOrEqual(0);
+  expect(clickX).toBeLessThanOrEqual(viewport.width);
+  expect(clickY).toBeGreaterThanOrEqual(0);
+  expect(clickY).toBeLessThanOrEqual(viewport.height);
+
+  // What does the browser's OWN hit-testing say is on top at that point?
+  // This is the exact regression signature (the overlay used to be the
+  // answer): assert the marker wins, and never the overlay.
+  const topmost = await page.evaluate(
+    ({ x, y }) => {
+      const element = document.elementFromPoint(x, y);
+      if (!element) {
+        return 'none';
+      }
+      return `${element.tagName}.${element.getAttribute('class') ?? ''}`;
+    },
+    { x: clickX, y: clickY },
+  );
+  expect(topmost).not.toContain('house-overlay');
+  expect(topmost).toContain('house-marker');
+
+  await page.mouse.click(clickX, clickY);
+
+  // ── The drill-down the marker click opens ────────────────────────
+  await expect(page.locator('[data-test="drilldown-panel"]')).toBeVisible();
+  await expect(page.locator('[data-test="anomaly-kind"]')).toContainText('memory');
+  await expect(page.locator('[data-test="anomaly-severity"]')).toContainText('high');
+  // …and the evidence round-trip the click triggered (the stub answered).
+  await expect(page.locator('[data-test="contributors"]')).toBeVisible();
+});
+
 // ── Degraded-wire resilience (merge-blocking defect fix) ──────────────
 //
 // Three legitimate paths reach this body (D11): monitor disabled,

@@ -208,6 +208,32 @@ function readDevicePixelRatio(): number {
           </circle>
         }
 
+        <!-- ── The nearest-point hover overlay (the overlay + bisect
+             extension). ────────────────────────────────────────────────
+             PAINT ORDER IS LOAD-BEARING: this rect is the full-plot hit
+             target (pointer-events: all), and SVG hit-testing delivers
+             the pointer to the TOPMOST hit-target. It therefore sits
+             ABOVE the series/areas (or a pointer over a line would never
+             reach it) and BENEATH the anomaly-marker group (or the
+             markers' click would never reach them — their g element is a
+             SIBLING, so the click cannot bubble back down). The
+             sibling ordering is pinned by the component spec ("paints
+             the hover overlay BENEATH the anomaly markers") and
+             exercised by a real pointer in the resources Playwright
+             gate. NOTE: no backticks in this template comment — the
+             template is a TS template literal. -->
+        <rect
+          class="house-overlay"
+          [attr.x]="geometry().plotLeft"
+          [attr.y]="geometry().plotTop"
+          [attr.width]="plotWidth()"
+          [attr.height]="plotHeight()"
+          fill="transparent"
+          data-test="house-hover-overlay"
+          (pointermove)="onPointerMove($event)"
+          (pointerleave)="onPointerLeave()"
+        ></rect>
+
         @for (marker of anomalyMarkers(); track marker.anomaly.anomalyId ?? $index) {
           <g
             class="house-anomaly-marker"
@@ -255,18 +281,6 @@ function readDevicePixelRatio(): number {
             <title>{{ hover.title }}</title>
           </circle>
         }
-
-        <rect
-          class="house-overlay"
-          [attr.x]="geometry().plotLeft"
-          [attr.y]="geometry().plotTop"
-          [attr.width]="plotWidth()"
-          [attr.height]="plotHeight()"
-          fill="transparent"
-          data-test="house-hover-overlay"
-          (pointermove)="onPointerMove($event)"
-          (pointerleave)="onPointerLeave()"
-        ></rect>
 
         @if (!hasValues()) {
           <text

@@ -474,6 +474,59 @@ describe('HouseSvgRendererComponent — the rewritten component assertions', () 
     expect((emitted[0] as { anomalyId?: string }).anomalyId).toBe('anom-1');
   });
 
+  // ── C-1 (council fold): the PAINT ORDER of the hover overlay. ────────
+  //
+  // jsdom performs NO SVG hit-testing, so the click leg above passes
+  // regardless of paint order — which is exactly how the overlay ended up
+  // painted ON TOP of the anomaly markers, silently shadowing every marker
+  // click in a real browser (the fallback path's drill-down).
+  //
+  // SVG hit-testing delivers the pointer to the TOPMOST hit-target, and
+  // the overlay is a full-plot `<rect>` with `pointer-events: all`. So the
+  // document order below IS the hit-test order, and a DOM assertion is the
+  // strongest check jsdom can make: the overlay must FOLLOW the series (a
+  // pointer over a line has to reach it) and PRECEDE the marker group (a
+  // pointer over a marker has to reach the marker — its `<g>` is a
+  // SIBLING of the overlay, so a click cannot bubble back down).
+  it('paints the hover overlay BENEATH the anomaly markers (a real pointer must reach them)', () => {
+    fixture.componentRef.setInput('series', [series('a')]);
+    fixture.componentRef.setInput('anomalies', [
+      { anomalyId: 'anom-1', seriesId: 'a', severity: 'high', tsMs: T0, title: 'anomaly' },
+    ]);
+    fixture.detectChanges();
+
+    const overlay = fixture.debugElement.query(By.css('[data-test="house-hover-overlay"]'));
+    const line = fixture.debugElement.query(By.css('[data-test="house-series-line"]'));
+    const marker = fixture.debugElement.query(By.css('[data-test="house-anomaly-marker"]'));
+    expect(overlay).not.toBeNull();
+    expect(line).not.toBeNull();
+    expect(marker).not.toBeNull();
+
+    const overlayEl = overlay!.nativeElement as Element;
+    const lineEl = line!.nativeElement as Element;
+    const markerEl = marker!.nativeElement as Element;
+
+    // The overlay is painted AFTER the series (else the pointer over a line
+    // would never reach the hover listener)...
+    expect(
+      Boolean(
+        lineEl.compareDocumentPosition(overlayEl) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+
+    // ...and BEFORE the marker group (else the marker would be shadowed).
+    expect(
+      Boolean(
+        overlayEl.compareDocumentPosition(markerEl) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+    expect(
+      Boolean(
+        overlayEl.compareDocumentPosition(markerEl) & Node.DOCUMENT_POSITION_PRECEDING,
+      ),
+    ).toBe(false);
+  });
+
   it('shows the empty label when there are no samples', () => {
     fixture.detectChanges();
     const empty = fixture.debugElement.query(By.css('[data-test="house-empty"]'));
