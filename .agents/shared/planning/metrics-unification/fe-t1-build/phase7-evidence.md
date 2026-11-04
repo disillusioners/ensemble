@@ -223,14 +223,15 @@ $ cd $WT && grep -rn "/resources" frontend/ docs/ --exclude-dir=node_modules --e
     --include="*.ts" --include="*.html" --include="*.scss" --include="*.json" --include="*.mjs" --include="*.md"
 ```
 
-**137 hits** (the base sweep was 139). **EVERY hit is classified** — the full
-per-hit table is `/tmp/p7-sweep-classified.txt` (137 lines, one per hit, each
-with its class):
+**141 hits** (the base sweep was 139; the +2 net are the metrics gate's four
+new `/api/resources/*` stubs and the removed resources-page hits). **EVERY hit
+is classified** — the full per-hit table is `/tmp/p7-sweep-classified.txt`
+(141 lines, one per hit, each with its class):
 
 | class | count | what it is |
 |---|---|---|
 | (a) the intended redirect target | 30 | the redirect itself (its route + its doc, 5) · the e2e REDIRECT PROBE (1) · the ACCEPTANCE's own probes + needles (20) · a NEGATIVE guard whose string IS the absence assertion (1) · prose notices about the retirement (3) |
-| (b) the `/api/resources/*` endpoints (which STAY) | 104 | the API surface incl. the backend router path `daemon/routers/resources.py` (73) · the relocated module's own file names (`models/resources.models`, `services/resources.service`) (28) · the gate's own IDENTITY (its `testMatch` + its `/tmp/resources-gate-evidence` output dir) (3) |
+| (b) the `/api/resources/*` endpoints (which STAY) | 108 | the API surface incl. the backend router path `daemon/routers/resources.py` (77) · the relocated module's own file names (`models/resources.models`, `services/resources.service`) (28) · the gate's own IDENTITY (its `testMatch` + its `/tmp/resources-gate-evidence` output dir) (3) |
 | (c) a stale reference to the retired route | **0** | — |
 | (d) an operator doc still pointing at the retired route | 3 | the RETIREMENT NOTICES in the two runbooks — each one points at the NEW route and announces the retirement (`RETIRED` / `redirect` within the notice block) |
 
@@ -436,6 +437,15 @@ Test Suites: 4 failed, 149 passed, 153 total
 Tests:       9 failed, 4701 passed, 4710 total
 ```
 
+**The failing suites (verbatim) — the SAME four the phase-8 freeze recorded:**
+
+```
+FAIL src/app/components/schedule-create-dialog/schedule-create-dialog.component.spec.ts
+FAIL src/app/models/jobs-filter-state.model.spec.ts
+FAIL src/app/models/jobs-grouping.model.spec.ts
+FAIL src/app/pages/settings/settings.component.spec.ts
+```
+
 **The 9 reds are BASE-PROVEN.** The phase-8 freeze (the lane's immediately
 preceding freeze, same branch) recorded *"4702 collected / 4693 passed / 9
 failed — the 9 reds are BASE-PROVEN: the identical four specs
@@ -443,10 +453,8 @@ failed — the 9 reds are BASE-PROVEN: the identical four specs
 `schedule-create-dialog`) fail with the IDENTICAL 9 failing NAMES at the
 phase-8 base `4e0c82b8b` … The failing-NAME diff base→head is EMPTY in BOTH
 directions ⇒ net-new deterministic reds = 0"* (`.agents/tester/PACKS.md`, the
-`t1_fe_phase8_whole_tree` row). This phase touches NONE of those four files
-(`git diff --stat HEAD -- frontend/src/app/components frontend/src/app/models
-frontend/src/app/pages/settings frontend/src/app/pages/schedule*` is empty), the
-failing-suite count is the same **4** and the failing-test count is the same
+`t1_fe_phase8_whole_tree` row). This phase touches NONE of those four files,
+the failing-suite count is the same **4** and the failing-test count the same
 **9** ⇒ **net-new deterministic reds = 0** and none fixed.
 
 **The collected count moved 4702 → 4710**: `+22` (this phase's acceptance) and
