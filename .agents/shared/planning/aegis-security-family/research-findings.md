@@ -32,11 +32,13 @@ No discovery work was re-run; the explorers' findings were re-read for citation 
 extended only where a design point demanded it.
 
 **Correction to the dispatch brief:** the brief cites
-`tests/unit/agents/test_maintenancer_agent.py` as a pattern to mirror. **That file does not
-exist.** The real, extant patterns are
+`tests/unit/agents/test_maintenancer_agent.py` as a pattern to mirror. **That PATH is stale** (the
+directory is `tests/unit/`, not `tests/unit/agents/`). The real, extant patterns are
 `tests/unit/agents/test_sketcher_agent.py` (the richer one — 40+ test functions) and
 `tests/unit/test_maintenancer_team_members_within_team.py` (pure-file-parsing org-chart test).
-Both are recorded below (B8).
+Both are recorded below (B8). **Second correction (2026-11-04, plan council C1(a)):** the
+`tests/unit/test_maintenancer_agent.py` file at the correct path **DOES exist** and carries a
+load-bearing leader-length pin — see §B8 and the C1(a) correction there.
 
 ---
 
@@ -308,7 +310,15 @@ Exemplar bodies:
   peer is **not** in `team_members`. It explicitly treats *"ask the leader"* as a caller
   reference, **not** a violation. Its own header documents the guide §8 basis.
   ⇒ This is the exact shape for the aegis team-topology pin.
-- **`tests/unit/test_maintenancer_agent.py` DOES NOT EXIST** — the brief's reference is stale.
+- **~~`tests/unit/test_maintenancer_agent.py` DOES NOT EXIST~~ [CORRECTED 2026-11-04 — plan council, C1(a)]** the earlier claim conflated a STALE PATH with non-existence. The file **EXISTS** at `tests/unit/test_maintenancer_agent.py` (20,671 B) — it was `tests/unit/agents/test_maintenancer_agent.py` (the brief's path) that is stale. **This is a load-bearing correction:** the file's `test_leader_team_members_length_16` (`:517-524`) asserts `len(leader.team_members) == 16` ⇒ the leader one-liner (+`aegis` ⇒ 17) is a **DETERMINISTIC net-new red at Gate A** unless folded IN the pin-ceremony commit. It is a **REAL pin, registered in the fold list** — not a no-touch file. The pin's own docstring documents the house extension pattern: *"Spec — 15 after 'designer', 16 after appending 'gaia' (environment-terraform)"* ⇒ the sanctioned fold: 16 after 'gaia', **17 after appending 'aegis'** (C1(b)).
+- **`tests/unit/tools/test_prompt_section_reference_integrity.py`** (W5, plan council) — **ABSENT
+  from the original fold list; now registered.** This is the only repo-wide prompt-surface sweep: it
+  scans ALL `agents/*/{soul,rule,tools_note,workflow,memory}.md` AND every `skills-template/*.md` —
+  exactly the 16 prompt files + 4 skill bodies this lane lands. Its `BARE_AGENTS_PREFIX_RE` (`:251`)
+  enforces the second closure class (bare `agents/`-prefix cross-reference tokens) that guide §10
+  (`docs/agent-prompt-writing-guide.md:254`) requires alongside the `.md` token class. It runs
+  repo-wide at Gate A regardless (council adjudication), and is additionally a **named Phase-5 Gate
+  D leg** in `phase5-plan.md`.
 
 ---
 

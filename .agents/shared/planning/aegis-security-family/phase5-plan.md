@@ -28,14 +28,14 @@ Eight gates, **A–H**.
 
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 1 | **Gate A — the full-suite net-new comparison.** Run the whole collectable suite on **HEAD** and on the **base** with the *same* commands and the *same* environment; diff the FAILED lists. | Phase 4 exited | **Net-new deterministic reds = 0.** Any red that is red at the base too is pre-existing debt and is **disclosed**, not fixed. Any red that is *only* at HEAD is a lane regression and blocks the phase. |
+| 1 | **Gate A — the full-suite net-new comparison.** Run the whole collectable suite on **HEAD** and on the **base** with the *same* commands and the *same* environment; diff the FAILED lists. **C1(d) expected-red note:** `tests/unit/test_maintenancer_agent.py::test_leader_team_members_length_16` appears in the diff as base-RED/HEAD-green — the pre-registered 16→17 fold (C1(b)) landed IN the pin-ceremony commit, so the ledger records it as **FOLDED, not discovered**. | Phase 4 exited | **Net-new deterministic reds = 0.** Any red that is red at the base too is pre-existing debt and is **disclosed**, not fixed. The leader-length pin's base-red/HEAD-green flip is the expected FOLDED shape. Any red that is *only* at HEAD (other than the disclosed fold shape) is a lane regression and blocks the phase. |
 | 2 | **Gate B — the sealed-artifacts proof.** Run `tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts` on the branch. | 1 | Green. The 35 `SEALED_SHA_BASELINES` entries are unchanged — none of them references a not-yet-existing aegis path, so adding agent directories cannot redden them. This is the commission's **explicit** proof leg (S6). |
 | 3 | **Gate C — the plane census.** Run `tests/unit/tools/test_plane_agent_surface_census.py`. | 1 | Green, with `DISCLOSED_READ_HOLDERS` **still `{"watcher"}`** — the aegis family is **not** added to the frozen read-holder set. The E3 fold (explicit non-empty allow on every new meta) removes the exposure rather than whitelisting it. The E4 fold (no `mcp_full_access`) likewise. |
-| 4 | **Gate D — the report-integrity fold.** Run `tests/unit/test_report_integrity_prompts.py`. | 1 | Green. The dynamic check finds `aegis`'s scrutiny guidance (its non-empty team makes the guidance mandatory; the three children are exempt because their teams are empty). |
+| 4 | **Gate D — the report-integrity fold + the repo-wide prompt-section-reference sweep (two named legs, W5).** (D-1) Run `tests/unit/test_report_integrity_prompts.py`. (D-2) Run `tests/unit/tools/test_prompt_section_reference_integrity.py` — the only repo-wide prompt-surface sweep (all `agents/*/{soul,rule,tools_note,workflow,memory}.md` + every `skills-template/*.md`, exactly the 16+4 files this lane lands; enforces the bare-`agents/`-prefix closure class via `BARE_AGENTS_PREFIX_RE`). | 1 | Both green. D-1: the dynamic check finds `aegis`'s scrutiny guidance (its non-empty team makes the guidance mandatory; the three children are exempt because their teams are empty). D-2: the lane's 20 files pass the repo-wide section-reference sweep — both closure classes clean or on the enumerated exemption list. |
 | 5 | **Gate E — the boot-scan.** Run the T28 registry-scan leg under the venv, then the tester's isolated boot-scan leg. | 1 | The registry resolves all four ids (`aegis`, `hacker`, `cracker`, `sweeper`); the isolated boot scan is clean — no new agent appears in the census, no agent fails to register, and no `tools` block parses fail-open. |
 | 6 | **Gate F — the tool-categories proof.** Confirm `.agents/shared/metrics/tool-categories.json` is **byte-unchanged** in the lane diff, and run `tests/unit/tools/test_tool_category_artifact.py`. | 1 | The artifact is byte-identical to the base and the test is green — the **F-1 trap class** (a stale committed artifact reddening a whole lane) is avoided because this lane registers **no** new category. |
 | 7 | **Gate G — the manifest delta re-derivation.** Re-derive the agents-tree file count from the **actual tree** and compare against the plan's derivation rule (338 + 28 = 366). | 1 | The re-derived count matches the rule; if it does not, the reason is identified (an extra or missing file) and the plan's arithmetic is corrected **before** staging — the number is re-derived, never trusted. |
-| 8 | **Gate H — the scope and privacy assertions.** Confirm the lane diff touches only `agents/**` and `tests/**`; confirm no finding artifact, corpus, crash dump or secret was committed; confirm `agents/worker/**` is byte-identical. | 1 | The path list contains only `agents/` and `tests/`; a secret scan over the diff returns zero hits; `git diff --stat <base> -- agents/worker/` is empty. |
+| 8 | **Gate H — the scope and privacy assertions.** Confirm the lane diff touches only `agents/**`, `tests/**`, **and the lane's own committed planning set `.agents/shared/planning/aegis-security-family/`** (house doctrine commits planning docs — W4); confirm no finding artifact, corpus, crash dump or secret was committed; confirm `agents/worker/**` is byte-identical. | 1 | The complement of {`agents/`, `tests/`} **equals EXACTLY the planning-dir path list** (any extra path — genuine creep — still reds); a secret scan over the diff returns zero hits; `git diff --stat <base> -- agents/worker/` is empty. |
 | 9 | **Record the evidence.** Write the verification report into the lane's evidence location with the gate-by-gate result, the exact commands, the base-vs-HEAD failure-list diff, and every disclosed pre-existing red. | 1–8 | The report is complete enough that a reviewer can re-run every gate without re-deriving it, and every disclosed deviation is named. |
 
 ---
@@ -44,14 +44,14 @@ Eight gates, **A–H**.
 
 | Gate | Requirement | How it is checked |
 |---|---|---|
-| **A** | No behaviour regression | Full suite, net-new deterministic reds **0** vs the true pre-fix base |
+| **A** | No behaviour regression | Full suite, net-new deterministic reds **0** vs the true pre-fix base. **C1(d):** the `test_leader_team_members_length_16` base-red→HEAD-green flip is the PRE-REGISTERED FOLDED shape (C1(b)) — accounted, not discovered |
 | **B** | `SEALED_SHA_BASELINES` untouched (35 entries) | `TestPhaseDDoesNotModifySealedArtifacts` green on the branch |
 | **C** | The plane read-holder census is unchanged | census test green; `DISCLOSED_READ_HOLDERS` == `{"watcher"}` |
-| **D** | The report-integrity fold landed | `test_report_integrity_prompts.py` green |
+| **D** | The report-integrity fold + the repo-wide prompt-surface sweep landed (W5, two named legs) | `test_report_integrity_prompts.py` green (D-1); `test_prompt_section_reference_integrity.py` green over the lane's 16 prompt + 4 skill-body files (D-2) |
 | **E** | Boot-scan clean on the new agent set | T28 registry scan finds all four ids; the isolated boot scan is clean |
 | **F** | No tool-category drift | the artifact is byte-unchanged; `test_tool_category_artifact.py` green |
 | **G** | The manifest delta is re-derived from the real tree | `find agents -type f \| wc -l` matches the derivation rule |
-| **H** | Scope + privacy | the diff touches only `agents/**` and `tests/**`; no committed finding/corpus/secret; `worker` byte-identical |
+| **H** | Scope + privacy | the diff touches only `agents/**` + `tests/**` + the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/` — W4); no committed finding/corpus/secret; `worker` byte-identical |
 
 ---
 
@@ -90,7 +90,13 @@ find agents -type f | wc -l                                              # 338 +
 git diff --name-status $BASE -- agents/ | awk '$1=="A"' | wc -l           # expect 28 additions
 
 # --- Gate H: scope + privacy --------------------------------------------
-git diff --name-only $BASE | grep -v -E '^(agents/|tests/)' ; echo "out-of-scope hits above (expect none)"
+# W4 (plan council): the lane COMMITS its planning docs (house doctrine), so the complement of
+# {agents/, tests/} is NOT empty — it equals the planning set. The gate asserts the complement
+# EQUALS EXACTLY the planning dir; any extra path (genuine creep) still reds.
+git diff --name-only $BASE | grep -v -E '^(agents/|tests/)' > /tmp/aegis-scope-complement.txt
+diff <(sort /tmp/aegis-scope-complement.txt) <(git diff --name-only $BASE | grep '^\.agents/shared/planning/aegis-security-family/' | sort) \
+  && echo "Gate H scope OK: complement == exactly the planning set" \
+  || { echo "Gate H FAIL: out-of-scope paths beyond the planning set (listed above)"; }
 git diff --stat $BASE -- agents/worker/                                  # expect EMPTY
 git diff $BASE | grep -nE 'sk-(proj|ant)-|BEGIN [A-Z ]*PRIVATE KEY' ; echo "secret hits above (expect none)"
 
@@ -152,14 +158,14 @@ seven gates themselves are minutes each.
 
 Phase 5 is done when **all eight gates (A–H) are green** and the evidence report is written:
 
-- **A** — net-new deterministic reds **0** (every base-red disclosed by name);
+- **A** — net-new deterministic reds **0** (every base-red disclosed by name; the `test_leader_team_members_length_16` base-red→HEAD-green flip is the C1(b) pre-registered FOLD, recorded in the ledger as such);
 - **B** — `TestPhaseDDoesNotModifySealedArtifacts` green; the 35 sealed entries unchanged;
 - **C** — the plane census green with `DISCLOSED_READ_HOLDERS` still `{"watcher"}`;
-- **D** — the report-integrity dynamic check green;
+- **D** — the report-integrity dynamic check green **and** the repo-wide prompt-section-reference sweep green over the lane's 20 files (W5, two named legs);
 - **E** — the registry scan finds all four agents; the isolated boot scan is clean;
 - **F** — the tool-categories artifact byte-unchanged; its test green;
 - **G** — the agents-tree count re-derived from the real tree matches the derivation rule;
-- **H** — the diff touches only `agents/**` and `tests/**`; no committed finding/corpus/secret;
+- **H** — the diff touches only `agents/**`, `tests/**` and the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/`, W4); no committed finding/corpus/secret;
   `worker` byte-identical;
 
 **and** the evidence report names every disclosed pre-existing red, every timeout gap with its replay

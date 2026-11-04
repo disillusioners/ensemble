@@ -7,6 +7,13 @@ scoped, dispatched to the three analysis lanes plus `worker`, adjudicated into s
 findings, handed to `leader` for remediation, and re-verified per finding — with aegis itself never
 modifying code.
 
+**Target-class sizing (A-g, plan council — the sizing rationale the authoring phases need):** the
+personas, severity taxonomy, and installer skill sizing are cut for the family's **first target
+class: `~/Code/vkey`** — a fork of the Vikey IME: a **C++17 engine ingesting raw untrusted
+keystroke streams**, with **IPC** surfaces and a **CI supply chain** (attack classes: C++ memory
+safety, IME keystroke processing, IPC, CI supply chain). Author against that class — the severity
+definitions, the fuzzing-harness shapes, and the scanner selection all derive from it.
+
 Seven files land in this phase:
 
 ```
@@ -79,6 +86,11 @@ python3 -c "import json;m=json.load(open('agents/aegis/meta.json'));assert isins
 
 # guide §3 closure grep over the new agent dir — every survivor must be on the exemption list
 grep -rn '\.md\|workflow\.md\|rule\.md\|soul\.md\|tools_note\.md\|memory\.md' agents/aegis/ || true
+
+# W6 (plan council): the SECOND closure class — bare agents/-prefix cross-reference tokens
+# (guide §10 :254 + BARE_AGENTS_PREFIX_RE, tests/unit/tools/test_prompt_section_reference_integrity.py:251).
+# Violations ONLY when they function as cross-references to prompt sections, not operational paths (§12.5 #0).
+grep -rnE '\bagents/[[:space:]`]*[A-Z(]' agents/aegis/ || true
 
 # guide §1 forbidden-token sweep
 grep -rn 'meta\.json\|tools\.allow\|tools\.deny\|daemon/\|_tool_registry\|skill-set\.yaml\|innate_skills\|agent_id=\|seed_all\|default_agent_versions' agents/aegis/ || true

@@ -116,6 +116,7 @@ agents/sweeper/{… skills-template/sast-toolchain.md, …/sast-toolchain.lib.sh
 agents/leader/meta.json                                          (MODIFIED — one line)
 agents/.prompt-artifacts.sha256                                  (REGENERATED 161 → 177)
 tests/unit/agents/test_aegis_security_family.py                  (NEW)
+tests/test_maintenancer…::test_leader_team_members_length_16     (FOLDED 16→17 — C1(b))
 ```
 
 **Baseline arithmetic (exact under the four-file prompt set):** the collector is depth-2 only
@@ -143,14 +144,14 @@ edit after the re-stamp drifts the baseline and reddens the stage-time leg.
 
 | Gate | What it proves | How |
 |---|---|---|
-| **A** | No behaviour regression | Full suite, net-new deterministic reds **0** vs the true pre-fix base (same commands, same environment) |
+| **A** | No behaviour regression | Full suite, net-new deterministic reds **0** vs the true pre-fix base (same commands, same environment). **Expected-red ledger note (C1(d)):** `tests/unit/test_maintenancer_agent.py::test_leader_team_members_length_16` is red at the BASE (it pins `len == 16`; the base predates the fold) and **green at HEAD** after the in-commit 16→17 fold — it appears in the ledger as **FOLDED (pre-registered, C1(b)), not discovered**; any OTHER HEAD-only red is a lane regression and blocks |
 | **B** | `SEALED_SHA_BASELINES` untouched (35 entries) | `tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts` green on the branch (the commission's explicit proof leg) |
 | **C** | The plane read-holder census is unchanged | `tests/unit/tools/test_plane_agent_surface_census.py` green with `DISCLOSED_READ_HOLDERS` still `{"watcher"}` — **not** extended to the aegis family (the E3 fold removes the exposure instead of whitelisting it) |
 | **D** | The report-integrity fold landed | `tests/unit/test_report_integrity_prompts.py` green — `aegis`'s scrutiny guidance is found by the dynamic check |
 | **E** | Boot-scan clean on the new agent set | T28 registry scan finds `aegis`, `hacker`, `cracker`, `sweeper`; plus the tester's isolated boot-scan leg |
 | **F** | No tool-category drift (the F-1 proof) | `.agents/shared/metrics/tool-categories.json` byte-unchanged in the lane diff; `tests/unit/tools/test_tool_category_artifact.py` green |
 | **G** | The manifest delta is re-derived from the real tree | `find agents -type f \| wc -l` ⇒ 366 (or the re-derived value), and the staged payload's agents map matches |
-| **H** | Scope + privacy | the lane diff touches **only** `agents/**` and `tests/**`; no finding artifact, corpus, crash dump or secret is committed; `agents/worker/**` is byte-identical to the base |
+| **H** | Scope + privacy | the lane diff touches **only** `agents/**`, `tests/**` and the lane's committed planning set — the complement of {`agents/`, `tests/`} **equals exactly `.agents/shared/planning/aegis-security-family/`** (house doctrine commits planning docs; genuine creep still reds — W4); no finding artifact, corpus, crash dump or secret is committed; `agents/worker/**` is byte-identical to the base |
 
 ---
 
@@ -167,7 +168,8 @@ edit after the re-stamp drifts the baseline and reddens the stage-time leg.
 | **R7** | **Prompt-prose violations across 16 authored files.** System internals, `.md` path tokens, >7 cardinals, a missing tone block, a duplicated canonical home, an out-of-team fallback (guide §1–§10; C1). | Medium | High | The **guide-compliance checklist is an explicit gate in every authoring phase** (P0 produces it; P1/P2/P3 audit against it); T14–T19 mechanise the mechanically-checkable half (§1, §3, §5, §8, §10). |
 | **R8** | **Findings privacy.** Off-repo storage keeps findings out of git, but the artifacts are then not PR-reviewable and need filesystem access; in-repo storage would land them in git history and risk a push to origin (DP4). **AM-4:** the off-repo root is **reachable, not confined** — absolute paths are trusted by design and `bash` is unconstrained — and it **cannot be globbed** (`glob_files`/`grep_files` refuse absolute roots outside the workdir/temp), so discovery is by recorded path, never by walk. | Medium | Medium | **Q2 is RESOLVED (architect ruling: off-repo)**; under the ratified option the **severity summary travels inside the hand-off message** to `leader`, so the decision-maker is never blocked by file access, and the honest sentence "the privacy of the findings is discipline, not a boundary" is stated wherever the storage choice is. |
 
-> **Finalize-guard note (not a table row).** Branch/tip drift is handled by the house **finalize
+> **R9 — Finalize-guard note** *(promoted from a free-floating note to the risks ledger — A-b, plan
+> council 2026-11-04; the `(R9)` pointer in §Dependencies resolves here)*. Branch/tip drift is handled by the house **finalize
 > guard**: at merge time, fetch and verify `origin/latest` is **unmoved** from the branch base — moved
 > ⇒ **STOP** and re-derive the merge base rather than proceeding; the merge is `--no-ff`; the commit
 > composition is proved with `git show --stat HEAD`; and the stage-time tip-identity check is honoured
@@ -183,13 +185,13 @@ Mapped to the commission's verification expectations (E8) plus the family's own 
 | # | Criterion | How to Measure | Threshold |
 |---|-----------|----------------|-----------|
 | **S1** | Baseline / pin green | `python3 scripts/protection/generate_prompt_artifact_baseline.py --check` (read-only, exit 0 clean / 1 drift) **+ an explicit file-exists and row-count assertion** | the file **exists**, exit **0**, exactly **177** rows, zero drift (**AM-11:** `--check` exits 0 even when the file is absent ⇒ rc=0 alone proves nothing) |
-| **S2** | The pin ceremony is one commit | `git show --stat HEAD` on the lane commit | exactly: 28 new agent files + `agents/leader/meta.json` (1 line) + `agents/.prompt-artifacts.sha256` (regenerated) + the new test file — **and nothing else** |
+| **S2** | The pin ceremony is one commit | `git show --stat HEAD` on the lane commit | exactly the sanctioned set: 28 new agent files + `agents/leader/meta.json` (1 line) + `agents/.prompt-artifacts.sha256` (regenerated) + the new lane test file + **the 16→17 leader-length pin fold in `tests/unit/test_maintenancer_agent.py`** (C1(b)/(c) — the fifth sanctioned element) — **and nothing outside this enumerated set** |
 | **S3** | Boot-scan clean on the new agent set | T28 registry-scan probe (venv-bound) + the tester's isolated boot-scan leg | all four ids resolve in the registry; zero new entries in the plane read-holder census |
 | **S4** | Tool-category allow-list pins hold | T1–T11 (allow set, deny set, `deny_spawn`, roster, leaf teams, non-empty allow, write fence, no privileged category, no `job`, no `instance_read`/`instance_ops`, no `mcp_full_access`) | **11/11 green** |
 | **S5** | The report-integrity fold landed | T12 + the dynamic rot-mitigation test | `[REPORT SANITY:`, `interim, not completion` and `send_message` all present in `aegis`'s surface (**AM-9:** T12 asserts the **union** of `{rule.md, workflow.md, soul.md}` ∪ `{skills-template/*.md}` — the snippets are placed in `aegis`'s `rule.md` as the canonical home; `aegis-strategy.md` carries **no** report-delivery boilerplate); the dynamic test green |
 | **S6** | `SEALED_SHA_BASELINES` untouched + proof | `TestPhaseDDoesNotModifySealedArtifacts` | green; the 35 entries byte-unchanged |
 | **S7** | `worker` is untouched | T25 (byte-identical to base) | `agents/worker/**` byte-identical to `1f6898ae2` |
-| **S8** | No `daemon/` change | the lane diff's path list + P6's migration delta | the diff contains only `agents/**` and `tests/**`; migration delta **EMPTY** |
+| **S8** | No `daemon/` change | the lane diff's path list + P6's migration delta | the diff contains only `agents/**`, `tests/**` and the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/` — W4); migration delta **EMPTY** |
 | **S9** | Guide compliance, all four agents | the Phase-0 checklist audited per phase + T14–T19 | every checklist row satisfied per authored file; T14–T19 green ×4 |
 | **S10** | Install libraries are safe and complete | T23 (AM-10 definition) + per-library inspection | the three **`.md` FENCES bullet lists are byte-identical** (the shared block includes the C3 checksum bullet and excludes per-tool content); each `.lib.sh` carries a FENCES header mentioning the tool-agnostic keywords (secondary, **not** byte-identity); each has a sha256 release-asset verification step, a readiness probe returning **0 warm / 1 cold / 2 in-progress**, a release lock whose release runs on failure, an attempt cap of 2, and a mandatory reversal section |
 | **S11** | The methodology is single-homed | T24 + guide §2 | the 5 severity levels and **every named finding-record field** live **only** in `aegis-strategy`; the four prompt files link by section name and do not restate them |
@@ -251,7 +253,7 @@ See `decisions.md` §C-1 for the cut rationale (why there is no `phase7-plan.md`
 | [`plan-overview.md`](./plan-overview.md) | This file — the synthesis, the phase table, the coupling map, the risks, the success criteria. |
 | [`phase0-plan.md`](./phase0-plan.md) | Plan review (architect/council/approver) + exemplar read + the guide-compliance checklist + the Q1–Q4 rulings. |
 | [`phase1-plan.md`](./phase1-plan.md) | The `aegis` orchestrator — 7 files. |
-| [`phase2-plan.md`](./phase2-plan.md) | `hacker`, `cracker`, `sweeper` — 21 files. |
+| [`phase2-plan.md`](./phase2-plan.md) | `hacker`, `cracker`, `sweeper` — 18 files land in P2; the three `.lib.sh` complete the children's 21 in P3. |
 | [`phase3-plan.md`](./phase3-plan.md) | The three installer `.lib.sh` libraries. |
 | [`phase4-plan.md`](./phase4-plan.md) | The one-commit pin ceremony + the T1–T28 test file + the leader one-liner. |
 | [`phase5-plan.md`](./phase5-plan.md) | Verification — gates A–H. |
@@ -295,8 +297,13 @@ See `decisions.md` §C-1 for the cut rationale (why there is no `phase7-plan.md`
    not a style preference ⇒ every installer library and every scanner script is POSIX-sh.
 10. **The skill bank is global** (C2/C6) — anything seeded via `skill-set.yaml` becomes searchable by
     `worker` and every dynamic-skill agent ⇒ the three installer skills are **file-invoked** (the
-    charter precedent) so their procedure text never enters the shared bank, and the "worker never runs
-    offensive tools" boundary is enforceable rather than merely prose.
+    charter precedent) so their procedure text never enters the shared bank, and ~~the "worker never
+    runs offensive tools" boundary is enforceable rather than merely prose~~ **[QUALIFIED — W7, plan
+    council 2026-11-04; see the AM-7 restatement below]** the boundary is enforced against the SEARCH
+    INDEX only: `worker` holds `bash` + `filesystem` and CAN read the installer bodies on disk in the
+    release payload — the enforceable claim is scoped to search reachability, not filesystem reads
+    (the "worker never runs offensive tools" rule remains doctrine for the disk class, disclosed per
+    AM-7).
     **AM-7 restatement:** the blanket "bank is global ⇒ searchable by worker" is overstated — an
     ownership filter drops another agent's bank-cloned skills (`skill_search_service.py:718-822`).
     The TRUE invariant is **manifest-gating**: seeding enumerates only `skill-set.yaml` entries (no
