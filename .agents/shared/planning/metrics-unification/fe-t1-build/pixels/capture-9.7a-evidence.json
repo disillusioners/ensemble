@@ -1,0 +1,3553 @@
+{
+  "items": [
+    {
+      "id": "PX-1",
+      "ok": true,
+      "detail": "live_strip=1 timeline=1 anomalies_panel=1 anomaly_rows≈4 disclosure_text=true"
+    },
+    {
+      "id": "PX-2 tab2-runtime",
+      "ok": true,
+      "detail": "tab=runtime panels=3 stat_strips=0 family_chips=3 no_catalog=0"
+    },
+    {
+      "id": "PX-3 tab3-dbpool",
+      "ok": true,
+      "detail": "tab=db-pool panels=2 stat_strips=0 family_chips=3 no_catalog=0"
+    },
+    {
+      "id": "PX-4 tab4-jobs",
+      "ok": true,
+      "detail": "tab=jobs panels=2 stat_strips=1 family_chips=2 no_catalog=0"
+    },
+    {
+      "id": "PX-5 tab5-instances",
+      "ok": true,
+      "detail": "tab=instances panels=6 stat_strips=0 family_chips=2 no_catalog=0"
+    },
+    {
+      "id": "PX-6 tab6-checkpoint",
+      "ok": true,
+      "detail": "tab=checkpoint panels=1 stat_strips=0 family_chips=1 no_catalog=0"
+    },
+    {
+      "id": "PX-7 tab7-mcp",
+      "ok": true,
+      "detail": "tab=mcp panels=0 stat_strips=1 family_chips=1 no_catalog=0"
+    },
+    {
+      "id": "PX-9",
+      "ok": true,
+      "detail": "landed=http://127.0.0.1:8079/metrics?window=24h&x=1&tab=resource parsed={\"window\":\"24h\",\"x\":\"1\",\"tab\":\"resource\"}"
+    },
+    {
+      "id": "PX-10/L3",
+      "ok": true,
+      "detail": "panels memory=1 cpu=1 count=1; per-panel own-canvas mem=1 cpu=1 count=1; unit labels are canvas-drawn (pixel corroborates MB/%/count)"
+    },
+    {
+      "id": "PX-11a",
+      "ok": true,
+      "detail": "runtime: toggle=1 enabled=true (checked + waited) disclosure=1 note=0 'previous window' text=false"
+    },
+    {
+      "id": "PX-11b",
+      "ok": true,
+      "detail": "custom tab: toggle=1 disabled=true reason_el=1 reason=\"the resources door serves a fixed 15m/1h/24h/7d vocabulary with no previous-window offset\""
+    },
+    {
+      "id": "PX-12a",
+      "ok": true,
+      "detail": "central options=[{\"label\":\"15m\",\"disabled\":false},{\"label\":\"30m\",\"disabled\":false},{\"label\":\"1h\",\"disabled\":false},{\"label\":\"2h\",\"disabled\":false},{\"label\":\"24h\",\"disabled\":true},{\"label\":\"7d\",\"disabled\":true}] — 24h/7d present but DISABLED (visible enforcement): true"
+    },
+    {
+      "id": "PX-12b",
+      "ok": true,
+      "detail": "custom tab: own range control=1 options=[ 15m ,  30m ,  1h ,  2h ,  24h ,  7d ] control_note=1 labelled=true"
+    },
+    {
+      "id": "PX-13",
+      "ok": true,
+      "detail": "rows carry severity=true peak=true; drilldown=false drill carries kind/severity/peak=false; gap chips=[] every-gap-says-data-gap=true; no-restart-claim=false"
+    },
+    {
+      "id": "PX-14",
+      "ok": true,
+      "detail": "dark entries=[\"F1\\ndark\\nthe wedge capture is not active\",\"dark\",\"F3\\ndark\\nthe wedge capture is not active\",\"dark\"] live_entries=2 reason-wording=true"
+    },
+    {
+      "id": "L1b-rendered",
+      "ok": true,
+      "detail": "cause=[\"The metrics door requires authentication — this session is not signed in.\"] action=[\"Sign in, or present a token that is scoped for the metrics read.\"] retry_buttons=0 'unexpected'=false"
+    }
+  ],
+  "api": [
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=7200"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=7200"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=7200"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=7200"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=7200"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_readiness_probe_total&names=ensemble_readiness_grace_active&names=ensemble_readiness_failure_streak&names=ensemble_readiness_component_state&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_job_queue_depth&names=ensemble_dead_letter_items&names=ensemble_job_queue_items_created_total&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_db_pool_native&names=ensemble_db_pool_requests_errors_total&names=ensemble_db_pool_checked_out&names=ensemble_db_pool_waiting_clients&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_instance_status_count&names=ensemble_instance_liveness_count&names=ensemble_waiting_children_count&names=ensemble_waiting_children_max_age_seconds&names=ensemble_workers_total&names=ensemble_workers_busy&names=ensemble_worker_pool_wakeup_efficiency&names=ensemble_worker_pool_events_total&names=ensemble_task_heartbeat_age_seconds&names=ensemble_task_heartbeat_cadence_seconds&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/metrics/series?names=ensemble_checkpoint_blobs_table_bytes&names=ensemble_checkpoint_table_bytes&window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 403,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:8079/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 401,
+      "url": "http://127.0.0.1:8079/api/notifications/stream"
+    }
+  ],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Framing 'https://plane.ensem.dev/' violates the following Content Security Policy directive: \"frame-ancestors 'self' https://*.ensem.dev https://*.mtri.app http://localhost:8079 http://localhost:9797\"",
+    "Access to font at 'https://fonts.gstatic.com/s/materialicons/v145/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2' from origin 'http://127.0.0.1:8079' has been blocked by CORS policy: Request header field authoriz",
+    "Failed to load resource: net::ERR_FAILED",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "pageErrors": []
+}

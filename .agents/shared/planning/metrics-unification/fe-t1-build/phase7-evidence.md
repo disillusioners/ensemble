@@ -539,7 +539,7 @@ never reached; the live daemon on `:9797` was never contacted).
 | the null-fallback path (no current navigation) — logs, degrades to a param-less redirect, does not crash | §1 — the null-fallback proof — GREEN |
 | `frontend/src/app/pages/resources/` is GONE | §4 — `ls` ⇒ *No such file or directory*; pinned by the acceptance |
 | the gear menu has no `Resources` entry; the metrics entry remains | §3 — pinned by the acceptance AND by `metrics-gear-menu.spec.ts` |
-| the repo-wide sweep recorded with a per-hit classification; ZERO stale-route references and ZERO stale operator instructions | §6 — 137 hits, all classified, **0** class-(c) |
+| the repo-wide sweep recorded with a per-hit classification; ZERO stale-route references and ZERO stale operator instructions | §6 — **141** hits, all classified, **0** class-(c) |
 | no Playwright config OR spec drives the retired route; the gear-menu leg re-pointed | §7 — the config scan (0 hits), the `toHaveURL` scan (0 hits), the gear-menu leg re-pointed to `Metrics` |
 | the e2e specs are green against the stubbed server; the stubbed-server gate still passes | §9.2 — **BOTH** Playwright gates RUN and PASS: the resources gate **3 passed (35.2s)** and the metrics gate **4 passed (38.1s)** (real Chromium, every API call stubbed, zero daemon/DB/live port) |
 | the bundle guard re-runs GREEN at the freeze | §12 |

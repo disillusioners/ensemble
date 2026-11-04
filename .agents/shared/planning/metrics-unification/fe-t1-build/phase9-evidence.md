@@ -5,7 +5,14 @@ Lane: wi-32a99618 (FE-only T1 metrics dashboard) · worktree
 `feature/fe-metrics-dashboard` · HEAD `d2b4c2505` at phase start.
 Every command below was executed with the PINNED interpreter
 `/home/nea/ensemble-src/.venv/bin/python` (Python 3.13.15) from this
-worktree's cwd. Binary evidence lives in `/tmp/fe-t1-pixels/` (never the repo).
+worktree's cwd. Binary evidence (the 21 PNG captures + their drivers +
+JSON sidecars) lives in
+`.agents/shared/planning/metrics-unification/fe-t1-build/pixels/` —
+COMMITTED, by explicit leader override of the "binary evidence stays out
+of the repo" convention, because the council reviews consume it. Every
+OTHER lane artifact was staged under `/tmp/fe-t1-*` at run time and was
+SWEPT after the lane (see §9.10, "W-1 remediation"); the historical
+`/tmp/...` log paths quoted below are command transcripts, not live files.
 
 ---
 
@@ -130,7 +137,7 @@ Rendered: a no-bearer Playwright context on `/metrics?tab=runtime` → the
 sign-in panel — `metrics-door-state-cause` = "The metrics door requires
 authentication — this session is not signed in.", action = "Sign in, or
 present a token that is scoped for the metrics read.", **0 Retry buttons**,
-no `unexpected`. Screenshot: `/tmp/fe-t1-pixels/l1b-signin-panel.png`.
+no `unexpected`. Screenshot: `.agents/shared/planning/metrics-unification/fe-t1-build/pixels/l1b-signin-panel.png`.
 
 ## 9.5 / 9.7b — Leg L2/L4 (auth OFF)
 
@@ -174,7 +181,7 @@ Screenshot: `px10-mixed-units.png`.
 
 ## 9.7a — the pixel list (auth ON; 16/16 assertions PASS)
 
-Driver: `/tmp/fe-t1-pixels/capture-9.7a.js` (canonical shape; Playwright from
+Driver: `.agents/shared/planning/metrics-unification/fe-t1-build/pixels/capture-9.7a.js` (canonical shape; Playwright from
 `frontend/node_modules`, chromium `--no-sandbox`, domcontentloaded 30 s →
 networkidle best-effort 15 s → 3 s settle), viewport 1600×1000.
 
@@ -209,7 +216,7 @@ Fresh production build: `cd frontend &&
 | guard | threshold (AS WRITTEN) | measured | verdict |
 |---|---|---|---|
 | B1 initial-total delta | \|Δ\| ≤ 2,048 B vs 5,909,018 B (the artifact) | **5,907,717 B** → Δ **−1,301 B**; headroom **92,283 B** | GREEN |
-| B2 chart.js marker in initial chunks | 0 hits across the 35-JS initial set | **0 hits** | GREEN |
+| B2 chart.js marker in initial chunks | 0 hits across the **36-file** initial set (35 JS + 1 CSS) | **0 hits** | GREEN |
 | B3 import shape + site (statement-anchored) | 0 static `from 'chart.js'`; every site under `src/app/pages/metrics/**`; runtime form = dynamic | **0 static statements** (comment lines excluded per W6); 2 dynamic sites, both in `charts/chart-panel.component.ts` (line 164 `type ChartJsModule = typeof import('chart.js')` — type-erased; line 477 `await import('chart.js')` — the runtime form) | GREEN |
 | B4a new chart chunk min+gz | ≤ 65,536 B gz | `chunk-TXUCW6LI.js` = **206,857 B min / 71,054 B gz** → **over by 5,518 B gz** | **FAIL AS WRITTEN — caller adjudication** (recorded; NO code or threshold changed) |
 | B4b route fetch set growth (lazy-only basis, per the artifact's implementation-time ruling) | ≤ 65,536 B growth vs the 72,708 B lazy-only baseline | lazy-only **165,185 B** → growth **+92,477 B** (over by 26,941); total 682,399 vs 496,338 = +186,061 (transparency) | **FAIL AS WRITTEN — caller adjudication** |
@@ -464,3 +471,110 @@ the risk is real for any future reader who assumes a Phase-4 authority exists.
 frozen surface); this record prevents the phantom-authority citation from
 propagating — future plans should verify that a referenced artifact EXISTS at its
 cited freeze, not merely that it is named.
+
+---
+
+## 9.10 — W-1 remediation (council fold: prod credential at rest in /tmp)
+
+**The finding (coding-model council, W-1).** The lane's live-fence helper
+`/tmp/fe-t1-fence_obs.sh` hard-coded the PRODUCTION PostgreSQL credential
+in plaintext, in a world-readable (`0755`) file outside the repo. The repo
+itself was clean of it (`git grep` finds only two pre-existing Sept-2026
+files this lane never touched), the minted bearer landed only in a `0600`
+`/tmp/fe-t1-token.out`, and the mint/teardown ran against `ensemble_dev`
+— but the helper parked the prod password at rest for the life of the box.
+The credential is referred to as `<the prod password>` below and appears
+in NO artifact this fold writes. **No credential was rotated** — rotation
+is user-owned.
+
+### (a) The CORRECTED fence pattern (credential SOURCED, never inlined)
+
+```bash
+#!/usr/bin/env bash
+# The live-fence probe — CORRECTED SHAPE.
+#
+#1 the credential has exactly ONE at-rest home: the install's own .env
+#   (mode 0600, install-owned). Never inline it into a lane file.
+#2 it reaches psql through THIS process's environment for ONE command.
+#   It is never echoed, never written to a log, never put on a CLI argv
+#   (argv is world-readable via /proc).
+#3 the probe is SELECT-only.
+set -euo pipefail
+
+INSTALL_ENV=/home/nea/agents-ensemble/.env      # mode 0600
+# Verified in this fold (values never printed): the file carries exactly
+# one POSTGRES_HOST / POSTGRES_PORT / POSTGRES_DB / POSTGRES_USER /
+# POSTGRES_PASSWORD each — i.e. the five values the old helper inlined
+# (10.44.0.2 : 5432 / ensemble_prod / ensemble), so sourcing it removes
+# the hardcoded copy outright rather than relocating it.
+
+# Map the sourced values to libpq's own variable names in a SUBSHELL, so
+# nothing leaks into the calling shell and nothing is echoed.
+(
+  set -a
+  # shellcheck disable=SC1090
+  . "$INSTALL_ENV"
+  set +a
+  PGPASSWORD="$POSTGRES_PASSWORD" \
+  psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" \
+       -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+       "select count(*) from information_schema.tables where table_schema='public'"
+)
+# <the prod password> appears NOWHERE in this script's text. The only
+# at-rest copies are the install's own .env (0600) and the kernel's
+# per-process environment.
+```
+
+Not re-executed in this fold: the remediation is the SHAPE, and the lane
+takes no further live contact. The old pattern's other defect is worth
+naming — it also hard-coded the host, so a stale copy would silently
+outlive a DB move; sourcing cannot drift.
+
+### (b) Post-lane sweep — inventory, then remove
+
+Inventory taken BEFORE any deletion (`ls -la` + `find -type f`, no process
+holding them — `lsof /tmp/fe-t1-*` empty):
+
+| Class | Count | Disposition |
+|---|---|---|
+| `/tmp/fe-t1-pixels/` (21 PNG + 2 capture drivers + 2 JSON sidecars) | 25 files | **RELOCATED** → `pixels/` (committed — leader override; see §9.10(c)) |
+| Credential-bearing: `fe-t1-fence_obs.sh` (prod password ×2), `fe-t1-token.out` (`0600`, the minted bearer) | 2 files | **REMOVED** |
+| Build logs (`fe-t1-build-*` ×3, `fe-t1-p2/p3/p4/p5/p7/p9-prod.log` ×7, `fe-t1-p4-planted-eager.log`) | 11 files | **REMOVED** |
+| Jest / pack logs (`fe-t1-p3-jest-*` ×2, `fe-t1-pack-*` ×3, `fe-t1-p4-base-jest.txt`) | 6 files | **REMOVED** |
+| Daemon logs + boot scripts (`fe-t1-daemon-*`, `fe-t1-boot-auth-{on,off}.sh`) | 6 files | **REMOVED** |
+| Mint helper + stderr (`fe-t1-mint.sh`, `fe-t1-mint.stderr`) | 2 files | **REMOVED** (it only `unset`s `PGPASSWORD`; no secret in it — removed as a no-longer-needed artifact) |
+| Fence/live probes & JSON captures (`fe-t1-families.json`, `-resources-live.json`, `-snapshot-f9.json`, `-livez*.json`, `-401-*`, `-live-state.sha`, `-fence.log`) | 9 files | **REMOVED** |
+| Guard/measure scratch (`fe-t1-measure.js` copy, `fe-t1-p9-measure.json`, `-green.{json,err}`, `-plant.{json,err}`, `-route-chunk.bak`) | 7 files | **REMOVED** (the canonical guard/measure tools live in the repo; see §9.10(c)) |
+| Warning/sort scratch (`-baseline-warnings*`, `-p2-warnings.txt`, `-p9-warnings*`, `-p9w.sorted`) | 6 files | **REMOVED** |
+| **Total** | **50 top-level entries = 49 files + 1 dir / 74 files / ~3.1 MB** | **25 files relocated · 49 files removed · 0 kept** |
+
+**Nothing was kept**, and nothing needed keeping: no standing process held
+any of these files (`lsof` empty before the sweep; the lane's dev servers
+are ephemeral and were already down). Post-sweep check: `ls -d
+/tmp/fe-t1-*` → no match, and a credential scan over the whole of `/tmp`
+for `PROD_PW=` / `PGPASSWORD=<value>` / `postgres://` / `Bearer <token>`
+returns zero hits from this lane.
+
+**Credential-scan hits at inventory time** (for the record): `PROD_PW=`
+and `PGPASSWORD=` — `fe-t1-fence_obs.sh` only (the 2 real secrets);
+`Bearer` — `fe-t1-401-headers.txt` (the `www-authenticate: Bearer` scheme
+word, no token) and `pixels/capture-9.7a.js` (a *runtime* read of the mint
+path + the `` `Bearer ${bearer}` `` template — no literal token). The
+relocated drivers therefore carry NO secret; note that
+`capture-9.7a.js:12` reads `/tmp/fe-t1-token.out`, which this sweep
+DELETED — to re-run a capture the operator must re-mint (with the
+corrected fence shape above) rather than expecting the old path to
+resolve. The 21 PNGs and both JSON sidecars are self-contained.
+
+### (c) What moved into the repo, and why
+
+`pixels/` (25 files, 2.3 MB, set sha256 `296f4202…76f0c15`) is committed
+**by explicit leader override** of the house convention that binary
+evidence stays out of the repo: it is the artifact both council reviews
+consumed (and the agentic review's one disclosed limit was that it could
+NOT read them from `/tmp` under its write fence). The docs' references
+were re-pathed from `/tmp/fe-t1-pixels/...` to the repo-relative
+`…/fe-t1-build/pixels/...` (§9.1 intro, §9.4, §9.7a). The canonical guard
+and measure tools are NOT in `/tmp` and never were: they live in the repo
+as `bundle-guard.js` / `bundle-baseline.measure.js` / `bundle-baseline.json`
+beside this document; the `/tmp` copies were scratch.

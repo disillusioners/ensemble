@@ -24,13 +24,23 @@ c59d44434 ★ feat(fe): populate the metric-name unit vocabulary (6.3)
 
 Consequences, disclosed:
 
-* **File sets stayed disjoint** — my phase-6 surface is `metrics-units.*`,
-  `house-svg-renderer.*`, `resource/timeline/*`, `resource/live/*`; their
-  8.x surface is `metrics.model.*`, `charts-tab`, `overview-tab`,
-  `data-end-overlay-plugin`, `central-tab` component/spec (8.7/8.8 landed on
-  the central-tab files BEFORE my 6.3 commit, so my central-tab spec legs were
-  written against their post-8.7/8.8 component — the 44-node spec run proves
-  coexistence).
+* **File sets were ALMOST disjoint — ONE file was shared (RECORD CORRECTED
+  at the council fold, 2026-11-04).** My phase-6 surface is `metrics-units.*`,
+  `house-svg-renderer.*`, `resource/timeline/*`, `resource/live/*`; the
+  concurrent phase-8 surface is `metrics.model.*`, `charts-tab`,
+  `overview-tab`, `data-end-overlay-plugin`, `central-tab` component/spec.
+  **`frontend/src/app/pages/metrics/tabs/central-tab.component.spec.ts` was
+  touched by BOTH phases** (re-derived mechanically at the fold: phase-6
+  commits `c59d44434`/`b14f3a5f7`/`aa7c0b04e`/`fd6322639` touch 13 files,
+  phase-8 commits `b67d0ba13`/`6566c0111`/`79892f345`/`f7b88f56c`/`14b143c9f`/
+  `c899371ec` touch 20, and the intersection is exactly that one spec file), so
+  the earlier "file sets stayed disjoint" wording was imprecise. **Nothing was
+  lost:** the two phases added *different* `it` blocks to the same file —
+  phase 6's unit-vocabulary legs (6.3) and phase 8's 8.7/8.8/8.9/8.10 legs
+  (plus 8.2–8.5) all survive at the tip, and the 44-node spec run proves
+  coexistence (re-confirmed green at the fold). The interleaved order also
+  means my central-tab spec legs were written against their post-8.7/8.8
+  component.
 * **I used an unscoped `git stash` ONCE** (the ban is pathspec-scoped stash in
   shared worktrees). At that moment the only modifications in the tree were my
   own three house-svg files (their lane's work was committed; their later

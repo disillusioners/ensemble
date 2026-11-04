@@ -668,12 +668,21 @@ instance was still `running`. Phase 6's commits then landed **between**
 this phase's commits (`c59d44434` 6.3, `b14f3a5f7` 6.1/6.2, `aa7c0b04e`
 6.4–6.6, `fd6322639` the F4 unit pins).
 
-**Handling:** the file sets were disjoint at every step; every commit
+**Handling:** the file sets were disjoint **except for ONE shared spec file —
+the claim below is RECORD CORRECTED at the council fold (2026-11-04):**
+`frontend/src/app/pages/metrics/tabs/central-tab.component.spec.ts` was touched
+by BOTH phases (mechanically re-derived at the fold: the four phase-6 commits
+touch 13 files, the six phase-8 commits touch 20, and the intersection is
+exactly that one file). **Nothing was lost:** each phase added its own `it`
+blocks, and both sets survive at the tip — phase 6's unit-vocabulary legs
+(6.3) and phase 8's 8.2–8.5 / 8.7 / 8.8 / 8.9 / 8.10 legs are all present in
+the 44-node spec, which is green at the fold. Every commit
 used **targeted `git add --`** (never `add -A`), so no Phase-6 in-flight
 edit was ever staged by this phase; Phase 6's uncommitted working-tree
 edits were left untouched. `phase6-plan.md` itself declares Phase 6
-*"Independent of: Phase 1, Phase 2, Phase 7, Phase 8"*, which the
-disjoint file sets confirm.
+*"Independent of: Phase 1, Phase 2, Phase 7, Phase 8"* — independence at the
+DELIVERABLE level; the one shared spec file is the exception the original
+wording over-claimed away.
 
 ### 14.2 8.2 vs 8.3 — the "where the actionable panel renders" tension — RESOLVED
 
