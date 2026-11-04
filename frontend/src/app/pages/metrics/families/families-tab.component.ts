@@ -43,6 +43,12 @@ export type MetricsCatalogColumn = 'id' | 'role' | 'availability' | 'series' | '
   standalone: true,
   imports: [MatButtonModule, MatTooltipModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  // The shared tab-surface styles (banner/badge/hint/meta) live in the
+  // shared partial — the A-5 consolidation; the palette/geometry
+  // authority is metrics-door-state.component.ts (see the partial's
+  // header). Only this tab's OWN rules (.tab-error, the table) stay
+  // inline below.
+  styleUrls: ['../shared/tab-surface.scss'],
   template: `
     <div class="families">
       <div class="families-toolbar">
@@ -184,11 +190,6 @@ export type MetricsCatalogColumn = 'id' | 'role' | 'availability' | 'series' | '
         color: #cbd5e1;
         font-size: 0.78rem;
         padding: 0.2rem 0.4rem;
-      }
-
-      .tab-hint {
-        color: #64748b;
-        font-size: 0.8rem;
       }
 
       .tab-error {
