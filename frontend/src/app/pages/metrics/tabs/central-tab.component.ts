@@ -16,7 +16,6 @@ import { NgComponentOutlet } from '@angular/common';
 
 import { MetricsService } from '../../../services/metrics.service';
 import {
-  METRICS_DOOR_ERROR_COPY,
   MetricsChartRole,
   MetricsFamily,
   MetricsSeriesEntry,
@@ -65,6 +64,7 @@ import {
   MetricsTabStateReporter,
 } from '../metrics-state';
 import { MetricsCentralTab } from '../tabs.manifest';
+import { MetricsDoorStateComponent } from '../metrics-door-state.component';
 
 /**
  * One chart-primary series of a bound family — the rendering mode comes
@@ -133,25 +133,25 @@ const PANEL_REQUEST: ChartRequest = {
 @Component({
   selector: 'app-metrics-central-tab',
   standalone: true,
-  imports: [DecimalPipe, MatButtonModule, NgComponentOutlet],
+  imports: [DecimalPipe, MatButtonModule, NgComponentOutlet, MetricsDoorStateComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="central-tab">
-      @if (errorCopy(); as message) {
-        <div class="tab-banner" data-test="central-tab-error">
-          <span class="tab-banner-text">{{ message }}</span>
-          @if (state().errorClass !== 'timeout') {
-            <button
-              mat-stroked-button
-              type="button"
-              (click)="refresh()"
-              data-test="central-tab-retry"
-            >
-              Retry
-            </button>
-          }
-        </div>
-      }
+      <!--
+        THIS TAB'S OWN FAILURE (task 8.3).
+
+        The CENTRAL door's failure is rendered ONCE by the frame, so it
+        is never published into this tab's error class — the panel below
+        fires only for a failure of THIS tab's own read. The panel is
+        the shared one, so the copy and the RETRY POLICY come from the
+        same SSOT as the frame's.
+      -->
+      <app-metrics-door-state
+        [code]="state().errorClass"
+        [onRetry]="onRefresh"
+        testId="central-tab-error"
+        retryTestId="central-tab-retry"
+      ></app-metrics-door-state>
 
       @if (!families().length) {
         <p class="tab-hint" data-test="central-tab-no-catalog">
@@ -282,20 +282,6 @@ const PANEL_REQUEST: ChartRequest = {
       .central-tab {
         display: block;
         padding: 0.75rem 0;
-      }
-
-      .tab-banner {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.75rem;
-        padding: 0.5rem 0.75rem;
-        margin-bottom: 0.6rem;
-        border: 1px solid #7f1d1d;
-        border-radius: 6px;
-        background: #2a1414;
-        color: #fca5a5;
-        font-size: 0.8rem;
       }
 
       .tab-hint {
@@ -557,17 +543,6 @@ export class MetricsCentralTabComponent {
     return total > METRICS_SELECTOR_CEILING;
   });
 
-  /** The error copy — the door's SSOT copy for the failure class. */
-  readonly errorCopy = computed(() => {
-    const code = this.state().errorClass;
-    if (!code) {
-      return null;
-    }
-    // The copy comes from the door's SSOT — the manifest may carry a
-    // per-tab VARIANT of a state, never a second copy source (AM-20).
-    return METRICS_DOOR_ERROR_COPY[code];
-  });
-
   /** The stat strip — one card per published stat series. */
   readonly statCards = computed(() => {
     const out: {
@@ -618,6 +593,14 @@ export class MetricsCentralTabComponent {
       untracked(() => this.fetchStatStrip(ids));
     });
   }
+
+  /**
+   * The panel's retry handler — the user-initiated refresh (always
+   * fires; it is never a silent no-op).
+   */
+  readonly onRefresh = (): void => {
+    this.refresh();
+  };
 
   /** The user-initiated refresh — always fires. */
   refresh(): void {

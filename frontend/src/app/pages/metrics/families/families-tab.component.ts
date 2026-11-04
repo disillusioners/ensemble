@@ -129,8 +129,20 @@ export type MetricsCatalogColumn = 'id' | 'role' | 'availability' | 'series' | '
         </tbody>
       </table>
 
-      @if (error(); as message) {
-        <p class="tab-error" data-test="families-error">{{ message }}</p>
+      @if (error()) {
+        <!--
+          THE CATALOG COULD NOT BE READ (task 8.3).
+
+          The drawer states the FACT and POINTS at the failure — it does
+          NOT re-render the door-state panel: the page renders that state
+          ONCE (the frame's panel), and a second copy of the same
+          failure on the same page is the duplicate banner the audit
+          found. The empty copy stays ERROR-GATED either way: an
+          unread catalog is UNKNOWN, never empty.
+        -->
+        <p class="tab-error" data-test="families-error">
+          The family catalog could not be read — the failure is stated above.
+        </p>
       } @else if (!families().length) {
         <p class="tab-hint" data-test="families-empty">No families are registered.</p>
       } @else if (!visibleFamilies().length) {

@@ -16,6 +16,7 @@ import { MatTabsModule } from '@angular/material/tabs';
 import { MetricsService } from '../../services/metrics.service';
 import {
   METRICS_REGISTRY_DEGRADED_COPY,
+  MetricsDoorErrorCode,
   MetricsFamily,
   decodeMetricsDoorError,
 } from '../../models/metrics.model';
@@ -31,6 +32,7 @@ import {
   MetricsTabStateReporter,
 } from './metrics-state';
 import { MetricsFamilyCatalogComponent } from './families/families-tab.component';
+import { MetricsDoorStateComponent } from './metrics-door-state.component';
 import {
   METRICS_BASELINE_CUSTOM_SLOT_REASON,
   METRICS_BASELINE_FIDELITY_DISCLOSURE,
@@ -102,6 +104,7 @@ const initialRangeOption: MetricsRangeOption =
     MatButtonModule,
     MatTabsModule,
     MetricsFamilyCatalogComponent,
+    MetricsDoorStateComponent,
   ],
   templateUrl: './metrics.component.html',
   styleUrl: './metrics.component.scss',
@@ -119,6 +122,14 @@ export class MetricsComponent implements OnInit {
   /** The catalog — the family projection the door serves. */
   readonly families = signal<readonly MetricsFamily[]>([]);
   readonly catalogError = signal<string | null>(null);
+  /**
+   * The CENTRAL door's failure CLASS (T1 phase 8, task 8.2).
+   *
+   * The copy alone cannot render an actionable state — the class is what
+   * selects the copy SSOT entry (cause / meaning / action / pointer) and
+   * the class's RETRY POLICY. `null` while healthy.
+   */
+  readonly catalogErrorCode = signal<MetricsDoorErrorCode | null>(null);
   readonly catalogStale = signal(false);
   readonly catalogLoaded = signal(false);
   /**
@@ -199,6 +210,29 @@ export class MetricsComponent implements OnInit {
 
   /** The degraded-registry badge's copy (the fact, never a cause). */
   readonly registryDegradedCopy = METRICS_REGISTRY_DEGRADED_COPY;
+
+  /**
+   * The PAGE-SCOPED door posture (T1 phase 8, task 8.5 — AM-21).
+   *
+   * The door's posture is a PAGE-LOCAL fact: the daemon is HEALTHY when
+   * the metrics door is deliberately fail-closed, so this must never
+   * recolour the app shell's GLOBAL status dot (that dot is bound to
+   * `/api/health` and says nothing about this page). The chip states
+   * the posture where it is true — in this page's header.
+   */
+  readonly doorPosture = computed<'loading' | 'ok' | 'fail-closed' | 'failed'>(() => {
+    const code = this.catalogErrorCode();
+    if (!code) {
+      return this.catalogLoaded() ? 'ok' : 'loading';
+    }
+    if (code === 'auth_required' || code === 'auth_not_configured') {
+      return 'fail-closed';
+    }
+    return 'failed';
+  });
+
+  /** The chip's label — the posture, named. */
+  readonly doorPostureLabel = computed(() => `metrics door: ${this.doorPosture()}`);
 
   /** The monotonic supersede token of the catalog load. */
   private catalogSeq = 0;
@@ -524,7 +558,7 @@ export class MetricsComponent implements OnInit {
    */
   private publishCentralSource(patch: {
     doorState: MetricsTabState['doorState'];
-    errorClass: MetricsTabState['errorClass'];
+    errorClass?: MetricsTabState['errorClass'];
     families?: Record<string, readonly MetricsFamily[]>;
   }): void {
     for (const tab of this.tabs) {
@@ -534,7 +568,11 @@ export class MetricsComponent implements OnInit {
       }
       this.applyTabState(entry.id, {
         doorState: patch.doorState,
-        errorClass: patch.errorClass,
+        // The CENTRAL failure is rendered ONCE by the frame (8.3), so
+        // it is NOT published as the tab's error class — a tab body
+        // renders only ITS OWN failure. `errorClass` is passed through
+        // when the caller supplies one (the healthy path clears it).
+        ...(patch.errorClass !== undefined ? { errorClass: patch.errorClass } : {}),
         ...(patch.families ? { families: patch.families[entry.id] ?? [] } : {}),
       });
     }
@@ -571,6 +609,7 @@ export class MetricsComponent implements OnInit {
           const hadPreviousCatalog = this.families().length > 0;
           this.families.set(payload.families);
           this.catalogError.set(null);
+          this.catalogErrorCode.set(null);
           // A FAILED registry read answers 200 with an EMPTY body — the
           // degraded flag is the ONLY way to tell it from an empty
           // registry. The predicate is `=== false` (absent = healthy).
@@ -598,11 +637,17 @@ export class MetricsComponent implements OnInit {
           // last-good catalog is retained in EVERY branch.
           const decoded = decodeMetricsDoorError(err);
           this.catalogError.set(decoded.copy);
+          this.catalogErrorCode.set(decoded.code);
           this.catalogStale.set(this.families().length > 0);
           this.catalogLoaded.set(true);
           // The bound families are NOT cleared — the last-good catalog
           // is retained in every branch.
-          this.publishCentralSource({ doorState: decoded.code, errorClass: decoded.code });
+          //
+          // 8.3 — the central failure is rendered ONCE (by the frame),
+          // so the tab bodies are NOT given the error class: a tab
+          // body renders only its OWN failure. The tab's own fetch
+          // failure still lands in its own state.
+          this.publishCentralSource({ doorState: decoded.code });
         },
       });
   }

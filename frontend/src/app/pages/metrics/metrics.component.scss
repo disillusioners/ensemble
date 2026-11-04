@@ -19,20 +19,6 @@
   font-size: 0.8rem;
 }
 
-.metrics-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.5rem 0.75rem;
-  margin-bottom: 0.6rem;
-  border: 1px solid #7f1d1d;
-  border-radius: 6px;
-  background: #2a1414;
-  color: #fca5a5;
-  font-size: 0.8rem;
-}
-
 .stale-badge {
   display: inline-block;
   margin-bottom: 0.5rem;
@@ -132,6 +118,51 @@
 
 .metrics-baseline-disclosure {
   max-width: 34rem;
+}
+
+.metrics-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/*
+ * THE PAGE-SCOPED DOOR-POSTURE CHIP (task 8.5 — AM-21).
+ *
+ * The door's posture is a PAGE-LOCAL fact: the daemon is HEALTHY when
+ * the metrics door is deliberately fail-closed, so this chip NEVER
+ * stands in for the app shell's GLOBAL status dot (that dot is bound
+ * to `/api/health` and says nothing about this page).
+ */
+.metrics-door-chip {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #1e293b;
+  border-radius: 4px;
+  background: #0f172a;
+  color: #64748b;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.metrics-door-chip[data-door-posture='ok'] {
+  border-color: #14532d;
+  background: #052e16;
+  color: #4ade80;
+}
+
+.metrics-door-chip[data-door-posture='fail-closed'] {
+  border-color: #92400e;
+  background: #2a1414;
+  color: #fbbf24;
+}
+
+.metrics-door-chip[data-door-posture='failed'] {
+  border-color: #7f1d1d;
+  background: #2a1414;
+  color: #fca5a5;
 }
 
 .metrics-header-row {

@@ -309,7 +309,13 @@ describe('MetricsComponent — the availability-driven empty state (P5-M4 / P5-M
   });
 
   it('a failed catalog load is an ERROR state, not an empty state', () => {
+    // ── RE-POINTED BY PHASE 8 (task 8.2) ───────────────────────────
+    // The panel is CLASS-driven (the class selects the copy SSOT entry
+    // and the Retry policy), so the failure is set as a class. The leg
+    // keeps its intent: a failed load is an ERROR state, never the
+    // empty panel.
     component.catalogError.set('The metrics door is unreachable.');
+    component.catalogErrorCode.set('network');
     component.catalogLoaded.set(true);
     fixture.detectChanges();
     expect(component.showEmptyPanel()).toBe(false);
@@ -683,9 +689,16 @@ describe('MetricsComponent — the PER-SOURCE state model (2.11 / AM-1)', () => 
     // The custom tab is untouched.
     expect(component.tabStates()['resource'].doorState).toBe('ok');
     expect(component.tabStates()['resource'].families.length).toBe(1);
-    // The central tabs carry the failure.
-    expect(component.tabStates()['runtime'].errorClass).toBe('auth_not_configured');
+    // ── RE-POINTED BY PHASE 8 (task 8.3) ───────────────────────────
+    // The central tabs carry the failure as their POSTURE, and the
+    // FAILURE CLASS lives on the frame — the central state is rendered
+    // ONCE, so it is no longer published into every central tab's
+    // error class (that was the duplicate banner). The leg keeps its
+    // intent — the central failure reaches the central tabs — and now
+    // asserts the posture plus the frame's class.
     expect(component.tabStates()['runtime'].doorState).toBe('auth_not_configured');
+    expect(component.tabStates()['runtime'].errorClass).toBeNull();
+    expect(component.catalogErrorCode()).toBe('auth_not_configured');
   });
 
   it('a failing CUSTOM source does NOT blank a central tab\'s state', () => {

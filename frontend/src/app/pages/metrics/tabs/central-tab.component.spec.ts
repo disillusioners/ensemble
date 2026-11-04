@@ -487,11 +487,31 @@ describe('MetricsCentralTabComponent — the per-source reporting (2.11)', () =>
   });
 
   it('a retryable failure DOES offer the Retry affordance', () => {
-    fixture.componentRef.setInput('state', state({ errorClass: 'auth_not_configured' }));
+    // ── RE-POINTED BY PHASE 8 (task 8.2 / AM-4) ──────────────────────
+    // This leg used to use `auth_not_configured` as its "retryable"
+    // example. That was the DEFECT the plan names: a fail-closed CONFIG
+    // error is not transient, so a Retry on it is an affordance that can
+    // never succeed. The leg keeps its intent — a retryable failure
+    // offers the Retry — and now names a class that IS retryable.
+    fixture.componentRef.setInput('state', state({ errorClass: 'network' }));
     fixture.detectChanges();
     expect(
       fixture.nativeElement.querySelector('[data-test="central-tab-retry"]'),
     ).not.toBeNull();
+  });
+
+  it('the AUTH state offers NO Retry (a config error is not transient — 8.2)', () => {
+    // The PLANTED VARIANT the plan names: a Retry on the auth state
+    // FAILS this leg. The actionable state carries the runbook pointer
+    // instead of a button that can never succeed.
+    fixture.componentRef.setInput('state', state({ errorClass: 'auth_not_configured' }));
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-test="central-tab-retry"]'),
+    ).toBeNull();
+    const panel = fixture.nativeElement.querySelector('[data-test="central-tab-error"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.textContent ?? '').toContain('docs/runbooks/oauth2-auth.md');
   });
 });
 

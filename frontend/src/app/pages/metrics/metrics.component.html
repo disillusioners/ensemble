@@ -7,30 +7,40 @@
           Central metrics door — families, current values and trends (UTC)
         </p>
       </div>
-      <button
-        mat-stroked-button
-        type="button"
-        (click)="toggleDrawer()"
-        data-test="metrics-catalog-drawer-toggle"
-      >
-        Families
-      </button>
+      <div class="metrics-header-actions">
+        <span
+          class="metrics-door-chip"
+          [attr.data-test]="'metrics-door-chip'"
+          [attr.data-door-posture]="doorPosture()"
+        >
+          {{ doorPostureLabel() }}
+        </span>
+        <button
+          mat-stroked-button
+          type="button"
+          (click)="toggleDrawer()"
+          data-test="metrics-catalog-drawer-toggle"
+        >
+          Families
+        </button>
+      </div>
     </div>
   </header>
 
-  @if (catalogError(); as message) {
-    <div class="metrics-banner" data-test="metrics-catalog-error">
-      <span class="metrics-banner-text">{{ message }}</span>
-      <button
-        mat-stroked-button
-        type="button"
-        (click)="loadCatalog()"
-        data-test="metrics-catalog-retry"
-      >
-        Retry
-      </button>
-    </div>
-  }
+  <!--
+    THE CENTRAL DOOR'S STATE — rendered ONCE, here (task 8.3).
+
+    The tab bodies do NOT each re-render it: the state is per SOURCE
+    (AM-1), so a `central` slot shows this state and the `custom` slot
+    (tab 1) shows its own — which is why tab 1 stays lit under a
+    central-door failure.
+  -->
+  <app-metrics-door-state
+    [code]="catalogErrorCode()"
+    [onRetry]="onReloadCatalog"
+    testId="metrics-catalog-error"
+    retryTestId="metrics-catalog-retry"
+  ></app-metrics-door-state>
 
   @if (catalogStale()) {
     <span class="stale-badge" data-test="metrics-catalog-stale">STALE — last known catalog</span>
