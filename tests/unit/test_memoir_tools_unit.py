@@ -55,6 +55,7 @@ from daemon.tools.memoir import (
     MEMOIR_CODE_K_OUT_OF_RANGE,
     MEMOIR_CODE_NOT_AUTHORIZED,
     MEMOIR_CODE_NOT_FOUND,
+    MEMOIR_CODE_QUERY_REQUIRED,
     MEMOIR_CODE_REASON_REQUIRED,
     MEMOIR_CODE_TITLE_TOO_LONG,
     MEMOIR_CODES,
@@ -167,8 +168,8 @@ class TestTheSurface:
             tool_idx = source.index(f"@tool(args_schema={schema})")
             assert dec_idx < tool_idx, f"{schema}: decorator order inverted"
 
-    def test_the_import_time_assertion_freezes_eighteen_codes(self):
-        assert len(MEMOIR_CODES) == 18
+    def test_the_import_time_assertion_freezes_nineteen_codes(self):
+        assert len(MEMOIR_CODES) == 19
 
 
 # ── AC1: the enforced gate order ────────────────────────────────────────
@@ -407,15 +408,18 @@ class TestTheRefusalMatrix:
         _assert_envelope(result, "memoir_unpin", MEMOIR_CODE_NOT_FOUND)
 
     @pytest.mark.asyncio
-    async def test_a_blank_recall_query_falls_back_to_the_catch_all(
+    async def test_a_blank_recall_query_refuses_with_query_required(
         self, mgr, tools
     ):
-        """``query_required`` has no frozen counterpart; the tool maps it
-        onto ``memoir_internal_error`` with the TRUE message preserved —
-        the vocabulary is frozen, so the tool never invents a code."""
+        """V-1 (user-ruled 2026-11-05): the honest code for an
+        empty/whitespace ``memoir_recall`` query is an INPUT error —
+        ``memoir_query_required``, identity-mapped from the retrieval
+        service's ``query_required``. It is NOT the catch-all: calling a
+        user's empty string an ``internal error`` was a permanent lie in
+        the contract (audit: 0 of the 18 predecessor codes honest)."""
         result = await tools["memoir_recall"].ainvoke({"query": "   "})
         _assert_envelope(
-            result, "memoir_recall", "memoir_internal_error"
+            result, "memoir_recall", MEMOIR_CODE_QUERY_REQUIRED
         )
         assert "empty" in result
 

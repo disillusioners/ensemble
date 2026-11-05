@@ -38,8 +38,8 @@ not its comment):
 
 An unauthorized caller therefore learns NOTHING about the knob's state.
 
-THE REFUSAL VOCABULARY IS FROZEN (D4.8 — 18 codes, asserted at import):
-``MEMOIR_CODES`` must match the 18 exactly or the import FAILS LOUD. The
+THE REFUSAL VOCABULARY IS FROZEN (D4.8 — 19 codes, asserted at import):
+``MEMOIR_CODES`` must match the 19 exactly or the import FAILS LOUD. The
 envelope is ``Error: {tool} REFUSED — reason={code}: {message}`` and no
 tool ever raises (ADR-005). MAPPING (the tool layer never re-derives a
 bound — the repository owns the bounds and refuses with a code; the tool
@@ -52,12 +52,13 @@ maps it onto this vocabulary): ``body_required``/``body_too_long`` →
 → ``memoir_not_found``; ``invalid_actor`` → ``memoir_invalid_actor``;
 ``reason_required`` → ``memoir_reason_required``; the admission errors
 (``pin_count`` / ``keepsake_zone_tokens``) → ``memoir_keepsake_cap_reached``;
-the recall-service ``k_out_of_range`` → ``memoir_k_out_of_range`` and its
-``invalid_window`` → ``memoir_invalid_window``. A service code with NO
-frozen counterpart (``query_required``) falls back to
-``memoir_internal_error`` with the TRUE message preserved — the
-vocabulary is frozen, so the tool never invents a code (the same fallback
-covers every unexpected internal failure).
+the recall-service ``k_out_of_range`` → ``memoir_k_out_of_range``, its
+``invalid_window`` → ``memoir_invalid_window``, and the recall-service
+``query_required`` → ``memoir_query_required``. A service code with NO
+frozen counterpart falls back to ``memoir_internal_error`` with the
+TRUE message preserved — the vocabulary is frozen, so the tool never
+invents a code (the same fallback covers every unexpected internal
+failure).
 
 WRITE-PATH PURITY (D4.11/DD-20/AM-12, pinned by
 ``tests/unit/test_memoir_write_purity_tool.py``): this module contains
@@ -152,7 +153,8 @@ MEMOIR_TOOL_NAMES: frozenset[str] = frozenset(
 #: layer 2 of the two-layer posture; the category allow entry is layer 1).
 MEMOIR_AUTHORIZED_AGENT = "ari"
 
-# ── D4.8: the typed error vocabulary — 18 codes, FROZEN ────────────────
+# ── D4.8: the typed error vocabulary — 19 codes, FROZEN (V-1: the
+#    user-ruled 19th, ``memoir_query_required``, 2026-11-05) ────────────
 MEMOIR_CODE_DISABLED = "memoir_disabled"
 MEMOIR_CODE_AGENT_UNKNOWN = "memoir_agent_unknown"
 MEMOIR_CODE_NOT_AUTHORIZED = "memoir_not_authorized"
@@ -172,6 +174,12 @@ MEMOIR_CODE_INVALID_WINDOW = "memoir_invalid_window"
 MEMOIR_CODE_TITLE_TOO_LONG = "memoir_title_too_long"
 MEMOIR_CODE_STARS_OUT_OF_BOUNDS = "memoir_stars_out_of_bounds"
 MEMOIR_CODE_INVALID_EVENT_AT = "memoir_invalid_event_at"
+#: V-1 (user-ruled 2026-11-05): the honest code for an empty/whitespace
+#: ``memoir_recall`` query — an INPUT error, identity-mapped from the
+#: retrieval service's ``query_required`` (the audit found 0 of the 18
+#: predecessors honest for it; ``memoir_internal_error`` claimed a bug
+#: where the caller sent an empty string).
+MEMOIR_CODE_QUERY_REQUIRED = "memoir_query_required"
 
 #: The frozen vocabulary — validated loudly at import (the notify
 #: precedent: a mistyped code must fail loud, never diff).
@@ -195,11 +203,12 @@ MEMOIR_CODES: frozenset[str] = frozenset(
         MEMOIR_CODE_TITLE_TOO_LONG,
         MEMOIR_CODE_STARS_OUT_OF_BOUNDS,
         MEMOIR_CODE_INVALID_EVENT_AT,
+        MEMOIR_CODE_QUERY_REQUIRED,
     }
 )
 
-assert len(MEMOIR_CODES) == 18, (
-    "memoir: the frozen refusal vocabulary must hold EXACTLY 18 codes; "
+assert len(MEMOIR_CODES) == 19, (
+    "memoir: the frozen refusal vocabulary must hold EXACTLY 19 codes; "
     f"got {len(MEMOIR_CODES)}: {sorted(MEMOIR_CODES)}"
 )
 for _code in (
@@ -248,6 +257,7 @@ _WRITE_CODE_MAP: dict[str, str] = {
 _RECALL_CODE_MAP: dict[str, str] = {
     "k_out_of_range": MEMOIR_CODE_K_OUT_OF_RANGE,
     "invalid_window": MEMOIR_CODE_INVALID_WINDOW,
+    "query_required": MEMOIR_CODE_QUERY_REQUIRED,
 }
 
 
@@ -341,9 +351,9 @@ def _map_recall_error(exc: MemoirRecallError, label: str) -> str:
     """Map a retrieval-service refusal onto the frozen vocabulary."""
     code = _RECALL_CODE_MAP.get(str(getattr(exc, "code", "")))
     if code is None:
-        # ``query_required`` (and any future service code with no frozen
-        # counterpart) falls back to the catch-all with the TRUE message
-        # preserved — the vocabulary is frozen; no code invention.
+        # Any future service code with no frozen counterpart falls back
+        # to the catch-all with the TRUE message preserved — the
+        # vocabulary is frozen; no code invention.
         code = MEMOIR_CODE_INTERNAL_ERROR
     return _refuse(label, code, str(getattr(exc, "message", exc)))
 
