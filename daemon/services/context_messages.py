@@ -128,6 +128,16 @@ CONTEXT_KIND_CHILD_REPORT_CHECK = "child_report_check"
 # ``instance_metadata["snapshot_digest"]`` by the spawn tool's atomic
 # ``set_metadata_many`` (Wave 2b); THIS module only reads/consumes.
 CONTEXT_KIND_SNAPSHOT_DIGEST = "snapshot_digest"
+
+# Memoir Store v1 (memoir P5, D5.1): the wake briefing kind. Stamping
+# ``context_kind="memoir"`` is the WHOLE compaction change (D5.3/AM-40):
+# the hoist is truthy-keyed on any ``context_kind``
+# (``daemon/_content_hardening.py``, ``is_hoisted_injected``) — there is
+# NO membership set to add the kind to. Stable message id
+# ``memoir:{agent_id}`` — one block per agent, ``add_messages``
+# supersedes in place. The block is BUILT here but the once-flag is
+# written by the CONSUMER (``instance_messaging.py``, D5.4/AM-22).
+CONTEXT_KIND_MEMOIR = "memoir"
 _AMBIENT_KV_FRESH: bool | None = None
 _AMBIENT_KV_FRESH_BOOT_LOG_EMITTED = False
 
@@ -392,6 +402,114 @@ async def _build_snapshot_digest_message(
     )
 
 
+# ── Memoir wake briefing (memoir P5) — the seam gate ─────────────────────
+# The briefing is BUILT here and NOWHERE ELSE is it gated: the seam runs
+# on EVERY turn, the once-flag is read FRESH each assembly (revive-safe,
+# D5.11), the ari gate reads ``row.agent_id`` from the SAME off-loop
+# read that fetches the flag (D5.5 — ONE read, two consumers, DD-13:
+# never a caller-supplied key), and the knob is re-read per assembly
+# (D5.13). This function BUILDS ONLY — it NEVER writes the once-flag:
+# ``daemon/graph.py`` discards this module's persistent half
+# (``graph.py`` ContextSlot path), so a builder-written flag would
+# consume the flag on a thrown-away block and permanently, silently
+# lose the briefing for that instance (D5.4/AM-22 — the consumer,
+# ``instance_messaging.py``, writes the flag after CONFIRMING the
+# returned persistent half carries the block).
+
+
+async def _assemble_memoir_briefing(
+    instance_id: str,
+    manager: Any,
+    repo: Any,
+) -> HumanMessage | None:
+    """The memoir gate body: knob → off-loop row read → builder.
+
+    Every await is deadline-bounded (AM-38): the row read under the
+    per-read timeout, the content build under the whole-build budget
+    (applied by :func:`_maybe_memoir_briefing_message`). Any failure
+    DEGRADES (no block, no flag write) — the assembly seam is never
+    hostage to memoir health (D5.14).
+    """
+    from .memoir_briefing import (
+        MEMOIR_AGENT_ID,
+        MEMOIR_BRIEFING_FLAG,
+        MEMOIR_READ_TIMEOUT_S,
+        _build_memoir_briefing_message,
+        knob_allows,
+    )
+
+    if not knob_allows(getattr(manager, "config", None)):
+        # D5.13: OFF ⇒ no block and NO flag write — a later enable
+        # delivers on the next turn (intended); the memory is
+        # unreadable meanwhile (no other read path exists in v1).
+        return None
+
+    row = await asyncio.wait_for(
+        asyncio.to_thread(repo.get, instance_id),
+        timeout=MEMOIR_READ_TIMEOUT_S,
+    )
+    if row is None:
+        return None
+    agent_id = getattr(row, "agent_id", None)
+    if agent_id != MEMOIR_AGENT_ID:
+        # D5.12: the briefing builds ONLY for ari, and the identity
+        # comes from the row — never a caller-supplied key (DD-13).
+        return None
+    if (getattr(row, "instance_metadata", None) or {}).get(
+        MEMOIR_BRIEFING_FLAG
+    ):
+        # D5.11: once per INSTANCE, read fresh each turn (revive-safe).
+        return None
+
+    return await _build_memoir_briefing_message(
+        agent_id=agent_id,
+        instance_id=instance_id,
+        manager=manager,
+    )
+
+
+async def _maybe_memoir_briefing_message(
+    instance_id: str,
+    manager: Any,
+    instance_repository: Any,
+) -> HumanMessage | None:
+    """The whole-build budget wrapper — degrade, never delay the turn.
+
+    The ≤5 s budget (AM-38/D5.6) covers the ENTIRE memoir step: the
+    knob read, the off-loop flag/agent read, and the content reads.
+    A breach (or any failure) logs and returns ``None`` — no block, and
+    therefore no flag write (the consumer only writes when the block is
+    present in the returned persistent half).
+    """
+    from .memoir_briefing import MEMOIR_BUILD_BUDGET_S
+
+    repo = (
+        instance_repository
+        if instance_repository is not None
+        else getattr(manager, "_instance_repository", None)
+    )
+    if repo is None:
+        return None
+    try:
+        return await asyncio.wait_for(
+            _assemble_memoir_briefing(instance_id, manager, repo),
+            timeout=MEMOIR_BUILD_BUDGET_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"[ContextMessages] memoir briefing exceeded the "
+            f"{MEMOIR_BUILD_BUDGET_S}s whole-build budget for "
+            f"{instance_id[:8]}... — degraded (no block, no flag write)"
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            f"[ContextMessages] memoir briefing build failed for "
+            f"{instance_id[:8]}...: {exc}"
+        )
+        return None
+
+
 def _stable_id_for(
     kind: str,
     *,
@@ -411,6 +529,7 @@ def _stable_id_for(
     ``project``               ``project:{instance_id}``                       ``instance_id``
     ``shared_meta_kv``        ``kv:{context_key}``                            ``context_key``
     ``attestation_nudge``     ``attestation_nudge:{instance_id}``             ``instance_id``
+    ``memoir``                ``memoir:{agent_id}``                           ``agent_id``
     ========================  =============================================  =========================
 
     ``context_key`` is the FULL resolved tree-root partition key — the
@@ -504,10 +623,21 @@ def _stable_id_for(
                 "requires instance_id"
             )
         return f"attestation_final_report_reminder:{instance_id}"
+    if kind == "memoir":
+        # Memoir Store v1 (memoir P5, D5.2): the wake briefing block is
+        # keyed per AGENT — one memoir block per agent, superseded in
+        # place by ``add_messages``. The suffix IS the agent the memory
+        # belongs to, so supersede granularity matches data granularity
+        # (the same discipline as the ``kv:{context_key}`` suffix).
+        if not agent_id:
+            raise ValueError(
+                "_stable_id_for('memoir') requires agent_id"
+            )
+        return f"memoir:{agent_id}"
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
-        "for 'project', 'shared_meta_kv', 'attestation_nudge', and "
-        "'attestation_final_report_reminder' blocks"
+        "for 'project', 'shared_meta_kv', 'attestation_nudge', "
+        "'attestation_final_report_reminder', and 'memoir' blocks"
     )
 
 
@@ -2064,29 +2194,40 @@ async def assemble_context_messages(
             if al_msg is not None:
                 persistent_after_inject.append(al_msg)
         skills_enabled_only = bool(getattr(agent_meta, "skill_injection", False))
-        if not skills_enabled_only:
-            return (persistent_after_inject, [])
-        if skill_injection_result is not None:
-            injection_text, _skill_ids = skill_injection_result
-        else:
-            injection_text, _skill_ids = await _run_skill_search(
-                user_query=user_query,
-                project_id=project_id,
-                instance_id=instance_id,
-                manager=manager,
-                message_id=message_id,
-                agent_id=getattr(agent_meta, "id", None),
-            )
-        skills_msg = build_skills_message(injection_text)
-        if skills_msg is None:
-            return (persistent_after_inject, [])
-        # Skills are now PERSISTENT (checkpointed). The pre-refactor
-        # ephemeral path returned ``([], [skills_msg])`` — kept as a
-        # comment here for traceability:
-        #   return ([], [skills_msg])
-        # Future versions may re-enable ephemeral injection with
-        # explicit skill lifecycles.
-        persistent_after_inject.append(skills_msg)
+        if skills_enabled_only:
+            if skill_injection_result is not None:
+                injection_text, _skill_ids = skill_injection_result
+            else:
+                injection_text, _skill_ids = await _run_skill_search(
+                    user_query=user_query,
+                    project_id=project_id,
+                    instance_id=instance_id,
+                    manager=manager,
+                    message_id=message_id,
+                    agent_id=getattr(agent_meta, "id", None),
+                )
+            skills_msg = build_skills_message(injection_text)
+            if skills_msg is not None:
+                # Skills are now PERSISTENT (checkpointed). The pre-refactor
+                # ephemeral path returned ``([], [skills_msg])`` — kept as a
+                # comment here for traceability:
+                #   return ([], [skills_msg])
+                # Future versions may re-enable ephemeral injection with
+                # explicit skill lifecycles.
+                persistent_after_inject.append(skills_msg)
+
+        # ── Memoir wake briefing (memoir P5) — PERSISTENT, every-turn gate ──
+        # The seam runs on EVERY turn (this branch INCLUDED): the once-flag
+        # is read fresh each assembly, so a knob enabled mid-life (or a
+        # turn-1 flag-write failure) delivers on the next turn (D5.11/
+        # D5.13). BUILD ONLY — the consumer writes the flag (D5.4/AM-22).
+        memoir_msg = await _maybe_memoir_briefing_message(
+            instance_id=instance_id,
+            manager=manager,
+            instance_repository=instance_repository,
+        )
+        if memoir_msg is not None:
+            persistent_after_inject.append(memoir_msg)
         return (persistent_after_inject, [])
 
     persistent_msgs: list[HumanMessage] = []
@@ -2384,6 +2525,25 @@ async def assemble_context_messages(
             #   ephemeral_msgs.append(skills_msg)
             persistent_msgs.append(skills_msg)
 
+    # ── 5. Memoir wake briefing (memoir P5) — PERSISTENT, every-turn gate ──
+    # OUTSIDE the ``project_already_injected`` gate deliberately: the
+    # seam runs on EVERY turn, the once-flag is read fresh each
+    # assembly (revive-safe), and the ari identity comes from the SAME
+    # off-loop instance read that fetches the flag (D5.5 — ONE read,
+    # two consumers). BUILD ONLY — the once-flag is written by the
+    # CONSUMER (``instance_messaging.py``) after it CONFIRMS the
+    # returned persistent half carries the block (D5.4/AM-22): the
+    # graph path discards this half, and a builder-written flag would
+    # consume the flag on a thrown-away block (the permanent,
+    # silent briefing loss).
+    memoir_msg = await _maybe_memoir_briefing_message(
+        instance_id=instance_id,
+        manager=manager,
+        instance_repository=instance_repository,
+    )
+    if memoir_msg is not None:
+        persistent_msgs.append(memoir_msg)
+
     return (persistent_msgs, ephemeral_msgs)
 
 
@@ -2400,6 +2560,7 @@ __all__ = [
     "CONTEXT_KIND_PROJECT_SCOPE_GUIDE",
     "CONTEXT_KIND_SHARED_META_KV",
     "CONTEXT_KIND_SNAPSHOT_DIGEST",
+    "CONTEXT_KIND_MEMOIR",
     "SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS",
     # Pure builder functions
     "build_project_context_message",
