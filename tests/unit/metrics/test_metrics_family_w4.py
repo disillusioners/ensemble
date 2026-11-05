@@ -81,8 +81,13 @@ def _reset_registry() -> Any:
 
 
 class _FakeCursor:
-    def __init__(self, rows_by_sql: dict[str, list[tuple[Any, ...]]]) -> None:
+    def __init__(
+        self,
+        rows_by_sql: dict[str, list[tuple[Any, ...]]],
+        executed: list[tuple[str, tuple[Any, ...]]] | None = None,
+    ) -> None:
         self._rows_by_sql = rows_by_sql
+        self._executed = executed
 
     def __enter__(self) -> "_FakeCursor":
         return self
@@ -91,6 +96,8 @@ class _FakeCursor:
         return None
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+        if self._executed is not None:
+            self._executed.append((sql, params))
         self._sql = sql
         self._rows = self._rows_by_sql.get(sql, [])
 
@@ -102,9 +109,12 @@ class _FakeConn:
     def __init__(self, rows_by_sql: dict[str, list[tuple[Any, ...]]]) -> None:
         self._rows_by_sql = rows_by_sql
         self.closed = False
+        #: every (sql, params) pair executed on this connection — the
+        #: ADVISORY-⑦ pin reads the BOUND cutoff parameter from here.
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
 
     def cursor(self) -> _FakeCursor:
-        return _FakeCursor(self._rows_by_sql)
+        return _FakeCursor(self._rows_by_sql, self.executed)
 
     def close(self) -> None:
         self.closed = True
@@ -290,6 +300,64 @@ class TestTheAdapter:
         assert w4.anomaly_reports_total.get(category="tool-failure") == 3
         assert w4.anomaly_reports_rate_limited_total.get(category="llm-provider") == 2
         assert w4.anomaly_clusters_open.get(category="performance", severity="critical") == 1
+
+    def test_the_open_clusters_cutoff_is_bound_not_hardcoded(self) -> None:
+        """ADVISORY-⑦ (code council fix cycle, 2026-11-05) — the
+        open-clusters cutoff is COMPUTED IN PYTHON from
+        ``NestReportConfig().resolve_window_seconds`` and BOUND as a
+        query parameter (the AM-4 house idiom). The SQL carries no
+        ``interval`` literal, so the resolve-window knob cannot
+        silently desync from the query."""
+        from datetime import datetime, timedelta, timezone
+
+        from daemon.config import NestReportConfig
+
+        sql = w4._ANOMALY_CLUSTERS_OPEN_SQL
+        assert "interval" not in sql.lower(), (
+            "the SQL must not hardcode an interval literal — the "
+            "window comes from the knob, as a bound parameter"
+        )
+        assert "%s" in sql
+
+        conn = _bind_fake({sql: []})
+        before = datetime.now(timezone.utc)
+        w4.adapt_f23(None)
+        after = datetime.now(timezone.utc)
+        assert conn.closed
+
+        executed = dict(
+            (sql_, params) for sql_, params in conn.executed
+        ).get(sql)
+        assert executed is not None, "the open-clusters query ran"
+        window = NestReportConfig().resolve_window_seconds
+        assert len(executed) == 1
+        (cutoff,) = executed
+        assert isinstance(cutoff, datetime)
+        # the BOUND cutoff is now - resolve_window_seconds, i.e. derived
+        # from the same knob the service's resolution sweep reads.
+        assert (
+            before - timedelta(seconds=window)
+            <= cutoff
+            <= after - timedelta(seconds=window)
+        ), (
+            f"cutoff {cutoff} is not [now-{window}s] — the parameter "
+            "is not derived from the resolve-window knob"
+        )
+
+    def test_the_cutoff_helper_derives_from_the_knob_deterministically(
+        self,
+    ) -> None:
+        """The helper half of ⑦: a fixed ``now`` + a fixed window land
+        exactly ``now - window`` — the knob flows through the helper
+        with no hidden constant."""
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 11, 5, 12, 0, 0, tzinfo=timezone.utc)
+        got = w4._open_clusters_cutoff(now=now, window_seconds=7200)
+        assert got == now - timedelta(seconds=7200)
+        assert w4._open_clusters_cutoff(now=now, window_seconds=1) == (
+            now - timedelta(seconds=1)
+        )
 
     def test_a_failing_query_is_a_rate_limited_warning_and_the_tick_survives(
         self, caplog: pytest.LogCaptureFixture

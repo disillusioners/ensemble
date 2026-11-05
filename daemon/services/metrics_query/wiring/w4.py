@@ -69,6 +69,7 @@ fix is routed to the central-metrics lane, not this one.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from daemon.services.metrics_query.wiring import db, vocab
@@ -221,11 +222,41 @@ _ANOMALY_REPORTS_RATE_LIMITED_SQL = (
     "WHERE outcome = 'rate_limited' GROUP BY category"
 )
 
+#: ADVISORY-⑦ (code council fix cycle, 2026-11-05): the open-clusters
+#: cutoff is COMPUTED IN PYTHON from ``NestReportConfig().
+#: resolve_window_seconds`` and BOUND as a query parameter — the SQL
+#: carries no ``interval`` literal, so the knob cannot silently desync
+#: from the query (the pre-fix shape hardcoded ``interval '1 hour'``,
+#: decoupled from the knob).
 _ANOMALY_CLUSTERS_OPEN_SQL = (
     "SELECT category, max_severity, COUNT(*) FROM anomaly_clusters "
-    "WHERE last_report_at::timestamptz >= now() - interval '1 hour' "
+    "WHERE last_report_at::timestamptz >= %s "
     "GROUP BY category, max_severity"
 )
+
+
+def _open_clusters_cutoff(
+    now: datetime | None = None,
+    window_seconds: int | None = None,
+) -> datetime:
+    """The open-clusters cutoff — derived from the resolve-window knob.
+
+    AM-4: the cutoff is computed in Python (single source:
+    ``NestReportConfig().resolve_window_seconds`` — the same knob the
+    anomaly service's resolution sweep reads) and bound as a parameter
+    by :func:`adapt_f23`.  The import is LAZY so ``daemon.config``
+    stays off the wiring package's import graph (the same discipline
+    the write-time counters use in this module).
+    """
+    from daemon.config import NestReportConfig  # LAZY (see docstring)
+
+    window = (
+        window_seconds
+        if window_seconds is not None
+        else NestReportConfig().resolve_window_seconds
+    )
+    moment = now or datetime.now(timezone.utc)
+    return moment - timedelta(seconds=window)
 
 
 def adapt_f23(sampler: Any) -> None:
@@ -253,7 +284,11 @@ def adapt_f23(sampler: Any) -> None:
     ) as conn:
         report_rows = db.fetch_rows(conn, _ANOMALY_REPORTS_ACCEPTED_SQL)
         limited_rows = db.fetch_rows(conn, _ANOMALY_REPORTS_RATE_LIMITED_SQL)
-        open_rows = db.fetch_rows(conn, _ANOMALY_CLUSTERS_OPEN_SQL)
+        open_rows = db.fetch_rows(
+            conn,
+            _ANOMALY_CLUSTERS_OPEN_SQL,
+            params=(_open_clusters_cutoff(),),
+        )
 
     # AM-2d — the RAW stored token reaches ``.set()``; the registry
     # folds.  There is NO ``token not in vocab.ANOMALY_CATEGORIES``
