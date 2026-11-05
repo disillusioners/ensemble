@@ -830,7 +830,7 @@ class MemoirRepository:
         No side table: the column's emptiness is the queue (AM-30).
         """
         with Session(self.engine) as session:
-            stmt = select(MemoirEpisode).where(MemoirEpisode.embedding.is_(None))
+            stmt = select(MemoirEpisode).where(MemoirEpisode.embedding.is_(None)).where(MemoirEpisode.embedded_at.is_(None))
             if agent_id:
                 stmt = stmt.where(MemoirEpisode.agent_id == agent_id)
             stmt = stmt.order_by(

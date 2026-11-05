@@ -216,3 +216,63 @@ def test_the_runbook_carries_the_requeue_procedure():
     assert re.search(r"ENSEMBLE_MEMOIR_EMBEDDING_TICK_S", runbook)
     assert "[MemoirEmbed]" in runbook  # the tick line is documented
     assert TERMINAL_ERROR_MARKER in runbook  # the terminal marker is documented
+
+
+
+# ── phase 7 ITEM 1: semantic-ON fused result ─────────────────────────────
+
+
+async def test_phase7_semantic_on_returns_fused_result(repo):
+    """ITEM 1: a service with a working query embedder reports semantic=on
+    and an active model in the footer (the semantic lane is live)."""
+    for index in range(3):
+        repo.insert_episode(
+            agent_id="ari",
+            title=f"note {index}",
+            body=f"the kubernetes rollout for service {index} completed",
+        )
+    rows = repo.fetch_latest("ari", limit=None)
+    repo.store_embedding(rows[0].id, [1.0, 0.0, 0.0], "text-embedding-3-small", 3)
+
+    from daemon.services.timestamps import now_utc
+
+    service = MemoirRetrievalService(
+        repo,
+        embedder=lambda query: [1.0, 0.0, 0.0],
+        embedding_model="text-embedding-3-small",
+        embedding_dims=3,
+        now_fn=now_utc,
+    )
+    result = service.recall("ari", "kubernetes rollout")
+    assert result.semantic_enabled is True
+    assert result.active_model == "text-embedding-3-small"
+    assert "semantic=on" in result.footer
+    assert "active_model=text-embedding-3-small" in result.footer
+
+
+async def test_phase7_semantic_down_degrades_to_lexical(repo):
+    """ITEM 1: an embedder that raises degrades to lexical-only with the
+    footer disclosing semantic=off."""
+    for index in range(3):
+        repo.insert_episode(
+            agent_id="ari",
+            title=f"note {index}",
+            body=f"the kubernetes rollout for service {index} completed",
+        )
+
+    def _raising(query):
+        raise RuntimeError("embedder down")
+
+    from daemon.services.timestamps import now_utc
+
+    service = MemoirRetrievalService(
+        repo,
+        embedder=_raising,
+        embedding_model="text-embedding-3-small",
+        embedding_dims=3,
+        now_fn=now_utc,
+    )
+    result = service.recall("ari", "kubernetes rollout")
+    assert result.semantic_enabled is False
+    assert "semantic=off" in result.footer
+    assert len(result.episodes) == 3
