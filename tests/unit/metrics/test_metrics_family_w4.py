@@ -129,6 +129,20 @@ class TestTheRegistration:
         for metric in metrics:
             assert metric.cluster if hasattr(metric, "cluster") else True
 
+    def test_the_family_is_wired_into_the_sampler(self) -> None:
+        """M-3b — the family is not merely REGISTERED: its pull adapter
+        is WIRED (the sampler's stage A runs it).
+
+        A family that registers its metrics but never wires its adapter
+        renders NO series — the F1/F3/F6 "dark family" trap.  This pin
+        is the structural half of the publish assertion below.
+        """
+        from daemon.services.metrics_query.wiring.registry import (
+            registered_pull_adapter_families,
+        )
+
+        assert "F23" in registered_pull_adapter_families()
+
     def test_the_family_carries_the_cluster_and_verdict(self) -> None:
         from daemon.services.metrics_query.wiring.registry import registered_families
 

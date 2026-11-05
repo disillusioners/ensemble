@@ -189,6 +189,11 @@ class TestTheReadPathPurity:
         for forbidden in (
             "manager.engine",
             ".engine",
+            # the STRING form too — ``getattr(manager, "engine", None)``
+            # never writes "manager.engine", so the attribute-name ban
+            # alone would let the raw-handle read slip past (the M-3c
+            # mutation's exact shape).
+            '"engine"',
             "AnomalyRepository",
             "session.exec",
             "httpx",
