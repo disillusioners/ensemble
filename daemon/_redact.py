@@ -133,13 +133,23 @@ _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(\S+)")
 
 # 3. The keyword FAMILY — ``api_key`` / ``token`` / ``password`` /
 #    ``secret`` / ``access_key`` / ``credential`` / ``pwd`` /
-#    ``private_key`` (the W2 council widening, 2026-11-05: the three
-#    additions mirror ``env_key_policy``'s SECRET_MARKER_WORDS — every
-#    SECRET-SHAPED word it recognizes, carried over; the non-secret-
-#    shaped ``AUTH``/``PRIVATE``-bare words are deliberately NOT),
-#    each with an OPTIONAL QUOTE on either
-#    side of the name and a TRAILING WORD SEGMENT (R-a: the keyword
-#    masks the FAMILY — ``secret_note`` / ``password_hint`` /
+#    ``private_key`` (the W2 council widening, 2026-11-05) PLUS the
+#    SUFFIX-ANCHORED ``*_key`` / ``*_auth`` class (Condition B, code
+#    council delta 2026-11-05: the bare-KEY word class measured
+#    UNMASKED — ``encryption_key`` / ``SIGNING_KEY`` / ``auth_key`` /
+#    ``ENCRYPTION_KEY=`` / ``SSH_KEY=`` / ``MCP_AUTH=``).
+#    The suffix anchor is DELIBERATE: ``monkey`` / ``keyword`` /
+#    ``primary key: id`` stay CLEAR (the anchor needs the underscore
+#    separator), so the widening is fail-safe without destroying
+#    diagnostic value.  NOTE the anchor is NARROWER than
+#    ``env_key_policy``'s substring test (which classifies ``monkey``
+#    as secret-shaped): the masker keeps diagnostics readable, the
+#    write/read policy keeps the surface closed.  A bare ``key`` /
+#    ``auth`` / ``private`` word is NOT carried (it would mask
+#    ``auth flow`` / ``private channel``).
+#    Each family member carries an OPTIONAL QUOTE on either side of
+#    the name and a TRAILING WORD SEGMENT (R-a: the keyword masks the
+#    FAMILY — ``secret_note`` / ``password_hint`` /
 #    ``client_secret_id`` are all masked; over-masking is the fail-safe
 #    direction).
 #
@@ -153,7 +163,8 @@ _KEYWORD_SECRET_RE = re.compile(
     r"(?i)"
     r"([\"']?)"                                            # 1: optional opening quote
     r"([A-Za-z0-9_]*"                                      # 2: FULL key name
-    r"(?:api[_-]?key|token|password|secret|access[_-]?key|credential|pwd|private[_-]?key)"
+    r"(?:api[_-]?key|token|password|secret|access[_-]?key|credential|pwd|private[_-]?key"
+    r"|_key|_auth)"
     r"[a-z_]*)"
     r"([\"']?\s*[:=]\s*)"                                  # 3: closing quote + separator
     r"(\"[^\"]*\"|'[^']*'|\S+)"                            # 4: the value
@@ -168,6 +179,11 @@ _QUERY_SECRET_RE = re.compile(
 #    ``*_PASSWORD=`` / ``*_SECRET=`` / ``*_CREDENTIAL=`` / ``*_PWD=`` /
 #    ``*_PRIVATE_KEY=`` (the W2 council widening — the same three
 #    secret-shaped words the keyword FAMILY gained).
+#    REDUNDANT-BY-CONSTRUCTION (code-council delta, 2026-11-05): the
+#    keyword FAMILY above already matches the env form (a
+#    case-insensitive name followed by ``=``), so this branch normally
+#    never fires — it is kept as a second, narrower net and must stay
+#    in sync with the family it mirrors.
 _ENV_SECRET_RE = re.compile(
     r"(?i)([A-Za-z0-9_]*_(?:API_KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL|PWD|PRIVATE_KEY)\s*=\s*)(\S+)"
 )
@@ -228,13 +244,19 @@ def redact_secret_shapes(text: object, limit: int = 200) -> str:
     2. ``Bearer <token>``.
     3. The keyword FAMILY (``api_key`` / ``token`` / ``password`` /
        ``secret`` / ``access_key`` / ``credential`` / ``pwd`` /
-       ``private_key``, with an optional quote on either
+       ``private_key`` PLUS the suffix-anchored ``*_key`` / ``*_auth``
+       class — ``encryption_key`` / ``SIGNING_KEY`` / ``auth_key`` /
+       ``SSH_KEY`` / ``MCP_AUTH`` — while ``monkey`` / ``keyword`` /
+       ``primary key: id`` stay clear; with an optional quote on either
        side of the name and a trailing word segment) — the value is
        masked WHOLE, including a quoted multi-word passphrase (E1).
     4. URL query-parameter secrets.
     5. Environment-variable shapes (``*_API_KEY=`` / ``*_TOKEN=`` /
        ``*_PASSWORD=`` / ``*_SECRET=`` / ``*_CREDENTIAL=`` /
-       ``*_PWD=`` / ``*_PRIVATE_KEY=``).
+       ``*_PWD=`` / ``*_PRIVATE_KEY=``). Defence-in-depth: the keyword
+       FAMILY already matches the env form (case-insensitive name +
+       ``=``), so this branch is redundant-by-construction for every
+       name the family covers — kept as a second, narrower net.
 
     NOT masked (E3): the token-metering diagnostics — ``max_tokens``,
     ``input_tokens``, ``output_tokens``, ``token_budget``,

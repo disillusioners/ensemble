@@ -453,16 +453,45 @@ class TestTheScrubPipeline:
         )
         assert "abc123XYZ" not in scrub_text("SERVICE_PWD=abc123XYZ!", 200)
 
+    def test_the_secret_shape_masker_masks_the_bare_key_suffix_class(self) -> None:
+        """Condition B (code-council delta, 2026-11-05) — the bare-KEY
+        word class measured UNMASKED: ``encryption_key`` / ``SIGNING_KEY``
+        / ``auth_key`` in prose, and the env form (``ENCRYPTION_KEY=`` /
+        ``SSH_KEY=`` / ``MCP_AUTH=``). The widening is SUFFIX-ANCHORED
+        (``*_key`` / ``*_auth``), so the benign diagnostics stay clear
+        (see the no-over-mask test)."""
+        assert "s3cr3t-key-1" not in scrub_text(
+            "encryption_key = s3cr3t-key-1", 200
+        )
+        assert "s3cr3t-key-2" not in scrub_text(
+            '{"signing_key": "s3cr3t-key-2"}', 200
+        )
+        assert "s3cr3t-key-3" not in scrub_text("auth_key = s3cr3t-key-3", 200)
+        assert "s3cr3t-key-4" not in scrub_text(
+            "ENCRYPTION_KEY=s3cr3t-key-4", 500
+        )
+        assert "s3cr3t-key-5" not in scrub_text("SSH_KEY=s3cr3t-key-5", 500)
+        assert "s3cr3t-auth-6" not in scrub_text("MCP_AUTH=s3cr3t-auth-6", 500)
+
     def test_the_widened_family_does_not_mask_secret_free_prose(self) -> None:
         """The no-over-mask probes for the W2 words: prose carrying the
         new words in a NON-secret shape (no ``[:=]`` separator after
         the name) stays clear. The separator requirement plus the E3
         denylist ARE the over-masking guards — masking these would
-        destroy the excerpt's diagnostic value, not protect it."""
+        destroy the excerpt's diagnostic value, not protect it.
+
+        Condition B adds the SUFFIX-ANCHOR probes: ``monkey`` and
+        ``keyword`` carry the KEY letters WITHOUT the underscore
+        separator, and ``primary key: id`` is a bare two-word phrase —
+        all three must stay clear, which is what makes the ``*_key``
+        widening fail-safe rather than destructive."""
         for text in (
             "my credentials are current",
             "the pwd guidance was updated",
             "private key rotation is scheduled",
+            "the monkey escaped the enclosure",
+            "keyword search is slow today",
+            "primary key: id",
         ):
             assert scrub_text(text, 200) == text
 
