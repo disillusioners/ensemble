@@ -146,6 +146,8 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+from daemon._redact import redact_exc_str
+
 from ._tool_registry import register_tool_category
 from daemon.repositories.anomaly.models import OUTCOME_UNCLUSTERED
 from daemon.services.anomaly_service import (
@@ -501,7 +503,7 @@ def create_nest_report_tools(
             logger.warning(
                 "report_anomaly persist failed for agent type %r: %s",
                 caller_agent_id,
-                exc,
+                redact_exc_str(exc, limit=200),
             )
             return _refusal(
                 "report_anomaly",

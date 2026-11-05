@@ -48,6 +48,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+from daemon._redact import redact_exc_str
 from daemon.auth.decorators import scope_required
 from daemon.services.metrics_query.envelope import decode_cursor, encode_cursor
 
@@ -339,7 +340,9 @@ async def list_nest_report_clusters(
     except ValueError as exc:
         raise _err(400, _ERR_BAD_REQUEST, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — the route never 500s the door
-        logger.warning("nest-reports clusters failed: %s", exc)
+        logger.warning(
+            "nest-reports clusters failed: %s", redact_exc_str(exc, limit=200)
+        )
         raise _err(
             503,
             _ERR_UNAVAILABLE,
@@ -410,7 +413,9 @@ async def get_nest_report_cluster(cluster_id: str, request: Request) -> Any:
     except ValueError as exc:
         raise _err(400, _ERR_BAD_REQUEST, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — the route never 500s the door
-        logger.warning("nest-reports cluster detail failed: %s", exc)
+        logger.warning(
+            "nest-reports cluster detail failed: %s", redact_exc_str(exc, limit=200)
+        )
         raise _err(
             503,
             _ERR_UNAVAILABLE,

@@ -81,6 +81,7 @@ from typing import Annotated, Any
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from daemon._redact import redact_exc_str
 from daemon.services.metrics_query.constants import (
     RESPONSE_BYTE_CEILING,
     WINDOW_SECONDS,
@@ -475,7 +476,9 @@ def create_nest_report_read_tools(
                 str(exc),
             )
         except Exception as exc:  # noqa: BLE001 — tools never raise
-            logger.warning("anomaly_clusters failed: %s", exc)
+            logger.warning(
+                "anomaly_clusters failed: %s", redact_exc_str(exc, limit=200)
+            )
             return _error(f"anomaly_clusters failed: {exc}")
 
     class AnomalyReportDetailInput(BaseModel):
@@ -586,7 +589,9 @@ def create_nest_report_read_tools(
                 str(exc),
             )
         except Exception as exc:  # noqa: BLE001 — tools never raise
-            logger.warning("anomaly_report_detail failed: %s", exc)
+            logger.warning(
+                "anomaly_report_detail failed: %s", redact_exc_str(exc, limit=200)
+            )
             return _error(f"anomaly_report_detail failed: {exc}")
 
     return [anomaly_clusters, anomaly_report_detail]
