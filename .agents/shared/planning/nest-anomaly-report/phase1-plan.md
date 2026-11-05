@@ -79,7 +79,7 @@ e.g. `daemon/tools/filesystem.py:103`). Tokens, checked in this order:
 | 1 | `tool-disabled` | kill-switch `ENSEMBLE_NEST_REPORT_ENABLED=false` or config absent, OR the writer's agent-type id is on the AM-16 deny list `ENSEMBLE_NEST_REPORT_DISABLED_AGENTS` (comma-separated; checked PRE-rate-gate; that writer only; restart-required, documented) | no |
 | 2 | `invalid-input` | empty description; severity out of set; non-string arg types | no (authored-content validation; nothing persisted) |
 | 3 | `rate-limited` | phase 2 (R5b); ledger row ONLY up to `refusal_ledger_max_per_agent` (default **10**/10min — AM-9): beyond it the SAME envelope returns with **NO ledger row** (the metric is the scalable signal; the ledger is for morning review) | yes (phase 2), CAPPED: outcome=rate_limited, harvest columns NULL, cluster_id NULL |
-| 4 | `capacity-exhausted` | **AM-9** pre-INSERT caps exceeded: `max_rows_global` (**50,000**) or `max_rows_per_tree_root` (**2,000**) (served by `idx_anomaly_reports_outcome_created` / `idx_anomaly_reports_tree_root_created`); also the AM-9 pre-harvest global ceiling `max_accepted_per_hour_global` (**5,000**/hour, capacity family); **F-1: the global TOTAL-row bound (accepted + refused) fires HERE on the refusal path too — a rate-limited call at/over the ceiling returns `capacity-exhausted`, NO ledger row** | **no ledger row** |
+| 4 | `capacity-exhausted` | **AM-9 + C3** ceilings: `max_rows_global` (**50,000** — the nest-wide wall; TOTAL rows accepted + refused, served by `idx_anomaly_reports_outcome_created`) or the pre-harvest global ceiling `max_accepted_per_hour_global` (**1,500**/hour — D3, fold round 6; capacity family). **F-1: the global TOTAL-row bound fires HERE on the refusal path too — a rate-limited call at/over the ceiling returns `capacity-exhausted`, NO ledger row.** **C3: `max_rows_per_tree_root` (2,000) NEVER refuses — it SHEDS (oldest-first trim, C3(ii))** | **no ledger row** |
 | 5 | `persist-failed` | INSERT failed; ONE minimal retry row (evidence NULL, outcome=persist-failed, refusal_reason=error token); if that also fails → refusal + WARN, no ledger | yes (best-effort) |
 
 Success envelope (single string, field-per-line):
@@ -118,9 +118,9 @@ naming convention (`NotifyUserConfig` docstring verbatim precedent); the kill-sw
 | `retention_days` | 30 | `..._RETENTION_DAYS` | R6 |
 | `retention_batch_size` | 500 | `..._RETENTION_BATCH_SIZE` | R6 batched DELETE |
 | `refusal_ledger_max_per_agent` | 10 | `..._REFUSAL_LEDGER_MAX_PER_AGENT` | AM-9 flood fence (no-row-beyond) |
-| `max_rows_global` | 50000 | `..._MAX_ROWS_GLOBAL` | AM-9 **SINGLE TOTAL-row bound (accepted + refused — F-1); also gates the refusal-ledger INSERT** |
-| `max_rows_per_tree_root` | 2000 | `..._MAX_ROWS_PER_TREE_ROOT` | AM-9 pre-INSERT cap (accept path only — inapplicable to NULL-tree_root refusal rows, F-1) |
-| `max_accepted_per_hour_global` | 5000 | `..._MAX_ACCEPTED_PER_HOUR_GLOBAL` | AM-9 pre-harvest ceiling |
+| `max_rows_global` | 50000 | `..._MAX_ROWS_GLOBAL` | AM-9 **SINGLE TOTAL-row bound (accepted + refused — F-1); also gates the refusal-ledger INSERT**; C3: the nest-wide WALL (refuses with `capacity-exhausted` + F23 counter) |
+| `max_rows_per_tree_root` | 2000 | `..._MAX_ROWS_PER_TREE_ROOT` | **C3(ii) — per-tree SHED threshold, NOT a refusal: oldest-first batched trim + AM-6 per-cluster decrements; the channel never goes dark for one tree** |
+| `max_accepted_per_hour_global` | 1500 | `..._MAX_ACCEPTED_PER_HOUR_GLOBAL` | AM-9 pre-harvest ceiling; **D3 (fold round 6): 5,000→2,000→1,500. Rationale against the REAL key count: the budget key is the agent TYPE — 36 DISTINCT budget keys (41 dirs = 36 base + 5 `[v2]` mirrors resolving to the base id via `version_tag`, AM-10) → maximal steady rate = 36 × (30 minor/major + 20 critical) = 1,800/h. 1,500 binds in STEADY state; the knob is an OPERATOR BRAKE, not a security fence (the per-type caps remain the inner brake)** |
 | `disabled_agents` | `""` | `ENSEMBLE_NEST_REPORT_DISABLED_AGENTS` (special full-env form per AM-16) | comma-separated agent-type ids; per-writer deny; restart-required |
 | `max_board_items_per_tree_root_per_hour` | 3 | `..._MAX_BOARD_ITEMS_PER_TREE_ROOT_PER_HOUR` | AM-13 (enforced in phase 2's board sink) |
 | `max_board_items_per_hour_global` | 20 | `..._MAX_BOARD_ITEMS_PER_HOUR_GLOBAL` | AM-13 (enforced in phase 2's board sink); **W-6: 50→20 — 20/h ⇒ 480/day matches the architect's stated harm bound and trips under a uniform multi-tree flood** |
@@ -211,20 +211,23 @@ unique is impossible because resolution is DERIVED (no open flag exists to index
 |---|---|---|---|---|
 | ancestor chain + tree_root | `daemon/repositories/instance/repository.py:1217 get_ancestor_ids` (cap `_MAX_TRAVERSAL_DEPTH=256`, `:50`) | 1 off-loop call | ≤256 hops; returns **parent→root, self excluded** (advisory 7); chain truncated at cap, tree_root = **last element of the chain, or the reporter itself when the chain is empty** + WARN in log (not in report) | exception → chain `[]`, tree_root NULL, report still persists (evidence-loss ≠ refusal) |
 | agent labels | `repository.py:1237 get_agent_ids_for` (ONE query) | 1 off-loop call | chain length | exception → `""` entries; labels never block |
-| job/mission/dispatch_chain | reporter's active task row lookup; metadata key `job_queue_service.py:82`, minted `:1461-1463`, read `job_processor.py:57` | 1 off-loop query | one row | no active task → all NULL |
-| transcript excerpt | **AM-8a SEAM SWAP** — the bounded `instance_read.py:889-909` pattern: `manager.checkpointer.raw_saver.aget(...)` + `messages[-N:]` (N ≤ 20, `MAX_LAST_MESSAGES` precedent `instance_read.py:154`) + per-message truncation. The plan's former `get_instance_messages` seam is WRONG (full materialize + full serialize + full prompt reconstruction; adjacent to the O(N²) family). The read cap is enforced AT THE READ SEAM — M-1g (remove the cap) must red against the seam, not a post-read trim. **SKIPPED ENTIRELY for minor severity** (AM-8e: no harvest, no column, no cost — excerpt persists for major + critical ONLY) | 1 off-loop call (`aget` materializes checkpoint state; only the tail slice is kept) | ≤20 messages sliced, per-message truncation, ≤500 chars/part, ≤2000 total | read fail/empty → excerpt NULL (fail-closed rules in the scrub section apply) |
+| **(scope ruling, C6 — fold round 5)** | "instance tree" in this lane = the **ANCESTOR chain (parent→root, self EXCLUDED)** — the causal path UPWARD from the reporter. The SUBTREE reading (descendants/siblings) was considered and **REJECTED** — a subtree harvest would grow this table AND the off-loop ceiling. Descendants/siblings are NOT harvested. | no extra call | — | — |
+| job/mission/dispatch_chain | **C4 (fold round 5) — the REAL 3-table chain: `Task` → `JobItem` → `MissionCommission`.** Seams: `daemon/repositories/task/repository.py:739 find_running_by_instance` (the reporter's running Task) → `daemon/repositories/job_queue/repository.py:626 get_active_by_instance` (the JobItem — `job_id` at `job_queue/models.py:317`, `job_metadata` at `:363` where `DISPATCH_CHAIN_KEY` lives, minted `job_queue_service.py:1461-1463`, read `job_processor.py:57`) → `daemon/repositories/mission_record/repository.py:137 find_outstanding_commission_for_worker` (MissionCommission, `mission_record/models.py:383-390`). JOIN ORDER as listed; SHORT-CIRCUITED (no running task ⇒ skip the rest) | ≤3 off-loop queries, 3 tables | no running task ⇒ all NULL; partial chain ⇒ NULLs for the missing limbs |
+| transcript excerpt | **AM-8a SEAM SWAP** — the bounded `instance_read.py:889-909` pattern: `manager.checkpointer.raw_saver.aget(...)` + `messages[-N:]` (N ≤ 20, `MAX_LAST_MESSAGES` precedent `instance_read.py:154`) + per-message truncation. The plan's former `get_instance_messages` seam is WRONG (full materialize + full serialize + full prompt reconstruction; adjacent to the O(N²) family). The read cap is enforced AT THE READ SEAM — M-1g (remove the cap) must red against the seam, not a post-read trim. **SKIPPED ENTIRELY for minor severity** (AM-8e: no harvest, no column, no cost — excerpt persists for major + critical ONLY) | 1 off-loop call (`aget` materializes checkpoint state; only the tail slice is kept) | **SELECTION RULE (C5, fold round 5 — SINGULAR, identical to decisions.md R6): "the excerpt = the last ≤5 ERROR-BEARING tool messages in the turn, selected from a bounded scan window of the last ≤20 messages of that turn's transcript (the AM-8a read cap); each excerpt ≤500 chars, total ≤2000."** Error-bearing predicate (D1 fold round 6 + E2 fold round 7 — the house ASSIGNMENT form, verbatim from `daemon/services/watchover_service.py:114`: `msg_type = getattr(msg, "type", None) or getattr(msg, "role", None)` THEN `msg_type == "tool"`). LangChain `ToolMessage`s carry `.type`, NOT `.role` (the former `role == tool` predicate never matched ⇒ empty excerpt), and the one-expression form WITHOUT outer parentheses parses as `A or (B == "tool")` — the `.type` STRING short-circuits, degenerating the tool test into truthiness and admitting Human/AI prose carrying "ERROR:" into the excerpt (a trust-boundary break against "auto-filed — unverified agent prose"). PLANNER RULING: use the two-line ASSIGNMENT form — it is the cited source of truth and removes the precedence ambiguity entirely. `msg_type == "tool"` AND the content carries the house's typed error shape — `ERROR:` (`daemon/tools/filesystem.py:175/:181/:190`) and/or `Error: {label} REFUSED — reason={token}: {message}` (`daemon/tools/instance_ops.py:256`, `instance_read.py:221`). The scan window IS the same ≤20-message read cap — no extra cost. **POSITIVE-SELECTION LEG (D1b) — `M-1h`:** plant a tool message carrying `Error: … REFUSED — reason=…` and/or `ERROR:` ⇒ it LANDS in the excerpt (MUTATION: invert the predicate ⇒ RED). **NEGATIVE-SELECTION LEG (E2b) — `M-1i`:** a HumanMessage AND an AIMessage carrying "ERROR:" in PROSE must NOT land (MUTATION: drop the `msg_type == "tool"` test ⇒ RED — the pre-E2 collapsed form fails this leg). The phase-6 leg table references both | read fail/empty → excerpt NULL (fail-closed rules in the scrub section apply) |
 | registry snapshot ref | `manager.metrics_query_provider.families()` per the provider discipline (`metrics_read.py:44-49`) — hash `json.dumps(summary, sort_keys=True)` → sha256 + captured_at; payloads NEVER copied (holds — `provider.py:211`/`checkpoint_metrics.py:1067-1069`) | **AM-8b: called IN-LINE, OUTSIDE any offload worker** — it takes the REGISTRY-LEVEL lock; running it inside a worker holds a scarce 25-slot worker behind that lock (reentrancy guard family `db_offload.py:379-385`) | one hash + one timestamp | provider absent/raises → both NULL + WARN |
 | wedge cross-link | `daemon/repositories/wedge_captures/repository.py:94 list_recent(limit=50)`; match `captured_at` within ±`wedge_match_window_seconds` AND same `boot_epoch` — **AM-8d: `boot_epoch` canonicalized to NAIVE-UTC on BOTH sides before any compare** (the wedge subsystem has TWO shapes: watchdog naive `wedge_capture/watchdog.py:591`; boot-record `isoformat()+'Z'` `boot_record.py:122-133`); store capture_id refs ONLY | 1 off-loop query (index-served) | ≤50 scanned; ≤ matched ids stored | repo absent → NULL |
 | boot epoch | `daemon/services/boot_epoch.py:70 get_boot_epoch()` — **AM-8d: pinned to the NAIVE-UTC form (no offset — `:70-75`, the watchdog writer's shape)**; stored as-is; NEVER compared against `+00:00`/`Z`-shaped values as raw strings | free (O(1) in-RAM) | one value | None → NULL |
 | timestamps | local `_utc_now_iso` (AM-4 fixed-width form) | free | — | — |
 
-**Honest cost ceiling (AM-8c — supersedes the former "≤4 round-trips" claim): 5 off-loop
-CALLS.** The ancestor walk is **O(chain-depth ≤ 256) SEQUENTIAL PK reads inside ONE call**
-(`instance/repository.py:1217-1235` — disclosed, NOT one round trip); agent labels 1;
-task-row lookup 1; excerpt `aget` 1; wedge `list_recent` 1 (index-served); `boot_epoch`
-O(1) in-RAM; `families()` in-line off-worker. Every harvest failure degrades THAT field to
-NULL and the report still persists — evidence harvest NEVER refuses a report (only tokens
-1/2/4 refuse, pre-harvest). **AM-14/NR-10 disclosure:** ~5 offloads/report against the
+**Honest cost ceiling (AM-8c, re-derived per C4 — supersedes the former "≤4 round-trips"
+claim and the interim "5 calls" figure): ~7 off-loop CALLS.** The ancestor walk is
+**O(chain-depth ≤ 256) SEQUENTIAL PK reads inside ONE call** (`instance/repository.py:1217-1235`
+— disclosed, NOT one round trip); agent labels 1; **the C4 chain Task → JobItem →
+MissionCommission ≈ 3 queries on 3 tables (short-circuited)**; excerpt `aget` 1; wedge
+`list_recent` 1 (index-served); `boot_epoch` O(1) in-RAM; `families()` in-line off-worker.
+Every harvest failure degrades THAT field to NULL and the report still persists — evidence
+harvest NEVER refuses a report (only tokens 1/2/4 refuse, pre-harvest). **AM-14/NR-10
+disclosure (UPDATED by C4):** ~7 offloads/report against the
 25-slot strict-admission executor — under a burst, offload-gate refusal ⇒ evidence fields
 NULL, report still accepted (CATEGORY_DOC disclosure; systemic pressure → the
 DB-pool/offload lane).
@@ -235,9 +238,43 @@ For every persisted TEXT (description, suspected_cause, excerpt parts):
 0. **`redact_secret_shapes(text, limit)` (AM-11, NEW additive function in
    `daemon/_redact.py`)** — masks the empirically-surviving shapes: `sk-[A-Za-z0-9_\-]{8,}`,
    `Bearer\s+\S+`, `(?i)(api[_-]?key|token|password|secret|access[_-]?key)\s*[:=]\s*\S+`,
-   `(?i)\?[^\s]*(key|token|secret)=[^&\s]+`, and env-var shapes `*_API_KEY=` / `*_TOKEN=` /
-   `*_PASSWORD=` / `*_SECRET=`. Applied FIRST. `redact_exc_str` itself is UNTOUCHED (its
-   callers are pinned).
+   **the JSON key/value shape (C1, fold round 5 — CRITICAL: allow an OPTIONAL QUOTE between
+   the keyword and the separator and mask the OPTIONAL-QUOTED value; **R-a, fold round 6:
+   the keyword alternation also carries a TRAILING WORD SEGMENT `[a-z_]*` so the keyword
+   FAMILY masks (`{"secret_note": …}`, `{"password_hint": …}`, `{"client_secret_id": …}` —
+   the C1 form alone masked only a keyword FINAL before the separator), erring toward
+   OVER-masking (the fail-safe direction); PIN LEG for the widened family: the three
+   suffix examples ARE masked while legitimate prose ("the token expired", "password
+   policy") stays untouched (the over-match probe — mutation: delete `[a-z_]*` ⇒ the
+   suffix legs RED)**:
+   `(?i)["']?(api[_-]?key|token|password|secret|access[_-]?key)[a-z_]*["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)`
+   — covers `{"password": "hunter2"}`, `{"postgres_password": "s3cr3t"}` (the alternation
+   may match as a SUFFIX, no left boundary required), `{"token": "abc123XYZ"}`, which the
+   un-quoted keyword pattern and the house `_KV_DSN_RE` (`daemon/_redact.py:60-65`) both
+   MISS. **E1 (fold round 7 — the passphrase tail): the value class is QUOTE-AWARE —
+   `(?:"[^"]*"|'[^']*'|\S+)` — replacing the former whitespace-excluding
+   `["']?[^"'\s,}]+`, which masked a quoted value only up to its first SPACE (a
+   PASSPHRASE — the most common DB/API credential shape — leaked its tail in cleartext:
+   `{"password": "correct horse battery staple"}` → `{*** horse battery staple}`,
+   `{"db_password": "my secret phrase"}` → `{"db_*** secret phrase"}`,
+   `password="two word secret"` → `*** word secret"`); with the quote-aware class the
+   WHOLE quoted value is masked and the unquoted form is unchanged. E1 is a CLOSURE GAP
+   in the C1 class — the same fence, an unclosed value shape — NOT a new class.**
+   **E3 (fold round 7 — diagnostic preservation): the widened keyword family EXCLUDES the
+   benign token-metering names explicitly** — `max_tokens`, `input_tokens`,
+   `output_tokens`, `token_budget`, `token_count`, and the `*_tokens` family — a keyword
+   match whose FULL name hits this BENIGN DENYLIST is NOT masked (those fields are the
+   text of a token-exhaustion error — exactly what the excerpt exists to capture; the
+   house doctrine `daemon/_redact.py:8-11` masks "only patterns that are unambiguous
+   database identifiers" to preserve diagnostic value). The over-match probe covers the
+   token-metering names (not just prose phrases) so a regression REDs.**
+   The remaining shapes (unchanged): `(?i)\?[^\s]*(key|token|secret)=[^&\s]+` (URL query
+   params), and env-var shapes `*_API_KEY=` / `*_TOKEN=` / `*_PASSWORD=` / `*_SECRET=`.
+   Applied FIRST. `redact_exc_str` itself is UNTOUCHED (its callers are pinned).
+   **SOLE-DEFENCE statement (C1c):** for a NON-STORED secret the pattern masker is the ONLY
+   defence — the exact-match scrubber knows only stored values, so scrubber PRESENCE is
+   irrelevant to that class; the excerpt fail-closed posture (below) must NOT be read as
+   covering it.
 1. `redact_exc_str(text, limit=<field cap>)` — `daemon/_redact.py:74-98`; pure shape
    masker (URI netloc / libpq DSN / KV DSN / IPv4:port); never raises; limit AFTER redaction.
 2. `scrub_enqueued_body(text, actor="nest_report")` —
@@ -252,22 +289,38 @@ the **EXCERPT column flips FAIL-CLOSED** (persist NULL + WARN) — it is raw too
 pattern masker is the always-on floor) + WARN; the CATEGORY_DOC disclosure states both
 legs. Scrub-gap seams (nomask `system.py:357-422`, env-inherit `bash.py:287-302`,
 `proc_tools.py:496`) remain known-open, disclosed in decisions R6, NOT fixed here.
-**Planted-secret pin (AM-11.4): plants a NON-STORED shape** (e.g. `sk-proj-…` inside a
-transcript tool message) — a `secret_store`-planted value is satisfied by the exact-match
-path and proves nothing about the real risk; mutation legs per the new pattern.
+**Planted-secret pin (AM-11.4 + C1b, fold round 5 + E1b, fold round 7): plants THREE NON-STORED shapes** —
+(i) `sk-proj-…` inside a transcript tool message, (ii) a **JSON-shaped secret**
+(`{"password": "hunter2"}`-form) inside the same transcript, AND (iii) a **MULTI-WORD
+QUOTED (passphrase) value** — e.g. `{"password": "correct horse battery staple"}` — with
+the assertion that the **FULL value** is absent from EVERY persisted column (the needle
+must be the FULL phrase: a first-word-only needle still passes on a partial mask — the
+exact hole E1 closed). **A mutation leg PER PATTERN** (delete the JSON-quote alternation →
+the JSON leg REDs; delete the quote-aware value class → the passphrase leg REDs; delete the
+`sk-` pattern → the sk leg REDs). A `secret_store`-planted value is satisfied by the
+exact-match path and proves nothing about the real risk.
 
 ## 10-Step Registration Checklist (applied; source `daemon/tools/upgrade_tools.py:150-184`)
 
 1. `daemon/tools/nest_report.py` — factory builds the `@tool` inside the closure; each
    tool carries `@register_tool_category("nest-report")` ABOVE `@tool`. CATEGORY_DOC
    header documents: purpose; the refusal ladder incl. **the AM-11 split disclosure**
-   (excerpt fail-CLOSED, description/suspected_cause fail-open on scrubber-absent);
-   **the AM-10 per-TYPE budget semantics** (agent_id = the type; instances share one
-   budget; spawning does not multiply it; key space not agent-expandable); **the AM-14
-   offload-gate pressure** (~5 offloads/report vs the 25-slot strict-admission executor;
-   burst ⇒ NULL evidence fields, report still accepted); **the AM-16 conditional
-   default-ON** (cross-ref decisions.md Leader decision (a)); closed vocabulary; severity
-   tiers.
+   (excerpt fail-CLOSED, description/suspected_cause fail-open on scrubber-absent) **+
+   the C1 sole-defence statement** (for NON-stored secrets the pattern masker is the ONLY
+   defence — scrubber presence is irrelevant to that class); **the AM-10 per-TYPE budget
+   semantics** (agent_id = the type; instances share one budget; spawning does not
+   multiply it; key space not agent-expandable); **the AM-14 offload-gate pressure** (~7
+   offloads/report per C4 vs the 25-slot strict-admission executor; burst ⇒ NULL evidence
+   fields, report still accepted); **the AM-16 conditional default-ON** (cross-ref
+   decisions.md Leader decision (a)); **the N2 bound hierarchy, named plainly**: the
+   per-tree row cap (sheds) + the global total-row ceiling (the hard nest-wide wall) are
+   the hard walls; the 1,500/h hourly knob is the early global brake (D3: an operator
+   brake, not a security fence); the per-type caps
+   are the inner brake; **the N3 concurrency caveat**: "5 per 10 min" is BEST-EFFORT under
+   concurrency — the check is read-then-insert, so two concurrent reports from one agent
+   type can both pass (not a hard invariant); **the C3 note**: the per-tree cap sheds
+   oldest-first and never refuses, so one tree cannot go dark (the durable critical record
+   is the board item); closed vocabulary; severity tiers.
 2. `daemon/tools/_tool_registry.py` CATEGORY_MODULES += `"nest-report":
    "daemon.tools.nest_report"`.
 3. `daemon/tools/_tool_registry.py` DYNAMIC_TOOL_NAMES += `{"report_anomaly"}`.

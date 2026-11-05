@@ -91,7 +91,7 @@ not evidence (the house "false-confidence pin" rule).
 | `tests/unit/test_anomaly_report_models.py` | table/column shapes; index naming `idx_<table>_<cols>`; the write-once `excerpt_sha256` + `excerpt_length` pair; the `category` closed-vocabulary column + `category_raw` preservation | **M-1a** — drop the `category_raw` column → red. **M-1b** — widen the excerpt cap by 1 byte → red |
 | `tests/unit/test_anomaly_report_scrub.py` | the planted secret is ABSENT from every persisted TEXT column; the excerpt sha256 matches the stored excerpt; `redact_exc_str` never raises (`daemon/_redact.py:74-98`); the limit is applied **after** redaction | **M-1c — swap the scrub order** (redact → cap → scrub becomes cap → redact) → red (the planted secret survives in the capped path). **M-1d** — replace `redact_exc_str` with `str(exc)` → red (an exception whose `__str__` raises would escape the never-raises contract) |
 | `tests/unit/test_anomaly_report_tool_registration.py` | the category key; the `KNOWN_TOOL_NAMES` / `DYNAMIC_TOOL_NAMES` entries; the registration-site **order** (the list-append must precede `create_help_tool` / `scan_tools_for_full_docs` / `_apply_tool_filter`, `daemon/tools/upgrade_tools.py:150-184`); the artifact drift check (`tests/unit/tools/test_tool_category_artifact.py:14-23`) | **M-1e — drop the category fold** (remove the key from the registry) → the artifact drift test reds. **M-1f — skip the artifact regen** (leave the committed artifact at 57 categories) → the drift test reds (the F-1 trap from the metrics-agent-tools lane) |
-| `tests/unit/test_anomaly_report_transcript_harvest.py` | the bounded read discipline: harvest reads are **bounded** (never an unbounded transcript walk); the harvest cost is capped per report | **M-1g — remove the read cap** → red (the O(N²) walk family of the v0.27.15 incident) |
+| `tests/unit/test_anomaly_report_transcript_harvest.py` | the bounded read discipline: harvest reads are **bounded** (never an unbounded transcript walk); the harvest cost is capped per report. **The excerpt SELECTION predicate (D1(b)/E2 — house ASSIGNMENT form):** `msg_type = getattr(msg, "type", None) or getattr(msg, "role", None)` **THEN** `msg_type == "tool"` — an **assignment followed by a separate comparison**, exactly as the house writes it (`daemon/services/watchover_service.py:114` assigns `msg_type`, `:350` compares it separately). **The parentheses-less rendering `getattr(msg, "type", None) or getattr(msg, "role", None) == "tool"` is WRONG** — Python parses it as `A or (B == "tool")`, so the `.type` **string short-circuits** the `or` and the "is a tool message" half degenerates into a truthiness test on `.type`. The typed error shapes are `ERROR:` and `Error: {label} REFUSED — reason={token}: {message}` | **M-1g — remove the read cap** → red (the O(N²) walk family of the v0.27.15 incident). **M-1h — POSITIVE SELECTION LEG** *(leg id used by phase 6; the sibling's id is pending — coordinate: phase 6 uses **M-1h** unless the sibling names one first)*: plant a tool message carrying the refusal/error shape ⇒ it **MUST land in the excerpt**; mutation: **invert the predicate** ⇒ RED. (Without this leg the excerpt would ALWAYS be empty while the contract read as satisfied — the old pack pinned only the read cap M-1g, nothing pinned the selection.) **M-1i — NEGATIVE SELECTION LEG** *(leg id used by phase 6; sibling id pending — coordinate the same way)*: a **HumanMessage** AND an **AIMessage** carrying `ERROR:` in **prose** **MUST NOT** land in the excerpt; mutation: **drop the tool-message test** ⇒ RED. **M-1h stays GREEN under that mutation** — the two legs are complementary: M-1h proves the tool message **lands**, M-1i proves non-tool messages **do not**. **Approver-executed consequence of the broken form (recorded):** it ALSO admits a HumanMessage and an AIMessage carrying `ERROR:` in prose — the agent's **OWN PROSE** and the **SYSTEM PROMPT** — which breaks the **"auto-filed — unverified agent prose" trust boundary** (the excerpt would launder agent-authored text and the system prompt into a system-shaped field). |
 
 ### Phase 2 — clustering / rate limits / board / retention
 
@@ -339,14 +339,14 @@ symlink target plus the pending-ceremony candidates.
    (`anomaly_reports`, `anomaly_clusters`) do **not** collide with any existing table (no
    `anomaly*` table exists today), but the **config-key namespace and the FE label namespace
    do**. **Per R9's `nest-` namespace, phase 1 must namespace the new kill-switch distinctly (`nest_report_*` / env surface `ENSEMBLE_NEST_REPORT_*` — e.g. `ENSEMBLE_NEST_REPORT_ENABLED`, `ENSEMBLE_NEST_REPORT_DISABLED_AGENTS`); the earlier `anomaly_report_*` form is SUPERSEDED and must not be used.** The FE tab must not reuse the resource-anomaly label. **Disclosed for the sibling phases.** *This block is the authoritative naming-collision disclosure; the release-posture section points here.*
-10. **The three allow-array pins are re-pinned in the same commit as the grant** (the ari
+9. **The three allow-array pins are re-pinned in the same commit as the grant** (the ari
     trailing set, `GAIA_TOOLS_ALLOW`, sketcher's `EXPECTED_ALLOW`) — each grows by exactly one
     entry. The sketcher's documented "no write surface" fence is **amended honestly** in the
     same commit and disclosed as a morning item.
-11. **Phase 3 and phase 5 both edit 3 `meta.json` files** (`maintenancer`, `devops`,
+10. **Phase 3 and phase 5 both edit 3 `meta.json` files** (`maintenancer`, `devops`,
     `wanderer`). The fixed order is **phase 3 first, phase 5 appends after**; the grant pin
     asserts the entry is the **last** element, so a mis-ordered array is caught mechanically.
-12. **The privileged-count literal is hardcoded as a STRING in a mutation-matrix pack.**
+11. **The privileged-count literal is hardcoded as a STRING in a mutation-matrix pack.**
     `test/packs/metrics_read_mutation_matrix_test.py:92-93` (MT-01-count-pin) plants the
     literal `"assert len(PRIVILEGED_TOOL_CATEGORIES) == 17"` as a find/replace pair against
     `tests/unit/test_board_registration.py`. When phase 3 moves the count to 18, that `find`
@@ -370,7 +370,7 @@ symlink target plus the pending-ceremony candidates.
     | AM | What it binds | The pin that must be visible at gate time |
     |---|---|---|
     | **AM-9** | flood fences — refusal-ledger cap, row caps, per-hour accepted cap, retention capacity trim | **"ledger INSERT never takes TOTAL rows above `max_rows_global`"** — the ceiling fires **ON THE REFUSAL PATH** (accepted **and** refused rows both count against the total); the **per-tree** cap is **inapplicable to NULL-`tree_root` refusal rows** and therefore is **not** part of this leg. The sibling is folding the fence itself into phase 1/2 — the leg must be visible at gate time against the landed implementation |
-    | **AM-11** | scrub hardening — `redact_secret_shapes` + fail-closed excerpt on scrubber-absent + excerpt only for major/critical | the planted-**non-stored**-secret pin + the per-pattern mutation legs |
+    | **AM-11** | scrub hardening — `redact_secret_shapes` + fail-closed excerpt on scrubber-absent + excerpt only for major/critical | the fence MUST cover the **NAMED CLASS** — the **JSON key/value secret shape** must be masked (the approver verified `{"password": "hunter2"}` / `{"postgres_password": "s3cr3t"}` / `{"token": "abc123XYZ"}` come out **UNMASKED**: the keyword pattern needs `:`/`=` immediately after the keyword and JSON puts a **quote** there, and the house `_KV_DSN_RE` misses it too). The excerpt is **RAW TOOL STDOUT** (`bash.py:1152`, 150k cap) and the exact-match scrubber knows only **STORED** secrets ⇒ for a **non-stored** secret the **pattern masker is the SOLE defence**, so the "excerpt fails closed when the scrubber is absent" posture gives **false comfort** for this class. The sibling is adding the **optional-quote JSON shape** to `redact_secret_shapes`, adding a **JSON-shaped NON-STORED** planted secret to the **AM-11.4** pin with a **mutation leg per pattern**, and stating that the pattern masker is the sole defence for non-stored secrets. **A fence that leaves the named JSON class open does NOT satisfy this gate item.** |
     | **AM-12** | projection + injection pins — list excludes `excerpt`; detail behind `?include_excerpt=true`; FE no `innerHTML`/`bypassSecurityTrust`; deterministic `top_description` | the list-has-no-`excerpt`-key pin; the FE no-innerHTML pin; the determinism pin |
     | **AM-13** | board ceilings — per-tree-root and global board-item ceilings + note-append + suppression counter | the board-ceiling pin + the suppression-counter pin |
 
@@ -387,6 +387,18 @@ symlink target plus the pending-ceremony candidates.
     (comma-separated agent-type ids; checked **pre-rate-gate** → `tool-disabled` for that writer
     only; **restart-required**, documented) — the surgical lever the whole-surface kill-switch
     lacks.
+
+13. **N5 — "one-door" here means PER-DOMAIN.** Metric-shaped data goes through the
+    `MetricsQueryProvider`; row-shaped data goes through the anomaly service. The metric-shaped
+    half remains **reachable by the ops trio via the existing metrics-read tools they already
+    hold** — no new door, no second metrics query path.
+14. **N6 — the FE tab is DARK until the user's auth enablement.** The **WRITE tool is
+    unaffected** — requirement 1 works at promote; requirement 4's FE shows the **actionable
+    empty state** until the auth enablement lands (see U-1 for the canonical recipe).
+15. **N8 — NO INTERIM PROMOTE occurs.** C2/C3 would register a live, **unrate-limited** write
+    tool until the C3 fences land, and the **per-commit smoke set does NOT check the rate
+    gates** — so the lane MUST NOT be promoted between C2 and the fences. The promote is the
+    user's ceremony, after the full C1..C9 series is green.
 
 ## Tasks
 

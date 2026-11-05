@@ -280,7 +280,27 @@ art `daemon/repositories/notify_audit/models.py:100-201`; counting index served 
   pin gains the cross-agent/global leg "ledger INSERT never takes total rows above
   `max_rows_global`" (mutation-meaningful: flood planted with the per-agent cap
   unsaturated — the ceiling must fire ON THE REFUSAL PATH).
-- **AM-10** — `agent_id` is the agent **TYPE** (`instance.py:3015-3023` docstring; threaded `instance_lifecycle.py:2144-2149/:4846-4851`; `[v2]` mirrors resolve to the base id via `version_tag`); custom agents exist only via the auth-gated REST route — the key space is NOT agent-expandable. Ruling: **KEEP the type key** — spawning does NOT multiply the budget (the fan-out attack is structurally dead); a type's instances SHARE one budget (noisy neighbour); a nest-wide critical burst past 20/hour/type is still VISIBLE (the cluster exists + the rate-limited counter spikes — itself a nest-distress signal). The `(agent_id, tree_root)` alternative **REJECTED** — it multiplies the global ceiling by tree count (an orchestrator spawning trees re-opens the flood). CATEGORY_DOC + `NestReportConfig` field docs MUST state the sharing explicitly; the critical cap stays 20/hour default (knob exists for operators).
+  — **C3 correction (fold round 5 — LIVENESS + DoS, option (a)): the per-tree cap SHEDS, it
+  never refuses; capacity refusals become OBSERVABLE.** As fenced, one tree root
+  accumulating 2,000 accepted rows (reachable at the per-type cap 5/10min ≈ 30/h ≈ 67h)
+  was blocked from reporting ENTIRELY — including criticals — until the idle-gated 30-day
+  sweep ran (the AM-15/NR-7 class), and at the global ceiling the WHOLE nest went dark with
+  NOTHING recording that it happened. FIX: (i) a `capacity-exhausted` counter joins F23 —
+  `ensemble_anomaly_capacity_exhausted_total` (the band is re-declared with it per AM-2a's
+  zero-headroom rule; the F23 REGISTRATION is phase 3's — stated dependency); (ii) the
+  per-tree cap gets a TRIM path — PLANNER RULING: a per-tree OLDEST-FIRST BATCHED TRIM
+  (shed-then-accept at insert + re-run in the maintenance job; per-cluster `report_count`
+  decrements per AM-6; the durable critical record is the BOARD item, which the trim does
+  not remove) rather than a per-tree cluster cap — the channel never goes dark for one
+  tree; the GLOBAL total-row ceiling remains the nest-wide wall (still refuses with
+  `capacity-exhausted`); (iii) `global_capacity_cap_leg` asserts the OBSERVABLE
+  CONSEQUENCE — envelope returned, NO row written, the capacity-exhausted counter
+  increments, the refusal surfaced for review (not merely the envelope shape).
+  — **N2 correction (fold round 5) + D3 correction (fold round 6): `max_accepted_per_hour_global` 5,000 → 2,000 → 1,500.** The N2 rationale's arithmetic was WRONG on the key count: the budget key is the agent TYPE and the distinct-key figure is **36** (41 dirs = 36 base + 5 `[v2]` mirrors resolving to the base id via `version_tag`) ⇒ maximal steady rate = 36 × (30 minor/major + 20 critical) = **1,800/h**, so 2,000 sat ABOVE the steady maximum (reachable only via window-boundary bursts + the N3 read-then-insert race). PLANNER RULING: **1,500/h** — it binds in STEADY state; the knob is an OPERATOR BRAKE, not a security fence (the per-type caps remain the inner brake). CATEGORY_DOC names the bound hierarchy plainly (per-tree row cap [sheds] + global total-row ceiling [the hard nest-wide wall] = hard walls; the 1,500/h hourly knob = early global brake; per-type caps = inner brake). **N3:** "5 per 10 min" is
+  BEST-EFFORT under concurrency (read-then-insert; two concurrent reports from one agent
+  type can both pass) — stated in CATEGORY_DOC, not a hard invariant. **N4:** every COUNT
+  in phase 2 executes via `db_offload.offload` (the v0.27.14 discipline).
+- **AM-10** — `agent_id` is the agent **TYPE** (`instance.py:3015-3023` docstring; threaded `instance_lifecycle.py:2144-2149/:4846-4851`; `[v2]` mirrors resolve to the base id via `version_tag` — **D3, fold round 6: the distinct budget-key count is 36** (41 dirs = 36 base + 5 `[v2]` mirrors resolving to the base id; verified in-tree — e.g. `agents/approver[v2]/meta.json` carries `id="approver"`)); custom agents exist only via the auth-gated REST route — the key space is NOT agent-expandable. Ruling: **KEEP the type key** — spawning does NOT multiply the budget (the fan-out attack is structurally dead); a type's instances SHARE one budget (noisy neighbour); a nest-wide critical burst past 20/hour/type is still VISIBLE (the cluster exists + the rate-limited counter spikes — itself a nest-distress signal). The `(agent_id, tree_root)` alternative **REJECTED** — it multiplies the global ceiling by tree count (an orchestrator spawning trees re-opens the flood). CATEGORY_DOC + `NestReportConfig` field docs MUST state the sharing explicitly; the critical cap stays 20/hour default (knob exists for operators).
 
 ---
 
@@ -291,9 +311,20 @@ art `daemon/repositories/notify_audit/models.py:100-201`; counting index served 
 IPv4:port; never raises; limit applied AFTER redaction), THEN
 `scrub_enqueued_body(text, actor=…)` (`daemon/services/secret_persistence_scrub.py:1250`
 — exact-match value substitution on STORED secret values). Transcript excerpts are
-bounded BEFORE persistence: last N=5 tool-error messages, ≤500 chars per excerpt,
-≤2000 chars total; stored scrubbed with `excerpt_sha256` + `excerpt_length`
-(notify_audit discipline: hash + length, never raw bulk). Scrubber unavailable
+bounded BEFORE persistence: **the excerpt = the last ≤5 ERROR-BEARING tool messages in the
+turn, selected from a bounded scan window of the last ≤20 messages of that turn's
+transcript (the AM-8a read cap); each excerpt ≤500 chars, total ≤2000** (C5, fold round 5 —
+the singular rule, identical in phase1-plan.md; error-bearing = **the house ASSIGNMENT
+form (`watchover_service.py:114`): `msg_type = getattr(msg, "type", None) or
+getattr(msg, "role", None)` THEN `msg_type == "tool"`** (D1, fold round 6 — corrected from
+`role == tool`, which never matched a LangChain `ToolMessage`; E2, fold round 7 — the
+one-expression form WITHOUT outer parentheses parses as `A or (B == "tool")`, so the
+`.type` string short-circuits and Human/AI prose carrying "ERROR:" would be admitted;
+the two-line assignment form removes the precedence ambiguity entirely) AND the
+content carries the house's typed error shape — the `ERROR:`/refusal-envelope markers house
+tools return; the ≤20 scan window IS the same read cap — no extra cost); stored scrubbed
+with `excerpt_sha256` + `excerpt_length` (notify_audit discipline: hash + length, never raw
+bulk). Scrubber unavailable
 (`get_process_scrubber()` → None, `:263`): `redact_exc_str` STILL applies + WARN log —
 the report is NEVER refused for scrubber absence (fail-open, disclosed in the tool doc;
 the S3 precedent). NEVER persist: raw transcripts, full message lists, env dumps,
@@ -328,6 +359,12 @@ redaction"); `secret_persistence_scrub.py:615 scrub_text`, `:1250 scrub_enqueued
 
 **Amendment trail (fold round 2 — `architecture-recommendation.md`; appended, history intact).**
 - **AM-11** — the surviving secret classes are EMPIRICALLY verified against `daemon/_redact.py:74-98`: `POSTGRES_PASSWORD=…` (the KV-DSN regex's `\b` fails after `POSTGRES_`), bare `OPENAI_API_KEY=sk-…`, URL **query-param** secrets (the netloc masker stops at the first `/`), JSON secret dumps, bearer tokens; the exact-match scrubber knows only STORED secrets (the daemon's runtime creds are invisible to it; scrubber-absent = fail-open identity, `secret_persistence_scrub.py:1270-1283`); the excerpt harvests raw tool stdout (`bash.py:1152` returns `STDOUT:` verbatim, 150k cap). Fence: NEW additive `redact_secret_shapes(text, limit)` in `daemon/_redact.py` (masks `sk-[A-Za-z0-9_\-]{8,}`, `Bearer\s+\S+`, `(?i)(api[_-]?key|token|password|secret|access[_-]?key)\s*[:=]\s*\S+`, `(?i)\?[^\s]*(key|token|secret)=[^&\s]+`, env-var shapes `*_API_KEY=`/`*_TOKEN=`/`*_PASSWORD=`/`*_SECRET=`) applied to description/suspected_cause/excerpt BEFORE `redact_exc_str`; **`redact_exc_str` itself is UNTOUCHED** (its callers are pinned); the EXCERPT column flips **FAIL-CLOSED** on scrubber-absent (persist NULL + WARN) while description/suspected_cause keep the fail-open shape (the pattern masker is the always-on floor) — the CATEGORY_DOC disclosure is updated accordingly; the planted-secret pin plants a **NON-STORED** shape (e.g. `sk-proj-…` inside a transcript tool message — a `secret_store`-planted value is satisfied by the exact-match path and proves nothing about the real risk). Excerpt persists for **major + critical ONLY** (AM-8e).
+- **C5 amendment (fold round 5 — excerpt selection rule made SINGULAR; the approver's ruling that the ERROR-FILTER reading wins):** the canonical rule is now stated once, identically here and in phase1-plan.md — *"the excerpt = the last ≤5 ERROR-BEARING tool messages in the turn, selected from a bounded scan window of the last ≤20 messages of that turn's transcript (the AM-8a read cap); each excerpt ≤500 chars, total ≤2000."* Error-bearing predicate: **the house ASSIGNMENT form (`watchover_service.py:114`, `watcher_context_builder.py:309`): `msg_type = getattr(msg, "type", None) or getattr(msg, "role", None)` THEN `msg_type == "tool"` (D1, fold round 6 — corrected from `role == tool`, which never matched a LangChain `ToolMessage`; E2, fold round 7 — the unparenthesized one-expression form parses as `A or (B == "tool")` and admits Human/AI prose carrying "ERROR:" — the trust-boundary break the negative-selection leg `M-1i` now pins) AND the content carries the house's typed error shape (`ERROR:` — `daemon/tools/filesystem.py:175/:181/:190` — and/or `Error: {label} REFUSED — reason={token}: {message}` — `daemon/tools/instance_ops.py:256`, `instance_read.py:221`).** Numeric bounds unchanged (5 × 500, ≤2000 total); the scan window is the SAME read cap (no extra cost). **D1b:** the phase-1 transcript pack gains the POSITIVE-SELECTION LEG **M-1h** (plant an error-bearing tool message ⇒ it LANDS in the excerpt; mutation: invert the predicate ⇒ RED) — the former pack pinned only the read cap (M-1g), so the empty-excerpt failure was silent. No CATEGORY_DOC deviation note is needed — "recent tool errors" was always the intent.
+- **C1 correction (fold round 5 — SECURITY, approver-verified): the secret-shape fence did NOT cover the JSON-secret class it named.** The keyword pattern required `:`/`=` immediately after the keyword, but JSON puts a QUOTE there; the house `_KV_DSN_RE` (`daemon/_redact.py:60-65`) misses it too. Verified UNMASKED by the approver: `{"password": "hunter2"}`, `{"postgres_password": "s3cr3t"}`, `{"token": "abc123XYZ"}` (while `POSTGRES_PASSWORD=`, `Authorization: Bearer`, `?api_key=` ARE masked). This matters more than a normal gap: the excerpt is RAW tool stdout (`bash.py:1152`, 150k cap) and the exact-match scrubber knows only STORED secrets (`secret_persistence_scrub.py:1250`) — for a NON-STORED secret the pattern masker is the SOLE defence, so "excerpt fails closed when the scrubber is absent" gives FALSE comfort there. FIX (all folded in phase1-plan.md): (a) `redact_secret_shapes` gains the JSON key/value shape — an OPTIONAL QUOTE between keyword and separator, masking the optional-quoted value (`(?i)["']?(api[_-]?key|token|password|secret|access[_-]?key)["']?\s*[:=]\s*["']?[^"'\s,}]+`; the alternation may match as a suffix, e.g. `postgres_password`); (b) the planted-secret pin plants a JSON-shaped NON-STORED secret IN ADDITION to `sk-proj-…`, with a mutation leg PER PATTERN; (c) phase1 states the sole-defence fact explicitly and forbids reading the fail-closed posture as covering the class; (d) this record.
+- **R-a hardening (fold round 6):** the C1 pattern required the keyword FAMILY word to be FINAL before the separator — `{"secret_note":…}`, `{"password_hint":…}`, `{"client_secret_id":…}` survived (value unmasked). The keyword alternation now carries a TRAILING WORD SEGMENT `[a-z_]*` (keyword-FAMILY masks; over-masking is the fail-safe direction, and the over-match probe must still leave legitimate prose untouched). A PIN LEG covers the widened family (mutation: delete `[a-z_]*` ⇒ the suffix legs RED). Folded in phase1-plan.md's scrub step 0.
+- **E3 (fold round 7 — LOW–MEDIUM, diagnostic preservation): the widened family over-masks the token-metering diagnostics.** `[a-z_]*` lets `token` absorb suffixes, so `{"max_tokens": 200000}`, `{"input_tokens": 1200, "output_tokens": 340}`, `token_budget: 200000` were masked — precisely the fields of a TOKEN-EXHAUSTION error, the exact text the excerpt exists to capture (the house doctrine `daemon/_redact.py:8-11` masks "only patterns that are unambiguous database identifiers" to preserve diagnostic value). PLANNER RULING: keep the widened secret-bearing family (R-a) but EXCLUDE the benign names explicitly — `max_tokens`, `input_tokens`, `output_tokens`, `token_budget`, `token_count`, and the `*_tokens` family — and extend the over-match probe to those names (the pin must be able to go RED on a regression). Folded in phase1-plan.md's scrub step 0.
+- **R-b residual (fold round 6):** a per-tree/global shed can delete ALL member rows of a cluster while the cluster row survives (report_count = 0, still "open" up to 30 days, counted by `ensemble_anomaly_clusters_open`). Mitigation folded in phase2-plan.md: clusters whose report_count reaches 0 are DELETED in the SAME unit-of-work (both the age/global trim and the per-tree trim leg), pinned by `cluster_row_dies_with_members`.
+- **E1 closure gap in the C1 class (fold round 7 — NOT a new class: the same fence, an unclosed value shape).** The value class `["']?[^"\s,}]+` excluded WHITESPACE, so a quoted value containing a space was masked only up to its first space — approver-verified leaks: `{"password": "correct horse battery staple"}` → `{*** horse battery staple}`; `{"db_password": "my secret phrase"}` → `{"db_*** secret phrase"}`; `password="two word secret"` → `*** word secret"`. A PASSPHRASE is the most common DB/API credential shape, and the exact-match scrubber does NOT help (stored values only — C1c: the pattern masker is the SOLE defence for a non-stored secret); the planted pin (`{"password": "hunter2"}`, single token) was GREEN with the hole open. FIX: the value class is QUOTE-AWARE — `(?:"[^"]*"|'[^']*'|\S+)` (closes all three leaks; unquoted form unchanged) — and the planted pin gains a MULTI-WORD QUOTED case asserting the FULL value is absent from every persisted column (a first-word-only needle would still pass on a partial mask). Folded in phase1-plan.md's scrub step 0 + planted pin.
 
 ---
 
@@ -479,6 +516,15 @@ reflects the TABLE-BACKED members (counts/clusters/open-gauge — read rows, sur
 restarts); AM-13f's 4th member (`ensemble_anomaly_board_items_suppressed_total`) is
 process-durable — see phase3's family-projection disclosure.
 
+**Closed-space arithmetic (N1, fold round 5 — AUTHORITATIVE).** The 4-member state was
+13 + 39 + 13 + 1 = **66** ⇒ global closed space 425 → **491** (the approver's iter-001
+figure). With C3(i)'s 5th member (`ensemble_anomaly_capacity_exhausted_total`) the band is
+13 + 39 + 13 + 1 + 1 = **67** and the global closed space is 425 → **492**. The ceremony
+text derives the FINAL number from THIS line (the D-5 rule), never from a phase file.
+C3(i) DEPENDENCY: the 5th member's registration is PHASE 3's (sibling) — the F23 pack must
+count 5 members and the band must be re-declared with the vocabulary (AM-2a's
+zero-headroom rule makes this mechanical).
+
 **Disclosure (do NOT fix in this lane).** The registry idiom's known-live defects — R_i
 (census gated polarity inverted vs the contract truth table) and R_ii (F1/F3
 `capture_active` never wired, `api.py:2528-2533`) — are STILL LIVE at base `1f6898ae2`.
@@ -545,6 +591,7 @@ Carried as surveyed facts WITH anchors; the two contradictions are FLAGGED loudl
   disclosure line. Rationale: the user directive is "all agents get this tool" — default-OFF
   hollows the commission; the four AMs bound the abuse surface; the env kill-switch stays the
   operator escape. The per-writer deny list `ENSEMBLE_NEST_REPORT_DISABLED_AGENTS` lands.
+- **(c) IMPLEMENTATION GATE NOTE (fold round 7): E1 + E2 MUST be present before implementation commit C1 lands** — they land in C1/C2 (the scrub fence and the excerpt-selection predicate are both C1-code), and the phase-6 gate must confirm both before the C1 boundary is declared GREEN; an E1/E2 regression at gate time REDs C1, not the lane.
 - **(b) The `(reviewer, workflow)` pending-approval DB row stays USER-OWNED and disclosed
   (morning item U-2b)** — it cannot mask anything this lane lands: the duty home is `rule.md`
   and `artifact='rule'` has ZERO DB rows of any state for any agent (census below).
@@ -573,17 +620,17 @@ ruling overturned).
 | AM | One-line | Folded where |
 |---|---|---|
 | AM-1 | Metrics-router route-set pin (exactly `{/families, /snapshot, /series}`; a 4th route REDs — the census-only tripwire is degraded) | phase 3 route pack (sibling) |
-| AM-2 | F23 fences: zero-headroom band (66 after AM-13f's 4th unlabelled counter; the architect's §4 arithmetic was 65 pre-AM-13f — phase3-plan.md:196 derives it) re-declared with the vocabulary; `bands ⊇ registered` pin; raw-token fold — let the registry fold out-of-vocab (AM-2d); all-three F23 roster role pins + general roster-coverage pin; `monotonic` disclosure (AM-2f) | phase 3 packs (sibling) |
+| AM-2 | F23 fences: zero-headroom band (65 architect §4 pre-AM-13f → 66 @ 4 members (phase3-plan.md:196) → **67 @ 5 members with C3(i)'s capacity-exhausted counter; global closed space 425→492** — the authoritative line lives in the F23 section) re-declared with the vocabulary; `bands ⊇ registered` pin; raw-token fold — let the registry fold out-of-vocab (AM-2d); all-three F23 roster role pins + general roster-coverage pin; `monotonic` disclosure (AM-2f) | phase 3 packs (sibling) |
 | AM-3 | Missed VOCAB bump sites: two test literals (`test_metrics_family_adjudication.py:419`, `test_metrics_vocabulary_amendment.py:26`) + `checkpoint_metrics.py:200-217` docstring history + exposition baseline re-run per bump | phase 3 packs (sibling); the C2-side test-literal update rides phase 1's bump commit |
 | AM-4 | Fixed-width timestamps (`isoformat(timespec='microseconds')`) + Python-bound cutoffs (the phase-2 rate SQL ERRORS on PG as written) + `timestamp_shape_is_fixed_width` pin | decisions R5 ✓; phase1 models/config; phase2 rate counts |
 | AM-5 | ONE-transaction unit-of-work + orphan TERMINALIZATION to `unclustered`, never reassignment; outcome vocab +1; accepted MEANS clustered | decisions R5 ✓; phase1 outcome enum; phase2 sections+pins |
 | AM-6 | Retention DECREMENTS `report_count` per deleted member; invariant absolute; pins `report_count_equals_member_rows` / `no_orphan_accepted_rows` / `retention_decrements_counts` | decisions R5 ✓; phase2 retention+pins |
 | AM-6c | FE incident list groups by `(tree_root_instance_id, category)` + occurrence badge — read-side affordance, never re-assignment | phase 4 (sibling) |
 | AM-7 | Peak-severity labeling everywhere ("critical (peak)") + board item → `done` on cluster resolve (board-row write only) | decisions R3 ✓; phase2 board/maintenance |
-| AM-8 | Harvest rewrite: transcript seam → `instance_read.py:889-909` bounded `raw_saver.aget` + `messages[-N:]` (N ≤ 20, `:154` precedent), cap AT the seam (M-1g reds at the seam); `families()` OUTSIDE any offload worker (registry lock; reentrancy guard `db_offload.py:379-385`); honest ceiling 5 off-loop CALLS (ancestor walk = O(depth ≤ 256) sequential PK reads in ONE call, NOT 1 round trip); `boot_epoch` pinned to NAIVE-UTC, never compared cross-shape; minor severity SKIPS the transcript read entirely | phase1 harvest table ✓ |
+| AM-8 | Harvest rewrite: transcript seam → `instance_read.py:889-909` bounded `raw_saver.aget` + `messages[-N:]` (N ≤ 20, `:154` precedent), cap AT the seam (M-1g reds at the seam); `families()` OUTSIDE any offload worker (registry lock; reentrancy guard `db_offload.py:379-385`); honest ceiling 5 off-loop CALLS (ancestor walk = O(depth ≤ 256) sequential PK reads in ONE call, NOT 1 round trip) — **C4 (fold round 5) re-derives 5 → ~7: the task→JobItem→MissionCommission chain is ≈3 queries on 3 tables**; `boot_epoch` pinned to NAIVE-UTC, never compared cross-shape; minor severity SKIPS the transcript read entirely | phase1 harvest table ✓ |
 | AM-9 | Flood fences: refusal-ledger cap (no-row-beyond), pre-INSERT global/tree caps → `capacity-exhausted`, pre-harvest global accepted/hour, retention capacity trim oldest-first; pins (unbounded-refusal-loop leg, global-cap leg) | decisions R5b ✓; phase1 config+token; phase2 enforcement+pins |
 | AM-10 | Budget is per agent TYPE; type key KEPT; `(agent_id, tree_root)` REJECTED; sharing disclosed in CATEGORY_DOC + field docs; key space not agent-expandable | decisions R5b ✓; phase1 docs |
-| AM-11 | NEW `redact_secret_shapes` masker BEFORE `redact_exc_str` (untouched); excerpt FAIL-CLOSED on scrubber-absent; NON-STORED planted-secret pin; excerpt for major+critical only | decisions R6 ✓; phase1 scrub pipeline |
+| AM-11 | NEW `redact_secret_shapes` masker BEFORE `redact_exc_str` (untouched); excerpt FAIL-CLOSED on scrubber-absent; NON-STORED planted-secret pin; excerpt for major+critical only — **C1 (fold round 5): the JSON key/value shape (optional quote + quoted value) is added; the class the fence already named was NOT covered until C1** | decisions R6 ✓; phase1 scrub pipeline |
 | AM-12 | Projection/injection pins: list projection EXCLUDES excerpt; detail behind `?include_excerpt=true`; FE ≤300-char reveal; NO innerHTML/bypassSecurityTrust (pinned, mutation leg); `top_description` deterministic (highest severity, tie `created_at ASC, id ASC`) + fixed board-body prefix "auto-filed — unverified agent prose" | phase 3/4 (sibling) EXCEPT AM-12e → phase2 board sink ✓ |
 | AM-13 | Board ceilings (3/tree/hour, 50 global) + note-append fallback + suppression counter; TITLE carries cluster_id; single-reporter-HOLD REJECTED; `MAX_NOTES_PER_ITEM=20` disclosed+routed | decisions R3 ✓; phase2 board sink |
 | AM-14 | 64-slot striped per-key locks replace the process-global lock; offload-gate pressure (~5 offloads/report vs the 25-slot strict-admission executor; burst ⇒ NULL evidence, report accepted) disclosed in CATEGORY_DOC | decisions R5 ✓; phase1 CATEGORY_DOC; phase2 locking |
@@ -591,3 +638,20 @@ ruling overturned).
 | AM-16 | Conditional default-ON (Leader decision (a)) + per-writer deny list `ENSEMBLE_NEST_REPORT_DISABLED_AGENTS` | decisions R4 ✓ + Leader decisions ✓; phase1 config |
 | AM-17 | Nine-commit ordered choreography C1-C9, each boundary GREEN (boot-scan, drift tests, privileged-set pins); per-commit smoke set binding; the 81-file single ceremony commit REJECTED | lane implementation / phase 6 |
 | AM-18 | Phase-order CONFIRMED (P3 after P1+P2; P4 after P3; P5 after P1 + after P3's meta.json appends; VOCAB double-bump ordered) — no re-order, no fusion | record only (arch §8) |
+
+---
+
+## Watch-outline consultation (N7 — fold round 5)
+
+Consulted `docs/architecture/metrics-watch-outline.md` (design-only; v1 PULL-ONLY per its
+own ruling R3 — it plans "no tool, no category, no schedule row, no trigger vocabulary, no
+delivery path").
+
+- **APPLIES:** its delivery-primitives census (board = ALWAYS, notify = deliberate) is
+  EXACTLY this lane's critical→board ruling — the anomaly path writes the board and never
+  auto-notifies. Its chat bounds (N=1/turn ≥60s, M=6/rolling-hour) are NOT auto-called by
+  this lane (nothing here sends chat), so they impose nothing on it.
+- **EXPLICITLY DECLINED:** no triggers, no evaluator, no schedule arming — the watch/alert
+  lane remains a separate PENDING USER DECISION; this lane adds a reporting surface only.
+- **CROSS-CHECK:** the board-only choice is consistent with that census — the board is the
+  guaranteed surface; the anomaly tool never voices.

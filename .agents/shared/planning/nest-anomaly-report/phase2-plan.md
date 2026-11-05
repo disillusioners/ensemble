@@ -92,10 +92,19 @@ async def accept_and_assign(report_args, harvested, agent_id, instance_id) -> En
     #  refusal IS the spam signal)
 
     # ── 1. HARVEST + SCRUB (phase-1 path, unchanged; AM-8/AM-11 seams live there)
-    #    PRE-INSERT capacity caps (AM-9) run HERE, post-harvest pre-persist:
-    #    COUNT(all rows) >= max_rows_global (50,000) OR
+    #    PRE-INSERT capacity (AM-9 + C3, fold round 5), post-harvest pre-persist:
+    #    COUNT(all rows) >= max_rows_global (50,000) → refuse("capacity-exhausted")
+    #    (the nest-wide WALL; no ledger row; the F23 capacity-exhausted counter
+    #    INCREMENTS — the observable consequence, C3(iii)).
     #    COUNT(rows, tree_root = :root) >= max_rows_per_tree_root (2,000)
-    #    → refuse("capacity-exhausted")            # no ledger row
+    #    → SHED-THEN-ACCEPT: a per-tree OLDEST-FIRST BATCHED TRIM runs inside
+    #    this same unit-of-work via the SHARED `shed_members(ids)` helper (E5,
+    #    fold round 7 — the SAME decrement-and-delete implementation the
+    #    maintenance trims call: RELATIVE per-cluster `report_count` decrements
+    #    per AM-6/D2 + the R-b zero-count cluster DELETE), then the report
+    #    proceeds — the per-tree cap NEVER refuses, so one tree root can never
+    #    go dark (C3(ii); the durable critical record is the BOARD item, which
+    #    the trim does not remove).
 
     # ── 2+3. ONE TRANSACTION (AM-5a) — the report INSERT + cluster
     #    INSERT/UPDATE + report→cluster UPDATE execute as ONE repository
@@ -112,14 +121,31 @@ async def accept_and_assign(report_args, harvested, agent_id, instance_id) -> En
                 AND last_report_at >= :cutoff                     # :cutoff BOUND (idx key_window)
               ORDER BY last_report_at DESC LIMIT 1
         if row is not None:
-            new_count  = row.report_count + 1
+            # D2 (fold round 6 — DATA-INTEGRITY RACE fix): the rollup is
+            #     RELATIVE, never absolute-from-stale-read. A concurrent
+            #     per-tree SHED (C3/R-b) decrements a cluster owned by a
+            #     DIFFERENT key under a DIFFERENT stripe slot; under READ
+            #     COMMITTED the absolute form (SET = :new_count from a stale
+            #     read) would clobber the decrement. Relative + RETURNING
+            #     re-evaluates against the updated row version:
             new_max    = max_rank(row.max_severity, severity)
             UPDATE anomaly_clusters
-               SET report_count = :new_count,
+               SET report_count = report_count + 1,
                    last_report_at = :now,
                    max_severity = :new_max
              WHERE id = :row.id
-            cluster_id, count, first_at = row.id, new_count, row.first_report_at
+             RETURNING report_count
+            post_count = <RETURNING value>          # envelope cluster_report_count
+            # E4 (fold round 7): an EMPTY RETURNING means the cluster was
+            #     zero-count-DELETED by a concurrent shed (R-b) between our SELECT
+            #     and this UPDATE — a different stripe slot, so not serialized.
+            #     Treat it as an ASSIGNMENT FAILURE: the report row is written
+            #     outcome='unclustered' via the existing AM-5b terminal mechanism —
+            #     NEVER a cluster_id pointing at a DELETED cluster (an orphan shape
+            #     the AM-5 sweep cannot see: it looks for accepted + NULL cluster_id).
+            if post_count is None:
+                return terminalize_this_report_unclustered(...)   # AM-5b path
+            cluster_id, count, first_at = row.id, post_count, row.first_report_at
         else:
             INSERT INTO anomaly_clusters
               (id=new_uuid, cluster_key_hash=key(tree_root, canonical),
@@ -130,9 +156,13 @@ async def accept_and_assign(report_args, harvested, agent_id, instance_id) -> En
             cluster_id, count, first_at = new_uuid, 1, now
         UPDATE anomaly_reports SET cluster_id = :cluster_id WHERE id = :report_id
 
-    # ── 4. CRITICAL → BOARD (R3) — inside the same service call ──────────────
-    if severity == "critical":
-        await ensure_board_surface(cluster_id, ...)
+        # ── 4. CRITICAL → BOARD (R3 + C2, fold round 5) — INSIDE the SAME-KEY
+        #    STRIPE (AM-14 prose is AUTHORITATIVE where earlier pseudocode
+        #    disagreed): the board read (`board_item_id IS NULL`) and the board
+        #    create/note-append are serialized with the assignment, so two
+        #    concurrent criticals on a fresh cluster CANNOT both create an item.
+        if severity == "critical":
+            await ensure_board_surface(cluster_id, ...)   # create-or-note INSIDE the stripe
 
     # ── 5. envelope with REAL cluster fields ──────────────────────────────────
     return ok(report_id, cluster_id, count, first_at, fold_notice)
@@ -195,11 +225,22 @@ a parameter — the section-0 SQL as originally written (`created_at >= now() - 
    (accepted + refused) — the SAME check gates the §0b refusal-ledger INSERT (at/over the
    ceiling the refusal envelope becomes `capacity-exhausted`, NO row); the per-tree cap is
    INAPPLICABLE to refusal rows (NULL tree_root per R5b).**
-3. Pre-harvest global ceiling: `max_accepted_per_hour_global` (5,000) → `capacity-exhausted`.
-4. Retention gains a **capacity trim**: oldest-first beyond `max_rows_global`, batched —
-   self-stabilizing with the insert gate (once at ceiling, inserts refuse ⇒ inflow stops ⇒
-   the trim converges). *Holds ONLY post-F-1: pre-F-1 the insert gate counted accepted rows
-   exclusively, so refused inflow never stopped — the claim was FALSE as written.*
+3. Pre-harvest global ceiling: `max_accepted_per_hour_global` (**1,500** — D3, fold round 6:
+   5,000→2,000→1,500; rationale against the REAL key count: the budget key is the agent
+   TYPE — **36 distinct budget keys** (41 dirs = 36 base + 5 `[v2]` mirrors resolving to the
+   base id via `version_tag`, AM-10) ⇒ maximal steady rate = 36 × (30 minor/major + 20
+   critical) = **1,800/h**; 1,500 binds in STEADY state. The knob is an OPERATOR BRAKE, not
+   a security fence — the per-type caps remain the inner brake) → `capacity-exhausted`.
+4. Retention gains a **capacity trim**: the GLOBAL oldest-first trim beyond
+   `max_rows_global`, batched — plus, per C3(ii), a **per-tree oldest-first batched trim**
+   at `max_rows_per_tree_root` (shed-then-accept at insert, and re-run in this job) with
+   the AM-6 per-cluster decrements. *Self-stabilizing ONLY post-F-1: pre-F-1 the insert
+   gate counted accepted rows exclusively, so refused inflow never stopped, and pre-C3 the
+   per-tree cap had no trim path at all (one tree could go dark until the idle-gated
+   30-day sweep ran — the silent-failure class).*
+5. **N4 (fold round 5):** every COUNT in this section (the rate gates, the ledger-cap
+   count, the total-row and global/hour ceilings) executes via `db_offload.offload` —
+   never on the event loop (the v0.27.14 discipline, `db_offload.py:386`).
 Pins: the unbounded-refusal-loop leg (N refused calls ⇒ persisted rows ≤ ledger cap) + a
 global-cap leg.
 
@@ -320,15 +361,31 @@ loop (max retention_batch_size × MAX_BATCHES_PER_RUN rows per tick):
     ids = SELECT id, cluster_id FROM anomaly_reports WHERE created_at < :cutoff LIMIT :batch
     if not ids: break
     DELETE FROM anomaly_reports WHERE id IN (:ids); deleted_total += len(ids)
-    # AM-6: DECREMENT report_count per cluster by this batch's deleted-member count:
-    for cluster_id, n in GROUP(deleted ids BY cluster_id):
-        UPDATE anomaly_clusters SET report_count = report_count - :n WHERE id = :cluster_id
+    # AM-6 + D2 + R-b: the ONE shared decrement-and-delete helper — the LIVE shed
+    # (shed-then-accept) and BOTH maintenance trims call the SAME implementation
+    # (`shed_members(ids)`): per-cluster RELATIVE decrement (`report_count =
+    # report_count - :n`; composes with concurrent relative INCREMENTS under READ
+    # COMMITTED) + the zero-count cluster DELETE in the SAME unit-of-work. One
+    # implementation, two callers, no drift (E5, fold round 7 — the live hot path is
+    # where the 0-count condition actually arises).
+    shed_members(ids, unit_of_work):
+        for cluster_id, n in GROUP(ids BY cluster_id):
+            UPDATE anomaly_clusters SET report_count = report_count - :n WHERE id = :cluster_id
+            DELETE FROM anomaly_clusters WHERE id = :cluster_id AND report_count <= 0
+              AND NOT EXISTS (SELECT 1 FROM anomaly_reports WHERE cluster_id = :cluster_id)
+              # E4 optional guard: best-effort TOCTOU reducer; the DEFINITIVE
+              # closure is the empty-RETURNING → 'unclustered' handling in §2+3.
     if deleted_total >= per-run cap: break
 # AM-9 capacity trim (oldest-first beyond max_rows_global, batched — alongside the age sweep):
 loop:
     ids = SELECT id FROM anomaly_reports ORDER BY created_at ASC LIMIT :batch   # only when COUNT > max_rows_global
     if COUNT(all rows) <= max_rows_global: break
-    DELETE ... + the same per-cluster DECREMENT as above
+    DELETE the batch, then shed_members(batch_ids)   # the SAME shared helper (E5)
+# C3(ii) per-tree trim (defense leg — the LIVE shed runs shed-then-accept at insert):
+for root in tree_roots_above(max_rows_per_tree_root):
+    ids = SELECT id FROM anomaly_reports WHERE tree_root_instance_id = :root
+          ORDER BY created_at ASC LIMIT :batch
+    DELETE the batch, then shed_members(batch_ids)   # the SAME shared helper (E5)
 # clusters after their member reports:
 loop:
     ids = SELECT id FROM anomaly_clusters WHERE last_report_at < :cutoff LIMIT :batch
@@ -379,16 +436,18 @@ is phase 4's; this phase owns the terminal state.
 | `n_agents_one_incident` | 3 sibling agents (same root, same canonical category) inside W → 1 cluster | 3 rows share cluster_id; report_count=3; parent chains differ, tree_root equal |
 | `rate_limit_refusal` | 6th minor within 10min → typed refusal + honest ledger | refusal envelope token `rate-limited`; 6th row outcome=rate_limited, harvest columns NULL, cluster counts unchanged; 5 accepted + 1 refused = budget still 5 (refusal didn't consume) |
 | `critical_exempt_then_capped` | criticals bypass the 5/10min but cap at 20/hour | 6th critical within 10min ACCEPTED; 21st critical within the hour REFUSED |
-| `board_single_row_per_cluster` | two criticals on one cluster → exactly ONE board item + ONE note | board item count for the cluster == 1; notes == 1; concurrent-leg variant: two simultaneous criticals on a fresh cluster still yield one item (lock covers the seam) |
+| `board_single_row_per_cluster` | two criticals on one cluster → exactly ONE board item + ONE note | board item count for the cluster == 1; notes == 1; concurrent-leg variant: two simultaneous criticals on a fresh cluster still yield one item — **run against the CORRECTED shape (C2, fold round 5: `ensure_board_surface` INSIDE the same-key stripe); the pin may NOT be used to rescue the earlier outside-the-lock pseudocode** |
 | `resolution_derived` | no status column mutation exists; open/closed is computed | grep-level assertion (no reopen write path) + a read-time openness check flips at resolve_window without any write |
 | `notify_never_called` | the anomaly path cannot voice | import-graph assertion: `daemon/services/anomaly_service.py` references no notify symbol; behavioral: critical report produces zero notify-audit rows |
 | `no_orphan_accepted_rows` (AM-5) | after ANY accepted report settles, zero rows carry `outcome='accepted' AND cluster_id IS NULL` | post-assignment SELECT count == 0; crash-injection leg: kill between INSERT and UPDATE → the sweep terminalizes to `unclustered` |
 | `orphan_terminalized_not_reassigned` (AM-5) | an orphan becomes `unclustered`, NEVER re-clustered | MUTATION: make the sweep reassign instead → RED |
-| `report_count_equals_member_rows` (AM-6) | `report_count == COUNT(members WHERE outcome='accepted')` per cluster, both directions | build a chronic cluster, sweep mid-lifetime members → count decrements and stays equal; reverse: fabricate drift → pin REDs |
+| `report_count_equals_member_rows` (AM-6 + D2) | `report_count == COUNT(members WHERE outcome='accepted')` per cluster, both directions | build a chronic cluster, sweep mid-lifetime members → count decrements and stays equal; reverse: fabricate drift → pin REDs; **D2 CONCURRENT-SHED leg: a per-tree shed on tree T racing an assignment on a cluster of T under a DIFFERENT stripe slot ⇒ the invariant still holds** (relative + RETURNING composition; mutation: revert to absolute-from-stale-read ⇒ RED) |
+| `cluster_row_dies_with_members` (R-b) | a cluster whose report_count reaches 0 is DELETED in the same unit-of-work | shed ALL members of one cluster → cluster row absent; `ensemble_anomaly_clusters_open` does not count a 0-count row |
 | `retention_decrements_counts` (AM-6) | each deleted member decrements exactly its cluster's count by 1 | batch-delete N members of one cluster → report_count −= N exactly |
 | `board_item_closes_when_cluster_resolves` (AM-7) | a resolved cluster's board item reaches `done` | advance last_report_at past resolve_window → maintenance tick → item status == done; cluster row itself UNTOUCHED |
 | `unbounded_refusal_loop_capped` (AM-9) | N refused calls persist ≤ refusal_ledger_max_per_agent refusal rows — **F-1 global leg: the ledger INSERT never takes TOTAL rows (accepted + refused) above `max_rows_global`** | fire 50 refused calls → COUNT(rate_limited rows) ≤ 10, envelope still returned every call; **F-1 mutation-meaningful leg: plant a flood with the per-agent ledger cap UNSATURATED — the ceiling must fire ON THE REFUSAL PATH** (the round-0 form alone was a false-confidence fence under the AM-16 conditionality gate) |
-| `global_capacity_cap_leg` (AM-9) | the global/hour + row-count ceilings refuse with `capacity-exhausted` | seed rows to a ceiling → next report refused `capacity-exhausted`, no ledger row |
+| `global_capacity_cap_leg` (AM-9 + C3(iii)) | the global ceilings refuse with `capacity-exhausted` AND the refusal's OBSERVABLE CONSEQUENCE is proven | seed rows to a ceiling → next report: (a) the `capacity-exhausted` envelope is returned, (b) NO row is written, (c) the F23 `ensemble_anomaly_capacity_exhausted_total` counter INCREMENTS (the observable signal), (d) the refusal is surfaced in the morning review — not merely the envelope shape |
+| `per_treetrim_keeps_channel_live` (C3(ii)) | a tree root at its row cap NEVER goes dark: the next report is ACCEPTED after an oldest-first shed | build a tree at `max_rows_per_tree_root` → next report accepted; the tree's oldest batch deleted; affected clusters' `report_count` decremented per AM-6 (invariant stays equal) |
 
 ## Tasks
 

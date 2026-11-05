@@ -111,6 +111,47 @@ full-payload posture). The binding amendment set folded into the phase plans:
 - **Census (folded)**: prompt_versions has ZERO approved+selected rows; `rule` has zero rows
   of any state — no planned duty edit can be shadowed; the (reviewer,workflow)
   pending-approval row is the one latent caveat (user-owned, morning item U-2b).
+- **Fold round 5 (fresh approver, APPROVED-WITH-CONDITIONS)**: C1 — AM-11's shape fence now
+  covers the JSON key/value secret class (the class it named but did not mask: the optional
+  quote between keyword and separator); the pattern masker is the SOLE defence for
+  non-STORED secrets, and the phase-6 gate item no longer accepts a fence that leaves that
+  class open. C4 — the harvest row rewritten against the REAL schema (Task → JobItem →
+  MissionCommission, 3 tables) and AM-8c's honest ceiling re-derived 5 → **~7** off-loop
+  calls against the 25-slot strict-admission executor (NR-10 + AM-14 disclosures ride it).
+  C5 — the excerpt selection rule is SINGULAR and error-filtered: the last ≤5 ERROR-BEARING
+  tool messages, selected from a bounded scan of the turn's last ≤20 messages. C6 —
+  "instance tree" = the ANCESTOR chain (parent→root, self excluded); the subtree reading
+  was considered and REJECTED. C2 — the board write runs INSIDE the same-key stripe (AM-14
+  prose authoritative). C3 — the per-tree cap sheds oldest rows (batched, decrementing
+  cluster counts) instead of darkening a tree; a capacity-exhausted counter is added to F23
+  (band 67, closed space 425 → 492 — decisions.md is the source of truth, D-5).
+- **Fold round 6 (approver iteration 002, DELTA-CONDITIONS)**: D1 — the excerpt predicate is the
+  house DUAL form — the house ASSIGNMENT form, with the comparison SEPARATE:
+  `msg_type = getattr(msg, "type", None) or getattr(msg, "role", None)` THEN `msg_type == "tool"`;
+  the old `role == tool` form could never match a ToolMessage (the house keys on `.type`), so the
+  excerpt would have shipped EMPTY while the contract read satisfied — closed by the positive
+  selection leg **M-1h** (plant a refusal/error-shaped tool message ⇒ it must land). D2 — the
+  cluster rollup is RELATIVE (`report_count = report_count + 1 … RETURNING`), so it composes
+  with a concurrent shed decrement under READ COMMITTED (the absolute stale-read form drifted
+  ±1 against the invariant the refuse-vs-merge defense rests on). D3 — the global hourly knob
+  is **1,500/h**, re-derived against the **36 distinct budget keys** (41 dirs → 36 base ids
+  after `[v2]` resolution; 36 × 50/h = 1,800/h steady ceiling ⇒ the knob now binds in steady
+  state; it is an operator brake, not a security fence). R-a — the secret keyword family is
+  hardened (trailing segment allowed; over-masking is the fail-safe direction). R-b — a cluster
+  whose members are all shed is deleted in the same unit-of-work.
+- **Fold round 7 (approver iteration 003, FINAL planning fold)**: E1 — the secret value class is
+  QUOTE-AWARE (`(?:"[^"]*"|'[^']*'|\S+)`), so a passphrase's tail no longer leaks; the
+  planted-secret needle is the FULL value, not the first word. E2 — the predicate carries the
+  house ASSIGNMENT form (`msg_type = getattr(msg,"type",None) or getattr(msg,"role",None)` then
+  `msg_type == "tool"`); the parenthesised/collapsed form let the agent's OWN prose and the
+  SYSTEM PROMPT into the excerpt, breaking the "unverified agent prose" boundary — closed by a
+  NEGATIVE selection leg (a HumanMessage/AIMessage carrying "ERROR:" in prose must not land).
+  E3 — the widened keyword family excludes the benign token-metering names, so a
+  token-exhaustion error keeps its diagnostic value (house redaction doctrine,
+  `daemon/_redact.py:8-11`). E4 — an empty RETURNING is an ASSIGNMENT FAILURE → the report row
+  is `unclustered` (AM-5b), so "accepted MEANS clustered" holds. E5 — the live hot-path shed
+  calls the SAME shared decrement-and-delete helper as the maintenance job. E1 is a closure gap
+  in the C1 class (not a new class); E1+E2 must be present before implementation commit C1.
 
 ## Coupling Map
 
