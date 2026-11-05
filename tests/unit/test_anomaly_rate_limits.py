@@ -133,6 +133,13 @@ class _Clock:
     def iso(self) -> str:
         return self.now.isoformat(timespec="microseconds")
 
+    def past(self, **kwargs: float) -> str:
+        # moved with the F-1 pin + the W1 race pin (council fix cycle,
+        # 2026-11-05): seeds need an ISO timestamp INSIDE the now-clock.
+        return (self.now - timedelta(**kwargs)).isoformat(
+            timespec="microseconds"
+        )
+
 
 @pytest.fixture
 def clock(monkeypatch) -> _Clock:
@@ -197,6 +204,43 @@ def _count(engine, **filters) -> int:
         for key, value in filters.items():
             stmt = stmt.where(column_map[key] == value)
         return int(session.exec(stmt).one())
+
+
+def _seed_rows(
+    engine,
+    *,
+    count: int,
+    created_at: str,
+    agent_id: str = "worker",
+    severity: str = "minor",
+    outcome: str = "accepted",
+) -> None:
+    """Bulk-seed report rows directly (moved with the F-1 pin from the
+    retention pack — council fix cycle ③, 2026-11-05).
+
+    ``outcome`` is EXPLICIT so a capacity scenario can make the ACCEPTED
+    count and the TOTAL count DIVERGE. With every row accepted the two
+    counts are equal, and a TOTAL-row fence is then indistinguishable
+    from an ACCEPTED-only fence — the F-1 vacuous-pin trap (mutating the
+    fence's ``outcome=None`` to ``outcome='accepted'`` would pass).
+    """
+    with Session(engine) as session:
+        for index in range(count):
+            session.add(
+                AnomalyReport(
+                    created_at=created_at,
+                    agent_id=agent_id,
+                    instance_id="inst-1",
+                    tree_root_instance_id="root-1",
+                    category="tool-failure",
+                    category_raw="tool-failure",
+                    severity=severity,
+                    description=f"seeded {index}",
+                    cluster_id=None,
+                    outcome=outcome,
+                )
+            )
+        session.commit()
 
 
 # ── the pins ──────────────────────────────────────────────────────────────
@@ -438,6 +482,54 @@ class TestTheRefusalLedgerCap:
             assert caught.value.token == "rate-limited"
         assert _count(engine, outcome="rate_limited") == 10
 
+    async def test_the_f1_global_leg_the_ceiling_fires_on_the_refusal_path(
+        self, tmp_path, clock
+    ) -> None:
+        """F-1 — the ledger INSERT never takes TOTAL rows above
+        ``max_rows_global``. The flood is planted with the per-agent
+        LEDGER cap UNSATURATED (0 rows) — the ceiling must still fire
+        ON THE REFUSAL PATH. (Moved from the retention pack — council
+        fix cycle ③, 2026-11-05: the pin belongs where the fence lives.)"""
+        engine = _engine(tmp_path)
+        config = NestReportConfig(max_rows_global=6)
+        service = _service(engine, config=config)
+        # 5 accepted rows for agent 'spammer' — its budget is spent.
+        for _ in range(5):
+            await _accept(service, agent_id="spammer")
+        # a 6th row from another agent: total 6 = at the ceiling, so
+        # this accept path itself refuses (no row) — instead seed it.
+        # The seeded row is ``rate_limited`` on PURPOSE: the ACCEPTED
+        # count (5) and the TOTAL count (6) must DIVERGE, or the
+        # scenario cannot tell a TOTAL-row fence from an ACCEPTED-only
+        # one (the F-1 vacuous-pin trap — with every row accepted, the
+        # mutation ``outcome=None`` → ``outcome='accepted'`` on the
+        # FENCE-2 count would pass undetected).
+        _seed_rows(
+            engine,
+            count=1,
+            created_at=clock.past(minutes=1),
+            outcome="rate_limited",
+        )
+        assert _count(engine) == 6
+        assert _count(engine, outcome="accepted") == 5, (
+            "the ACCEPTED count (5) and the TOTAL count (6) DIVERGE — "
+            "the fence under test is a TOTAL-row fence"
+        )
+        # the refused call: per-agent DECISION refuses (budget spent),
+        # FENCE 1 would allow a ledger row (0 so far) — but FENCE 2
+        # already refused the whole call with NO row.
+        with pytest.raises(AnomalyRefusalError) as caught:
+            await _accept(service, agent_id="spammer")
+        assert caught.value.token == "capacity-exhausted"
+        assert service.capacity_exhausted_total == 1
+        assert _count(engine) == 6, (
+            "the ledger INSERT never takes TOTAL rows above the ceiling"
+        )
+        assert _count(engine, outcome="rate_limited") == 1, (
+            "the ONLY rate_limited row is the SEEDED one — the refused "
+            "call wrote NO ledger row"
+        )
+
 
 class TestFenceThreeGlobalHourBrake:
     async def test_the_global_accepted_per_hour_brake_fires_pre_harvest(
@@ -457,6 +549,83 @@ class TestFenceThreeGlobalHourBrake:
         assert caught.value.token == "capacity-exhausted"
         assert service.capacity_exhausted_total == 1
         assert _count(engine) == 3, "no row is written on the brake"
+
+
+class TestPreInsertCapacityRecheck:
+    """W1 (code council fix cycle, 2026-11-05) — the post-harvest,
+    PRE-INSERT global TOTAL-row re-check is MUTATION-CAUGHT.
+
+    The council proved by execution that planting ``if False and`` on
+    the pre-insert re-check (``anomaly_service.py`` — the second
+    ``count_reports`` TOTAL read on the ACCEPT path) passed all 61
+    then-current lane tests: every other capacity scenario is refused
+    by the PRE-harvest FENCE-2 read, so the re-check is unreachable in
+    them.  This pin FORCES the interleaving the re-check exists for —
+    the read-then-insert race: FENCE 2 reads a total just UNDER the
+    ceiling, a concurrent writer lands rows INSIDE that read's return
+    (pushing the total to the ceiling), and the accept path must still
+    refuse — ``capacity-exhausted`` with NO row persisted.
+    """
+
+    async def test_the_read_then_insert_race_refuses_and_persists_nothing(
+        self, tmp_path, clock, monkeypatch
+    ) -> None:
+        engine = _engine(tmp_path)
+        config = NestReportConfig(max_rows_global=6)
+        service = _service(engine, config=config)
+        # 5 rows — one UNDER the ceiling: FENCE 2 must pass its read.
+        _seed_rows(
+            engine,
+            count=5,
+            created_at=clock.past(minutes=1),
+            outcome="rate_limited",
+        )
+        assert _count(engine) == 5
+
+        real_count = service.repository.count_reports
+        fired = {"interleaved": False}
+
+        def _interleaving_count(**kwargs):
+            # Trigger on the FIRST TOTAL-row read (``outcome is None``)
+            # of this call — that is FENCE 2, pre-harvest.  FENCE 1
+            # (``outcome='rate_limited'``) and the per-agent budget
+            # (``outcome='accepted'``) pass their outcome explicitly.
+            if "outcome" in kwargs and kwargs["outcome"] is None:
+                if fired["interleaved"]:
+                    return real_count(**kwargs)
+                fired["interleaved"] = True
+                under = real_count(**kwargs)
+                # The CONCURRENT WRITER lands between the FENCE-2 read
+                # and the pre-insert re-check: the total reaches the
+                # ceiling (6) inside the race window.
+                _seed_rows(
+                    engine,
+                    count=1,
+                    created_at=clock.past(minutes=1),
+                    outcome="rate_limited",
+                )
+                return under
+            return real_count(**kwargs)
+
+        monkeypatch.setattr(
+            service.repository, "count_reports", _interleaving_count
+        )
+
+        # fresh agent + rate_limited-only seeds: every OTHER gate is
+        # green — the refusal can only come from the PRE-INSERT
+        # re-check reading the raced total (6 >= 6).
+        with pytest.raises(AnomalyRefusalError) as caught:
+            await _accept(service, agent_id="fresh-agent")
+        assert caught.value.token == "capacity-exhausted"
+        assert fired["interleaved"] is True, (
+            "the pin lost its interleaving — it no longer forces the "
+            "race this fence exists for (vacuous)"
+        )
+        assert service.capacity_exhausted_total == 1
+        assert _count(engine) == 6, (
+            "NO row persisted — the 6 rows are all the concurrent "
+            "writer's; the raced report itself wrote nothing"
+        )
 
 
 # ── the fence-shape contract (F-4) ─────────────────────────────────────────

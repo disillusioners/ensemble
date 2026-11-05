@@ -692,52 +692,11 @@ class TestUnboundedRefusalLoopCapped:
             service.repository.count_reports(outcome="rate_limited") == 10
         )
 
-    async def test_the_f1_global_leg_the_ceiling_fires_on_the_refusal_path(
-        self, tmp_path, clock
-    ) -> None:
-        """F-1 — the ledger INSERT never takes TOTAL rows above
-        ``max_rows_global``. The flood is planted with the per-agent
-        LEDGER cap UNSATURATED (0 rows) — the ceiling must still fire
-        ON THE REFUSAL PATH."""
-        engine = _engine(tmp_path)
-        config = NestReportConfig(max_rows_global=6)
-        service = _service(engine, config=config)
-        # 5 accepted rows for agent 'spammer' — its budget is spent.
-        for _ in range(5):
-            await _accept(service, agent_id="spammer")
-        # a 6th row from another agent: total 6 = at the ceiling, so
-        # this accept path itself refuses (no row) — instead seed it.
-        # The seeded row is ``rate_limited`` on PURPOSE: the ACCEPTED
-        # count (5) and the TOTAL count (6) must DIVERGE, or the
-        # scenario cannot tell a TOTAL-row fence from an ACCEPTED-only
-        # one (the F-1 vacuous-pin trap — with every row accepted, the
-        # mutation ``outcome=None`` → ``outcome='accepted'`` on the
-        # FENCE-2 count would pass undetected).
-        _seed_rows(
-            engine,
-            count=1,
-            created_at=clock.past(minutes=1),
-            outcome="rate_limited",
-        )
-        assert service.repository.count_reports(outcome=None) == 6
-        assert service.repository.count_reports(outcome="accepted") == 5, (
-            "the ACCEPTED count (5) and the TOTAL count (6) DIVERGE — "
-            "the fence under test is a TOTAL-row fence"
-        )
-        # the refused call: per-agent DECISION refuses (budget spent),
-        # FENCE 1 would allow a ledger row (0 so far) — but FENCE 2
-        # already refused the whole call with NO row.
-        with pytest.raises(AnomalyRefusalError) as caught:
-            await _accept(service, agent_id="spammer")
-        assert caught.value.token == "capacity-exhausted"
-        assert service.capacity_exhausted_total == 1
-        assert service.repository.count_reports(outcome=None) == 6, (
-            "the ledger INSERT never takes TOTAL rows above the ceiling"
-        )
-        assert service.repository.count_reports(outcome="rate_limited") == 1, (
-            "the ONLY rate_limited row is the SEEDED one — the refused "
-            "call wrote NO ledger row"
-        )
+    # The F-1 global-ceiling pin (test_the_f1_global_leg…) was MOVED to
+    # the RATE pack (council fix cycle ③, 2026-11-05): the ceiling is a
+    # RATE-GATE fence — the pin sits where the fence lives, so a future
+    # pack reorganization cannot strand it from the fence-shape
+    # contract that pins its predicate.
 
 
 class TestGlobalCapacityCapLeg:
