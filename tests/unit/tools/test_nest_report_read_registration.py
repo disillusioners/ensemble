@@ -258,12 +258,21 @@ class TestTheGrants:
         assert CATEGORY not in meta["tools"]["allow"]
 
     def test_the_grant_arrays_keep_a_clean_append_point(self) -> None:
-        """Phase 5 appends ``nest-report`` AFTER this category — the
-        array's LAST element must be this one (a mis-ordered array is
-        caught mechanically)."""
+        """Phase 5 appends ``nest-report`` AFTER this category — and it has
+        LANDED: the array's LAST element is now the phase-5 write
+        category, and the phase-3 read category sits immediately before it
+        (the clean append point was USED, and nothing was reordered).
+
+        The pre-ceremony form of this pin asserted that the LAST element
+        was still this (read) category — true while phase 5 was ahead,
+        and RED the moment the grant ceremony landed.  The intent (a
+        mis-ordered array is caught mechanically) is unchanged: the order
+        is now pinned END-TO-END.
+        """
         for agent in ("maintenancer", "devops", "wanderer"):
             allow = _agent_meta(agent)["tools"]["allow"]
-            assert allow[-1] == CATEGORY, (agent, allow[-3:])
+            assert allow[-2] == CATEGORY, (agent, allow[-3:])
+            assert allow[-1] == "nest-report", (agent, allow[-3:])
 
 
 class TestColdBootWiring:

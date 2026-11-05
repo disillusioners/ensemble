@@ -50,8 +50,14 @@ AGENTS_DIR = REPO_ROOT / "agents"
 CATEGORY = "nest-report"
 
 #: The pinned population (Ruling P5-D9 / P5-D8).
-EXPECTED_EXPLICIT = 40
-EXPECTED_TOTAL_META = 41
+#:
+#: 40 explicit grants / 41 meta.json at the ceremony; 44 / 45 after the
+#: MERGE-FIRST step (origin/latest 97b76e20e — the v0.28.12 aegis
+#: release) added FOUR agents (``aegis`` / ``cracker`` / ``hacker`` /
+#: ``sweeper``), each with a NON-EMPTY allow list and therefore each
+#: granted mechanically by the SAME append.
+EXPECTED_EXPLICIT = 44
+EXPECTED_TOTAL_META = 45
 #: The ONE agent that inherits instead of carrying an explicit entry.
 INHERITANCE_EXCEPTIONS: frozenset[str] = frozenset({"watcher"})
 

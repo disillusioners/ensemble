@@ -25,7 +25,8 @@
       "question",
       "midflight",
       "dynamic-skill",
-      "todo"
+      "todo",
+      "nest-report"
     ],
     "deny": [
       "write_file",

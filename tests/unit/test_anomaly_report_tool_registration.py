@@ -870,18 +870,39 @@ class TestTheAllowListPosture:
         )
         assert [getattr(t, "name", "") for t in filtered] == [TOOL_NAME]
 
-    def test_no_agent_holds_the_category_yet(self) -> None:
-        """The grant ceremony is phase 5 — NO in-repo ``meta.json``
-        names the category yet (C2 touches no ``agents/**`` file)."""
+    def test_the_grant_ceremony_landed(self) -> None:
+        """The phase-5 grant ceremony LANDED: every explicitly-allow-listed
+        agent now names the category.
+
+        The pre-ceremony form of this pin asserted the OPPOSITE ("no
+        in-repo ``meta.json`` names the category yet") — it was true
+        while the ceremony was still ahead (C2 touches no ``agents/**``
+        file) and it went RED the moment the ceremony landed.  It is
+        re-pointed here to the POST-ceremony truth: the category is
+        held by every agent whose ``tools.allow`` is non-empty, and the
+        inheritance exception (``watcher``) holds it implicitly.
+        """
         holders = []
+        empty = []
         for meta_path in sorted((REPO_ROOT / "agents").glob("*/meta.json")):
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             allow = meta.get("tools", {}).get("allow", [])
+            if not allow:
+                empty.append(meta_path.parent.name)
+                continue
             if CATEGORY in allow:
                 holders.append(meta_path.parent.name)
-        assert holders == [], (
-            f"the grant ceremony is phase 5 — {holders} already hold the "
-            "category"
+        assert len(holders) >= 40, (
+            f"only {len(holders)} agents hold the category — the phase-5 "
+            "grant ceremony must reach EVERY explicitly-allow-listed agent"
+        )
+        assert empty == ["watcher"], (
+            "the only inheritance exception is 'watcher' (its empty allow "
+            f"inherits the non-privileged category) — got {empty}"
+        )
+        assert "watcher" not in holders, (
+            "watcher's allow list is EMPTY — it inherits; an explicit entry "
+            "would strip every other tool it inherits"
         )
 
 

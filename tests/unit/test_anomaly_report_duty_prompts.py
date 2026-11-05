@@ -9,7 +9,10 @@ and the duty text is BYTE-IDENTICAL everywhere.
 This pack pins the ceremony (phase5-plan "The Two New Pins" / AC-5.1 ..
 AC-5.6):
 
-(a) **the decomposition** — ``41 = 39 walk + 2 underscore specials``.  The
+(a) **the decomposition** — ``45 = 43 walk + 2 underscore specials``
+    (41 = 39 + 2 before the MERGE-FIRST step added the four aegis-lane
+    agents; the count pin is the "a new agent must carry the duty"
+    tripwire).  The
     walk enumerates DIRS (never collapsed ids): the report-integrity
     precedent's id-collapsed walk reaches only 34 of the 41 (it skips
     every underscore dir and resolves a ``[v2]`` pair to ONE operative
@@ -76,9 +79,19 @@ DUTY_BLOCK_SHA256 = hashlib.sha256(DUTY_BLOCK.encode("utf-8")).hexdigest()
 #: The canonical-home resolution order (Ruling P5-D3).
 HOME_ORDER: tuple[str, ...] = ("rule.md", "workflow.md", "soul.md")
 
-#: The pinned decomposition (AC-5.5 / the plan's "41 = 39 walk + 2").
-EXPECTED_TOTAL = 41
-EXPECTED_WALK = 39
+#: The pinned decomposition (AC-5.5 / the plan's "41 = 39 walk + 2",
+#: EXTENDED to the merged population).
+#:
+#: The MERGE-FIRST step (origin/latest 97b76e20e — the v0.28.12 aegis
+#: release) added FOUR agents to the nest (``aegis`` / ``cracker`` /
+#: ``hacker`` / ``sweeper``), each with its own ``rule.md`` canonical
+#: home.  The ceremony was extended to them mechanically (the SAME
+#: template constant, the SAME append), so the decomposition moves from
+#: 41 = 39 walk + 2 specials to 45 = 43 walk + 2 specials.  The pins
+#: RED without this — the count pin IS the "a new agent must carry the
+#: duty" tripwire (mutation leg M-P5-4).
+EXPECTED_TOTAL = 45
+EXPECTED_WALK = 43
 EXPECTED_SPECIALS = 2
 
 #: The underscore specials — the two dirs the id-collapsed walk skips.
@@ -165,8 +178,13 @@ SEAL_UNTOUCHED_BASE_VALUES: dict[str, str] = {
 }
 
 #: The baseline manifest (h) — the committed versioned-artifact anchor.
+#:
+#: 161 entries at the ceremony; 177 after the MERGE-FIRST step
+#: (origin/latest 97b76e20e — the v0.28.12 aegis release) added the four
+#: aegis-lane agents' artifacts (+16 versioned files).  The COUNT is
+#: pinned so a NEW versioned artifact cannot appear silently.
 BASELINE_FILE = AGENTS_DIR / ".prompt-artifacts.sha256"
-BASELINE_EXPECTED_ENTRIES = 161
+BASELINE_EXPECTED_ENTRIES = 177
 
 
 # ---------------------------------------------------------------------------
@@ -263,11 +281,12 @@ def _sha256(path: Path) -> str:
 
 
 class TestTheDutyWalkDecomposition:
-    """``41 = 39 walk + 2 underscore specials`` — the pinned count.
+    """``45 = 43 walk + 2 underscore specials`` — the pinned count.
 
     The count is pinned so a NEWLY added agent dir cannot silently change
     the total: a new agent MUST carry the duty (M-P5-4) and MUST be
-    registered here.
+    registered here.  (41 = 39 + 2 at the ceremony; 45 = 43 + 2 after the
+    MERGE-FIRST step brought in the four aegis-lane agents.)
     """
 
     def test_the_total_is_41(self) -> None:
