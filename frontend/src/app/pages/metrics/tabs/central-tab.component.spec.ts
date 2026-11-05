@@ -455,8 +455,8 @@ describe('MetricsCentralTabComponent — EVERY central tab (the W-10 exit criter
     fixture.destroy();
   });
 
-  it('the manifest declares SIX central tabs', () => {
-    expect(METRICS_CENTRAL_ENTRIES).toHaveLength(6);
+  it('the manifest declares SEVEN central tabs', () => {
+    expect(METRICS_CENTRAL_ENTRIES).toHaveLength(7);
   });
 
   for (const entry of METRICS_CENTRAL_ENTRIES) {

@@ -63,7 +63,7 @@ import { MetricsDoorErrorCode } from '../../models/metrics.model';
 import { ResourcesWindow } from '../../models/resources.models';
 
 /**
- * The REGISTERED family ids — the E-1 census (16 families).
+ * The REGISTERED family ids — the E-1 census (17 families).
  *
  * The census is re-derived from the registry SSOT
  * (`daemon/services/metrics_query/wiring/registry.py`'s `FAMILY_SPECS`
@@ -86,7 +86,8 @@ export type MetricsRegisteredFamilyId =
   | 'F13'
   | 'F17'
   | 'F18'
-  | 'F21';
+  | 'F21'
+  | 'F23';
 
 /**
  * The families the adjudication ruled OUT — DROPPED, never planned, and
@@ -227,7 +228,8 @@ export type MetricsModuleEntry =
   | MetricsDroppedModule;
 
 /**
- * The 7 MODULE TABS (plan-overview §4.1), in tab order.
+ * The 8 MODULE TABS (plan-overview §4.1 + the nest-anomaly lane's
+ * phase 4), in tab order.
  *
  * The BRACKETED planned families are BOUND NOW and gated by
  * availability (ADJ-vi): when their producer lands (R-ii wires
@@ -321,6 +323,32 @@ export const METRICS_TABS = [
     familyIds: ['F17'],
     // F17 (the init-guard snapshot) is stat-primary.
     statFamilyIds: ['F17'],
+    allowedWindows: ['15m', '30m', '1h', '2h'],
+    // The central ladder's default — the window the tab asked for before
+    // the frame owned it (the hardcoded 1 h).
+    defaultWindowS: '1h',
+    copyVariant: 'auth_not_configured',
+  },
+  {
+    disposition: 'bound',
+    slot: 'central',
+    id: 'nest-reports',
+    // The USER-VISIBLE label is deliberately NOT "Anomalies": the
+    // Resources tab (tab 1) already renders an "Anomalies" panel
+    // (the resource-anomaly family) and the two show unrelated
+    // data. The slug IS `nest-reports` — it now MATCHES the label.
+    label: 'Nest Reports',
+    // F23 — the anomaly family (phase 3).
+    familyIds: ['F23'],
+    // F23's snapshot values feed the stat strip (the strip renders the
+    // LIVE series of the named families — the shared body fetches
+    // GET /api/metrics/snapshot?family=<F>). The family's closed
+    // space is 67 series (decisions.md F23: 13 + 39 + 13 + 1 + 1 —
+    // the fifth member is the capacity-exhausted counter), so the
+    // strip's worst case is 67 cards, bounded by the closed
+    // vocabulary; the LIVE count is the categories/severities
+    // actually present.
+    statFamilyIds: ['F23'],
     allowedWindows: ['15m', '30m', '1h', '2h'],
     // The central ladder's default — the window the tab asked for before
     // the frame owned it (the hardcoded 1 h).

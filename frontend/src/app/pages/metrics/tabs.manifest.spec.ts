@@ -66,9 +66,9 @@ function frozenResourcesWindows(): string[] {
 const CENTRAL_TABS = METRICS_CENTRAL_ENTRIES;
 const CUSTOM_TABS = METRICS_CUSTOM_ENTRIES;
 
-describe('the tab manifest — the 7 module tabs (2.1 / 2.2)', () => {
-  it('carries exactly 7 tabs', () => {
-    expect(METRICS_TABS).toHaveLength(7);
+describe('the tab manifest — the 8 module tabs (2.1 / 2.2 + the nest-anomaly lane)', () => {
+  it('carries exactly 8 tabs', () => {
+    expect(METRICS_TABS).toHaveLength(8);
   });
 
   it('the tab ids are unique and stable', () => {
@@ -82,6 +82,7 @@ describe('the tab manifest — the 7 module tabs (2.1 / 2.2)', () => {
       'instances',
       'checkpoint',
       'mcp',
+      'nest-reports',
     ]);
   });
 
@@ -91,7 +92,7 @@ describe('the tab manifest — the 7 module tabs (2.1 / 2.2)', () => {
     expect(METRICS_TABS[0].slot).toBe('custom');
   });
 
-  it('the labels match the plan-overview §4.1 table', () => {
+  it('the labels match the plan-overview §4.1 table + the nest-reports ruling', () => {
     expect(METRICS_TABS.map((tab) => tab.label)).toEqual([
       'Resources',
       'Runtime',
@@ -100,15 +101,16 @@ describe('the tab manifest — the 7 module tabs (2.1 / 2.2)', () => {
       'Instances',
       'Checkpoint',
       'MCP',
+      'Nest Reports',
     ]);
   });
 
-  it('exactly ONE tab is the custom slot — the other six are central', () => {
+  it('exactly ONE tab is the custom slot — the other seven are central', () => {
     expect(CUSTOM_TABS).toHaveLength(1);
-    expect(CENTRAL_TABS).toHaveLength(6);
+    expect(CENTRAL_TABS).toHaveLength(7);
   });
 
-  it('binds the EXACT family roster per tab (plan-overview §4.1)', () => {
+  it('binds the EXACT family roster per tab (plan-overview §4.1 + F23)', () => {
     const bindings = Object.fromEntries(
       CENTRAL_TABS.map((tab) => [tab.id, [...tab.familyIds]]),
     );
@@ -119,6 +121,7 @@ describe('the tab manifest — the 7 module tabs (2.1 / 2.2)', () => {
       instances: ['F13', 'F11'],
       checkpoint: ['F8'],
       mcp: ['F17'],
+      'nest-reports': ['F23'],
     });
   });
 
@@ -144,6 +147,7 @@ describe('the tab manifest — the 7 module tabs (2.1 / 2.2)', () => {
       instances: [],
       checkpoint: [],
       mcp: ['F17'],
+      'nest-reports': ['F23'],
     });
   });
 
@@ -166,6 +170,7 @@ describe('the tab manifest — the 7 module tabs (2.1 / 2.2)', () => {
       'F17',
       'F18',
       'F21',
+      'F23',
     ]);
     for (const id of bound) {
       expect(registered.has(id)).toBe(true);

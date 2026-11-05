@@ -8,6 +8,7 @@ import { JobsTabComponent } from './jobs-tab.component';
 import { InstancesTabComponent } from './instances-tab.component';
 import { CheckpointTabComponent } from './checkpoint-tab.component';
 import { McpTabComponent } from './mcp-tab.component';
+import { NestReportsTabComponent } from './nest-reports-tab.component';
 
 /**
  * The manifest → component MAP (T1 phase 2, task 2.4/2.5).
@@ -28,6 +29,7 @@ export const METRICS_TAB_COMPONENTS: Readonly<Record<MetricsTabId, Type<unknown>
   instances: InstancesTabComponent,
   checkpoint: CheckpointTabComponent,
   mcp: McpTabComponent,
+  'nest-reports': NestReportsTabComponent,
 };
 
 /** One tab of the shell — the manifest entry plus its body. */
