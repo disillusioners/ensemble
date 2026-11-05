@@ -1431,7 +1431,12 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # Prior value 2cb6e01b3bdfd07865aed967d524b98d7bcd965f60ffd741e52a7ee71c44573c.
     "agents/charter/rule.md": "df10691815b9db8274e9d1de3e5b72966b3e74b6266fae677be67edcd604e876",
     "agents/charter/soul.md": "458f65a608b495df0cac8c565a83663595ea85c3d13a200295dc611189387aad",
-    "agents/charter/meta.json": "e1034e1d92e7bb30f2d39ab0a625a661287251cf5ca961cbeba3e1893dcfd492",
+    # agents/charter/meta.json re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C9): the phase-5 GRANT ceremony appended the "nest-report" category to this
+    # file's tools.allow array, so the pinned content-sha256 moved with the real
+    # bytes.
+    # Prior value e1034e1d92e7bb30f2d39ab0a625a661287251cf5ca961cbeba3e1893dcfd492.
+    "agents/charter/meta.json": "b71c45c4065420ef93729e440a2b8586ba030823d4cbe4b5c3015ec899bbbd49",
     "agents/charter/skills-template/install-mermaid-cli.md": "ee43576c9b9d746c8ce6563c85ed289567e9fcebadc75c0bd7ede417aaaa667e",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "fcd6f4612d6077a81fe521341e6e2332d1f5da31880d3fc710decbc0579fedbf",
     "agents/_prompt_system/innate-skills/chart/skill.md": "fa29084d7dc0f86c87d667ef46dcfc060fa11e20e0b647295cdd75ff43353515",

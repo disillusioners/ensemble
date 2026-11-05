@@ -283,7 +283,15 @@ class TestAllowLists:
             # "wedge-capture" — the SAME-PR trailing discipline (only
             # categories appended after the board may follow it) holds;
             # the set grew by one entry again.
-            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user"],
+            # nest-anomaly-report phase 5 / C9 (2026-11-05): the
+            # "nest-report" category appended after "notify-user" — the
+            # SAME discipline, the set grew by one entry AGAIN.  The
+            # pin's INTENT is unchanged: only the categories appended
+            # AFTER the board may follow it, and "nest-report" IS such a
+            # category.  Prior value: the 6-entry set
+            # ["self-alarm", "view-write", "board-link", "mcp_rpc",
+            # "wedge-capture", "notify-user"].
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "nest-report"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)

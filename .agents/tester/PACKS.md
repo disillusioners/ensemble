@@ -1,3 +1,31 @@
+## Commission nest-anomaly-report (wi-2d691ed2) — Phase-5 / C9 grant pack REGISTERED (2026-11-05, implementation lane `feature/nest-anomaly-report`, base `1f6898ae2`)
+
+> **What this block registers.** The **C9** commit's Tier-1 pack — the ALL-AGENTS GRANT half of
+> phase 5 (the explicit `"nest-report"` category entry in all 40 explicitly-allow-listed agents'
+> `meta.json` + the re-pinned allow-array constants + the `charter/meta.json` seal re-pin). **C9 =
+> "P5b grants"** (AM-17's ordered choreography: the duty pin and the grant pin are INDEPENDENT, so
+> two green boundaries beat one 81-file commit).
+>
+> **Keep-both:** every earlier block in this file stays as-is — it records THAT phase's packs.
+> This block is the newest, so it sits at the top (newest-first).
+>
+> **Node counts are MECHANICAL** — a per-file `--collect-only` census re-derived at this freeze,
+> never a declared number.
+>
+> **Fences.** No daemon, no live port, no live database — the pack reads the repo tree only.
+>
+> **MEASURED SET = 5 allow-array pins (the plan's census named 3).** The two EXTRA pins are the
+> CRITIC's exact-set allow, asserted in TWO packs (`tests/unit/agents/test_sketcher_agent.py` and
+> `tests/unit/tools/test_image_gen_tool.py`); both were re-pinned in the SAME commit as the grant.
+> The sketcher's two docstrings that claimed "no write surface" were AMENDED honestly (the closed
+> allow is now "no shell / no filesystem / no GENERAL write surface — the ONE write surface is the
+> anomaly reporter").
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `anomaly_report_grant_pins` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/test_anomaly_report_grant_pins.py -q --tb=line -rfE -p no:randomly --timeout=120` | **Leg C9-G1 (Tier 1).** The grant completeness walk over DIRS: every ``agents/*/meta.json`` with a NON-EMPTY ``tools.allow`` carries ``"nest-report"`` (**40/40 explicit**), exactly once, as the **LAST** element (the ari trailing-entry precedent — the order is asserted, not just the presence); the **``watcher`` inheritance exception** is encoded EXPLICITLY (its ``tools.allow`` is ``[]`` ⇒ it inherits every non-privileged category through the default universe; an explicit entry would convert the empty allow into a 1-entry allow and SILENTLY STRIP every other tool watcher inherits — Ruling P5-D8) and the exception set is pinned against the live empty-allow population; the **two-phase edit order** is pinned (the three phase-3-touched agents — ``maintenancer`` / ``devops`` / ``wanderer`` — carry BOTH ``"nest-report-read"`` AND ``"nest-report"``, the grant AFTER the read category); the **re-pinned allow-array constants** (the ari trailing set = the 7-entry set, ``GAIA_TOOLS_ALLOW`` = the 6-entry set, the sketcher ``EXPECTED_ALLOW`` = the 7-entry set, and the CRITIC's exact set in BOTH packs) each carry the grant; and the **seal map is 0-stale** with ``agents/charter/meta.json`` (the ONE sealed file the grant touches) MOVED from its base value. **15 nodes.** | 2026-11-05 | ✅ registered (implementation lane, C9 freeze: 15/15 PASS) |
+| `anomaly_report_p5_grant_mutation_legs` | the legs are driven by `/tmp/mutation_legs_p5_c9.py` (the driver lives OUTSIDE the repo — it plants ONE defect, runs the owning pack, records the RED node ids, restores the file BYTE-IDENTICALLY (sha256-verified) and re-runs to prove GREEN) | **4 legs, all RED→GREEN with a byte-identical restore: M-P5-2** (remove ``"nest-report"`` from `agents/gaia/meta.json` ⇒ 2 RED: the non-empty-allow leg and the 40/40 leg) · **M-P5-3** (move the entry off the last position in `agents/project-manager/meta.json` ⇒ 1 RED: the LAST-element order leg — proves the order pin is not vacuous) · **M-P5-7** (revert the ari trailing set to its 6-entry value ⇒ 2 RED: the ari trailing pin in `test_board_registration.py` AND the grant pack's 7-entry pin — proves the re-pin is LOAD-BEARING, not cosmetic) · **M-P5-8** (remove a grant from the phase-3-touched `agents/devops/meta.json` ⇒ 3 RED: the non-empty-allow leg, the 40/40 leg and the two-phase-edit-order leg — proves the two-phase edit order is verified). | 2026-11-05 | ✅ PASS 4/4 RED→GREEN (every restore sha256-identical; every pack GREEN again after the restore) |
+
 ## Commission nest-anomaly-report (wi-2d691ed2) — Phase-5 / C8 duty-prompt pack REGISTERED (2026-11-05, implementation lane `feature/nest-anomaly-report`, base `1f6898ae2`)
 
 > **What this block registers.** The **C8** commit's Tier-1 pack — the ALL-AGENTS DUTY PROMPT half
