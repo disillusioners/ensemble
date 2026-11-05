@@ -8,9 +8,23 @@
 # lane-down with the wave-2 lexical recall + footer disclosure, the
 # runbook requeue procedure) AND proves ONE mutation leg:
 #
-#   M6  the terminal-row filter disabled (the worker re-embeds
-#       terminal rows forever) ⇒ the runbook requeue test goes RED
-#       (the skipped-row assertion stops holding — the AM-30 class)
+#   M6  the terminal predicate disabled (rows stop being terminal)
+#       ⇒ the runbook requeue test goes RED (the AM-30 class)
+#
+#   W-2 PLANT-TARGET NOTE (why the SQL form): the terminal rule is
+#   SINGLE-SOURCED in the repository since the council fix cycle
+#   (f012b4787) — the SQL form ``memoir_embedding_terminal_predicate``
+#   feeds BOTH the pending-scan exclusion AND ``_count_terminal``, and
+#   the worker's Python belt (``_is_terminal_row`` →
+#   ``memoir_row_is_terminal``) upholds the skip INDEPENDENTLY as
+#   defence-in-depth. Disabling the Python form alone is therefore
+#   VACUOUS (the SQL exclusion still hides terminal rows from the scan,
+#   so nothing re-embeds); the guard's reachable trip is the SQL form —
+#   the pack plants it to match nothing and the guard's terminal-count
+#   assertion (``_count_terminal() == 1``) stops holding. The pre-W-2
+#   plant keyed on the worker's INLINE predicate body, which the W-2
+#   delegation removed (the MT-01 lockstep class: a standing mutation
+#   instrument's literals move in lockstep with the code it mutates).
 #
 # EXIT-CODE CONTRACT (the house shape): pack 0 = PASS · 1 = FAIL.
 #
@@ -59,7 +73,7 @@ run_suite() {
   return ${rc}
 }
 
-WORKER_PY="daemon/services/memoir_embedding_worker.py"
+PLANT_TARGET="daemon/repositories/memoir/repository.py"
 
 # ── Leg 1: the baseline suite is GREEN ───────────────────────────────────
 run_suite "leg 1 baseline (full suite)" "${TEST_FILE}"
@@ -71,35 +85,39 @@ fi
 
 # ── Leg 2: the mutation leg must go RED ──────────────────────────────────
 BACKUP="$(mktemp -t memoir-deg-mutation-XXXXXX.py)"
-cp "${WORKER_PY}" "${BACKUP}"
+cp "${PLANT_TARGET}" "${BACKUP}"
 restore() {
-  cp "${BACKUP}" "${WORKER_PY}"
+  cp "${BACKUP}" "${PLANT_TARGET}"
   rm -f "${BACKUP}"
 }
 trap restore EXIT INT TERM
 
-echo "--- leg 2 mutation: plant the terminal filter disabled ---"
-"${PY}" - "${WORKER_PY}" <<'PLANT'
+echo "--- leg 2 mutation: plant the terminal predicate disabled ---"
+"${PY}" - "${PLANT_TARGET}" <<'PLANT'
 import sys
 
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as handle:
     text = handle.read()
 
-old = '''def _is_terminal_row(row: Any, attempt_cap: int) -> bool:
-    """The worker-side terminal predicate (see the module docstring)."""
-    attempts = int(getattr(row, "embedding_attempts", 0) or 0)
-    if attempts >= attempt_cap:
-        return True
-    error = getattr(row, "embedding_error", None) or ""
-    return error.startswith(TERMINAL_ERROR_MARKER)'''
-new = '''def _is_terminal_row(row: Any, attempt_cap: int) -> bool:
-    """MUTATION: the terminal predicate disabled — rows re-embed forever."""
-    return False'''
+# W-2: the terminal rule's SQL form is the single source feeding BOTH
+# the pending-scan exclusion and _count_terminal (see the header note).
+old = '''    return or_(
+        func.coalesce(MemoirEpisode.embedding_attempts, 0) >= int(attempt_cap),
+        func.coalesce(MemoirEpisode.embedding_error, "").like(
+            f"{MEMOIR_EMBEDDING_TERMINAL_MARKER}%"
+        ),
+    )'''
+new = '''    return or_(  # MUTATION M6: the terminal predicate disabled — nothing matches
+        func.coalesce(MemoirEpisode.embedding_attempts, 0) < 0,
+        func.coalesce(MemoirEpisode.embedding_error, "").like(
+            f"{MEMOIR_EMBEDDING_TERMINAL_MARKER}%MUTATION-NEVER"
+        ),
+    )'''
 if text.count(old) != 1:
     sys.exit(
         "MUTATION PLANT FAILED: expected exactly one occurrence of the "
-        f"terminal predicate, found {text.count(old)}"
+        f"terminal predicate (SQL form), found {text.count(old)}"
     )
 with open(path, "w", encoding="utf-8") as handle:
     handle.write(text.replace(old, new))
