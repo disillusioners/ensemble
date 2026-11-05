@@ -235,8 +235,12 @@ A single mismatch is a drift defect, not style (X-02).
 The pass mechanism was assigned to `technical-analysis.md` and is **absent** there. Ruling: the **pass is
 performed by the consuming agent's own judgment**, and recorded by **re-running the scanner** with
 explicit `--llm-verdict` / `--llm-confidence` arguments. The scanner **validates** the values against the
-closed vocabularies and **applies monotonicity** — it refuses any downgrade of a heuristic `hostile` (SK-11
-becomes mechanically enforced rather than a promise). Consequences: no extra model call, no pinned model,
+closed vocabularies and **applies monotonicity on both axes**: the verdict may only rise
+(`clean` < `suspect` < `hostile`) and confidence may only rise (`none` < `low` < `medium` < `high`); **any**
+downgrade attempt is a typed refusal, the block keeps the heuristic values, and the disagreement is
+recorded (`classifier: heuristic+llm`, both verdicts visible). *(AM-3, 2026-11-05 — §3.6 superseded by
+AM-3 — any downgrade refused, monotonic on both axes. The stricter SK-11 is binding; a verdict is a label,
+never an authorization token, so a stuck-high verdict costs one fence label, never a block — SK-09.)* Consequences: no extra model call, no pinned model,
 no provider dependency, `classifier: heuristic+llm` only when the arguments are present, and pinned tests
 run with the pass **OFF** by construction.
 
@@ -690,5 +694,13 @@ byte-identity therefore carries **exactly one named exception — the `auto_load
 permitted fold iff the council verifies the seed service honors a manifest `auto_load` key. Amends §2.3,
 §4.1, §5.4.
 
+**AM-3 — D3/§3.6, LLM-pass monotonicity (2026-11-05, approver iteration-002 candidate).** The stricter
+SK-11 is **CONFIRMED binding**: the pass may only RAISE, **monotonic on both axes** — verdict
+(`clean` < `suspect` < `hostile`) and confidence (`none` < `low` < `medium` < `high`); **any** downgrade is
+refused. §3.6 amended in place. Cause: a pass that can lower any signal is the cheapest weaponisation path,
+and the screen never blocks (SK-09), so a stuck-high verdict costs one label, not a false block. SK-11
+needs **no re-point**; the requirements layer stays authoritative and is stricter than the record's first
+form by design (the asymmetry is now closed in the record's favour). Amends §3.6.
+
 *End of ruling record. The plan is authorised to proceed to G1 (plan council) under these rulings and
-amendments AM-1/AM-2.*
+amendments AM-1/AM-2/AM-3.*

@@ -740,7 +740,7 @@ Where ambiguity matters the text says "predecessor AM-n".
 
 | Item | Divergence | Fixation (adopted) | Files | Status |
 |---|---|---|---|---|
-| **B3 source-vs-requirement divergence** | `architecture-recommendation.md` §3.6 narrows the refusal to a heuristic `hostile` only; the adopted SK-11 rule refuses **ANY** downgrade on **both** axes (verdict rank + confidence rank) | `requirements.md` is the **normative contract** and is **deliberately STRICTER** than the arch narrative; the arch doc is the architect's **frozen record at `cc6303308`** and is **NOT edited** — the asymmetry is disclosed here rather than silently repaired in either direction | `decisions.md` §C-bis.5 (this row) + the B3 row above; `requirements.md` SK-11 | **OPEN-FOR-ARCHITECT** (AM-3 candidate — confirm alignment at the next ruling; does **not** block the fold) |
+| **B3 source-vs-requirement divergence** | `architecture-recommendation.md` §3.6 narrows the refusal to a heuristic `hostile` only; the adopted SK-11 rule refuses **ANY** downgrade on **both** axes (verdict rank + confidence rank) | `requirements.md` is the **normative contract** and is **deliberately STRICTER** than the arch narrative; the arch doc is the architect's **frozen record at `cc6303308`** and is **NOT edited** — the asymmetry is disclosed here rather than silently repaired in either direction | `decisions.md` §C-bis.5 (this row) + the B3 row above; `requirements.md` SK-11 | **RESOLVED — AM-3** (architect ruling: the stricter SK-11 is CONFIRMED binding; `architecture-recommendation.md` §3.6 amended in place + §14 AM-3; SK-11 needs **no** re-point) |
 
 ---
 
