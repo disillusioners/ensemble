@@ -49,7 +49,6 @@ from daemon.repositories.anomaly.models import (
     AnomalyReport,
 )
 from daemon.repositories.anomaly.repository import (
-    AnomalyRepository,
     shed_members,
 )
 from daemon.services import anomaly_service

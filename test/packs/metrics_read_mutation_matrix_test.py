@@ -94,9 +94,10 @@ CONTRACT_PACK = "tests/unit/metrics/test_central_metrics_contract_doc.py"
 #: failure with a misleading diagnosis).  Deriving the strings makes the
 #: leg STRUCTURAL: the mutation always plants the count minus one, so
 #: the planted pin always claims one fewer member than the set carries.
-_PRIV_COUNT_NOW = __import__(
-    "daemon.tools._tool_registry", fromlist=["PRIVILEGED_TOOL_CATEGORIES"]
-).PRIVILEGED_TOOL_CATEGORIES
+from daemon.tools._tool_registry import (
+    PRIVILEGED_TOOL_CATEGORIES as _PRIV_COUNT_NOW,
+)
+
 _COUNT_FIND = f"assert len(PRIVILEGED_TOOL_CATEGORIES) == {len(_PRIV_COUNT_NOW)}"
 _COUNT_REPLACE = (
     f"assert len(PRIVILEGED_TOOL_CATEGORIES) == {len(_PRIV_COUNT_NOW) - 1}"

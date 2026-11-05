@@ -30,7 +30,6 @@ import re
 from pathlib import Path
 
 import pytest
-from sqlalchemy import JSON
 from sqlmodel import SQLModel
 
 from daemon.config import NestReportConfig
@@ -334,9 +333,12 @@ class TestTheFreshSqliteBoot:
             engine.dispose()
 
     def test_the_models_and_the_sql_agree_on_the_column_names(self) -> None:
-        # A create_all over the model + the .sql applied to the same
-        # DB must not raise "already exists" — the two artifacts name
-        # the same columns.
+        # The MODEL half of the lockstep: a create_all over the model
+        # yields columns the INSERT shapes below land in. (The
+        # create_all -> `.sql` "already exists" collision class is
+        # covered statically by the IF-NOT-EXISTS pin above and
+        # behaviourally by the fresh-SQLite apply leg; this test proves
+        # the model's own insert shape.)
         from sqlalchemy import create_engine, text
 
         engine = create_engine("sqlite:///:memory:")

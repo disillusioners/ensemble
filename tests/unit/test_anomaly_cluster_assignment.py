@@ -54,7 +54,6 @@ from daemon.repositories.anomaly.models import (
 from daemon.repositories.anomaly import repository as anomaly_repository
 from daemon.services import anomaly_service
 from daemon.services.anomaly_service import (
-    AnomalyRefusalError,
     AnomalyService,
 )
 

@@ -344,17 +344,18 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # SAME-PR RULE (D18/A14): the set is pinned by exact-equality asserts at
 # ELEVEN sites — five inline ``frozenset({...})`` literals + six
 # ``EXPECTED_PRIVILEGED_SET`` constants — plus a
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at SEVEN
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at EIGHT
 # phase-local pins — plus ONE mutation-pack find/replace STRING pair
 # (``test/packs/metrics_read_mutation_matrix_test.py`` MT-01 — derived
 # from the live constant at pack-import time so a count bump cannot
-# stale it) — NINETEEN assertion/pack sites across ELEVEN test files
-# plus the pack (re-grepped with BOTH greps —
+# stale it) — NINETEEN assertion sites across THIRTEEN test files
+# (11 exact-set + 8 count) plus the pack (re-grepped with BOTH greps —
 # ``PRIVILEGED_TOOL_CATEGORIES == frozenset`` AND
 # ``== EXPECTED_PRIVILEGED_SET`` AND ``len(PRIVILEGED_TOOL_CATEGORIES)``
 # — on the nest-anomaly-report lane tip, 2026-11-05; the earlier
 # ``TEN/SIXTEEN`` figures were the ari-voice-lane snapshot and went
-# stale when the nest-report phase-1 pack added a seventh count pin).
+# stale when the nest-report phase-1 pack added a seventh AND an
+# eighth count pin).
 # Adding or
 # removing a category REQUIRES updating ALL of them in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
@@ -675,8 +676,8 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # trend ring) the HTTP query door serves from — one provider, one
     # ring, one truth.
     #
-    # SAME-PR pin updates at the ELEVEN files carrying the NINETEEN
-    # assertion sites (11 exact-set + 7 count + 1 pack string) are
+    # SAME-PR pin updates at the THIRTEEN files carrying the NINETEEN
+    # assertion sites (11 exact-set + 8 count + 1 pack string) are
     # mandatory (this entry ships in the SAME commit as those bumps
     # — the set must never be red between two commits).
     "metrics-read",
@@ -702,8 +703,8 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # ``/api/nest-reports`` route calls the SAME service projector
     # (one projector, two transports — AM-1).
     #
-    # SAME-PR pin updates at the ELEVEN files carrying the NINETEEN
-    # assertion sites (11 exact-set + 7 count + 1 pack string) are
+    # SAME-PR pin updates at the THIRTEEN files carrying the NINETEEN
+    # assertion sites (11 exact-set + 8 count + 1 pack string) are
     # mandatory (this entry ships in the SAME commit as those bumps
     # — the set must never be red between two commits).
     "nest-report-read",

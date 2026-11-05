@@ -137,7 +137,15 @@ class TestTheRegistration:
         metrics = [m for m in registered_family_metrics() if m.family == "F23"]
         assert tuple(m.name for m in metrics) == F23_NAMES
         for metric in metrics:
-            assert metric.cluster if hasattr(metric, "cluster") else True
+            # The Metric objects do NOT carry `cluster` — it lives on the
+            # FAMILY spec (asserted in
+            # ``test_the_family_carries_the_cluster_and_verdict``). The
+            # former ``hasattr``-guarded line was vacuous by construction
+            # (attribute absent ⇒ the literal True branch), so it is
+            # replaced by the attributes the objects DO expose.
+            assert metric.family == "F23"
+            assert metric.name in F23_NAMES
+            assert metric.kind in {"counter", "gauge"}
 
     def test_the_family_is_wired_into_the_sampler(self) -> None:
         """M-3b — the family is not merely REGISTERED: its pull adapter
