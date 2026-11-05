@@ -1,3 +1,32 @@
+## Commission nest-anomaly-report (wi-2d691ed2) — TESTER-GATE FIX CYCLE: B3 pack REGISTRATIONS (AM-12/AM-13 → AM-16 gate-verifiable) (2026-11-05, fix lane `feature/nest-anomaly-report`)
+
+> **What this block registers.** Blocker **B3**: the AM-12 pins existed and were mutation-meaningful
+> (MUT-C/D RED→GREEN at the gate) but ran in **NO REGISTERED PACK**; the AM-13 shipped VALUES
+> (3/tree/h, 20/h global) were **NOT pinned** (planting the stale `50` left 89 nodes GREEN — MUT-A).
+> This block registers the three AM-12 packs and adds the AM-13 value pins, making the AM-16
+> condition ("AM-9 + AM-11 + AM-12 + AM-13 landed AND verified by the tester gate")
+> **gate-verifiable**: every AM now lives in a named, runnable pack.
+>
+> **AM → pack map (the AM-16 condition, resolvable by the gate):**
+> **AM-9** → `anomaly_rate_limits` (registered 2026-11-05, C3 freeze, 12/12) ·
+> **AM-11** → the scrub pack `tests/unit/test_anomaly_report_scrub.py` (registered with the C2
+> rows below this block; G2 mutation legs MUT-CondA/CondB RED→GREEN at the gate) ·
+> **AM-12** → `anomaly_read_tools` + `anomaly_read_registration` + `nest_reports_fe_tab`
+> (ALL THREE registered in THIS block) ·
+> **AM-13** → `anomaly_board_sink` re-registered at **16 nodes** in THIS block, now carrying
+> `TestAM13ShippedCeilingValues` (the shipped 3/20 pins — mutation-meaningful: planting the stale
+> 50 REDs `test_global_ceiling_ships_20`, restore GREEN, sha-identical).
+>
+> **Keep-both:** every earlier block stays as-is (the C3-freeze `anomaly_board_sink` row at 14
+> nodes records THAT freeze); this block's row supersedes the count going forward. Newest-first.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `anomaly_read_tools` (AM-12) | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/test_nest_report_read_tools.py -q --tb=line -rfE -p no:randomly --timeout=120` | The privileged read half of AM-12: the list projection EXCLUDES `excerpt` (harvested evidence never rides the list); `?include_excerpt=true` gates the detail reveal; the `top_description` determinism (highest severity, tie `created_at ASC, id ASC`); the decision-ready ops shape. **26 nodes** (mechanical `--collect-only` census at this freeze). | 2026-11-05 | ✅ registered (fix cycle: 26/26 PASS) |
+| `anomaly_read_registration` (AM-12) | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/tools/test_nest_report_read_registration.py -q --tb=line -rfE -p no:randomly --timeout=120` | The `nest-report-read` privileged category registration (#18): the holders census (maintenancer/devops/wanderer EXACT), the category in `PRIVILEGED_TOOL_CATEGORIES`, the grant arrays' clean append point, the deny-wins strip, the agent-visible doc surface. **21 nodes** (mechanical census). | 2026-11-05 | ✅ registered (fix cycle: 21/21 PASS) |
+| `nest_reports_fe_tab` (AM-12, FE) | `cd $WT/frontend && CI=1 timeout 600 ./node_modules/.bin/jest --ci --silent --runInBand src/app/pages/metrics/metrics.nest-reports.spec.ts src/app/models/nest-reports.models.spec.ts src/app/services/nest-reports.service.spec.ts` | The FE leg of AM-12: the ≤300-char excerpt reveal (never the full body), NO `innerHTML`/`bypassSecurityTrust` sinks (pinned), the clustered-vs-raw distinction, the honest 503/403/network degradation states (per-source, never blanks), severity chip `critical (peak)` + rank. **3 suites / 37 nodes** (per-file jest census at this freeze). | 2026-11-05 | ✅ registered (fix cycle: 37/37 PASS) |
+| `anomaly_board_sink` (AM-13 — RE-REGISTERED with the value pins) | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/test_anomaly_board_sink.py -q --tb=line -rfE -p no:randomly --timeout=120` | The C3-freeze scope (14 nodes: the critical→board seam incl. the concurrent leg, the item shape, AM-12e determinism, `notify_never_called`, the AM-13 ceiling MECHANISM) **+ the fix-cycle `TestAM13ShippedCeilingValues`**: the shipped per-tree ceiling == **3** and global ceiling == **20** (the W-6 correction; authority decisions.md AM-13 fold-round-3). Mutation proof: planting the stale `50` at `config.py` REDs `test_global_ceiling_ships_20` (1 failed, restore sha-identical → GREEN) — the value regression class the gate's MUT-A exposed is closed. **16 nodes** (14 + 2; mechanical census). | 2026-11-05 | ✅ re-registered (fix cycle: 16/16 PASS; MUT-A leg RED→GREEN proven) |
+
 ## Commission nest-anomaly-report (wi-2d691ed2) — TESTER-GATE FIX CYCLE: B1 concurrent-shed pin REGISTERED (2026-11-05, fix lane `feature/nest-anomaly-report`)
 
 > **What this block registers.** Blocker **B1** from the independent functional gate

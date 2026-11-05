@@ -482,3 +482,31 @@ class TestTheAM13Ceilings:
         assert len(_board_items(engine)) == 2, (
             "the ceiling only counts items created within the hour"
         )
+
+
+class TestAM13ShippedCeilingValues:
+    """B3 (functional-gate fix cycle) — the SHIPPED ceiling VALUES, pinned.
+
+    The tester planted the stale ``50`` for ``max_board_items_per_hour_global``
+    and 89 nodes stayed GREEN: the ceiling MECHANISM was pinned (MUT-B, 2 RED)
+    but the shipped VALUES were not — so a value regression (a revert of the
+    W-6 correction, 50 -> 20) would ship unpinned. Authority: decisions.md
+    AM-13 (fold round 3) — per-tree ceiling default **3**, global ceiling
+    default **20** (20/h = 480/day, matching the architect's stated harm
+    bound). Precedent form: the w4 knob pin reading
+    ``NestReportConfig().resolve_window_seconds`` at the config seam
+    (tests/unit/metrics/test_metrics_family_w4.py).
+    """
+
+    def test_per_tree_ceiling_ships_3(self) -> None:
+        assert NestReportConfig().max_board_items_per_tree_root_per_hour == 3, (
+            "AM-13: the shipped per-tree board ceiling must be 3/tree/hour "
+            "(decisions.md AM-13, fold round 2)"
+        )
+
+    def test_global_ceiling_ships_20(self) -> None:
+        assert NestReportConfig().max_board_items_per_hour_global == 20, (
+            "AM-13: the shipped global board ceiling must be 20/hour — the "
+            "W-6 correction (decisions.md AM-13, fold round 3: 50/h = "
+            "1,200/day EXCEEDED the architect's own ~480/day harm bound)"
+        )
