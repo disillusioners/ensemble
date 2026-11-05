@@ -174,6 +174,23 @@ env-poison family: occ#7 leaked into a BOOT, F7 leaked into FILES via an
 env-dump capture, and this one leaked a whole DATABASE SELECT/DELETE
 cycle through the engine factory's env override.
 
+## 4.5.1 LEADER DECISION — KEEP the four memoir tables + seeded persona row in ensemble_prod (2026-11-05, leader-attributed)
+
+Appendix to §4.5 above. The prod-DB incident (occ#8, env-poison family)
+created four memoir tables plus a seeded persona row in `ensemble_prod`.
+
+**Decision: KEEP them. Do NOT drop them.**
+
+Rationale (leader, verbatim): they are inert on the live binary (the
+board-tables/notify_audit inert-on-rollback class) and the promote creates
+the same tables idempotently via `create_all`, so prod already matches the
+promoted end-state; a `DROP TABLE` is a destructive write for zero gain
+that would diverge prod from that end-state.
+
+Root fix: the boot-epoch/heartbeat-gated refusal of `discard_on_startup`
+is ESCALATED and ROUTED OUT of this lane — do NOT touch the boot-recovery
+code. Recorded as a critical-note ticket; its own lane after memoir lands.
+
 ## 5. New test files (implied by the packs)
 The four packs need pytest bodies. The pack FILES are this wave's
 declared ownership; the pytest files below are NEW and are named so they

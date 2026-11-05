@@ -1,0 +1,55 @@
+{
+  "digest": "a333455e19023049a62ed7408f30e15e9d5771d29479659892bd05cf6f0a7938",
+  "results": {
+    "memoir_admission_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "25 passed, 1 warning in 2.06s"
+    },
+    "memoir_briefing_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "17 passed, 1 warning in 2.66s"
+    },
+    "memoir_budget_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "10 passed, 1 warning in 1.21s"
+    },
+    "memoir_knob_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "38 passed, 1 warning in 0.86s"
+    },
+    "memoir_persona_lane_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "14 passed, 1 warning in 1.36s"
+    },
+    "memoir_retrieval_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "27 passed, 1 warning in 1.83s"
+    },
+    "memoir_schema_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "18 passed, 1 warning in 0.98s"
+    },
+    "memoir_seed_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "8 passed, 1 warning in 0.71s"
+    },
+    "memoir_tools_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "43 passed, 1 warning in 7.85s"
+    },
+    "memoir_write_purity_unit_test": {
+      "rc": 0,
+      "status": "PASS",
+      "summary": "14 passed, 1 warning in 0.72s"
+    }
+  }
+}

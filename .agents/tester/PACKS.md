@@ -3962,3 +3962,27 @@ Tier-1 blast-radius leg (recipe: blast-radius-leg v1.0.3; two-class declaration 
 | `test_upgrade_serving_green_closer` (D1 re-verify, pytest) | `timeout 600 .venv/bin/python -m pytest tests/unit/tools/test_upgrade_serving_green_closer.py -q -p no:randomly --timeout=120` | the daemon-side closer pins (P-6/P-12/P-18/P-21/P-22/P-28/P-34/P-35/P-37/P-38) | ✅ 20/20 at the tip |
 
 **Tier-2 whole-tree dual-side (P3-PIN-17): PASS-WITH-DISCLOSURES — net-new DETERMINISTIC reds = 0.** BASE 32450 nodes collected / HEAD 32470 (+20 = Phase 2's pytest file); 10 shards × 3300, identical split rule both legs, xdist `-n auto --dist loadfile` per shard, per-shard `timeout 1750`, the full LLM/PG fence env. Digests (BARE-ID): BASE **499** reds `fee0dc94…`, HEAD **473** reds `a3a040d0…`; HEAD-only = 3, all adjudicated load/order-sensitive flakes by the 3×-isolation ladder (auto-kill D8 race: HEAD 5/9 green alone; lcau LLM e2e: 2/3 green alone; message-metadata: 3/3 green alone) — none touches the lane's diff (no python file changed by Phase 3); BASE-only (resolved) = 29. Three chunk deaths (the xdist worker-crash class) recovered by the recipe's §5 recursive bisection — incl. ONE isolated BASE-side single-node hang (`test_post_restart_arm_notify_drill_smoke.py::test_drill_smoke`, green at HEAD) and the lesson recorded: **a chunk that dies with an internal error prints NO `-rEf` FAILED lines — recover it or its reds are invisible** (the first naive comparison showed 51 phantom net-new that were BASE shard_005's unrecorded reds). Budget breach disclosed: ~6.5 h wall vs the 90-min advisory (the death-recovery tail, not the sweep rate — the shard-0 projection was ≈27 min). Full detail: `.agents/shared/planning/promote-handback-halt/phase3-completion-map.md` §Tier-2.
+
+## Gate packs 2026-11-05 — Memoir Store v1 (ari memory system) — REGISTERED
+
+Lane `feature/ari-memoir-store` (base `5dc08aca8`, head `830060619` + phase 7). Scope: five memoir tools behind the auth-first two-layer gate; hybrid retrieval (BM25 ∥ cosine, RRF k=60); embedding worker; wake briefing; inner_soul ari redirect; persona lane. All packs are scoped (no farm runs).
+
+| Pack | Invocation | Scope | Result |
+|---|---|---|---|
+| `memoir_knob_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_knob_unit.py -q -p no:randomly --override-ini="addopts="` | kill-switch truth table | ✅ |
+| `memoir_schema_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_schema_unit.py -q -p no:randomly --override-ini="addopts="` | schema + migration | ✅ |
+| `memoir_schema_pg_test` | `timeout 300 bash test/packs/memoir_schema_pg_test.sh` | real-PG schema | ✅ |
+| `memoir_seed_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_seed_unit.py -q -p no:randomly --override-ini="addopts="` | persona seed | ✅ |
+| `memoir_persona_lane_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_persona_lane_unit.py -q -p no:randomly --override-ini="addopts="` | persona state machine | ✅ |
+| `memoir_retrieval_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_retrieval_unit.py -q -p no:randomly --override-ini="addopts="` | hybrid arithmetic | ✅ 27 passed |
+| `memoir_retrieval_pg_test` | `timeout 300 bash test/packs/memoir_retrieval_pg_test.sh` | real-PG ranker | ✅ 12 passed |
+| `memoir_admission_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_admission_unit.py -q -p no:randomly --override-ini="addopts="` | keepsake admission | ✅ 25 passed |
+| `memoir_budget_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_budget_unit.py -q -p no:randomly --override-ini="addopts="` | budget envelope | ✅ 10 passed |
+| `memoir_write_purity_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_write_purity_unit.py -q -p no:randomly --override-ini="addopts="` | write purity (repo half) | ✅ |
+| `memoir_embedding_worker_unit_test` | `timeout 300 bash test/packs/memoir_embedding_worker_unit_test.sh` | worker ticks | ✅ |
+| `memoir_embedding_degradation_test` | `timeout 300 bash test/packs/memoir_embedding_degradation_test.sh` | lane-down degradation | ✅ 6 passed |
+| `memoir_briefing_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_briefing_unit.py -q -p no:randomly --override-ini="addopts="` | briefing builder | ✅ 17 passed |
+| `memoir_briefing_seam_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_briefing_seam_unit.py -q -p no:randomly --override-ini="addopts="` | briefing seam | ✅ 10 passed |
+| `memoir_tools_unit_test` | `timeout 300 bash test/packs/memoir_tools_unit_test.sh` | tools + purity (tool half) | ✅ 43 passed |
+| `memoir_inner_soul_redirect_test` | `timeout 300 bash test/packs/memoir_inner_soul_redirect_test.sh` | ari redirect | ✅ (tree-fence expected to flag phase-7 edits) |
+| `memoir_mutation_matrix_test` (NEW, phase 7) | `timeout 600 .venv/bin/python test/packs/memoir_mutation_matrix_test.py` | consolidated D7.5 leg orchestration | ✅ see driver |
