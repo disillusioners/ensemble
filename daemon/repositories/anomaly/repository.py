@@ -378,7 +378,7 @@ class AnomalyRepository:
         *,
         agent_id: str | None = None,
         tree_root_instance_id: str | None = None,
-        outcome: str | None = OUTCOME_ACCEPTED,
+        outcome: str | None = None,
         severity: str | None = None,
         since: str | None = None,
     ) -> int:
@@ -390,13 +390,23 @@ class AnomalyRepository:
         rides ``idx_anomaly_reports_tree_root_created``; the outcome
         variant rides ``idx_anomaly_reports_outcome_created``).
 
+        The ``outcome`` DEFAULT is the TOTAL row (every outcome) — NOT
+        ``accepted``.  The default is deliberately the WIDE one: a
+        caller that forgets the keyword must never silently inherit an
+        ACCEPTED-only predicate (the "a TOTAL-row fence written as an
+        ACCEPTED-only one" shape the F-4 sweep hunted for).  Every
+        capacity/rate fence STATES its predicate explicitly — the
+        F-4 class-guard pin
+        (``tests/unit/test_anomaly_rate_limits.py``) asserts that
+        census mechanically.
+
         Args:
             agent_id: Restrict to one agent TYPE (AM-10 — the budget
                 key is the type).
             tree_root_instance_id: Restrict to one tree root.
-            outcome: Restrict to one outcome; ``None`` counts every
-                outcome (the TOTAL-row capacity count — the F-1
-                single TOTAL-row bound).
+            outcome: Restrict to one outcome; ``None`` (the DEFAULT)
+                counts every outcome (the TOTAL-row capacity count —
+                the F-1 single TOTAL-row bound).
             severity: Restrict to one severity tier (the critical
                 counting leg).
             since: An ISO-8601 lower bound (Python-bound — never a

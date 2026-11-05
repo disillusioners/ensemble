@@ -473,11 +473,15 @@ class TestFenceThreeGlobalHourBrake:
 #   the per-tree cap (a SHED, never a refusal) -> TOTAL
 #   the pre-insert global ceiling      -> TOTAL
 #
-# The trap this pin closes: ``count_reports`` DEFAULTS to
-# ``outcome='accepted'``, so a call site that forgets the keyword
-# silently becomes an ACCEPTED-only count — the exact shape the sweep
-# hunted for (a TOTAL fence written as an ACCEPTED-only one).  Every
-# call site must therefore STATE its predicate.
+# The trap this pin closes: a call site that forgets the ``outcome=``
+# keyword silently inherits the DEFAULT predicate — and if that default
+# is ACCEPTED-only, a TOTAL-row fence becomes an ACCEPTED-only one
+# (the exact shape the sweep hunted for).  Every call site must
+# therefore STATE its predicate.
+#
+# The DEFAULT itself is the TOTAL row (M1) — the wide one — so a
+# keyword-less caller can never silently under-count.  The census below
+# is the belt; the signature default is the braces (both are pinned).
 
 
 class TestTheFenceShapeContract:
@@ -529,8 +533,32 @@ class TestTheFenceShapeContract:
         keywords = {kw.arg for kw in call.keywords if kw.arg}
         assert "outcome" in keywords, (
             f"{path.name}:{call.lineno} — count_reports without an "
-            "explicit outcome= inherits the ACCEPTED-only default; a "
+            "explicit outcome= inherits the DEFAULT predicate; a "
             "capacity fence must STATE whether it counts TOTAL rows or "
             "ACCEPTED rows only"
         )
         return f"{path.name}:{call.lineno}"
+
+    def test_the_count_reports_default_is_the_TOTAL_row(self) -> None:
+        """M1 — the DEFAULT predicate is TOTAL, never ACCEPTED-only.
+
+        The default is the WIDE one on purpose: a caller that forgets
+        the keyword must never silently inherit an ACCEPTED-only count
+        (the "a TOTAL-row fence written as an ACCEPTED-only one" shape
+        the F-4 sweep hunted for).  The call-site census above is the
+        belt; this is the braces — a future caller that forgets the
+        keyword gets the TOTAL row, and the fence must then SAY which
+        it wants.
+        """
+        import inspect
+
+        from daemon.repositories.anomaly.repository import AnomalyRepository
+
+        signature = inspect.signature(AnomalyRepository.count_reports)
+        default = signature.parameters["outcome"].default
+        assert default is None, (
+            "count_reports' outcome default must be None (the TOTAL row) "
+            f"— it is {default!r}.  An ACCEPTED-only default is the "
+            "structural root of the 'TOTAL fence written as ACCEPTED-only' "
+            "class; every fence must STATE its predicate."
+        )

@@ -996,6 +996,55 @@ class TestTheCategoryDoc:
             )
 
 
+# ── the single-sourced category cap ───────────────────────────────────────
+
+
+class TestTheSingleSourcedCategoryCap:
+    """M1 — the raw-category cap is ONE value, not two copies.
+
+    The tool module's constant USED to be a duplicated literal that
+    CLAIMED to be imported from the service ("the single source of
+    truth") while no import existed — the two could drift silently.
+    The tool now imports the service's constant (the service does NOT
+    import the tool, so the import is acyclic), and this pack pins the
+    equality so the two can never drift apart again.
+    """
+
+    def test_the_tool_cap_equals_the_service_cap(self) -> None:
+        from daemon.services.anomaly_service import (
+            CATEGORY_RAW_MAX_CHARS as SERVICE_CAP,
+        )
+        from daemon.tools.nest_report import CATEGORY_RAW_MAX_CHARS as TOOL_CAP
+
+        assert TOOL_CAP == SERVICE_CAP, (
+            "the tool's raw-category cap must EQUAL the service's — "
+            f"tool={TOOL_CAP!r} service={SERVICE_CAP!r}"
+        )
+
+    def test_the_tool_cap_is_the_service_object_not_a_copy(self) -> None:
+        """The tool's constant IS the service's constant — the cap is
+        SINGLE-SOURCED, not merely equal (a re-duplicated literal that
+        happens to match today would drift on the next change)."""
+        from daemon.services.anomaly_service import (
+            CATEGORY_RAW_MAX_CHARS as SERVICE_CAP,
+        )
+        from daemon.tools.nest_report import CATEGORY_RAW_MAX_CHARS as TOOL_CAP
+
+        assert TOOL_CAP is SERVICE_CAP, (
+            "the tool must IMPORT the service's cap, not re-declare it"
+        )
+
+    def test_the_r1_cap_value_is_unchanged(self) -> None:
+        """R1 — the cap itself is 64 chars (the value the plan froze)."""
+        from daemon.services.anomaly_service import (
+            CATEGORY_RAW_MAX_CHARS as SERVICE_CAP,
+        )
+        from daemon.tools.nest_report import CATEGORY_RAW_MAX_CHARS as TOOL_CAP
+
+        assert TOOL_CAP == 64
+        assert SERVICE_CAP == 64
+
+
 # ── the scratch-POSTGRESQL leg ────────────────────────────────────────────
 
 

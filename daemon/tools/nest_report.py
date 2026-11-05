@@ -146,6 +146,9 @@ from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
 from daemon.repositories.anomaly.models import OUTCOME_UNCLUSTERED
+from daemon.services.anomaly_service import (
+    CATEGORY_RAW_MAX_CHARS as _SERVICE_CATEGORY_RAW_MAX_CHARS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,9 +185,12 @@ SEVERITIES: tuple[str, ...] = ("minor", "major", "critical")
 DEFAULT_SEVERITY = "major"
 
 #: The raw-category cap (R1) — the reporter's verbatim input, capped.
-#: The value is imported from the service (the single source of truth —
-#: a duplicated literal would drift).
-CATEGORY_RAW_MAX_CHARS = 64
+#: The value is IMPORTED from the service (the single source of truth —
+#: a duplicated literal would drift).  The service does NOT import this
+#: tool, so the import is acyclic (verified in both import orders).
+#: ``tests/unit/test_anomaly_report_tool_registration.py`` pins the
+#: tool's cap EQUALS the service's cap, so the two can never drift.
+CATEGORY_RAW_MAX_CHARS = _SERVICE_CATEGORY_RAW_MAX_CHARS
 
 #: The envelope's cluster tail — phase 1 writes the DEGENERATE cluster
 #: tail (phase 2 replaces it with the real assignment).
