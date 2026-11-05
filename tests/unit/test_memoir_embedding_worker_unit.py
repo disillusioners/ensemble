@@ -558,9 +558,13 @@ async def test_tick_line_m_is_the_total_terminal_not_this_tick(repo, caplog):
         await worker._tick()
 
     lines = [r.message for r in caplog.records if r.message.startswith("[MemoirEmbed] pending=")]
+    # The optional `` fail_classes=...`` suffix is the item-15 census
+    # (present only when this tick recorded failures); the stable prefix
+    # is unchanged.
     match = re.match(
         r"^\[MemoirEmbed\] pending=(\d+) embedded=(\d+) errors=(\d+) "
-        r"terminal=(\d+) tick_ms=(\d+) slow_mode=(True|False)$",
+        r"terminal=(\d+) tick_ms=(\d+) slow_mode=(True|False)"
+        r"(?: fail_classes=[a-z_0-9:,]+)?$",
         lines[-1],
     )
     pending, embedded, errors, terminal, tick_ms, slow_mode = match.groups()
@@ -736,3 +740,50 @@ def test_the_worker_publishes_a_not_started_block_before_any_worker():
     # The module snapshot is honest before the lifespan runs (probe apps).
     snap = latest_snapshot()
     assert snap["phase"] in {"not_started", "running", "parked"}
+
+
+# ── Tidier item 15 (B4): distinguishable failure classes in the tick ─────
+
+
+async def test_the_tick_line_keeps_distinct_failure_classes(repo, caplog):
+    """A dims mismatch must NOT read like a credential rejection.
+
+    Both are terminal failures, but they call for opposite operator
+    actions (fix the model identity vs re-mint the key). The tick line
+    carries the per-class census and the token is the CLASS, never the
+    bare ``terminal`` marker word.
+    """
+    repo.insert_episode(agent_id="ari", title="t", body="b")
+
+    def _wrong_dims(text, **kwargs):
+        return [0.0] * 3  # != the default 1536
+
+    worker = _make_worker(repo, _wrong_dims)
+    with caplog.at_level(logging.INFO, logger=WORKER_LOGGER):
+        await worker._tick()
+
+    tick_lines = [
+        r.message for r in caplog.records if "[MemoirEmbed] pending=" in r.message
+    ]
+    assert tick_lines, "the tick line must be emitted"
+    line = tick_lines[-1]
+    assert "fail_classes=embedding_dimensions_mismatch:1" in line, line
+    assert "terminal:" not in line
+
+
+async def test_record_failure_returns_the_class_token_not_the_marker(repo):
+    """The returned token drives the census — it must be the CLASS."""
+    repo.insert_episode(agent_id="ari", title="t", body="b")
+    row = repo.fetch_latest("ari", limit=1)[0]
+    worker = _make_worker(repo, _ok_embedder())
+    token = await worker._record_failure(
+        row,
+        "terminal:embedding_dimensions_mismatch expected=1536 got=3",
+        immediate_terminal=True,
+        already_marked=True,
+    )
+    assert token == "embedding_dimensions_mismatch", token
+    # And the PERSISTED error keeps the terminal marker + true class.
+    stored = repo.fetch_latest("ari", limit=1)[0]
+    assert stored.embedding_error.startswith(TERMINAL_ERROR_MARKER)
+    assert "embedding_dimensions_mismatch" in stored.embedding_error

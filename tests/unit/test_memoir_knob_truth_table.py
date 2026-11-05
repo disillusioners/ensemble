@@ -327,3 +327,36 @@ def test_a_changed_knob_value_re_warns(caplog):
         os.environ[MEMOIR_ENABLED_ENV_VAR] = "maybe"
         resolve_memoir_knob()
     assert len(_records(caplog, logging.WARNING)) == 2
+
+
+# ── Tidier item 14 (B3): non-string types FAIL CLOSED, never raise ────────
+
+
+def test_non_string_garbage_types_fail_closed_instead_of_raising():
+    """A list/dict/float ``enabled`` is garbage ⇒ DISABLED, not a crash.
+
+    The pre-fix tail ``return value`` handed these straight to Pydantic,
+    which raised ``ValidationError`` — a config-file list would abort
+    the BOOT instead of failing the surface closed (DR-3). Pinned so the
+    pass-through cannot return.
+    """
+    from daemon.config import MemoirConfig
+
+    for garbage in ([1, 2], {"on": True}, 3.5):
+        config = MemoirConfig(enabled=garbage)
+        assert config.enabled is False, f"{garbage!r} must fail CLOSED"
+
+
+def test_yaml_integer_scalars_keep_their_meaning():
+    """``enabled: 0`` / ``enabled: 1`` are conventional YAML booleans.
+
+    They keep their meaning (0=off, 1=on); any OTHER integer is out of
+    domain and fails closed. This is the boundary the fix deliberately
+    preserves so an upgrade cannot silently disable a working surface.
+    """
+    from daemon.config import MemoirConfig
+
+    assert MemoirConfig(enabled=1).enabled is True
+    assert MemoirConfig(enabled=0).enabled is False
+    for out_of_domain in (-1, 2, 7):
+        assert MemoirConfig(enabled=out_of_domain).enabled is False

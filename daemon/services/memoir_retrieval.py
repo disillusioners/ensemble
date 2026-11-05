@@ -59,6 +59,7 @@ BEHIND that gate, so it neither reads nor caches the knob.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -70,6 +71,18 @@ from daemon.repositories.memoir.repository import (
     as_aware_utc,
 )
 from daemon.services.timestamps import now_utc, to_utc_iso
+
+logger = logging.getLogger(__name__)
+
+#: The ONE spelling of the "semantic ranker did not run" reason tokens
+#: shipped in the footer (``semantic_reason=...``). The footer token is
+#: the agent-visible half of the same fact the WARNING logs (tidier H7 /
+#: AM-33 footer extension): a degraded recall must never be
+#: indistinguishable from a complete one.
+SEMANTIC_REASON_NONE = "none"
+SEMANTIC_REASON_NO_EMBEDDER = "no_embedder"
+SEMANTIC_REASON_TIMEOUT = "timeout"
+SEMANTIC_REASON_DIMS_MISMATCH = "embedding_query_dims_mismatch"
 
 __all__ = [
     "MEMOIR_PRIOR_TAU_DAYS",
@@ -347,6 +360,21 @@ class MemoirRetrievalService:
         #: embed call raised or timed out. Drives ``semantic_used`` so a
         #: degraded recall reports ``semantic=off`` honestly.
         self._embed_call_failed: bool = False
+        #: Per-recall reason token for the footer (AM-33 extension). One
+        #: of the ``SEMANTIC_REASON_*`` values, or "" before the first
+        #: read. Reset at the top of every public read.
+        self._semantic_reason: str = ""
+        # ONE-SHOT construction INFO naming the MISSING ARM (tidier H7):
+        # a lexical-only service is a configured steady state, not a
+        # surprise — but it must be visible without reading logs per
+        # recall. Never a WARNING here (the per-read WARNING covers
+        # actual degradations).
+        if self.embedder is None:
+            logger.info(
+                "[MemoirRecall] semantic lane OFF — missing arm=%s "
+                "(recall runs lexical-only)",
+                self._missing_semantic_arm(),
+            )
 
     # -- the public reads --
 
@@ -368,6 +396,8 @@ class MemoirRetrievalService:
             MemoirRecallError: on an out-of-range ``k`` or an empty query.
         """
         count = self._validate_k(k)
+        self._embed_call_failed = False
+        self._semantic_reason = ""
         clean_query = (query or "").strip()
         if not clean_query:
             raise MemoirRecallError(
@@ -380,7 +410,6 @@ class MemoirRetrievalService:
         rows = self.repository.fetch_latest(agent_id, limit=None)
         by_id = {row.id: row for row in rows}
 
-        self._embed_call_failed = False
         semantic, embedding_excluded = self._semantic_pool(rows, clean_query)
         missing_embedding = self._count_missing_embeddings(lexical, by_id)
 
@@ -445,6 +474,8 @@ class MemoirRetrievalService:
         ``memoir_timeline(since?, until?, q?)`` (DR-4 renamed only the
         window bounds; the narrowing term stays ``q``).
         """
+        self._embed_call_failed = False
+        self._semantic_reason = ""
         if since is not None and until is not None:
             if as_aware_utc(since) > as_aware_utc(until):  # type: ignore[operator]
                 raise MemoirRecallError(
@@ -501,6 +532,34 @@ class MemoirRetrievalService:
             self.embedding_dims
         )
 
+    def _missing_semantic_arm(self) -> str:
+        """WHICH arm of the default-embedder resolution is missing (H7).
+
+        Named tokens (never prose) so the log line is greppable:
+        ``no_config`` / ``no_api_key`` / ``no_base_url`` /
+        ``no_model_or_dims``. Only called when ``self.embedder is None``.
+        """
+        if self._config is None:
+            return "no_config"
+        if not self._resolve_default_api_key():
+            return "no_api_key"
+        if not self._resolve_default_base_url():
+            return "no_base_url"
+        return "no_model_or_dims"
+
+    @staticmethod
+    def _degrade_reason(exc: BaseException) -> str:
+        """The per-read degrade reason token for a raised embed call (H7).
+
+        ``timeout`` for any timeout-shaped failure (the house SDK raises
+        ``APITimeoutError``; ``asyncio.TimeoutError`` is a builtin
+        ``TimeoutError`` alias) and the exception CLASS NAME otherwise —
+        a token, never a message, so the footer and the log agree.
+        """
+        if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower():
+            return SEMANTIC_REASON_TIMEOUT
+        return type(exc).__name__ or "unknown_error"
+
     # ── ITEM 1: default query-embedder resolution (design section 7) ─────
 
     def _resolve_default_embedding_model(self) -> str | None:
@@ -535,7 +594,12 @@ class MemoirRetrievalService:
             )
 
             return DEFAULT_EMBEDDING_MODEL
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[MemoirRecall] no embedding model resolvable "
+                "(reason=%s) — the semantic lane stays off",
+                type(exc).__name__,
+            )
             return None
 
     def _resolve_default_embedding_dims(self) -> int | None:
@@ -547,7 +611,11 @@ class MemoirRetrievalService:
             try:
                 return int(env_value)
             except ValueError:
-                pass
+                logger.warning(
+                    "[MemoirRecall] ENSEMBLE_MEMOIR_EMBEDDING_DIMENSIONS="
+                    "%r is not an integer — falling back to the config tier",
+                    env_value,
+                )
         memoir_cfg = getattr(self._config, "memoir", None)
         if memoir_cfg is not None:
             dims = getattr(memoir_cfg, "embedding_dimensions", None)
@@ -555,13 +623,22 @@ class MemoirRetrievalService:
                 try:
                     return int(dims)
                 except (TypeError, ValueError):
-                    pass
+                    logger.warning(
+                        "[MemoirRecall] memoir.embedding_dimensions=%r is not "
+                        "an integer — falling back to the class default",
+                        dims,
+                    )
         # Fall back to the worker's default (1536).
         try:
             from daemon.config import MemoirConfig
 
             return int(MemoirConfig.model_fields["embedding_dimensions"].default)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[MemoirRecall] MemoirConfig default dimensions unresolvable "
+                "(reason=%s) — keeping 1536",
+                type(exc).__name__,
+            )
             return 1536
 
     def _resolve_default_base_url(self) -> str | None:
@@ -647,6 +724,15 @@ class MemoirRetrievalService:
         """
         embedded = [row for row in rows if row.embedding is not None]
         if not self._semantic_enabled():
+            # A recall served lexical-only is DEGRADED, and the degrade
+            # must be visible in the log AND in the footer (H7). The
+            # construction INFO already named the missing arm once.
+            self._semantic_reason = SEMANTIC_REASON_NO_EMBEDDER
+            logger.warning(
+                "[MemoirRecall] semantic ranker DEGRADED reason=%s — "
+                "this recall is lexical-only",
+                SEMANTIC_REASON_NO_EMBEDDER,
+            )
             return [], 0
 
         matched: list[Any] = []
@@ -671,8 +757,32 @@ class MemoirRetrievalService:
 
         try:
             query_vector = list(self.embedder(query) or [])  # type: ignore[misc]
-        except Exception:  # noqa: BLE001 — degrade to lexical-only
+        except Exception as exc:  # noqa: BLE001 — degrade to lexical-only
             self._embed_call_failed = True
+            reason = self._degrade_reason(exc)
+            self._semantic_reason = reason
+            logger.warning(
+                "[MemoirRecall] semantic ranker DEGRADED reason=%s (%s) — "
+                "this recall is lexical-only",
+                reason,
+                type(exc).__name__,
+            )
+            return [], excluded
+
+        # ── H8: the query vector's DIMENSIONS must match the active
+        # identity. The house cosine zips the shorter sequence, so a
+        # wrong-length vector silently scores against a PREFIX of every
+        # row embedding — silent corruption, not a crash. Degrade to
+        # lexical-only and say why.
+        if dims and len(query_vector) != dims:
+            self._embed_call_failed = True
+            self._semantic_reason = SEMANTIC_REASON_DIMS_MISMATCH
+            logger.warning(
+                "[MemoirRecall] embedding_query_dims_mismatch expected=%d "
+                "got=%d — this recall is lexical-only",
+                dims,
+                len(query_vector),
+            )
             return [], excluded
         scored: list[tuple[str, float]] = []
         for row in matched:
@@ -781,6 +891,7 @@ class MemoirRetrievalService:
             missing_embedding=missing_embedding,
             embedding_excluded=embedding_excluded,
             semantic_used=semantic_used,
+            semantic_reason=self._semantic_reason,
         )
         total_tokens = body_tokens + _estimate_tokens(footer)
 
@@ -801,6 +912,7 @@ class MemoirRetrievalService:
                 missing_embedding=missing_embedding,
                 embedding_excluded=embedding_excluded,
                 semantic_used=semantic_used,
+                semantic_reason=self._semantic_reason,
             )
             total_tokens = body_tokens + _estimate_tokens(footer)
 
@@ -839,6 +951,7 @@ class MemoirRetrievalService:
         missing_embedding: int = 0,
         embedding_excluded: int = 0,
         semantic_used: bool = False,
+        semantic_reason: str = "",
     ) -> str:
         """The recall footer (D2.10 / D2.11).
 
@@ -858,6 +971,7 @@ class MemoirRetrievalService:
             f"[{kind}: episodes={episodes} dropped={dropped} "
             f"body_tokens={body_tokens} budget={MEMOIR_RECALL_TOKEN_BUDGET} "
             f"rank={rank_basis} semantic={'on' if semantic_used else 'off'} "
+            f"semantic_reason={semantic_reason or SEMANTIC_REASON_NONE} "
             f"missing_embedding={missing_embedding} "
             f"active_model={self.embedding_model or 'none'} "
             f"embedding_excluded={embedding_excluded} "

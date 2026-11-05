@@ -3333,6 +3333,15 @@ class MemoirConfig(BaseSettings):
         so no consumer parses the env itself. This validator NEVER
         raises: an unrecognised value resolves to DISABLED (fail closed,
         DR-3) instead of aborting the boot.
+
+        Tidier item 14: the former tail ``return value`` passed ANY
+        non-str/non-bool value through to Pydantic's ``bool`` coercion,
+        which RAISED ``ValidationError`` for a list/dict/float (a
+        config-file list would abort the boot) while silently coercing
+        other truthy objects. Unvalidated types now FAIL CLOSED; the
+        YAML-conventional integer scalars ``0`` / ``1`` stay accepted
+        (an operator's ``enabled: 1`` must not become a disable on
+        upgrade), and every other integer is out of domain ⇒ DISABLED.
         """
         if value is None:
             return True
@@ -3341,7 +3350,12 @@ class MemoirConfig(BaseSettings):
         if isinstance(value, str):
             enabled, _resolution, _rejected = classify_memoir_enabled(value)
             return enabled
-        return value
+        if isinstance(value, int):
+            # YAML boolean-ish scalars only; anything else fails CLOSED.
+            return bool(value) if value in (0, 1) else False
+        # list / dict / float / anything else: garbage ⇒ DISABLED, and
+        # NEVER a raise (DR-3: a mis-set knob must not abort the boot).
+        return False
 
     @model_validator(mode="after")
     def _record_resolution(self) -> "MemoirConfig":

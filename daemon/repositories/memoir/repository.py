@@ -1179,14 +1179,14 @@ class MemoirRepository:
     def _count_pins(
         self, session: Session, agent_id: str, *, exclude_id: str | None = None
     ) -> int:
-        stmt = (
-            select(MemoirEpisode)
-            .where(MemoirEpisode.agent_id == agent_id)
-            .where(MemoirEpisode.is_keepsake.is_(True))
-        )
-        if exclude_id:
-            stmt = stmt.where(MemoirEpisode.id != exclude_id)
-        return len(session.exec(stmt).all())
+        """The pin COUNT — derived from the SAME list the zone sums.
+
+        Tidier M8: the counter used to run its own query, so it could
+        drift from ``_pin_details`` (the thing admission actually
+        measures). ``len`` of the one list keeps the denominator and the
+        numerators single-sourced.
+        """
+        return len(self._pin_details(session, agent_id, exclude_id=exclude_id))
 
     def _zone_tokens(
         self, session: Session, agent_id: str, *, exclude_id: str | None = None

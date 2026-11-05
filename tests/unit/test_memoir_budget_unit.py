@@ -168,6 +168,11 @@ def test_the_footer_carries_the_counts_and_the_disclosure(repo, service):
     assert "missing_embedding=1" in footer
     assert "active_model=none" in footer
     assert "embedding_excluded=0" in footer
+    # AM-33 footer extension (tidier H7): the degrade REASON rides the
+    # footer — this service has no embedder, so the token is
+    # ``no_embedder`` and the semantic lane is disclosed as off.
+    assert "semantic=off" in footer
+    assert "semantic_reason=no_embedder" in footer
     assert "stats_updated=true" in footer
     assert "note=partial_recall" not in footer
 
@@ -193,6 +198,10 @@ def test_the_footer_carries_the_partial_recall_note(repo):
     assert "embedding_excluded=1" in result.footer
     assert "note=partial_recall" in result.footer
     assert "active_model=active-model" in result.footer
+    # The healthy semantic lane reports the NONE reason explicitly, so a
+    # missing token is itself detectable (H7).
+    assert "semantic=on" in result.footer
+    assert "semantic_reason=none" in result.footer
 
 
 def test_the_footer_of_a_timeline_never_claims_the_stats(repo, service):

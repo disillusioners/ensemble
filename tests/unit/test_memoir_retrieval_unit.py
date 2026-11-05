@@ -474,3 +474,62 @@ def test_k_caps_the_shipped_episode_count_on_a_larger_corpus(repo):
     )
     assert len(result.rendered_ids) == 5
     assert result.marked_ids == result.rendered_ids
+
+
+# ── H8 / H7 — the semantic-degrade disclosures ────────────────────────────
+
+
+def test_a_wrong_length_query_vector_degrades_to_lexical_only(repo):
+    """H8: a query embedding of the WRONG LENGTH is silent corruption.
+
+    The house cosine ``zip``s to the shorter sequence, so a 3-long query
+    vector against 2-long row embeddings scores a PREFIX — no exception,
+    no warning, just wrong numbers. The guard degrades the read to
+    lexical-only and names the reason in the footer.
+    """
+    episode = repo.insert_episode(agent_id="ari", body="the preserved first day")
+    repo.store_embedding(episode, [1.0, 0.0], "active-model", 2)
+    service = _service(
+        repo,
+        embedder=lambda query: [1.0, 0.0, 0.0],  # 3 != dims=2
+        embedding_model="active-model",
+        embedding_dims=2,
+    )
+    result = service.recall("ari", "preserved", k=5)
+    assert episode in result.rendered_ids, "the lexical lane must still ship"
+    assert result.semantic_enabled is False
+    assert "semantic=off" in result.footer
+    assert "semantic_reason=embedding_query_dims_mismatch" in result.footer
+
+
+def _raising_embedder(query):  # noqa: ARG001 — signature parity
+    raise RuntimeError("the embed service is unavailable")
+
+
+def test_a_failing_embedder_names_its_reason_token(repo):
+    """H7: every degrade carries a token — here the exception class."""
+    repo.insert_episode(agent_id="ari", body="the preserved first day")
+    service = _service(
+        repo,
+        embedder=_raising_embedder,
+        embedding_model="active-model",
+        embedding_dims=2,
+    )
+    result = service.recall("ari", "preserved", k=5)
+    assert "semantic=off" in result.footer
+    assert "semantic_reason=RuntimeError" in result.footer
+
+
+def test_a_healthy_semantic_recall_reports_the_none_reason(repo):
+    """The token is ALWAYS present, so its absence is detectable."""
+    episode = repo.insert_episode(agent_id="ari", body="the preserved first day")
+    repo.store_embedding(episode, [1.0, 0.0], "active-model", 2)
+    service = _service(
+        repo,
+        embedder=lambda query: [1.0, 0.0],
+        embedding_model="active-model",
+        embedding_dims=2,
+    )
+    result = service.recall("ari", "preserved", k=5)
+    assert "semantic=on" in result.footer
+    assert "semantic_reason=none" in result.footer

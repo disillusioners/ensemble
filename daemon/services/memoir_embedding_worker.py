@@ -491,6 +491,13 @@ class MemoirEmbeddingWorker:
         errors = 0
         credential_rejected = False
         budget_exhausted_deferred = 0
+        #: Per-tick failure CLASS census, keyed by the distinct outcome
+        #: token (``credential_rejected`` / an exception class name /
+        #: ``embedding_dimensions_mismatch`` / …). The tick line prints
+        #: it so a dead credential and a dims mismatch are DISTINGUISHABLE
+        #: in the log instead of collapsing into one ``errors=N`` count
+        #: (tidier item 15).
+        fail_classes: dict[str, int] = {}
 
         for row in candidates:
             elapsed = self._clock() - started
@@ -509,6 +516,7 @@ class MemoirEmbeddingWorker:
                 embedded += 1
             elif outcome is not None:
                 errors += 1
+                fail_classes[outcome] = fail_classes.get(outcome, 0) + 1
                 if outcome == "credential_rejected":
                     credential_rejected = True
 
@@ -585,10 +593,19 @@ class MemoirEmbeddingWorker:
             tick_ms=tick_ms,
             model=settings.model,
         )
+        classes_text = (
+            " fail_classes="
+            + ",".join(
+                f"{token}:{count}"
+                for token, count in sorted(fail_classes.items())
+            )
+            if fail_classes
+            else ""
+        )
         logger.info(
             f"[MemoirEmbed] pending={pending_total} embedded={embedded} "
             f"errors={errors} terminal={terminal_total} "
-            f"tick_ms={tick_ms} slow_mode={self._latched}"
+            f"tick_ms={tick_ms} slow_mode={self._latched}{classes_text}"
         )
 
         if self._latched:
@@ -739,7 +756,12 @@ class MemoirEmbeddingWorker:
             )
         if credential:
             return "credential_rejected"
-        return error_text.split(":", 1)[0] or "embedding_error"
+        # The DISTINCT class token (tidier item 15): ``_reason_token``
+        # strips the ``terminal:`` marker first, so a terminal dims
+        # mismatch reports ``embedding_dimensions_mismatch`` instead of
+        # the marker word (which collapsed it with every other terminal
+        # failure). An unclassifiable failure still yields a token.
+        return self._reason_token(error_text) or "embedding_error"
 
     # ── helpers ─────────────────────────────────────────────────────────
 
