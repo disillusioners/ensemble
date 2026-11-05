@@ -244,6 +244,10 @@ def _anomaly_service(manager: Any) -> Any:
     (``manager._anomaly_service``); the public alias is accepted as a
     second door so a mount under either name resolves.  Resolved PER CALL
     so a service mounted after the tool list was built is still seen.
+
+    TWIN: ``daemon/tools/nest_report_read.py::_anomaly_service`` (and the
+    router's request-scoped variant) — an attribute-order change must
+    land in all three.
     """
     for attribute in ("_anomaly_service", "anomaly_service"):
         service = getattr(manager, attribute, None)

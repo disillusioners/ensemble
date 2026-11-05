@@ -641,7 +641,6 @@ export class NestReportsTabComponent implements OnInit, OnDestroy {
     return rank === 3 || rank === 2 || rank === 1 ? `sev-${rank}` : 'sev-0';
   }
 
-
   /** The excerpt cap — at most 300 characters are rendered. */
   excerptText(excerpt: string, reportId: string): string {
     if (this.isRevealed(reportId)) {

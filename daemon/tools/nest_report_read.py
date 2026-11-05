@@ -250,6 +250,10 @@ def _anomaly_service(manager: Any) -> Any:
     (``manager._anomaly_service``); the public alias is accepted as a
     second door.  Resolved PER CALL (RULING-1) so a degraded boot leaves
     the tools present and loudly refusing.
+
+    TWIN: ``daemon/tools/nest_report.py::_anomaly_service`` (and the
+    router's request-scoped variant) — an attribute-order change must
+    land in all three.
     """
     for attribute in ("_anomaly_service", "anomaly_service"):
         service = getattr(manager, attribute, None)
