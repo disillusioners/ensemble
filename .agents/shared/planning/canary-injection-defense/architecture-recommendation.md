@@ -25,7 +25,7 @@ recorded defaults.
 | **D1** | **A — lean compose-and-hand** | Canary holds zero instance tools; aegis is the sole spawner/firer. The "project-scoped spawn right" is unenforceable in v1 (verified twice: `_auth.py:89-115`, no project axis) — B over-promises, C is the v2 mechanical path. |
 | **D2** | **B — seed the standing readers**, corrected `auto_load` | 4 seeded recipients: canary (canonical), aegis, worker, sweeper. **`auto_load: true` for canary AND sweeper** (no other path exists for a persona with no skill tools — the plan's `false` default would have shipped an unreachable skill to sweeper); `false` + workflow-mandated load for aegis and worker. hacker/cracker = doctrine-only, **disclosed**. Evolution = git-only + version bump. |
 | **D3** | **Option A landing sites + two-layer N** | aegis `(g)`; leaves `(f)`; worker `## Must` CRITICAL subsection; canary cardinal 7 from birth. Online rule = same/adjacent turn; offline metric = tool results since ingestion (campaign-scored). Marker `[UNTRUSTED-ADJACENCY: …]`. Carve-out = "the fencing is the container". |
-| **D4** | **Option A** | Corpus bound to `tests/fixtures/injection_corpus/` (COR-01 wins over the `decisions.md:348` illustration); rule table inside the skill body as the single machine-readable JSON block; named migration trigger to a sibling file. |
+| **D4** | **A (corpus) + B (rule home — AM-4 flip)** | Corpus bound to `tests/fixtures/injection_corpus/` (COR-01 wins over the `decisions.md:348` illustration). **Rule table = a single canonical data file from day one** (AM-4: the body is capped by the 8 000-char `skill_view` display window, so the table cannot live in it); the mirrored bodies carry the pointer + human summary. |
 | **D5** | **Option A — family file grows T31–T37** | T29 20→25; worker **outside** the matrix (C2); T31 = 24 anchors + canary's 2 carve-out anchors; **complete** named re-derivation ledger (plan's list was complete for the family file **plus** two baseline-arithmetic constants). |
 | **D6** | **Option A — core 5 legs** | Channels 1/2/3/5 fired + 6 as comparison baseline; 4/7/8/9 deferred with reasons; 11 (chat inbound) disclosed as the widest uncovered surface. Sandbox = **logical only**; five-item mechanical pre-flight. |
 | **D7** | **Tool surface + containment** | Canary: `allow = {bash, filesystem, time, help}` — **NO `proc`** (full shell substitute + background persistence past teardown) and **NO `self`** (AM-1: inner_soul/access_memory is the durable self-behavior-write channel — the exact F1 shape on the most-exposed agent); `deny = {write_file, edit_file}`; no instance/mcp/secrets/job/chart/knowledge/plane/image. **No per-instance tool narrowing exists** ⇒ **the payload is the containment unit** (new binding: inert-and-observable payloads only). The screen's execution mechanism is a committed scanner in the shipped agents tree (NC-2). |
@@ -256,22 +256,30 @@ run with the pass **OFF** by construction.
   illustration (`tests/unit/agents/fixtures/injection-corpus/`) is **superseded** (disclosed text
   divergence, now resolved). Rationale unchanged: committed, inert, **never shipped** (`tests/` is not in
   the release payload — verified), and outside the agents tree (no prompt-surface proximity).
-- **Rule-set home:** the **single machine-readable JSON block inside the canonical skill body** (SK-04 /
-  RUL-01…06). One artifact, two readers (human + scanner). The scanner parses the block; the body carries
-  the human summary table and a pointer.
-- **Seed-table size budget (AM-2, 2026-11-05):** the v1 seed table is **18 rules, ≤ 8 000 chars, ≤ 120
-  lines**; the whole body stays **≤ 18 000 chars** (2 000 headroom under the 20 000-char body cap so the
-  contract/procedure text can grow without forcing the migration). At 18 rules ≈ 4–7 KiB the table fits
-  comfortably — the migration stays a **distant trigger**, not a day-one need.
-- **Named migration trigger** (tightened by AM-2): move the table to a **sibling data file read by the
-  skill** when the table exceeds **8 000 chars**, or the body exceeds **18 000 chars**, or a rule needs
-  per-rule fixture content the body budget cannot carry. (NFR-05's 24 KiB table ceiling is the *upper bound
-  of the migration window*, never a v1 target — a table at that ceiling cannot fit any body cap, which is
-  exactly why the trigger fires far below it.) When the migration fires: exactly one machine-readable
-  source moves (the data file); the body keeps the human summary + pointer; the scanner's discovery ladder
-  extends by one file in the same directory; the W4 version bump still propagates body + pointer
-  atomically. The file-invoked precedent exists (installer toolchains, and the
-  `test_installer_skills_in_no_manifest` pin must be respected).
+- **Rule-set home — AM-4 flip (2026-11-05, approver iteration-002): a single canonical DATA FILE from day
+  one**, `agents/canary/skills-template/injection-rules.json` (D4's rule-home option **B**; the corpus
+  stays on option **A**'s `tests/` path). Cause: the real visibility limit is the **8 000-char `skill_view`
+  display cap** (`daemon/tools/skill_tools.py:428-432`, `:1001-1004`), not the lane-authored 20 000-char
+  budget AM-2 leaned on — and a seed table sized against that window leaves none for the contract. The
+  mirrored bodies carry the **pointer + human summary**; the file holds the machine-readable table.
+- **Visibility budgets (AM-4 — these govern, superseding AM-2's numbers):**
+  - **Skill body ≤ 8 000 chars (HARD, pinned).** Universal across all four mirrors, because the bound read
+    path is the **weakest** one any recipient uses (see §4.1b read paths) and the bodies are byte-identical.
+  - **Rule table ≤ 8 000 chars / ≤ 120 lines / 18 rules** — now a *data-file* budget, decoupled from the
+    body window. (NFR-05's 24 KiB table ceiling stays the outer bound of the file, never a v1 target.)
+  - Contract + procedure + pointer must fit the remaining body budget; the contract's **normative literals**
+    are what the tests pin (prose may compress, literals may not).
+- **Discovery + byte-identity consequences of the flip:** the scanner, the table and the body are the only
+  artifacts. The table is **co-located with the scanner** and resolved **relative to the scanner's own
+  file** (`Path(__file__).with_name("injection-rules.json")`) — CWD-independent, so the discovery ladder
+  now covers **the scanner only**. The table is **canonical once, not mirrored** (the single-machine-
+  readable-source invariant is strengthened: one file, not four copies), so **rule evolution never touches
+  the mirrored bodies** and body byte-identity is unaffected. The W4 version bump propagates the **body/
+  contract**; a table-only change is a data-file commit and needs no body version bump (the table carries
+  its own `version` field, asserted by T32). AM-2's byte-identity rule stands unchanged: bodies are
+  identical **modulo exactly one named exception — the `auto_load:` frontmatter line**.
+  The file-invoked precedent exists (installer toolchains, and the
+  `test_installer_skills_in_no_manifest` pin must be respected — a data file is not a skill at all).
 - **Corpus labelling + hygiene:** COR-02 (`SYNTHETIC-ATTACK-SAMPLE` notice) and COR-06 (secret scan **with
   positive and negative controls**, fail-closed) are binding. A control-less scan is vacuous, not clean.
 
@@ -332,7 +340,11 @@ experience: T21/T25/T29 all redden by design on this lane).
   block** (a parse failure means "all tools allowed" — a privilege escalation, not a lint error).
 - **Corpus:** label present; secret scan with both controls; coverage counts.
 - **Scanner:** deterministic; bare `python3`; no network; no writes outside stdout; parses the rule table
-  from the canonical body; refuses an LLM downgrade of `hostile`.
+  from the canonical **data file** (resolved relative to the scanner, AM-4); refuses **any** verdict or
+  confidence downgrade — monotonic on both axes (AM-3).
+- **Visibility (AM-4):** every mirrored body asserts `len(body) <= 8000` (the `skill_view` display window);
+  the data file asserts `<= 8000` chars / `<= 120` lines / `18` distinct `INJ-nn` ids; the body's pointer
+  names the data file and the scanner; the data file's `version` is asserted (T32).
 
 ### 5.4 Mutation legs (minimum set, each observed RED→GREEN)
 
@@ -702,5 +714,22 @@ and the screen never blocks (SK-09), so a stuck-high verdict costs one label, no
 needs **no re-point**; the requirements layer stays authoritative and is stricter than the record's first
 form by design (the asymmetry is now closed in the record's favour). Amends §3.6.
 
+**AM-4 — D4 rule-set home + visibility budgets (2026-11-05, approver iteration-002).** Verified facts
+invalidate AM-2's arithmetic: there is **no 20 000-char body cap** in the skill layer; `skill_view`
+**truncates the display at 8 000 chars** (`skill_tools.py:428-432`, `:1001-1004`; DB-seeded skills get no
+`read_file` fallback — only file skills carry the body-path hint), while the **auto-load block** and the
+**dispatch `load_skill` injection path** deliver the **full body** (injection path renders uncapped,
+`skill_injection_service.py:806` "never truncates"). A dispatcher-attached load is **dispatch-dependent**
+and cannot be a bound self-load path; therefore the bound read path for the `auto_load: false` class
+(aegis, worker) is `skill_view` at **8 000 chars**, and that one window governs the byte-identical body for
+**all four** recipients. **Ruling:** (a) auto-load = FULL (canary, sweeper); `skill_view` = 8 000-char
+display (aegis, worker self-load); push delivery = full but not bound. (b)+(c) **D4 flips the rule home to
+a data file from day one** — `agents/canary/skills-template/injection-rules.json`, canonical once, resolved
+relative to the scanner (`Path(__file__).with_name(...)`, CWD-independent); bodies carry the pointer + human
+summary and are **≤ 8 000 chars (hard pin)**. (d) Rule-count budgets kept: **18 rules / ≤ 120 lines /
+≤ 8 000 chars** (now a data-file budget). AM-2's byte-identity rule stands intact (bodies identical modulo
+the `auto_load:` line; the table leaves the mirrored body, so rule evolution cannot drift a mirror).
+Supersedes AM-2's "body ≤ 18 000" (rested on a non-existent cap). Amends §0, §4.1, §5.3.
+
 *End of ruling record. The plan is authorised to proceed to G1 (plan council) under these rulings and
-amendments AM-1/AM-2/AM-3.*
+amendments AM-1/AM-2/AM-3/AM-4.*

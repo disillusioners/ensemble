@@ -374,6 +374,15 @@ carries **exactly one named exception — the `auto_load:` frontmatter line** (`
 service is verified to honor a manifest `auto_load` key. Full text:
 `architecture-recommendation.md` §2.3/§4.1/§5.4 + §14 AM-2.
 
+**AMENDMENT AM-4 (2026-11-05, approver iteration-002 — supersedes AM-2's budgets):** there is no 20 000-char
+body cap; `skill_view` displays at most **8 000 chars** (DB skills get no `read_file` fallback), so the
+byte-identical body is pinned to **≤ 8 000 chars** for every recipient. The rule table therefore **leaves
+the body**: **D4 flips to data-file-from-day-one** — `agents/canary/skills-template/injection-rules.json`,
+canonical once (not mirrored), resolved relative to the scanner (`Path(__file__).with_name(...)`), body
+carries the pointer + human summary. Table budget stays **18 rules / ≤ 120 lines / ≤ 8 000 chars**; AM-2's
+`auto_load` byte-identity exception stands. Full text: `architecture-recommendation.md` §4.1/§5.3 + §14
+AM-4.
+
 **Mechanics that bound the options (B11, A.4, B6):** a corpus file under `agents/<persona>/` that is not
 one of the eight artifact names adds **zero** baseline rows but does grow the agents-tree census; a
 corpus placed **inside a skill body** would be injected into prompts (the screen's own corpus would
@@ -809,7 +818,7 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 | **D1** | Spawn topology (lean vs doctrinal-scope vs decoy-only) | **RULED — A: lean compose-and-hand** | architect | 2026-11-05 · `architecture-recommendation.md` §1 · commit `f6d11c232` |
 | **D2** | Skill mechanism + distribution (seed set, copies, auto-load, evolution) | **RULED — B; `auto_load` corrected (canary+sweeper true)** | architect | 2026-11-05 · §2 · commit `f6d11c232` |
 | **D3** | Doctrine wording + landing sites + step semantics + carve-out | **RULED — A sites + two-layer N** | architect | 2026-11-05 · §3 · commit `f6d11c232` |
-| **D4** | Payload corpus home + rule-set home | **RULED — A (`tests/fixtures/injection_corpus/`); AM-2: seed budget + `auto_load` mirror exception** | architect | 2026-11-05 · §4 + §14 AM-2 · commits `f6d11c232` + AM-2 amendment |
+| **D4** | Payload corpus home + rule-set home | **RULED — A corpus + B rule-home (AM-4 data file from day one); AM-2 `auto_load` mirror exception** | architect | 2026-11-05 · §4 + §14 AM-2/AM-4 · commits `f6d11c232` + AM-2/AM-4 amendments |
 | **D5** | Test-matrix shape (25 cells, packs, mutations, census, re-derivations) | **RULED — A (family file grows T31–T37)** | architect | 2026-11-05 · §5 · commit `f6d11c232` |
 | **D6** | Intake-channel coverage + sandbox semantics | **RULED — A (core 5 legs; logical-only sandbox)** | architect | 2026-11-05 · §6 · commit `f6d11c232` |
 | **D7** | (leader-added) Canary tool surface + mechanical containment | **RULED — no `proc`, no `self` (AM-1); payload inertness is the containment unit** | architect | 2026-11-05 · §7 + §14 AM-1 · commits `f6d11c232` + AM-1 amendment |
