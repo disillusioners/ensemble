@@ -916,8 +916,7 @@ touched by this lane. D1–D7 and all arithmetic (177→181, T29 20→25, boot 4
   phase plans — outside this file's exclusive ownership; not touched.
 
 **Post-fold verification (this document).** Ruling-tag vector on requirement rows re-derived after the
-fold: **D1=1, D2=3, D3=4, D4=1, D5=4, D6=3, D7=2** — unchanged (no ruling tag added, removed, or
-re-pointed; AM-1 and AM-2 are recorded as amendments, not as new rulings). Census constants
+fold: vector unchanged on exact ruling tags (D1=1, D2=3, D3=4, D4=1, D5=4, D6=3, D7=2); four rows gained or extended a `D4/AM-4` amendment tag as part of the AM-4 fold (new tag: SK-04, CAG-11, RUL-06; extended: NFR-05 gained D4/AM-4 alongside D2) — a content change, not bookkeeping. Census constants
 (177→181, T29 20→25, boot 43→44, 24-cell doctrine matrix, 25-cell family matrix), §11 adopted-ruling
 phrasing, the CAG-17/18/CER-16 three-CWD content, and the blast-radius rows are untouched.
 

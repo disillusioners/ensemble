@@ -36,8 +36,7 @@ the lane already has to edit that file for the re-derivation set (T4/T5/T6-T8/T2
 one corpus of pins avoids two matrices drifting apart. The **cell counts** are binding: **25**
 family cells (T29) + **24** doctrine cells (T31) + canary's 2 carve-out anchors; `worker` stays
 **outside** the 25-cell matrix (its legacy prose cannot carry a `^\d+\.\s\*\*` anchor without a
-re-shape the commission forbids) and its coverage is a separate small pin set. If the architect
-prefers a split by concern, the skill-only legs may move to a sibling file — the composition below is
+re-shape the commission forbids) and its coverage is a separate small pin set. The composition below is
 re-derived, but **no leg semantics and no cell count changes**.
 
 ---
@@ -151,7 +150,7 @@ canary gets exactly four prompt files.
 | T6/T7/T8 allow/deny/privileged | `:348-369` | 3 children | + canary | new persona pins |
 | T21 family manifests | `:556-567` | `["aegis"]` exactly | **declared seeded roster** (aegis, worker, sweeper, canary) | skill seeded into 4 agents |
 | T22 version parity | `:585-597` | aegis-only | every seeded `(agent, name)` pair | 4 mirrors |
-| T25 worker byte-identity | `:684-691` | `git diff … agents/worker/ == ""` | **additive-scope**: one file, zero deletions, hunk confined to the new CRITICAL subsection | worker is edited **by design** |
+| T25 worker byte-identity | `:684-691` | `git diff … agents/worker/ == ""` | additive-scope: `rule.md` zero deletions, hunk confined to the new CRITICAL subsection; `skill-set.yaml` (one added entry) + the new `skills-template/injection-screen.md` explicitly allowed (DOC-10: additivity, not one-file-ness). | worker is edited **by design** |
 | T29 matrix | `:759-812` | len 20, agents = FAMILY | len 25, agents include canary, 5 new single-site cells | canary column |
 | **Baseline arithmetic** | `test_aegis_security_family.py:2490-2512` | `EXPECTED_BASELINE_ROWS = 177`; 4 rows/new agent | **181**; canary contributes exactly 4 | canary's 4 prompt artifacts |
 | Leader roster | `test_maintenancer_agent.py:517-523` | 17 members | **unchanged** — canary is an aegis child | verified: no second leader one-liner |
@@ -178,7 +177,7 @@ own):**
 
 | # | Literal (base line) | Today | New | Leg |
 |---|---|---|---|---|
-| **L1** | `_REGISTRY_PROBE` tuple (`:721`) | `('aegis','hacker','cracker','sweeper')` | add `'canary'` | `test_registry_scan_discovers_family` (`:711`), `test_registry_scan_tools_block_round_trips` (`:733`) — **green without the fold, silently under-covering the new persona**; the fold is a coverage fix, not a red |
+| **L1** | `_REGISTRY_PROBE` tuple (`:721`) | `('aegis','hacker','cracker','sweeper')` | add `'canary'` | `test_registry_scan_discovers_family` (`:733`), `test_registry_scan_tools_block_round_trips` (`:744`) — **green without the fold, silently under-covering the new persona**; the fold is a coverage fix, not a red |
 | **L2** | The aegis team literal in `test_aegis_team_members_exact` (**T4**, `:326-327`) | 4-set `{hacker, cracker, sweeper, worker}` | 5-set `{hacker, cracker, sweeper, worker, canary}` | T4 — **reds** (P3 task 8 adds `canary`) |
 | **L3** | The **second** aegis team literal in `test_the_tool_matrix_is_untouched` (`:3405-3408`) | 4-set | 5-set | **reds** — the same assertion restated in a different leg; folding only L2 leaves this one red (the class the previous ledger missed) |
 
