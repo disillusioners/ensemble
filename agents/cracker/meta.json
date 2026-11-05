@@ -1,0 +1,15 @@
+{
+  "id": "cracker",
+  "name": "Cracker",
+  "description": "White-hat protection-strength auditor — threat-models the crypto/credential surface, generates synthetic-sample benches only, runs hashcat/john-style strength benches inside the engagement sandbox, and reports protection weaknesses as candidates; never ingests real credentials, real user data, or third-party hashes",
+  "icon": "🔐",
+  "color": "accent-amber",
+  "version": "1.0.0",
+  "llm_model": "coding",
+  "default_queue": "system_parallel_queue",
+  "tools": {
+    "allow": ["bash", "proc", "filesystem", "time", "help", "self"],
+    "deny": ["write_file", "edit_file"]
+  },
+  "team_members": []
+}

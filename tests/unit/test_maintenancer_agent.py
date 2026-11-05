@@ -515,10 +515,10 @@ class TestLeaderTeamMembership:
         )
 
     def test_leader_team_members_length_16(self) -> None:
-        """Spec — 15 after 'designer', 16 after appending 'gaia' (environment-terraform)."""
+        """Spec — 15 after 'designer', 16 after appending 'gaia' (environment-terraform), 17 after appending 'aegis'."""
         leader_meta = _load_leader_meta()
         team = leader_meta.get("team_members", [])
-        assert len(team) == 16, (
-            f"leader team_members length must be 16 (was 13, +1 'maintenancer', "
-            f"+1 'designer', +1 'gaia'). Got: {len(team)}"
+        assert len(team) == 17, (
+            f"leader team_members length must be 17 (was 13, +1 'maintenancer', "
+            f"+1 'designer', +1 'gaia', +1 'aegis'). Got: {len(team)}"
         )
