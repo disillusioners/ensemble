@@ -225,6 +225,10 @@ class TestTheSelectionPredicate:
         ]
         assert comparisons, "the house form COMPARES msg_type separately"
         assert all(len(node.comparators) == 1 for node in comparisons)
+        # F-2: the pin must discriminate on the OPERATOR too — the
+        # M-1h `!=` inversion kept this pin GREEN because it only
+        # asserted the comparator Constant, never ast.Eq.
+        assert all(isinstance(node.ops[0], ast.Eq) for node in comparisons)
         assert all(
             isinstance(node.comparators[0], ast.Constant)
             and node.comparators[0].value == "tool"

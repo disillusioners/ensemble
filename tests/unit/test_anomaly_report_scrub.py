@@ -544,3 +544,41 @@ class TestTheAcceptPathContract:
         assert result.cluster_id is None
         assert result.cluster_report_count == 1
         assert result.cluster_first_report_at == row.created_at
+
+    async def test_the_report_insert_routes_through_the_offload_seam(
+        self, tmp_path
+    ) -> None:
+        """F-1: the INSERT must leave the event loop.
+
+        ``insert_report`` opens a ``Session`` and ``commit()``s —
+        running it directly inside ``async def accept_report`` is the
+        v0.27.14 event-loop sync-DB incident class. The call must be
+        routed through the service's ``offload`` seam (the same seam
+        the harvest reads use), never invoked directly.
+        """
+        engine = _engine(tmp_path)
+        routed: list[str] = []
+
+        async def _recording_offload(fn, *args, **kwargs):
+            routed.append(getattr(fn, "__name__", "<anonymous>"))
+            return fn(*args, **kwargs)
+
+        service = AnomalyService(
+            engine,
+            config=NestReportConfig(),
+            manager=_FakeManager([]),
+            offload=_recording_offload,
+        )
+        result = await service.accept_report(
+            agent_id="worker",
+            instance_id="inst-1",
+            category="tool-failure",
+            description="boom",
+            severity="major",
+        )
+        assert result.report_id, "the report persisted"
+        assert "insert_report" in routed, (
+            "insert_report must be invoked VIA the offload seam "
+            "(await self._offload(...)), never as a direct synchronous "
+            "call on the event loop"
+        )

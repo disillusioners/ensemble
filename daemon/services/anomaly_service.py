@@ -540,7 +540,7 @@ class AnomalyService:
             outcome=OUTCOME_ACCEPTED,
             refusal_reason=None,
         )
-        report_id = self._repository.insert_report(row)
+        report_id = await self._offload(self._repository.insert_report, row)
         return AnomalyAcceptResult(
             report_id=report_id,
             category=canonical,
