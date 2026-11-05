@@ -357,4 +357,41 @@ The coding councilor's objection is **real** and is upheld as a risk: a memoir-s
 
 ---
 
-*Phase B architect adjudication. Verdict SOUND-WITH-AMENDMENTS; 14 flags ruled (4 ADOPT / 9 ADOPT-AS-AMENDED / 1 CONFIRMED-no-row); 43 amendments (12 blocking); 6 deviation records; R1–R4 verified compliant. Adjudicated 2026-11-05 on `feature/ari-memoir-store` @ `63032008b`. Addenda: §11 delta re-review (post plan-fold `4d5b43637`) and §12 Q6 containment ruling (plan council record `6601b15a`; `decisions.md` §4 rows 1–17).*
+## 13. V-1 — refusal-vocabulary ruling (Phase C, 2026-11-05)
+
+**Question routed by the dev lane** (Phase C landed P0–P7 at `d14702b40`): the refusal vocabulary is frozen at 18 codes (phase4 D4.8 as folded, import-asserted, unit-pinned); wave 4 found that an **empty/whitespace `memoir_recall` query** has no dedicated code and is mapped to `memoir_internal_error` — a user-input error reported as an internal error. Is a 19th code warranted?
+
+### 13.1 Ruling
+
+> **Option (b) — AUTHORIZE the 19th code `memoir_query_required`**, mapped **identity** from the retrieval service's `query_required` (`daemon/services/memoir_retrieval.py:374`).
+
+### 13.2 Why not (a) — keep the 18 and pick a "best-fit" argument-family code
+
+**There is no honest best fit.** The frozen argument family is **entirely field-specific**: `memoir_reason_required`, `memoir_actor_required`, `memoir_invalid_actor`, `memoir_importance_out_of_range`, `memoir_body_too_long`, `memoir_title_too_long`, `memoir_stars_out_of_bounds`, `memoir_invalid_event_at`, `memoir_k_out_of_range`, `memoir_invalid_window`. None is generic. Mapping an empty recall query onto (say) `memoir_reason_required` would tell the model that its **pin reason** was missing — a worse falsehood than the catch-all, and one that invites a wrong retry. `memoir_internal_error` is at least not a lie about *another field*, but it is a semantic falsehood about **agency**: it says "a bug happened" when the caller sent `""`, and it misroutes incident triage (an operator hunting a bug where the caller sent an empty string). The dev's instinct was right about preserving the true message; the code — the machine-readable field agents and operators key on — is the part that needs the new member.
+
+### 13.3 Why the specific name, not a generic `memoir_invalid_argument`
+
+1. **Family style**: every existing argument code is field-specific; a generic member would be the odd one out and would become the dumping ground for every future unmapped argument error — re-creating today's mislabelling class at a nicer label.
+2. **Identity mapping**: the service already emits `query_required`; the tool's `_RECALL_CODE_MAP` gains an identity entry instead of a translation, and the catch-all loses its one known user (it should remain for genuinely unexpected internal failures only).
+3. **The predicate is already right**: `clean_query = (query or "").strip()` in the service covers empty **and** whitespace; no tool-side pre-validation is added — D4.8's stated philosophy is that the tool never re-derives a bound, it maps the service's code onto this vocabulary.
+
+### 13.4 Considered and rejected
+
+- **Silent reinterpretation** (treat an empty query as "most recent"): it masks a caller bug *and* smuggles `memoir_timeline`'s semantics into `memoir_recall` — precisely the "two tools, two expectations" error flag #10 warns against.
+- **A generic 19th code**: see 13.3.
+- **Keeping the catch-all and only rewording the message**: the message is *already* carried (`Error: {tool} REFUSED — reason={code}: {message}`); the only lie is the code, so this changes nothing.
+
+### 13.5 Consequences — exactly, and what is NOT touched
+
+| Surface | Change |
+|---|---|
+| `daemon/tools/memoir.py` | new `MEMOIR_CODE_QUERY_REQUIRED = "memoir_query_required"`; one frozenset member; `assert len(MEMOIR_CODES) == 18` → **19** (`:201`); module docstring "18 exactly" → 19 and the mapping table gains `query_required → memoir_query_required`; `_RECALL_CODE_MAP["query_required"]` identity entry; the catch-all comment drops its now-mapped example |
+| `tests/unit/test_memoir_tools_unit.py` | `len(MEMOIR_CODES) == 18` → **19** (`:171`); the fallback test (`test_a_blank_recall_query_falls_back_to_the_catch_all`, `:410-420`) **inverts** to assert `memoir_query_required` + the true message — a red-to-green flip that is mutation-meaningful |
+| `daemon/services/memoir_retrieval.py` | **no change** — it already emits `query_required` with the correct message and trims the predicate |
+| **NOT touched** | the `PRIVILEGED_TOOL_CATEGORIES` census (#18 of 18), the 5-tool / 4-family counts, `DYNAMIC_TOOL_NAMES` / `KNOWN_TOOL_NAMES`, and the `agents/.prompt-artifacts.sha256` baseline (the ari doctrine mentions `memoir_disabled` as an example but does **not** enumerate the code set — verified). **The refusal-code frozen set is a separate, module-local set**, which is why 18 → 19 never reaches the surfaces the registration ceremony settled |
+
+Recorded in `decisions.md` §4 row 18.
+
+---
+
+*Phase B architect adjudication. Verdict SOUND-WITH-AMENDMENTS; 14 flags ruled (4 ADOPT / 9 ADOPT-AS-AMENDED / 1 CONFIRMED-no-row); 43 amendments (12 blocking); 6 deviation records; R1–R4 verified compliant. Adjudicated 2026-11-05 on `feature/ari-memoir-store` @ `63032008b`. Addenda: §11 delta re-review (post plan-fold `4d5b43637`), §12 Q6 containment ruling (plan council record `6601b15a`), and §13 V-1 refusal-vocabulary ruling (Phase C; `decisions.md` §4 rows 1–18).*
