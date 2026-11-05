@@ -177,3 +177,60 @@ The two councilors ran **concurrently in the same worktree**, each planting/rest
 ## Record provenance
 
 Append-only continuation of the Round-1 record above (unchanged). Reviewer-verified at evaluation time: HEAD `b60502671`, porcelain 0, `code-review.md` untouched since `003966f4c`, zero metrics/boot-recovery files in the fix diff, no remote memoir ref.
+
+
+---
+
+# DELTA-2 — Tidier-cycle re-review (Round 3 of the review arc)
+
+- **Date:** 2026-11-05
+- **Scope (delta only — Round 1 and DELTA-1 above stand as recorded):** the tidier cycle answering the tidier's 49 findings — `5324d4beb` (Batch A: gate helper, dead validation, fail-loud packs, annotations; 19 files) · `af013ed20` (Batch B: recall observability, query-dims guard, fail-closed knob, honest failure classes; 9 files) · `dd8b6cd06` (Batch C: post-commit honesty, per-read briefing guards, stats-write guard; 9 files) · `bed22dc6d` (docs) · `0ff59023e` (digest refresh: 9/9 lines, counts+hash only, no timings). **Evaluated HEAD: `0ff59023e`, porcelain 0, branch unpushed.**
+
+## Council-process record (disclosed)
+
+The council governor (`55f9b6ec`) died twice on the provider-side `insufficient_balance` error (coding-plan quota exhausted + empty wallet; the known D7 proxy-defect family — third lane impact today). Recovery ladder followed: one revive (failed identically) → one replacement per the ladder. **This delta was verified by a SINGLE replacement reviewer** (`b29f386c`, worker agent, model `agentic`, skill `code-review`; ran 23:15–23:39Z with zero provider failures) — single-reviewer caveat applies to the full delta. **Mitigating corroboration:** the interrupted council's own `agentic` councilor (council manifest, round 3) had already COMPLETED with the identical gate-blocking finding (same file, same lines :244/:253, same mechanism) before the governor died — so NEW-1 below carries **two independent model sources**, and the reviewer independently confirmed both pin literals present at HEAD. The governor's replacement mutation runner (`29a56b20`) errored on the same provider class and is NOT running; no orphan planter (porcelain 0 verified before record-write).
+
+## Verdict: **REJECT**
+
+Solely on **NEW-1**: the H1 refactor orphaned two static shape-pins, producing **2 net-new deterministic reds at HEAD** (`tests/unit/test_memoir_registration.py`: 2 failed / 195 passed across the memoir unit corpus) — the lane's own net-new-reds=0 doctrine makes this gate-blocking. The properties the pins guarded HOLD (behavioral gate-order pins green); the pins are stale in FORM only. All ten briefed items otherwise verify, several with executed plant→RED→restore→GREEN evidence. **One mechanical test-side re-point away from APPROVE-WITH-ADVISORIES.**
+
+## Per-item verification
+
+1. **H1 gate helper — EXECUTED/READ-VERIFIED.** `_gate(label, action)` (`daemon/tools/memoir.py:319`) called by all five bodies (:750 write, :863 pin, :962 unpin, :1029 recall, :1079 timeline). Pre-image (`5324d4beb^` :658/:772/:878/:963/:1045) vs post: identical refusal codes; `AGENT_UNKNOWN`/`NOT_AUTHORIZED` remain DISTINCT branches inside `_gate` (:346-360); knob branch in every body; per-body codes retained. Disabled wording unified ("nothing was {action}") — wording-only, outcomes identical. Behaviorally re-proven by the tools pack (45/45).
+2. **H3 tool-side re-derivation deleted — EXECUTED.** `_validate_k` exists only in the service (`memoir_retrieval.py:528`); tool grep = 0. Executed at the tool surface: `k=0` → `memoir_k_out_of_range`, `k=21` → same, inverted window → `memoir_invalid_window`, unparseable `since` → `memoir_invalid_event_at`. No code lost.
+3. **H5 stable id — EXECUTED (pin) + READ-VERIFIED.** One context_messages row `memoir:{agent_id}`; producer (`memoir_briefing.py:528`) and consumer (`:398`) call `_stable_id_for("memoir", agent_id=…)` with identical arguments; once-flag written only after the persistent half is confirmed; failed flag-write self-heals. Pin green (11/11 incl. idempotence).
+4. **H6 packs/matrix/M12/L21/M15 — EXECUTED.** All **17** packs fail-loud now (superset of the five briefed; `MEMOIR_PACK_PYTHON` override honored; loud branch executed RC=1). M12: `EXPECTED_PASSED_N=10` == measured collected 10; one node deselected in a byte-faithful replica → RED `passed=9 != 10` — **measured, not hardcoded**. L21 membership loop present (`memoir.py:239-246`); M15 RESERVED annotations on the two reserved codes, `len(MEMOIR_CODES)==19` asserted (:235), re-derived by import: 19.
+5. **H7/H8 — EXECUTED.** H8 dims guard plant → pin RED → restore (sha OK) → 32/32 green. `_classify_enabled` fails closed for garbage types, never raises (truth-table pins 40/40 incl. list/dict/float→DISABLED). Worker `fail_classes=` keeps `credential_rejected` (401/403, latched) DISTINCT from `embedding_dimensions_mismatch` (worker suite 39/39). M8 `_count_pins` derived (`repository.py:1189`). L22: all four fallbacks WARNING-logged.
+6. **M16 post-commit honesty — EXECUTED (pins 45/45) + full enumeration.** Write :827 POST string: "the episode write MAY HAVE BEEN APPLIED … Verify with memoir_timeline (or memoir_recall) BEFORE retrying: a retry would record the memory twice"; "nothing was recorded" reachable only pre-write. Pin :937 analogous. Unpin :1014 has NO post-commit assembly work ⇒ truthful. Recall/timeline are read paths. Pins assert MAY-HAVE-BEEN-APPLIED + the named verification read + NOT-"nothing was recorded/changed".
+7. **M17 per-read guards — EXECUTED.** Seeded persona-read failure (11/11): block still ships, ONLY the persona zone degrades with the missing-persona prefix, failure logged — D5.9 conformance proven.
+8. **M18 stats-write guard — EXECUTED.** Monkeypatched exploding `mark_recalled`: episodes returned, `stats_updated=False`, `marked_ids=[]`, `WARNING stats_write_failed:RuntimeError`.
+9. **A11 — ruling below.** READ-VERIFIED.
+10. **C3 — ruling below.** READ-VERIFIED.
+
+## Rulings (reviewer accepts both, on the evidence)
+
+- **(9) A11 provenance home — RIGHT HOME for v1: keep `daemon/tools/provenance.py`; route a debt row; NOT gate-blocking.** The helper's deps are stdlib + `.upgrade_journal`→constants (no FastAPI/router/service deps) — the nest-ops-M7 weight class does not apply; the services→tools import is function-local (`memoir_briefing.py:431`), no cycle is possible or latent; single-sourcing is real (exactly ONE `def capture_provenance_class_name` at `provenance.py:172`; both consumers delegate); the log line is real (module logger, WARNING, `instance=<id>` + ExcType, :189-195). Minting `daemon/services/provenance.py` would create a second home for zero benefit. The directional inversion is genuine house debt — flag in implementation-notes (already A11) and relocate later if more services consume it.
+- **(10) C3 footer/stats mismatch — DISCLOSED-MISMATCH-ACCEPTABLE-FOR-V1; route a v2 polish row; do NOT fix now.** The `stats_updated=` footer token is priced before `mark_recalled` and reaches ONLY agent-visible tool output verbatim — nothing parses it programmatically, the briefing does not consume it, and the operator truth exists exactly on the failed path (`WARNING stats_write_failed:<ExcType>` + structured result fields). Fix-now costs more than the cosmetic mismatch: re-pricing after stats would need to UN-MARK popped ids (violating D2.8 mark-exactly-shipped) or post-write string substitution would grow the byte-pinned envelope. v2 shape: conditional footer append on the failure path.
+
+## N-1 (DELTA-1 carry): **NOT COVERED — definitive; route it**
+
+`grep exclude_terminal` over `tests/` + `test/packs` = zero hits; every test call site invokes `get_pending_embeddings()` bare (default SQL-exclusion shape); no `exclude_terminal=False` call, no belt-predicate plant anywhere (`memoir_row_is_terminal`/`_is_terminal_row` in no test). The SQL leg remains the only *pinned* gate (single-sourced predicate keeps drift structurally hard; defence-in-depth intact). Suggested pin unchanged: one node calling `get_pending_embeddings(exclude_terminal=False)` then running the worker's Python filter, asserting the terminal row is skipped. Non-blocking; carry to ceremony notes.
+
+## New findings
+
+- 🟡 **NEW-1 (gate-blocking under the lane's net-new-reds=0 doctrine)** — `tests/unit/test_memoir_registration.py:243-244, :252-258`: static pins assert the pre-H1 inline shape — `source.count("if not _is_memoir_authorized(caller_agent_id):") == 5` now counts 0 (the shape lives ONCE inside `_gate` with the param renamed `agent_id`), and the order pin `index()`es the same literal. 2 net-new deterministic reds at HEAD; introduced by `5324d4beb` without re-pointing these pins. **Fix (mechanical, ~10 lines):** count `refusal = _gate(label,` == 5 across the bodies; re-anchor the order assertion inside the `_gate` body span (auth < `memoir_enabled` < first `asyncio.to_thread`), or delegate order to the behavioral pins and pin the helper's internal order once. Re-run the file green + porcelain 0 → this delta becomes APPROVE-WITH-ADVISORIES.
+- 🟢 **NEW-2** — historical records describe the pre-tidier `python3` fallback as current-at-the-time (append-only records, correct as history); awareness only.
+- 🟢 **NEW-3** — `daemon/services/memoir_retrieval.py:747/:779/:796`: per-recall WARNING on a *steadily* degraded semantic lane (one WARNING per recall); optional N-tick dampener if volume proves noisy.
+- 🟢 **carried** — A-4 (`body_required → memoir_body_to_long`) still present, carried per DELTA-1 to ceremony notes.
+
+## Boundary
+
+Porcelain 0 at every checkpoint; planted file restored sha-identical; **branch not pushed** (`git branch -r --contains HEAD` = 0); tidier diff = memoir daemon files + packs + unit tests + 3 planning docs ONLY — zero metrics surface, zero boot-recovery/discard/hard-reboot files, zero new deps; digest diff `0ff59023e` read: 1 hash + 8 counts, no timings. Aggregate memoir unit corpus: 195 passed / 2 failed (both NEW-1).
+
+## Gate readiness
+
+**TESTER-GATE-READY: NO — blocked solely by NEW-1.** One mechanical test-side re-point (no production code) closes it: re-run `tests/unit/test_memoir_registration.py` green + confirm porcelain 0, and this delta is APPROVE-WITH-ADVISORIES with the advisory set: N-1 unpinned belt (route), C3 v2 polish row, NEW-2/NEW-3, A-4 ceremony carry, plus the standing DELTA-1 advisories.
+
+## Record provenance
+
+Append-only continuation; Round-1 and DELTA-1 sections untouched. Written and committed by the reviewer controller from the replacement reviewer's evidence-tagged payload, with the council-manifest corroboration noted above.
