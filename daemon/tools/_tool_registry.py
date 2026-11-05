@@ -280,6 +280,16 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "metrics_families",
     "metrics_snapshot",
     "metrics_history",
+    # nest-report (2026-11-05, nest-anomaly-report lane): the ONE write
+    # tool of the nest-anomaly surface — ``report_anomaly``, created by
+    # the create_nest_report_tools() factory
+    # (daemon/tools/nest_report.py). Factory-built (not import-time
+    # registered), so it belongs in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is NOT privileged (R4): the
+    # empty-allow inherit universe DOES grant it, and the explicit
+    # ``tools.allow: ["nest-report"]`` grant lands in the phase-5
+    # ceremony.
+    "report_anomaly",
 })
 
 
@@ -1123,6 +1133,28 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # (``metrics_*``) — the house pattern (``self-alarm`` →
     # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
     "metrics-read": "daemon.tools.metrics_read",
+    # nest-report (2026-11-05, nest-anomaly-report lane): the ONE write
+    # category of the nest-anomaly surface — ``report_anomaly`` (an agent
+    # reports something wrong; the daemon normalizes, scrubs, harvests the
+    # bounded evidence and persists ONE row).
+    #
+    # NOT PRIVILEGED (R4): the category is deliberately OUT of
+    # ``PRIVILEGED_TOOL_CATEGORIES`` — the tool cannot read secrets, the
+    # environment or another instance's data, and its own evidence harvest
+    # is self-scoped and scrubbed.  So the empty-allow inherit universe
+    # DOES grant it (agents with an empty allow list inherit the tool
+    # immediately); an agent with an EXPLICIT allow list receives it in
+    # the phase-5 grant ceremony.  The privileged set and its pin sites
+    # stay UNTOUCHED.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot. The category key is
+    # KEBAB-case (``nest-report``) while the tool name is snake_case
+    # (``report_anomaly``) — the house pattern (``self-alarm`` →
+    # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
+    "nest-report": "daemon.tools.nest_report",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1550,6 +1582,16 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "read_context",
     "read_file",
     "release_info",
+    # nest-report (2026-11-05, nest-anomaly-report lane): the ONE write
+    # tool of the nest-anomaly surface — created by the
+    # create_nest_report_tools() factory
+    # (daemon/tools/nest_report.py). Factory-built (not import-time
+    # registered), so it belongs in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is NOT privileged (R4): the
+    # empty-allow inherit universe DOES grant it; the explicit
+    # ``tools.allow: ["nest-report"]`` grant lands in the phase-5
+    # ceremony.
+    "report_anomaly",
     "resume_instance",
     "send_message",
     "service_list",
