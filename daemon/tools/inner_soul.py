@@ -98,6 +98,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 from ._tool_registry import register_tool_category
+from .memoir_knob import memoir_enabled
 from ..rag.config import is_rag_enabled
 from ..repositories.prompt_version.models import (
     PROMPT_ARTIFACT_CLASSES,
@@ -382,6 +383,63 @@ def _format_rag_redirect(request: str, classification: dict, targets: list[str])
         f'  experience(text="{request.replace(chr(34), chr(92)+chr(34))}")',
         "",
         "→ Use the `explore()` tool to query existing knowledge.",
+    ]
+
+    return "\n".join(lines)
+
+
+def _format_memoir_redirect(
+    request: str,
+    classification: dict,
+    targets: list[str],
+    manager: "InstanceManager | None" = None,
+) -> str:
+    """Format ari's episodic redirect — the MEMOIR half of the repair.
+
+    The counterpart of :func:`_format_rag_redirect`, and the surface the
+    memoir-store lane exists to provide (the leak this replaces: ari's
+    episodic ``inner_soul`` writes were redirected to ``experience()`` —
+    a RAG tool ari does not hold — so the content was dropped silently).
+
+    The guide names the classification, states that the record is DURABLE
+    (it outlives this session, this instance and the wake), and shows the
+    content shape ``memoir_write`` expects (first-person narrative, with
+    the optional title / importance / event_at / stars levers). The write
+    itself is NEVER performed from here — the agent must SEE the write
+    happen.
+
+    The kill-switch is read AT CALL TIME: with the memoir surface OFF the
+    branch is STILL taken and says so LOUDLY, because a disabled memory
+    that falls back to the RAG redirect re-creates the silent drop this
+    branch exists to cure (D6.3).
+    """
+    if not memoir_enabled(getattr(manager, "config", None)):
+        return (
+            "memory recording is disabled (ENSEMBLE_MEMOIR_ENABLED) — "
+            "this content was NOT recorded"
+        )
+    truncated = request[:80] + ('...' if len(request) > 80 else '')
+    class_type = classification.get("type", "unknown")
+    escaped = request.replace(chr(34), chr(92) + chr(34))
+
+    lines = [
+        f"📋 Redirected to Memory: \"{truncated}\"",
+        f"  Classification: {class_type} ({classification.get('description', '')})",
+        f"  Original targets: {', '.join(targets)} → now handled by the memoir store",
+        "",
+        "This is MY durable episodic memory: it survives this session, this",
+        "instance and the wake, and it is what the briefing shows me next time.",
+        "",
+        "→ Use the `memoir_write` tool to record it:",
+        f'  memoir_write(text="{escaped}")',
+        "",
+        "Write it in the FIRST PERSON — what happened, what I learned, what I",
+        "would do differently. Optional: title (a short label), importance",
+        "(1-10, default 5), event_at (ISO-8601; defaults to now), stars (the",
+        "mention strings).",
+        "",
+        "→ Use the `memoir_recall` tool for what I already know about a topic,",
+        "and `memoir_timeline` for what was true at a given time.",
     ]
 
     return "\n".join(lines)
@@ -714,6 +772,10 @@ def create_inner_soul_tool(
                 # experience() via _should_redirect_to_rag(). This must run
                 # before the REJECT check below.
                 if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
+                    if agent_id == "ari":
+                        return _format_memoir_redirect(
+                            actual_request, classification, targets, manager=manager
+                        )
                     return _format_rag_redirect(actual_request, classification, targets)
 
                 # PRIMARY REJECT check (G2 critical fix): examine the
@@ -775,9 +837,14 @@ def create_inner_soul_tool(
                     # below, since when RAG is enabled, project_knowledge is
                     # routed to experience() via _should_redirect_to_rag().
                     if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
-                        rag_response = _format_rag_redirect(part, classification, targets)
+                        if agent_id == "ari":
+                            rag_response = _format_memoir_redirect(
+                                part, classification, targets, manager=manager
+                            )
+                        else:
+                            rag_response = _format_rag_redirect(part, classification, targets)
                         compound_lines.append(f"  Part {idx}: \"{part[:50]}{'...' if len(part) > 50 else ''}\" → {classification['type']}")
-                        compound_lines.append(f"    {rag_response.split(chr(10))[0]} (redirected to RAG)")
+                        compound_lines.append(f"    {rag_response.split(chr(10))[0]} (redirected to {'memoir' if agent_id == 'ari' else 'RAG'})")
                         all_results.append({"part": part, "redirected": True, "response": rag_response})
                         continue
 
