@@ -330,13 +330,15 @@ class AnomalyRepository:
                     report.cluster_id = None
                     report.outcome = OUTCOME_UNCLUSTERED
                     session.add(report)
+                    report_id = report.id
+                    first_report_at = report.created_at
                     session.commit()
                     return ClusterAssignment(
                         assigned=False,
-                        report_id=report.id,
+                        report_id=report_id,
                         cluster_id=None,
                         report_count=1,
-                        first_report_at=report.created_at,
+                        first_report_at=first_report_at,
                     )
                 count = int(post_count)
             else:
