@@ -20,7 +20,8 @@
             "skill_search",
             "shared_meta_kv",
             "time",
-            "help"
+            "help",
+          "nest-report"
         ]
     }
 }

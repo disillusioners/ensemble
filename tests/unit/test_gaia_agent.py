@@ -27,7 +27,12 @@ GAIA_AGENT_DIR = Path(__file__).parent.parent.parent / "agents" / "gaia"
 # healthchecks. Everything else (project, instance, mcp, shared_meta_kv, service,
 # system_upgrade, system-log, ens-db, mcp_rpc) is absent BY OMISSION — Gaia's
 # grant model is a strict allow-list with no deny field.
-GAIA_TOOLS_ALLOW = ["bash", "proc", "filesystem", "help", "system"]
+#
+# nest-anomaly-report phase 5 / C9 (2026-11-05): "nest-report" (the
+# non-privileged anomaly-reporting write category) was appended by the
+# grant ceremony.  Prior value: ["bash", "proc", "filesystem", "help",
+# "system"] (5 entries).
+GAIA_TOOLS_ALLOW = ["bash", "proc", "filesystem", "help", "system", "nest-report"]
 
 # Tool categories for synthetic filter-resolution tests (mirrors the shape of the
 # real registry's categories; keeps the negative fixtures self-contained).

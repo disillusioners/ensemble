@@ -6,9 +6,9 @@ construction) is proven END-TO-END here, in the instance_ops shape:
 
 * (a) the AST discovery finds ``notify_user`` in the category module;
 * (b) the category is in ``PRIVILEGED_TOOL_CATEGORIES``;
-* (c) the frozenset LENGTH is 17 (ari-voice joined 2026-10-25 as the
-  sixteenth member; metrics-read joined 2026-11-03);
-* (d) the set is EXACTLY the seventeen entries (pin);
+* (c) the frozenset LENGTH is 18 (nest-report-read joined 2026-11-05 as
+  the eighteenth member; metrics-read joined 2026-11-03);
+* (d) the set is EXACTLY the eighteen entries (pin);
 * (e) ``CATEGORY_MODULES["notify-user"]`` resolves to a
   ``daemon.tools.*`` path (the AST scanner resolves the value as
   ``daemon/tools/<parts[2:]>.py`` — a ``daemon.services.*`` value is
@@ -80,6 +80,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # access path, and every tool body ALSO carries its own
     # agent_id gate.
     "metrics-read",
+    "nest-report-read",
 })
 
 
@@ -175,11 +176,11 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
+    def test_the_set_is_exactly_the_eighteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_seventeen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
+    def test_the_set_has_eighteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
 
 
 class TestAriOnlyAllowList:

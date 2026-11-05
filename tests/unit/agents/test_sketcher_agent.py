@@ -69,6 +69,13 @@ SYSTEM_INTERNAL_TOKENS = (
 # registry + designer's allow precedent; "image" is the category carrying
 # explain_image / image_save / image_list / image_get (+ compare_images
 # facade lives under design, NOT image).
+#
+# nest-anomaly-report phase 5 / C9 (2026-11-05): the "nest-report"
+# category (the non-privileged anomaly-reporting write surface) was
+# appended by the grant ceremony — the SAME-PR trailing discipline.  The
+# closed-allow fence is WIDENED by exactly this one category; see the
+# FORBIDDEN_ALLOW note below.  Prior value: the 6-entry set
+# {od.generate, od.compose_brief, od.lint, od.save, image, dynamic-skill}.
 EXPECTED_ALLOW = {
     "od.generate",
     "od.compose_brief",
@@ -76,10 +83,20 @@ EXPECTED_ALLOW = {
     "od.save",
     "image",
     "dynamic-skill",
+    "nest-report",
 }
 
 # Categories that must NEVER appear in the sketcher allow (the closed
-# allow IS the fence — no shell, no filesystem, no write surface).
+# allow IS the fence — no shell, no filesystem, and NO GENERAL write
+# surface).
+#
+# DISCLOSURE (nest-anomaly-report phase 5 / C9, 2026-11-05): the closed
+# allow is no longer "no write surface" — the grant ceremony appended the
+# "nest-report" category, which IS a write surface (it persists ONE
+# anomaly row, self-scoped and scrubbed, and it can read NOTHING).  The
+# fence is therefore stated honestly: no shell, no filesystem, no general
+# write surface — the ONE write surface is the anomaly reporter, and it
+# is explicitly NOT in this forbidden set.
 FORBIDDEN_ALLOW = {
     "bash",
     "proc",
@@ -131,8 +148,19 @@ class TestSketcherMetaShape:
         assert allow == EXPECTED_ALLOW
 
     def test_closed_allow_is_the_fence(self):
-        """No shell/filesystem/write/instance surface — and no deny list
-        (the closed allow is the fence; a deny list would be dead weight)."""
+        """No shell/filesystem/general-write/instance surface — and no deny
+        list (the closed allow is the fence; a deny list would be dead
+        weight).
+
+        DISCLOSURE (nest-anomaly-report phase 5 / C9, 2026-11-05): the
+        fence used to be stated as "no write surface".  The grant
+        ceremony appended the "nest-report" category, which IS a write
+        surface (it persists ONE self-scoped anomaly row and can read
+        nothing) — so the fence is stated HONESTLY: the ONE write
+        surface is the anomaly reporter, and it is deliberately NOT in
+        the forbidden set.  The shell/filesystem/instance/general-write
+        prohibition is unchanged.
+        """
         allow = set(_meta()["tools"]["allow"])
         assert not (allow & FORBIDDEN_ALLOW)
         assert "deny" not in _meta()["tools"]
@@ -548,11 +576,18 @@ class TestCriticAgentNit2:
     def test_critic_meta(self):
         """Critic meta.json shape per the canonical D6 form: bare-name
         allow, image_save + mcp + hard refusals in deny, view-views
-        absent, leaf team, vision lane."""
+        absent, leaf team, vision lane.
+
+        nest-anomaly-report phase 5 / C9 (2026-11-05): the grant
+        ceremony appended the non-privileged "nest-report" category to
+        the critic's allow array (the SAME-PR trailing discipline — it is
+        the LAST element and nothing was reordered).  Prior value:
+        ["read_file", "image", "design"].
+        """
         meta = _critic_meta()
         assert meta["id"] == "critic"
         assert meta["team_members"] == []
-        assert meta["tools"]["allow"] == ["read_file", "image", "design"]
+        assert meta["tools"]["allow"] == ["read_file", "image", "design", "nest-report"]
         deny = set(meta["tools"]["deny"])
         for token in (
             "bash", "proc", "instance", "service", "midflight",

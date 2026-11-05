@@ -1,0 +1,346 @@
+{
+  "items": [
+    {
+      "id": "PX-1 central door-state panel visible + non-degenerate",
+      "ok": true,
+      "detail": "visible=true box={\"x\":20,\"y\":140.3125,\"width\":848.453125,\"height\":105.609375} tab_local_banner=null"
+    },
+    {
+      "id": "PX-2 exactly ONE auth_not_configured banner",
+      "ok": true,
+      "detail": "count=1 (the domain panel is suppressed while the posture is stated)"
+    },
+    {
+      "id": "PX-3 no Retry affordance",
+      "ok": true,
+      "detail": "catalog_retry=0 domain_retry=0 any_retry_button=0"
+    },
+    {
+      "id": "PX-4 the runbook pointer is visible inside the banner",
+      "ok": true,
+      "detail": "pointer_present=true"
+    },
+    {
+      "id": "PX-5 the incident placeholder is non-degenerate",
+      "ok": true,
+      "detail": "placeholder={\"x\":20,\"y\":471.796875,\"width\":848.453125,\"height\":20.109375} section={\"x\":20,\"y\":437.890625,\"width\":848.453125,\"height\":54.015625}"
+    },
+    {
+      "id": "PX-6 the banner and the placeholder do not intersect",
+      "ok": true,
+      "detail": "banner={\"x\":20,\"y\":140.3125,\"width\":848.453125,\"height\":105.609375} placeholder={\"x\":20,\"y\":471.796875,\"width\":848.453125,\"height\":20.109375}"
+    },
+    {
+      "id": "PX-7 no request storm (the incident read is not retried in a loop)",
+      "ok": true,
+      "detail": "nest_reports_calls=1 total_api_calls=26"
+    }
+  ],
+  "api": [
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/settings/editor"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/health"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/migration/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/settings/plane"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/maintenance/checkpoint-cleanup/availability"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/projects"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/jobs?status=queued,active"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/missions?liveness=processing,pending,paused&limit=20"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/queues/defer-blocked"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/prompts/pending-count"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/families"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/resources/history?window=1h&resolution=auto"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/resources/anomalies?window=1h"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/resources/live"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/resources/self-cost"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/snapshot?family=F3"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/snapshot?family=F12"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/snapshot?family=F17"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/nest-reports/clusters?window_s=3600"
+    },
+    {
+      "method": "GET",
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/snapshot?family=F23"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/notifications/stream"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/notifications/stream"
+    }
+  ],
+  "observed": [
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/prompts/pending-count",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/settings/editor",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/health",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/migration/availability",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/settings/plane",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/maintenance/checkpoint-cleanup/availability",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/projects",
+      "body": "{\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/jobs?status=queued,active",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/jobs?status=completed,settled,failed,cancelled,dead_letter&limit=10",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/missions?liveness=processing,pending,paused&limit=20",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/instances?limit=10&offset=0&exclude_kb=true&include_descendants=false&order=activity",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/queues/defer-blocked",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/notifications/stream",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/families",
+      "body": "{\"detail\":{\"error\":\"AUTH_NOT_CONFIGURED\",\"message\":\"Auth not configured (fail-closed)\"}}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/prompts/pending-count",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/resources/history?window=1h&resolution=auto",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/snapshot?family=F3",
+      "body": "{\"detail\":{\"error\":\"AUTH_NOT_CONFIGURED\",\"message\":\"Auth not configured (fail-closed)\"}}"
+    },
+    {
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/snapshot?family=F12",
+      "body": "{\"detail\":{\"error\":\"AUTH_NOT_CONFIGURED\",\"message\":\"Auth not configured (fail-closed)\"}}"
+    },
+    {
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/snapshot?family=F17",
+      "body": "{\"detail\":{\"error\":\"AUTH_NOT_CONFIGURED\",\"message\":\"Auth not configured (fail-closed)\"}}"
+    },
+    {
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/nest-reports/clusters?window_s=3600",
+      "body": "{\"detail\":{\"error\":\"AUTH_NOT_CONFIGURED\",\"message\":\"Auth not configured (fail-closed)\"}}"
+    },
+    {
+      "status": 503,
+      "url": "http://127.0.0.1:35447/api/metrics/snapshot?family=F23",
+      "body": "{\"detail\":{\"error\":\"AUTH_NOT_CONFIGURED\",\"message\":\"Auth not configured (fail-closed)\"}}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/resources/anomalies?window=1h",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/resources/live",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/resources/self-cost",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/notifications/stream",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    },
+    {
+      "status": 200,
+      "url": "http://127.0.0.1:35447/api/notifications/stream",
+      "body": "{\"instances\":[],\"agents\":[],\"jobs\":[],\"items\":[],\"projects\":[]}"
+    }
+  ],
+  "consoleErrors": [
+    "ERROR TypeError: Cannot read properties of undefined (reading 'length')\n    at lo (http://127.0.0.1:35447/main-PYACNCQG.js:111:84092)\n    at i.applyFetchResults (http://127.0.0.1:35447/main-PYACNCQG.j",
+    "EventSource's response has a MIME type (\"application/json\") that is not \"text/event-stream\". Aborting the connection.",
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    "ERROR TypeError: Cannot read properties of undefined (reading 'cpu_pct')\n    at Ei (http://127.0.0.1:35447/chunk-UNBI7D7V.js:1:18706)\n    at Af (http://127.0.0.1:35447/chunk-77DBAEUQ.js:4:58391)\n    a",
+    "EventSource's response has a MIME type (\"application/json\") that is not \"text/event-stream\". Aborting the connection.",
+    "EventSource's response has a MIME type (\"application/json\") that is not \"text/event-stream\". Aborting the connection."
+  ],
+  "pageErrors": [],
+  "boxes": {
+    "bannerBox": {
+      "x": 20,
+      "y": 140.3125,
+      "width": 848.453125,
+      "height": 105.609375
+    },
+    "tabBannerBox": null,
+    "placeholderBox": {
+      "x": 20,
+      "y": 471.796875,
+      "width": 848.453125,
+      "height": 20.109375
+    },
+    "sectionBox": {
+      "x": 20,
+      "y": 437.890625,
+      "width": 848.453125,
+      "height": 54.015625
+    }
+  },
+  "dom": {
+    "catalogBannerHtml": "<div _ngcontent-ng-c993595351=\"\" class=\"metrics-banner\" data-test=\"metrics-catalog-error\" data-error-class=\"auth_not_configured\"><div _ngcontent-ng-c993595351=\"\" class=\"metrics-banner-body\"><span _ngcontent-ng-c993595351=\"\" data-test=\"metrics-door-state-cause\" class=\"metrics-banner-text\"> The metrics door is fail-closed — auth is not configured on the daemon. </span><span _ngcontent-ng-c993595351=\"\" data-test=\"metrics-door-state-meaning\" class=\"metrics-banner-meaning\"> No credential can fix this — it is daemon configuration, so the door serves no metrics. </span><span _ngcontent-ng-c993595351=\"\" data-test=\"metrics-door-state-action\" class=\"metrics-banner-action\"> An operator must configure auth on the daemon and restart it. </span><span _ngcontent-ng-c993595351=\"\" data-test=\"metrics-door-state-pointer\" class=\"metrics-banner-pointer\"> docs/runbooks/oauth2-auth.md </span><!----></div><!----></div>",
+    "catalogBannerText": "The metrics door is fail-closed — auth is not configured on the daemon.\nNo credential can fix this — it is daemon configuration, so the door serves no metrics.\nAn operator must configure auth on the daemon and restart it.\ndocs/runbooks/oauth2-auth.md",
+    "errorClassAttributes": [
+      "auth_not_configured"
+    ],
+    "nestSectionText": "Incident list the durable anomaly store — grouped by tree root × category\n\nthe incident list is unavailable under this daemon's auth posture."
+  }
+}

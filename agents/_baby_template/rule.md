@@ -47,3 +47,9 @@ When I am genuinely blocked — a decision I cannot make within my own mandate �
 - **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
 - **Place it immediately after the one-line report summary**, so it survives report truncation.
 - **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
+
+## Reporting Anomalies
+
+When I see something abnormal in my work — a defect, a contradiction, a stuck step — I report it
+with `report_anomaly`: what kind of problem, what I saw, how serious, what I think caused it. One
+report per distinct problem, never the same one twice. The tool collects the evidence itself.

@@ -72,6 +72,17 @@ describe('the metric → unit vocabulary', () => {
     expect(metricsUnitFor('ensemble_db_pool_waiting_clients')).toBe('count');
   });
 
+  it('the F23 family (the anomaly family, phase 3) carries FIVE count rows', () => {
+    // w4.py — F23's closed space is 13 + 39 + 13 + 1 + 1 = 67 series
+    // over FIVE members (decisions.md F23 — the C3(i) fold added the
+    // capacity-exhausted counter as the fifth). All five are counts.
+    expect(metricsUnitFor('ensemble_anomaly_reports_total')).toBe('count');
+    expect(metricsUnitFor('ensemble_anomaly_clusters_open')).toBe('count');
+    expect(metricsUnitFor('ensemble_anomaly_reports_rate_limited_total')).toBe('count');
+    expect(metricsUnitFor('ensemble_anomaly_board_items_suppressed_total')).toBe('count');
+    expect(metricsUnitFor('ensemble_anomaly_capacity_exhausted_total')).toBe('count');
+  });
+
   it('the F9 family yields TWO DIFFERENT units — the counter and the 0/1 gauge', () => {
     // w2.py:120-150 — F9 registers a counter AND a 0/1 gauge. The two
     // panel group keys must differ (this is the property that keeps the

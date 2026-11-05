@@ -11,7 +11,7 @@ This pack pins:
   discovered by the AST scanner and the exact-equality drift pin
   fails at boot);
 * (b) the category is in ``PRIVILEGED_TOOL_CATEGORIES``;
-* (c) the frozenset LENGTH is 17 (metrics-read joined 2026-11-03);
+* (c) the frozenset LENGTH is 18 (nest-report-read joined 2026-11-05);
 * (d) both tool names are in ``DYNAMIC_TOOL_NAMES`` and
   ``KNOWN_TOOL_NAMES``;
 * (e) the AST scanner finds both ``@tool`` functions (decorator-only
@@ -97,6 +97,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # access path, and every tool body ALSO carries its own
 # agent_id gate.
 "metrics-read",
+"nest-report-read",
 })
 
 
@@ -173,11 +174,11 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
+    def test_the_set_is_exactly_the_eighteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_seventeen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
+    def test_the_set_has_eighteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
 
 
 # ── A13: the attribute pin + the default-deny behavioral leg ───────────────

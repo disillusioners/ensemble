@@ -95,6 +95,12 @@ export const METRICS_UNIT_UNKNOWN = 'unit unknown';
  * ── F17 the MCP server health (`w3.py`) ──
  * `ensemble_mcp_server_state`            → state  (an enumerated health-state code)
  * `ensemble_mcp_failures_total`          → count
+ * ── F23 the anomaly family (`w4.py` — FIVE members) ──
+ * `ensemble_anomaly_reports_total`             → count (the accepted-reports counter, by category)
+ * `ensemble_anomaly_clusters_open`             → count (the open-cluster gauge, by category × severity)
+ * `ensemble_anomaly_reports_rate_limited_total`→ count (the rate-gate counter, by category)
+ * `ensemble_anomaly_board_items_suppressed_total` → count (the unlabelled write-time suppression counter)
+ * `ensemble_anomaly_capacity_exhausted_total`  → count (the unlabelled store-capacity counter — C3(i)'s fifth member)
  * ── the resource timeline's OWN series (`timeline-series.ts`; served by
  *    the resources API, not the door) ──
  * `daemon_rss_mb`                        → MB
@@ -154,6 +160,14 @@ export const METRICS_UNIT_VOCABULARY: Readonly<Record<string, string>> = {
   // F17 — the MCP server health
   ensemble_mcp_server_state: 'state',
   ensemble_mcp_failures_total: 'count',
+  // F23 — the anomaly family (phase 3, w4.py — FIVE members: the
+  // count-by-category counters, the open-cluster gauge, the rate-gate
+  // counter, and the two unlabelled write-time counters)
+  ensemble_anomaly_reports_total: 'count',
+  ensemble_anomaly_clusters_open: 'count',
+  ensemble_anomaly_reports_rate_limited_total: 'count',
+  ensemble_anomaly_board_items_suppressed_total: 'count',
+  ensemble_anomaly_capacity_exhausted_total: 'count',
   // The resource timeline's own series (the resources API's names)
   daemon_rss_mb: 'MB',
   cgroup_mem_mb: 'MB',

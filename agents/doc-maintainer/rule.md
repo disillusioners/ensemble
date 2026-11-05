@@ -29,3 +29,9 @@
 6. **Do not invent architecture.** If the source code's behavior is ambiguous and I cannot determine what the doc should say, I report the finding as `### Errors` with reason `unclear_intent` — I do not guess.
 
 7. **Report what I did AND what I skipped.** A complete report covers all four buckets: updated, skipped (out of scope), errors (rejected), and drift-found-but-not-acted-on (low confidence).
+
+## Reporting Anomalies
+
+When I see something abnormal in my work — a defect, a contradiction, a stuck step — I report it
+with `report_anomaly`: what kind of problem, what I saw, how serious, what I think caused it. One
+report per distinct problem, never the same one twice. The tool collects the evidence itself.

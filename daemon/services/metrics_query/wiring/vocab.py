@@ -71,6 +71,46 @@ WEDGE_REASONS: tuple[str, ...] = (
 )
 WEDGE_WRITE_OUTCOMES: tuple[str, ...] = ("ok", "failed")
 
+# ── the nest-anomaly category + severity vocabularies (F23) ──────────────
+# Source: `daemon/repositories/anomaly/models.py` — the stored
+# ``category`` / ``severity`` columns of the nest-anomaly store
+# (decisions.md R1 / R3).
+#
+# THE CATEGORY SET IS CLOSED (R1). The value the metric label carries is
+# the CANONICAL one, folded at WRITE time (never at query time — a
+# query-time fold re-folds historical rows differently as the
+# vocabulary evolves, which makes the chart dishonest). An unknown
+# input folds to the RESERVED member, which is why ``RESERVED`` is a
+# MEMBER of this tuple: every value the column can hold must be
+# chart-legal, or the F23 family would carry a label outside its own
+# ``allowed_values`` set.
+#
+# The twelve canonical values plus the reserved fold target = 13
+# members (R1's own list is "≤15 ... 12 values + reserved other").
+# Extending the vocabulary is a LATER lane (vocab.py edit + a
+# VOCABULARY_VERSION bump), never an ad-hoc write.
+ANOMALY_CATEGORIES: tuple[str, ...] = (
+    "tool-failure",
+    "performance",
+    "resource-exhaustion",
+    "loop-stall",
+    "wedge-suspected",
+    "data-corruption",
+    "auth-permission",
+    "external-dependency",
+    "mcp-failure",
+    "llm-provider",
+    "queue-scheduling",
+    "environment-config",
+    RESERVED,
+)
+
+#: The severity tiers (decisions.md R3) — a closed 3-tier set. An
+#: out-of-set severity is a typed ``invalid-input`` REFUSAL, never a
+#: silent fold (``critical`` -> ``major`` would hide a nest-level
+#: event).
+ANOMALY_SEVERITIES: tuple[str, ...] = ("minor", "major", "critical")
+
 # ── F4 / F5 — the pool vocabularies ───────────────────────────────────────
 # Source: `daemon/services/wedge_capture/collector.py` (the A2 canonical
 # pool counter names) + `daemon/services/readiness.py`
@@ -295,6 +335,8 @@ def instance_statuses() -> tuple[str, ...]:
 
 __all__ = [
     "ADMISSION_STATE_KEY",
+    "ANOMALY_CATEGORIES",
+    "ANOMALY_SEVERITIES",
     "CHECKPOINT_TABLES",
     "GATEWAY_AUDIT_OUTCOMES",
     "INSTANCE_LIVENESS",

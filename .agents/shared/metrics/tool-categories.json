@@ -32,6 +32,8 @@
     "midflight",
     "mission",
     "mother",
+    "nest-report",
+    "nest-report-read",
     "notify-user",
     "plane",
     "plane_sync",
@@ -58,8 +60,8 @@
     "view-write",
     "wedge-capture"
   ],
-  "count": 57,
+  "count": 59,
   "reserved": "other",
   "source": "daemon/tools/_tool_registry.py CATEGORY_MODULES + @register_tool_category call sites",
-  "vocabulary_version": 3
+  "vocabulary_version": 5
 }

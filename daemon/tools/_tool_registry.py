@@ -280,6 +280,26 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "metrics_families",
     "metrics_snapshot",
     "metrics_history",
+    # nest-report-read (2026-11-05, nest-anomaly-report lane): the TWO
+    # READ-ONLY anomaly-store tools — created by the
+    # create_nest_report_read_tools() factory
+    # (daemon/tools/nest_report_read.py). Factory-built (not
+    # import-time registered), so they belong in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #18) —
+    # opt-in only, never default-granted; the runtime agent gate lives
+    # in the tool bodies (the R8 ops trio).
+    "anomaly_clusters",
+    "anomaly_report_detail",
+    # nest-report (2026-11-05, nest-anomaly-report lane): the ONE write
+    # tool of the nest-anomaly surface — ``report_anomaly``, created by
+    # the create_nest_report_tools() factory
+    # (daemon/tools/nest_report.py). Factory-built (not import-time
+    # registered), so it belongs in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is NOT privileged (R4): the
+    # empty-allow inherit universe DOES grant it, and the explicit
+    # ``tools.allow: ["nest-report"]`` grant lands in the phase-5
+    # ceremony.
+    "report_anomaly",
 })
 
 
@@ -322,14 +342,21 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # the W4 leader decision, reviewer council 2026-10-02).
 #
 # SAME-PR RULE (D18/A14): the set is pinned by exact-equality asserts at
-# TEN sites — five inline ``frozenset({...})`` literals + five
+# ELEVEN sites — five inline ``frozenset({...})`` literals + six
 # ``EXPECTED_PRIVILEGED_SET`` constants — plus a
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at FIVE
-# phase-local pins — plus ONE allow-array TRAILING-ENTRY pin (the
-# ``tools.allow`` ARRAY-ORDER discipline: only the categories appended
-# after the board may follow it — the board registration pin) —
-# SIXTEEN assertion sites across TEN files
-# (re-grepped on tip 9098df432; ari-voice lane). Adding or
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at EIGHT
+# phase-local pins — plus ONE mutation-pack find/replace STRING pair
+# (``test/packs/metrics_read_mutation_matrix_test.py`` MT-01 — derived
+# from the live constant at pack-import time so a count bump cannot
+# stale it) — NINETEEN assertion sites across THIRTEEN test files
+# (11 exact-set + 8 count) plus the pack (re-grepped with BOTH greps —
+# ``PRIVILEGED_TOOL_CATEGORIES == frozenset`` AND
+# ``== EXPECTED_PRIVILEGED_SET`` AND ``len(PRIVILEGED_TOOL_CATEGORIES)``
+# — on the nest-anomaly-report lane tip, 2026-11-05; the earlier
+# ``TEN/SIXTEEN`` figures were the ari-voice-lane snapshot and went
+# stale when the nest-report phase-1 pack added a seventh AND an
+# eighth count pin).
+# Adding or
 # removing a category REQUIRES updating ALL of them in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
 # ``tests/unit/tools/test_attestation_registration.py``,
@@ -350,20 +377,26 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # ``tests/unit/test_wedge_capture_registration.py`` (the wedge-capture
 # pin — added 2026-10-22; exact-set AND count) and
 # ``tests/unit/test_notify_user_registration.py`` (the ari-voice pin —
-# added 2026-10-25; exact-set AND count). The five phase-local
-# pins ALSO carry a ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count
-# assertion (16 as of the notify-user entry).
+# added 2026-10-25; exact-set AND count) and
+# ``tests/unit/test_metrics_read_registration.py`` (the metrics-read
+# pin — added 2026-11-03; exact-set AND count) and
+# ``tests/unit/test_anomaly_report_tool_registration.py`` (the
+# nest-report WRITE-tool pin — added 2026-11-05; count) and
+# ``tests/unit/tools/test_nest_report_read_registration.py`` (the
+# nest-report-read pin — added 2026-11-05; exact-set AND count).
+# The seven count pins assert
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == 18`` as of the nest-report-read
+# entry.  SEPARATELY, ONE allow-array TRAILING-ENTRY pin (the ari
+# ``tools.allow`` ARRAY-ORDER discipline,
+# ``tests/unit/test_board_registration.py:280-291``) keeps the per-agent
+# grant arrays ordered; it pins ARRAY ORDER, not the set.
 #
 # DERIVE THE PIN SET BY GREPPING THE TREE — do NOT trust this prose:
-#   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py
-#   grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/ --include=*.py
+#   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ test/ --include=*.py
+#   grep -rn "PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET" tests/ test/ --include=*.py
+#   grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/ test/ --include=*.py
 # Silent additions and silent removals (fail-open regressions) both trip the
 # pins.
-#
-# Derive the authoritative pin set by GREPPING THE TREE — do NOT trust
-# a plan's count:
-#   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/
-#   grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/
 PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
@@ -643,11 +676,38 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # trend ring) the HTTP query door serves from — one provider, one
     # ring, one truth.
     #
-    # SAME-PR pin updates at the TEN files carrying the SIXTEEN assertion
-    # sites (10 exact-set + 5 count + 1 allow-array trailing-entry pin)
-    # are mandatory (this entry ships in the SAME commit as those bumps
+    # SAME-PR pin updates at the THIRTEEN files carrying the NINETEEN
+    # assertion sites (11 exact-set + 8 count + 1 pack string) are
+    # mandatory (this entry ships in the SAME commit as those bumps
     # — the set must never be red between two commits).
     "metrics-read",
+    # nest-report-read (2026-11-05, nest-anomaly-report lane): the
+    # READ-ONLY anomaly-store category — ``anomaly_clusters`` +
+    # ``anomaly_report_detail``, created by the
+    # create_nest_report_read_tools() factory
+    # (daemon/tools/nest_report_read.py). PRIVILEGED category (entry
+    # #18 of PRIVILEGED_TOOL_CATEGORIES): the anomaly store carries
+    # agent-filed incident rows with harvested evidence (the excerpt is
+    # raw tool stdout), so the empty-allow inherit universe must NOT
+    # auto-grant it. Explicit ``tools.allow: ["nest-report-read"]`` on
+    # maintenancer + devops + wanderer is the only access path (the R8
+    # ops trio), and every tool body ALSO carries its own ``agent_id``
+    # gate (the ONE shared helper in
+    # ``daemon/tools/nest_report_read.py``) — a LITERAL tool name in an
+    # allow list bypasses the category gate outright, so the category
+    # alone cannot spell the audience.
+    #
+    # The surface is structurally READ-ONLY and reads through the
+    # ANOMALY SERVICE (never a raw engine handle, never direct
+    # repository access, never REST-scraping — R8); the
+    # ``/api/nest-reports`` route calls the SAME service projector
+    # (one projector, two transports — AM-1).
+    #
+    # SAME-PR pin updates at the THIRTEEN files carrying the NINETEEN
+    # assertion sites (11 exact-set + 8 count + 1 pack string) are
+    # mandatory (this entry ships in the SAME commit as those bumps
+    # — the set must never be red between two commits).
+    "nest-report-read",
 })
 
 
@@ -1123,6 +1183,42 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # (``metrics_*``) — the house pattern (``self-alarm`` →
     # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
     "metrics-read": "daemon.tools.metrics_read",
+    # nest-report-read (2026-11-05, nest-anomaly-report lane): the
+    # READ-ONLY anomaly-store category — ``anomaly_clusters`` +
+    # ``anomaly_report_detail`` over the anomaly service. PRIVILEGED
+    # category (entry #18 of PRIVILEGED_TOOL_CATEGORIES): the store
+    # carries agent-filed incident rows with harvested evidence, so the
+    # empty-allow inherit universe must never auto-grant it.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``. The
+    # category key is KEBAB-case (``nest-report-read``) while the tool
+    # names keep the DATA vocabulary (``anomaly_*``) — R9's two-layer
+    # naming split (the OPERATIONAL surface is nest-, the DATA layer is
+    # anomaly-).
+    "nest-report-read": "daemon.tools.nest_report_read",
+    # nest-report (2026-11-05, nest-anomaly-report lane): the ONE write
+    # category of the nest-anomaly surface — ``report_anomaly`` (an agent
+    # reports something wrong; the daemon normalizes, scrubs, harvests the
+    # bounded evidence and persists ONE row).
+    #
+    # NOT PRIVILEGED (R4): the category is deliberately OUT of
+    # ``PRIVILEGED_TOOL_CATEGORIES`` — the tool cannot read secrets, the
+    # environment or another instance's data, and its own evidence harvest
+    # is self-scoped and scrubbed.  So the empty-allow inherit universe
+    # DOES grant it (agents with an empty allow list inherit the tool
+    # immediately); an agent with an EXPLICIT allow list receives it in
+    # the phase-5 grant ceremony.  The privileged set and its pin sites
+    # stay UNTOUCHED.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot. The category key is
+    # KEBAB-case (``nest-report``) while the tool name is snake_case
+    # (``report_anomaly``) — the house pattern (``self-alarm`` →
+    # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
+    "nest-report": "daemon.tools.nest_report",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1550,6 +1646,16 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "read_context",
     "read_file",
     "release_info",
+    # nest-report (2026-11-05, nest-anomaly-report lane): the ONE write
+    # tool of the nest-anomaly surface — created by the
+    # create_nest_report_tools() factory
+    # (daemon/tools/nest_report.py). Factory-built (not import-time
+    # registered), so it belongs in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is NOT privileged (R4): the
+    # empty-allow inherit universe DOES grant it; the explicit
+    # ``tools.allow: ["nest-report"]`` grant lands in the phase-5
+    # ceremony.
+    "report_anomaly",
     "resume_instance",
     "send_message",
     "service_list",
@@ -1627,6 +1733,15 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "metrics_families",
     "metrics_snapshot",
     "metrics_history",
+    # nest-report-read (2026-11-05, nest-anomaly-report lane): the two
+    # READ-ONLY anomaly-store tools — created by the
+    # create_nest_report_read_tools() factory
+    # (daemon/tools/nest_report_read.py). Factory-built (not
+    # import-time registered), so they belong in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #18); the
+    # runtime agent gate lives in the tool bodies.
+    "anomaly_clusters",
+    "anomaly_report_detail",
     "terminate_instance",
     "time",
     "todo_clear",

@@ -145,3 +145,9 @@ This rule is non-negotiable. I do not relax it for speed, fatigue, or "looks fin
 
 **Receive the vision message with two images → judge each pinned criterion with evidence → assemble the findings-wire-schema JSON object (verdict + per_criterion rows + summary + pinned_spec_sha) → return it bare (no fences, no prose).**
 emble findings artifact (verdict + per-criterion rows + summary) → return.**
+
+## Reporting Anomalies
+
+When I see something abnormal in my work — a defect, a contradiction, a stuck step — I report it
+with `report_anomaly`: what kind of problem, what I saw, how serious, what I think caused it. One
+report per distinct problem, never the same one twice. The tool collects the evidence itself.

@@ -115,6 +115,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # access path, and every tool body ALSO carries its own
 # agent_id gate.
 "metrics-read",
+"nest-report-read",
 })
 
 #: The ONLY agent allowed to hold the self-alarm category.
@@ -211,11 +212,11 @@ class TestPrivilegedCategory:
     def test_self_alarm_is_in_the_privileged_set(self) -> None:
         assert SELF_ALARM_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
+    def test_the_set_is_exactly_the_eighteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_seventeen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
+    def test_the_set_has_eighteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
 
 
 # ── the allow-lists ──────────────────────────────────────────────────────

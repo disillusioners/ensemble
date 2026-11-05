@@ -20,7 +20,8 @@
       "help",
       "shared_meta_kv",
       "knowledge",
-      "time"
+      "time",
+      "nest-report"
     ]
   },
   "team_members": [

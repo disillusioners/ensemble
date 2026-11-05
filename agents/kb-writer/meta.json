@@ -9,7 +9,7 @@
   "blueprint_inactive": true,
   "innate_skills": [],
   "tools": {
-    "allow": ["rag_insert_text", "tool_help", "time"]
+    "allow": ["rag_insert_text", "tool_help", "time", "nest-report"]
   },
   "team_members": []
 }

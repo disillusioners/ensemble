@@ -841,10 +841,16 @@ class TestDownsample:
 class TestChartPrimaryRoster:
     """Plan task 2.7b — the chart-primary roster."""
 
-    def test_the_roster_carries_twelve_families(self) -> None:
+    def test_the_roster_carries_thirteen_families(self) -> None:
+        """The roster count pin (12 → 13 with F23, the nest-anomaly lane).
+
+        The method name carries the CURRENT count so a future bump that
+        touches only the literal reads as a stale name (the honesty
+        pass the privileged-set pins follow).
+        """
         from daemon.services.metrics_query.roster import roster_family_names
 
-        assert len(roster_family_names()) == 12
+        assert len(roster_family_names()) == 13
 
     def test_the_dropped_family_is_absent(self) -> None:
         from daemon.services.metrics_query.roster import roster_family_names

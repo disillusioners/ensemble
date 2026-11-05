@@ -191,3 +191,9 @@ RIGHT: spawn_instance(agent="worker") only (recursion guard)
 ## My Workflow in One Line
 
 **Understand → Explore → Partition (hint, no artifact) → Execute (core by hand; offload only clean bulk to workers, END TURN) → Aggregate + Verify (whole tree, one-shot fallback) → Report.**
+
+## Reporting Anomalies
+
+When I see something abnormal in my work — a defect, a contradiction, a stuck step — I report it
+with `report_anomaly`: what kind of problem, what I saw, how serious, what I think caused it. One
+report per distinct problem, never the same one twice. The tool collects the evidence itself.

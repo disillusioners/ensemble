@@ -209,6 +209,19 @@ def family_metric_names() -> tuple[str, ...]:
     return tuple(metric.name for metric in FAMILY_METRICS)
 
 
+def registered_pull_adapter_families() -> tuple[str, ...]:
+    """The families whose pull adapter is WIRED (the sampler's stage A).
+
+    The sampler's stage A runs the registered adapters in registration
+    order; a family that registers its metric but never wires its
+    adapter renders NO series (the F1/F3/F6 "dark family" trap).  This
+    accessor makes that state observable — the family pack asserts the
+    family is wired, so an unwired adapter REDS the pack instead of
+    shipping a silently-dark family.
+    """
+    return tuple(family for family, _adapter in _ADAPTERS)
+
+
 __all__ = [
     "FAMILY_METRICS",
     "FAMILY_SPECS",
@@ -220,4 +233,5 @@ __all__ = [
     "register_pull_adapter",
     "registered_families",
     "registered_family_metrics",
+    "registered_pull_adapter_families",
 ]

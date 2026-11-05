@@ -175,6 +175,14 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # the text-exposition route's lone ``maintenance:read`` stays inside
     # the OR-set (both directions remain green).
     "/api/metrics": "maintenance:read|metrics:read",
+    # nest-reports (2026-11-05, nest-anomaly-report lane): the anomaly
+    # DOMAIN route. The SAME any-of spelling as the /api/metrics row
+    # above — the route accepts the door's QUERY scope set
+    # (``maintenance:read|metrics:read``) and NOTHING broader (the
+    # planner ruling on worker OQ1, 2026-11-04). The text-exposition
+    # route's lone ``maintenance:read`` is NOT our model; the three
+    # QUERY routes' any-of set IS.
+    "/api/nest-reports": "maintenance:read|metrics:read",
 }
 
 #: The wildcard sentinel as stored in the manifest.
@@ -315,9 +323,9 @@ class TestSourceMatchTarget:
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 37, (
+        assert len(matches) == 38, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 37 = 34 unconditional + 2 auth-ON-gated + 1 "
+            "(pinned 38 = 35 unconditional + 2 auth-ON-gated + 1 "
             "gateway-flag-gated (WS)). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
@@ -354,7 +362,10 @@ class TestScopeManifestCage:
         central-metrics-v1 QUERY routes (GET /api/metrics/families,
         GET /api/metrics/snapshot, GET /api/metrics/series — the ONE
         query door, each carrying the SAME ``maintenance:read`` scope
-        the family already declares) = 111
+        the family already declares) + the 2 /api/nest-reports routes
+        (GET /clusters, GET /clusters/{cluster_id} — the nest-anomaly
+        lane's DOMAIN route, each carrying the metrics door's any-of
+        scope set) = 113
         declared routes. A drift is a decoration added/removed without
         a manifest row change.
 
@@ -400,12 +411,17 @@ class TestScopeManifestCage:
         SAME /api/metrics family (GET /families, GET /snapshot,
         GET /series — the one query door; NO new router module, NO new
         mount, NO new scope — each carries the family's existing
-        ``maintenance:read``), growing the cage count 108 → 111. The
-        MOUNT census stays 37 (the family extends an existing mount)
-        and the CLASS-manifest family count stays 33 (the family is
-        already pinned as protected-default) — the three-way cage form
-        (declared-route 111 · mount 37 · class manifest 33) is pinned
-        by the P3 scope-cage pack.
+        ``maintenance:read``), growing the cage count 108 → 111.
+
+        nest-anomaly-report (2026-11-05) added the /api/nest-reports
+        DOMAIN family (GET /clusters, GET /clusters/{cluster_id} — two
+        scope-decorated routes carrying the door's any-of scope set),
+        growing the cage count 111 → 113. The MOUNT census grew 37 → 38
+        (the domain route is ONE new mount) and the CLASS-manifest
+        family count grew 33 → 34 (the new family is pinned as
+        protected-default) — the three-way cage form (declared-route
+        113 · mount 38 · class manifest 34) is pinned by the P3
+        scope-cage pack.
         """
         declared = [
             r
@@ -414,8 +430,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 111, (
-            f"declared-route census drifted: {len(declared)} (pinned 111)"
+        assert len(declared) == 113, (
+            f"declared-route census drifted: {len(declared)} (pinned 113)"
         )
 
     def test_manifest_entries_valid(self):

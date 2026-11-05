@@ -18,7 +18,8 @@
       "od.lint",
       "od.save",
       "image",
-      "dynamic-skill"
+      "dynamic-skill",
+      "nest-report"
     ]
   },
   "context_injection": {

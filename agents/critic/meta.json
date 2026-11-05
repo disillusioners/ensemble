@@ -10,7 +10,7 @@
   "skill_injection": true,
   "recursion_limit_multiplier": 7,
   "tools": {
-    "allow": ["read_file", "image", "design"],
+    "allow": ["read_file", "image", "design", "nest-report"],
     "deny": ["bash", "proc", "instance", "service", "midflight",
              "shared_meta_kv", "infra", "mcp", "image_save"]
   },

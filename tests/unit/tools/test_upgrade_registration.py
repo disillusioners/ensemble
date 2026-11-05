@@ -99,8 +99,8 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_seventeen_entries(self) -> None:
-        """The default-deny set is exactly seventeen entries —
+    def test_privileged_categories_is_exactly_eighteen_entries(self) -> None:
+        """The default-deny set is exactly eighteen entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``secrets``,
         ``settings``, ``board``, ``self-alarm``,
@@ -228,6 +228,12 @@ class TestStaticRegistrationChecklist:
         # access path, and every tool body ALSO carries its own
         # agent_id gate.
         "metrics-read",
+        # nest-report-read (2026-11-05, nest-anomaly-report lane):
+        # the READ-ONLY anomaly-store category — opt-in-only; the
+        # maintenancer / devops / wanderer allow entries are the only
+        # access path, and every tool body ALSO carries its own
+        # agent_id gate.
+        "nest-report-read",
 })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

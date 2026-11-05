@@ -77,16 +77,22 @@ CHILDREN = ("hacker", "cracker", "sweeper")
 PROMPT_SURFACE = ("soul.md", "rule.md", "workflow.md", "tools_note.md")
 
 # --- DP1 tool matrices (decisions.md §B.2 — AM-1/AM-2 corrected) -----------
+# Re-pointed at the nest-report grant ceremony (2026-11-05, leader ruling
+# "all 47 agents"): every explicitly-allow-listed agent — the aegis family
+# included — carries "nest-report" as the LAST allow entry. The expectation
+# set moves; the EXACT-set discipline does not.
 AEGIS_ALLOW = frozenset({
     "instance", "bash", "proc", "filesystem", "time", "self", "help",
     "context", "shared_meta_kv", "knowledge", "mcp", "question",
-    "midflight", "dynamic-skill", "todo",
+    "midflight", "dynamic-skill", "todo", "nest-report",
 })
 AEGIS_DENY = frozenset({
     "write_file", "edit_file", "terminate_instance", "pause_instance",
     "resume_instance", "set_instance_tunable",
 })
-CHILD_ALLOW = frozenset({"bash", "proc", "filesystem", "time", "help", "self"})
+CHILD_ALLOW = frozenset({
+    "bash", "proc", "filesystem", "time", "help", "self", "nest-report",
+})
 
 # The 17 privileged categories (daemon/tools/_tool_registry.py
 # PRIVILEGED_TOOL_CATEGORIES — pinned here as data; T8 asserts the family's
@@ -681,14 +687,56 @@ class TestSeverityTaxonomyDeclared:
 
 
 class TestWorkerUntouched:
-    def test_worker_untouched(self):  # T25
+    def test_worker_untouched(self):  # T25 — re-pointed at the ceremony
+        """Worker is untouched BY THE AEGIS LANE — its only diff vs the
+        aegis-lane base is the nest-report GRANT CEREMONY (leader ruling
+        "all 47 agents", 2026-11-05): exactly ``meta.json`` (the single
+        ``"nest-report"`` append, LAST position) + ``rule.md`` (the
+        duty-prompt section, additions only). Any OTHER file or hunk
+        shape still fails the pin — the guard is re-pointed, not
+        weakened."""
         result = subprocess.run(
             ["git", "diff", "--name-only", LANE_BASE_COMMIT, "--", "agents/worker/"],
             cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60,
         )
         assert result.returncode == 0, f"git diff failed: {result.stderr[-500:]}"
-        assert result.stdout.strip() == "", (
-            f"agents/worker/ changed vs base: {result.stdout.strip()}"
+        changed = sorted(ln.strip() for ln in result.stdout.splitlines() if ln.strip())
+        assert changed == ["agents/worker/meta.json", "agents/worker/rule.md"], (
+            f"agents/worker/ changed beyond the nest-report ceremony vs base: {changed}"
+        )
+        # meta.json: the ONLY change is the "nest-report" grant append.
+        base_show = subprocess.run(
+            ["git", "show", f"{LANE_BASE_COMMIT}:agents/worker/meta.json"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60,
+        )
+        assert base_show.returncode == 0, base_show.stderr[-300:]
+        base_meta = json.loads(base_show.stdout)
+        head_meta = _meta("worker")
+        expected_meta = json.loads(base_show.stdout)
+        expected_meta["tools"]["allow"] = [
+            *base_meta["tools"]["allow"], "nest-report",
+        ]
+        assert head_meta == expected_meta, (
+            "worker meta.json must differ from base ONLY by the "
+            "'nest-report' grant appended at the LAST allow position"
+        )
+        # rule.md: additions only, and they introduce the duty prompt.
+        rule_diff = subprocess.run(
+            ["git", "diff", LANE_BASE_COMMIT, "--", "agents/worker/rule.md"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60,
+        )
+        assert rule_diff.returncode == 0, rule_diff.stderr[-300:]
+        removed = [
+            ln for ln in rule_diff.stdout.splitlines()
+            if ln.startswith("-") and not ln.startswith("---")
+        ]
+        assert removed == [], f"worker rule.md lost lines vs base: {removed[:5]}"
+        added = [
+            ln for ln in rule_diff.stdout.splitlines()
+            if ln.startswith("+") and not ln.startswith("+++")
+        ]
+        assert any("## Reporting Anomalies" in ln for ln in added), (
+            "worker rule.md additions must be the duty-prompt section"
         )
 
 
