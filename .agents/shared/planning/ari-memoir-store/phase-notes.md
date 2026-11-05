@@ -184,3 +184,159 @@ cannot collide with the later waves' files (phase 4 owns
 * `tests/unit/test_memoir_schema_contract.py` (phase 1 pack)
 * `tests/unit/test_memoir_persona_seed.py` (phase 1 pack)
 * `tests/unit/test_memoir_persona_lane.py` (phase 1 pack)
+
+---
+
+# Phase notes — Memoir Store v1 (wave 2 of 5 — phase 2: the repository + the retrieval service)
+
+**Lane:** `feature/ari-memoir-store` @ `/home/nea/ensemble-src-wt-memoir-store`,
+base `362ed11ec` (wave 1), phase-2 commits `c2328cffb` → `96896d0c9`.
+**Status:** PHASE 2 COMPLETE — the closed repository surface, the hybrid
+retrieval service, five packs, seven mutation legs proven.
+
+## 6. Anchor sweep (re-grepped at `362ed11ec`, 2026-11-05)
+
+P-7 discipline: the recorded anchors are LEADS. Every anchor this phase
+cites was re-grepped at use time.
+
+| Anchor | Cited | Verified | Note |
+|---|---|---|---|
+| `estimate_tokens` (the house estimator) | `daemon/loader.py:1027` | `daemon/loader.py:1027` | EXACT. Imported lazily (the loader is heavy); the house precedent is the same lazy import (`daemon/graph.py:7712`). |
+| the house BM25 helper | `skill_search_service._bm25_score` | `daemon/services/skill_search_service.py:228` (`_tokenize` at `:201`) | EXACT. The plan's "critical_notes_selector precedent `:12-20`" is a DIFFERENT anchor (a caller of the helper), not the helper itself. |
+| the cosine shape | `critical_notes_selector.py:230-238` | `:230` | EXACT. Imported lazily (the module costs ~2.6 s to import). |
+| the JSONB column type | (not cited with a line) | `daemon/repositories/infra/types.py:35` | — |
+| the timestamp helpers | (not cited with a line) | `timestamps.py:41` `now_utc`, `:63` `now_utc_iso`, `:76` `to_utc_iso` | `now_utc_iso()` takes NO argument — the `store_embedding(..., now)` stamp is serialized with `to_utc_iso(now)`. |
+| `_ensure_postgres_columns` | `daemon/manager.py:8055` | **`daemon/manager.py:8110`** | **DRIFT (+55 lines)** — the wave-1 lane and other lanes added lines above the def. The plan/architecture cite is a LEAD; the def and the memoir statements were re-located by grep. |
+| the memoir `tsv` ensure + GIN | (phase 1) | `daemon/manager.py:9641` (the ALTER), `:9646` (the GIN) | The GIN index name is `idx_memoir_episodes_tsv` — the PG pack's EXPLAIN leg asserts it by name. |
+| the memoir model registration | `:975` (create_all) | registration `:983`, `create_all` `:990`, the ensure call `:1012`, the persona seed `:1069` | DRIFT from the plan's `:975/:980/:997` — re-grepped. The BOOT ORDER is unchanged (register → create_all → runner → ensure → seed). |
+| the human-lane error | `prompt_version_service.py:678-716` | the class is at **`daemon/services/prompt_version_service.py:184`** | The cited range is the SERVICE method, not the class; the class is what the persona repository imports. |
+| the critical-notes cap precedent | `critical_notes.py:537-546` | `_MAX_ENTRIES = 200` at `:70`, the cap check at `:538` | EXACT in substance. |
+| the engine factory | (the wave-1 incident's root) | `daemon/repositories/factory.py:304` `create_postgres_engine` reads the AMBIENT `POSTGRES_*` over the passed config | **This phase does NOT use the factory.** The repository takes the caller's engine; the service takes the repository. No engine is ever constructed by a phase-2 probe, test or script. |
+| the migration census | 119 → 120 | `daemon/migrations/versions/*.sql` = **120** files | The memoir migration (20261105_102821) took it 119 → 120. |
+
+## 7. Drift and readings recorded (not re-litigated)
+
+**7.1 — the brief's description of the wave-1 repository was stale (P-7).**
+The dispatch brief said the wave-1 file "already carries
+`get_approved_persona`, `seed_persona_if_absent`". It did NOT: the
+persona lane carried `get_current` (the pointer's version, whatever its
+status) and `seed_persona_if_absent` lives in
+`daemon/repositories/memoir/seed.py` as a MODULE function. D2.1 names both
+on the closed surface, so both were ADDED to the episode repository
+(`get_approved_persona` follows the pointer and falls back to the newest
+APPROVED version; `seed_persona_if_absent` delegates to the seed module,
+so the boot-time call and the method cannot drift). The wave-1 persona
+lane itself is UNTOUCHED.
+
+**7.2 — the PG lexical SQL carries an `agent_id` equality predicate.**
+D2.2 quotes the statement without one. The shipped SQL adds
+`AND agent_id = :agent_id` because the recall service is AGENT-SCOPED and
+DD-13 makes the identity factory-captured (never a caller-supplied scope
+key). The argument order, the `ts_rank_cd` / `tsvector` / `@@` forms and
+the ordering are byte-preserved; the predicate cannot change behaviour
+for the single-agent case (design §4.1: `agent_id` is `ari` in v1). The
+SQLite leg scopes the same way.
+
+**7.3 — the service does NOT read the kill-switch.**
+The phase-0 skeleton docstring said the service "reads
+`daemon.tools.memoir_knob.memoir_enabled()` at CALL time". AM-16 fixes
+the gate ORDER as auth → knob → validation → DB touch, and the knob is
+the CALLER's gate (the tool layer, phase 4; the briefing, phase 5) — an
+unauthorized caller learns nothing about the knob's state, and the
+briefing must DEGRADE (not raise) when the knob is off. The service
+therefore neither reads nor caches the knob. The skeleton docstring was
+corrected in phase 2.
+
+**7.4 — `MEMOIR_RANK_CANDIDATES` lives in the repository module.**
+AM-2 asks for "a module constant". The FUSION lives in the service, but
+the repository's `lexical_rank` also needs the pool size, and the
+repository may not import the service (the service imports the
+repository). The constant is therefore defined in
+`daemon/repositories/memoir/repository.py` and re-exported by
+`daemon/services/memoir_retrieval.py` — one value, two import sites, no
+config knob.
+
+**7.5 — the semantic identity audit reads the WHOLE episode set.**
+The `embedding_excluded` count (D2.11) must not be silently partial: a
+bounded scan would hide the very loss the disclosure exists to make
+visible. `fetch_latest(agent_id, limit=None)` therefore returns the
+agent's whole set, and the service derives the semantic pool, the
+excluded count and the missing-embedding count from ONE read. v1 is
+single-agent and personal-scale (R1, R4); a ceiling with a disclosure
+would be a v2 concern.
+
+**7.6 — the package `__init__.py` was NOT touched.**
+It is wave-1's file, so the new class is imported from the module
+directly (`daemon.repositories.memoir.repository.MemoirRepository`). The
+package's `__all__` does not re-export it — a wave-1 amendment or the
+lane closeout may add it.
+
+**7.7 — the write bounds are enforced in the REPOSITORY.**
+D2.13's bounds are write hygiene, so they live with the write: the tool
+layer (phase 4) passes the values through and the repository refuses.
+The refusal carries a CODE so the tool can map it onto the frozen
+`memoir_*` vocabulary (AM-21) without re-deriving the reason.
+
+**7.8 — the "admission after the insert" failure mode is smaller than W3
+describes — but the pin still stands.** A same-transaction inversion
+rolls back with the refusal, so no row survives; the harm W3 names (the
+13th keepsake written and THEN refused) needs the commit to precede the
+refusal. The ORDER is still the adjudicated contract, and the phase-2
+pin is a SOURCE-ORDER pin (`test_the_admission_reads_precede_the_insert_in_the_source`)
+plus the behavioural "a refused keepsake write leaves NO row behind".
+
+## 8. The phase-2 mutation matrix (seven legs, all proven)
+
+Each leg: plant the defect → run the pack → capture the failing node IDs
+→ restore → re-run GREEN. The tree was clean at the end of every cycle.
+
+| # | The planted defect | Pack | RED node IDs | Restored |
+|---|---|---|---|---|
+| M1 | the FINAL RE-CHECK removed (`while False:`) | `memoir_budget_unit_test` | `test_the_final_re_check_drops_the_tail_when_the_footer_tips_it_over` | 10 passed |
+| M2 | the trim measures the RAW rows (`text = row.body`) | `memoir_budget_unit_test` | `test_the_final_re_check_drops_the_tail_when_the_footer_tips_it_over`, `test_the_shipped_projection_is_measured_not_the_raw_rows` | 10 passed |
+| M3 | the PRE-CLAMP candidate set is marked | `memoir_budget_unit_test` | `test_a_dropped_episode_is_neither_returned_nor_marked` | 10 passed |
+| M4 | an UPDATE touches the record column `body` | `memoir_write_purity_unit_test` | `test_no_update_touches_a_record_column`, `test_the_stats_update_is_one_statement_setting_two_columns` | 14 passed |
+| M5 | the write-back is not column-targeted (one column + its bind dropped) | `memoir_write_purity_unit_test` | `test_the_write_back_is_one_statement_setting_the_four_columns_together`, `test_the_write_back_sets_the_four_columns_together` | 14 passed |
+| M6 | the admission reads moved AFTER the INSERT | `memoir_write_purity_unit_test` | `test_the_admission_reads_precede_the_insert_in_the_source` | 14 passed |
+| M7 | the REVERSED `ts_rank_cd` argument order | `memoir_retrieval_pg_test` | `test_the_shipped_lexical_sql_uses_the_tsvector_first`, `test_the_shipped_lexical_sql_returns_the_ts_rank_cd_ordering`, `test_the_repository_lexical_rank_uses_the_shipped_sql`, `test_the_gin_index_serves_the_lexical_query` (+ the `UndefinedFunction` traceback — the R2 proof) | 12 passed |
+
+M5 was planted twice: the first form (dropping a SET column without its
+bindparam) broke the MODULE IMPORT, so the pack failed at collection
+(`GREEN-AT-ZERO IS A FAILURE`) rather than at a node — a vacuous RED.
+The second form (the SET column AND its bindparam) is the real leg.
+
+## 9. The phase-2 test surface
+
+| Pack | Nodes | Result |
+|---|---|---|
+| `memoir_retrieval_unit_test` | 27 | PASS |
+| `memoir_admission_unit_test` | 25 | PASS |
+| `memoir_budget_unit_test` | 10 | PASS |
+| `memoir_write_purity_unit_test` | 14 | PASS |
+| `memoir_retrieval_pg_test` (real PG 16.15) | 12 | PASS |
+
+Wave-1 packs re-run after the extension: `memoir_knob_unit_test`,
+`memoir_schema_unit_test`, `memoir_seed_unit_test`,
+`memoir_persona_lane_unit_test`, `memoir_schema_pg_test` — all PASS.
+**The wave-1 persona pack CAUGHT a real regression**: the phase-2 import
+edit dropped `now_utc_iso` from the repository module and broke the
+persona transition guard (9 reds). The phase-2 packs never touch that
+path, so only the wave-1 pack could see it. Fixed in `96896d0c9`. The
+lesson: extending a file that carries another wave's lane REQUIRES
+re-running that wave's pack.
+
+## 10. The PG proof (the R2 defect, proved)
+
+The scratch database: `ensemble_memoir_retrieval_pg_<pid>` on
+**127.0.0.1:5432** (the LOCAL cluster — PostgreSQL 16.15), created and
+DROPPED by the pack. The pack ASSERTS the resolved target before the
+first statement (`SELECT current_database()` must print the scratch name
+and must not be a live name) and refuses to continue otherwise. The
+ambient `POSTGRES_*` (which points at PRODUCTION) is scrubbed PER
+VARIABLE — never with the `env -u POSTGRES_*` glob form, which is a
+silent no-op.
+
+The shipped SQL is EXTRACTED from `daemon/repositories/memoir/repository.py`
+with `ast` (never copied), so the PG leg proves the code that ships. The
+reversed form raises `psycopg.errors.UndefinedFunction` — the leg that
+would have stayed GREEN on the SQLite fallback.
