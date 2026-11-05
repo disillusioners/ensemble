@@ -132,7 +132,12 @@ _SK_KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(\S+)")
 
 # 3. The keyword FAMILY — ``api_key`` / ``token`` / ``password`` /
-#    ``secret`` / ``access_key``, each with an OPTIONAL QUOTE on either
+#    ``secret`` / ``access_key`` / ``credential`` / ``pwd`` /
+#    ``private_key`` (the W2 council widening, 2026-11-05: the three
+#    additions mirror ``env_key_policy``'s SECRET_MARKER_WORDS — every
+#    SECRET-SHAPED word it recognizes, carried over; the non-secret-
+#    shaped ``AUTH``/``PRIVATE``-bare words are deliberately NOT),
+#    each with an OPTIONAL QUOTE on either
 #    side of the name and a TRAILING WORD SEGMENT (R-a: the keyword
 #    masks the FAMILY — ``secret_note`` / ``password_hint`` /
 #    ``client_secret_id`` are all masked; over-masking is the fail-safe
@@ -148,7 +153,7 @@ _KEYWORD_SECRET_RE = re.compile(
     r"(?i)"
     r"([\"']?)"                                            # 1: optional opening quote
     r"([A-Za-z0-9_]*"                                      # 2: FULL key name
-    r"(?:api[_-]?key|token|password|secret|access[_-]?key)"
+    r"(?:api[_-]?key|token|password|secret|access[_-]?key|credential|pwd|private[_-]?key)"
     r"[a-z_]*)"
     r"([\"']?\s*[:=]\s*)"                                  # 3: closing quote + separator
     r"(\"[^\"]*\"|'[^']*'|\S+)"                            # 4: the value
@@ -160,9 +165,11 @@ _QUERY_SECRET_RE = re.compile(
 )
 
 # 5. Environment-variable shapes — ``*_API_KEY=`` / ``*_TOKEN=`` /
-#    ``*_PASSWORD=`` / ``*_SECRET=``.
+#    ``*_PASSWORD=`` / ``*_SECRET=`` / ``*_CREDENTIAL=`` / ``*_PWD=`` /
+#    ``*_PRIVATE_KEY=`` (the W2 council widening — the same three
+#    secret-shaped words the keyword FAMILY gained).
 _ENV_SECRET_RE = re.compile(
-    r"(?i)([A-Za-z0-9_]*_(?:API_KEY|TOKEN|PASSWORD|SECRET)\s*=\s*)(\S+)"
+    r"(?i)([A-Za-z0-9_]*_(?:API_KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL|PWD|PRIVATE_KEY)\s*=\s*)(\S+)"
 )
 
 #: The E3 benign-name denylist — the TOKEN-METERING diagnostics. These
@@ -220,12 +227,14 @@ def redact_secret_shapes(text: object, limit: int = 200) -> str:
     1. ``sk-…`` provider keys.
     2. ``Bearer <token>``.
     3. The keyword FAMILY (``api_key`` / ``token`` / ``password`` /
-       ``secret`` / ``access_key``, with an optional quote on either
+       ``secret`` / ``access_key`` / ``credential`` / ``pwd`` /
+       ``private_key``, with an optional quote on either
        side of the name and a trailing word segment) — the value is
        masked WHOLE, including a quoted multi-word passphrase (E1).
     4. URL query-parameter secrets.
     5. Environment-variable shapes (``*_API_KEY=`` / ``*_TOKEN=`` /
-       ``*_PASSWORD=`` / ``*_SECRET=``).
+       ``*_PASSWORD=`` / ``*_SECRET=`` / ``*_CREDENTIAL=`` /
+       ``*_PWD=`` / ``*_PRIVATE_KEY=``).
 
     NOT masked (E3): the token-metering diagnostics — ``max_tokens``,
     ``input_tokens``, ``output_tokens``, ``token_budget``,

@@ -107,7 +107,9 @@ THE CONCURRENCY CAVEAT (N3) — READ IT AS A CAVEAT
 --------------------------------------------------
 "5 per 10 min" is BEST-EFFORT under concurrency: the check is
 read-then-insert, so two concurrent reports from one agent type can BOTH
-pass.  It is NOT a hard invariant.
+pass.  It is NOT a hard invariant.  The GLOBAL TOTAL-ROW CEILING and
+the 1,500/hour GLOBAL BRAKE are read-then-insert BEST-EFFORT in
+exactly the same way.
 
 THE OFFLOAD-GATE PRESSURE (AM-14)
 ---------------------------------

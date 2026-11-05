@@ -406,6 +406,53 @@ class TestTheScrubPipeline:
             payload = json.dumps({name: "value-xyz"})
             assert "value-xyz" not in scrub_text(payload, 200)
 
+    def test_the_secret_shape_masker_masks_the_w2_council_keywords(self) -> None:
+        """W2 (code council fix cycle, 2026-11-05) — ``credential`` /
+        ``pwd`` / ``private_key`` join the keyword FAMILY. The council
+        verified all three UNMASKED BY EXECUTION pre-widening; the
+        widening mirrors ``env_key_policy``'s SECRET_MARKER_WORDS
+        (every SECRET-SHAPED word it recognizes — the non-secret-shaped
+        ``AUTH`` / bare-``PRIVATE`` words are deliberately NOT carried
+        over). One leg per keyword per shape class: plain / JSON /
+        quoted multi-word (E1) + the ``*_``-env-var shape family."""
+        # credential — plain + JSON
+        assert "super-cred-9" not in scrub_text("credential=super-cred-9", 200)
+        assert "hunter2" not in scrub_text('{"credential": "hunter2"}', 200)
+        # pwd — plain + JSON + quoted multi-word (E1: the WHOLE value)
+        assert "hunter2" not in scrub_text("pwd=hunter2", 200)
+        assert "hunter2" not in scrub_text('{"pwd": "hunter2"}', 200)
+        assert "two word secret" not in scrub_text(
+            'pwd = "two word secret"', 200
+        )
+        # private_key — plain + JSON PEM + quoted
+        assert "AKIA1234567890ABCDEF" not in scrub_text(
+            "private_key=AKIA1234567890ABCDEF", 500
+        )
+        assert "BEGIN PRIVATE KEY" not in scrub_text(
+            '{"private_key": "-----BEGIN PRIVATE KEY-----"}', 500
+        )
+        # the env-var shape family carries the same three words
+        assert "sk-ant-XY1212345678" not in scrub_text(
+            "MY_PRIVATE_KEY=sk-ant-XY1212345678", 500
+        )
+        assert "postgres-super-9" not in scrub_text(
+            "DB_CREDENTIAL=postgres-super-9", 200
+        )
+        assert "abc123XYZ" not in scrub_text("SERVICE_PWD=abc123XYZ!", 200)
+
+    def test_the_widened_family_does_not_mask_secret_free_prose(self) -> None:
+        """The no-over-mask probes for the W2 words: prose carrying the
+        new words in a NON-secret shape (no ``[:=]`` separator after
+        the name) stays clear. The separator requirement plus the E3
+        denylist ARE the over-masking guards — masking these would
+        destroy the excerpt's diagnostic value, not protect it."""
+        for text in (
+            "my credentials are current",
+            "the pwd guidance was updated",
+            "private key rotation is scheduled",
+        ):
+            assert scrub_text(text, 200) == text
+
     def test_the_secret_shape_masker_is_the_sole_defence_for_non_stored_values(
         self,
     ) -> None:
