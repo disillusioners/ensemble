@@ -6,7 +6,8 @@
 [`architecture-recommendation.md`](./architecture-recommendation.md) (G0, commit `f6d11c232`); §F below points at each ruling. The
 slot framings below are retained as decision context; a ruling is authoritative where it differs. Flag state, gate state and the decision state
 are single-sourced in **§F** (this file is the authority; the plan set cross-references it and never
-duplicates it).
+duplicates it). **Amended by AM-1/AM-2 (`cc6303308`) and folded against approver iteration-001
+(REJECTED, 7 blockers) — fold record in §C-bis.5; gate state in §F.4.**
 
 **Companion records:**
 [`technical-analysis.md`](./technical-analysis.md) (the mechanics + trade-space this record frames) ·
@@ -24,7 +25,7 @@ duplicated here):** `plan-overview.md`, `phase0-plan.md` … `phaseN-plan.md`, `
   the plan set must re-derive at P4 are stated here.
 - **§B — binding facts + inherited rulings.** The facts and the predecessor's rulings that this lane
   does not re-open. Each carries its source. §B is the "do not re-litigate" section.
-- **§C — the six decision slots (D1–D6).** Each slot carries: **Options** (with the mechanics that
+- **§C — the seven decision slots (D1–D7; D7 was leader-added).** Each slot carries: **Options** (with the mechanics that
   make an option viable or not), a **Trade-offs** table on consistent criteria, a **RECOMMENDATION
   (framing only — the architect rules)**, and the **fold-consequence per option** (what changes in the
   plan set, the pins and the files if that option is chosen).
@@ -466,6 +467,35 @@ architect may prefer it.
    (177 → 181 — content changes, row count only by canary's four files), `tool-categories.json`
    (untouched — B14), the seal map (untouched).
 
+**D5-ledger completeness item (approver iteration-001, B1 — the ledger is COMPLETE as of this fold).**
+The re-derivation ledger above was declared complete while missing one **constant overload** and two
+**arity/shape** consequences. All three are now named rows, and the ledger is complete **because** they
+are in it:
+
+- **`LEAVES` / `INSTALLER_CHILDREN` split.** `CHILDREN` (`test_aegis_security_family.py:76`) is
+  **overloaded**: it is both the *persona roster* (fed to **25** `@pytest.mark.parametrize("agent",
+  CHILDREN)` sites) and the *installer-toolchain roster* (resolved by `_lib_path` `:266` /
+  `_skill_body_path` `:271` through **`INSTALLER_SKILLS` — 3 keys only** at `:145`). Appending
+  `canary` without splitting the constant raises **`KeyError: 'canary'`** on every leg that resolves a
+  skill body or lib path — an **error**, not a targeted red, and it reads as "the pin failed" rather
+  than "the constant is overloaded". Required re-derivation: split into `LEAVES` (persona roster, gains
+  canary) and `INSTALLER_CHILDREN` (the three installer personas, unchanged), with each parametrized
+  site pointed at the correct one — the sites that resolve bodies/libs take `INSTALLER_CHILDREN`.
+- **T23 arity.** `test_fences_bullet_lists_byte_identical` (`:604-626`) hard-codes the **3-way**
+  identity `lists[0] == lists[1] == lists[2]` (`:613-618`) and `zip(CHILDREN, lists)`. A 4th persona in
+  that list is an **arity break**, not an extension: the assertion must be re-derived (N-way identity
+  over the installer roster, count still pinned) rather than widened by a literal.
+- **`CHILD_ALLOW` per-agent map.** One shared `frozenset({"bash","proc","filesystem","time","help",
+  "self"})` (`:89`) is asserted for **every** child at `:359`. A literal `+ canary` **reds** (canary
+  carries neither `proc` (D7/NC-4) nor `self` (AM-1)), and the naive repair — adding `proc`/`self` to
+  the shared set so canary matches — **re-installs the NC-4 defect and defeats AM-1**. Required
+  re-derivation: a **per-agent allow map** whose canary entry is exactly `{bash, filesystem, time,
+  help}`, asserted per agent (T35/T6/T7 continue to assert each agent's set individually).
+
+**Ownership:** the concrete constant **values** are the plans sibling's authoring (`architecture-
+recommendation.md` §5.2 ledger row + the phase files); this record states the **split and the cause**
+and cites them — it does not author constants.
+
 **Fold-consequence per option.**
 
 - **If A** — one test file grows; the T-numbers continue from the family's highest (no collision);
@@ -487,10 +517,13 @@ architect may prefer it.
 **Ruling (adopted): D6-A — core 5 legs; logical-only sandbox.** Channels 1/2/3/5 fired + 6 as comparison
 baseline; 4/7/8/9 deferred with reasons; 11 (chat inbound) disclosed as the widest uncovered surface.
 Sandbox = logical only (no OS/network/credential/write/read/project/identity fence — the architect's
-exact list, §6.2 of architecture-recommendation.md); five-item mechanical pre-flight. Fold-cost:
+exact list, §6.2 of architecture-recommendation.md); **six-item mechanical pre-flight** (= the ruling's
+five (§6.3) **plus** §6.2's scratch-project clause — the sixth is sourced from the frozen §6.2, so it
+**completes** the ruling rather than diverging from it). Fold-cost:
 campaign spec covers 5 legs; target persona leaf-class (T6/T7 pins apply); pre-flight checklist becomes a
-five-item mechanical pre-flight in the campaign procedure; coverage table lists channels 4/7/8/9/11 as not
-covered in v1 with reasons; hand-off report carries the limits sentence.
+**six-item mechanical pre-flight** (= the ruling's five §6.3 items + §6.2's scratch-project clause) in
+the campaign procedure; coverage table lists channels 4/7/8/9/11 as not covered in v1 with reasons;
+hand-off report carries the limits sentence.
 
 **Question.** Which real intake surfaces do v1 campaigns cover, and what does "a sandboxed self-owned
 target" concretely mean — and explicitly not mean?
@@ -519,6 +552,19 @@ payloads. It is **not** an OS boundary, **not** a network fence, **not** a crede
 write fence, **not** a read fence, **not** a project fence (B8) and **not** an identity fence
 (`data/ensemble.json` outranks a scrubbed environment).
 
+**Scratch-root definition + pre-flight gap (approver iteration-001, B2).** The CAG-06 allowlist has as
+its reference point a **"campaign scratch root"** — and that phrase occurred **only inside the
+allowlist quote**, never defined (no path, no creation, no teardown, no assertion), even though it is
+the anchor for **2 of the 4** allowlisted action classes in the **only** containment control. Second
+half of the same defect: §6.2's **scratch project** clause never reached the five-item pre-flight, so a
+target could be spawned with a **live `project_id`** while ingesting a hostile payload. Recorded
+requirement (the **concrete definition is owned by `phase3-plan.md`'s pre-fire assertion** — it does not
+exist on disk yet, and this record does not invent a path): one absolute root per campaign, created
+**before** the first fire, asserted inside action class (i), torn down **after** the last observation,
+and recorded in the campaign log; the pre-flight becomes **six** items — dev identity · dev DB ·
+scratch `DATA_DIR` with a non-poisoned pin · **scratch project (no live `project_id`)** · self-owned
+parentage · synthetic inert payload.
+
 | Option | v1 leg set | Target class | Cost |
 |---|---|---|---|
 | **A — core set** | channels 1, 2, 3, 5 (fire) + 6 (compare the existing frame) | **leaf-class** targets (deny write/edit, no privileged categories) | lowest blast radius; channels 4/7/8/9 are **disclosed as uncovered in v1** |
@@ -535,13 +581,14 @@ disclosed as the widest uncovered surface — the plan must **state plainly what
 (prompts + campaign record + hand-off, AM-13 precedent). Option C is worth a decision only if the
 architect wants the MCP leg to be *real* rather than *shaped*; option B should be weighed against the
 fact that an `mcp`-class target is a much richer attack surface than the lane's other legs need.
-*Superseded by the ruling at §C.6 (D6): 'sandboxed target' reframed as logical-only fence (NC-5); five-item mechanical pre-flight.*
+*Superseded by the ruling at §C.6 (D6): 'sandboxed target' reframed as logical-only fence (NC-5); five-item mechanical pre-flight **at the time of that record** (the live control set is now six items — §C.6).*
 
 **Fold-consequence per option.**
 
 - **If A** — the campaign spec covers 5 legs; the target persona is leaf-class (T6/T7 pins apply); the
   pre-flight checklist (dev identity asserted, dev DB asserted, scratch `DATA_DIR` with a non-poisoned
-  pin, self-owned parentage, synthetic payload) becomes a **five-item mechanical pre-flight** in the
+  pin, **scratch project — no live `project_id` (§6.2)**, self-owned parentage, synthetic payload)
+  becomes a **six-item mechanical pre-flight** (= the ruling's five + §6.2's clause) in the
   campaign procedure; the coverage table in the plan lists channels 4/7/8/9/11 as **not covered in v1**
   with reasons; the hand-off report carries the limits sentence.
 - **If B** — the target set includes an `aegis`/`worker`-class instance ⇒ the target's allow carries
@@ -660,6 +707,43 @@ disk** — dedicated rows below carry what closed them; verified read-only this 
 
 ---
 
+### C-bis.5 — Fold round 3 (approver iteration-001) — blockers B1–B7 + the two amendments
+
+Added by the approver-001 fold, 2026-11-05. Gate arc at this commit: **G2 REJECTED (iteration 001,
+7 blockers)** → **AMENDED** (AM-1/AM-2 @ `cc6303308`) → **FOLD LANDED** (this record) → **iteration 002
+PENDING** (cap 3). The **requirements layer was APPROVED CLEAN** at iteration 001 — ~45 census claims
+re-derived, cross-doc arithmetic consistent — so nothing in D1–D7's *requirements* statement is
+re-litigated here. Every blocker was recorded by both rejecting workers as a cheap surgical fold, no
+structural rework. **AM-1 and AM-2 are ADOPTED amendments, not deltas to argue**; they amend stable
+ruling IDs in place (`architecture-recommendation.md` §14 + §7.1/§4.1/§5.3/§5.4/§11).
+
+**ID-scope note (prevents a real collision).** These AM-1 / AM-2 are **THIS lane's** amendment IDs
+(`architecture-recommendation.md` §14). The **predecessor aegis lane** also used AM-n labels for its own
+amendments — §B's "predecessor Q1 / AM-1" row (the `chart` inheritance fact) and the "AM-13 precedent"
+citations (limits-sentence in three places) point at the **predecessor's namespace**, not this one.
+Where ambiguity matters the text says "predecessor AM-n".
+
+| Item | Pre-fold state | Fixation (adopted) | Files |
+|---|---|---|---|
+| **AM-1 · canary allow set** | `allow ⊆ {bash, proc, filesystem, time, help, self}` in the plan default; frozen §7.1 carried `self` by **leaf-precedent carry-over**, never examined by the D7 review | **ADOPTED: `self` DROPPED — allow is exactly `{bash, filesystem, time, help}`.** `self` (`inner_soul`/`access_memory`) is the sanctioned **durable self-behaviour-write channel**: a payload that persuades canary to write a preference into its own persona files survives the campaign and silently re-preferences every future one (F1/R2 on the most-exposed agent); retention was **not** part of the F1 acceptance. **Mechanical removal over doctrinal mitigation**; continuity stays off-repo (CAG-09 + git-proposed rule changes). **Disclosed residual: `bash` is still an unconfined write path for every persona** — AM-1 narrows, it does not fence. Pins: **T35** exact set; **T6/T7 per-agent** exact-set pins | `architecture-recommendation.md` §7.1 + §14 AM-1 (**landed**, `cc6303308`); this record §C.7 in-place note + §C-bis D7 row + §E.9 (**landed**); `technical-analysis.md` predecessor-leaf note + containment-ledger `self` row + residual bullet (**landed**); canary `meta.json` + T35/T6/T7 (P3/P4) |
+| **AM-2 · D4 rule-table home/budget + D2 `auto_load` placement** | (a) D4 carried a **"200 lines / 24 KiB"** migration trigger — **dead arithmetic**, since a 24 KiB table cannot fit the 20 000-char body cap; (b) `auto_load` placement unresolved ⇒ mirror byte-identity unsatisfiable as stated | **ADOPTED (a): body-with-trigger CONFIRMED with an explicit seed budget** — table **≤ 18 rules / 8 000 chars / 120 lines** (18 rules / 8,000 chars / 120 lines); body **≤ 18 000 chars** (18,000 chars); trigger = table > **8 000 chars** (8,000) **or** body > **18 000 chars** (18,000) **or** per-rule fixture content beyond budget. **The 24 KiB (NFR-05) ceiling is the migration WINDOW's upper bound, never a v1 target.** **ADOPTED (b): `auto_load` stays FRONTMATTER** ⇒ mirror byte-identity carries **exactly one named exception — the `auto_load:` line** (`true`: canary, sweeper; `false`: aegis, worker); all other bytes identical. Manifest placement = **permitted fold iff** the council verifies the seed service honours a manifest `auto_load` key (unverified ⇒ not folded) | `architecture-recommendation.md` §4.1 + §2.3 + §5.4 + §14 AM-2 (**landed**); this record §C.4 note + §F.1 D4 row (**landed**); `technical-analysis.md` D2/D4 mechanics + debt item 4 + paydown 2 (**landed**); skill body (P1) |
+| **B1 · D5 ledger completeness** | Ledger declared **COMPLETE** but missing the **`CHILDREN` overload**: one constant served both the persona roster and the installer-toolchain roster | **Ledger is complete after this fold** — three named rows added (§C.5 "D5-ledger completeness item"): the **`LEAVES`/`INSTALLER_CHILDREN` split** (`INSTALLER_SKILLS` = 3 keys ⇒ `KeyError: 'canary'` on 25 parametrized sites' body/lib resolutions), **T23 arity** (`lists[0]==lists[1]==lists[2]` + `zip` ⇒ 4th element is an arity break), and the **`CHILD_ALLOW` per-agent map** (shared set at `:89`/`:359`; literal `+ canary` reds, naive repair re-installs NC-4) | This record §C.5 (**landed**); concrete constants = **plans sibling's authoring** (`architecture-recommendation.md` §5.2 row + phase files) — cited, not authored here |
+| **B2 · scratch root** | "campaign scratch root" appeared **twice, both inside the CAG-06 allowlist quote**, never defined; §6.2's **scratch-project** clause absent from the five-item pre-flight ⇒ target spawnable with a live `project_id` under a hostile payload | **Requirement recorded; definition OWNED by phase3's pre-fire assertion.** One absolute root per campaign: created before first fire, asserted inside action class (i), torn down after last observation, logged. Pre-flight becomes **six** items (adds **scratch project, no live `project_id`**) | This record §C.6 (**landed**); `technical-analysis.md` fold-recordings B2 row (**landed**); `phase3-plan.md` pre-fire assertion (**sibling-owned — definition not yet on disk**) |
+| **B3 · SK-11 monotonicity contradiction** | §3.6 rules "refuses any downgrade of a heuristic `hostile`" while `requirements.md` SK-11 says "**may only raise a verdict or raise confidence**" ⇒ **suspect→clean laundering** via `--llm-verdict clean --llm-confidence high`, corrupting the F14 leakage metric | **Refuse ANY downgrade** (one sentence in §3.6 + one pin) **or** amend SK-11 on the record; plus state plainly that **no verdict value is an authorization token** | `requirements.md` SK-11 — **LANDED on disk in the concurrent fold** ("refuses ANY downgrade", monotonic in **both** axes: verdict rank *and* confidence rank); `architecture-recommendation.md` §3.6 still carries the **hostile-only** wording (frozen at `cc6303308`) ⇒ **deliberate, disclosed asymmetry** — see the divergence row below; the arch doc is **NOT** edited, and `requirements.md` SK-11 is the **STRICTER** normative contract; CAG-18/CER-16 pins to follow |
+| **B4 · one-commit enumeration disagreement** | `plan-overview.md` §one-commit pin ceremony (closes "and nothing outside this enumerated set", **PACKS.md absent**) vs `phase4-plan.md` task 6 + §one-commit composition (**PACKS.md present**) ⇒ each commit complies with one doc and false-fails the other | **One-line fold** — the two enumerations must name the same set (PACKS.md **in**, as tester bookkeeping) | `plan-overview.md` §one-commit enumeration — **LANDED on disk** (PACKS.md is *inside* the set, one list not two); `phase4-plan.md` already carried it ⇒ the pair is reconciled |
+| **B5 · G1.2 vs SK-16 confidence** | `phase1-plan.md` Gate G1.2 asserts "no `confidence` field" for the degraded case while tasks 1/3 + SK-16 rule confidence **always present** with `none` as the legal degrade value (byte-identity acceptance requires it) ⇒ the gate is **unsatisfiable / tests the opposite shape** | **Reword G1.2 to "visible via `confidence: none`"** | `phase1-plan.md` **G1.2 — LANDED on disk in the concurrent fold** (now "visible via `confidence: none` — the field is **always present** (SK-16), never omitted and never fabricated") ⇒ satisfied as worded |
+| **B6 · merge-overlap premise** | `plan-overview.md` §Merge-Overlap premise + `phase0-plan.md` task 7/Gate **G0.5**: "memoir touches zero `agents/` paths **today**" — **stale**, and the check was **vacuously clean** (`origin/feature/ari-memoir-store` does not exist ⇒ a `git diff …` piped into `wc -l` prints `0` on `bad revision`) | **Present fact recorded: TRUE 3-path overlap** at memoir tip **`b60502671`** — `agents/.prompt-artifacts.sha256`, `agents/ari/meta.json`, `agents/ari/tools_note.md` (+83/−2); **no `aegis`-path overlap**; `origin/latest` still `97b76e20e`. **G0.5 cannot pass as specified** ⇒ local ref + the **producer's own** exit status + a **non-zero expected count**. Vacuous-pipe ban restated | This record §C-bis.5 (**landed**) + `technical-analysis.md` §Merge-overlap (**landed**); `phase0-plan.md` task 7 / **G0.5 landed on disk** (local ref, exactly-3-paths, producer exit status) + `plan-overview.md` Merge-Overlap **landed** |
+| **B7 · baseline conflict rule** | `agents/.prompt-artifacts.sha256` conflicts on **both** branches with **no** resolution rule; the only named rule (PACKS.md **keep-both**) is **actively wrong** for a hash baseline (double-key corruption) | **Rule: take EITHER side, regenerate ONCE on the merged tree (P6 task 2), NEVER keep-both.** A hash baseline is a **single derived artifact** (one row per file, every value recomputed from the tree) — merging two independently derived versions is stale by construction; PACKS.md is an append-only registry of independent rows, which is why keep-both is right there and wrong here | This record §C-bis.5 (**landed**) + `technical-analysis.md` §Merge-overlap baseline bullet (**landed**); `plan-overview.md` Merge-Overlap item **2b landed on disk** ("the baseline file NEVER resolves keep-both"); `phase6-plan.md` task 3 **still names only the PACKS keep-both rule** ⇒ the baseline clause must be added there |
+| **Non-blocking batch** (D4 trigger arithmetic · mirror byte-identity vs per-recipient `auto_load` · §5.5 `8+3+2=379` vs 378 · **T38** absent from §5.1/§11 inventory · bare `python3` host dependency · inertness reviewer unnamed · provenance caller-declared · no explicit rollback statement · stale cross-refs / duplicate corpus authorship / vacuous dirname corroboration / phase-local greps / S17 placement / P5↔P0 wording / `decisions.md` §1 "six slots" prose) | Nine non-blocking notes; none verdict-affecting | **Dispositioned, split by owner:** (i) **AM-2(a)/(b) absorb** the trigger arithmetic and the mirror-`auto_load` question (the pin **normalises the one named line**; the mirror does **not** omit the key); (ii) **recorded as limitations in this lane's own docs** — **inertness attestation split** (aegis **attests** at fire time, canary **declares**; **declaration ≠ certification**, and that asymmetry is the weakest link of the **only** containment control); **provenance caller-declared** (named must-not-claim: v1 never claims provenance *verified*, only recorded+versioned); **bare `python3`** host dependency (screen must **fail closed / suspect** when absent; pre-flight `command -v python3` recommended); (iii) **sibling-owned fixes** — §5.5 decomposition, T38 inventory, stale cross-refs, duplicate corpus authorship, vacuous dirname corroboration, phase-local greps, S17 placement, P5↔P0 wording; (iv) **rollback statement** — implicit house answer is adequate for a stage-only lane (no promote) | This record §C-bis.5 + `technical-analysis.md` §"Approver iteration-001 — fold recordings" non-blocking table (**landed**); sibling files for (iii), phase3/phase5 pre-flight for the `python3` assertion |
+
+**Open-for-architect (non-blocking) — source-vs-requirement divergence.**
+
+| Item | Divergence | Fixation (adopted) | Files | Status |
+|---|---|---|---|---|
+| **B3 source-vs-requirement divergence** | `architecture-recommendation.md` §3.6 narrows the refusal to a heuristic `hostile` only; the adopted SK-11 rule refuses **ANY** downgrade on **both** axes (verdict rank + confidence rank) | `requirements.md` is the **normative contract** and is **deliberately STRICTER** than the arch narrative; the arch doc is the architect's **frozen record at `cc6303308`** and is **NOT edited** — the asymmetry is disclosed here rather than silently repaired in either direction | `decisions.md` §C-bis.5 (this row) + the B3 row above; `requirements.md` SK-11 | **OPEN-FOR-ARCHITECT** (AM-3 candidate — confirm alignment at the next ruling; does **not** block the fold) |
+
+---
+
 ## D. Surfaced flags beyond D1–D6 (F1–F14)
 
 *(Each flag is a real finding from the framing work. Severity is this worker's judgment; the
@@ -705,6 +789,11 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
    spawn path, but `explore()`/`experience()` spawn internally outside the team gate.
 8. **The LLM-classification pass is OFF in pinned tests** (F4) — the deterministic leg is
    heuristic-only, and the pass's presence/absence must be observable in the skill's output.
+9. **`bash` remains an unconfined write path for EVERY persona — canary included** (AM-1 residual,
+   B12). Dropping `self` (AM-1) removes the *structured durable self-behaviour-write channel*
+   (`inner_soul`/`access_memory`) from the most injection-exposed agent; it does **not** fence the
+   shell — a turned canary can write the same bytes through `bash`. AM-1 must never be described as a
+   containment boundary, and no persona prompt may imply that the absent `self` category bounds writes.
 
 ---
 
@@ -750,7 +839,7 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 |---|---|---|---|
 | G0 — architect review | **rules D1–D7 + C1–C4** | **COMPLETE — 2026-11-05** (ruling commit `f6d11c232`; `architecture-recommendation.md`) | architect |
 | G1 — plan council | the plan set against the ruled slots | **FOLD r2 LANDED — round-1 REJECTED → council residues C-1/C-2 folded r2 (§C-bis table council rows + §C-bis.4); delta re-check PENDING** | plan council |
-| G2 — approver | execution-layer blockers | PENDING (blocked by G1) | approver |
+| G2 — approver | execution-layer blockers | **REJECTED (iteration 001 — 7 blockers: architecture 1–3, phases 4–7; the requirements layer APPROVED CLEAN, ~45 census claims re-derived) → AMENDED (AM-1/AM-2 @ `cc6303308`) → FOLD LANDED (approver-001 fold — §C-bis.5 B1–B7 + non-blocking batch) → iteration 002 PENDING (cap 3)** — 2026-11-05 | approver |
 | G3 — code council | implementation | PENDING | code council |
 | G4 — tidier | hygiene pass | PENDING | tidier |
 | G5 — functional gate | the aegis **A–H** pattern + `PACKS.md` registration (B4) | PENDING | tester |

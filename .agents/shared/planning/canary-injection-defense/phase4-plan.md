@@ -2,7 +2,8 @@
 
 ## Objective
 
-Land the lane's entire payload in **exactly one commit**: the `canary` tree, the four skill mirrors,
+Land the lane's entire payload in **exactly one commit**: the `canary` tree, the **three skill
+mirrors (+ the canonical body)**,
 the manifest entries, the six edited persona files, the two `aegis` edits, the regenerated
 prompt-artifact baseline (**177 → 181 rows**), the corpus fixtures, **and the shared `aegis` test
 file's re-derivation set + the new T31–T38 legs** (the lane edits that file either way) —
@@ -44,13 +45,14 @@ re-derived, but **no leg semantics and no cell count changes**.
 
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 1 | **Extend the family test file** (`tests/unit/agents/test_aegis_security_family.py`, per **D5's Option A** — the lane already edits it for the re-derivation set, so one corpus of pins avoids two matrices drifting apart) with the new legs — pure file parsing wherever possible (no daemon import, no DB, no LLM) so the file runs on bare `python3`; the single exception is the registry-scan leg, which is venv-bound. It assembles the legs authored in P1 (fence contract), P2 (doctrine anchors) and P3 (canary meta + campaign shape) into one file, under the **house leg names** (each leg carries a `# T3x` comment so the pack registry can cite it — `requirements.md` CER-03): **T31** the doctrine-anchor matrix (**6 personas × 4 anchors = 24 cells** + canary's **2 carve-out anchors**); **T32** the fence-contract leg (structure, tokens, the directive literal, header **order** + closed vocabularies); **T33** the parser leg (region-awareness with the `verdict: clean`-in-payload fixture; `lines`/`escaped` integrity; forged END rejection; unknown version refusal); **T34** the heuristic corpus leg (every case's expected verdict/confidence/rules, **LLM off**); **T35** the canary meta pins (leaf, allow/deny exact, no privileged, no `mcp_full_access`, no `chart`, the tools-block round-trip); **T36** the campaign-log + report shape leg; **T37** the corpus hygiene leg (label present, secret scan **with controls**, coverage counts); **T38** the scanner-execution leg (the P1 task-5b three-CWD test assembled into the same file — inventory below). Plus the **baseline assertions** (the file **exists** and has **exactly 181 rows**; canary contributes exactly 4), the **mirror/manifest legs** (the roster set is exact; every copy byte-identical to the canonical copy; every receiving manifest has exactly one entry; **no other agent's manifest mentions it**; `include:` ∉ frontmatter; **all roster versions equal**), and the **boot-scan leg** (venv-bound; `canary` resolves in the registry). | P1, P2, P3 | The file is green; **every leg name in the T31–T38 inventory exists**; each leg is **mutation-meaningful** — each named mutation (break the delimiter, drop a header field, change the enum, delete a fixture, delete a doctrine anchor, drift a mirror, add a stray manifest entry, bump a cardinal, swap the team set, paste payload text unfenced into a report) turns **exactly** the intended leg red and restoring turns it green. |
-| 2 | **Fold the shared pins in `tests/unit/agents/test_aegis_security_family.py`** — the **re-derivation set** (this lane's shared pins are not all byte-stable; each is re-derived and the reason is written down): (a) **T4**: the team-set assertion becomes the 5-set `{hacker, cracker, sweeper, worker, canary}`; (b) **T5**: the leaf tool-set parametrisation now **includes canary** (a set extension under D1-A — a class split only under D1-B/C); (c) **T6/T7/T8**: canary's allow/deny/privileged intersection enters the leaf pins; (d) **T21**: the family-manifest list is re-derived as *the family manifests are exactly the seeded set* (it reds if the skill is seeded beyond aegis); (e) **T22**: generalised from aegis-only to **every seeded (agent, name) pair**; (f) **T25**: worker byte-unchanged **reds by design this lane** — re-worded against **this lane's own base**, its intent restated as "worker touched by design"; (g) **T29**: add the **canary row** to `_LEGALITY_MATRIX` — one cell per family (5) with **single-site** anchors — and move the completeness leg from `len == 20` to `len == 25`; (h) the `LEGALITY_CELLS` derivation follows automatically (it is `sorted(_LEGALITY_MATRIX.keys())`). **Every leg outside this set stays byte-identical.** | 1 | The shared file's diff is **exactly** the re-derivation set; the predecessor's other legs are untouched; the matrix is 5 personas × 5 families = **25** cells; each fold carries a one-line reason in the file. |
+| 1 | **Extend the family test file** (`tests/unit/agents/test_aegis_security_family.py`, per **D5's Option A** — the lane already edits it for the re-derivation set, so one corpus of pins avoids two matrices drifting apart) with the new legs — pure file parsing wherever possible (no daemon import, no DB, no LLM) so the file runs on bare `python3`; the single exception is the registry-scan leg, which is venv-bound. It assembles the legs authored in P1 (fence contract), P2 (doctrine anchors) and P3 (canary meta + campaign shape) into one file, under the **house leg names** (each leg carries a `# T3x` comment so the pack registry can cite it — `requirements.md` CER-03): **T31** the doctrine-anchor matrix (**6 personas × 4 anchors = 24 cells** + canary's **2 carve-out anchors**); **T32** the fence-contract leg (structure, tokens, the directive literal, header **order** + closed vocabularies); **T33** the parser leg (region-awareness with the `verdict: clean`-in-payload fixture; `lines`/`escaped` integrity; forged END rejection; unknown version refusal); **T34** the heuristic corpus leg (every case's expected verdict/confidence/rules, **LLM off**); **T35** the canary meta pins (leaf, allow/deny **exact per-agent** — canary `{bash, filesystem, time, help}` under **AM-1**, and each leaf-trio agent asserted individually via `ALLOW_BY_AGENT`; no privileged, no `mcp_full_access`, no `chart`, the tools-block round-trip); **T36** the campaign-log + report shape leg; **T37** the corpus hygiene leg (label present, secret scan **with controls**, coverage counts, **and the AM-2 seed budgets** — table ≤18 rules / 8,000 chars / 120 lines, body ≤18,000 chars); **T38** the scanner-execution leg (the P1 task-5b three-CWD test assembled into the same file — inventory below). Plus the **baseline assertions** (the file **exists** and has **exactly 181 rows**; canary contributes exactly 4), the **mirror/manifest legs** (the roster set is exact; every copy byte-identical to the canonical copy **once the single permitted `auto_load:` line is filtered out** — AM-2, never a raw `cmp`; every receiving manifest has exactly one entry; **no other agent's manifest mentions it**; `include:` ∉ frontmatter; **all roster versions equal**), and the **boot-scan leg** (venv-bound; `canary` resolves in the registry). | P1, P2, P3 | The file is green; **every leg name in the T31–T38 inventory exists**; each leg is **mutation-meaningful** — each named mutation (break the delimiter, drop a header field, change the enum, delete a fixture, delete a doctrine anchor, drift a mirror, add a stray manifest entry, bump a cardinal, swap the team set, paste payload text unfenced into a report) turns **exactly** the intended leg red and restoring turns it green. |
+| 2 | **Fold the shared pins in `tests/unit/agents/test_aegis_security_family.py`** — the **re-derivation set** (this lane's shared pins are not all byte-stable; each is re-derived and the reason is written down): (a) **T4**: the team-set assertion becomes the 5-set `{hacker, cracker, sweeper, worker, canary}`; (b) **T5**: the leaf tool-set parametrisation now **includes canary** (a set extension under D1-A — a class split only under D1-B/C); (c) **T6/T7/T8**: canary's allow/deny/privileged intersection enters the leaf pins; (d) **T21**: the family-manifest list is re-derived as *the family manifests are exactly the seeded set* (it reds if the skill is seeded beyond aegis); (e) **T22**: generalised from aegis-only to **every seeded (agent, name) pair**; (f) **T25**: worker byte-unchanged **reds by design this lane** — re-worded against **this lane's own base**, its intent restated as "worker touched by design"; (g) **T29**: add the **canary row** to `_LEGALITY_MATRIX` — one cell per family (5) with **single-site** anchors — and move the completeness leg from `len == 20` to `len == 25`; (h) the `LEGALITY_CELLS` derivation follows automatically (it is `sorted(_LEGALITY_MATRIX.keys())`); **(i) the children-constant split (B1)** — `CHILDREN` is **overloaded** (it keys `INSTALLER_SKILLS`, drives T23's hardcoded 3-arity, and parametrizes ~25 legs) and `CHILD_ALLOW` is **one shared 6-set**; both are replaced exactly as §"The children-constant split (B1, binding)" specifies — `INSTALLER_CHILDREN` (3, **unchanged**) / `FAMILY_CHILDREN` (4) / `ALLOW_BY_AGENT` (per-agent sets). Adding `canary` to `CHILDREN` without this split is a `KeyError` on every `INSTALLER_SKILLS` leg and arity-breaks T23; "repairing" `CHILD_ALLOW` by widening it re-installs `proc` (NC-4) and `self` (AM-1), which is the defect the split exists to prevent. **Every leg outside this set stays byte-stable.** | 1 | The shared file's diff is **exactly** the re-derivation set; the predecessor's other legs are untouched; the matrix is 5 personas × 5 families = **25** cells; each fold carries a one-line reason in the file. |
 | 3 | **Extend the boot-scan census expectation** — the discoverable-agent count moves 43 → **44**
    (canary is the 44th; the 4 `_`-prefixed directories remain skipped). | 1 | The census expectation matches the re-derived count; the leg is not hard-coded to a stale number. |
-| 4 | **Write the corpus fixtures** — the synthetic seed corpus at **`tests/fixtures/injection_corpus/`** (the D4 adopted ruling's bound home): one positive fixture
-   per rule ID + a benign control per family. Every fixture is **invented**; no real credential
-   material, no real user data, no real repo content. | 1 | The corpus covers every rule ID and carries benign controls; a secret-shape scan over it is clean **with both a positive and a negative control** (a control-less scanner is vacuous, not clean); every fixture path is under `tests/fixtures/injection_corpus/`. |
+| 4 | **Land + VERIFY the corpus (SINGLE authoring site — P1 task 4 authors it; this task never re-authors)** — the synthetic seed corpus at **`tests/fixtures/injection_corpus/`** (the D4 adopted ruling's bound home): one positive fixture
+   per rule ID + a benign control per family. This task lands P1's set in the one commit and verifies
+   coverage, path containment and the secret-shape scan; it writes **no** corpus content of its own
+   (two authorship sites drift the fixtures away from the registry P1 pinned). | 1 | The landed corpus is **byte-identical** to P1's authored set; the corpus covers every rule ID and carries benign controls; a secret-shape scan over it is clean **with both a positive and a negative control** (a control-less scanner is vacuous, not clean); every fixture path is under `tests/fixtures/injection_corpus/`; **no corpus content originates in P4**. |
 | 5 | **Re-stamp the baseline** — run the generator (venv-free) so `agents/.prompt-artifacts.sha256`
    moves **177 → 181 rows**. This is the **LAST content change under `agents/**`** in the lane. | 1–4 | `--check` exits 0 **AND** the file **exists** with **exactly 181 rows** — the exit code alone proves nothing (the checker exits 0 when the file is absent). The row count is re-derived from the tree, not asserted from this plan's number. |
 | 6 | **Register the lane's packs** in `.agents/tester/PACKS.md` (house format) so the pack registry can cite the **T31–T38** leg names; the pack entries declare the scope, the leg names and the derived blast-radius composition. This registration travels **in the one commit** — it is the lane's own declaration of its packs, exactly as the baseline re-stamp travels with the payload. | 1–5 | The registrations name the **T31–T38** legs; the file's merge behaviour is **keep-both, newest-first** (the memoir lane may register in the same file). |
@@ -63,13 +65,19 @@ re-derived, but **no leg semantics and no cell count changes**.
 
 ## The one-commit composition (binding — verbatim)
 
+**Stated once (B4).** This block is the **single canonical enumeration** of the lane commit;
+`plan-overview.md` §The one-commit pin ceremony quotes it **byte-identically** (one list, not two).
+`.agents/tester/PACKS.md` is **inside** the set: pack registration is house bookkeeping and the
+commit gate cites the **T31–T38** registrations from it, so forbidding it would forbid a file the gate
+depends on.
+
 ```
 agents/canary/{meta.json, soul.md, rule.md, workflow.md, tools_note.md, skill-set.yaml,
                skills-template/injection-screen.md,
                skills-template/injection_scan.py}                                  (+8 NEW)
 agents/aegis/skills-template/injection-screen.md                                    (+1 NEW)
 agents/aegis/skill-set.yaml                                     (MODIFIED — one entry added)
-agents/worker/skills-template/injection-screen.md                                    (+1 NEW)
+agents/worker/skills-template/injection-screen.md                                   (+1 NEW)
 agents/worker/skill-set.yaml                                     (MODIFIED — one entry added)
 agents/sweeper/{skill-set.yaml, skills-template/injection-screen.md}               (+2 NEW)
 agents/aegis/meta.json                                                            (MODIFIED — one line)
@@ -85,7 +93,7 @@ tests/fixtures/injection_corpus/                               (NEW — syntheti
 .agents/tester/PACKS.md                                        (MODIFIED — the lane's pack registration)
 ```
 
-> **NC-2 fold correction:** the pre-fold block above erroneously listed `hacker`/`cracker` mirror
+> **NC-2 fold correction (historical — an earlier DRAFT of this block):** that draft erroneously listed `hacker`/`cracker` mirror
 > pairs (+2 NEW each) and omitted the `aegis` mirror and the `aegis/skill-set.yaml` entry. D2's
 > recipient table is authoritative: `hacker`/`cracker` are **doctrine only** (no mirror, no
 > manifest), `aegis` gets a mirror with a **second entry in its existing manifest**, `worker` a
@@ -110,7 +118,7 @@ layer only, and the gap is disclosed.
 **Baseline arithmetic:** the collector is depth-2 and covers `soul/rule/workflow/tools_note` (+ the
 legacy `tools.md`/`skill.md`/`memory.md`/`growth.md`) ⇒ canary contributes **exactly 4 rows** ⇒
 **177 → 181**. `meta.json`, `skill-set.yaml`, `skills-template/*` and the corpus fixtures contribute
-**zero**; the eight modified files change **content hashes, not row counts**. **Any** of
+**zero**; the **nine** modified agent files change **content hashes, not row counts** (the regenerated baseline is the **tenth** modified `agents/` entry and adds no row). **Any** of
 `memory.md`, `growth.md`, `tools.md` or `skill.md` on canary would add a row and move the number ⇒
 canary gets exactly four prompt files.
 
@@ -133,12 +141,66 @@ canary gets exactly four prompt files.
 | T29 matrix | `:759-812` | len 20, agents = FAMILY | len 25, agents include canary, 5 new single-site cells | canary column |
 | **Baseline arithmetic** | `test_aegis_security_family.py:2490-2512` | `EXPECTED_BASELINE_ROWS = 177`; 4 rows/new agent | **181**; canary contributes exactly 4 | canary's 4 prompt artifacts |
 | Leader roster | `test_maintenancer_agent.py:517-523` | 17 members | **unchanged** — canary is an aegis child | verified: no second leader one-liner |
+| **Children-constant split (B1)** | `tests/unit/agents/test_aegis_security_family.py:76` (`CHILDREN`), `:89` (`CHILD_ALLOW`); consumed at `:266`/`:271`/`:571` (`INSTALLER_SKILLS`) and `:615`/`:618` (T23 3-arity) | `CHILDREN` = 3 installer children; `CHILD_ALLOW` = one shared 6-set `{bash, proc, filesystem, time, help, self}` | **`INSTALLER_CHILDREN`** = 3 (**unchanged**) · **`FAMILY_CHILDREN`** = 4 (+`canary`) · **`ALLOW_BY_AGENT`** = per-agent sets (trio keeps its 6-set; canary `{bash, filesystem, time, help}`) | `canary` in `CHILDREN` ⇒ `KeyError` on every `INSTALLER_SKILLS` leg + T23's 3-arity break (`lists[0]==lists[1]==lists[2]`, `zip(CHILDREN, lists)`); widening `CHILD_ALLOW` re-installs `proc` (NC-4) and `self` (AM-1) |
+
+### The children-constant split (B1, binding — as written)
+
+`CHILDREN` is **overloaded**: it parametrizes ~25 legs (`parametrize("agent", CHILDREN)`), keys
+`INSTALLER_SKILLS` (`:145`, three keys, read at `:266`/`:271`/`:571`), and drives T23's hardcoded
+3-arity (`lists[0] == lists[1] == lists[2]` + `zip(CHILDREN, lists)`, `:615`/`:618`). `CHILD_ALLOW`
+(`:89`) is a single 6-set asserted for **every** child (`test_children_allow_set_exact`, `:359`).
+Adding `"canary"` naively therefore produces **three** failures at once — `KeyError` on every
+`INSTALLER_SKILLS` leg, a T23 arity break, and an allow-set literal that either reds (D7 removed
+`proc`) or, if "repaired" by widening, re-installs the NC-4 and AM-1 defects. The ruling is a **named
+split**, written exactly as follows:
+
+```python
+# Installer-side identity: NOTHING changes here. 3 members, because:
+#   - INSTALLER_SKILLS keys on these three (hacker/cracker/sweeper),
+#   - T23's byte-identity leg is hardcoded to 3-arity
+#     (lists[0] == lists[1] == lists[2]; zip(CHILDREN, lists)).
+#   A 4th element ARITY-BREAKS T23 -- do not add canary here.
+INSTALLER_CHILDREN = ("hacker", "cracker", "sweeper")
+
+# Family-side identity: the tuple that GROWS, for the legs that must cover canary
+# (T5 team-empty, T6 allow-non-empty, T7 write-deny-fence -- claims true of canary).
+FAMILY_CHILDREN = ("hacker", "cracker", "sweeper", "canary")
+
+# ALLOW_BY_AGENT replaces the single CHILD_ALLOW 6-set.
+# The leaf trio KEEPS its 6-set. Canary deviates by EXACTLY TWO categories,
+# each with its recorded ruling reason:
+#   - "proc" : NC-4  -- a full bash substitute granting background persistence
+#                       past teardown; canary has no long-running-process mandate.
+#   - "self" : AM-1  -- inner_soul/access_memory is the sanctioned durable
+#                       self-behavior-write channel; a payload that re-preferences
+#                       canary survives the campaign (the self-hypnosis shape).
+#                       Removed MECHANICALLY, not doctrinally.
+ALLOW_BY_AGENT = {
+    "hacker":  frozenset({"bash", "proc", "filesystem", "time", "help", "self"}),
+    "cracker": frozenset({"bash", "proc", "filesystem", "time", "help", "self"}),
+    "sweeper": frozenset({"bash", "proc", "filesystem", "time", "help", "self"}),
+    "canary":  frozenset({"bash", "filesystem", "time", "help"}),
+}
+```
+
+**Three binding rules that follow from the split:**
+
+1. **`INSTALLER_CHILDREN` stays a 3-tuple.** T23 keeps `lists[0] == lists[1] == lists[2]` and
+   `zip(INSTALLER_CHILDREN, lists)`; a 4th element requires rewriting the leg's arity, which is not
+   this lane's business and would weaken the pin.
+2. **`FAMILY_CHILDREN` carries `canary`** — for T5/T6/T7 and any other leg whose claim is true of
+   canary. A leg that reads an installer artifact (`INSTALLER_SKILLS`, the FENCES block, a per-tool
+   installer body) **stays** on `INSTALLER_CHILDREN`.
+3. **The `CHILD_ALLOW` repair must NOT re-install `proc`.** Canary's set is
+   `{bash, filesystem, time, help}`; a "make it match the other children" edit adds `proc` **and**
+   `self` back and re-opens NC-4 and AM-1. `ALLOW_BY_AGENT` is asserted **per agent** — there is no
+   shared leaf set left for a naive edit to satisfy.
 
 **Cell arithmetic (binding):** T29 20 → **25** (5 families × 5 personas: aegis, hacker, cracker, sweeper, canary); completeness `len == 25`; `agents` set includes `canary`; each canary anchor **single-site** on a `^\d+\.\s\*\*` line. T31: 6 personas × 4 anchors = **24** anchor assertions + canary's 2 carve-out anchors = **26**. For the five cardinal personas the self-proof asserts *exactly once* and the numbered-line property. **For worker the numbered-line property is NOT asserted** (legacy `## Must` prose): its anchors must occur exactly once, each on a single line, inside the declared CRITICAL subsection.
 
-**New pins (T31–T38):** T31 doctrine-anchor matrix · T32 fence-contract leg · T33 parser leg · T34 heuristic corpus leg (LLM off) · T35 canary meta pins · T36 campaign-log + report shape · T37 corpus hygiene · **T38 scanner-execution leg** — runs the committed `agents/canary/skills-template/injection_scan.py` from the **ruled three-CWD set (W8): repo root · `/tmp` · the INSTALL/RELEASE ROOT** — the same three labels P5 and P6 assert; the discovery-ladder purpose survives as assertion **(e)** while the byte-identity triple is the ruled one. It asserts **(a)** the three runs are **byte-identical** (fence + sha256 + verdict blocks); **(b)** bare `python3` works — **no daemon import, no venv dependency, no network, no writes outside the scratch root**; **(c)** the **LLM pass is OFF by default**; **(d)** a `--llm-verdict` **lower in severity than the heuristic `hostile` is REFUSED** (monotonicity, §3.6); **(e)** the **discovery ladder resolves from each of the three documented locations** (cwd-relative rung first, then the install-root-resolved rung — the reason the install-root leg exists). Each re-derivation is recorded with a written reason; a blind copy of the predecessor's pin set is a lane-blocking red.
+**New pins (T31–T38):** T31 doctrine-anchor matrix · T32 fence-contract leg · T33 parser leg · T34 heuristic corpus leg (LLM off) · T35 canary meta pins · T36 campaign-log + report shape · T37 corpus hygiene · **T38 scanner-execution leg** — runs the committed `agents/canary/skills-template/injection_scan.py` from the **ruled three-CWD set (W8): repo root · `/tmp` · the INSTALL/RELEASE ROOT** — the same three labels P5 and P6 assert; the discovery-ladder purpose survives as assertion **(e)** while the byte-identity triple is the ruled one. It asserts **(a)** the three runs are **byte-identical** (fence + sha256 + verdict blocks); **(b)** bare `python3` works — **no daemon import, no venv dependency, no network, no writes outside the scratch root**; **(c)** the **LLM pass is OFF by default**; **(d)** a `--llm-verdict` **lower in severity than the heuristic `hostile` is REFUSED** (monotonicity, §3.6); **(e)** the **discovery ladder resolves from each of the three documented locations** (cwd-relative rung first, then the install-root-resolved rung — the reason the install-root leg exists). **Host dependency (stated, never discovered at stage time):** the scanner legs require a **host `python3` on `PATH`** — the scanner imports stdlib only, so the host interpreter suffices; a host without `python3` simply cannot run T38 / Gate E / P6 task 10. **Budget pins (AM-2):** T37 also asserts the seed budgets — **table ≤ 18 rules / 8,000 chars / 120 lines**, **body ≤ 18,000 chars** — and records **24 KiB as the migration window's upper bound, never a v1 target**. **Attestation vocabulary:** T36 asserts the campaign log carries `expected_action_class` **and** `inertness_attested_by: aegis` + `attested_at` — the **FIRER attests inertness at fire time**; canary's declaration is not a certification. Each re-derivation is recorded with a written reason; a blind copy of the predecessor's pin set is a lane-blocking red.
 
-**Mutation legs (minimum set, each observed RED→GREEN):** M1 delete a canary T29 anchor → exactly that cell reds · M2 delete the directive literal → T32 reds · M3 swap a corpus expectation → T34 reds · M4 remove a worker doctrine anchor → T31 reds · M5 change one rule ID → id-uniqueness/coverage reds · M6 unescape a payload line starting with the BEGIN token → round-trip/parser reds · **M7 change a mirror's bytes without bumping its version → identity pin reds** (the silent-drift class) · **M8 break the discovery ladder (drop the install-root rung) → T38 reds in exactly the `/tmp` + install/release-root legs of the ruled set** — the repo-root leg still passes on the cwd-relative rung, so the observed red set is exactly the two non-repo legs; that partial red set is the point: it proves the pin bites the *ladder* and not the scanner body.
+**Mutation legs (minimum set, each observed RED→GREEN):** M1 delete a canary T29 anchor → exactly that cell reds · M2 delete the directive literal → T32 reds · M3 swap a corpus expectation → T34 reds · M4 remove a worker doctrine anchor → T31 reds · M5 change one rule ID → id-uniqueness/coverage reds · M6 unescape a payload line starting with the BEGIN token → round-trip/parser reds · **M7 change a mirror's bytes — OUTSIDE the single permitted `auto_load:` frontmatter line — without bumping its version → identity pin reds** (the silent-drift class) · **M8 break the discovery ladder (drop the install-root rung) → T38 reds in exactly the `/tmp` + install/release-root legs of the ruled set** — the repo-root leg still passes on the cwd-relative rung, so the observed red set is exactly the two non-repo legs; that partial red set is the point: it proves the pin bites the *ladder* and not the scanner body.
 
 **Census / artifacts:** boot census **43 → 44** (staged-gate artifact; no unit pin asserts a total count). Agents-tree files: **366 → 378** (the 12 new files enumerated in the File-arithmetic paragraph: canary's 8 — canary's new manifest among them — + 3 mirror bodies + sweeper's standalone manifest) — **re-derive at P4**, never freeze. Baseline rows **177 → 181**, re-stamped LAST. `tool-categories.json` and the seal map untouched.
 
@@ -151,7 +213,7 @@ canary gets exactly four prompt files.
 | **G4.1** | `--check` exits 0 **AND** the baseline file exists with **exactly 181 rows** (both asserted). |
 | **G4.2** | `git show --stat HEAD` shows exactly the enumerated composition — **and nothing outside it**. |
 | **G4.3** | The re-stamp was the **last** content change under `agents/**` in the lane (no later prompt edit). |
-| **G4.4** | The shared test file's diff is **exactly** the T4 set change + the T29 canary row + the completeness count — every other leg byte-stable. |
+| **G4.4** | The shared test file's diff is **exactly the re-derivation set** — T4 set, the T5/T6/T7/T8 constant split (`INSTALLER_CHILDREN` / `FAMILY_CHILDREN` / `ALLOW_BY_AGENT`), T21, T22, T25, the T29 canary row + `len == 25`, and `EXPECTED_BASELINE_ROWS` — with **every other leg byte-stable** and every fold carrying its one-line reason. |
 | **G4.5** | Every leg in the extended family test file is **mutation-meaningful** (the named mutation reds exactly the intended leg), and the **T31–T38** leg inventory is complete with the `# T3x` markers present. |
 | **G4.5b** | The pack registration names the **T31–T38** legs; the mutation evidence is written in the house format *planted change → expected red set → observed red set → restore → green* (the evidence itself is the tester lane's P5 deliverable — `requirements.md` CER-08). |
 | **G4.6** | The re-derived agents count (**378**) and discoverable count (**44**) match the derivation rule. |
@@ -205,12 +267,25 @@ git diff --name-only HEAD~1 HEAD -- agents/                 # the payload files 
 find tests/fixtures/injection_corpus -type f | wc -l          # re-derive; one positive per rule ID
 #                                                    + benign controls
 
-# --- DERIVATION 8: the mirror + manifest invariants (the drift pin) ---
+# --- DERIVATION 8: the mirror + manifest invariants (the drift pin; AM-2 exception) ---
 CANON=agents/canary/skills-template/injection-screen.md
-for a in aegis sweeper worker; do cmp -s "$CANON" "agents/$a/skills-template/injection-screen.md" \
-  && echo "OK $a" || echo "DRIFT $a"; done             # the 3 mirrors (hacker/cracker: none -- D2 doctrine only)
+strip_auto() { grep -v '^auto_load:' "$1"; }
+for a in aegis sweeper worker; do
+  diff -q <(strip_auto "$CANON") <(strip_auto "agents/$a/skills-template/injection-screen.md") >/dev/null \
+    && echo "OK $a" || { echo "DRIFT $a"; exit 1; }
+done
+#   the 3 mirrors (hacker/cracker: none -- D2 doctrine only). Byte-identity MODULO BLANK LINES and
+#   the single named `auto_load:` line; a raw `cmp` is the WRONG pin (it would red on that one line).
 grep -l 'injection-screen' agents/*/skill-set.yaml | wc -l    # 4 (canary + aegis + worker + sweeper)
 grep -h 'version:' agents/*/skill-set.yaml | sort -u | wc -l # 1 (all equal -- the propagation lever)
+
+# --- DERIVATION 9: the children-constant split is REAL in the file (B1) ---
+grep -n 'INSTALLER_CHILDREN\|FAMILY_CHILDREN\|ALLOW_BY_AGENT' tests/unit/agents/test_aegis_security_family.py
+#   all three names present; INSTALLER_CHILDREN == exactly 3 members; FAMILY_CHILDREN == 4 (with canary)
+grep -n 'zip(INSTALLER_CHILDREN\|lists\[0\] == lists\[1\] == lists\[2\]' tests/unit/agents/test_aegis_security_family.py
+#   T23 keeps its 3-arity (a 4th element would break it)
+grep -c 'CHILD_ALLOW' tests/unit/agents/test_aegis_security_family.py
+#   0 -- the shared 6-set is GONE; every allow assertion reads ALLOW_BY_AGENT (no proc/self re-entry)
 ```
 
 ---

@@ -17,7 +17,9 @@
 **Date:** 2026-11-05 (lane worktree created 2026-11-05T14:20:00Z)
 **Author:** planner[v2] via technical-analysis worker
 **Analysis depth:** deep-dive (mechanics resolution + adopted architecture)
-**Status:** **Adopted** — D1–D7 ruled; F1–F14 dispositioned; ruling commit `f6d11c232`.
+**Status:** **Adopted** — D1–D7 ruled; F1–F14 dispositioned; ruling commit `f6d11c232`. **Amended
+AM-1/AM-2 (`cc6303308`) and folded against approver iteration-001 (REJECTED, 7 blockers) — see
+§"Approver iteration-001 — fold recordings" below.**
 
 **Worktree:** `/home/nea/ensemble-src-wt-canary-injection-defense` @ `97b76e20e` (== `origin/latest`,
 0/0 divergence at creation; clean porcelain at analysis time)
@@ -101,7 +103,11 @@ LIVE) established: a **caller-side, deny-by-default team gate** (`daemon/tools/_
 **no project axis** (grep for `project` in that module returns zero hits — the gate reads the caller's
 `team_members` and nothing else); a **leaf posture** for the three children (`allow: bash, proc,
 filesystem, time, help, self`; `deny: write_file, edit_file`; `team_members: []`; `innate_skills:
-None` — verified in-tree; note: predecessor leaves carried `proc`; canary does NOT — D7 drops `proc`)
+None` — verified in-tree; note: predecessor leaves carried **both** `proc` and `self`; canary carries
+**neither** — D7 drops `proc` (NC-4: `proc_run` shells out and grants background persistence past
+teardown) and **AM-1 drops `self`** (the sanctioned durable self-behaviour-write channel — the exact F1
+shape on the most injection-exposed agent; §14 AM-1), so canary's allow is `{bash, filesystem, time,
+help}`, two categories narrower than the leaf trio, each with a recorded reason)
 **20-cell legality matrix** (`tests/unit/agents/test_aegis_security_family.py:158-193`, `FAMILY =
 ("aegis","hacker","cracker","sweeper")` at :75, `CHILDREN` at :76); **off-repo findings** with
 recorded-path discovery (never glob); a **single-spawner** discipline with aegis as the orchestrator
@@ -362,6 +368,7 @@ the persona, the campaign record, or the hand-off report (AM-13 precedent).
 |---|---|---|---|
 | Tool universe is enforced (`resolve_tool_filter`) | ✔ allow/deny at construction | ✔ (persona-level) | **MECHANICAL** |
 | `deny: {write_file, edit_file}` removes those tools | ✔ (filesystem allowed) | ✔ (leaf-class targets) | **MECHANICAL** |
+| `self` (inner_soul/access_memory) absent — no durable self-write | ✔ (dropped, AM-1) | leaf trio still holds `self` (persona-level) | **MECHANICAL** (canary) / persona fact (targets) |
 | No per-instance tool narrowing | ✔ | ✘ **cannot narrow** | **MECHANICAL LIMIT** |
 | "bash denied ⇒ no shell" | ✘ — `proc` substitutes (and `proc` is now removed) | ✘ — same | **FALSE** (NC-4) |
 | OS/container isolation | ✘ | ✘ | **FALSE** |
@@ -381,6 +388,10 @@ the persona, the campaign record, or the hand-off report (AM-13 precedent).
   reaches the host (read anything, execute anything as the daemon user). That is the honest worst case.
 - **Target:** **none** beyond its persona's own allow/deny. There is no per-instance override, no project
   axis, no container.
+- **Residual after AM-1 (disclosed, B12):** `bash` remains an **unconfined write path for every
+  persona**. Dropping `self` closes the *structured* durable self-behaviour-write channel on canary
+  (`inner_soul`/`access_memory`); it does not close the shell — a turned canary can still write the same
+  bytes through `bash`. AM-1 is a narrowing, not a fence, and must never be stated as one.
 
 **The new binding rule (§7.4): the payload is the containment unit.** Because targets cannot be
 mechanically narrowed, containment must live where it can be enforced — in what the payload asks for.
@@ -439,13 +450,15 @@ worse than no lane:**
 | **not a project fence** | the team gate has **no project axis** (`_auth.py:89-115`); "self-owned" is a parentage + roster assertion, not a namespace the daemon enforces |
 | **not an identity fence** | `ENSEMBLE_SELF_ENV` is identity *detection*, not DB binding (`daemon/tools/upgrade_tools.py:253`, `:576-579`); the DB binding is `daemon/ensemble_config.py:42`, `:56-61` — and `data/ensemble.json` outranks a scrubbed environment |
 
-**Therefore the honest v1 control set is a five-item pre-flight checklist, asserted mechanically
-before every fire:** (1) dev environment identity asserted; (2) dev DB asserted, not assumed;
-(3) scratch `DATA_DIR` with a non-poisoned pin; (4) the target's `parent_id` is inside the family's
-own subtree; (5) the payload is synthetic, self-authored, and contains no real credential material
-or real user content. **The limits sentence must appear in the prompts, the campaign record and the
-hand-off report** — the predecessor's AM-13 precedent is that a limit stated only in a plan file
-reaches nobody at 03:00.
+**Therefore the honest v1 control set is a six-item pre-flight checklist, asserted mechanically
+before every fire** (= the ruling's five in §6.3 **plus** §6.2's scratch-project clause; the sixth is
+sourced from the frozen §6.2, so it *completes* the ruling rather than diverging from it): (1) dev
+environment identity asserted; (2) dev DB asserted, not assumed; (3) scratch `DATA_DIR` with a
+non-poisoned pin; (4) **a scratch project — the target is NEVER spawned with a live `project_id`
+(§6.2)**; (5) the target's `parent_id` is inside the family's own subtree; (6) the payload is
+synthetic, self-authored, and contains no real credential material or real user content. **The limits
+sentence must appear in the prompts, the campaign record and the hand-off report** — the
+predecessor's AM-13 precedent is that a limit stated only in a plan file reaches nobody at 03:00.
 
 ---
 
@@ -501,13 +514,37 @@ A single mismatch is a drift defect, not style (X-02).
 
 - **Base:** `97b76e20e` == `origin/latest` at lane start; the canary branch is `feature/canary-injection-defense`
   on worktree `/home/nea/ensemble-src-wt-canary-injection-defense` (the shared KV records the claim).
-- **Memoir contention.** The memoir lane (`feature/ari-memoir-store`, local branch present, **not
-  merged**; its fork carries **120** migrations against our 119) is a *conditional* overlap: the
-  digest's claim that it touches `agents/` paths is a hazard to **re-derive at finalise**, not a
-  present fact (the fork's `agents/` delta is empty on disk today). If memoir lands first, our
-  **migration delta** becomes 119 → 120 **inherited** (not authored by us) — which changes the
-  stage-time rollback adjudication wording (an *inherited* additive migration is inert on rollback
-  under the standing rule, but the reason string must say "inherited", not "ours").
+- **Memoir contention — CORRECTED at approver iteration-001 (B6).** The memoir lane
+  (`feature/ari-memoir-store`, local branch present, **not merged**; its fork carries **120**
+  migrations against our 119) is **not** a conditional overlap: the overlap is a **present fact**, a
+  **TRUE 3-path `agents/` overlap** at memoir tip **`b60502671`** (2026-11-05T20:41Z — *postdates this
+  plan set*) — `agents/.prompt-artifacts.sha256`, `agents/ari/meta.json`, `agents/ari/tools_note.md`
+  (`git diff --stat 97b76e20e...feature/ari-memoir-store -- agents/` = 3 files, +83/−2). The earlier
+  "zero `agents/` paths today" premise was **stale**, and the command that produced it was
+  **vacuously clean**: `phase0-plan.md` DERIVATION 5 / task 7 / Gate **G0.5** pipe
+  `git diff … origin/feature/ari-memoir-store | wc -l`. **No `origin/feature/ari-memoir-store` ref
+  exists** ⇒ git fatals with `bad revision`, `wc` prints **`0`**, and the pipeline exit code is `wc`'s
+  ⇒ a vacuous `0` that reads as a pass. That is the exact **vacuous-clean trap the plan set bans**
+  (a control-less check is vacuous, never clean), so **G0.5 cannot pass as specified**: the fix is the
+  **local ref** (`feature/ari-memoir-store`), an assertion on the *command's own* exit status, and a
+  **non-zero expected count** (3) rather than an expected 0. Mitigating, verified: **no `aegis`-path
+  overlap** (our whole `agents/` edit surface — aegis, hacker, cracker, sweeper, worker, canary — is
+  disjoint from memoir's three ari/baseline paths), and `origin/latest` is still `97b76e20e`. If
+  memoir lands first, our **migration delta** becomes 119 → 120 **inherited** (not authored by us) —
+  which changes the stage-time rollback adjudication wording (an *inherited* additive migration is
+  inert on rollback under the standing rule, but the reason string must say "inherited", not "ours").
+- **Baseline conflict rule (B7) — the one file the two branches genuinely both change.**
+  `agents/.prompt-artifacts.sha256` is modified on **both** sides (memoir edits its `ari` rows; this
+  lane re-stamps 177 → 181 at P4). It has **no** conflict-resolution rule in the plan set today — and
+  the only *named* rule, PACKS.md **keep-both newest-first**, is **actively wrong** for a hash
+  baseline: keeping both sides produces a **doubled-key** file that no generator will reproduce and
+  that no `--check` will pass. Rule: **take either side, regenerate ONCE on the merged tree**
+  (P6 task 2's generator, after the merge, as the last `agents/**` content change), **NEVER
+  keep-both**. Why a hash baseline differs from PACKS.md: PACKS.md is an append-only human registry
+  whose entries are independent rows (keeping both loses nothing and is merge-order tolerant), while
+  a hash baseline is a **single derived artifact** — one row per file, every value recomputed from
+  the tree — so merging two independently derived versions yields a stale/wrong digest by
+  construction. Derive, never merge.
 - **Version slot.** `v0.28.13` is contended (memoir). This lane should derive the slot **at stage
   time** from the live census (highest tag + `releases/` contents + next free bump) rather than
   reserving one — the predecessor's arbitration precedent (`staged_release_v0272_composition`
@@ -516,11 +553,62 @@ A single mismatch is a drift defect, not style (X-02).
 - **Prompt-artifact overlap.** The predecessor's baseline is **177**; ours is **177 → 181**. If the
   memoir lane also adds prompt files, the count moves under us and the baseline leg must assert the
   **derived** count at stamp time, not a frozen literal (the predecessor's arithmetic rule: *"re-derive
-  at P4, never trust a frozen number"*).
+  at P4, never trust a frozen number"*). The file itself resolves per the **B7 rule above** (either
+  side, regenerate once on the merged tree, never keep-both).
+- **Vacuous-pipe ban (restated — this is the trap B6 fell into).** No overlap/census/secret check may
+  report a count through a pipe that swallows the producer's failure: `git diff … | wc -l` prints `0`
+  for a **bad revision**, and `grep … | wc -l` prints `0` for an unreadable path. Every such check
+  asserts (i) the **producer's own exit status** (never the pipeline's — that is `wc`'s), (ii) a
+  **`PIPESTATUS`/`pipefail`-safe** form or a temp-file capture, and (iii) a **non-zero expected**
+  count wherever the honest answer is non-zero. A check whose expected value is `0` cannot distinguish
+  "clean" from "did not run".
 - **Seal lane.** 4 `SEALED_SHA_BASELINES` entries are base-stale (pre-existing, R1 seal-lane owned).
   This lane touches **no sealed file** by design ⇒ **no seal re-pin ceremony**, and the tripwire
   must be asserted to stay green rather than re-pinned. If the doctrine layer touches a sealed file
   (e.g. `daemon/sources/registry.py` — it will not), the re-pin obligation returns.
+
+---
+
+## Approver iteration-001 — fold recordings (AM-1, AM-2, B1–B7, non-blocking batch)
+
+**Verdict recap (single source: `decisions.md` §F.4).** Approver **iteration 001 (2026-11-05) =
+REJECTED — 7 blockers**, from 3 section-partitioned workers: the **requirements layer was APPROVED
+CLEAN** (0 blocking; the cross-doc arithmetic — D1–D7, baseline 177→181, T29 20→25, boot 43→44, tree
+366→378 — all consistent, ~45 census claims independently re-derived) while the **architecture** worker
+raised blockers 1–3 and the **phases** worker raised blockers 4–7. Both rejecting workers recorded every
+blocker as a **cheap surgical fold, no structural rework**. Then: the two architect **amendments AM-1 /
+AM-2** landed (`cc6303308`), the approver-001 fold landed (this recording), iteration 002 next (cap 3).
+
+**AM-1 and AM-2 are ADOPTED, not deltas to argue.** They are recorded as amendments to stable ruling IDs
+(no D/C/F/NC renumbering) in `architecture-recommendation.md` §14, with operative text amended in place
+(§7.1, §4.1, §5.3, §5.4, §11) and pointed at from `decisions.md` §C.4/§C.7/§F.1/§C-bis.
+
+| Item | Pre-fold state | Fixation (adopted) | Where it is reflected |
+|---|---|---|---|
+| **AM-1 — canary allow set** | The frozen §7.1 set carried `self` alongside `{bash, filesystem, time, help}` (quoted pre-fold state); `self` was retained by **leaf-precedent carry-over**, never examined by the D7 review | **ADOPTED: `self` DROPPED.** Allow is exactly **`{bash, filesystem, time, help}`**. Cause: `self` (`inner_soul`/`access_memory`) is the sanctioned **durable self-behaviour-write channel** — a payload that persuades canary to write a preference into its own persona files survives the campaign and silently re-preferences every future one (the **F1/self-hypnosis shape on the most-exposed agent**, R2); retention was **not** part of the F1 acceptance. **Mechanical removal over doctrinal mitigation** (a mid-campaign `inner_soul` prohibition is prompt text guarding the channel an attacker most wants). Functional cost ≈ 0 (campaign continuity = off-repo log CAG-09 + git-proposed rule changes CAG-11). **Disclosed residual: `bash` remains an unconfined write path for EVERY persona** — AM-1 closes the structured channel, not the shell (B12). | §7.1 + §14 AM-1; `decisions.md` §C.7 in-place note + §C-bis D7 row; **this file**: predecessor-leaf paragraph, containment ledger (`self` row + residual bullet). Pins: **T35** asserts the amended set verbatim; **T6/T7 become per-agent exact-set pins** (canary deviates from the leaf trio by two categories, both with recorded reasons) |
+| **AM-2 — rule-table home/budget + `auto_load` placement** | (a) D4 carried a **"200 lines / 24 KiB"** migration trigger — dead arithmetic inside the 20 000-char body cap; (b) `auto_load` placement unresolved, so mirror byte-identity was unsatisfiable as stated | **ADOPTED: body-with-trigger CONFIRMED + explicit seed budget** — table **≤ 18 rules / 8 000 chars / 120 lines** (18 rules / 8,000 chars / 120 lines), body **≤ 18 000 chars** (18,000 chars), trigger = table > **8 000 chars** (8,000) **or** body > **18 000 chars** (18,000) **or** per-rule fixture content beyond budget. **The 24 KiB (NFR-05) ceiling is the migration WINDOW's upper bound, never a v1 target.** (b) **`auto_load` stays frontmatter** ⇒ mirror byte-identity carries **exactly one named exception — the `auto_load:` line** (`true`: canary, sweeper; `false`: aegis, worker); all other bytes identical. **Manifest placement is a permitted fold iff the council verifies the seed service honours a manifest `auto_load` key** (unverified ⇒ not folded). | §4.1 + §2.3 + §5.4 + §14 AM-2; `decisions.md` §C.4 note + §F.1 D4 row; **this file**: D2 mechanics (exception bullet), D4 mechanics (budget bullet), debt item 4, paydown item 2 |
+| **B1 — D5 ledger completeness** | The ledger was declared COMPLETE while missing the **`CHILDREN` overload**: the same constant is both the *persona roster* and the *installer-toolchain roster* | **Ledger is complete after this fold.** The required split, and what reddens without it: **`LEAVES` / `INSTALLER_CHILDREN` split** — `CHILDREN` (`test_aegis_security_family.py:76`) feeds **25** `@pytest.mark.parametrize("agent", CHILDREN)` sites, and the installer-shape helpers resolve through `INSTALLER_SKILLS` (**3 keys only**, `:145`) at `_lib_path` (`:266`) / `_skill_body_path` (`:271`) ⇒ appending `canary` raises **`KeyError: 'canary'`** on every leg that resolves a body/lib path, not a targeted red; **T23 arity** — `test_fences_bullet_lists_byte_identical` (`:604-626`) hard-codes the 3-way identity `lists[0] == lists[1] == lists[2]` (`:613-618`) ⇒ a 4th element is an **arity break**, not an extension; **`CHILD_ALLOW` per-agent map** — one shared `frozenset({"bash","proc","filesystem","time","help","self"})` (`:89`) asserted for every child at `:359`, so a literal `+ canary` **reds** (canary has no `proc`/`self` per D7+AM-1) and the naive repair (**adding `proc`/`self` to the shared set**) **re-installs the NC-4 defect** ⇒ the fix is a **per-agent allow map**, canary's entry being the AM-1 set. **The concrete constant values are the plans sibling's authoring** (±`architecture-recommendation.md` §5.2 + the phase files); this record states the *split and the cause*, and cites rather than authors the constants. | `decisions.md` §C.5 (added §"D5-ledger completeness" paragraph) records it as a D5 item; the constants land in the plans sibling's ledger row (T25-style named re-derivation with a written reason) |
+| **B2 — scratch-root definition** | "campaign scratch root" — the reference point for **2 of the 4 allowlisted action classes** in the **only** containment control — occurred **twice, both inside the allowlist quote**, and was **never defined** (no path, no creation, no teardown, no assertion). Separately, §6.2's **scratch-project** clause never reached the five-item pre-flight ⇒ a target could be spawned with a **live `project_id`** under a hostile payload. | **Requirement recorded; the definition is OWNED by phase3's pre-fire assertion** (it does not exist on disk yet — this fold records the obligation, it does not invent a path). Binding shape: one absolute root per campaign, created **before** the first fire, asserted **inside** every payload's action class (i), torn down **after** the last observation, recorded in the campaign log; and the pre-flight gains the **scratch-project** clause as its sixth item (dev identity · dev DB · scratch `DATA_DIR` with non-poisoned pin · **scratch project (no live `project_id`)** · self-owned parentage · synthetic inert payload). | `decisions.md` §C.6 (added row) + §F.4 note; `phase3-plan.md` pre-fire assertion (sibling-owned) |
+| **B3 — monotonicity contradiction (sibling-owned)** | §3.6 ruled "refuses any downgrade of a heuristic `hostile`" while `requirements.md` SK-11 said "may only raise a verdict **or raise confidence**" ⇒ **suspect→clean laundering** (`--llm-verdict clean --llm-confidence high` accepted by the scanner), which corrupts the F14 leakage metric | **Refuse ANY downgrade** (one sentence + one pin) **or** amend SK-11 on the record; plus state that **no verdict value is an authorization token**. Recorded here; the wording lands in the sibling pair | `requirements.md` SK-11 — **LANDED on disk** ("refuses ANY downgrade", monotonic in **both** axes: verdict rank and confidence rank); the arch narrative (§3.6, **frozen at `cc6303308`**) is deliberately **STRICTER-superseded by the normative requirements rule** — the asymmetry is **disclosed, not repaired** (`decisions.md` §C-bis.5 divergence row; **AM-3 candidate**) |
+| **B4 — one-commit enumeration disagreement (sibling-owned)** | `plan-overview.md` §one-commit ceremony closes "nothing outside this enumerated set" with **PACKS.md absent**, while `phase4-plan.md` task 6 + §composition **include** it ⇒ each commit complies with one doc and false-fails the other | **One-line fold**: the two enumerations name the same set (PACKS.md **in**, as tester bookkeeping). Recorded here | `plan-overview.md` §one-commit enumeration — **LANDED on disk** (PACKS.md inside the set; one list, not two); `phase4-plan.md` already carried it ⇒ reconciled |
+| **B5 — G1.2 vs SK-16 confidence (sibling-owned)** | `phase1-plan.md` Gate G1.2 asserted "no `confidence` field" for the degrade case while tasks 1/3 + SK-16 rule confidence **always present** with `none` as the legal degrade value (byte-identity acceptance requires it) ⇒ the gate is **unsatisfiable / tests the opposite shape** | **Reword G1.2 to "visible via `confidence: none`"**. Recorded here | `phase1-plan.md` **G1.2 — LANDED on disk** (now "visible via `confidence: none`"; the field is always present per SK-16) ⇒ satisfied as worded |
+| **B6 — merge-overlap premise** | "The memoir lane touches zero `agents/` paths **today**" — **stale**; and the check that produced it was **vacuously clean** (`origin/feature/ari-memoir-store` does not exist ⇒ a `git diff …` piped into `wc -l` prints `0` on a `bad revision`) | **Present fact recorded: TRUE 3-path overlap** on `agents/` at memoir tip **`b60502671`** — `agents/.prompt-artifacts.sha256`, `agents/ari/meta.json`, `agents/ari/tools_note.md` (+83/−2). **No `aegis`-path overlap** (disjoint from our edit surface) and `origin/latest` still `97b76e20e`. Gate **G0.5 cannot pass as specified** ⇒ fix: local ref, the **producer's own** exit status, and a **non-zero expected count**. The **vacuous-pipe ban is restated** in this file (§Merge-overlap last bullet). | **this file** §Merge-overlap (corrected memoir bullet + vacuous-pipe bullet); `decisions.md` §C-bis.5 row; `phase0-plan.md` task 7 / **G0.5 landed on disk**; `plan-overview.md` Merge-Overlap **landed** |
+| **B7 — baseline conflict rule** | `agents/.prompt-artifacts.sha256` conflicts on **both** branches and had **no** resolution rule; the only named rule (PACKS.md **keep-both**) is **actively wrong** for a hash baseline (double-key corruption) | **Rule recorded: take EITHER side, regenerate ONCE on the merged tree (P6 task 2), NEVER keep-both.** Why a hash baseline differs from PACKS.md: PACKS.md is an append-only human registry whose rows are independent (keep-both loses nothing, merge-order tolerant); a hash baseline is a **single derived artifact** — one row per file, every value recomputed from the tree — so merging two independently derived versions is stale/wrong **by construction**. Derive, never merge. | **this file** §Merge-overlap (baseline-conflict bullet); `decisions.md` §C-bis.5 row; `plan-overview.md` item **2b landed on disk** ("NEVER resolves keep-both"); `phase6-plan.md` task 3 **still names only the PACKS rule** ⇒ the baseline clause must be added |
+
+### Non-blocking batch (recorded, dispositioned; none verdict-affecting)
+
+| Note | Recording / disposition |
+|---|---|
+| **Inertness attestation split** | **aegis attests at fire time; canary declares.** Payload inertness is the **only containment control**, and the reviewer was **unnamed** — self-certification by the composer is its weakest link. The split is now explicit: canary **declares** `expected_action_class` (authorship-side claim), aegis **attests** at fire time (independent check before the wave leaves). **Declaration ≠ certification** — and this asymmetry, not the payload review, is the weakest link of the only containment control. Recorded as a limitation, not a mechanic. |
+| **Provenance caller-declared** | The fence header's `source=`/`sha256=` are **declared by the caller**, not attested by the daemon. Named as a **must-not-claim limitation** (in the §7.6 six-item list's footing and the skill's non-guarantees, SK-24 family): v1 must never claim provenance is verified, only that it is *recorded and versioned*. |
+| **Bare `python3` host dependency** | The scanner runs on **bare `python3`** (CAG-17: no daemon import, no venv). This is an **unstated host dependency**: on a host without `python3` the screen is unusable and must **fail closed** (`suspect`), never silently pass. Recommended pre-flight assertion (phase3/phase5): `command -v python3` as a campaign precondition, and a pinned leg for the absent-binary path. |
+| D4 trigger arithmetic | **Fixed by AM-2(a)** (the 24 KiB/200-line trigger was dead inside the 20 000-char body cap) — see the AM-2 row. |
+| Mirror byte-identity vs per-recipient `auto_load` | **Fixed by AM-2(b)**: the pin **normalises the one named line**; the mirror does not omit the key (§D2 mechanics). |
+| `§5.5` decomposition `8+3+2 = 379` vs total 378 | Sibling-owned arithmetic note (the **total is correct**, the parts are not); recorded here, folded in `architecture-recommendation.md` §5.5. Does not touch this file's counts. |
+| **T38 absent** from the §5.1/§11 pin inventory lists | Sibling-owned inventory completeness (r2 fold added T38; leg-count disagreement). Recorded; `requirements.md` CER-03 already names **T31–T38**. |
+| Stale cross-refs / duplicate corpus authorship / vacuous dirname corroboration / phase-local greps of lane-end state | Sibling-owned plan hygiene (phase files + overview); recorded here as the fold ledger's non-blocking tail. |
+| `decisions.md` §1 "six decision slots (D1–D6)" stale prose (D7 exists) | **FIXED here** — §1 now reads "seven decision slots (D1–D7; D7 was leader-added)"; no other §1 prose touched (this record, §1). |
+| Rollback statement implicit in the primary pair | House answer adequate for a stage-only lane (no promote); no change. |
 
 ---
 
@@ -534,11 +622,14 @@ A single mismatch is a drift defect, not style (X-02).
 | **R4** | **Fence brittleness** — the delimiters + provenance header must survive markdown rendering and context compaction | compaction may reword a model-visible frame (the one existing precedent, `graph.py:343-373`, has no compaction guarantee) | doctrine re-assert duty (§3.4): when context is compacted, body content is dropped before markers; any payload-derived text that survives into a summary is re-emitted inside a new fence with `source:` preserved and `classifier:` unchanged | daemon-side compaction guarantee is routed (§G(c)); must not claim mechanical durability (F2) |
 | **R5** | **Doctrine without enforcement** — the untrusted-content rule lands as prompt text; nothing in the daemon checks it | the untrusted-content rule is additive prompt text; no daemon-side check | the canary campaign is the **enforcement oracle**: leakage measurement is the only feedback that the doctrine actually changed behaviour; the machine-checkable fence envelope makes at least the *screen* output verifiable | personas outside the family (planner/developer lanes) are uncovered in v1 — the disclosure is the mitigation (flag **F8**); the screen is a filter, not a boundary |
 
-**Also monitored (below the top five):** distribution cost growing with the recipient set (per-agent bodies + manifest entries; W4 guard propagation) — mitigated by push delivery for episodic needs and a minimal seed set for standing needs; the optional LLM-classification pass's cost/determinism (F4) — OFF in pinned tests; heuristic false-positive burden (F3); the 4 base-stale seal entries (R1 seal lane owns them).
-cost/determinism (F4); unicode/homoglyph scanning against our own multilingual content (F5); the
-T21/T22 re-derivation scope (F6); memoir merge-order and slot contention (F7); the non-family blast
-radius (F8); the baseline arithmetic edge (F9); canary's deny-list surface (F10); target
-contamination (F11); MCP-leg mechanics (F12); the context-dict cap as a realistic shape (F13);
+**Also monitored (below the top five):** distribution cost growing with the recipient set (per-agent
+bodies + manifest entries; W4 guard propagation) — mitigated by push delivery for episodic needs and a
+minimal seed set for standing needs; the optional LLM-classification pass's cost/determinism (F4) — OFF
+in pinned tests; heuristic false-positive burden (F3); the 4 base-stale seal entries (R1 seal lane owns
+them); unicode/homoglyph scanning against our own multilingual content (F5); the T21/T22 re-derivation
+scope (F6); memoir merge-order and slot contention (F7 — now a **present** 3-path overlap, §Merge-overlap);
+the non-family blast radius (F8); the baseline arithmetic edge (F9); canary's deny-list surface (F10);
+target contamination (F11); MCP-leg mechanics (F12); the context-dict cap as a realistic shape (F13);
 leakage-metric objectivity (F14).
 
 ---
@@ -597,6 +688,15 @@ historical framing; the ruling text is authoritative wherever it differs.
   source while N copies exist. With N seeded copies the honest declaration is the canonical-home +
   mirrors form, and the **mirror declaration itself must be truthful** (guide §2 explicitly blesses
   honest duplication when the copies are necessary).
+- **Byte-identity carries EXACTLY ONE named exception (AM-2(b), approver iteration-001).** `auto_load`
+  stays a **frontmatter** field (verified exemplar mechanics), so the four mirrors cannot be
+  unconditionally byte-identical: the `auto_load:` line is `true` for **canary** and **sweeper** and
+  `false` for **aegis** and **worker**. The identity pin (T22 / M7 / the paydown item below) therefore
+  **normalises that single named line** — the mirror does **not** omit the key, and the pin does not
+  go blind: any other byte difference is still a red, and changing the key's *value* without a version
+  bump is still the silent-drift class. Moving the key to the **manifest** is a permitted fold **only
+  if** the council verifies the seed service honours a manifest `auto_load` key (unverified today ⇒
+  not folded).
 - **Context cost**: `auto_load: true` puts the body in `[SYSTEM CONTEXT: Auto-Load Skills]` on every
   turn of every seeded instance (`context_messages.py:1554-1612`); `auto_load: false` moves it to a
   search-injection lane (needs `skill_injection: true` + the agent owning the row) or to an explicit
@@ -665,6 +765,19 @@ historical framing; the ruling text is authoritative wherever it differs.
   table) vs a separate rules file the skill loads (canary-owned; keeps the body small; adds a
   load-path). Precedent for the file-invoked shape already exists in the family (the three installer
   toolchains are file-invoked and **never** in a manifest, T21's `test_installer_skills_in_no_manifest`).
+- **Seed budget + named migration trigger (AM-2(a), approver iteration-001) — the arithmetic that makes
+  the body-with-trigger shape honest.** The v1 seed table is **≤ 18 rules / ≤ 8 000 chars / ≤ 120
+  lines**; the **whole body** stays **≤ 18 000 chars** (2 000 chars of headroom under the 20 000-char
+  body cap). At 18 rules ≈ 4–7 KiB the table fits comfortably ⇒ the migration is a **distant trigger**,
+  not a day-one need. Trigger (binding, three disjuncts): the table exceeds **8 000 chars**, **or** the
+  body exceeds **18 000 chars**, **or** a rule needs per-rule fixture content the body budget cannot
+  carry. **NFR-05's 24 KiB table ceiling is the upper bound of the migration WINDOW, never a v1
+  target** — a table at that ceiling cannot fit any body cap, which is precisely why the trigger fires
+  far below it. (The pre-AM-2 framing — a "200 lines / 24 KiB" trigger — was **dead arithmetic**: it
+  named a size the body cap forbids.) When the migration fires, exactly one machine-readable source
+  moves (the sibling data file); the body keeps the human summary + pointer; the scanner's discovery
+  ladder extends by one file in the same directory; the W4 version bump still propagates body +
+  pointer atomically.
 
 ### D5 — test-matrix shape (mechanics)
 
@@ -724,8 +837,9 @@ historical framing; the ruling text is authoritative wherever it differs.
 - Channel **11** (chat-source inbound) has **no sanitisation anywhere** in the tree and is the widest
   unshielded channel; closing it is a daemon change and is out of scope ⇒ it must be **disclosed as an
   uncovered surface**, not implied closed.
-- The sandbox semantics are in the table above; the five-item pre-flight checklist is the v1 control
-  set, and the **limits sentence is part of the deliverable** (prompts + campaign record + hand-off).
+- The sandbox semantics are in the table above; the **six-item** pre-flight checklist (= the ruling's
+  five §6.3 items + §6.2's scratch-project clause) is the v1 control set, and the **limits sentence is
+  part of the deliverable** (prompts + campaign record + hand-off).
 
 ---
 
@@ -770,7 +884,7 @@ spawn topology becomes the answer.
 | 1 | **No inbound sanitisation for chat sources** | the widest untrusted channel is unscreened; v1 can only disclose it | High (coverage gap, not a defect this lane introduces) | `daemon/sources/mapper.py` |
 | 2 | **No project axis in the spawn gate** | "sandbox-project-only" is unenforceable in v1 ⇒ D1's option B is doctrinal-only | High (directly shapes D1) | `daemon/tools/_auth.py:89-115` |
 | 3 | **No shared-source skill body** | distribution is N copies + N manifest entries; the propagation lever is a version bump; mirrors must be declared honestly | Medium | `skill_seed_service.py:274-283`, `:340-359`, `:436-468` |
-| 4 | **Per-agent skill bodies ⇒ no guaranteed cross-agent version equality** | the mirrors can drift silently (the "stated once" trap in its sharpest form) | Medium | `skill_seed_service.py:402-430` |
+| 4 | **Per-agent skill bodies ⇒ no guaranteed cross-agent version equality** | the mirrors can drift silently (the "stated once" trap in its sharpest form); the identity pin must normalise **exactly one** named line — the `auto_load:` frontmatter key, whose value legitimately differs per recipient (AM-2(b)) | Medium | `skill_seed_service.py:402-430` |
 | 5 | **Compaction may reword model-visible frames** | the fence envelope's durability across compaction is unproven | Medium | `daemon/graph.py:343-373` (the only precedent) + compaction path |
 | 6 | **`data/ensemble.json` outranks the environment** | a dev boot from a poisoned tree targets prod ⇒ the scratch-DATA_DIR control is mandatory, not hygiene | Medium | `daemon/ensemble_config.py:42`, `:56-61` |
 | 7 | **The prompt-artifact generator exits 0 when the baseline file is absent** | a missing baseline reads as clean ⇒ every leg must assert existence + count | Low | `generate_prompt_artifact_baseline.py:127-133` |
@@ -791,8 +905,10 @@ re-litigated here.
    and the v1 answer is the roster + doctrine form (this is exactly why D1's fold-consequences
    enumerate the enforcement delta).
 2. **Pin the mirror-equality of the seeded skill bodies** (a T23-style cross-agent byte-identity
-   check, modulo blank lines) *if* more than one agent is seeded — otherwise the mirror drift is
-   invisible until a rule change lands in one copy only.
+   check, modulo blank lines **and modulo the single named `auto_load:` frontmatter line — AM-2(b);
+   normalise that one line, do not omit the key**) *if* more than one agent is seeded — otherwise the
+   mirror drift is invisible until a rule change lands in one copy only. Note the pin is not
+   `auto_load`-blind: a value change without a version bump is the silent-drift class (M7).
 3. **State the limits sentence in three places** (persona prompt, campaign record template, hand-off
    report) — the AM-13 precedent.
 4. **Derive every count at P4** (baseline rows, agents-tree files, T29 cells, boot census) rather than
