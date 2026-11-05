@@ -22,7 +22,11 @@ from __future__ import annotations
 import pytest
 from sqlmodel import SQLModel, Session, create_engine, select
 
-from daemon.repositories.memoir.models import MemoirEpisode
+from daemon.repositories.memoir.models import (
+    KEEPSAKE_ADMISSION_PCLASS,
+    MemoirEpisode,
+    render_keepsake_line,
+)
 from daemon.repositories.memoir.repository import (
     MEMOIR_BODY_CHAR_CAP,
     MEMOIR_KEEPSAKE_ZONE_TOKEN_BUDGET,
@@ -134,21 +138,30 @@ def test_clear_pin_nulls_the_whole_pin_column_set(repo):
 
 
 def test_an_oversized_pin_is_refused_by_the_zone_with_names(repo):
-    """The zone is 4,000 tokens; a refusal names the pins and their sizes."""
-    big = "word " * 2000
-    first = _episode(repo, body=big)
-    repo.set_pin(first, actor="empress", reason="a large keepsake")
-    second = _episode(repo, body=big)
+    """W-1 (council): the zone measures the RENDERED keepsake lines, so
+    an over-long ``pinned_reason`` — uncapped by ``_validate_pin_claim``
+    — blows the 4,000-token zone and is REJECTED at admission
+    (reject-don't-evict: the cap working, not a clamp). The refusal
+    names the binding constraint and the held pins with their rendered
+    sizes. This test is the W-1 regression pin: under the old
+    content-only arithmetic a long reason measured as NOTHING and the
+    zone never refused."""
+    held_reason = "word " * 700
+    first = _episode(repo)
+    repo.set_pin(first, actor="empress", reason=held_reason)
+    second = _episode(repo)
 
     with pytest.raises(MemoirAdmissionError) as excinfo:
-        repo.set_pin(second, actor="emperor", reason="another large one")
+        repo.set_pin(second, actor="emperor", reason="word " * 4000)
 
     error = excinfo.value
     assert error.constraint == "keepsake_zone_tokens"
     assert MEMOIR_KEEPSAKE_ZONE_TOKEN_BUDGET == 4000
     assert len(error.pins) == 1
     assert error.pins[0]["id"] == first
-    assert error.pins[0]["tokens"] > 1000
+    # W-1 arithmetic: the held pin is measured as its RENDERED line — a
+    # 3,500-character reason alone renders to hundreds of tokens.
+    assert error.pins[0]["tokens"] > 600
 
 
 def test_the_zone_counts_the_existing_keepsakes(repo):
@@ -160,13 +173,26 @@ def test_the_zone_counts_the_existing_keepsakes(repo):
 
 
 def test_a_re_pin_of_an_existing_keepsake_does_not_double_count(repo):
-    """Re-pinning replaces; it does not add a second pin."""
+    """Re-pinning replaces; it does not add a second pin. W-1: the zone
+    is the RENDERED line of the ONE surviving pin — never the sum of
+    two pins' lines."""
     episode = _episode(repo, body="word " * 100)
     repo.set_pin(episode, actor="empress", reason="worth keeping")
     before = repo.keepsake_zone_tokens("ari")
+    assert before > 0
     assert repo.set_pin(episode, actor="emperor", reason="re-pinned")
     assert repo.count_pins("ari") == 1
-    assert repo.keepsake_zone_tokens("ari") == before
+    from daemon.loader import estimate_tokens
+
+    expected_after = estimate_tokens(
+        render_keepsake_line(
+            title=None,
+            pinned_by="emperor",
+            pclass=KEEPSAKE_ADMISSION_PCLASS,
+            pinned_reason="re-pinned",
+        )
+    )
+    assert repo.keepsake_zone_tokens("ari") == expected_after
     with Session(repo.engine) as session:
         row = session.exec(
             select(MemoirEpisode).where(MemoirEpisode.id == episode)

@@ -404,7 +404,72 @@ class MemoirSynthesis(SQLModel, table=True):
     )
 
 
+# ── THE KEEPSAKE LINE (D5.7 / AM-24 / W-1) ───────────────────────────────
+#: The ONE keepsake-line template. It LIVES IN THE REPOSITORY PACKAGE so
+#: D2.12's admission arithmetic measures the SAME bytes the briefing
+#: ships (W-1: admission used to measure the content alone and under-
+#: counted every pin by the wrapper + ``pinned_by`` + the provenance
+#: class + the uncapped ``pinned_reason`` — ≈+18 tokens/pin, so the
+#: 4,000-token zone was claimed but not enforced).
+#: ``daemon/services/memoir_briefing.py`` imports it FROM HERE — the
+#: bytes are pinned by the briefing pack; change them here and BOTH the
+#: briefing pack and the admission pack go RED.
+KEEPSAKE_LINE_TEMPLATE = (
+    "- [keepsake] {title} (pinned_by={pinned_by}; "
+    "provenance={pclass}) {pinned_reason}"
+)
+
+#: The placeholder title the briefing renders when an episode has none.
+MEMOIR_UNTITLED_TITLE = "(untitled)"
+
+#: The provenance class admission MEASURES with. The briefing's
+#: ``pclass`` is NOT row state — it is captured ONCE per briefing build
+#: from the reader's manager (AM-24), so admission cannot know it. It
+#: therefore measures the WORST CASE — the longest class the briefing
+#: can render (``direct`` | ``inherited`` | ``""``) — so the 4,000-token
+#: zone bound holds for EVERY future read, not just the ones whose
+#: reader happens to carry the empty class.
+KEEPSAKE_ADMISSION_PCLASS = "inherited"
+
+
+def _keepsake_one_line(value: str | None) -> str:
+    """Collapse ONE field to ONE line (newlines are structure loss).
+
+    The briefing's renderer applies the same normalization to the same
+    fields, so admission and briefing measure identical bytes.
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
+
+
+def render_keepsake_line(
+    *,
+    title: str | None,
+    pinned_by: str | None,
+    pclass: str,
+    pinned_reason: str | None,
+) -> str:
+    """Render ONE keepsake line from the byte-pinned template (D5.7).
+
+    The SINGLE SOURCE of the rendered line: the briefing renders with
+    this function (so a wrong ``pinned_by`` claim stays detectable at
+    read time), and the pin admission MEASURES with it (D2.12/W-1 — the
+    candidate's rendered line, not its content alone).
+    """
+    clean_title = _keepsake_one_line(title) or MEMOIR_UNTITLED_TITLE
+    return KEEPSAKE_LINE_TEMPLATE.format(
+        title=clean_title,
+        pinned_by=(pinned_by or "unknown"),
+        pclass=(pclass or ""),
+        pinned_reason=_keepsake_one_line(pinned_reason),
+    )
+
+
 __all__ = [
+    "KEEPSAKE_ADMISSION_PCLASS",
+    "KEEPSAKE_LINE_TEMPLATE",
+    "MEMOIR_UNTITLED_TITLE",
     "MemoirEpisode",
     "MemoirPersona",
     "MemoirPersonaVersion",
@@ -415,4 +480,5 @@ __all__ = [
     "PIN_ACTORS",
     "StarsListType",
     "SYNTHESIS_VERBS",
+    "render_keepsake_line",
 ]

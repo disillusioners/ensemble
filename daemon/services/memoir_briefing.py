@@ -50,6 +50,14 @@ import asyncio
 import logging
 from typing import Any, Sequence
 
+from daemon.repositories.memoir.models import (
+    KEEPSAKE_LINE_TEMPLATE,
+    MEMOIR_UNTITLED_TITLE,
+)
+from daemon.repositories.memoir.models import (
+    render_keepsake_line as render_keepsake_line_shared,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── identity + flag (D5.12 / T5.4) ────────────────────────────────────────
@@ -72,15 +80,13 @@ MEMOIR_BRIEFING_FLAG = "memoir_briefing_injected"
 #: ``[SYSTEM CONTEXT: <title>]`` prefix around it (ADR-4/ADR-5).
 MEMOIR_BLOCK_TITLE = "Memoir"
 
-#: The ONE keepsake-line template (D5.7, AM-24). Byte-pinned here so
-#: D2.12's admission arithmetic (``est(candidate_render)``) measures
-#: the same bytes the briefing ships, and so a wrong pin claim stays
-#: DETECTABLE (the provenance class rides the line). The template is
-#: the pack's pinned bytes — change it here and the pack goes RED.
-KEEPSAKE_LINE_TEMPLATE = (
-    "- [keepsake] {title} (pinned_by={pinned_by}; "
-    "provenance={pclass}) {pinned_reason}"
-)
+#: The ONE keepsake-line template (D5.7, AM-24). SINGLE-SOURCED in the
+#: repository package (``daemon/repositories/memoir/models.py``) so
+#: D2.12's admission arithmetic measures the same bytes this module
+#: ships (W-1) — the constant above is IMPORTED from there and re-
+#: exported for the pack's byte pin. The template is the pack's pinned
+#: bytes — change it THERE and this pack goes RED.
+# (``KEEPSAKE_LINE_TEMPLATE`` is imported at the top of this module.)
 
 #: The closing affordance line (D5.10). The block ENDS with it — the
 #: one-liner that answers "why doesn't she remember an hour ago" at
@@ -160,7 +166,9 @@ _PERSONA_HEADER = "## Persona"
 _KEEPSAKES_HEADER = "## Keepsakes"
 _RECENT_HEADER = "## Recent episodes"
 
-_UNTITLED = "(untitled)"
+#: Single-sourced with the repository renderer (W-1) — the same
+#: placeholder the keepsake-line admission arithmetic measures with.
+_UNTITLED = MEMOIR_UNTITLED_TITLE
 
 
 def _estimate_tokens(text: str) -> int:
@@ -203,17 +211,20 @@ def render_keepsake_line(
 ) -> str:
     """Render ONE keepsake line from the byte-pinned template (D5.7).
 
+    DELEGATES to the repository-package renderer (W-1) — the SAME
+    function the pin admission measures with, so the briefing ships and
+    the admission measures identical bytes by construction.
+
     ``pclass`` is the house provenance class (AM-24 — ``direct`` /
     ``inherited`` / ``""``), captured ONCE per briefing build and
     rendered identically on every keepsake line so a wrong ``pinned_by``
     claim stays detectable at read time as well as write time.
     """
-    clean_title = _one_line(title) or _UNTITLED
-    return KEEPSAKE_LINE_TEMPLATE.format(
-        title=clean_title,
-        pinned_by=(pinned_by or "unknown"),
-        pclass=(pclass or ""),
-        pinned_reason=_one_line(pinned_reason),
+    return render_keepsake_line_shared(
+        title=title,
+        pinned_by=pinned_by,
+        pclass=pclass,
+        pinned_reason=pinned_reason,
     )
 
 

@@ -52,6 +52,7 @@ from sqlmodel import Session, select
 
 from daemon.repositories.infra.types import JSONBType
 from daemon.repositories.memoir.models import (
+    KEEPSAKE_ADMISSION_PCLASS,
     PERSONA_SOURCES,
     PERSONA_STATUSES,
     PERSONA_VALID_TRANSITIONS,
@@ -60,6 +61,7 @@ from daemon.repositories.memoir.models import (
     MemoirPersona,
     MemoirPersonaVersion,
     StarsListType,
+    render_keepsake_line,
 )
 from daemon.repositories.memoir.seed import (
     MEMOIR_SEED_AGENT_ID,
@@ -641,8 +643,17 @@ class MemoirRepository:
         with Session(self.engine) as session:
             if is_keepsake:
                 # THE ADMISSION READS — PINNED-PRECEDE the single INSERT.
+                # W-1: the candidate is measured as the RENDERED keepsake
+                # line (the wrapper + pinned_by + the provenance class +
+                # the uncapped reason) — the SAME bytes the briefing
+                # ships — never the content alone.
                 candidate_tokens = _estimate_tokens(
-                    render_episode_content(clean_title, clean_body)
+                    render_keepsake_line(
+                        title=clean_title,
+                        pinned_by=pinned_by,
+                        pclass=KEEPSAKE_ADMISSION_PCLASS,
+                        pinned_reason=pinned_reason,
+                    )
                 )
                 self._admit_pin(
                     session,
@@ -714,8 +725,17 @@ class MemoirRepository:
                 raise MemoirWriteError(
                     "episode_not_found", f"no episode with id {episode_id!r}"
                 )
+            # W-1: the candidate is measured as the RENDERED keepsake
+            # line the briefing will ship for this row — never the
+            # content alone (the wrapper + pinned_by + the provenance
+            # class + the uncapped reason are part of the zone).
             candidate_tokens = _estimate_tokens(
-                render_episode_content(episode.title, episode.body)
+                render_keepsake_line(
+                    title=episode.title,
+                    pinned_by=actor,
+                    pclass=KEEPSAKE_ADMISSION_PCLASS,
+                    pinned_reason=reason,
+                )
             )
             self._admit_pin(
                 session,
@@ -1049,8 +1069,17 @@ class MemoirRepository:
                     "id": episode.id,
                     "title": episode.title,
                     "pinned_by": episode.pinned_by,
+                    # W-1: each held pin counts as the RENDERED keepsake
+                    # line the briefing ships for it — the same
+                    # arithmetic the candidate is measured with, so the
+                    # zone sum and the candidate render cannot disagree.
                     "tokens": _estimate_tokens(
-                        render_episode_content(episode.title, episode.body)
+                        render_keepsake_line(
+                            title=episode.title,
+                            pinned_by=episode.pinned_by,
+                            pclass=KEEPSAKE_ADMISSION_PCLASS,
+                            pinned_reason=episode.pinned_reason,
+                        )
                     ),
                 }
             )
