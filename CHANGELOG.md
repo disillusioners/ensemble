@@ -93,6 +93,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.28.12] — 2026-11-05
+
+### Added — the aegis security agent family: one orchestrator + three worker children (`feature/aegis-security-family`)
+
+- **Four new agents under `agents/`** — `aegis` (the orchestrator) plus the leaf children `hacker`, `cracker` and `sweeper` — 28 new files: per-agent `meta.json` / `soul.md` / `rule.md` / `workflow.md` / `tools_note.md`, plus one skill template per worker (`fuzzing-toolchain`, `credential-bench`, `sast-toolchain` — each a `.md` body with a `.lib.sh` companion). `aegis` runs on the `agentic` model lane and owns `hacker` / `cracker` / `sweeper` / `worker` as its team members.
+- **The leader gains exactly one line** — `agents/leader/meta.json` adds `aegis` to `team_members` (16 → 17); the fold is mirrored in `tests/unit/test_maintenancer_agent.py` (assertion value 16 → 17; the test NAME stays `test_leader_team_members_length_16` — ledger-bound, deliberately not renamed).
+- **Prompt-artifact baseline regenerated 161 → 177** (`agents/.prompt-artifacts.sha256`, +16 entries = the depth-2 collector's four prompt files per new agent).
+- **Gate pack** — `tests/unit/agents/test_aegis_security_family.py` (new, 110 tests): the family's contract is PINNED, not merely described.
+- **AGENTS-ONLY release payload:** zero `daemon/` code, zero `scripts/upgrade` changes, ZERO `.sql` — migration delta EMPTY vs v0.28.11 (119 == 119); the functional gate returned GO with net-new deterministic reds 0.
+
 ## [0.28.11] — 2026-11-04
 
 ### Added — the FE-only T1 metrics dashboard (`feature/fe-metrics-dashboard`, wi-32a99618)
