@@ -385,8 +385,17 @@ def memoir_block_present(messages: Sequence[Any] | None, agent_id: str | None = 
     The stable id needs the agent id; the kind match does not — so a
     failed instance-row read cannot strand the flag unset when the
     block is visibly present.
+
+    The id is composed through the DECLARED single source
+    (``context_messages._stable_id_for`` — tidier A3/H5): the format's
+    one home. Lazy import (the module-level one would cycle: the seam
+    lazily imports THIS module).
     """
-    stable_id = f"memoir:{agent_id}" if agent_id else None
+    stable_id = None
+    if agent_id:
+        from .context_messages import _stable_id_for
+
+        stable_id = _stable_id_for("memoir", agent_id=agent_id)
     for message in messages or []:
         kwargs = getattr(message, "additional_kwargs", None) or {}
         if kwargs.get("context_kind") == "memoir":
@@ -414,18 +423,14 @@ def knob_allows(config: Any = None) -> bool:
 def _capture_provenance_class(manager: Any, instance_id: str) -> str:
     """The house provenance class, captured ONCE per build (AM-24).
 
-    Pure in-memory manager-store read; ``capture_provenance_class`` is
-    itself defensive (returns the empty-provenance shape on any
-    failure) and this wrapper adds one more swallow so the briefing can
-    never be killed by a provenance hiccup.
+    ONE home for the derivation (tidier A11/M9): delegates to
+    ``daemon/tools/provenance.py``'s ``capture_provenance_class_name``
+    (the same helper the memoir tools use — it logs before any empty
+    return). The manager read is pure in-memory state.
     """
-    try:
-        from daemon.tools.provenance import capture_provenance_class
+    from daemon.tools.provenance import capture_provenance_class_name
 
-        capture = capture_provenance_class(manager, instance_id)
-        return str(capture.get("provenance_class") or "")
-    except Exception:  # pragma: no cover - defensive
-        return ""
+    return capture_provenance_class_name(manager, instance_id)
 
 
 async def _build_memoir_briefing_message(

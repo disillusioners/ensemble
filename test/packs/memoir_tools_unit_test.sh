@@ -150,19 +150,16 @@ import sys
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as handle:
     text = handle.read()
-old = (
-    "            # ── D4.2 gate 1: the factory-captured identity, FIRST ────\n"
-    "            if not _is_memoir_authorized(caller_agent_id):"
-)
+old = "    if not _is_memoir_authorized(agent_id):"
 new = (
-    "            # MUTATION M1: the gate order inverted (knob before auth).\n"
-    "            if not memoir_enabled(getattr(manager, \"config\", None)):\n"
-    "                return _refuse(\n"
-    "                    label,\n"
-    "                    MEMOIR_CODE_DISABLED,\n"
-    "                    \"mutated: knob first\",\n"
-    "                )\n"
-    "            if not _is_memoir_authorized(caller_agent_id):"
+    "    # MUTATION M1: the gate order inverted (knob before auth).\n"
+    "    if not memoir_enabled(getattr(manager, \"config\", None)):\n"
+    "        return _refuse(\n"
+    "            label,\n"
+    "            MEMOIR_CODE_DISABLED,\n"
+    "            \"mutated: knob first\",\n"
+    "        )\n"
+    "    if not _is_memoir_authorized(agent_id):"
 )
 if text.count(old) != 1:
     sys.exit(

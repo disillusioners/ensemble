@@ -74,6 +74,21 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
+# Size rationale (~1,451 lines, refreshed 2026-11-05): this is the
+# memoir DATA layer — the persona state machine, the episode writers,
+# the keepsake admission arithmetic, the lexical rankers (PG
+# ``ts_rank_cd`` + the SQLite BM25 dev fallback), the recall-stats
+# writers and the windowed timeline read. It is one module because
+# every one of those operations shares the SAME transaction discipline
+# and the SAME single-sourced predicates (terminal-row predicate,
+# keepsake-line renderer, admission token arithmetic); splitting by verb
+# would duplicate the predicates and re-open the W-1 drift (admission
+# measuring different bytes than the briefing ships). Mirrors the
+# ``manager.py`` precedent: a deferred-decomposition ledger, not an
+# aspiration — extract a cohesive seam (e.g. the lexical rankers) behind
+# this module's public methods when one outgrows its section; never split
+# a shared predicate from its consumer.
+
 
 class MemoirTransitionError(ValueError):
     """Raised when a persona version transition is not permitted.

@@ -109,6 +109,32 @@ from daemon.tools.memoir_knob import resolve_memoir_knob
 
 logger = logging.getLogger(__name__)
 
+#: The module's supported surface. ``_default_embed`` is DELIBERATELY
+#: here (tidier M13/A9): it is the lane's ONLY SDK call site, and
+#: ``daemon/services/memoir_retrieval.py`` imports it to build the
+#: bounded query embedder — declaring it keeps the cross-module use
+#: intentional instead of accidental (the name keeps its underscore:
+#: renaming would churn every import site for no behaviour change).
+__all__ = [
+    "DEFAULT_EMBEDDING_MODEL",
+    "EMBEDDING_ATTEMPT_CAP",
+    "EMBED_CALL_TIMEOUT_S",
+    "LATCH_THRESHOLD_TICKS",
+    "LATCH_TICK_INTERVAL_S",
+    "MemoirEmbeddingWorker",
+    "SCAN_LIMIT",
+    "TERMINAL_ERROR_MARKER",
+    "TICK_EMBED_BUDGET_S",
+    "TickSettings",
+    "_default_embed",
+    "classify_embed_failure",
+    "current_executor_thread_name",
+    "executor_thread_prefix",
+    "latest_snapshot",
+    "register_worker",
+    "run_embed_on_executor",
+]
+
 # ── AM-32: the explicit transient status set ────────────────────────────
 #: The house retryable set WIDENED lane-locally with 408 (Request
 #: Timeout — the server timed out waiting for the request). The house
@@ -153,10 +179,14 @@ TICK_EMBED_BUDGET_S = 45.0
 #    the same model id).
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
-# ── the scan window: the worker fetches a bounded working set each tick
-#    and filters terminal rows out of it in memory (the terminal rows
-#    still satisfy the repository's ``embedding IS NULL`` predicate —
-#    the frozen contract has no terminal-aware scan).
+# ── the scan window: the worker fetches a bounded working set each tick.
+#    W-2 TRUTH: the repository scan IS terminal-aware
+#    (``get_pending_embeddings`` excludes rows the single-sourced
+#    predicate classifies terminal, so the window ADVANCES past them);
+#    ``SCAN_LIMIT`` therefore bounds the NON-TERMINAL working set. The
+#    Python ``_is_terminal_row`` filter in the tick is the BELT — a row
+#    can become terminal between the scan and the filter — and it
+#    delegates to the same predicate, so window and belt cannot drift.
 SCAN_LIMIT = 200
 
 #: The numeric knobs' env names (``MemoirConfig`` documents them; the

@@ -26,14 +26,18 @@ Five callable tools, four families (pin/unpin are one family):
   AM-42). The timeline writes NO access stats (DD-12).
 
 THE GATE ORDER IS AUTH-FIRST (D4.2/AM-16, following the exemplar's CODE,
-not its comment):
+not its comment) and lives in ONE helper (``_gate`` — the tidier H1: the
+five bodies had drifted into three spellings of the same refusal):
 
 1. ``_is_memoir_authorized(caller_agent_id)`` — the FACTORY-CAPTURED
    ``agent_id`` (DD-13: never a caller-supplied scoping key) ⇒
    ``memoir_agent_unknown`` / ``memoir_not_authorized``;
 2. the kill-switch AT CALL TIME (D4.16 — never boot-cached) ⇒
    ``memoir_disabled`` naming the variable;
-3. argument validation (the typed field codes);
+3. argument validation (the typed field codes) — the TOOL owns only what
+   the repository/service cannot know (ISO parsing); the ``k`` bounds and
+   the timeline window ORDER are the service's and are mapped, never
+   re-derived (H3);
 4. any DB touch.
 
 An unauthorized caller therefore learns NOTHING about the knob's state.
@@ -108,7 +112,6 @@ from ..repositories.memoir.repository import (
 )
 from ..services.memoir_retrieval import (
     MEMOIR_RECALL_DEFAULT_K,
-    MEMOIR_RECALL_MAX_K,
     MemoirRecallError,
     MemoirRetrievalService,
 )
@@ -117,6 +120,20 @@ from ._tool_registry import register_tool_category
 from .memoir_knob import memoir_enabled, memoir_tool_help
 
 logger = logging.getLogger(__name__)
+
+# Size rationale (~1,170 lines, refreshed 2026-11-05): the memoir TOOL
+# surface is one module because the five tools share ONE refusal
+# vocabulary, ONE gate (``_gate``), ONE provenance read and ONE help
+# template set — the cohesion is the frozen D4.8 contract, not a
+# missing extraction. The bulk is the five Pydantic input schemas +
+# their agent-facing field prose (the description text IS the tool's
+# contract and must live beside the schema it describes) and the five
+# ``_full_doc_`` bodies; neither is delegated-worthy behaviour. The
+# behaviours themselves are thin: each body gates, validates, makes ONE
+# repository/service call, and renders. If this file grows a sixth
+# family, extract the schema/full-doc block — do NOT split the gate or
+# the vocabulary (two homes for one vocabulary is the drift class this
+# lane's V-1 fix exists to prevent).
 
 CATEGORY_DOC = """\
 The memoir store — MY durable episodic memory (first-person narrative),
@@ -163,9 +180,17 @@ MEMOIR_CODE_ACTOR_REQUIRED = "memoir_actor_required"
 MEMOIR_CODE_INVALID_ACTOR = "memoir_invalid_actor"
 MEMOIR_CODE_KEEPSAKE_CAP_REACHED = "memoir_keepsake_cap_reached"
 MEMOIR_CODE_NOT_FOUND = "memoir_not_found"
+#: RESERVED (tidier M15) — declared in the frozen set with NO live
+#: emitter: ``memoir_unpin`` on a non-keepsake is an idempotent NO-OP
+#: with a note, never a refusal (D4.9/AC5), and the budget path answers
+#: with the ranked-drop disclosure, never a budget refusal. Kept so the
+#: vocabulary stays stable for a future caller; do NOT wire a 20th code.
 MEMOIR_CODE_NOT_A_KEEPSAKE = "memoir_not_a_keepsake"
 MEMOIR_CODE_IMPORTANCE_OUT_OF_RANGE = "memoir_importance_out_of_range"
 MEMOIR_CODE_BODY_TOO_LONG = "memoir_body_too_long"
+#: RESERVED (tidier M15) — same standing as ``MEMOIR_NOT_A_KEEPSAKE``:
+#: the recall budget DROPS the tail (D2.10) and discloses it in the
+#: footer; it never refuses.
 MEMOIR_CODE_BUDGET_EXCEEDED = "memoir_budget_exceeded"
 MEMOIR_CODE_INTERNAL_ERROR = "memoir_internal_error"
 #: The five W10 field codes completing the set.
@@ -230,6 +255,7 @@ for _code in (
     MEMOIR_CODE_TITLE_TOO_LONG,
     MEMOIR_CODE_STARS_OUT_OF_BOUNDS,
     MEMOIR_CODE_INVALID_EVENT_AT,
+    MEMOIR_CODE_QUERY_REQUIRED,
 ):
     if _code not in MEMOIR_CODES:  # pragma: no cover — fails loud at import
         raise RuntimeError(
@@ -280,6 +306,66 @@ def _is_memoir_authorized(agent_id: str) -> bool:
 def _refuse(label: str, code: str, message: str) -> str:
     """The house REFUSED envelope (D4.8)."""
     return f"Error: {label} REFUSED — reason={code}: {message}"
+
+
+#: The kill-switch refusal's consequence clause — ONE template, one
+#: per-tool action noun (tidier H1). The five bodies had drifted into
+#: three spellings ("nothing was recorded" / "nothing was changed" /
+#: "the memory is unreadable while disabled"); the template keeps the
+#: wording action-specific without duplicating the sentence.
+_DISABLED_CONSEQUENCE_TEMPLATE = "nothing was {action}"
+
+
+def _gate(label: str, action: str, agent_id: str, manager: Any) -> str | None:
+    """The SHARED gates 1-2 of D4.2 — auth FIRST, then the kill-switch.
+
+    Called by ALL FIVE tool bodies (the ``_is_memoir_authorized`` habit,
+    extended): the order and the wording live HERE, once. Auth-first
+    means an unauthorized caller learns NOTHING about the knob's state
+    and touches no DB (D4.2/AM-16).
+
+    The CONFIG is read INSIDE the gate, after auth — passing an already
+    evaluated config would read the knob property at the CALL SITE and
+    invert the order the pin measures (the tools pack's ProbeManager
+    counts these reads; D4.2 is proven behaviourally).
+
+    Args:
+        label: The tool's name (the envelope's leading token).
+        action: The tool's action noun — ``recorded`` / ``changed`` /
+            ``read`` — rendered into the ONE disabled-consequence
+            template.
+        agent_id: The FACTORY-CAPTURED identity (DD-13), never a
+            caller-supplied parameter.
+        manager: The caller's manager (the knob's config tier is read
+            from it ONLY after the auth gate has passed).
+
+    Returns:
+        The REFUSED envelope when a gate denies, else ``None`` (both
+        gates passed; the body proceeds to validation and the DB).
+    """
+    if not _is_memoir_authorized(agent_id):
+        if not agent_id:
+            return _refuse(
+                label,
+                MEMOIR_CODE_AGENT_UNKNOWN,
+                "the caller's agent identity is unknown; the memoir "
+                f"store is {MEMOIR_AUTHORIZED_AGENT}-only",
+            )
+        return _refuse(
+            label,
+            MEMOIR_CODE_NOT_AUTHORIZED,
+            f"the memoir store is {MEMOIR_AUTHORIZED_AGENT}-only "
+            f"(caller: {agent_id})",
+        )
+    if not memoir_enabled(getattr(manager, "config", None)):
+        consequence = _DISABLED_CONSEQUENCE_TEMPLATE.format(action=action)
+        return _refuse(
+            label,
+            MEMOIR_CODE_DISABLED,
+            f"the memoir surface is disabled ({MEMOIR_ENABLED_ENV_VAR}"
+            f"=false); {consequence}",
+        )
+    return None
 
 
 def _memoir_repository_for(manager: Any) -> MemoirRepository | None:
@@ -361,16 +447,17 @@ def _map_recall_error(exc: MemoirRecallError, label: str) -> str:
 def _provenance_class_for(manager: Any, instance_id: str) -> str:
     """The house provenance class, surfaced beside the pin CLAIM (D4.10).
 
-    ``capture_provenance_class`` is defensive; one more swallow keeps the
-    claim's corroboration from ever killing the tool.
+    ONE home for the derivation (tidier A11/M9): delegates to
+    ``daemon/tools/provenance.py``'s ``capture_provenance_class_name``
+    (which logs before any empty return). This module keeps NO second
+    copy of the computation — the brief's literal
+    ``daemon/services/provenance.py`` path is a DEVIATION from the
+    existing surface; reusing the real module is the intent (recorded in
+    ``implementation-notes.md``).
     """
-    try:
-        from .provenance import capture_provenance_class
+    from .provenance import capture_provenance_class_name
 
-        capture = capture_provenance_class(manager, instance_id)
-        return str(capture.get("provenance_class") or "")
-    except Exception:  # noqa: BLE001 — defensive (D4.10)
-        return ""
+    return capture_provenance_class_name(manager, instance_id)
 
 
 def _parse_event_at(value: Any) -> datetime | None:
@@ -654,29 +741,10 @@ def create_memoir_tools(
         """Append one episodic memory to my memoir store. Use tool_help("memoir_write") for details."""
         label = "memoir_write"
         try:
-            # ── D4.2 gate 1: the factory-captured identity, FIRST ────
-            if not _is_memoir_authorized(caller_agent_id):
-                if not caller_agent_id:
-                    return _refuse(
-                        label,
-                        MEMOIR_CODE_AGENT_UNKNOWN,
-                        "the caller's agent identity is unknown; the memoir "
-                        f"store is {MEMOIR_AUTHORIZED_AGENT}-only",
-                    )
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_NOT_AUTHORIZED,
-                    f"the memoir store is {MEMOIR_AUTHORIZED_AGENT}-only "
-                    f"(caller: {caller_agent_id})",
-                )
-            # ── D4.2 gate 2: the kill-switch, AT CALL TIME ───────────
-            if not memoir_enabled(getattr(manager, "config", None)):
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_DISABLED,
-                    f"the memoir surface is disabled ({MEMOIR_ENABLED_ENV_VAR}"
-                    "=false); nothing was recorded",
-                )
+            # ── D4.2 gates 1-2: auth FIRST, then the kill-switch ─────
+            refusal = _gate(label, "recorded", caller_agent_id, manager)
+            if refusal is not None:
+                return refusal
             # ── D4.2 gate 3: argument validation (pre-DB) ────────────
             if not isinstance(text, str) or not text.strip():
                 return _refuse(
@@ -769,27 +837,9 @@ def create_memoir_tools(
         """Pin an existing episode as a keepsake (cap-refused, never evicted). Use tool_help("memoir_pin") for details."""
         label = "memoir_pin"
         try:
-            if not _is_memoir_authorized(caller_agent_id):
-                if not caller_agent_id:
-                    return _refuse(
-                        label,
-                        MEMOIR_CODE_AGENT_UNKNOWN,
-                        "the caller's agent identity is unknown; the memoir "
-                        f"store is {MEMOIR_AUTHORIZED_AGENT}-only",
-                    )
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_NOT_AUTHORIZED,
-                    f"the memoir store is {MEMOIR_AUTHORIZED_AGENT}-only "
-                    f"(caller: {caller_agent_id})",
-                )
-            if not memoir_enabled(getattr(manager, "config", None)):
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_DISABLED,
-                    f"the memoir surface is disabled ({MEMOIR_ENABLED_ENV_VAR}"
-                    "=false); nothing was changed",
-                )
+            refusal = _gate(label, "changed", caller_agent_id, manager)
+            if refusal is not None:
+                return refusal
             if not isinstance(id, str) or not id.strip():
                 return _refuse(
                     label,
@@ -875,27 +925,9 @@ def create_memoir_tools(
         """Unpin a keepsake — the episode itself is kept, only the pin is cleared. Use tool_help("memoir_unpin") for details."""
         label = "memoir_unpin"
         try:
-            if not _is_memoir_authorized(caller_agent_id):
-                if not caller_agent_id:
-                    return _refuse(
-                        label,
-                        MEMOIR_CODE_AGENT_UNKNOWN,
-                        "the caller's agent identity is unknown; the memoir "
-                        f"store is {MEMOIR_AUTHORIZED_AGENT}-only",
-                    )
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_NOT_AUTHORIZED,
-                    f"the memoir store is {MEMOIR_AUTHORIZED_AGENT}-only "
-                    f"(caller: {caller_agent_id})",
-                )
-            if not memoir_enabled(getattr(manager, "config", None)):
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_DISABLED,
-                    f"the memoir surface is disabled ({MEMOIR_ENABLED_ENV_VAR}"
-                    "=false); nothing was changed",
-                )
+            refusal = _gate(label, "changed", caller_agent_id, manager)
+            if refusal is not None:
+                return refusal
             if not isinstance(id, str) or not id.strip():
                 return _refuse(
                     label,
@@ -960,44 +992,12 @@ def create_memoir_tools(
         """Recall my own episodes by relevance (budgeted hybrid retrieval). Use tool_help("memoir_recall") for details."""
         label = "memoir_recall"
         try:
-            if not _is_memoir_authorized(caller_agent_id):
-                if not caller_agent_id:
-                    return _refuse(
-                        label,
-                        MEMOIR_CODE_AGENT_UNKNOWN,
-                        "the caller's agent identity is unknown; the memoir "
-                        f"store is {MEMOIR_AUTHORIZED_AGENT}-only",
-                    )
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_NOT_AUTHORIZED,
-                    f"the memoir store is {MEMOIR_AUTHORIZED_AGENT}-only "
-                    f"(caller: {caller_agent_id})",
-                )
-            if not memoir_enabled(getattr(manager, "config", None)):
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_DISABLED,
-                    f"the memoir surface is disabled ({MEMOIR_ENABLED_ENV_VAR}"
-                    "=false); the memory is unreadable while disabled",
-                )
-            # D4.2 gate 3 — the k bounds are REFUSED pre-DB, never clamped.
-            try:
-                k_value = int(k)
-            except (TypeError, ValueError):
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_K_OUT_OF_RANGE,
-                    f"k must be an integer; got {k!r}",
-                )
-            if k_value < 1 or k_value > MEMOIR_RECALL_MAX_K:
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_K_OUT_OF_RANGE,
-                    f"k must be between 1 and {MEMOIR_RECALL_MAX_K}; got "
-                    f"{k_value} (an out-of-range k is refused, never "
-                    "silently clamped)",
-                )
+            refusal = _gate(label, "read", caller_agent_id, manager)
+            if refusal is not None:
+                return refusal
+            # D4.2 gate 3 — the k bounds are the SERVICE'S (single-owned):
+            # the tool passes ``k`` through untouched and maps the
+            # service's typed refusal (the tool never re-derives a bound).
             service = _memoir_service_for(manager)
             if service is None:
                 return _refuse(
@@ -1007,7 +1007,7 @@ def create_memoir_tools(
                     "(no engine)",
                 )
             result = await asyncio.to_thread(
-                service.recall, caller_agent_id, query, k_value
+                service.recall, caller_agent_id, query, k
             )
             # The FOOTER ships VERBATIM (its bytes are pinned by wave 2's
             # budget pack — the tool never reformats it).
@@ -1042,31 +1042,13 @@ def create_memoir_tools(
         """Time-travel over my episodes by event time (writes no stats). Use tool_help("memoir_timeline") for details."""
         label = "memoir_timeline"
         try:
-            if not _is_memoir_authorized(caller_agent_id):
-                if not caller_agent_id:
-                    return _refuse(
-                        label,
-                        MEMOIR_CODE_AGENT_UNKNOWN,
-                        "the caller's agent identity is unknown; the memoir "
-                        f"store is {MEMOIR_AUTHORIZED_AGENT}-only",
-                    )
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_NOT_AUTHORIZED,
-                    f"the memoir store is {MEMOIR_AUTHORIZED_AGENT}-only "
-                    f"(caller: {caller_agent_id})",
-                )
-            if not memoir_enabled(getattr(manager, "config", None)):
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_DISABLED,
-                    f"the memoir surface is disabled ({MEMOIR_ENABLED_ENV_VAR}"
-                    "=false); the memory is unreadable while disabled",
-                )
-            # D4.2 gate 3 — the window bounds are parsed pre-DB. An
-            # unparseable bound is an event-time validation failure
-            # (memoir_invalid_event_at, naming the parameter); an
-            # inverted window is memoir_invalid_window (AM-42).
+            refusal = _gate(label, "read", caller_agent_id, manager)
+            if refusal is not None:
+                return refusal
+            # D4.2 gate 3 — the tool owns ISO PARSING (memoir_invalid_event_at
+            # names the offending parameter); the WINDOW ORDER is the
+            # SERVICE'S bound — ``timeline()`` raises ``invalid_window``
+            # and ``_map_recall_error`` maps it (one owner, no re-derivation).
             try:
                 since_dt = _parse_event_at(since)
             except MemoirWriteError as exc:
@@ -1082,16 +1064,6 @@ def create_memoir_tools(
                     label,
                     MEMOIR_CODE_INVALID_EVENT_AT,
                     f"until: {exc.message}",
-                )
-            if (
-                since_dt is not None
-                and until_dt is not None
-                and since_dt > until_dt
-            ):
-                return _refuse(
-                    label,
-                    MEMOIR_CODE_INVALID_WINDOW,
-                    "the timeline window is inverted: since is after until",
                 )
             service = _memoir_service_for(manager)
             if service is None:

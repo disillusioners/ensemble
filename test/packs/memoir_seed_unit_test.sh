@@ -23,13 +23,18 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 echo "=== Test Pack: memoir_seed_unit_test ==="
 cd "$PROJECT_DIR"
 
-PY="${MEMOIR_PACK_PYTHON:-}"
+PY=""
+if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
+  PY="$PROJECT_DIR/.venv/bin/python"
+elif [ -n "${MEMOIR_PACK_PYTHON:-}" ] && [ -x "${MEMOIR_PACK_PYTHON}" ]; then
+  PY="${MEMOIR_PACK_PYTHON}"
+fi
 if [ -z "$PY" ]; then
-  if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
-    PY="$PROJECT_DIR/.venv/bin/python"
-  else
-    PY="python3"
-  fi
+  # FAIL LOUD (the false-green class): a bare `python3` fallback can
+  # import `daemon` from the MAIN checkout, so the pack would test a
+  # tree that is not this worktree and report GREEN. Never fall back.
+  echo "RESULT: FAIL (MISSING-INTERPRETER — the worktree-local .venv/bin/python is absent)"
+  exit 1
 fi
 echo "Interpreter: $PY"
 

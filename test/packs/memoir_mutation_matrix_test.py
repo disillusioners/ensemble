@@ -419,6 +419,21 @@ def run_matrix() -> int:
         print("  (recover with --recover, or restore the tree; a dirty tree is not attributable)")
         return 1
 
+    # L16: the interpreter guard. Every leg shells out to ``PYTHON``; if
+    # the worktree has no ``.venv`` the legs would fail one by one with
+    # obscure import/exec errors (a bare ``python3`` here would import
+    # ``daemon`` from the MAIN checkout and test the wrong tree). Refuse
+    # ONCE, by name, before any leg runs.
+    if not (os.access(PYTHON, os.X_OK) and Path(PYTHON).is_file()):
+        print(
+            "RESULT: FAIL (MISSING-INTERPRETER — "
+            f"{PYTHON} is absent or not executable). The matrix measures "
+            "packs with the WORKTREE interpreter; run it from a checkout "
+            "with its own .venv (never a bare python3, which would import "
+            "the main checkout's daemon)."
+        )
+        return 1
+
     manifest = _record_manifest()
     print(f"pre-run manifest: {manifest['head_sha']} over {len(manifest['files'])} files")
 

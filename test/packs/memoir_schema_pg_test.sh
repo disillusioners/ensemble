@@ -96,7 +96,28 @@ if ! PGPASSWORD="${PG_TEST_PASSWORD}" psql \
   exit 1
 fi
 
+#: The MEASURED node count at the pin (2026-11-05, this worktree):
+#  `-lt 1` let a silently-shortened selection pass; an exact count
+#  turns "a test disappeared" into a RED instead of a quieter green
+#  (tidier M12). Re-measure and move this constant deliberately.
+EXPECTED_PASSED_N=12
+
 LOG="$(mktemp -t memoir_schema_pg.XXXXXX)"
+
+# FAIL LOUD (the false-green class): a bare `python3` fallback can
+# import `daemon` from the MAIN checkout, so a "pass" would describe a
+# tree that is not this worktree. The interpreter is resolved FIRST.
+PG_PY=""
+if [ -x "${REPO_ROOT}/.venv/bin/python" ]; then
+  PG_PY="${REPO_ROOT}/.venv/bin/python"
+elif [ -n "${MEMOIR_PACK_PYTHON:-}" ] && [ -x "${MEMOIR_PACK_PYTHON}" ]; then
+  PG_PY="${MEMOIR_PACK_PYTHON}"
+fi
+if [ -z "${PG_PY}" ]; then
+  echo "RESULT: FAIL (MISSING-INTERPRETER — the worktree-local .venv/bin/python is absent)"
+  exit 1
+fi
+echo "Interpreter: ${PG_PY}"
 
 if [ -x ".venv/bin/pytest" ]; then
   # The house path: the env-scrub wrapper (it hardcodes
@@ -114,7 +135,7 @@ else
     -u PGHOST -u PGPORT -u PGDATABASE -u PGUSER -u PGPASSWORD
     -u PGPASSFILE -u PGSSLMODE -u PGSERVICE -u PGSERVICEFILE
     -u PLANE_WORKSPACE_SLUG -u PLANE_BASE_URL
-    "${MEMOIR_PACK_PYTHON:-python3}" -m pytest)
+    "${PG_PY}" -m pytest)
 fi
 
 timeout 280s "${RUNNER[@]}" \
@@ -136,8 +157,12 @@ case "${SUMMARY}" in
   [0-9]*) PASSED_N="${SUMMARY%% *}" ;;
   *)      PASSED_N="" ;;
 esac
-if [ -z "${PASSED_N}" ] || [ "${PASSED_N}" -lt 1 ]; then
-  RESULT="FAIL (rc=${RC}, collected-count check: no \"N passed\" N>=1 in summary — collection/selection failure or a fully-skipped module; GREEN-AT-ZERO IS A FAILURE)"
+if [ -z "${PASSED_N}" ]; then
+  RESULT="FAIL (rc=${RC}, collected-count check: no \"N passed\" in summary — collection/selection failure or a fully-skipped module; GREEN-AT-ZERO IS A FAILURE)"
+  exit 1
+fi
+if [ "${PASSED_N}" -ne "${EXPECTED_PASSED_N}" ]; then
+  RESULT="FAIL (rc=${RC}, passed=${PASSED_N} != EXPECTED_PASSED_N=${EXPECTED_PASSED_N} — the node count moved without the pin moving)"
   exit 1
 fi
 if [ "${RC}" -ne 0 ]; then

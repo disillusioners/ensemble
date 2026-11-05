@@ -79,6 +79,12 @@ if [ "${MISSING}" -ne 0 ]; then
   exit 1
 fi
 
+#: The MEASURED node count at the pin (2026-11-05, this worktree):
+#  `-lt 1` let a silently-shortened selection pass; an exact count
+#  turns "a test disappeared" into a RED instead of a quieter green
+#  (tidier M12). Re-measure and move this constant deliberately.
+EXPECTED_PASSED_N=17
+
 LOG="$(mktemp -t memoir_briefing_unit_test.XXXXXX)"
 trap 'rm -f "${LOG}"' EXIT
 
@@ -97,8 +103,12 @@ case "${SUMMARY}" in
   [0-9]*) PASSED_N="${SUMMARY%% *}" ;;
   *)      PASSED_N="" ;;
 esac
-if [ -z "${PASSED_N}" ] || [ "${PASSED_N}" -lt 1 ]; then
-  echo "RESULT: FAIL (rc=${RC}, collected-count check: no \"N passed\" N>=1 in summary — GREEN-AT-ZERO IS A FAILURE)"
+if [ -z "${PASSED_N}" ]; then
+  echo "RESULT: FAIL (rc=${RC}, collected-count check: no \"N passed\" in summary — GREEN-AT-ZERO IS A FAILURE)"
+  exit 1
+fi
+if [ "${PASSED_N}" -ne "${EXPECTED_PASSED_N}" ]; then
+  echo "RESULT: FAIL (rc=${RC}, passed=${PASSED_N} != EXPECTED_PASSED_N=${EXPECTED_PASSED_N} — the node count moved without the pin moving)"
   exit 1
 fi
 if [ "${RC}" -ne 0 ]; then
