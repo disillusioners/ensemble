@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -233,30 +234,77 @@ class TestTheRegistrationWiring:
     def test_the_body_gate_is_present_in_source(self) -> None:
         """Layer 2 — the in-body runtime gate. A literal tool name in an
         allow list bypasses the category gate, so the body gate is
-        mandatory."""
+        mandatory. The tidier's Batch-A consolidation moved the gates
+        into ONE shared ``_gate`` helper: the count is now on the
+        DELEGATION call shape — every one of the five bodies must gate
+        on the factory-captured id by delegating to ``_gate``."""
         source = (REPO_ROOT / "daemon" / "tools" / "memoir.py").read_text(
             encoding="utf-8"
         )
-        # FIVE tool bodies, each gating on the factory-captured id (the
-        # docstring mention is not a call site — the count is on the
-        # call shape).
         assert (
-            source.count("if not _is_memoir_authorized(caller_agent_id):") == 5
+            source.count("refusal = _gate(label,") == 5
         ), "every one of the five bodies must gate on the captured id"
+        assert source.count("def _gate(label: str, action: str, agent_id: str, manager: Any) -> str | None:") == 1, (
+            "the shared gate helper must exist exactly once"
+        )
 
     def test_the_gate_order_is_auth_first_in_source(self) -> None:
         """The auth gate precedes the knob read, which precedes the first
-        DB touch (AM-16's order — the exemplar's CODE, not its comment)."""
+        DB touch (AM-16's order — the exemplar's CODE, not its comment).
+        Batch-A: the order AUTH-then-KNOB lives in the ONE ``_gate``
+        helper every body delegates to, and the helper itself touches no
+        DB; each body's first DB touch comes only AFTER its gate call
+        passed (``_gate`` returned ``None``)."""
         source = (REPO_ROOT / "daemon" / "tools" / "memoir.py").read_text(
             encoding="utf-8"
         )
-        auth_idx = source.index("if not _is_memoir_authorized(caller_agent_id):")
-        knob_idx = source.index("if not memoir_enabled(getattr(manager")
-        db_idx = source.index("asyncio.to_thread(")
-        assert auth_idx < knob_idx < db_idx, (
-            "the auth gate must precede the knob, which must precede the "
-            "first DB touch"
+        gate_def_idx = source.index("def _gate(")
+        helper_end_idx = source.index("\ndef ", gate_def_idx + 1)
+        helper_span = source[gate_def_idx:helper_end_idx]
+        auth_idx = helper_span.index("if not _is_memoir_authorized(")
+        knob_idx = helper_span.index("if not memoir_enabled(")
+        assert auth_idx < knob_idx, (
+            "the shared gate helper must check auth BEFORE the knob"
         )
+        assert "asyncio.to_thread(" not in helper_span, (
+            "the shared gate helper must touch no DB (an unauthorized "
+            "caller learns nothing and touches no DB)"
+        )
+        # Every delegation site must precede its body's first DB touch.
+        call_starts = [
+            match.start()
+            for match in re.finditer(r"refusal = _gate\(label,", source)
+        ]
+        assert len(call_starts) == 5, "five bodies must delegate to _gate"
+        for start in call_starts:
+            first_db_idx = source.find("asyncio.to_thread(", start)
+            assert first_db_idx != -1, (
+                "each gated body must reach the DB through asyncio.to_thread"
+            )
+            assert start < first_db_idx, (
+                "the _gate delegation must precede the body's first DB "
+                "touch (auth-first: no DB work before the gates pass)"
+            )
+            segment = source[start:first_db_idx]
+            assert segment.count("refusal = _gate(") == 1, (
+                "the FIRST DB touch after a delegation must belong to the "
+                "SAME body — a hoisted DB touch before the gate hides "
+                "behind a later body's call otherwise"
+            )
+        # A DB touch must not precede the gate WITHIN a body: from each
+        # tool decorator to its body's gate call, no DB touch may appear.
+        for match in re.finditer(
+            r"@register_tool_category\(MEMOIR_CATEGORY_KEY\)", source
+        ):
+            gate_idx = source.find("refusal = _gate(label,", match.start())
+            assert gate_idx != -1, (
+                "each decorated tool body must delegate to _gate"
+            )
+            prefix = source[match.start():gate_idx]
+            assert "asyncio.to_thread(" not in prefix, (
+                "a DB touch must not precede the body's gate call "
+                "(auth-first: an unauthorized caller touches no DB)"
+            )
 
 
 class TestTheAriOnlyAllowList:
