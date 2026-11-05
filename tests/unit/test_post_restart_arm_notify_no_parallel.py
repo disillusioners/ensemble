@@ -115,6 +115,19 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     # same fix pass (same reasoning: not a wake endpoint; registered
     # unconditionally).
     "metrics_router",       # /api/metrics
+    # nest-anomaly-report lane (2026-11-05, wi-2d691ed2): the anomaly
+    # domain REST surface (/api/nest-reports — the ops/FE read door).
+    # Added to THIS pin in the tester-gate fix cycle (B2): the lane
+    # grew the router set (37 -> 38 include sites) but never updated
+    # this census. The rationale the guard demands, for this addition:
+    #   (a) it is NOT an HTTP endpoint for the wake — it is a read
+    #       surface for anomaly reports, and it adds no wake path;
+    #   (b) it is registered UNCONDITIONALLY, so the OFF-state route
+    #       table grows by this one family — accepted for the same
+    #       reason the wedge-capture and metrics families above are.
+    # The guard's intent is UNCHANGED: an unauthorized 39th mount
+    # still fails this test loudly.
+    "nest_reports_router",  # /api/nest-reports (anomaly domain read door)
     "plane_router",         # /api/plane
     "tmp_images_router",    # /api/tmp_images
     "prompts_router",       # /api/prompts (agent-prompt-immutability Phase B T5)

@@ -604,6 +604,17 @@ class TestWebFetchBootstrapIntegration:
         # only when ``initialize()`` runs. Still, we set it to keep the mock
         # self-consistent for any test that calls ``initialize()``.
         config.persistence.maintenance_check_interval_minutes = 60
+        # ``InstanceManager.__init__`` constructs ``AnomalyService`` with
+        # ``config=self.config.nest_report`` (manager.py:1749, the
+        # nest-anomaly-report lane) — the spec'd ``Config`` mock does not
+        # auto-expose the Pydantic v2 instance field, so we wire it
+        # explicitly (same convention as service_tool above). A REAL
+        # ``NestReportConfig()`` (pure defaults, no test-specific drift):
+        # the bootstrap tests never invoke the report paths, and the real
+        # object keeps every lazily-read knob type-correct for free.
+        from daemon.config import NestReportConfig
+
+        config.nest_report = NestReportConfig()
 
         return config
 
