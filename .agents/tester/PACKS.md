@@ -1,3 +1,24 @@
+## Commission nest-anomaly-report (wi-2d691ed2) — Phase-5 / C8 duty-prompt pack REGISTERED (2026-11-05, implementation lane `feature/nest-anomaly-report`, base `1f6898ae2`)
+
+> **What this block registers.** The **C8** commit's Tier-1 pack — the ALL-AGENTS DUTY PROMPT half
+> of phase 5 (the canonical duty line in all 41 agents' own canonical-home artifact + the
+> prompt-artifact baseline re-stamp + the seal re-pins). **C8 = "P5a duty"** (AM-17's ordered
+> choreography: the duty pin and the grant pin are INDEPENDENT, so two green boundaries beat one
+> 81-file commit).
+>
+> **Keep-both:** every earlier block in this file stays as-is — it records THAT phase's packs.
+> This block is the newest, so it sits at the top (newest-first).
+>
+> **Node counts are MECHANICAL** — a per-file `--collect-only` census re-derived at this freeze,
+> never a declared number.
+>
+> **Fences.** No daemon, no live port, no live database — the pack reads the repo tree only.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `anomaly_report_duty_prompts` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/test_anomaly_report_duty_prompts.py -q --tb=line -rfE -p no:randomly --timeout=120` | **Leg C8-G1 (Tier 1).** The duty-prompt completeness walk over DIRS (never collapsed ids): the decomposition **41 = 39 walk + 2 underscore specials** is PINNED (a newly added agent dir cannot silently change the total); every one of the 41 files ends with the SAME byte-identical block (one template constant — sha256 `da18f1f9cf2ccda2c443e0edb5c76c13ec00c3368f8e284a65b61ae0091663e9`; a one-character variant fails the pin); the block is the LAST top-level section of its file; the **5 `[v2]` mirror pairs** (`approver` / `developer` / `planner` / `reviewer` / `tidier`) stay byte-identical in `rule.md`; the **forbidden-token closure** (AC-5.1 — the duty prose names ONLY the tool: no filename, path, category name, allow-list token or system-internal token); the **Cardinal count is UNCHANGED** (AC-5.2 — self-computing: the count over the file equals the count over the file minus the duty block, so the duty section adds ZERO Cardinal entries); the **seal map is 0-stale** (35 rows, each recomputed from the real bytes) and the re-pin touched EXACTLY the rows whose bytes moved (the anti-blanket-re-stamp invariant — the 19 re-pinned rows MOVED, the 15 untouched rows keep their base values verbatim, and `agents/charter/meta.json` is the C9 row the grant ceremony re-pins); and the **prompt-artifact baseline** agrees with the real bytes (161 entries, the ceremony adds NO artifact). **19 nodes.** | 2026-11-05 | ✅ registered (implementation lane, C8 freeze: 19/19 PASS) |
+| `anomaly_report_p5_duty_mutation_legs` | the legs are driven by `/tmp/mutation_legs_p5.py` (the driver lives OUTSIDE the repo — it plants ONE defect, runs the owning pack, records the RED node ids, restores the file BYTE-IDENTICALLY (sha256-verified) and re-runs to prove GREEN) | **4 legs, all RED→GREEN with a byte-identical restore: M-P5-1** (remove the duty block from `agents/giter/rule.md` ⇒ 5 RED: the byte-identity walk, the last-section leg, the Cardinal-count leg, the forbidden-token leg and the baseline-agreement leg) · **M-P5-4** (add a NEW agent dir with a `meta.json` and no duty line ⇒ 7 RED: the pinned total, the walk/specials decomposition, the byte-identity walk, the last-section leg, the Cardinal-count leg, the forbidden-token leg and the baseline-coverage leg — "adding a new agent without the guidance fails") · **M-P5-5** (perturb one byte of the sealed+edited `agents/leader/rule.md` ⇒ the SEALED TRIPWIRE REDS **and** the baseline `--check` reports `PROMPT-DRIFT-FILE: agents/leader/rule.md (modified)` — both fences are live) · **M-P5-6** (perturb `agents/planner[v2]/rule.md` ⇒ the v2 byte-sync pin REDS, with the base-pair leg and the mirror-duty leg alongside). | 2026-11-05 | ✅ PASS 4/4 RED→GREEN (every restore sha256-identical; every pack GREEN again after the restore) |
+
 ## Commission nest-anomaly-report (wi-2d691ed2) — Phase-2 / C3 packs REGISTERED (2026-11-05, implementation lane `feature/nest-anomaly-report`, base `1f6898ae2`)
 
 > **What this block registers.** The **C3** commit's four Tier-1 packs — the PHASE-2 service half
