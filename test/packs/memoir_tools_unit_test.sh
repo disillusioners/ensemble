@@ -64,7 +64,8 @@ LOG_DIR="${MEMOIR_TOOLS_LOG_DIR:-/tmp/memoir-tools-gate}"
 mkdir -p "$LOG_DIR"
 
 SCRUB=(env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT
-       -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT -u DAEMON_PORT)
+       -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT -u DAEMON_PORT \
+       -u ENSEMBLE_SELF_ENV)
 
 run_suite() {
   local label="$1"; shift
