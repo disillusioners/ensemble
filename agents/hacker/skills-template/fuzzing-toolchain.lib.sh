@@ -27,6 +27,9 @@
 #   aegis_acquire_install_lock                0 acquired / 1 contended
 #   aegis_release_install_lock                always succeeds
 #   aegis_attempt_allowed / _bump_ / _clear_  self-heal cap of 2 per session
+#   aegis_bin_answers <bin>                   0 evidence query answered / 1 refused
+#   aegis_install_all                         installs the toolchain; 0 on success
+#   aegis_reversal                            removes the installed toolchain
 #
 # Companion: fuzzing-toolchain.md (the installer skill body, same directory)
 
@@ -163,8 +166,6 @@ _aegis_clear_attempts() {
 aegis_bin_answers() {
     _aba_bin="$1"
     case "$(basename "$_aba_bin")" in
-        clang|clang++|clang-tidy)
-            "$_aba_bin" --version >/dev/null 2>&1 ;;
         afl-fuzz)
             "$_aba_bin" -h 2>&1 | grep -q "afl-fuzz" ;;
         *)

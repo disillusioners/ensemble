@@ -36,6 +36,9 @@
 #   aegis_corpus_path_ok <path> <root>        0 resolved-inside-root / 1 refused
 #   aegis_write_synthetic_corpus <path> <root> <generator>
 #                                            0 written / 1 refused (HARD_BLOCKER)
+#   aegis_bin_answers <bin>                   0 evidence query answered / 1 refused
+#   aegis_install_all                         installs the toolchain; 0 on success
+#   aegis_reversal                            removes the installed toolchain
 #
 # Companion: credential-bench.md (the installer skill body, same directory)
 
@@ -120,6 +123,7 @@ aegis_acquire_install_lock() {
         printf '%s\n' "$$" > "$_ail_lock/owner"
         return 0
     fi
+    # staleness: a lock older than the window is a crashed install — abandon it
     _ail_stale_min=$(( (AEGIS_LOCK_STALE_SECS + 59) / 60 ))
     if [ -n "$(find "$_ail_lock" -type d -mmin +"$_ail_stale_min" 2>/dev/null)" ]; then
         echo "WARN: stale install lock (older than ${AEGIS_LOCK_STALE_SECS}s) — treating as abandoned"
@@ -359,8 +363,6 @@ aegis_write_synthetic_corpus() {
 aegis_bin_answers() {
     _aba_bin="$1"
     case "$(basename "$_aba_bin")" in
-        hashcat)
-            "$_aba_bin" --version >/dev/null 2>&1 ;;
         john)
             "$_aba_bin" 2>&1 | grep -q "John the Ripper" ;;
         *)
@@ -403,6 +405,7 @@ aegis_readiness_probe() {
     _rp_cfg="$AEGIS_CONFIG_HOME/$AEGIS_LIB_CONFIG"
     [ -f "$_rp_cfg" ] || return 1
     if aegis_verify_install "$_rp_cfg"; then
+        # warm: export every recorded path for the caller
         while IFS='=' read -r _rp_k _rp_v; do
             export "$_rp_k=$_rp_v"
         done < "$_rp_cfg"

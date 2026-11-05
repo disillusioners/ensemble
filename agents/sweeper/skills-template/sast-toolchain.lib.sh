@@ -31,6 +31,9 @@
 #   aegis_canonical_output_path <path> <root> CANONICAL path on stdout / 1
 #                                            refused (diagnostics on stderr —
 #                                            stdout is the data channel)
+#   aegis_bin_answers <bin>                   0 evidence query answered / 1 refused
+#   aegis_install_all                         installs the toolchain; 0 on success
+#   aegis_reversal                            removes the installed toolchain
 #
 # Companion: sast-toolchain.md (the installer skill body, same directory)
 
@@ -123,6 +126,7 @@ aegis_acquire_install_lock() {
         printf '%s\n' "$$" > "$_ail_lock/owner"
         return 0
     fi
+    # staleness: a lock older than the window is a crashed install — abandon it
     _ail_stale_min=$(( (AEGIS_LOCK_STALE_SECS + 59) / 60 ))
     if [ -n "$(find "$_ail_lock" -type d -mmin +"$_ail_stale_min" 2>/dev/null)" ]; then
         echo "WARN: stale install lock (older than ${AEGIS_LOCK_STALE_SECS}s) — treating as abandoned"
@@ -326,14 +330,7 @@ aegis_canonical_output_path() {
 # --- Tool-specific evidence queries (existence is not evidence) -----------
 aegis_bin_answers() {
     _aba_bin="$1"
-    case "$(basename "$_aba_bin")" in
-        clang-tidy)
-            "$_aba_bin" --version >/dev/null 2>&1 ;;
-        gitleaks|semgrep|cppcheck|trivy)
-            "$_aba_bin" --version >/dev/null 2>&1 ;;
-        *)
-            "$_aba_bin" --version >/dev/null 2>&1 ;;
-    esac
+    "$_aba_bin" --version >/dev/null 2>&1
 }
 
 # --- Verify (evidence not claims — gates config promotion) ---------------
@@ -371,6 +368,7 @@ aegis_readiness_probe() {
     _rp_cfg="$AEGIS_CONFIG_HOME/$AEGIS_LIB_CONFIG"
     [ -f "$_rp_cfg" ] || return 1
     if aegis_verify_install "$_rp_cfg"; then
+        # warm: export every recorded path for the caller
         while IFS='=' read -r _rp_k _rp_v; do
             export "$_rp_k=$_rp_v"
         done < "$_rp_cfg"
