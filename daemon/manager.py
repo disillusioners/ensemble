@@ -971,6 +971,21 @@ class InstanceManager:
             ProjectSkillFile,
             ProjectSkillUsageRecord,
         )
+        # Memoir Store v1 Phase 1 (T1.3): register the 4 memoir tables
+        # BEFORE create_all so the PG boot path lands them on existing PG
+        # databases (SQLModel.metadata.create_all is the PG
+        # source-of-truth per the app_settings / resource_monitor /
+        # board / bash_spawn / PSL precedent). The SQLite path is the
+        # Phase-1 .sql file (20261105_102821_create_memoir_tables.sql).
+        # The PG-only ``tsv`` generated column is NOT a model (SQLite has
+        # no to_tsvector) — it is added by the ``_ensure_postgres_columns``
+        # ensure below.
+        from .repositories.memoir.models import (  # noqa: F401  # memoir P1: register before create_all
+            MemoirEpisode,
+            MemoirPersona,
+            MemoirPersonaVersion,
+            MemoirSynthesis,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -1030,6 +1045,46 @@ class InstanceManager:
             # database; the production readers are out of scope for
             # this batch.
             self._ensure_postgres_drop_admission_legacy()
+
+        # ── Memoir Store v1 (memoir P1) — the persona seed ────────────────
+        # Boot order (AM-11): (1) model registration → (2) create_all →
+        # (3) the migration runner → (4) _ensure_postgres_columns (the
+        # memoir tsv ALTER + GIN) → (5) the persona seed → (6) the
+        # embedding worker task starts LAST (the api.py lifespan).
+        #
+        # The seed is an INSERT into ``memoir_persona_versions``, so it
+        # CANNOT run before (2). It runs on BOTH drivers — the migration
+        # runner is SQLite-only, so a migration-carried INSERT would
+        # never seed PostgreSQL (the operative driver).
+        #
+        # The seed is KNOB-INDEPENDENT (flag #13): the kill-switch gates
+        # the SURFACES, not the substrate. It runs with the knob OFF.
+        #
+        # A SEED FAILURE NEVER ABORTS THE BOOT (D1.13 / AM-39): the
+        # persona is CONTENT, not schema. ``seed_persona_if_absent``
+        # logs ``WARNING [Memoir] persona seed failed: <exc>`` and
+        # returns None; the boot continues and the briefing renders its
+        # keepsakes-only stable zone with the "persona unavailable"
+        # prefix.
+        from .repositories.memoir.seed import seed_persona_if_absent
+
+        seed_persona_if_absent(self._engine)
+
+        # ── The memoir kill-switch line (once per boot) ───────────────────
+        # The knob's resolved state is emitted ONCE at boot so the
+        # "unset ⇒ ENABLED by default" default is never silent (D0.7 /
+        # AM-26). The VALUE is never cached here — every consumer reads
+        # the knob at CALL TIME (D0.5 / AM-27).
+        try:
+            from .tools.memoir_knob import emit_boot_state
+
+            # ``self.config`` is the daemon ``Config`` (the object that
+            # carries the ``memoir:`` section). ``self._ensemble_config``
+            # is the DATABASE-BACKEND config — a different object, and
+            # it has no ``memoir`` section.
+            emit_boot_state(getattr(self, "config", None))
+        except Exception as exc:  # noqa: BLE001 — a knob line never aborts boot
+            logger.error("[Memoir] kill-switch resolution failed: %s", exc)
 
         # ── Database Tool Category (Phase 2) ──────────────────────────────
         # ConnectionPoolManager is a shared singleton at the manager level (C3)
@@ -9551,6 +9606,46 @@ class InstanceManager:
             "CREATE INDEX IF NOT EXISTS idx_psur_instance_id ON project_skill_usage_records (instance_id)",
             "CREATE INDEX IF NOT EXISTS idx_psur_instance_feedback ON project_skill_usage_records (instance_id, feedback_applied)",
             "CREATE INDEX IF NOT EXISTS idx_psur_skill_created ON project_skill_usage_records (skill_id, created_at)",
+            # ── Memoir Store v1 (memoir P1) ──
+            # The PG-only ``tsv`` generated column + its GIN index.
+            #
+            # WHY THIS IS AN ENSURE AND NOT A MODEL: SQLite has no
+            # ``to_tsvector``, so a generated column in the SQLModel
+            # would break every SQLite boot. The four memoir TABLES are
+            # created by the model registration above (create_all); the
+            # ``tsv`` COLUMN is the one artifact the ORM cannot express,
+            # so it is added here — the house precedent for a column
+            # added to a create_all-created table
+            # (``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` at
+            # :9481-9484, ``secrets_audit.context``).
+            #
+            # THE TWO-ARGUMENT to_tsvector IS MANDATORY (D1.4 / AM-8):
+            # ``to_tsvector(regconfig, text)`` is IMMUTABLE and legal in
+            # a ``GENERATED ... STORED`` expression, while the
+            # one-argument ``to_tsvector(text)`` is STABLE and
+            # PostgreSQL REJECTS it ("generation expression is not
+            # immutable") — proven on PG 16.15 during phase 1.
+            #
+            # PLACEMENT IS AN AUDITABILITY / OWNERSHIP CHOICE ONLY —
+            # ORDER IS NOT A CONTAINMENT MEASURE (D1.5 / AM-9, overturned
+            # by the architect delta ``bc491ab54``): the ensure is ONE
+            # transaction over ONE shared statement list, executed by
+            # this method's own loop with NO per-statement try/except
+            # (the house fail-loud semantics, :8259-8265). A failure in
+            # ANY entry — the memoir statements OR an inherited lane's —
+            # rolls the whole ensure back and ABORTS THE BOOT. Placing
+            # the memoir statements last does NOT reduce the blast
+            # radius. Per-statement isolation inside the shared ensure is
+            # a HOUSE-PATTERN CHANGE, routed OUT of this lane.
+            (
+                "ALTER TABLE memoir_episodes ADD COLUMN IF NOT EXISTS tsv "
+                "tsvector GENERATED ALWAYS AS (to_tsvector('english', "
+                "coalesce(title,'') || ' ' || body)) STORED"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_memoir_episodes_tsv "
+                "ON memoir_episodes USING GIN (tsv)"
+            ),
         ]
         with self._engine.begin() as conn:
             for stmt in statements:

@@ -76,8 +76,26 @@ no plan text changes.
 | P0-4 | `MemoirConfig` reads the env tier for `enabled` in its own before-validator (`_env_tier_wins`). | The env tier must beat `config.yaml` for a kill-switch, and the precedence rule must have exactly one home (D0.4/N-2: no consumer parses the env). |
 | P0-5 | The `memoir:` yaml block IS wired into `load_config` (`config_dict["memoir"]`). | AC3 requires `config.yaml memoir.enabled:false` to be honoured when the env is absent. (House note: the `notify_user:` yaml block is NOT wired — its field is populated by the default factory only, so its yaml tier is inert. That pre-existing condition is NOT this lane's to change; the memoir section is wired deliberately.) |
 
-## 3.1 Reserved migration prefix (T0.4)
+## 3.2 Phase 1 findings (T1.1–T1.6)
 
+| # | Finding | Handling |
+|---|---|---|
+| P1-1 | **The two-argument `to_tsvector` form is PROVEN on PG 16.15** (this host): the `ALTER TABLE ... GENERATED ALWAYS AS (to_tsvector('english', coalesce(title,'') \|\| ' ' \|\| body)) STORED` form applies, populates on INSERT and is matched by `plainto_tsquery('english', ...)`. The ONE-argument form is rejected by PostgreSQL with exactly *"generation expression is not immutable"* — the AM-8 RED condition, observed rather than cited. | Both legs are pinned in `test/packs/memoir_schema_pg_test.sh` (`test_the_tsv_column_is_created_by_the_ensure_and_populates`, `test_the_one_argument_tsv_form_is_rejected_by_pg`). |
+| P1-2 | **The W8 blast-radius proof is done MECHANICALLY here, not with the frozen-binary boot drill.** The plan's AC3 folds W8 (a scratch frozen-binary boot with one deliberately invalid memoir statement) into phase 1, and adds "the same legs live in phase7 D7.6". | The phase-1 leg proves the SAME blast radius against the SHIPPED statement list (extracted from `daemon/manager.py` via `ast`, not copied): a sentinel statement from "another lane" executed FIRST in one transaction, the memoir statement failing second ⇒ the sentinel's table is ABSENT afterwards (the collateral rollback, proved rather than claimed). The frozen-binary boot drill (W8 legs (i)–(iii) with the live fence) is NOT run in this wave: it is a boot smoke, and the standing critical notes make a boot smoke the most dangerous operation on this host. **DISCLOSED as a deliberate scope reduction** — phase 7 owns the frozen-binary drill, per the plan's own "the same legs live in phase7 D7.6". |
+| P1-3 | The manager carries TWO config objects: `self.config` is the daemon `Config` (the one with the `memoir:` section) and `self._ensemble_config` is the DATABASE-BACKEND config (`daemon/ensemble_config.py` — it has `is_postgres` and no `memoir` section). | The boot-time knob line passes `self.config`. Passing the wrong object would have made the resolver's "configuration tier is unreadable" branch fire ⇒ ERROR ⇒ DISABLED — a fail-closed misfire. |
+| P1-4 | The house migration test `tests/migration/test_attestation_migration.py::test_no_boolean_int_literal_default` forbids `BOOLEAN ... DEFAULT 0` in shipped migrations (PG rejects it). | This lane's `.sql` declares `is_keepsake BOOLEAN NOT NULL DEFAULT false` and the model uses `server_default=text("false")` — the canonical spelling. The test is **BASE-RED** on this tree for four PRE-EXISTING migrations (20260915_120000, 20261025_122631, 20261025_122700, 20261031_120002) — none of them this lane's. |
+| P1-5 | `sqlalchemy` exports the float type as `REAL`, not `Real` (the model import was corrected at build time). | Recorded so a later reader does not "fix" it back. |
+| P1-6 | `tests/migration/` prints a `HARD ABORT: PG scratch fixture resolved a live-shaped database` on this host (from `test_secrets_audit_context_parity.py` — a PRE-EXISTING file). | Pre-existing / host-state, not lane-attributable. |
+| P1-7 | The house PG pack wrapper `scripts/run_tests_scrubbed.sh` hardcodes `exec .venv/bin/pytest` — and a sibling worktree has no `.venv` of its own. | The PG pack uses the wrapper when `.venv/bin/pytest` exists (the repo case) and otherwise falls back to the SAME scrub performed PER VARIABLE (`env -u POSTGRES_DB -u POSTGRES_USER …` — never the `env -u POSTGRES_*` glob form, which is a silent no-op). The pack creates and DROPS its own throwaway database and declares it through `PG_TEST_ALLOWED_DBS` (the house scratch fence, exact-name membership). |
+
+## 3.3 The persona seed's byte identity
+
+`MEMOIR_PERSONA_SEED` is byte-equal to the fenced block of `design.md` §11
+(616 bytes UTF-8 / 614 characters — the em-dash is three bytes). The pin
+extracts the block from the design document at test time and compares the
+BYTES, so a paraphrase, a re-wrap or a re-indent is a RED.
+
+## 3.1 Reserved migration prefix (T0.4)
 **`20261105_102821`** — minted at the implementation HEAD (`5dc08aca8`),
 2026-11-05T10:28:21Z. Uniqueness re-verified against the census: the
 highest existing prefix is `20261031_120002`, and the census is 119 files

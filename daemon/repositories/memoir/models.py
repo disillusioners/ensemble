@@ -1,32 +1,418 @@
-"""The four Memoir Store tables — PHASE 0 SKELETON (no behavior).
+"""The four Memoir Store tables — layer 1 (episodes), 3 (persona), 4 (syntheses).
 
-Phase 0 of the Memoir Store v1 lane (plan:
-``.agents/shared/planning/ari-memoir-store/phase0-plan.md`` T0.2 — module
-skeletons: "empty-but-importable packages/modules with docstrings stating
-the design contract refs").
+Phase 1 of the Memoir Store v1 lane (plan:
+``.agents/shared/planning/ari-memoir-store/phase1-plan.md``).
 
-PHASE 1 OWNS THE CONTENT of this module:
+Design contract refs: ``design.md`` §3 (the three storage kinds — the
+relational table is the TRUTH, the ``tsv`` column is the LEXICAL half,
+the JSONB embedding is the SEMANTIC half), §4.1 (episodes), §4.2
+(keepsakes — a STATUS on the episode row, not a table), §4.3 (the
+persona layer), §4.4 (syntheses — SCHEMA ONLY in v1, EMPTY); D1.2 (every
+string column is TEXT), D1.8 (``StarsListType``), D1.9 (the embedding
+identity columns), D1.14 (``source_episode_ids`` is ``JSONBType``),
+D1.15 (the timestamp families).
 
-* the four SQLModel tables — ``memoir_episodes`` (layer 1 + the keepsake
-  flag of layer 2), ``memoir_persona`` + ``memoir_persona_versions``
-  (layer 3), ``memoir_syntheses`` (layer 4, schema-only and EMPTY);
-* the ``StarsListType`` column adapter (``impl = JSON``,
-  ``cache_ok = True``, PG → ``ARRAY(Text())`` / SQLite → ``JSON()``,
-  identity ``process_bind_param`` / ``process_result_value`` returning a
-  Python list on BOTH drivers, nullable, never a mutable default);
-* the MODEL-bound CHECK constraints (``__table_args__ = (CheckConstraint(
-  ...),)``) — the PG tables are built by ``create_all`` FROM THE MODELS,
-  so a constraint that lives only in the ``.sql`` would not exist on PG;
-* the dual-dialect partial indexes (``sqlite_where`` /
-  ``postgresql_where``).
+Storage posture (the ``app_settings`` / ``resource_monitor`` / ``board``
+precedent):
 
-Design contract refs: ``design.md`` §3 (storage kinds), §4.1 (episodes),
-§4.2 (keepsakes), §4.3 (persona), §4.4 (syntheses); ``phase1-plan.md``
-§3 (the exact column list), D1.2/D1.4/D1.8/D1.9/D1.14/D1.15.
+* **PostgreSQL** — the schema comes from
+  ``SQLModel.metadata.create_all`` with THESE models as the canonical
+  source. The models register into the metadata via the late-import
+  block in ``daemon/manager.py`` BEFORE the ``create_all`` call, so the
+  tables arrive on existing PG databases on the next boot with zero
+  operator action.
+* **SQLite** — the companion migration
+  ``daemon/migrations/versions/20261105_102821_create_memoir_tables.sql``
+  is the canonical persistent record of the schema change (the runner is
+  SQLite-only; the PG side of the runner is a NO-OP).
 
-Phase 1 ALSO adds the PG-only ``tsv`` generated column — which is in NO
-model (it is added by the ``_ensure_postgres_columns`` ensure, because
-SQLite has no ``to_tsvector``).
+THE ``tsv`` COLUMN IS IN NO MODEL (D1.4). SQLite has no ``to_tsvector``,
+so a generated column in the model would break every SQLite boot. It is
+added by the ``_ensure_postgres_columns`` ensure as an idempotent
+``ALTER TABLE ... ADD COLUMN IF NOT EXISTS ... GENERATED ALWAYS AS
+(to_tsvector('english', coalesce(title,'') || ' ' || body)) STORED`` plus
+a GIN index. The **two-argument** ``to_tsvector`` form is mandatory: the
+one-argument form is STABLE and PostgreSQL rejects it (*"generation
+expression is not immutable"*) — proven on PG 16.15 during phase 1.
+
+MODEL-BOUND CONSTRAINTS (W2): the CHECK constraints below are bound to
+the MODELS, not only to the ``.sql`` — on PG the tables are built by
+``create_all`` FROM THE MODELS (the runner is SQLite-only, so the
+``.sql`` never runs there). SQLModel's ``Field()`` does not emit CHECK:
+without ``__table_args__`` the PG tables would carry no importance /
+pinned_by / status / source / verb constraint at all.
+
+Column families (D1.15): ``created_at`` / ``event_at`` / ``pinned_at`` /
+``last_accessed_at`` / ``updated_at`` are timezone-aware ``DATETIME``;
+``embedded_at`` / ``submitted_at`` / ``approved_at`` / ``valid_from`` /
+``valid_to`` are ISO-8601 TEXT (the PSL / critical-notes string
+convention for provenance stamps).
+
+MUTABILITY (DD-8, decision §4 row 5): the record columns (``id``,
+``agent_id``, ``title``, ``body``, ``created_at``, ``event_at``,
+``importance``, ``stars``) are written ONCE at INSERT. Every operational
+family has exactly ONE named repository writer; there is no
+general-purpose update method (phase 2 owns those writers).
 """
 
 from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    REAL,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.types import TypeDecorator
+from sqlmodel import Field, SQLModel
+
+from daemon.repositories.infra.types import JSONBType
+
+
+# ── StarsListType (D1.8 / AM-7) ────────────────────────────────────────────
+
+
+class StarsListType(TypeDecorator):
+    """A flat list of entity mentions — ``TEXT[]`` on PG, JSON on SQLite.
+
+    Contract (D1.8, architect-verified round-trip on both drivers for
+    ``["Emperor", "the Emperor"]``, ``None`` and ``[]``):
+
+    * ``impl = JSON`` and ``cache_ok = True``.
+    * ``load_dialect_impl`` → ``dialect.type_descriptor(ARRAY(Text()))``
+      on PostgreSQL (so PG renders ``TEXT[]`` — the house "never VARCHAR"
+      rule) and ``dialect.type_descriptor(JSON())`` elsewhere.
+    * ``process_bind_param`` / ``process_result_value`` are IDENTITY: they
+      return a **Python list on BOTH drivers**. A pre-serialized JSON
+      string would be re-encoded on PG (double-encoding).
+    * The column stays NULLABLE — ``None`` is not ``[]`` — and there is
+      never a mutable default.
+
+    The stars are stored FLAT and UNUSED by retrieval in v1 (DD-19): the
+    mentions are captured exactly as the writer phrased them; the v2
+    alias merge is a star-table identity problem, not a string
+    transform.
+    """
+
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Any) -> Any:
+        """Return the dialect-specific column type."""
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(ARRAY(Text()))
+        return dialect.type_descriptor(JSON())
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any:
+        """Coerce to a plain list of strings (identity, never a JSON string)."""
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        return value
+
+    def process_result_value(self, value: Any, dialect: Any) -> Any:
+        """Return a plain list of strings (identity, on BOTH drivers)."""
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        return value
+
+
+# ── The persona vocabulary (mirrored from the prompt-version lane) ────────
+
+#: The persona version lifecycle (DD-9, D1.11). MIRRORED from
+#: ``daemon/repositories/prompt_version/repository.py`` (``VALID_TRANSITIONS``)
+#: so DD-9's gate is enforced by the data and not by a convention. The
+#: house set is: ``draft -> pending_approval -> approved | rejected |
+#: draft`` and ``draft -> archived``. ``draft -> approved`` is NOT a
+#: member — the human lane is not optional.
+PERSONA_VALID_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
+    ("draft", "pending_approval"),
+    ("pending_approval", "approved"),
+    ("pending_approval", "rejected"),
+    ("pending_approval", "draft"),
+    ("draft", "archived"),
+})
+
+#: The persona version STATUS vocabulary (the CHECK constraint domain).
+PERSONA_STATUSES: frozenset[str] = frozenset({
+    "draft",
+    "pending_approval",
+    "approved",
+    "rejected",
+    "archived",
+})
+
+#: The persona version SOURCE vocabulary. ``seed`` is the day-one seed
+#: (born ``approved``, bypassing the transition vocabulary by design);
+#: ``ari`` and ``operator`` are the v2 authoring lanes.
+PERSONA_SOURCES: frozenset[str] = frozenset({"seed", "ari", "operator"})
+
+#: The synthesis VERB vocabulary (design §4.4): how a new belief relates
+#: to the prior one.
+SYNTHESIS_VERBS: frozenset[str] = frozenset({
+    "CREATE",
+    "CORROBORATE",
+    "REFINE",
+    "CORRECT",
+})
+
+#: Who may pin a keepsake (R2 — the dual governance: the user via Ari in
+#: chat, and Ari via tool).
+PIN_ACTORS: frozenset[str] = frozenset({"empress", "emperor"})
+
+
+# ── Layer 1 + 2 — memoir_episodes ─────────────────────────────────────────
+
+
+class MemoirEpisode(SQLModel, table=True):
+    """One append-only, immutable first-person narrative row.
+
+    Layer 1 of the four layers (design §4.1). Layer 2 (keepsakes) is a
+    STATUS on this row (``is_keepsake`` + the pin columns), not a table.
+
+    The write path is ONE INSERT and never blocks the turn (DD-20): the
+    ``tsv`` lexical half is DB-generated and instant, and the semantic
+    half is computed by the background worker (phase 3). An episode is
+    therefore lexically searchable the moment it is written and
+    semantically searchable when its embedding lands.
+
+    Two-axis time discipline (DD-7): ``created_at`` is the WRITE time and
+    ``event_at`` is the EVENT time (defaulting to the write time). The
+    past can be written about late, and time-travel queries run on
+    ``event_at``.
+    """
+
+    __tablename__ = "memoir_episodes"
+
+    __table_args__ = (
+        # W2 — the CHECK constraints are bound to the MODEL, because PG
+        # builds the table from the model (the .sql never runs there).
+        CheckConstraint(
+            "importance BETWEEN 1 AND 10",
+            name="ck_memoir_episodes_importance",
+        ),
+        CheckConstraint(
+            "pinned_by IS NULL OR pinned_by IN ('empress', 'emperor')",
+            name="ck_memoir_episodes_pinned_by",
+        ),
+        # 3-site index lockstep — the names AND column lists are
+        # byte-identical to the companion .sql migration.
+        Index("idx_memoir_ep_agent_event", "agent_id", "event_at"),
+        Index(
+            "idx_memoir_ep_keepsakes",
+            "agent_id",
+            "created_at",
+            sqlite_where=text("is_keepsake"),
+            postgresql_where=text("is_keepsake"),
+        ),
+        Index(
+            "idx_memoir_ep_pending_emb",
+            "agent_id",
+            sqlite_where=text("embedding IS NULL"),
+            postgresql_where=text("embedding IS NULL"),
+        ),
+    )
+
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    agent_id: str = Field(sa_column=Column(Text, nullable=False))
+    title: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    body: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    event_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    importance: int = Field(
+        default=5, sa_column=Column(Integer, nullable=False, server_default="5")
+    )
+    stars: list[str] | None = Field(
+        default=None, sa_column=Column(StarsListType, nullable=True)
+    )
+    is_keepsake: bool = Field(
+        default=False,
+        sa_column=Column(Boolean, nullable=False, server_default=text("false")),
+    )
+    pinned_by: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    pinned_reason: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    pinned_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    last_accessed_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    access_count: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default="0")
+    )
+    embedding: list[float] | None = Field(
+        default=None, sa_column=Column(JSONBType, nullable=True)
+    )
+    embedding_model: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    embedding_dims: int | None = Field(
+        default=None, sa_column=Column(Integer, nullable=True)
+    )
+    embedded_at: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    embedding_attempts: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default="0")
+    )
+    embedding_error: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    superseded_by: str | None = Field(
+        default=None,
+        sa_column=Column(Text, ForeignKey("memoir_episodes.id"), nullable=True),
+    )
+
+
+# The dynamic-zone index is DESC-ordered, which cannot be expressed with
+# the string column references ``__table_args__`` accepts — so it is
+# declared here, after the class, against the live table columns. The
+# name and the column list stay in 3-site lockstep with the .sql.
+Index(
+    "idx_memoir_ep_agent_created",
+    MemoirEpisode.__table__.c.agent_id,
+    MemoirEpisode.__table__.c.created_at.desc(),
+)
+
+
+# ── Layer 3 — memoir_persona + memoir_persona_versions ────────────────────
+
+
+class MemoirPersona(SQLModel, table=True):
+    """The pointer row: WHICH persona version is currently in force.
+
+    Layer 3 (design §4.3) is one small evolving markdown document — "who
+    we are". The document itself lives in
+    :class:`MemoirPersonaVersion`; this row is the pointer to the
+    currently-approved version, so the durable self is never overwritten
+    in place (the Hy-Memory production scar).
+    """
+
+    __tablename__ = "memoir_persona"
+
+    agent_id: str = Field(sa_column=Column(Text, primary_key=True))
+    current_version_id: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    updated_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class MemoirPersonaVersion(SQLModel, table=True):
+    """One version of the persona document (the reviewable durable self).
+
+    The transition vocabulary is mirrored from the prompt-version lane
+    (DD-9): a persona edit lands ``pending_approval`` and takes effect
+    ONLY on approval — the human lane. ``(draft, approved)`` is not a
+    member of :data:`PERSONA_VALID_TRANSITIONS`, so the gate is enforced
+    by the data.
+    """
+
+    __tablename__ = "memoir_persona_versions"
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'pending_approval', 'approved', 'rejected', "
+            "'archived')",
+            name="ck_memoir_persona_versions_status",
+        ),
+        CheckConstraint(
+            "source IN ('seed', 'ari', 'operator')",
+            name="ck_memoir_persona_versions_source",
+        ),
+        UniqueConstraint(
+            "agent_id", "version", name="uq_memoir_persona_versions_agent_version"
+        ),
+        Index("idx_memoir_persona_versions_agent", "agent_id", "version"),
+    )
+
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    agent_id: str = Field(sa_column=Column(Text, nullable=False))
+    version: int = Field(sa_column=Column(Integer, nullable=False))
+    body: str = Field(sa_column=Column(Text, nullable=False))
+    status: str = Field(sa_column=Column(Text, nullable=False))
+    source: str = Field(sa_column=Column(Text, nullable=False))
+    submitted_at: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    approved_at: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+
+
+# ── Layer 4 — memoir_syntheses (SCHEMA ONLY, EMPTY in v1) ────────────────
+
+
+class MemoirSynthesis(SQLModel, table=True):
+    """One synthesized belief — the table ships EMPTY in v1 (DD-2).
+
+    Layer 4 exists so that v2 adds a BEHAVIOR, not migration churn.
+    Nothing writes to this table in v1: the only references in the tree
+    are this model and the manager's registration import.
+    """
+
+    __tablename__ = "memoir_syntheses"
+
+    __table_args__ = (
+        CheckConstraint(
+            "verb IN ('CREATE', 'CORROBORATE', 'REFINE', 'CORRECT')",
+            name="ck_memoir_syntheses_verb",
+        ),
+        Index("idx_memoir_syntheses_agent", "agent_id", "created_at"),
+    )
+
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    agent_id: str = Field(sa_column=Column(Text, nullable=False))
+    claim: str = Field(sa_column=Column(Text, nullable=False))
+    # D1.14 / DR-6: JSONBType (JSONB on PG, JSON on SQLite). The design
+    # §4.4 sketch shows ``[]``; the typed column keeps the .sql
+    # SQLite-valid and has ZERO behavioural effect while the table is
+    # empty.
+    source_episode_ids: list[str] | None = Field(
+        default=None, sa_column=Column(JSONBType, nullable=True)
+    )
+    valid_from: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    valid_to: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    verb: str = Field(sa_column=Column(Text, nullable=False))
+    supersedes: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    superseded_by: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    confidence: float | None = Field(
+        default=None, sa_column=Column(REAL, nullable=True)
+    )
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+__all__ = [
+    "MemoirEpisode",
+    "MemoirPersona",
+    "MemoirPersonaVersion",
+    "MemoirSynthesis",
+    "PERSONA_SOURCES",
+    "PERSONA_STATUSES",
+    "PERSONA_VALID_TRANSITIONS",
+    "PIN_ACTORS",
+    "StarsListType",
+    "SYNTHESIS_VERBS",
+]
