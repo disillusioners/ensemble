@@ -152,6 +152,35 @@ The provenance sidecar's `git_dirty` is computed from `git status --porcelain`, 
 
 Running a pack against a disposable worktree resolves `import daemon` to the **MAIN** checkout: the shell CWD (`sys.path[0]=''`) wins over the editable `.pth`. A probe showed **all three** worktree venvs (lane 3.14.7, stage 3.14.7, main 3.13.15) importing `daemon` from `/home/nea/ensemble-src`. Unforced, the staged-tree pack would have silently tested the wrong tree and reported green for a tree that was never executed. Forced via `PYTHONPATH=<worktree>` + cwd, and proven by printing `daemon.__file__`.
 
+### F7 — CREDENTIAL INCIDENT: the scratch harness captured the ambient env and wrote the LIVE `OPENAI_API_KEY` to disk (contained; never reached the repo)
+
+**What happened.** The S2 boot-smoke harness wrote the **live `OPENAI_API_KEY`** (sha256 prefix `e33c34f5af4278a0` — byte-identical to `/home/nea/agents-ensemble/.env`) into four scratch files — `harness/pg.env`, `harness/boot.dryrun.sh`, `harness/boot.materialised.sh` and `daemon.log` — at **mode 644, world-readable**, for roughly 25 minutes before the prune.
+
+**Root cause.** An agent shell on this host inherits the live install's `.env` exports (`POSTGRES_DB=ensemble_prod`, `POSTGRES_HOST=10.44.0.2`, `PORT=9797`, `ENSEMBLE_SELF_ENV=live`, `ENSEMBLE_UPGRADE_LIVE=1`, the live `OPENAI_API_KEY`, `SSL_CERT_*` from the live `_MEIPASS`). Any harness step that **captures the ambient env** — an `env` dump, `export -p`, a verbose launcher log, a `PG*`-prefixed capture — persists every live credential at default permissions. This is a class, not a one-off: every staged-release boot smoke runs in a shell with the live env ambient.
+
+**Containment.** The lane redacted the value in all four files (the variable **name** was kept, so the fence evidence still shows the var was set), then pruned the scratch from **279 MB → 168 KB**.
+
+**Independent fail-closed verification** (9 needles derived from the live `.env` read-only — 8 distinct values + 3 regex classes — **each with a positive AND a negative control**; values reported only as sha256 prefixes):
+
+| surface | result |
+|---|---|
+| the 3 committed blobs @ pushed sha `a34a35eec` | **0** live-secret hits (42,294 / 1,181,288 / 10,349 B) |
+| whole-branch diff `01feee49b..a34a35eec` | **0** |
+| **all 9 objects the branch adds** (3 blobs + 1 commit + 5 trees) | **0** — no stray blob rode along |
+| 20,115 `.agents/` history blobs | **0** |
+| 705 historical `PACKS.md` versions | **0** |
+| the scratch (19 files) | **0** live hits; 6 occurrences of the **dead** throwaway PG password |
+
+**The committed RESULTS quotes only the role/db IDENTIFIERS** (`ens_smoke_v02812_ae7bc386`, `ensemble_smoke_v02812_ae7bc386`), never the password and never a `user:password@` DSN — so the evidence carries the fence semantics without the credential. (An earlier brief in this run asserted the opposite; the scan corrected the premise, not the artifact.)
+
+**Dead-credential proof done properly.** The failed connect alone proves nothing — PostgreSQL emits `password authentication failed` for a **non-existent** role too. The proof is the **catalog count on the same cluster that held it**: `pg_roles` = **0**, `pg_database` = **0** on `127.0.0.1:5432` (the scratch DSN's own target), cross-checked on the remote `10.44.0.2:5432` cluster → also 0/0.
+
+**Mode hardening applied afterwards** (chmod only, 0 bytes changed): scratch dir + `harness/` → **700**; all regular files → **600**; the two owner-executable scripts → **700** (exec preserved). 19/19 files present with **identical sizes and identical per-file sha256** before and after.
+
+**Impact: none on the repo or the pushed branch. No secret rotation is required.** The exposure window was local, mode-644, scratch-only, and closed before the commit.
+
+**Root-cause fix for the next lane (this is the durable part):** write harness env files under **`umask 077`** and **scrub the ambient env BEFORE capture** — capture a *redacted* block (variable name + value sha256 prefix) rather than the raw value. Redaction after the fact is a mitigation, not a fix.
+
 ### Host facts recorded for reuse
 
 - `systemctl --user` is **inert on this host** — `systemctl --user show ensemble-main.service -p MainPID` returns EMPTY ("Failed to connect to bus: No medium found"); the unit is SYSTEM-level. Using `--user` makes the MainPID/NRestarts/ActiveEnterTimestamp fence legs **VACUOUS** (empty compares equal to empty). Use plain `systemctl` and assert the MainPID is non-empty and numeric.
@@ -278,6 +307,9 @@ The ambient poison (`POSTGRES_DB=ensemble_prod`, `POSTGRES_HOST=10.44.0.2`, `POR
 - **Skill defects filed** (`skill_fix`): `staged-release-artifact-verification` (a2220107) — the live-fence systemd form (`--user` is inert ⇒ vacuous fence) and the manifest subtree-relative key convention; `staged-release-verification-method-traps` (3b7a21df, created by the S1 lane during this run) — add the manifest key convention and the systemd-fence traps as further traps. **NOTE: the skill-evolution admission lane is DISABLED (`ENSEMBLE_SKILL_EVOLUTION_ENABLED` off) — both requests are RECORDED in the skill store with NO keeper job dispatched.** They will not self-apply; a keeper must pick them up when the lane is re-enabled.
 - **New skill created by the S1 lane**: `staged-release-verification-method-traps` (3b7a21df) — tree-hash sort key, prompt-baseline `--tree` default, `.sql` census path-prefix + 15-char uniqueness key.
 - **New skill created by the evidence-branch lane**: `prepare-tester-evidence-branch-and-worktree` (439d01c1).
+- **Harness env-capture (F7) — routed to the next staged-boot-smoke lane**: any scratch harness that captures the ambient env MUST write it under `umask 077` and scrub BEFORE capture; capture a redacted block (name + value sha256 prefix) rather than the raw value. Redaction-after is a mitigation, not a fix.
+- **Secret-scan harness false-CLEAN traps (found in this run's scan) — carried**: (a) `grep … | head -1` under `set -o pipefail` → SIGPIPE 141 → **empty needle**, nondeterministically (3 keys resolved, the 4th empty in one run) — use `grep -m1`; (b) `IFS='=' read -r k v` **silently truncates a trailing `=`** (44-byte key came out 43) and a 1-byte-short needle can NEVER match — use `${line#*=}`; (c) `set -euo pipefail` + a `grep` that legitimately finds nothing kills a loop mid-way — add `|| true`. **Every needle needs a positive AND a negative control; a control-less scan is vacuous, not clean.**
+- **Dead-credential proof discipline**: a failed `psql` connect proves nothing (PostgreSQL reports `password authentication failed` for a non-existent role too) — the proof is the **`pg_roles`/`pg_database` catalog count = 0 on the SAME cluster** that held the credential (the live `.env` may point at a different one).
 - **R1** stale `SEALED_SHA_BASELINES` map (4 entries) → release/seal lane re-pin (base-proven; **this lane touched zero sealed files**).
 - **R2** charter + developer prompt-surface debt + param-id instability → prompt-debt lane.
 - **R3** `daemon/persistence.py:326` logs the file-config DSN while the effective DSN is env-first — never trust that line as a prod-contact signal → mechanical-file lane.

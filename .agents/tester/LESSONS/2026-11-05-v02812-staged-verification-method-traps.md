@@ -85,6 +85,34 @@ Companion: `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` must be **pinned explicitl
 
 ---
 
+## 9. A scratch harness that captures the ambient env writes the LIVE secrets to disk
+
+**What happened (2026-11-05, v0.28.12 S2 boot smoke).** The harness files `harness/pg.env`, `harness/boot.dryrun.sh`, `harness/boot.materialised.sh` and the scratch `daemon.log` each carried the **live `OPENAI_API_KEY`** (sha256 prefix `e33c34f5af4278a0` — byte-identical to `/home/nea/agents-ensemble/.env`) at **mode 644, world-readable**, for ~25 minutes before the prune.
+
+**Root cause.** An agent shell on this host inherits the live install's `.env` exports — `POSTGRES_DB=ensemble_prod`, `POSTGRES_HOST=10.44.0.2`, `PORT=9797`, `ENSEMBLE_SELF_ENV=live`, `ENSEMBLE_UPGRADE_LIVE=1`, the live `OPENAI_API_KEY`, `SSL_CERT_*` from the live `_MEIPASS`. Any harness step that captures the ambient env — an `env` dump, `export -p`, a verbose launcher log, a `PG*`-prefixed capture — persists **every** live credential at default permissions. This is a CLASS, not a one-off: every staged-release boot smoke runs in a shell with the live env ambient.
+
+**Containment + verification.**
+- Redact the value in place; **keep the variable NAME** so the fence evidence still shows the var was set.
+- Prune the scratch (279 MB → 168 KB) once the log is no longer needed.
+- **Independent fail-closed scan** (9 needles derived from the live `.env` read-only, values reported only as sha256 prefixes): the 3 committed blobs, the whole branch diff, **all 9 objects the branch adds**, and 20,115 `.agents/` history blobs → **0** live hits. The committed evidence quoted only role/db **identifiers**, never the password.
+- Harden the retained scratch afterwards: dirs → **700**, regular files → **600**, owner-executable scripts → **700** (exec preserved). Verify **19/19 files present with identical sizes AND identical per-file sha256** — chmod is metadata-only, so any content delta is a bug.
+
+**Root-cause fix for the next lane (the durable part).** Write harness env files under **`umask 077`**, and **scrub the ambient env BEFORE capture** — capture a *redacted* block (variable name + value sha256 prefix) rather than the raw value. Redaction after the fact is a **mitigation, not a fix**.
+
+## 10. Secret-scan harness traps that produce a FALSE CLEAN
+
+Found in this run's own scan harness — both would have reported "clean" while scanning for nothing.
+
+1. **`grep … | head -1` under `set -o pipefail`** — head exits first, grep dies with SIGPIPE (141), the pipeline status is non-zero, and a fallback that swallows the error yields an **EMPTY needle**. This is **nondeterministic across needles** — in one run 3 keys resolved correctly and the 4th came out empty. Use `grep -m1` (one process, no pipeline) or drop `pipefail`.
+2. **`IFS='=' read -r k v` silently truncates a trailing `=`** — `SYSTEM_ENCRYPTION_KEY` came out **43 bytes against a true 44**. A 1-byte-short needle can **never** match, which is a false CLEAN by construction. Use pure parameter expansion `${line#*=}`.
+3. **`set -euo pipefail` + a `grep` that legitimately finds nothing** kills a loop mid-way — add `|| true`.
+
+**Rule: a secret scan WITHOUT a positive control is VACUOUS, not clean.** Every needle needs a positive control (prove the method finds it in its known source) AND a negative control (prove it does not fire on a benign string). Derive needles from the authoritative source, never from memory; report values only as sha256 prefixes.
+
+**Dead-credential proof discipline.** A failed `psql` connect proves **nothing** — PostgreSQL emits `password authentication failed` for a **non-existent** role too. The proof is the **catalog count on the SAME cluster** that held the credential: `SELECT count(*) FROM pg_roles WHERE rolname='<role>'` and the same for `pg_database` → expect 0 and 0. The live `.env` may point at a **different** cluster than the throwaway did — check the one the credential was actually issued against.
+
+---
+
 ## Skill routing
 
 | Skill | Verdict | Note |
