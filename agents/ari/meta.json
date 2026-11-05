@@ -41,7 +41,8 @@
       "board-link",
       "mcp_rpc",
       "wedge-capture",
-      "notify-user"
+      "notify-user",
+      "memoir"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

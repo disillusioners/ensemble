@@ -453,6 +453,12 @@ class TestPrivilegedCategoryRegistryShape:
         # access path, and every tool body ALSO carries its own
         # agent_id gate.
         "metrics-read",
+        # memoir (2026-11-05, memoir-store-v1 lane): the ``memoir``
+        # category — ari's durable episodic memory + keepsake
+        # governance. opt-in-only (PRIVILEGED entry #18); the ari
+        # allow entry is the only access path, and every tool body
+        # ALSO carries its own factory-captured agent_id gate.
+        "memoir",
 })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

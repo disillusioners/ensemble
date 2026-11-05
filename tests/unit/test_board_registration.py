@@ -109,6 +109,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # access path, and every tool body ALSO carries its own
 # agent_id gate.
 "metrics-read",
+    # memoir (2026-11-05, memoir-store-v1 lane): the ``memoir``
+    # category — ari's durable episodic memory + keepsake governance.
+    # opt-in-only (PRIVILEGED entry #18); the ari allow entry is the
+    # only access path, and every tool body ALSO carries its own
+    # factory-captured agent_id gate.
+    "memoir",
 })
 
 #: The ONLY agent allowed to hold the board category.
@@ -219,7 +225,7 @@ class TestPrivilegedCategory:
         "ninth entry" is a property of the SET SIZE at the time of the
         phase-1 commit and of the registry's literal order afterwards;
         the comment block in the registry records the ordinal."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")
@@ -272,6 +278,10 @@ class TestAllowLists:
         appended AFTER the board may follow it) is unchanged; the SET
         grew by one entry.
 
+        The memoir-store lane (2026-11-05) appended ``memoir`` at the END
+        of ari's array — the trailing set grew by one entry again, and
+        the INTENT is unchanged.
+
         NOTE (user ruling 2026-10-20): the board categories are
         ARI-ONLY, so leader's array no longer carries ``board`` (nor
         ``board-link``) at all — the trailing discipline is asserted
@@ -282,7 +292,10 @@ class TestAllowLists:
             # "wedge-capture" — the SAME-PR trailing discipline (only
             # categories appended after the board may follow it) holds;
             # the set grew by one entry again.
-            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user"],
+            # memoir (2026-11-05): "memoir" appended after "notify-user"
+            # — the SAME-PR trailing discipline holds; the set grew by
+            # one entry again.
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "memoir"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)

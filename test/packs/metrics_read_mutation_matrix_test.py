@@ -89,8 +89,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
     (
         "MT-01-count-pin",
         "tests/unit/test_board_registration.py",
+        "assert len(PRIVILEGED_TOOL_CATEGORIES) == 18",
         "assert len(PRIVILEGED_TOOL_CATEGORIES) == 17",
-        "assert len(PRIVILEGED_TOOL_CATEGORIES) == 16",
         "tests/unit/test_board_registration.py",
         "test_board_is_the_ninth_entry",
     ),

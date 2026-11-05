@@ -280,6 +280,18 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "metrics_families",
     "metrics_snapshot",
     "metrics_history",
+    # memoir (2026-11-05, memoir-store-v1 lane): the five memoir tools —
+    # created by the create_memoir_tools() factory
+    # (daemon/tools/memoir.py). Factory-built (not import-time
+    # registered), so they belong in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #18) — opt-in
+    # only, never default-granted; the ari-only runtime gate lives in
+    # the tool bodies (DD-13 — the factory-captured agent id).
+    "memoir_write",
+    "memoir_pin",
+    "memoir_unpin",
+    "memoir_recall",
+    "memoir_timeline",
 })
 
 
@@ -322,14 +334,19 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # the W4 leader decision, reviewer council 2026-10-02).
 #
 # SAME-PR RULE (D18/A14): the set is pinned by exact-equality asserts at
-# TEN sites — five inline ``frozenset({...})`` literals + five
-# ``EXPECTED_PRIVILEGED_SET`` constants — plus a
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at FIVE
-# phase-local pins — plus ONE allow-array TRAILING-ENTRY pin (the
-# ``tools.allow`` ARRAY-ORDER discipline: only the categories appended
-# after the board may follow it — the board registration pin) —
-# SIXTEEN assertion sites across TEN files
-# (re-grepped on tip 9098df432; ari-voice lane). Adding or
+# FIVE sites — five inline ``frozenset({...})`` literals — plus
+# ``EXPECTED_PRIVILEGED_SET`` definition literals at SIX phase-local pins
+# (the comparison asserts that consume them need no edit — the
+# definitions do) — plus a ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count
+# assertion at SIX phase-local pins — plus ONE allow-array TRAILING-ENTRY
+# pin (the ``tools.allow`` ARRAY-ORDER discipline: only the categories
+# appended after the board may follow it — the board registration pin) —
+# EIGHTEEN EDIT sites across ELEVEN files
+# (re-grepped on the memoir lane's ceremony commit, 2026-11-05; the
+# memoir-store lane corrected this census — the previous "SIXTEEN
+# assertion sites across TEN files" claim omitted
+# ``tests/unit/test_metrics_read_registration.py`` and undercounted the
+# count pins and definition literals). Adding or
 # removing a category REQUIRES updating ALL of them in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
 # ``tests/unit/tools/test_attestation_registration.py``,
@@ -350,9 +367,11 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # ``tests/unit/test_wedge_capture_registration.py`` (the wedge-capture
 # pin — added 2026-10-22; exact-set AND count) and
 # ``tests/unit/test_notify_user_registration.py`` (the ari-voice pin —
-# added 2026-10-25; exact-set AND count). The five phase-local
+# added 2026-10-25; exact-set AND count) and
+# ``tests/unit/test_metrics_read_registration.py`` (the metrics pin —
+# added 2026-11-03; exact-set AND count). The six phase-local
 # pins ALSO carry a ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count
-# assertion (16 as of the notify-user entry).
+# assertion (18 as of the memoir entry).
 #
 # DERIVE THE PIN SET BY GREPPING THE TREE — do NOT trust this prose:
 #   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py
@@ -619,11 +638,13 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # list bypasses the category gate, so the tool body ALSO carries
     # an ``agent_id == "ari"`` runtime gate. Both gates are required;
     # neither substitutes for the other.
-    # SAME-PR pin updates at the TEN files carrying the SIXTEEN
-    # assertion sites (10 exact-set + 5 count + 1 allow-array
-    # trailing-entry pin — re-grepped on tip 9098df432, ari-voice lane)
-    # are mandatory (this entry ships in the SAME commit as those bumps
-    # — the set must never be red between two commits).
+    # SAME-PR pin updates at the ELEVEN files carrying the EIGHTEEN
+    # assertion sites (5 exact-set + 6 EXPECTED_PRIVILEGED_SET
+    # definitions + 6 count + 1 allow-array trailing-entry pin —
+    # re-derived by grep at the memoir ceremony, 2026-11-05; the
+    # memoir-store lane corrected this census) are mandatory (this entry
+    # ships in the SAME commit as those bumps — the set must never be red
+    # between two commits).
     "notify-user",
     # metrics-read (2026-11-03, metrics-agent-tools lane): the THREE
     # read-only metric-registry tools — created by the
@@ -643,11 +664,34 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # trend ring) the HTTP query door serves from — one provider, one
     # ring, one truth.
     #
-    # SAME-PR pin updates at the TEN files carrying the SIXTEEN assertion
-    # sites (10 exact-set + 5 count + 1 allow-array trailing-entry pin)
-    # are mandatory (this entry ships in the SAME commit as those bumps
-    # — the set must never be red between two commits).
+    # SAME-PR pin updates at the ELEVEN files carrying the EIGHTEEN
+    # assertion sites (5 exact-set + 6 EXPECTED_PRIVILEGED_SET
+    # definitions + 6 count + 1 allow-array trailing-entry pin —
+    # re-derived by grep at the memoir ceremony, 2026-11-05; the
+    # memoir-store lane corrected this census) are mandatory (this entry
+    # ships in the SAME commit as those bumps — the set must never be red
+    # between two commits).
     "metrics-read",
+    # memoir (2026-11-05, memoir-store-v1 lane): ari's durable episodic
+    # memory + keepsake governance — the FIVE tools of design §5.4,
+    # created by the create_memoir_tools() factory
+    # (daemon/tools/memoir.py). PRIVILEGED entry #18 of
+    # PRIVILEGED_TOOL_CATEGORIES (17 -> 18): the empty-allow inherit
+    # universe must NOT auto-grant authority over ari's durable
+    # first-person narrative (append-only, never hard-deleted). Explicit
+    # ``tools.allow: ["memoir"]`` on ari is the only access path —
+    # ARI-EXACTLY (R2), and every tool body ALSO carries its own
+    # factory-captured agent_id gate (DD-13 — the layer prompt content
+    # cannot bend; a LITERAL tool name in an allow list bypasses the
+    # category gate outright). The kill-switch
+    # (``ENSEMBLE_MEMOIR_ENABLED``) is fail-closed on indeterminate
+    # values (DR-3) and is read AT CALL TIME (D4.16), behind the auth
+    # gate (AM-16's auth-first order — an unauthorized caller learns
+    # nothing about the knob's state). The write path performs exactly
+    # ONE insert (AM-12/D4.11 — the embedder is reachable only from the
+    # worker module); keepsakes are capped (12 pins / a 4,000-token
+    # zone) and NEVER evicted (DD-3).
+    "memoir",
 })
 
 
@@ -1123,6 +1167,20 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # (``metrics_*``) — the house pattern (``self-alarm`` →
     # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
     "metrics-read": "daemon.tools.metrics_read",
+    # memoir (2026-11-05, memoir-store-v1 lane): ari's durable episodic
+    # memory + keepsake governance. PRIVILEGED category (entry #18 of
+    # PRIVILEGED_TOOL_CATEGORIES): ari's durable first-person narrative
+    # must never reach the empty-allow inherit universe.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot. The category key is the
+    # exact tool-family word ``memoir`` (D4.1 — never "memoir-store" /
+    # "ari-memoir"); the tool names are snake_case
+    # (``memoir_write``/``memoir_pin``/``memoir_unpin``/
+    # ``memoir_recall``/``memoir_timeline``).
+    "memoir": "daemon.tools.memoir",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1627,6 +1685,18 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "metrics_families",
     "metrics_snapshot",
     "metrics_history",
+    # memoir (2026-11-05, memoir-store-v1 lane): the five memoir tools —
+    # created by the create_memoir_tools() factory
+    # (daemon/tools/memoir.py). Factory-built (not import-time
+    # registered), so they belong in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #18) — opt-in
+    # only, never default-granted; the ari-only runtime gate lives in
+    # the tool bodies.
+    "memoir_write",
+    "memoir_pin",
+    "memoir_unpin",
+    "memoir_recall",
+    "memoir_timeline",
     "terminate_instance",
     "time",
     "todo_clear",

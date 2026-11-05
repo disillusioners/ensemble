@@ -1,0 +1,348 @@
+"""Registration + allow-list proof for the ``memoir`` category
+(memoir-store-v1 lane, 2026-11-05 — the phase-4 ceremony).
+
+The three-step registration seam (decorator + registry entries +
+construction) is proven END-TO-END here, in the notify-user shape:
+
+* (a) the AST discovery finds the five memoir tools in the category
+  module;
+* (b) the category is in ``PRIVILEGED_TOOL_CATEGORIES``;
+* (c) the frozenset LENGTH is 18 (memoir joined 2026-11-05 as the
+  eighteenth member);
+* (d) the set is EXACTLY the eighteen entries — and the expected set is
+  DERIVED BY GREP AT TEST TIME (the registry's own literal, cross-checked
+  against every pin file's literal), never hardcoded from prose;
+* (e) ``CATEGORY_MODULES["memoir"]`` resolves to a ``daemon.tools.*``
+  path (the AST scanner resolves the value as
+  ``daemon/tools/<parts[2:]>.py`` — a ``daemon.services.*`` value is
+  never discovered and the drift pin fails at boot);
+* (f) ``DYNAMIC_TOOL_NAMES`` + ``KNOWN_TOOL_NAMES`` carry the five
+  tool names (factory-built, not import-time registered);
+* (g) the ``create_instance_tools`` extend is greppable in source AND
+  precedes ``create_help_tool`` / ``scan_tools_for_full_docs`` /
+  ``_apply_tool_filter`` (decorator-only registration is SILENTLY
+  INVISIBLE — a late extend bypasses the privileged strip);
+* (h) the ari-ONLY census: ``memoir`` appears in
+  ``agents/ari/meta.json`` and NOWHERE ELSE across every
+  ``agents/*/meta.json``;
+* (i) the in-body runtime gate exists in source (layer 2 — a literal
+  tool name in an allow list bypasses the category gate);
+* (j) the decorator order is load-bearing and pinned:
+  ``@register_tool_category`` ABOVE ``@tool``.
+
+THE CEREMONY SELF-VERIFICATION (the pin that outlives the ceremony):
+every count pin says 18; every exact-set literal (the registry's own +
+every pin file's) carries the SAME eighteen members; the ari allow array
+ENDS with ``"memoir"``; and the standing mutation instrument's MT-01
+literals are LOCKSTEPPED (find 18 / replace 17 — never 18/18, which
+would make the mutation vacuous).
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+from daemon.tools._tool_registry import (
+    CATEGORY_MODULES,
+    DYNAMIC_TOOL_NAMES,
+    KNOWN_TOOL_NAMES,
+    PRIVILEGED_TOOL_CATEGORIES,
+)
+
+CATEGORY = "memoir"
+MODULE = "daemon.tools.memoir"
+TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "memoir_write",
+        "memoir_pin",
+        "memoir_unpin",
+        "memoir_recall",
+        "memoir_timeline",
+    }
+)
+
+#: The pin files the ceremony grep found (the SET is derived at test time
+#: from the greps below — this list is the fixture the greps are run
+#: against, not a census claim).
+COUNT_PIN_FILES: tuple[str, ...] = (
+    "tests/unit/test_board_registration.py",
+    "tests/unit/test_wedge_capture_registration.py",
+    "tests/unit/test_self_alarm_registration.py",
+    "tests/unit/test_notify_user_registration.py",
+    "tests/unit/test_metrics_read_registration.py",
+    "tests/unit/test_instance_ops_registration.py",
+)
+EXPECTED_SET_FILES: tuple[str, ...] = (
+    "tests/unit/test_board_registration.py",
+    "tests/unit/test_wedge_capture_registration.py",
+    "tests/unit/test_self_alarm_registration.py",
+    "tests/unit/test_notify_user_registration.py",
+    "tests/unit/test_metrics_read_registration.py",
+    "tests/unit/test_instance_ops_registration.py",
+)
+EXACT_SET_FILES: tuple[str, ...] = (
+    "tests/integration/test_service_tool_flag_off_byte_identical.py",
+    "tests/integration/test_maintenancer_spawn_resolves_tools.py",
+    "tests/unit/tools/test_secrets_registration.py",
+    "tests/unit/tools/test_upgrade_registration.py",
+    "tests/unit/tools/test_attestation_registration.py",
+)
+MT01_FILE = "test/packs/metrics_read_mutation_matrix_test.py"
+
+
+def _frozenset_literals(path: Path) -> list[frozenset[str]]:
+    """Every ``frozenset({...})`` literal in a file (AST-extracted).
+
+    The members are read from the SOURCE, never from prose — the pin
+    compares what the files ACTUALLY assert.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: list[frozenset[str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "frozenset"):
+            continue
+        if len(node.args) != 1:
+            continue
+        arg = node.args[0]
+        if not isinstance(arg, (ast.Set, ast.List, ast.Tuple)):
+            continue
+        members = {
+            element.value
+            for element in arg.elts
+            if isinstance(element, ast.Constant) and isinstance(element.value, str)
+        }
+        # The PRIVILEGED-CATEGORY literal, not the tool-NAME sets: the
+        # category members carry the category spellings (system-log /
+        # ens-db / ens-env), the tool-name sets carry the tool names
+        # (ens_system_log_*).
+        if {"system_upgrade", "system-log", "ens-db", "ens-env"} <= members:
+            found.append(frozenset(members))
+    return found
+
+
+def _registry_literal_members() -> frozenset[str]:
+    """The registry's own ``PRIVILEGED_TOOL_CATEGORIES`` literal (AST)."""
+    literals = _frozenset_literals(REPO_ROOT / "daemon" / "tools" / "_tool_registry.py")
+    assert literals, "the registry's privileged-set literal was not found"
+    # The registry holds exactly ONE privileged literal (the DYNAMIC /
+    # KNOWN name sets carry no category members).
+    assert len(literals) == 1, f"unexpected privileged literals: {literals}"
+    return literals[0]
+
+
+class TestTheCategory:
+    def test_the_category_is_privileged(self) -> None:
+        assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
+
+    def test_the_set_has_eighteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
+
+    def test_the_derived_set_is_exactly_the_eighteen_entries(self) -> None:
+        """The expected set is DERIVED (the registry's own literal), never
+        hardcoded from a prose census."""
+        derived = _registry_literal_members()
+        assert len(derived) == 18, sorted(derived)
+        assert CATEGORY in derived
+        assert PRIVILEGED_TOOL_CATEGORIES == derived
+
+    def test_the_memoir_entry_is_the_last_one_in_the_literal(self) -> None:
+        """The registry's literal appends the new entry at the END (the
+        house convention — the set is a frozen literal, not a set)."""
+        source = (REPO_ROOT / "daemon" / "tools" / "_tool_registry.py").read_text(
+            encoding="utf-8"
+        )
+        block = source.split("PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({", 1)[
+            1
+        ]
+        literal = block.split("\n})", 1)[0]
+        entries = [
+            line.strip().strip(",").strip('"')
+            for line in literal.splitlines()
+            if line.strip().startswith('"')
+        ]
+        assert entries[-1] == CATEGORY, entries[-4:]
+
+    def test_the_category_module_resolves_to_a_daemon_tools_path(self) -> None:
+        assert CATEGORY_MODULES.get(CATEGORY) == MODULE
+        assert MODULE.startswith("daemon.tools.")
+
+    def test_the_five_tool_names_are_known(self) -> None:
+        for name in TOOL_NAMES:
+            assert name in DYNAMIC_TOOL_NAMES, name
+            assert name in KNOWN_TOOL_NAMES, name
+
+    def test_the_module_imports_cleanly_and_carries_the_five_tools(self) -> None:
+        from daemon.tools.memoir import (
+            MEMOIR_CATEGORY_KEY,
+            MEMOIR_TOOL_NAMES,
+            create_memoir_tools,
+        )
+
+        assert MEMOIR_CATEGORY_KEY == CATEGORY
+        assert MEMOIR_TOOL_NAMES == TOOL_NAMES
+        built = create_memoir_tools(None, agent_id="ari")
+        assert {tool.name for tool in built} == set(TOOL_NAMES)
+
+
+class TestTheRegistrationWiring:
+    def test_the_extend_precedes_the_help_scan_and_filter(self) -> None:
+        source = (REPO_ROOT / "daemon" / "tools" / "instance.py").read_text(
+            encoding="utf-8"
+        )
+        extend_idx = source.index("create_memoir_tools(")
+        help_idx = source.index("create_help_tool(tools")
+        scan_idx = source.index("scan_tools_for_full_docs(tools)")
+        filter_idx = source.index("_apply_tool_filter(tools, agent_id")
+        assert extend_idx < help_idx, "extend must precede create_help_tool"
+        assert extend_idx < scan_idx, (
+            "extend must precede scan_tools_for_full_docs"
+        )
+        assert extend_idx < filter_idx, (
+            "extend must precede _apply_tool_filter"
+        )
+
+    def test_the_module_import_sits_with_the_other_factories(self) -> None:
+        source = (REPO_ROOT / "daemon" / "tools" / "instance.py").read_text(
+            encoding="utf-8"
+        )
+        assert "from .memoir import create_memoir_tools" in source
+
+    def test_the_decorator_order_is_load_bearing(self) -> None:
+        source = (REPO_ROOT / "daemon" / "tools" / "memoir.py").read_text(
+            encoding="utf-8"
+        )
+        assert source.count("@register_tool_category(MEMOIR_CATEGORY_KEY)") == 5
+        for schema in (
+            "MemoirWriteInput",
+            "MemoirPinInput",
+            "MemoirUnpinInput",
+            "MemoirRecallInput",
+            "MemoirTimelineInput",
+        ):
+            dec_idx = source.index("@register_tool_category(MEMOIR_CATEGORY_KEY)")
+            tool_idx = source.index(f"@tool(args_schema={schema})")
+            assert dec_idx < tool_idx, f"{schema}: decorator order inverted"
+
+    def test_the_body_gate_is_present_in_source(self) -> None:
+        """Layer 2 — the in-body runtime gate. A literal tool name in an
+        allow list bypasses the category gate, so the body gate is
+        mandatory."""
+        source = (REPO_ROOT / "daemon" / "tools" / "memoir.py").read_text(
+            encoding="utf-8"
+        )
+        # FIVE tool bodies, each gating on the factory-captured id (the
+        # docstring mention is not a call site — the count is on the
+        # call shape).
+        assert (
+            source.count("if not _is_memoir_authorized(caller_agent_id):") == 5
+        ), "every one of the five bodies must gate on the captured id"
+
+    def test_the_gate_order_is_auth_first_in_source(self) -> None:
+        """The auth gate precedes the knob read, which precedes the first
+        DB touch (AM-16's order — the exemplar's CODE, not its comment)."""
+        source = (REPO_ROOT / "daemon" / "tools" / "memoir.py").read_text(
+            encoding="utf-8"
+        )
+        auth_idx = source.index("if not _is_memoir_authorized(caller_agent_id):")
+        knob_idx = source.index("if not memoir_enabled(getattr(manager")
+        db_idx = source.index("asyncio.to_thread(")
+        assert auth_idx < knob_idx < db_idx, (
+            "the auth gate must precede the knob, which must precede the "
+            "first DB touch"
+        )
+
+
+class TestTheAriOnlyAllowList:
+    def test_ari_meta_carries_the_category_key(self) -> None:
+        meta = json.loads(
+            (REPO_ROOT / "agents" / "ari" / "meta.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        allow = meta.get("tools", {}).get("allow", []) or []
+        assert CATEGORY in allow
+        assert allow[-1] == CATEGORY, (
+            "the memoir entry must be the LAST entry of ari's allow array "
+            "(the trailing-entry discipline)"
+        )
+
+    def test_no_other_agent_carries_the_category(self) -> None:
+        offenders: list[str] = []
+        for meta_path in sorted((REPO_ROOT / "agents").glob("*/meta.json")):
+            if meta_path.parent.name == "ari":
+                continue
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            allow = meta.get("tools", {}).get("allow", []) or []
+            if CATEGORY in allow:
+                offenders.append(str(meta_path.relative_to(REPO_ROOT)))
+        assert offenders == [], (
+            f"the memoir category is ARI-ONLY; found in: {offenders}"
+        )
+
+    def test_the_trailing_set_pin_carries_memoir_last(self) -> None:
+        """The board's trailing-entry pin — the SET the ceremony bumped."""
+        source = (REPO_ROOT / "tests/unit/test_board_registration.py").read_text(
+            encoding="utf-8"
+        )
+        assert '"notify-user", "memoir"' in source
+
+
+class TestTheCeremonySelfVerification:
+    """The pins outlive the ceremony: every count pin says 18, every
+    exact-set literal agrees with the registry's own, and the standing
+    mutation instrument is lockstepped."""
+
+    def test_every_count_pin_says_eighteen(self) -> None:
+        for rel in COUNT_PIN_FILES:
+            source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 18" in source, rel
+            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 17" not in source, (
+                f"{rel}: a stale 17-flavored count pin survived"
+            )
+
+    def test_every_expected_set_definition_agrees_with_the_registry(self) -> None:
+        derived = _registry_literal_members()
+        for rel in EXPECTED_SET_FILES:
+            literals = _frozenset_literals(REPO_ROOT / rel)
+            assert literals, f"{rel}: no privileged-set literal found"
+            for literal in literals:
+                assert literal == derived, (
+                    f"{rel}: the pinned set diverges from the registry's "
+                    f"literal ({sorted(literal ^ derived)})"
+                )
+
+    def test_every_inline_exact_set_pin_agrees_with_the_registry(self) -> None:
+        derived = _registry_literal_members()
+        for rel in EXACT_SET_FILES:
+            literals = _frozenset_literals(REPO_ROOT / rel)
+            assert literals, f"{rel}: no inline privileged-set literal found"
+            for literal in literals:
+                assert literal == derived, (
+                    f"{rel}: the inline pinned set diverges from the "
+                    f"registry's literal ({sorted(literal ^ derived)})"
+                )
+
+    def test_the_mt01_literals_are_lockstepped_and_not_vacuous(self) -> None:
+        """W4 — the standing mutation instrument: the FIND string must
+        match the new count (18) and the REPLACE string must be the OLD
+        count (17). Bumping both to 18 makes the mutation vacuous."""
+        source = (REPO_ROOT / MT01_FILE).read_text(encoding="utf-8")
+        find = '"assert len(PRIVILEGED_TOOL_CATEGORIES) == 18"'
+        replace = '"assert len(PRIVILEGED_TOOL_CATEGORIES) == 17"'
+        assert find in source, "MT-01's find string is not 18-flavored"
+        assert replace in source, "MT-01's replace string is not the old count"
+        assert find != replace, "MT-01 would be vacuous"
+
+    def test_the_registry_prose_census_is_corrected(self) -> None:
+        source = (REPO_ROOT / "daemon" / "tools" / "_tool_registry.py").read_text(
+            encoding="utf-8"
+        )
+        assert "SIXTEEN assertion sites across TEN files" not in source
+        assert "EIGHTEEN EDIT sites across ELEVEN files" in source

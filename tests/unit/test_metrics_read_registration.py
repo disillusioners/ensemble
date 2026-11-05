@@ -106,6 +106,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "mcp_rpc",
     "notify-user",
     "metrics-read",
+    # memoir (2026-11-05, memoir-store-v1 lane): the ``memoir``
+    # category — ari's durable episodic memory + keepsake governance.
+    # opt-in-only (PRIVILEGED entry #18); the ari allow entry is the
+    # only access path, and every tool body ALSO carries its own
+    # factory-captured agent_id gate.
+    "memoir",
 })
 
 
@@ -218,7 +224,7 @@ class TestPrivilegedCategory:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
     def test_the_set_has_seventeen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
 
 
 # ── A13: the attribute pin + the default-deny behavioral leg ───────────────
