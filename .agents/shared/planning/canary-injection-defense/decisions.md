@@ -2,9 +2,9 @@
 
 **Date:** 2026-11-05 (lane worktree created 2026-11-05T14:20:00Z)
 **Author:** planner[v2] via technical-analysis worker
-**Status:** **DRAFT — D1–D6 OPEN for the architect.** This worker frames the slots; it does **not**
-decide. Every "RECOMMENDATION" below is explicitly a **framing** — the architect rules in the next
-phase and the ruling is recorded against the same slot. Flag state, gate state and the decision state
+**Status:** **RULED (2026-11-05)** — the architect decided D1–D6 (+ leader-added D7) in
+[`architecture-recommendation.md`](./architecture-recommendation.md); §F below points at each ruling. The
+slot framings below are retained as decision context; a ruling is authoritative where it differs. Flag state, gate state and the decision state
 are single-sourced in **§F** (this file is the authority; the plan set cross-references it and never
 duplicates it).
 
@@ -558,38 +558,39 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 
 | Slot | Subject | State | Ruling owner | Ruling recorded at |
 |---|---|---|---|---|
-| **D1** | Spawn topology (lean vs doctrinal-scope vs decoy-only) | **OPEN** | architect | ☐ |
-| **D2** | Skill mechanism + distribution (seed set, copies, auto-load, evolution) | **OPEN** | architect | ☐ |
-| **D3** | Doctrine wording + landing sites + step semantics + carve-out | **OPEN** | architect | ☐ |
-| **D4** | Payload corpus home + rule-set home | **OPEN** | architect | ☐ |
-| **D5** | Test-matrix shape (25 cells, packs, mutations, census, re-derivations) | **OPEN** | architect | ☐ |
-| **D6** | Intake-channel coverage + sandbox semantics | **OPEN** | architect | ☐ |
+| **D1** | Spawn topology (lean vs doctrinal-scope vs decoy-only) | **RULED — A: lean compose-and-hand** | architect | 2026-11-05 · `architecture-recommendation.md` §1 |
+| **D2** | Skill mechanism + distribution (seed set, copies, auto-load, evolution) | **RULED — B; `auto_load` corrected (canary+sweeper true)** | architect | 2026-11-05 · §2 |
+| **D3** | Doctrine wording + landing sites + step semantics + carve-out | **RULED — A sites + two-layer N** | architect | 2026-11-05 · §3 |
+| **D4** | Payload corpus home + rule-set home | **RULED — A (`tests/fixtures/injection_corpus/`)** | architect | 2026-11-05 · §4 |
+| **D5** | Test-matrix shape (25 cells, packs, mutations, census, re-derivations) | **RULED — A (family file grows T31–T37)** | architect | 2026-11-05 · §5 |
+| **D6** | Intake-channel coverage + sandbox semantics | **RULED — A (core 5 legs; logical-only sandbox)** | architect | 2026-11-05 · §6 |
+| **D7** | (leader-added) Canary tool surface + mechanical containment | **RULED — no `proc`; payload inertness is the containment unit** | architect | 2026-11-05 · §7 |
 
 ### F.2 Confirmation requests (not slots — rulings the architect makes on the record)
 
 | # | Confirmation | State | Note |
 |---|---|---|---|
-| **C1** | Canary inherits **no** `chart`-implied member (B2) | **OPEN** | mechanical, but it belongs to the architect's ruling set |
-| **C2** | **Worker stays outside** the T29 matrix (its legacy prose shape cannot carry the anchor construction) | **OPEN** | affects the 25-cell arithmetic |
-| **C3** | The **non-family blast radius** (F8) is disclosed for v1, not covered | **OPEN** | affects the scope statement |
-| **C4** | Canary's deny surface stays `⊇ {write_file, edit_file}` (F10) — no speculative entries | **OPEN** | the closed allow is the fence |
+| **C1** | Canary inherits **no** `chart`-implied member (B2) | **CONFIRMED** | canary's effective team = its manifest exactly |
+| **C2** | **Worker stays outside** the T29 matrix (its legacy prose shape cannot carry the anchor construction) | **CONFIRMED** | T31 asserts worker anchors without the numbered-line property |
+| **C3** | The **non-family blast radius** (F8) is disclosed for v1, not covered | **CONFIRMED** | disclosure in report + plan scope + skill non-guarantees |
+| **C4** | Canary's deny surface stays `⊇ {write_file, edit_file}` (F10) — no speculative entries | **CONFIRMED** | surviving write path = `bash` into the off-repo store (accident-prevention, not a fence) |
 
 ### F.3 Flag state
 
 | Flags | State | Routing |
 |---|---|---|
-| **F1, F2, F3, F4, F5, F11, F13, F14** (design-surface flags) | **OPEN** — fold into the ruled slots | resolve via D2/D3/D4/D6 |
-| **F6, F9** (pin/arithmetic) | **OPEN** — mechanical | resolve via D2/D5 at P4 |
-| **F7** (merge/slot) | **OPEN** — re-derive at finalise/stage | stage lane |
-| **F8, F10** (scope/deny) | **OPEN** — confirmation requests C3/C4 | architect |
-| **F12** (MCP leg) | **OPEN** — deferred under D6-A | architect |
+| **F1, F2, F3, F4, F5, F11, F13, F14** (design-surface flags) | **DISPOSITIONED** — F1/F2 accepted-with-disclosure; F3/F4/F5/F11/F14 resolved-by-ruling; F13 accepted as a leg feature | `architecture-recommendation.md` §9 |
+| **F6, F9** (pin/arithmetic) | **RESOLVED** via D2/D5 | §5.2 re-derivation ledger |
+| **F7** (merge/slot) | **ACCEPTED** — stage-time derivation | stage lane |
+| **F8, F10** (scope/deny) | **CONFIRMED** via C3/C4 | §8 |
+| **F12** (MCP leg) | **DEFERRED** under D6-A | §9 |
 
 ### F.4 Gate arc (planned; the architect leg is next)
 
 | Gate | Scope | State | Owner |
 |---|---|---|---|
-| G0 — architect review | **rules D1–D6 + C1–C4** | **PENDING (next phase)** | architect |
-| G1 — plan council | the plan set against the ruled slots | PENDING (blocked by G0) | plan council |
+| G0 — architect review | **rules D1–D7 + C1–C4** | **COMPLETE — 2026-11-05** (`architecture-recommendation.md`) | architect |
+| G1 — plan council | the plan set against the ruled slots | PENDING (G0 complete — unblocked) | plan council |
 | G2 — approver | execution-layer blockers | PENDING (blocked by G1) | approver |
 | G3 — code council | implementation | PENDING | code council |
 | G4 — tidier | hygiene pass | PENDING | tidier |
