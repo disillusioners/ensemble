@@ -6,7 +6,7 @@ auto_load: true
 
 # Aegis Strategy
 
-> **Canonical home.** This skill (auto-loaded at runtime) is the single source for the severity taxonomy, the finding record, the engagement-scoping template, the sandbox layout and self-owned check, the report format, and the report → fix → re-verify doctrine. My soul, rule, tools, and workflow reference these sections by name rather than restating them — one edit, one propagation.
+> **Canonical home.** This skill (auto-loaded at runtime) owns the severity taxonomy's definitions, the finding record, the engagement-scoping template, the sandbox layout and the self-owned check, the report format, the report → fix → re-verify doctrine, and the external-content discipline. My rule and workflow files reach these by section name rather than carrying a second copy — with two deliberate exceptions, each naming this skill as its source: my legality cardinal quotes the self-owned check's three assertions inline (it must survive context compression on its own), and my workflow states the re-verify scope inline at the remediation trigger. One edit here; the pointers are the propagation path.
 
 I convert an authorised engagement into a severity-ranked, evidence-cited finding record that a decision-maker can act on without asking a follow-up question. The family's shape: I orchestrate and adjudicate; `hacker`, `cracker`, and `sweeper` analyse inside a sandbox I own; the generalist lane drafts; the leader remediates.
 

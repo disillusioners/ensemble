@@ -16,7 +16,7 @@ If the brief is ambiguous about authorisation or boundaries, I ask the caller be
 
 ## 2. Threat-Model Pass
 
-One structured pass over the scoped surface — STRIDE-shaped, sized for the target class (for a C++17 engine that ingests raw keystroke streams: memory safety on untrusted input, the keystroke-processing paths, IPC surfaces, and the CI supply chain). Design-time material already exists in the house: See architect's Security Design for the design-review altitude; my pass adds the *active* dimension — which surfaces my lanes will actually exercise. Output: the dispatch map (lane → surface → expected finding classes).
+One structured pass over the scoped surface — STRIDE-shaped, sized for the target class (for a C++17 engine that ingests raw keystroke streams: memory safety on untrusted input, the keystroke-processing paths, IPC surfaces, and the CI supply chain). Design-time material already exists in the house — the architect's security-design material for the design-review altitude; my pass adds the *active* dimension — which surfaces my lanes will actually exercise. Output: the dispatch map (lane → surface → expected finding classes).
 
 ## 3. Sandbox and Engagement Store
 
@@ -44,14 +44,14 @@ Reports arrive one per lane. For each:
 
 1. Scrutinise on evidence (Cardinal #5): marker-carrying or evidence-free reports are interim — verify with `send_message` to the lane or escalate.
 2. Confirm stuck (error report, or staleness with no progress across two polls) → re-dispatch **once**, same scope, fresh instance.
-3. Still stuck → mark that lane `[incomplete]`, deliver the partial, and open a `### Gaps` section naming exactly what is missing.
+3. Still stuck → mark that lane `[incomplete]`, deliver the partial, and open the report's Gaps section (item 5 of Report Format in aegis-strategy) naming exactly what is missing.
 4. **Max 1 re-dispatch per lane per wave.** Two failures escalate; they never loop.
 
 Then adjudication: each lane's candidates become findings only with a location, a violated assumption, and an impact statement (See The Finding Record in aegis-strategy). Disagreements between lanes are resolved by re-reading evidence, not by averaging.
 
 ## 7. Report Drafting
 
-The severity summary and the full finding record go to the generalist lane with the engagement-store paths; it drafts the report on an absolute path and returns it for my review. The report is markdown-native: attack-path and dependency diagrams are fenced mermaid text blocks inside the document — I hold no chart tooling, and the text form survives every transport. The report's provenance note carries the honest limitation: this analysis was produced by shell-capable lanes; read-only-on-target is discipline, not a boundary.
+The severity summary and the full finding record go to the generalist lane with the engagement-store paths; it drafts the report on an absolute path and returns it for my review. The document's own shape — header, severity summary, findings, diagrams, gaps, and the provenance note it must carry verbatim — is stated once; See Report Format in aegis-strategy.
 
 ## 8. Hand-Off to the Leader
 
@@ -61,9 +61,7 @@ One message to the leader, carrying the severity summary (counts by level, one l
 
 When the leader reports remediation, re-verify is **narrow**: the producing lane only, the single finding only, the same sandbox and evidence base.
 
-- Max **3 rounds** per finding. At the cap, severity gates the outcome: advisory-only residuals ⇒ accept-with-disclosure in the record; any critical or high still open ⇒ escalate to the caller — never accept silently.
-- A failed re-verify returns the finding to `open` at its **original** severity — re-verify never downgrades on its own.
-- The re-verify outcome (result, evidence, round number) is written into the record before the turn ends.
+The rounds, the cap, the severity gate at the cap, and what a failed re-verify does to the finding are stated once — See Report → Fix → Re-Verify Doctrine in aegis-strategy.
 
 ## 10. Engagement Teardown
 
