@@ -268,6 +268,58 @@ class AnomalyRefusalError(Exception):
         self.detail = detail
 
 
+def _write_time_counter(handle_name: str) -> Any | None:
+    """Resolve a w4 write-time F23 handle WITHOUT a top-level import.
+
+    A module-top ``from ...wiring.w4 import ...`` would drag the whole
+    wiring package (w1/w2/w3 + their imports) into the anomaly
+    service's import graph for one counter — the lazy import below
+    runs ONLY at the increment/read points.  Returns ``None`` on any
+    import-time failure (the counter then degrades to 0 on read and
+    the event is only in the log — never a refused report).
+    """
+    try:
+        from daemon.services.metrics_query.wiring import w4
+
+        return getattr(w4, handle_name, None)
+    except Exception:  # noqa: BLE001 — the counter must never break the write path
+        logger.warning(
+            "anomaly: the F23 write-time counter %r is unreachable",
+            handle_name,
+        )
+        return None
+
+
+def _write_time_inc(handle_name: str) -> None:
+    """Increment a write-time F23 counter at its service write point.
+
+    ONE increment point per event: the w4 REGISTRY HANDLE is the
+    single counter store (there is deliberately NO parallel local
+    int — two stores would drift).
+    """
+    handle = _write_time_counter(handle_name)
+    if handle is None:
+        return
+    try:
+        handle.inc()
+    except Exception:  # noqa: BLE001 — the counter must never break the write path
+        logger.warning(
+            "anomaly: incrementing the F23 write-time counter %r failed",
+            handle_name,
+        )
+
+
+def _write_time_read(handle_name: str) -> int:
+    """Read a write-time F23 counter (the property view of the handle)."""
+    handle = _write_time_counter(handle_name)
+    if handle is None:
+        return 0
+    try:
+        return int(handle.get())
+    except Exception:  # noqa: BLE001 — a read failure reads as 0, never raises
+        return 0
+
+
 def _now_dt() -> datetime:
     """The service's clock — ONE derivation point.
 
@@ -521,11 +573,16 @@ class AnomalyService:
         self._seams: Any = None
         # AM-14 — the 64-slot stripe (index = hash(cluster_key_hash) % 64).
         self._stripe_locks: list[Any] = [asyncio.Lock() for _ in range(STRIPE_SLOTS)]
-        # C3(i) + AM-13 — the process-durable counters the phase-3 F23
-        # pull adapter reads (the observable capacity / suppression
-        # signal; the ledger rows are the per-agent trace).
-        self._capacity_exhausted_total: int = 0
-        self._board_items_suppressed_total: int = 0
+        # C3(i) + AM-13 — the write-time F23 counters have NO local
+        # twin: the w4 REGISTRY HANDLES are the single counter store
+        # (incremented via :func:`_write_time_inc` — a lazy import of
+        # ``daemon.services.metrics_query.wiring.w4``).  The metric is
+        # the PROCESS-WIDE nest signal; the per-SERVICE read below is
+        # the delta since THIS service was constructed (one store, two
+        # projections — a local int counter would be a second, drifting
+        # system).
+        self._capacity_exhausted_baseline = _write_time_read("capacity_exhausted")
+        self._board_items_suppressed_baseline = _write_time_read("board_items_suppressed")
 
     # ── configuration access ──────────────────────────────────────────
 
@@ -539,13 +596,26 @@ class AnomalyService:
 
     @property
     def capacity_exhausted_total(self) -> int:
-        """C3(i) — how many reports the capacity ceilings refused."""
-        return self._capacity_exhausted_total
+        """C3(i) — how many reports THIS service refused on capacity.
+
+        The counter STORE is the process-wide F23 handle; this read is
+        the per-instance delta since construction (a fresh service
+        starts at zero without rewriting the global counter).
+        """
+        return max(
+            0,
+            _write_time_read("capacity_exhausted")
+            - self._capacity_exhausted_baseline,
+        )
 
     @property
     def board_items_suppressed_total(self) -> int:
-        """AM-13 — how many board creates the ceilings routed to a note."""
-        return self._board_items_suppressed_total
+        """AM-13 — how many board creates THIS service routed to a note."""
+        return max(
+            0,
+            _write_time_read("board_items_suppressed")
+            - self._board_items_suppressed_baseline,
+        )
 
     def _stripe_for(self, key_hash: str) -> Any:
         """The AM-14 same-key stripe slot for a cluster key hash."""
@@ -806,7 +876,7 @@ class AnomalyService:
         WARNING surfaces the refusal for morning review (the metric is
         the scalable signal; the ledger is for per-agent trace only).
         """
-        self._capacity_exhausted_total += 1
+        _write_time_inc("capacity_exhausted")
         logger.warning(
             "anomaly: capacity-exhausted refusal (surfaced for morning "
             "review): %s",
@@ -1052,7 +1122,7 @@ class AnomalyService:
                     self._repository.most_recent_board_item_for_tree
                 )
             if target is not None:
-                self._board_items_suppressed_total += 1
+                _write_time_inc("board_items_suppressed")
                 note = (
                     f"anomaly cluster {cluster_id}: critical report "
                     f"#{count} from {agent_id} at {now} SUPPRESSED "

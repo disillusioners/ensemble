@@ -12,6 +12,10 @@ THE THREE CLUSTERS
 * **W1** — F0.3 · F1 · F3 · F4 · F5 · F6
 * **W2** — F7 · F8 · F9 · F10 · F11 · F12 · F13
 * **W3** — F17 · F18 · F21
+* **W4** — F23 (the nest-anomaly family — three pull-fed aggregates
+  plus two WRITE-TIME process counters the anomaly service
+  increments at its refusal/suppression points through a lazy
+  import of ``w4``'s module-level handles)
 
 F2 is NOT here (the value ruling, AM-25 / LR-2) and neither are the F21
 phase families (AD4(b) / D-4).
@@ -49,10 +53,12 @@ from daemon.services.metrics_query.wiring import vocab  # noqa: F401  (the vocab
 from daemon.services.metrics_query.wiring.w1 import register_w1_adapters
 from daemon.services.metrics_query.wiring.w2 import register_w2_adapters
 from daemon.services.metrics_query.wiring.w3 import register_w3_adapters
+from daemon.services.metrics_query.wiring.w4 import register_w4_adapters
 
 register_w1_adapters()
 register_w2_adapters()
 register_w3_adapters()
+register_w4_adapters()
 
 
 def default_adapters() -> tuple[PullAdapter, ...]:

@@ -103,24 +103,38 @@ def _closed_label_space(metrics: list[cm.Metric]) -> int:
 class TestTheAdjudicationTable:
     def test_every_catalog_family_carries_exactly_one_verdict(self) -> None:
         verdicts = adjudication.CATALOG_FAMILY_VERDICTS
-        assert len(verdicts) == 26
-        expected = {"F0.1", "F0.2", "F0.3", "F0.4"} | {f"F{n}" for n in range(1, 23)}
+        assert len(verdicts) == 27
+        expected = {"F0.1", "F0.2", "F0.3", "F0.4"} | {f"F{n}" for n in range(1, 24)}
         assert set(verdicts) == expected
         for family, (verdict, seam) in verdicts.items():
             assert verdict in adjudication.VALID_VERDICTS, family
             assert seam and seam.strip(), family
 
-    def test_the_binding_subset_is_sixteen_of_twenty_six(self) -> None:
+    def test_the_binding_subset_is_seventeen_of_twenty_seven(self) -> None:
         verdicts = adjudication.CATALOG_FAMILY_VERDICTS
         full = [f for f, (v, _s) in verdicts.items() if v == "IN"]
         partial = [f for f, (v, _s) in verdicts.items() if v == "PARTIAL"]
-        assert len(full) == 10
+        assert len(full) == 11
         assert len(partial) == 6
         assert tuple(sorted(full + partial)) == tuple(sorted(adjudication.REGISTERED_FAMILIES))
 
     def test_the_registered_families_match_the_verdicts(self) -> None:
         registered = set(registry.registered_families())
         assert registered == set(adjudication.REGISTERED_FAMILIES)
+
+    def test_every_registered_family_carries_a_band_entry(self) -> None:
+        """AM-2(b) — the band-coverage pin.
+
+        The band check (:meth:`TestTheBudget.
+        test_each_family_stays_inside_its_declared_band`) iterates
+        ``FAMILY_SERIES_BANDS``, so a registered family with NO band
+        entry is SILENTLY SKIPPED — the family would carry no closed-
+        space cap at all.  This pin makes the omission loud.
+        """
+        missing = set(adjudication.REGISTERED_FAMILIES) - set(
+            adjudication.FAMILY_SERIES_BANDS
+        )
+        assert not missing, sorted(missing)
 
 
 class TestOutMetricAbsence:
