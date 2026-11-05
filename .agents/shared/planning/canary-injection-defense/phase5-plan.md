@@ -7,7 +7,11 @@ regression**, that every commission expectation holds, and that the artifacts ar
 plan claimed. Each gate below is **independently checkable** and separately attributable, so a
 failure names its own cause.
 
-Eight gates, **A–H**.
+Eight gates, **A–H**, plus the **contract-drift leg** (NC-1): the fence contract's distinctive
+literals (INJ-*, the three-value verdict, the `key: value` header, the 4-backtick carrier, the
+truncation marker) appear in the skill bodies and **nowhere** in persona prose (CER-04 no-restatement
+grep). NC-1…NC-5 are **CLOSED-BY-RULING** (architect G0) and are verified here as legs, not as open
+risks.
 
 ---
 
@@ -45,9 +49,9 @@ Eight gates, **A–H**.
    `tests/unit/tools/test_prompt_section_reference_integrity.py` — the repo-wide prompt-surface sweep
    over **every edited prompt file** (the six persona `rule.md`s + canary's four prompt files), enforcing
    the `.md`-token class and the bare-`agents/`-prefix closure class (`requirements.md` CER-15). | 1 | Both green. D-1: under the D1 leaf default, `canary` is **skipped** by the empty-team exemption (`test_report_integrity_prompts.py:242`) — a skip, not a pass-by-omission; the leg asserts the skip so a D1 change flips it deliberately. `aegis`'s existing `[REPORT SANITY:]` guidance (canonical home: its `rule.md`) is **not** removed by the `workflow.md` section append. D-2: every edited prompt file passes the repo-wide sweep — both closure classes clean or on the enumerated exemption list. |
-| 5 | **Gate E — the boot-scan + the skill loads.** Run the registry-scan leg under the venv, then the tester's isolated boot-scan leg. | 1 | The registry resolves `canary`; the discoverable-agent census is **44** (43 + 1); the isolated boot scan is clean — no agent fails to register and no `tools` block parses fail-open; the `injection-screen` skill **loads** for every member of the screened roster (manifest-gated seeding: the manifest enumerates the entry and the body must exist at the same-dir template path). |
+| 5 | **Gate E — the boot-scan + the skill loads.** Run the registry-scan leg under the venv, then the tester's isolated boot-scan leg. | 1 | The registry resolves `canary`; the discoverable-agent census is **44** (43 + 1); the isolated boot scan is clean — no agent fails to register and no `tools` block parses fail-open; the `injection-screen` skill **loads** for every member of the screened roster (manifest-gated seeding: the manifest enumerates the entry and the body must exist at the same-dir template path); the **T38 scanner-execution leg is green** — the committed `agents/canary/skills-template/injection_scan.py` runs from **three working directories** (repo root; `agents/`; the consumer's own cwd) with the three runs **byte-identical** (fence + sha256 + verdict blocks), **three-run determinism**, the **LLM pass OFF by default**, and the **monotonicity refusal** firing (`--llm-verdict` below the heuristic `hostile` is refused); **plus one presence-only content pin:** the **six must-not-claim items** (architecture-recommendation §7.6) are present in phase3's authored text (canary's `rule.md`/`soul.md`, the campaign record template, and the hand-off report — P3 task 10b's landing sites). |
 | 6 | **Gate F — the tool-categories proof.** Confirm `.agents/shared/metrics/tool-categories.json` is **byte-unchanged** in the lane diff, and run `tests/unit/tools/test_tool_category_artifact.py`. | 1 | The artifact is byte-identical to the base and the test is green — the **F-1 trap class** (a stale committed artifact reddening a whole lane) is avoided because **a skill is not a category**: this lane registers no category. |
-| 7 | **Gate G — the manifest delta re-derivation.** Re-derive the agents-tree file count (**366 + 11 = 377**) and the discoverable-dir count (**43 + 1 = 44**) from the **actual tree** and compare against the plan's derivation rule. | 1 | The re-derived counts match the rule; if they do not, the reason is identified (an extra or missing file) and the plan's arithmetic is corrected **before** staging — the number is re-derived, never trusted. |
+| 7 | **Gate G — the manifest delta re-derivation.** Re-derive the agents-tree file count (**366 + 12 = 378**) and the discoverable-dir count (**43 + 1 = 44**) from the **actual tree** and compare against the plan's derivation rule. | 1 | The re-derived counts match the rule; if they do not, the reason is identified (an extra or missing file) and the plan's arithmetic is corrected **before** staging — the number is re-derived, never trusted. |
 | 8 | **Gate H — scope + privacy.** (a) **Scope:** the **lane-own diff** touches only `agents/**`, `tests/**`, the lane's committed planning set, the **tester lane's pack registration** (`.agents/tester/PACKS.md` — house bookkeeping, exactly like the approver bookkeeping) and the approver bookkeeping — the complement of {`agents/`, `tests/`, `.agents/tester/PACKS.md`, `.agents/approver/`} equals exactly `.agents/shared/planning/canary-injection-defense/`. The merge/bump/tag/giter choreography is **outside** this gate (P6 asserts it). (b) **Privacy legs:** (i) **no committed corpus file contains real credential material** — a secret-shaped string is a lane failure, not a finding; (ii) **no campaign artifact, engagement output or corpus output is committed**; (iii) the campaign store path is **off-repo** (`$HOME/.local/state/aegis/engagements/<id>/`), team-internal, never committed, discovered by **recorded path, never glob**; (iv) `agents/leader/**`, `agents/developer/**` and every persona outside the declared set are byte-identical to the base. | 1–7 | The complement set equals exactly the planning dir; the secret-shape scan is clean **with both controls**; no campaign artifact is committed; the off-repo pattern is the family's; the untouched personas are byte-identical. |
 | 9 | **The mutation-evidence record** — the house-format evidence for the lane's mutation legs (*planted change → expected red set → observed red set → restore → green*), with the minimum set: delete a canary T29 anchor → exactly that cell reds; delete the directive sentence literal → the fence-contract leg reds; swap `clean`↔`hostile` in a corpus case's expectation → the corpus leg reds; remove a worker doctrine anchor → the T31 cell reds; change one rule id in the table → the id-uniqueness/coverage leg reds; unescape a payload line that begins with the BEGIN token → the round-trip/parser leg reds (`requirements.md` CER-08). | 1–8 | Every mutation leg is **executed**, its expected red set is **predicted before** the plant, and the observed red set **matches the prediction exactly**; the record is written in the house format and attached to the gate evidence. **Mutation legs are the only proof the pins bite** — an unexecuted mutation is not evidence. |
 
@@ -60,10 +64,10 @@ Eight gates, **A–H**.
 | **A** | Net-new deterministic reds **0** vs the true base; the T4/T29 folds are green on **both** legs. |
 | **B** | `SEALED_SHA_BASELINES` green with the 4 pre-existing base-stale rows **disclosed** and **not** re-pinned; zero sealed files touched ⇒ no re-pin. |
 | **C** | The plane read-holder census is unchanged (`{"watcher"}`). |
-| **D** | The report-integrity posture + the prompt-section integrity sweep are green (the predecessor's **two-legged D**): canary skipped by the empty-team exemption under the D1 default (or present if D1 granted a spawn right); `aegis`'s guidance untouched; every edited prompt file passes the repo-wide closure sweep. |
-| **E** | Boot-scan clean; `canary` resolves; **44** discoverable dirs; the skill loads for every roster member. |
+| **D** | The report-integrity posture + the prompt-section integrity sweep are green (the predecessor's **two-legged D**): canary skipped by the empty-team exemption under adopted ruling D1-A (or present if D1 granted a spawn right); `aegis`'s guidance untouched; every edited prompt file passes the repo-wide closure sweep. |
+| **E** | Boot-scan clean; `canary` resolves; **44** discoverable dirs; the skill loads for every roster member; the **T38 scanner-execution leg is green** (three-CWD byte-identity, three-run determinism, pass-OFF default, monotonicity refusal); the **six must-not-claim items** (§7.6) are present in phase3's authored text (presence-only content pin). |
 | **F** | `tool-categories.json` byte-unchanged; the artifact test green. |
-| **G** | The agents count **377** and the discoverable count **44** are re-derived from the real tree. |
+| **G** | The agents count **378** and the discoverable count **44** are re-derived from the real tree. |
 | **H** | The lane-own diff touches only the sanctioned paths (incl. the pack registration as bookkeeping); no real credential material in the corpus; no campaign artifact committed; the off-repo store pattern holds; the untouched personas are byte-identical. |
 | **M** | The mutation-evidence record is complete and **executed** — every planted change's observed red set matches its predicted red set, in the house format. |
 
@@ -93,23 +97,42 @@ grep -n 'DISCLOSED_READ_HOLDERS' -A3 tests/unit/tools/test_plane_agent_surface_c
 
 # --- Gate D: the report-integrity posture ---
 python3 -m pytest tests/unit/test_report_integrity_prompts.py -q -rs
-#   expect a SKIP for 'canary' (empty team under the D1 default) and no new failure
+#   expect a SKIP for 'canary' (empty team under adopted ruling D1-A) and no new failure
 
 # --- Gate E: the boot scan + the skill loads ---
 ls -d agents/*/ | grep -v '/_' | wc -l                      # 44 (43 base + canary)
-for a in canary hacker cracker sweeper worker; do
+for a in canary aegis sweeper worker; do
   printf '%-10s ' "$a"; grep -c 'name: injection-screen' agents/$a/skill-set.yaml
-done                                                        # each MUST be 1
-for a in canary hacker cracker sweeper worker; do
+done                                                        # each MUST be 1 (the seeded roster -- D2)
+for a in canary aegis sweeper worker; do
   test -f "agents/$a/skills-template/injection-screen.md" || echo "MISSING BODY $a"
 done                                                        # the seeder's same-dir body requirement
+
+# --- Gate E: the T38 scanner-execution leg (three-CWD) + the must-not-claim presence pin ---
+SCAN=agents/canary/skills-template/injection_scan.py
+for d in . agents tests; do                                 # repo root; agents/; a consumer cwd
+  ( cd "$d" && \
+    P="$SCAN"; [ -f "$P" ] || P="$(git rev-parse --show-toplevel 2>/dev/null)/$SCAN" || true; \
+    [ -f "$P" ] || P="<install-root>/$SCAN"; \
+    python3 "$P" <base-input> | sha256sum )
+done
+#   the cwd-relative rung intentionally MISSES from agents/ and tests/ -- the ladder's
+#   install-root rung resolves there, and that resolution is part of assertion (e). The three
+#   digests MUST be equal (byte-identical fence + sha256 + verdict blocks); a re-run of any one
+#   of them MUST reproduce its digest (three-run determinism); the LLM pass is OFF by default
+#   (no --llm-* flag -> heuristic path only); a --llm-verdict LOWER in severity than the
+#   heuristic 'hostile' MUST be refused (monotonicity).
+grep -l 'logical' agents/canary/rule.md agents/canary/soul.md >/dev/null && \
+grep -c 'not confined\|not enforcement\|inert' agents/canary/rule.md agents/canary/soul.md
+#   presence-only content pin: the six §7.6 must-not-claim items are present in phase3's authored
+#   text (canary rule.md/soul.md + campaign record template + hand-off report -- P3 task 10b).
 
 # --- Gate F: no category drift (a skill is not a category) ---
 git diff --name-only $BASE HEAD -- .agents/shared/metrics/tool-categories.json | wc -l   # expected 0
 python3 -m pytest tests/unit/tools/test_tool_category_artifact.py -q
 
 # --- Gate G: the manifest delta re-derivation ---
-find agents -type f | wc -l                                  # 377 (366 base + 11 new) -- re-derive
+find agents -type f | wc -l                                  # 378 (366 base + 12 new) -- re-derive
 ls -d agents/*/ | grep -v '/_' | wc -l                      # 44
 
 # --- Gate H: scope + privacy ---

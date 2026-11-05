@@ -1,10 +1,11 @@
 # Technical Analysis: Canary Injection Defense
 
-> **DRAFT — FRAMING ONLY, NOT A DECISION.** This record resolves the *mechanics* of the
-> canary-injection-defense lane and frames six design points as decision slots. Each slot in
-> [`decisions.md`](./decisions.md) §C carries Options · Trade-offs · a **clearly-labelled framing
-> recommendation** · and the **fold-consequence per option**. The architect rules in the next phase;
-> the ruling is recorded there. Nothing in this file decides D1–D6.
+> **ADOPTED ARCHITECTURE (ruling commit `f6d11c232`, G0, 2026-11-05).** This record now describes the
+> **ruled** architecture — the four-build system as adopted by the architect in
+> [`architecture-recommendation.md`](./architecture-recommendation.md). It is no longer framing-only: the
+> six design points are ruled (D1–D7) and the dispositions of F1–F14 are recorded in
+> [`decisions.md`](./decisions.md) §D. The plan set consumes this record; the gate state is single-sourced
+> in `decisions.md` §F.
 >
 > **Sibling artifacts (cross-referenced, never duplicated here):** the plan set —
 > `plan-overview.md`, `phase0-plan.md` … `phaseN-plan.md` — and `requirements.md` — are authored by
@@ -15,14 +16,13 @@
 
 **Date:** 2026-11-05 (lane worktree created 2026-11-05T14:20:00Z)
 **Author:** planner[v2] via technical-analysis worker
-**Analysis depth:** deep-dive (mechanics resolution + trade-space framing; the downstream plan worker
-consumes the arithmetic rules verbatim)
-**Status:** Draft — **D1–D6 OPEN for the architect**; F-flags F1–F14 surfaced (§D of the decision
-record); no ruling recorded by this worker.
+**Analysis depth:** deep-dive (mechanics resolution + adopted architecture)
+**Status:** **Adopted** — D1–D7 ruled; F1–F14 dispositioned; ruling commit `f6d11c232`.
 
 **Worktree:** `/home/nea/ensemble-src-wt-canary-injection-defense` @ `97b76e20e` (== `origin/latest`,
 0/0 divergence at creation; clean porcelain at analysis time)
 **Companion record:** [`decisions.md`](./decisions.md) — the authoritative decision slots.
+**Ruling record:** [`architecture-recommendation.md`](./architecture-recommendation.md) — architect G0.
 **Predecessor lane (v0.28.12 LIVE):**
 `.agents/shared/planning/aegis-security-family/{decisions.md,technical-analysis.md,architecture-recommendation.md}` —
 the inherited rulings this lane is bound by (§B of the decision record).
@@ -101,7 +101,7 @@ LIVE) established: a **caller-side, deny-by-default team gate** (`daemon/tools/_
 **no project axis** (grep for `project` in that module returns zero hits — the gate reads the caller's
 `team_members` and nothing else); a **leaf posture** for the three children (`allow: bash, proc,
 filesystem, time, help, self`; `deny: write_file, edit_file`; `team_members: []`; `innate_skills:
-None` — verified in-tree); a **five-family guardrail set** with per-persona forms, asserted as a
+None` — verified in-tree; note: predecessor leaves carried `proc`; canary does NOT — D7 drops `proc`)
 **20-cell legality matrix** (`tests/unit/agents/test_aegis_security_family.py:158-193`, `FAMILY =
 ("aegis","hacker","cracker","sweeper")` at :75, `CHILDREN` at :76); **off-repo findings** with
 recorded-path discovery (never glob); a **single-spawner** discipline with aegis as the orchestrator
@@ -335,18 +335,82 @@ for **D6**; the architect rules on coverage in `decisions.md` §C.6.
 | 11 | **chat-source inbound** | `daemon/sources/mapper.py` — **no inbound sanitisation anywhere in the tree** | message-sized | chat-dispatched instances | **out of v1** — the widest unshielded channel; disclose, do not pretend (flag **F8** family) |
 | 12 | **Plane bodies** | PM-only via MCP; `plane_sync_project` is **outbound** only | — | PM-class | **out of v1** |
 
-**Reading of the table.** Four channels (1, 2, 3, 5) are reachable by *any* target that holds the
-corresponding tools — including a leaf-class target — and are therefore the **v1 core campaign
-set**. Channel 6 is special: the daemon already frames child reports, so the canary's most valuable
-early measurement is *whether the existing frame holds* against a crafted payload — a comparison
-leg, not a coverage gap. Channels 4, 7, 8, 9 need a target class that only `aegis`/`worker` can
-play, which means either aegis-class targets (a wider, more privileged target — a deliberate risk
-trade) or a deferred leg. Channel 11 is the largest hole and is explicitly **not** closed by this
-lane.
+**Reading of the table (relabeled per D6-A).** **Core v1 legs (leaf-class targets):** channels 1, 2, 3, 5
+fire; channel 6 is the **comparison baseline** (the daemon already frames child reports — the most
+informative early measurement is whether the existing frame holds). **Privileged-target legs (deferred):**
+channels 4, 7, 8, 9 need a target class that only `aegis`/`worker` can play (mcp/knowledge/read_context);
+they are **disclosed as uncovered in v1**, not silently dropped. **Disclosed hole:** channel 11 (chat
+inbound) is the widest unshielded surface — unsanitised anywhere in the tree — and is explicitly **out
+of v1** (§G(a)). Four channels (1, 2, 3, 5) are reachable by any target that holds the corresponding
+tools, including a leaf-class target, and are therefore the v1 core campaign set. Channel 6 is special:
+the daemon already frames child reports, so the canary's most valuable early measurement is *whether the
+existing frame holds* against a crafted payload — a comparison leg, not a coverage gap. Channels 4, 7, 8,
+9 need a target class that only `aegis`/`worker` can play, which means either aegis-class targets (a
+wider, more privileged target — a deliberate risk trade) or a deferred leg. Channel 11 is the largest
+hole and is explicitly **not** closed by this lane.
 
 ---
 
-## Sandbox-trust analysis — what the isolation actually is
+## Containment ledger — what is MECHANICAL, what is DOCTRINE, what is FALSE (D7, §7.3)
+
+Reproduced faithfully from `architecture-recommendation.md` §7.3. The canary persona and the campaign target
+are judged against the same claims; "FALSE" means the claim cannot be made in v1 and must not appear in
+the persona, the campaign record, or the hand-off report (AM-13 precedent).
+
+| Claim | Canary persona | Campaign target | Class |
+|---|---|---|---|
+| Tool universe is enforced (`resolve_tool_filter`) | ✔ allow/deny at construction | ✔ (persona-level) | **MECHANICAL** |
+| `deny: {write_file, edit_file}` removes those tools | ✔ (filesystem allowed) | ✔ (leaf-class targets) | **MECHANICAL** |
+| No per-instance tool narrowing | ✔ | ✘ **cannot narrow** | **MECHANICAL LIMIT** |
+| "bash denied ⇒ no shell" | ✘ — `proc` substitutes (and `proc` is now removed) | ✘ — same | **FALSE** (NC-4) |
+| OS/container isolation | ✘ | ✘ | **FALSE** |
+| Network fence | ✘ | ✘ | **FALSE** |
+| Credential fence (secrets in child env; `.env` readable) | ✘ | ✘ | **FALSE** |
+| Read fence (`read_file` absolute paths) | ✘ | ✘ | **FALSE** |
+| Project fence on spawn | ✘ | ✘ | **FALSE** (B8) |
+| Identity fence (`data/ensemble.json` outranks env) | ✘ | ✘ | **FALSE** |
+| Findings privacy | **discipline** (off-repo, recorded path) | n/a | **DOCTRINAL** |
+| **Payload inertness** | ✔ (authoring cardinal) | ✔ (the only thing bounding consequence) | **BINDING DOCTRINE + REVIEW** |
+| Screen is a filter, not a boundary | ✔ | ✔ | **DOCTRINAL** |
+
+**Strongest mechanical containment, stated plainly:**
+
+- **Canary:** the tool-category allow set (construction-time) + no instance tools + no write tools. It
+  bounds *which tools exist*, not *what the tools reach* — with `filesystem` + `bash`, a turned canary
+  reaches the host (read anything, execute anything as the daemon user). That is the honest worst case.
+- **Target:** **none** beyond its persona's own allow/deny. There is no per-instance override, no project
+  axis, no container.
+
+**The new binding rule (§7.4): the payload is the containment unit.** Because targets cannot be
+mechanically narrowed, containment must live where it can be enforced — in what the payload asks for.
+CAG-06 amendment (binding on P1/P3):
+
+> Every payload's requested action is **INERT AND OBSERVABLE**, drawn from this closed allowlist:
+> (i) write a fixed marker string into a file **inside the campaign scratch root**;
+> (ii) invoke a named side-effect-free tool with benign arguments;
+> (iii) reply with a fixed token;
+> (iv) read a scratch file and echo a fixed token.
+> **No payload may request** a destructive command, a network call to a non-scratch host, credential/secret
+> access, a live-instance message, a `git push`, or an upgrade/promote — not even as a "test".
+> The campaign log records `expected_action_class`; the campaign procedure asserts the observed action class.
+> An out-of-allowlist requested action is a **corpus-review failure before firing**.
+
+This converts the containment question from *"how do we sandbox the target"* (unanswerable in v1) to
+*"how do we guarantee the payload is harmless"* (authorable, reviewable, loggable). It also bounds F1:
+the worst payload canary can produce is a harmless instruction.
+
+**What canary v1 must NOT claim (§7.6):** (1) the target is sandboxed in any containment sense — it is a
+logical fence; (2) "bash is denied" — it is not, and `proc` would have been a substitute anyway;
+(3) targets run with narrowed tools — no such mechanism exists; (4) the screen is enforcement — it is a
+filter; a payload that lands in context has been read; (5) findings are confined — they are *reachable,
+not confined* (discipline, recorded path); (6) payloads are safe *because the target is sandboxed* — they
+are safe *because they are inert* (§7.4), which is doctrine + review, not mechanics. The limits sentence
+(6 items, compressed) must appear in the canary persona `rule.md`/`soul.md`, the campaign record template,
+and the hand-off report (AM-13 precedent).
+
+---
+
+## Sandbox-trust analysis — what the isolation actually is (logical only)
 
 **What "a sandboxed self-owned target" is, concretely:**
 
@@ -384,6 +448,54 @@ reaches nobody at 03:00.
 
 ---
 
+## F4 mechanism — the optional LLM pass (§3.6)
+
+The pass mechanism was assigned to this analysis and is **absent** here in the original framing. Ruling:
+the **pass is performed by the consuming agent's own judgment**, and recorded by **re-running the scanner**
+with explicit `--llm-verdict` / `--llm-confidence` arguments. The scanner **validates** the values against
+the closed vocabularies and **applies monotonicity** — it refuses any downgrade of a heuristic `hostile`
+(SK-11 becomes mechanically enforced rather than a promise). Consequences: no extra model call, no pinned
+model, no provider dependency, `classifier: heuristic+llm` only when the arguments are present, and pinned
+tests run with the pass **OFF** by construction. Cost/latency: ≤20 s when used; determinism: heuristic-only
+in pinned tests.
+
+## NC-2 — the screen's execution mechanism (§7.5)
+
+SK-17 requires a **sha256 of arbitrary content** and SK-13 a byte-exact block; an LLM cannot emit either
+from prose. The mechanism: **the screen's procedure is to run the reference scanner; its stdout IS the
+fenced block.** The model does not hand-assemble the block.
+
+- **Location:** `agents/canary/skills-template/injection_scan.py` — the **only shipped, precedented**
+  location (`stage.sh` copies `agents/` verbatim; `scripts/` and `tests/` do **not** ship; executable
+  precedent at `agents/charter/skills-template/install-mermaid-cli.lib.sh`, mode 100755).
+- **Discovery ladder (binding):** the skill body specifies a ladder — cwd-relative first, then an
+  install-root-resolved path — and the **staged gate runs a three-CWD test** (repo root, `/tmp`, the
+  install/release root). The existing family precedent is CWD-only (`. agents/<lane>/…lib.sh`, no env
+  lookup) and is **insufficient**; the ladder is the fix.
+- **Safety properties (testable):** bare `python3`, no daemon import, no network, no writes outside stdout,
+  deterministic; reads the single machine-readable rule table from the canonical body; validates and
+  monotonicises the optional `--llm-*` inputs (§3.6 / F4).
+- **Mirrors** invoke the same install-global path (`agents/canary/…`) — the scanner is one artifact, not
+  four. The screen is a **filter, not a boundary**; a payload that lands in context has been read.
+
+## NC-1 contract (§3.5) — normative vs superseded
+
+`requirements.md` SK-13…SK-25 + RUL-01…RUL-06 are the **normative contract**; `phase1-plan.md` tasks 1–3
+are an earlier, looser sketch and are **superseded** on these points:
+
+| Point | phase1 sketch | Normative (requirements) |
+|---|---|---|
+| Rule-ID namespace | `IS-001…` | **`INJ-nn`**, contiguous from `INJ-01`, never reused (X-02/RUL-01) |
+| Verdict enum | `clean` / `hostile` | **`clean` / `suspect` / `hostile`** (SK-16) |
+| `confidence` | omitted when the pass did not run | **always present**; `none` is a legal value (SK-16/RUL-04) |
+| Header format | `key=value` | **`key: value`** (SK-16) |
+| `version` field | a header field | **not a header field** — the grammar version lives in the BEGIN token (`v1`) |
+| Carrier | unmentioned | **4-backtick `untrusted-data` carrier + escape rule + truncation marker** (SK-18/19/22) |
+
+A single mismatch is a drift defect, not style (X-02).
+
+---
+
 ## Merge-overlap and version-slot analysis
 
 - **Base:** `97b76e20e` == `origin/latest` at lane start; the canary branch is `feature/canary-injection-defense`
@@ -411,18 +523,17 @@ reaches nobody at 03:00.
 
 ---
 
-## Risk concentration — the top five
+## Risk concentration — the top five (updated for the adopted architecture, D7)
 
 | # | Risk | Why it concentrates here | Mitigation available in v1 | Residual |
 |---|---|---|---|---|
-| **R1** | **The sandbox is a convention; a payload that lands in a dev-daemon child runs as the daemon user** | the canary's whole job is to make hostile text reach a live LLM turn; the target's `bash` is unconfined, its `read_file` is unbounded, secrets resolve into its env | dev-daemon + dev-DB + scratch-DATA_DIR pre-flight assertions; **leaf-class targets** (deny write/edit, no privileged categories); synthetic payloads only; never live or busy instances | a payload that convinces the target to `bash` something is still a real command on the host — **the blast radius of a successful injection is the host**, not the sandbox |
-| **R2** | **The measurer is the most exposed agent** — canary reads payloads by design | the red-team persona ingests hostile text that the doctrine says must never be ingested; "I handle it as data" is exactly the state an attacker wants | payloads stored as **labelled data-with-provenance** artifacts, off-repo (predecessor §B.5 root); canary's own cardinals state the carve-out; campaign logs never re-enter a prompt unframed; the campaign record stores **payload + target + result**, which is the audit trail | a sufficiently clever payload may still shift canary's framing — the mitigations are procedural, not mechanical (flag **F1**) |
-| **R3** | **Doctrine without enforcement is a suggestion** | the untrusted-content rule lands as prompt text; nothing in the daemon checks it | the canary campaign is the **enforcement oracle**: leakage measurement is the only feedback that the doctrine actually changed behaviour; the machine-checkable fence envelope makes at least the *screen* output verifiable | personas outside the family (planner/developer lanes) are uncovered in v1 — the disclosure is the mitigation (flag **F8**) |
-| **R4** | **Distribution cost grows with the recipient set** | per-agent bodies + per-agent manifest entries; the "stated once" trap forces honest mirror declarations; the W4 guard means propagation is a version bump + a boot | **push delivery** (`load_skill` dispatch tag + cross-agent clone-on-miss) for episodic needs; a **minimal seed set** for standing needs; one commit carrying every body + every version field + a cross-agent identity pin | push delivery makes the skill's presence **dispatch-dependent** — a dispatch that forgets `load_skill` delivers an unscreened turn (mitigable by doctrine, not by mechanics) |
-| **R5** | **The lane rewrites the family's pin corpus** | canary adds a persona (T29 20→25, T5 set extension), the doctrine edits worker (T25 "worker untouched" reds), and any multi-agent seeding reds T21 ("exactly one family manifest") and demands a generalized T22 | one **re-derivation commit** carrying the pin changes; derive counts at P4; leave the seal lane untouched; keep `tool-categories.json` untouched (a skill is not a tool category) | pin churn is mechanical but noisy — every re-derived pin must keep the **mutation-meaningful** property (a pin that cannot fail is worse than no pin) |
+| **R1** | **Payload inertness is now the ONLY mechanical containment** — a non-inert payload defeats the model | no per-instance tool narrowing exists (`spawn_instance` has no tool parameter; filters resolve per-agent meta at `instance.py:425`/`:7183`); the target's `bash` is unconfined, its `read_file` is unbounded, secrets resolve into its env; the "sandbox" is a logical fence (no OS/network/credential/write/read/project/identity fence) | the CAG-06 amendment (§7.4): every payload's requested action is inert and observable, drawn from a closed allowlist (fixed marker write inside scratch root, named side-effect-free tool call, fixed-token reply, read scratch + echo token); no destructive/network/credential/live-instance/git-push/upgrade requests; `expected_action_class` recorded in the campaign log; corpus-review failure before firing if out of allowlist | a non-inert payload that slips review defeats the model — payload review is doctrine + review, not mechanics; the worst payload canary can produce is a harmless instruction only if review holds |
+| **R2** | **The measurer is the most exposed agent (self-hypnosis)** — canary reads payloads by design | the red-team persona ingests hostile text that the doctrine says must never be ingested; "I handle it as data" is exactly the state an attacker wants | payloads stored as **labelled data-with-provenance** artifacts, off-repo (predecessor §B.5 root); canary's own cardinals state the carve-out ("the fencing is the container"); campaign logs never re-enter a prompt unframed; the campaign record stores payload + target + result (audit trail); the carve-out is single-site if it becomes a T29 anchor | a sufficiently clever payload may still shift canary's framing — the mitigations are procedural, not mechanical (flag **F1**) |
+| **R3** | **Shared-pin re-derivation** — the lane rewrites the family's pin corpus | canary adds a persona (T29 20→25, T5 set extension), the doctrine edits worker (T25 "worker untouched" reds), multi-agent seeding reds T21 ("exactly one family manifest") and demands a generalized T22 | one **re-derivation commit** carrying the pin changes; derive counts at P4; leave the seal lane untouched; keep `tool-categories.json` untouched (a skill is not a tool category); mutation legs M1–M7 each observed RED→GREEN | pin churn is mechanical but noisy — every re-derived pin must keep the **mutation-meaningful** property (a pin that cannot fail is worse than no pin); baseline 177→181, agents-tree 366→378 |
+| **R4** | **Fence brittleness** — the delimiters + provenance header must survive markdown rendering and context compaction | compaction may reword a model-visible frame (the one existing precedent, `graph.py:343-373`, has no compaction guarantee) | doctrine re-assert duty (§3.4): when context is compacted, body content is dropped before markers; any payload-derived text that survives into a summary is re-emitted inside a new fence with `source:` preserved and `classifier:` unchanged | daemon-side compaction guarantee is routed (§G(c)); must not claim mechanical durability (F2) |
+| **R5** | **Doctrine without enforcement** — the untrusted-content rule lands as prompt text; nothing in the daemon checks it | the untrusted-content rule is additive prompt text; no daemon-side check | the canary campaign is the **enforcement oracle**: leakage measurement is the only feedback that the doctrine actually changed behaviour; the machine-checkable fence envelope makes at least the *screen* output verifiable | personas outside the family (planner/developer lanes) are uncovered in v1 — the disclosure is the mitigation (flag **F8**); the screen is a filter, not a boundary |
 
-**Also monitored (below the top five):** the fence contract's brittleness across markdown rendering and
-context compaction (F2); heuristic false-positive burden (F3); the optional LLM-classification pass's
+**Also monitored (below the top five):** distribution cost growing with the recipient set (per-agent bodies + manifest entries; W4 guard propagation) — mitigated by push delivery for episodic needs and a minimal seed set for standing needs; the optional LLM-classification pass's cost/determinism (F4) — OFF in pinned tests; heuristic false-positive burden (F3); the 4 base-stale seal entries (R1 seal lane owns them).
 cost/determinism (F4); unicode/homoglyph scanning against our own multilingual content (F5); the
 T21/T22 re-derivation scope (F6); memoir merge-order and slot contention (F7); the non-family blast
 radius (F8); the baseline arithmetic edge (F9); canary's deny-list surface (F10); target

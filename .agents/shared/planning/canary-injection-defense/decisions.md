@@ -2,8 +2,8 @@
 
 **Date:** 2026-11-05 (lane worktree created 2026-11-05T14:20:00Z)
 **Author:** planner[v2] via technical-analysis worker
-**Status:** **RULED (2026-11-05)** — the architect decided D1–D6 (+ leader-added D7) in
-[`architecture-recommendation.md`](./architecture-recommendation.md); §F below points at each ruling. The
+**Status:** **RULED (2026-11-05)** — the architect decided D1–D7 (+ leader-added D7) in
+[`architecture-recommendation.md`](./architecture-recommendation.md) (G0, commit `f6d11c232`); §F below points at each ruling. The
 slot framings below are retained as decision context; a ruling is authoritative where it differs. Flag state, gate state and the decision state
 are single-sourced in **§F** (this file is the authority; the plan set cross-references it and never
 duplicates it).
@@ -130,15 +130,25 @@ skill without being seeded.
 
 ---
 
-## C. The D1–D6 decision slots — OPEN for the architect
+## C. The D1–D7 decision slots — RULED AND ADOPTED (architect G0, commit f6d11c232)
 
 > Each slot: **Options** (with the mechanics that make an option viable) → **Trade-offs** →
 > **RECOMMENDATION (framing only — the architect rules)** → **Fold-consequence per option**.
-> Mechanics and citations live in [`technical-analysis.md`](./technical-analysis.md).
+> Mechanics and citations live in [`technical-analysis.md`](./technical-analysis.md). The ruling for each
+> slot is recorded as `**Ruling (adopted):**` immediately below the slot header, with the actual
+> fold-cost incurred. The architect's ruling record is
+> [`architecture-recommendation.md`](./architecture-recommendation.md) (G0, 2026-11-05).
 
 ### C.1 — **D1 · Spawn topology**
 
-**Question.** Does canary hold a spawn right (and can it be *narrowly scoped* to a sandbox project),
+**Ruling (adopted): D1-A — lean compose-and-hand.** Canary holds zero instance tools; aegis is the sole
+spawner/firer. Fold-cost incurred: canary `meta.json` leaf-shaped (`allow ⊆ {bash, proc, filesystem, time,
+help, self}` → `proc` dropped per D7, see C.7); `team_members: []`; T5 parametrised set extends to
+include canary; aegis `workflow.md` gains fire/observe duties; campaign record gains staged-observation
+layout (paths, not inline text); D6 legs mediated by aegis for privileged channels. The "project-scoped
+spawn right" is unenforceable in v1 (`_auth.py:89-115`, no project axis) — B over-promises; C is the v2
+mechanical path (§G(b)). Fold-cost: Option C v2 trigger = demonstrable campaign throughput/fidelity
+suffering OR a project-scoped spawn-gate commission.
 or does it compose and hand off to aegis, which spawns the targets?
 
 **Mechanics that bound the options (B8):** the team gate is binary and has **no project axis**. A
@@ -174,6 +184,7 @@ discipline (B9). **Option C is the named v2 escalation path**: it is the only op
 second pin set. **Option B should not be selected in its "project-only" form in v1**, because B8 makes
 that qualifier unenforceable — if the architect wants a *real* scope, the honest v1 answer is A with C
 documented, or a separate daemon commission (routed, §G).
+*Adopted as recommended (§C.1, D1); no delta.*
 
 **Fold-consequence per option.**
 
@@ -196,7 +207,13 @@ documented, or a separate daemon commission (routed, §G).
 
 ### C.2 — **D2 · Skill mechanism and distribution**
 
-**Question.** Who is seeded, how is the body distributed, is it auto-loaded, and what does "canary owns
+**Ruling (adopted): D2-B — seed the standing readers, `auto_load` corrected.** 4 seeded recipients:
+canary (canonical, `auto_load: true`), aegis (mirror, `false` + workflow-mandated load), worker (mirror,
+`false` + CRITICAL load), sweeper (mirror, `auto_load: true` — **overruled default**, NC-3). hacker/cracker
+= doctrine-only (disclosed gap, C3). Evolution = git-only + version bump (B6/B7). Fold-cost incurred: 4
+bodies + 4 manifest entries (+2 manifest files: worker already has one); hacker/cracker get doctrine text
+only; T21/T22 re-derivation over 4 pairs; mirror-identity pin over 4 bodies; cross-agent identity pin
+mandatory. The sweeper unreachable gap is closed (NC-3).
 and evolves the rule set" mean under the git-only rule (B6)?
 
 **Mechanics that bound the options (A.4):** seeding is per-agent (N bodies + N manifest entries);
@@ -241,6 +258,7 @@ where a dispatch forgets the tag, which is exactly the failure the lane exists t
 option is chosen, the "stated once" claim must be honest** (guide §2): with N bodies the declaration
 is "canonical body at `agents/canary/skills-template/injection-screen.md`; the seeded copies are
 mirrors, kept in sync by a version bump and a cross-agent identity pin".
+*Superseded by the ruling at §C.2 (D2): sweeper `auto_load` false → true (NC-3); hacker/cracker = doctrine-only (disclosed gap, C3).*
 
 **Fold-consequence per option.**
 
@@ -261,7 +279,14 @@ mirrors, kept in sync by a version bump and a cross-agent identity pin".
 
 ### C.3 — **D3 · Doctrine wording and landing sites**
 
-**Question.** What exactly do the untrusted-content rule and the action-distance rule say, where do
+**Ruling (adopted): D3-A sites + two-layer N.** aegis `(g)` after `(f)`; leaves `(f)` after `(e)`; worker
+`## Must` CRITICAL subsection; canary cardinal 7 from birth. Online rule = same/adjacent turn (N3);
+offline metric = tool results since ingestion (N1, campaign-scored). Marker `[UNTRUSTED-ADJACENCY: …]`.
+Carve-out = "the fencing is the container". The original N=1-measured-in-assistant-turns default is
+superseded by the two-layer N (refinement, not an overruled default). F2 fence-vs-compaction: doctrine
+re-assert duty (§3.4 of architecture-recommendation.md); daemon guarantee routed (§G(c)); must not claim
+mechanical durability. Fold-cost: aegis `rule.md` gains `(g)`; each leaf gains `(f)`; worker gains a
+CRITICAL bullet; canary gains cardinals; T29 gains 5 canary cells anchored on cardinal lines.
 they land per persona, what does "N steps" mean, and how does canary's carve-out read?
 
 **Mechanics that bound the options (§A.3):** aegis is **at 7/7 cardinals** (a new cardinal requires a
@@ -304,6 +329,7 @@ model's own units of experience and the campaign scores it in transcript units. 
 weakest** and should be rejected explicitly: a rule that lives only in a skill body is evicted by
 compaction while the persona's `rule.md` survives, and the guide's cardinal discipline exists for
 exactly that reason.
+*Adopted as recommended (§C.3, D3); no delta.*
 
 **The carve-out (canary).** It must read as *"the fencing is the container"*, not as an exception to
 the rule: canary's payloads are **labelled, provenance-bearing DATA inside a named engagement
@@ -332,7 +358,12 @@ Whatever wording is chosen must be **single-site** if it becomes a T29 anchor (F
 
 ### C.4 — **D4 · Payload corpus and rule-set home**
 
-**Question.** Where does the seeded payload corpus live, and where do evolved detection rules
+**Ruling (adopted): D4-A.** Corpus path = `tests/fixtures/injection_corpus/` (COR-01 wins; the
+`decisions.md:348` illustration `tests/unit/agents/fixtures/injection_corpus/` is superseded). Rule-set
+home = the single machine-readable JSON block inside the canonical skill body (SK-04 / RUL-01…06). Named
+migration trigger to a sibling file (200 lines / 24 KiB). Fold-cost: new fixture directory + index;
+skill body carries the rule table; corpus referenced by path; agents-tree count unaffected (fixtures
+outside `agents/`); baseline count unaffected.
 accumulate?
 
 **Mechanics that bound the options (B11, A.4, B6):** a corpus file under `agents/<persona>/` that is not
@@ -345,7 +376,7 @@ rules file must also be git-committed.
 
 | Option | Corpus home | Rule-set home | Notes |
 |---|---|---|---|
-| **A — test-scoped corpus, rules in the skill body** | `tests/` fixtures dir (e.g. `tests/unit/agents/fixtures/injection-corpus/`), one labelled payload per file + an index | the rule table lives **inside** the skill body (version-bumped per B7) | one artefact; propagation = version bump + N body copies; body grows with the table |
+| **A — test-scoped corpus, rules in the skill body** | `tests/` fixtures dir (e.g. `tests/unit/agents/fixtures/injection_corpus/`), one labelled payload per file + an index | the rule table lives **inside** the skill body (version-bumped per B7) | one artefact; propagation = version bump + N body copies; body grows with the table |
 | **B — test-scoped corpus, separate rules file** | same | a canary-owned rules file the skill loads (file-invoked precedent: the family's three installer toolchains are file-invoked and never in a manifest) | the body stays small; a second artefact to keep in sync; the file-invoked shape has a T21 pin to respect (`test_installer_skills_in_no_manifest`) |
 | **C — persona-scoped corpus** | `agents/canary/corpus/` | inside the skill body | self-contained persona; but the corpus sits **inside the agents tree** (prompt-surface proximity) and grows the census; a grep from any persona reaches it |
 
@@ -358,6 +389,7 @@ outgrows a skill body. Option C is the weakest: it buys self-containment at the 
 hostile text inside the agents tree, one `grep` away from every persona that searches the repo — and
 the doctrine this lane is writing says untrusted content is exactly what must not be lying around
 unframed.
+*Superseded by the ruling at §C.4 (D4): corpus path illustration superseded — `tests/fixtures/injection_corpus/` (COR-01 wins); migration trigger named.*
 
 **Fold-consequence per option.**
 
@@ -377,7 +409,12 @@ unframed.
 
 ### C.5 — **D5 · Test-matrix shape**
 
-**Question.** How does the pin corpus change: T29 20 → 25, which packs are new, which mutation legs
+**Ruling (adopted): D5-A — family file grows T31–T37.** T29 20→25 (canary column); worker outside the
+matrix (C2); T31 = 24 anchors + canary's 2 carve-out anchors = 26; complete re-derivation ledger (§5.2 of
+architecture-recommendation.md) including baseline 177→181 and agents-tree 366→378. Fold-cost: T21, T22,
+T25 (re-worded), T5 set, T6/T7/T8, T29 completeness; T32 fence contract; T33 parser; T34 heuristic
+corpus; T35 meta pins; T36 campaign-log + report shape; T37 corpus hygiene. Mutation legs M1–M7 each
+observed RED→GREEN. Boot census 43→44.
 are required, and which existing pins must be re-derived?
 
 **Mechanics (A.3, §B11):** T29 is a dict keyed `(persona, family)` → verbatim anchor tuples with a
@@ -399,6 +436,7 @@ the family file (T21/T22/T25/T29 all red), so keeping one corpus in one file avo
 fixtures) belong in the same file unless the plan prefers a separate `test_injection_screen.py` for the
 **skill-only** concerns — a split by *concern* (family pins vs skill packs) is defensible and the
 architect may prefer it.
+*Superseded by the ruling at §C.5 (D5): re-derivation ledger completed — baseline 177→181 + agents-tree 366→378 constants named; worker outside matrix (C2).*
 
 **Sub-decisions the architect must confirm:**
 
@@ -438,6 +476,14 @@ architect may prefer it.
 ---
 
 ### C.6 — **D6 · Intake-channel inventory and sandbox semantics**
+
+**Ruling (adopted): D6-A — core 5 legs; logical-only sandbox.** Channels 1/2/3/5 fired + 6 as comparison
+baseline; 4/7/8/9 deferred with reasons; 11 (chat inbound) disclosed as the widest uncovered surface.
+Sandbox = logical only (no OS/network/credential/write/read/project/identity fence — the architect's
+exact list, §6.2 of architecture-recommendation.md); five-item mechanical pre-flight. Fold-cost:
+campaign spec covers 5 legs; target persona leaf-class (T6/T7 pins apply); pre-flight checklist becomes a
+five-item mechanical pre-flight in the campaign procedure; coverage table lists channels 4/7/8/9/11 as not
+covered in v1 with reasons; hand-off report carries the limits sentence.
 
 **Question.** Which real intake surfaces do v1 campaigns cover, and what does "a sandboxed self-owned
 target" concretely mean — and explicitly not mean?
@@ -482,6 +528,7 @@ disclosed as the widest uncovered surface — the plan must **state plainly what
 (prompts + campaign record + hand-off, AM-13 precedent). Option C is worth a decision only if the
 architect wants the MCP leg to be *real* rather than *shaped*; option B should be weighed against the
 fact that an `mcp`-class target is a much richer attack surface than the lane's other legs need.
+*Superseded by the ruling at §C.6 (D6): 'sandboxed target' reframed as logical-only fence (NC-5); five-item mechanical pre-flight.*
 
 **Fold-consequence per option.**
 
@@ -501,6 +548,82 @@ fact that an `mcp`-class target is a much richer attack surface than the lane's 
 
 ---
 
+### C.7 — **D7 · Canary tool surface and containment** (leader-added)
+
+**Ruling (adopted): D7 — no `proc`; payload inertness is the containment unit.** Canary `allow = {bash,
+filesystem, time, help, self}`; `deny = {write_file, edit_file}`; no instance/mcp/secrets/job/chart/
+knowledge/plane/image. `proc` REMOVED (it is a full shell substitute and grants background persistence
+past teardown; NC-4). `bash` retained (screen requires sha256/byte-exact fence assembly; NC-2). **No
+per-instance tool narrowing exists** ⇒ **the payload is the containment unit** (CAG-06 amendment:
+inert-and-observable payloads only — fixed marker write inside scratch root, named side-effect-free
+tool call, fixed-token reply, read scratch + echo token; no destructive/network/credential/live-instance/
+git-push/upgrade requests). The screen's execution mechanism is the committed scanner at
+`agents/canary/skills-template/injection_scan.py` (NC-2) + discovery ladder + three-CWD test. Fold-cost:
+canary `meta.json` allow/deny exact sets (T35); CAG-06 amendment + `expected_action_class` campaign-log
+field; NC-2 scanner + three-CWD acceptance test; containment ledger in persona + campaign record +
+hand-off (AM-13 precedent); limits sentence in `rule.md`/`soul.md`. **Overruled default**: `proc` in
+canary's allow set (NC-4). C1 (no chart) confirmed; C4 (deny ⊇ {write_file, edit_file}) confirmed.
+
+---
+
+## C-bis. Fold record — plan defaults → adopted rulings
+
+| Item | Plan default BEFORE | Ruling | Delta folded | Files touched |
+|---|---|---|---|---|
+| D1 spawn topology | lean compose-and-hand (commission default) | A (confirmed) | none — confirmed lean; B over-promises (no project axis, B8); C = v2 path | canary `meta.json` leaf-shaped; aegis `workflow.md` gains fire/observe duties; campaign record staged-observation layout |
+| D2 seeding set | 6 recipients (Option A) | B — 4 readers (canary, aegis, worker, sweeper) | hacker/cracker = doctrine-only (disclosed gap, C3) | 4 bodies + 4 manifest entries (+2 manifest files); T21/T22 re-derivation |
+| D2 `auto_load` (sweeper) | `false` | `true` (NC-3 overrule) | sweeper becomes reachable; `auto_load: false` would ship an unreachable skill | sweeper `skill-set.yaml` + `skills-template/injection-screen.md` |
+| D2 `auto_load` (canary) | (plan default `false`) | `true` | canary has no skill tools; auto-load is the only self-sufficient path | canary `skill-set.yaml` |
+| D2 `auto_load` (aegis/worker) | — | `false` + workflow-mandated load + push delivery | cheap path with real failure mode | aegis/worker `rule.md`/`workflow.md` mandates |
+| D3 landing sites | guideline slots (framing) | A — aegis `(g)`, leaves `(f)`, worker CRITICAL bullet, canary cardinal 7 | no cardinal churn; T29 anchors untouched | aegis/leaves/worker/canary `rule.md` |
+| D3 step semantics | N=1 (plan default) | two-layer N: online N3 (same/adjacent turn) + offline N1 (tool results since ingestion) | refinement, not overrule; marker `[UNTRUSTED-ADJACENCY: …]` | doctrine block text |
+| D3 carve-out | "the fencing is the container" | adopted verbatim, single-site | canary cardinal 7 born with it | canary `rule.md` cardinal 7 |
+| D3 F2 compaction | (unstated) | doctrine re-assert duty; daemon guarantee routed (§G(c)); must not claim mechanical durability | disclosure only | doctrine block + standing disclosure |
+| D4 corpus path | `tests/unit/agents/fixtures/injection_corpus/` (illustration) | `tests/fixtures/injection_corpus/` (COR-01 wins) | path corrected; COR-02/COR-06 binding | corpus dir + index; packs reference by path |
+| D4 rule-set home | (various) | single machine-readable JSON block inside canonical skill body | one artifact, two readers | canonical skill body |
+| D5 matrix | 20 cells | 25 cells (+canary column); T31 = 24 + 2 carve-out = 26 | worker outside (C2); numbered-line property not asserted for worker | T29 matrix + T31 anchors |
+| D5 baseline rows | 177 | 181 (canary's 4 prompt files) | +4; assert exists + exact count (F9) | baseline generator re-stamp at P4 |
+| D5 agents-tree files | 366 | 366 + canary + skill bodies (estimate 378) | derived at P4 | census at stage |
+| D5 boot census | 43 | 44 | staged-boot artifact | staged gate |
+| D6 v1 legs | (framing) | core 5 (channels 1/2/3/5 + 6 baseline) | 4/7/8/9 deferred; 11 disclosed widest hole | campaign spec + coverage table |
+| D6 sandbox | "sandboxed target" language | logical only — no OS/network/credential/write/read/project/identity fence | over-claim removed (NC-5) | persona + campaign record + hand-off limits sentence |
+| D7 tool surface (canary) | `allow ⊆ {bash, proc, filesystem, time, help, self}` | `allow = {bash, filesystem, time, help, self}` (no `proc`) | `proc` dropped (NC-4); `bash` retained for screen | canary `meta.json`; T35 pin |
+| D7 containment | (unstated) | payload is the containment unit (CAG-06 amendment) | inert-and-observable payloads only | requirements CAG-06/CAG-09; campaign-log `expected_action_class` |
+| NC-1 contract | phase1 sketch (`IS-001…`) | `requirements.md` SK-13…SK-25 normative (`INJ-nn`, clean/suspect/hostile, confidence always present, `key: value`, no version field, 4-backtick carrier) | phase1 tasks 1–3 re-aligned | phase1-plan.md tasks 1–3 |
+| NC-2 screen mechanism | (absent) | committed scanner `agents/canary/skills-template/injection_scan.py` + discovery ladder + three-CWD test | new shipped artifact | scanner + tests |
+| NC-3 sweeper reachability | `auto_load: false` | `auto_load: true` | overruled default | sweeper manifest + body |
+| NC-4 `proc` in canary allow | present | removed | overruled default | canary `meta.json` |
+| NC-5 "sandboxed target" language | present | payload-inertness framing | overruled framing | persona + campaign record + hand-off |
+
+### C-bis.1 — Three overruled plan defaults (explicitly named)
+
+1. **Sweeper `auto_load: false`** (plan default) → **overruled to `true`** (NC-3). A `false` default would
+   ship an unreachable skill: sweeper holds neither `dynamic-skill` nor `skill_injection`, so no search-injection
+   or explicit load path exists; auto-load is the only reachability path.
+2. **`proc` in canary's allow set** (plan default) → **overruled to dropped** (NC-4). `proc_run` shells out
+   (`proc_tools.py:1190-1206`) and grants background persistence past teardown — a full `bash` substitute
+   that defeats any "no shell" claim. `bash` retained because the screen requires sha256/byte-exact fence
+   assembly (NC-2).
+3. **"Sandboxed target" containment language** (plan default) → **overruled to payload-inertness framing**
+   (NC-5). No per-instance tool narrowing exists (`spawn_instance` has no tool parameter; filters resolve
+   per-agent meta at `instance.py:425`/`:7183`), so the phrase over-claimed. Payload inertness (§7.4 of
+   architecture-recommendation.md) is the binding containment.
+
+### C-bis.2 — Ruling refinement (not an overruled default)
+
+D3's original default read N as "measured in assistant turns" (N1). The ruling supersedes this with the
+**two-layer N**: online N3 (same/adjacent turn, adoptable without counting) + offline N1 (tool results
+since ingestion, campaign-scored). The doctrine states the online bound; the campaign scores the offline
+metric. Anchor literals are metric-neutral so the pins hold under either. The marker shape is
+`[UNTRUSTED-ADJACENCY: source=<label> sha256=<12-hex-prefix> action=<one-line> why=<one-line>]`.
+
+### C-bis.3 — Objection rows (recorded, not actioned)
+
+*(None recorded. If a ruling is believed wrong, add at most 3 rows here: ruling id · reasoning ·
+`status: recorded, not actioned`.)*
+
+---
+
 ## D. Surfaced flags beyond D1–D6 (F1–F14)
 
 *(Each flag is a real finding from the framing work. Severity is this worker's judgment; the
@@ -508,20 +631,20 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 
 | # | Flag | Severity | Disposition |
 |---|---|---|---|
-| **F1** | **Canary self-injection** — the red-team persona ingests hostile text by design; "I handle it as data" is precisely the state an attacker wants. The mitigations are procedural: payloads as **labelled, provenance-bearing data artefacts**, off-repo (B1); canary's own carve-out worded as *"the fencing is the container"*; campaign logs never re-enter a prompt unframed. | **High** | OPEN — the carve-out wording belongs to D3; the storage convention belongs to D4 |
-| **F2** | **Fence-contract brittleness** — the delimiters + provenance header must survive markdown rendering and **context compaction**; compaction may reword a model-visible frame (the one existing precedent, `graph.py:343-373`, has no compaction guarantee). v1 answer: the doctrine states a **re-assert duty**, and the plan records that fence durability across compaction is **unproven** (not claimed). | Medium-High | OPEN — a daemon-side compaction guarantee is a routed item (§G) |
-| **F3** | **Heuristic false-positive burden** — a screen that flags normal repository content makes every `read_file` noisy and the persona a boy who cries wolf; the screen must carry **severity levels and a clean-verdict path**, and the clean path must be the *default* for ordinary content. | High (adoption friction) | OPEN — belongs to the skill contract (Build 1) |
-| **F4** | **Optional LLM-classification pass** — cost, latency, model choice and **determinism**. Pinned tests must run with the pass **OFF** (heuristic-only) so the packs are deterministic; the pass's model and budget need a decision. | Medium | OPEN — the pass is *optional*; the v1 default is heuristic-only |
-| **F5** | **Unicode / homoglyph scanning vs our own multilingual content** — the corpus and the screens must not flag the team's Vietnamese/Unicode prose; a normalisation policy (case-fold, strip zero-width, NFKC) is needed, and the rule set must say what it normalises before it matches. | Medium | OPEN — belongs to the rule table (D4) |
-| **F6** | **T21/T22 re-derivation scope** — the exact family-manifest assertion (`:556-563`) and the leaf-no-manifest assertion (`:565-567`) red as soon as the skill is seeded into any family member beyond aegis; the scope depends on D2's seeding set. | Medium (mechanical, but load-bearing) | OPEN — depends on **D2** |
-| **F7** | **Memoir merge-order + version-slot contention** — `v0.28.13` is contended; if memoir lands first our migration delta becomes **119 → 120 inherited** (not authored), which changes the stage-time rollback reason string. | Medium | OPEN — derive the slot at stage time; re-derive the overlap at finalise |
-| **F8** | **Non-family blast radius** — planner, developer, reviewer, tester and every other lane are **not** covered by the skill or the doctrine in v1; their agents read foreign content every turn. The mitigation is disclosure, not coverage. | **High (disclosure burden)** | OPEN — a house-wide doctrine is a different lane (§G) |
-| **F9** | **Baseline arithmetic edge** — canary adds **exactly 4** rows **only if** none of the legacy artifact names (`memory.md`, `growth.md`, `tools.md`, `skill.md`) appears on it; and `--check` exits 0 when the file is absent, so the leg must assert **exists + exact count**. | Medium | OPEN — mechanical; enforce at P4 |
-| **F10** | **Canary's deny surface** — under a closed allow, extra deny entries are **dead weight** (predecessor §B.2 invariant 2). The framing: keep `deny ⊇ {write_file, edit_file}` (leaf precedent) and **do not** add speculative `image`/`secrets` denies; the closed allow is the fence. | Low-Medium | OPEN — confirmation requested (§F) |
-| **F11** | **Target contamination** — a target that swallowed payload *k* is not a clean target for payload *k+1*; either one payload per target (cost) or contamination is itself a measured effect (and must be distinguished from leakage). | Medium | OPEN — belongs to the campaign protocol (D3/D6) |
-| **F12** | **MCP-result leg mechanics** — firing a payload "through" a real MCP result needs a real MCP-shaped result; the target must be `mcp`-class (aegis/worker) and v1 has no mock-server scope. | Medium | OPEN — depends on **D6** (Option A defers it) |
-| **F13** | **The 4 000-char context cap is a realistic intake shape, not only an obstacle** — a payload delivered in the dispatch context is truncated at 4 000 chars; the truncated form is what the target actually sees and is a **legitimate** thing to test (truncation can strip a fence or a warning). | Medium | OPEN — belongs to the channel-5 leg |
-| **F14** | **Leakage-metric objectivity** — "the target followed the payload" is a judgement; the campaign needs a **closed taxonomy** (followed · escalated · tool-called · ignored) plus a **false-positive class** (benign tool-calls that the payload merely mentioned), and the scorer must not grade payloads it composed for intent ambiguity. | Medium | OPEN — belongs to the campaign loop (Build 3) |
+| **F1** | **Canary self-injection** — the red-team persona ingests hostile text by design; "I handle it as data" is precisely the state an attacker wants. The mitigations are procedural: payloads as **labelled, provenance-bearing data artefacts**, off-repo (B1); canary's own carve-out worded as *"the fencing is the container"*; campaign logs never re-enter a prompt unframed. | **High** | **ACCEPTED-WITH-DISCLOSURE** (mitigations binding; carve-out wording D3; storage convention D4) |
+| **F2** | **Fence-contract brittleness** — the delimiters + provenance header must survive markdown rendering and **context compaction**; compaction may reword a model-visible frame (the one existing precedent, `graph.py:343-373`, has no compaction guarantee). v1 answer: the doctrine states a **re-assert duty**, and the plan records that fence durability across compaction is **unproven** (not claimed). | Medium-High | **ACCEPTED-WITH-DISCLOSURE** (doctrine re-assert duty §3.4; daemon guarantee routed §G(c); must not claim mechanical durability) |
+| **F3** | **Heuristic false-positive burden** — a screen that flags normal repository content makes every `read_file` noisy and the persona a boy who cries wolf; the screen must carry **severity levels and a clean-verdict path**, and the clean path must be the *default* for ordinary content. | High (adoption friction) | **RESOLVED-BY-RULING** (binding in P1; `clean` default; labels/fences never blocks/rewrites/deletes; SK-09) |
+| **F4** | **Optional LLM-classification pass** — cost, latency, model choice and **determinism**. Pinned tests must run with the pass **OFF** (heuristic-only) so the packs are deterministic; the pass's model and budget need a decision. | Medium | **RESOLVED-BY-RULING** (§3.6 of architecture-recommendation.md; agent-judgment pass via scanner args; monotonic validation; no `hostile` downgrade) |
+| **F5** | **Unicode / homoglyph scanning vs our own multilingual content** — the corpus and the screens must not flag the team's Vietnamese/Unicode prose; a normalisation policy (case-fold, strip zero-width, NFKC) is needed, and the rule set must say what it normalises before it matches. | Medium | **RESOLVED-BY-RULING** (normalisation policy in the rule table; rules declare NFKC/case-fold/zero-width-strip before matching; unicode rules match raw text) |
+| **F6** | **T21/T22 re-derivation scope** — the exact family-manifest assertion (`:556-563`) and the leaf-no-manifest assertion (`:565-567`) red as soon as the skill is seeded into any family member beyond aegis; the scope depends on D2's seeding set. | Medium (mechanical, but load-bearing) | **RESOLVED** via D2/D5 (re-derivation ledger §5.2 of architecture-recommendation.md) |
+| **F7** | **Memoir merge-order + version-slot contention** — `v0.28.13` is contended; if memoir lands first our migration delta becomes **119 → 120 inherited** (not authored), which changes the stage-time rollback reason string. | Medium | **ACCEPTED** (stage-time derivation; reason string says inherited) |
+| **F8** | **Non-family blast radius** — planner, developer, reviewer, tester and every other lane are **not** covered by the skill or the doctrine in v1; their agents read foreign content every turn. The mitigation is disclosure, not coverage. | **High (disclosure burden)** | **CONFIRMED** via C3 (disclosed in three places; house-wide doctrine routed §G(e)) |
+| **F9** | **Baseline arithmetic edge** — canary adds **exactly 4** rows **only if** none of the legacy artifact names (`memory.md`, `growth.md`, `tools.md`, `skill.md`) appears on it; and `--check` exits 0 when the file is absent, so the leg must assert **exists + exact count**. | Medium | **RESOLVED** via D5 (assert exists + exactly 181; `--check` exit 0 ≠ clean) |
+| **F10** | **Canary's deny surface** — under a closed allow, extra deny entries are **dead weight** (predecessor §B.2 invariant 2). The framing: keep `deny ⊇ {write_file, edit_file}` (leaf precedent) and **do not** add speculative `image`/`secrets` denies; the closed allow is the fence. | Low-Medium | **CONFIRMED** via C4 (deny is intra-category subtraction; closed allow is the fence; surviving write path = `bash` into off-repo store) |
+| **F11** | **Target contamination** — a target that swallowed payload *k* is not a clean target for payload *k+1*; either one payload per target (cost) or contamination is itself a measured effect (and must be distinguished from leakage). | Medium | **RESOLVED-BY-RULING** (one payload per target in v1; reuse makes contamination a measured effect, recorded as such; §6.3 pre-flight) |
+| **F12** | **MCP-result leg mechanics** — firing a payload "through" a real MCP result needs a real MCP-shaped result; the target must be `mcp`-class (aegis/worker) and v1 has no mock-server scope. | Medium | **DEFERRED** under D6-A (revisit when mock MCP server or privileged-target leg exists; finding must state "shape, not server behaviour") |
+| **F13** | **The 4 000-char context cap is a realistic intake shape, not only an obstacle** — a payload delivered in the dispatch context is truncated at 4 000 chars; the truncated form is what the target actually sees and is a **legitimate** thing to test (truncation can strip a fence or a warning). | Medium | **ACCEPTED AS A LEG FEATURE** (channel-5 leg records the truncation; truncated form is what the target sees) |
+| **F14** | **Leakage-metric objectivity** — "the target followed the payload" is a judgement; the campaign needs a **closed taxonomy** (followed · escalated · tool-called · ignored) plus a **false-positive class** (benign tool-calls that the payload merely mentioned), and the scorer must not grade payloads it composed for intent ambiguity. | Medium | **RESOLVED-BY-RULING** (closed taxonomy CAG-08 + false-positive class + composer/scorer separation + `ambiguous` exclusion; §6.4) |
 
 ---
 
@@ -558,13 +681,13 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 
 | Slot | Subject | State | Ruling owner | Ruling recorded at |
 |---|---|---|---|---|
-| **D1** | Spawn topology (lean vs doctrinal-scope vs decoy-only) | **RULED — A: lean compose-and-hand** | architect | 2026-11-05 · `architecture-recommendation.md` §1 |
-| **D2** | Skill mechanism + distribution (seed set, copies, auto-load, evolution) | **RULED — B; `auto_load` corrected (canary+sweeper true)** | architect | 2026-11-05 · §2 |
-| **D3** | Doctrine wording + landing sites + step semantics + carve-out | **RULED — A sites + two-layer N** | architect | 2026-11-05 · §3 |
-| **D4** | Payload corpus home + rule-set home | **RULED — A (`tests/fixtures/injection_corpus/`)** | architect | 2026-11-05 · §4 |
-| **D5** | Test-matrix shape (25 cells, packs, mutations, census, re-derivations) | **RULED — A (family file grows T31–T37)** | architect | 2026-11-05 · §5 |
-| **D6** | Intake-channel coverage + sandbox semantics | **RULED — A (core 5 legs; logical-only sandbox)** | architect | 2026-11-05 · §6 |
-| **D7** | (leader-added) Canary tool surface + mechanical containment | **RULED — no `proc`; payload inertness is the containment unit** | architect | 2026-11-05 · §7 |
+| **D1** | Spawn topology (lean vs doctrinal-scope vs decoy-only) | **RULED — A: lean compose-and-hand** | architect | 2026-11-05 · `architecture-recommendation.md` §1 · commit `f6d11c232` |
+| **D2** | Skill mechanism + distribution (seed set, copies, auto-load, evolution) | **RULED — B; `auto_load` corrected (canary+sweeper true)** | architect | 2026-11-05 · §2 · commit `f6d11c232` |
+| **D3** | Doctrine wording + landing sites + step semantics + carve-out | **RULED — A sites + two-layer N** | architect | 2026-11-05 · §3 · commit `f6d11c232` |
+| **D4** | Payload corpus home + rule-set home | **RULED — A (`tests/fixtures/injection_corpus/`)** | architect | 2026-11-05 · §4 · commit `f6d11c232` |
+| **D5** | Test-matrix shape (25 cells, packs, mutations, census, re-derivations) | **RULED — A (family file grows T31–T37)** | architect | 2026-11-05 · §5 · commit `f6d11c232` |
+| **D6** | Intake-channel coverage + sandbox semantics | **RULED — A (core 5 legs; logical-only sandbox)** | architect | 2026-11-05 · §6 · commit `f6d11c232` |
+| **D7** | (leader-added) Canary tool surface + mechanical containment | **RULED — no `proc`; payload inertness is the containment unit** | architect | 2026-11-05 · §7 · commit `f6d11c232` |
 
 ### F.2 Confirmation requests (not slots — rulings the architect makes on the record)
 
@@ -589,7 +712,7 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 
 | Gate | Scope | State | Owner |
 |---|---|---|---|
-| G0 — architect review | **rules D1–D7 + C1–C4** | **COMPLETE — 2026-11-05** (`architecture-recommendation.md`) | architect |
+| G0 — architect review | **rules D1–D7 + C1–C4** | **COMPLETE — 2026-11-05** (ruling commit `f6d11c232`; `architecture-recommendation.md`) | architect |
 | G1 — plan council | the plan set against the ruled slots | PENDING (G0 complete — unblocked) | plan council |
 | G2 — approver | execution-layer blockers | PENDING (blocked by G1) | approver |
 | G3 — code council | implementation | PENDING | code council |
@@ -626,3 +749,6 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 | (f) | **A real MCP-result injection leg** (F12) | needs mock-server infrastructure or a privileged target class | ROUTED unless D6 rules otherwise |
 | (g) | **Defender/patcher-side remediation** (the fix half of the loop) | the family's v1 scope was detection-and-report; remediation is the leader's | INHERITED from the predecessor lane |
 | (h) | **The first live campaign** (the "vkey" analogue for this lane) | requires a live family ⇒ the user's promote ceremony, which this lane does not perform | DOCUMENTED, not gated — the predecessor's D-3 precedent |
+| (i) | **Channel 11 (chat inbound) — widest uncovered surface** | no inbound sanitisation anywhere in the tree (`daemon/sources/mapper.py`); out of v1 scope | ROUTED — own commission (§G(a) sibling); disclosed in §E.3 and the campaign record |
+| (j) | **Non-family blast radius** (planner/developer/reviewer/tester/charter/architect) | out of commission scope; disclosure is the v1 answer | ROUTED — separate lane (§G(e)); disclosure in three places (§2.4) |
+| (k) | **Option C (decoy-only spawn) v2 trigger** | requires demonstrable campaign throughput/fidelity suffering from the wave tax OR a project-scoped spawn-gate commission | ROUTED — v2 escalation path (D1 ruling) |
