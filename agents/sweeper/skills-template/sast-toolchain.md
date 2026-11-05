@@ -154,36 +154,56 @@ Self-heal runs at most **TWICE per session**; beyond the cap the cold path stops
 # symlinked parent, or a compound symlink-then-".." path) is a
 # HARD_BLOCKER and the sweep does not run. The out root is created
 # first so a missing parent is never misread as an out-of-sandbox
-# refusal.
+# refusal. Each write then acts on the CANONICAL destination resolved
+# once by aegis_canonical_output_path — the raw path is never handed
+# back to the kernel at the write, so no second resolution runs between
+# the check and the write and a post-guard swap of the raw path cannot
+# redirect the write.
 mkdir -p "$SANDBOX_ROOT/out"
 aegis_scanner_output_ok "$SANDBOX_ROOT/out/semgrep.json" "$SANDBOX_ROOT" || {
     echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
     exit 1
 }
+_out="$(aegis_canonical_output_path "$SANDBOX_ROOT/out/semgrep.json" "$SANDBOX_ROOT")" || {
+    echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+    exit 1
+}
 "$SEMGREP_BIN" scan --config <pinned-pack> --json \
-    "$SANDBOX_ROOT/builds/src" > "$SANDBOX_ROOT/out/semgrep.json" 2>&1
+    "$SANDBOX_ROOT/builds/src" > "$_out" 2>&1
 aegis_scanner_output_ok "$SANDBOX_ROOT/out/gitleaks.json" "$SANDBOX_ROOT" || {
+    echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+    exit 1
+}
+_out="$(aegis_canonical_output_path "$SANDBOX_ROOT/out/gitleaks.json" "$SANDBOX_ROOT")" || {
     echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
     exit 1
 }
 # --redact: secret VALUES never enter the JSON report (the no-plaintext
 # fence) — the finding names the rule and the location only
 "$GITLEAKS_BIN" detect --redact --source "$SANDBOX_ROOT/builds/src" \
-    --report-format json --report-path "$SANDBOX_ROOT/out/gitleaks.json"
+    --report-format json --report-path "$_out"
 aegis_scanner_output_ok "$SANDBOX_ROOT/out/cppcheck.xml" "$SANDBOX_ROOT" || {
     echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
     exit 1
 }
+_out="$(aegis_canonical_output_path "$SANDBOX_ROOT/out/cppcheck.xml" "$SANDBOX_ROOT")" || {
+    echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+    exit 1
+}
 "$CPPCHECK_BIN" --enable=all --xml \
-    "$SANDBOX_ROOT/builds/src" 2> "$SANDBOX_ROOT/out/cppcheck.xml"
+    "$SANDBOX_ROOT/builds/src" 2> "$_out"
 # clang-tidy leg runs ONLY when the build's compile database is present:
 if [ -f "$SANDBOX_ROOT/builds/compile_commands.json" ]; then
     aegis_scanner_output_ok "$SANDBOX_ROOT/out/clang-tidy.txt" "$SANDBOX_ROOT" || {
         echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
         exit 1
     }
+    _out="$(aegis_canonical_output_path "$SANDBOX_ROOT/out/clang-tidy.txt" "$SANDBOX_ROOT")" || {
+        echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+        exit 1
+    }
     "$CLANG_TIDY_BIN" -p "$SANDBOX_ROOT/builds" "$SANDBOX_ROOT/builds/src"/* \
-        > "$SANDBOX_ROOT/out/clang-tidy.txt" 2>&1
+        > "$_out" 2>&1
 else
     echo "clang-tidy: no compile database in scope — reported, not generated"
 fi
@@ -191,12 +211,17 @@ aegis_scanner_output_ok "$SANDBOX_ROOT/out/trivy.txt" "$SANDBOX_ROOT" || {
     echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
     exit 1
 }
+_out="$(aegis_canonical_output_path "$SANDBOX_ROOT/out/trivy.txt" "$SANDBOX_ROOT")" || {
+    echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
+    exit 1
+}
 # trivy has NO secret-redaction flag at the pinned major (verified against
-# its documented flag set — secret findings embed the matched line), so
-# the trivy report is quarantined sandbox material: never transcribed,
-# never quoted; findings cite location and type only.
+# its documented flag set — the matched secret VALUES are masked by default; what a
+# finding still carries is the CONTEXT lines around the match), so the
+# trivy report is quarantined sandbox material: never transcribed, never
+# quoted; findings cite location and type only.
 "$TRIVY_BIN" fs --scanners vuln,secret,misconfig \
-    "$SANDBOX_ROOT/builds" > "$SANDBOX_ROOT/out/trivy.txt" 2>&1
+    "$SANDBOX_ROOT/builds" > "$_out" 2>&1
 ```
 
 The compile database is **detected, never generated**: its absence is a per-tool gap in the report — generating build metadata would mean running the target's build, which is not this lane.

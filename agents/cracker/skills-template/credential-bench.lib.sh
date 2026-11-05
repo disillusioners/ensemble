@@ -192,7 +192,18 @@ _aegis_resolve_path() {
     _rp_path="${1:-}"
     _rp_hops=0
     while [ -n "$_rp_path" ]; do
+        # A non-normalized TAIL — the path ends in '/', '/.' or '/..' —
+        # resolves below to a NON-canonical string ("<canon>/", "<canon>/."
+        # or "<canon>/..") that PASSES the root prefix comparison yet can
+        # never be a write target: the kernel answers EISDIR and the guard
+        # has attributed nothing. Refused here, BY NAME, before any
+        # comparison. The diagnostic goes to STDERR so a caller's command
+        # substitution still captures path-or-nothing on stdout.
         case "$_rp_path" in
+            */.|*/..|*/)
+                echo "HARD_BLOCKER: path ends in a directory segment ('/'), a self segment ('/.'), or a parent segment ('/..') — normalize the path: $_rp_path" >&2
+                return 1
+                ;;
             */*) : ;;
             *) return 1 ;;
         esac
@@ -253,6 +264,14 @@ aegis_corpus_path_ok() {
         echo "HARD_BLOCKER: corpus path and engagement sandbox root are both required — synthetic benches read sandbox inputs only"
         return 1
     fi
+    # non-normalized tails are refused with the problem NAMED, never left
+    # to the kernel's EISDIR after the prefix comparison already passed
+    case "$_cp_path" in
+        */.|*/..|*/)
+            echo "HARD_BLOCKER: corpus path ends in a directory segment ('/'), a self segment ('/.'), or a parent segment ('/..') — normalize the path"
+            return 1
+            ;;
+    esac
     _cp_canon_root=$(cd -P "$_cp_root" 2>/dev/null && pwd -P) || {
         echo "HARD_BLOCKER: engagement sandbox root unresolvable — the root must exist before the corpus write"
         return 1
@@ -298,6 +317,20 @@ aegis_write_synthetic_corpus() {
         echo "HARD_BLOCKER: corpus path, engagement sandbox root and generator are all required — refusing the corpus write"
         return 1
     fi
+    # non-normalized tails are refused with the problem NAMED, never left
+    # to the kernel's EISDIR after the prefix comparison already passed
+    case "$_wc_path" in
+        */.|*/..|*/)
+            echo "HARD_BLOCKER: corpus path ends in a directory segment ('/'), a self segment ('/.'), or a parent segment ('/..') — normalize the path"
+            return 1
+            ;;
+    esac
+    case "$_wc_gen" in
+        */.|*/..|*/)
+            echo "HARD_BLOCKER: corpus generator path ends in a directory segment ('/'), a self segment ('/.'), or a parent segment ('/..') — normalize the path"
+            return 1
+            ;;
+    esac
     _wc_canon_root=$(cd -P "$_wc_root" 2>/dev/null && pwd -P) || {
         echo "HARD_BLOCKER: engagement sandbox root unresolvable — the root must exist before the corpus write; refusing the corpus write"
         return 1

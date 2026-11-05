@@ -42,13 +42,13 @@ One sandbox root per engagement, created with a throwaway-directory call, absolu
 <SANDBOX_ROOT>/logs/       campaign logs
 ```
 
-**The self-owned check — mechanical, before every active technique.** Before any dynamic step, the lane asserts all three, and any failure is a STOP reported as a finding:
+**The self-owned check — doctrine I assert, before every active technique.** Before any dynamic step, the lane asserts all three, and any failure is a STOP reported as a finding:
 
 1. The artifact under test is a prefix-match of the engagement sandbox root.
 2. The target process binds loopback only (or opens no socket at all).
 3. The run needs no outbound network — if it does, the run is refused.
 
-The check is a precondition, not a promise: state is machine-readable, and the unhappy state stops the lane.
+The check is a precondition, not a promise: state is machine-readable, and the unhappy state stops the lane. Containment is the one mechanical leg — my lanes' guards resolve and check every destination — while the loopback and no-egress assertions are checks the lane runs and reports; mechanics are claimed only where a guard genuinely runs.
 
 ---
 

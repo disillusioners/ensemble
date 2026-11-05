@@ -134,6 +134,12 @@ Self-heal runs at most **TWICE per session**; beyond the cap the cold path stops
 ## Campaign surface (run time — class (ii) only)
 
 ```sh
+# The campaign's run-time sub-layout is created BEFORE the first write
+# lands in any of it — a fresh sandbox executes the recipe, a missing
+# parent is never misdiagnosed as a containment refusal, and the
+# must-survive evidence root exists from the first step (crash artifacts
+# land there with stable names).
+mkdir -p "$SANDBOX_ROOT/builds" "$SANDBOX_ROOT/corpus" "$SANDBOX_ROOT/out" "$SANDBOX_ROOT/logs" "$SANDBOX_ROOT/evidence"
 # libFuzzer primary: instrumented build inside the sandbox build tree
 "$CLANG_BIN" -fsanitize=fuzzer,address -g -O1 \
     -o "$SANDBOX_ROOT/builds/fuzz_keystroke" "$SANDBOX_ROOT/builds/harness.cpp"

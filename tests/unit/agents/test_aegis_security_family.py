@@ -1188,6 +1188,15 @@ def _abs_under(root: Path, rel: str) -> Path:
 #   missing-root           sandbox/corpora/x.hashes    missing     REFUSE
 #   missing-parent-dir     sandbox/no-such-dir/x.hashes sandbox    REFUSE
 #
+# N-5 wart family (non-normalized TAILS on the TARGET): a path ending in
+# '/', '/.' or '/..' resolves to a non-canonical string that PASSES the
+# prefix comparison, so pre-fix the guard ACCEPTED (rc=0) and the write
+# failed at the KERNEL with EISDIR — nothing created, nothing attributed.
+# Post-fix each is refused BY NAME ("… — normalize the path") with
+# rc=1 + HARD_BLOCKER, and the nothing-created property still holds.
+# These rows carry RAW string forms (see _WART_STRING_ROWS): pathlib
+# silently strips a trailing '/', which would erase the defect shape.
+#
 # The generator column is the staged generator the corpus is produced from
 # (inside the sandbox) unless the row says otherwise.
 _CORPUS_CONTAINMENT_MATRIX = (
@@ -1221,7 +1230,24 @@ _CORPUS_CONTAINMENT_MATRIX = (
      "sandbox/builds/gen_corpus.sh", False, None),
     ("missing-parent-dir", "sandbox/no-such-dir/x.hashes", "sandbox",
      "sandbox/builds/gen_corpus.sh", False, None),
+    ("trailing-slash-target", None, "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("trailing-dot-target", None, "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("trailing-dotdot-target", None, "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
+    ("root-level-dotdot-target", None, "sandbox",
+     "sandbox/builds/gen_corpus.sh", False, None),
 )
+
+# Raw string forms for the N-5 wart rows — PurePath strips a trailing
+# '/' and would normalize the defect shape away, so these bypass Path.
+_WART_STRING_ROWS = {
+    "trailing-slash-target": "{abs}/sandbox/corpora/x.hashes/",
+    "trailing-dot-target": "{abs}/sandbox/corpora/x.hashes/.",
+    "trailing-dotdot-target": "{abs}/sandbox/corpora/x.hashes/..",
+    "root-level-dotdot-target": "{abs}/sandbox/..",
+}
 
 _CORPUS_WRITE_PROBE = (
     'if aegis_write_synthetic_corpus "$CORPUS" "$ROOT" "$GEN"; then\n'
@@ -1317,7 +1343,12 @@ class TestCorpusContainmentExecuted:
             (fixture["sandbox"] / "evil").symlink_to(
                 fixture["outside"], target_is_directory=True
             )
-        corpus = _abs_under(tmp_path, corpus_rel)
+        if row in _WART_STRING_ROWS:
+            # N-5 wart row: keep the RAW string — PurePath strips the
+            # trailing '/' and would erase the defect shape
+            corpus = _WART_STRING_ROWS[row].replace("{abs}", str(tmp_path))
+        else:
+            corpus = _abs_under(tmp_path, corpus_rel)
         root = _abs_under(tmp_path, root_rel)
         generator = _abs_under(tmp_path, gen_rel)
         result = _run_lib_probe(
@@ -1348,10 +1379,30 @@ class TestCorpusContainmentExecuted:
             assert "HARD_BLOCKER" in stdout, (
                 f"{row}: refusal did not emit HARD_BLOCKER: stdout={stdout!r}"
             )
-            assert not corpus.is_file(), (
+            assert not Path(corpus).is_file(), (
                 f"{row}: a file was created at the refused path {corpus} — "
                 "nothing may be created on a refusal"
             )
+            if row in _WART_STRING_ROWS:
+                # the guard must attribute the wart ITSELF, by name —
+                # never leave it to the kernel's EISDIR after the prefix
+                # comparison already passed (N-5)
+                assert "normalize the path" in stdout, (
+                    f"{row}: wart refusal did not NAME the non-normalized "
+                    f"tail (expected '… — normalize the path'): "
+                    f"stdout={stdout!r} stderr={result.stderr!r}"
+                )
+            if row == "missing-parent-dir":
+                # re-gate residual #1: the diagnosis split is pinned by its
+                # WORDING — a missing parent is named as a precondition
+                # failure, never misdiagnosed as an out-of-sandbox refusal
+                # (a future wording revert reds here)
+                assert "parent directory must both exist" in stdout, (
+                    f"{row}: the unresolvable-path diagnosis no longer names "
+                    f"the precondition (expected 'the sandbox root and the "
+                    f"corpus path's parent directory must both exist'): "
+                    f"stdout={stdout!r}"
+                )
 
     def test_corpus_traversal_path_is_refused_and_creates_nothing(self, tmp_path):
         """(a) A ".."-traversal corpus path is refused: non-zero rc,
@@ -1822,10 +1873,73 @@ class TestScannerOutputGuardWired:
                 "precede the effectful site"
             )
 
+    def test_sweep_redirects_act_on_canonical_paths(self):
+        """N-1: the five scanner-output redirect sites act on the CANONICAL
+        destination — ``> "$_out"`` / ``2> "$_out"`` / ``--report-path
+        "$_out"``, where ``_out`` is captured once from
+        ``aegis_canonical_output_path`` — never on the raw caller path.
+        The boolean ``aegis_scanner_output_ok`` guard stays as the cheap
+        pre-check; this pin reds if any ONE redirect is reverted to the
+        raw path (the swap-after-guard race re-opens at that site — the
+        executed legs cannot discriminate it deterministically, same
+        rationale as the cracker C-1(a) pin)."""
+        lib = _lib_path("sweeper").read_text(encoding="utf-8")
+        assert "aegis_canonical_output_path() {" in lib, (
+            "the path-returning companion is absent from the sweeper "
+            "library — the redirects cannot act on canonical paths"
+        )
+        body = _skill_body_path("sweeper").read_text(encoding="utf-8")
+        blocks = re.findall(r"```sh\n(.*?)```", body, re.DOTALL)
+        sweep = [b for b in blocks if "$SANDBOX_ROOT/out/" in b]
+        assert len(sweep) == 1, "sweep surface sh-block not found (or duplicated)"
+        lines = sweep[0].splitlines()
+        dest_re = re.compile(r"\$SANDBOX_ROOT/out/[A-Za-z0-9._-]+")
+        check_re = re.compile(r"aegis_scanner_output_ok|aegis_canonical_output_path")
+        # (a) every raw destination token appears ONLY on check lines — a
+        # write line carrying the raw path is an un-substituted site
+        effectful = [
+            ln for ln in lines if dest_re.search(ln) and not check_re.search(ln)
+        ]
+        assert effectful == [], (
+            f"scanner-output write sites still act on the RAW destination "
+            f"path: {effectful} — the swap-after-guard race (N-1) is open "
+            "at that site"
+        )
+        # (b) every destination is captured through the companion, and the
+        # boolean pre-check survives
+        dests = sorted({m for ln in lines for m in dest_re.findall(ln)})
+        assert len(dests) == 5, (
+            f"expected the five scanner destinations, found {dests}"
+        )
+        for d in dests:
+            assert len([ln for ln in lines if f'aegis_canonical_output_path "{d}"' in ln]) == 1, (
+                f"destination {d} is not captured exactly once through "
+                "aegis_canonical_output_path"
+            )
+            assert len([ln for ln in lines if f'aegis_scanner_output_ok "{d}"' in ln]) == 1, (
+                f"destination {d} lost its boolean aegis_scanner_output_ok "
+                "pre-check (the companion adds substitution, it must not "
+                "replace the guard)"
+            )
+        # (c) exactly five writes act on the canonical variable
+        uses = [ln for ln in lines if "$_out" in ln]
+        assert len(uses) == 5, (
+            f"expected five writes on the canonical variable $_out, found "
+            f"{len(uses)}: {uses}"
+        )
+        for ln in uses:
+            assert re.search(r'(?:2?>|--report-path) "\$_out"', ln), (
+                f"$_out appears on a non-write line: {ln!r}"
+            )
 
-# The scanner-guard containment matrix (C-2). Same single-primitive +
-# compound classes as the corpus guard, executed against the sweeper
-# library's own guard under BOTH shells.
+
+# The scanner-guard containment matrix (C-2 + the N-5 wart rows). Same
+# single-primitive + compound classes as the corpus guard, executed
+# against the sweeper library's own guard under BOTH shells. The four
+# trailing rows are the N-5 family: non-normalized TAILS on the TARGET
+# that pre-fix PASSED the prefix comparison and died at the kernel with
+# EISDIR (rc=2/1, nothing created, nothing attributed) — now refused BY
+# NAME with rc=1 + HARD_BLOCKER.
 _SCANNER_MATRIX = (
     ("in-root", "out/semgrep.json", True),
     ("traversal-out", "../outside/semgrep.json", False),
@@ -1836,7 +1950,15 @@ _SCANNER_MATRIX = (
     ("empty-path", "\0empty", False),
     ("missing-root", "out/semgrep.json", None),  # root does not exist
     ("missing-parent", "no-such/semgrep.json", False),
+    ("trailing-slash-dst", "out/semgrep.json/", False),
+    ("trailing-dot-dst", "out/semgrep.json/.", False),
+    ("trailing-dotdot-dst", "out/semgrep.json/..", False),
+    ("root-level-dotdot-dst", "..", False),
 )
+_SCANNER_WART_ROWS = frozenset({
+    "trailing-slash-dst", "trailing-dot-dst",
+    "trailing-dotdot-dst", "root-level-dotdot-dst",
+})
 
 
 class TestScannerOutputGuardExecuted:
@@ -1865,6 +1987,12 @@ class TestScannerOutputGuardExecuted:
             dst = ""
         elif row == "root-itself":
             dst = sandbox
+        elif row == "trailing-slash-dst":
+            # RAW string — PurePath strips the trailing '/' AND collapses
+            # '/.' — either would erase the wart shape (N-5)
+            dst = f"{sandbox}/out/semgrep.json/"
+        elif row == "trailing-dot-dst":
+            dst = f"{sandbox}/out/semgrep.json/."
         else:
             dst = sandbox / dst_rel
         root = tmp_path / "no-such-root" if row == "missing-root" else sandbox
@@ -1895,9 +2023,127 @@ class TestScannerOutputGuardExecuted:
                 f"{row}: refusal did not emit HARD_BLOCKER under {shell}: "
                 f"stdout={result.stdout!r}"
             )
+            if row in _SCANNER_WART_ROWS:
+                assert "normalize the path" in result.stdout, (
+                    f"{row}: wart refusal did not NAME the non-normalized "
+                    f"tail under {shell} (expected '… — normalize the "
+                    f"path'): stdout={result.stdout!r} "
+                    f"stderr={result.stderr!r}"
+                )
         # nothing is created anywhere on any probe (guard or refusal)
         assert not (outside / "semgrep.json").exists()
         assert not list((tmp_path / "sandbox-evil").iterdir())
+        if row in _SCANNER_WART_ROWS:
+            # the nothing-created property STILL holds for the wart family
+            # (pre-fix the kernel refused the write with EISDIR — post-fix
+            # the guard refuses before any write)
+            assert not list((sandbox / "out").iterdir()), (
+                f"{row}: something was created in the sandbox out root on a "
+                f"wart refusal under {shell}"
+            )
+
+
+# The companion (N-1) containment matrix — the path-returning
+# aegis_canonical_output_path, executed under BOTH shells. Stdout is the
+# DATA channel: the accept row must echo the CANONICAL path (and nothing
+# else); every refusal fails closed with rc=1, an EMPTY capture and the
+# diagnostic on stderr.
+_CANONICAL_OUTPUT_MATRIX = (
+    # row, dst_rel, expect_accept
+    ("in-root", "out/semgrep.json", True),
+    ("traversal-out", "../outside/semgrep.json", False),
+    ("symlinked-dir", "evil/semgrep.json", False),
+    ("compound-evil-dotdot", "evil/../semgrep.json", False),
+    ("prefix-collision", None, False),  # sandbox-evil sibling dir
+    ("trailing-slash", None, False),    # N-5 wart family on the companion
+    ("trailing-dot", None, False),
+    ("trailing-dotdot", None, False),
+    ("root-level-dotdot", None, False),
+    ("missing-parent", "no-such/semgrep.json", False),
+)
+_CANONICAL_PROBE = (
+    '_canon="$(aegis_canonical_output_path "$DST" "$ROOT")"\n'
+    'echo "RC=$?"\n'
+    'echo "CANON=[$_canon]"\n'
+)
+
+
+class TestCanonicalOutputPathExecuted:
+    """N-1 — the sweeper's path-returning companion, really executed
+    against the sweeper library under dash AND bash. The accept row pins
+    the VALUE (the canonical path, so the redirect lands where the check
+    looked); every refusal pins rc=1 + an empty capture + HARD_BLOCKER on
+    stderr (stdout stays path-or-nothing)."""
+
+    @pytest.mark.parametrize("shell", COMPOUND_SHELLS, ids=["dash", "bash"])
+    @pytest.mark.parametrize(
+        "row,dst_rel,expect_accept",
+        _CANONICAL_OUTPUT_MATRIX,
+        ids=[r[0] for r in _CANONICAL_OUTPUT_MATRIX],
+    )
+    def test_canonical_output_path_matrix(self, tmp_path, shell, row, dst_rel, expect_accept):
+        sandbox = tmp_path / "sandbox"
+        (sandbox / "out").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (sandbox / "evil").symlink_to(outside, target_is_directory=True)
+        (tmp_path / "sandbox-evil").mkdir()
+        if row == "prefix-collision":
+            dst = tmp_path / "sandbox-evil" / "semgrep.json"
+        elif row == "trailing-slash":
+            dst = f"{sandbox}/out/semgrep.json/"   # RAW string (N-5)
+        elif row == "trailing-dot":
+            dst = f"{sandbox}/out/semgrep.json/."
+        elif row == "trailing-dotdot":
+            dst = f"{sandbox}/out/semgrep.json/.."
+        elif row == "root-level-dotdot":
+            dst = f"{sandbox}/.."
+        else:
+            dst = sandbox / dst_rel
+        result = _run_probe(
+            shell, _lib_path("sweeper"), tmp_path, _CANONICAL_PROBE,
+            {"DST": str(dst), "ROOT": str(sandbox)},
+        )
+        m = re.search(r"RC=(\d+)", result.stdout)
+        assert m, f"{row}: probe produced no RC under {shell}: {result.stdout!r}"
+        rc = int(m.group(1))
+        canom = re.search(r"CANON=\[(.*)\]", result.stdout)
+        assert canom is not None
+        captured = canom.group(1)
+        if expect_accept:
+            assert rc == 0, (
+                f"{row}: in-sandbox destination refused under {shell} — the "
+                f"companion over-refuses: stdout={result.stdout!r} "
+                f"stderr={result.stderr!r}"
+            )
+            expected = Path(os.path.realpath(sandbox)) / "out" / "semgrep.json"
+            assert captured == str(expected), (
+                f"{row}: the companion did not echo the CANONICAL path "
+                f"(expected {expected!s}, captured {captured!r}) — the "
+                "redirect would not act on the resolved form"
+            )
+        else:
+            assert rc == 1, (
+                f"{row}: refusal must fail closed with rc=1 under {shell}, "
+                f"got rc={rc}: stdout={result.stdout!r}"
+            )
+            assert captured == "", (
+                f"{row}: a refusal echoed {captured!r} on STDOUT — the "
+                "data channel must stay empty on refusal (the caller would "
+                "redirect into whatever this captured)"
+            )
+            assert "HARD_BLOCKER" in result.stderr, (
+                f"{row}: refusal did not emit HARD_BLOCKER on stderr under "
+                f"{shell}: stderr={result.stderr!r}"
+            )
+            if row.startswith(("trailing-", "root-level-")):
+                assert "normalize the path" in result.stderr, (
+                    f"{row}: wart refusal did not NAME the non-normalized "
+                    f"tail under {shell}: stderr={result.stderr!r}"
+                )
+        # nothing is created anywhere on any probe
+        assert not (outside / "semgrep.json").exists()
+        assert not list((sandbox / "out").iterdir())
 
 
 class TestRound3WarningFolds:
@@ -1965,21 +2211,56 @@ class TestRound3WarningFolds:
             "leaves the staged file behind"
         )
 
-    def test_bench_surface_creates_run_time_roots(self):
-        """W-2: the cracker bench surface creates the run-time roots
-        BEFORE the guarded write, so a fresh sandbox executes the recipe
-        and a missing parent can never be misdiagnosed as an
-        out-of-sandbox refusal."""
-        body = _skill_body_path("cracker").read_text(encoding="utf-8")
-        mkdir_line = 'mkdir -p "$SANDBOX_ROOT/corpora" "$SANDBOX_ROOT/out"'
-        assert mkdir_line in body, (
-            "the bench surface does not create the corpora/out roots — the "
-            "guarded write hard-fails on a fresh sandbox"
+    # N-2: every body's DECLARED run-time sub-layout (what its run-time
+    # surface references or declares as sandbox material) and the FIRST
+    # effectful write marker per body — root creation must precede it.
+    _RUN_TIME_ROOTS = {
+        "cracker": ('"$SANDBOX_ROOT/corpora"', '"$SANDBOX_ROOT/out"',
+                    '"$SANDBOX_ROOT/builds"'),
+        "hacker": ('"$SANDBOX_ROOT/builds"', '"$SANDBOX_ROOT/corpus"',
+                   '"$SANDBOX_ROOT/out"', '"$SANDBOX_ROOT/logs"',
+                   '"$SANDBOX_ROOT/evidence"'),
+        "sweeper": ('"$SANDBOX_ROOT/out"',),
+    }
+    _FIRST_EFFECTFUL = {
+        "cracker": "aegis_write_synthetic_corpus",
+        "hacker": '-o "$SANDBOX_ROOT/builds/fuzz_keystroke"',
+        "sweeper": '"$SEMGREP_BIN" scan',
+    }
+
+    @pytest.mark.parametrize("agent", CHILDREN)
+    def test_bench_surface_creates_run_time_roots(self, agent):
+        """W-2/N-2 (family-wide): every body that declares run-time roots
+        creates ALL of them BEFORE its first effectful write — a fresh
+        sandbox executes the recipe, a missing parent can never be
+        misdiagnosed as an out-of-sandbox refusal, and the must-survive
+        evidence root exists from the first step. (Pre-fold this held for
+        the cracker alone; the hacker campaign wrote builds/, corpus/,
+        out/, logs/ — and its persona-declared evidence/ — with no
+        creating mkdir.)"""
+        body = _skill_body_path(agent).read_text(encoding="utf-8")
+        mkdir_lines = [
+            ln for ln in body.splitlines()
+            if "mkdir -p" in ln and "$SANDBOX_ROOT" in ln
+        ]
+        assert mkdir_lines, (
+            f"{agent} declares run-time roots but creates none of them"
         )
-        mkdir_at = body.index(mkdir_line)
-        write_at = body.index("aegis_write_synthetic_corpus")
-        assert mkdir_at < write_at, (
-            "root creation must PRECEDE the guarded corpus write"
+        joined = " ".join(mkdir_lines)
+        for root in self._RUN_TIME_ROOTS[agent]:
+            assert root in joined, (
+                f"{agent} recipe does not create its declared run-time "
+                f"root {root} — a write into it hard-fails on a fresh "
+                "sandbox"
+            )
+        mkdir_at = min(body.index(ln) for ln in mkdir_lines)
+        marker = self._FIRST_EFFECTFUL[agent]
+        assert marker in body, (
+            f"{agent} first-effectful marker {marker!r} not found"
+        )
+        assert mkdir_at < body.index(marker), (
+            f"{agent} run-time root creation must PRECEDE the first "
+            "effectful write into the sandbox"
         )
 
     def test_gitleaks_recipe_redacts_secret_values(self):
@@ -2017,6 +2298,19 @@ class TestRound3WarningFolds:
             "the trivy quarantine note (no redaction flag exists at the "
             "pinned major) is absent from the sweep surface"
         )
+        # N-3: the JUSTIFICATION is pinned to the council-verified truth —
+        # trivy masks the matched secret VALUES by default; what leaks is
+        # the CONTEXT lines around the match. The retracted form ("secret
+        # findings embed the matched line") must not come back.
+        assert "masked by default" in body, (
+            "the corrected trivy rationale (matched secret values ARE "
+            "masked by default) is absent from the sweep surface"
+        )
+        assert "embed the matched line" not in body, (
+            "the retracted trivy justification (findings embed the matched "
+            "line — values are masked by default; the context lines are "
+            "what leak) survives in the sweep surface"
+        )
 
     def test_hacker_recipe_uses_the_librarys_aflpp_name(self):
         """W2: AFLPP_BIN (the library's recorded config key, exported by
@@ -2053,6 +2347,29 @@ class TestRound3RideAlongs:
     """R2 — the executed checksum-mismatch leg (the existing legs cover
     the unset-pin refusal; this one really runs the verify path with a
     WRONG pin and asserts the mismatch refusal)."""
+
+    def test_strategy_self_owned_check_honesty(self):
+        """N-4: the strategy's self-owned-check heading carries the same
+        honesty framing the round-3 W-3 fold gave rule.md cardinal 3 —
+        doctrine asserted, mechanics claimed only where a guard genuinely
+        runs. The flat over-claim ('self-owned check — mechanical') must
+        not come back at that site."""
+        strategy = (_agent_dir("aegis") / "skills-template" / "aegis-strategy.md").read_text(encoding="utf-8")
+        assert "The self-owned check — doctrine I assert" in strategy, (
+            "the self-owned check heading still over-claims — the "
+            "round-3 W-3 honesty reword (doctrine I assert; mechanics "
+            "claimed only where a guard genuinely runs) did not reach "
+            "this site"
+        )
+        assert "The self-owned check — mechanical" not in strategy, (
+            "the flat 'mechanical' over-claim survives in the strategy "
+            "self-owned-check heading"
+        )
+        assert "mechanics are claimed only where a guard genuinely runs" in strategy, (
+            "the honesty clause (loopback/no-egress are checks the lane "
+            "runs and reports; containment is the one mechanical leg) is "
+            "absent from the self-owned check section"
+        )
 
     @pytest.mark.parametrize("agent", CHILDREN)
     def test_checksum_mismatch_refuses_and_promotes_nothing(self, agent, tmp_path):

@@ -28,6 +28,9 @@
 #   aegis_release_install_lock                always succeeds
 #   aegis_attempt_allowed / _bump_ / _clear_  self-heal cap of 2 per session
 #   aegis_scanner_output_ok <path> <sandbox>  0 sandbox-relative / 1 refused
+#   aegis_canonical_output_path <path> <root> CANONICAL path on stdout / 1
+#                                            refused (diagnostics on stderr —
+#                                            stdout is the data channel)
 #
 # Companion: sast-toolchain.md (the installer skill body, same directory)
 
@@ -190,7 +193,18 @@ _aegis_resolve_path() {
     _rp_path="${1:-}"
     _rp_hops=0
     while [ -n "$_rp_path" ]; do
+        # A non-normalized TAIL — the path ends in '/', '/.' or '/..' —
+        # resolves below to a NON-canonical string ("<canon>/", "<canon>/."
+        # or "<canon>/..") that PASSES the root prefix comparison yet can
+        # never be a write target: the kernel answers EISDIR and the guard
+        # has attributed nothing. Refused here, BY NAME, before any
+        # comparison. The diagnostic goes to STDERR so a caller's command
+        # substitution still captures path-or-nothing on stdout.
         case "$_rp_path" in
+            */.|*/..|*/)
+                echo "HARD_BLOCKER: path ends in a directory segment ('/'), a self segment ('/.'), or a parent segment ('/..') — normalize the path: $_rp_path" >&2
+                return 1
+                ;;
             */*) : ;;
             *) return 1 ;;
         esac
@@ -253,11 +267,60 @@ aegis_scanner_output_ok() {
         echo "HARD_BLOCKER: scanner output destination and engagement sandbox root are both required — scanner output lands in the sandbox only"
         return 1
     fi
+    # non-normalized tails are refused with the problem NAMED, never left
+    # to the kernel's EISDIR after the prefix comparison already passed
+    case "$_so_path" in
+        */.|*/..|*/)
+            echo "HARD_BLOCKER: scanner output destination ends in a directory segment ('/'), a self segment ('/.'), or a parent segment ('/..') — normalize the path"
+            return 1
+            ;;
+    esac
     if _aegis_path_in_root "$_so_path" "$_so_root"; then
         return 0
     fi
     echo "HARD_BLOCKER: scanner output destination outside the engagement sandbox — scanner output lands in the sandbox only"
     return 1
+}
+
+aegis_canonical_output_path() {
+    # usage: aegis_canonical_output_path <path> <sandbox-root>
+    #   -> echoes the CANONICAL destination path on stdout (rc=0)
+    # Path-returning companion to aegis_scanner_output_ok: the caller's
+    # redirect acts on the RESOLVED form, so no second, independent kernel
+    # resolution runs between the check and the write — a swap of the raw
+    # path after the guard cannot redirect the write (the N-1 companion;
+    # the boolean guard stays the cheap pre-check, this adds canonical
+    # substitution). Stdout is the DATA channel — the path alone — so
+    # every refusal is emitted on STDERR and fails closed (rc=1, nothing
+    # echoed, the caller's capture stays empty).
+    _cop_path="${1:-}"
+    _cop_root="${2:-}"
+    if [ -z "$_cop_path" ] || [ -z "$_cop_root" ]; then
+        echo "HARD_BLOCKER: scanner output destination and engagement sandbox root are both required — scanner output lands in the sandbox only" >&2
+        return 1
+    fi
+    case "$_cop_path" in
+        */.|*/..|*/)
+            echo "HARD_BLOCKER: scanner output destination ends in a directory segment ('/'), a self segment ('/.'), or a parent segment ('/..') — normalize the path" >&2
+            return 1
+            ;;
+    esac
+    _cop_canon_root=$(cd -P "$_cop_root" 2>/dev/null && pwd -P) || {
+        echo "HARD_BLOCKER: engagement sandbox root unresolvable — the root must exist before the sweep runs" >&2
+        return 1
+    }
+    _cop_canon_path=$(_aegis_resolve_path "$_cop_path") || {
+        echo "HARD_BLOCKER: scanner output destination unresolvable — the sandbox root and the destination's parent directory must both exist before the sweep runs" >&2
+        return 1
+    }
+    case "$_cop_canon_path" in
+        "$_cop_canon_root"/*) ;;
+        *)
+            echo "HARD_BLOCKER: scanner output destination outside the engagement sandbox — scanner output lands in the sandbox only" >&2
+            return 1
+            ;;
+    esac
+    printf '%s\n' "$_cop_canon_path"
 }
 
 # --- Tool-specific evidence queries (existence is not evidence) -----------
