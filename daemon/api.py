@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, APIRouter
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Optional, TYPE_CHECKING
 from pathlib import Path
 
@@ -2800,6 +2801,67 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # Memoir Store v1 Phase 3 (T3.2 / D3.1): the embedding worker —
+    # a dedicated lifespan asyncio task following the readiness-
+    # refresher pattern (create_task stored on app.state, cancelled
+    # AND awaited in the shutdown sequence below). Knob-gated AT
+    # BOOT (flag #13: "OFF ⇒ the task is never started" covers boot;
+    # a RUNNING worker parks per tick instead — D3.12/AM-27). The
+    # resolved memoir config tier is stashed so the /readyz advisory
+    # block (T0.5) re-resolves the knob with the SAME config tier the
+    # boot used, never a tier-less default.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.memoir_embedding_worker import (
+        MemoirEmbeddingWorker,
+        register_worker,
+    )
+    from daemon.repositories.memoir.repository import MemoirRepository
+    from daemon.tools.memoir_knob import resolve_memoir_knob as _memoir_knob_at_boot
+
+    app.state.memoir_config = config.memoir
+    _memoir_boot_knob = _memoir_knob_at_boot(config)
+    if _memoir_boot_knob.enabled:
+        try:
+            memoir_worker = MemoirEmbeddingWorker(
+                MemoirRepository(manager.engine),
+                config=config,
+            )
+            memoir_worker_task = asyncio.create_task(
+                memoir_worker.run(),
+                name="memoir-embedding-worker",
+            )
+            # Strong references — the naming precedent is
+            # ``app.state.readiness_refresher_task`` (api.py, D3.1).
+            app.state.memoir_embedding_worker_task = memoir_worker_task
+            app.state.memoir_embedding_worker = memoir_worker
+            register_worker(memoir_worker)
+            daemon_logger.info(
+                "[MemoirEmbed] worker started: interval="
+                f"{config.memoir.embedding_tick_s}s batch="
+                f"{config.memoir.embedding_batch_cap} dims="
+                f"{config.memoir.embedding_dimensions}"
+            )
+        except Exception as memoir_boot_exc:  # noqa: BLE001 — advisory surface
+            # The embedding lane must NEVER take the daemon down
+            # (DD-6 graceful degradation): lexical recall works with
+            # zero embeddings; the advisory block reports not_started.
+            app.state.memoir_embedding_worker_task = None
+            app.state.memoir_embedding_worker = None
+            daemon_logger.warning(
+                f"[MemoirEmbed] worker failed to start (lexical-only "
+                f"recall continues): {memoir_boot_exc}"
+            )
+    else:
+        app.state.memoir_embedding_worker_task = None
+        app.state.memoir_embedding_worker = None
+        daemon_logger.info(
+            "[MemoirEmbed] worker not started: memoir knob is OFF at boot "
+            f"(resolution={_memoir_boot_knob.resolution}); flip "
+            "ENSEMBLE_MEMOIR_ENABLED and restart to enable"
+        )
+
+
+    # ─────────────────────────────────────────────────────────────
     # OAuth2 auth background machinery (Phase 2, T2.4/T2.8).
     # Config-gated by settings.auth.enabled: with auth OFF this
     # constructs NOTHING (FR-2 / D5 not-registered — no sweeper task,
@@ -3593,6 +3655,24 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"Readiness refresher shutdown error: {e}")
         app.state.readiness_refresher_task = None
+
+    # Stop the memoir embedding worker (Memoir Store v1 Phase 3, D3.1/
+    # D3.13): cancel + await — the same shape as the readiness refresher
+    # above. The worker's loop re-raises CancelledError, so the await
+    # returns promptly; a mid-batch embed thread is bounded by the client
+    # timeout and abandoned cleanly (the executor is daemon-lifetime).
+    if hasattr(app.state, "memoir_embedding_worker_task"):
+        memoir_task = app.state.memoir_embedding_worker_task
+        if memoir_task is not None and not memoir_task.done():
+            memoir_task.cancel()
+            try:
+                await memoir_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"[MemoirEmbed] worker shutdown error: {e}")
+        app.state.memoir_embedding_worker_task = None
+
 
     # Stop the A3 promote-txn hold's release driver (soak-gate-mcp-warmup).
     # The driver is lazily created on the FIRST deferral and ticks only
@@ -4394,6 +4474,47 @@ def _read_skill_sources_snapshot(manager: "InstanceManager") -> dict[str, Any]:
             "overflow_dropped": [],
             "embeddings_pending": 0,
         }
+
+
+def _read_memoir_snapshot(app_state: Any) -> dict[str, Any]:
+    """The memoir knob + embedding-worker advisory block (readiness
+    ``detail.memoir``).
+
+    Memoir Store v1 Phase 3, the wave-1 routed item T0.5: the knob's
+    resolved state must be discoverable WITHOUT reading logs. Published
+    in the ``detail.mcp``/``detail.skill_sources`` family — ADVISORY
+    ONLY: it NEVER feeds a readiness component and NEVER contributes to
+    ``reasons`` (a disabled memoir is not a degraded daemon). The route
+    injects the block AFTER the composite verdict and the status code
+    are decided, so the guarantee is structural, not conventional.
+
+    CHEAP + SIDE-EFFECT FREE: two in-memory reads — the knob resolution
+    (env/config tier, no DB, no filesystem) and the worker's published
+    tick snapshot (module state). NO DB read on the readiness path.
+    """
+    block: dict[str, Any] = {}
+    try:
+        from daemon.tools.memoir_knob import resolve_memoir_knob
+
+        memoir_cfg = getattr(app_state, "memoir_config", None)
+        tier = SimpleNamespace(memoir=memoir_cfg) if memoir_cfg is not None else None
+        knob = resolve_memoir_knob(tier)
+        block["enabled"] = bool(knob.enabled)
+        block["resolution"] = knob.resolution
+        block["source"] = knob.source
+        if knob.rejected_value is not None:
+            block["rejected_value"] = knob.rejected_value
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        block["enabled"] = None
+        block["degraded"] = True
+        block["degraded_reason"] = type(exc).__name__
+    try:
+        from daemon.services.memoir_embedding_worker import latest_snapshot
+
+        block["worker"] = latest_snapshot()
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        block["worker"] = {"phase": "unknown", "degraded_reason": type(exc).__name__}
+    return block
 
 
 def _read_mcp_snapshot() -> Optional[dict]:
@@ -5642,12 +5763,33 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
                 # Auth OFF → field ABSENT (model_dump would emit null —
                 # popped so the OFF-state body stays byte-identical).
                 body.pop("auth_dependency_status", None)
+            # Memoir advisory block (Memoir Store v1 Phase 3, T0.5) —
+            # the same injection the composite branch does below:
+            # POST-verdict, advisory-only, never a component/reason.
+            try:
+                detail["memoir"] = _read_memoir_snapshot(request.app.state)
+                body["detail"] = detail
+            except Exception:  # noqa: BLE001 — advisory must never 500 the probe
+                pass
             return JSONResponse(
                 status_code=503,
                 content=body,
                 headers={"Retry-After": "5"},
             )
         payload = composite.to_payload(draining=False)
+        # Memoir advisory block (Memoir Store v1 Phase 3, T0.5): the
+        # knob's resolved state + the worker's park/latch/tick state,
+        # in the ``detail.mcp``/``detail.skill_sources`` family. The
+        # injection happens AFTER the composite verdict and the status
+        # code are decided — structurally it can NEVER flip a readiness
+        # component or contribute to ``reasons`` (a disabled memoir is
+        # not a degraded daemon). Cheap: two in-memory reads, no DB.
+        try:
+            payload.setdefault("detail", {})["memoir"] = _read_memoir_snapshot(
+                request.app.state
+            )
+        except Exception:  # noqa: BLE001 — advisory must never 500 the probe
+            pass
         if composite.ready:
             return JSONResponse(status_code=200, content=payload)
         return JSONResponse(
