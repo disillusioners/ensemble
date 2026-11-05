@@ -272,6 +272,21 @@ def test_the_write_back_is_one_statement_setting_the_four_columns_together():
     assert "embedding_error = NULL" in write_back
 
 
+def test_the_write_back_sets_the_four_columns_together(repo):
+    """D2.16 / AM-15 — the behavioural half: all four columns land at once."""
+    episode = repo.insert_episode(agent_id="ari", body="a vector memory")
+    assert repo.store_embedding(episode, [0.1, 0.2, 0.3], "text-embedding-3-small", 3)
+    with Session(repo.engine) as session:
+        row = session.exec(
+            select(MemoirEpisode).where(MemoirEpisode.id == episode)
+        ).first()
+        assert row.embedding == [0.1, 0.2, 0.3]
+        assert row.embedding_model == "text-embedding-3-small"
+        assert row.embedding_dims == 3
+        assert row.embedded_at is not None
+        assert row.embedding_error is None
+
+
 def test_the_stats_update_is_one_statement_setting_two_columns():
     """D2.8: ONE column-targeted UPDATE."""
     constants = _module_sql_constants()
