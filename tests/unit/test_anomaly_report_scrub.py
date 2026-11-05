@@ -395,10 +395,23 @@ class TestTheScrubPipeline:
         # E3: the token-metering diagnostics are the text a
         # token-exhaustion error carries — masking them would destroy
         # the diagnostic value the excerpt exists to capture.
+        #
+        # The VALUE must survive, not just the NAME (Condition A — the
+        # "pin that cannot catch its defect" class): a disabled
+        # benign-name exemption masks the value while leaving the name
+        # intact, so a name-only assertion stays green.
         for name in ("max_tokens", "input_tokens", "output_tokens", "token_count"):
             payload = json.dumps({name: 200000})
-            assert name in scrub_text(payload, 200)
-        assert "token_budget" in scrub_text("token_budget: 200000", 200)
+            out = scrub_text(payload, 200)
+            assert name in out
+            assert "200000" in out, f"{name}: the metering VALUE was masked"
+        out = scrub_text("token_budget: 200000", 200)
+        assert "token_budget" in out
+        assert "200000" in out
+        # the plural family (the `*_tokens` suffix) — the value survives too.
+        out = scrub_text(json.dumps({"total_tokens": 987654}), 200)
+        assert "total_tokens" in out
+        assert "987654" in out
 
     def test_the_secret_shape_masker_masks_the_widened_keyword_family(self) -> None:
         # R-a: the keyword FAMILY masks (the suffix legs).
