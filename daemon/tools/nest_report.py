@@ -110,7 +110,12 @@ THE CONCURRENCY CAVEAT (N3) — READ IT AS A CAVEAT
 read-then-insert, so two concurrent reports from one agent type can BOTH
 pass.  It is NOT a hard invariant.  The GLOBAL TOTAL-ROW CEILING and
 the 1,500/hour GLOBAL BRAKE are read-then-insert BEST-EFFORT in
-exactly the same way.
+exactly the same way.  The overshoot is BOUNDED by the
+concurrent-insert width, never unbounded: a single wave of 20
+concurrent accepts against max_rows_global=5 measured +15 accepted
+beyond the ceiling (and +18 beyond a per-type cap of 2) — every
+beyond-cap report is still refused loudly (a ledgered refusal row or
+an incremented counter), never silently lost.
 
 THE OFFLOAD-GATE PRESSURE (AM-14)
 ---------------------------------
