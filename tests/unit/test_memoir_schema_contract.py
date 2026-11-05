@@ -368,12 +368,16 @@ def test_the_syntheses_table_has_no_writer_in_the_tree():
         timeout=60,
     )
     hits = [line for line in result.stdout.splitlines() if line.strip()]
-    # Only the model, the package export and the manager's registration
-    # may reference the table. A WRITER would add another file.
+    # Only the model, the package export, the manager's registration and
+    # the audit-record .sql may reference the table. A WRITER would add
+    # another file.
     allowed = {
         "daemon/repositories/memoir/models.py",
         "daemon/repositories/memoir/__init__.py",
         "daemon/manager.py",
+        # The .sql is the persistent AUDIT RECORD of the schema change
+        # (DD-18) — it CREATES the empty table and never writes a row.
+        "daemon/migrations/versions/20261105_102821_create_memoir_tables.sql",
     }
     unexpected = [hit for hit in hits if hit.split(":")[0] not in allowed]
     assert not unexpected, f"memoir_syntheses is referenced by: {unexpected}"

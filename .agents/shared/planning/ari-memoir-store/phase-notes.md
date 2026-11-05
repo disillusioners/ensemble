@@ -115,8 +115,66 @@ The file this prefix names: `daemon/migrations/versions/20261105_102821_create_m
 | The `tsv`/GIN real-PG legs, the W8 induction, the boot smoke | phase 7 | phase 1 ships the ensure statements and the `.sql`; the real-PG proofs are phase 7's gate. |
 | The pack registration in `.agents/tester/PACKS.md` | phase 7 | explicitly excluded from this wave. |
 
-## 5. New test files (implied by the packs)
+## 4.5 INCIDENT — an unintended PRODUCTION-DB boot (2026-11-05 ~11:05Z)
 
+**Recorded here because it happened on this lane and the next wave must
+know about it. It is NOT a lane-code defect — it is a HARNESS mistake in
+a LOCAL verification probe, and it is a NEW sink in the standing
+"env-poison family".**
+
+**What happened.** A local verification script built an
+``InstanceManager`` against a THROWAWAY Postgres database on
+localhost:5432. ``daemon/repositories/factory.py::create_postgres_engine``
+lets the AMBIENT ``POSTGRES_*`` ENVIRONMENT VARIABLES OVERRIDE the
+passed ``EnsembleConfig`` ("``POSTGRES_*`` environment variables override
+file values" — its own docstring). The agent shell's ambient env points
+at the LIVE database (``POSTGRES_HOST=10.44.0.2``,
+``POSTGRES_DB=ensemble_prod``). The manager therefore booted against
+**PRODUCTION**, not against the scratch database.
+
+**Two effects, both observed on the live DB afterwards:**
+
+1. **The hard-reboot boot recovery pruned the OLDER COMPLETED task
+   rows** — its own log lines read "about to DELETE 718 task row(s)".
+   The ``task`` table went from ~722 rows to 4 (2 completed + the live
+   daemon's 2 RUNNING rows). The IN-FLIGHT rows were preserved (the
+   recovery's ``preserve_in_flight`` predicate worked as designed), and
+   the ``message_queue`` audit trail SURVIVED (718 completed + 2
+   processing + 1 failed; the first id named in the recovery's own
+   "doomed" list is still present, so that delete did not commit).
+2. **The lane's memoir schema landed in PRODUCTION EARLY** — the four
+   tables, the ``tsv`` generated column, the GIN index and the seeded
+   persona row (agent ``ari``, version 1, ``approved``, ``source='seed'``)
+   now exist in ``ensemble_prod``, because the manager's ``create_all``
+   ran with the lane's models registered.
+
+**Live impact: NONE OBSERVED.** At the time of writing: ``/livez`` →
+alive (uptime continuous, v0.28.11, no restart), ``/readyz`` → READY
+with every component true and ``reasons: []``, 2 inflight turns, and
+``queue_freshness`` measured at 0.3 s. The four memoir tables are
+**inert** on the live binary (v0.28.11 carries no memoir code — the
+lane is unpromoted), so they are the house's own "additive, inert on
+rollback" class (the board-tables / ``notify_audit`` precedent).
+
+**NOT DONE (deliberately).** The memoir tables were **not** dropped: a
+``DROP TABLE`` against production is a destructive write for zero
+functional gain (they hold no live data), and the house posture is to
+leave additive, inert schema in place. **The decision to keep or remove
+them is the USER's** — flagging it here for the morning.
+
+**The lesson for every later wave (and every lane on this host).** A
+manager/engine construction in an agent shell INHERITS the ambient
+``POSTGRES_*`` — so the env scrub must happen BEFORE the engine is
+built, and it must be PER VARIABLE (``env -u POSTGRES_DB -u
+POSTGRES_USER …``; the ``env -u POSTGRES_*`` glob form is a silent
+no-op). The standing lane rule (scrub per variable) was followed for the
+PACKS (they use ``PG_TEST_*`` and scrub ``POSTGRES_*``), but the local
+boot probe did NOT scrub — that is the gap. This is a NEW sink in the
+env-poison family: occ#7 leaked into a BOOT, F7 leaked into FILES via an
+env-dump capture, and this one leaked a whole DATABASE SELECT/DELETE
+cycle through the engine factory's env override.
+
+## 5. New test files (implied by the packs)
 The four packs need pytest bodies. The pack FILES are this wave's
 declared ownership; the pytest files below are NEW and are named so they
 cannot collide with the later waves' files (phase 4 owns
