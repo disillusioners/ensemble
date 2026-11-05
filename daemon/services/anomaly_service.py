@@ -468,13 +468,17 @@ def select_error_excerpt(
     *,
     max_messages: int,
     max_chars_per_message: int,
-    max_total_chars: int,
 ) -> list[str]:
     """The C5 selection rule — the SINGULAR excerpt rule.
 
     "The excerpt = the last ≤5 ERROR-BEARING tool messages in the turn,
     selected from a bounded scan window of the last ≤20 messages of
     that turn's transcript; each excerpt ≤500 chars, total ≤2000."
+
+    The TOTAL cap is applied by the CALLER after the parts are joined
+    (``_harvest_excerpt`` slices the joined text to
+    ``excerpt_max_total_chars``) — this function bounds the per-part
+    length and the part COUNT only.
 
     The ERROR-BEARING predicate is the house ASSIGNMENT form, as TWO
     statements — the assignment, then a SEPARATE comparison::
@@ -494,7 +498,6 @@ def select_error_excerpt(
             caller — the read cap lives at the READ seam).
         max_messages: How many excerpts to keep (the last N).
         max_chars_per_message: The per-excerpt character cap.
-        max_total_chars: The total character cap across the excerpts.
 
     Returns:
         The selected excerpt parts, OLDEST FIRST (chronological).
@@ -1896,7 +1899,6 @@ class AnomalyService:
             window,
             max_messages=self._config.excerpt_max_messages,
             max_chars_per_message=self._config.excerpt_max_chars_per_message,
-            max_total_chars=self._config.excerpt_max_total_chars,
         )
         if not parts:
             return

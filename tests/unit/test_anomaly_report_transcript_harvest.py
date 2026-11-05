@@ -271,7 +271,6 @@ class TestTheSelectionBehaviour:
             [_tool_message(ERROR_TOOL_TEXT)],
             max_messages=5,
             max_chars_per_message=500,
-            max_total_chars=2000,
         )
         assert len(parts) == 1
         assert ERROR_TOOL_TEXT in parts[0]
@@ -281,7 +280,6 @@ class TestTheSelectionBehaviour:
             [HumanMessage(content="ERROR: please do the thing")],
             max_messages=5,
             max_chars_per_message=500,
-            max_total_chars=2000,
         )
         assert parts == []
 
@@ -290,7 +288,6 @@ class TestTheSelectionBehaviour:
             [AIMessage(content="ERROR: I could not do the thing")],
             max_messages=5,
             max_chars_per_message=500,
-            max_total_chars=2000,
         )
         assert parts == []
 
@@ -299,7 +296,6 @@ class TestTheSelectionBehaviour:
             [_tool_message("the file was written")],
             max_messages=5,
             max_chars_per_message=500,
-            max_total_chars=2000,
         )
         assert parts == []
 
@@ -309,7 +305,6 @@ class TestTheSelectionBehaviour:
             messages,
             max_messages=5,
             max_chars_per_message=500,
-            max_total_chars=2000,
         )
         assert len(parts) == 5
         assert parts[0].endswith("failure 3")
@@ -321,7 +316,6 @@ class TestTheSelectionBehaviour:
             [_tool_message(long_text)],
             max_messages=5,
             max_chars_per_message=500,
-            max_total_chars=2000,
         )
         assert len(parts) == 1
         assert len(parts[0]) == 500
@@ -335,7 +329,6 @@ class TestTheSelectionBehaviour:
             messages,
             max_messages=5,
             max_chars_per_message=500,
-            max_total_chars=2000,
         )
         assert parts == ["ERROR: first", "ERROR: second"]
 
