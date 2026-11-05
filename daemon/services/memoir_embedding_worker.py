@@ -98,7 +98,13 @@ from daemon.llm_error_classifier import (
     RETRYABLE_STATUS_CODES,
     classify_transient_apierror_body,
 )
-from daemon.repositories.memoir.repository import MemoirRepository
+from daemon.repositories.memoir.repository import (
+    MEMOIR_EMBEDDING_ATTEMPT_CAP,
+    MEMOIR_EMBEDDING_TERMINAL_MARKER,
+    MemoirRepository,
+    memoir_embedding_terminal_predicate,
+    memoir_row_is_terminal,
+)
 from daemon.tools.memoir_knob import resolve_memoir_knob
 
 logger = logging.getLogger(__name__)
@@ -118,10 +124,20 @@ MEMOIR_RETRYABLE_STATUS_CODES = frozenset(RETRYABLE_STATUS_CODES) | {408}
 PERMANENT_CREDENTIAL_STATUS_CODES = frozenset({401, 403})
 
 #: The error-string marker that makes a row terminal on the next scan.
-TERMINAL_ERROR_MARKER = "terminal:"
+#: W-2: SINGLE-SOURCED in the repository package — this alias exists so
+#: the worker's vocabulary and the SQL scan window cannot drift.
+TERMINAL_ERROR_MARKER = MEMOIR_EMBEDDING_TERMINAL_MARKER
 
 # ── AM-30 / D3.7: the attempt budget ────────────────────────────────────
-EMBEDDING_ATTEMPT_CAP = 5
+#: W-2: SINGLE-SOURCED in the repository package (the pending scan's
+#: ``attempt_cap`` and this budget are THE SAME number by construction).
+EMBEDDING_ATTEMPT_CAP = MEMOIR_EMBEDDING_ATTEMPT_CAP
+
+# ── W-2: the stall warning ──────────────────────────────────────────────
+#: The number of consecutive ``pending>0 and embedded==0`` ticks after
+#: which the worker logs a LOUD stall WARNING. Silent-forever is
+#: unacceptable: a starved window must be visible to the operator.
+MEMOIR_EMBED_STALL_WARN_TICKS = 3
 
 # ── D3.10: the lane-down latch ──────────────────────────────────────────
 LATCH_THRESHOLD_TICKS = 3
@@ -282,12 +298,12 @@ def classify_embed_failure(exc: BaseException) -> tuple[str, bool]:
 
 
 def _is_terminal_row(row: Any, attempt_cap: int) -> bool:
-    """The worker-side terminal predicate (see the module docstring)."""
-    attempts = int(getattr(row, "embedding_attempts", 0) or 0)
-    if attempts >= attempt_cap:
-        return True
-    error = getattr(row, "embedding_error", None) or ""
-    return error.startswith(TERMINAL_ERROR_MARKER)
+    """The worker-side terminal predicate (see the module docstring).
+
+    W-2: a THIN DELEGATE to the repository-package predicate — the SQL
+    scan window and this belt cannot drift because both are the same
+    function."""
+    return memoir_row_is_terminal(row, attempt_cap)
 
 
 class MemoirEmbeddingWorker:
@@ -322,6 +338,10 @@ class MemoirEmbeddingWorker:
         # D3.10 latch state (per-process; a restart re-evaluates).
         self._all_fail_streak = 0
         self._latched = False
+        # W-2 stall state: consecutive ``pending>0, embedded==0`` ticks
+        # and whether the loud WARNING has already fired for this stall.
+        self._stall_streak = 0
+        self._stall_warned = False
         # D3.12 park state.
         self._parked = False
         # The published snapshot (read by the readiness surface — T0.5).
@@ -422,11 +442,14 @@ class MemoirEmbeddingWorker:
         )
 
         # ── the scan window + the terminal filter (D3.2/D3.7) ───────────
+        # W-2: the REPOSITORY's pending query is terminal-aware — the
+        # oldest-N window ADVANCES past the rows this predicate would
+        # exclude, so pending rows BEHIND a head of terminal rows are
+        # reachable. The Python filter stays as the belt.
+        scan = self._repository.get_pending_embeddings
         rows = await loop.run_in_executor(
             _EMBED_EXECUTOR,
-            self._repository.get_pending_embeddings,
-            None,
-            self._scan_limit,
+            lambda: scan(None, self._scan_limit),
         )
         candidates = [
             row
@@ -493,6 +516,37 @@ class MemoirEmbeddingWorker:
         terminal_total = await loop.run_in_executor(
             _EMBED_EXECUTOR, self._count_terminal
         )
+
+        # ── W-2: the stall assessment (the starved-window WARNING) ──────
+        # ``pending > 0`` while ``embedded == 0`` tick after tick means
+        # the window is starved — by terminal rows the scan could not
+        # advance past (pre-W-2), by a perpetual budget exhaustion, or
+        # by anything else. Silent-forever is unacceptable: after N
+        # consecutive starved ticks the worker names the pending count,
+        # the scan window and the terminal-row count OUT LOUD.
+        if pending_total > 0 and embedded == 0:
+            self._stall_streak += 1
+            if (
+                self._stall_streak >= MEMOIR_EMBED_STALL_WARN_TICKS
+                and not self._stall_warned
+            ):
+                self._stall_warned = True
+                logger.warning(
+                    "[MemoirEmbed] STALL: pending=%d but embedded=0 for %d "
+                    "consecutive ticks — the scan window (limit=%d) may be "
+                    "blocked by terminal rows (terminal=%d); pending rows "
+                    "behind them are starved",
+                    pending_total,
+                    self._stall_streak,
+                    self._scan_limit,
+                    terminal_total,
+                )
+        else:
+            # A healthy tick (progress made, or nothing pending) clears
+            # the streak and re-arms the warning for the NEXT stall.
+            self._stall_streak = 0
+            self._stall_warned = False
+
         self._publish_tick(
             pending=pending_total,
             embedded=embedded,
@@ -733,26 +787,22 @@ class MemoirEmbeddingWorker:
         """M — the TOTAL terminal rows in the table (D3.11).
 
         Terminal = still missing its embedding AND (attempts at/over the
-        cap OR the ``terminal:`` marker present). Driver-agnostic: no
-        ``tsv`` reference; ``LIKE`` works on SQLite and PG alike.
+        cap OR the ``terminal:`` marker present). W-2: the predicate is
+        SINGLE-SOURCED — this SELECT and the pending scan's exclusion
+        are the same :func:`memoir_embedding_terminal_predicate`.
+        Driver-agnostic: no ``tsv`` reference; ``LIKE`` works on SQLite
+        and PG alike.
         """
-        from sqlmodel import Session, func, select, text
+        from sqlmodel import Session, func, select
 
         from daemon.repositories.memoir.models import MemoirEpisode
 
-        marker = f"{TERMINAL_ERROR_MARKER}%"
         statement = (
             select(func.count())
             .select_from(MemoirEpisode)
             .where(
                 MemoirEpisode.embedding.is_(None),
-                text(
-                    "memoir_episodes.embedding_attempts >= :attempt_cap "
-                    "OR memoir_episodes.embedding_error LIKE :marker"
-                ).bindparams(
-                    attempt_cap=EMBEDDING_ATTEMPT_CAP,
-                    marker=marker,
-                ),
+                memoir_embedding_terminal_predicate(EMBEDDING_ATTEMPT_CAP),
             )
         )
         with Session(self._repository.engine) as session:

@@ -577,6 +577,58 @@ def _estimate_tokens(text: str) -> int:
     return estimate_tokens(text)
 
 
+# ── THE EMBEDDING TERMINAL PREDICATE (W-2, single-sourced) ───────────────
+#: The error-string marker that makes an embedding row terminal on the
+#: next scan (D3.7/AM-30 — the worker's own vocabulary). It LIVES HERE
+#: so the SQL scan window and the worker's Python belt predicate cannot
+#: drift: the worker imports BOTH this marker and the predicate below.
+MEMOIR_EMBEDDING_TERMINAL_MARKER = "terminal:"
+
+#: The per-row embedding attempt budget (D3.7 — attempts at/over the cap
+#: are terminal). Single-sourced here; the worker re-exports it.
+MEMOIR_EMBEDDING_ATTEMPT_CAP = 5
+
+
+def memoir_embedding_terminal_predicate(attempt_cap: int = MEMOIR_EMBEDDING_ATTEMPT_CAP):
+    """THE terminal predicate, SQL form (W-2).
+
+    Terminal = still missing its embedding AND (attempts at/over the cap
+    OR the ``terminal:`` marker present). ``get_pending_embeddings``
+    EXCLUDES this predicate (so the oldest-N window advances past
+    terminal rows — W-2: terminal rows matched the pending query
+    forever, their embedding never arrives, and the worker's Python
+    filter emptied the window every tick); ``_count_terminal`` in the
+    worker SELECTS it (D3.11's operator slice).
+
+    BOTH legs ``coalesce`` their nullable input so the predicate is
+    TOTAL — it never evaluates to SQL NULL. This matters for the
+    EXCLUSION: ``NOT (NULL OR FALSE)`` is NULL (not TRUE) in SQL's
+    three-valued logic, so a naive negation would silently drop every
+    fresh row whose ``embedding_error`` is still NULL — the exact
+    opposite of the fix. The Python form (:func:`memoir_row_is_terminal`)
+    mirrors the same coalescing (``or 0`` / ``or ""``).
+    """
+    from sqlalchemy import func, or_
+
+    return or_(
+        func.coalesce(MemoirEpisode.embedding_attempts, 0) >= int(attempt_cap),
+        func.coalesce(MemoirEpisode.embedding_error, "").like(
+            f"{MEMOIR_EMBEDDING_TERMINAL_MARKER}%"
+        ),
+    )
+
+
+def memoir_row_is_terminal(row: Any, attempt_cap: int = MEMOIR_EMBEDDING_ATTEMPT_CAP) -> bool:
+    """THE terminal predicate, Python form (W-2) — the same rule the SQL
+    predicate encodes, stated ONCE so the two cannot disagree. The
+    worker keeps a thin alias (``_is_terminal_row``) as the belt."""
+    attempts = int(getattr(row, "embedding_attempts", 0) or 0)
+    if attempts >= int(attempt_cap):
+        return True
+    error = getattr(row, "embedding_error", None) or ""
+    return error.startswith(MEMOIR_EMBEDDING_TERMINAL_MARKER)
+
+
 class MemoirRepository:
     """The episode surface — the CLOSED public surface (D2.1).
 
@@ -843,16 +895,40 @@ class MemoirRepository:
     # ── reads ────────────────────────────────────────────────────────────
 
     def get_pending_embeddings(
-        self, agent_id: str | None = None, limit: int = 100
+        self,
+        agent_id: str | None = None,
+        limit: int = 100,
+        *,
+        attempt_cap: int = MEMOIR_EMBEDDING_ATTEMPT_CAP,
+        exclude_terminal: bool = True,
     ) -> list[MemoirEpisode]:
         """The worker's pending queue — ``embedding IS NULL`` IS the queue.
 
         No side table: the column's emptiness is the queue (AM-30).
+
+        W-2 (terminal-aware window): the query EXCLUDES the rows the
+        worker would classify terminal (the single-sourced
+        :func:`memoir_embedding_terminal_predicate`), so the oldest-N
+        window ADVANCES past them. Without the exclusion, terminal rows
+        — whose embedding never arrives — sat at the head of the window
+        forever: ``pending > 0`` yet the worker's Python filter emptied
+        ``candidates`` every tick, silently and permanently. The
+        exclusion is the fix; the worker's Python-side filter stays as
+        the belt. ``exclude_terminal=False`` restores the raw
+        emptiness-is-the-queue read (the diagnostic shape).
         """
         with Session(self.engine) as session:
-            stmt = select(MemoirEpisode).where(MemoirEpisode.embedding.is_(None)).where(MemoirEpisode.embedded_at.is_(None))
+            stmt = (
+                select(MemoirEpisode)
+                .where(MemoirEpisode.embedding.is_(None))
+                .where(MemoirEpisode.embedded_at.is_(None))
+            )
             if agent_id:
                 stmt = stmt.where(MemoirEpisode.agent_id == agent_id)
+            if exclude_terminal:
+                stmt = stmt.where(
+                    ~memoir_embedding_terminal_predicate(attempt_cap)
+                )
             stmt = stmt.order_by(
                 MemoirEpisode.created_at.asc(), MemoirEpisode.id.asc()
             )
@@ -1351,6 +1427,8 @@ class MemoirRepository:
 __all__ = [
     "MEMOIR_BODY_CHAR_CAP",
     "MEMOIR_BODY_WORD_CAP",
+    "MEMOIR_EMBEDDING_ATTEMPT_CAP",
+    "MEMOIR_EMBEDDING_TERMINAL_MARKER",
     "MEMOIR_IMPORTANCE_MAX",
     "MEMOIR_IMPORTANCE_MIN",
     "MEMOIR_INSERT_COLUMNS",
@@ -1367,5 +1445,7 @@ __all__ = [
     "MemoirTransitionError",
     "MemoirWriteError",
     "as_aware_utc",
+    "memoir_embedding_terminal_predicate",
+    "memoir_row_is_terminal",
     "render_episode_content",
 ]

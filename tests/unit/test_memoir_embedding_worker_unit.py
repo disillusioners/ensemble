@@ -424,6 +424,99 @@ async def test_five_attempts_are_terminal_and_skipped(repo):
     assert worker.snapshot()["last_terminal"] == 1
 
 
+# ── W-2: the terminal-aware window + the stall warning ──────────────────
+
+
+async def test_pending_rows_behind_a_head_of_terminal_rows_are_still_found(repo):
+    """W-2 (council): the oldest-N window stalled PERMANENTLY behind
+    terminal rows — their embedding stays NULL forever, so they matched
+    the pending query forever while the worker's Python filter emptied
+    ``candidates`` every tick: pending>0, embedded=0, forever, silently.
+    The terminal-aware scan advances the window; the pinned shape is the
+    incident itself: >=200 terminal rows at the head, a fresh pending
+    row behind them."""
+    for index in range(200):
+        burned = repo.insert_episode(
+            agent_id="ari", title=f"old{index}", body=f"old body {index}"
+        )
+        for _ in range(EMBEDDING_ATTEMPT_CAP):
+            repo.record_embedding_attempt(burned, "burned")
+    survivor = repo.insert_episode(
+        agent_id="ari", title="fresh", body="the fresh body"
+    )
+
+    # The repro shape depends on the window: the default scan limit is
+    # exactly 200, so the terminal head FILLS the whole window and the
+    # survivor sits behind it (the pre-W-2 shape starved forever here).
+    assert worker_scan_limit_covers() == 200
+
+    worker = _make_worker(repo, _ok_embedder())
+    await worker._tick()
+
+    row = repo.fetch_latest("ari", limit=1)[0]
+    assert row.id == survivor
+    assert row.embedding is not None, (
+        "a pending row behind a head of terminal rows must still be "
+        "found and embedded (W-2) — the window must advance"
+    )
+    assert worker.snapshot()["last_embedded"] >= 1
+
+
+def worker_scan_limit_covers() -> int:
+    """The worker's default scan limit (the window the incident
+    clogged). Exposed for the pin's readability only."""
+    from daemon.services.memoir_embedding_worker import SCAN_LIMIT
+
+    return int(SCAN_LIMIT)
+
+
+async def test_a_starved_window_warns_after_n_stalled_ticks(repo, caplog):
+    """W-2: ``pending>0`` with ``embedded==0`` for N consecutive ticks
+    fires a LOUD WARNING naming the pending count, the scan window and
+    the terminal-row count — silent-forever is unacceptable. The
+    warning fires AT the Nth stalled tick (not before), does NOT repeat
+    every stalled tick after that, and a healthy tick clears the stall
+    (no warning, re-armed)."""
+    from daemon.services.memoir_embedding_worker import (
+        MEMOIR_EMBED_STALL_WARN_TICKS,
+    )
+
+    repo.insert_episode(agent_id="ari", title="s", body="stalled body")
+
+    def _transient(text, **kwargs):
+        # 503 is transient: the attempt is recorded, the row stays
+        # NON-terminal and pending — exactly a starved-but-alive queue.
+        raise _StatusError(503, "lane down")
+
+    worker = _make_worker(repo, _transient)
+    with caplog.at_level(logging.WARNING, logger=WORKER_LOGGER):
+        for _ in range(MEMOIR_EMBED_STALL_WARN_TICKS - 1):
+            await worker._tick()
+        early = [r for r in caplog.records if "STALL" in r.message]
+        assert early == [], "no stall warning before the threshold"
+
+        await worker._tick()  # the threshold tick
+        warnings = [r for r in caplog.records if "STALL" in r.message]
+        assert len(warnings) == 1, "the stall WARNING fires AT the threshold"
+        message = warnings[0].message
+        assert "pending=1" in message
+        assert f"limit={worker._scan_limit}" in message
+        assert "terminal=0" in message
+
+        # A stalled tick AFTER the warning does not repeat it (one loud
+        # line per stall; the operator alerting owns repetition).
+        await worker._tick()
+        assert [r for r in caplog.records if "STALL" in r.message] == warnings
+
+        # THE HEALTHY TICK — a successful embed clears the stall and
+        # fires nothing.
+        worker._embedder = _ok_embedder()
+        repo.insert_episode(agent_id="ari", title="ok", body="fine now")
+        caplog.clear()
+        await worker._tick()
+        assert [r for r in caplog.records if "STALL" in r.message] == []
+
+
 # ── AC5: the tick line + the park semantics ──────────────────────────────
 
 
