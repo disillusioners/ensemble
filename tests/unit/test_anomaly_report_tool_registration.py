@@ -689,11 +689,20 @@ class TestTheSuccessEnvelope:
             "cluster_first_report_at",
         }, parsed
         assert parsed["report_id"]
-        assert parsed["cluster_id"] == "pending-phase-2", (
-            "phase 1 writes the degenerate cluster tail"
+        # C3 — the envelope carries the REAL cluster identity (the
+        # phase-2 flip; the degenerate ``pending-phase-2`` tail is gone
+        # and the tool file itself is UNTOUCHED).
+        assert parsed["cluster_id"] != "pending-phase-2", (
+            "phase 2 replaced the degenerate cluster tail"
+        )
+        assert len(parsed["cluster_id"]) == 36, (
+            "the cluster id is a uuid"
         )
         assert parsed["cluster_report_count"] == "1"
         assert parsed["cluster_first_report_at"].endswith("+00:00")
+        assert parsed["cluster_first_report_at"] == _row(
+            engine, parsed["report_id"]
+        ).created_at
 
     async def test_the_fold_notice_appears_iff_a_fold_happened(
         self, tmp_path

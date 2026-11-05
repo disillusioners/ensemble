@@ -526,9 +526,11 @@ class TestTheAcceptPathContract:
         )
         assert canonical.fold_notice is None
 
-    async def test_the_accepted_row_carries_the_degenerate_cluster_tail(
+    async def test_the_accepted_row_carries_the_real_cluster_assignment(
         self, tmp_path
     ) -> None:
+        """C3 — the DEGENERATE tail is gone: an accepted report is
+        ALWAYS clustered (AM-5b — ``accepted`` MEANS clustered)."""
         engine = _engine(tmp_path)
         service = _service(engine)
         result = await service.accept_report(
@@ -540,21 +542,29 @@ class TestTheAcceptPathContract:
         )
         row = _row(engine, result.report_id)
         assert row.outcome == "accepted"
-        assert row.cluster_id is None
-        assert result.cluster_id is None
+        assert row.cluster_id is not None
+        assert row.cluster_id == result.cluster_id
         assert result.cluster_report_count == 1
         assert result.cluster_first_report_at == row.created_at
+        # the cluster row exists and counts its member rows
+        with Session(engine) as session:
+            cluster = session.get(AnomalyCluster, row.cluster_id)
+            assert cluster is not None
+            session.expunge(cluster)
+        assert cluster.report_count == 1
+        assert cluster.first_report_at == row.created_at
 
     async def test_the_report_insert_routes_through_the_offload_seam(
         self, tmp_path
     ) -> None:
         """F-1: the INSERT must leave the event loop.
 
-        ``insert_report`` opens a ``Session`` and ``commit()``s —
+        ``assign_report_unit`` opens a ``Session`` and ``commit()``s —
         running it directly inside ``async def accept_report`` is the
         v0.27.14 event-loop sync-DB incident class. The call must be
         routed through the service's ``offload`` seam (the same seam
-        the harvest reads use), never invoked directly.
+        the harvest reads and the rate-gate counts use), never invoked
+        directly.
         """
         engine = _engine(tmp_path)
         routed: list[str] = []
@@ -577,8 +587,9 @@ class TestTheAcceptPathContract:
             severity="major",
         )
         assert result.report_id, "the report persisted"
-        assert "insert_report" in routed, (
-            "insert_report must be invoked VIA the offload seam "
+        assert "assign_report_unit" in routed, (
+            "the ONE-TRANSACTION unit-of-work (report INSERT + cluster "
+            "INSERT/UPDATE) must be invoked VIA the offload seam "
             "(await self._offload(...)), never as a direct synchronous "
             "call on the event loop"
         )

@@ -1,17 +1,71 @@
-"""The nest-anomaly ACCEPT path — validate → normalize → scrub → harvest → persist.
+"""The nest-anomaly ACCEPT path — validate → gate → scrub → harvest → cluster → board.
 
 The write-side half of the ``nest-report`` tool category (the
-``nest-anomaly-report`` lane, board ``wi-2d691ed2``). Phase 1 (commit
-C1) ships this service with the accept path ONLY:
+``nest-anomaly-report`` lane, board ``wi-2d691ed2``). Phase 2 (commit
+C3) completes the path:
 
-    validate → normalize (R1/R3) → scrub (R6 + AM-11) → harvest (AM-8)
-    → persist
+    validate → rate gates (R5b, PRE-harvest) → scrub (R6 + AM-11)
+    → harvest (AM-8) → pre-insert capacity (AM-9 + C3)
+    → ONE-TRANSACTION cluster assignment (AM-5a, inside the AM-14
+    same-key stripe) → critical → BOARD (R3, inside the SAME stripe)
+    → envelope with REAL cluster fields
 
-CLUSTERING, RATE LIMITS, THE BOARD SINK and RETENTION land in phase 2
-(commit C3) — the phase-1 accept path therefore writes the DEGENERATE
-cluster tail: ``cluster_id=NULL``, ``cluster_report_count=1``,
-``cluster_first_report_at=created_at``. The exposure window is bounded
-to this lane (phases 1-2 stage TOGETHER; no interim promote exists).
+Phase-1's DEGENERATE cluster tail (``cluster_id=NULL``, envelope
+``pending-phase-2``) is DELETED — accepted reports are ALWAYS
+clustered (AM-5b: ``accepted`` MEANS clustered; a live assignment
+failure writes the terminal outcome ``unclustered`` directly).
+
+THE RATE GATES RUN BEFORE ANY HARVEST (R5b + AM-9 + F-1 + N4)
+----------------------------------------------------------------
+A refused report harvests NOTHING — no transcript read, no ancestor
+walk, no task-row lookup. Order (the FIRST refusal wins):
+
+* FENCE 1 (read) — the per-agent refusal-ledger cap decides whether a
+  rate-limited refusal may WRITE its ledger row (DECIDE first, WRITE
+  later; beyond ``refusal_ledger_max_per_agent`` the SAME envelope
+  returns with NO row — the metric is the scalable signal).
+* FENCE 2 (read) — the GLOBAL TOTAL-row ceiling (accepted + refused;
+  the F-1 correction) — at/over it the envelope is
+  ``capacity-exhausted`` with NO row, no ledger, and the
+  capacity-exhausted counter increments.
+* the R5b per-agent decision — minor/major: COUNT accepted ≥ 5/10min;
+  critical: COUNT accepted+critical ≥ 20/hour. Over → the typed
+  ``rate-limited`` refusal (ledgered iff FENCE 1 allowed it; ALL
+  harvest-derived columns NULL — a refused report harvests NOTHING).
+* FENCE 3 (read) — the pre-harvest global accepted/hour ceiling
+  (1,500/h) → ``capacity-exhausted``, no row.
+
+ALL cutoffs are computed in PYTHON and BOUND as parameters (AM-4 —
+the ``created_at >= now() - interval`` SQL form ERRORS on PG), and
+EVERY COUNT executes via ``db_offload.offload`` (N4).
+
+THE AM-14 STRIPE (64 slots, index = ``hash(cluster_key_hash) % 64``)
+---------------------------------------------------------------------
+All cluster writes funnel through one in-process 64-slot stripe array
+— same-key serialization is FULLY preserved (the board double-create
+race stays closed because the board write stays INSIDE the same-key
+stripe) while cross-key contention is eliminated. The lock wraps ONLY
+the assignment unit + the critical board surface — never harvest or
+scrub (a slow report cannot stall an unrelated cluster join).
+
+CRITICAL → BOARD, NEVER NOTIFY (R3)
+-----------------------------------
+On a critical report the service writes the board row SERVER-SIDE via
+``BoardService`` (the manager seam) — agents NEVER see a board tool
+from this lane, and ``notify_user`` is NEVER called (the doctrine:
+board is the ALWAYS surface; notify is the deliberate MAY voice).
+ONE item per cluster (note-append on repeat criticals); AM-13
+ceilings (3/tree/hour, 20/hour global) route overflow to a NOTE on the
+tree's most recent anomaly item + the suppression counter; the title
+carries the cluster_id and "critical (peak)" (AM-7); the body's first
+line is the FIXED prefix "auto-filed — unverified agent prose"
+(AM-12e).
+
+RESOLUTION IS DERIVED (R5)
+--------------------------
+A cluster is open ⇔ ``last_report_at >= now - resolve_window_seconds``
+— there is NO status column and NO reopen write anywhere; read
+surfaces compute openness at query time.
 
 THE SPLIT POSTURE (AM-11) — READ THIS BEFORE EDITING
 ----------------------------------------------------
@@ -39,8 +93,8 @@ a failing transcript read leaves the excerpt NULL; a failing registry
 snapshot leaves both registry columns NULL. Only the PERSIST step can
 fail the report (``persist-failed``).
 
-THE DB SEAMS RUN OFF-LOOP (AM-8)
---------------------------------
+THE DB SEAMS RUN OFF-LOOP (AM-8 / N4)
+-------------------------------------
 Every DB-touching seam goes through ``db_offload.offload`` — the
 v0.27.14 discipline (a sync DB read on the event loop is the incident
 class). ONE exception, pinned by AM-8b: ``metrics_query_provider
@@ -56,18 +110,25 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from daemon._redact import redact_exc_str, redact_secret_shapes
 from daemon.config import NestReportConfig
 from daemon.repositories.anomaly.models import (
     OUTCOME_ACCEPTED,
+    OUTCOME_RATE_LIMITED,
+    OUTCOME_UNCLUSTERED,
+    SEVERITY_CRITICAL,
     SEVERITY_MAJOR,
     SEVERITY_MINOR,
     AnomalyReport,
 )
-from daemon.repositories.anomaly.repository import AnomalyRepository
+from daemon.repositories.anomaly.repository import (
+    AnomalyRepository,
+    ClusterAssignment,
+    cluster_key_hash,
+)
 from daemon.services.db_offload import offload as _db_offload
 from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY
 from daemon.services.metrics_query.wiring.vocab import (
@@ -84,6 +145,27 @@ logger = logging.getLogger(__name__)
 
 #: The scrub actor recorded on the value-substitution audit rows.
 SCRUB_ACTOR = "nest_report"
+
+#: The refusal tokens the service raises back at the tool (the C2
+#: ``_service_token`` duck-typing contract — the tool maps ``.token``
+#: onto the house envelope rungs; anything else is ``persist-failed``).
+TOKEN_RATE_LIMITED = "rate-limited"
+TOKEN_CAPACITY_EXHAUSTED = "capacity-exhausted"
+
+#: AM-14 — the stripe slot count (index = ``hash(cluster_key_hash) % 64``).
+STRIPE_SLOTS = 64
+
+#: The AM-13 suppression-note + AM-7 done-transition author. The
+#: maintenance job is daemon-side (there is no reporting instance) —
+#: a named SYSTEM identity keeps the board audit trail honest.
+MAINTENANCE_AUTHOR_INSTANCE = "ensemble-anomaly-maintenance"
+
+#: The retention per-run cap multiplier (phase2-plan: batch × 10).
+MAX_BATCHES_PER_RUN = 10
+
+#: The board body's top-description budget (the body stays ≤ ~1800
+#: chars — the plan's "scrubbed, ≤ ~1800 chars body cap").
+BOARD_TOP_DESCRIPTION_MAX_CHARS = 1500
 
 #: The raw category cap (R1) — the reporter's verbatim input, capped.
 CATEGORY_RAW_MAX_CHARS = 64
@@ -160,6 +242,55 @@ class AnomalyInputError(ValueError):
         super().__init__(message)
         self.message = message
         self.detail = detail
+
+
+class AnomalyRefusalError(Exception):
+    """A typed service refusal (R5b / AM-9) — carries ``.token``.
+
+    The C2 tool contract: the tool's ``_service_token`` duck-types the
+    ``token`` attribute onto the refusal-ladder rungs
+    (``rate-limited`` / ``capacity-exhausted``); any other failure is
+    ``persist-failed``. The token is asserted against the closed pair
+    at construction so an unknown token can never leak into the
+    envelope vocabulary.
+    """
+
+    __slots__ = ("token", "message", "detail")
+
+    def __init__(
+        self, token: str, message: str, *, detail: str = ""
+    ) -> None:
+        if token not in (TOKEN_RATE_LIMITED, TOKEN_CAPACITY_EXHAUSTED):
+            raise ValueError(f"unknown refusal token: {token!r}")
+        super().__init__(message)
+        self.token = token
+        self.message = message
+        self.detail = detail
+
+
+def _now_dt() -> datetime:
+    """The service's clock — ONE derivation point.
+
+    Everything (``now`` stamps, every window cutoff) derives from
+    ``_utc_now_iso()`` so a single monkeypatch controls the whole
+    service deterministically.
+    """
+    parsed = _parse_iso(_utc_now_iso())
+    if parsed is not None:
+        return parsed
+    return datetime.now(timezone.utc)
+
+
+def _cutoff(seconds: float) -> str:
+    """A Python-computed, FIXED-WIDTH window cutoff (AM-4).
+
+    Bound as a parameter — NEVER a SQL ``now() - interval`` (the TEXT
+    vs timestamptz operator does not exist on PG).
+    """
+    return (
+        _now_dt() - timedelta(seconds=float(seconds))
+    ).isoformat(timespec="microseconds")
+
 
 
 @dataclass
@@ -366,8 +497,9 @@ class AnomalyService:
 
     Constructed with the daemon engine; the ``manager`` is OPTIONAL
     and supplies the evidence seams (the repositories, the
-    checkpointer, the metrics query provider). A missing seam degrades
-    its field to NULL — it never fails the report.
+    checkpointer, the metrics query provider, the board service). A
+    missing seam degrades its field to NULL — it never fails the
+    report.
     """
 
     def __init__(
@@ -379,12 +511,21 @@ class AnomalyService:
         repository: AnomalyRepository | None = None,
         offload: Callable[..., Any] | None = None,
     ) -> None:
+        import asyncio
+
         self._engine = engine
         self._config = config or NestReportConfig()
         self._manager = manager
         self._repository = repository or AnomalyRepository(engine)
         self._offload = offload or _db_offload
         self._seams: Any = None
+        # AM-14 — the 64-slot stripe (index = hash(cluster_key_hash) % 64).
+        self._stripe_locks: list[Any] = [asyncio.Lock() for _ in range(STRIPE_SLOTS)]
+        # C3(i) + AM-13 — the process-durable counters the phase-3 F23
+        # pull adapter reads (the observable capacity / suppression
+        # signal; the ledger rows are the per-agent trace).
+        self._capacity_exhausted_total: int = 0
+        self._board_items_suppressed_total: int = 0
 
     # ── configuration access ──────────────────────────────────────────
 
@@ -395,6 +536,29 @@ class AnomalyService:
     @property
     def repository(self) -> AnomalyRepository:
         return self._repository
+
+    @property
+    def capacity_exhausted_total(self) -> int:
+        """C3(i) — how many reports the capacity ceilings refused."""
+        return self._capacity_exhausted_total
+
+    @property
+    def board_items_suppressed_total(self) -> int:
+        """AM-13 — how many board creates the ceilings routed to a note."""
+        return self._board_items_suppressed_total
+
+    def _stripe_for(self, key_hash: str) -> Any:
+        """The AM-14 same-key stripe slot for a cluster key hash."""
+        return self._stripe_locks[hash(key_hash) % STRIPE_SLOTS]
+
+    def _board_service(self) -> Any:
+        """The manager's board service (or ``None`` — degraded board)."""
+        manager = self._manager
+        for attribute in ("_board_service", "board_service"):
+            board = getattr(manager, attribute, None) if manager else None
+            if board is not None:
+                return board
+        return None
 
     # ── normalization (R1 / R3) ───────────────────────────────────────
 
@@ -496,6 +660,18 @@ class AnomalyService:
         canonical, fold_notice = self.normalize_category(category)
         raw_category = category[:CATEGORY_RAW_MAX_CHARS]
 
+        # ── 0b. RATE LIMITS (R5b + AM-4 + AM-9 + F-1 + N4) — BEFORE any
+        #    harvest. A refused report harvests NOTHING (no transcript
+        #    read, no ancestor walk, no task-row lookup).
+        await self._enforce_rate_gates(
+            agent_id=agent_id,
+            instance_id=instance_id,
+            severity=severity_value,
+            category=category,
+            description=description,
+            suspected_cause=suspected_cause,
+        )
+
         truncated = False
         description_cap = self._config.description_max_chars
         cause_cap = self._config.suspected_cause_max_chars
@@ -540,21 +716,519 @@ class AnomalyService:
             outcome=OUTCOME_ACCEPTED,
             refusal_reason=None,
         )
-        report_id = await self._offload(self._repository.insert_report, row)
+
+        # ── 1b. PRE-INSERT capacity (AM-9 + C3, fold round 5),
+        #    post-harvest pre-persist. The GLOBAL TOTAL-row ceiling is
+        #    the nest-wide WALL — it REFUSES. The per-tree cap SHEDS
+        #    (oldest-first, via the SHARED shed_members helper inside
+        #    the same unit-of-work) — the channel NEVER goes dark.
+        tree_root = harvest.tree_root_instance_id or instance_id
+        total_rows = await self._offload(
+            self._repository.count_reports, outcome=None
+        )
+        if total_rows >= self._config.max_rows_global:
+            self._refuse_capacity(
+                f"the nest-wide anomaly row ceiling is reached "
+                f"({total_rows} rows >= {self._config.max_rows_global})"
+            )
+        shed_ids: list[str] | None = None
+        tree_rows = await self._offload(
+            self._repository.count_reports,
+            tree_root_instance_id=tree_root,
+            outcome=None,
+        )
+        if tree_rows >= self._config.max_rows_per_tree_root:
+            over = tree_rows - (self._config.max_rows_per_tree_root - 1)
+            take = min(over, self._config.retention_batch_size)
+            shed_ids = await self._offload(
+                self._repository.select_oldest_report_ids,
+                tree_root_instance_id=tree_root,
+                limit=take,
+            )
+
+        # ── 2+3. THE ONE-TRANSACTION UNIT-OF-WORK (AM-5a) inside the
+        #    AM-14 same-key stripe — report INSERT + cluster
+        #    INSERT/UPDATE + binding in ONE repository transaction, ONE
+        #    db_offload call.
+        key_hash = cluster_key_hash(tree_root, canonical)
+        window_cutoff = _cutoff(self._config.cluster_window_seconds)
+        async with self._stripe_for(key_hash):
+            assignment: ClusterAssignment = await self._offload(
+                self._repository.assign_report_unit,
+                row,
+                tree_root_instance_id=tree_root,
+                category=canonical,
+                severity=severity_value,
+                window_cutoff=window_cutoff,
+                now=created_at,
+                shed_report_ids=shed_ids,
+            )
+            # ── 4. CRITICAL → BOARD (R3) — INSIDE the SAME-KEY stripe
+            #    (AM-14 prose is authoritative: the board read and the
+            #    create/note-append are serialized with the assignment,
+            #    so two concurrent criticals on a fresh cluster CANNOT
+            #    both create an item).
+            if severity_value == SEVERITY_CRITICAL and assignment.assigned:
+                await self._ensure_board_surface(
+                    cluster_id=assignment.cluster_id or "",
+                    tree_root=tree_root,
+                    canonical=canonical,
+                    count=assignment.report_count,
+                    first_report_at=assignment.first_report_at,
+                    agent_id=agent_id,
+                    reporting_instance_id=instance_id,
+                    now=created_at,
+                )
+
+        # ── 5. the envelope with REAL cluster fields.
         return AnomalyAcceptResult(
-            report_id=report_id,
+            report_id=assignment.report_id,
             category=canonical,
             category_raw=raw_category,
             severity=severity_value,
             fold_notice=fold_notice,
             truncated=truncated,
-            cluster_id=None,
-            cluster_report_count=1,
-            cluster_first_report_at=created_at,
+            cluster_id=assignment.cluster_id if assignment.assigned else None,
+            cluster_report_count=assignment.report_count,
+            cluster_first_report_at=assignment.first_report_at,
             excerpt_sha256=harvest.excerpt_sha256,
             excerpt_length=harvest.excerpt_length,
-            outcome=OUTCOME_ACCEPTED,
+            outcome=OUTCOME_ACCEPTED if assignment.assigned else OUTCOME_UNCLUSTERED,
         )
+
+    # ── the rate gates (R5b / AM-9 / F-1 / N4) ────────────────────────
+
+    def _refuse_capacity(self, detail: str) -> None:
+        """Refuse ``capacity-exhausted`` — NO row, NO ledger, COUNTER up.
+
+        The C3(iii) OBSERVABLE CONSEQUENCE: the envelope returns, no row
+        is written, the capacity-exhausted counter increments and a
+        WARNING surfaces the refusal for morning review (the metric is
+        the scalable signal; the ledger is for per-agent trace only).
+        """
+        self._capacity_exhausted_total += 1
+        logger.warning(
+            "anomaly: capacity-exhausted refusal (surfaced for morning "
+            "review): %s",
+            detail,
+        )
+        raise AnomalyRefusalError(
+            TOKEN_CAPACITY_EXHAUSTED,
+            "the nest-wide anomaly capacity ceiling is reached",
+            detail=detail,
+        )
+
+    async def _enforce_rate_gates(
+        self,
+        *,
+        agent_id: str,
+        instance_id: str,
+        severity: str,
+        category: str,
+        description: str,
+        suspected_cause: str | None = None,
+    ) -> None:
+        """Fences 1-3 + the R5b per-agent decision — all READS first.
+
+        Order (phase2-plan §0b): FENCE 1 (ledger-cap read — DECIDE
+        first, WRITE later) → FENCE 2 (the GLOBAL TOTAL-row ceiling,
+        BEFORE any refusal-ledger write) → the per-agent rate decision
+        (the only WRITE path — the ledgered refusal row) → FENCE 3
+        (the pre-harvest global accepted/hour ceiling).
+        """
+        cfg = self._config
+        # FENCE 1 (read) — is this agent's refusal-ledger window full?
+        ledger_cutoff = _cutoff(cfg.rate_window_seconds)
+        ledger_rows = await self._offload(
+            self._repository.count_reports,
+            agent_id=agent_id,
+            outcome=OUTCOME_RATE_LIMITED,
+            since=ledger_cutoff,
+        )
+        ledger_allowed = ledger_rows < cfg.refusal_ledger_max_per_agent
+        # FENCE 2 (read) — the GLOBAL TOTAL-row ceiling (accepted +
+        # refused — the F-1 correction: no path persists a refusal row
+        # while the ceiling is at/over max_rows_global).
+        total_rows = await self._offload(
+            self._repository.count_reports, outcome=None
+        )
+        if total_rows >= cfg.max_rows_global:
+            self._refuse_capacity(
+                f"the nest-wide anomaly row ceiling is reached "
+                f"({total_rows} rows >= {cfg.max_rows_global})"
+            )
+        # The R5b per-agent decision (read only).
+        window_name = "10min"
+        observed = 0
+        maximum = 0
+        if severity != SEVERITY_CRITICAL:
+            window_name = f"{cfg.rate_window_seconds}s"
+            maximum = cfg.rate_max_per_agent
+            observed = await self._offload(
+                self._repository.count_reports,
+                agent_id=agent_id,
+                outcome=OUTCOME_ACCEPTED,
+                since=_cutoff(cfg.rate_window_seconds),
+            )
+        else:
+            window_name = f"{cfg.critical_window_seconds}s"
+            maximum = cfg.critical_max_per_agent
+            observed = await self._offload(
+                self._repository.count_reports,
+                agent_id=agent_id,
+                outcome=OUTCOME_ACCEPTED,
+                severity=SEVERITY_CRITICAL,
+                since=_cutoff(cfg.critical_window_seconds),
+            )
+        if observed >= maximum:
+            # FENCE 1 decides the WRITE; FENCE 2 already guaranteed the
+            # ceiling. Beyond the ledger cap the SAME envelope returns
+            # with NO ledger row (the metric is the scalable signal).
+            if ledger_allowed:
+                await self._ledger_refusal(
+                    agent_id=agent_id,
+                    instance_id=instance_id,
+                    severity=severity,
+                    observed=observed,
+                    maximum=maximum,
+                    window_name=window_name,
+                    category=category,
+                    description=description,
+                    suspected_cause=suspected_cause,
+                )
+            raise AnomalyRefusalError(
+                TOKEN_RATE_LIMITED,
+                "this agent type's report budget for the current "
+                "window is exhausted",
+                detail=f"rate-limited: {window_name} {observed}/{maximum}",
+            )
+        # FENCE 3 (read) — the pre-harvest global accepted/hour ceiling
+        # (the OPERATOR BRAKE, N2/D3: 1,500/h binds in steady state).
+        hour_cutoff = _cutoff(3600)
+        accepted_hour = await self._offload(
+            self._repository.count_reports,
+            outcome=OUTCOME_ACCEPTED,
+            since=hour_cutoff,
+        )
+        if accepted_hour >= cfg.max_accepted_per_hour_global:
+            self._refuse_capacity(
+                f"the global accepted-per-hour brake fired "
+                f"({accepted_hour} >= {cfg.max_accepted_per_hour_global})"
+            )
+
+    async def _ledger_refusal(
+        self,
+        *,
+        agent_id: str,
+        instance_id: str,
+        severity: str,
+        observed: int,
+        maximum: int,
+        window_name: str,
+        category: str,
+        description: str,
+        suspected_cause: str | None = None,
+    ) -> None:
+        """Persist the LEDGERED refusal row (R5b — the spam signal).
+
+        Authored content IS stored (agent, instance, category, severity,
+        description — morning review sees WHAT was suppressed); ALL
+        harvest-derived columns are NULL (``tree_root_instance_id``,
+        chains, excerpt*, job/mission/dispatch, boot_epoch, registry*,
+        wedge*) — a refused report harvests NOTHING. The row never
+        consumes budget (counting queries filter ``outcome='accepted'``).
+        """
+        row = AnomalyReport(
+            created_at=_utc_now_iso(),
+            agent_id=agent_id,
+            instance_id=instance_id,
+            tree_root_instance_id=None,
+            parent_chain=[],
+            parent_chain_agents=[],
+            category=(self.normalize_category(category))[0],
+            category_raw=category[:CATEGORY_RAW_MAX_CHARS],
+            severity=severity,
+            description=scrub_text(
+                description, self._config.description_max_chars
+            ),
+            suspected_cause=(
+                scrub_text(suspected_cause, self._config.suspected_cause_max_chars)
+                if suspected_cause
+                else None
+            ),
+            cluster_id=None,
+            outcome=OUTCOME_RATE_LIMITED,
+            refusal_reason=f"rate-limited: {window_name} {observed}/{maximum}",
+        )
+        await self._offload(self._repository.insert_report, row)
+
+    # ── the critical → board seam (R3 + AM-13 + AM-12e + AM-7) ────────
+
+    async def _ensure_board_surface(
+        self,
+        *,
+        cluster_id: str,
+        tree_root: str,
+        canonical: str,
+        count: int,
+        first_report_at: str,
+        agent_id: str,
+        reporting_instance_id: str,
+        now: str,
+    ) -> None:
+        """Exactly ONE board item per cluster — create once, note-append.
+
+        Runs INSIDE the same-key stripe (AM-14 prose is authoritative),
+        so two concurrent criticals on a fresh cluster cannot both see
+        ``board_item_id IS NULL`` and double-create. A board failure is
+        DEGRADED (WARNING) — the report is already accepted and stays
+        accepted; the board is the surface, not the transaction.
+        ``notify_user`` is NEVER called (R3 — pinned).
+        """
+        board = self._board_service()
+        if board is None:
+            logger.warning(
+                "anomaly: board service unavailable — the critical "
+                "board surface for cluster %s was SKIPPED (the report "
+                "stays accepted)",
+                cluster_id,
+            )
+            return
+        # The append path — the cluster already owns its board row.
+        existing = await self._offload(
+            self._repository.get_cluster_board_item_id, cluster_id
+        )
+        if existing:
+            note = (
+                f"anomaly cluster {cluster_id}: critical report #{count} "
+                f"from {agent_id} at {now}; cluster total={count}, "
+                f"max_severity=critical (peak)"
+            )
+            try:
+                await self._offload(
+                    board.update_item,
+                    item_id=existing,
+                    note=note,
+                    author_instance=reporting_instance_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — board degrades
+                logger.warning(
+                    "anomaly: board note-append failed for cluster %s: %s",
+                    cluster_id,
+                    redact_exc_str(exc, limit=200),
+                )
+            return
+        # AM-13 ceilings — COUNT recent anomaly items (this tree /
+        # global, per hour) BEFORE create; beyond a ceiling: append a
+        # NOTE to the tree's most recent anomaly item instead of
+        # creating + increment the suppression counter + point the
+        # cluster at that item.
+        hour_cutoff = (
+            _now_dt() - timedelta(hours=1)
+        ).isoformat(timespec="microseconds")
+        tree_recent = await self._offload(
+            self._repository.count_recent_board_items,
+            tree_root_instance_id=tree_root,
+            since=hour_cutoff,
+        )
+        global_recent = await self._offload(
+            self._repository.count_recent_board_items,
+            since=hour_cutoff,
+        )
+        ceiling_hit = (
+            tree_recent >= self._config.max_board_items_per_tree_root_per_hour
+            or global_recent >= self._config.max_board_items_per_hour_global
+        )
+        if ceiling_hit:
+            target = await self._offload(
+                self._repository.most_recent_board_item_for_tree, tree_root
+            )
+            if target is None:
+                # The tree has no anomaly item yet (the GLOBAL ceiling
+                # fired): the note lands on the most recent anomaly
+                # item ANYWHERE — a global flood must not mint fresh
+                # items just because each tree is on its first.
+                target = await self._offload(
+                    self._repository.most_recent_board_item_for_tree
+                )
+            if target is not None:
+                self._board_items_suppressed_total += 1
+                note = (
+                    f"anomaly cluster {cluster_id}: critical report "
+                    f"#{count} from {agent_id} at {now} SUPPRESSED "
+                    f"(board ceiling) — appended to this item; cluster "
+                    f"total={count}, max_severity=critical (peak)"
+                )
+                try:
+                    await self._offload(
+                        board.update_item,
+                        item_id=target,
+                        note=note,
+                        author_instance=reporting_instance_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 — board degrades
+                    logger.warning(
+                        "anomaly: suppressed-board note-append failed "
+                        "for cluster %s: %s",
+                        cluster_id,
+                        redact_exc_str(exc, limit=200),
+                    )
+                    return
+                await self._offload(
+                    self._repository.set_cluster_board_item, cluster_id, target
+                )
+                return
+            # No target item exists (nothing to append to) — fall
+            # through and create; disclosed.
+        # The create path (R3's verbatim shape).
+        top_description = await self._offload(
+            self._repository.top_description_for_cluster,
+            cluster_id,
+            max_chars=BOARD_TOP_DESCRIPTION_MAX_CHARS,
+        )
+        title = f"[anomaly][critical (peak)] {canonical} — cluster {cluster_id}"
+        body_md = (
+            "auto-filed — unverified agent prose\n"
+            f"cluster_id: {cluster_id}\n"
+            f"tree_root: {tree_root}\n"
+            f"reports: {count} (max_severity: critical, peak)\n"
+            f"first_report_at: {first_report_at}\n\n"
+            f"top description:\n{top_description or '(none)'}"
+        )
+        try:
+            item = await self._offload(
+                board.create_item,
+                title=title,
+                body_md=body_md,
+                tags=["anomaly", "severity:critical", f"category:{canonical}"],
+                project_id=None,
+                created_by_instance=reporting_instance_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — board degrades
+            logger.warning(
+                "anomaly: board create failed for cluster %s: %s",
+                cluster_id,
+                redact_exc_str(exc, limit=200),
+            )
+            return
+        item_id = str(item.get("id")) if isinstance(item, dict) else str(item)
+        await self._offload(
+            self._repository.set_cluster_board_item, cluster_id, item_id
+        )
+
+    # ── the retention job (R6 + AM-6 + AM-9 + AM-5b + AM-7) ───────────
+
+    async def run_retention_sweep(self) -> None:
+        """The 24h maintenance job — bounded, batched, best-effort.
+
+        Registered on the EXISTING ``MaintenanceService`` seam
+        (``manager.py``'s registration cluster). An exception logs a
+        WARNING and returns — it never crashes the maintenance loop
+        (the house sweep convention).
+
+        AM-15 / NR-7 DISCLOSURE (do not fix here): idle-gated
+        maintenance starvation — on a continuously busy nest this
+        sweep can starve (the checkpoint-cleanup class); the AM-9
+        insert gate keeps the flood bounded (the F-1-corrected
+        TOTAL-row bound) while the sweep starves. Routed to the
+        maintenance lane.
+        """
+        try:
+            await self._run_retention_sweep_inner()
+        except Exception as exc:  # noqa: BLE001 — never kill the loop
+            logger.warning(
+                "anomaly: retention sweep failed (best-effort, will "
+                "retry next tick): %s",
+                redact_exc_str(exc, limit=300),
+            )
+
+    async def _run_retention_sweep_inner(self) -> None:
+        cfg = self._config
+        now_dt = _now_dt()
+        age_cutoff = (
+            now_dt - timedelta(days=cfg.retention_days)
+        ).isoformat(timespec="microseconds")
+        resolve_cutoff = (
+            now_dt - timedelta(seconds=cfg.resolve_window_seconds)
+        ).isoformat(timespec="microseconds")
+        batch = cfg.retention_batch_size
+        per_run_cap = batch * MAX_BATCHES_PER_RUN
+
+        # 1. the age sweep — reports, batched, with the AM-6 decrements.
+        deleted = 0
+        while deleted < per_run_cap:
+            taken = await self._offload(
+                self._repository.sweep_reports_older_than,
+                age_cutoff,
+                limit=batch,
+            )
+            if taken == 0:
+                break
+            deleted += taken
+
+        # 2. the AM-9 GLOBAL capacity trim (oldest-first beyond
+        #    max_rows_global — TOTAL rows, every outcome).
+        await self._offload(
+            self._repository.trim_to_global_capacity,
+            max_rows=cfg.max_rows_global,
+            batch=batch,
+            per_run_cap=per_run_cap,
+        )
+
+        # 3. the C3(ii) per-tree trim (the defense leg — the LIVE shed
+        #    runs shed-then-accept at insert).
+        await self._offload(
+            self._repository.trim_trees_to_capacity,
+            max_rows_per_tree=cfg.max_rows_per_tree_root,
+            batch=batch,
+        )
+
+        # 4. clusters AFTER their member reports (by last_report_at age).
+        removed = 1
+        swept_clusters = 0
+        while removed and swept_clusters < per_run_cap:
+            removed = await self._offload(
+                self._repository.delete_clusters_older_than,
+                age_cutoff,
+                limit=batch,
+            )
+            swept_clusters += removed
+
+        # 5. AM-5b — TERMINALIZE orphan accepted+NULL rows (bounded,
+        #    age-gated at the resolve window so a live assignment is
+        #    never raced). NEVER reassigned.
+        await self._offload(
+            self._repository.terminalize_orphan_accepted,
+            resolve_cutoff,
+            limit=batch,
+        )
+
+        # 6. AM-7 — board lifecycle: transition resolved clusters'
+        #    board items to ``done`` (a BOARD-row write ONLY — never a
+        #    cluster write; R5 forbids cluster status).
+        board = self._board_service()
+        if board is None:
+            return
+        pairs = await self._offload(
+            self._repository.resolved_clusters_with_open_board_items,
+            resolve_cutoff,
+            limit=200,
+        )
+        for _cluster_id, item_id in pairs:
+            try:
+                await self._offload(
+                    board.update_item,
+                    item_id=item_id,
+                    status="done",
+                    author_instance=MAINTENANCE_AUTHOR_INSTANCE,
+                )
+            except Exception as exc:  # noqa: BLE001 — one item degrades
+                logger.warning(
+                    "anomaly: board done-transition failed for item %s: %s",
+                    item_id,
+                    redact_exc_str(exc, limit=200),
+                )
+
 
     # ── the evidence harvest (AM-8) ───────────────────────────────────
 
@@ -954,11 +1628,16 @@ class AnomalyService:
 __all__ = [
     "CATEGORY_RAW_MAX_CHARS",
     "CATEGORY_SYNONYMS",
+    "MAINTENANCE_AUTHOR_INSTANCE",
     "MAX_TRANSCRIPT_WINDOW",
     "SCRUB_ACTOR",
+    "STRIPE_SLOTS",
+    "TOKEN_CAPACITY_EXHAUSTED",
+    "TOKEN_RATE_LIMITED",
     "AnomalyAcceptResult",
     "AnomalyHarvest",
     "AnomalyInputError",
+    "AnomalyRefusalError",
     "AnomalyService",
     "canonical_boot_epoch",
     "is_error_bearing",
