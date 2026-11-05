@@ -26,7 +26,7 @@ recorded defaults.
 | **D2** | **B — seed the standing readers**, corrected `auto_load` | 4 seeded recipients: canary (canonical), aegis, worker, sweeper. **`auto_load: true` for canary AND sweeper** (no other path exists for a persona with no skill tools — the plan's `false` default would have shipped an unreachable skill to sweeper); `false` + workflow-mandated load for aegis and worker. hacker/cracker = doctrine-only, **disclosed**. Evolution = git-only + version bump. |
 | **D3** | **Option A landing sites + two-layer N** | aegis `(g)`; leaves `(f)`; worker `## Must` CRITICAL subsection; canary cardinal 7 from birth. Online rule = same/adjacent turn; offline metric = tool results since ingestion (campaign-scored). Marker `[UNTRUSTED-ADJACENCY: …]`. Carve-out = "the fencing is the container". |
 | **D4** | **A (corpus) + B (rule home — AM-4 flip)** | Corpus bound to `tests/fixtures/injection_corpus/` (COR-01 wins over the `decisions.md:348` illustration). **Rule table = a single canonical data file from day one** (AM-4: the body is capped by the 8 000-char `skill_view` display window, so the table cannot live in it); the mirrored bodies carry the pointer + human summary. |
-| **D5** | **Option A — family file grows T31–T37** | T29 20→25; worker **outside** the matrix (C2); T31 = 24 anchors + canary's 2 carve-out anchors; **complete** named re-derivation ledger (plan's list was complete for the family file **plus** two baseline-arithmetic constants). |
+| **D5** | **Option A — family file grows T31–T38** | T29 20→25; worker **outside** the matrix (C2); T31 = 24 anchors + canary's 2 carve-out anchors; **T38** = the NC-2 scanner-execution leg (folded by planning, approver-002 — T38 is the fold-cost addition to the ruling's minimum set, §11 item 4); **complete** named re-derivation ledger over **four split constants** (§5.2: `INSTALLER_CHILDREN` / `FAMILY_CHILDREN` / `ALLOW_BY_AGENT` / `FAMILY_ROSTER`) **plus** two baseline-arithmetic constants. |
 | **D6** | **Option A — core 5 legs** | Channels 1/2/3/5 fired + 6 as comparison baseline; 4/7/8/9 deferred with reasons; 11 (chat inbound) disclosed as the widest uncovered surface. Sandbox = **logical only**; five-item mechanical pre-flight. |
 | **D7** | **Tool surface + containment** | Canary: `allow = {bash, filesystem, time, help}` — **NO `proc`** (full shell substitute + background persistence past teardown) and **NO `self`** (AM-1: inner_soul/access_memory is the durable self-behavior-write channel — the exact F1 shape on the most-exposed agent); `deny = {write_file, edit_file}`; no instance/mcp/secrets/job/chart/knowledge/plane/image. **No per-instance tool narrowing exists** ⇒ **the payload is the containment unit** (new binding: inert-and-observable payloads only). The screen's execution mechanism is a committed scanner in the shipped agents tree (NC-2). |
 | **C1** | **CONFIRMED** | Canary inherits no `chart`-implied member; effective team = its manifest, exactly. |
@@ -297,8 +297,10 @@ no real user content, no live endpoints** (family-3 canary form).
 
 ### 5.1 Ruling
 
-**D5 = Option A.** `tests/unit/agents/test_aegis_security_family.py` grows **T31–T37**; one corpus of
-pins, one set of constants, no cross-file drift.
+**D5 = Option A.** `tests/unit/agents/test_aegis_security_family.py` grows **T31–T38**; one corpus of
+pins, one **split** constant set (four — §5.2), no cross-file drift. *(T31–T38: **T38** is the NC-2
+scanner-execution leg added to the ruling's minimum set by the fold-cost checklist, §11 item 4 — folded
+by planning, approver-002.)*
 
 **Cell arithmetic (binding):**
 
@@ -311,25 +313,53 @@ pins, one set of constants, no cross-file drift.
   - **For worker the numbered-line property is NOT asserted** (legacy `## Must` prose): its anchors must
     occur exactly once, each on a single line, inside the declared CRITICAL subsection.
 - **T32** fence contract · **T33** parser · **T34** heuristic corpus (LLM off) · **T35** canary meta pins ·
-  **T36** campaign-log + report shape · **T37** corpus hygiene.
+  **T36** campaign-log + report shape · **T37** corpus hygiene · **T38** scanner execution (three-CWD
+  byte-identity + three-run determinism + pass-OFF default + monotonicity refusal + ladder resolution).
+  *(T38 inventoried per the fold-cost checklist; folded by planning, approver-002.)*
 
 ### 5.2 Complete re-derivation ledger (never a silent copy)
+
+> **The constant split — four constants, not one (folded by planning, approver-002).**
+> `CHILDREN` (`test_aegis_security_family.py:76`) is **overloaded**: the same tuple is the *persona
+> roster*, the *installer-toolchain roster*, and the subject set of the per-child allow pins. Appending
+> `canary` to it raises `KeyError: 'canary'` at every body/lib resolution (`INSTALLER_SKILLS` — **3
+> keys**, `:145`; `_lib_path` `:266`; `_skill_body_path` `:271`) — an **error**, not a targeted red. The
+> ledger therefore re-derives **four** constants:
+>
+> | Constant | Arity | Contents | Consumers |
+> |---|---|---|---|
+> | `INSTALLER_CHILDREN` | **3** | hacker, cracker, sweeper | installer-toolchain resolution (`_lib_path` / `_skill_body_path`), `test_installer_skills_in_no_manifest` (`:568`), the T23 N-way fence identity (`:604-626`) |
+> | `FAMILY_CHILDREN` | **4** | hacker, cracker, sweeper, **canary** | leaf-shape legs: team-empty (T5), allow-non-empty, deny fence (T7); `test_children_have_no_manifest` (`:565-567`) is **split** — see the T21 row |
+> | `ALLOW_BY_AGENT` | **per-agent** | canary `{bash, filesystem, time, help}` (AM-1); hacker/cracker/sweeper `{bash, proc, filesystem, time, help}`; aegis = `AEGIS_ALLOW` | `test_children_allow_set_exact` (`:357-359`) becomes a **per-agent exact-set** assertion (T6/T7); the shared `CHILD_ALLOW` (`:89`) survives only as the leaf-trio entry |
+> | `FAMILY_ROSTER` | **5** | aegis, hacker, cracker, sweeper, **canary** | T29's 5×5 matrix (`:759-812`), the T5 set, the per-agent cardinal pin (T29 completeness + self-proof) |
+>
+> `FAMILY_ROSTER` is the **fourth** constant the earlier plan ledger omitted — the roster the canary
+> column extends. `decisions.md` §C.5 calls the same roster `LEAVES` after its split; the **content is
+> identical** (aegis, hacker, cracker, sweeper, canary) and the authoring lane fixes one name. Widening
+> the shared allow set so canary matches (`+ proc`, `+ self`) **re-installs the NC-4 defect and defeats
+> AM-1** (`decisions.md` §C.5).
 
 | Pin | Location | Today | Must become | Why it reddens |
 |---|---|---|---|---|
 | T4 team set | `test_aegis_security_family.py:326-327` | 4-member set | 5-member set (+`canary`) | aegis roster one-liner |
-| T5 leaf parametrisation | `:338-345` | 3 children | + canary | new leaf persona |
-| T6/T7/T8 allow/deny/privileged | `:348-369` | 3 children | + canary | new persona pins |
-| T21 family manifests | `:556-567` | `["aegis"]` exactly | **declared seeded roster** (aegis, worker, sweeper, canary) | skill seeded into 4 agents |
+| **T4 second site (aegis team literal)** | `:3391-3408` (`test_the_tool_matrix_is_untouched`) | `{"hacker","cracker","sweeper","worker"}` | + `canary` | a **second** aegis team one-liner — updating T4 alone leaves this leg red (folded by planning, approver-002) |
+| T5 leaf parametrisation | `:338-345` | `CHILDREN` (3) | `FAMILY_CHILDREN` (4) on the leaf-shape legs; `INSTALLER_CHILDREN` (3) wherever a body/lib is resolved | new leaf persona; an overloaded constant is a `KeyError`, not a red |
+| T6/T7/T8 allow/deny/privileged | `:348-369` | one shared `CHILD_ALLOW` asserted for every child — `test_children_allow_set_exact` (`:357-359`) | **`ALLOW_BY_AGENT`** — per-agent exact sets (canary's = the AM-1 set); T6/T7 assert per agent, T8 stays family-wide | canary carries neither `proc` (D7/NC-4) nor `self` (AM-1): a literal `+ canary` reds, a widened shared set re-installs NC-4 |
+| T17 tone headings | `:131` (consumed `:501`) | 4 entries (aegis, hacker, cracker, sweeper) | + `canary` entry | `TONE_HEADINGS[agent]` raises `KeyError` for canary (folded by planning, approver-002) |
+| T21 family manifests | `:556-567` | `["aegis"]` exactly; `test_children_have_no_manifest` over `CHILDREN` | **declared seeded roster** (aegis, worker, sweeper, canary) **and the no-manifest leg SPLIT by role**: installer children assert no-manifest; **sweeper and canary assert POSITIVE manifest** (the seeded `injection-screen`); **hacker/cracker stay doctrine-only** (no manifest) | one leg cannot assert both "no manifest" (installer mode) and "seeded manifest" (D2); the seeded roster reds the unsplit leg |
 | T22 version parity | `:585-597` | aegis-only | every seeded `(agent, name)` pair | 4 mirrors |
+| T23 fence identity | `:604-626` | 3-way identity `lists[0]==lists[1]==lists[2]` + `zip(CHILDREN, lists)` | N-way identity over `INSTALLER_CHILDREN`, count still pinned | a 4th element in a hard-coded 3-way identity is an arity break |
 | T25 worker byte-identity | `:684-691` | `git diff … agents/worker/ == ""` | **additive-scope**: one file, zero deletions, hunk confined to the new CRITICAL subsection | worker is edited **by design** |
-| T29 matrix | `:759-812` | len 20, agents = FAMILY | len 25, agents include canary, 5 new single-site cells | canary column |
+| T29 matrix | `:759-812` | len 20, agents = FAMILY | len **25**, agents = **`FAMILY_ROSTER`** (5), 5 new single-site cells | canary column |
+| **T35 meta `default_queue`** | `agents/canary/meta.json` | — | `default_queue` pinned with leaf/allow/deny/model | meta-pin completeness (folded by planning, approver-002) |
 | **Baseline arithmetic** | `test_aegis_security_family.py:2490-2512` | `EXPECTED_BASELINE_ROWS = 177`; 4 rows/new agent | **181**; canary contributes exactly 4 | canary's 4 prompt artifacts |
 | Leader roster | `test_maintenancer_agent.py:517-523` | 17 members | **unchanged** — canary is an aegis child | verified: no second leader one-liner |
 
 Each re-derivation is recorded **with a written reason** in the re-derivation commit; a blind copy of the
 predecessor's pin set is a lane-blocking red (the pin re-derivation class is documented in project
-experience: T21/T25/T29 all redden by design on this lane).
+experience: T21/T25/T29 all redden by design on this lane). The ledger covers the re-derivation set
+**plus** the new **T31–T38** legs (§5.1); the four-constant block above is the complete constant
+inventory — no fifth constant is introduced by this lane (folded by planning, approver-002).
 
 ### 5.3 New pins the persona + skill require
 
@@ -352,14 +382,21 @@ M1 delete a canary T29 anchor → exactly that cell reds · M2 delete the direct
 M3 swap a corpus expectation → T34 reds · M4 remove a worker doctrine anchor → T31 reds · M5 change one
 rule ID → id-uniqueness/coverage reds · M6 unescape a payload line starting with the BEGIN token →
 round-trip/parser reds · **M7 change a mirror's bytes — outside the named `auto_load:` frontmatter
-exception — without bumping its version → identity pin reds** (the silent-drift class). A mutation never observed red is a false-confidence pin (v0.28.11 F-1 class).
+exception — without bumping its version → identity pin reds** (the silent-drift class; **mandatory**) ·
+**M8 break the discovery ladder (drop the install-root rung) → T38 reds in exactly the `/tmp` +
+install/release-root legs while the repo-root leg still passes** (the partial red set is the point: it
+proves the pin bites the *ladder*, not the scanner body). A mutation never observed red is a
+false-confidence pin (v0.28.11 F-1 class). *(Floor stated as **M1–M8** — M8 is the discovery-ladder leg added
+to the ruling's set; folded by planning, approver-002. M7 stays mandatory.)*
 
 ### 5.5 Census / artifacts
 
 Boot census **43 → 44** (staged-gate artifact; no unit pin asserts a total count — verified).
-Agents-tree files: **366 → 378** as derived today (canary's 8 files + 3 mirror bodies + 2 new manifests
-[canary, sweeper]) — **re-derive at P4**, never freeze. Baseline rows **177 → 181**, re-stamped LAST.
-`tool-categories.json` and the seal map untouched.
+Agents-tree files: **366 at base**; the post-lane total is **DERIVED at P4 from the plan's parts→total
+table** (`plan-overview.md` §… file-arithmetic paragraph; `phase4-plan.md` task 9 — the enumeration is the
+plans lane's, and this record does not restate a decomposition it has not summed) — **never freeze the
+estimate; gates consume the derived number**. Baseline rows **177 → 181**, re-stamped LAST.
+`tool-categories.json` and the seal map untouched. *(Arithmetic pointer folded by planning, approver-002.)*
 
 ---
 
@@ -563,7 +600,7 @@ reaches nobody).
 | **F1** canary self-injection | **ACCEPTED-WITH-DISCLOSURE** (mitigations binding) | Carve-out wording (§3.3); payloads as labelled provenance-bearing artefacts, off-repo, recorded path; campaign logs never re-enter a prompt unframed; **payload inertness** (§7.4) bounds the worst case; CAG-12 anchors pinned. The measurer remains the most exposed agent — state it. |
 | **F2** fence vs compaction | **ACCEPTED-WITH-DISCLOSURE** | Doctrine re-assert duty (§3.4); daemon guarantee routed (§G(c)); **must not claim** mechanical durability. |
 | **F3** false-positive burden | **RESOLVED-BY-RULING** (binding in P1) | `clean` is the default for ordinary content; the screen labels/fences, never blocks/rewrites/deletes (SK-09); corpus negatives (COR-05) are the operational definition; severity levels + the clean path in the contract. |
-| **F4** LLM pass cost/determinism | **RESOLVED-BY-RULING** (§3.6) | Agent-judgment pass recorded through scanner args; monotonic validation (no `hostile` downgrade); OFF in every pinned test; no pinned model; ≤20 s when used. |
+| **F4** LLM pass cost/determinism | **RESOLVED-BY-RULING** (§3.6, **as amended by AM-3**) | Agent-judgment pass recorded through scanner args; monotonic validation on **BOTH axes** — **any** verdict **or** confidence downgrade is refused (not merely a `hostile` downgrade); OFF in every pinned test; no pinned model; ≤20 s when used. *(AM-3 wording folded by planning, approver-002.)* |
 | **F5** homoglyph vs multilingual | **RESOLVED-BY-RULING** | Normalisation policy in the rule table: rules declare NFKC/case-fold/zero-width-strip **before** matching; unicode rules match the **raw** text for control characters; corpus must contain Vietnamese/Unicode **negatives** that must classify `clean`. |
 | **F6** T21/T22 scope | **RESOLVED** via D2/D5 | Re-derivation ledger §5.2. |
 | **F7** memoir merge-order/slot | **ACCEPTED (stage-time procedure)** | Slot derived at stage time from the live census; migration delta reason string says **inherited** if memoir lands first; overlap re-derived at finalise. |
@@ -619,7 +656,14 @@ flowchart LR
 5. **Payload inertness:** new binding requirement (CAG-06 amendment) + campaign-log field
    `expected_action_class`. Files: requirements CAG-06/CAG-09, phase3 campaign map, phase5 Gate H.
 6. **D5 ledger additions:** `EXPECTED_BASELINE_ROWS 177→181` + the per-new-agent 4-rows test are named
-   re-derivations; T31 must **not** assert the numbered-line property for worker.
+   re-derivations; T31 must **not** assert the numbered-line property for worker. The ledger now also
+   carries the **four-constant split** — `INSTALLER_CHILDREN` (3) / `FAMILY_CHILDREN` (4) /
+   `ALLOW_BY_AGENT` (per-agent) / `FAMILY_ROSTER` (5) — and its affected legs: the
+   `test_children_have_no_manifest` split (installer children no-manifest; sweeper/canary
+   positive-manifest; hacker/cracker doctrine-only), the `TONE_HEADINGS` canary entry, the per-agent
+   cardinal pin (T29), canary's `default_queue` (T35), and the **second aegis team literal**
+   (`test_the_tool_matrix_is_untouched` `:3391-3408`). Pin inventory is **T31–T38**; mutation floor is
+   **M1–M8** (M7 mandatory). *(Folded by planning, approver-002.)*
 7. **D4 path binding:** corpus = `tests/fixtures/injection_corpus/` (the `decisions.md:348` illustration is
    superseded).
 8. **D3 marker + N:** two-layer formulation and the `[UNTRUSTED-ADJACENCY: …]` shape are binding; anchors
@@ -632,9 +676,11 @@ flowchart LR
 - The plan set contains **no** claim that contradicts §7.6 (the six MUST-NOT-claim items) or §7.3 (the
   containment ledger).
 - The re-derivation ledger (§5.2) is complete and each row is a **named** re-derivation with a written
-  reason — no silent copies; mutation legs M1–M7 each observed RED→GREEN.
-- The four arithmetic quantities are **derived at P4**, never frozen (baseline 181, agents tree 378
-  today's estimate, T29 25, boot 44).
+  reason — no silent copies; mutation legs **M1–M8** each observed RED→GREEN (M7 mandatory, M8 =
+  discovery ladder — folded by planning, approver-002).
+- The four arithmetic quantities are **derived at P4**, never frozen (baseline 181, agents tree **379**
+  by the plan's parts→total table — 9 canary-dir files + 3 mirror bodies + 1 standalone new manifest =
+  13 ⇒ 366 + 13 = 379 *(folded by planning, approver-002)*; T29 25, boot 44).
 - No `daemon/` diff, no new tool category, `tool-categories.json` byte-identical, seal map untouched —
   unless a ruling required otherwise (none did).
 - Zero live contact, zero vkey contact.
@@ -706,7 +752,7 @@ byte-identity therefore carries **exactly one named exception — the `auto_load
 permitted fold iff the council verifies the seed service honors a manifest `auto_load` key. Amends §2.3,
 §4.1, §5.4.
 
-**AM-3 — D3/§3.6, LLM-pass monotonicity (2026-11-05, approver iteration-002 candidate).** The stricter
+**AM-3 — D3/§3.6, LLM-pass monotonicity** (2026-11-05, approver iteration-002 — **adopted ruling** `e559548bf` — **commit verified in this worktree** (`docs(canary-injection-defense): AM-3 — LLM pass monotonic on both axes`); status recorded by planning, approver-002). The stricter
 SK-11 is **CONFIRMED binding**: the pass may only RAISE, **monotonic on both axes** — verdict
 (`clean` < `suspect` < `hostile`) and confidence (`none` < `low` < `medium` < `high`); **any** downgrade is
 refused. §3.6 amended in place. Cause: a pass that can lower any signal is the cheapest weaponisation path,
@@ -714,7 +760,7 @@ and the screen never blocks (SK-09), so a stuck-high verdict costs one label, no
 needs **no re-point**; the requirements layer stays authoritative and is stricter than the record's first
 form by design (the asymmetry is now closed in the record's favour). Amends §3.6.
 
-**AM-4 — D4 rule-set home + visibility budgets (2026-11-05, approver iteration-002).** Verified facts
+**AM-4 — D4 rule-set home + visibility budgets** (2026-11-05, approver iteration-002 — **adopted ruling**; its content is recorded below; its hash `3483dfb53` is **verified: `git cat-file -t` → commit; ancestor of `HEAD`**. Status recorded by planning, approver-002). Verified facts
 invalidate AM-2's arithmetic: there is **no 20 000-char body cap** in the skill layer; `skill_view`
 **truncates the display at 8 000 chars** (`skill_tools.py:428-432`, `:1001-1004`; DB-seeded skills get no
 `read_file` fallback — only file skills carry the body-path hint), while the **auto-load block** and the
@@ -730,6 +776,8 @@ summary and are **≤ 8 000 chars (hard pin)**. (d) Rule-count budgets kept: **1
 ≤ 8 000 chars** (now a data-file budget). AM-2's byte-identity rule stands intact (bodies identical modulo
 the `auto_load:` line; the table leaves the mirrored body, so rule evolution cannot drift a mirror).
 Supersedes AM-2's "body ≤ 18 000" (rested on a non-existent cap). Amends §0, §4.1, §5.3.
+
+*Hash-correction note: AM-4 is commit `3483dfb53`; the earlier 8-char truncation of this hash was a dispatcher-brief hash typo (8-char truncation); corrected and verified against the repo.*
 
 *End of ruling record. The plan is authorised to proceed to G1 (plan council) under these rulings and
 amendments AM-1/AM-2/AM-3/AM-4.*

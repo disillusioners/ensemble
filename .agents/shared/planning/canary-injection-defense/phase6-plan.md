@@ -13,9 +13,11 @@ with full provenance → **the promote command recorded, not executed**.
 
 **Staged payload additions from the rulings:** the staged payload now includes the committed scanner
 `agents/canary/skills-template/injection_scan.py` (an `agents/` file, shipped verbatim); the staged
-tests run with the LLM pass **OFF** (deterministic heuristic path); the arithmetic (baseline 181,
-agents tree 378, discoverable 44, T29 25 cells) is **re-derived at stage**, never frozen; the
-promote command is recorded **NOT run**.
+tests run with the LLM pass **OFF** (deterministic heuristic path); the staged payload also carries
+the **AM-4 rule data file** `agents/canary/skills-template/injection-rules.json` (a shipped `agents/`
+file, resolved by the scanner relative to itself); the arithmetic (baseline 181, agents tree **379** =
+366 + 13, discoverable 44, T29 25 cells, pins T31–T38, mutations M1–M8) is **re-derived at stage**,
+never frozen; the promote command is recorded **NOT run**.
 
 ---
 
@@ -23,9 +25,11 @@ promote command is recorded **NOT run**.
 
 - **Phase 5 exited** — gates **A–H** are green on the committed branch.
 - The **finalize guard** passes: `origin/latest` is **unmoved** from the lane base
-  `97b76e20e1d640c69b720149547e93565ab22b4c`. **If it moved** (the concurrent memoir lane is the live
-  candidate) ⇒ **STOP**, re-derive the merge base, re-run the Phase 5 gates on the merged tree, and
-  only then continue. The guard is never overridden.
+  `97b76e20e1d640c69b720149547e93565ab22b4c`. **If it moved — for ANY reason, by ANY lane** (B15: the
+  memoir lane is merely today's known candidate; a metrics / checkpoint / aegis lane moves `latest`
+  exactly the same way) ⇒ **STOP**, re-derive the merge base, re-run the Phase 5 gates on the merged
+  tree, and only then continue. The guard is never overridden, and the stop is **not** phrased as
+  "if memoir landed".
 - The **slot** is derived at this moment — **never reserved** (§Risks R5: `v0.28.13` is **contended**
   with the memoir lane).
 
@@ -36,15 +40,15 @@ promote command is recorded **NOT run**.
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
 | 1 | **Derive the version slot (W9)** — enumerate the local + remote tags, the `releases/` directory contents and the current `__version__`; pick the **next free slot strictly above all of them**. `v0.28.13` is **contended** with the memoir lane — whichever lane stages first takes it; this lane **re-derives**, it never reserves. | — | The slot is derived from live state at this moment, and the derivation (tags + dirs + current version) is written into the lane record. |
-| 2 | **Re-derive the baseline on the merged tree.** If the memoir lane landed `agents/**` edits, the row count may have moved (a content edit changes a hash, not a count; a **new** prompt file adds a row). The re-stamp is computed **on the merged tree**, never on the lane branch. **The baseline conflict is never resolved by content (B7):** `agents/.prompt-artifacts.sha256` conflicts on **both** lanes — take **EITHER** side, then **regenerate once here**, and let the regenerated file replace both sides. Keep-both or a hand-merge produces a **forged seal** (a hash file matching neither tree) and is a gate failure. | — | The merged tree's baseline file exists, is clean, and its row count equals the **re-derived** value (181 unless a foreign lane added prompt files — in which case the re-derived number wins and the discrepancy is recorded); the file was **regenerated on the merged tree**, not taken from either branch. |
-| 3 | **Merge `--no-ff`** the lane into `origin/latest`. Merge-conflict rules, by file class: `PACKS.md` resolves **keep-both, newest-first** (house precedent); **`agents/.prompt-artifacts.sha256` NEVER keep-both** — either side, then regenerate once (task 2), because a merged hash file is a forged seal; any **other** `agents/**` overlap (today: `agents/ari/**`) keeps **both** lanes' content and the re-stamp runs **once** afterwards. | 1, 2 | The merge is `--no-ff` (no fast-forward squash); the merge parents are recorded; no conflict resolution silently drops a lane's content. |
+| 2 | **Merge `--no-ff`** the lane into `origin/latest` (B14: the **merge comes FIRST**). Merge-conflict rules, by file class: `PACKS.md` resolves **keep-both, newest-first** (house precedent); **`agents/.prompt-artifacts.sha256` NEVER keep-both** — take **either** side here, then regenerate **once** in task 3, because a merged hash file is a forged seal; any **other** `agents/**` overlap (today: `agents/ari/**`) keeps **both** lanes' content and the re-stamp runs **once** afterwards. | 1 | The merge is `--no-ff` (no fast-forward squash); the merge parents are recorded; no conflict resolution silently drops a lane's content; **the merge commit exists BEFORE the baseline is regenerated** (the ordering is the point). |
+| 3 | **Re-derive the baseline on the MERGED tree** (B14: this task depends on task 2 — its rule always said "regenerate after the merge", and the earlier numbering contradicted it). If a foreign lane landed `agents/**` edits, the row count may have moved (a content edit changes a hash, not a count; a **new** prompt file adds a row). The re-stamp is computed **on the merge result**, never on the lane branch. **The baseline conflict is never resolved by content (B7):** `agents/.prompt-artifacts.sha256` conflicts on **both** lanes — take **EITHER** side (done in task 2), then **regenerate once here**, and let the regenerated file replace both sides. Keep-both or a hand-merge produces a **forged seal** (a hash file matching neither tree) and is a gate failure. | 2 | The merged tree's baseline file exists, is clean, and its row count equals the **re-derived** value (181 unless a foreign lane added prompt files — then the re-derived number wins and the discrepancy is recorded); `git log --oneline -1 -- agents/.prompt-artifacts.sha256` is the **post-merge** regeneration commit, not either side's original. |
 | 4 | **The 4-file version bump** — `pyproject.toml`, `daemon/__init__.py`, `tests/test_api.py`, `uv.lock` — exactly one hit each; **targeted `git add`**, never `add -A`. The house commit message is `chore(release): bump version to <slot>`. `CHANGELOG` is touched only if a live `[Unreleased]` section exists. | 3 | The bump diff is exactly 4 files, 1 line each; the working tree has no stray staged paths. |
 | 5 | **Push the annotated tag** — the tag is **pushed** (the house convention), pointing at the bump commit; the annotation carries the rollback adjudication and the **no-promote disclosure**. Push order: `latest` first, then the tag. | 4 | The tag exists locally **and** on the remote and peels to the bump commit. |
 | 6 | **Create the detached stage worktree at the tag** — the worktree is **kept** (not removed) so both provenance sidecars remain recoverable for the ceremony (the predecessor's v0.25.2 provenance-gap pattern is the precedent). | 5 | The worktree is detached at the tag, `git status --porcelain` is empty, and both sidecars are present. |
 | 7 | **Stage env-first against the live target** — the stage writes the release directory **only** (live-dir write, journaled); `ENSEMBLE_ROLLBACK_SAFE=1` is set **explicitly** with the reason recorded. | 6 | The release directory exists with the binary + manifest + both sidecars; the stage is journaled; **the promote fields of the state journal are untouched**. |
 | 8 | **Migration-delta census** — count the `.sql` files in the **staged binary** and in the **live** binary and compare with the source tree. This lane authors **zero** `.sql` files, so its own delta is **EMPTY**. If the memoir lane landed, the delta is **+1 (memoir's migration)** — the adjudication must then reason on the **merged** delta: an additive `CREATE TABLE` is inert on rollback ⇒ `rollback_safe = true`, source explicit, and the reasoning names the migration as **memoir's**, not this lane's. | 7 | The census is stated at all three levels (source / staged binary / live binary); the rollback-safe reason matches the **actual** merged delta. |
 | 9 | **4-way sha verification** — release dir == stage-worktree dist == manifest == provenance sidecar. | 7 | All four agree; the manifest's per-file entries re-hash clean (the whole payload). |
-| 10 | **Payload hygiene** — the release directory is **source-less** (no `scripts/`, no `.env`, no `daemon/`, no `.git/`, no build residue); the payload's prompt-artifact baseline is clean; no `.staging.*` / `.aside.*` residue; **the staged payload contains `agents/canary/skills-template/injection_scan.py`** (a shipped `agents/` file — its manifest entry re-hashes clean in task 9), and **the scanner leg is executed from the STAGED tree over the LITERAL ruled three-CWD set (W8): repo root · `/tmp` · the INSTALL/RELEASE ROOT** — the same three labels P4's T38 and P5's Gate E use; the divergent "agents/ + consumer cwd" formulation is **retired and must not reappear**. The run is repeated from the stage worktree detached at the tag — the same tree the payload was built from — so the worktree execution certifies the payload copy through the manifest re-hash (byte-identical ⇒ one artifact). **Install-root anchor method (named explicitly — do not guess it):** `STAGE_WT="$(git rev-parse --show-toplevel)"` from inside the stage worktree; the install root is **the stage's release directory's parent** — `<release-dir>/..`, i.e. the install root the stage actually wrote into (`/home/nea/agents-ensemble` on this host), corroborated by `dirname "$(readlink <install>/releases/current)" | xargs dirname`. The loop asserts the anchor is **non-empty, is a directory, and contains `releases/`** before running; a wrong anchor is a **gate failure**, never a silent skip. **Executable at stage time**: bare `python3` — the **host `python3` on `PATH` is a stated host dependency** (stdlib-only scanner; no host interpreter ⇒ the leg cannot run, declared rather than discovered) — no daemon import, no venv, no network; the stage worktree is a plain checkout, so no compensating-evidence escape is needed; the staged three-CWD digests must additionally equal the P5 branch-run digests. | 9 | The payload shape matches the house pattern; the baseline in the payload is clean at the re-derived row count; `injection_scan.py` is present in the payload manifest; the staged three-CWD runs over **repo root · `/tmp` · the install/release root** are byte-identical to each other and to the P5 branch-run outputs; the install-root anchor is recorded with the method that produced it and validated (`releases/` present) before the loop runs. |
+| 10 | **Payload hygiene** — the release directory is **source-less** (no `scripts/`, no `.env`, no `daemon/`, no `.git/`, no build residue); the payload's prompt-artifact baseline is clean; no `.staging.*` / `.aside.*` residue; **the staged payload contains `agents/canary/skills-template/injection_scan.py` and `agents/canary/skills-template/injection-rules.json`** (both shipped `agents/` files — their manifest entries re-hash clean in task 9; **exactly one** copy of the data file ships, AM-4), and **the scanner leg is executed from the STAGED tree over the LITERAL ruled three-CWD set (W8): repo root · `/tmp` · the INSTALL/RELEASE ROOT** — the same three labels P4's T38 and P5's Gate E use; the divergent "agents/ + consumer cwd" formulation is **retired and must not reappear**. The run is repeated from the stage worktree detached at the tag — the same tree the payload was built from — so the worktree execution certifies the payload copy through the manifest re-hash (byte-identical ⇒ one artifact). **Install-root anchor method (named explicitly — do not guess it):** `STAGE_WT="$(git rev-parse --show-toplevel)"` from inside the stage worktree; the install root is **the stage's release directory's parent** — `<release-dir>/..`, i.e. the install root the stage actually wrote into (`/home/nea/agents-ensemble` on this host), corroborated by `dirname "$(readlink <install>/releases/current)" \| xargs dirname`. The loop asserts the anchor is **non-empty, is a directory, and contains `releases/`** before running; a wrong anchor is a **gate failure**, never a silent skip. **Executable at stage time**: bare `python3` — the **host `python3` on `PATH` is a stated host dependency** (stdlib-only scanner; no host interpreter ⇒ the leg cannot run, declared rather than discovered) — no daemon import, no venv, no network; the stage worktree is a plain checkout, so no compensating-evidence escape is needed; the staged three-CWD digests must additionally equal the P5 branch-run digests. | 9 | The payload shape matches the house pattern; the baseline in the payload is clean at the re-derived row count; `injection_scan.py` is present in the payload manifest; the staged three-CWD runs over **repo root · `/tmp` · the install/release root** are byte-identical to each other and to the P5 branch-run outputs; the install-root anchor is recorded with the method that produced it and validated (`releases/` present) before the loop runs. |
 | 11 | **Live fence: PRE == MID == POST** — the live daemon, the `current` symlink, the live `/livez` version and the promote fields of the state journal are **byte-identical** before, during and after the stage. | 7–10 | Three reads of the fence fields are identical; the live daemon's uptime is continuous across the stage window. |
 | 12 | **Record the promote command — DO NOT RUN IT.** The command is written into the lane record with its ceremony preconditions (the arm-time scripts-dir guard and the tip-identity check), together with the **no-promote disclosure**. | 11 | The command is **recorded**; the stage never invoked it; no promote field in the journal was written. |
 
@@ -55,12 +59,12 @@ promote command is recorded **NOT run**.
 | Gate | Criterion |
 |------|-----------|
 | **G6.1a** | The release-mechanics gate: merge is `--no-ff` with recorded parents; the bump is **exactly 4 files / 1 line each**; the tag is **pushed** and peels to the bump commit; the stage worktree is detached at the tag with a clean status and both sidecars present. |
-| **G6.1b** | The artifact gate: 4-way sha match; payload source-less; the baseline clean in the payload; the agents tree re-derived (**378** or the re-derived value); the staged payload contains `agents/canary/skills-template/injection_scan.py` and the **staged three-CWD scanner run** (repo root · `/tmp` · install/release root) is byte-identical to the P5 branch run. |
+| **G6.1b** | The artifact gate: 4-way sha match; payload source-less; the baseline clean in the payload; the agents tree re-derived (**379** = 366 + 13, or the re-derived value); the staged payload contains `agents/canary/skills-template/injection_scan.py` **and `agents/canary/skills-template/injection-rules.json`** (exactly one copy — AM-4's canonical-once invariant), and the **staged three-CWD scanner run** (repo root · `/tmp` · install/release root) is byte-identical to the P5 branch run. |
 | **G6.2** | The **migration-delta census** is stated at all three levels, with the rollback-safe reason matching the **actual merged delta** (EMPTY if no foreign lane landed; +1 memoir's if it did — reasoned, not assumed). |
 | **G6.3** | The **live fence** is byte-identical PRE == MID == POST; the live daemon is untouched. |
 | **G6.4** | The **promote command is recorded and NOT executed**; no promote field was written. |
 | **G6.5** | The slot derivation is recorded (the contention with the memoir lane resolved by live state, not by reservation). |
-| **G6.6** | The **baseline conflict rule (B7)** was honoured: `agents/.prompt-artifacts.sha256` was resolved by taking **either** side and **regenerating once on the merged tree** — **never keep-both, never hand-merged** — and the regenerated file is the one in the payload. |
+| **G6.6** | The **baseline conflict rule (B7) + the task ORDER (B14)** were honoured: `agents/.prompt-artifacts.sha256` was resolved by taking **either** side and **regenerating once on the merged tree** — **never keep-both, never hand-merged** — and the regenerated file is the one in the payload. **The regeneration commit postdates the merge commit** (task 3 runs on task 2's result); a baseline file whose content predates the merge is a **forged seal** and reds this gate. |
 
 ---
 
@@ -69,22 +73,31 @@ promote command is recorded **NOT run**.
 ```bash
 cd /home/nea/ensemble-src-wt-canary-injection-defense
 
-# --- DERIVATION 1: the slot (W9) -- derive at stage time, NEVER reserve ---
-git tag --list 'v0.28.*' | sort -V | tail -5
-ls -1 /home/nea/agents-ensemble/releases/ | sort -V | tail -5
-grep -n '__version__' daemon/__init__.py
-#   the slot is the next free one strictly above ALL of these.
-#   v0.28.13 is CONTENDED with the memoir lane -> whichever stages first takes it.
+# --- DERIVATION 1: the slot (W9) -- LIVE-derived at stage time, NEVER a literal, NEVER reserved ---
+#   B15/NB: no `v0.28.13` literal anywhere -- the slot is COMPUTED from live state on this host, and
+#   the same variable feeds every later command (`$SLOT`, never a hand-typed version).
+HIGHEST_TAG=$( { git tag --list 'v*' | sed 's/^v//'; } | sort -V | tail -1 )
+HIGHEST_DIR=$( { ls -1 /home/nea/agents-ensemble/releases/ 2>/dev/null || true; } \
+                 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V | tail -1 )
+CURRENT=$(grep -oE '__version__ *= *"[0-9.]+"' daemon/__init__.py | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+printf 'tag=%s dir=%s current=%s\n' "$HIGHEST_TAG" "$HIGHEST_DIR" "$CURRENT"
+#   SLOT = next free patch strictly above ALL THREE (and above origin's tags -- fetch --tags first).
+git fetch --tags --quiet
+SLOT="$(printf '%s\n%s\n%s\n' "$HIGHEST_TAG" "$HIGHEST_DIR" "$CURRENT" | sort -V | tail -1 \
+       | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')"
+echo "SLOT=v$SLOT"
+#   the derived slot is written into the lane record with all three inputs. A slot literal anywhere
+#   in this plan set (including a `cat-file -t v0.28.13`) is a defect: it can already be taken.
 
 # --- DERIVATION 2: the merge shape ---
 git log --oneline --graph -3 origin/latest
 git show --no-patch --format='%P' HEAD        # two parents => --no-ff (no squash)
 git show --stat HEAD~1 | tail -20             # the bump: EXACTLY 4 files, 1 line each
 
-# --- DERIVATION 3: the tag ---
-git cat-file -t v0.28.13                       # 'tag' (annotated, not lightweight)
-git rev-parse v0.28.13^{commit}               # peels to the bump commit
-git ls-remote --tags origin | grep v0.28.13   # present on the remote
+# --- DERIVATION 3: the tag (uses the DERIVED slot from DERIVATION 1 -- never a literal) ---
+git cat-file -t "v$SLOT"                       # 'tag' (annotated, not lightweight)
+git rev-parse "v$SLOT^{commit}"                # peels to the bump commit
+git ls-remote --tags origin | grep -F "v$SLOT" # present on the remote
 
 # --- DERIVATION 4: the migration-delta census (three levels) ---
 ls daemon/migrations/versions/*.sql | wc -l                       # source tree
@@ -115,7 +128,7 @@ m = json.load(open('<release-dir>/manifest.json'))
 print("agents", len(m.get("agents", {})), "frontend", len(m.get("frontend", {})), "plugins", len(m.get("plugins", {})))
 print("rollback_safe", m.get("rollback_safe"), "| known_schema_gen", m.get("known_schema_gen"))
 PY
-#   agents == 378 (or the re-derived value) | frontend/plugins unchanged | rollback_safe True
+#   agents == 379 (or the re-derived value) | frontend/plugins unchanged | rollback_safe True
 
 # --- DERIVATION 7: the live fence PRE == MID == POST ---
 readlink /home/nea/agents-ensemble/releases/current
@@ -132,8 +145,10 @@ test -f agents/canary/skills-template/injection_scan.py      # present in the st
 python3 - <<'PY'
 import json
 m = json.load(open('<release-dir>/manifest.json'))
-hits = [k for k in m.get("agents", {}) if k.endswith("canary/skills-template/injection_scan.py")]
+hits  = [k for k in m.get("agents", {}) if k.endswith("canary/skills-template/injection_scan.py")]
+rules = [k for k in m.get("agents", {}) if k.endswith("canary/skills-template/injection-rules.json")]
 print("scanner in staged payload manifest:", bool(hits), hits[:1])
+print("rule data file, exactly once:   ", len(rules), rules[:1])
 PY
 #   payload containment: task 9 re-hashed the manifest's per-file entries clean, so the shipped
 #   copy is byte-identical to the stage-worktree file => the worktree run certifies the payload copy.
