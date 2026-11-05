@@ -1,129 +1,196 @@
-# Memoir Store v1 — Plan Overview (Phase B implementation plan)
+# Memoir Store v1 — Plan Overview (Phase B implementation plan — ADJUDICATED)
 
-**Lane:** `feature/ari-memoir-store` @ worktree `/home/nea/ensemble-src-wt-memoir-store`. Plan written at `0d2f31dde` (Phase A design record; tree content == `1f6898ae2` == origin/latest at Phase A).
-**Authority stack:** `decisions.md` §6 — Emperor rulings R1–R4 > blessed `design.md` > this plan > code. This plan stays WITHIN layers 1–2; every §14 flag disposition herein is **PROPOSED — architect adjudicates** (full analysis in `flag-dispositions.md`; draft §4 rows pre-staged there in §16).
+**Lane:** `feature/ari-memoir-store` @ worktree `/home/nea/ensemble-src-wt-memoir-store`. Plan authored at `63032008b`; **folded** against the architect's adjudication (`architecture-recommendation.md` @ `0e913486`, 14 rulings · 43 amendments · 6 deviation records) and `decisions.md` §4 (16 rows, 2026-11-05).
+**Authority stack (`decisions.md` §6):** R1–R4 (Emperor) > blessed `design.md` > **architect adjudication** (`architecture-recommendation.md` + `decisions.md` §4) > this plan > code. **This plan set is ADJUDICATED, not provisional:** every §14 flag below carries its RULING, and every statement in phases 0–8 reflects the ruling. The plan no longer says "PROPOSED — architect adjudicates" anywhere; the proposal record survives in `flag-dispositions.md` as the audit trail.
+**The two blessed-text deviations (visible by design, never quiet edits):** **DR-1** — the briefing's hard section ceiling is **24,000 characters**, superseding `design.md` §8.2's "~12k chars" figure (surgically, per P-4 — §4 row 3; the "~12k" survives as the NOMINAL size); **DR-3** — the kill-switch polarity (unset ⇒ config default ON + a loud per-boot WARNING; present-but-unparseable ⇒ INDETERMINATE ⇒ fail **CLOSED**/OFF + WARNING), a deliberate divergence from the `notify_user` precedent (which repairs garbage to the default = ON = fail-OPEN). Both are also carried in phase8's release/ceremony notes.
 
 ---
 
 ## 1. Objective
 
-Deliver **Memoir Store v1 — usable memory for Ari** end-to-end: the four-table schema (episodes / persona / persona-versions / empty syntheses), the `memoir` privileged tool category (ari-exactly, 5 tools, two-layer gate, kill-switch), hybrid retrieval (lexical ∥ semantic RRF k=60, importance tie-break, 180-day recency prior, keepsake-exempt), the background embedding worker (never blocking writes, graceful lexical-only degradation), the turn-1 `[SYSTEM CONTEXT: Memoir]` wake briefing (two zones, budget model, once-per-instance), and the ari-only `inner_soul` redirect repair — staged as a release, NO promote (user 3-factor nonce ceremony owns the flip).
+Deliver **Memoir Store v1 — usable memory for Ari** end-to-end: the four-table schema (episodes / persona / persona-versions / empty syntheses), the `memoir` privileged tool category (ari-exactly, 5 tools, auth-first two-layer gate, frozen refusal vocabulary, kill-switch), hybrid retrieval (lexical ∥ semantic, RRF k=60 with the adjudicated arithmetic, importance tie-break, 180-day recency prior, keepsake-exempt), the background embedding worker (bounded, isolated, never blocking writes, graceful lexical-only degradation), the turn-1 `[SYSTEM CONTEXT: Memoir]` wake briefing (two zones, budget model with its render-time backstop, once per instance — flag written by the **consumer**), and the ari-only `inner_soul` redirect repair — staged as a release, NO promote (user 3-factor nonce ceremony owns the flip).
 
 ## 2. Scope
 
-**In (v1 end-to-end):** everything in `design.md` §1 "What v1 is" + `roadmap.md` v1 table — write/pin/unpin/recall/timeline, keepsake governance (R2, reject-don't-evict), seeded persona (§11 verbatim), wake briefing, leak repair, stars seed, syntheses schema, migration + PG materialization + tsv ensure, embedding worker, tests/gates/boot-smoke, staged release.
+**In (v1 end-to-end):** everything in `design.md` §1 "What v1 is" + `roadmap.md` v1 table — write/pin/unpin/recall/timeline, keepsake governance (R2, reject-don't-evict), seeded persona (§11 verbatim, read-only in v1 with a human-lane-guarded dormant approve seam), the wake briefing, the leak repair, the stars seed, the syntheses schema, migration + PG materialization + the `tsv` ensure, the embedding worker, tests/gates/boot-smoke, staged release.
 
-**Out (guardrails Phase C cannot smuggle in — from the commission §10 and design §10.3/§13):**
+**Out (guardrails Phase C cannot smuggle in — from design §10.3/§13 and the commission):**
 - NO other agents' tool sets; ari-exactly means exactly that.
 - NO RAG/knowledge-system changes EXCEPT the ari `inner_soul` redirect branch (§6.2).
 - NO loader/system-prompt changes (L1/DD-10 — context block only).
-- NO new external deps, NO new services, NO graph DB, NO pgvector (R4/DD-1/DD-17).
+- NO new external deps, NO new services, NO graph DB, NO pgvector (R4/DD-1/DD-17) — **asserted by the G6 grep sweep** (the worker must reuse the house client, not introduce a new HTTP/embedding dependency).
 - NO federation/sync (R1).
-- NO syntheses behavior — schema only (DD-2); NO `memoir_about` (DD-4); NO LLM importance scoring (DD-5); NO star normalization build (DD-19, flag #5 = awareness only); NO episode-body mutability (DD-8, flag #6 partition); NO per-turn reinjection (DD-11); NO v2/v3/v4 work (roadmap: no build authority).
-- NO scheduler bare-HUMAN stamp change (L4) — explicitly forbidden even for the briefing.
+- NO syntheses behavior — schema only (DD-2); NO `memoir_about` (DD-4); NO LLM importance scoring (DD-5); NO star normalization build (DD-19, flag #5 = awareness only); NO episode-body mutability (DD-8, flag #6 partition); NO per-turn reinjection (DD-11); NO v2/v3/v4 work (roadmap: no build authority); NO automatic re-embedding/backfill in v1 (AM-33 — the operator requeue is a runbook procedure).
+- NO scheduler bare-HUMAN stamp change (L4) — explicitly forbidden, and the briefing does NOT need it (L4 governs the message STAMP, not the context BLOCK).
 
 ## 3. Binding-input summary (what this plan treats as specification)
 
-`design.md` (413 lines, blessed 2026-11-04): §3 storage kinds (relational + tsvector full-text + JSONB/Python-cosine vectors); §4 four layers and the `memoir_episodes` column contract; §5 tool surface + three-step registration + two-layer gate + `ENSEMBLE_MEMOIR_ENABLED`; §6 inner_soul repair; §7 retrieval algorithm (RRF k=60, tie-break, recency prior τ=180d, keepsake exemption, recall-only stats); §8 briefing seam + two zones; §10 seams/landmines; §11 persona seed VERBATIM; §14 the 14 flags. `decisions.md`: R1–R4 verbatim; P-1..P-7 protocol; DD-1..DD-20; §4 empty (Phase B fills via architect). `roadmap.md`: v1 builds now; doctrine pressure already folded (syntheses-empty, stars-seed). N1–N5 citations are `[citation needed]` board-only artifacts — planned around, never fabricated, never blocking. **All code anchors this plan cites were re-grep-verified on 2026-11-05** (values recorded in phase files; drift notes where they occur — notably flag #4's inner_soul lead-vs-truth).
+`design.md` (413 lines, blessed 2026-11-04): §3 storage kinds; §4 four layers and the `memoir_episodes` column contract; §5 tool surface + three-step registration + two-layer gate + `ENSEMBLE_MEMOIR_ENABLED`; §6 inner_soul repair; §7 retrieval algorithm; §8 briefing seam + two zones; §10 seams/landmines; §11 persona seed VERBATIM; §14 the 14 flags. `decisions.md`: R1–R4 verbatim; P-1..P-7 protocol; DD-1..DD-20; **§4 now carries the architect's 16 adjudication rows** (13 flag resolutions + 3 additional bindings: the RRF arithmetic, the timeline parameter rename, the syntheses typing). `roadmap.md`: v1 builds now. `architecture-recommendation.md`: the adjudication of record (14 rulings, 43 amendments, 6 DRs). N1–N5 citations are `[citation needed]` board-only artifacts — planned around, never fabricated, never blocking. **All code anchors this plan cites were re-grep-verified on 2026-11-05**, and the architect's own anchors were re-verified during the fold (two cite-path drifts found — see §11 fold notes).
 
 ## 4. Phases
 
 | # | Name | File | Objective | Depends on | Flags consumed |
 |---|------|------|-----------|------------|----------------|
-| 0 | Anchor re-verification + scaffolding | phase0-plan.md | Final grep sweep at implementation HEAD; repository/service/tool module skeletons; config block + kill-switch knob module; migration timestamp reservation | — | #13 (knob shape) |
-| 1 | Schema + PG materialization + persona seed | phase1-plan.md | One `.sql` (SQLite-valid, additive, IF NOT EXISTS); 4 SQLModel tables + manager registration before create_all; PG tsv+GIN ensure; boot-time seed ensure (§11 verbatim, pin-tested) | P0 | #14, #8 (mirror schema), #6 (column families) |
-| 2 | Repository + hybrid retrieval service | phase2-plan.md | Named-writer repository (no general update); RRF k=60 hybrid retrieval (ts_rank_cd ∥ Python cosine, identity-matched); importance tie-break; 180d recency prior, keepsake-exempt; recall-only stats; timeline filter-then-rank; recall budget | P1 | #6, #10, #11, #5 (bounds), #1 (admission) |
-| 3 | Embedding worker | phase3-plan.md | Lifespan asyncio task; NULL-embedding queue; attempts/backoff/terminal; lane-down latch; boot catch-up; per-tick counter; kill-switch-gated | P1 | #7, #13 |
-| 4 | Tool category + 5 tools + gates + pin ceremony | phase4-plan.md | `daemon/tools/memoir.py` (category #18, 5 tools, two-layer gate, kill-switch typed refusals, budgets, dual pin admission); three-step registration; ari allow entry (implemented in Phase C per commission); ari tools_note doctrine; ONE-commit pin ceremony + re-stamp | P2, P3 | #12, #13, #2, #1, #5, #11 |
-| 5 | Wake briefing | phase5-plan.md | `CONTEXT_KIND_MEMOIR` block at the assembly seam; stable id `memoir:{agent_id}`; compaction-hoisted; once-per-instance flag; two-zone renderer + normalized budget model; kill-switch OFF → no block | P2 | #3, #9, #1, #13 |
-| 6 | inner_soul ari-only redirect | phase6-plan.md | Branch at the two `_should_redirect_to_rag` call sites (`:716`/`:777`) with factory-captured `agent_id`; memoir redirect text; kill-switch loud notice; non-ari byte-identical | P4 | #4, #13, (DD-13/DD-16) |
-| 7 | Tests + gates + boot smoke | phase7-plan.md | Unit packs + mutation matrix; Tier-1 per-phase + Tier-2 lane-final (mechanical: manager.py+api.py are core seams); real-PG legs; degradation + catch-up legs; byte-identity leg; boot smoke per standing conventions | P1–P6 | all (pins) |
-| 8 | Staged release | phase8-plan.md | Version slot derived at stage time (W9); rollback-safe adjudication (standing rule); NO promote; staging worktree + provenance sidecars kept | P7 | — |
+| 0 | Anchor re-verification + scaffolding | phase0-plan.md | Final grep sweep at implementation HEAD; module skeletons; the knob as ONE authority (truth table, fail-closed garbage, call-time reads, discoverable resolved state) | — | #13 |
+| 1 | Schema + PG materialization + persona seed | phase1-plan.md | ONE `.sql` (SQLite-valid, additive, all string columns TEXT); 4 SQLModel tables registered before `create_all`; PG `tsv`+GIN via the ensure (two-arg `to_tsvector`, statements LAST); persona seed (knob-independent, never aborts boot); the dormant approve seam with the human-lane guard | P0 | #14, #8, #6, (DR-2, DR-6) |
+| 2 | Repository + hybrid retrieval service | phase2-plan.md | Closed repository surface (no general update); the corrected PG lexical SQL; the adjudicated RRF arithmetic (pool 100/ranker, competition ranks, absent-term, total comparator, NULL-safe idle, fixed summation, no rounding); recall-only stats; timeline `since`/`until`; recall budget; write-path purity | P1 | #6, #10, #11, #1, #5 |
+| 3 | Embedding worker | phase3-plan.md | Lifespan asyncio task; NULL-embedding queue; 30 s timeout + dedicated executor + sequential embeds; attempts/terminal (write-back failures count); dims-mismatch terminal; house error classification; tick semantics; knob park/resume; driver-agnostic | P1 | #7, #13 |
+| 4 | Tool category + 5 tools + gates + pin ceremony | phase4-plan.md | `daemon/tools/memoir.py` (category #18, 5 tools, **auth-first** gate order, frozen 13-code refusal vocabulary, adjudicated result shapes, call-time knob, write purity); three-step registration; ari allow entry + doctrine; ONE-commit **grep-derived** pin ceremony + tools_note-only re-stamp + FC9 measurement | P2, P3 | #12, #13, #2, #1, #5, #11, #10 |
+| 5 | Wake briefing | phase5-plan.md | `CONTEXT_KIND_MEMOIR` block at the assembly seam; stable id `memoir:{agent_id}`; compaction-surviving (no hoist set — truthy-keyed); once-flag **written by the consumer**; off-loop flag read + deadline-bounded reads; two-zone renderer + the 24,000-char ceiling with its render-time backstop; persona-missing path; knob re-read | P2 | #3, #9, #1, #13 |
+| 6 | inner_soul ari-only redirect | phase6-plan.md | Branch at the two `_should_redirect_to_rag` call sites (`:716`/`:777`) with factory-captured `agent_id`; memoir redirect text; knob OFF ⇒ the loud not-recorded notice; non-ari byte-identical | P4 | #4, #13 |
+| 7 | Tests + gates + boot smoke | phase7-plan.md | Unit packs + the full mutation matrix; Tier-1 per-phase + Tier-2 lane-final (mechanical: manager.py+api.py are core seams); real-PG legs; degradation + catch-up legs; byte-identity leg; boot smoke with the **embedding-endpoint fence** + worker census; grep-derived pin census (G4) | P1–P6 | all (pins) |
+| 8 | Staged release | phase8-plan.md | Version slot derived at stage time (W9); rollback-safe adjudication (standing rule); DR-1 + DR-3 visible in the ceremony notes; NO promote | P7 | — |
 
-Sequencing note: P3 and P5 can proceed in parallel after P2 (they share no files); P4 depends on both (tools need the worker's store_embedding seam contract and the service). P6 after P4 (redirect text references the live tools). The plan's critical path is P0→P1→P2→P4→P7→P8.
+Critical path: P0→P1→P2→P4→P7→P8. P3 and P5 run in parallel after P2 (disjoint files); P4 depends on both (the tools need the worker's store contract and the service).
 
 ## 5. Coupling map
 
 | | P1 | P2 | P3 | P4 | P5 | P6 | P7 | P8 |
 |---|---|---|---|---|---|---|---|---|
-| P1 schema | — | models consumed | NULL-embedding columns | — | — | — | real-PG legs | migration delta |
-| P2 repo/service | | — | `store_embedding`/pending scan contract | tools call service | briefing calls renderer | — | packs | — |
-| P3 worker | | | — | kill-switch shared | — | — | degradation legs | — |
+| P1 schema | — | models consumed | NULL-embedding columns | — | persona/keepsake reads | — | real-PG legs | migration delta |
+| P2 repo/service | | — | `store_embedding`/pending scan contract | tools call the service | briefing calls the renderer | — | packs | — |
+| P3 worker | | | — | knob shared | — | — | degradation legs | — |
 | P4 tools+category | | | | — | affordance line | redirect target exists | registration pack | release content |
-| P5 briefing | | | | | — | — | budget pins | — |
+| P5 briefing | | | | | — | — | budget + flag-site pins | — |
 | P6 inner_soul | | | | | | — | byte-identity leg | — |
-| `daemon/manager.py` | registration+ensure (P1) + worker wiring is api.py | | | | | | | Tier-2 trigger |
-| `daemon/api.py` | — | | worker lifespan task (P3) | | | | | Tier-2 trigger |
+| `daemon/manager.py` | registration + ensure (P1) | | | | | | | Tier-2 trigger |
+| `daemon/api.py` | — | | worker lifespan (P3) | | | | | Tier-2 trigger |
 | `daemon/services/context_messages.py` | | | | | CONTEXT_KIND + builder (P5) | | | — |
+| `daemon/services/instance_messaging.py` | | | | | **once-flag write (consumer)** (P5) | | | — |
 | `daemon/tools/inner_soul.py` | | | | | | two call sites (P6) | | — |
 | `_tool_registry.py` + `instance.py` | | | | category entries + extend (P4) | | | | |
-| `agents/ari/*` | | | | allow entry + tools_note (P4, Phase C) | | | re-stamp | payload trees |
+| `agents/ari/*` | | | | allow entry + tools_note (P4) | provenance line | | re-stamp (tools_note only) | payload trees |
 
-Hard-coupling hazard called out: P1's manager.py edit and P3's api.py edit are the two Tier-2 core-seam touches — both land early and are pinned in P7's whole-tree leg.
+Hard-coupling hazards: P1's manager.py edit and P3's api.py edit are the two Tier-2 core-seam touches; P5's flag write crosses a **module** boundary (builder → consumer) and is the lane's silent-failure class.
 
 ## 6. Risk register (top risks)
 
 | ID | Risk | Impact | Mitigation |
 |----|------|--------|------------|
-| R1 | **SQLite/PG DDL divergence** — tsvector + ARRAY are PG-only; a naive model breaks SQLite boots (the runner applies the .sql to SQLite; create_all must stay dual-driver) | high | tsv lives in NO model (PG ALTER-ensure, flag #14); `stars` via a TypeDecorator (PG ARRAY(Text) / SQLite JSON — the `JSONBType` pattern at `daemon/repositories/infra/types.py:35`); .sql is SQLite-valid by construction; boot smoke on BOTH drivers (P7) |
-| R2 | **Registration invisibility** — decorator-only category addition is silently invisible (C5: "no error, no tool, no clue") | high | three-step seam checklist in P4 + `test_memoir_registration.py` (a)–(j) legs + extends-order pin; ceremony in ONE commit |
-| R3 | **Budget arithmetic unsound** → stable-zone truncation (the one invariant that must NEVER break) | high | dual pin admission makes overflow impossible by construction (flag #1); 24k absolute ceiling derived from the token ceilings (flag #3); mutation pins on both |
-| R4 | **inner_soul blast radius** — non-ari behavior drifts | high | branch condition is `agent_id == "ari"` only; byte-identity pack leg (pre/post responses identical for a non-ari fixture); DD-16 |
-| R5 | **Embedding lane down at runtime** (the known live-proxy defect class) | medium | P3 degradation is the design (lexical-immediate / semantic-soon); lane-down latch + terminal-at-5; writes never block (DD-20) |
-| R6 | **Env-poison / boot-smoke incidents** (standing critical notes: sweep kills live procs; `env -u POSTGRES_*` is a no-op) | high | P7 boot smoke pins `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` explicitly, per-variable env scrub, `ENSEMBLE_SELF_ENV=sandbox`, binary COPY to scratch, scratch DB, state.json fence PRE==MID==POST |
-| R7 | **Event-loop discipline** — DB reads on the loop (the routed incident class) | medium | all memoir DB access behind `asyncio.to_thread` (the snapshot-digest builder precedent at `context_messages.py:358-392`); Tier-2 whole-tree gate covers the class |
-| R8 | **Pin-ceremony drift** — a count/exact-set pin missed → false-red gates later | medium | P4 enumerates all 11 pin sites (6 count + 5 exact-set) + the new one, grepped fresh at implementation time; one commit |
-| R9 | **Phase C re-derives design** (scope creep into v2) | medium | §2 Out-list is contractual; each phase names its flags; non-goal guardrails repeated in phase files |
+| R1 | **SQLite/PG DDL divergence** — tsvector + ARRAY are PG-only; a naive model breaks SQLite boots | high | tsv lives in NO model (PG ALTER-ensure, two-arg `to_tsvector` — the one-arg form is STABLE and PG rejects it); `stars` via `StarsListType` (identity list on both drivers); `.sql` SQLite-valid by construction; boot smoke on BOTH drivers |
+| R2 | **The PG lexical half raises `UndefinedFunction`** — `ts_rank_cd(tsquery, tsvector)` does not exist; the SQLite fallback stays green, so the defect surfaces only in production | high | the corrected form is pinned in phase2's D2.2 and proven by a **real-PG** leg + a reversed-order mutation leg (RED) |
+| R3 | **The briefing is permanently lost for an instance, silently** — a builder-written once-flag consumes the flag on a block the graph path **discards** (`daemon/graph.py:8524-8532`); no error, no log, no user-visible symptom | high | the flag write moves to the **consumer** (phase5's D5.4); a pin drops the block from the persistent half and asserts the flag stays unset; the flag read is off-loop and the reads deadline-bounded |
+| R4 | **The embedding lane pins shared default-executor workers for 600 s each** — the house client sets no timeout, and `asyncio.to_thread` shares a 12–20-worker pool with ~1,351 LLM/compaction sites | high | dedicated `ThreadPoolExecutor(max_workers=2, thread_name_prefix="memoir-embed")`, `httpx.Timeout(timeout=30.0, connect=5.0)`, tick embed budget ≤45 s, sequential embeds, thread-prefix pin |
+| R5 | **Dimension mismatch produces silently wrong rankings** — the house cosine zips to the shorter side, so a 3072-dim vector scores "confidently" against a 1536-dim query | medium | dims mismatch = per-row **terminal** (nothing stored); the semantic ranker filters on `embedding_model` **and** `embedding_dims`; the recall footer discloses `active_model` / `embedding_excluded=N` |
+| R6 | **Registration invisibility** — a decorator-only category addition is silently invisible (no error, no tool, no clue) | high | the three-step seam checklist + `test_memoir_registration.py` (a)–(j) legs + the extends-order pin; the ceremony in ONE commit |
+| R7 | **Budget arithmetic unsound** → stable-zone truncation (the one invariant that must never break) | high | dual pin admission makes overflow impossible by construction; the 24,000-char ceiling is derived from the token ceilings; the render-time backstop withholds rather than truncates (24k → stable in full + dynamic dropped; 48k → no block, no flag write); mutation pins on both |
+| R8 | **inner_soul blast radius** — non-ari behavior drifts | high | the branch condition is `agent_id == "ari"` only; the byte-identity pack leg (pre/post responses identical for a non-ari fixture); the diff census (only the helper + import + 2 call sites) |
+| R9 | **Embedding lane down at runtime** (the known live-proxy defect class) | medium | P3 degradation is the design (lexical-immediate / semantic-soon); 401/403 ⇒ terminal at once + the latch engages immediately; write-back failure counts as an attempt; the worker parks on the knob |
+| R10 | **Env-poison / boot-smoke incidents** (standing 🔴 critical notes: the sweep kills live procs; `env -u POSTGRES_*` is a no-op) | high | the boot smoke pins `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` explicitly, scrubs PG **and** the embedding env per-variable, uses `ENSEMBLE_SELF_ENV=sandbox`, a scratch DB, a binary COPY, and the state.json fence |
+| R11 | **The pin census is undercounted** — the plan's earlier 11-site list and the registry's own prose census both undercount; a missed site reddens future whole-tree gates | medium | **G4**: the ceremony re-derives the set BY GREP at implementation time; the registry's stale prose is corrected in the same commit; no count is ever trusted from prose |
+| R12 | **The knob's misspelled-NAME residual** — indistinguishable from unset ⇒ the surface is ON, and only the boot WARNING distinguishes it | medium | accepted, **loud-only**, recorded: the per-boot WARNING names the var and the resolved state, and the resolved state is discoverable without reading logs (tool_help + health surface) |
+| R13 | **Event-loop discipline** — DB reads on the loop (the routed incident class) | medium | the once-flag read is off-loop (`asyncio.to_thread`), every briefing read is `wait_for(timeout=10)`, the whole build is ≤5 s, and a timeout degrades rather than delaying the turn |
+| R14 | **Phase C re-derives design** (scope creep into v2) | medium | §2's Out-list is contractual; each phase names its flags; the G6 guardrail sweep is an acceptance test |
 
 ## 7. Test strategy
 
-- **Unit packs** per module (repo, retrieval, worker, briefing, tools, knob, redirect) — registered in `.agents/tester/PACKS.md` per house convention.
-- **Mutation matrix**: cap rejection (count-bound + budget-bound legs), keepsake exemption, once-flag, agent gate (blank/non-str/scoped), decorator order, extends order, budget clamps (admission + render + recall envelope on the SHIPPED projection), pin-admission arithmetic, seed byte-identity, kill-switch tristate, byte-identity (non-ari inner_soul).
-- **Gate tiers** (`.agents/tester/rules/ensure.md` doctrine): Tier-1 blast-radius per phase merge; **Tier-2 whole-tree at lane end — MECHANICAL trigger: the lane touches `daemon/manager.py` (registration + ensure) and `daemon/api.py` (worker lifespan), both on the core-seam list.**
-- **Real-PG legs** where behavior is PG-specific: tsvector generated column + GIN + `ts_rank_cd`/`plainto_tsquery`, JSONB embedding round-trip, ARRAY `stars`, CHECK constraints, partial indexes; SQLite legs for the Python-BM25 fallback + migration-runner path.
-- **Embedding legs**: worker with mock endpoint (down→attempts+error+latch; up→catch-up; terminal-at-5); boot catch-up (restart with pending NULLs).
-- **Boot smoke**: frozen-binary copy to scratch, `ENSEMBLE_SELF_ENV=sandbox`, per-var PG scrub, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` PINNED, throwaway DB, live fence (state.json byte-identical; `current->` symlink untouched), SIGTERM-only teardown.
-- **Registration pin pack**: `tests/unit/test_memoir_registration.py` — the notify-shape (a)–(j), 18-flavored.
+- **Unit packs** per module (repo, retrieval, worker, briefing, tools, knob, redirect, persona lane, schema, seed) — registered in `.agents/tester/PACKS.md` per house convention.
+- **Mutation matrix** — the architect-named pins plus the standing ones: **write-path purity** (AM-12), **once-flag write site** (AM-22), **embed thread-prefix** (AM-29), **dimension mismatch** (AM-31), **PG SQL argument order** (AM-1), **two-arg `to_tsvector`** (AM-8), **gate order** (AM-16), **refusal-vocabulary freeze** (AM-21), **result-shape bytes** (AM-23), **marked-id equality** (AM-14), **atomic write-back** (AM-15), **write-back failure = attempt** (AM-30), **error classification** (AM-32), **driver-agnostic worker** (AM-36), **knob fail-closed** (AM-25) + resolved-state discoverability (AM-26), **off-loop flag read** (AM-37) + **read deadline** (AM-38), **seed-failure tolerance** (AM-39), **backstop legs** (AM-43), **FC9 measurement** (AM-20) — plus cap rejection ×2, keepsake exemption, once-flag, decorator order, extends order, budget clamps ×3, seed byte-identity, non-ari byte-identity, tick-counter honesty.
+- **Gate tiers** (`.agents/tester/rules/ensure.md`): Tier-1 blast-radius per phase merge; **Tier-2 whole-tree at lane end — MECHANICAL trigger** (`daemon/manager.py` + `daemon/api.py` are core seams).
+- **Real-PG legs** where behavior is PG-specific: two-arg `tsv` generation, GIN usage (EXPLAIN), the corrected `ts_rank_cd(tsv, plainto_tsquery('english', :q))` (+ the reversed-order mutation leg), JSONB embedding round-trip + Python cosine, ARRAY `stars`, CHECK constraints, partial indexes, ensure idempotence, ensure-LAST ordering, loud ALTER failure.
+- **Embedding legs**: mock endpoint (down ⇒ attempts+error+latch; up ⇒ catch-up; 401 ⇒ terminal at once; dims mismatch ⇒ terminal; write-back failure ⇒ an attempt), restart catch-up.
+- **Boot smoke**: frozen-binary copy to scratch, `ENSEMBLE_SELF_ENV=sandbox`, per-variable PG **and embedding-endpoint** scrub, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` PINNED, throwaway DB, **worker task census** (one with the knob ON, ZERO with `ENSEMBLE_MEMOIR_ENABLED=false` pinned explicitly), state.json fence PRE==MID==POST, `current->` untouched, SIGTERM-only teardown.
+- **Registration pin pack**: `tests/unit/test_memoir_registration.py` — the notify-shape (a)–(j), 18-flavored; the ceremony's set is **grep-derived** (G4), never hardcoded.
+- **G6 sweep**: no new dependency, no new service, no graph DB, no pgvector, no federation/sync — asserted by a grep-assertion sweep in Phase C's acceptance.
 
 ## 8. Release plan
 
-Stage only — **NO live promote** (user 3-factor nonce ceremony owns the flip). Version slot derived at stage time per house W9 (highest tag + releases/ census; never hardcoded). Rollback-safe adjudication under the standing rule: additive `CREATE TABLE IF NOT EXISTS` ×4; PG tsv ensure is additive `ALTER ADD COLUMN`; zero references in the pre-lane tree ⇒ old binary never touches the tables (the board-tables/notify_audit inert-on-rollback class) ⇒ `ENSEMBLE_ROLLBACK_SAFE=1`, reasoning recorded in stage journal + tag annotation. Staging worktree + BOTH provenance sidecars kept (v0.25.2 gap avoided). Payload: agents tree changes (ari `meta.json` + `tools_note.md`) + daemon binary; FE/plugins untouched.
+Stage only — **NO live promote** (the user's 3-factor nonce ceremony owns the flip). Version slot derived at stage time per house W9 (highest tag + releases/ census; never hardcoded). Rollback-safe adjudication under the standing rule: additive `CREATE TABLE IF NOT EXISTS` ×4 + the additive `tsv` ALTER; zero references in the pre-lane tree ⇒ the old binary never touches the tables (the board-tables/notify_audit inert-on-rollback class) ⇒ `ENSEMBLE_ROLLBACK_SAFE=1`, reasoning recorded in the stage journal + tag annotation; consequence = FIX-LOSS, never incompatibility. Staging worktree + BOTH provenance sidecars kept (the v0.25.2 gap avoided). Payload: the agents tree changes (ari `meta.json` + `tools_note.md`); FE/plugins untouched.
 
-## 9. Flag-disposition summary (full analysis: flag-dispositions.md)
+**The two blessed-text deviations are carried into the release/ceremony notes (visible, never quiet):**
+- **DR-1** — the briefing's hard section ceiling is **24,000 characters** (tokens plan; the design's "~12k chars" survives as the NOMINAL size). It supersedes `design.md` §8.2's "~12k chars" surgically, per P-4 (`decisions.md` §4 row 3).
+- **DR-3** — the kill-switch polarity: unset ⇒ config default ON with a loud per-boot WARNING; present-but-unparseable ⇒ INDETERMINATE ⇒ fail **CLOSED**/OFF + WARNING — a deliberate, recorded divergence from `notify_user`'s fail-OPEN garbage repair. **Promote-time operator lever:** `ENSEMBLE_MEMOIR_ENABLED=false` disables the whole memoir personality on a live deployment (tools refuse, briefing off, memory unreadable, worker parks, the inner_soul branch still notifies loudly) **without touching the data and without a restart** (the knob is read at call time).
 
-| # | Short name | Status | One-line disposition |
+## 9. Flag rulings (14 — adjudicated; the proposal record survives in `flag-dispositions.md`)
+
+| # | Short name | RULING | Substance now binding in this plan | Where reflected |
+|---|---|---|---|---|
+| 1 | Pin-cap integer | **ADOPT** | cap = **12 count** PLUS a second admission bound — the 4,000-token stable keepsake zone; both bounds must hold; the rejection names the binding constraint and the current pins; never evicts | phase2 D2.12 / phase4 / phase5 |
+| 2 | Pin attribution | **ADOPT-AS-AMENDED** | a **required** `actor` (Literal empress/emperor) on `memoir_pin` and `memoir_write(keepsake=true)` — a CLAIM, never derived; **`memoir_unpin` keeps the blessed `(id)` signature**; the house provenance class is surfaced in the tool result and the briefing line (wrong claim detectable at write time); a durable ledger is deferred to v2 | phase2 D2.12 / phase4 D4.7, D4.10 |
+| 3 | Budget units | **ADOPT-AS-AMENDED — BLESSED-TEXT DEVIATION (DR-1)** | tokens plan; the stable zone is pre-bounded by admission (persona ≤2,000 / keepsakes ≤4,000) and NEVER truncated; dynamic ≤3,000 oldest-first; hard absolute section ceiling **24,000 chars**; "~12k" = nominal | phase5 D5.7, D5.8 / plan §8 / phase8 |
+| 4 | inner_soul anchors | **CONFIRMED — NO §4 ROW (P-7)** | the predicate (`:316-362`) and its two call sites (`:716`/`:777`) are the target; the classification block stays untouched; **and there is no compaction-hoist set to add** (truthy-keyed) | phase6 §2 / phase5 D5.3 |
+| 5 | Stars normalization | **ADOPT** | stored verbatim; the v2 rule is documented now; the input bounds are hygiene, not normalization | phase2 D2.13 / phase4 |
+| 6 | Mutability partition | **ADOPT** | three-way partition, structurally enforced: record columns written once at INSERT; each operational family has exactly ONE named repository writer; **no general-purpose update method**; `tsv` is DB-derived | phase2 D2.1 / phase7 |
+| 7 | Embedding worker | **ADOPT-AS-AMENDED** | the shape stands (lifespan task, `embedding IS NULL` IS the queue, boot catch-up, bounded retries, greppable counters) + timeout 30 s/5 s connect, dedicated executor with sequential embeds, write-back failure counts as an attempt, dims mismatch = terminal, 401/403 permanent + latch at once, knob re-read per tick, drift disclosed at the agent surface, no automatic backfill, tick-counter semantics defined, atomic per-row write of the four embedding columns | phase3 (whole phase) / phase2 D2.11, D2.16 |
+| 8 | Persona approval lane | **ADOPT-AS-AMENDED — BLESSED-TEXT DEVIATION (DR-2)** | mirror the transition vocabulary in `memoir_persona_versions`; v1 ships **no** persona-edit write path; **the dormant approve seam carries the human-lane guard** (`auth_method == "session"` ⇒ else `HumanLaneRequiredError`); the §11 seed is born `approved` with `source='seed'`, byte-pinned | phase1 D1.11, D1.12, D1.13 / phase2 T2.6, AC6 |
+| 9 | Once-per-instance | **ADOPT** | DD-11 stands, with three corrections: the briefing **does** fire on a scheduler-sourced wake (L4 governs the STAMP, not the BLOCK — no source lane changes); "attribution visible at every wake" overstates (once per INSTANCE); the flag write site is the **consumer**. Accommodations: the byte-pinned affordance line; a fresh per-turn read (revive-safe); the v2 alarm-wake refresh inherits the L4 constraint. Residual disclosed: a long-lived instance's dynamic zone goes stale with **no signal** | phase5 D5.4, D5.10, D5.11 |
+| 10 | Timeline `q?` | **ADOPT-AS-AMENDED** | filter-then-rank with **`since`/`until`** (the blessed `from`/`to` are Python keywords — DR-4); `q` = lexical-only ranker; no cosine/RRF/recency/keepsake priority; no stats writes; **the `k?` parameter is DROPPED** (§5.4's three-parameter signature stands; timeline is bounded by the shared recall envelope) | phase2 D2.2, D2.9 / phase4 D4.7 |
+| 11 | Recall budget | **ADOPT-AS-AMENDED** | k default 5, hard max 20 (out-of-range ⇒ typed refusal); per-episode body clamp 1,200 tokens; total envelope ≤6,000 tokens with ranked-drop + count/hint footer; enforced on the **shipped** projection with a final re-check; **the marked-id set equals the shipped projection exactly** (equality, not containment); plus the embedding-identity disclosure | phase2 D2.8, D2.10, D2.11 |
+| 12 | Census numbers | **ADOPT-AS-AMENDED** | `memoir` = PRIVILEGED **#18** (17 today; #16 notify-user, #17 metrics-read); 5 tools / 4 families; the ceremony set is **16 sites across 11 files** — 6 count pins + 5 exact-set pins + the `EXPECTED_PRIVILEGED_SET` comparison sites + the ari allow-trailing-set pin (`tests/unit/test_board_registration.py:285`) — but that count is **dated evidence**: the plan **instructs grep re-derivation** (G4) and never hardcodes a target; the re-stamp touches **only `agents/ari/tools_note.md`** (meta.json is not in the 161-line baseline); an **FC9 prompt-budget measurement is required** | phase4 D4.12, D4.13, D4.14 / phase7 D7.7 |
+| 13 | Kill-switch | **ADOPT-AS-AMENDED — BLESSED-TEXT DEVIATION (DR-3)** | OFF = the whole personality (tools refuse `memoir_disabled`; the briefing is not built and the memory is **unreadable**; the worker parks; the inner_soul ari branch still returns the loud notice; the data is untouched). Polarity: unset ⇒ config default ON (admissible only because the default is never silent — one WARNING per boot + discoverable state); present-but-unparseable ⇒ INDETERMINATE ⇒ **fail CLOSED** + WARNING — a deliberate divergence from `notify_user`'s fail-OPEN repair | phase0 D0.5–D0.8 (the truth table) / phase3 D3.12 / phase4 D4.16 / phase5 D5.13 / phase6 D6.3 |
+| 14 | PG materialization | **ADOPT-AS-AMENDED** | the three-artifact decomposition is sound: `.sql` = SQLite-path DDL + audit record; PG tables via model registration → `create_all` (`:975`); PG `tsv`+GIN via the `_ensure_postgres_columns` ensure (function `:8055`, called `:997` PG-gated; house ALTER precedent `:9481-9484`); **the `.sql` declares `embedding TEXT` and `stars TEXT`**; the `tsv` expression uses the **two-arg** `to_tsvector('english', …)` (the one-arg form is STABLE and PG rejects it); the memoir statements go **LAST** in the ensure (no per-statement try/except — fail-loud stands); the boot order is pinned; `memoir_syntheses.source_episode_ids` typed **JSONBType** (DR-6) | phase1 D1.2, D1.4–D1.8, D1.14 / phase7 |
+
+## 10. Assumptions & open questions — the three Phase-B questions are RULED
+
+**The three questions the plan carried for the architect are now answered by the rulings:**
+
+| Former question | Ruling | Binding consequence |
+|---|---|---|
+| #3 ceiling: accept the 24,000-char absolute ceiling (Option B) or shrink the token ceilings to honour 12k chars (Option A)? | **24,000 chars (Option B)** — ADOPT-AS-AMENDED, DR-1, §4 row 3 | the token ceilings stand (2,000 / 4,000 / 3,000); "~12k" is nominal; the backstop governs the overflow outcome (24k → stable in full + dynamic dropped; 48k → withhold) |
+| #8 persona lane: any in-v1 persona edit path? | **None** — read-only persona in v1; the dormant approve seam carries the human-lane guard | §5.4's five-tool surface is binding; the v2 lane inherits the lane guard explicitly |
+| #13 polarity: default-ON (unset → config default true) or a strict "unset must not enable" reading? | **Default-ON with a loud unset; fail-CLOSED on garbage** — ADOPT-AS-AMENDED, DR-3, §4 row 12 | the truth table is the single authority (phase0); the divergence from `notify_user` is recorded; the misspelled-NAME residual is accepted, loud-only |
+
+**Assumptions that remain (flagged, not buried):**
+- The 5-tool surface is exhaustive for v1 (§5.4) — no persona-edit tool.
+- `agents/ari/meta.json`'s allow entry + the `tools_note.md` doctrine land in Phase C implementation; the re-stamp scope is `tools_note.md` only.
+- The house estimator (`estimate_tokens`, tiktoken cl100k) is THE budget instrument — no new tokenizer dependency (R4).
+- The embedding model/endpoint come from the shared `EMBEDDING_*` config family; the design's 1536-dim contract is checked per row, and a mismatch is terminal (never silently zipped).
+- N1–N5 board citations stay `[citation needed]`; nothing blocks on them.
+
+**No open question remains for the architect** that would block Phase C implementation.
+
+## 11. Fold notes (discrepancies found during the fold — recorded, NOT edited in the source documents)
+
+Per the fold's duty: the architect's document and `decisions.md` §4 are **read-only**; anything found here is recorded in the plan and reported to the caller, never silently contradicted in code.
+
+| # | Discrepancy | Handling |
+|---|---|---|
+| FN-1 | `architecture-recommendation.md` AM-32 cites the house error classifier at **`daemon/services/llm_error_classifier.py`** — that path does not exist; the real module is **`daemon/llm_error_classifier.py`** (verified: `is_retryable_status_code`, `RETRYABLE_STATUS_CODES`, the transient-channel patterns) | phase3's D3.9 cites the **verified** path. The house classifier's retryable set does not include **408**, while the ruling classifies 408 as transient ⇒ phase3's D3.9 states the transient set as "the house retryable set **∪ {408}**" so the two agree |
+| FN-2 | AM-10 states the ensure is "executed `:9555-9557`" — that region is the **project-skill-loader lane's own** ensure statement loop (`with self._engine.begin() … for stmt in statements`), not the `_ensure_postgres_columns` method body. The method is defined at **`:8055`** and **called at `:997`** (PG-gated) | phase1's D1.6 cites the verified anchors (`:8055` definition, `:997` call, house ALTER precedent `:9481-9484`) and does not repeat the `:9555-9557` execution cite |
+| FN-3 | AM-18 counts "4 `EXPECTED_PRIVILEGED_SET` comparison sites"; a fresh grep shows **6 files** carry `EXPECTED_PRIVILEGED_SET` (board `:70`, wedge `:72`, self_alarm `:76`, notify `:55`, metrics_read `:91`, instance_ops `:88`), each comparing in its own file | no plan change needed: the ruling itself says the count is **dated evidence** and the plan must **grep-derive** it (G4, phase4 D4.12, phase7 D7.7). The count discrepancy is exactly why the count is not written into the plan as a target |
+| FN-4 | `architecture-recommendation.md` §6 says "nothing in the **41** amendments touches the Emperor's rulings" while the document's own headline counts **43** | internal to the architect's document; the plan uses 43 (the headline + the §5 enumeration). Recorded for the architect's re-eyes; the substance (R1–R4 compliance, §6's table) is unaffected |
+| FN-5 | AM-10 characterizes the planner's anchor as "`:838-883`" — the plan set never cited that range (the plan cited the `:9500`-family raw-DDL block, itself a *different* lane's ensure statements) | phase1's D1.6 now cites the verified ensure anchors; no plan text depended on `:838-883` |
+| FN-6 | The architect's artifact index records "`flag-dispositions.md` — **unmodified** — the planner's proposals are adjudicated, not edited" | the fold's duty is to ANNOTATE that file (status banner + per-flag rulings + the AM-1 SQL correction inside #10), not to rewrite the proposals — which is what the fold did. The index describes the architect's own action, not the fold's |
+| FN-7 | The architect's ruling #4 cites AM-33 as the amendment for the "no compaction-hoist set" point, while AM-33 is the recall-footer model-drift disclosure (AM-40 is the hoist point) | phase5's D5.3 carries the substance (no hoist set — truthy-keyed) with the **AM-40** reference; the flag-#4 ruling's AM reference is corrected in `flag-dispositions.md`'s annotation |
+
+## 12. Fold coverage (evidence that nothing was dropped)
+
+**Every AM-1..AM-43 → the plan location where it landed.** 43 rows, no AM unaccounted for.
+
+| AM | Sev | Landed at | AM | Sev | Landed at |
+|---|---|---|---|---|---|
+| AM-1 | 🔴 | phase2 D2.2 (corrected PG SQL) + phase2 AC2 + phase4 D4.7 (timeline ranker) + flag-dispositions #10 + phase7 D7.5/D7.6 | AM-23 | 🟡 | phase4 D4.9 (result shapes + argument types) + phase4 AC5 |
+| AM-2 | 🟡 | phase2 D2.4 (candidate pool 100) | AM-24 | 🟡 | phase4 D4.10 + phase5 D5.7 (the briefing provenance line) |
+| AM-3 | 🟡 | phase2 D2.5 (competition ranks; absent ⇒ no term) | AM-25 | 🔴 | phase0 D0.4/D0.5 (truth table; one authority) + phase3 D3.12 + phase4 D4.16 + phase5 D5.13 + phase6 D6.3 |
+| AM-4 | 🟡 | phase2 D2.7 (total comparator; NULL-safe idle) | AM-26 | 🟡 | phase0 D0.5/D0.7/D0.8 (WARNING + discoverability + the accepted residual) + phase7 D7.5 |
+| AM-5 | 🟢 | phase2 D2.6 (`RRF_K` constant; fixed order; no rounding) | AM-27 | 🟡 | phase0 D0.5/T0.6 (call-time read) + phase3 D3.12 (per-tick re-read + park) + phase5 D5.13 (per-assembly re-read) |
+| AM-6 | 🟡 | phase1 D1.2 + AC1 (`embedding TEXT`, `stars TEXT`) | AM-28 | 🔴 | phase3 D3.4 (timeout 30 s/5 s connect; tick budget ≤45 s) + phase3 AC2 |
+| AM-7 | 🟡 | phase1 D1.8 (StarsListType contract) + phase1 AC2 | AM-29 | 🔴 | phase3 D3.5 (dedicated executor; no to_thread; sequential) + phase3 AC3 + phase7 D7.5 |
+| AM-8 | 🔴 | phase1 D1.4 (two-arg `to_tsvector`) + phase1 AC3 + phase7 D7.6 | AM-30 | 🔴 | phase3 D3.7 (write-back failure counts as an attempt) + phase3 AC4 + phase7 D7.5 |
+| AM-9 | 🟡 | phase1 D1.5 (memoir statements LAST; fail-loud) + phase1 AC3 | AM-31 | 🔴 | phase3 D3.8 (dims mismatch terminal) + phase2 D2.3 (dims predicate) + phase3 AC4 + phase7 D7.5 |
+| AM-10 | 🟡 | phase1 D1.6 (corrected ensure anchors) + phase1 T1.3 | AM-32 | 🟡 | phase3 D3.9 (house classifier; 401/403 permanent + latch) + phase3 AC4 |
+| AM-11 | 🟡 | phase1 D1.7 (pinned boot order) + phase1 T1.3/T1.4 | AM-33 | 🟡 | phase2 D2.11 (recall footer: `active_model`, `embedding_excluded`) + phase3 D3.15 (no auto backfill; runbook requeue) + phase3 AC7 |
+| AM-12 | 🔴 | phase2 D2.14 + phase2 T2.7/AC7 + phase4 D4.11 + phase7 D7.5 | AM-34 | 🟡 | phase3 D3.10/D3.11/D3.12 (tick-line semantics; event lines; `app.state.memoir_embedding_worker_task`; per-tick interval) + phase3 AC5 |
+| AM-13 | 🟡 | phase2 D2.15 (the exact INSERT column set) + phase2 AC7 | AM-35 | 🟡 | phase3 D3.13 (try/except + CancelledError re-raise) + phase3 D3.1 (shutdown cancel+await) + phase3 AC6 |
+| AM-14 | 🟡 | phase2 D2.8 (marked == shipped, equality) + phase2 AC7 + phase7 D7.5 | AM-36 | 🟡 | phase3 D3.14 (driver-agnostic) + phase2 D2.17 + phase3 AC6 |
+| AM-15 | 🟡 | phase1 D1.10 + phase2 D2.16 (atomic four-column write-back) + phase3 D3.6 | AM-37 | 🟡 | phase5 D5.5 (off-loop flag read) + phase5 AC3 + phase7 D7.5 |
+| AM-16 | 🔴 | phase4 D4.2 (auth-first gate order) + phase4 AC1 + phase7 D7.5 | AM-38 | 🟡 | phase5 D5.6 (deadline 10 s per read; ≤5 s whole build; degrade) + phase5 AC3 |
+| AM-17 | 🔴 | phase1 D1.12 + phase1 T1.5/AC5 + phase2 T2.6 (the repository's approve seam) + phase2 AC6 | AM-39 | 🟡 | phase1 D1.13 (seed failure ⇒ WARNING, boot continues) + phase5 D5.9 (persona missing ⇒ keepsakes-only) + phase5 AC5 |
+| AM-18 | 🟡 | phase4 D4.12 (grep-derived set; prose correction) + phase7 D7.7 (G4) | AM-40 | 🟢 | phase5 D5.3 (no hoist set; truthy-keyed) + phase5 AC1 |
+| AM-19 | 🟡 | phase4 D4.13 (re-stamp = tools_note only; 161/161) + phase4 T4.4/AC4 | AM-41 | 🟡 | phase7 D7.3 (embedding-endpoint fence) + phase7 D7.4 (worker task census) + phase7 AC6 |
+| AM-20 | 🟡 | phase4 D4.14 + phase4 T4.6/AC6 + phase7 T7.8/AC8 | AM-42 | 🔴 | phase4 D4.7 (`since`/`until`; `k?` dropped) + phase2 D2.9 + phase2 AC4 |
+| AM-21 | 🟡 | phase4 D4.8 (13 frozen codes + envelope; tools never raise) + phase4 AC1 | AM-43 | 🟡 | phase5 D5.8 (the render-time backstop) + phase5 D5.7 (the 24,000-char ceiling) + phase5 AC5 |
+| AM-22 | 🔴 | phase5 D5.4 (consumer writes the flag) + phase5 T5.4/T5.6/AC4/AC6 + phase7 D7.5 | | | |
+
+**Flag rulings #1..#14** → see §9 (all 14 adjudicated: 4 ADOPT · 9 ADOPT-AS-AMENDED · 1 CONFIRMED-no-row); the proposal record and the per-flag ruling annotations live in `flag-dispositions.md`.
+
+**Deviation records DR-1..DR-6** → where visible:
+
+| DR | Substance | Visible in plan text | Visible in release/ceremony notes |
 |---|---|---|---|
-| 1 | Pin-cap integer | PROPOSED | 12 count + dual admission (count AND 4,000-token zone budget); reject names the binding constraint |
-| 2 | Pin attribution | PROPOSED | Required `actor` Literal(empress/emperor) param + visible `pinned_by` render; turn-provenance + separate-tool rejected |
-| 3 | Budget units | PROPOSED | Tokens plan (house estimator); stable zone admission-bounded (2,000+4,000); dynamic 3,000 oldest-first; absolute section cap 24,000 chars; ~12k = nominal |
-| 4 | inner_soul anchors | PROPOSED | Re-grep confirms predicate `:316-362` + call sites `:716`/`:777` are the target; P-7 note, no §4 row |
-| 5 | Stars normalization | PROPOSED | Store verbatim; v2 rule documented now; input bounds (16×120 chars) = hygiene not normalization |
-| 6 | Mutability partition | PROPOSED | Record columns INSERT-once; each operational family exactly ONE named repository writer; no general update method |
-| 7 | Embedding worker | PROPOSED | Lifespan asyncio task; NULL=is-queue; 5-attempt terminal; lane-down latch; catch-up by construction; per-tick counter |
-| 8 | Persona approval lane | PROPOSED | MIRROR the transition vocabulary in `memoir_persona_versions`; seed born approved `source='seed'`; NO v1 edit path |
-| 9 | Once-per-instance | PROPOSED | Stands (DD-11); affordance closing line; fresh per-turn flag read; v2 alarm-refresh inherits L4 constraint |
-| 10 | Timeline q? | PROPOSED | Filter-then-rank; lexical-only ranker; no cosine/RRF/recency/keepsake priority; no stats writes |
-| 11 | Recall budget | PROPOSED | k≤20 (default 5); 1,200-token per-episode clamp; 6,000-token envelope, ranked-drop + hint footer |
-| 12 | Census numbers | PROPOSED | `memoir` = privileged #18 (17→18); 5 tools/4 families; 11 pin sites + new pack in ONE commit + re-stamp |
-| 13 | Kill-switch semantics | PROPOSED | OFF = whole personality (tools/briefing/worker off, loud inner_soul notice, data untouched); tristate polarity, unset→config default ON, garbage→fail-closed OFF+WARNING |
-| 14 | PG materialization | PROPOSED | .sql = SQLite+audit (no tsvector/ARRAY); PG via manager registration→create_all; tsv+GIN via ALTER-ensure; seed via boot get-or-create |
-
-**14 PROPOSED / 0 OPEN-FOR-ARCHITECT.** 13 earn §4 rows once adjudicated (#4 exempt, P-7); draft row text pre-staged in `flag-dispositions.md` §16.
-
-## 10. Assumptions & open questions
-
-**Assumptions (flagged, not buried):**
-- The 5-tool surface is exhaustive for v1 (§5.4); no persona-edit tool (flag #8 disposition) — if the architect rules an in-v1 edit path, P4 gains a task and §5.4 text is superseded surgically.
-- `agents/ari/meta.json` allow entry + `tools_note.md` doctrine edit land in Phase C (implementation) as the commission states — planned in P4, executed there.
-- The house estimator (`estimate_tokens`, tiktoken cl100k) is THE budget instrument (flag #3); no new tokenizer dependency (R4).
-- Embedding model/endpoint come from the shared `EMBEDDING_*` config family (config.py:4374-4376); dimension 1536 is the design contract (§3) — the per-row `embedding_dims` column records reality if the lane ever differs, and identity-mismatched vectors never compare (DD-6).
-- N1–N5 board citations stay `[citation needed]`; nothing in this plan blocks on them.
-
-**Open questions for the architect** (all carried WITH proposed dispositions — none blocks planning):
-1. Flag #3: accept the 24,000-char absolute ceiling (Option B) or shrink the token ceilings to honor 12k chars (Option A)? Recommended: B.
-2. Flag #8 conditional: any in-v1 persona edit path? Default: none.
-3. Flag #13: confirm default-ON (unset → config default true) against a strict "unset must not enable" reading. Recommended: default-ON with fail-closed-on-garbage.
-
-## 11. Non-goals guardrails (restated for Phase C)
-
-See §2 Out-list. Phase C acceptance includes a grep-assertion sweep that NONE of the forbidden surfaces were touched: loader.py, RAG tools beyond the inner_soul ari branch, other agents' meta.json, external dependency manifests (pyproject/uv.lock beyond version bump), plugin trees. The guardrails are load-bearing, not decorative.
+| DR-1 | the briefing ceiling 24,000 chars (supersedes §8.2's "~12k chars") | plan §0 header + §8 + §9 row 3; phase5 D5.7/D5.8; phase8 D8.8 | phase8 D8.8 + the ceremony notes (phase8 T8.4/AC4) |
+| DR-2 | persona: read-only in v1; the dormant approve seam carries the human-lane guard | plan §9 row 8; phase1 D1.12; phase2 T2.6 | phase8's composition note (the persona row is schema-only + a seeded row) |
+| DR-3 | the kill-switch polarity (default-ON with a loud unset; fail-CLOSED on garbage; the notify_user divergence) | plan §0 header + §8 + §9 row 13; phase0 D0.5/D0.6/D0.8; phase3/4/5/6 | phase8 D8.7 (the operator lever) + D8.8 |
+| DR-4 | `memoir_timeline` parameters `from`/`to` ⇒ `since`/`until` | plan §9 row 10; phase2 D2.9; phase4 D4.7 | phase8's tool-signature note (the rename is a name binding) |
+| DR-5 | the RRF arithmetic (pool/ranks/absent-term/comparator/idle-basis/constant/order) | plan §9 row 7/10/11; phase2 D2.4–D2.7 | phase8's payload note (the retrieval semantics ship as adjudicated) |
+| DR-6 | `memoir_syntheses.source_episode_ids` typed JSONBType | plan §9 row 14; phase1 D1.14 | phase8's migration note (schema-only, empty) |

@@ -1,10 +1,27 @@
 # flag-dispositions.md — Memoir Store v1 — Phase B dispositions for the 14 design.md §14 flags
 
+> ## ⚖️ STATUS: SUPERSEDED BY ADJUDICATION
+>
+> **This file is the PROPOSAL RECORD — the audit trail of what the planner proposed on 2026-11-05 at `63032008b`. It has been adjudicated.**
+> **Adjudication of record:** `architecture-recommendation.md` @ **`0e913486`** (verdict SOUND-WITH-AMENDMENTS; 14 rulings — 4 ADOPT · 9 ADOPT-AS-AMENDED · 1 CONFIRMED-no-row; 43 amendments — 12 🔴 blocking; 6 deviation records DR-1..DR-6) + **`decisions.md` §4 (16 rows, appended 2026-11-05)**.
+> **The proposal text below is preserved as written** — it is NOT rewritten (the record of what was proposed, and why). **Each flag now carries an ADJUDICATION annotation** stating the ruling and where the adjudicated text lives (the plan file + the AM/DR/§4-row reference).
+> **§16's pre-staged draft §4 rows are HISTORICAL** — superseded by the architect's actual 16 rows (`decisions.md` §4). They are retained for the audit trail, not for use.
+> **The only edit made to the proposal text by the fold** is the AM-1 SQL correction inside **#10** (`ts_rank_cd` argument order), which the architect explicitly sanctioned ("AM-1 explicitly names those two plan files + flag-dispositions #10"). Note: the architect's artifact index records this file as "unmodified" — that describes the **architect's own** action, not the planner lane's fold.
+> **The plan set that implements the rulings** is `plan-overview.md` + `phase0..8-plan.md` (folded at the plan-set level).
+
 **Lane:** `feature/ari-memoir-store` @ worktree `/home/nea/ensemble-src-wt-memoir-store`, plan base `0d2f31dde` (tree content == `1f6898ae2`).
-**Status:** PHASE B — PROPOSED DISPOSITIONS. Every disposition below is marked **"PROPOSED — architect adjudicates"** per `decisions.md` §2/P-3. None of this text is a ruling; none of it modifies `design.md`, `decisions.md`, or `roadmap.md` (binding inputs are read-only for Phase B).
+**Status at authoring:** PHASE B — PROPOSED DISPOSITIONS. Every disposition below was marked **"PROPOSED — architect adjudicates"** per `decisions.md` §2/P-3; none of this text modified `design.md`, `decisions.md`, or `roadmap.md` (binding inputs are read-only for Phase B).
 **Grep provenance:** every code anchor cited below was re-verified in this worktree on 2026-11-05 (house rule P-7 — recorded line numbers are leads; grep at use time). Verified values are recorded inline; drift notes where they occur.
 
-**Summary:** 14 flags — **14 PROPOSED / 0 OPEN-FOR-ARCHITECT**. Each carries rationale + failure-mode analysis. Flags #3 and #9 (user-experience behavior) carry extended multi-paragraph analysis per the commission. 13 dispositions earn a `decisions.md` §4 adjudication-log row once adjudicated (flag #4 is P-7 anchor drift — exempt per `decisions.md` §4's own preamble: "Anchor drift does not belong here — it is a re-grep, not a deviation"). Draft §4 row text is pre-staged in §16 below for the architect's lane to lift verbatim; Phase B does NOT write to `decisions.md`.
+**Summary at authoring:** 14 flags — **14 PROPOSED / 0 OPEN-FOR-ARCHITECT**. Each carries rationale + failure-mode analysis. Flags #3 and #9 (user-experience behavior) carry extended multi-paragraph analysis per the commission. 13 dispositions earn a `decisions.md` §4 adjudication-log row once adjudicated (flag #4 is P-7 anchor drift — exempt per `decisions.md` §4's own preamble: "Anchor drift does not belong here — it is a re-grep, not a deviation"). Draft §4 row text is pre-staged in §16 below for the architect's lane to lift verbatim; Phase B does NOT write to `decisions.md`.
+
+**Summary after adjudication:** **14 flags adjudicated — 4 ADOPT · 9 ADOPT-AS-AMENDED · 1 CONFIRMED (no row).** 16 §4 rows recorded (13 flag resolutions + 3 additional bindings: the RRF arithmetic (DR-5/§4 row 15), the timeline parameter rename (DR-4/§4 row 14), the syntheses typing (DR-6/§4 row 16)). Three blessed-text deviations recorded: **DR-1** (the briefing ceiling — §4 row 3), **DR-2** (the persona lane — §4 row 7), **DR-3** (the kill-switch polarity — §4 row 12).
+
+---
+
+## Flag #1 — Exact keepsake pin-cap integer — PROPOSED — architect adjudicates
+
+> **✅ ADJUDICATED — ADOPT.** §4 row 1 (2026-11-05). The proposal's substance stands: **12 count PLUS the 4,000-token zone admission bound**, both bounds must hold, the rejection names the binding constraint and the current pins, never evicts. **Where the adjudicated text lives:** `phase2-plan.md` D2.12 (the admission rule) + `phase4-plan.md` (the pin tool) + `phase5-plan.md` D5.7 (the zone budget it protects). Amendment carried: **AM-43** (the render-time backstop that keeps "never truncated" true — see flag #3).
 
 ---
 
@@ -28,6 +45,7 @@ The rejection error names the binding constraint and lists current pins (id, tit
 ---
 
 ## Flag #2 — Pin attribution mechanism (`pinned_by ∈ {empress, emperor}`) — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT-AS-AMENDED.** §4 row 2. The proposal's substance stands (a REQUIRED `actor` claim, never derived; turn-provenance and a second pin tool rejected). **Amended:** `memoir_unpin` **keeps the blessed `(id)` signature** — no column exists to record an unpin actor, and adding one would touch the blessed column list; the house provenance class (`daemon/tools/provenance.py`) is surfaced in the tool result and the briefing keepsake line so a wrong claim is **detectable at write time**; a durable per-pin governance ledger is **deferred to v2**. **Where the adjudicated text lives:** `phase4-plan.md` D4.7 (signatures) + D4.10 (corroboration) + `phase2-plan.md` D2.12 (the pin columns the claim writes) + `phase5-plan.md` D5.7 (the briefing line). Amendments: **AM-23, AM-24**.
 
 **Disposition: an explicit REQUIRED `actor: Literal["empress","emperor"]` parameter on `memoir_pin` (and on the keepsake-at-write path of `memoir_write`), with a tool-contract rule for which value to assert, and `pinned_by` rendered visibly in the briefing so mis-attribution is observable at every wake.**
 
@@ -44,6 +62,7 @@ The rejection error names the binding constraint and lists current pins (id, tit
 ---
 
 ## Flag #3 — Briefing budget arithmetic: two unit systems — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT-AS-AMENDED — BLESSED-TEXT DEVIATION (DR-1).** §4 row 3. The proposal's Option B is the ruling: tokens are the planning unit; the stable zone is pre-bounded by **admission** (persona ≤2,000 / keepsakes ≤4,000 tokens) and NEVER truncated; the dynamic zone ≤3,000 tokens, oldest-dropped-first; the hard absolute section ceiling is **24,000 CHARACTERS**, sized from the admitted stable worst case (6,000 tokens ≈ 24k chars) so "never truncated" is arithmetically true. **The design's "~12k chars" figure is superseded surgically (P-4) and survives as the NOMINAL size.** **Where the adjudicated text lives:** `phase5-plan.md` D5.7 (the model) + D5.8 (the render-time backstop: >24k ⇒ stable in full + dynamic dropped + overage disclosure; >48k ⇒ withhold the block, no flag write, WARNING) + `plan-overview.md` §0/§8 + `phase8-plan.md` D8.8. Amendments: **AM-38, AM-43**.
 
 This flag touches user-visible behavior every session; both sides are argued before the recommendation.
 
@@ -67,6 +86,7 @@ This flag touches user-visible behavior every session; both sides are argued bef
 ---
 
 ## Flag #4 — inner_soul anchor drift (lead-vs-truth) — PROPOSED (re-grep note; NO §4 row) — architect adjudicates
+> **✅ ADJUDICATED — CONFIRMED, NO §4 ROW (P-7).** The re-grep confirms the proposal: the implementation target is the `_should_redirect_to_rag` predicate (`:316-362`) and its two call sites (`:716`, `:777`), not the `:232-278` classification block; the factory-captured `agent_id` is in scope at both. Anchor drift is a re-grep, not a deviation — **no §4 row** is owed. **Added by the ruling:** there is **no compaction-hoist membership set** to add (the hoist is truthy-keyed on any `context_kind` — `daemon/_content_hardening.py:227-250`). **Where the adjudicated text lives:** `phase6-plan.md` §2 + `phase5-plan.md` D5.3. (The architect's flag-#4 row cites AM-33 for the hoist point; the hoist amendment is **AM-40** — the substance is what governs.)
 
 **Disposition: confirmed by fresh grep — the implementation target is the `_should_redirect_to_rag` call sites, NOT the `:232-278` classification block. This is P-7 anchor drift (re-grep + note), not a deviation; no `decisions.md` §4 row is owed.**
 
@@ -77,6 +97,7 @@ Verified in this worktree (2026-11-05): `_RAG_TARGETS` at `inner_soul.py:303`; `
 ---
 
 ## Flag #5 — `stars` normalization (silent in v1) — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT.** §4 row 4. The proposal stands verbatim in substance: stars are stored **verbatim**; the v2 normalization rule (casefold / trim / collapse whitespace / per-write dedupe) is **documented now**; the input bounds (≤16 entries × ≤120 chars) are **request-shape hygiene, not normalization**. **Where the adjudicated text lives:** `phase2-plan.md` D2.13 + `phase4-plan.md` (the tool schema).
 
 **Disposition: awareness-only, exactly as the commission frames it — v1 stores stars VERBATIM (no normalization build), ships the v2 normalization RULE as documentation now, and adds input BOUNDS (not normalization) at write time.**
 
@@ -89,6 +110,7 @@ Verified in this worktree (2026-11-05): `_RAG_TARGETS` at `inner_soul.py:303`; `
 ---
 
 ## Flag #6 — Episode mutability partition — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT.** §4 row 5. The proposal stands: the three-way mutability partition, enforced **structurally** (record columns written once at INSERT; each operational family has exactly ONE named repository writer; **no general-purpose update method**; `tsv` is DB-derived), proved by a repository-surface test + a grep pin. **Where the adjudicated text lives:** `phase2-plan.md` D2.1 + `phase7-plan.md` (the pins). Amendments folded in: **AM-14** (marked-id equality), **AM-15** (atomic embedding write-back).
 
 **Disposition: an explicit three-way partition, enforced structurally — the repository exposes NO general-purpose episode-update method; each mutable column family has exactly ONE named writer method.**
 
@@ -105,6 +127,7 @@ Verified in this worktree (2026-11-05): `_RAG_TARGETS` at `inner_soul.py:303`; `
 ---
 
 ## Flag #7 — Embedding worker identity + durability — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT-AS-AMENDED.** §4 row 6. The proposal's **shape stands** (dedicated lifespan task, `embedding IS NULL` IS the queue, boot catch-up, bounded retries, greppable per-tick counters). **Amended** with the load-bearing mechanics: a 30 s request timeout (5 s connect; tick embed budget ≤45 s); a **dedicated executor** (`ThreadPoolExecutor(max_workers=2, thread_name_prefix="memoir-embed")`) with **sequential** embeds — `asyncio.to_thread` is forbidden (the shared default executor carries ~1,351 LLM/compaction sites and does not release a cancelled worker); write-back failure **counts as an attempt**; dimension mismatch = **per-row terminal** (the house cosine silently zips to the shorter side); 401/403 = permanent with the lane-down latch engaging at once; the knob re-read per tick; model-identity drift disclosed at the **agent** surface (`active_model`, `embedding_excluded=N`); **no automatic backfill** in v1 (operator requeue in the runbook); tick-counter semantics defined; the four embedding columns written atomically. The flag's real fear (semantic recall silently misses N episodes) is closed **only** by the recall-footer disclosure. **Where the adjudicated text lives:** `phase3-plan.md` (whole phase) + `phase2-plan.md` D2.11 (the footer) + D2.16 (the atomic write). Amendments: **AM-28..AM-36**.
 
 **Disposition: a dedicated in-daemon asyncio background task started in the `api.py` lifespan (the house `asyncio.create_task` + strong-ref + cancel/await-on-shutdown pattern — e.g. the readiness refresher at `daemon/api.py:2772-2777` and the bash-reconcile task at `:940-975`), with `embedding IS NULL` AS the queue, bounded retries, boot catch-up by construction, and a greppable per-tick counter line.**
 
@@ -122,6 +145,7 @@ Verified in this worktree (2026-11-05): `_RAG_TARGETS` at `inner_soul.py:303`; `
 ---
 
 ## Flag #8 — Persona version table vs the prompt_version human lane — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT-AS-AMENDED — BLESSED-TEXT DEVIATION (DR-2).** §4 row 7. Option A (the proposal's) is confirmed: **mirror** the transition vocabulary in `memoir_persona_versions` (never reuse `prompt_versions` — wrong artifact family); **v1 ships NO persona-edit write path** (the five-tool surface §5.4 is binding); the §11 seed is born `approved` with `source='seed'`, byte-pinned. **The load-bearing amendment:** the dormant approve seam ships the **human-lane guard** — `approve()` raises `HumanLaneRequiredError` unless `actor.auth_method == "session"` (~15 lines, no new surface) — so DD-9 is safe-by-construction for the v2 lane, not safe-by-a-grep-pin. `submit()` has **no caller in v1**; the mirrored transitions are the second, defence-in-depth layer. **Where the adjudicated text lives:** `phase1-plan.md` D1.11/D1.12/D1.13 + `phase2-plan.md` T2.6/AC6 (the repository's approve seam). Amendment: **AM-17**.
 
 **Disposition: MIRROR the pattern, do not reuse the table. `memoir_persona_versions` carries its own `status` state machine with the SAME transition vocabulary as `prompt_versions` (`draft→pending_approval→approved|rejected|draft`, verified at `daemon/repositories/prompt_version/repository.py:217-221`), enforced in the memoir repository. The §11 seed is born `approved` with `source='seed'`. v1 ships NO persona-edit write path beyond the seed** (the blessed five-tool surface §5.4 contains no persona tool) — the first real edit path (v2's governed persona, or an operator/REST human-lane route if the Emperor wants in-v1 edits) inherits a table whose guarantees are already real.
 
@@ -136,6 +160,7 @@ Verified in this worktree (2026-11-05): `_RAG_TARGETS` at `inner_soul.py:303`; `
 ---
 
 ## Flag #9 — Briefing once-per-instance vs long-lived instances — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT.** §4 row 8. DD-11 stands, with **three corrections** to the proposal's analysis: (a) the briefing **does** fire on a **scheduler-sourced** wake — the assembly seam runs on every turn; L4 governs the **message STAMP**, not the **context BLOCK**, so L4 is **not** violated and **no source lane changes**; (b) the proposal's "attribution visible at every wake" **overstates** — the briefing is once **per INSTANCE**; (c) the once-flag **write site must be the consumer, not the builder** (the graph path discards the persistent half — `daemon/graph.py:8524-8532` — so a builder-written flag consumes the flag on a discarded block ⇒ the briefing is **permanently lost, silently**). Accommodations kept: the byte-pinned affordance line; a fresh per-turn flag read (revive-safe); the v2 alarm-wake refresh inherits the L4 constraint (never "fix" the bare-HUMAN stamp). **Disclosed residual:** a long-lived instance's dynamic zone goes stale with **no signal** (by design, DD-11; the v2 alarm-wake refresh is the designated fix). **Where the adjudicated text lives:** `phase5-plan.md` D5.4 (consumer-side write) + D5.10 (affordance) + D5.11 (landing semantics) + D5.5/D5.6 (off-loop read, deadline). Amendments: **AM-22, AM-37, AM-38**.
 
 This flag touches the most predictable user-experience complaint of the whole feature; both sides are argued in full.
 
@@ -157,8 +182,11 @@ This flag touches the most predictable user-experience complaint of the whole fe
 ---
 
 ## Flag #10 — `memoir_timeline(q?)` semantics — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT-AS-AMENDED.** §4 row 9. Filter-then-rank confirmed: **`since`/`until`** (the blessed `from`/`to` are Python keywords ⇒ unimplementable literally — **DR-4**; `until` inclusive, ISO-8601, UTC-normalised, `since ≤ until` validated by the tool) filter on `event_at`; `q` applies the **lexical-only** ranker; absent `q` ⇒ `event_at DESC`; no cosine, no RRF, no recency prior, no keepsake priority; timeline writes **no** stats. **Amended:** the proposal's `k?` parameter is **DROPPED** — §5.4's three-parameter signature stands, and timeline is bounded by the **shared recall envelope**. **Where the adjudicated text lives:** `phase2-plan.md` D2.2/D2.9 + `phase4-plan.md` D4.7. Amendments: **AM-1** (the SQL correction below), **AM-42**.
 
-**Disposition: filter-then-rank.** `from`/`to` (inclusive, on `event_at`, indexed range scan) filter the candidate set; `q` then applies the LEXICAL-ONLY ranker over that set (PG: `ts_rank_cd(plainto_tsquery('english', q), tsv)`; SQLite/dev: the Python BM25 house helper) and the output is rank-ordered within the window; with `q` absent the output is `event_at DESC` chronological. **NO cosine, NO RRF fusion, NO recency prior, NO keepsake prioritization** in timeline — it is a time-travel VIEW (roadmap v1: "Time-travel over `event_at`"), not a relevance search: the recency prior would actively distort a historical window ("what was true in March" must not be demoted for being March), and semantic ranking answers "what is this about", not "what happened then". Timeline does NOT update access stats (DD-12: only explicit `memoir_recall` writes stats).
+**Disposition: filter-then-rank.** `since`/`until` (inclusive, on `event_at`, indexed range scan) filter the candidate set; `q` then applies the LEXICAL-ONLY ranker over that set (PG: `ts_rank_cd(tsv, plainto_tsquery('english', q))`; SQLite/dev: the Python BM25 house helper) and the output is rank-ordered within the window; with `q` absent the output is `event_at DESC` chronological. **NO cosine, NO RRF fusion, NO recency prior, NO keepsake prioritization** in timeline — it is a time-travel VIEW (roadmap v1: "Time-travel over `event_at`"), not a relevance search: the recency prior would actively distort a historical window ("what was true in March" must not be demoted for being March), and semantic ranking answers "what is this about", not "what happened then". Timeline does NOT update access stats (DD-12: only explicit `memoir_recall` writes stats).
+
+> **⚠️ AM-1 CORRECTION (fold edit, sanctioned):** the SQL above originally read `ts_rank_cd(plainto_tsquery('english', q), tsv)` — the **reversed argument order**, which does **not exist in PostgreSQL** (no `ts_rank_cd(tsquery, tsvector)` overload; the reversed form raises `psycopg.errors.UndefinedFunction`). The `tsvector` MUST be the **first** argument. The defect would have been invisible on SQLite (the Python-BM25 fallback stayed green) and would have surfaced in production only. Architect-verified against a live PG 16.15 catalogue. **Where the adjudicated form lives:** `phase2-plan.md` D2.2 (+ the reversed-order mutation leg in the real-PG pack).
 
 **Why not independent-BM25-as-a-second-recall:** with both `q` and no bounds the tool degrades gracefully to a pure lexical ranked list — the SAME code path, no second machinery; with bounds present it is a filter. One ranker, one semantics, two entry shapes. The user-facing contract (tool description) states it plainly: "timeline is chronology with optional lexical narrowing; recall is relevance search."
 
@@ -171,6 +199,7 @@ This flag touches the most predictable user-experience complaint of the whole fe
 ---
 
 ## Flag #11 — Recall result budget — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT-AS-AMENDED.** §4 row 10. The proposal stands: k default 5, hard max 20 (out-of-range ⇒ typed refusal, not a silent clamp); per-episode body clamp 1,200 tokens with the house truncation marker; total envelope ≤6,000 tokens with **ranked-drop**; enforced on the **shipped projection** with a final re-check (metrics-read M-1 doctrine). **Amended:** the marked-id set must **equal** the shipped projection exactly (post-clamp, post-drop) — asserted by equality, not containment; dropped-for-budget episodes are neither returned nor marked. Plus the embedding-identity disclosure (`active_model`, `embedding_excluded=N`). **Where the adjudicated text lives:** `phase2-plan.md` D2.8/D2.10/D2.11 + `phase4-plan.md` (the tool body). Amendments: **AM-14, AM-33**.
 
 **Disposition: a concrete two-axis cap harmonized with the briefing budget model and the metrics-read M-1 output-budget doctrine (shipped projection, never raw rows).**
 
@@ -186,6 +215,7 @@ This flag touches the most predictable user-experience complaint of the whole fe
 ---
 
 ## Flag #12 — Tool-count wording / pin-ceremony census numbers — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT-AS-AMENDED.** §4 row 11. Confirmed: `memoir` = PRIVILEGED **#18** (the set is 17 today — #16 `notify-user`, #17 `metrics-read`); 5 tools across 4 families. **Amended:** the proposal's 11-site enumeration is **INCOMPLETE** — the ceremony set is **16 sites across 11 files** (6 count pins + 5 exact-set pins + the `EXPECTED_PRIVILEGED_SET` comparison sites + the ari allow-trailing-set pin at `tests/unit/test_board_registration.py:285`), all bumped to 18 in **ONE commit** with `"memoir"` appended at the **END** of ari's allow array, and the registry's own stale prose census corrected in the same commit. **But that count is dated EVIDENCE, not a specification** — the plan must **re-derive the set by grep at implementation time** and must never hardcode a count as the target. **Also amended:** the prompt-artifact re-stamp touches **ONLY `agents/ari/tools_note.md`** (`meta.json` is **not** in the 161-line baseline; the count stays 161 — the meta.json allow entry still ships). **Addition:** an **FC9 prompt-budget measurement is required** (measure, don't judge): `estimate_tokens(system prompt) + Σ estimate_tokens(convert_to_openai_tool(t))`, evaluating both `growth_tokens ≤ max(10_000, 0.25×baseline)` and `growth_pct ≤ 0.25`; a breach makes narrowing the grant the default. **Where the adjudicated text lives:** `phase4-plan.md` D4.12/D4.13/D4.14 + `phase7-plan.md` D7.7 (G4). Amendments: **AM-18, AM-19, AM-20**.
 
 **Disposition: the pin numbers are fixed by fresh census (2026-11-05): the category is `memoir`, PRIVILEGED entry **#18** (count 17 → 18); the category carries **5 tools** (`memoir_write`, `memoir_pin`, `memoir_unpin`, `memoir_recall`, `memoir_timeline`) across **4 families** (pin/unpin share one); the pin assertions encode 18 / exact-18-set / 5-tool-names.**
 
@@ -196,6 +226,7 @@ Verified census at plan time: `PRIVILEGED_TOOL_CATEGORIES` currently has **17** 
 ---
 
 ## Flag #13 — Kill-switch OFF semantics + env polarity — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT-AS-AMENDED — BLESSED-TEXT DEVIATION (DR-3).** §4 row 12. OFF = the **whole personality** confirmed: tools refuse `memoir_disabled`; the briefing is not built **and the memory is unreadable** (no other read path exists in v1 — stated plainly); the worker parks; the `inner_soul` ari branch is **still taken** and returns the loud not-recorded notice (never the RAG void); **the data is untouched** (the knob is not a delete). **Polarity:** unset ⇒ config default **ON** — admissible **only because the default is never silent** (one WARNING per boot naming the var and the resolved state; the state must be discoverable **without reading logs**); a present-but-unparseable value is **INDETERMINATE ⇒ fail CLOSED (OFF)** + a boot WARNING naming the value and the canonical spelling — a deliberate, recorded **divergence from `notify_user`**, whose garbage handling repairs to the default (ON) and is therefore fail-**open**; the cost asymmetry is the reason (a mis-set notify knob leaves a bounded audited chat message; a mis-set memoir knob leaves unbounded, append-only, never-hard-deleted first-person narrative rows). **The misspelled-var-NAME residual** (indistinguishable from unset ⇒ surface ON) is **accepted, loud-only, unpreventable** — recorded. **Where the adjudicated text lives:** `phase0-plan.md` D0.5–D0.8 (the canonical truth table) + `phase3-plan.md` D3.12 + `phase4-plan.md` D4.16 + `phase5-plan.md` D5.13 + `phase6-plan.md` D6.3. Amendments: **AM-25, AM-26, AM-27**.
 
 **Disposition: OFF is the whole-personality lever — tools refuse with a typed refusal, the briefing is NOT built, the inner_soul ari branch emits a LOUD not-recorded notice (never a silent drop), the embedding worker is not started; the DATA is untouched (rows stay; no other read path exists in v1, which is stated rather than hidden). Polarity: tristate explicit-string, notify-user family, default ON via config.**
 
@@ -210,6 +241,7 @@ Verified census at plan time: `PRIVILEGED_TOOL_CATEGORIES` currently has **17** 
 ---
 
 ## Flag #14 — PG materialization path — PROPOSED — architect adjudicates
+> **✅ ADJUDICATED — ADOPT-AS-AMENDED.** §4 row 13. The three-artifact decomposition is **sound and empirically validated on PG 16.15**: `.sql` = SQLite-path DDL + the permanent audit record (the runner is SQLite-only — `daemon/migrations/runner.py:837-842`); PG tables = model registration immediately before `create_all` (`daemon/manager.py:975`); PG `tsv` + GIN = an idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` inside the `_ensure_postgres_columns` ensure (function **`:8055`**, called **`:997`** PG-gated; house precedent `:9481-9484`; the planner's `:838-883` was a comment block — P-7). **Amended:** the `.sql` must declare **`embedding TEXT`** and **`stars TEXT`** (every string column is TEXT on both drivers); the `tsv` expression MUST use the **two-arg** `to_tsvector('english', …)` form (the one-arg form is STABLE and PG rejects it as a generation expression ⇒ the ALTER and the PG boot fail); the two memoir statements go **LAST** in the ensure list (the ensure has no per-statement try/except — house fail-loud stands: `manager.py:8259-8265`); the boot order is pinned (registration → `create_all` → runner → ensure → persona seed → worker task last); `memoir_syntheses.source_episode_ids` typed **JSONBType** (**DR-6** — recorded so the divergence from §4.4's sketch is not rediscovered as a defect). The persona seed ships as a boot-time idempotent get-or-create (a migration INSERT would never seed PG). **Where the adjudicated text lives:** `phase1-plan.md` D1.2–D1.8/D1.13/D1.14 + `phase7-plan.md` D7.6. Amendments: **AM-6..AM-11**.
 
 **Disposition: three coordinated artifacts, each named, per the verified house mechanics.**
 
@@ -227,9 +259,13 @@ Verified census at plan time: `PRIVILEGED_TOOL_CATEGORIES` currently has **17** 
 
 Per `decisions.md` §4 (resolving a §14 item "is still worth a row so the number has provenance") — 13 of the 14 dispositions, **if accepted**, require a §4 row: **#1, #2, #3, #5, #6, #7, #8, #9, #10, #11, #12, #13, #14**. Flag **#4 requires NO row** (P-7 anchor drift — `decisions.md` §4's preamble explicitly excludes it; the re-grep note lives in this file and phase6-plan.md).
 
-## §16 — Pre-staged DRAFT §4 rows (for the architect's lane to lift; Phase B does NOT write to decisions.md)
+**Outcome (2026-11-05): the architect filed 16 rows** — the 13 flag resolutions above (rows 1–13) plus **three additional bindings**: row 14 (the `memoir_timeline` parameter rename, DR-4), row 15 (the RRF arithmetic, DR-5 + the AM-1 defect correction), row 16 (the `memoir_syntheses.source_episode_ids` typing, DR-6). **Flag #4 remains row-free** (P-7). **Where each row's substance now lives:** `plan-overview.md` §9 (per-flag ruling + plan location), §12 (the fold-coverage table), and the phase files named in each row's Links column.
 
-> Rows below are DRAFTS. The architect edits the Adjudication column to the actual ruling (or rejects/changes the disposition) before the row lands; Date/Links are filled at adjudication time.
+## §16 — Pre-staged DRAFT §4 rows — **HISTORICAL · SUPERSEDED**
+
+> **⚠️ HISTORICAL — DO NOT LIFT.** These are the planner's pre-staged DRAFT rows (authored at `63032008b`, before adjudication). The architect filed **16 actual rows** in `decisions.md` §4 on 2026-11-05 — **these drafts were superseded by that log and are retained only as the audit trail of what the planner proposed.** Where a draft differs from the filed row, **the filed row governs** (e.g. the drafts' row numbering D1…D14 does not correspond to the log's 1…16; the log adds three rows the planner did not anticipate). Nothing in the plan set depends on this section.
+>
+> Original preamble (historical): "Rows below are DRAFTS. The architect edits the Adjudication column to the actual ruling (or rejects/changes the disposition) before the row lands; Date/Links are filled at adjudication time."
 
 | # | Deviation (design says / reality forces) | Adjudication (DRAFT — architect) | Links |
 |---|---|---|---|
