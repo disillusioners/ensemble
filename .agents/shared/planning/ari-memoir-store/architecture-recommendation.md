@@ -357,41 +357,91 @@ The coding councilor's objection is **real** and is upheld as a risk: a memoir-s
 
 ---
 
-## 13. V-1 — refusal-vocabulary ruling (Phase C, 2026-11-05)
+## 13. V-1 — refusal-vocabulary ruling (Phase C, 2026-11-05) — **USER-RULED**
 
-**Question routed by the dev lane** (Phase C landed P0–P7 at `d14702b40`): the refusal vocabulary is frozen at 18 codes (phase4 D4.8 as folded, import-asserted, unit-pinned); wave 4 found that an **empty/whitespace `memoir_recall` query** has no dedicated code and is mapped to `memoir_internal_error` — a user-input error reported as an internal error. Is a 19th code warranted?
+### 13.0 Authority
 
-### 13.1 Ruling
+The **Emperor, as OWNER of the memoir tool surface**, ruled on 2026-11-05 — verbatim:
 
-> **Option (b) — AUTHORIZE the 19th code `memoir_query_required`**, mapped **identity** from the retrieval service's `query_required` (`daemon/services/memoir_retrieval.py:374`).
+> *"as the OWNER of the memoir tool surface, I rule that TRUTHFULNESS OF THE ERROR OUTWEIGHS THE FROZEN COUNT — at pre-release, before anything ships and before any pin/compat burden exists, authorizing a 19th code for a genuine user-input error is cheap; shipping a code that calls a user mistake an 'internal error' is a permanent lie in the contract, and my own future instances will read those errors and mis-learn from them. So: if an existing code (or a best-fit 19th) can say 'empty/invalid query' honestly, take it — authorize the 19th if necessary. Keep 18 ONLY if one of them is genuinely honest for this case. Record the ruling in decisions.md either way, and keep the pin/coverage consequences explicit in the ceremony notes."*
 
-### 13.2 Why not (a) — keep the 18 and pick a "best-fit" argument-family code
+This **supersedes** the architect's earlier "prefer minimum churn" steer, and it supersedes the *authority* of the architect's own same-day V-1 ruling (which had reached the same disposition on architecture grounds). The disposition is unchanged; **the authority is now the surface's owner**, and the audit below is the reasoning the ruling required.
 
-**There is no honest best fit.** The frozen argument family is **entirely field-specific**: `memoir_reason_required`, `memoir_actor_required`, `memoir_invalid_actor`, `memoir_importance_out_of_range`, `memoir_body_too_long`, `memoir_title_too_long`, `memoir_stars_out_of_bounds`, `memoir_invalid_event_at`, `memoir_k_out_of_range`, `memoir_invalid_window`. None is generic. Mapping an empty recall query onto (say) `memoir_reason_required` would tell the model that its **pin reason** was missing — a worse falsehood than the catch-all, and one that invites a wrong retry. `memoir_internal_error` is at least not a lie about *another field*, but it is a semantic falsehood about **agency**: it says "a bug happened" when the caller sent `""`, and it misroutes incident triage (an operator hunting a bug where the caller sent an empty string). The dev's instinct was right about preserving the true message; the code — the machine-readable field agents and operators key on — is the part that needs the new member.
+### 13.1 The audit — all 18 codes tested for a GENUINELY honest fit
 
-### 13.3 Why the specific name, not a generic `memoir_invalid_argument`
+| # | Code | Honest for an empty/whitespace `memoir_recall` query? | Why |
+|---|---|---|---|
+| 1 | `memoir_disabled` | **NO** | Names the knob, not the input — and the knob gate fires *before* argument validation, so it cannot even be reached for this case. |
+| 2 | `memoir_agent_unknown` | **NO** | Identity failure. |
+| 3 | `memoir_not_authorized` | **NO** | Identity/authority failure. |
+| 4 | `memoir_reason_required` | **NO** | Right *family* ("required field"), **wrong field** — it tells the model its PIN REASON is missing and invites a wrong retry. |
+| 5 | `memoir_actor_required` | **NO** | Right family, wrong field (actor). |
+| 6 | `memoir_invalid_actor` | **NO** | Wrong field. |
+| 7 | `memoir_keepsake_cap_reached` | **NO** | Domain rule (pin admission). |
+| 8 | `memoir_not_found` | **NO** | Id-lookup failure. |
+| 9 | `memoir_not_a_keepsake` | **NO** | Domain rule (unpin). |
+| 10 | `memoir_importance_out_of_range` | **NO** | Wrong field. |
+| 11 | `memoir_body_too_long` | **NO** | Wrong field (write path). |
+| 12 | `memoir_budget_exceeded` | **NO** | Names the **output** envelope (recall results), not the input. |
+| 13 | `memoir_internal_error` | **NO** | Claims a bug/agency failure where the caller sent `""` — **precisely the permanent lie the ruling forbids**. |
+| 14 | `memoir_k_out_of_range` | **NO** | Right family, **wrong parameter** — `k` is valid in this request. |
+| 15 | `memoir_invalid_window` | **NO** | `since`/`until` are *timeline* parameters; recall has no window. |
+| 16 | `memoir_title_too_long` | **NO** | Wrong field. |
+| 17 | `memoir_stars_out_of_bounds` | **NO** | Wrong field. |
+| 18 | `memoir_invalid_event_at` | **NO** | Wrong field. |
 
-1. **Family style**: every existing argument code is field-specific; a generic member would be the odd one out and would become the dumping ground for every future unmapped argument error — re-creating today's mislabelling class at a nicer label.
-2. **Identity mapping**: the service already emits `query_required`; the tool's `_RECALL_CODE_MAP` gains an identity entry instead of a translation, and the catch-all loses its one known user (it should remain for genuinely unexpected internal failures only).
-3. **The predicate is already right**: `clean_query = (query or "").strip()` in the service covers empty **and** whitespace; no tool-side pre-validation is added — D4.8's stated philosophy is that the tool never re-derives a bound, it maps the service's code onto this vocabulary.
+> **AUDIT RESULT: 0 of 18 honest.** The near-misses are all *adjacent, not honest*: the "required-field" pair names the wrong field, the "argument" pair names the wrong parameter, and the catch-all names the wrong **agency**. Each would misroute the model's retry — which is exactly what "my own future instances will read those errors and mis-learn from them" describes.
 
-### 13.4 Considered and rejected
+### 13.2 Ruling — the 19th code
 
-- **Silent reinterpretation** (treat an empty query as "most recent"): it masks a caller bug *and* smuggles `memoir_timeline`'s semantics into `memoir_recall` — precisely the "two tools, two expectations" error flag #10 warns against.
-- **A generic 19th code**: see 13.3.
-- **Keeping the catch-all and only rewording the message**: the message is *already* carried (`Error: {tool} REFUSED — reason={code}: {message}`); the only lie is the code, so this changes nothing.
+> **`MEMOIR_CODE_QUERY_REQUIRED = "memoir_query_required"`** — mapped **identity** from the retrieval service's `query_required`.
 
-### 13.5 Consequences — exactly, and what is NOT touched
+- **Name**: the "required" sub-family (`memoir_reason_required`, `memoir_actor_required`) — the family style, and it says exactly what is true: a required input was empty.
+- **Rejected: generic `memoir_invalid_argument`** — a dumping ground that re-creates today's mislabelling class at a nicer label, and the one member of the set that would never say anything specific.
+- **Rejected: silent reinterpretation** of an empty query as "most recent" — masks a caller bug *and* smuggles `memoir_timeline` semantics into `memoir_recall` (the exact "two tools, two expectations" error flag #10 warns against).
+- **The predicate is already right**: `daemon/services/memoir_retrieval.py:374` — `clean_query = (query or "").strip()` / `if not clean_query: raise MemoirRecallError("query_required", "the recall query must not be empty")` — covers **empty and whitespace**. No tool-side pre-validation is added: D4.8's philosophy is that the tool never re-derives a bound, it maps the service's code onto the vocabulary.
 
-| Surface | Change |
-|---|---|
-| `daemon/tools/memoir.py` | new `MEMOIR_CODE_QUERY_REQUIRED = "memoir_query_required"`; one frozenset member; `assert len(MEMOIR_CODES) == 18` → **19** (`:201`); module docstring "18 exactly" → 19 and the mapping table gains `query_required → memoir_query_required`; `_RECALL_CODE_MAP["query_required"]` identity entry; the catch-all comment drops its now-mapped example |
-| `tests/unit/test_memoir_tools_unit.py` | `len(MEMOIR_CODES) == 18` → **19** (`:171`); the fallback test (`test_a_blank_recall_query_falls_back_to_the_catch_all`, `:410-420`) **inverts** to assert `memoir_query_required` + the true message — a red-to-green flip that is mutation-meaningful |
-| `daemon/services/memoir_retrieval.py` | **no change** — it already emits `query_required` with the correct message and trims the predicate |
-| **NOT touched** | the `PRIVILEGED_TOOL_CATEGORIES` census (#18 of 18), the 5-tool / 4-family counts, `DYNAMIC_TOOL_NAMES` / `KNOWN_TOOL_NAMES`, and the `agents/.prompt-artifacts.sha256` baseline (the ari doctrine mentions `memoir_disabled` as an example but does **not** enumerate the code set — verified). **The refusal-code frozen set is a separate, module-local set**, which is why 18 → 19 never reaches the surfaces the registration ceremony settled |
+### 13.3 Mechanical fix list — verbatim for the dev
+
+**`daemon/tools/memoir.py`**
+1. Add the constant beside its siblings (`:174`, after `MEMOIR_CODE_INVALID_EVENT_AT`): `MEMOIR_CODE_QUERY_REQUIRED = "memoir_query_required"`.
+2. Add **one** member to the `MEMOIR_CODES` frozenset (`:178-199`).
+3. `:201`: `assert len(MEMOIR_CODES) == 18` → `== 19`; `:202` message `"EXACTLY 18 codes"` → `"EXACTLY 19 codes"`.
+4. `:42` docstring: "must match the 18 exactly" → **19**.
+5. `:53-58` docstring: the mapping table gains *"the recall-service `query_required` → `memoir_query_required`"*; the sentence *"A service code with NO frozen counterpart (`query_required`) falls back to `memoir_internal_error` …"* loses its now-mapped example → *"A service code with NO frozen counterpart falls back to `memoir_internal_error` with the TRUE message preserved — the vocabulary is frozen, so the tool never invents a code (the same fallback covers every unexpected internal failure)."*
+6. `_RECALL_CODE_MAP` (beside `:340`): add `"query_required": MEMOIR_CODE_QUERY_REQUIRED`.
+7. `:344-346` comment: drop the `query_required` example, keep "any future service code with no frozen counterpart".
+8. **No `__all__` change** — `__all__` exports the `MEMOIR_CODES` *set*, not the individual constants (the test imports module-level names directly).
+
+**`tests/unit/test_memoir_tools_unit.py`**
+9. Import block (`:47-60`): add `MEMOIR_CODE_QUERY_REQUIRED`.
+10. `:170` test name `test_the_import_time_assertion_freezes_eighteen_codes` → `…_freezes_nineteen_codes`; `:171` `== 18` → `== 19`.
+11. `:410` test: rename `test_a_blank_recall_query_falls_back_to_the_catch_all` → `test_a_blank_recall_query_refuses_with_query_required`; rewrite the docstring (it is no longer a fallback — it is the honest code); assert `MEMOIR_CODE_QUERY_REQUIRED` (keep `assert "empty" in result`). **This assertion IS the pin** and is mutation-meaningful: reverting item 6 turns it RED.
+
+**`daemon/services/memoir_retrieval.py`** — **no change** (it already emits `query_required` with the true message and trims the predicate).
+
+**Optional (cheap, not required)**: an 11th leg in `test/packs/memoir_mutation_matrix_test.py` that deletes the `_RECALL_CODE_MAP` entry ⇒ item 11 must go RED.
+
+### 13.4 Instrument census — who carries the count (the ruling's explicit question)
+
+| Instrument | Carries the `MEMOIR_CODES` count? | Detail |
+|---|---|---|
+| `daemon/tools/memoir.py:201` import-time assertion | **YES** | item 3 |
+| `tests/unit/test_memoir_tools_unit.py:171` + the test **name** ("eighteen") | **YES** | item 10 — the name carries the count in prose and must flip too |
+| **MT-01** (`test/packs/metrics_read_mutation_matrix_test.py:92-93`) | **NO** | Its literal is `assert len(PRIVILEGED_TOOL_CATEGORIES) == 18` → `== 17` — the **category** count. It never references `MEMOIR_CODES`; unaffected. |
+| `test/packs/memoir_mutation_matrix_test.py` (10 legs) | **NO** | Zero references to `MEMOIR_CODES`, `query_required`, or `memoir_internal_error`. |
+| Any shell pack (`test/packs/*memoir*.sh`) | **NO** | Repo-wide grep: no pack references `MEMOIR_CODES`. |
+| A separate frozen-set "coverage table" | **Does not exist** | Coverage is the per-code unit-test set; the new code's coverage row is item 11. |
+| `agents/.prompt-artifacts.sha256` | **NO** | The ari doctrine mentions `memoir_disabled` as an example but does **not** enumerate the set ⇒ baseline stays 161/161. |
+
+**The refusal-code set is a separate, module-local frozen set.** That is precisely why 18 → 19 never reaches the surfaces the Phase-4 registration ceremony settled.
+
+### 13.5 Ceremony-notes text — VERBATIM for the Phase-8 fold
+
+> **V-1 refusal-vocabulary consequence (user-ruled 2026-11-05; `decisions.md` §4 row 18).** This release ships the refusal vocabulary at **19 codes**, not 18: `memoir_query_required` was authorized by the Emperor — owner of the memoir tool surface — because no existing code was honest for an empty/whitespace `memoir_recall` query (audit: **0 of 18 honest**; every near-miss names a different *field* or a different *parameter*, and `memoir_internal_error` claims a bug where the caller sent an empty string). The 18 → 19 bump is **release-local and self-contained**: it touches **only** `daemon/tools/memoir.py` (the constant, one frozenset member, the import-time `assert len(MEMOIR_CODES) == 19`, the docstring count and mapping table, the `_RECALL_CODE_MAP` identity entry) and `tests/unit/test_memoir_tools_unit.py` (the import, the count pin **and its test name**, and the inverted empty-query test). It does **NOT** touch the `PRIVILEGED_TOOL_CATEGORIES` census (#18 of 18), the 5-tool / 4-family counts, `DYNAMIC_TOOL_NAMES` / `KNOWN_TOOL_NAMES`, the prompt-artifact baseline (`agents/.prompt-artifacts.sha256` stays 161/161 — the ari doctrine does not enumerate the set), **MT-01** (`test/packs/metrics_read_mutation_matrix_test.py:92-93` carries the *category* count 18 → 17, not the refusal-code count, and is unaffected), or the memoir mutation matrix (its 10 legs reference no code). **Ceremony acceptance therefore does NOT re-run MT-01 for this change and does NOT re-stamp the prompt baseline; it DOES require the memoir tools unit pack green** — the inverted empty-query test is the pin, and it is mutation-meaningful (reverting the `_RECALL_CODE_MAP` entry turns it RED) — **plus a `grep` census showing `len(MEMOIR_CODES) == 19` as the only count-bearing literal on this set.** Rollback posture is unchanged (no schema, no migration delta): a rollback reverts the vocabulary to 18 and degrades the empty-query refusal to `memoir_internal_error` — **fix-loss only, no data effect**.
 
 Recorded in `decisions.md` §4 row 18.
 
 ---
 
-*Phase B architect adjudication. Verdict SOUND-WITH-AMENDMENTS; 14 flags ruled (4 ADOPT / 9 ADOPT-AS-AMENDED / 1 CONFIRMED-no-row); 43 amendments (12 blocking); 6 deviation records; R1–R4 verified compliant. Adjudicated 2026-11-05 on `feature/ari-memoir-store` @ `63032008b`. Addenda: §11 delta re-review (post plan-fold `4d5b43637`), §12 Q6 containment ruling (plan council record `6601b15a`), and §13 V-1 refusal-vocabulary ruling (Phase C; `decisions.md` §4 rows 1–18).*
+*Phase B architect adjudication. Verdict SOUND-WITH-AMENDMENTS; 14 flags ruled (4 ADOPT / 9 ADOPT-AS-AMENDED / 1 CONFIRMED-no-row); 43 amendments (12 blocking); 6 deviation records; R1–R4 verified compliant. Adjudicated 2026-11-05 on `feature/ari-memoir-store` @ `63032008b`. Addenda: §11 delta re-review (post plan-fold `4d5b43637`), §12 Q6 containment ruling (plan council record `6601b15a`), and §13 V-1 refusal-vocabulary ruling (Phase C, **user-ruled**; `decisions.md` §4 rows 1–18).*
