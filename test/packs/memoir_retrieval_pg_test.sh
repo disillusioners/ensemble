@@ -138,7 +138,7 @@ timeout 280 env \
   -u PORT -u DAEMON_PORT \
   "${PY}" -m pytest "${TARGET[@]}" \
   --override-ini="addopts=" -m postgres \
-  -q --tb=short -rs -p no:randomly >"${LOG}" 2>&1
+  -q --tb=short -rfE -p no:randomly >"${LOG}" 2>&1
 RC=$?
 cat "${LOG}"
 

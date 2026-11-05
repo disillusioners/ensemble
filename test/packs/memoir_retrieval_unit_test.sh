@@ -80,7 +80,7 @@ LOG="$(mktemp -t memoir_retrieval_unit_test.XXXXXX)"
 trap 'rm -f "${LOG}"' EXIT
 
 timeout 300 env "${SCRUB[@]}" "${PY}" -m pytest "${TARGET[@]}" \
-  -q --tb=short -rs -p no:randomly --override-ini="addopts=" >"${LOG}" 2>&1
+  -q --tb=short -rfE -p no:randomly --override-ini="addopts=" >"${LOG}" 2>&1
 RC=$?
 cat "${LOG}"
 
