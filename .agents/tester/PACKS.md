@@ -1,3 +1,34 @@
+## Commission nest-anomaly-report (wi-2d691ed2) — TESTER-GATE FIX CYCLE: B1 concurrent-shed pin REGISTERED (2026-11-05, fix lane `feature/nest-anomaly-report`)
+
+> **What this block registers.** Blocker **B1** from the independent functional gate
+> (`.agents/tester/RESULTS/2026-11-05-nest-anomaly-report-functional-gate.md`): the per-tree
+> shed decremented `cluster.report_count` from a **pre-delete read** while the `DELETE` can
+> affect **0 rows** (a concurrent shed already removed the victims) — drifting the count by
+> −1 per racing shed, measured **40/40 rounds** on PG 16.15 (control: 20/20 exact with no shed).
+> The fix drives the per-cluster decrement from **`DELETE … RETURNING`** — the row set the
+> delete ACTUALLY removed is the single atomic truth for both halves, so the invariant
+> `report_count == COUNT(members WHERE outcome='accepted')` composes with a concurrent relative
+> INCREMENT (D2) AND a concurrent shed (E5's four call sites).
+>
+> **The pin is the tester's 40-round harness shape.** A concurrent DOUBLE shed racing an
+> assignment on a cluster owned by a DIFFERENT key: S1 sheds the victim batch UNCOMMITTED
+> (holding the row locks), the racer's `assign_report_unit` (different key, same
+> `shed_report_ids`) blocks on the victim rows, S1 commits, the racer's `RETURNING` observes
+> 0 deleted rows and must decrement NOTHING. The interleave is DETERMINISTIC (rendezvous via
+> `pg_stat_activity` wait-event polling), not a hope-race — 40/40 rounds assert exact counts,
+> no negative counts, no dangling `cluster_id`, no silent loss. A control leg pins the
+> no-shed 20-thread composition.
+>
+> **PG-only by design:** the race needs real row-lock blocking under READ COMMITTED, which
+> SQLite cannot produce; when PG is unreachable the pack skips loudly via the shared conftest
+> probe. **Mutation proof:** restoring the pre-read decrement (the committed HEAD form) fails
+> the pin with the predicted drift (`round 0: victim cluster count 0 != 2`) — RED; the fix —
+> GREEN. **Keep-both:** every earlier block stays as-is; newest-first.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `anomaly_shed_concurrency_pg` (B1 — the 40-round double-shed race + the no-shed control) | `cd $WT && timeout 900 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT PG_TEST_HOST=127.0.0.1 PG_TEST_PORT=5432 PG_TEST_DB=<scratch> PG_TEST_ALLOWED_DBS=<scratch> PG_TEST_USER=<role> PG_TEST_PASSWORD=<pw> .venv/bin/python -m pytest tests/postgres/test_anomaly_shed_concurrency_pg.py --override-ini="addopts=" -m postgres -q --tb=short -p no:randomly --timeout=600` | **2 nodes** (mechanical `--collect-only` census at this freeze): `test_report_count_exact_40_rounds` — **40 rounds**, per round: seed a 4-member `performance` cluster, shed its 2 oldest members UNCOMMITTED in S1, race `assign_report_unit` on a `correctness` cluster carrying the same victim batch, rendezvous on a real PG row-lock wait, commit S1, then assert `report_count == 2 == COUNT(accepted members)`, the racer's report durable + clustered, `report_count >= 0` everywhere, zero dangling `cluster_id`, and every cluster's count == its member count · `test_concurrent_same_key_accepts_stay_exact` — the control: 20 barrier-synchronized same-key accepts with NO shed stay exact (per-cluster counts + total == 20). **Serial only.** Scratch DB created/dropped by the invoking lane; DROP verified, census zero leftovers. | 2026-11-05 | ✅ **2/2 PASS on PG 16.15** (40/40 rounds exact); mutation leg RED at the pre-read form (`count 0 != 2`), GREEN after restore |
+
 ## Commission nest-anomaly-report (wi-2d691ed2) — MERGE-FIRST extension: the ceremony reaches the four aegis-lane agents (2026-11-05, implementation lane `feature/nest-anomaly-report`)
 
 > **What this block registers.** The **merge-first extension** — the phase-5 ceremony (the duty

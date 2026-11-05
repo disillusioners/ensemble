@@ -120,8 +120,12 @@ def shed_members(session: Session, report_ids: list[str]) -> int:
     Deletes the given member rows and, IN THE SAME unit-of-work:
 
     * per-cluster RELATIVE decrement — ``report_count = report_count
-      - :n`` grouped over the batch's deleted ids (AM-6; composes with
-      concurrent relative INCREMENTS under READ COMMITTED — D2), and
+      - :n`` where ``:n`` is the count of rows THIS ``DELETE ...
+      RETURNING`` actually removed, grouped over the returned
+      ``cluster_id`` values (AM-6; composes with concurrent relative
+      INCREMENTS under READ COMMITTED — D2 — AND with a concurrent
+      shed that already removed some of these ids — B1: a pre-read
+      count would double-decrement rows another transaction shed), and
     * the R-b zero-count cluster DELETE — a cluster whose
       ``report_count`` reaches 0 and has no surviving members is
       DELETED (``DELETE ... WHERE id=:c AND report_count <= 0 AND NOT
@@ -130,19 +134,37 @@ def shed_members(session: Session, report_ids: list[str]) -> int:
     One implementation, FOUR call sites (the live per-tree
     shed-then-accept at insert, the age sweep, and both capacity
     trims) — no drift. Rows with a NULL ``cluster_id`` (refusal rows)
-    are deleted with NO decrement (they are not members).
+    are deleted with NO decrement (they are not members). Returns the
+    number of rows actually deleted (RETURNING-driven — a concurrent
+    shed may have removed some ids first).
     """
     ids = [str(item) for item in report_ids if item]
     if not ids:
         return 0
-    groups = session.execute(
-        select(AnomalyReport.cluster_id, func.count())
+    # B1 — the decrement is driven by the rows THIS delete ACTUALLY
+    # removed (DELETE ... RETURNING), never by a pre-delete read: two
+    # concurrent sheds (or a shed racing a trim) select the same
+    # victim ids, and under READ COMMITTED the SECOND transaction's
+    # DELETE affects 0 rows — decrementing from a pre-read count would
+    # subtract rows the OTHER transaction already shed (measured −1
+    # drift per racing shed, 40/40 rounds on PG 16). The RETURNING row
+    # set is the single atomic truth for both the delete and the
+    # decrement, so the invariant ``report_count == COUNT(members
+    # WHERE outcome='accepted')`` composes with a concurrent relative
+    # INCREMENT (D2) AND a concurrent shed (E5's four call sites).
+    deleted_cluster_ids = session.execute(
+        delete(AnomalyReport)
         .where(AnomalyReport.id.in_(ids))
-        .where(AnomalyReport.cluster_id.is_not(None))
-        .group_by(AnomalyReport.cluster_id)
-    ).all()
-    session.execute(delete(AnomalyReport).where(AnomalyReport.id.in_(ids)))
-    for cluster_id, count in groups:
+        .returning(AnomalyReport.cluster_id)
+    ).scalars().all()
+    per_cluster: dict[str, int] = {}
+    for cluster_id in deleted_cluster_ids:
+        if cluster_id is None:
+            # Refusal rows are NOT members — deleted with no decrement.
+            continue
+        key = str(cluster_id)
+        per_cluster[key] = per_cluster.get(key, 0) + 1
+    for cluster_id, count in per_cluster.items():
         session.execute(
             update(AnomalyCluster)
             .where(AnomalyCluster.id == cluster_id)
@@ -159,7 +181,7 @@ def shed_members(session: Session, report_ids: list[str]) -> int:
                 ),
             )
         )
-    return len(ids)
+    return len(deleted_cluster_ids)
 
 
 @dataclass
