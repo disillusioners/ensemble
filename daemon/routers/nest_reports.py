@@ -241,10 +241,12 @@ async def _build_off_loop(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def _bound_payload(payload: dict[str, Any], key: str) -> dict[str, Any]:
-    """The byte-ceiling belt (the door's shape, ported).
+    """The byte-ceiling belt (the door's trim shape, ported).
 
-    The trim measures the SHIPPED envelope and the bound block says so
-    — a bound that drops something is never silent.
+    The trim measures the PRETTY-PRINTED form (``indent=2``) while the
+    wire ships compact JSON, so it is deliberately CONSERVATIVE — it
+    trims earlier than the bound the wire actually applies. The bound
+    block keeps a dropped item visible, never silent.
     """
     from daemon.services.metrics_query.constants import RESPONSE_BYTE_CEILING
 

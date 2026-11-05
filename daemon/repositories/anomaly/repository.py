@@ -20,11 +20,13 @@ retention/trims:
   was zero-count-DELETED by a concurrent shed between the SELECT and
   the UPDATE; the report row is terminalized ``unclustered`` — NEVER a
   ``cluster_id`` pointing at a deleted cluster.
-* **E5 — ONE shed helper, two callers.** :func:`shed_members` is THE
-  decrement-and-delete implementation (per-cluster RELATIVE decrement
-  per AM-6 + the R-b zero-count cluster DELETE in the same
-  unit-of-work); the LIVE per-tree shed-then-accept and BOTH
-  maintenance trims call it. One implementation, no drift.
+* **E5 — ONE shed helper, FOUR call sites.** :func:`shed_members` is
+  THE decrement-and-delete implementation (per-cluster RELATIVE
+  decrement per AM-6 + the R-b zero-count cluster DELETE in the same
+  unit-of-work); the LIVE per-tree shed-then-accept at insert, the
+  age sweep (``sweep_reports_older_than``) and BOTH capacity trims
+  (``trim_to_global_capacity`` / ``trim_tree_to_capacity``) call it.
+  One implementation, no drift.
 * **AM-4 — CUTOFFS ARE PYTHON-BOUND.** Every window predicate binds a
   Python-computed ISO-8601 parameter; the SQL never says
   ``now() - interval`` (on PostgreSQL a TEXT column has no such
@@ -125,10 +127,10 @@ def shed_members(session: Session, report_ids: list[str]) -> int:
       DELETED (``DELETE ... WHERE id=:c AND report_count <= 0 AND NOT
       EXISTS (members)``).
 
-    One implementation, TWO callers (the live per-tree
-    shed-then-accept at insert, and both maintenance trims) — no
-    drift. Rows with a NULL ``cluster_id`` (refusal rows) are deleted
-    with NO decrement (they are not members).
+    One implementation, FOUR call sites (the live per-tree
+    shed-then-accept at insert, the age sweep, and both capacity
+    trims) — no drift. Rows with a NULL ``cluster_id`` (refusal rows)
+    are deleted with NO decrement (they are not members).
     """
     ids = [str(item) for item in report_ids if item]
     if not ids:

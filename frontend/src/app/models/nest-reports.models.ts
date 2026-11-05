@@ -23,10 +23,10 @@
  *     server-side (`SEVERITY_RANK`), never in a second FE copy;
  *   * the chip's TEXT is the route's `severity_label` — the PEAK
  *     phrasing ("critical (peak)", AM-7), rendered verbatim;
- *   * `open` is DERIVED SERVER-SIDE (`last_report_at >= now − 1h`,
- *     the R5 resolve window) — the FE renders the boolean and never
- *     recomputes it (a client clock would disagree with the server's
- *     window).
+ *   * `open` is DERIVED SERVER-SIDE (`last_report_at >= now −
+ *     resolve_window_seconds`, the R5 resolve window; default 1h) —
+ *     the FE renders the boolean and never recomputes it (a client
+ *     clock would disagree with the server's window).
  */
 
 import { decodeMetricsDoorError } from './metrics.model';

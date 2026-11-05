@@ -3171,8 +3171,8 @@ class NestReportConfig(BaseSettings):
       trade-off: one agent's burst can consume its siblings' quota).
     * The KEY SPACE IS NOT AGENT-EXPANDABLE — custom agents exist
       only through the auth-gated REST route, so the distinct budget
-      keys are fixed by the in-repo agent catalogue (36 at this
-      freeze).
+      keys are fixed by the in-repo agent catalogue (re-derived at
+      each release).
 
     AM-16 — THE DEFAULT-ON POSTURE IS CONDITIONAL
     ---------------------------------------------
@@ -3356,10 +3356,11 @@ class NestReportConfig(BaseSettings):
         ge=1,
         description="AM-9 — the pre-harvest global ceiling on ACCEPTED "
                     "reports per hour. D3: 5,000 -> 2,000 -> 1,500 — "
-                    "the budget key is the agent TYPE (36 distinct "
-                    "keys at this freeze), so the maximal steady rate "
-                    "is 36 x (30 minor/major + 20 critical) = 1,800/h "
-                    "and 1,500 binds in steady state. This knob is an "
+                    "the budget key is the agent TYPE (the key count "
+                    "follows the in-repo agent catalogue, re-derived at "
+                    "each release), so the maximal steady rate is "
+                    "keys x (30 minor/major + 20 critical) and 1,500 "
+                    "binds in steady state. This knob is an "
                     "OPERATOR BRAKE, not a security fence (the per-type "
                     "caps are the inner brake). Env: "
                     "ENSEMBLE_NEST_REPORT_MAX_ACCEPTED_PER_HOUR_GLOBAL.",
@@ -5430,8 +5431,9 @@ class Config(BaseSettings):
     # nest-anomaly-report (2026-11-05): the report_anomaly knob section
     # (R9 — class NestReportConfig, env prefix ENSEMBLE_NEST_REPORT_;
     # the OPERATIONAL surfaces take the nest- prefix while the DATA
-    # layer keeps the anomaly- names). Peers with `notify_user:` — the
-    # yaml block mirrors the field names exactly.
+    # layer keeps the anomaly- names). ENV-ONLY: this section has no
+    # config.yaml block and ``load_config`` has no pass-through for
+    # it, so a hand-added yaml block would be silently ignored.
     nest_report: NestReportConfig = Field(default_factory=NestReportConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)

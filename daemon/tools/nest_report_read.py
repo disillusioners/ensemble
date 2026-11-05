@@ -126,8 +126,9 @@ de-escalates; it is not a "current" severity.
 OPEN IS DERIVED (R5)
 --------------------
 A cluster is open iff its last report is within the resolve window
-(1h). The flag is computed SERVER-side at query time; there is no
-stored status and nothing to drift.
+(default 1h; ``NestReportConfig.resolve_window_seconds``). The flag is
+computed SERVER-side at query time; there is no stored status and
+nothing to drift.
 
 THE EXCERPT IS OPT-IN (AM-12)
 ------------------------------

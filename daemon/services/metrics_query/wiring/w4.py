@@ -125,7 +125,8 @@ anomaly_clusters_open = register_family_metric(
         "labelled by their PEAK severity (critical (peak) = the highest "
         "severity seen in that cluster's window — max_severity never "
         "de-escalates). Open is DERIVED, never stored: "
-        "last_report_at >= now - 1 hour."
+        "last_report_at >= now minus the configured resolve window "
+        "(NestReportConfig.resolve_window_seconds, default 1 hour)."
     ),
     source_idiom="registry",
     durability="durable",

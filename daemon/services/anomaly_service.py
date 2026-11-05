@@ -101,6 +101,17 @@ class). ONE exception, pinned by AM-8b: ``metrics_query_provider
 .families()`` runs IN-LINE, never inside an offload worker — it takes
 the REGISTRY-LEVEL lock, and holding a scarce 25-slot worker behind
 that lock is the deadlock the amendment names.
+
+MODULE SHAPE — WHY THIS IS ONE MODULE
+-------------------------------------
+The accept path, both read projectors, the four harvest seams and the
+retention sweep live here because they share two invariants: the fence
+ORDER (every refusal precedes any harvest) and the per-call manager
+dereference for the seams. Splitting the seams into a collaborator
+would move the degradation policy away from the ordering it must
+compose with (an off-loop seam failure degrades ONE field — it must
+never become a refusal). The repository layer below owns the SQL; this
+module owns the ordering, the stripes and the degradation.
 """
 
 from __future__ import annotations
@@ -1809,8 +1820,11 @@ class AnomalyService:
         +/- ``wedge_match_window_seconds`` of the report AND its
         ``boot_epoch`` equals the report's — both sides canonicalized
         to naive-UTC before the compare (the wedge subsystem writes
-        two different shapes). Only the capture IDS are stored; the
-        payloads are never read.
+        two different shapes). The epoch leg is SKIPPED when the
+        report's own epoch is unknown (``own_epoch is None`` — the
+        permissive fallback: a time-window match survives a failed
+        epoch harvest). Only the capture IDS are stored; the payloads
+        are never read.
         """
         seams = self._resolve_seams()
         wedge_repository = seams.wedge_repository

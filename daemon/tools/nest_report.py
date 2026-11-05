@@ -194,8 +194,10 @@ DEFAULT_SEVERITY = "major"
 #: tool's cap EQUALS the service's cap, so the two can never drift.
 CATEGORY_RAW_MAX_CHARS = _SERVICE_CATEGORY_RAW_MAX_CHARS
 
-#: The envelope's cluster tail — phase 1 writes the DEGENERATE cluster
-#: tail (phase 2 replaces it with the real assignment).
+#: The envelope's cluster tail for the IMPOSSIBLE
+#: ``accepted``-without-cluster shape — the greppable marker for an
+#: AM-5b contract violation the service cannot produce (phase 2 deleted
+#: the phase-1 degenerate tail).
 PENDING_CLUSTER_ID = "pending-phase-2"
 
 #: The envelope's cluster tail for a report whose ASSIGNMENT FAILED —

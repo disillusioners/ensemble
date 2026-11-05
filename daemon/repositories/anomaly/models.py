@@ -135,7 +135,8 @@ class AnomalyReport(SQLModel, table=True):
         wedge_capture_ids: The matched wedge capture ids — REFERENCES
             only, never payloads.
         cluster_id: The cluster identity, assigned ONCE at write time.
-            NULL in phase 1 (the cluster assignment lands in phase 2).
+            NULL only on refusal rows and on the ``unclustered``
+            terminal outcome; every ``accepted`` row carries one.
         outcome: One of :data:`OUTCOME_VALUES`.
         refusal_reason: The typed refusal token + short detail, when
             the row is a refusal.
