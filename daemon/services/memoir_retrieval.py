@@ -393,6 +393,7 @@ class MemoirRetrievalService:
             missing_embedding=missing_embedding,
             embedding_excluded=embedding_excluded,
             semantic_used=self._semantic_enabled() and not self._embed_call_failed,
+            count=count,
         )
         rendered_ids = [episode["id"] for episode in shipped]
 
@@ -736,19 +737,32 @@ class MemoirRetrievalService:
         missing_embedding: int = 0,
         embedding_excluded: int = 0,
         semantic_used: bool = False,
+        count: int | None = None,
     ) -> tuple[list[dict[str, Any]], int, int, str, int]:
         """The budget enforcement on the SHIPPED projection (D2.10).
 
-        The per-episode body clamp, then the total envelope with a
+        The K-SLICE first (C-1): when ``count`` is set, only the first
+        ``count`` ranked candidates are even considered — ``k`` is the
+        cap on HOW MANY episodes ship and the token envelope is the cap
+        on HOW BIG they may be, and BOTH must hold. Without the slice
+        the validated ``k`` was checked twice and applied never, so a
+        ``k=5`` recall over a larger corpus shipped everything that fit
+        the budget. The timeline passes ``count=None`` (AM-42: it has no
+        ``k``) and is bounded by the shared envelope alone.
+
+        Then the per-episode body clamp, then the total envelope with a
         RANKED-DROP (the head results stay whole), then the FINAL
         RE-CHECK — the footer is part of the shipped bytes, so the
         envelope is re-measured with it in place and the tail is dropped
         again if the footer pushed the total over.
         """
+        candidates: list[Any] = list(ranked)
+        if count is not None:
+            candidates = candidates[:count]
         shipped: list[dict[str, Any]] = []
         shipped_texts: list[str] = []
         body_tokens = 0
-        for row in ranked:
+        for row in candidates:
             projection = self._project(row)
             text = render_episode(projection)
             tokens = _estimate_tokens(text)
@@ -757,7 +771,7 @@ class MemoirRetrievalService:
             shipped.append(projection)
             shipped_texts.append(text)
             body_tokens += tokens
-        dropped = len(ranked) - len(shipped)
+        dropped = len(candidates) - len(shipped)
 
         footer = self._footer(
             episodes=len(shipped),

@@ -442,3 +442,35 @@ def test_the_recall_marks_exactly_the_shipped_ids(repo):
         ).first()
         assert row.access_count == 1
         assert row.last_accessed_at is not None
+
+
+# ── C-1: k is the result-count cap (the k-slice) ─────────────────────────
+
+
+def test_k_caps_the_shipped_episode_count_on_a_larger_corpus(repo):
+    """C-1 (council): ``k`` was validated twice and applied NEVER — the
+    budget loop shipped every row that fit the token envelope, so a
+    ``k=5`` recall over a larger corpus returned the whole corpus.
+
+    The corpus is TWELVE rows (larger than k=5) with bodies small enough
+    that the 6,000-token envelope is never the binding constraint — the
+    ONLY thing that may bound the shipment here is ``k`` itself:
+    ``len(result.episodes) == 5``, never 12.
+    """
+    base = FIXED_NOW - timedelta(days=10)
+    for index in range(12):
+        created = base + timedelta(minutes=index)
+        repo.insert_episode(
+            agent_id="ari",
+            body=f"preserved moment {index} — a small body",
+            created_at=created,
+            event_at=created,
+        )
+    service = _service(repo)
+    result = service.recall("ari", "preserved", k=5)
+    assert len(result.episodes) == 5, (
+        f"k=5 must cap the shipment at 5 episodes; got "
+        f"{len(result.episodes)} — the k-slice was not applied"
+    )
+    assert len(result.rendered_ids) == 5
+    assert result.marked_ids == result.rendered_ids
