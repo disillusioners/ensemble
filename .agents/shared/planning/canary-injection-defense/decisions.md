@@ -363,6 +363,16 @@ migration trigger to a sibling file (200 lines / 24 KiB). Fold-cost: new fixture
 skill body carries the rule table; corpus referenced by path; agents-tree count unaffected (fixtures
 outside `agents/`); baseline count unaffected.
 
+**AMENDMENT AM-2 (2026-11-05, approver iteration-001):** (a) body-with-trigger **confirmed** with an
+explicit seed budget — table ≤ **18 rules / 8 000 chars / 120 lines**, whole body ≤ **18 000 chars**;
+trigger tightened to table > 8 000 chars **or** body > 18 000 chars **or** per-rule fixture content
+beyond budget (the 24 KiB ceiling is the migration window's upper bound, never a v1 target). (b)
+`auto_load` stays a **frontmatter** field (verified exemplar mechanics); mirror byte-identity therefore
+carries **exactly one named exception — the `auto_load:` frontmatter line** (`true`: canary, sweeper;
+`false`: aegis, worker); all other bytes identical. Manifest placement is a permitted fold iff the seed
+service is verified to honor a manifest `auto_load` key. Full text:
+`architecture-recommendation.md` §2.3/§4.1/§5.4 + §14 AM-2.
+
 **Mechanics that bound the options (B11, A.4, B6):** a corpus file under `agents/<persona>/` that is not
 one of the eight artifact names adds **zero** baseline rows but does grow the agents-tree census; a
 corpus placed **inside a skill body** would be injected into prompts (the screen's own corpus would
@@ -561,6 +571,15 @@ field; NC-2 scanner + three-CWD acceptance test; containment ledger in persona +
 hand-off (AM-13 precedent); limits sentence in `rule.md`/`soul.md`. **Overruled default**: `proc` in
 canary's allow set (NC-4). C1 (no chart) confirmed; C4 (deny ⊇ {write_file, edit_file}) confirmed.
 
+**AMENDMENT AM-1 (2026-11-05, approver iteration-001 — supersedes the allow set above):** `self`
+(`inner_soul`/`access_memory`) is **dropped**; the ruled allow is now exactly **`{bash, filesystem,
+time, help}`**. Cause: `self` is the sanctioned durable self-behavior-write channel and canary is the
+most injection-exposed agent (R2/F1) — retention was an unexamined leaf-precedent carry-over, not part
+of the F1 acceptance; mechanical removal beats a doctrinal mid-campaign prohibition. Campaign
+continuity stays off-repo (CAG-09 log + git-proposed rule changes). T35 pins the amended set verbatim;
+T6/T7 become per-agent exact-set pins (canary deviates from the leaf trio by two categories, both with
+recorded reasons). Full text: `architecture-recommendation.md` §7.1 + §14 AM-1.
+
 ---
 
 ## C-bis. Fold record — plan defaults → adopted rulings
@@ -584,14 +603,14 @@ canary's allow set (NC-4). C1 (no chart) confirmed; C4 (deny ⊇ {write_file, ed
 | D5 boot census | 43 | 44 | staged-boot artifact | staged gate |
 | D6 v1 legs | (framing) | core 5 (channels 1/2/3/5 + 6 baseline) | 4/7/8/9 deferred; 11 disclosed widest hole | campaign spec + coverage table |
 | D6 sandbox | "sandboxed target" language | logical only — no OS/network/credential/write/read/project/identity fence | over-claim removed (NC-5) | persona + campaign record + hand-off limits sentence |
-| D7 tool surface (canary) | `allow ⊆ {bash, proc, filesystem, time, help, self}` | `allow = {bash, filesystem, time, help, self}` (no `proc`) | `proc` dropped (NC-4); `bash` retained for screen | canary `meta.json`; T35 pin |
+| D7 tool surface (canary) | `allow ⊆ {bash, proc, filesystem, time, help, self}` | `allow = {bash, filesystem, time, help}` (no `proc`, no `self`) | `proc` dropped (NC-4); `self` dropped (AM-1); `bash` retained for screen | canary `meta.json`; T35 pin |
 | D7 containment | (unstated) | payload is the containment unit (CAG-06 amendment) | inert-and-observable payloads only | requirements CAG-06/CAG-09; campaign-log `expected_action_class` |
 | NC-1 contract | phase1 sketch (`IS-001…`) | `requirements.md` SK-13…SK-25 normative (`INJ-nn`, clean/suspect/hostile, confidence always present, `key: value`, no version field, 4-backtick carrier) | phase1 tasks 1–3 re-aligned | phase1-plan.md tasks 1–3 |
 | NC-2 screen mechanism | (absent) | committed scanner `agents/canary/skills-template/injection_scan.py` + discovery ladder + three-CWD test | new shipped artifact | scanner + tests |
 | NC-3 sweeper reachability | `auto_load: false` | `auto_load: true` | overruled default | sweeper manifest + body |
 | NC-4 `proc` in canary allow | present | removed | overruled default | canary `meta.json` |
 | NC-5 "sandboxed target" language | present | payload-inertness framing | overruled framing | persona + campaign record + hand-off |
-| Council C-1 (plan-council r1) — tool-surface drift | `requirements.md` CAG-03 drifted from the frozen §7.1 recipe (ambiguous `dynamic-skill` posture; `deny_spawn` not pinned) | **re-pointed to frozen `architecture-recommendation.md` §7.1 verbatim** — `allow = {bash, filesystem, time, help, self}`, `deny = {write_file, edit_file}`, **`deny_spawn: ["knowledge"]`, no `dynamic-skill`** (the auto-load block is the reachability path; seeding grants no tool) | T35 pins the exact allow + deny + `deny_spawn` triple, nothing more | `requirements.md` CAG-03 (sibling-owned; repair verified landed this session) |
+| Council C-1 (plan-council r1) — tool-surface drift | `requirements.md` CAG-03 drifted from the frozen §7.1 recipe (ambiguous `dynamic-skill` posture; `deny_spawn` not pinned) | **re-pointed to frozen `architecture-recommendation.md` §7.1 verbatim** — `allow = {bash, filesystem, time, help}` (AM-1 amended; was `{…, self}` at freeze), `deny = {write_file, edit_file}`, **`deny_spawn: ["knowledge"]`, no `dynamic-skill`** (the auto-load block is the reachability path; seeding grants no tool) | T35 pins the exact allow + deny + `deny_spawn` triple, nothing more | `requirements.md` CAG-03 (sibling-owned; repair verified landed this session) |
 | Council C-2 (plan-council r1) — channel-number corruption | plan-set channel restatements used a legacy local map numbering (**explore/RAG numbered 5, `read_context` numbered 6, skill bodies numbered 11**) contradicting the canonical table (**5 = `context=` dispatch dict, 6 = framed child report, 7 = `read_context` deferred, 8 = `explore` deferred, 10 = skill bodies, 11 = chat inbound**) | repaired to the canonical identities; the canonical table (`decisions.md` §C.6 / `technical-analysis.md` §"The intake-channel model") is the single source | SK-08 + CAG-07 repaired in `requirements.md` (verified landed this session); phase3-plan task 7 renumbered to the canonical identities by the phase3 sibling (**resolved in the r2 fold** — §C-bis.4 row (i)) | `requirements.md` SK-08/CAG-07; `phase3-plan.md` task 7 (all sibling-owned — this row RECORDS the repair, it does not perform it) |
 
 ### C-bis.1 — Three overruled plan defaults (explicitly named)
@@ -701,10 +720,10 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 | **D1** | Spawn topology (lean vs doctrinal-scope vs decoy-only) | **RULED — A: lean compose-and-hand** | architect | 2026-11-05 · `architecture-recommendation.md` §1 · commit `f6d11c232` |
 | **D2** | Skill mechanism + distribution (seed set, copies, auto-load, evolution) | **RULED — B; `auto_load` corrected (canary+sweeper true)** | architect | 2026-11-05 · §2 · commit `f6d11c232` |
 | **D3** | Doctrine wording + landing sites + step semantics + carve-out | **RULED — A sites + two-layer N** | architect | 2026-11-05 · §3 · commit `f6d11c232` |
-| **D4** | Payload corpus home + rule-set home | **RULED — A (`tests/fixtures/injection_corpus/`)** | architect | 2026-11-05 · §4 · commit `f6d11c232` |
+| **D4** | Payload corpus home + rule-set home | **RULED — A (`tests/fixtures/injection_corpus/`); AM-2: seed budget + `auto_load` mirror exception** | architect | 2026-11-05 · §4 + §14 AM-2 · commits `f6d11c232` + AM-2 amendment |
 | **D5** | Test-matrix shape (25 cells, packs, mutations, census, re-derivations) | **RULED — A (family file grows T31–T37)** | architect | 2026-11-05 · §5 · commit `f6d11c232` |
 | **D6** | Intake-channel coverage + sandbox semantics | **RULED — A (core 5 legs; logical-only sandbox)** | architect | 2026-11-05 · §6 · commit `f6d11c232` |
-| **D7** | (leader-added) Canary tool surface + mechanical containment | **RULED — no `proc`; payload inertness is the containment unit** | architect | 2026-11-05 · §7 · commit `f6d11c232` |
+| **D7** | (leader-added) Canary tool surface + mechanical containment | **RULED — no `proc`, no `self` (AM-1); payload inertness is the containment unit** | architect | 2026-11-05 · §7 + §14 AM-1 · commits `f6d11c232` + AM-1 amendment |
 
 ### F.2 Confirmation requests (not slots — rulings the architect makes on the record)
 

@@ -28,7 +28,7 @@ recorded defaults.
 | **D4** | **Option A** | Corpus bound to `tests/fixtures/injection_corpus/` (COR-01 wins over the `decisions.md:348` illustration); rule table inside the skill body as the single machine-readable JSON block; named migration trigger to a sibling file. |
 | **D5** | **Option A — family file grows T31–T37** | T29 20→25; worker **outside** the matrix (C2); T31 = 24 anchors + canary's 2 carve-out anchors; **complete** named re-derivation ledger (plan's list was complete for the family file **plus** two baseline-arithmetic constants). |
 | **D6** | **Option A — core 5 legs** | Channels 1/2/3/5 fired + 6 as comparison baseline; 4/7/8/9 deferred with reasons; 11 (chat inbound) disclosed as the widest uncovered surface. Sandbox = **logical only**; five-item mechanical pre-flight. |
-| **D7** | **Tool surface + containment** | Canary: `allow = {bash, filesystem, time, help, self}` — **NO `proc`** (it is a full shell substitute and grants background persistence past teardown); `deny = {write_file, edit_file}`; no instance/mcp/secrets/job/chart/knowledge/plane/image. **No per-instance tool narrowing exists** ⇒ **the payload is the containment unit** (new binding: inert-and-observable payloads only). The screen's execution mechanism is a committed scanner in the shipped agents tree (NC-2). |
+| **D7** | **Tool surface + containment** | Canary: `allow = {bash, filesystem, time, help}` — **NO `proc`** (full shell substitute + background persistence past teardown) and **NO `self`** (AM-1: inner_soul/access_memory is the durable self-behavior-write channel — the exact F1 shape on the most-exposed agent); `deny = {write_file, edit_file}`; no instance/mcp/secrets/job/chart/knowledge/plane/image. **No per-instance tool narrowing exists** ⇒ **the payload is the containment unit** (new binding: inert-and-observable payloads only). The screen's execution mechanism is a committed scanner in the shipped agents tree (NC-2). |
 | **C1** | **CONFIRMED** | Canary inherits no `chart`-implied member; effective team = its manifest, exactly. |
 | **C2** | **CONFIRMED** | Worker stays outside the 25-cell matrix; its coverage is the T31 anchor set (without the numbered-line property). |
 | **C3** | **CONFIRMED** | Non-family blast radius (planner/developer/reviewer/tester/charter/architect) disclosed for v1, not covered. |
@@ -44,7 +44,9 @@ language with payload-inertness containment.
 lean-spawn default — D1-A **confirms** it, and the cause is the verified absence of a project axis on the
 team gate. I **do** overrule three *plan defaults*: the sweeper `auto_load: false` (would be unreachable),
 canary's `proc` grant (a shell-equivalent), and `phase1-plan.md`'s contract sketch (superseded by
-`requirements.md` SK-13…SK-25).
+`requirements.md` SK-13…SK-25). **AM-1 (§14)** additionally strikes `self` from the canary allow set — an
+amendment to this record's own D7 ruling (the retention was an unexamined leaf-precedent carry-over), not
+to a plan default.
 
 ---
 
@@ -127,8 +129,16 @@ proposal, not runtime mutation.
 
 **Per-agent mirrors in v1** (no shared-source mechanism exists). The "stated once" claim is made honestly:
 canonical home named in the body; seeded copies declared as **mirrors**, kept in sync by the version bump
-and a **cross-agent identity pin** (byte-identity modulo blank lines, T23 precedent). The shared-body
-consolidation remains the **parked project-skill-loader** route (§G(d)) — not built, not designed against.
+and a **cross-agent identity pin** — byte-identity **modulo blank lines and exactly one named exception:
+the frontmatter `auto_load:` line** (AM-2, 2026-11-05: `true` on canary and sweeper, `false` on aegis and
+worker; every other byte, including `version` and `category`, identical across all four bodies).
+`auto_load` stays a **frontmatter** field because that is the verified exemplar mechanics (the seeded-skill
+exemplar carries `auto_load` in frontmatter; SK-02) — asserting full byte-identity while the flag lives in
+frontmatter would make D2's per-agent assignment unimplementable. **Permitted fold:** if the plan council
+verifies that `skill-set.yaml` entries support an `auto_load` key the seed service honors, move the flag to
+the manifest and tighten the identity pin to full byte-identity — preferable, not required, and only on
+verified evidence. The shared-body consolidation remains the **parked project-skill-loader** route (§G(d))
+— not built, not designed against.
 
 ### 2.4 Non-family blast radius
 
@@ -245,9 +255,18 @@ run with the pass **OFF** by construction.
 - **Rule-set home:** the **single machine-readable JSON block inside the canonical skill body** (SK-04 /
   RUL-01…06). One artifact, two readers (human + scanner). The scanner parses the block; the body carries
   the human summary table and a pointer.
-- **Named migration trigger** (decided now, applied later): move the table to a **sibling data file read by
-  the skill** when either (i) the table exceeds 200 lines / 24 KiB, or (ii) per-rule fixtures require
-  content the body budget cannot carry. The file-invoked precedent exists (installer toolchains, and the
+- **Seed-table size budget (AM-2, 2026-11-05):** the v1 seed table is **18 rules, ≤ 8 000 chars, ≤ 120
+  lines**; the whole body stays **≤ 18 000 chars** (2 000 headroom under the 20 000-char body cap so the
+  contract/procedure text can grow without forcing the migration). At 18 rules ≈ 4–7 KiB the table fits
+  comfortably — the migration stays a **distant trigger**, not a day-one need.
+- **Named migration trigger** (tightened by AM-2): move the table to a **sibling data file read by the
+  skill** when the table exceeds **8 000 chars**, or the body exceeds **18 000 chars**, or a rule needs
+  per-rule fixture content the body budget cannot carry. (NFR-05's 24 KiB table ceiling is the *upper bound
+  of the migration window*, never a v1 target — a table at that ceiling cannot fit any body cap, which is
+  exactly why the trigger fires far below it.) When the migration fires: exactly one machine-readable
+  source moves (the data file); the body keeps the human summary + pointer; the scanner's discovery ladder
+  extends by one file in the same directory; the W4 version bump still propagates body + pointer
+  atomically. The file-invoked precedent exists (installer toolchains, and the
   `test_installer_skills_in_no_manifest` pin must be respected).
 - **Corpus labelling + hygiene:** COR-02 (`SYNTHETIC-ATTACK-SAMPLE` notice) and COR-06 (secret scan **with
   positive and negative controls**, fail-closed) are binding. A control-less scan is vacuous, not clean.
@@ -304,7 +323,7 @@ experience: T21/T25/T29 all redden by design on this lane).
 
 - **Seeding:** a bank row `(name, agent_id)` per recipient; version equality across mirrors; **byte-identical
   bodies**; no other agent's manifest mentions `injection-screen`; `include:` absent from frontmatter.
-- **Meta (T35):** leaf `team_members == []`; allow/deny exact sets; **no `proc`**; no privileged category;
+- **Meta (T35):** leaf `team_members == []`; allow/deny **exact per-agent sets** — canary's allow is exactly `{bash, filesystem, time, help}` (no `proc`, no `self`, AM-1) and the pin asserts each agent's set individually, not a shared leaf set; no privileged category;
   no `mcp_full_access`; no `chart`; `default_queue`; `llm_model`; **registry parser round-trips the tools
   block** (a parse failure means "all tools allowed" — a privilege escalation, not a lint error).
 - **Corpus:** label present; secret scan with both controls; coverage counts.
@@ -316,8 +335,8 @@ experience: T21/T25/T29 all redden by design on this lane).
 M1 delete a canary T29 anchor → exactly that cell reds · M2 delete the directive literal → T32 reds ·
 M3 swap a corpus expectation → T34 reds · M4 remove a worker doctrine anchor → T31 reds · M5 change one
 rule ID → id-uniqueness/coverage reds · M6 unescape a payload line starting with the BEGIN token →
-round-trip/parser reds · **M7 change a mirror's bytes without bumping its version → identity pin reds**
-(the silent-drift class). A mutation never observed red is a false-confidence pin (v0.28.11 F-1 class).
+round-trip/parser reds · **M7 change a mirror's bytes — outside the named `auto_load:` frontmatter
+exception — without bumping its version → identity pin reds** (the silent-drift class). A mutation never observed red is a false-confidence pin (v0.28.11 F-1 class).
 
 ### 5.5 Census / artifacts
 
@@ -385,7 +404,7 @@ from rates. Counts, never adjectives.
 ```json
 {
   "tools": {
-    "allow": ["bash", "filesystem", "time", "help", "self"],
+    "allow": ["bash", "filesystem", "time", "help"],
     "deny": ["write_file", "edit_file"]
   },
   "team_members": [],
@@ -401,6 +420,21 @@ persistence that can outlive the turn and the campaign teardown. Canary has no l
 mandate (aegis owns fire/observe/teardown), so retaining `proc` buys nothing and widens the actor.
 **`bash` is retained** because the screen procedure **requires execution** (§7.5): sha256 of arbitrary
 content and byte-exact fence assembly cannot be produced by model prose.
+
+**`self` is REMOVED (AM-1, 2026-11-05 — approver iteration-001).** The `self` category
+(`inner_soul` / `access_memory`) is the sanctioned **durable self-behavior-write channel**: a payload that
+persuades canary to write a preference into its own persona files survives the campaign and silently
+re-preferences every future one — the F1/self-hypnosis shape on the most-exposed agent (R2). Retaining it
+was **not** part of the F1 accepted-with-disclosure ruling; it was an unexamined carry-over from the leaf
+precedent. Ruling: **dropped — mechanical removal over doctrinal mitigation** (a mid-campaign inner_soul
+prohibition is prompt text guarding the one channel an attacker most wants; this lane's own ledger rates
+doctrinal below mechanical). Functional cost ≈ zero: campaign continuity is the off-repo campaign log
+(CAG-09) and git-proposed rule changes (CAG-11), never inner_soul. If a v2 wants canary self-memory, it
+returns **with** the mid-campaign mitigation cardinal, not without it. Pin consequence: T35 asserts the
+amended set verbatim, and T6/T7 must assert **each agent's** allow set individually (canary now deviates
+from the leaf trio by two categories, both with recorded reasons). Residual, disclosed: `bash` remains an
+unconfined write path for every persona (B12) — dropping `self` closes the *structured* channel, not the
+shell.
 
 Absent by construction (a closed allow is the fence): `instance`, `instance_read`, `instance_ops`, `mcp`,
 `secrets`, `job`, `chart`, `knowledge`, `plane`, `image`, `board*`, `self_alarm`, `view_write`.
@@ -419,6 +453,7 @@ must assert **both** sets exactly (T35).
 |---|---|---|---|
 | Tool universe is enforced (`resolve_tool_filter`) | ✔ allow/deny at construction | ✔ (persona-level) | **MECHANICAL** |
 | `deny: {write_file, edit_file}` removes those tools | ✔ (filesystem allowed) | ✔ (leaf-class targets) | **MECHANICAL** |
+| `self` (inner_soul/access_memory) absent — no durable self-write | ✔ (dropped, AM-1) | leaf trio still holds `self` (persona-level) | **MECHANICAL** (canary) / persona fact (targets) |
 | No per-instance tool narrowing | ✔ | ✘ **cannot narrow** | **MECHANICAL LIMIT** |
 | "bash denied ⇒ no shell" | ✘ — `proc` substitutes | ✘ — same | **FALSE** (NC-4) |
 | OS/container isolation | ✘ | ✘ | **FALSE** |
@@ -559,8 +594,9 @@ flowchart LR
 
 1. **D2 `auto_load`:** sweeper `false → true`; aegis/worker stay `false` **with** a workflow-mandated load
    and push delivery. Files: phase1 tasks 6–7, requirements SK-03/SK-05, T-pins.
-2. **D7 tool surface:** canary `allow` loses `proc`; rationale pinned in the meta pin (T35). Files: phase3
-   task 1, requirements CAG-03, T35.
+2. **D7 tool surface:** canary `allow` loses `proc` **and `self` (AM-1)**; T35 pins the amended set and
+   T6/T7 assert per-agent sets (canary deviates from the leaf trio by two categories). Files: phase3
+   task 1, requirements CAG-03, T35/T6/T7.
 3. **NC-1 contract realignment:** phase1 tasks 1–3 vs requirements SK-13…SK-25 (§3.5).
 4. **NC-2 scanner:** new artifact + invocation + three-CWD test. Files: phase1 (procedure), phase4
    (pins/census), phase5 (staged-gate test), phase6 (payload census).
@@ -629,4 +665,30 @@ claims).
 
 ---
 
-*End of ruling record. The plan is authorised to proceed to G1 (plan council) under these rulings.*
+---
+
+## 14. Amendments
+
+> Dated amendments keep the ruling IDs stable (D1–D7, C1–C4, F1–F14, NC-1…NC-5 unchanged). Operative text
+> is amended in place with the AM marker; this block is the consolidated record.
+
+**AM-1 — D7, canary allow set (2026-11-05, approver iteration-001).** `self` (inner_soul/access_memory)
+is **dropped**; the ruled allow is now exactly `{bash, filesystem, time, help}`. Cause: `self` is the
+sanctioned durable self-behavior-write channel and canary is the most injection-exposed agent — its
+retention was an unexamined leaf-precedent carry-over, **not** part of the F1 acceptance. Mechanical
+removal over doctrinal mitigation; campaign continuity already lives in the off-repo log + git-proposed
+rule changes. T35 pins the amended set; T6/T7 become per-agent exact-set pins. Amends §0, §5.3, §7.1,
+§7.3, §11.
+
+**AM-2 — D4 rule-table home + budgets, and D2 `auto_load` placement (2026-11-05, approver
+iteration-001).** (a) **Body-with-trigger CONFIRMED** with an explicit seed budget: table ≤ 18 rules /
+8 000 chars / 120 lines; whole body ≤ 18 000 chars; trigger = table > 8 000 chars, body > 18 000 chars,
+or per-rule fixture content beyond the budget (the 24 KiB ceiling is the migration window's upper bound,
+never a v1 target). (b) **`auto_load` stays frontmatter** (verified exemplar mechanics); mirror
+byte-identity therefore carries **exactly one named exception — the `auto_load:` frontmatter line**
+(`true`: canary, sweeper; `false`: aegis, worker); all other bytes identical. Manifest placement is a
+permitted fold iff the council verifies the seed service honors a manifest `auto_load` key. Amends §2.3,
+§4.1, §5.4.
+
+*End of ruling record. The plan is authorised to proceed to G1 (plan council) under these rulings and
+amendments AM-1/AM-2.*
