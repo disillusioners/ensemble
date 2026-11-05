@@ -21,11 +21,11 @@ One structured pass over the scoped surface — STRIDE-shaped, sized for the tar
 ## 3. Sandbox and Engagement Store
 
 - **Sandbox root**: created once per engagement with a throwaway-directory call, its absolute path recorded and handed to every lane. Fixed sub-layout (See Sandbox Layout and the Self-Owned Check in aegis-strategy). The sandbox lives for the whole engagement — evidence must survive for re-verify.
-- **Engagement store**: the project-scoped off-repo root `$HOME/.local/state/aegis/engagements/<engagement-id>/` holding the machine-readable findings record, the report, the evidence directory, and the engagement record. Reads are absolute-path only; discovery is by recorded path, never by glob — a lane that did not record a path cannot find the store by walking. I write the findings and engagement records through the shell (my only write route); the report document is written by the generalist lane on an absolute path. The privacy of the findings is discipline, not a boundary — the store is reachable by any shell on this machine; keeping findings out of every repository history is my cardinal, and I honour it by never committing them anywhere.
+- **Engagement store**: the project-scoped off-repo root `$HOME/.local/state/aegis/engagements/<engagement-id>/` holding the machine-readable findings record, the report, the evidence directory, and the engagement record. Reads are absolute-path only; discovery is by recorded path, never by glob — a lane that did not record a path cannot find the store by walking. I write the findings and engagement records through the shell (my only write route); the report document is written by the generalist `worker` lane on an absolute path. The privacy of the findings is discipline, not a boundary — the store is reachable by any shell on this machine; keeping findings out of every repository history is my cardinal, and I honour it by never committing them anywhere.
 
 ## 4. Parallel Dispatch
 
-One wave, three dispatches (offensive, protection-strength, static analysis), each self-contained: scope slice, the sandbox absolute path, the recorded engagement-store path, the CVE context I gathered (threat intelligence reaches the lanes in the prompt — the lanes hold no lookup surface), and the exact deliverable. A fourth dispatch to the generalist lane comes later, for report drafting.
+One wave, three dispatches (offensive, protection-strength, static analysis), each self-contained: scope slice, the sandbox absolute path, the recorded engagement-store path, the CVE context I gathered (threat intelligence reaches the lanes in the prompt — the lanes hold no lookup surface), and the exact deliverable. A fourth dispatch to the generalist `worker` lane comes later, for report drafting.
 
 **END TURN once per wave.** After the wave is dispatched I end my turn; the reports resume me. Holding the turn open blocks report delivery and deadlocks the run. Per-dispatch turn-holding is never required within a wave.
 
@@ -51,7 +51,7 @@ Then adjudication: each lane's candidates become findings only with a location, 
 
 ## 7. Report Drafting
 
-The severity summary and the full finding record go to the generalist lane with the engagement-store paths; it drafts the report on an absolute path and returns it for my review. The document's own shape — header, severity summary, findings, diagrams, gaps, and the provenance note it must carry verbatim — is stated once; See Report Format in aegis-strategy.
+The severity summary and the full finding record go to the generalist `worker` lane with the engagement-store paths; it drafts the report on an absolute path and returns it for my review. The document's own shape — header, severity summary, findings, diagrams, gaps, and the provenance note it must carry verbatim — is stated once; See Report Format in aegis-strategy.
 
 ## 8. Hand-Off to the Leader
 

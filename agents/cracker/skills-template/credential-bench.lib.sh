@@ -31,7 +31,12 @@
 #   aegis_verify_sha256 <file> <expected>     0 match / 1 mismatch-or-refusal
 #   aegis_verify_install <cfg>                evidence gate before promotion
 #   aegis_acquire_install_lock                0 acquired / 1 contended
-#   aegis_release_install_lock                always succeeds
+#   aegis_release_install_lock                0 always; a FOREIGN owner's
+#                                            lock is left INTACT (the
+#                                            release is ownership-checked)
+#   aegis_install_signal <INT|TERM>           terminates the critical section
+#                                            (130 / 143) and releases the
+#                                            OWNED lock
 #   aegis_attempt_allowed / _bump_ / _clear_  self-heal cap of 2 per session
 #   aegis_corpus_path_ok <path> <root>        0 resolved-inside-root / 1 refused
 #   aegis_write_synthetic_corpus <path> <root> <generator>
@@ -54,6 +59,19 @@ _aegis_caller_nounset=0
 case "$-" in *e*) _aegis_caller_errexit=1 ;; esac
 case "$-" in *u*) _aegis_caller_nounset=1 ;; esac
 set -eu
+
+# --- Sourced-vs-executed detection -----------------------------------------
+# A SOURCED library must never `exit`: an exit inside a sourced file kills
+# the CALLER's shell, so the promised refusal never runs and the caller
+# cannot report anything. A DIRECTLY EXECUTED library must still end
+# non-zero. "$0" is this file's own path when the file is executed and the
+# CALLER's name when it is sourced — the one portable signal POSIX offers.
+# The detection is computed ONCE here and REUSED by the dispatch block at
+# the end of the file, so the two can never disagree.
+_aegis_lib_executed=0
+case "$0" in
+    *credential-bench.lib.sh) _aegis_lib_executed=1 ;;
+esac
 
 # --- Config (class-(i) install-time locations) ---------------------------
 AEGIS_TOOLBENCH_ROOT="${AEGIS_TOOLBENCH_ROOT:-$HOME/.local/opt/aegis-toolbench}"
@@ -81,6 +99,99 @@ _aegis_attempts_file() { printf '%s\n' "$AEGIS_STATE_HOME/credential-bench-sessi
 
 _aegis_ensure_dirs() {
     mkdir -p "$AEGIS_TOOLBENCH_ROOT/bin" "$AEGIS_STATE_HOME" "$AEGIS_CONFIG_HOME"
+}
+
+# --- Install-flow state (staging root, promoted assets) -------------------
+# The staging root and the assets THIS run promoted. The state is what
+# makes a refusal or a signal leave NOTHING half-promoted behind.
+_AEGIS_STAGE_DIR=""
+_AEGIS_PROMOTED_PATHS=""
+
+_aegis_discard_stage() {
+    # usage: _aegis_discard_stage
+    # Removes the staging root this run created. A failed removal is
+    # REPORTED, never swallowed: a staging root that survives a refusal is
+    # a class-(i) path left behind on the host.
+    if [ -n "$_AEGIS_STAGE_DIR" ]; then
+        if [ -d "$_AEGIS_STAGE_DIR" ]; then
+            if ! rm -rf "$_AEGIS_STAGE_DIR" 2>/dev/null; then
+                echo "WARN: staging root could not be discarded ($_AEGIS_STAGE_DIR)"
+            fi
+        fi
+        _AEGIS_STAGE_DIR=""
+    fi
+}
+
+_aegis_record_promotion() {
+    # usage: _aegis_record_promotion <path>
+    # Records an asset this run is ABOUT to promote, so a later refusal or
+    # signal can roll it back. Only assets this run CREATES are recorded:
+    # a path that already existed belongs to a previous install, and
+    # removing it on rollback would destroy a working toolchain that this
+    # run merely overwrote.
+    if [ -e "$1" ]; then
+        return 0
+    fi
+    _AEGIS_PROMOTED_PATHS="$_AEGIS_PROMOTED_PATHS$1
+"
+}
+
+_aegis_rollback_promoted() {
+    # A refusal or a signal must never leave a half-installed toolchain:
+    # every asset this run created is removed again. The probe-visible
+    # config is promoted LAST, so a rollback leaves the probe cold rather
+    # than advertising a toolchain that is not there.
+    if [ -z "$_AEGIS_PROMOTED_PATHS" ]; then
+        return 0
+    fi
+    printf '%s' "$_AEGIS_PROMOTED_PATHS" | while IFS= read -r _rb_path; do
+        if [ -n "$_rb_path" ]; then
+            rm -f "$_rb_path" 2>/dev/null || true
+        fi
+    done
+    _AEGIS_PROMOTED_PATHS=""
+}
+
+_aegis_install_fail() {
+    # usage: _aegis_install_fail <message>
+    # The ONE refusal path of the install flow: the message is emitted, the
+    # assets this run promoted are rolled back, the staging root is
+    # discarded, the OWNED lock is released, and the flow ends non-zero.
+    # In a SOURCED library the flow RETURNS (the caller's shell survives);
+    # in a DIRECTLY EXECUTED library the process exits non-zero.
+    echo "$1"
+    _aegis_rollback_promoted
+    _aegis_discard_stage
+    aegis_release_install_lock
+    trap - EXIT INT TERM
+    if [ "$_aegis_lib_executed" -eq 1 ]; then
+        exit 1
+    fi
+    return 1
+}
+
+# --- Signal handling (terminate the critical section) ---------------------
+aegis_install_signal() {
+    # usage: aegis_install_signal <INT|TERM>
+    # A signal during the install MUST terminate the critical section. The
+    # old handler only released the lock and let the install CONTINUE, so
+    # the installer ran on holding NO lock at all and a second installer
+    # could promote into the shared toolbench while the first was still
+    # writing to it. This handler rolls back what this run promoted,
+    # discards the staging root, releases the OWNED lock (a foreign
+    # owner's lock survives intact) and exits non-zero: 130 for INT, 143
+    # for TERM.
+    _ais_sig="$1"
+    _ais_rc=130
+    if [ "$_ais_sig" = "TERM" ]; then
+        _ais_rc=143
+    fi
+    echo "HARD_BLOCKER: $_ais_sig received — install critical section terminated, nothing promoted"
+    _aegis_rollback_promoted
+    _aegis_discard_stage
+    aegis_release_install_lock
+    trap - EXIT INT TERM
+    exit "$_ais_rc"
 }
 
 # --- sha256 verification (EXECUTED before every promotion) ---------------
@@ -116,20 +227,122 @@ aegis_verify_sha256() {
 }
 
 # --- Locking (mkdir-based, BSD-portable, no hard flock) -------------------
+# The lock directory carries ONE owner record: the pid of the run that took
+# it AND a per-run NONCE minted at acquire time, written as "<pid> <nonce>".
+#
+#   * the NONCE makes the release OWNERSHIP-CHECKED — a run may remove only
+#     a lock whose nonce is its own. A FOREIGN owner's lock (a concurrent
+#     installer's) survives INTACT: removing it would let a second
+#     installer promote into the shared toolbench while the first is still
+#     installing.
+#   * the PID makes the stale reclaim SAFE — a lock is reclaimed only when
+#     its recorded owner pid is PROVEN DEAD. A LIVE owner's lock is never
+#     removed, however old the directory looks: an install that runs longer
+#     than the staleness window is still an install in progress.
+_AEGIS_OWNED_NONCE=""
+
+_aegis_lock_owner_file() { printf '%s\n' "$(_aegis_lock_dir)/owner"; }
+
+_aegis_mint_nonce() {
+    # A per-run token: the pid, the wall clock and — where the kernel
+    # offers it — random bytes. The pid alone would not distinguish two
+    # runs of a recycled pid.
+    _mn_nonce="$$-$(date +%s 2>/dev/null || echo 0)"
+    if [ -r /dev/urandom ]; then
+        _mn_rand=$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+        if [ -n "$_mn_rand" ]; then
+            _mn_nonce="$_mn_nonce-$_mn_rand"
+        fi
+    fi
+    printf '%s\n' "$_mn_nonce"
+}
+
+_aegis_lock_owner_state() {
+    # usage: _aegis_lock_owner_state -> "alive" | "dead" | "unknown"
+    # The owner record is "<pid> <nonce>"; only the pid decides liveness.
+    # Death is never guessed: "kill -0" cannot tell "no such process" from
+    # "permission denied", so /proc settles it where it exists. Where it
+    # does not, the state stays "unknown" — death UNPROVEN, and an
+    # unproven death never authorises a reclaim.
+    _los_file="$(_aegis_lock_owner_file)"
+    if [ ! -f "$_los_file" ]; then
+        echo "unknown"
+        return 0
+    fi
+    _los_pid=""
+    while read -r _los_first _los_rest; do
+        _los_pid="$_los_first"
+        break
+    done < "$_los_file"
+    case "$_los_pid" in
+        ''|*[!0-9]*)
+            echo "unknown"
+            return 0
+            ;;
+    esac
+    if kill -0 "$_los_pid" 2>/dev/null; then
+        echo "alive"
+        return 0
+    fi
+    if [ -d /proc ]; then
+        if [ -d "/proc/$_los_pid" ]; then
+            echo "alive"
+            return 0
+        fi
+        echo "dead"
+        return 0
+    fi
+    echo "unknown"
+    return 0
+}
+
+_aegis_lock_reclaimable() {
+    # usage: _aegis_lock_reclaimable  (0 = the lock may be reclaimed, 1 = it may not)
+    # A lock is reclaimable only when it is older than the staleness window
+    # AND its owner is not alive:
+    #   * a recorded owner that is ALIVE -> never reclaimable, however old
+    #     the directory looks (an install that runs longer than the window
+    #     is still an install in progress);
+    #   * a recorded owner that is PROVEN dead -> reclaimable;
+    #   * an UNRECORDED owner -> reclaimable only once the window has
+    #     passed: the only way to reach it is an installer that died
+    #     between taking the lock and recording its ownership, and no live
+    #     installer stays there for the whole window.
+    _lrc_lock="$(_aegis_lock_dir)"
+    _lrc_stale_min=$(( (AEGIS_LOCK_STALE_SECS + 59) / 60 ))
+    if [ -z "$(find "$_lrc_lock" -type d -mmin +"$_lrc_stale_min" 2>/dev/null)" ]; then
+        return 1
+    fi
+    case "$(_aegis_lock_owner_state)" in
+        dead)
+            return 0
+            ;;
+        unknown)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 aegis_acquire_install_lock() {
     _ail_lock="$(_aegis_lock_dir)"
     mkdir -p "$(dirname "$_ail_lock")"
+    _ail_nonce="$(_aegis_mint_nonce)"
     if mkdir "$_ail_lock" 2>/dev/null; then
-        printf '%s\n' "$$" > "$_ail_lock/owner"
+        printf '%s %s\n' "$$" "$_ail_nonce" > "$_ail_lock/owner"
+        _AEGIS_OWNED_NONCE="$_ail_nonce"
         return 0
     fi
-    # staleness: a lock older than the window is a crashed install — abandon it
-    _ail_stale_min=$(( (AEGIS_LOCK_STALE_SECS + 59) / 60 ))
-    if [ -n "$(find "$_ail_lock" -type d -mmin +"$_ail_stale_min" 2>/dev/null)" ]; then
-        echo "WARN: stale install lock (older than ${AEGIS_LOCK_STALE_SECS}s) — treating as abandoned"
+    # A lock exists. It may be reclaimed ONLY when it is reclaimable — an
+    # owner that is alive is never removed, however old the lock looks.
+    if _aegis_lock_reclaimable; then
+        echo "WARN: stale install lock (owner not alive, older than ${AEGIS_LOCK_STALE_SECS}s) — treating as abandoned"
         rm -rf "$_ail_lock"
         if mkdir "$_ail_lock" 2>/dev/null; then
-            printf '%s\n' "$$" > "$_ail_lock/owner"
+            printf '%s %s\n' "$$" "$_ail_nonce" > "$_ail_lock/owner"
+            _AEGIS_OWNED_NONCE="$_ail_nonce"
             return 0
         fi
     fi
@@ -137,42 +350,112 @@ aegis_acquire_install_lock() {
 }
 
 aegis_release_install_lock() {
-    rm -rf "$(_aegis_lock_dir)" 2>/dev/null || true
+    # Releases the install lock — but ONLY the lock THIS run owns: the
+    # lock's nonce must match the nonce this run minted at acquire time.
+    # A FOREIGN owner's lock is left INTACT and reported.
+    _arl_lock="$(_aegis_lock_dir)"
+    if [ ! -d "$_arl_lock" ]; then
+        _AEGIS_OWNED_NONCE=""
+        return 0
+    fi
+    _arl_nonce=""
+    if [ -f "$_arl_lock/owner" ]; then
+        while read -r _arl_first _arl_second; do
+            _arl_nonce="$_arl_second"
+            break
+        done < "$_arl_lock/owner"
+    fi
+    if [ -z "$_AEGIS_OWNED_NONCE" ] || [ "$_arl_nonce" != "$_AEGIS_OWNED_NONCE" ]; then
+        echo "WARN: install lock is owned by another run — left intact"
+        return 0
+    fi
+    if ! rm -rf "$_arl_lock" 2>/dev/null; then
+        echo "WARN: install lock removal failed — the lock dir may survive"
+    fi
+    _AEGIS_OWNED_NONCE=""
+    return 0
 }
 
 _aegis_lock_held() {
+    # The PROBE's view of the lock: a lock whose owner is alive (or whose
+    # owner cannot be proven dead) is HELD — the probe reports "install in
+    # progress" (rc=2). The probe NEVER removes a lock: a probe that
+    # deleted a live install's lock would let a second installer promote
+    # into the shared toolbench. The probe also never ACQUIRES the lock,
+    # so it can never block the installer it is watching.
     _lh_lock="$(_aegis_lock_dir)"
-    [ -e "$_lh_lock" ] || return 1
-    _lh_stale_min=$(( (AEGIS_LOCK_STALE_SECS + 59) / 60 ))
-    if [ -n "$(find "$_lh_lock" -type d -mmin +"$_lh_stale_min" 2>/dev/null)" ]; then
-        rm -rf "$_lh_lock" 2>/dev/null || true
+    if [ ! -e "$_lh_lock" ]; then
+        return 1
+    fi
+    if _aegis_lock_reclaimable; then
         return 1
     fi
     return 0
 }
 
 # --- Self-heal attempt cap (2 per session) --------------------------------
+# The counter is VALIDATED before it is compared. A malformed counter
+# (empty, garbage, negative, or out of range) is a HARD_BLOCKER, never a
+# silent "no attempts used": an unvalidated counter lets a negative value
+# straight through the cap, and a self-heal loop with no bound is exactly
+# what the cap exists to prevent.
 _aegis_read_attempts() {
     _ra_file="$(_aegis_attempts_file)"
     if [ -f "$_ra_file" ]; then
-        cat "$_ra_file" 2>/dev/null || echo 0
+        _ra_content=$(cat "$_ra_file" 2>/dev/null) || _ra_content=""
+        printf '%s' "$_ra_content"
     else
         echo 0
     fi
 }
 
+_aegis_attempts_valid() {
+    # usage: _aegis_attempts_valid <raw-counter>  (0 = usable, 1 = malformed)
+    _av_raw=$(printf '%s' "${1:-}" | tr -d ' \t\n\r')
+    if [ -z "$_av_raw" ]; then
+        return 1
+    fi
+    case "$_av_raw" in
+        *[!0-9]*) return 1 ;;
+    esac
+    if [ "$_av_raw" -gt "$AEGIS_ATTEMPT_CAP" ]; then
+        return 1
+    fi
+    return 0
+}
+
 aegis_attempt_allowed() {
-    [ "$(_aegis_read_attempts)" -lt "$AEGIS_ATTEMPT_CAP" ]
+    # usage: aegis_attempt_allowed  (0 = one attempt is still allowed)
+    _aa_raw="$(_aegis_read_attempts)"
+    if ! _aegis_attempts_valid "$_aa_raw"; then
+        echo "HARD_BLOCKER: malformed self-heal attempt counter ('$_aa_raw') — refusing the attempt; the cap is not a licence to run unbounded"
+        return 1
+    fi
+    _aa_count=$(printf '%s' "$_aa_raw" | tr -d ' \t\n\r')
+    if [ "$_aa_count" -lt "$AEGIS_ATTEMPT_CAP" ]; then
+        return 0
+    fi
+    return 1
 }
 
 _aegis_bump_attempt() {
-    _ba_now="$(_aegis_read_attempts)"
+    _ba_raw="$(_aegis_read_attempts)"
+    if ! _aegis_attempts_valid "$_ba_raw"; then
+        echo "HARD_BLOCKER: malformed self-heal attempt counter ('$_ba_raw') — refusing the attempt"
+        return 1
+    fi
+    _ba_now=$(printf '%s' "$_ba_raw" | tr -d ' \t\n\r')
     _ba_next=$(( _ba_now + 1 ))
     printf '%s\n' "$_ba_next" > "$(_aegis_attempts_file)"
 }
 
 _aegis_clear_attempts() {
-    rm -f "$(_aegis_attempts_file)" 2>/dev/null || true
+    _ca_file="$(_aegis_attempts_file)"
+    if [ -f "$_ca_file" ]; then
+        if ! rm -f "$_ca_file" 2>/dev/null; then
+            echo "WARN: self-heal attempt counter could not be cleared ($_ca_file)"
+        fi
+    fi
 }
 
 # --- Synthetic-corpus discipline (no fetch, sandbox-only inputs) ----------
@@ -415,6 +698,11 @@ aegis_readiness_probe() {
 }
 
 # --- Fetch (download only — verification is always a separate gate) -------
+# The fetch is GUARDED: a transport failure, a non-2xx HTTP status and an
+# empty body all REFUSE — the caller sees a non-zero status and NOTHING is
+# promoted. "curl -f" alone is not enough: without an explicit status
+# check a 404 body is a perfectly good file, and the sha256 gate would
+# then be the only thing standing between an error page and a promotion.
 _aegis_fetch() {
     _af_url="$1"
     _af_dest="$2"
@@ -422,47 +710,91 @@ _aegis_fetch() {
         echo "HARD_BLOCKER: curl absent — release asset download impossible"
         return 1
     }
-    curl -fsSL -o "$_af_dest" "$_af_url"
+    _af_code=$(curl -sS -L -o "$_af_dest" -w '%{http_code}' "$_af_url" 2>/dev/null) || _af_code=""
+    case "$_af_code" in
+        2??) : ;;
+        *)
+            echo "HARD_BLOCKER: fetch failed (HTTP ${_af_code:-none}) for $_af_url — nothing promoted"
+            rm -f "$_af_dest" 2>/dev/null || true
+            return 1
+            ;;
+    esac
+    if [ ! -s "$_af_dest" ]; then
+        echo "HARD_BLOCKER: fetch failed (empty body) for $_af_url — nothing promoted"
+        rm -f "$_af_dest" 2>/dev/null || true
+        return 1
+    fi
+    return 0
 }
 
 # --- Install flow (class-(i) writes only; trap releases the lock) ---------
 aegis_install_all() {
+    # The install lock is taken BEFORE the first mutation and released on
+    # EVERY exit path — success, refusal, signal. The INT/TERM handlers
+    # TERMINATE the critical section: the old handler only released the
+    # lock and let the install CONTINUE, so the installer ran on holding
+    # NO lock at all and a second installer could promote into the shared
+    # toolbench while the first was still writing to it.
     aegis_attempt_allowed || {
         echo "HARD_BLOCKER: self-heal attempt cap reached (${AEGIS_ATTEMPT_CAP}) — report, do not retry"
         return 1
     }
+    # The signal handlers are armed BEFORE the lock is taken: a signal that
+    # lands in the window between "lock taken" and "handlers armed" would
+    # kill the install with the default disposition, and the lock would
+    # survive with an owner that never released it.
+    trap 'aegis_install_signal INT' INT
+    trap 'aegis_install_signal TERM' TERM
     aegis_acquire_install_lock || {
         echo "install in progress elsewhere — degrade this turn, retry next"
+        trap - INT TERM
         return 1
     }
-    trap 'aegis_release_install_lock' EXIT INT TERM
-    _aegis_bump_attempt
+    trap 'aegis_release_install_lock' EXIT
+    if ! _aegis_bump_attempt; then
+        return 1
+    fi
 
-    command -v curl >/dev/null 2>&1 || { echo "HARD_BLOCKER: curl"; exit 1; }
-    command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || { echo "HARD_BLOCKER: sha256 tool"; exit 1; }
+    if ! command -v curl >/dev/null 2>&1; then
+        _aegis_install_fail "HARD_BLOCKER: curl absent — release asset download impossible"
+        return 1
+    fi
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        if ! command -v shasum >/dev/null 2>&1; then
+            _aegis_install_fail "HARD_BLOCKER: no sha256 tool available (need sha256sum or shasum)"
+            return 1
+        fi
+    fi
 
     _aegis_ensure_dirs
     _in_stage="$(mktemp -d)"
-    trap 'rm -rf "$_in_stage"; aegis_release_install_lock' EXIT INT TERM
+    _AEGIS_STAGE_DIR="$_in_stage"
 
     echo "fetching hashcat@$HASHCAT_VERSION ..."
-    _aegis_fetch "$HASHCAT_URL" "$_in_stage/hashcat.7z"
-    # sha256 gate BEFORE any promotion — mismatch aborts, deletes, promotes nothing
-    aegis_verify_sha256 "$_in_stage/hashcat.7z" "$HASHCAT_SHA256" || {
-        rm -rf "$_in_stage"
-        echo "VERIFY FAILED — staged asset discarded, nothing promoted"
-        exit 1
-    }
-    command -v 7z >/dev/null 2>&1 || { rm -rf "$_in_stage"; echo "HARD_BLOCKER: 7z unpacker absent — never install one; report"; exit 1; }
-    7z x -o"$_in_stage/hashcat" "$_in_stage/hashcat.7z" >/dev/null 2>&1
-    if [ -f "$_in_stage"/hashcat/hashcat ]; then
-        cp "$_in_stage"/hashcat/hashcat "$AEGIS_TOOLBENCH_ROOT/bin/hashcat"
-        chmod 0755 "$AEGIS_TOOLBENCH_ROOT/bin/hashcat"
-    else
-        rm -rf "$_in_stage"
-        echo "HARD_BLOCKER: no verified release binary for hashcat@$HASHCAT_VERSION — never source-build from an unpinned tree"
-        exit 1
+    if ! _aegis_fetch "$HASHCAT_URL" "$_in_stage/hashcat.7z"; then
+        _aegis_install_fail "HARD_BLOCKER: hashcat release asset could not be fetched — nothing promoted"
+        return 1
     fi
+    # sha256 gate BEFORE any promotion — mismatch aborts, deletes, promotes nothing
+    if ! aegis_verify_sha256 "$_in_stage/hashcat.7z" "$HASHCAT_SHA256"; then
+        _aegis_install_fail "VERIFY FAILED — staged asset discarded, nothing promoted"
+        return 1
+    fi
+    if ! command -v 7z >/dev/null 2>&1; then
+        _aegis_install_fail "HARD_BLOCKER: 7z unpacker absent — never install one; report"
+        return 1
+    fi
+    if ! 7z x -o"$_in_stage/hashcat" "$_in_stage/hashcat.7z" >/dev/null 2>&1; then
+        _aegis_install_fail "HARD_BLOCKER: hashcat archive did not unpack — nothing promoted"
+        return 1
+    fi
+    if [ ! -f "$_in_stage"/hashcat/hashcat ]; then
+        _aegis_install_fail "HARD_BLOCKER: no verified release binary for hashcat@$HASHCAT_VERSION — never source-build from an unpinned tree"
+        return 1
+    fi
+    _aegis_record_promotion "$AEGIS_TOOLBENCH_ROOT/bin/hashcat"
+    cp "$_in_stage"/hashcat/hashcat "$AEGIS_TOOLBENCH_ROOT/bin/hashcat"
+    chmod 0755 "$AEGIS_TOOLBENCH_ROOT/bin/hashcat"
 
     # john: verified binary releases are vendor-dependent — an absent binary
     # is a per-tool HARD_BLOCKER (never a source build, never a real-corpus
@@ -470,18 +802,23 @@ aegis_install_all() {
     _in_john_ok=0
     if [ "$JOHN_SHA256" != "pin-before-first-install" ]; then
         echo "fetching john@$JOHN_VERSION ..."
-        if _aegis_fetch "$JOHN_URL" "$_in_stage/john.tar.xz" \
-           && aegis_verify_sha256 "$_in_stage/john.tar.xz" "$JOHN_SHA256"; then
-            tar -xJf "$_in_stage/john.tar.xz" -C "$_in_stage" 2>/dev/null || true
-            if [ -f "$_in_stage"/john-*/run/john ]; then
-                cp "$_in_stage"/john-*/run/john "$AEGIS_TOOLBENCH_ROOT/bin/john"
-                chmod 0755 "$AEGIS_TOOLBENCH_ROOT/bin/john"
-                _in_john_ok=1
-            fi
+        if ! _aegis_fetch "$JOHN_URL" "$_in_stage/john.tar.xz"; then
+            echo "HARD_BLOCKER: john release asset could not be fetched — bench degrades to hashcat only"
+        elif ! aegis_verify_sha256 "$_in_stage/john.tar.xz" "$JOHN_SHA256"; then
+            echo "HARD_BLOCKER: john release asset failed its sha256 gate — bench degrades to hashcat only"
+        elif ! tar -xJf "$_in_stage/john.tar.xz" -C "$_in_stage" 2>/dev/null; then
+            echo "HARD_BLOCKER: john archive did not unpack — bench degrades to hashcat only"
+        elif [ ! -f "$_in_stage"/john-*/run/john ]; then
+            echo "HARD_BLOCKER: no verified release binary for john@$JOHN_VERSION — bench degrades to hashcat only; never source-build"
+        else
+            _aegis_record_promotion "$AEGIS_TOOLBENCH_ROOT/bin/john"
+            cp "$_in_stage"/john-*/run/john "$AEGIS_TOOLBENCH_ROOT/bin/john"
+            chmod 0755 "$AEGIS_TOOLBENCH_ROOT/bin/john"
+            _in_john_ok=1
         fi
     fi
     if [ "$_in_john_ok" -eq 0 ]; then
-        echo "HARD_BLOCKER: no verified release binary for john@$JOHN_VERSION — bench degrades to hashcat only; never source-build"
+        echo "HARD_BLOCKER: no verified john binary at $AEGIS_TOOLBENCH_ROOT/bin/john — bench degrades to hashcat only; never source-build"
     fi
 
     # staged config -> verify -> promote (probe-visible config LAST).
@@ -496,17 +833,19 @@ aegis_install_all() {
         printf 'JOHN_BIN=%s\nJOHN_VERSION=%s\n' \
             "$AEGIS_TOOLBENCH_ROOT/bin/john" "$JOHN_VERSION" >> "$_in_tmpcfg"
     fi
-    aegis_verify_install "$_in_tmpcfg" || {
+    if ! aegis_verify_install "$_in_tmpcfg"; then
+        _aegis_install_fail "VERIFY FAILED — config discarded, probe stays cold"
+        return 1
+    fi
+    if ! mv "$_in_tmpcfg" "$AEGIS_CONFIG_HOME/$AEGIS_LIB_CONFIG"; then
         rm -f "$_in_tmpcfg"
-        rm -rf "$_in_stage"
-        echo "VERIFY FAILED — config discarded, probe stays cold"
-        exit 1
-    }
-    mv "$_in_tmpcfg" "$AEGIS_CONFIG_HOME/$AEGIS_LIB_CONFIG"
+        _aegis_install_fail "HARD_BLOCKER: config promote failed — probe stays cold"
+        return 1
+    fi
 
-    rm -rf "$_in_stage"
+    _aegis_discard_stage
     _aegis_clear_attempts
-    trap - EXIT
+    trap - EXIT INT TERM
     aegis_release_install_lock
     echo "credential-bench: OK (hashcat=$AEGIS_TOOLBENCH_ROOT/bin/hashcat, john=$_in_john_ok)"
 }
@@ -530,14 +869,15 @@ if [ "$_aegis_caller_nounset" = 1 ]; then set -u; else set +u; fi
 unset _aegis_caller_errexit _aegis_caller_nounset
 
 # --- Dispatch when executed directly (sourcing defines functions only) ----
-case "$0" in
-    *credential-bench.lib.sh)
-        set -eu
-        case "${1:-}" in
-            probe)    aegis_readiness_probe; exit $? ;;
-            install)  aegis_install_all ;;
-            reversal) aegis_reversal ;;
-            *) echo "usage: $0 probe|install|reversal" >&2; exit 64 ;;
-        esac
-        ;;
-esac
+# The sourced/executed detection computed at the top of this file is
+# REUSED here, so the dispatch decision and the refusal path can never
+# disagree about how this library was entered.
+if [ "$_aegis_lib_executed" -eq 1 ]; then
+    set -eu
+    case "${1:-}" in
+        probe)    aegis_readiness_probe; exit $? ;;
+        install)  aegis_install_all ;;
+        reversal) aegis_reversal ;;
+        *) echo "usage: $0 probe|install|reversal" >&2; exit 64 ;;
+    esac
+fi

@@ -168,8 +168,15 @@ _out="$(aegis_canonical_output_path "$SANDBOX_ROOT/out/semgrep.json" "$SANDBOX_R
     echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
     exit 1
 }
+_scan_status=0
 "$SEMGREP_BIN" scan --config <pinned-pack> --json \
-    "$SANDBOX_ROOT/builds/src" > "$_out" 2>&1
+    "$SANDBOX_ROOT/builds/src" > "$_out" 2>&1 || _scan_status=$?
+# a findings-exit (1) is a SUCCESSFUL scan, not a failed one — the mapping
+# keeps "the scanner found something" apart from "the scanner broke"
+aegis_scan_status_ok "$_scan_status" semgrep || {
+    echo "HARD_BLOCKER: semgrep did not complete — the sweep result is incomplete"
+    exit 1
+}
 aegis_scanner_output_ok "$SANDBOX_ROOT/out/gitleaks.json" "$SANDBOX_ROOT" || {
     echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
     exit 1
@@ -180,8 +187,18 @@ _out="$(aegis_canonical_output_path "$SANDBOX_ROOT/out/gitleaks.json" "$SANDBOX_
 }
 # --redact: secret VALUES never enter the JSON report (the no-plaintext
 # fence) — the finding names the rule and the location only
+_scan_status=0
 "$GITLEAKS_BIN" detect --redact --source "$SANDBOX_ROOT/builds/src" \
-    --report-format json --report-path "$_out"
+    --report-format json --report-path "$_out" || _scan_status=$?
+# gitleaks exits 1 when it FINDS A SECRET — that is a successful scan WITH
+# findings, not a failed scan. The mapping keeps the two apart: a
+# findings-exit must never mark the sweep failed (a real secret in the tree
+# is this lane's job), and a real failure (>= 2, including 127 = the
+# scanner is absent) must never be reported as a clean bill of health.
+aegis_scan_status_ok "$_scan_status" gitleaks || {
+    echo "HARD_BLOCKER: gitleaks did not complete — the sweep result is incomplete"
+    exit 1
+}
 aegis_scanner_output_ok "$SANDBOX_ROOT/out/cppcheck.xml" "$SANDBOX_ROOT" || {
     echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
     exit 1
@@ -190,8 +207,14 @@ _out="$(aegis_canonical_output_path "$SANDBOX_ROOT/out/cppcheck.xml" "$SANDBOX_R
     echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
     exit 1
 }
+_scan_status=0
 "$CPPCHECK_BIN" --enable=all --xml \
-    "$SANDBOX_ROOT/builds/src" 2> "$_out"
+    "$SANDBOX_ROOT/builds/src" 2> "$_out" || _scan_status=$?
+# cppcheck exits 1 when it FINDS an error — findings, not a failed scan
+aegis_scan_status_ok "$_scan_status" cppcheck || {
+    echo "HARD_BLOCKER: cppcheck did not complete — the sweep result is incomplete"
+    exit 1
+}
 # clang-tidy leg runs ONLY when the build's compile database is present:
 if [ -f "$SANDBOX_ROOT/builds/compile_commands.json" ]; then
     aegis_scanner_output_ok "$SANDBOX_ROOT/out/clang-tidy.txt" "$SANDBOX_ROOT" || {
@@ -202,6 +225,10 @@ if [ -f "$SANDBOX_ROOT/builds/compile_commands.json" ]; then
         echo "HARD_BLOCKER: scanner output destination refused — the sweep does not run"
         exit 1
     }
+    # clang-tidy is NOT in the findings-exit family: its exit status is an
+    # ERROR COUNT, not a status class, so the 1=findings mapping does not
+    # apply to it — a non-zero status here is not a "findings" signal and
+    # must not be reported as one.
     "$CLANG_TIDY_BIN" -p "$SANDBOX_ROOT/builds" "$SANDBOX_ROOT/builds/src"/* \
         > "$_out" 2>&1
 else
@@ -220,8 +247,15 @@ _out="$(aegis_canonical_output_path "$SANDBOX_ROOT/out/trivy.txt" "$SANDBOX_ROOT
 # finding still carries is the CONTEXT lines around the match), so the
 # trivy report is quarantined sandbox material: never transcribed, never
 # quoted; findings cite location and type only.
+_scan_status=0
 "$TRIVY_BIN" fs --scanners vuln,secret,misconfig \
-    "$SANDBOX_ROOT/builds" > "$_out" 2>&1
+    "$SANDBOX_ROOT/builds" > "$_out" 2>&1 || _scan_status=$?
+# trivy exits 0 on a clean scan and 1 when it is asked to exit non-zero on
+# findings — either way the mapping keeps findings apart from a failure
+aegis_scan_status_ok "$_scan_status" trivy || {
+    echo "HARD_BLOCKER: trivy did not complete — the sweep result is incomplete"
+    exit 1
+}
 ```
 
 The compile database is **detected, never generated**: its absence is a per-tool gap in the report — generating build metadata would mean running the target's build, which is not this lane.

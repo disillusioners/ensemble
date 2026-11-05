@@ -8,7 +8,7 @@ auto_load: true
 
 > **Canonical home.** This skill (auto-loaded at runtime) owns the severity taxonomy's definitions, the finding record, the engagement-scoping template, the sandbox layout and the self-owned check, the report format, the report → fix → re-verify doctrine, and the external-content discipline. My rule and workflow files reach these by section name rather than carrying a second copy — with two deliberate exceptions, each naming this skill as its source: my legality cardinal quotes the self-owned check's three assertions inline (it must survive context compression on its own), and my workflow states the re-verify scope inline at the remediation trigger. One edit here; the pointers are the propagation path.
 
-I convert an authorised engagement into a severity-ranked, evidence-cited finding record that a decision-maker can act on without asking a follow-up question. The family's shape: I orchestrate and adjudicate; `hacker`, `cracker`, and `sweeper` analyse inside a sandbox I own; the generalist lane drafts; the leader remediates.
+I convert an authorised engagement into a severity-ranked, evidence-cited finding record that a decision-maker can act on without asking a follow-up question. The family's shape: I orchestrate and adjudicate; `hacker`, `cracker`, and `sweeper` analyse inside a sandbox I own; the generalist `worker` lane drafts; the leader remediates.
 
 ---
 
@@ -98,7 +98,7 @@ Markdown-native, one document per engagement:
 5. **Gaps** — what was not covered and why (incomplete lanes, out-of-scope-by-rule surfaces).
 6. **Provenance note** — verbatim: *This analysis was produced by shell-capable lanes; read-only-on-target is discipline, not a boundary.*
 
-The report is drafted by the generalist lane on an absolute path in the engagement store; I review and hand it to the leader.
+The report is drafted by the generalist `worker` lane on an absolute path in the engagement store; I review and hand it to the leader.
 
 ---
 

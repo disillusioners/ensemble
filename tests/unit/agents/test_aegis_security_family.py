@@ -2517,3 +2517,893 @@ class TestBaselineArithmetic:
         (each would silently move the 177 count)."""
         for name in ("memory.md", "growth.md", "tools.md", "skill.md"):
             assert not (_agent_dir(agent) / name).exists(), f"{agent}/{name} must not exist (AM-11)"
+
+
+# ---------------------------------------------------------------------------
+# Final round — the five routed behaviour defects (lock ownership, signal
+# termination, sourced-lib exit, guarded fetch, counter validation) plus the
+# scan findings-exit mapping.
+#
+# Every leg here is EXECUTED against the committed library: the install flow
+# is driven with STUB binaries on a scratch PATH, so NOTHING touches the
+# network and nothing outside the scratch tree is written. The stubs are the
+# only executables the install flow can reach (curl, 7z, clang, clang++),
+# and every root (toolbench, state, config, staging) is redirected into the
+# scratch tree.
+# ---------------------------------------------------------------------------
+
+import io
+import tarfile
+import time
+
+FINAL_SHELLS = ("/bin/dash", "/bin/bash")
+
+# The per-library state names (the lock dir and the attempt counter live
+# beside the library's own config name).
+_LOCK_DIR_NAME = {
+    "cracker": "credential-bench-install.lock",
+    "hacker": "fuzzing-install.lock",
+    "sweeper": "sast-install.lock",
+}
+_ATTEMPTS_FILE_NAME = {
+    "cracker": "credential-bench-session-state",
+    "hacker": "fuzzing-session-state",
+    "sweeper": "sast-session-state",
+}
+_CONFIG_NAME = {
+    "cracker": "credential-bench.env",
+    "hacker": "fuzzing.env",
+    "sweeper": "sast.env",
+}
+
+# The stub curl: the install legs never touch the network. STUB_CURL_MODE
+# selects the behaviour the leg needs:
+#   ok        -> 200 with the body file
+#   http404   -> 404 with an error body (curl WITHOUT -f exits 0 here)
+#   transport -> a transport failure (non-zero, no output at all)
+#   empty     -> 200 with an empty body
+_STUB_CURL = """#!/bin/sh
+# stub curl — NO network is ever touched by the install legs.
+_dest=""
+_mode="${STUB_CURL_MODE:-ok}"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) _dest="$2"; shift 2 ;;
+        -w) shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [ -n "${STUB_CURL_SLEEP:-}" ]; then
+    sleep "$STUB_CURL_SLEEP"
+fi
+case "$_mode" in
+    http404)
+        printf 'stub: 404 not found\\n' > "$_dest"
+        printf '404'
+        exit 0
+        ;;
+    transport)
+        exit 7
+        ;;
+    empty)
+        : > "$_dest"
+        printf '200'
+        exit 0
+        ;;
+esac
+if [ -n "${STUB_CURL_BODY:-}" ] && [ -f "$STUB_CURL_BODY" ]; then
+    cp "$STUB_CURL_BODY" "$_dest"
+else
+    printf 'STUB-ASSET-BODY\\n' > "$_dest"
+fi
+printf '200'
+exit 0
+"""
+
+# The stub 7z: it "extracts" by copying the ARCHIVE it was handed into the
+# expected binary path — so the promoted binary's bytes identify WHICH
+# install promoted it (the concurrency leg's "exactly ONE mutates" proof).
+_STUB_7Z = """#!/bin/sh
+# stub 7z — no archive is parsed; the archive bytes become the binary.
+_out=""
+_archive=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o*) _out="${1#-o}"; shift ;;
+        x) shift ;;
+        *) _archive="$1"; shift ;;
+    esac
+done
+if [ -z "$_out" ] || [ -z "$_archive" ]; then
+    exit 2
+fi
+mkdir -p "$_out"
+cp "$_archive" "$_out/hashcat"
+chmod 0755 "$_out/hashcat"
+exit 0
+"""
+
+# The stub clang / clang++ (the hacker lane's prerequisites): they answer the
+# evidence query the library verifies them with.
+_STUB_CLANG = """#!/bin/sh
+echo "clang version 18.1.8 (stub)"
+exit 0
+"""
+
+
+def _write_stub(path: Path, body: str) -> Path:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _tarball(entries: dict[str, bytes]) -> bytes:
+    """A real .tar.gz in memory (the sweeper/hacker legs unpack it for real)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _scanner_stub(name: str) -> bytes:
+    return b"#!/bin/sh\necho '" + name.encode() + b" 1.0.0 (stub)'\nexit 0\n"
+
+
+def _default_body(agent: str, tag: str) -> bytes:
+    """The asset the stub curl serves for each library."""
+    if agent == "cracker":
+        # an executable whose bytes carry the installer's tag
+        return ("#!/bin/sh\necho 'hashcat 6.2.6 " + tag + "'\n").encode()
+    if agent == "hacker":
+        return _tarball({
+            "aflplusplus-4.10c/afl-fuzz": b"#!/bin/sh\necho 'afl-fuzz 4.10c (stub)'\n",
+        })
+    return _tarball({
+        "semgrep": _scanner_stub("semgrep"),
+        "gitleaks": _scanner_stub("gitleaks"),
+        "cppcheck": _scanner_stub("cppcheck"),
+        "trivy": _scanner_stub("trivy"),
+    })
+
+
+def _install_fixture(
+    tmp_path: Path,
+    agent: str,
+    *,
+    mode: str = "ok",
+    tag: str = "X",
+    sleep_secs: str = "",
+    body: bytes | None = None,
+    pin_sha: str | None = None,
+) -> dict:
+    """The scratch tree, the stub PATH and the pins for one install leg."""
+    root = tmp_path / f"fx-{agent}-{tag}"
+    root.mkdir(parents=True, exist_ok=True)
+    roots = {
+        "toolbench": root / "toolbench",
+        "state": root / "state",
+        "config": root / "config",
+        "tmp": root / "tmp",
+        "home": root / "home",
+    }
+    for p in roots.values():
+        p.mkdir(parents=True, exist_ok=True)
+    stubs = root / "stubs"
+    stubs.mkdir(exist_ok=True)
+    _write_stub(stubs / "curl", _STUB_CURL)
+    if agent == "cracker":
+        _write_stub(stubs / "7z", _STUB_7Z)
+    if agent == "hacker":
+        _write_stub(stubs / "clang", _STUB_CLANG)
+        _write_stub(stubs / "clang++", _STUB_CLANG)
+    body_path = root / "asset.bin"
+    if body is None:
+        body = _default_body(agent, tag)
+    body_path.write_bytes(body)
+    sha = pin_sha if pin_sha is not None else hashlib.sha256(body).hexdigest()
+
+    env = dict(os.environ)
+    env["HOME"] = str(roots["home"])
+    env["PATH"] = f"{stubs}:{env.get('PATH', '/usr/bin:/bin')}"
+    env["AEGIS_TOOLBENCH_ROOT"] = str(roots["toolbench"])
+    env["AEGIS_STATE_HOME"] = str(roots["state"])
+    env["AEGIS_CONFIG_HOME"] = str(roots["config"])
+    env["TMPDIR"] = str(roots["tmp"])
+    env["STUB_CURL_MODE"] = mode
+    env["STUB_CURL_BODY"] = str(body_path)
+    if sleep_secs:
+        env["STUB_CURL_SLEEP"] = sleep_secs
+    for _k in [k for k in env if k.startswith("POSTGRES_")]:
+        env.pop(_k, None)
+    env.pop("ENSEMBLE_SELF_ENV", None)
+    env["ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"] = "0"
+
+    if agent == "cracker":
+        env["HASHCAT_SHA256"] = sha
+        env["HASHCAT_URL"] = "https://stub.invalid/hashcat.7z"
+        env["JOHN_SHA256"] = "pin-before-first-install"
+    elif agent == "hacker":
+        env["AFLPP_SHA256"] = sha
+        env["AFLPP_URL"] = "https://stub.invalid/aflpp.tar.gz"
+    else:
+        for var in ("SEMGREP", "GITLEAKS", "CPPCHECK", "TRIVY"):
+            env[f"{var}_SHA256"] = sha
+            env[f"{var}_URL"] = "https://stub.invalid/tool.tar.gz"
+        env["SEMGREP_VERSION"] = "1.0.0"
+        env["GITLEAKS_VERSION"] = "8.0.0"
+        env["CPPCHECK_VERSION"] = "2.0.0"
+        env["TRIVY_VERSION"] = "0.0.1"
+    return {"root": root, "roots": roots, "env": env, "sha": sha, "body": body,
+            "lock_dir": roots["state"] / _LOCK_DIR_NAME[agent],
+            "attempts_file": roots["state"] / _ATTEMPTS_FILE_NAME[agent],
+            "config_file": roots["config"] / _CONFIG_NAME[agent],
+            "bin_dir": roots["toolbench"] / "bin"}
+
+
+def _install_probe(shell: str, agent: str, fixture: dict) -> Path:
+    """A SOURCING caller: the library is sourced and the install is called.
+
+    The caller survives the call whatever the library does — that is the
+    whole point of the sourced-lib leg.
+    """
+    probe = fixture["root"] / f"probe-{Path(shell).name}.sh"
+    probe.write_text(
+        '. "$1"\n'
+        'aegis_install_all\n'
+        '_rc=$?\n'
+        'echo "RC=$_rc"\n'
+        'echo "CALLER-ALIVE"\n',
+        encoding="utf-8",
+    )
+    return probe
+
+
+def _run_install(
+    shell: str, agent: str, fixture: dict, mode: str = "executed", timeout: int = 90
+) -> subprocess.CompletedProcess:
+    """Run the library's install — SOURCED (the caller's shell survives) or
+    EXECUTED directly (the process itself ends non-zero)."""
+    lib = _lib_path(agent)
+    if mode == "executed":
+        return subprocess.run(
+            [shell, str(lib), "install"],
+            capture_output=True, text=True, timeout=timeout,
+            env=fixture["env"], cwd=str(fixture["root"]),
+        )
+    probe = _install_probe(shell, agent, fixture)
+    return subprocess.run(
+        [shell, str(probe), str(lib)],
+        capture_output=True, text=True, timeout=timeout,
+        env=fixture["env"], cwd=str(fixture["root"]),
+    )
+
+
+def _start_install(shell: str, agent: str, fixture: dict) -> subprocess.Popen:
+    """Start an install in its own process group (so a signal can be sent to
+    the whole group, exactly as a terminal's Ctrl-C does)."""
+    lib = _lib_path(agent)
+    return subprocess.Popen(
+        [shell, str(lib), "install"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=fixture["env"], cwd=str(fixture["root"]), start_new_session=True,
+    )
+
+
+def _wait_for(path: Path, timeout: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _wait_for_owner_record(lock_dir: Path, timeout: float = 20.0) -> bool:
+    """Wait until the lock's owner record is COMPLETE ("<pid> <nonce>").
+
+    The owner record is written immediately after the lock dir is created;
+    a signal that lands in that window finds a lock with no owner, and the
+    ownership-checked release refuses to remove a lock it cannot prove it
+    owns. The signal leg therefore waits for the record, so it measures the
+    handler's behaviour and not the width of that window."""
+    deadline = time.monotonic() + timeout
+    owner = lock_dir / "owner"
+    while time.monotonic() < deadline:
+        if owner.is_file():
+            fields = owner.read_text(encoding="utf-8").split()
+            if len(fields) >= 2:
+                return True
+        time.sleep(0.02)
+    return False
+
+
+def _promoted_assets(fixture: dict) -> list[str]:
+    """The names of the assets the install promoted into the toolbench bin."""
+    bin_dir = fixture["bin_dir"]
+    if not bin_dir.is_dir():
+        return []
+    return sorted(p.name for p in bin_dir.iterdir())
+
+
+class TestFinalRoundLockOwnership:
+    """Item 1 — the install lock is OWNERSHIP-CHECKED and the release never
+    removes a foreign owner's lock."""
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    def test_two_concurrent_installs_promote_exactly_one(self, tmp_path, shell):
+        """Two concurrent installs into the SAME shared toolbench: exactly ONE
+        may mutate the shared path.
+
+        The first install holds the lock while it fetches; the second must
+        be refused as contended and must promote nothing. The promoted
+        binary's bytes carry the promoting installer's tag, so the leg can
+        prove WHICH install mutated the shared path."""
+        fx_a = _install_fixture(tmp_path, "cracker", tag="A", sleep_secs="4")
+        fx_b = _install_fixture(tmp_path, "cracker", tag="B")
+        # both installs share ONE shared toolbench/config/state tree
+        for key in ("toolbench", "state", "config", "tmp"):
+            shared = fx_a["roots"][key]
+            fx_b["roots"][key] = shared
+        fx_b["env"]["AEGIS_TOOLBENCH_ROOT"] = str(fx_a["roots"]["toolbench"])
+        fx_b["env"]["AEGIS_STATE_HOME"] = str(fx_a["roots"]["state"])
+        fx_b["env"]["AEGIS_CONFIG_HOME"] = str(fx_a["roots"]["config"])
+        fx_b["env"]["TMPDIR"] = str(fx_a["roots"]["tmp"])
+        fx_b["lock_dir"] = fx_a["lock_dir"]
+        fx_b["attempts_file"] = fx_a["attempts_file"]
+        fx_b["config_file"] = fx_a["config_file"]
+        fx_b["bin_dir"] = fx_a["bin_dir"]
+
+        proc_a = _start_install(shell, "cracker", fx_a)
+        try:
+            assert _wait_for(fx_a["lock_dir"]), (
+                "the first install never took the lock — the concurrency leg "
+                "cannot discriminate"
+            )
+            # the first install is still fetching (its stub curl sleeps):
+            # the second install must find the lock HELD
+            result_b = _run_install(shell, "cracker", fx_b, mode="executed")
+            assert result_b.returncode != 0, (
+                "the second concurrent install SUCCEEDED while the first held "
+                f"the lock: stdout={result_b.stdout!r}"
+            )
+            assert "install in progress elsewhere" in result_b.stdout, (
+                "the second concurrent install was not refused as contended: "
+                f"stdout={result_b.stdout!r}"
+            )
+            assert "OK (" not in result_b.stdout, (
+                "the second concurrent install reported success: "
+                f"stdout={result_b.stdout!r}"
+            )
+            assert _promoted_assets(fx_a) == [], (
+                "the refused install promoted assets into the shared "
+                f"toolbench: {_promoted_assets(fx_a)}"
+            )
+            out_a, err_a = proc_a.communicate(timeout=90)
+        finally:
+            if proc_a.poll() is None:
+                proc_a.kill()
+                proc_a.communicate(timeout=30)
+        assert proc_a.returncode == 0, (
+            f"the first install did not succeed: rc={proc_a.returncode} "
+            f"stdout={out_a!r} stderr={err_a!r}"
+        )
+        promoted = fx_a["bin_dir"] / "hashcat"
+        assert promoted.is_file(), (
+            "the winning install promoted nothing — the leg cannot prove "
+            "which install mutated the shared path"
+        )
+        body = promoted.read_bytes()
+        assert b" A" in body, (
+            f"the promoted binary is not the FIRST install's: {body!r}"
+        )
+        assert b" B" not in body, (
+            f"the refused install mutated the shared toolbench: {body!r}"
+        )
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    def test_release_leaves_a_foreign_lock_intact(self, tmp_path, shell):
+        """Releasing a lock owned by ANOTHER run must leave that lock INTACT.
+
+        The release is ownership-checked: the lock's nonce must match the
+        nonce THIS run minted at acquire time. A foreign owner's lock is
+        never removed — removing it would let a second installer promote
+        into the shared toolbench while the first is still installing."""
+        fixture = _install_fixture(tmp_path, "cracker", tag="F")
+        lock = fixture["lock_dir"]
+        lock.mkdir(parents=True, exist_ok=True)
+        (lock / "owner").write_text(
+            f"{os.getpid()} foreign-nonce-from-another-run\n", encoding="utf-8"
+        )
+        probe = fixture["root"] / "release_probe.sh"
+        probe.write_text(
+            '. "$1"\n'
+            'aegis_release_install_lock\n'
+            'echo "RELEASE-RC=$?"\n'
+            'echo "CALLER-ALIVE"\n',
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [shell, str(probe), str(_lib_path("cracker"))],
+            capture_output=True, text=True, timeout=60,
+            env=fixture["env"], cwd=str(fixture["root"]),
+        )
+        assert "CALLER-ALIVE" in result.stdout, (
+            f"the caller died on the release: stdout={result.stdout!r}"
+        )
+        assert lock.is_dir(), (
+            "the release REMOVED a lock owned by another run — the release is "
+            "not ownership-checked"
+        )
+        assert (lock / "owner").read_text(encoding="utf-8") == (
+            f"{os.getpid()} foreign-nonce-from-another-run\n"
+        ), "the foreign lock's owner record was rewritten"
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    def test_install_never_calls_the_readiness_probe(self, shell):
+        """The install lock and the readiness probe are the SAME lock, and the
+        install critical section must never call the probe — the probe
+        reports "install in progress" (rc=2) for a lock it did not take, so
+        an install that called it would deadlock against itself."""
+        lib = _lib_path("cracker").read_text(encoding="utf-8")
+        body = lib.split("aegis_install_all() {", 1)[1].split("\n}\n", 1)[0]
+        assert "aegis_readiness_probe" not in body, (
+            "the install critical section calls the readiness probe — it "
+            "would deadlock against the lock it holds itself"
+        )
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    def test_probe_reports_in_progress_while_the_install_holds_the_lock(
+        self, tmp_path, shell
+    ):
+        """Coexistence, PROVED: while an install holds the lock, the probe
+        reports "install in progress" (rc=2) and the install itself is
+        unaffected — the probe never acquires and never removes the lock."""
+        fixture = _install_fixture(tmp_path, "cracker", tag="P", sleep_secs="4")
+        proc = _start_install(shell, "cracker", fixture)
+        try:
+            assert _wait_for(fixture["lock_dir"]), (
+                "the install never took the lock — the coexistence leg cannot "
+                "discriminate"
+            )
+            probe = fixture["root"] / "probe_probe.sh"
+            probe.write_text(
+                '. "$1"\n'
+                'aegis_readiness_probe\n'
+                'echo "PROBE-RC=$?"\n',
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [shell, str(probe), str(_lib_path("cracker"))],
+                capture_output=True, text=True, timeout=60,
+                env=fixture["env"], cwd=str(fixture["root"]),
+            )
+            assert "PROBE-RC=2" in result.stdout, (
+                "the probe did not report 'install in progress' (rc=2) while "
+                f"the install held the lock: stdout={result.stdout!r}"
+            )
+            assert fixture["lock_dir"].is_dir(), (
+                "the probe REMOVED the live install's lock — the probe must "
+                "never remove a lock"
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=30)
+
+
+class TestFinalRoundSignalTermination:
+    """Item 2 — a signal TERMINATES the critical section and releases the
+    OWNED lock; a partial promotion never survives."""
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    @pytest.mark.parametrize(
+        "signal_name,expected_rc", [("SIGINT", 130), ("SIGTERM", 143)]
+    )
+    def test_signal_terminates_the_install_and_releases_the_lock(
+        self, tmp_path, shell, signal_name, expected_rc
+    ):
+        """An INT/TERM during the install must END the install with the
+        signal's status (130 / 143), release the lock it owns, and leave no
+        promoted asset behind.
+
+        The old handler only released the lock and let the install CONTINUE:
+        the installer then ran on holding no lock at all, and a second
+        installer could promote into the shared toolbench."""
+        import signal as signal_mod
+
+        fixture = _install_fixture(tmp_path, "cracker", tag="S", sleep_secs="8")
+        proc = _start_install(shell, "cracker", fixture)
+        assert _wait_for_owner_record(fixture["lock_dir"]), (
+            "the install never took the lock (or never recorded its "
+            "ownership) — the signal leg cannot discriminate"
+        )
+        os.killpg(os.getpgid(proc.pid), getattr(signal_mod, signal_name))
+        out, err = proc.communicate(timeout=60)
+        assert proc.returncode == expected_rc, (
+            f"the install did not terminate with the signal's status "
+            f"(expected {expected_rc}): rc={proc.returncode} "
+            f"stdout={out!r} stderr={err!r}"
+        )
+        assert not fixture["lock_dir"].exists(), (
+            "the signal handler left the install lock behind — the owned "
+            "lock was not released"
+        )
+        assert _promoted_assets(fixture) == [], (
+            "a partially promoted toolbench survived the signal: "
+            f"{_promoted_assets(fixture)}"
+        )
+        assert not fixture["config_file"].exists(), (
+            "a probe-visible config survived the signal — the install was "
+            "promoted despite the interruption"
+        )
+
+
+class TestFinalRoundSourcedLibExit:
+    """Item 3 — a refusal in a SOURCED library returns; it never kills the
+    caller's shell. A DIRECTLY EXECUTED library still exits non-zero."""
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    def test_sourced_refusal_keeps_the_caller_alive(self, tmp_path, shell):
+        """Sourcing the library and triggering a failing install: the
+        CALLER's shell survives, the function returns non-zero, and the
+        refusal is reported.
+
+        "exit 1" inside a sourced file kills the caller — the promised
+        HARD_BLOCKER refusal never runs and the caller cannot report
+        anything."""
+        fixture = _install_fixture(tmp_path, "cracker", tag="C", mode="http404")
+        result = _run_install(shell, "cracker", fixture, mode="sourced")
+        assert "CALLER-ALIVE" in result.stdout, (
+            "the CALLER's shell was killed by the library's refusal: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert result.returncode == 0, (
+            f"the caller shell exited with rc={result.returncode} — it was "
+            "killed by the library instead of receiving a refusal"
+        )
+        assert re.search(r"RC=[1-9]\d*", result.stdout), (
+            "the refusal did not report a non-zero rc: "
+            f"stdout={result.stdout!r}"
+        )
+        assert "HARD_BLOCKER" in result.stdout, (
+            f"the refusal did not emit HARD_BLOCKER: stdout={result.stdout!r}"
+        )
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    def test_executed_refusal_exits_non_zero(self, tmp_path, shell):
+        """The SAME failure, executed directly: the library exits non-zero.
+        The refusal is not a sourced-only behaviour."""
+        fixture = _install_fixture(tmp_path, "cracker", tag="E", mode="http404")
+        result = _run_install(shell, "cracker", fixture, mode="executed")
+        assert result.returncode != 0, (
+            "the executed library exited 0 on a failed install: "
+            f"stdout={result.stdout!r}"
+        )
+        assert "HARD_BLOCKER" in result.stdout, (
+            f"the executed refusal did not emit HARD_BLOCKER: "
+            f"stdout={result.stdout!r}"
+        )
+
+    @pytest.mark.parametrize("agent", CHILDREN)
+    def test_no_install_flow_exits_from_a_sourced_context(self, agent):
+        """Static half: the install flow must not `exit` — every refusal
+        goes through the shared helper, which RETURNS when the library was
+        sourced. An `exit` inside the flow would kill the caller's shell
+        before the refusal could be reported.
+
+        The dispatch block (which only runs when the library is EXECUTED)
+        is outside the flow and is not covered by this leg."""
+        lib = _lib_path(agent).read_text(encoding="utf-8")
+        flow = _extract_function(lib, "aegis_install_all")
+        offenders = [
+            ln for ln in flow.splitlines()
+            if re.search(r"(^|[;&|]\s*)exit\s", ln)
+        ]
+        assert offenders == [], (
+            f"{agent} install flow still exits — a sourced library would "
+            f"kill its caller: {offenders[:3]}"
+        )
+
+    @pytest.mark.parametrize("agent", CHILDREN)
+    def test_the_refusal_helper_returns_when_sourced(self, agent):
+        """Static half: the shared refusal helper ends the library by
+        RETURNING when it was sourced and by EXITING when it was executed
+        — the two can never disagree, because both read the SAME
+        sourced/executed detection."""
+        lib = _lib_path(agent).read_text(encoding="utf-8")
+        helper = _extract_function(lib, "_aegis_install_fail")
+        assert "_aegis_lib_executed" in helper, (
+            f"{agent} refusal helper does not consult the sourced/executed "
+            "detection"
+        )
+        assert "exit 1" in helper and "return 1" in helper, (
+            f"{agent} refusal helper does not carry BOTH endings — the sourced "
+            "path must return and the executed path must exit non-zero"
+        )
+        detection = re.search(
+            r"_aegis_lib_executed=0\ncase \"\$0\" in\n\s+\*[\w.\-]+\) "
+            r"_aegis_lib_executed=1 ;;\nesac",
+            lib,
+        )
+        assert detection, (
+            f"{agent} library has no sourced/executed detection — the refusal "
+            "path cannot tell how the library was entered"
+        )
+
+
+class TestFinalRoundGuardedFetch:
+    """Item 4 — the fetch is guarded (non-2xx / transport / empty body all
+    refuse) and a findings-exit is NOT a failure."""
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    @pytest.mark.parametrize(
+        "mode", ["http404", "transport", "empty"], ids=["http404", "transport", "empty"]
+    )
+    def test_a_failed_fetch_promotes_nothing(self, tmp_path, shell, mode):
+        """A fetch that does not return a 2xx body must fail CLOSED: nothing
+        is promoted and the install ends non-zero.
+
+        The sha256 pin is set to the digest of the body the stub ACTUALLY
+        serves, so the checksum gate cannot be what stops the promotion —
+        the HTTP status check is the only thing left that can."""
+        served = {
+            "http404": b"stub: 404 not found\n",
+            "transport": b"",
+            "empty": b"",
+        }[mode]
+        fixture = _install_fixture(
+            tmp_path, "cracker", tag="F", mode=mode,
+            pin_sha=hashlib.sha256(served).hexdigest(),
+        )
+        result = _run_install(shell, "cracker", fixture, mode="executed")
+        assert result.returncode != 0, (
+            f"the install SUCCEEDED after a {mode} fetch: "
+            f"stdout={result.stdout!r}"
+        )
+        assert "fetch failed" in result.stdout, (
+            f"the {mode} fetch was not refused by the guarded fetch: "
+            f"stdout={result.stdout!r}"
+        )
+        assert _promoted_assets(fixture) == [], (
+            f"a {mode} fetch still promoted assets: {_promoted_assets(fixture)}"
+        )
+        assert not fixture["config_file"].exists(), (
+            f"a {mode} fetch still promoted a probe-visible config"
+        )
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    def test_a_good_fetch_still_installs(self, tmp_path, shell):
+        """The non-vacuity control: the SAME harness with a 200 response
+        installs successfully. Without it, the guard above could be green
+        because the fetch is broken, not because it is guarded."""
+        fixture = _install_fixture(tmp_path, "cracker", tag="G", mode="ok")
+        result = _run_install(shell, "cracker", fixture, mode="executed")
+        assert result.returncode == 0, (
+            "a good fetch did not install cleanly — the fetch guard rejects "
+            f"legitimate downloads: stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
+        assert "OK (" in result.stdout, (
+            f"the install did not report success: stdout={result.stdout!r}"
+        )
+        assert fixture["config_file"].is_file(), (
+            "the successful install promoted no probe-visible config"
+        )
+        assert _promoted_assets(fixture) == ["hashcat"], (
+            f"the successful install promoted {_promoted_assets(fixture)}"
+        )
+
+    def test_scan_status_maps_findings_to_success(self, tmp_path):
+        """A gitleaks findings-exit (1) is a SUCCESSFUL scan; a real failure
+        (>= 2, including 127 = the scanner is absent) is a failure.
+
+        gitleaks exits 1 when it FINDS a secret — that is the lane's job, not
+        a broken tool. Mapping 1 to a failure would make every real finding
+        look like a failure; mapping a real failure to findings would report
+        a broken scanner as a clean bill of health."""
+        fixture = _install_fixture(tmp_path, "sweeper", tag="SC")
+        findings = fixture["root"] / "gitleaks-findings"
+        _write_stub(findings, "#!/bin/sh\necho 'Finding: secret at src/a.py:3'\nexit 1\n")
+        broken = fixture["root"] / "gitleaks-absent"
+        _write_stub(broken, "#!/bin/sh\nexit 127\n")
+        probe = fixture["root"] / "scan_probe.sh"
+        probe.write_text(
+            '. "$1"\n'
+            '_status=0\n'
+            '"$2" detect --redact >/dev/null 2>&1 || _status=$?\n'
+            'aegis_scan_status_ok "$_status" gitleaks\n'
+            'echo "MAP-RC=$?"\n',
+            encoding="utf-8",
+        )
+        result_findings = subprocess.run(
+            ["/bin/sh", str(probe), str(_lib_path("sweeper")), str(findings)],
+            capture_output=True, text=True, timeout=60,
+            env=fixture["env"], cwd=str(fixture["root"]),
+        )
+        assert "MAP-RC=0" in result_findings.stdout, (
+            "a gitleaks findings-exit was mapped to a FAILURE — every real "
+            "finding would look like a broken tool: "
+            f"stdout={result_findings.stdout!r}"
+        )
+        assert "findings" in result_findings.stdout.lower(), (
+            "the findings-exit was not reported as findings: "
+            f"stdout={result_findings.stdout!r}"
+        )
+        result_broken = subprocess.run(
+            ["/bin/sh", str(probe), str(_lib_path("sweeper")), str(broken)],
+            capture_output=True, text=True, timeout=60,
+            env=fixture["env"], cwd=str(fixture["root"]),
+        )
+        assert "MAP-RC=1" in result_broken.stdout, (
+            "an absent scanner (exit 127) was mapped to SUCCESS — a broken "
+            f"scanner would be reported as a clean bill of health: "
+            f"stdout={result_broken.stdout!r}"
+        )
+        assert "HARD_BLOCKER" in result_broken.stdout, (
+            "a real scanner failure did not emit HARD_BLOCKER: "
+            f"stdout={result_broken.stdout!r}"
+        )
+
+    def test_sweep_recipe_maps_the_scanner_exit_status(self):
+        """Static half: the sweep surface maps the scanner exit status —
+        gitleaks above all. A scanner whose status is not mapped cannot
+        distinguish findings from a broken tool."""
+        body = _skill_body_path("sweeper").read_text(encoding="utf-8")
+        blocks = re.findall(r"```sh\n(.*?)```", body, re.DOTALL)
+        sweep = [b for b in blocks if "$SANDBOX_ROOT/out/" in b]
+        assert len(sweep) == 1, "sweep surface sh-block not found (or duplicated)"
+        sweep_text = sweep[0]
+        for tool in ("gitleaks", "cppcheck", "semgrep", "trivy"):
+            assert f'aegis_scan_status_ok "$_scan_status" {tool}' in sweep_text, (
+                f"the {tool} leg does not map its exit status — a findings-exit "
+                "and a real failure are indistinguishable there"
+            )
+        assert sweep_text.count("_scan_status=0") == 4, (
+            "every mapped scanner leg must capture its own status"
+        )
+
+
+class TestFinalRoundCounterValidation:
+    """Item 5 — the self-heal attempt counter is validated before use."""
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    @pytest.mark.parametrize(
+        "raw", ["", "abc", "-1", "3", "1 2", "1.5"], ids=["empty", "garbage", "negative", "out-of-range", "two-values", "decimal"]
+    )
+    def test_a_malformed_counter_refuses_the_attempt(self, tmp_path, shell, raw):
+        """A malformed counter (empty / garbage / negative / out of range)
+        must FAIL CLOSED with a HARD_BLOCKER that NAMES the counter — never
+        a silent "no attempts used".
+
+        An unvalidated negative counter passed straight through the cap: the
+        self-heal loop ran with no bound at all."""
+        fixture = _install_fixture(tmp_path, "cracker", tag="M")
+        fixture["attempts_file"].parent.mkdir(parents=True, exist_ok=True)
+        fixture["attempts_file"].write_text(raw, encoding="utf-8")
+        probe = fixture["root"] / "counter_probe.sh"
+        probe.write_text(
+            '. "$1"\n'
+            'aegis_attempt_allowed\n'
+            'echo "ALLOWED-RC=$?"\n',
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [shell, str(probe), str(_lib_path("cracker"))],
+            capture_output=True, text=True, timeout=60,
+            env=fixture["env"], cwd=str(fixture["root"]),
+        )
+        assert "ALLOWED-RC=1" in result.stdout, (
+            f"a malformed counter ({raw!r}) was ACCEPTED — the cap is not "
+            f"enforced: stdout={result.stdout!r}"
+        )
+        assert "HARD_BLOCKER" in result.stdout, (
+            f"a malformed counter ({raw!r}) did not emit HARD_BLOCKER: "
+            f"stdout={result.stdout!r}"
+        )
+        assert "malformed" in result.stdout, (
+            f"the refusal did not NAME the malformed counter: "
+            f"stdout={result.stdout!r}"
+        )
+
+    @pytest.mark.parametrize("shell", FINAL_SHELLS, ids=["dash", "bash"])
+    def test_a_valid_counter_permits_exactly_the_cap(self, tmp_path, shell):
+        """A valid counter still permits exactly AEGIS_ATTEMPT_CAP attempts:
+        two allowed, then the cap refuses."""
+        fixture = _install_fixture(tmp_path, "cracker", tag="V")
+        probe = fixture["root"] / "counter_probe.sh"
+        probe.write_text(
+            '. "$1"\n'
+            'printf "0" > "$AEGIS_STATE_HOME/credential-bench-session-state"\n'
+            'aegis_attempt_allowed; echo "A1=$?"\n'
+            '_aegis_bump_attempt\n'
+            'aegis_attempt_allowed; echo "A2=$?"\n'
+            '_aegis_bump_attempt\n'
+            'aegis_attempt_allowed; echo "A3=$?"\n',
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [shell, str(probe), str(_lib_path("cracker"))],
+            capture_output=True, text=True, timeout=60,
+            env=fixture["env"], cwd=str(fixture["root"]),
+        )
+        assert "A1=0" in result.stdout, (
+            f"the first attempt was refused: stdout={result.stdout!r}"
+        )
+        assert "A2=0" in result.stdout, (
+            f"the second attempt was refused: stdout={result.stdout!r}"
+        )
+        assert "A3=1" in result.stdout, (
+            "the third attempt was ALLOWED — the cap permits more than "
+            f"AEGIS_ATTEMPT_CAP attempts: stdout={result.stdout!r}"
+        )
+
+
+class TestFinalRoundNamingRuling:
+    """The leader's naming ruling: the canonical agent id is `worker`.
+    "generalist" may appear only as a DESCRIPTIVE ADJUNCT, never as a
+    name/label standing in for the agent."""
+
+    _NAME_POSITIONS = (
+        ("rule.md", "the generalist is the only report-drafting lane"),
+        ("soul.md", "the generalist that drafts my reports"),
+        ("soul.md", "and the generalist for report drafting"),
+    )
+
+    @pytest.mark.parametrize("persona,phrase", _NAME_POSITIONS)
+    def test_name_positions_name_the_canonical_id(self, persona, phrase):
+        """A name position ("the generalist is ...", "the generalist that
+        ...") stands in for the agent — it must carry the canonical id."""
+        text = _read("aegis", persona)
+        assert phrase not in text, (
+            f"aegis/{persona} still uses 'generalist' as a NAME: {phrase!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "persona", ["rule.md", "soul.md", "tools_note.md", "workflow.md"]
+    )
+    def test_every_adjectival_use_names_the_canonical_id(self, persona):
+        """Where 'generalist' survives as an adjective, the canonical id
+        `worker` must be named beside it."""
+        text = _read("aegis", persona)
+        for line in text.splitlines():
+            if "generalist" not in line:
+                continue
+            assert "`worker`" in line, (
+                f"aegis/{persona} uses 'generalist' without naming the "
+                f"canonical id: {line.strip()!r}"
+            )
+
+    def test_strategy_skill_names_the_canonical_id(self):
+        """The strategy skill body carries the same ruling."""
+        text = _read("aegis", "skills-template", "aegis-strategy.md")
+        for line in text.splitlines():
+            if "generalist" not in line:
+                continue
+            assert "`worker`" in line, (
+                "aegis-strategy.md uses 'generalist' without naming the "
+                f"canonical id: {line.strip()!r}"
+            )
+
+    def test_the_tool_matrix_is_untouched(self):
+        """The ruling is a NAMING ruling: the team membership and the tool
+        matrices are untouched by it.
+
+        The matrices themselves are pinned by T1-T4 (the exact allow and
+        deny sets, the exact team members). What this leg adds is the
+        ruling's own reach: no meta.json may name a lane "generalist" —
+        the canonical ids are what the matrices carry."""
+        for agent in FAMILY:
+            blob = json.dumps(_meta(agent))
+            assert "generalist" not in blob, (
+                f"{agent}/meta.json names a lane 'generalist' — the canonical "
+                "agent id is 'worker'"
+            )
+        assert set(_meta("aegis")["team_members"]) == {
+            "hacker", "cracker", "sweeper", "worker"
+        }, (
+            f"the aegis team_members changed: {_meta('aegis')['team_members']}"
+        )
