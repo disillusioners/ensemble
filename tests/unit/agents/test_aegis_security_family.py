@@ -10,12 +10,26 @@ installer-guard pin pack).
 Design notes that matter to every leg:
 
 * **Pure file parsing wherever possible** — no daemon import, no DB, no LLM
-  — so the file runs on bare ``python3``. The single exception is the
-  registry-scan pair (``test_registry_scan_*``): the fail-open guard
-  (tools-block round-trip through ``ToolFilter``) and the boot-scan leg
-  need the venv interpreter, so both run as subprocess probes under
-  ``sys.executable`` and both carry the ``registry_scan`` name so the
-  bare-python subset is ``-k "not registry_scan"``.
+  — so the file runs on bare ``python3``. Two exception classes remain: the
+  registry-scan pair (``test_registry_scan_*``), whose fail-open guard
+  (tools-block round-trip through ``ToolFilter``) and boot-scan leg need
+  the venv interpreter and so run as subprocess probes under
+  ``sys.executable`` (both carry the ``registry_scan`` name, so the
+  bare-python subset is ``-k "not registry_scan"``); and the EXECUTED legs
+  that SOURCE the committed ``.lib.sh`` under ``/bin/sh`` and ``/bin/dash``
+  to exercise the shipped guards for real — the four containment classes
+  named below, plus the T30(b) unset-pin and corpus-write legs.
+* **The council / fix-round-3 classes.** Seven classes were added after the
+  T1–T30 blocks and are named here so the file's shape is discoverable
+  from its header: ``TestCorpusContainmentExecuted`` (round-2 C-1/W-2 — the
+  cracker's corpus containment matrix, executed under ``/bin/sh``),
+  ``TestCompoundContainmentMatrix`` (round-3 C-1 — the compound
+  symlink-then-``..`` class, executed under ``/bin/dash`` and ``/bin/bash``),
+  ``TestScannerOutputGuardWired`` (C-2 — the sweeper's guard wiring plus
+  the shared-core byte-identity pin), ``TestScannerOutputGuardExecuted`` and
+  ``TestCanonicalOutputPathExecuted`` (N-1 — the sweeper's boolean guard and
+  its path-returning companion, executed), ``TestRound3WarningFolds`` (the
+  round-3 warning folds) and ``TestRound3RideAlongs`` (the ride-along pins).
 * **The T29 matrix is 5 guardrail families x 4 personas = 20 asserted
   cells, every cell positive with its per-persona form** (R1 leader ruling
   2026-11-04). Anchors are CASE-SENSITIVE verbatim substrings of the
@@ -1266,6 +1280,11 @@ def _run_lib_probe(
 ) -> subprocess.CompletedProcess:
     """Run `body` under /bin/sh with the cracker library SOURCED.
 
+    Thin wrapper over ``_run_probe`` (defined below) — only the shell, the
+    library and this lane's distinct probe filename are fixed here; the
+    scratch HOME, the per-variable POSTGRES_* scrub and the boot-sweep
+    guard live in the shared implementation.
+
     HOME is redirected into the scratch tree so the library's
     env-overridable roots resolve there, POSTGRES_* is scrubbed
     PER-VARIABLE (``env -u POSTGRES_*`` is a silent no-op — bash does not
@@ -1273,20 +1292,14 @@ def _run_lib_probe(
     is fetched and no release asset is involved: the only command that can
     run is the lane's own scratch generator.
     """
-    probe = tmp_path / "probe.sh"
-    probe.write_text(f'{prelude}. "$1"\n{body}\n', encoding="utf-8")
-    scratch_home = tmp_path / "home"
-    scratch_home.mkdir(exist_ok=True)
-    env = dict(os.environ)
-    env["HOME"] = str(scratch_home)
-    env["ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"] = "0"
-    for _k in [k for k in env if k.startswith("POSTGRES_")]:
-        env.pop(_k, None)
-    if env_extra:
-        env.update(env_extra)
-    return subprocess.run(
-        ["/bin/sh", str(probe), str(_lib_path("cracker"))],
-        capture_output=True, text=True, timeout=60, env=env, cwd=str(tmp_path),
+    return _run_probe(
+        "/bin/sh",
+        _lib_path("cracker"),
+        tmp_path,
+        body,
+        env_extra,
+        prelude,
+        probe_name="probe.sh",
     )
 
 
@@ -1615,16 +1628,26 @@ def _run_probe(
     tmp_path: Path,
     body: str,
     env_extra: dict[str, str] | None = None,
+    prelude: str = "",
+    probe_name: str | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run `body` under `shell` with `lib` SOURCED (shell-parameterized
-    variant of ``_run_lib_probe``).
+    """Run `body` under `shell` with `lib` SOURCED — the single implementation
+    behind both probe helpers (``_run_lib_probe`` delegates here with the
+    cracker library under /bin/sh).
+
+    ``prelude`` is written ahead of the source line, so a caller can set the
+    sourcing shell's own options before the library is sourced.
+    ``probe_name`` overrides the derived probe filename; the two helpers keep
+    DISTINCT names so a lib probe and a shell-parameterized probe sharing one
+    scratch tree can never overwrite each other.
 
     HOME is redirected into the scratch tree, POSTGRES_* is scrubbed
     PER-VARIABLE (``env -u POSTGRES_*`` is a silent no-op — bash does not
     glob env names), and the boot-sweep guard is pinned explicitly.
     """
-    probe = tmp_path / f"probe_{Path(shell).name}.sh"
-    probe.write_text(f'. "$1"\n{body}\n', encoding="utf-8")
+    name = probe_name or f"probe_{Path(shell).name}.sh"
+    probe = tmp_path / name
+    probe.write_text(f'{prelude}. "$1"\n{body}\n', encoding="utf-8")
     scratch_home = tmp_path / "home"
     scratch_home.mkdir(exist_ok=True)
     env = dict(os.environ)
@@ -1671,6 +1694,8 @@ def _compound_fixture(tmp_path: Path) -> dict[str, Path]:
     }
 
 
+# The compound class reuses the round-2 probe verbatim — the same sanctioned
+# corpus write, exercised against the compound fixture instead.
 _COMPOUND_WRITE_PROBE = _CORPUS_WRITE_PROBE
 
 
