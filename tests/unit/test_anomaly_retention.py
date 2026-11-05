@@ -204,10 +204,18 @@ def _seed_rows(
     cluster: AnomalyCluster | None = None,
     agent_id: str = "worker",
     severity: str = "minor",
+    outcome: str = "accepted",
 ) -> list[str]:
     """Bulk-seed report rows directly (the sweep does not care who wrote
     them). When a cluster is given, the rows become its members and its
-    ``report_count`` is set to the total member count."""
+    ``report_count`` is set to the total member count.
+
+    ``outcome`` is EXPLICIT so a capacity scenario can make the ACCEPTED
+    count and the TOTAL count DIVERGE. With every row accepted the two
+    counts are equal, and a TOTAL-row fence is then indistinguishable
+    from an ACCEPTED-only fence — the F-1 vacuous-pin trap (mutating
+    the fence's ``outcome=None`` to ``outcome='accepted'`` would pass).
+    """
     ids = []
     with Session(engine) as session:
         from sqlalchemy import func
@@ -226,6 +234,7 @@ def _seed_rows(
                 severity=severity,
                 description=f"seeded {index}",
                 cluster_id=cluster.id if cluster else None,
+                outcome=outcome,
             )
             session.add(row)
             ids.append(row.id)
@@ -698,8 +707,23 @@ class TestUnboundedRefusalLoopCapped:
             await _accept(service, agent_id="spammer")
         # a 6th row from another agent: total 6 = at the ceiling, so
         # this accept path itself refuses (no row) — instead seed it.
-        _seed_rows(engine, count=1, created_at=clock.past(minutes=1))
+        # The seeded row is ``rate_limited`` on PURPOSE: the ACCEPTED
+        # count (5) and the TOTAL count (6) must DIVERGE, or the
+        # scenario cannot tell a TOTAL-row fence from an ACCEPTED-only
+        # one (the F-1 vacuous-pin trap — with every row accepted, the
+        # mutation ``outcome=None`` → ``outcome='accepted'`` on the
+        # FENCE-2 count would pass undetected).
+        _seed_rows(
+            engine,
+            count=1,
+            created_at=clock.past(minutes=1),
+            outcome="rate_limited",
+        )
         assert service.repository.count_reports(outcome=None) == 6
+        assert service.repository.count_reports(outcome="accepted") == 5, (
+            "the ACCEPTED count (5) and the TOTAL count (6) DIVERGE — "
+            "the fence under test is a TOTAL-row fence"
+        )
         # the refused call: per-agent DECISION refuses (budget spent),
         # FENCE 1 would allow a ledger row (0 so far) — but FENCE 2
         # already refused the whole call with NO row.
@@ -710,7 +734,10 @@ class TestUnboundedRefusalLoopCapped:
         assert service.repository.count_reports(outcome=None) == 6, (
             "the ledger INSERT never takes TOTAL rows above the ceiling"
         )
-        assert service.repository.count_reports(outcome="rate_limited") == 0
+        assert service.repository.count_reports(outcome="rate_limited") == 1, (
+            "the ONLY rate_limited row is the SEEDED one — the refused "
+            "call wrote NO ledger row"
+        )
 
 
 class TestGlobalCapacityCapLeg:

@@ -28,7 +28,9 @@ Mutation legs (phase6 §(b)):
 
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -455,3 +457,80 @@ class TestFenceThreeGlobalHourBrake:
         assert caught.value.token == "capacity-exhausted"
         assert service.capacity_exhausted_total == 1
         assert _count(engine) == 3, "no row is written on the brake"
+
+
+# ── the fence-shape contract (F-4) ─────────────────────────────────────────
+#
+# The F-4 sweep classified EVERY capacity/rate fence in the anomaly
+# service + repository as either a TOTAL-row count (accepted + refused)
+# or an ACCEPTED-only count (refusals never consume budget).  Each one
+# matches its design intent:
+#
+#   FENCE 1 (refusal-ledger cap)      -> ACCEPTED-only? NO — refusal-only
+#   FENCE 2 (global row ceiling)       -> TOTAL   (the F-1 correction)
+#   FENCE 3 (global accepted/hour)     -> ACCEPTED-only (an accepted brake)
+#   the per-agent budgets (5/10min, 20/hour) -> ACCEPTED-only (by design)
+#   the per-tree cap (a SHED, never a refusal) -> TOTAL
+#   the pre-insert global ceiling      -> TOTAL
+#
+# The trap this pin closes: ``count_reports`` DEFAULTS to
+# ``outcome='accepted'``, so a call site that forgets the keyword
+# silently becomes an ACCEPTED-only count — the exact shape the sweep
+# hunted for (a TOTAL fence written as an ACCEPTED-only one).  Every
+# call site must therefore STATE its predicate.
+
+
+class TestTheFenceShapeContract:
+    """F-4 — no capacity/rate count may INHERIT its predicate."""
+
+    _SOURCES = (
+        Path(__file__).resolve().parents[2]
+        / "daemon"
+        / "services"
+        / "anomaly_service.py",
+        Path(__file__).resolve().parents[2]
+        / "daemon"
+        / "repositories"
+        / "anomaly"
+        / "repository.py",
+    )
+
+    def test_every_count_reports_call_site_states_its_outcome_predicate(
+        self,
+    ) -> None:
+        sites: list[str] = []
+        for path in self._SOURCES:
+            assert path.exists(), path
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                # (a) a DIRECT call — self.count_reports(...)
+                if isinstance(func, ast.Attribute) and func.attr == "count_reports":
+                    sites.append(self._assert_outcome(path, node))
+                    continue
+                # (b) an OFFLOADED reference — the fence's count is
+                #     handed to the offload seam, so the predicate
+                #     keyword rides the SAME call.
+                for arg in node.args:
+                    if (
+                        isinstance(arg, ast.Attribute)
+                        and arg.attr == "count_reports"
+                    ):
+                        sites.append(self._assert_outcome(path, node))
+        assert len(sites) >= 9, (
+            f"the fence census found only {len(sites)} count_reports call "
+            f"sites ({sites}) — a fence site lost its coverage"
+        )
+
+    @staticmethod
+    def _assert_outcome(path: Path, call: ast.Call) -> str:
+        keywords = {kw.arg for kw in call.keywords if kw.arg}
+        assert "outcome" in keywords, (
+            f"{path.name}:{call.lineno} — count_reports without an "
+            "explicit outcome= inherits the ACCEPTED-only default; a "
+            "capacity fence must STATE whether it counts TOTAL rows or "
+            "ACCEPTED rows only"
+        )
+        return f"{path.name}:{call.lineno}"

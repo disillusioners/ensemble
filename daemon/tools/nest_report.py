@@ -145,6 +145,7 @@ from typing import Any
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+from daemon.repositories.anomaly.models import OUTCOME_UNCLUSTERED
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,13 @@ CATEGORY_RAW_MAX_CHARS = 64
 #: The envelope's cluster tail — phase 1 writes the DEGENERATE cluster
 #: tail (phase 2 replaces it with the real assignment).
 PENDING_CLUSTER_ID = "pending-phase-2"
+
+#: The envelope's cluster tail for a report whose ASSIGNMENT FAILED —
+#: the AM-5b ``unclustered`` terminal state.  The value IS the outcome
+#: token (one vocabulary, no drift): phase 2 deleted the phase-1
+#: "clustering not yet available" tail — a report with no cluster was
+#: TERMINALIZED, never deferred.
+UNCLUSTERED_CLUSTER_ID = OUTCOME_UNCLUSTERED
 
 CATEGORY_DOC = __doc__ or ""
 
@@ -258,6 +266,29 @@ def _service_token(exc: BaseException) -> str | None:
     return None
 
 
+def _cluster_tail(result: Any) -> str:
+    """The envelope's cluster tail — HONEST about a missing assignment.
+
+    Phase 2 deleted the phase-1 ``pending-phase-2`` tail: there is no
+    "clustering not yet available" state.  A report that carries no
+    cluster was TERMINALIZED ``unclustered`` (AM-5b — ``accepted``
+    MEANS clustered), so the envelope renders the outcome's own token
+    and never a stale "pending" marker.
+
+    The ``pending-phase-2`` fallback survives ONLY for a result that
+    carries no cluster AND claims ``accepted`` — an AM-5b contract
+    violation the service cannot produce (it writes the ``unclustered``
+    outcome instead).  It is kept as the greppable marker for that
+    impossible shape.
+    """
+    cluster_id = getattr(result, "cluster_id", None)
+    if cluster_id:
+        return str(cluster_id)
+    if getattr(result, "outcome", None) == OUTCOME_UNCLUSTERED:
+        return UNCLUSTERED_CLUSTER_ID
+    return PENDING_CLUSTER_ID
+
+
 def _success_envelope(result: Any, *, truncated: bool) -> str:
     """The success envelope — a single string, one field per line.
 
@@ -265,13 +296,13 @@ def _success_envelope(result: Any, *, truncated: bool) -> str:
 
     ``OK: anomaly accepted``
     ``report_id=<uuid>``
-    ``cluster_id=<uuid | pending-phase-2>``
+    ``cluster_id=<uuid | unclustered>``
     ``cluster_report_count=<n>``
     ``cluster_first_report_at=<ISO-8601>``
     ``category_fold_notice=<notice>``  (ONLY when a fold happened)
     ``truncated=true``                 (ONLY when a field was capped)
     """
-    cluster_id = getattr(result, "cluster_id", None) or PENDING_CLUSTER_ID
+    cluster_id = _cluster_tail(result)
     lines = [
         "OK: anomaly accepted",
         f"report_id={getattr(result, 'report_id', '')}",
@@ -498,7 +529,8 @@ ARGUMENTS
 THE SUCCESS ENVELOPE (one field per line)
   OK: anomaly accepted
   report_id=<uuid>
-  cluster_id=<uuid | pending-phase-2>
+  cluster_id=<uuid | unclustered>   (unclustered = the cluster assignment
+                                    failed; the row was terminalized)
   cluster_report_count=<n>
   cluster_first_report_at=<ISO-8601>
   category_fold_notice=<notice>   (ONLY when the category was folded)
@@ -544,5 +576,6 @@ __all__ = [
     "TOKEN_PERSIST_FAILED",
     "TOKEN_RATE_LIMITED",
     "TOKEN_TOOL_DISABLED",
+    "UNCLUSTERED_CLUSTER_ID",
     "create_nest_report_tools",
 ]

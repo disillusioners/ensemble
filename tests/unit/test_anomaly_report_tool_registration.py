@@ -707,6 +707,54 @@ class TestTheSuccessEnvelope:
             engine, parsed["report_id"]
         ).created_at
 
+    async def test_the_unclustered_outcome_renders_an_honest_cluster_tail(
+        self,
+    ) -> None:
+        """F-2 — a report whose ASSIGNMENT FAILED must not be told that
+        clustering is "not yet available".
+
+        Phase 2 deleted the phase-1 ``pending-phase-2`` tail: the row
+        was TERMINALIZED ``unclustered`` (AM-5b — ``accepted`` MEANS
+        clustered), so the envelope's cluster tail says ``unclustered``.
+        The stale tail told the agent a FALSE story: that the
+        clustering work was still pending, when the assignment had
+        already failed and the row was terminalized.
+        """
+        from types import SimpleNamespace
+
+        class _UnclusteredService:
+            async def accept_report(self, **kwargs: Any) -> Any:
+                return SimpleNamespace(
+                    report_id="11111111-1111-1111-1111-111111111111",
+                    cluster_id=None,
+                    cluster_report_count=1,
+                    cluster_first_report_at="2026-11-05T00:00:00.000000+00:00",
+                    outcome="unclustered",
+                    fold_notice=None,
+                    truncated=False,
+                )
+
+        manager = _StubManager(service=_UnclusteredService())
+        tools = _by_name(_tools(manager))
+        result = await tools[TOOL_NAME].ainvoke(
+            {"category": "performance", "description": "slow"}
+        )
+        parsed = _parse_envelope(result)
+        assert parsed["cluster_id"] == "unclustered", (
+            "the assignment FAILED and the row was terminalized — the "
+            "envelope must not claim the clustering is still pending"
+        )
+        assert "pending-phase-2" not in result, (
+            "the phase-1 'clustering not yet available' tail is DELETED"
+        )
+        # the pinned field set is UNCHANGED (no outcome field was added).
+        assert set(parsed) == {
+            "report_id",
+            "cluster_id",
+            "cluster_report_count",
+            "cluster_first_report_at",
+        }, parsed
+
     async def test_the_fold_notice_appears_iff_a_fold_happened(
         self, tmp_path
     ) -> None:

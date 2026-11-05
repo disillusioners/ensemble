@@ -41,7 +41,11 @@ from daemon._redact import redact_exc_str
 from daemon.config import NestReportConfig
 from daemon.repositories.anomaly.models import AnomalyCluster, AnomalyReport
 from daemon.services import anomaly_service
-from daemon.services.anomaly_service import AnomalyService, scrub_text
+from daemon.services.anomaly_service import (
+    AnomalyRefusalError,
+    AnomalyService,
+    scrub_text,
+)
 
 # ── the planted, NON-STORED secrets ──────────────────────────────────────
 #
@@ -592,4 +596,35 @@ class TestTheAcceptPathContract:
             "INSERT/UPDATE) must be invoked VIA the offload seam "
             "(await self._offload(...)), never as a direct synchronous "
             "call on the event loop"
+        )
+
+        # ── F-3 — the LEDGER-REFUSAL INSERT takes the SAME seam.
+        # It opens a Session and commits()s, so a direct call inside the
+        # async path is the same event-loop sync-DB incident class.  The
+        # offload-routing pin used to cover the accept path only (it was
+        # re-pointed from ``insert_report`` to ``assign_report_unit``),
+        # which left the ledger INSERT unpinned.
+        for _ in range(4):
+            await service.accept_report(
+                agent_id="worker",
+                instance_id="inst-1",
+                category="tool-failure",
+                description="boom",
+                severity="major",
+            )
+        # the 6th report in the window exhausts the per-agent budget →
+        # the ledgered refusal (the ledger cap is unsatisfied, so the
+        # refusal row IS written).
+        with pytest.raises(AnomalyRefusalError):
+            await service.accept_report(
+                agent_id="worker",
+                instance_id="inst-1",
+                category="tool-failure",
+                description="boom",
+                severity="major",
+            )
+        assert "insert_report" in routed, (
+            "the LEDGER-REFUSAL INSERT must be invoked VIA the offload "
+            "seam (await self._offload(...)), never as a direct "
+            "synchronous call on the event loop"
         )
