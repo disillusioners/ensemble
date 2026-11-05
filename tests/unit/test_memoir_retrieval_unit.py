@@ -533,3 +533,34 @@ def test_a_healthy_semantic_recall_reports_the_none_reason(repo):
     result = service.recall("ari", "preserved", k=5)
     assert "semantic=on" in result.footer
     assert "semantic_reason=none" in result.footer
+
+
+# ── Tidier M18 (C3): a stats-write failure must not destroy the recall ────
+
+
+def test_a_failed_stats_write_keeps_the_recall(repo, monkeypatch, caplog):
+    """``mark_recalled`` exploding is bookkeeping pain, not read failure.
+
+    The episodes ARE returned, ``stats_updated`` is False and
+    ``marked_ids`` is empty — and the WARNING carries the exception
+    class so the operator can see WHY. The planted defect (unguarded
+    ``mark_recalled``) turns this into a raised exception ⇒ RED.
+    """
+    import logging
+
+    episode = repo.insert_episode(agent_id="ari", body="the preserved first day")
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("the stats table is locked")
+
+    monkeypatch.setattr(repo, "mark_recalled", _explode)
+    service = _service(repo)
+    with caplog.at_level(logging.WARNING, logger="daemon.services.memoir_retrieval"):
+        result = service.recall("ari", "preserved", k=5)
+
+    assert result.rendered_ids == [episode], "the read must survive"
+    assert result.stats_updated is False
+    assert result.marked_ids == []
+    warnings = [r.getMessage() for r in caplog.records if "stats_write_failed" in r.getMessage()]
+    assert warnings, "the failed stats write must be logged"
+    assert "stats_write_failed:RuntimeError" in warnings[0]

@@ -792,3 +792,56 @@ class TestTheDegradedBoot:
             mgr, current_instance_id="inst-9", agent_id=MEMOIR_AUTHORIZED_AGENT
         )
         assert len(tools) == 5
+
+
+# ── Tidier M16 (C1): POST-COMMIT honesty ────────────────────────────────
+# A failure AFTER the write landed must never read as "nothing was
+# recorded": a retry would duplicate the episode / overwrite the claim.
+# The planted defect (one shared "nothing was …" string for both phases)
+# flips these RED.
+
+
+class TestPostCommitHonesty:
+    @pytest.mark.asyncio
+    async def test_a_post_commit_write_failure_says_it_may_have_landed(
+        self, monkeypatch, mgr, tools, repo
+    ):
+        """The insert lands; the RESULT assembly raises ⇒ honest wording,
+        and the episode IS in the store (so a retry WOULD duplicate)."""
+        from daemon.tools import memoir as memoir_module
+
+        def _boom(value):
+            raise RuntimeError("result assembly exploded")
+
+        monkeypatch.setattr(memoir_module, "to_utc_iso", _boom)
+        result = await tools["memoir_write"].ainvoke({"text": "we chose the hybrid"})
+        assert isinstance(result, str)
+        assert result.startswith("Error: memoir_write REFUSED — reason=memoir_internal_error")
+        assert "MAY HAVE BEEN APPLIED" in result
+        assert "memoir_timeline" in result
+        assert "nothing was recorded" not in result
+        # PROOF of the hazard: the episode is really there.
+        assert len(repo.fetch_latest(MEMOIR_AUTHORIZED_AGENT, None)) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_post_commit_pin_failure_says_it_may_have_landed(
+        self, monkeypatch, mgr, tools, repo
+    ):
+        from daemon.tools import memoir as memoir_module
+
+        episode_id = repo.insert_episode(agent_id=MEMOIR_AUTHORIZED_AGENT, body="body")
+
+        def _boom(value):
+            raise RuntimeError("result assembly exploded")
+
+        monkeypatch.setattr(memoir_module, "to_utc_iso", _boom)
+        result = await tools["memoir_pin"].ainvoke(
+            {"id": episode_id, "reason": "must always be here", "actor": "empress"}
+        )
+        assert isinstance(result, str)
+        assert "MAY HAVE BEEN APPLIED" in result
+        assert "memoir_recall" in result and "memoir_timeline" in result
+        assert "nothing was changed" not in result
+        # PROOF of the hazard: the pin really landed.
+        keepsakes = repo.fetch_keepsakes(MEMOIR_AUTHORIZED_AGENT)
+        assert [row.id for row in keepsakes] == [episode_id]

@@ -367,3 +367,52 @@ def test_stable_id_supersede_not_duplicate():
     )
     with pytest.raises(ValueError):
         _stable_id_for("memoir", agent_id=None)
+
+
+# ── Tidier M17 (C2): per-read guards — D5.9 conformance ─────────────────
+
+
+def test_a_failing_persona_read_still_ships_the_keepsakes(
+    monkeypatch, caplog, repo, fake_repo, manager
+):
+    """D5.9 say it plainly: "a missing persona does not suppress keepsakes".
+
+    Before the per-read guards, a persona read EXCEPTION aborted the whole
+    build, so the keepsake that HAD loaded never reached the block. The
+    planted defect (one shared try around all three reads) flips this RED.
+    """
+    from daemon.repositories.memoir.repository import MemoirRepository
+    from daemon.services.memoir_briefing import (
+        MEMOIR_PERSONA_MISSING_PREFIX,
+        MEMOIR_READ_TIMEOUT_S,  # noqa: F401 — documents the bound
+    )
+
+    repo.seed_persona_if_absent(MEMOIR_AGENT_ID)
+    keepsake_id = repo.insert_episode(
+        agent_id=MEMOIR_AGENT_ID,
+        body="the emperor set the doctrine",
+        title="doctrine",
+        is_keepsake=True,
+        pinned_by="emperor",
+        pinned_reason="binding doctrine",
+    )
+
+    def _explode(self, agent_id):  # noqa: ARG001 — signature parity
+        raise RuntimeError("persona read exploded")
+
+    monkeypatch.setattr(MemoirRepository, "get_approved_persona", _explode)
+
+    with caplog.at_level(logging.WARNING, logger="daemon.services.memoir_briefing"):
+        persistent, _ = asyncio.run(_assemble(manager, fake_repo))
+
+    blocks = _memoir_blocks(persistent)
+    assert len(blocks) == 1, "the persona failure must not suppress the block"
+    body = blocks[0].content
+    assert MEMOIR_PERSONA_MISSING_PREFIX in body, "the persona zone must degrade"
+    assert keepsake_id in body or "doctrine" in body, (
+        "the keepsake MUST still ship when only the persona read failed"
+    )
+    reasons = [r.getMessage() for r in caplog.records if "briefing read failed" in r.getMessage()]
+    assert reasons, "the degrade must be logged with its reason token"
+    assert "read=persona" in reasons[0]
+    assert "RuntimeError" in reasons[0]

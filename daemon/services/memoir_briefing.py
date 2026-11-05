@@ -433,6 +433,34 @@ def _capture_provenance_class(manager: Any, instance_id: str) -> str:
     return capture_provenance_class_name(manager, instance_id)
 
 
+async def _guarded_read(
+    label: str,
+    read: Any,
+    *args: Any,
+    default: Any,
+) -> Any:
+    """ONE deadline-bounded briefing read that CANNOT abort the build.
+
+    AM-38 (every read is deadline-bounded) + tidier M17 (each read is
+    guarded INDIVIDUALLY): an exception OR a timeout degrades only this
+    read to ``default`` and logs a reason token, so a missing persona
+    still ships the keepsakes (D5.9's explicit promise).
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(read, *args),
+            timeout=MEMOIR_READ_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 — a read must never kill the block
+        logger.warning(
+            "[Memoir] briefing read failed read=%s reason=%s — degrading "
+            "this zone only",
+            label,
+            type(exc).__name__,
+        )
+        return default
+
+
 async def _build_memoir_briefing_message(
     agent_id: str,
     instance_id: str,
@@ -455,17 +483,23 @@ async def _build_memoir_briefing_message(
 
     repo = MemoirRepository(engine)
 
-    persona = await asyncio.wait_for(
-        asyncio.to_thread(repo.get_approved_persona, agent_id),
-        timeout=MEMOIR_READ_TIMEOUT_S,
+    # ── Tidier M17: PER-READ guards (D5.9 conformance). A failure in ONE
+    # read must degrade ONLY its own zone — before this, a persona read
+    # error aborted the whole build and the keepsakes (which HAD loaded)
+    # never shipped. Each failure logs its reason token; the block still
+    # assembles from whatever is available.
+    persona = await _guarded_read(
+        "persona", repo.get_approved_persona, agent_id, default=None
     )
-    keepsakes = await asyncio.wait_for(
-        asyncio.to_thread(repo.fetch_keepsakes, agent_id),
-        timeout=MEMOIR_READ_TIMEOUT_S,
+    keepsakes = await _guarded_read(
+        "keepsakes", repo.fetch_keepsakes, agent_id, default=[]
     )
-    episodes = await asyncio.wait_for(
-        asyncio.to_thread(repo.fetch_latest, agent_id, MEMOIR_DYNAMIC_EPISODES),
-        timeout=MEMOIR_READ_TIMEOUT_S,
+    episodes = await _guarded_read(
+        "episodes",
+        repo.fetch_latest,
+        agent_id,
+        MEMOIR_DYNAMIC_EPISODES,
+        default=[],
     )
 
     provenance_class = _capture_provenance_class(manager, instance_id)

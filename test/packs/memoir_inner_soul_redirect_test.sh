@@ -275,12 +275,21 @@ def main() -> int:
     evidence["tree_status"] = status
     changed_files = {ln[3:].strip() for ln in status.splitlines() if ln.strip()}
     # The fence is a PREFIX allow-list (the lane's own file set): any
-    # changed file outside it is a stray edit.
+    # changed file outside it is a stray edit. The lane's surface is the
+    # tools + the SERVICES + the repository + the config knob + the packs
+    # + the prompt artifacts — the tidier and the later phases touched all
+    # of them, so a fence that admitted only ``inner_soul.py`` failed
+    # mid-lane for legitimate edits (2026-11-05 tidier batch C).
     prefixes = [
         "daemon/tools/inner_soul.py",
+        "daemon/tools/memoir.py",
+        "daemon/tools/provenance.py",
+        "daemon/services/memoir_",
+        "daemon/repositories/memoir/",
+        "daemon/config.py",
         "test/packs/memoir_",
         "tests/unit/test_memoir_",
-        "daemon/tools/memoir.py",
+        "tests/postgres/test_memoir_",
         "agents/ari/",
         "agents/.prompt-artifacts.sha256",
     ]

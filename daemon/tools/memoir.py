@@ -740,6 +740,11 @@ def create_memoir_tools(
     ) -> dict | str:
         """Append one episodic memory to my memoir store. Use tool_help("memoir_write") for details."""
         label = "memoir_write"
+        #: Set the instant ``insert_episode`` returns: from then on the
+        #: episode IS in the store, so a later failure must never claim
+        #: "nothing was recorded" (a retry would duplicate it) — tidier
+        #: M16.
+        committed = False
         try:
             # ── D4.2 gates 1-2: auth FIRST, then the kill-switch ─────
             refusal = _gate(label, "recorded", caller_agent_id, manager)
@@ -799,6 +804,7 @@ def create_memoir_tools(
                 pinned_by=actor if keepsake else None,
                 pinned_reason=reason if keepsake else None,
             )
+            committed = True
             result: dict[str, Any] = {
                 "episode_id": new_id,
                 "created_at": to_utc_iso(created),
@@ -820,6 +826,19 @@ def create_memoir_tools(
             return _map_write_error(exc, label)
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("memoir_write failed")
+            if committed:
+                # POST-COMMIT: the insert already landed. Saying "nothing
+                # was recorded" here would invite a retry that DUPLICATES
+                # the episode (M16).
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_INTERNAL_ERROR,
+                    "the episode write MAY HAVE BEEN APPLIED — it was "
+                    "committed, but the result could not be assembled "
+                    "(logged server-side). Verify with memoir_timeline (or "
+                    "memoir_recall) BEFORE retrying: a retry would record "
+                    "the memory twice",
+                )
             return _refuse(
                 label,
                 MEMOIR_CODE_INTERNAL_ERROR,
@@ -836,6 +855,10 @@ def create_memoir_tools(
     ) -> dict | str:
         """Pin an existing episode as a keepsake (cap-refused, never evicted). Use tool_help("memoir_pin") for details."""
         label = "memoir_pin"
+        #: Set the instant ``set_pin`` returns (tidier M16): the claim IS
+        #: written, so the failure wording must not read as "nothing
+        #: happened".
+        committed = False
         try:
             refusal = _gate(label, "changed", caller_agent_id, manager)
             if refusal is not None:
@@ -884,6 +907,7 @@ def create_memoir_tools(
             await asyncio.to_thread(
                 repo.set_pin, id, actor=actor, reason=reason
             )
+            committed = True
             kept = await asyncio.to_thread(repo.fetch_keepsakes, caller_agent_id)
             pinned_at = None
             for row in kept or []:
@@ -912,6 +936,16 @@ def create_memoir_tools(
             return _map_write_error(exc, label)
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("memoir_pin failed")
+            if committed:
+                # POST-COMMIT: the pin (and its claim) already landed.
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_INTERNAL_ERROR,
+                    "the pin write MAY HAVE BEEN APPLIED — the claim was "
+                    "committed, but the result could not be assembled "
+                    "(logged server-side). Verify with memoir_recall or "
+                    "memoir_timeline BEFORE retrying",
+                )
             return _refuse(
                 label,
                 MEMOIR_CODE_INTERNAL_ERROR,

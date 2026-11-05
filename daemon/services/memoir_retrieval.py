@@ -431,9 +431,25 @@ class MemoirRetrievalService:
         marked_ids: list[str] = []
         stats_updated = False
         if rendered_ids:
-            self.repository.mark_recalled(rendered_ids, now=self._now_fn())
-            marked_ids = list(rendered_ids)
-            stats_updated = True
+            # Tidier M18: the STATS write is bookkeeping, the RECALL is
+            # the product. A failed ``mark_recalled`` (a locked table, a
+            # vanished row) must not destroy a read that already
+            # succeeded — guard it, keep the computed result, and say so
+            # in the log. The shipped footer was measured BEFORE the
+            # write (it must be, to price the envelope), so it keeps the
+            # pre-write flag; the RESULT fields below are the truth.
+            try:
+                self.repository.mark_recalled(rendered_ids, now=self._now_fn())
+                marked_ids = list(rendered_ids)
+                stats_updated = True
+            except Exception as exc:  # noqa: BLE001 — never lose the recall
+                logger.warning(
+                    "[MemoirRecall] stats_write_failed:%s — the recall "
+                    "result is kept; the access stats were NOT updated",
+                    type(exc).__name__,
+                )
+                marked_ids = []
+                stats_updated = False
 
         return MemoirRecallResult(
             episodes=shipped,

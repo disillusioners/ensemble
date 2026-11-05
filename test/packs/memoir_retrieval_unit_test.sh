@@ -80,7 +80,7 @@ fi
 #  `-lt 1` let a silently-shortened selection pass; an exact count
 #  turns "a test disappeared" into a RED instead of a quieter green
 #  (tidier M12). Re-measure and move this constant deliberately.
-EXPECTED_PASSED_N=31
+EXPECTED_PASSED_N=32
 
 LOG="$(mktemp -t memoir_retrieval_unit_test.XXXXXX)"
 trap 'rm -f "${LOG}"' EXIT
