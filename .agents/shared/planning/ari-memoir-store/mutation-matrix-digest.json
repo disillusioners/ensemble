@@ -1,10 +1,10 @@
 {
-  "digest": "39e805175e3fb381f7c58974d649ed2678eab2732fb932ec28793aee7b7cfedd",
+  "digest": "d1299e0f3623fa01dda9e55c66caf7893224884b918f7a4402f8bb3cdf2c6df5",
   "legs": [
     {
       "green_node_counts": {
         "failed": null,
-        "passed": 28
+        "passed": 32
       },
       "green_rc": 0,
       "guard": "tests/unit/test_memoir_retrieval_unit.py",
@@ -15,7 +15,7 @@
       "red_node": "FAILED tests/unit/test_memoir_retrieval_unit.py::test_k_caps_the_shipped_episode_count_on_a_larger_corpus",
       "red_node_counts": {
         "failed": 1,
-        "passed": 27
+        "passed": 31
       },
       "red_rc": 1,
       "restore_byte_identical": true,
@@ -44,7 +44,7 @@
     {
       "green_node_counts": {
         "failed": null,
-        "passed": 37
+        "passed": 39
       },
       "green_rc": 0,
       "guard": "tests/unit/test_memoir_embedding_worker_unit.py",
@@ -55,7 +55,7 @@
       "red_node": "FAILED tests/unit/test_memoir_embedding_worker_unit.py::test_a_starved_window_warns_after_n_stalled_ticks",
       "red_node_counts": {
         "failed": 1,
-        "passed": 36
+        "passed": 38
       },
       "red_rc": 1,
       "restore_byte_identical": true,
@@ -64,7 +64,7 @@
     {
       "green_node_counts": {
         "failed": null,
-        "passed": 43
+        "passed": 45
       },
       "green_rc": 0,
       "guard": "tests/unit/test_memoir_tools_unit.py",
@@ -75,7 +75,7 @@
       "red_node": "FAILED tests/unit/test_memoir_tools_unit.py::TestTheRefusalMatrix::test_a_blank_recall_query_refuses_with_query_required",
       "red_node_counts": {
         "failed": 1,
-        "passed": 42
+        "passed": 44
       },
       "red_rc": 1,
       "restore_byte_identical": true,
@@ -84,7 +84,7 @@
     {
       "green_node_counts": {
         "failed": null,
-        "passed": 38
+        "passed": 40
       },
       "green_rc": 0,
       "guard": "tests/unit/test_memoir_knob_truth_table.py",
@@ -95,7 +95,7 @@
       "red_node": "FAILED tests/unit/test_memoir_knob_truth_table.py::test_indeterminate_value_fails_closed",
       "red_node_counts": {
         "failed": 2,
-        "passed": 36
+        "passed": 38
       },
       "red_rc": 1,
       "restore_byte_identical": true,
