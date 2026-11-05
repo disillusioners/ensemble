@@ -41,8 +41,6 @@ vocabulary is NOT widened by this route.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -51,6 +49,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from daemon.auth.decorators import scope_required
+from daemon.services.metrics_query.envelope import decode_cursor, encode_cursor
 
 logger = logging.getLogger(__name__)
 
@@ -133,23 +132,13 @@ def _anomaly_service(request: Request) -> Any:
 
 
 def _encode_cursor(payload: dict[str, Any]) -> str:
-    """Encode an OPAQUE cursor (base64url of a compact JSON payload)."""
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    """Encode an OPAQUE cursor (the door's codec, imported never copied)."""
+    return encode_cursor(payload)
 
 
 def _decode_cursor(raw: str) -> dict[str, Any]:
     """Decode an opaque cursor; raise ``ValueError`` when it is invalid."""
-    padded = raw.strip()
-    padding = "=" * (-len(padded) % 4)
-    try:
-        decoded = base64.urlsafe_b64decode(padded + padding)
-        payload = json.loads(decoded.decode("utf-8"))
-    except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
-        raise ValueError(f"undecodable cursor: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("cursor payload is not an object")
-    return payload
+    return decode_cursor(raw)
 
 
 def _filter_fingerprint(

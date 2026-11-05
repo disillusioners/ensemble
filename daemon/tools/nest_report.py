@@ -149,6 +149,7 @@ from langchain_core.tools import tool
 from ._tool_registry import register_tool_category
 from daemon.repositories.anomaly.models import OUTCOME_UNCLUSTERED
 from daemon.services.anomaly_service import (
+    ANOMALY_SEVERITIES as _SERVICE_ANOMALY_SEVERITIES,
     CATEGORY_RAW_MAX_CHARS as _SERVICE_CATEGORY_RAW_MAX_CHARS,
 )
 
@@ -180,8 +181,10 @@ SERVICE_TOKENS: frozenset[str] = frozenset(
     {TOKEN_RATE_LIMITED, TOKEN_CAPACITY_EXHAUSTED}
 )
 
-#: The closed severity tiers (R3).
-SEVERITIES: tuple[str, ...] = ("minor", "major", "critical")
+#: The closed severity tiers (R3) — IMPORTED from the service vocabulary
+#: (the single source of truth: a duplicated literal would drift exactly
+#: like the category cap below). ``SEVERITIES`` stays the tool-side name.
+SEVERITIES: tuple[str, ...] = _SERVICE_ANOMALY_SEVERITIES
 
 #: The default severity — the tier an unreported severity lands on.
 DEFAULT_SEVERITY = "major"

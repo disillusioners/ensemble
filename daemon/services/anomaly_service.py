@@ -356,7 +356,6 @@ def _cutoff(seconds: float) -> str:
     ).isoformat(timespec="microseconds")
 
 
-
 @dataclass
 class AnomalyHarvest:
     """The bounded evidence harvest for one report.
@@ -1105,9 +1104,7 @@ class AnomalyService:
         # NOTE to the tree's most recent anomaly item instead of
         # creating + increment the suppression counter + point the
         # cluster at that item.
-        hour_cutoff = (
-            _now_dt() - timedelta(hours=1)
-        ).isoformat(timespec="microseconds")
+        hour_cutoff = _cutoff(3600)
         tree_recent = await self._offload(
             self._repository.count_recent_board_items,
             tree_root_instance_id=tree_root,
@@ -1674,7 +1671,6 @@ class AnomalyService:
                 "is the reporter itself",
                 instance_id,
             )
-        if not chain:
             return
         try:
             labels = await self._offload(
@@ -2032,7 +2028,6 @@ __all__ = [
     "AnomalyRefusalError",
     "AnomalyService",
     "canonical_boot_epoch",
-    "is_error_bearing",
     "scrub_text",
     "select_error_excerpt",
 ]

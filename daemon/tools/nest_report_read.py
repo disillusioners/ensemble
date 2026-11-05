@@ -454,7 +454,6 @@ def create_nest_report_read_tools(
                 kept = await _offload(
                     _trim_to_byte_ceiling, payload, key="groups", items=items
                 )
-                trimmed = len(kept) < len(items)
                 payload["groups"] = kept
                 payload["bound"] = {
                     **payload["bound"],
@@ -465,7 +464,6 @@ def create_nest_report_read_tools(
                 payload["byte_ceiling_caveat"] = _byte_ceiling_caveat(
                     "anomaly_clusters"
                 )
-                _ = trimmed
             return json.dumps(payload, indent=2, default=str)
         except ValueError as exc:
             # AnomalyInputError subclasses ValueError — the typed

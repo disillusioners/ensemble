@@ -68,7 +68,6 @@ fix is routed to the central-metrics lane, not this one.
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -79,8 +78,6 @@ from daemon.services.metrics_query.wiring.registry import (
     register_pull_adapter,
 )
 from daemon.services.metrics_query.wiring.sources import current_sources
-
-logger = logging.getLogger(__name__)
 
 CLUSTER = "W4"
 
