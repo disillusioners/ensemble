@@ -542,7 +542,7 @@ A single mismatch is a drift defect, not style (X-02).
   the only *named* rule, PACKS.md **keep-both newest-first**, is **actively wrong** for a hash
   baseline: keeping both sides produces a **doubled-key** file that no generator will reproduce and
   that no `--check` will pass. Rule: **take either side, regenerate ONCE on the merged tree**
-  (P6 task 2's generator, after the merge, as the last `agents/**` content change), **NEVER
+  (P6 task 3's generator, after the merge, as the last `agents/**` content change), **NEVER
   keep-both**. Why a hash baseline differs from PACKS.md: PACKS.md is an append-only human registry
   whose entries are independent rows (keeping both loses nothing and is merge-order tolerant), while
   a hash baseline is a **single derived artifact** — one row per file, every value recomputed from
