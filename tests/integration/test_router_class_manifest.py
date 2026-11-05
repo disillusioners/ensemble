@@ -145,6 +145,13 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # one) and the auth-OFF 503 fail-closed gate, so the route is NOT
     # open in the auth-OFF local mode any more.
     "/api/metrics": frozenset({"pd"}),
+    # nest-reports (2026-11-05, nest-anomaly-report lane): the anomaly
+    # DOMAIN route. No route carries an explicit class tag ⇒ it
+    # classifies protected-default ("pd"), the metrics-router
+    # precedent. The scope declaration lives in the scope cage
+    # (``tests/unit/test_router_scope_manifest.py``); the auth-OFF
+    # 503 fail-closed gate lives in the route.
+    "/api/nest-reports": frozenset({"pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -382,4 +389,4 @@ class TestRouterClassManifest:
         # checkpoint read-path plan / Track-1 item 4 added the
         # /api/metrics family — the api_families count grew from 32
         # to 33.
-        assert len(api_families) == 33, sorted(api_families)
+        assert len(api_families) == 34, sorted(api_families)
