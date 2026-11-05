@@ -73,3 +73,115 @@ destructive write for zero gain that would diverge prod from that end-state.
 
 Root fix (boot-epoch/heartbeat-gated refusal of discard_on_startup) is
 escalated and routed OUT of this lane — do not touch boot-recovery code.
+
+## Tidier fix cycle — 2026-11-05 (49 findings: 8H/18M/23L)
+
+### The referenced tidier report was ABSENT
+
+The commission says "read the tidier report at `.agents/tidier/`". It is
+**not there**: `.agents/tidier/notes.md` holds OTHER lanes' tidy passes
+(newest 2026-11-03/04), and a whole-tree plus main-checkout search finds
+no memoir tidier record. Every item was therefore executed from the
+leader's enumerated rulings (item numbers + defect descriptions +
+anchors), located in the tree by the described defect. Items the ruling
+list does not enumerate could not be transcribed — they are recorded
+BELOW by label only, with NO invented detail.
+
+### Applied (batches A/B/C)
+
+- A1 H1 `_gate` helper (memoir.py) — five bodies, ONE gate, ONE wording
+  template; the three drifting kill-switch spellings are gone. The
+  gate-order pin caught a real evaluation-order regression during the
+  fix (an eagerly-read `manager.config` at the call site); the helper now
+  takes the manager and reads the knob AFTER the auth gate.
+- A2 H3 tool-side `k`/window re-derivation deleted; the service owns both
+  bounds. Proven through the tool: k=0 / k=21 / k=-3 ⇒
+  `memoir_k_out_of_range`; a non-integer reaches the body's typed
+  envelope (`k must be an integer; got 'abc'`) via the service's own
+  code; through `ainvoke` the int args_schema rejects it first (framework
+  validation, pre-existing). NO type coercion kept, NO 20th code.
+- A3 H5 `memoir_block_present` mints the stable id through
+  `_stable_id_for("memoir", agent_id=…)` (lazy import).
+- A4 H4 SCAN_LIMIT comment now states the W-2 truth (terminal-aware scan;
+  the limit bounds the NON-TERMINAL working set; the Python filter is the
+  belt).
+- A5 H6 five packs fail loud on a missing interpreter
+  (`RESULT: FAIL (MISSING-INTERPRETER …)` + exit 1) and the L16 matrix
+  PYTHON guard refuses once, by name, before any leg.
+- A6 M12 exact `EXPECTED_PASSED_N` in the eight packs that carried
+  `-lt 1` — measured, not copied (see the table in the lane report).
+- A7 M15 RESERVED annotations on `memoir_not_a_keepsake` and
+  `memoir_budget_exceeded` (no live emitter; no 20th code).
+- A8 L21 `MEMOIR_CODE_QUERY_REQUIRED` added to the import-time membership
+  guard loop.
+- A9 M13 worker `__all__` + `_default_embed` declared (the lane's only
+  SDK call site; imported by the retrieval service).
+- A10 M11 size rationales for `daemon/tools/memoir.py` and
+  `daemon/repositories/memoir/repository.py`, in the manager.py:235
+  style.
+- A11 M9 ONE provenance helper: `daemon/tools/provenance.py`
+  `capture_provenance_class_name` (logs before any empty return); both
+  memoir consumers delegate. **DEVIATION, flagged:** the brief's
+  `daemon/services/provenance.py` path does not exist and was NOT
+  created — the real existing module is `daemon/tools/provenance.py`.
+- B1 H7 recall logging: module logger; a WARNING with a reason token on
+  every semantic degrade (`no_embedder` / `timeout` / exception class
+  name); one-shot construction INFO naming the missing arm
+  (`no_config` / `no_api_key` / `no_base_url` / `no_model_or_dims`);
+  `semantic_reason=` footer token (AM-33 extension) with the budget
+  pack's footer assertions updated IN THE SAME COMMIT. Note: the footer
+  pin is SUBSTRING-based (`tests/unit/test_memoir_budget_unit.py`), not a
+  literal byte pin — the assertions were extended, not rewritten.
+- B2 H8 query-vector dimension guard + pin (mutation-verified:
+  RED without the guard, GREEN with it).
+- B3 item 14 `Config._classify_enabled` fails CLOSED for unvalidated
+  types. VERIFIED BEFORE: a list / dict / float made Pydantic RAISE
+  `ValidationError` (a config-file list would abort the BOOT); int 1/0
+  were silently coerced. AFTER: 1/0 keep their YAML meaning; every other
+  non-str, non-bool value resolves DISABLED and never raises.
+- B4 item 15 `_record_failure` returns the CLASS token
+  (`_reason_token`, marker-stripped) and the tick line carries a
+  `fail_classes=token:count` census, so a dead credential and a dims
+  mismatch are distinguishable.
+- B5 M8 `_count_pins` ⇒ `len(self._pin_details(...))`.
+- B6 L22 the four silent embedder-resolution fallbacks now log at
+  WARNING with the offending value / reason: (1) env dims not an int,
+  (2) config dims not an int, (3) the MemoirConfig default unresolvable
+  (keeping 1536), (4) no embedding model resolvable.
+- C1 M16 post-commit honesty in `memoir_write` / `memoir_pin` (a
+  `committed` flag; the post-commit envelope says the write MAY HAVE BEEN
+  APPLIED and names the verification read).
+- C2 M17 per-read briefing guards (`_guarded_read`): a persona failure
+  degrades ONLY the persona zone and the keepsakes still ship (D5.9),
+  pinned.
+- C3 M18 stats-write guard: a failed `mark_recalled` keeps the recall
+  (`stats_updated=False`, `marked_ids=[]`,
+  `WARNING stats_write_failed:<ExcType>`), pinned. RESIDUAL, disclosed:
+  the shipped footer was measured BEFORE the write (it must be, to price
+  the envelope), so on this path the footer still says
+  `stats_updated=true` while the result fields say False.
+
+### Deferred follow-ups (labels only — the report's per-item detail could not be transcribed)
+
+| Label | What is known | Action now |
+|---|---|---|
+| **H2** BM25 consolidation | Production lexical path is PG `ts_rank_cd`; the SQLite path is the dev fallback. | NOT attempted: ranking equivalence was not provable under the lane's time budget. Divergence recorded; route as its own follow-up. |
+| **M4** constant consolidation | The "readers" status is DISPUTED in the rulings. | NOT consolidated: no reader-verified constant identified. Record. |
+| **M1 / M2 / M7** | Prose that describes PRE-FIX behaviour. | Not located by label (no report). Doc-only; needs the report or a reviewer pass to point at the exact sentences. Recorded, NOT guessed. |
+| **M3** | Unknown detail (report absent). | Follow-up. |
+| **M5** | Unknown detail (report absent). | Follow-up. |
+| **M6** | Unknown detail (report absent). | Follow-up. |
+| **M10** | Unknown detail (report absent). | Follow-up. |
+| **M14** | Unknown detail (report absent). | Follow-up. |
+| **Low polish set** | Not enumerated in the rulings. | Follow-up. |
+
+A one-item note on M1/M2/M7: the A4 comment fix and the A2 docstring
+correction DID remove two lying-prose instances that happened to be
+identified by their own rulings; anything else needs the missing report.
+
+### Test-fence correction (disclosed)
+
+`test/packs/memoir_inner_soul_redirect_test.sh` carried a tree-fence
+PREFIX allow-list admitting only `inner_soul.py` — it failed mid-lane for
+legitimate edits to the memoir service/repository/config files. Extended
+to the lane's real surface (disclosed in the lane report).
