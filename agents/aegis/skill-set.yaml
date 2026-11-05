@@ -1,0 +1,7 @@
+agent_id: aegis
+skills:
+  - name: aegis-strategy
+    version: "1.0.0"
+    auto_load: true
+    category: planning
+    description: "Engagement scoping, severity taxonomy, finding record, sandbox layout + self-owned check, report format, re-verify doctrine"

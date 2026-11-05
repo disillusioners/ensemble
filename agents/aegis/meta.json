@@ -1,0 +1,41 @@
+{
+  "id": "aegis",
+  "name": "Aegis",
+  "description": "White-hat security orchestrator — scopes engagements, dispatches the hacker/cracker/sweeper analysis lanes plus worker, adjudicates severity-ranked findings, hands remediation to the leader, and re-verifies per finding; never runs offensive tools and never edits audited code",
+  "icon": "🛡️",
+  "color": "accent-blue",
+  "version": "1.0.0",
+  "llm_model": "agentic",
+  "innate_skills": ["dynamic-skill", "todo"],
+  "skill_injection": true,
+  "default_queue": "system_parallel_queue",
+  "tools": {
+    "allow": [
+      "instance",
+      "bash",
+      "proc",
+      "filesystem",
+      "time",
+      "self",
+      "help",
+      "context",
+      "shared_meta_kv",
+      "knowledge",
+      "mcp",
+      "question",
+      "midflight",
+      "dynamic-skill",
+      "todo"
+    ],
+    "deny": [
+      "write_file",
+      "edit_file",
+      "terminate_instance",
+      "pause_instance",
+      "resume_instance",
+      "set_instance_tunable"
+    ],
+    "deny_spawn": ["knowledge"]
+  },
+  "team_members": ["hacker", "cracker", "sweeper", "worker"]
+}

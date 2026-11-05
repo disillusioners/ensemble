@@ -1,0 +1,207 @@
+# Phase 5: Verification
+
+## Objective
+
+Prove — on the committed branch — that the aegis family introduces **no behaviour regression**, that
+every commission verification expectation holds, and that the artifacts are exactly what the plan
+claimed. Each gate below is **independently checkable** and separately attributable, so a failure names
+its own cause.
+
+Eight gates, **A–H**.
+
+---
+
+## Entry Criteria
+
+- **Phase 4 exited** — the one commit exists, the baseline **file exists at exactly 177 rows** and is
+  clean (**AM-11: existence + count are asserted explicitly — the `--check` exit code alone proves
+  nothing**), the lane test is green, and the working tree is clean.
+- The **true pre-fix base** for the net-new comparison is known: the base commit
+  `1f6898ae2889ff002b4656486f6be3ee1048b649` (= `origin/latest` at lane start). Net-new reds are
+  computed as the **FAILED-list diff** of the same commands on the base and on HEAD — not a raw
+  failure count.
+- A venv exists (`uv sync`) for the suite runs; the baseline checks remain venv-free.
+
+---
+
+## Tasks
+
+| # | Task | Depends On | Acceptance |
+|---|------|------------|------------|
+| 1 | **Gate A — the full-suite net-new comparison.** Run the whole collectable suite on **HEAD** and on the **base** with the *same* commands and the *same* environment; diff the FAILED lists. **C1(d) expected-red note (council-D1, delta re-gate — true signature):** `tests/unit/test_maintenancer_agent.py::test_leader_team_members_length_16` is **green at base (the base roster is 16 and the pin asserts ==16)** and **green at HEAD only via the in-commit fold (C1(b)); absent the fold it would be the single HEAD-only red** — post-fold it appears in NEITHER FAILED list, and the ledger records the fold; no flip signature appears. | Phase 4 exited | **Net-new deterministic reds = 0.** Any red that is red at the base too is pre-existing debt and is **disclosed**, not fixed. The leader-length pin is green on BOTH legs when the fold landed (the true council-D1 signature); a HEAD-only red at this pin means the fold was skipped and blocks the phase. Any other red that is *only* at HEAD is a lane regression and blocks the phase. |
+| 2 | **Gate B — the sealed-artifacts proof.** Run `tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts` on the branch. | 1 | Green. The 35 `SEALED_SHA_BASELINES` entries are unchanged — none of them references a not-yet-existing aegis path, so adding agent directories cannot redden them. This is the commission's **explicit** proof leg (S6). |
+| 3 | **Gate C — the plane census.** Run `tests/unit/tools/test_plane_agent_surface_census.py`. | 1 | Green, with `DISCLOSED_READ_HOLDERS` **still `{"watcher"}`** — the aegis family is **not** added to the frozen read-holder set. The E3 fold (explicit non-empty allow on every new meta) removes the exposure rather than whitelisting it. The E4 fold (no `mcp_full_access`) likewise. |
+| 4 | **Gate D — the report-integrity fold + the repo-wide prompt-section-reference sweep (two named legs, W5).** (D-1) Run `tests/unit/test_report_integrity_prompts.py`. (D-2) Run `tests/unit/tools/test_prompt_section_reference_integrity.py` — the only repo-wide prompt-surface sweep (all `agents/*/{soul,rule,tools_note,workflow,memory}.md` + every `skills-template/*.md`, exactly the 16+4 files this lane lands; enforces the bare-`agents/`-prefix closure class via `BARE_AGENTS_PREFIX_RE`). | 1 | Both green. D-1: the dynamic check finds `aegis`'s scrutiny guidance (its non-empty team makes the guidance mandatory; the three children are exempt because their teams are empty). D-2: the lane's 20 files pass the repo-wide section-reference sweep — both closure classes clean or on the enumerated exemption list. |
+| 5 | **Gate E — the boot-scan.** Run the T28 registry-scan leg under the venv, then the tester's isolated boot-scan leg. | 1 | The registry resolves all four ids (`aegis`, `hacker`, `cracker`, `sweeper`); the isolated boot scan is clean — no new agent appears in the census, no agent fails to register, and no `tools` block parses fail-open. |
+| 6 | **Gate F — the tool-categories proof.** Confirm `.agents/shared/metrics/tool-categories.json` is **byte-unchanged** in the lane diff, and run `tests/unit/tools/test_tool_category_artifact.py`. | 1 | The artifact is byte-identical to the base and the test is green — the **F-1 trap class** (a stale committed artifact reddening a whole lane) is avoided because this lane registers **no** new category. |
+| 7 | **Gate G — the manifest delta re-derivation.** Re-derive the agents-tree file count from the **actual tree** and compare against the plan's derivation rule (338 + 28 = 366). | 1 | The re-derived count matches the rule; if it does not, the reason is identified (an extra or missing file) and the plan's arithmetic is corrected **before** staging — the number is re-derived, never trusted. |
+| 8 | **Gate H — the scope and privacy assertions over the LANE-OWN diff (Blocker 1+2).** Confirm the **lane-own diff** (this branch's own commits, pre-merge — the merge/bump/tag/giter choreography are OUTSIDE the gated set, owned by P6's giter sequence and asserted by G6.1a) touches only `agents/**`, `tests/**`, **and the lane's own committed planning set `.agents/shared/planning/aegis-security-family/`** (house doctrine commits planning docs — W4); confirm no finding artifact, corpus, crash dump or secret was committed; confirm `agents/worker/**` is byte-identical. **Blocker 1+2 separate giter-set leg (runs in P6 as G6.1a):** merge parents correct, bump = exactly the 4 house files, tag exists and is pushed. | 1 | The complement of {`agents/`, `tests/`, `.agents/approver/`} over the lane-own diff **equals EXACTLY the planning-dir path list** (any extra path — genuine creep — still reds; the approver-bookkeeping tolerance is the ONLY carve-out, B7); a secret scan over the diff returns zero hits; `git diff --stat <base> -- agents/worker/` is empty. |
+| 9 | **Record the evidence.** Write the verification report into the lane's evidence location with the gate-by-gate result, the exact commands, the base-vs-HEAD failure-list diff, and every disclosed pre-existing red. | 1–8 | The report is complete enough that a reviewer can re-run every gate without re-deriving it, and every disclosed deviation is named. |
+
+---
+
+## Gates
+
+| Gate | Requirement | How it is checked |
+|---|---|---|
+| **A** | No behaviour regression | Full suite, net-new deterministic reds **0** vs the true pre-fix base. **C1(d) + council-D1:** `test_leader_team_members_length_16` is green at base (16==16) and green at HEAD only via the in-commit fold — absent the fold it would be the single HEAD-only red; the ledger records the fold, **no flip signature appears** |
+| **B** | `SEALED_SHA_BASELINES` untouched (35 entries) | `TestPhaseDDoesNotModifySealedArtifacts` green on the branch |
+| **C** | The plane read-holder census is unchanged | census test green; `DISCLOSED_READ_HOLDERS` == `{"watcher"}` |
+| **D** | The report-integrity fold + the repo-wide prompt-surface sweep landed (W5, two named legs) | `test_report_integrity_prompts.py` green (D-1); `test_prompt_section_reference_integrity.py` green over the lane's 16 prompt + 4 skill-body files (D-2) |
+| **E** | Boot-scan clean on the new agent set + **the T29 legality-cardinal matrix (Blocker 4)** + **the T30 installer-guard pin pack (Blocker 9)** | T28 registry scan finds all four ids; the isolated boot scan is clean; **the T29 20-ASSERTED matrix green (5×4, every cell positive — family 3 per-persona forms per the R1 leader ruling: cracker = synthetic benches; aegis/hacker/sweeper = no real-credential ingestion/transcription) — including the approver acceptance test (hacker "no external targets, ever" deletion ⇒ RED)**; **the T30 pack green — per-bullet presence across the three bodies + library-contract assertions (checksum EXECUTED, no docker/apt/sudo, trap-based lock release, attempt cap)** |
+| **F** | No tool-category drift | the artifact is byte-unchanged; `test_tool_category_artifact.py` green |
+| **G** | The manifest delta is re-derived from the real tree | `find agents -type f \| wc -l` matches the derivation rule |
+| **H** | Scope + privacy (LANE-OWN diff, Blocker 1+2, B7-amended) | the lane-own diff touches only `agents/**` + `tests/**` + the committed planning set (complement == exactly `.agents/shared/planning/aegis-security-family/` — W4) **+ the approver bookkeeping `.agents/approver/**` (B7 — house-tracked review-loop artifacts)**; the giter set is outside this gate (G6.1a owns it); no committed finding/corpus/secret; `worker` byte-identical |
+
+---
+
+## Verification Commands
+
+```bash
+cd /home/nea/ensemble-src-wt-aegis-security-family || { echo "FAIL: worktree dir missing"; exit 1; }
+# N3 (close-condition): NO `set -o pipefail` — it ABORTS the whole block under /bin/sh (dash:
+# "Illegal option", rc=2, before any gate runs); it is also unnecessary — the R5/F1 scan greps
+# a FILE, not a pipe.
+
+BASE=1f6898ae2889ff002b4656486f6be3ee1048b649
+HEAD_SHA=$(git rev-parse HEAD)
+
+# --- Gate A: net-new reds -------------------------------------------------
+# The house method: net-new = the FAILED-list DIFF vs the true base, same commands.
+.venv/bin/python -m pytest -q --timeout=30 2>&1 | tee /tmp/aegis-head-full.log | grep -E "^(FAILED|ERROR)" | sort > /tmp/aegis-head.txt || true
+# (e): the FULL log is captured via tee — no truncation; the FAILED list is derived from it
+# (run the same on the base in a separate worktree/checkout, then diff the FAILED lists)
+
+# --- Gate B: the sealed-artifacts proof leg ------------------------------
+.venv/bin/python -m pytest tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts -q
+
+# --- Gate C: the plane read-holder census --------------------------------
+.venv/bin/python -m pytest tests/unit/tools/test_plane_agent_surface_census.py -q
+grep -n 'DISCLOSED_READ_HOLDERS' tests/unit/tools/test_plane_agent_surface_census.py   # expect {"watcher"}
+
+# --- Gate D: the report-integrity dynamic check --------------------------
+.venv/bin/python -m pytest tests/unit/test_report_integrity_prompts.py -q
+
+# --- Gate A supplementary leg: the T29 legality-cardinal pin matrix (Blocker 4) ----------
+.venv/bin/python -m pytest tests/unit/agents/test_aegis_security_family.py -q -k legality
+# approver acceptance test: delete hacker's "no external targets, ever" cardinal → this leg REDS
+
+# --- Gate E supplementary leg: the T30 installer-guard pin pack (Blocker 9) ---------------
+.venv/bin/python -m pytest tests/unit/agents/test_aegis_security_family.py -q -k "fences or library_contract"
+# approver acceptance: delete the NO-Docker bullet from all three .md bodies → byte-identity
+# survives BUT the T30 per-bullet presence pin REDS (the false-green class is closed)
+
+# --- Gate E: the boot-scan / registry scan -------------------------------
+.venv/bin/python -m pytest tests/unit/agents/test_aegis_security_family.py -q -k registry
+
+# --- Gate F: the tool-categories F-1 proof -------------------------------
+git diff --stat $BASE -- .agents/shared/metrics/tool-categories.json     # expect EMPTY
+.venv/bin/python -m pytest tests/unit/tools/test_tool_category_artifact.py -q
+
+# --- Gate G: the manifest delta re-derivation ----------------------------
+find agents -type f | wc -l                                              # 338 + 28 = 366 expected
+git diff --name-status $BASE -- agents/ | awk '$1=="A"' | wc -l           # expect 28 additions
+
+# --- Gate H: scope + privacy --------------------------------------------
+# W4 (plan council) + council-D2 (delta re-gate): the lane COMMITS its planning docs (house doctrine), so
+# the complement of {agents/, tests/} equals the planning set. POSIX-safe form — /bin/sh is dash
+# and `diff <(...)` is a PARSE error there (exit 2 before any || fallback can fire). Write both
+# sides to temp files, then plain diff:
+# BLOCKER 1+2: this gate runs over the LANE-OWN diff (the feature branch's own commits, pre-merge).
+# The merge commit, bump commit, tag and giter choreography are OUTSIDE the gated set (P6 G6.1a
+# asserts them separately: merge parents correct, bump = exactly the 4 house files, tag pushed).
+# B7 (approver iter-002, VERIFIED) + F5 (final micro-fold): .agents/approver/** (active.md +
+# tracking.md) is house-tracked approver-lane WORKING-FILE residue of this lane's own review loop
+# (NAMED OWNER: the approver lane, files authored by approver ce82a383; UNCOMMITTED in the lane
+# commits — committed separately in the bookkeeping commit) — tolerated in the complement.
+git diff --name-only $BASE | grep -v -E '^(agents/|tests/|\.agents/approver/)' | sort > /tmp/aegis-scope-complement.txt
+git diff --name-only $BASE | grep '^\.agents/shared/planning/aegis-security-family/' | sort > /tmp/aegis-scope-planning.txt
+if diff /tmp/aegis-scope-complement.txt /tmp/aegis-scope-planning.txt; then
+  echo "Gate H scope OK (lane-own diff): complement == exactly the planning set (+ approver bookkeeping, tolerated)"
+else
+  echo "Gate H FAIL: out-of-scope paths beyond the planning set + approver bookkeeping (temp files retained)"; exit 1
+fi
+git diff --stat $BASE -- agents/worker/                                  # expect EMPTY
+# R5 (leader disposition — FAIL-CLOSED form) + F1 (execution-proven form, reviewer spot-check):
+# the `if git diff | grep` form treats GIT'S OWN FAILURE as "no match" ⇒ prints OK having
+# scanned NOTHING. Materialize the diff to a file FIRST (git failure ⇒ INCONCLUSIVE, exit 1),
+# then grep the FILE (not the pipe; no pipefail — N3: it aborts dash and is unnecessary here).
+git diff $BASE > /tmp/aegis-diff.txt || { echo "FAIL: git diff failed (bad BASE / not a repo) — scan INCONCLUSIVE"; exit 1; }
+if grep -nE 'sk-(proj|ant)-|BEGIN [A-Z ]*PRIVATE KEY' /tmp/aegis-diff.txt; then
+  echo "FAIL: secret-shaped content in the lane diff (R5 fail-closed)"; exit 1
+else
+  echo "OK: secret scan clean"
+fi
+
+# --- the baseline is still clean on the committed tree --------------------
+python3 scripts/protection/generate_prompt_artifact_baseline.py --check; echo "exit=$?"   # expect 0
+# AM-11: --check exits 0 BOTH when clean AND when the baseline file is ABSENT
+# (generate_prompt_artifact_baseline.py:127-133) — rc=0 alone proves nothing:
+test -f agents/.prompt-artifacts.sha256 || { echo "FAIL: baseline file MISSING"; exit 1; }
+wc -l agents/.prompt-artifacts.sha256    # expect exactly 177
+```
+
+**House notes for this phase:**
+
+- **`pytest -q` buffers tracebacks to the end of the session** — for a large run, use
+  `… | tee /tmp/aegis-suite.log >/dev/null; tail -2 /tmp/aegis-suite.log`. A SIGTERM'd run leaves
+  dots only, which is not evidence.
+- **The net-new comparison must use the same commands on both legs.** A base run with different flags
+  produces a meaningless diff.
+- **Whole-tree runs can hit async-hang classes.** If a chunk times out, isolate the chunk, re-run it
+  3× in isolation, and record the result honestly — a timeout is not a pass and not a fail; it is a
+  disclosed gap with a scoped replay recipe.
+
+---
+
+## Coupling
+
+- **Tight with:** P4 — this phase verifies P4's commit; it must run against the committed tree, not a
+  dirty working tree.
+- **Tight with:** P6 — the staging hand-off consumes this phase's verdict; P6 does not start unless
+  Gates A–H are green.
+- **Loose with:** P1–P3 — the content is already fixed; a gate failure means a content fix and a
+  re-run of P4's commit discipline (a second commit is acceptable **only** if it carries a
+  re-stamped baseline — the one-commit rule governs the *initial* landing, not every later fix).
+- **Independent of:** P0.
+
+---
+
+## Risks
+
+| # | Risk | Impact | Likelihood | Mitigation |
+|---|------|--------|------------|------------|
+| **P5-R1** | The net-new comparison is run against the wrong base (e.g. a drifted tip instead of `1f6898ae2`) ⇒ the diff is meaningless. | **High** | Medium | The base sha is pinned in the phase text; the diff is computed against that exact sha; the base leg is run in a separate checkout of that sha, never "the current main". |
+| **P5-R2** | Pre-existing reds are misread as lane regressions (or vice versa) ⇒ a false pass or a false block. | High | Medium | The house method: net-new = the FAILED-list **diff** of the same commands; every base-red is disclosed by name; every HEAD-only red is investigated to a root cause before the phase closes. |
+| **P5-R3** | A whole-tree run times out and the timeout is quietly treated as "no new failures". | Medium | Medium | A timeout is disclosed as a **gap** with a scoped replay recipe; it is never recorded as a pass. Chunks are re-run 3× in isolation to separate a real red from a flake. |
+| **P5-R4** | The census "passes" because the aegis family was added to `DISCLOSED_READ_HOLDERS` — the exposure whitelisted instead of removed. | **High** | Low | Gate C asserts the frozen set is **still** `{"watcher"}` — the value is read from the file, not inferred from a green test. The E3 fold is verified positively: every new meta's allow is non-empty (T6). |
+| **P5-R5** | The sealed-artifacts leg passes vacuously (the test's scope does not cover the new files) ⇒ the commission's proof requirement is unmet. | Medium | Low | The leg is run and reported with its actual scope (35 entries), and the plan states plainly that the seal does **not** cover the new agents' files — the *baseline* is what covers them. The disclosure is in `plan-overview.md`'s bottleneck list. |
+| **P5-R6** | A finding artifact, corpus, crash dump, or secret was committed by accident. | **High** | Low | Gate H's secret scan over the diff plus the path-list check; the family's storage design keeps findings off-repo (DP4/Q2) so there is nothing to commit in the first place. |
+
+---
+
+## Effort
+
+**≈ 0.5 – 1 working day** — the dominant cost is the base-leg suite run (the same suite twice). The
+seven gates themselves are minutes each.
+
+---
+
+## Exit Criterion
+
+Phase 5 is done when **all eight gates (A–H) are green** and the evidence report is written:
+
+- **A** — net-new deterministic reds **0** (every base-red disclosed by name; `test_leader_team_members_length_16` is green at base (16==16) and green at HEAD only via the in-commit fold — the C1(b) FOLD is recorded in the ledger, no flip signature appears);
+- **B** — `TestPhaseDDoesNotModifySealedArtifacts` green; the 35 sealed entries unchanged;
+- **C** — the plane census green with `DISCLOSED_READ_HOLDERS` still `{"watcher"}`;
+- **D** — the report-integrity dynamic check green **and** the repo-wide prompt-section-reference sweep green over the lane's 20 files (W5, two named legs);
+- **E** — the registry scan finds all four agents; the isolated boot scan is clean; **the T29 legality-cardinal matrix (20 assertions) green AND the T30 installer-guard pin pack green, both approver acceptance tests exercised**;
+- **F** — the tool-categories artifact byte-unchanged; its test green;
+- **G** — the agents-tree count re-derived from the real tree matches the derivation rule;
+- **H** — the **lane-own diff** touches only `agents/**`, `tests/**`, the committed planning set and the approver bookkeeping `.agents/approver/**` (complement == planning set + approver artifacts, B7); the merge/bump/tag/giter set is outside the gate (G6.1a, Blocker 1+2); no committed finding/corpus/secret;
+  `worker` byte-identical;
+
+**and** the evidence report names every disclosed pre-existing red, every timeout gap with its replay
+recipe, and every deviation from `plan-overview.md`.
+
+Only then does Phase 6 stage the release.
