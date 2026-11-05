@@ -291,6 +291,7 @@ from .wedge_capture import create_wedge_capture_tools
 from .notify_user import create_notify_user_tools
 from .metrics_read import create_metrics_read_tools
 from .nest_report import create_nest_report_tools
+from .nest_report_read import create_nest_report_read_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools, create_kms_tools, create_mcp_env_tools
 from .system import create_system_tools
@@ -6696,6 +6697,45 @@ Returns:
     # scope here.
     tools.extend(
         create_nest_report_tools(
+            manager,
+            current_instance_id=current_instance_id,
+            agent_id=agent_id,
+            agent_tag=version_tag,
+        )
+    )
+
+    # ── Nest report READ tools (nest-anomaly-report lane, 2026-11-05) ──
+    # Same critical list-append pattern as the metrics-read extend
+    # above: decorator-only registration is SILENTLY INVISIBLE — this
+    # extend is the third step of the three-step registration seam
+    # (decorator + registry entries + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # The category IS privileged (entry #18): the anomaly store carries
+    # agent-filed incident rows with harvested evidence, so the
+    # empty-allow inherit universe must NOT auto-grant it — the strip
+    # is the point. Explicit ``tools.allow: ["nest-report-read"]`` on
+    # maintenancer + devops + wanderer (the R8 ops trio) is the only
+    # access path.
+    #
+    # NO ``*_if_available`` wrapper (the metrics-read RULING-1 shape):
+    # the factory only builds the closure, and the tool BODY resolves
+    # the anomaly service on the manager PER CALL — so a degraded boot
+    # leaves the tools PRESENT and loudly refusing
+    # (``anomaly-unavailable`` + the degraded block), never silently
+    # vanished.
+    #
+    # ``agent_id`` is the layer-2 gate's input — the shared
+    # ``_is_nest_report_authorized`` helper in the tool module reads it
+    # (a LITERAL tool name in an allow list bypasses the category gate
+    # outright, so the body gate is load-bearing).
+    tools.extend(
+        create_nest_report_read_tools(
             manager,
             current_instance_id=current_instance_id,
             agent_id=agent_id,

@@ -85,12 +85,29 @@ CONTRACT_PACK = "tests/unit/metrics/test_central_metrics_contract_doc.py"
 #: The ``red marker`` is a substring that MUST appear in the RED run's
 #: output — it proves the mutation was caught by the INTENDED assertion
 #: and not by an unrelated crash.
+#:
+#: MT-01's find/replace pair is DERIVED from the live constant at
+#: pack-import time (the nest-anomaly-report lane's C5 fix, 2026-11-05):
+#: the pair was previously a hardcoded ``"… == 17"/"… == 16"`` literal,
+#: which went stale the moment a later lane moved the count (a stale
+#: find-string makes the harness print ``SKIPPED`` and FAIL — a loud
+#: failure with a misleading diagnosis).  Deriving the strings makes the
+#: leg STRUCTURAL: the mutation always plants the count minus one, so
+#: the planted pin always claims one fewer member than the set carries.
+_PRIV_COUNT_NOW = __import__(
+    "daemon.tools._tool_registry", fromlist=["PRIVILEGED_TOOL_CATEGORIES"]
+).PRIVILEGED_TOOL_CATEGORIES
+_COUNT_FIND = f"assert len(PRIVILEGED_TOOL_CATEGORIES) == {len(_PRIV_COUNT_NOW)}"
+_COUNT_REPLACE = (
+    f"assert len(PRIVILEGED_TOOL_CATEGORIES) == {len(_PRIV_COUNT_NOW) - 1}"
+)
+
 MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
     (
         "MT-01-count-pin",
         "tests/unit/test_board_registration.py",
-        "assert len(PRIVILEGED_TOOL_CATEGORIES) == 17",
-        "assert len(PRIVILEGED_TOOL_CATEGORIES) == 16",
+        _COUNT_FIND,
+        _COUNT_REPLACE,
         "tests/unit/test_board_registration.py",
         "test_board_is_the_ninth_entry",
     ),

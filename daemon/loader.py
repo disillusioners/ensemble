@@ -535,6 +535,15 @@ def _ensure_tool_metadata_populated() -> None:
     # instance build repopulates the metadata (the W1-FIX-NOW class,
     # verbatim).
     from .tools.nest_report import create_nest_report_tools
+    # nest-report-read (nest-anomaly-report lane, 2026-11-05): the
+    # READ-ONLY anomaly-store category (``anomaly_clusters`` +
+    # ``anomaly_report_detail``). The same cold-boot pattern as the
+    # entries above: the ``@register_tool_category("nest-report-read")``
+    # decorator must run HERE so the cold-boot metadata scan registers
+    # the category — otherwise the section is MISSING from the agent's
+    # rendered prompt until some instance build repopulates the
+    # metadata (the W1-FIX-NOW class, verbatim).
+    from .tools.nest_report_read import create_nest_report_read_tools
 
     # Create dummy instances to get the tools (these create closures with None manager)
     # We just need the tool objects themselves for metadata scanning
@@ -577,6 +586,10 @@ def _ensure_tool_metadata_populated() -> None:
     # builds the closure — the manager, its config and the anomaly
     # service are dereferenced at CALL time, never at construction.
     nest_report_tools = create_nest_report_tools(None)
+    # Nest report READ tools (nest-anomaly-report lane): the factory
+    # only builds closures — the manager and the anomaly service are
+    # dereferenced at CALL time, never at construction.
+    nest_report_read_tools = create_nest_report_read_tools(None)
     # create_db_tools reads manager.credential_manager at construction
     # (N1 — shared Fernet handle), so it needs a minimal attribute stub;
     # None is sufficient — the credential manager is only invoked inside
@@ -604,7 +617,7 @@ def _ensure_tool_metadata_populated() -> None:
     for factory_tools in (
         system_log_tools, ens_db_tools, knowledge_tools,
         upgrade_tools, db_tools, service_tools, snapshot_tools,
-        metrics_read_tools, nest_report_tools,
+        metrics_read_tools, nest_report_tools, nest_report_read_tools,
     ):
         if factory_tools:
             all_tools.extend(factory_tools)

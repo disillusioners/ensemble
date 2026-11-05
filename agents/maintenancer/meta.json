@@ -19,7 +19,8 @@
       "instance_read",
       "instance_ops",
       "wedge-capture",
-      "metrics-read"
+      "metrics-read",
+      "nest-report-read"
     ],
     "deny": ["git_commit", "edit_file", "write_file"]
   },

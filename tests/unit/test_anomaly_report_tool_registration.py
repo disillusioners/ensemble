@@ -374,12 +374,15 @@ class TestTheNonPrivilegedCategory:
         assert CATEGORY not in PRIVILEGED_TOOL_CATEGORIES
 
     def test_the_privileged_set_is_unchanged_by_this_lane(self) -> None:
-        """The seventeen-member privileged set — the nest-anomaly lane
-        adds nothing to it (R4: the tool is a write surface, not an ops
-        surface)."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
+        """The privileged set's WRITE-side posture — the nest-anomaly
+        lane's phase 1 added no WRITE category to it (R4: the tool is a
+        write surface, not an ops surface).  Phase 3 of the same lane
+        later added the READ-ONLY ``nest-report-read`` (entry #18) —
+        the count moved 17 → 18 with ALL its pin sites in that phase's
+        commit."""
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
         assert "nest-report" not in PRIVILEGED_TOOL_CATEGORIES
-        assert "nest-report-read" not in PRIVILEGED_TOOL_CATEGORIES
+        assert "nest-report-read" in PRIVILEGED_TOOL_CATEGORIES
 
 
 class TestTheArtifact:

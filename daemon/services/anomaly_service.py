@@ -127,6 +127,7 @@ from daemon.repositories.anomaly.models import (
 from daemon.repositories.anomaly.repository import (
     AnomalyRepository,
     ClusterAssignment,
+    SEVERITY_RANK,
     cluster_key_hash,
 )
 from daemon.services.db_offload import offload as _db_offload
@@ -1299,6 +1300,313 @@ class AnomalyService:
                     redact_exc_str(exc, limit=200),
                 )
 
+
+    # ── the phase-3 READ half (ONE projector, TWO transports) ────────
+    #
+    # R8: the row-shaped reads go through THIS service — never a raw
+    # engine handle, never direct repository access from a tool/route
+    # body, never REST-scraping.  The nest-report-read TOOLS and the
+    # /api/nest-reports route BOTH call these two projectors, so the
+    # grouped projection cannot drift between the transports (AM-1).
+
+    #: The read-page defaults + caps (the metrics-read house shape).
+    DEFAULT_READ_LIMIT = 20
+    MAX_READ_LIMIT = 50
+    DEFAULT_WINDOW_S = 3600
+    MAX_WINDOW_S = 7200  # WINDOW_SECONDS (metrics constants), restated
+
+    def _validate_read_filters(
+        self,
+        *,
+        window_s: int | None,
+        severity: str | None,
+        category: str | None,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[int, str | None, str | None, int, int]:
+        """Clamp/validate the read filters (typed ``invalid-input``)."""
+        if window_s is None:
+            effective_window = self.DEFAULT_WINDOW_S
+        else:
+            if not isinstance(window_s, (int, float)) or isinstance(window_s, bool):
+                raise AnomalyInputError(
+                    "window_s must be a number of seconds",
+                    detail="non-numeric window_s",
+                )
+            effective_window = int(window_s)
+        effective_window = max(1, min(self.MAX_WINDOW_S, effective_window))
+        if severity is not None:
+            if not isinstance(severity, str) or severity not in ANOMALY_SEVERITIES:
+                raise AnomalyInputError(
+                    "severity must be one of minor | major | critical",
+                    detail="out-of-set severity filter",
+                )
+        if category is not None:
+            if not isinstance(category, str) or category not in ANOMALY_CATEGORIES:
+                raise AnomalyInputError(
+                    "category must be one of the closed canonical vocabulary",
+                    detail="out-of-set category filter",
+                )
+        if limit is None:
+            effective_limit = self.DEFAULT_READ_LIMIT
+        else:
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                raise AnomalyInputError(
+                    "limit must be an integer", detail="non-integer limit"
+                )
+            effective_limit = limit
+        effective_limit = max(1, min(self.MAX_READ_LIMIT, effective_limit))
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise AnomalyInputError(
+                "offset must be a non-negative integer",
+                detail="invalid offset",
+            )
+        return effective_window, severity, category, effective_limit, offset
+
+    def _read_cluster_page(
+        self,
+        *,
+        window_cutoff: str | None,
+        severity: str | None,
+        category: str | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        """The SYNC persistence half of the grouped read (runs OFF the
+        event loop inside ONE offload — count + page + member fetch)."""
+        matched = self._repository.count_cluster_groups(
+            window_cutoff=window_cutoff,
+            severity=severity,
+            category=category,
+        )
+        page = self._repository.page_cluster_groups(
+            window_cutoff=window_cutoff,
+            severity=severity,
+            category=category,
+            limit=limit + 1,
+            offset=offset,
+        )
+        more_available = len(page) > limit
+        page = page[:limit]
+        members: dict[tuple[str, str], list[tuple[str, str | None]]] = {}
+        for tree_root, cat, _occ, _rep, _last, _peak in page:
+            members[(tree_root, cat)] = self._repository.cluster_ids_for_group(
+                tree_root_instance_id=tree_root,
+                category=cat,
+                limit=limit,
+            )
+        return {
+            "matched": matched,
+            "page": page,
+            "members": members,
+            "more_available": more_available,
+        }
+
+    async def list_clusters(
+        self,
+        *,
+        window_s: int | None = None,
+        severity: str | None = None,
+        category: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """THE grouped decision-ready projection (AM-6c) — ONE projector.
+
+        The nest-report-read tools and ``GET /api/nest-reports/clusters``
+        BOTH consume this dict; the grouping, the peak-of-peaks, the
+        ``open`` derivation and the excerpt exclusion (AM-12a) live HERE
+        so the two transports cannot drift.
+
+        Raises:
+            AnomalyInputError: an out-of-set filter (the caller maps
+                the typed ``invalid-input`` refusal / ``400``).
+        """
+        effective_window, severity, category, effective_limit, offset = (
+            self._validate_read_filters(
+                window_s=window_s,
+                severity=severity,
+                category=category,
+                limit=limit,
+                offset=offset,
+            )
+        )
+        now = _utc_now_iso()
+        window_cutoff = _cutoff(effective_window)
+        resolve_cutoff = _cutoff(self._config.resolve_window_seconds)
+        data = await self._offload(
+            self._read_cluster_page,
+            window_cutoff=window_cutoff,
+            severity=severity,
+            category=category,
+            limit=effective_limit,
+            offset=offset,
+        )
+
+        groups: list[dict[str, Any]] = []
+        breakdown: dict[str, dict[str, int]] = {}
+        for tree_root, cat, occurrence, report_count, newest_last, peak in data[
+            "page"
+        ]:
+            member_rows = data["members"].get((tree_root, cat), [])
+            cluster_ids = [row[0] for row in member_rows]
+            board_ids = [row[1] for row in member_rows if row[1] is not None]
+            open_ = newest_last >= resolve_cutoff
+            entry: dict[str, Any] = {
+                "tree_root_instance_id": tree_root,
+                "category": cat,
+                "severity": peak,
+                "severity_label": f"{peak} (peak)",
+                "severity_rank": int(SEVERITY_RANK.get(peak, 1)),
+                "report_count": report_count,
+                "occurrence_count": occurrence,
+                "cluster_ids": cluster_ids,
+                "last_report_at": newest_last,
+                "open": open_,
+            }
+            if board_ids:
+                entry["board_item_ids"] = board_ids
+            groups.append(entry)
+            bucket = breakdown.setdefault(cat, {"groups": 0, "reports": 0})
+            bucket["groups"] += 1
+            bucket["reports"] += report_count
+
+        matched = int(data["matched"])
+        returned = len(groups)
+        more_available = bool(data["more_available"])
+        dropped = max(0, matched - returned)
+        narrow_hint = None
+        if more_available or dropped:
+            narrow_hint = (
+                "the group page was bounded — narrow the query (a smaller "
+                "`window_s=`, a specific `severity=` or `category=`, or a "
+                "smaller `limit`) or advance the cursor to read the rest."
+            )
+        return {
+            "groups": groups,
+            "bound": {
+                "matched_count": matched,
+                "returned_count": returned,
+                "dropped_count": dropped,
+                "more_available": more_available,
+                "truncated": more_available or dropped > 0,
+                "narrow_hint": narrow_hint,
+            },
+            "category_breakdown": dict(sorted(breakdown.items())),
+            "freshness": {
+                "window_s": effective_window,
+                "window_cutoff_utc": window_cutoff,
+                "queried_at_utc": now,
+                "resolve_window_s": int(self._config.resolve_window_seconds),
+                "line": (
+                    f"clusters with a report in the last {effective_window}s "
+                    f"as of {now} (server clock); open means last report "
+                    f"within {int(self._config.resolve_window_seconds)}s"
+                ),
+            },
+            "generated_at_utc": now,
+        }
+
+    async def list_cluster_reports(
+        self,
+        *,
+        cluster_id: str,
+        limit: int | None = None,
+        include_excerpt: bool = False,
+        offset: int = 0,
+    ) -> dict[str, Any] | None:
+        """ONE cluster's member reports, FRESHEST-FIRST (the detail read).
+
+        Returns ``None`` when the cluster id matches nothing (the
+        transports map that to their own typed miss — the tool's
+        ``invalid-input`` refusal, the route's 404
+        ``anomaly_cluster_not_found``).
+
+        AM-12(b): the ``excerpt`` key appears on a member ONLY when
+        ``include_excerpt=True`` — the default payload carries NO
+        excerpt anywhere.
+        """
+        if not isinstance(cluster_id, str) or not cluster_id.strip():
+            raise AnomalyInputError(
+                "cluster_id must be a non-empty string",
+                detail="empty cluster_id",
+            )
+        _w, _sev, _cat, effective_limit, offset = self._validate_read_filters(
+            window_s=None,
+            severity=None,
+            category=None,
+            limit=limit,
+            offset=offset,
+        )
+        cluster = await self._offload(self._repository.get_cluster, cluster_id)
+        if cluster is None:
+            return None
+        rows = await self._offload(
+            self._repository.list_cluster_reports,
+            cluster_id,
+            limit=effective_limit + 1,
+        )
+        more_available = len(rows) > effective_limit
+        rows = rows[:effective_limit]
+        now = _utc_now_iso()
+        resolve_cutoff = _cutoff(self._config.resolve_window_seconds)
+        members: list[dict[str, Any]] = []
+        for row in rows:
+            member: dict[str, Any] = {
+                "report_id": row["report_id"],
+                "agent_id": row["agent_id"],
+                "instance_id": row["instance_id"],
+                "created_at": row["created_at"],
+                "category": row["category"],
+                "category_raw": row["category_raw"],
+                "severity": row["severity"],
+                "description": row["description"],
+                "outcome": row["outcome"],
+            }
+            if include_excerpt:
+                member["excerpt"] = row["excerpt"]
+            members.append(member)
+        total = int(cluster["report_count"])
+        returned = len(members)
+        dropped = max(0, total - returned)
+        narrow_hint = None
+        if more_available or dropped:
+            narrow_hint = (
+                "the member page was bounded — use a smaller `limit` or "
+                "advance the cursor to read the rest of the cluster."
+            )
+        return {
+            "cluster_id": cluster["id"],
+            "category": cluster["category"],
+            "severity": cluster["max_severity"],
+            "severity_rank": int(SEVERITY_RANK.get(cluster["max_severity"], 1)),
+            "severity_label": f"{cluster['max_severity']} (peak)",
+            "report_count": total,
+            "tree_root_instance_id": cluster["tree_root_instance_id"],
+            "first_report_at": cluster["first_report_at"],
+            "last_report_at": cluster["last_report_at"],
+            "open": cluster["last_report_at"] >= resolve_cutoff,
+            "board_item_id": cluster["board_item_id"],
+            "reports": members,
+            "bound": {
+                "matched_count": total,
+                "returned_count": returned,
+                "dropped_count": dropped,
+                "more_available": more_available,
+                "truncated": more_available or dropped > 0,
+                "narrow_hint": narrow_hint,
+            },
+            "freshness": {
+                "queried_at_utc": now,
+                "resolve_window_s": int(self._config.resolve_window_seconds),
+                "line": (
+                    f"cluster members as of {now} (server clock); open "
+                    f"means last report within "
+                    f"{int(self._config.resolve_window_seconds)}s"
+                ),
+            },
+            "generated_at_utc": now,
+        }
 
     # ── the evidence harvest (AM-8) ───────────────────────────────────
 

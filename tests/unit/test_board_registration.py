@@ -109,6 +109,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # access path, and every tool body ALSO carries its own
 # agent_id gate.
 "metrics-read",
+"nest-report-read",
 })
 
 #: The ONLY agent allowed to hold the board category.
@@ -198,7 +199,7 @@ class TestPrivilegedCategory:
     def test_board_is_in_the_privileged_set(self) -> None:
         assert BOARD_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
+    def test_the_set_is_exactly_the_eighteen_entries(self) -> None:
         """The set is exact — the phase-2 commit moved this pin with the
         tenth entry (``self-alarm``) and the phase-3 commit moved it
         again with the eleventh + twelfth (``view-write`` /
@@ -219,7 +220,7 @@ class TestPrivilegedCategory:
         "ninth entry" is a property of the SET SIZE at the time of the
         phase-1 commit and of the registry's literal order afterwards;
         the comment block in the registry records the ordinal."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")

@@ -155,6 +155,11 @@ class TestRealMaintenancerMetaShape:
             "instance_ops",
             "wedge-capture",
             "metrics-read",
+            # nest-report-read (2026-11-05, nest-anomaly-report lane
+            # phase 3): the READ-ONLY anomaly-store category — the
+            # grant array's LAST entry is this one (phase 5 appends
+            # the WRITE category "nest-report" AFTER it).
+            "nest-report-read",
         ]
 
     def test_real_meta_deny_is_exact_category_set(self) -> None:
@@ -312,7 +317,7 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly seventeen categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly eighteen categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
@@ -340,7 +345,7 @@ class TestPrivilegedCategoryRegistryShape:
     (the fifth exact-set pin added by the iteration-002 council B2
     correction)."""
 
-    def test_privileged_categories_contains_seventeen_entries(self) -> None:
+    def test_privileged_categories_contains_eighteen_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
@@ -453,6 +458,12 @@ class TestPrivilegedCategoryRegistryShape:
         # access path, and every tool body ALSO carries its own
         # agent_id gate.
         "metrics-read",
+        # nest-report-read (2026-11-05, nest-anomaly-report lane):
+        # the READ-ONLY anomaly-store category — opt-in-only; the
+        # maintenancer / devops / wanderer allow entries are the only
+        # access path, and every tool body ALSO carries its own
+        # agent_id gate.
+        "nest-report-read",
 })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

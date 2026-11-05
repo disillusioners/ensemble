@@ -427,12 +427,15 @@ class TestTheBudget:
         the TOOL-CATEGORY label set (the metrics-agent-tools lane
         registered the ``metrics-read`` privileged category, so the
         frozen label set changed and the bump contract requires the
-        marker to move) — and 3 → 4 for the SAME axis again (the
+        marker to move) — 3 → 4 for the SAME axis again (the
         nest-anomaly-report lane registered the ``nest-report`` WRITE
-        category).  The F7 op enum's own annex (``{aget, other}``)
+        category) — and 4 → 5 for the SAME axis a second time (the
+        lane's Phase 3 registered the ``nest-report-read`` PRIVILEGED
+        READ category; two commits, never one 3 → 5 jump).  The F7 op
+        enum's own annex (``{aget, other}``)
         did NOT move, and the op-enum pins in this file still hold.
         """
-        assert cm.VOCABULARY_VERSION == 4
+        assert cm.VOCABULARY_VERSION == 5
 
     def test_each_family_stays_inside_its_declared_band(self) -> None:
         specs = registry.registered_families()

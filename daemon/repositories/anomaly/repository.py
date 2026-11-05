@@ -790,6 +790,218 @@ class AnomalyRepository:
                 ).one()
             )
 
+    # ── the phase-3 READ queries (the read half's persistence) ────────
+    #
+    # The SERVICE owns the projection (ONE projector, two transports —
+    # the nest-report-read tools and the /api/nest-reports route); this
+    # class owns the bounded, paginated persistence reads.  Every
+    # cutoff is PYTHON-BOUND (AM-4); every page is LIMIT/OFFSET-bounded
+    # with an explicit ``more_available`` probe row (LIMIT n+1).
+
+    def count_cluster_groups(
+        self,
+        *,
+        window_cutoff: str | None = None,
+        severity: str | None = None,
+        category: str | None = None,
+    ) -> int:
+        """COUNT the ``(tree_root, category)`` GROUPS the filters match.
+
+        The bound block's ``matched_count`` (the AM-6c grouped read).
+        """
+        with Session(self._engine) as session:
+            base = select(
+                AnomalyCluster.tree_root_instance_id,
+                AnomalyCluster.category,
+            )
+            if window_cutoff is not None:
+                base = base.where(AnomalyCluster.last_report_at >= window_cutoff)
+            if severity is not None:
+                base = base.where(AnomalyCluster.max_severity == severity)
+            if category is not None:
+                base = base.where(AnomalyCluster.category == category)
+            grouped = base.group_by(
+                AnomalyCluster.tree_root_instance_id,
+                AnomalyCluster.category,
+            ).subquery()
+            return int(
+                session.execute(
+                    select(func.count()).select_from(grouped)
+                ).scalar_one()
+            )
+
+    def page_cluster_groups(
+        self,
+        *,
+        window_cutoff: str | None = None,
+        severity: str | None = None,
+        category: str | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[tuple[str, str, int, int, str, str]]:
+        """ONE PAGE of the AM-6c GROUPS, freshest-first.
+
+        Returns ``(tree_root_instance_id, category, occurrence_count,
+        report_count_sum, newest_last_report_at, peak_severity)`` rows.
+        The GROUP key is ``(tree_root_instance_id, category)``; the
+        peak severity is ``MAX(max_severity)`` — the closed 3-tier
+        set's lexicographic order IS the rank order
+        (``critical > major > minor``), so the SQL MAX is the
+        peak-of-peaks (AM-7).  Callers pass ``limit + 1`` and read the
+        surplus row as the ``more_available`` probe.
+        """
+        with Session(self._engine) as session:
+            stmt = select(
+                AnomalyCluster.tree_root_instance_id,
+                AnomalyCluster.category,
+                func.count().label("occurrence_count"),
+                func.coalesce(func.sum(AnomalyCluster.report_count), 0).label(
+                    "report_count"
+                ),
+                func.max(AnomalyCluster.last_report_at).label("last_report_at"),
+                func.max(AnomalyCluster.max_severity).label("peak_severity"),
+            ).group_by(
+                AnomalyCluster.tree_root_instance_id,
+                AnomalyCluster.category,
+            )
+            if window_cutoff is not None:
+                stmt = stmt.where(AnomalyCluster.last_report_at >= window_cutoff)
+            if severity is not None:
+                stmt = stmt.where(AnomalyCluster.max_severity == severity)
+            if category is not None:
+                stmt = stmt.where(AnomalyCluster.category == category)
+            stmt = stmt.order_by(
+                func.max(AnomalyCluster.last_report_at).desc(),
+                AnomalyCluster.tree_root_instance_id,
+                AnomalyCluster.category,
+            ).limit(max(1, int(limit))).offset(max(0, int(offset)))
+            return [
+                (
+                    str(row[0]),
+                    str(row[1]),
+                    int(row[2]),
+                    int(row[3]),
+                    str(row[4]),
+                    str(row[5]),
+                )
+                for row in session.execute(stmt).all()
+            ]
+
+    def cluster_ids_for_group(
+        self,
+        *,
+        tree_root_instance_id: str,
+        category: str,
+        limit: int,
+    ) -> list[tuple[str, str | None]]:
+        """The group's member cluster ids + board row ids, freshest-first.
+
+        Bounded by ``limit`` (the plan's "member ``cluster_ids`` bounded
+        by the same page limit").  Served by
+        ``idx_anomaly_clusters_key_window``.
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(
+                    AnomalyCluster.id,
+                    AnomalyCluster.board_item_id,
+                )
+                .where(AnomalyCluster.tree_root_instance_id == tree_root_instance_id)
+                .where(AnomalyCluster.category == category)
+                .order_by(AnomalyCluster.last_report_at.desc())
+                .limit(max(1, int(limit)))
+            )
+            return [
+                (str(row[0]), (str(row[1]) if row[1] is not None else None))
+                for row in session.execute(stmt).all()
+            ]
+
+    def get_cluster(self, cluster_id: str) -> dict[str, Any] | None:
+        """One cluster's scalar fields by id, or ``None``.
+
+        PLAIN DATA, not an ORM row: the row is captured INSIDE the
+        session (a post-close attribute read raises
+        ``DetachedInstanceError`` — the ``insert_report`` lesson) and the
+        caller crosses an offload boundary, where an ORM instance
+        would be detached anyway.
+        """
+        with Session(self._engine) as session:
+            row = session.execute(
+                select(
+                    AnomalyCluster.id,
+                    AnomalyCluster.category,
+                    AnomalyCluster.max_severity,
+                    AnomalyCluster.report_count,
+                    AnomalyCluster.tree_root_instance_id,
+                    AnomalyCluster.first_report_at,
+                    AnomalyCluster.last_report_at,
+                    AnomalyCluster.board_item_id,
+                ).where(AnomalyCluster.id == cluster_id)
+            ).first()
+            if row is None:
+                return None
+            return {
+                "id": str(row[0]),
+                "category": str(row[1]),
+                "max_severity": str(row[2]),
+                "report_count": int(row[3]),
+                "tree_root_instance_id": str(row[4]),
+                "first_report_at": str(row[5]),
+                "last_report_at": str(row[6]),
+                "board_item_id": (str(row[7]) if row[7] is not None else None),
+            }
+
+    def list_cluster_reports(
+        self,
+        cluster_id: str,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """The cluster's member reports, FRESHEST-FIRST, bounded.
+
+        PLAIN DATA (the same reason as :meth:`get_cluster`).  Callers
+        pass ``limit + 1`` and read the surplus row as the
+        ``more_available`` probe.  Only ``accepted`` rows carry a
+        ``cluster_id`` (AM-5), so the cluster filter is the honest
+        member set — no outcome filter is needed.
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(
+                    AnomalyReport.id,
+                    AnomalyReport.agent_id,
+                    AnomalyReport.instance_id,
+                    AnomalyReport.created_at,
+                    AnomalyReport.category,
+                    AnomalyReport.category_raw,
+                    AnomalyReport.severity,
+                    AnomalyReport.description,
+                    AnomalyReport.outcome,
+                    AnomalyReport.excerpt,
+                )
+                .where(AnomalyReport.cluster_id == cluster_id)
+                .order_by(
+                    AnomalyReport.created_at.desc(),
+                    AnomalyReport.id,
+                )
+                .limit(max(1, int(limit)))
+            )
+            return [
+                {
+                    "report_id": str(row[0]),
+                    "agent_id": str(row[1]),
+                    "instance_id": str(row[2]),
+                    "created_at": str(row[3]),
+                    "category": str(row[4]),
+                    "category_raw": str(row[5]),
+                    "severity": str(row[6]),
+                    "description": str(row[7]),
+                    "outcome": str(row[8]),
+                    "excerpt": (str(row[9]) if row[9] is not None else None),
+                }
+                for row in session.execute(stmt).all()
+            ]
+
 
 __all__ = [
     "AnomalyRepository",
