@@ -1088,6 +1088,19 @@ async def lifespan(app: FastAPI):
     from daemon.repositories.wedge_captures.models import WedgeCapture
     WedgeCapture.metadata.create_all(manager.engine)
 
+    # nest-anomaly-report (2026-11-05) — ``anomaly_reports`` +
+    # ``anomaly_clusters`` are the two new tables that back the
+    # ``nest-report`` tool category (the nest-level anomaly store: one
+    # agent-filed report row + the incident cluster identity anchor).
+    # Brand-new tables — the same create_all precedent as the secrets /
+    # instance_ops / mcps_gateway / wedge_captures pairs above. The .sql
+    # migrations (20261105_020500 / 20261105_020501) handle SQLite and
+    # the models handle PG. No ``_ensure_postgres_columns`` mirror
+    # needed (a brand-new table has no legacy shape to repair).
+    from daemon.repositories.anomaly.models import AnomalyCluster, AnomalyReport
+    AnomalyReport.metadata.create_all(manager.engine)
+    AnomalyCluster.metadata.create_all(manager.engine)
+
     # agent-secrets P1 — ``SecretService`` is constructed in
     # ``InstanceManager.__init__`` alongside
     # ``_prompt_version_service`` /
