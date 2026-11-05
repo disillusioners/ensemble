@@ -97,7 +97,8 @@ THE BOUNDS ARE A HIERARCHY (N2), NOT ONE KNOB
 * The PER-TREE ROW CAP (2,000 rows) SHEDS (oldest-first trim) and NEVER
   refuses — so one tree can never go dark; the durable critical record is
   the board item, not the report row.
-* The GLOBAL TOTAL-ROW CEILING (50,000 rows) is the HARD nest-wide wall.
+* The GLOBAL TOTAL-ROW CEILING (50,000 rows) is the nest-wide wall
+  (bounded BEST-EFFORT enforcement — see the concurrency caveat below).
 * The 1,500/hour knob is the EARLY GLOBAL BRAKE — an OPERATOR BRAKE, not
   a security fence.
 * The PER-TYPE CAPS (5 per 10 min for minor+major, 20 per hour for
@@ -572,10 +573,11 @@ type's instances SHARE one budget, and the key space is not
 agent-expandable.
 
 BOUNDS ARE A HIERARCHY: the per-tree row cap SHEDS (never refuses, so
-one tree cannot go dark); the global total-row ceiling is the hard
-nest-wide wall; the 1,500/hour knob is an operator brake, not a security
-fence; the per-type caps are the inner brake. "5 per 10 min" is
-BEST-EFFORT under concurrency (read-then-insert), not a hard invariant.
+one tree cannot go dark); the global total-row ceiling is the nest-wide
+wall (bounded BEST-EFFORT enforcement); the 1,500/hour knob is an
+operator brake, not a security fence; the per-type caps are the inner
+brake. "5 per 10 min" is BEST-EFFORT under concurrency
+(read-then-insert), not a hard invariant.
 """
 
     return [report_anomaly]

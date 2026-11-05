@@ -344,6 +344,24 @@ class TestTheAdapter:
             "is not derived from the resolve-window knob"
         )
 
+        # COUPLING PRECONDITION (code-council delta, 2026-11-05): w4
+        # registers from the ENV tier (NestReportConfig()) while the
+        # SERVICE reads the composed yaml+env config. That is faithful
+        # only while the shipped config.yaml carries no ``nest_report:``
+        # block (load_config has no pass-through for it — a hand-added
+        # block would be silently ignored). Adding one must reconcile
+        # w4's registration in the same change.
+        from pathlib import Path as _Path
+        import re as _re
+
+        repo_root = _Path(__file__).resolve().parents[3]
+        shipped = (repo_root / "config.yaml").read_text(encoding="utf-8")
+        assert not _re.search(r"^nest_report:", shipped, _re.M), (
+            "config.yaml gained a nest_report: block — w4's env-tier "
+            "registration must be reconciled with the composed config "
+            "(thread the resolved value or re-derive the cutoff)"
+        )
+
     def test_the_cutoff_helper_derives_from_the_knob_deterministically(
         self,
     ) -> None:
