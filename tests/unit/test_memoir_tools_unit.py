@@ -559,9 +559,9 @@ class TestTheReads:
         service_result = None
         from daemon.services.memoir_retrieval import MemoirRetrievalService
 
-        direct = MemoirRetrievalService(repo).recall(
-            MEMOIR_AUTHORIZED_AGENT, "zebra", 5
-        )
+        direct = MemoirRetrievalService(
+            repo, config=getattr(mgr, "config", None)
+        ).recall(MEMOIR_AUTHORIZED_AGENT, "zebra", 5)
         result = await tools["memoir_recall"].ainvoke({"query": "zebra"})
         assert isinstance(result, str)
         assert result.endswith(direct.footer), (

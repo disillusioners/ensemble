@@ -73,6 +73,7 @@ from daemon.services.timestamps import now_utc, to_utc_iso
 
 __all__ = [
     "MEMOIR_PRIOR_TAU_DAYS",
+    "MEMOIR_QUERY_EMBED_TIMEOUT_S",
     "MEMOIR_RANK_CANDIDATES",
     "MEMOIR_RECALL_BODY_TOKEN_CLAMP",
     "MEMOIR_RECALL_DEFAULT_K",
@@ -94,9 +95,21 @@ __all__ = [
 #: RENDERED size, not the ranking.
 RRF_K = 60
 
+#: Sentinel for "embedder not provided" (ITEM 1). Distinct from
+#: an explicit ``None`` (which means "semantic disabled").
+_UNSET = object()
+
 #: The recency prior's half-life-ish constant: ``exp(−idle_days / tau)``
 #: with tau = 180 days (design §7).
 MEMOIR_PRIOR_TAU_DAYS = 180.0
+
+#: The query-embed budget for a single recall (ITEM 1 of the memoir
+#: phase-7 close-out). The worker's 30 s budget is for ticks; a recall
+#: sits in an agent's turn, so it gets a SHORT bounded timeout. On any
+#: exception/timeout/config-missing the service degrades to lexical-only
+#: (design section 3 degradation contract) — a recall never fails and
+#: never hangs because of the embedder.
+MEMOIR_QUERY_EMBED_TIMEOUT_S = 5.0
 
 #: The recall budget (D2.10 / adjudication row 10).
 MEMOIR_RECALL_DEFAULT_K = 5
@@ -286,22 +299,54 @@ class MemoirRetrievalService:
         self,
         repository: MemoirRepository,
         *,
-        embedder: Callable[[str], Sequence[float]] | None = None,
+        embedder: Any = _UNSET,
         embedding_model: str | None = None,
         embedding_dims: int | None = None,
+        config: Any = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
-        #: The QUERY embedder. Called EXACTLY ONCE per recall (D2.3) —
-        #: embedding the query per candidate would turn one embed into a
-        #: hundred.
-        self.embedder = embedder
+        self._config = config
+        # Resolve identity defaults only when a config is available
+        # (production path). Without config (tests / degraded boots) keep
+        # None so the service stays lexical-only and hermetic. An
+        # explicitly injected model (e.g. the degradation test) is
+        # preserved.
+        if embedding_model is None and self._config is not None:
+            if self._resolve_default_api_key() and self._resolve_default_base_url():
+                embedding_model = self._resolve_default_embedding_model()
+            else:
+                embedding_model = None
+        if embedding_dims is None and self._config is not None:
+            if self._resolve_default_api_key() and self._resolve_default_base_url():
+                embedding_dims = self._resolve_default_embedding_dims()
+            else:
+                embedding_dims = None
         #: The ACTIVE embedding identity. The semantic ranker only
         #: considers rows whose ``embedding_model`` AND ``embedding_dims``
         #: match (DD-6: "a dimension is not an identity").
         self.embedding_model = embedding_model
         self.embedding_dims = embedding_dims
+        #: The QUERY embedder. Called EXACTLY ONCE per recall (D2.3) —
+        #: embedding the query per candidate would turn one embed into a
+        #: hundred. When None, the service degrades to lexical-only. When
+        #: not injected, a DEFAULT house embedder is resolved (ITEM 1) so
+        #: production recall runs hybrid (design section 7 / D2.3) rather
+        #: than lexical-only. The embed call is bounded and degradable:
+        #: any exception/timeout/config-missing degrades to lexical-only
+        #: (design section 3). The tool module stays PURE — it holds no
+        #: embedder symbol; the service owns the resolution.
+        if embedder is _UNSET:
+            if self._can_resolve_default_embedder():
+                embedder = self._make_default_embedder()
+            else:
+                embedder = None
+        self.embedder = embedder
         self._now_fn = now_fn or now_utc
+        #: Per-recall flag: set True in ``_semantic_pool`` when the query
+        #: embed call raised or timed out. Drives ``semantic_used`` so a
+        #: degraded recall reports ``semantic=off`` honestly.
+        self._embed_call_failed: bool = False
 
     # -- the public reads --
 
@@ -335,6 +380,7 @@ class MemoirRetrievalService:
         rows = self.repository.fetch_latest(agent_id, limit=None)
         by_id = {row.id: row for row in rows}
 
+        self._embed_call_failed = False
         semantic, embedding_excluded = self._semantic_pool(rows, clean_query)
         missing_embedding = self._count_missing_embeddings(lexical, by_id)
 
@@ -346,7 +392,7 @@ class MemoirRetrievalService:
             rank_basis="rrf",
             missing_embedding=missing_embedding,
             embedding_excluded=embedding_excluded,
-            semantic_used=self._semantic_enabled(),
+            semantic_used=self._semantic_enabled() and not self._embed_call_failed,
         )
         rendered_ids = [episode["id"] for episode in shipped]
 
@@ -372,7 +418,7 @@ class MemoirRetrievalService:
             active_model=self.embedding_model,
             embedding_excluded=embedding_excluded,
             missing_embedding=missing_embedding,
-            semantic_enabled=self._semantic_enabled(),
+            semantic_enabled=self._semantic_enabled() and not self._embed_call_failed,
         )
 
     def timeline(
@@ -454,6 +500,135 @@ class MemoirRetrievalService:
             self.embedding_dims
         )
 
+    # ── ITEM 1: default query-embedder resolution (design section 7) ─────
+
+    def _resolve_default_embedding_model(self) -> str | None:
+        """Resolve the active embedding model identity (mirrors the worker).
+
+        Precedence: ``EMBEDDING_MODEL`` env > the shared config's
+        ``embedding_model`` > the worker's ``DEFAULT_EMBEDDING_MODEL``
+        (``text-embedding-3-small``). Returns ``None`` only when nothing
+        usable can be resolved.
+        """
+        import os
+
+        env_value = (os.environ.get("EMBEDDING_MODEL") or "").strip()
+        if env_value:
+            return env_value
+        cfg = getattr(self._config, "llm", None)
+        # The memoir config does not carry an embedding_model; the shared
+        # embedding family does. Consult the config's embedding_model if it
+        # exposes one (it does not in v1 — the env/worker default wins).
+        shared = getattr(self._config, "embedding", None)
+        if shared is not None:
+            model = getattr(shared, "embedding_model", None)
+            if model:
+                return str(model)
+        if cfg is not None:
+            model = getattr(cfg, "embedding_model", None)
+            if model:
+                return str(model)
+        try:
+            from daemon.services.memoir_embedding_worker import (
+                DEFAULT_EMBEDDING_MODEL,
+            )
+
+            return DEFAULT_EMBEDDING_MODEL
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _resolve_default_embedding_dims(self) -> int | None:
+        """Resolve the active embedding dimensionality (mirrors the worker)."""
+        import os
+
+        env_value = (os.environ.get("ENSEMBLE_MEMOIR_EMBEDDING_DIMENSIONS") or "").strip()
+        if env_value:
+            try:
+                return int(env_value)
+            except ValueError:
+                pass
+        memoir_cfg = getattr(self._config, "memoir", None)
+        if memoir_cfg is not None:
+            dims = getattr(memoir_cfg, "embedding_dimensions", None)
+            if dims:
+                try:
+                    return int(dims)
+                except (TypeError, ValueError):
+                    pass
+        # Fall back to the worker's default (1536).
+        try:
+            from daemon.config import MemoirConfig
+
+            return int(MemoirConfig.model_fields["embedding_dimensions"].default)
+        except Exception:  # noqa: BLE001
+            return 1536
+
+    def _resolve_default_base_url(self) -> str | None:
+        import os
+
+        env_value = (os.environ.get("EMBEDDING_BASE_URL") or "").strip()
+        if env_value:
+            return env_value
+        cfg = getattr(self._config, "llm", None)
+        if cfg is not None:
+            base_url = getattr(cfg, "base_url", None)
+            if base_url:
+                return str(base_url)
+        return None
+
+    def _resolve_default_api_key(self) -> str | None:
+        import os
+
+        env_value = (os.environ.get("EMBEDDING_API_KEY") or "").strip()
+        if env_value:
+            return env_value
+        cfg = getattr(self._config, "llm", None)
+        if cfg is not None:
+            api_key = getattr(cfg, "api_key", None)
+            if api_key:
+                return str(api_key)
+        return None
+
+    def _can_resolve_default_embedder(self) -> bool:
+        """Whether a usable house embedder can be built.
+
+        Config-missing degrades to lexical-only (design section 3): if we
+        cannot resolve an API key, semantic stays off rather than failing
+        at recall time.
+        """
+        if self._config is None:
+            return False
+        return bool(self._resolve_default_api_key()) and bool(
+            self._resolve_default_base_url()
+        ) and bool(self.embedding_model) and bool(self.embedding_dims)
+
+    def _make_default_embedder(self) -> Callable[[str], Sequence[float]]:
+        """Build the bounded, degradable house embedder (ITEM 1).
+
+        Wraps ``memoir_embedding_worker._default_embed`` (the ONLY SDK call
+        site in the lane) with the short query timeout and converts any
+        exception into a degraded (lexical-only) signal by re-raising a
+        sentinel that ``_semantic_pool`` catches. The embedder is called
+        EXACTLY ONCE per recall (D2.3).
+        """
+        from daemon.services.memoir_embedding_worker import _default_embed
+
+        model = self.embedding_model
+        base_url = self._resolve_default_base_url()
+        api_key = self._resolve_default_api_key()
+        timeout_s = MEMOIR_QUERY_EMBED_TIMEOUT_S
+
+        def _embed(text: str) -> Sequence[float]:
+            return _default_embed(
+                text,
+                model=model,  # type: ignore[arg-type]
+                base_url=base_url,
+                api_key=api_key,
+                timeout_s=timeout_s,
+            )
+
+        return _embed
+
     def _semantic_pool(
         self, rows: Sequence[Any], query: str
     ) -> tuple[list[tuple[str, float]], int]:
@@ -486,10 +661,18 @@ class MemoirRetrievalService:
                 continue
             matched.append(row)
 
-        # THE QUERY IS EMBEDDED ONCE per call (D2.3).
+        # THE QUERY IS EMBEDDED ONCE per call (D2.3). Bounded and
+        # degradable (ITEM 1): any exception/timeout/config-missing
+        # degrades to lexical-only and the footer discloses it
+        # (semantic=off). A recall never fails or hangs because of the
+        # embedder (design section 3).
         from daemon.services.critical_notes_selector import _cosine_similarity
 
-        query_vector = list(self.embedder(query) or [])  # type: ignore[misc]
+        try:
+            query_vector = list(self.embedder(query) or [])  # type: ignore[misc]
+        except Exception:  # noqa: BLE001 — degrade to lexical-only
+            self._embed_call_failed = True
+            return [], excluded
         scored: list[tuple[str, float]] = []
         for row in matched:
             score = _cosine_similarity(query_vector, list(row.embedding or []))

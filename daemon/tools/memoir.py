@@ -65,15 +65,16 @@ ZERO references to the embedder, to ``client.embeddings``, or to
 ``store_embedding``; the write body performs EXACTLY ONE
 ``insert_episode`` (the keepsake admission lives INSIDE it — wave 2's
 pinned-precede contract); the embedder is reachable only from
-``daemon/services/memoir_embedding_worker.py``. A consequence, recorded
-honestly: the v1 tool lane constructs
-:class:`~daemon.services.memoir_retrieval.MemoirRetrievalService` with NO
-query embedder, so the tool-lane recall runs LEXICAL-ONLY
-(``semantic=off`` in the verbatim budget footer; the
-``missing_embedding`` count still discloses the un-embedded candidates).
-The semantic recall lane needs an embedder injection point that v1 does
-not build — wiring one would put an embedder symbol inside this module,
-which AM-12 forbids. Recorded in ``phase-notes-p4p6.md``.
+``daemon/services/memoir_embedding_worker.py``. A consequence of D4.11/DD-20/AM-12, recorded honestly: this module
+holds NO embedder symbol. The retrieval SERVICE (phase 7, ITEM 1) now
+resolves a default query embedder internally from the shared
+``EMBEDDING_*`` family / the memoir config, so production recall runs
+hybrid (BM25 || cosine, RRF k=60) instead of lexical-only — the
+service owns the resolution, and this module stays PURE (zero embedder
+references, pinned by ``TestTheWritePurity``). The footer still discloses
+``semantic=off`` whenever the embedder is unavailable or degrades. The
+``missing_embedding`` count still discloses the un-embedded candidates.
+Recorded in ``phase-notes-p4p6.md`` and ``implementation-notes.md``.
 
 HOUSE CONVENTIONS HONORED HERE: the repository/service wrap the CALLER'S
 engine (``manager._engine``) — this module never builds an engine and
@@ -289,14 +290,16 @@ def _memoir_repository_for(manager: Any) -> MemoirRepository | None:
 def _memoir_service_for(manager: Any) -> MemoirRetrievalService | None:
     """Build the retrieval service over the caller's engine.
 
-    NO query embedder is passed (see the module docstring's purity
-    consequence): the v1 tool-lane recall is lexical-only and the verbatim
-    budget footer discloses it (``semantic=off``).
+    The service resolves its own query embedder from the shared
+    ``EMBEDDING_*`` family / the memoir config (phase 7, ITEM 1); this
+    module stays PURE and passes no embedder symbol. The caller's config
+    is forwarded so the service can resolve the LLM fallback and the
+    memoir embedding dimensions; ``None`` config degrades to lexical-only.
     """
     repo = _memoir_repository_for(manager)
     if repo is None:
         return None
-    return MemoirRetrievalService(repo)
+    return MemoirRetrievalService(repo, config=getattr(manager, "config", None))
 
 
 def _map_write_error(exc: MemoirWriteError, label: str) -> str:
