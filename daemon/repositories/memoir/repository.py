@@ -65,7 +65,7 @@ from daemon.repositories.memoir.seed import (
     MEMOIR_SEED_AGENT_ID,
     seed_persona_if_absent as _seed_persona_if_absent,
 )
-from daemon.services.timestamps import now_utc, to_utc_iso
+from daemon.services.timestamps import now_utc, now_utc_iso, to_utc_iso
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.engine import Engine
