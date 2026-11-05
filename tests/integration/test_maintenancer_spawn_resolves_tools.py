@@ -119,11 +119,12 @@ class TestRealMaintenancerMetaShape:
     granted or denied must fail here first."""
 
     def test_real_meta_allow_is_exact_category_set(self) -> None:
-        """tools.allow = exactly the 10 categories: the privileged pair
+        """tools.allow = exactly the 12 categories: the privileged pair
         (system-log, ens-db), system_upgrade, system_restart, knowledge,
         db (D19 — external user-registered connections only), the two
         nest-ops fleet categories (instance_read / instance_ops), the
-        wedge-capture read surface and the metrics-read registry surface.
+        wedge-capture read surface, the metrics-read registry surface and
+        the anomaly-store pair (nest-report-read / nest-report).
 
         nest-ops (2026-10-21): the inherited 3-red fold. ``system_restart``
         was added to the allow list by ``ff27305c4`` (which updated only
@@ -143,7 +144,21 @@ class TestRealMaintenancerMetaShape:
         (``metrics_families`` / ``metrics_snapshot`` /
         ``metrics_history``). The category is PRIVILEGED, so an explicit
         allow entry is the only access path; the tool bodies ALSO carry
-        their own agent_id gate."""
+        their own agent_id gate.
+
+        nest-report (2026-11-05, nest-anomaly-report lane phase 5): the
+        ELEVENTH and TWELFTH entries — the anomaly-store pair. Phase 3
+        appended the READ-ONLY half (``nest-report-read``) and phase 5
+        appended the WRITE half (``nest-report``) AFTER it, so the pair
+        sits at the END of the array and the WRITE category is the LAST
+        element. Both are PRIVILEGED, so an explicit allow entry is the
+        only access path.
+
+        This pin was STALE from the phase-5 grant ceremony onward: it
+        still stated the pre-grant literal (11 entries), so it went RED
+        the moment the grant landed — the same pre/post-ceremony
+        inversion the lane's other two re-pointed pins had. The literal
+        is stated in full so a fold lands at 0 in ONE shot."""
         assert MAINTAINER_META_ALLOW == [
             "system-log",
             "ens-db",
@@ -157,9 +172,15 @@ class TestRealMaintenancerMetaShape:
             "metrics-read",
             # nest-report-read (2026-11-05, nest-anomaly-report lane
             # phase 3): the READ-ONLY anomaly-store category — the
-            # grant array's LAST entry is this one (phase 5 appends
-            # the WRITE category "nest-report" AFTER it).
+            # grant array's LAST entry was this one while phase 5 was
+            # still ahead (phase 5 appends the WRITE category
+            # "nest-report" AFTER it).
             "nest-report-read",
+            # nest-report (2026-11-05, nest-anomaly-report lane phase 5):
+            # the WRITE anomaly-store category — appended AFTER the read
+            # category by the grant ceremony, so it is the array's LAST
+            # element (the ari trailing-entry precedent).
+            "nest-report",
         ]
 
     def test_real_meta_deny_is_exact_category_set(self) -> None:
