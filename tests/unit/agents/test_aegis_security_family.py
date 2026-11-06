@@ -4107,9 +4107,11 @@ class TestCanaryMetaPins:
 
     def test_t35_leaf_trio_allow_sets_individual(self):  # T35 (per-agent exact)
         expected = {
-            "hacker": {"bash", "proc", "filesystem", "time", "help", "self"},
-            "cracker": {"bash", "proc", "filesystem", "time", "help", "self"},
-            "sweeper": {"bash", "proc", "filesystem", "time", "help", "self"},
+            # [2026-11-06 drift-merge] trio absorbs the nest-report grant (nest
+            # ceremony, leader ruling "all 47 agents"); canary NOT granted.
+            "hacker": {"bash", "proc", "filesystem", "time", "help", "self", "nest-report"},
+            "cracker": {"bash", "proc", "filesystem", "time", "help", "self", "nest-report"},
+            "sweeper": {"bash", "proc", "filesystem", "time", "help", "self", "nest-report"},
             "canary": CANARY_ALLOW,
         }
         for agent, want in expected.items():
