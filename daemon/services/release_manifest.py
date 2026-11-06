@@ -78,10 +78,15 @@ class ManifestVerdict:
     checked: int
     skipped_unmanifested: int
     mismatches: tuple[str, ...]
+    #: C1 (leader ruling 2026-11-06): requested paths skipped for being
+    #: unmanifested OUTSIDE the allow-listed class (``memories/``). A
+    #: non-zero value is a REFUSAL-grade finding — a skip outside the
+    #: allow-list can never again be laundered as benign.
+    unexpected_skips: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
-        return not self.mismatches
+        return not self.mismatches and not self.unexpected_skips
 
 
 def load_release_manifest(release_root: Path) -> ReleaseManifest | None:
@@ -130,14 +135,31 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _in_skippable_class(relpath: str, prefixes: tuple[str, ...]) -> bool:
+    """True when ``relpath`` sits inside an allow-listed skip class.
+
+    The prefixes name DIRECTORY segments (e.g. ``memories/``), and
+    agents/-relative paths carry the agent dir first
+    (``ari/memories/x.md``) — so match on segment boundaries, not on
+    ``str.startswith``.
+    """
+    padded = f"/{relpath.strip('/')}/"
+    return any(f"/{prefix.strip('/')}/" in padded for prefix in prefixes)
+
+
 def verify_paths(
     release_root: Path,
     manifest: ReleaseManifest,
     relpaths: list[str] | tuple[str, ...],
+    *,
+    skippable_prefixes: tuple[str, ...] = ("memories/",),
 ) -> ManifestVerdict:
     """Verify requested ``agents/``-relative paths against the manifest.
 
-    Per path: unmanifested → SKIP (never mismatch — Advisory 2);
+    Per path: unmanifested → SKIP when the path is inside an
+    ALLOW-LISTED class (``memories/`` — the real manifest carries zero
+    memory entries, Advisory 2); unmanifested OUTSIDE the allow-list →
+    ``unexpected_skips`` (C1: a skip must never be laundered as benign);
     manifested but missing on disk → MISMATCH (the release claims the
     file); manifested with a differing sha256 → MISMATCH (tamper /
     corruption — the exact class this check exists to catch).
@@ -146,10 +168,17 @@ def verify_paths(
     checked = 0
     skipped = 0
     mismatches: list[str] = []
+    unexpected_skips: list[str] = []
     for relpath in relpaths:
         expected = manifest.agents_manifest.get(relpath)
         if expected is None:
-            skipped += 1
+            if _in_skippable_class(relpath, skippable_prefixes):
+                skipped += 1
+            else:
+                unexpected_skips.append(
+                    f"{relpath}: unmanifested outside the allow-listed "
+                    f"skip class {skippable_prefixes}"
+                )
             continue
         on_disk = root / "agents" / relpath
         if not on_disk.is_file():
@@ -166,4 +195,5 @@ def verify_paths(
         checked=checked,
         skipped_unmanifested=skipped,
         mismatches=tuple(mismatches),
+        unexpected_skips=tuple(unexpected_skips),
     )

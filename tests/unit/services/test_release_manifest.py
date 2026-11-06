@@ -107,6 +107,19 @@ class TestReader:
         assert verdict.ok
         assert verdict.skipped_unmanifested == 1
         assert verdict.checked == 0
+        assert verdict.unexpected_skips == ()
+
+    def test_unmanifested_outside_the_allow_list_is_a_refusal(self, tmp_path: Path) -> None:
+        """C1.3 — a skip outside ``memories/`` can never be laundered as
+        benign; it is a refusal-grade finding."""
+        (tmp_path / "manifest.json").write_text(
+            '{"agents_manifest": {}}', encoding="utf-8"
+        )
+        manifest = load_release_manifest(tmp_path)
+        verdict = verify_paths(tmp_path, manifest, ["ari/knowledge.md"])
+        assert not verdict.ok
+        assert verdict.skipped_unmanifested == 0
+        assert any("ari/knowledge.md" in s for s in verdict.unexpected_skips)
 
     def test_mismatch_detected_on_tampered_file(self, tmp_path: Path) -> None:
         release_root = _stage_release(tmp_path)
@@ -211,6 +224,43 @@ class TestPrimitiveManifestLegs:
         target.write_text(target.read_text(encoding="utf-8") + "\nEVIL", encoding="utf-8")
         result = await _run_live(_Manager(), tmp_path)
         assert result.code == pr.CODE_MANIFEST_MISMATCH
+        pr._BASELINE_MAP.clear()
+
+    async def test_live_tampered_SHARED_persona_file_refuses(self, tmp_path: Path) -> None:
+        """C1.4 — the council's end-to-end reproduction: tampering the
+        SHARED ``_prompt_system/knowledge.md`` under an AUTHENTIC manifest
+        must REFUSE. Before the fix the shared files were keyed under the
+        agent dir → unmanifested → skipped → ``manifest=ok`` and the
+        tampered persona was popped into effect."""
+        pr._BASELINE_MAP.clear()
+        release_root = _stage_release(tmp_path)
+        _write_manifest(release_root, _agent_manifest_entries(release_root))
+        shared = release_root / "agents" / "_prompt_system" / "knowledge.md"
+        assert shared.is_file(), "the staged copy must carry the shared knowledge file"
+        shared.write_text(
+            shared.read_text(encoding="utf-8") + "\nTAMPERED SHARED PERSONA",
+            encoding="utf-8",
+        )
+        manager = _Manager()
+        manager.instances = {"iid-1": (object(), "x")}  # must SURVIVE a refusal
+        result = await _run_live(manager, tmp_path)
+        assert result.code == pr.CODE_MANIFEST_MISMATCH, result.message
+        assert "_prompt_system/knowledge.md" in result.message
+        # And NOTHING composed/popped for a refused call.
+        assert "iid-1" in manager.instances
+        pr._BASELINE_MAP.clear()
+
+    async def test_live_unmanifested_shared_file_refuses(self, tmp_path: Path) -> None:
+        """C1.3 end-to-end: a manifest missing a shared entry is an
+        unexpected skip → refusal (never ``ok`` with a skip count)."""
+        pr._BASELINE_MAP.clear()
+        release_root = _stage_release(tmp_path)
+        entries = _agent_manifest_entries(release_root)
+        entries.pop("_prompt_system/knowledge.md")  # drop one shared entry
+        _write_manifest(release_root, entries)
+        result = await _run_live(_Manager(), tmp_path)
+        assert result.code == pr.CODE_MANIFEST_MISMATCH
+        assert "_prompt_system/knowledge.md" in result.message
         pr._BASELINE_MAP.clear()
 
     async def test_live_absent_manifest_is_missing_live(self, tmp_path: Path) -> None:

@@ -47,9 +47,11 @@ Mechanism (leader ruling R1, probe-validated):
   AWAITED on the daemon's main loop (the awaitless-atomicity argument
   collapses off-loop).
 
-Persistent effects (exactly three, all pinned — Advisory 4):
-``instances.pop``, ``cache.set`` (on miss, inside the loader), and
-``cache.invalidate`` (the AM-8 bust). Nothing else mutates state.
+Persistent effects (all pinned): ``instances.pop``, ``cache.set`` (on
+miss, inside the loader), ``cache.invalidate`` (the AM-8 bust), and the
+process-local baseline map write (D5 — bounded at
+``_BASELINE_MAX_ENTRIES`` with insertion-order eviction; the runbook
+carries the same ledger). Nothing else mutates state.
 
 Refusal vocabulary (AM-6/D6 — FINAL, 9 REFUSED + 1 FAILED): see
 :data:`REFUSAL_CODES` / :data:`FAILURE_CODES`. ``not_ari`` is
@@ -253,13 +255,43 @@ _OWN_PROMPT_FILES: tuple[str, ...] = (
     "memory.md",
 )
 
+#: The three SHARED ``_prompt_system/`` basenames the loader reads. The
+#: loader keys them by BASENAME in its mtime map (``loader.py:1374``,
+#: ``:1391``); the release manifest lists them under ``_prompt_system/``.
+#: Derived from the loader's own path constants so a constant change can
+#: never silently drift this mapping (C1: keying them as ``<agent>/<name>``
+#: made them unmanifested → SKIP → the two shared persona files were
+#: NEVER verified).
+_SHARED_PROMPT_BASENAMES: frozenset[str] = frozenset(
+    {
+        PROJECT_EXPERIENCE_FILE.name,
+        KNOWLEDGE_FILE.name,
+        KNOWLEDGE_NO_FORCE_EXPLORE_FILE.name,
+    }
+)
+
 # ── The process-local baseline map (D5) ─────────────────────────────────────
 # Key: (agent_id, version_tag, tuple(sorted(mcp_tool_names))).
 # Value: (read-set file sha256 map, db fingerprint operand).
 # Written ONLY by this primitive (Advisory 2: a FORCED pop also writes it —
 # every successful compose/fill seeds it, else post-force calls would forever
-# return unproven).
+# return unproven). A2 (leader ruling 2026-11-06): this is the FOURTH
+# persistent effect (documented in the runbook + docstring); it is BOUNDED —
+# insertion-order eviction past _BASELINE_MAX_ENTRIES (max ~256 small
+# entries) so the process map can never grow without limit.
 _BASELINE_MAP: dict[tuple[str | None, str | None, tuple[str, ...]], tuple[dict[str, str], str]] = {}
+_BASELINE_MAX_ENTRIES = 256
+
+
+def _record_baseline(
+    key: tuple[str | None, str | None, tuple[str, ...]],
+    hashes: dict[str, str],
+    db_fingerprint: str,
+) -> None:
+    """Write one baseline record, evicting the OLDEST past the size bound."""
+    _BASELINE_MAP[key] = (hashes, db_fingerprint)
+    while len(_BASELINE_MAP) > _BASELINE_MAX_ENTRIES:
+        _BASELINE_MAP.pop(next(iter(_BASELINE_MAP)), None)
 
 
 @dataclass
@@ -403,10 +435,17 @@ def _loader_read_set(agent_dir: Path, meta: dict[str, Any] | None) -> dict[str, 
 def _manifest_relpath(agent_dir_name: str, key: str) -> str:
     """Map a loader mtime key to its ``agents/``-relative manifest path.
 
-    Shared ``_prompt_system/`` files are ALREADY agents/-relative in the
-    manifest; per-agent keys (artifacts, tools_note, memories) are
-    prefixed with the agent dir name.
+    C1 fix (leader ruling 2026-11-06): the three SHARED persona files are
+    keyed by BASENAME in the loader's mtime map but live under
+    ``_prompt_system/`` in the manifest — map them explicitly. The
+    ``read_set`` keys stay UNTOUCHED (renaming them would break the
+    loader-mtime parity in the stale-cache bust). Shared
+    ``_prompt_system/`` keys (innate skills) are already
+    agents/-relative; per-agent keys (artifacts, tools_note, memories)
+    are prefixed with the agent dir name.
     """
+    if key in _SHARED_PROMPT_BASENAMES:
+        return f"_prompt_system/{key}"
     if key.startswith("_prompt_system/"):
         return key
     return f"{agent_dir_name}/{key}"
@@ -519,6 +558,9 @@ def format_info_line(
     outcome enum is the six-value superset (INFO_OUTCOMES)."""
     release = provenance.get("running_release") or "?"
     daemon_version = provenance.get("daemon_version") or "?"
+    # W6 (leader ruling): primitive-origin refusals carry no counts yet —
+    # render the explicit unknown marker, never an empty field.
+    manager_instances = provenance.get("manager_instances") or "?->?"
     return (
         f"prompt_reload: instance={instance_id} agent={agent_id} "
         f"outcome={outcome} code={code or '-'} release={release} "
@@ -540,8 +582,11 @@ async def refresh_instance_prompt(
 ) -> PromptRefreshResult:
     """Validate → compose → compare → (maybe) pop, for ONE instance.
 
-    Raises nothing — every failure is a typed :class:`PromptRefreshResult`.
-    Must be AWAITED on the daemon's main loop (D23 runbook precondition).
+    Raises nothing — every failure is a typed :class:`PromptRefreshResult`
+    (W7: the env-provenance build is INSIDE the try, so even it cannot
+    raise to the caller — the future compaction caller inherits the same
+    contract). Must be AWAITED on the daemon's main loop (D23 runbook
+    precondition).
     """
     provenance: dict[str, Any] = {
         "instance_id": instance_id,
@@ -550,9 +595,9 @@ async def refresh_instance_prompt(
         "manager_instances": "",
         "was_cached": instance_id in getattr(manager, "instances", {}),
     }
-    provenance.update(_release_provenance())
 
     try:
+        provenance.update(_release_provenance())
         return await _refresh_impl(manager, instance_id, force, provenance)
     except Exception as exc:  # noqa: BLE001 — typed FAILED envelope, never raise
         logger.exception("prompt_reload internal error for %s", instance_id)
@@ -694,10 +739,11 @@ async def _refresh_impl(
             ]
             verdict = verify_paths(release_root, manifest, relpaths)
             if not verdict.ok:
+                problems = list(verdict.mismatches) + list(verdict.unexpected_skips)
                 return _refused(
                     CODE_MANIFEST_MISMATCH,
                     "loader read-set files fail manifest verification: "
-                    + "; ".join(verdict.mismatches),
+                    + "; ".join(problems),
                     provenance,
                 )
             provenance["manifest"] = (
@@ -753,8 +799,13 @@ async def _refresh_impl(
     # against MY key's entry would fabricate a delta (or hide one).
     parity_ok = not other_keys
 
-    # ── Claim-guard snapshot (AM-13/D23): capture ONCE, before composing ───
+    # ── Claim-guard snapshot (AM-13/D23): capture the tuple + its STORED
+    # MTIMES ONCE, before composing. The stored-mtimes conjunct is
+    # evaluated at decision time (below) — W5, leader ruling 2026-11-06:
+    # the weaker content-only guard was rejected because it leaves a
+    # permanently unverifiable leg. ──────────────────────────────────────
     snapshot_entry = prompt_cache._cache.get(my_cache_key)
+    snapshot_mtimes = snapshot_entry[2] if snapshot_entry is not None else None
 
     # ── Baseline-map consult + tuple decision (D5 — hash-based, AM-8) ───────
     baseline_key = (agent_id, version_tag, tuple(sorted(mcp_names)))
@@ -768,18 +819,22 @@ async def _refresh_impl(
         else False
     )
     hash_divergence = bool(files_changed and baseline is not None)
+    hash_mtime_divergence = False
     cache_busted = False
 
-    # Stale-cache bust (AM-8): files changed while the loader's own
-    # mtime+fingerprint equality would still HIT → the cache provably
-    # serves the stale persona on THIS compose AND the next restore.
-    if files_changed and snapshot_entry is not None:
+    # Stale-cache bust (AM-8): files changed WHILE a baseline exists and
+    # the loader's own mtime+fingerprint equality would still HIT → the
+    # cache provably serves the stale persona on THIS compose AND the
+    # next restore. W2: cold start (no baseline) NEVER busts a healthy
+    # shared cache — there is no stale claim to make without a baseline.
+    if baseline is not None and files_changed and snapshot_entry is not None:
         stored_mtimes = snapshot_entry[2]
         file_keys_match = {
             key: value for key, value in stored_mtimes.items() if key != FP_KEY
         } == current_mtimes
         fp_match = stored_mtimes.get(FP_KEY) == db_fingerprint
         if file_keys_match and fp_match:
+            hash_mtime_divergence = True
             prompt_cache.invalidate(agent_id, mcp_names, version_tag)
             cache_busted = True
             provenance["cache_busted_reason"] = "hash_mtime_divergence"
@@ -816,15 +871,24 @@ async def _refresh_impl(
     else:
         outcome = OUTCOME_RELOADED
 
-    # ── Tier-b vs tier-c diff (claim-guard D23 + AM-14 parity) ──────────────
+    # ── Tier-b vs tier-c diff (claim-guard AM-13/D23 + AM-14 parity) ────────
+    # W5 — the AM-13 stored-mtimes conjunct, evaluated at DECISION time:
+    # the entry must be EITHER untouched (cache hit — the mtimes object
+    # is still the snapshot's) OR exactly the entry our own compose just
+    # wrote. Any other stored-mtimes state ⇒ a third party refilled the
+    # entry mid-call ⇒ skew ⇒ tier-c. W1 — a cold process (no baseline)
+    # NEVER claims exactness ("unproven" must not print a delta).
     post_entry = prompt_cache._cache.get(my_cache_key)
+    compose_wrote = post_entry is not None and post_entry[0] == new_persona
+    stored_mtimes_unchanged = snapshot_mtimes is not None and (
+        (post_entry is snapshot_entry and post_entry[2] is snapshot_mtimes)
+        or compose_wrote
+    )
     claim_ok = (
         snapshot_entry is not None
+        and baseline is not None
         and parity_ok
-        and (
-            post_entry is snapshot_entry
-            or (post_entry is not None and post_entry[0] == new_persona)
-        )
+        and stored_mtimes_unchanged
     )
     if outcome in (OUTCOME_NO_CHANGE, OUTCOME_FORCED_RELOAD) and not files_changed:
         # Unchanged tree: the old and new personas are the same fill —
@@ -860,7 +924,7 @@ async def _refresh_impl(
         instances.pop(instance_id, None)
     after_count = len(instances)
     provenance["manager_instances"] = f"{before_count}->{after_count}"
-    provenance["hash_mtime_divergence"] = cache_busted
+    provenance["hash_mtime_divergence"] = hash_mtime_divergence
     provenance["cache_busted"] = cache_busted
     provenance["fingerprint_changed"] = fingerprint_changed
     provenance["hash_divergence"] = hash_divergence
@@ -869,7 +933,7 @@ async def _refresh_impl(
     provenance["claim_guard"] = "held" if claim_ok else "skew-or-absent"
 
     # ── Baseline write (Advisory 2 — every successful fill seeds it) ────────
-    _BASELINE_MAP[baseline_key] = (dict(current_hashes), db_fingerprint)
+    _record_baseline(baseline_key, dict(current_hashes), db_fingerprint)
 
     message = _outcome_message(outcome, files_changed, fingerprint_changed, cache_busted)
     return PromptRefreshResult(

@@ -202,7 +202,6 @@ def create_prompt_reload_tools(
     *,
     current_instance_id: str = "",
     agent_id: str = "",
-    agent_tag: str | None = None,
 ) -> list:
     """Build the prompt_reload tool for one instance/agent.
 

@@ -6805,7 +6805,6 @@ Returns:
             manager,
             current_instance_id=current_instance_id,
             agent_id=agent_id,
-            agent_tag=version_tag,
         )
     )
 

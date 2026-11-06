@@ -172,23 +172,62 @@ class TestLoaderReadSet:
         assert 'prompt_files = ["soul.md", "skill.md", "workflow.md", "rule.md", "memory.md"]' in source
         assert pr._OWN_PROMPT_FILES == ("soul.md", "skill.md", "workflow.md", "rule.md", "memory.md")
 
-    def test_read_set_for_ari_covers_own_meta_tools_and_shared(self) -> None:
-        meta = json.loads((ARI_DIR / "meta.json").read_text(encoding="utf-8"))
-        read_set = _loader_read_set(ARI_DIR, meta)
-        keys = set(read_set)
-        assert "soul.md" in keys and "rule.md" in keys and "meta.json" in keys
-        assert "tools_note.md" in keys
-        assert "project-experience.md" in keys
-        # knowledge file selected via no_force_explore (ari: false → knowledge.md)
-        assert "knowledge.md" in keys
-        # ari declares innate skills → the centralized skill files
-        assert any(k.startswith("_prompt_system/innate-skills/") for k in keys)
+    def test_derived_manifest_relpaths_EQUAL_the_loader_key_mapping(self, tmp_path: Path) -> None:
+        """C1.2/A3 (leader ruling): the pin is an EQUALITY, not an
+        inclusion — the C1 defect (shared persona files keyed as
+        ``<agent>/<name>`` → unmanifested → skipped unverified) was
+        exactly what an inclusion-based pin cannot see.
+
+        A controlled fixture agent dir makes the expected set fully
+        enumerable: own artifacts + meta + tools_note + the three shared
+        basenames (declared ONLY as ``_prompt_system/<name>``) + innate
+        skills + memories. The derivation must produce EXACTLY this set.
+        """
+        agent_dir = tmp_path / "agents" / "fixture-ari"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "soul.md").write_text("s", encoding="utf-8")
+        (agent_dir / "rule.md").write_text("r", encoding="utf-8")
+        (agent_dir / "tools_note.md").write_text("t", encoding="utf-8")
+        (agent_dir / "meta.json").write_text(
+            json.dumps({"innate_skills": ["dynamic-skill"]}), encoding="utf-8"
+        )
+        (agent_dir / "memories").mkdir()
+        (agent_dir / "memories" / "note.md").write_text("m", encoding="utf-8")
+        innate = tmp_path / "agents" / "_prompt_system" / "innate-skills" / "dynamic-skill"
+        innate.mkdir(parents=True)
+        (innate / "skill.md").write_text("sk", encoding="utf-8")
+
+        meta = json.loads((agent_dir / "meta.json").read_text(encoding="utf-8"))
+        read_set = _loader_read_set(agent_dir, meta)
+        relpaths = {pr._manifest_relpath(agent_dir.name, key) for key in read_set}
+
+        expected = {
+            "fixture-ari/soul.md",
+            "fixture-ari/rule.md",
+            "fixture-ari/tools_note.md",
+            "fixture-ari/meta.json",
+            "fixture-ari/memories/note.md",
+            # The three SHARED files — agents/-relative under _prompt_system,
+            # NEVER under the agent dir (the C1 mapping).
+            "_prompt_system/project-experience.md",
+            "_prompt_system/knowledge.md",
+            "_prompt_system/innate-skills/dynamic-skill/skill.md",
+        }
+        assert relpaths == expected, relpaths ^ expected
+        # And no shared basename may ever be requested under the agent dir.
+        assert not any(
+            rp.endswith(("fixture-ari/knowledge.md", "fixture-ari/project-experience.md"))
+            for rp in relpaths
+        )
 
     def test_no_force_explore_selects_the_other_knowledge_file(self) -> None:
         meta = {"no_force_explore": True}
         keys = set(_loader_read_set(ARI_DIR, meta))
         assert "knowledge_no_force_explore.md" in keys
         assert "knowledge.md" not in keys
+        assert pr._manifest_relpath("ari", "knowledge_no_force_explore.md") == (
+            "_prompt_system/knowledge_no_force_explore.md"
+        )
 
 
 # ── AC1.2 — three-fixture divergence matrix (AM-5: NO raise, NO refusal) ────
@@ -472,6 +511,53 @@ class TestClaimGuard:
         assert result.ok
         assert result.provenance["parity_ok"] is False
         assert result.diff["persona_diff"] == "unavailable"
+
+    async def test_w1_warm_cache_cold_process_is_unproven_tier_c_never_exact(self) -> None:
+        """W1 (leader ruling): the ORDINARY first production call — a cold
+        process with a WARM shared cache — must be ``unproven`` +
+        ``persona_diff=unavailable``; a no-baseline call NEVER claims an
+        exact delta."""
+        manager = StubManager()
+        # Warm cache, no baseline record.
+        cache_key = manager.prompt_cache._make_key("ari", [], None)
+        manager.prompt_cache._cache[cache_key] = (
+            "P_old", 1, {"soul.md": 1.0, pr.FP_KEY: ""},
+        )
+        manager.instances["iid-1"] = (object(), str(ARI_DIR))
+
+        result = await _run(manager, persona="P1 persona")
+        assert result.outcome == OUTCOME_UNPROVEN
+        assert result.diff["persona_diff"] == "unavailable"
+        assert "no persona delta is claimed" in result.message
+
+    async def test_w2_cold_start_never_busts_a_healthy_cache(self) -> None:
+        """W2 (leader ruling): with no baseline there is no stale claim —
+        a healthy shared cache must NOT be invalidated on cold start."""
+        manager = StubManager()
+        read_set = pr._loader_read_set(
+            ARI_DIR, json.loads((ARI_DIR / "meta.json").read_text())
+        )
+        current_mtimes = {k: p.stat().st_mtime for k, p in read_set.items()}
+        cache_key = manager.prompt_cache._make_key("ari", [], None)
+        manager.prompt_cache._cache[cache_key] = (
+            "P_old", 1, {**current_mtimes, pr.FP_KEY: ""},
+        )
+        invalidations: list[tuple] = []
+        orig = manager.prompt_cache.invalidate
+
+        def _watch(*args, **kwargs):
+            invalidations.append(args)
+            return orig(*args, **kwargs)
+
+        manager.prompt_cache.invalidate = _watch  # type: ignore[method-assign]
+        manager.instances["iid-1"] = (object(), str(ARI_DIR))
+
+        result = await _run(manager, persona="P_old")
+        assert result.outcome == OUTCOME_UNPROVEN
+        assert invalidations == []  # never busted
+        assert result.provenance["cache_busted"] is False
+        assert result.provenance["hash_mtime_divergence"] is False
+        assert cache_key in manager.prompt_cache._cache  # entry intact
 
 
 # ── AC1.7 — pop semantics (P3/AM-7/D22) ─────────────────────────────────────
