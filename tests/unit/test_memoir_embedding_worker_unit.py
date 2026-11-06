@@ -53,6 +53,7 @@ from daemon.services.memoir_embedding_worker import (
     TERMINAL_ERROR_MARKER,
     TickSettings,
     _default_embed,
+    _is_terminal_row,
     classify_embed_failure,
     latest_snapshot,
 )
@@ -468,6 +469,60 @@ def worker_scan_limit_covers() -> int:
     from daemon.services.memoir_embedding_worker import SCAN_LIMIT
 
     return int(SCAN_LIMIT)
+
+
+# ── N-1: the Python belt (the tick's second line of defence) ────────────
+
+
+async def test_the_python_belt_skips_terminal_rows_the_sql_did_not_exclude(repo):
+    """N-1 (council delta-2): the tick's Python filter (``_is_terminal_row``,
+    the thin delegate to ``memoir_row_is_terminal``) is the BELT behind the
+    SQL-side terminal exclusion (W-2). This pin calls
+    ``get_pending_embeddings(exclude_terminal=False)`` — the repository flag
+    that DISABLES the SQL-side exclusion (the diagnostic read) — and asserts
+    the belt ALONE still refuses the terminal rows: a SQL scan that returns
+    BOTH terminal forms (attempts at/over the cap AND the ``terminal:``
+    marker) must still yield only the pending row as tick candidates."""
+    burned = repo.insert_episode(agent_id="ari", title="burned", body="b")
+    for _ in range(EMBEDDING_ATTEMPT_CAP):
+        repo.record_embedding_attempt(burned, "burned")
+    marked = repo.insert_episode(agent_id="ari", title="marked", body="b")
+    repo.record_embedding_attempt(marked, f"{TERMINAL_ERROR_MARKER}gave up")
+    fresh = repo.insert_episode(agent_id="ari", title="fresh", body="b")
+
+    # The SQL exclusion is OFF: the raw emptiness-is-the-queue read must
+    # return ALL THREE rows — otherwise this pin proves nothing.
+    raw = repo.get_pending_embeddings(exclude_terminal=False)
+    raw_ids = {row.id for row in raw}
+    assert raw_ids == {burned, marked, fresh}, (
+        "with exclude_terminal=False the SQL must return all three rows "
+        "(both terminal forms plus the pending one)"
+    )
+
+    # Control leg: the SQL exclusion ON returns only the pending row —
+    # proving the flag is what switched the SQL-side behaviour.
+    excluded_ids = {row.id for row in repo.get_pending_embeddings()}
+    assert excluded_ids == {fresh}, (
+        "the default scan (exclude_terminal=True) must exclude both "
+        "terminal rows SQL-side"
+    )
+
+    # The BELT — the tick's own filter, applied to the raw scan exactly
+    # as the tick composes its candidates:
+    candidates = [
+        row
+        for row in raw
+        if not _is_terminal_row(row, EMBEDDING_ATTEMPT_CAP)
+    ]
+    assert [row.id for row in candidates] == [fresh], (
+        "the worker-side Python belt must skip both terminal rows the "
+        "SQL did not exclude"
+    )
+    for terminal_id in (burned, marked):
+        row = next(r for r in raw if r.id == terminal_id)
+        assert _is_terminal_row(row, EMBEDDING_ATTEMPT_CAP), (
+            f"row {terminal_id} must classify terminal (the belt's skip)"
+        )
 
 
 async def test_a_starved_window_warns_after_n_stalled_ticks(repo, caplog):
