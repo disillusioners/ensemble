@@ -93,6 +93,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.28.18] — 2026-11-06
+
+### Changed — residual PM-terminology genericization in Ari's prompts (`fix/ari-pm-terminology-residual`, merge `4826da386`)
+
+- **Ari's prompts now speak one generic PM vocabulary whole-file** — the v0.28.16 lane genericized the NEW behavioural sections; this closes the pre-existing product wording left elsewhere: `rule.md`'s Default Delegation Targets row and the four Project-Management Dispatch bullets (Trigger / Topology / Scope split / Environment discipline) lose their residual product mentions and backticked implementation verb names (`plane` / `plane_sync` / `plane_delete_issue`); `workflow.md`'s Triage Decision Matrix row + example quote and `soul.md`'s Mode 3 sentence follow. Wording only, ZERO behavior change.
+- **Whole-file occurrence gate, pinned** — `rule.md` carries EXACTLY ONE case-insensitive `plane` occurrence (the sanctioned backing note, preserved verbatim: "the PM interface is currently backed by Plane — an implementation detail that may change"); `workflow.md` and `soul.md` carry ZERO. `tests/unit/test_ari_pm_terminology_pins.py` gains the whole-file gates plus 9 mutation legs over a pure checker; the two ari seal rows in `SEALED_SHA_BASELINES` are re-pinned and the prompt-artifact baseline regenerated (181 rows, `--check` OK).
+- **Gates** — reviewer APPROVE-WITH-NOTES (0 blocking); tester PASS-WITH-DISCLOSURES, READY TO STAGE: YES (all 7 gates, net-new reds 0, fence stack mutation-proven on real bytes). Continuation of the v0.28.16 ari-pm-terminology lane (user feedback Discord 2026-11-06: use the generic "plan" word; name the implementation exactly once).
+
 ## [0.28.17] — 2026-11-06
 
 ### Added — Memoir Store v1: ari's durable episodic memory (`feature/ari-memoir-store`, merge `b73805dc4`, 72 lane commits)
