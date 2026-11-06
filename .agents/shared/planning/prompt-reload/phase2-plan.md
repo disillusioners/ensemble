@@ -1,0 +1,34 @@
+# Phase 2 — Tool surface + category/pin ceremony
+
+## 1. Objective
+
+The Ari-only `prompt_reload` tool: flat tool, args exactly `{force?: bool}`, three-layer privileged gate (notify-user precedent), category registration + artifact regeneration via the house generator, privileged pin census updates, kill-switch. The tool is a THIN wrapper over the Phase 1 primitive.
+
+## 2. Decisions
+
+| ID | Decision | Rationale (anchors) | Rejected alternatives |
+|----|----------|--------------------|-----------------------|
+| D8 | New privileged category `prompt-reload`, allow-list **ari EXACTLY**. Three-layer gate per the notify-user precedent (notify_user.py:23-29): (1) category registered privileged → stripped from the default-grant universe (`_strip_privileged_category_tools` default-deny; machinery comments daemon/tools/_tool_registry.py:203-482); (2) `agents/ari/meta.json` tools.allow gains `"prompt-reload"` (adjacent to `"notify-user"` :44 and `"memoir"` :46 — meta.json is NOT a prompt artifact; no baseline impact); (3) in-body factory-captured `agent_id != "ari"` → typed refusal `prompt_reload_not_ari` (a literal tool name in an allow list bypasses the category gate — notify_user.py:28-29). Registration via `@register_tool_category` + CATEGORY_MODULES (the artifact's declared source: tool-categories.json "source" field). Privileged roster ordinal: the set currently ends at memoir (v0.29.0 era) — exact count verified at implementation and pinned. | R5 + notify-user precedent (v0.28.8-era lane; category #16 with ari-EXACTLY ceremony). | Reusing an existing category; broader allow-list. |
+| D9 | Tool args EXACTLY `{force?: bool}` (R4). No target parameter (self-only, factory-captured agent_id/instance_id). No `dry_run` (explicitly rejected: the fingerprint no-op path already returns the full provenance + would-be diff without popping — a dry-run-shaped outcome for free; add later only if a real need appears). | R4 binding; dispatch fixes the args surface. | `target_instance_id` param (forbidden); `dry_run` param (redundant with no-op path). |
+| D10 | Breadcrumb = **tool-return only** (R7 leader leaning): the return text carries the abbreviated changes + an explicit "takes effect on your NEXT turn" line. NO persistent injection, NO history write, NO SystemMessage. | R7 leaning; never-touch-history guardrail (R6); context-cost avoidance. Architect confirmation = OQ3. | Injected persistent note (context cost, history pollution). |
+| D12 | `tool-categories.json` regeneration via the house generator ONLY (never hand-edit — F-1 trap class); `VOCABULARY_VERSION` bumped 6 → 7 in daemon/checkpoint_metrics.py:244 in the SAME change; `tests/unit/tools/test_tool_category_artifact.py` stays green. | Artifact "source" field declares the generator provenance; tester convention lesson: bind the artifact vocabulary_version to the code constant. F-1 incident (v0.28.9): stale artifact = 2 net-new reds. | Hand-editing the JSON (F-1 trap; mutation leg M4 proves it RED). |
+
+## 3. Tasks
+
+| ID | Task | Outcome (testable) | Touchpoints (files) | Depends on | Risks carried | AC |
+|----|------|--------------------|---------------------|------------|----------------|----|
+| T2.1 | `daemon/tools/prompt_reload.py`: flat tool, args `{force?: bool}` only (D9); factory-captured `agent_id` + `instance_id`; calls the Phase 1 primitive; returns the result envelope (diff + provenance + breadcrumb D10); kill-switch gate (D11 → `prompt_reload_disabled`); docstring per docs/agent-prompt-writing-guide.md (write as the agent; states next-turn semantics + cache-invalidation note R9; no config restatement). | Tool importable + constructible; non-ari caller refused in-body; kill-switch flip refuses typed. | daemon/tools/prompt_reload.py (NEW) | P1 complete | RA6 | AC2.1 |
+| T2.2 | Three-layer gate (D8): `@register_tool_category("prompt-reload", privileged=True)`; category-key constant (metrics_read.py:139 pattern: `PROMPT_RELOAD_CATEGORY_KEY = "prompt-reload"`); `_strip_privileged_category_tools` picks it up (verify via the existing strip test family); `agents/ari/meta.json` allow entry. | Category stripped from default-grant universe; ari alone grants it; layer-3 in-body check proven. | daemon/tools/_tool_registry.py, daemon/tools/prompt_reload.py, agents/ari/meta.json | T2.1 | RA8 | AC2.2 |
+| T2.3 | Artifact ceremony (D12): regenerate `.agents/shared/metrics/tool-categories.json` via the house generator; bump `VOCABULARY_VERSION` 6→7 (checkpoint_metrics.py:244); artifact pack green. | Artifact contains `prompt-reload`, count 61, vocabulary_version 7, generator-produced (byte-derived from the registry); artifact test green. | .agents/shared/metrics/tool-categories.json, daemon/checkpoint_metrics.py, tests/unit/tools/test_tool_category_artifact.py | T2.2 | RA8 | AC2.3 |
+| T2.4 | Privileged pin census: locate + extend the privileged-category set pin (referenced at daemon/tools/_tool_registry.py:374 — `test_privileged_category_set_is_pinned`) and the per-category registration/allow-list pins (notify-user pack pattern); add prompt_reload-specific pins (ari-exact allow; in-body gate; forbidden-mechanism greps for P4/P5). | Census reflects the new site count; all pins green at HEAD; each pin mutation-meaningful (Phase 4 M-legs). | tests/unit/tools/* (new pin pack test_prompt_reload_pins.py) | T2.2 | RA8 | AC2.4 |
+| T2.5 | Wire tool construction into the manager/factory registration path (flat-tool factory pattern per notify_user.py); verify tool_help surfaces for ari only. | ari sees `prompt_reload` in its tool surface; a control non-ari agent (e.g. worker) does not. | daemon/manager.py (factory wiring), daemon/tools/prompt_reload.py | T2.2 | — | AC2.5 |
+
+## 4. Acceptance Criteria
+
+| ID | Criterion |
+|----|-----------|
+| AC2.1 | Tool constructs with exactly one optional arg `force: bool = False`; docstring carries next-turn semantics + provider prompt-cache invalidation note; kill-switch OFF → typed `prompt_reload_disabled`. |
+| AC2.2 | Three layers each proven: privileged strip (non-ari default-grant universe excludes the tool), ari meta.json grant, in-body `agent_id != "ari"` refusal. |
+| AC2.3 | tool-categories.json regenerated (count 61, `prompt-reload` present, vocabulary_version 7) and the artifact pack passes WITHOUT hand-edits; VOCABULARY_VERSION constant == artifact field. |
+| AC2.4 | Privileged pin census updated (exact site count recorded); new pin pack green; prompt baseline UNTOUCHED (181 rows, `--check` clean). |
+| AC2.5 | Runtime surface: ari has the tool; a non-ari control agent does not (registry + factory verified). |
