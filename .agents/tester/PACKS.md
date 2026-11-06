@@ -3969,6 +3969,7 @@ Lane `feature/ari-memoir-store` (base `5dc08aca8`, head `830060619` + phase 7). 
 
 | Pack | Invocation | Scope | Result |
 |---|---|---|---|
+| `memoir_w8_boot_abort_test` (NEW, G1) | `MEMOIR_W8_BINS_DIR=<dir with ensemble-prod.{induction,clean,tryexcept}> timeout 900 bash test/packs/memoir_w8_boot_abort_test.sh` (pack self-provisions the scratch PG16 cluster; requires the three prebuilt binaries — missing ⇒ loud FAIL, never a silent skip) | W8 frozen-binary boot-abort induction: A1 abort + A2 statement named + A3 ensure artifacts rolled back + A4 inherited-sentinel collateral rollback + A5 live fence; B clean non-regression/idempotence; C structural pins; C2 try/except mutant boots (observation-1 RED). Actual runtime ~81 s; 900 s is conservative | ✅ PASS-WITH-NOTES (`RESULTS/2026-11-05-memoir-g1-w8-boot-abort.md`) |
 | `memoir_knob_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_knob_unit.py -q -p no:randomly --override-ini="addopts="` | kill-switch truth table | ✅ |
 | `memoir_schema_unit_test` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_memoir_schema_unit.py -q -p no:randomly --override-ini="addopts="` | schema + migration | ✅ |
 | `memoir_schema_pg_test` | `timeout 300 bash test/packs/memoir_schema_pg_test.sh` | real-PG schema | ✅ |
