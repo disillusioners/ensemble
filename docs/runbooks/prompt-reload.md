@@ -170,13 +170,41 @@ prompt_reload: instance=<id> agent=<agent_id> outcome=<no_change|reloaded_db|rel
 - No upgrade-journal write, no audit ledger, no metrics family in this
   lane (`prompt_reload_total{outcome}` is a routed follow-up — S10-m).
 
-## Persistent effects (exactly three)
+## Persistent effects (four, all bounded/documented)
 
 1. `manager.instances.pop(instance_id, None)` — the bare pop;
 2. `cache.set` — inside the loader on a cache miss;
-3. `cache.invalidate` — the stale-cache bust.
+3. `cache.invalidate` — the stale-cache bust;
+4. the process-local **baseline map** (the `(agent_id, version_tag,
+   mcp-set)` → `(file hashes, db fingerprint)` record that powers the
+   tuple decision) — write-only-by-the-primitive, process-local, lost at
+   restart (hence `unproven`), and **bounded**: insertion-order eviction
+   past `_BASELINE_MAX_ENTRIES` (256) so it can never grow without limit.
 
 Nothing else mutates state; conversation history is NEVER written.
+
+## Operational notes
+
+- **`force=true` after an MCP warmup.** The in-process dynamic tool
+  docs (the MCP section of the composed prompt) are OUTSIDE the
+  decision tuple by design (D5 — the tuple is the file read set + the
+  DB fingerprint). If the MCP tool set changed in-process and the files
+  did not, a normal call may report `no_change`; `force=true` pops
+  anyway and the next restore recomposes with the live MCP docs.
+- **`live` containment root.** The live/sandbox containment check uses
+  `_resolve_install_dir(...)` (HOME-derived canonical install path),
+  while the registry anchors on the frozen executable. They can differ
+  (e.g. a non-standard install location); the check fails CLOSED
+  (`prompt_reload_dir_invalid`) rather than verifying an unreachable
+  tree.
+- **Return-field scope.** The tool TEXT carries the abbreviated diff;
+  the structured facts (`was_cached`, `mcp_tool_names_source`,
+  `db_fingerprint`, `parity_ok`, `claim_guard`, `hash_divergence`, …)
+  live in the primitive's `provenance` payload and the INFO line only.
+- **Honesty marks need DB rows.** The F7 marks (S10-a/S10-b) render
+  only when effective prompt-versions rows EXIST for those artifacts —
+  0 live CORE rows today, so an L9 run must SEED rows (or a stub repo)
+  to exercise the marks.
 
 ## Cold start (first call after any restart)
 
