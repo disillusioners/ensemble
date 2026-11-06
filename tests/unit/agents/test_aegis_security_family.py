@@ -4224,6 +4224,22 @@ class TestCanaryCarveoutAnchors:
             "the carve-out must read as 'the fencing is the container', never as an exemption"
         )
 
+    @pytest.mark.parametrize("anchor", DOCTRINE_ANCHORS)
+    def test_t31_doctrine_anchor_on_numbered_cardinal_line(self, anchor):  # A4 (council fold)
+        """phase4-plan.md:318 — for canary EVERY anchor sits on a numbered
+        cardinal line. With the two carve-out legs above, this closes the
+        numbered-line property over all SIX canary anchors (was 3 of 6: the
+        concept anchor leg accepts a heading line, and the other three
+        doctrine anchors had no numbered-line leg at all)."""
+        rule = _read("canary", "rule.md")
+        hits = [line for line in rule.splitlines() if anchor in line]
+        assert len(hits) == 1, (
+            f"canary doctrine anchor {anchor!r} occurs {len(hits)} times (expected 1)"
+        )
+        assert re.match(r"^\d+\. \*\*", hits[0]), (
+            f"canary doctrine anchor {anchor!r} does not sit on a numbered cardinal line"
+        )
+
 
 class TestInjectionMirrorRoster:
     """The mirror/manifest invariants (P4 task 1) — the drift class M7's
@@ -4287,6 +4303,37 @@ class TestInjectionMirrorRoster:
             f"roster versions diverge: {sorted(versions)} — a rule-set change bumps "
             "every copy's version AND bytes in the same commit, or the copies drift"
         )
+
+    def test_auto_load_polarity_matrix_manifest_and_frontmatter(self):  # W2 (council fold)
+        """The 4 ruled polarity cells, manifest entry AND body frontmatter.
+
+        A silent CONSISTENT flip (e.g. sweeper true->false in both places)
+        passes the masked-identity M7 pin and every version-parity leg, so
+        polarity itself is pinned per agent here. Ruled set: canary and
+        sweeper auto-load (they consume the screen as doctrine-adjacent
+        surfaces); aegis and worker do not (they carry the explicit load
+        duty instead — the T31 D2 reachability legs)."""
+        expected = {"canary": True, "sweeper": True, "aegis": False, "worker": False}
+        for agent, want in expected.items():
+            manifest = yaml.safe_load(
+                (_agent_dir(agent) / "skill-set.yaml").read_text(encoding="utf-8")
+            )
+            entry = [e for e in manifest["skills"] if e["name"] == "injection-screen"][0]
+            assert entry["auto_load"] is want, (
+                f"{agent} manifest auto_load is {entry['auto_load']!r}; "
+                f"the ruled polarity is {want!r}"
+            )
+            front = (AGENTS_DIR / agent / "skills-template" / "injection-screen.md").read_text(
+                encoding="utf-8"
+            ).split("---")[1]
+            fm_auto = next(
+                (l.split(":", 1)[1].strip() for l in front.splitlines() if l.startswith("auto_load:")),
+                None,
+            )
+            assert fm_auto == str(want).lower(), (
+                f"{agent} frontmatter auto_load is {fm_auto!r}; "
+                f"the ruled polarity is {want!r}"
+            )
 
 
 class TestScannerExecution:
@@ -4397,3 +4444,86 @@ class TestScannerExecution:
         assert "my working directory" in body and "shipped beside this" in body, (
             "the ladder's two rungs (cwd-relative first, then the shipped copy) must be stated"
         )
+
+
+# ---------------------------------------------------------------------------
+# Code-council fold (rec 2, 2026-11-06): pins for the rec-1 scanner folds.
+# A1 — SK-17 on the error path: the header sha256/bytes describe the WHOLE
+# original payload even when the transported body is cut (AC-SK.7: a
+# truncated block's hash still equals the full payload's hash). A2 — the
+# caller's channel flows uniformly through EVERY error fence.
+# ---------------------------------------------------------------------------
+
+
+class TestErrorFenceHashCoversFullPayload:
+    """A1 — an oversized (unprocessable) payload still yields a fence whose
+    sha256 and byte count identify the FULL original payload; only the
+    transported body is kept small."""
+
+    def test_oversized_error_fence_hash_and_bytes_cover_whole_payload(self):
+        module = _scanner_module()
+        payload = b"Q" * (module.HARD_INPUT_CEILING + 1)
+        block, code = module.error_fence(payload, "content-too-large", "file-content")
+        assert code == "content-too-large"
+        header, body = _parse_emitted_block(module, block)
+        assert header["verdict"] == "suspect" and header["confidence"] == "none"
+        assert header["error"] == "content-too-large"
+        assert header["truncated"] == "false"
+        assert header["sha256"] == hashlib.sha256(payload).hexdigest(), (
+            "SK-17: the error fence's hash must cover the WHOLE original payload "
+            "— hashing the 1,000-byte transported cut is the A1 defect"
+        )
+        assert header["bytes"] == str(len(payload)), (
+            "SK-17: bytes must report the ORIGINAL payload length, not the cut"
+        )
+        assert sum(len(line) for line in body) <= 1000, (
+            "the transported body stays small (the fence-keep-small intent)"
+        )
+
+
+class TestErrorFenceChannelUniformity:
+    """A2 — every screen_bytes error path carries the caller's channel when
+    supplied (content-too-large and rule-table-unreadable previously dropped
+    it; scan-failed and classifier-failed already carried it)."""
+
+    def test_every_error_path_carries_channel(self, monkeypatch):
+        module = _scanner_module()
+
+        # (1) content-too-large — the >ceiling path
+        big = b"B" * (module.HARD_INPUT_CEILING + 1)
+        block, _ = module.screen_bytes(big, source="file-content", channel="bash:stdout")
+        header, _ = _parse_emitted_block(module, block)
+        assert header["error"] == "content-too-large"
+        assert header["channel"] == "bash:stdout", (
+            "the content-too-large error fence dropped the caller's channel"
+        )
+
+        # (2) rule-table-unreadable
+        def _unreadable(*_a, **_k):
+            raise module.RuleTableError("planted")
+
+        monkeypatch.setattr(module, "load_rules", _unreadable)
+        block, _ = module.screen_bytes(b"ok", source="file-content", channel="web:fetch")
+        header, _ = _parse_emitted_block(module, block)
+        assert header["error"] == "rule-table-unreadable"
+        assert header["channel"] == "web:fetch", (
+            "the rule-table-unreadable error fence dropped the caller's channel"
+        )
+
+        # (3) scan-failed — the pinned contrast path (was already uniform)
+        def _scan_boom(*_a, **_k):
+            raise RuntimeError("planted scan failure")
+
+        monkeypatch.undo()  # release the load_rules plant before leg (3)
+        monkeypatch.setattr(module, "evaluate_rules", _scan_boom)
+        block, _ = module.screen_bytes(b"ok", source="file-content", channel="mcp:stdio")
+        header, _ = _parse_emitted_block(module, block)
+        assert header["error"] == "scan-failed" and header["channel"] == "mcp:stdio"
+
+        # (4) classifier-failed
+        monkeypatch.undo()  # release the evaluate_rules plant before leg (4)
+        block, _ = module.screen_bytes(
+            b"ok", source="file-content", channel="plane:web", llm_verdict="bogus"
+        )
+        header, _ = _parse_emitted_block(module, block)
+        assert header["error"] == "classifier-failed" and header["channel"] == "plane:web"
