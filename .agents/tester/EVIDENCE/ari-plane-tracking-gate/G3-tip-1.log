@@ -1,0 +1,17 @@
+........................................................................ [ 57%]
+.........FF...........................................                   [100%]
+=================================== FAILURES ===================================
+_______ TestPromptComposition.test_soul_cites_rule_for_severity_framing ________
+tests/unit/test_project_manager_agent.py:1023: in test_soul_cites_rule_for_severity_framing
+    assert "rule.md" in soul_text, (
+E   AssertionError: soul.md must cross-reference rule.md (e.g., severity framing)
+E   assert 'rule.md' in '# Who I Am\n\n**Status:** 📊 Project Manager Agent — Strategic Oversight with Direct Project-Domain Management\n\nI am...## Discrepancies\n<list each row where Alignment != "aligned">\n\n### Decisions Pending\n<0–3 framed questions>\n```\n'
+___________ TestPromptComposition.test_workflow_cites_soul_and_rule ____________
+tests/unit/test_project_manager_agent.py:1030: in test_workflow_cites_soul_and_rule
+    assert "soul.md" in workflow_text, (
+E   AssertionError: workflow.md must reference soul.md for output templates
+E   assert 'soul.md' in '# Workflow\n\nI am invoked when the user or leader asks a **strategic** question:\n\n- "Where are we on `<feature>`?"...the same turn.\n\nIf you want an assessment acted on, ask me to dispatch — I have authority for strategic execution.\n'
+=========================== short test summary info ============================
+FAILED tests/unit/test_project_manager_agent.py::TestPromptComposition::test_soul_cites_rule_for_severity_framing
+FAILED tests/unit/test_project_manager_agent.py::TestPromptComposition::test_workflow_cites_soul_and_rule
+2 failed, 124 passed, 4 deselected in 1.70s

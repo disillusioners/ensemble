@@ -3143,6 +3143,260 @@ class NotifyUserConfig(BaseSettings):
     )
 
 
+class NestReportConfig(BaseSettings):
+    """Configuration for the ``report_anomaly`` tool (nest-anomaly-report).
+
+    Class name + env prefix per the R9 naming ruling: the OPERATIONAL
+    surfaces take the ``nest-`` prefix (``NestReportConfig`` /
+    ``ENSEMBLE_NEST_REPORT_``), while the DATA layer keeps the
+    ``anomaly-`` names (the ``anomaly_reports`` / ``anomaly_clusters``
+    tables, the ``report_anomaly`` tool function). Auto-covered by the
+    tests' ``_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")`` prefix
+    match in ``tests/conftest.py`` (no conftest edits required).
+
+    The kill-switch is ``enabled`` — ``false`` disables the tool with
+    the typed refusal ``tool-disabled``. The per-writer deny list is
+    ``disabled_agents`` (AM-16) — the surgical lever the whole-surface
+    kill-switch lacks.
+
+    AM-10 — THE BUDGET IS PER AGENT **TYPE**
+    ---------------------------------------
+    ``agent_id`` is the agent TYPE (the instance's agent type, e.g.
+    ``worker``), never the instance id. Consequences, stated here
+    because the field docs below are the agent-visible surface:
+
+    * SPAWNING DOES NOT MULTIPLY THE BUDGET — an orchestrator that
+      spawns fifty workers still spends ONE ``worker`` budget.
+    * A TYPE'S INSTANCES SHARE ONE BUDGET (the noisy-neighbour
+      trade-off: one agent's burst can consume its siblings' quota).
+    * The KEY SPACE IS NOT AGENT-EXPANDABLE — custom agents exist
+      only through the auth-gated REST route, so the distinct budget
+      keys are fixed by the in-repo agent catalogue (re-derived at
+      each release).
+
+    AM-16 — THE DEFAULT-ON POSTURE IS CONDITIONAL
+    ---------------------------------------------
+    ``enabled`` defaults to ``True`` IFF the four security amendments
+    (AM-9 capacity fences, AM-11 scrub fence, AM-12 board ceilings,
+    AM-13 board-item ceilings) have landed AND are verified by the
+    lane's gate. If any of the four is missing or unverified at gate
+    time, the lane ships default-OFF plus a mandatory morning-report
+    disclosure. The env kill-switch stays the operator escape hatch
+    in either case. This field doc IS that conditionality, written
+    where an operator will read it.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_NEST_REPORT_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Kill-switch (N9 mirror). false disables the "
+                    "report_anomaly tool with the typed refusal "
+                    "tool-disabled. DEFAULT-ON IS CONDITIONAL (AM-16): "
+                    "the default stays True IFF AM-9 + AM-11 + AM-12 + "
+                    "AM-13 have landed and are verified by the lane's "
+                    "gate; if any is missing or unverified at gate time "
+                    "the lane ships default-OFF plus a mandatory "
+                    "morning-report disclosure line. Restart-required. "
+                    "Env: ENSEMBLE_NEST_REPORT_ENABLED.",
+    )
+    rate_window_seconds: int = Field(
+        default=600,
+        ge=1,
+        description="The minor/major rate window (R5b) — 10 minutes. "
+                    "Env: ENSEMBLE_NEST_REPORT_RATE_WINDOW_SECONDS.",
+    )
+    rate_max_per_agent: int = Field(
+        default=5,
+        ge=1,
+        description="The minor/major cap per rolling window, counted "
+                    "from ACCEPTED rows only (a refused report never "
+                    "consumes budget). AM-10: the budget key is the "
+                    "agent TYPE, so a type's instances SHARE one "
+                    "budget and SPAWNING DOES NOT MULTIPLY IT (the key "
+                    "space is not agent-expandable). N3: the check is "
+                    "read-then-insert, so '5 per 10 min' is "
+                    "BEST-EFFORT under concurrency, not a hard "
+                    "invariant. Env: "
+                    "ENSEMBLE_NEST_REPORT_RATE_MAX_PER_AGENT.",
+    )
+    critical_window_seconds: int = Field(
+        default=3600,
+        ge=1,
+        description="The critical rate window (R5b) — 1 hour. "
+                    "Env: ENSEMBLE_NEST_REPORT_CRITICAL_WINDOW_SECONDS.",
+    )
+    critical_max_per_agent: int = Field(
+        default=20,
+        ge=1,
+        description="The critical cap per rolling hour. Critical "
+                    "reports are EXEMPT from the minor/major cap but "
+                    "capped here — a nest-wide critical burst past "
+                    "this is still VISIBLE (the cluster exists and the "
+                    "rate-limited counter spikes; the counter is "
+                    "itself a nest-distress signal). AM-10: the key is "
+                    "the agent TYPE (instances share one budget; "
+                    "spawning does not multiply it). Env: "
+                    "ENSEMBLE_NEST_REPORT_CRITICAL_MAX_PER_AGENT.",
+    )
+    excerpt_max_messages: int = Field(
+        default=5,
+        ge=1,
+        description="R6 — how many ERROR-BEARING tool messages the "
+                    "excerpt keeps (the last N of the scan window). "
+                    "Env: ENSEMBLE_NEST_REPORT_EXCERPT_MAX_MESSAGES.",
+    )
+    excerpt_max_chars_per_message: int = Field(
+        default=500,
+        ge=1,
+        description="R6 — the per-excerpt character cap. Env: "
+                    "ENSEMBLE_NEST_REPORT_EXCERPT_MAX_CHARS_PER_MESSAGE.",
+    )
+    excerpt_max_total_chars: int = Field(
+        default=2000,
+        ge=1,
+        description="R6 — the total excerpt character cap across the "
+                    "kept excerpts. Env: "
+                    "ENSEMBLE_NEST_REPORT_EXCERPT_MAX_TOTAL_CHARS.",
+    )
+    cluster_window_seconds: int = Field(
+        default=900,
+        ge=1,
+        description="R5 — the clustering sliding window W (15 min), "
+                    "measured from the cluster's LAST report (never "
+                    "fixed buckets: a fixed bucket splits one incident "
+                    "that spans a boundary). Env: "
+                    "ENSEMBLE_NEST_REPORT_CLUSTER_WINDOW_SECONDS.",
+    )
+    resolve_window_seconds: int = Field(
+        default=3600,
+        ge=1,
+        description="R5 — the DERIVED resolution window (1h): a "
+                    "cluster reads as open while last_report_at >= "
+                    "now - this. There is no status column and no "
+                    "reopen race. Env: "
+                    "ENSEMBLE_NEST_REPORT_RESOLVE_WINDOW_SECONDS.",
+    )
+    wedge_match_window_seconds: int = Field(
+        default=300,
+        ge=1,
+        description="AM-8d — the wedge cross-link window: a capture "
+                    "matches when its captured_at is within +/- this "
+                    "window of the report AND its boot_epoch equals "
+                    "the report's (canonicalized to naive-UTC on BOTH "
+                    "sides). Env: "
+                    "ENSEMBLE_NEST_REPORT_WEDGE_MATCH_WINDOW_SECONDS.",
+    )
+    description_max_chars: int = Field(
+        default=1000,
+        ge=1,
+        description="The description cap (authored text; over-length "
+                    "input truncates with an envelope note, never a "
+                    "refusal). Env: "
+                    "ENSEMBLE_NEST_REPORT_DESCRIPTION_MAX_CHARS.",
+    )
+    suspected_cause_max_chars: int = Field(
+        default=500,
+        ge=1,
+        description="The suspected_cause cap (authored text; "
+                    "over-length input truncates with an envelope "
+                    "note, never a refusal). Env: "
+                    "ENSEMBLE_NEST_REPORT_SUSPECTED_CAUSE_MAX_CHARS.",
+    )
+    retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="R6 — the retention window for reports AND "
+                    "clusters (30 days). Env: "
+                    "ENSEMBLE_NEST_REPORT_RETENTION_DAYS.",
+    )
+    retention_batch_size: int = Field(
+        default=500,
+        ge=1,
+        description="R6 — the batched retention DELETE size (LIMIT per "
+                    "batch; the caller loops). Env: "
+                    "ENSEMBLE_NEST_REPORT_RETENTION_BATCH_SIZE.",
+    )
+    refusal_ledger_max_per_agent: int = Field(
+        default=10,
+        ge=0,
+        description="AM-9 — the refusal-ledger fence: at most this "
+                    "many rate-limited ledger rows per agent TYPE per "
+                    "window. Beyond it the SAME rate-limited envelope "
+                    "returns with NO ledger row (the metric is the "
+                    "scalable signal; the ledger is for morning "
+                    "review). AM-10: the key is the agent TYPE. Env: "
+                    "ENSEMBLE_NEST_REPORT_REFUSAL_LEDGER_MAX_PER_AGENT.",
+    )
+    max_rows_global: int = Field(
+        default=50000,
+        ge=1,
+        description="AM-9 (F-1 correction) — the SINGLE TOTAL-row "
+                    "bound (accepted + refused; the refusal-ledger "
+                    "INSERT is gated by it too). This is the nest-wide "
+                    "WALL: at the ceiling the envelope is "
+                    "capacity-exhausted, NO row is written, and the "
+                    "capacity-exhausted counter increments. Env: "
+                    "ENSEMBLE_NEST_REPORT_MAX_ROWS_GLOBAL.",
+    )
+    max_rows_per_tree_root: int = Field(
+        default=2000,
+        ge=1,
+        description="AM-9 / C3(ii) — the per-tree row cap. It SHEDS, "
+                    "it NEVER refuses: at the threshold the oldest "
+                    "rows for that tree are trimmed in batches (with "
+                    "the per-cluster report_count decremented per "
+                    "AM-6), so one tree can never go dark — the "
+                    "durable critical record is the board item, which "
+                    "the trim does not remove. Env: "
+                    "ENSEMBLE_NEST_REPORT_MAX_ROWS_PER_TREE_ROOT.",
+    )
+    max_accepted_per_hour_global: int = Field(
+        default=1500,
+        ge=1,
+        description="AM-9 — the pre-harvest global ceiling on ACCEPTED "
+                    "reports per hour. D3: 5,000 -> 2,000 -> 1,500 — "
+                    "the budget key is the agent TYPE (the key count "
+                    "follows the in-repo agent catalogue, re-derived at "
+                    "each release), so the maximal steady rate is "
+                    "keys x (30 minor/major + 20 critical) and 1,500 "
+                    "binds in steady state. This knob is an "
+                    "OPERATOR BRAKE, not a security fence (the per-type "
+                    "caps are the inner brake). Env: "
+                    "ENSEMBLE_NEST_REPORT_MAX_ACCEPTED_PER_HOUR_GLOBAL.",
+    )
+    disabled_agents: str = Field(
+        default="",
+        description="AM-16 — the per-writer deny list: a "
+                    "comma-separated list of agent TYPE ids. A listed "
+                    "writer gets the typed refusal tool-disabled while "
+                    "the other writers in the same boot are unaffected. "
+                    "Checked PRE-rate-gate. Restart-required. Env: "
+                    "ENSEMBLE_NEST_REPORT_DISABLED_AGENTS.",
+    )
+    max_board_items_per_tree_root_per_hour: int = Field(
+        default=3,
+        ge=1,
+        description="AM-13 — the per-tree board-item ceiling per hour. "
+                    "Beyond it the board surface appends a NOTE to the "
+                    "tree's most recent anomaly board item instead of "
+                    "creating another one (the suppressed counter "
+                    "increments). Enforced in phase 2's board sink. "
+                    "Env: "
+                    "ENSEMBLE_NEST_REPORT_MAX_BOARD_ITEMS_PER_TREE_ROOT_PER_HOUR.",
+    )
+    max_board_items_per_hour_global: int = Field(
+        default=20,
+        ge=1,
+        description="AM-13 (W-6 correction: 50 -> 20) — the global "
+                    "board-item ceiling per hour: 20/h = 480/day, "
+                    "which matches the architect's stated harm bound "
+                    "and trips under a uniform multi-tree flood. "
+                    "Enforced in phase 2's board sink. Env: "
+                    "ENSEMBLE_NEST_REPORT_MAX_BOARD_ITEMS_PER_HOUR_GLOBAL.",
+    )
+
+
 class McpPoolConfig(BaseSettings):
     """MCP warm-up connection pool configuration."""
 
@@ -5174,6 +5428,13 @@ class Config(BaseSettings):
     # NotifyUserConfig, env prefix ENSEMBLE_NOTIFY_USER_). Peers with
     # `scheduling:` — the yaml block mirrors the field names exactly.
     notify_user: NotifyUserConfig = Field(default_factory=NotifyUserConfig)
+    # nest-anomaly-report (2026-11-05): the report_anomaly knob section
+    # (R9 — class NestReportConfig, env prefix ENSEMBLE_NEST_REPORT_;
+    # the OPERATIONAL surfaces take the nest- prefix while the DATA
+    # layer keeps the anomaly- names). ENV-ONLY: this section has no
+    # config.yaml block and ``load_config`` has no pass-through for
+    # it, so a hand-added yaml block would be silently ignored.
+    nest_report: NestReportConfig = Field(default_factory=NestReportConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)

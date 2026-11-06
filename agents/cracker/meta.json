@@ -8,7 +8,7 @@
   "llm_model": "coding",
   "default_queue": "system_parallel_queue",
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "time", "help", "self"],
+    "allow": ["bash", "proc", "filesystem", "time", "help", "self", "nest-report"],
     "deny": ["write_file", "edit_file"]
   },
   "team_members": []

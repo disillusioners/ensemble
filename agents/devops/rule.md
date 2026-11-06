@@ -210,3 +210,9 @@ If ANY condition fails → STOP and report to leader with:
 | `terraform destroy` | Critical | Explicit approval + state backup |
 | `docker system prune -a` | Critical | Explicit approval + impact list |
 | Production deploy | Critical | TrueAuto self-approval OR approval via open questions (orchestrator-gated) |
+
+## Reporting Anomalies
+
+When I see something abnormal in my work — a defect, a contradiction, a stuck step — I report it
+with `report_anomaly`: what kind of problem, what I saw, how serious, what I think caused it. One
+report per distinct problem, never the same one twice. The tool collects the evidence itself.

@@ -1,0 +1,32 @@
+=== G3 census suite commands (ari-plane-tracking gate leg G3) ===
+Source: spec commit 1ce41535f -> .agents/shared/planning/ari-plane-tracking/plan.md
+  - Part 4 ("run the §3.3 command + the §2.3/§3.2 acceptance greps"; §3.3 table
+    also names test_charter_render_capture.py:1188)
+  - Reviewer W-1 expectation adds tests/unit/tools/test_prompt_section_reference_integrity.py
+    (~10 pre-existing reds) and 3 test_charter_render_capture reds.
+Interpreter (BOTH legs): /home/nea/ensemble-src/.venv/bin/python
+  (worktree /home/nea/ensemble-src-wt-ari-plane/.venv ABSENT — verified)
+Env scrub per-variable (NEVER glob): -u PORT -u ENSEMBLE_SELF_ENV -u POSTGRES_DB
+  -u POSTGRES_USER -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL
+Common flags appended to spec command: -q --tb=short -p no:cacheprovider -p no:randomly --timeout=120
+Outer guard: timeout 300
+
+--- Invocation 1: spec §3.3 command VERBATIM (5 files, one pytest run) ---
+<python> -m pytest tests/unit/test_instance_ops_prompt_layer.py \
+  tests/unit/test_anomaly_report_duty_prompts.py \
+  tests/unit/test_project_manager_agent.py \
+  tests/unit/tools/test_mission_watch_prompts.py \
+  tests/test_chart_image_delivery_e2e.py -q
+
+--- Invocation 2: spec-table/reviewer-named additions (one pytest run) ---
+<python> -m pytest tests/test_charter_render_capture.py \
+  tests/unit/tools/test_prompt_section_reference_integrity.py -q
+
+LOCATED-BY (ambiguity resolution):
+- TestPromptComposition (PM) -> tests/unit/test_project_manager_agent.py:965
+  [grep -rln "class TestPromptComposition" tests/ ; in plan-named suite already]
+- test_charter_render_capture -> tests/test_charter_render_capture.py
+  [find tests -name '*charter_render_capture*'; own file, added to census]
+- prompt_section_reference_integrity -> tests/unit/tools/test_prompt_section_reference_integrity.py
+  [find tests -name '*prompt_section*'; task path tests/unit/ was approximate]
+Scope lock: 7 test files, 2 pytest invocations per leg, NOTHING else executed.

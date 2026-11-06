@@ -9,7 +9,7 @@ AC-10a, AC-10b):
   discovered by the AST scanner and the exact-equality drift pin
   fails at boot);
 * (b) BOTH categories are in ``PRIVILEGED_TOOL_CATEGORIES``;
-* (c) the frozenset LENGTH is 17 (metrics-read joined 2026-11-03);
+* (c) the frozenset LENGTH is 18 (nest-report-read joined 2026-11-05);
 * (d) all 10 tool names are in ``DYNAMIC_TOOL_NAMES`` and
   ``KNOWN_TOOL_NAMES``;
 * (e) the AST scanner finds all 10 ``@tool`` functions at any nesting
@@ -127,6 +127,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # access path, and every tool body ALSO carries its own
 # agent_id gate.
 "metrics-read",
+"nest-report-read",
 })
 
 
@@ -202,11 +203,11 @@ class TestPrivilegedCategory:
         assert READ_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
         assert ACT_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
+    def test_the_set_is_exactly_the_eighteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_seventeen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
+    def test_the_set_has_eighteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
 
 
 class TestAllowLists:

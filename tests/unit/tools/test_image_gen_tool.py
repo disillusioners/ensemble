@@ -1076,10 +1076,19 @@ class TestRegistryAndAllowlist:
         )
 
     def test_critic_allowlist_shape_unchanged(self):
+        """The critic's allow shape is the D6 form, plus the grant
+        ceremony's ONE appended category.
+
+        nest-anomaly-report phase 5 / C9 (2026-11-05): the grant
+        ceremony appended the non-privileged "nest-report" category (the
+        LAST element; nothing was reordered, and the generation-lane
+        isolation the sibling leg pins is untouched — "image-gen" is
+        still absent).  Prior value: ["read_file", "image", "design"].
+        """
         meta = json.loads(
             (Path(__file__).resolve().parents[3] / "agents" / "critic" / "meta.json").read_text()
         )
-        assert meta["tools"]["allow"] == ["read_file", "image", "design"]
+        assert meta["tools"]["allow"] == ["read_file", "image", "design", "nest-report"]
         assert "image_save" in (meta["tools"].get("deny") or [])
 
 

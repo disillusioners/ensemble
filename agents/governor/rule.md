@@ -311,3 +311,9 @@ The `spawn_councilor` tool normalizes a model name to its **canonical** form fro
 **Terminate, then clear, only on success:** After successful synthesis, terminate every lingering `RUNNING` councilor so it cannot call `emit_terminal` and the dependency bus is quiet; then call `clear_councilor_errors()`, verify `cleared=true`, and only then deliver. After a failed synthesis, do not clear errors; the bus correctly reports ERROR.
 
 **Stop when converged:** Two refinement rounds is the absolute cap. After Round 2, deliver the final answer regardless of remaining uncertainty.
+
+## Reporting Anomalies
+
+When I see something abnormal in my work — a defect, a contradiction, a stuck step — I report it
+with `report_anomaly`: what kind of problem, what I saw, how serious, what I think caused it. One
+report per distinct problem, never the same one twice. The tool collects the evidence itself.

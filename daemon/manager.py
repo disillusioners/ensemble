@@ -162,6 +162,10 @@ from .services.skill_injection_service import SkillInjectionService
 from .services.prompt_version_service import PromptVersionService
 from .services.secret_service import SecretService
 from .services.board_service import BoardService
+# nest-anomaly-report (2026-11-05, phase 2 / C3): the anomaly ACCEPT
+# service — mounted on the manager as ``_anomaly_service`` (the C2
+# tool contract seam, read per call by ``daemon/tools/nest_report.py``).
+from .services.anomaly_service import AnomalyService
 # remote-hands center gateway (2026-10-22) — the CENTER service of the
 # remote-hands protocol (SPEC.md v0.1) and its DB-backed audit sink.
 from .services.mcps_gateway.config import load_gateway_config
@@ -1732,6 +1736,19 @@ class InstanceManager:
         # direct constructors and ad-hoc tests get a working service
         # without the lifespan having run.
         self._board_service = BoardService(engine=self._engine)
+        # nest-anomaly-report (phase 2 / C3): the anomaly ACCEPT
+        # service, mounted beside the board service (the critical gate
+        # writes board rows THROUGH the manager's board service —
+        # agents never see a board tool from this lane, R3). The C2
+        # tool contract: ``daemon/tools/nest_report.py`` dereferences
+        # ``manager._anomaly_service`` (public alias
+        # ``manager.anomaly_service``) PER CALL — a degraded boot
+        # leaves the tool PRESENT and refusing ``tool-disabled``.
+        self._anomaly_service = AnomalyService(
+            engine=self._engine,
+            config=self.config.nest_report,
+            manager=self,
+        )
         # remote-hands center gateway (2026-10-22): the CENTER service of
         # the remote-hands protocol (SPEC.md v0.1). One instance per
         # process — the roster of the enrolled machines and the live
@@ -4559,6 +4576,22 @@ class InstanceManager:
             "dependency_bus_lock_reap",
             min_interval_hours=1.0,
             execute_fn=self._run_dependency_bus_lock_reap,
+        )
+
+        # ── nest-anomaly-report (phase 2 / C3): the 24h anomaly
+        # retention sweep (R6) on the EXISTING maintenance seam —
+        # bounded batched age DELETEs with the AM-6 per-cluster count
+        # decrements, the AM-9 global capacity trim + the C3(ii)
+        # per-tree trim (both via the SHARED shed_members helper), the
+        # AM-5b orphan terminalization and the AM-7 board done
+        # transitions. Best-effort (an exception logs WARNING inside
+        # the job and never kills this loop). AM-15/NR-7 disclosure:
+        # the idle-gated cadence can starve on a continuously busy
+        # nest — routed to the maintenance lane, not fixed here.
+        self._maintenance_service.register(
+            "anomaly_retention",
+            min_interval_hours=24,
+            execute_fn=self._anomaly_service.run_retention_sweep,
         )
 
         # Section 1 / T8 + W1 + W2 (v3 fix pass) — boot sweep of
@@ -15897,6 +15930,18 @@ class InstanceManager:
         replaced.
         """
         return self._board_service
+
+    @property
+    def anomaly_service(self) -> AnomalyService:
+        """The nest-anomaly ACCEPT service (nest-anomaly-report, phase 2).
+
+        The PUBLIC alias of ``_anomaly_service`` — the C2 tool contract
+        reads the private attribute first and accepts this door second
+        (``daemon/tools/nest_report.py::_anomaly_service``), so a mount
+        under either name resolves. One instance per process, beside
+        the board service whose writer seam the critical gate uses.
+        """
+        return self._anomaly_service
 
     @property
     def mcps_gateway_service(self):

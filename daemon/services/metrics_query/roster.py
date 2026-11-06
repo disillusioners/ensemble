@@ -4,7 +4,9 @@ FR-C2 requires EVERY registered family to be classified as
 chart-primary (series required) or stat-primary (current value only),
 and the plan pins the concrete subject set: the FR-C2 floor set
 **minus F2** (dropped by the value ruling AM-25 / LR-2) **plus** the
-four D5 partials that qualify (F7, F8, F18, F21) = **12 families**.
+four D5 partials that qualify (F7, F8, F18, F21) **plus F23** (the
+nest-anomaly family, the nest-anomaly-report lane 2026-11-05) =
+**13 families**.
 
 This module is the roster's canonical home.  It is NOT a second family
 table for the door: the roster is a DECLARATION of the chart roles that
@@ -196,6 +198,35 @@ CHART_PRIMARY_ROSTER: tuple[RosterFamily, ...] = (
         "F21",
         (RosterSeries("ensemble_journal_file_bytes", CHART_ROLE_LINE, ""),),
     ),
+    # F23 — the nest-anomaly family (nest-anomaly-report lane,
+    # 2026-11-05). ALL FIVE members are rostered (AM-2c's general pin:
+    # "every registered metric of a roster family has a roster entry" —
+    # an un-rostered member silently degrades to stat-primary INSIDE a
+    # chart family, invisible on the wire). The counters render STEP;
+    # the open-cluster gauge renders LINE (a gauge rises and falls — a
+    # line is the honest mode). The two unlabelled write-time counters
+    # carry the empty label template "" (the house precedent:
+    # w1.py's ensemble_waiting_children_count).
+    RosterFamily(
+        "F23",
+        (
+            RosterSeries("ensemble_anomaly_reports_total", CHART_ROLE_STEP, "{category}"),
+            RosterSeries(
+                "ensemble_anomaly_reports_rate_limited_total",
+                CHART_ROLE_STEP,
+                "{category}",
+            ),
+            RosterSeries(
+                "ensemble_anomaly_clusters_open", CHART_ROLE_LINE, "{category,severity}"
+            ),
+            RosterSeries(
+                "ensemble_anomaly_board_items_suppressed_total", CHART_ROLE_STEP, ""
+            ),
+            RosterSeries(
+                "ensemble_anomaly_capacity_exhausted_total", CHART_ROLE_STEP, ""
+            ),
+        ),
+    ),
 )
 
 #: The families that were dropped by the value ruling and are therefore
@@ -228,14 +259,14 @@ def roster_family_names() -> tuple[str, ...]:
 def assert_roster_is_well_formed() -> None:
     """Fail loud when the roster itself drifts (its own invariant).
 
-    * exactly the 12 chart-primary families;
+    * exactly the 13 chart-primary families;
     * F2 is absent;
     * every role is one of the two declared modes;
     * the family ids are unique.
     """
     names = roster_family_names()
-    if len(names) != 12:
-        raise ValueError(f"the chart-primary roster must carry 12 families; got {names}")
+    if len(names) != 13:
+        raise ValueError(f"the chart-primary roster must carry 13 families; got {names}")
     if len(set(names)) != len(names):
         raise ValueError(f"duplicate family in the chart-primary roster: {names}")
     for dropped in DROPPED_FAMILIES:

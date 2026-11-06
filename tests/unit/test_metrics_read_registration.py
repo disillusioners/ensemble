@@ -12,8 +12,8 @@ This pack pins:
   discovered by the AST scanner and the exact-equality drift pin fails at
   boot);
 * (b) the category is in ``PRIVILEGED_TOOL_CATEGORIES``;
-* (c) the frozenset LENGTH is 17 (metrics-read joined 2026-11-03);
-* (d) the set is EXACTLY the seventeen entries;
+* (c) the frozenset LENGTH is 18 (nest-report-read joined 2026-11-05);
+* (d) the set is EXACTLY the eighteen entries;
 * (e) both tool-name universes (``DYNAMIC_TOOL_NAMES`` +
   ``KNOWN_TOOL_NAMES``) carry all three names;
 * (f) the AST scanner finds all three ``@tool`` functions (decorator-only
@@ -87,7 +87,7 @@ TOOL_NAMES: frozenset[str] = frozenset({
 EXPECTED_HOLDERS: list[str] = ["maintenancer", "devops", "wanderer"]
 
 #: The privileged universe — the sixteen base entries plus the
-#: metrics-read category = seventeen members.
+#: nest-report-read category = eighteen members.
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
@@ -106,6 +106,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "mcp_rpc",
     "notify-user",
     "metrics-read",
+    "nest-report-read",
 })
 
 
@@ -214,11 +215,11 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_seventeen_entries(self) -> None:
+    def test_the_set_is_exactly_the_eighteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_seventeen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 17
+    def test_the_set_has_eighteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
 
 
 # ── A13: the attribute pin + the default-deny behavioral leg ───────────────

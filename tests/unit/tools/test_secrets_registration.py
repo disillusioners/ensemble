@@ -294,6 +294,12 @@ class TestStaticRegistrationChecklist:
         # access path, and every tool body ALSO carries its own
         # agent_id gate.
         "metrics-read",
+        # nest-report-read (2026-11-05, nest-anomaly-report lane):
+        # the READ-ONLY anomaly-store category — opt-in-only; the
+        # maintenancer / devops / wanderer allow entries are the only
+        # access path, and every tool body ALSO carries its own
+        # agent_id gate.
+        "nest-report-read",
 })
 
 

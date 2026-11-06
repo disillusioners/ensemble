@@ -111,6 +111,7 @@ from daemon.routers import (
     mcps_gateway_read_router, # /api/mcps-gateway/{machines,sessions,audit} (Phase C: the OAuth read lane)
     wedge_capture_router,    # /api/wedge-captures (wedge-capture: the capture evidence store)
     metrics_router,         # /api/metrics (checkpoint read instrumentation surface)
+    nest_reports_router,    # /api/nest-reports (nest-anomaly-report lane: the anomaly domain route)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -1087,6 +1088,19 @@ async def lifespan(app: FastAPI):
     # ``_ensure_postgres_columns`` mirror needed.
     from daemon.repositories.wedge_captures.models import WedgeCapture
     WedgeCapture.metadata.create_all(manager.engine)
+
+    # nest-anomaly-report (2026-11-05) — ``anomaly_reports`` +
+    # ``anomaly_clusters`` are the two new tables that back the
+    # ``nest-report`` tool category (the nest-level anomaly store: one
+    # agent-filed report row + the incident cluster identity anchor).
+    # Brand-new tables — the same create_all precedent as the secrets /
+    # instance_ops / mcps_gateway / wedge_captures pairs above. The .sql
+    # migrations (20261105_020500 / 20261105_020501) handle SQLite and
+    # the models handle PG. No ``_ensure_postgres_columns`` mirror
+    # needed (a brand-new table has no legacy shape to repair).
+    from daemon.repositories.anomaly.models import AnomalyCluster, AnomalyReport
+    AnomalyReport.metadata.create_all(manager.engine)
+    AnomalyCluster.metadata.create_all(manager.engine)
 
     # agent-secrets P1 — ``SecretService`` is constructed in
     # ``InstanceManager.__init__`` alongside
@@ -5385,6 +5399,20 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # OAuth2-protected by default (auth ON); the family is declared
     # in the router manifest cages (class + scope).
     api_router.include_router(metrics_router)           # /api/metrics
+    # nest-reports (nest-anomaly-report lane, 2026-11-05) — the anomaly
+    # DOMAIN route (``/api/nest-reports/clusters`` +
+    # ``/api/nest-reports/clusters/{cluster_id}``).  It is a DOMAIN
+    # route, NOT a second metrics query path: the central metrics door
+    # stays FROZEN at its three series-shaped routes.  The gate is
+    # IDENTICAL to the door's (the same any-of scope set
+    # ``maintenance:read|metrics:read`` + the fail-closed 503
+    # AUTH_NOT_CONFIGURED gate before any read).
+    #
+    # Mounted HERE — inside ``api_router``, BEFORE the SPA catch-all
+    # (the catch-all only fires for unmatched paths; the prefix
+    # /api/nest-reports is owned by this router).  The ``metrics_router``
+    # include above is the placement precedent.
+    api_router.include_router(nest_reports_router)      # /api/nest-reports
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned

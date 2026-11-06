@@ -115,10 +115,14 @@ MANIFEST_BEARING = ("aegis", "canary", "sweeper", "worker")
 PROMPT_SURFACE = ("soul.md", "rule.md", "workflow.md", "tools_note.md")
 
 # --- DP1 tool matrices (decisions.md §B.2 — AM-1/AM-2 corrected) -----------
+# Re-pointed at the nest-report grant ceremony (2026-11-05, leader ruling
+# "all 47 agents"): every explicitly-allow-listed agent — the aegis family
+# included — carries "nest-report" as the LAST allow entry. The expectation
+# set moves; the EXACT-set discipline does not.
 AEGIS_ALLOW = frozenset({
     "instance", "bash", "proc", "filesystem", "time", "self", "help",
     "context", "shared_meta_kv", "knowledge", "mcp", "question",
-    "midflight", "dynamic-skill", "todo",
+    "midflight", "dynamic-skill", "todo", "nest-report",
 })
 AEGIS_DENY = frozenset({
     "write_file", "edit_file", "terminate_instance", "pause_instance",
@@ -133,9 +137,9 @@ AEGIS_DENY = frozenset({
 #                re-preferences canary survives the campaign (self-hypnosis).
 #                Removed MECHANICALLY, not doctrinally.
 ALLOW_BY_AGENT = {
-    "hacker":  frozenset({"bash", "proc", "filesystem", "time", "help", "self"}),
-    "cracker": frozenset({"bash", "proc", "filesystem", "time", "help", "self"}),
-    "sweeper": frozenset({"bash", "proc", "filesystem", "time", "help", "self"}),
+    "hacker":  frozenset({"bash", "proc", "filesystem", "time", "help", "self", "nest-report"}),
+    "cracker": frozenset({"bash", "proc", "filesystem", "time", "help", "self", "nest-report"}),
+    "sweeper": frozenset({"bash", "proc", "filesystem", "time", "help", "self", "nest-report"}),
     "canary":  frozenset({"bash", "filesystem", "time", "help"}),
 }
 
@@ -145,6 +149,10 @@ ALLOW_BY_AGENT = {
 CARDINAL_COUNT_BY_AGENT = {
     "aegis": 7, "hacker": 7, "cracker": 7, "sweeper": 7, "canary": 7,
 }
+#   [2026-11-06 drift-merge] trio sets absorb the nest-report grant (nest ceremony,
+#   leader ruling "all 47 agents" — merged meta.json carries it LAST); canary is
+#   this lane's authored agent and is NOT granted (authored 4-set exact, gated).
+
 
 # The 17 privileged categories (daemon/tools/_tool_registry.py
 # PRIVILEGED_TOOL_CATEGORIES — pinned here as data; T8 asserts the family's
@@ -792,6 +800,9 @@ class TestWorkerUntouched:
             "agents/worker/rule.md",
             "agents/worker/skill-set.yaml",
             "agents/worker/skills-template/injection-screen.md",
+            # [2026-11-06 drift-merge] nest ceremony's meta.json grant rides the
+            # merged tree (leader ruling "all 47 agents"); absorbed, not authored.
+            "agents/worker/meta.json",
         }, f"worker surface drifted: {sorted(files.stdout.split())}"
 
 

@@ -32,7 +32,8 @@
       "ens-env",
       "snapshot_create",
       "snapshot_search",
-      "secrets"
+      "secrets",
+      "nest-report"
     ]
   },
   "context_injection": {

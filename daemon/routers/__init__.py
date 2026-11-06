@@ -33,6 +33,7 @@ from .resources import router as resources_router  # resource-cost-control P1: /
 from .mcps_gateway_read import router as mcps_gateway_read_router  # Phase C: /api/mcps-gateway/{machines,sessions,audit} (OAuth read lane)
 from .wedge_capture import router as wedge_capture_router  # wedge-capture: /api/wedge-captures
 from .metrics import router as metrics_router  # /api/metrics (checkpoint read instrumentation surface)
+from .nest_reports import router as nest_reports_router  # /api/nest-reports (nest-anomaly-report lane: the anomaly domain route)
 
 __all__ = [
     "agents_router",
@@ -68,4 +69,5 @@ __all__ = [
     "mcps_gateway_read_router",
     "wedge_capture_router",
     "metrics_router",
+    "nest_reports_router",
 ]

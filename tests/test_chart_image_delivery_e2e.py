@@ -1425,26 +1425,39 @@ class TestInstallerSkillHygiene:
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",
-    "agents/charter/rule.md": "2cb6e01b3bdfd07865aed967d524b98d7bcd965f60ffd741e52a7ee71c44573c",
+    # agents/charter/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 2cb6e01b3bdfd07865aed967d524b98d7bcd965f60ffd741e52a7ee71c44573c.
+    "agents/charter/rule.md": "df10691815b9db8274e9d1de3e5b72966b3e74b6266fae677be67edcd604e876",
     "agents/charter/soul.md": "458f65a608b495df0cac8c565a83663595ea85c3d13a200295dc611189387aad",
-    "agents/charter/meta.json": "e1034e1d92e7bb30f2d39ab0a625a661287251cf5ca961cbeba3e1893dcfd492",
+    # agents/charter/meta.json re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C9): the phase-5 GRANT ceremony appended the "nest-report" category to this
+    # file's tools.allow array, so the pinned content-sha256 moved with the real
+    # bytes.
+    # Prior value e1034e1d92e7bb30f2d39ab0a625a661287251cf5ca961cbeba3e1893dcfd492.
+    "agents/charter/meta.json": "b71c45c4065420ef93729e440a2b8586ba030823d4cbe4b5c3015ec899bbbd49",
     "agents/charter/skills-template/install-mermaid-cli.md": "ee43576c9b9d746c8ce6563c85ed289567e9fcebadc75c0bd7ede417aaaa667e",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "fcd6f4612d6077a81fe521341e6e2332d1f5da31880d3fc710decbc0579fedbf",
     "agents/_prompt_system/innate-skills/chart/skill.md": "fa29084d7dc0f86c87d667ef46dcfc060fa11e20e0b647295cdd75ff43353515",
-    # agents/ari/workflow.md re-pinned 2026-10-25 (ari-voice doctrine
-    # amendment — D12/fold-2): the "no ping path exists" absolute became
-    # FALSE when notify_user shipped, so the file's alarm-surfacing and
-    # patrol passages were AMENDED (never deleted). Prior value
-    # 4f07f32708ff9709…b3c00f (the 2026-10-20 user-ruling re-pin).
-    "agents/ari/workflow.md": "26f68f44ce975839a5d3dea7b3617909e1284c719a1a266bab15f3a34d461c43",
+    # agents/ari/workflow.md re-pinned 2026-11-06 (ari-plane-tracking):
+    # long-term Plane tracking doctrine — 3 policy bullets appended to
+    # the Plane & Project-Management Dispatch section's sibling section
+    # in workflow.md ("Commission Open & Close — the Plane Ledger Habit").
+    # Prior value 303c78e325b123587303461ba6c2d556569a8171abdc66303e7a9f32ede5967d.
+    # Prior re-pin note: nest-anomaly-report phase 5 / C8 (base-proven drift repair).
+    "agents/ari/workflow.md": "281de549be046b01dd2455f56678dc2206c42a74d6700f665fcfa163c6e8cd15",
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
-    # registry.py re-pinned 2026-10-18 (resource-cost-control O4): the
-    # backoff-reset gate (778a49cb2) + crashed-run lifetime metric
-    # (8fb77a7b5) edited this file's supervisor harness; pre-O4
-    # baseline was a46da82b930e...  Delta is EXACTLY the O4 edits and
-    # nothing in charter/render-pipeline semantics changed.
-    "daemon/sources/registry.py": "f90c57f73bffd28e4a1992049d617d7bb791b8d792807308b40d2720d9edf624",
+    # daemon/sources/registry.py re-pinned 2026-11-05 (nest-anomaly-report phase 5
+    # / C8): this row was ALREADY STALE at the lane's base — base-proven drift
+    # (the seal-map staleness re-pin ceremony the aegis lane recorded); the file's
+    # content landed in 0428c936e (refactor: mission-records PR1 hygiene pass)
+    # WITHOUT a re-pin. The value is recomputed from the real file bytes; this
+    # lane changed NO content in this file.
+    # Prior value f90c57f73bffd28e4a1992049d617d7bb791b8d792807308b40d2720d9edf624.
+    # Prior re-pin note: resource-cost-control O4.
+    "daemon/sources/registry.py": "1f18a51d44dffa52f80138e6bb7773726ff9e697674de3b748170ff190f54178",
     "daemon/sources/dispatcher.py": "4282ddc0396f9103ff7e14af9077c721d29e5329fac702ad3dfbfafd7083e53a",
     "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
     # Phase B — 7 daemon files + slack-setup.md (8).
@@ -1453,39 +1466,76 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # to this file still trips the tripwire.
     "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
-    # daemon/constants.py re-pinned 2026-10-28 (db-pool-idle-txn lane,
-    # Phase 3/Δ3): the contracted ADDITIVE change (the two F7 residence
-    # budget constants DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S +
-    # MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S with their derivation
-    # blocks — contract §2 constants table, Δ3/D-48/DR-35) edited this
-    # file without re-pinning, so the tripwire row went stale AGAIN.
-    # The value is recomputed from the real file bytes; the delta is
-    # EXACTLY the additive Δ3 block and nothing else — no sealed-segment
-    # (chart/sources) content changed. Only this ONE row changed; the
-    # other rows keep their values. Prior value cd589da47c7781f9…f51bc
-    # (the same lane's F2/T2.1 re-pin).
-    "daemon/constants.py": "464a2459fb4c91c6a1add2bc6bafc3b1242415996597f4e16bef44b3387c8e92",
+    # daemon/constants.py re-pinned 2026-11-05 (nest-anomaly-report phase 5 / C8):
+    # this row was ALREADY STALE at the lane's base — base-proven drift (the
+    # seal-map staleness re-pin ceremony the aegis lane recorded); the file's
+    # content landed in b03872e39 (fix: report-delivery obligation visibility —
+    # parts 1+2 atomic) WITHOUT a re-pin. The value is recomputed from the real
+    # file bytes; this lane changed NO content in this file.
+    # Prior value 464a2459fb4c91c6a1add2bc6bafc3b1242415996597f4e16bef44b3387c8e92.
+    # Prior re-pin note: db-pool-idle-txn lane, Phase 3/Δ3.
+    "daemon/constants.py": "5dd9bfa3e56db333d4cac92b78bba133ef26a327c6810312d819cd6e437a47b7",
     # Phase C — 20 agent canonical-home files
-    "agents/approver/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
-    "agents/approver[v2]/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
-    "agents/architect/rule.md": "ce96896142f568c480a2f92b9b92fa0775be641d877fa386205d8438d55b21b4",
-    "agents/ari/rule.md": "7b056aedb1e9c4b7ff4071e48c64fe2771f7eb599c1b0ef5a91bf5b0ca4073fe",
+    # agents/approver/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae.
+    "agents/approver/rule.md": "d1b53a60946e8a567c60eef7c3e44f50bfe3703e8153b523acfc937ef743dd59",
+    # agents/approver[v2]/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase
+    # 5 / C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae.
+    "agents/approver[v2]/rule.md": "d1b53a60946e8a567c60eef7c3e44f50bfe3703e8153b523acfc937ef743dd59",
+    # agents/architect/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value ce96896142f568c480a2f92b9b92fa0775be641d877fa386205d8438d55b21b4.
+    "agents/architect/rule.md": "ba53247b1e2095ba3776a7d23713c9b796927575647cb15e99842fe54b779a73",
+    # agents/ari/rule.md re-pinned 2026-11-06 (ari-plane-tracking):
+    # long-term Plane tracking doctrine — 3 policy bullets appended to
+    # the Plane & Project-Management Dispatch section (after the
+    # Environment-discipline bullet).
+    # Prior value 4b45329547dcad4e1bc4506b0f53266dda87f57ff7eaf6f7816971f38ed8fa8a.
+    # Prior re-pin note: nest-anomaly-report phase 5 / C8 (base-proven drift repair).
+    "agents/ari/rule.md": "d1df71e1c3471d5938c6aa10ad2e39f31f0d8d64f791ff7e04b91dd2d5500bde",
     "agents/coder/soul.md": "6263b648cfee8eeb84bb90361687e45728bc8bdae60702e965a84a23a1b46968",
-    "agents/developer/rule.md": "9b06c29c811e3636765f8ee09dd1a2b10901554e542723f3de6b851a85a97249",
+    # agents/developer/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 9b06c29c811e3636765f8ee09dd1a2b10901554e542723f3de6b851a85a97249.
+    "agents/developer/rule.md": "d4f8c671e354da079ec16bdaf9d25fd558d7601bb97fcc055d7b8d4bd22cc9ca",
     "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
-    "agents/devops/rule.md": "100d285927283b0276b8064520d8dfbc52b675d19e5dea78a608ca4cb13f7a1d",
-    "agents/doc-writer/rule.md": "350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5",
-    "agents/governor/rule.md": "07aaed75b0290d2d857ede82f876b6d55979d2f67ba29b861781531f815b41f2",
-    "agents/leader/rule.md": "f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a",
-    # agents/maintenancer/rule.md re-pinned 2026-10-20 (approver i3 follow-up
-    # round): the parent-side open-questions paragraph added at 23859484e was
-    # REMOVED — it asserted a tool call the agent cannot make (maintenancer's
-    # meta.json tools.allow carries no `instance` category, so neither
-    # spawn_instance nor send_message is grantable to it). The value below is
-    # the pre-paragraph baseline, byte-identical to the state before 23859484e.
-    # All other entries keep their values; membership stays 35.
-    "agents/maintenancer/rule.md": "abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec",
-    "agents/planner/rule.md": "4282ce61b58736026b5d2e72b7e2112925e4515bf95ffc88032104b4e4c4b6fb",
+    # agents/devops/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 100d285927283b0276b8064520d8dfbc52b675d19e5dea78a608ca4cb13f7a1d.
+    "agents/devops/rule.md": "ba64b0d1c23d850739c87d7f5a72e54c8dc85cf3c714250a905a2dae7b02587d",
+    # agents/doc-writer/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5
+    # / C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5.
+    "agents/doc-writer/rule.md": "3d633c54529f526bc6b5aa91311ee942db76d8351979e8192dc994c7d941d91e",
+    # agents/governor/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 07aaed75b0290d2d857ede82f876b6d55979d2f67ba29b861781531f815b41f2.
+    "agents/governor/rule.md": "a991057c811d709ff8be1e70c8b6f93680576387a4bfa1c21c6669bdd537fc22",
+    # agents/leader/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a.
+    "agents/leader/rule.md": "d104cb7fe0be553e2252322de1d5c861f808be503af4f3e428b64055affb2fc7",
+    # agents/maintenancer/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase
+    # 5 / C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec.
+    # Prior re-pin note: approver i3 follow-up round.
+    "agents/maintenancer/rule.md": "705f1da1692b5943bf24a1085ee0ab3e74f4c6850c28592b5ffa8e19bbcf2af4",
+    # agents/planner/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 4282ce61b58736026b5d2e72b7e2112925e4515bf95ffc88032104b4e4c4b6fb.
+    "agents/planner/rule.md": "1d9da74ef66bf83b84170b8a0da340e760859e9131d5f95c2926d1b6c818d1ed",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
     # agents/project-manager/workflow.md re-pinned 2026-11-02 (plane-pm-
     # issue-tools Phase 5 A' branch, FC9 BREACH — the narrowed grant): the
@@ -1497,10 +1547,26 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # feab3210ebc178835390d0235b0e6b74f30479331017fba1b056999e14b5aaad (the
     # 2026-11-02 Phase-4 charter-reconciliation re-pin).
     "agents/project-manager/workflow.md": "357263bd9ce19f2cd264717e9e8054293f89335c8c0ca5ea1ed264bbb951b0d2",
-    "agents/reviewer/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
-    "agents/reviewer[v2]/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
-    "agents/tidier/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",
-    "agents/tidier[v2]/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",
+    # agents/reviewer/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b.
+    "agents/reviewer/rule.md": "9bfc10b09cd23ea4ab5c74c0c3daeeb86cab9217cb51f9f1d854c52283b7b308",
+    # agents/reviewer[v2]/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase
+    # 5 / C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b.
+    "agents/reviewer[v2]/rule.md": "9bfc10b09cd23ea4ab5c74c0c3daeeb86cab9217cb51f9f1d854c52283b7b308",
+    # agents/tidier/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
+    # C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c.
+    "agents/tidier/rule.md": "26ad5cadd0bd41d7cae684cace5dcbc91b6587e6d71cb10fa5c9ee2c6396fd37",
+    # agents/tidier[v2]/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5
+    # / C8): the duty section was APPENDED to this file by the phase-5 duty
+    # ceremony, so the pinned content-sha256 moved with the real bytes.
+    # Prior value 73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c.
+    "agents/tidier[v2]/rule.md": "26ad5cadd0bd41d7cae684cace5dcbc91b6587e6d71cb10fa5c9ee2c6396fd37",
     "agents/wanderer/soul.md": "98a1f4b4de7657d37c3367fffcfbd3d08b3b66aacafcfa3a362a25a5be126dc2",
 }
 

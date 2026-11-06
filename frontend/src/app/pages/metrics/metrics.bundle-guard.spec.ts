@@ -74,7 +74,6 @@ describe('the bundle guard — its contract', () => {
   it('the guard EXISTS', () => {
     expect(existsSync(guardPath)).toBe(true);
   });
-
   it('the guard READS the named artifact (B8 — not a number copied into prose)', () => {
     expect(guardSrc).toContain('bundle-baseline.json');
     expect(guardSrc).toContain('BASELINE_PATH');
@@ -108,5 +107,68 @@ describe('the bundle guard — its contract', () => {
     expect(guardSrc).not.toContain('localhost');
     expect(guardSrc).not.toContain('9797');
     expect(guardSrc).not.toContain('.env');
+  });
+});
+
+// ── THE NEST-ANOMALY LANE EXTENSION (phase 4, Task 6) ────────────────────
+//
+// The guard is EXTENDED, never bypassed: the existing contract pins stay
+// green above, and the new tab's own exposure is pinned HERE.
+//
+// The new tab rides the SHARED central body for its charts, so it
+// imports NO chart library — the lane's vendor bytes in ANY static
+// fetch set are ZERO by construction (B2/B3/B4a stay at zero exposure).
+describe('the bundle guard — the nest-anomaly lane extension (phase 4)', () => {
+  const frontendDir = join(repoRoot, 'frontend');
+  const guardSrc = readFileSync(guardPath, 'utf-8');
+  const laneFiles = [
+    'src/app/pages/metrics/tabs/nest-reports-tab.component.ts',
+    'src/app/services/nest-reports.service.ts',
+    'src/app/models/nest-reports.models.ts',
+  ];
+
+  it('the artifact carries the B4b threshold + the frozen route-fetch-set baseline', () => {
+    const baseline = JSON.parse(readFileSync(baselinePath, 'utf-8'));
+    const b4 = baseline.guards.B4_new_chart_chunk_size;
+    expect(b4.threshold_B4b_route_fetch_set_lazy_only_bytes).toBe(185000);
+    expect(b4.baseline_metrics_route_fetch_set_lazy_only_bytes).toBe(165185);
+    expect(b4.threshold_B4a_chart_chunk_min_gz_bytes).toBe(82000);
+  });
+
+  it('the new tab imports NO chart vendor — its vendor bytes in ANY static fetch set are 0', () => {
+    for (const rel of laneFiles) {
+      const source = readFileSync(join(frontendDir, rel), 'utf-8');
+      expect(source).not.toMatch(/^\s*import\s[^\n]*\bfrom\s+['"]chart\.js['"]/m);
+      expect(source).not.toMatch(/^\s*import\s+['"]chart\.js['"]/m);
+      expect(source).not.toContain("from 'chart.js'");
+      expect(source).not.toContain('from "chart.js"');
+    }
+  });
+
+  it('the guard SCOPE covers the new tab — a static import there WOULD be caught', () => {
+    // The guard's B3 scan walks the whole frontend tree; the new tab
+    // lives under `src/app/pages/metrics/**`, the scope the guard
+    // names explicitly. A planted static import is therefore a RED, not
+    // a silent pass (mutation leg M-4c).
+    expect(guardSrc).toContain('collectSourceFiles(FRONTEND_DIR)');
+    expect(guardSrc).toContain('src/app/pages/metrics/');
+    expect(laneFiles[0].startsWith('src/app/pages/metrics/')).toBe(true);
+  });
+
+  it('the lane\'s own files import NO vendor package (the vendor set is untouched)', () => {
+    // The lane adds ZERO npm dependencies (package.json stays a 0-line
+    // diff) — expressed hermetically: none of the lane's own files
+    // imports a vendor package, so no new dependency could have been
+    // needed to build them.
+    const vendors = ['chart.js', 'echarts', 'apexcharts', 'd3', 'plotly'];
+    for (const rel of laneFiles) {
+      const source = readFileSync(join(frontendDir, rel), 'utf-8');
+      const imports = [...source.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((m) => m[1]);
+      for (const specifier of imports) {
+        for (const vendor of vendors) {
+          expect(specifier).not.toContain(vendor);
+        }
+      }
+    }
   });
 });

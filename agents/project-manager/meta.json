@@ -76,7 +76,8 @@
       "plane_update_work_item",
       "plane_update_work_item_comment",
       "instance",
-      "shared_meta_kv"
+      "shared_meta_kv",
+      "nest-report"
     ],
     "deny": [
       "experience",

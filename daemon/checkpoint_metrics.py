@@ -199,6 +199,31 @@ def _cardinality_cap() -> int:
 #: The frozen vocabulary version.  Any change to a frozen vocabulary set
 #: bumps this integer (the F0.4/A24 bump contract).
 #:
+#: **5** (nest-anomaly-report lane, 2026-11-05, Phase 3) — the
+#: TOOL-CATEGORY vocabulary gained the ``nest-report-read`` PRIVILEGED
+#: READ category (the lane's Phase-3 registration,
+#: ``daemon/tools/_tool_registry.py``), so the frozen label set changed
+#: and the bump contract requires the marker to move (4 → 5 in the
+#: lane's SECOND bump — the 3 → 4 move was the same lane's Phase-1
+#: ``nest-report`` WRITE category; two commits, never one 3 → 5 jump).
+#: The derived artifact
+#: ``.agents/shared/metrics/tool-categories.json`` is REGENERATED from
+#: the registry by the artifact pack's own generator mode
+#: (``ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=<path>``) — never
+#: hand-edited.  The F7 checkpoint ``op`` enum is UNCHANGED by this bump
+#: (its own vocabulary still reads ``{aget, other}``).
+#:
+#: **4** (nest-anomaly-report lane, 2026-11-05) — the TOOL-CATEGORY
+#: vocabulary gained the ``nest-report`` WRITE category (the lane's
+#: Phase-1 registration, ``daemon/tools/_tool_registry.py``), so the
+#: frozen label set changed and the bump contract requires the marker to
+#: move.  The derived artifact
+#: ``.agents/shared/metrics/tool-categories.json`` is REGENERATED from the
+#: registry by the artifact pack's own generator mode
+#: (``ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=<path>``) — never
+#: hand-edited.  The F7 checkpoint ``op`` enum is UNCHANGED by this bump
+#: (its own vocabulary still reads ``{aget, other}``).
+#:
 #: **3** (metrics-agent-tools lane, 2026-11-03) — the TOOL-CATEGORY
 #: vocabulary gained the ``metrics-read`` privileged category (the lane's
 #: Phase-2 registration, ``daemon/tools/_tool_registry.py``), so the
@@ -215,7 +240,7 @@ def _cardinality_cap() -> int:
 #: target and MUST stay declarable or the fold target itself falls out of
 #: the vocabulary).  The catalog's §14.4 row is amended in the ledger
 #: phase.
-VOCABULARY_VERSION: int = 3
+VOCABULARY_VERSION: int = 5
 
 
 # ─── Registration-time family metadata (AM-3) ───────────────────────────────

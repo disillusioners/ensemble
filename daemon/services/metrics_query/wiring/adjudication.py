@@ -40,9 +40,10 @@ F19        OUT           no pull-able snapshot
 F20        OUT           the commission's OUT
 F21        PARTIAL       the three read gauges (the phases are OUT)
 F22        OUT           the commission's OUT (an out-of-process writer)
+F23        IN            the nest-anomaly family (the anomaly tables)
 =========  ===========  =================================================
 
-**10 full + 6 partial = 16 of 26** — the plan's binding subset.
+**11 full + 6 partial = 17 of 27** — the plan's binding subset.
 """
 
 from __future__ import annotations
@@ -75,6 +76,11 @@ CATALOG_FAMILY_VERDICTS: dict[str, tuple[str, str]] = {
     "F20": ("OUT", "the commission's OUT — a new increment at the tap"),
     "F21": ("PARTIAL", "daemon/tools/upgrade_journal.py:159/:165/:255 (the three read gauges)"),
     "F22": ("OUT", "the commission's OUT — an out-of-process textfile writer"),
+    "F23": (
+        "IN",
+        "the anomaly tables (anomaly_reports / anomaly_clusters) + "
+        "daemon/services/metrics_query/wiring/w4.py::adapt_f23",
+    ),
 }
 
 #: The verdicts the table may carry.
@@ -98,6 +104,7 @@ REGISTERED_FAMILIES: tuple[str, ...] = (
     "F17",
     "F18",
     "F21",
+    "F23",
 )
 
 #: The canonical names of every metric that must be ABSENT from the
@@ -165,6 +172,17 @@ FAMILY_SERIES_BANDS: dict[str, int] = {
     "F17": 40,
     "F18": 5,
     "F21": 32,
+    # F23 — 13 (reports_total categories) + 39 (13 categories × 3
+    # severities, clusters_open) + 13 (rate_limited categories) + 1
+    # (the unlabelled AM-13f board-suppression counter) + 1 (the
+    # unlabelled C3 capacity-exhausted counter) = 67.
+    #
+    # AM-2(a) ZERO-HEADROOM: this band equals F23's measured closed
+    # space EXACTLY (67 = 67) — ANY vocabulary extension (R1's later
+    # lane adds a category ⇒ 13 → 14 ⇒ the closed space grows) REDS
+    # the band assertion BY DESIGN.  A vocabulary extension MUST
+    # re-declare this band in the SAME change as the vocab.py edit.
+    "F23": 67,
 }
 
 #: The registered baseline (the catalog convention, F7c-inclusive).

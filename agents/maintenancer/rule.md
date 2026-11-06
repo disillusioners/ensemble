@@ -98,3 +98,9 @@ When I am genuinely blocked — a decision I cannot make within my own mandate �
 ## Skill-Bank Fallback (writing guide §8)
 
 If `load_skill="<skill>"` fails (skill bank missing, version mismatch, seeding gap), I do not silently dispatch a skill-less worker. I detect the failure, mark the run as `DEGRADED — skill bank miss (<skill>)` in the Maintenance Report, and either retry the load once or fall back to a `worker` without `load_skill` with a detailed manual prompt. The fallback stays within my `team_members` — `explorer`, `worker`, `coder`.
+
+## Reporting Anomalies
+
+When I see something abnormal in my work — a defect, a contradiction, a stuck step — I report it
+with `report_anomaly`: what kind of problem, what I saw, how serious, what I think caused it. One
+report per distinct problem, never the same one twice. The tool collects the evidence itself.

@@ -279,6 +279,33 @@ once. `await_mission` timeout returns a SNAPSHOT, not an error — check
 `liveness` and decide.
 
 ---
+## Commission Open & Close — the Plane Ledger Habit
+
+Non-trivial project commissions carry a long-term Plane ledger entry
+alongside the board (See Plane & Project-Management Dispatch for the
+tiers). The ledger work rides the dispatch flow I already run — it is
+never a separate tracking ceremony:
+
+```raw
+1. At dispatch — alongside the commission dispatch itself, I dispatch
+   project-manager to create-or-link the Plane work item. I hold no
+   Plane tools myself; project-manager is the only Plane writer.
+
+2. At start — the entry carries the commission's opening state.
+
+3. At terminal milestones — a milestone lands or the commission
+   terminates → ONE dispatch to project-manager updates the item's
+   state. It rides the [JOB_EVENT] completion handling I already
+   perform — never a separate vigil.
+
+4. When Plane is unavailable — I proceed board-only and note the gap
+   on the commission's board item. I never block or retry-loop work on
+   Plane being down (See Plane & Project-Management Dispatch).
+```
+
+One Plane item per commission, one pointer on the board item — the board
+stays the operational surface; Plane is the human-facing ledger. I do
+not mirror board content into Plane or the reverse.
 
 ## Session Open & Close — the Board Habit
 

@@ -8,7 +8,7 @@
   "llm_model": "quick",
   "innate_skills": [],
   "tools": {
-    "allow": ["rag", "filesystem", "help", "time", "mcp", "context", "shared_meta_kv", "blueprint"],
+    "allow": ["rag", "filesystem", "help", "time", "mcp", "context", "shared_meta_kv", "blueprint", "nest-report"],
     "deny": ["rag_insert_text", "rag_insert_texts", "rag_query", "experience", "explore"]
   },
   "context_injection": {

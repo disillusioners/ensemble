@@ -290,9 +290,11 @@ def _resolve_critic_filter(instance_tag: str) -> set:
     meta = json.loads((critic_root / "meta.json").read_text(encoding="utf-8"))
     saved = dict(reg._tool_metadata)
     try:
+        from daemon.tools.nest_report import create_nest_report_tools
+
         tools = create_image_tools(None, instance_tag) + create_compare_tools(
             None, instance_tag
-        )
+        ) + create_nest_report_tools(None, current_instance_id=instance_tag)
         reg.scan_tools_for_full_docs(tools)
         return resolve_tool_filter(
             meta["tools"]["allow"], meta["tools"]["deny"],
@@ -306,16 +308,21 @@ def _resolve_critic_filter(instance_tag: str) -> set:
 class TestCriticToolsResolveNit2:
     """Nit-2 WRITE-LEAK GATE: resolving critic's canonical filter through
     the REAL daemon seam (factory-created tools -> scan_tools_for_full_docs
-    -> resolve_tool_filter) yields the EXACT 5-tool read-only set. An AC
-    pinned at '4+1' can never pass because the `image` category resolves
-    to FOUR tools incl. image_save — the explicit deny strips it."""
+    -> resolve_tool_filter) yields the EXACT 6-tool set — the 5 read-only
+    tools plus ``report_anomaly`` (the nest-report category the ALL-AGENTS
+    grant ceremony added to critic's allow, 2026-11-05; the probe's registry
+    must scan that factory too so the category expands to its REAL tool
+    name instead of falling through as a literal). An AC pinned at '4+1'
+    can never pass because the `image` category resolves to FOUR tools
+    incl. image_save — the explicit deny strips it."""
 
     EXPECTED_RESOLVED = {
-        "read_file", "image_get", "image_list", "explain_image", "compare_images",
+        "read_file", "image_get", "image_list", "explain_image",
+        "compare_images", "report_anomaly",
     }
 
     def test_critic_tools_resolve(self):
-        """AUTHORITATIVE exact-5-tool-set check (the shared seam's
+        """AUTHORITATIVE exact-tool-set check (the shared seam's
         assertion of record; test_sketcher_agent.test_critic_deny_wins is
         a thin consumer of the same seam shape)."""
         resolved = _resolve_critic_filter("critic-tools-resolve")

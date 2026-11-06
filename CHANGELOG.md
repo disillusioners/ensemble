@@ -93,6 +93,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.28.14] — 2026-11-06
+
+### Changed — ari Plane long-term project-tracking policy in prompts (`feature/ari-plane-tracking`)
+
+- **Prompt-only** — `agents/ari/rule.md` gains the long-term tracking tiers (non-trivial work earns a Plane work item created-or-linked by `project-manager` at dispatch time; medium one-shots are a judgment call leaning board-only; tiny/read-only/exploration/chat work skip Plane), **link-don't-duplicate** (the board stays the operational surface; a Plane-tracked item earns at most a board pointer), and the **degradation fallback** (Plane unavailable → proceed board-only, note the gap, never block or retry-loop). `agents/ari/workflow.md` gains the matching Commission Open & Close — the Plane Ledger Habit section. Zero daemon/ changes; Ari holds no Plane tools.
+- Seal re-pins (`tests/test_chart_image_delivery_e2e.py` — the two touched artifacts' content-sha256 rows) + prompt-artifact baseline regenerated for the moved rows.
+
 ## [0.28.12] — 2026-11-05
 
 ### Added — the aegis security agent family: one orchestrator + three worker children (`feature/aegis-security-family`)

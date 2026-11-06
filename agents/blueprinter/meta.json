@@ -21,7 +21,8 @@
             "self",
             "help",
             "instance",
-            "commit_docs_validated"
+            "commit_docs_validated",
+          "nest-report"
         ]
     },
     "team_members": [

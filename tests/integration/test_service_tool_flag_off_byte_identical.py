@@ -816,9 +816,11 @@ def test_privileged_category_set_is_pinned() -> None:
     override 2026-09-16 (D4 reversed; see decisions.md §D4
     override note).
 
-    The exact-set pin lives at TEN sites (5 ``EXPECTED_PRIVILEGED_SET``
-    constants + 5 inline ``frozenset`` literals — 15 EDIT sites plus the
-    1 VERIFY-ONLY ari trailing-entry pin in total):
+    The exact-set pin lives at ELEVEN sites (6 ``EXPECTED_PRIVILEGED_SET``
+    constants + 5 inline ``frozenset`` literals — 11 comparison sites +
+    7 count pins + 1 mutation-pack string pair in total, re-grepped with
+    BOTH greps 2026-11-05; plus the 1 VERIFY-ONLY ari trailing-entry
+    pin):
     ``tests/unit/tools/test_upgrade_registration.py``,
     ``tests/unit/tools/test_attestation_registration.py``,
     ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
@@ -912,6 +914,12 @@ def test_privileged_category_set_is_pinned() -> None:
         # access path, and every tool body ALSO carries its own
         # agent_id gate.
         "metrics-read",
+        # nest-report-read (2026-11-05, nest-anomaly-report lane):
+        # the READ-ONLY anomaly-store category — opt-in-only; the
+        # maintenancer / devops / wanderer allow entries are the only
+        # access path, and every tool body ALSO carries its own
+        # agent_id gate.
+        "nest-report-read",
 }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "

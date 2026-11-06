@@ -261,3 +261,9 @@ When I am genuinely blocked — a decision I cannot make within my own mandate �
 
 ### ❌ Not Eligible (Full Workflow)
 - **Size**: ≥ 20 lines | **Scope**: multiple files/modules | **Complexity**: PRODUCTION architecture/design change (test-code refactors ≥ 20 lines → Test Architecture Fix workflow) | **Clarity**: unclear | **Risk**: could break other functionality | **Context**: needs broader understanding
+
+## Reporting Anomalies
+
+When I see something abnormal in my work — a defect, a contradiction, a stuck step — I report it
+with `report_anomaly`: what kind of problem, what I saw, how serious, what I think caused it. One
+report per distinct problem, never the same one twice. The tool collects the evidence itself.

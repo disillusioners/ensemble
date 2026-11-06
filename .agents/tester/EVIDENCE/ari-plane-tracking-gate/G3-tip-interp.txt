@@ -1,0 +1,4 @@
+LEG=tip
+interpreter: /home/nea/ensemble-src/.venv/bin/python
+cwd: /home/nea/ensemble-src-wt-ari-plane
+daemon.__file__ = /home/nea/ensemble-src-wt-ari-plane/daemon/__init__.py

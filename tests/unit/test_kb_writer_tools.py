@@ -57,6 +57,11 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     # future category widening would be detected.
     "help": ["tool_help", "tool_help_extra_for_regression_check"],
     "time": ["time"],
+    # The nest-report category (the ALL-AGENTS grant ceremony, 2026-11-05;
+    # leader ruling "all 47 agents") resolves to its ONE tool. Declared here
+    # so the category expands to the REAL tool name instead of falling
+    # through as a literal "nest-report" entry.
+    "nest-report": ["report_anomaly"],
 }
 
 
@@ -196,9 +201,13 @@ class TestKBWriterResolvedToolSet:
     def test_resolved_set_is_exactly_expected(
         self, kb_writer_resolved_tools: set[str]
     ) -> None:
-        """The full resolved set is exactly the three tools granted.
+        """The full resolved set is exactly the four tools granted.
 
         Locks in the contract: any future change to kb-writer's
-        allow-list must also update this test deliberately.
+        allow-list must also update this test deliberately. The fourth
+        tool is ``report_anomaly`` — the nest-report category the
+        ALL-AGENTS grant ceremony appended (2026-11-05).
         """
-        assert kb_writer_resolved_tools == {"rag_insert_text", "tool_help", "time"}
+        assert kb_writer_resolved_tools == {
+            "rag_insert_text", "tool_help", "time", "report_anomaly",
+        }

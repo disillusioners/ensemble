@@ -1,0 +1,75 @@
+.....................................................................FFF [  4%]
+........................................................................ [  8%]
+........................................................................ [ 13%]
+........................................................................ [ 17%]
+........................................................................ [ 21%]
+........................................................................ [ 26%]
+........................................................................ [ 30%]
+........................................................................ [ 34%]
+........................................................................ [ 39%]
+........................................................................ [ 43%]
+........................................................................ [ 47%]
+........................................................................ [ 52%]
+........................................................................ [ 56%]
+........................................................................ [ 60%]
+........................................................................ [ 65%]
+........................................................................ [ 69%]
+..............F............................F............................ [ 73%]
+........................................................................ [ 78%]
+........................................................................ [ 82%]
+..F...........................FF........................................ [ 86%]
+........................................................................ [ 91%]
+........................................................................ [ 95%]
+........................................................................ [ 99%]
+.....                                                                    [100%]
+=================================== FAILURES ===================================
+________________ test_install_skill_has_render_contract_section ________________
+tests/test_charter_render_capture.py:1124: in test_install_skill_has_render_contract_section
+    assert RENDER_CONTRACT_HEADING in body, (
+E   AssertionError: install-mermaid-cli.md must carry the heading '## Render contract (the 6 canonical fixes)'
+E   assert '## Render contract (the 6 canonical fixes)' in '---\nversion: 1.0.0\ncategory: execution\nauto_load: false\n---\n\n# install-mermaid-cli — provision the mermaid-cli ...n. The verify-gated promotion (Step 5 →\nStep 6) plus the fast path (Step 0) are the complete idempotency\ncontract.\n'
+___________ test_install_skill_render_contract_encodes_all_six_fixes ___________
+tests/test_charter_render_capture.py:1145: in test_install_skill_render_contract_encodes_all_six_fixes
+    assert "--size 1200" in body, "fix #1: --size 1200 must be in the doc"
+E   AssertionError: fix #1: --size 1200 must be in the doc
+E   assert '--size 1200' in '---\nversion: 1.0.0\ncategory: execution\nauto_load: false\n---\n\n# install-mermaid-cli — provision the mermaid-cli ...n. The verify-gated promotion (Step 5 →\nStep 6) plus the fast path (Step 0) are the complete idempotency\ncontract.\n'
+______________ test_install_skill_has_prewarm_invocation_section _______________
+tests/test_charter_render_capture.py:1177: in test_install_skill_has_prewarm_invocation_section
+    assert PREWARM_HEADING in body, (
+E   AssertionError: install-mermaid-cli.md must carry the heading '## Provisioning / pre-warm invocation'
+E   assert '## Provisioning / pre-warm invocation' in '---\nversion: 1.0.0\ncategory: execution\nauto_load: false\n---\n\n# install-mermaid-cli — provision the mermaid-cli ...n. The verify-gated promotion (Step 5 →\nStep 6) plus the fast path (Step 0) are the complete idempotency\ncontract.\n'
+__________ test_no_bare_md_filename_tokens_in_prompts[workflow.md12] ___________
+tests/unit/tools/test_prompt_section_reference_integrity.py:603: in test_no_bare_md_filename_tokens_in_prompts
+    assert not hits, (
+E   AssertionError: agents/developer/workflow.md contains 2 bare-md filename token(s): design/design-spec.md, design/design-spec.md
+E   assert not ['design/design-spec.md', 'design/design-spec.md']
+__________ test_no_bare_md_filename_tokens_in_prompts[workflow.md19] ___________
+tests/unit/tools/test_prompt_section_reference_integrity.py:603: in test_no_bare_md_filename_tokens_in_prompts
+    assert not hits, (
+E   AssertionError: agents/developer[v2]/workflow.md contains 2 bare-md filename token(s): design/design-spec.md, design/design-spec.md
+E   assert not ['design/design-spec.md', 'design/design-spec.md']
+______ test_no_bare_md_filename_tokens_in_prompts[install-mermaid-cli.md] ______
+tests/unit/tools/test_prompt_section_reference_integrity.py:603: in test_no_bare_md_filename_tokens_in_prompts
+    assert not hits, (
+E   AssertionError: agents/charter/skills-template/install-mermaid-cli.md contains 1 bare-md filename token(s): rule.md
+E   assert not ['rule.md']
+_____________________ test_odd_fence_count_fails[rule.md4] _____________________
+tests/unit/tools/test_prompt_section_reference_integrity.py:688: in test_odd_fence_count_fails
+    assert count % 2 == 0, (
+E   AssertionError: agents/charter/rule.md has 1 ``` fences (odd). Fence count must be even (paired open/close). FENCE_LINE_RE locates each fence; the unmatched fence is at one of these lines:L94
+E   assert (1 % 2) == 0
+___________________ test_odd_fence_count_fails[workflow.md4] ___________________
+tests/unit/tools/test_prompt_section_reference_integrity.py:688: in test_odd_fence_count_fails
+    assert count % 2 == 0, (
+E   AssertionError: agents/charter/workflow.md has 41 ``` fences (odd). Fence count must be even (paired open/close). FENCE_LINE_RE locates each fence; the unmatched fence is at one of these lines:L40, L50, L103, L119, L137, L154, L216, L226, L235, L239, L248, L257, L268, L280, L295, L302, L381, L385, L397, L417, L421, L448, L468, L472, L496, L500, L533, L542, L545, L551, L555, L571, L574, L577, L578, L580, L585, L588, L589, L645, L664
+E   assert (41 % 2) == 0
+=========================== short test summary info ============================
+FAILED tests/test_charter_render_capture.py::test_install_skill_has_render_contract_section
+FAILED tests/test_charter_render_capture.py::test_install_skill_render_contract_encodes_all_six_fixes
+FAILED tests/test_charter_render_capture.py::test_install_skill_has_prewarm_invocation_section
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md12]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md19]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[install-mermaid-cli.md]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_odd_fence_count_fails[rule.md4]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_odd_fence_count_fails[workflow.md4]
+8 failed, 1653 passed, 4 deselected in 12.06s

@@ -15,7 +15,7 @@
               "image", "knowledge", "mcp", "context", "shared_meta_kv",
               "instance", "service", "midflight", "dynamic-skill",
               "design",
-              "view-views"]
+              "view-views", "nest-report"]
   },
   "context_injection": { "heuristic_match_shared_md_files": true },
   "team_members": ["worker", "sketcher", "critic"]
