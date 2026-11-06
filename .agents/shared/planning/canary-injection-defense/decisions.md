@@ -921,3 +921,10 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 | (i) | **Channel 11 (chat inbound) — widest uncovered surface** | no inbound sanitisation anywhere in the tree (`daemon/sources/mapper.py`); out of v1 scope | ROUTED — own commission (§G(a) sibling); disclosed in §E.3 and the campaign record |
 | (j) | **Non-family blast radius** (planner/developer/reviewer/tester/charter/architect) | out of commission scope; disclosure is the v1 answer | ROUTED — separate lane (§G(e)); disclosure in three places (§2.4) |
 | (k) | **Option C (decoy-only spawn) v2 trigger** | requires demonstrable campaign throughput/fidelity suffering from the wave tax OR a project-scoped spawn-gate commission | ROUTED — v2 escalation path (D1 ruling) |
+
+---
+
+## H. Post-gate reconciliation notes (2026-11-06, stage-time fold)
+
+1. **E(f) "transplant" standard (delta-review advisory):** in the E(f) fix cycle, "transplant" means MEANING-PRESERVING RE-VOICING of the tester-owned persona text, not byte-verbatim relocation — per the delta re-review CONFIRMED verdict.
+2. **T38 ladder spec-vs-realized:** the plan-text ladder shape is reconciled to the realized seam — scanner single-rung + T38 three-CWD ruled set + A7 loud refusal; `.agents/tester/RESULTS/2026-11-06-canary-injection-defense-mutation-record.md` is the authoritative record.
