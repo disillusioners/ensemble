@@ -234,3 +234,35 @@ Porcelain 0 at every checkpoint; planted file restored sha-identical; **branch n
 ## Record provenance
 
 Append-only continuation; Round-1 and DELTA-1 sections untouched. Written and committed by the reviewer controller from the replacement reviewer's evidence-tagged payload, with the council-manifest corroboration noted above.
+
+
+---
+
+# DELTA-2.1 — Micro-fix confirmation (NEW-1/N-1 closure; verdict flip)
+
+- **Date:** 2026-11-05
+- **Scope:** the three micro-fix commits closing DELTA-2's blocker — `a5176e6f4` (NEW-1: registration pins re-pointed, tests-only +60/−12) · `62d5ef99e` (N-1: Python-belt pin, tests-only +55) · `79e57fb3a` (NEW-2: implementation-notes A5 fail-loud idiom, docs-only). **HEAD `79e57fb3a`, porcelain 0, branch unpushed, zero production-code files in `0ff59023e..79e57fb3a`.**
+- **Verified by:** the same DELTA-2 replacement reviewer (`b29f386c`, `agentic`), revived with its own context; all evidence EXECUTED (sole planter; both planted files restored sha-identical).
+
+## Verdict flip: DELTA-2 REJECT → **APPROVE-WITH-ADVISORIES** — TESTER-GATE-READY: YES
+
+The stated mechanical condition (registration file green + porcelain 0) HOLDS, executed and confirmed.
+
+- **NEW-1 CLOSED (executed).** `tests/unit/test_memoir_registration.py` → **20 passed** (was 2 failed / 18 passed; no node-count change). Pin 1 (:245/:247): `count("refusal = _gate(label,") == 5` + the helper exists exactly once. Pin 2 (:261+/:299): helper-span auth-literal < knob-literal, **no `asyncio.to_thread` in the helper span**, and every one of the 5 call sites precedes its body's first DB touch (decorator-anchored prefix check). **Mutation-meaningful by reviewer-executed M2 re-proof** (independent of the dev's self-plant): auth/knob literals swapped inside the `_gate` span → order pin **1 failed** (`test_the_gate_order_is_auth_first_in_source`) / 19 passed → restored byte-identical (sha `581aee8c…` OK) → **20 passed**, porcelain 0.
+- **N-1 CLOSED (executed) — no longer needs routing.** Worker file **40 passed** (39+1). The new node (`test_memoir_embedding_worker_unit.py:477`) genuinely discriminates: non-vacuity (raw `exclude_terminal=False` MUST return all 3 rows), control leg (default SQL exclusion returns only the pending row), belt leg (`_is_terminal_row` over the raw scan yields only the pending row). **Independent mutation evidence:** planted `return False` in the belt delegate (`memoir_embedding_worker.py:336`) → node **RED** → restored (sha `1f4771fe…` OK) → green. The two-gate design is now **fully pinned** (SQL leg + belt leg).
+- **NEW-2 CLOSED.** A5 record states the shipped fail-loud interpreter idiom (`implementation-notes.md:111`), docs-only.
+
+## New (non-blocking) finding — the `_full_doc_` C3 caveat SUBSTANTIATED
+
+- 🟢 **NEW-4** — `daemon/tools/memoir.py:1184-1185` (`memoir_recall._full_doc_`, the agent-visible `tool_help` text): the clause *"the episodes returned are **exactly the episodes marked as accessed**"* overclaims the D2.8 mark-exactly-shipped invariant. On the C3 failed-stats path the recall is kept with `marked_ids=[]` / `stats_updated=False` — episodes returned, nothing marked — so the unconditional claim is false there. **Provenance:** this is the `_full_doc_` caveat recorded by the interrupted council's `agentic` councilor (council manifest, round 3 — not previously anchored in this record); now substantiated and anchored. No other surface carries stats-token semantics (input-schema descriptions clean; module docstring :79 covers only the semantic/footer disclosure; timeline `_full_doc_` correctly says "NO stats write"). **Fix:** one doc-only qualifying sentence ("…except the disclosed stats-write-failure path, where the recall is kept but the stats flag is not updated — the footer shows the pre-write value"). Route with the C3 ceremony-note row or the next doc pass; not gate-blocking.
+
+## Final advisory set for this delta (all non-blocking, all routed)
+
+1. C3 footer/stats mismatch — disclosed-acceptable-for-v1 (DELTA-2 ruling; v2 polish row) **+ NEW-4 doc overclaim** (same family, same routing).
+2. NEW-3 — per-recall WARNING on a steadily degraded semantic lane (optional N-tick dampener).
+3. A-4 — `body_required → memoir_body_to_long` label imprecision (agent-invisible; ceremony notes).
+4. Standing DELTA-1 advisories, **except the four-pack bare-`python3` fallback — CLOSED by Batch A** (all 17 lane packs fail-loud, executed in DELTA-2): knob `source="config"` mislabel; id-only `set_pin`/`clear_pin`/`mark_recalled` (single-agent v1); timeline double window read; unauthenticated `/readyz` echoing `rejected_value`; GREEN-AT-ZERO `N>=1` (mitigated by M12 exact counts in eight packs); seed docstring wording; persona guard has no production callers in v1.
+
+## Record provenance
+
+Append-only continuation; Round-1, DELTA-1, and DELTA-2 sections untouched. Boundary at close: porcelain 0, unpushed, no production code in the micro-fix delta, both probe plants restored sha-identical.
