@@ -1,5 +1,5 @@
 {
-  "digest": "d1299e0f3623fa01dda9e55c66caf7893224884b918f7a4402f8bb3cdf2c6df5",
+  "digest": "2e04948a37e627af8891640a0f620027be07e6127898970e3e0737d742d22633",
   "legs": [
     {
       "green_node_counts": {
@@ -44,7 +44,7 @@
     {
       "green_node_counts": {
         "failed": null,
-        "passed": 39
+        "passed": 40
       },
       "green_rc": 0,
       "guard": "tests/unit/test_memoir_embedding_worker_unit.py",
@@ -55,7 +55,7 @@
       "red_node": "FAILED tests/unit/test_memoir_embedding_worker_unit.py::test_a_starved_window_warns_after_n_stalled_ticks",
       "red_node_counts": {
         "failed": 1,
-        "passed": 38
+        "passed": 39
       },
       "red_rc": 1,
       "restore_byte_identical": true,
