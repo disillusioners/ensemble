@@ -105,9 +105,11 @@ BELOW by label only, with NO invented detail.
 - A4 H4 SCAN_LIMIT comment now states the W-2 truth (terminal-aware scan;
   the limit bounds the NON-TERMINAL working set; the Python filter is the
   belt).
-- A5 H6 five packs fail loud on a missing interpreter
-  (`RESULT: FAIL (MISSING-INTERPRETER …)` + exit 1) and the L16 matrix
-  PYTHON guard refuses once, by name, before any leg.
+- A5 H6 the interpreter fallback is gone — every lane pack FAILS LOUD on
+  a missing interpreter (`RESULT: FAIL (MISSING-INTERPRETER — the
+  worktree-local .venv/bin/python is absent)` + exit 1; batch A
+  normalized 13 pack files, 17 lane packs fail-loud in total) and the
+  L16 matrix PYTHON guard refuses once, by name, before any leg.
 - A6 M12 exact `EXPECTED_PASSED_N` in the eight packs that carried
   `-lt 1` — measured, not copied (see the table in the lane report).
 - A7 M15 RESERVED annotations on `memoir_not_a_keepsake` and
