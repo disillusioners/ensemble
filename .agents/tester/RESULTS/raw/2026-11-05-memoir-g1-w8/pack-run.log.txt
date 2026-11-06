@@ -1,0 +1,40 @@
+=== Test Pack: memoir_w8_boot_abort ===
+binary sha256:
+  8a8c227e90166bd0874a75da95b430e012925fd40a471d6ee34b3705d3b93f79  /tmp/g1-w8/bins/ensemble-prod.clean
+  c089ea551b903bfcfcac683e8ba14b3fc4bd8edf98ebc34db82905bde697bdf1  /tmp/g1-w8/bins/ensemble-prod.induction
+  dc3f719bdbb00baef4718e3f32526c04ab51ed23fb59b5101151e0f7ec8a9921  /tmp/g1-w8/bins/ensemble-prod.tryexcept
+scratch ports: pg=11558 daemon=17350 mutant=12234
+live fence PRE: state.json=520fce7f10fd4c1f0c2945f763d57af4e1e88a0cc417922dbe5512ed1359e0e6 current=releases/v0.28.12 :9797/livez=200
+--- C. structural pins (W8.3) ---
+  
+  -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+  3 passed, 1 warning in 0.69s
+PASS[C]: structural pins green (3/3)
+scratch PG16: /tmp/memoir-w8.wd9PVU/pg (port 11558, db memoir_w8_scratch)
+16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
+--- A. induction boot (planted no_such_imm_function) ---
+PASS[A0]: sentinels PENDING before boot
+PASS[A1]: boot FAILED, non-zero exit rc=3
+PASS[A1b]: no listener on 17350
+PASS[A2]: failure names the offending memoir statement (no_such_imm_function)
+PASS[A3]: no partial memoir ENSURE schema (tsv absent, GIN absent); create_all tables present=4 (separate committed transaction — disclosed)
+PASS[A4]: COLLATERAL ROLLBACK PROVED — instance_execution_leases ABSENT, uq_projects_name ABSENT
+--- B. clean boot (non-vacuity + non-regression) ---
+PASS[B1]: clean boot UP (/livez 200)
+PASS[B2]: 4 memoir tables present
+PASS[B3]: tsv GENERATED ALWAYS column present
+PASS[B4]: GIN index present
+PASS[B5]: tsv populates on INSERT and matches the query
+PASS[B6]: inherited sentinels COMMITTED (non-vacuity control)
+PASS[B7]: second clean boot UP (ensure idempotent)
+PASS[B8]: no-op on second boot (tables 91==91, indexes 571==571)
+--- C2. try/except mutant boot (the W8.2-1 RED condition) ---
+PASS[C2]: mutation is BEHAVIORALLY MEANINGFUL — with try/except the boot SUCCEEDS (observation-1 RED, as predicted)
+PASS[C3]: ensure result ABSENT while the daemon boots (tsv missing — the first lexical query would crash later)
+PASS[C4]: the ENTIRE shared ensure silently rolled back while the daemon booted (try/except turned a loud abort into a silent no-op)
+SCRATCH KEPT: /tmp/memoir-w8.wd9PVU
+live fence: PRE state=520fce7f10fd4c1f0c2945f763d57af4e1e88a0cc417922dbe5512ed1359e0e6 current=releases/v0.28.12 livez=200
+live fence: MID state=520fce7f10fd4c1f0c2945f763d57af4e1e88a0cc417922dbe5512ed1359e0e6 current=releases/v0.28.12 livez=200
+live fence: PST state=520fce7f10fd4c1f0c2945f763d57af4e1e88a0cc417922dbe5512ed1359e0e6 current=releases/v0.28.12 livez=200
+PASS[A5]: live fence holds (state.json byte-identical, current unchanged, :9797 monotone)
+RESULT: PASS

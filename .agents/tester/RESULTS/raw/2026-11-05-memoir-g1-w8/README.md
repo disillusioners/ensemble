@@ -6,14 +6,14 @@ Produced 2026-11-06T01:00–01:02Z by gate worker G1 on
 
 | File | What it is |
 |---|---|
-| `pack-run.log` | the full pack run (RESULT: PASS; binary shas; all 22 assertions) |
-| `induction.log` | the inducted frozen binary's boot log — `UndefinedFunction: function no_such_imm_function(text) does not exist`, the `[SQL: ALTER TABLE memoir_episodes …]` line, `Application startup failed. Exiting.` |
-| `clean.log` | clean-binary boot on the same scratch DB (Starting Ensemble v0.28.11; Uvicorn on 127.0.0.1:17350) |
-| `clean2.log` | second clean boot on the same DB (ensure idempotence) |
-| `mutant.log` | try/except mutant boot (boots successfully; DB assertions live in `pack-run.log`) |
-| `pins.log` | structural-pin pytest output (3 passed) |
-| `initdb.log` | scratch PG16 cluster init |
-| `pin-mutations.log` | M-i/M-ii/M-iii source mutation legs (each RED, restored green) |
+| `pack-run.log.txt` | the full pack run (RESULT: PASS; binary shas; all 22 assertions) |
+| `induction.log.txt` | the inducted frozen binary's boot log — `UndefinedFunction: function no_such_imm_function(text) does not exist`, the `[SQL: ALTER TABLE memoir_episodes …]` line, `Application startup failed. Exiting.` |
+| `clean.log.txt` | clean-binary boot on the same scratch DB (Starting Ensemble v0.28.11; Uvicorn on 127.0.0.1:17350) |
+| `clean2.log.txt` | second clean boot on the same DB (ensure idempotence) |
+| `mutant.log.txt` | try/except mutant boot (boots successfully; DB assertions live in `pack-run.log.txt`) |
+| `pins.log.txt` | structural-pin pytest output (3 passed) |
+| `initdb.log.txt` | scratch PG16 cluster init |
+| `pin-mutations.log.txt` | M-i/M-ii/M-iii source mutation legs (each RED, restored green) |
 | `MANIFEST.sha256` | hashes of the above |
 
 Scratch PG cluster: `/usr/lib/postgresql/16/bin/initdb -A trust`, `16.15 (Ubuntu
