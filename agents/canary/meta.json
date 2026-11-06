@@ -1,0 +1,16 @@
+{
+  "id": "canary",
+  "name": "Canary",
+  "description": "Adversarial-AI red team — composes synthetic prompt-injection payloads against our own intake surfaces, hands them to aegis which spawns self-owned sandboxed targets and returns observation bundles, measures whether the target followed the payload, and evolves the injection-screen rule set from what it learns; report-only, self-owned targets only, never a live instance or an external system",
+  "icon": "🐦",
+  "color": "accent-violet",
+  "version": "1.0.0",
+  "llm_model": "coding",
+  "default_queue": "system_parallel_queue",
+  "tools": {
+    "allow": ["bash", "filesystem", "time", "help"],
+    "deny": ["write_file", "edit_file"],
+    "deny_spawn": ["knowledge"]
+  },
+  "team_members": []
+}

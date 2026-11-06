@@ -1,2 +1,7 @@
 agent_id: worker
-skills: []
+skills:
+  - name: injection-screen
+    version: "1.0.1"
+    auto_load: false
+    category: security
+    description: "Prompt-injection screen: fence + provenance header + heuristic verdict for untrusted content; run the shipped scanner, stdout is the fenced block"
