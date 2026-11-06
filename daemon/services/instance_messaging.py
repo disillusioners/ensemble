@@ -4858,6 +4858,12 @@ class InstanceMessagingService:
                 # (parent_id column is None → returns own id; unchanged).
                 _persistent_project_id: str | None = None
                 _persistent_parent_id: str | None = None
+                # The memoir once-flag write (memoir P5, D5.4) needs the
+                # agent id for the stable-id match — taken from THIS row
+                # read (already required for project_id/parent_id; no
+                # new read). ``None`` when the read failed — the kind
+                # match below still works without it.
+                _memoir_agent_id: str | None = None
                 try:
                     _proj_row = await asyncio.to_thread(
                         self._manager._instance_repository.get, instance_id
@@ -4866,6 +4872,9 @@ class InstanceMessagingService:
                         _persistent_parent_id = (
                             getattr(_proj_row, "parent_id", None) or None
                         )
+                        _memoir_agent_id = (
+                            getattr(_proj_row, "agent_id", None) or None
+                        )
                         if _proj_row.instance_metadata:
                             _persistent_project_id = (
                                 _proj_row.instance_metadata.get("project_id")
@@ -4873,6 +4882,7 @@ class InstanceMessagingService:
                 except Exception:  # pragma: no cover - defensive
                     _persistent_project_id = None
                     _persistent_parent_id = None
+                    _memoir_agent_id = None
 
                 _persistent_msgs, _ephemeral_msgs = await assemble_context_messages(
                     instance_id=instance_id,
@@ -4909,6 +4919,47 @@ class InstanceMessagingService:
                         f"persistent context message(s) (incl. skills "
                         f"since 2026-07-29 refactor) to graph_input for "
                         f"{instance_id[:8]}... (project_injected={project_already_injected})"
+                    )
+
+                # ── Memoir briefing once-flag (memoir P5 — D5.4/AM-22) ──
+                # THE WRITE SITE IS THE CONSUMER. ``assemble_context_messages``
+                # BUILDS ONLY: the graph path (``daemon/graph.py``) discards
+                # this persistent half, so a builder-written flag would
+                # consume the flag on a thrown-away block and permanently,
+                # silently lose the briefing for this instance. The flag is
+                # written HERE — inside ``if not is_retry:`` AFTER the
+                # assemble call — and ONLY after the returned persistent
+                # half is CONFIRMED to carry the memoir block (stable-id
+                # ``memoir:{agent_id}`` or ``context_kind == "memoir"``
+                # match). Write shape mirrors the ``project_injected`` write
+                # (:4239-4242's ``asyncio.to_thread(set_metadata, …)`` — the
+                # sync DB write off the loop). A failed write is swallowed:
+                # the stable id means a re-delivered briefing SUPERSEDES in
+                # place next turn, so the failure self-heals.
+                try:
+                    from .memoir_briefing import (
+                        MEMOIR_BRIEFING_FLAG,
+                        memoir_block_present,
+                    )
+
+                    if memoir_block_present(_persistent_msgs, _memoir_agent_id):
+                        await asyncio.to_thread(
+                            self._manager._instance_repository.set_metadata,
+                            instance_id,
+                            MEMOIR_BRIEFING_FLAG,
+                            True,
+                        )
+                        logger.info(
+                            f"[Memoir] wake briefing delivered for "
+                            f"{instance_id[:8]}... — once-flag "
+                            f"({MEMOIR_BRIEFING_FLAG}) written"
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        f"[Memoir] once-flag write failed for "
+                        f"{instance_id[:8]}...: {exc} — the briefing may "
+                        f"re-deliver next turn (the stable id supersedes "
+                        f"in place)"
                     )
 
                 # ── Auto-load REPLACE sweep (C3 leak fix) ────────────────

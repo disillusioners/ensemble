@@ -338,7 +338,7 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly eighteen categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly nineteen categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
@@ -366,7 +366,7 @@ class TestPrivilegedCategoryRegistryShape:
     (the fifth exact-set pin added by the iteration-002 council B2
     correction)."""
 
-    def test_privileged_categories_contains_eighteen_entries(self) -> None:
+    def test_privileged_categories_contains_nineteen_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
@@ -485,6 +485,12 @@ class TestPrivilegedCategoryRegistryShape:
         # access path, and every tool body ALSO carries its own
         # agent_id gate.
         "nest-report-read",
+        # memoir (2026-11-05, memoir-store-v1 lane): the ``memoir``
+        # category — ari's durable episodic memory + keepsake
+        # governance. opt-in-only (PRIVILEGED entry #18); the ari
+        # allow entry is the only access path, and every tool body
+        # ALSO carries its own factory-captured agent_id gate.
+        "memoir",
 })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

@@ -21,6 +21,7 @@ from pydantic import (
     Field,
     ConfigDict,
     HttpUrl,
+    PrivateAttr,
     SecretStr,
     ValidationError,
     model_validator,
@@ -3396,6 +3397,244 @@ class NestReportConfig(BaseSettings):
                     "ENSEMBLE_NEST_REPORT_MAX_BOARD_ITEMS_PER_HOUR_GLOBAL.",
     )
 
+# ── Memoir Store v1 — the kill-switch knob (phase 0, D0.4/D0.5) ─────────────
+#
+# ONE authority for the memoir surface toggle. The raw environment
+# string is classified INSIDE this model (``field_validator(mode="before")``
+# on :class:`MemoirConfig`) — never by a consumer. Three parsers would be
+# three truths, and the fail-closed rule would have to be re-implemented
+# three times.
+#
+# The knob truth table (canonical — copied verbatim into
+# ``daemon/tools/memoir_knob.py``, which is the single authority for
+# phases 3/4/5/6):
+#
+#   | ``ENSEMBLE_MEMOIR_ENABLED`` | Resolved | Surface | Log (once per boot) |
+#   |---|---|---|---|
+#   | absent | config default (**ON** in v1) | ENABLED | **WARNING** |
+#   | empty string | = absent | ENABLED | as above |
+#   | ``true``/``1``/``yes``/``on``/``t``/``y`` (any case) | true | ENABLED | INFO |
+#   | ``false``/``0``/``no``/``off``/``f``/``n`` (any case) | false | DISABLED | INFO |
+#   | any other present value | **INDETERMINATE** | **DISABLED (fail closed)** | **WARNING** |
+#   | unparseable AND the fallback also fails | — | DISABLED | ERROR |
+#
+# WHY A ``mode="before"`` VALIDATOR (mechanism N-2): a plain
+# ``bool`` field would raise on a garbage value BEFORE any resolver
+# could classify it, and the raise would abort the boot instead of
+# failing the surface closed. The before-validator maps the raw string
+# onto the table above and never raises.
+#
+# DELIBERATE DIVERGENCE from ``notify_user`` (D0.6): ``notify_user``
+# REPAIRS a garbage value to the validated fallback (= the default =
+# ON) and is therefore FAIL-OPEN. The memoir knob FAILS CLOSED on the
+# indeterminate case (DR-3). The cost asymmetry decides it: a mis-set
+# notify knob leaves a bounded, rate-limited, audited chat message; a
+# mis-set memoir knob leaves unbounded, append-only, never-hard-deleted
+# first-person narrative rows.
+#
+# ACCEPTED RESIDUAL (D0.8): a MISSPELLED variable NAME is
+# indistinguishable from unset, so the surface is ON and only the
+# per-boot WARNING distinguishes it. Unpreventable by any knob design —
+# the mitigation is LOUDNESS, not prevention.
+
+MEMOIR_ENABLED_ENV_VAR = "ENSEMBLE_MEMOIR_ENABLED"
+
+#: Canonical truthy spellings (case-insensitive, whitespace-trimmed).
+MEMOIR_TRUTHY_VALUES: frozenset[str] = frozenset(
+    {"true", "1", "yes", "on", "t", "y"}
+)
+#: Canonical falsy spellings (case-insensitive, whitespace-trimmed).
+MEMOIR_FALSY_VALUES: frozenset[str] = frozenset(
+    {"false", "0", "no", "off", "f", "n"}
+)
+
+# Resolution codes — the vocabulary the knob module maps onto log levels.
+MEMOIR_RESOLUTION_DEFAULT = "default"
+MEMOIR_RESOLUTION_EXPLICIT_ON = "explicit_on"
+MEMOIR_RESOLUTION_EXPLICIT_OFF = "explicit_off"
+MEMOIR_RESOLUTION_CONFIG = "config"
+MEMOIR_RESOLUTION_INDETERMINATE = "indeterminate"
+MEMOIR_RESOLUTION_UNPARSEABLE = "unparseable"
+MEMOIR_RESOLUTION_ERROR = "error"
+
+
+def classify_memoir_enabled(raw: str) -> tuple[bool, str, str | None]:
+    """Classify a raw ``ENSEMBLE_MEMOIR_ENABLED`` value (pure).
+
+    This is the truth-table implementation. It lives with the model
+    because the model is the knob's single authority (D0.4/N-2): the raw
+    environment string is classified HERE, inside the model layer, and
+    no consumer ever classifies it for itself.
+
+    Args:
+        raw: The raw environment string (the exact value the operator
+            set — it is NOT lower-cased or trimmed by the caller, this
+            function does both).
+
+    Returns:
+        ``(enabled, resolution, rejected_value)`` where ``enabled`` is
+        the resolved surface state, ``resolution`` is one of the
+        ``MEMOIR_RESOLUTION_*`` codes, and ``rejected_value`` is the
+        offending raw string for the indeterminate case (else ``None``).
+    """
+    text = raw.strip()
+    if not text:
+        # Empty string == absent (truth table row 2).
+        return True, MEMOIR_RESOLUTION_DEFAULT, None
+    lowered = text.lower()
+    if lowered in MEMOIR_TRUTHY_VALUES:
+        return True, MEMOIR_RESOLUTION_EXPLICIT_ON, None
+    if lowered in MEMOIR_FALSY_VALUES:
+        return False, MEMOIR_RESOLUTION_EXPLICIT_OFF, None
+    # INDETERMINATE -> fail CLOSED (DR-3). The rejected value is carried
+    # out so the WARNING can name it.
+    return False, MEMOIR_RESOLUTION_INDETERMINATE, raw
+
+
+class MemoirConfig(BaseSettings):
+    """Configuration for the Memoir Store surface (phase 0, D0.4).
+
+    The kill-switch is ``enabled`` — ``false`` disables the whole
+    memoir personality (tools refuse ``memoir_disabled``; the briefing
+    is not built and the memory is unreadable; the embedding worker
+    parks; the ``inner_soul`` ari branch still returns the loud
+    not-recorded notice; **the data is untouched**).
+
+    The env prefix is ``ENSEMBLE_MEMOIR_`` (consistent with the tool
+    name ``memoir`` / category ``memoir``), auto-covered by the tests'
+    ``_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")`` prefix match in
+    ``tests/conftest.py``.
+
+    The raw env string is classified by :meth:`_classify_enabled`
+    (mechanism N-2) so a garbage value NEVER raises and NEVER enables
+    the surface by accident. The classification outcome is carried on
+    the instance as private attributes (``_resolution`` /
+    ``_rejected_value`` / ``_env_present``) — private so they are never
+    env-bound and never serialized.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_MEMOIR_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Kill-switch (DR-3). false disables the memoir surface "
+                    "(tools refuse memoir_disabled; the briefing is not "
+                    "built and the memory is unreadable; the worker parks; "
+                    "the DATA is untouched). Unset resolves to this default "
+                    "(ON in v1) and is NEVER silent — one WARNING per boot "
+                    "names the variable. A present-but-unrecognised value is "
+                    "INDETERMINATE and fails CLOSED. "
+                    "Env: ENSEMBLE_MEMOIR_ENABLED.",
+    )
+    embedding_tick_s: int = Field(
+        default=60,
+        gt=0,
+        description="Embedding worker tick interval in seconds (phase 3 "
+                    "owns the worker; the knob is re-read EVERY tick). "
+                    "Env: ENSEMBLE_MEMOIR_EMBEDDING_TICK_S.",
+    )
+    embedding_batch_cap: int = Field(
+        default=8,
+        gt=0,
+        description="Maximum rows embedded per tick (embeds are SEQUENTIAL "
+                    "— the batch is a count, not a concurrency). "
+                    "Env: ENSEMBLE_MEMOIR_EMBEDDING_BATCH_CAP.",
+    )
+    embedding_dimensions: int = Field(
+        default=1536,
+        gt=0,
+        description="Expected embedding dimensionality. A per-row mismatch "
+                    "is TERMINAL (never silently zipped). "
+                    "Env: ENSEMBLE_MEMOIR_EMBEDDING_DIMENSIONS.",
+    )
+
+    # Resolution metadata — written by the after-validator below.
+    # Private attributes: never env-bound, never serialized.
+    _resolution: str = PrivateAttr(default=MEMOIR_RESOLUTION_DEFAULT)
+    _rejected_value: str | None = PrivateAttr(default=None)
+    _env_present: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _env_tier_wins(cls, data: Any) -> Any:
+        """Let the env tier override the config-file tier for ``enabled``.
+
+        A kill-switch env var must beat ``config.yaml``: the operator
+        sets the env var precisely to override the shipped default. The
+        override is applied INSIDE the model so the precedence rule has
+        exactly one home (a consumer never re-reads the env).
+
+        An ABSENT or EMPTY env value does NOT override: an empty string
+        is "= absent" (truth table row 2), so the config-file tier
+        stands.
+        """
+        if not isinstance(data, dict):
+            return data
+        raw = os.environ.get(MEMOIR_ENABLED_ENV_VAR)
+        if raw is None or not raw.strip():
+            return data
+        merged = dict(data)
+        merged["enabled"] = raw
+        return merged
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _classify_enabled(cls, value: Any) -> Any:
+        """Classify the raw env string against the knob truth table.
+
+        Mechanism N-2 — the classification lives HERE, inside the model,
+        so no consumer parses the env itself. This validator NEVER
+        raises: an unrecognised value resolves to DISABLED (fail closed,
+        DR-3) instead of aborting the boot.
+
+        Tidier item 14: the former tail ``return value`` passed ANY
+        non-str/non-bool value through to Pydantic's ``bool`` coercion,
+        which RAISED ``ValidationError`` for a list/dict/float (a
+        config-file list would abort the boot) while silently coercing
+        other truthy objects. Unvalidated types now FAIL CLOSED; the
+        YAML-conventional integer scalars ``0`` / ``1`` stay accepted
+        (an operator's ``enabled: 1`` must not become a disable on
+        upgrade), and every other integer is out of domain ⇒ DISABLED.
+        """
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            enabled, _resolution, _rejected = classify_memoir_enabled(value)
+            return enabled
+        if isinstance(value, int):
+            # YAML boolean-ish scalars only; anything else fails CLOSED.
+            return bool(value) if value in (0, 1) else False
+        # list / dict / float / anything else: garbage ⇒ DISABLED, and
+        # NEVER a raise (DR-3: a mis-set knob must not abort the boot).
+        return False
+
+    @model_validator(mode="after")
+    def _record_resolution(self) -> "MemoirConfig":
+        """Record the truth-table resolution on the instance.
+
+        The env tier decides the resolution when it is present; the
+        config-file tier decides it when the env is absent (an explicit
+        ``memoir.enabled: false`` in ``config.yaml`` is an operator
+        decision — INFO, not the "unset" WARNING).
+        """
+        raw = os.environ.get(MEMOIR_ENABLED_ENV_VAR)
+        if raw is not None and raw.strip():
+            _enabled, resolution, rejected = classify_memoir_enabled(raw)
+            self._resolution = resolution
+            self._rejected_value = rejected
+            self._env_present = True
+        else:
+            self._env_present = False
+            self._rejected_value = None
+            self._resolution = (
+                MEMOIR_RESOLUTION_DEFAULT
+                if self.enabled
+                else MEMOIR_RESOLUTION_CONFIG
+            )
+        return self
+
 
 class McpPoolConfig(BaseSettings):
     """MCP warm-up connection pool configuration."""
@@ -5435,6 +5674,12 @@ class Config(BaseSettings):
     # config.yaml block and ``load_config`` has no pass-through for
     # it, so a hand-added yaml block would be silently ignored.
     nest_report: NestReportConfig = Field(default_factory=NestReportConfig)
+    # Memoir Store v1 (phase 0, D0.4): the memoir kill-switch section
+    # (class MemoirConfig, env prefix ENSEMBLE_MEMOIR_). Peers with
+    # `notify_user:` — the yaml block mirrors the field names exactly
+    # and the ENV tier wins over the yaml tier (resolved INSIDE the
+    # model, so the precedence rule has exactly one home).
+    memoir: MemoirConfig = Field(default_factory=MemoirConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
@@ -7210,6 +7455,13 @@ def load_config(config_path: str | None = None) -> Config:
         # ``_seed_phase1_roots`` for the full operator-override
         # model.
         config_dict["live_views"] = processed_config["live_views"]
+    if "memoir" in processed_config:
+        # Memoir Store v1 (phase 0, D0.4): the yaml tier for the memoir
+        # kill-switch. The ENV tier wins over this tier — the override is
+        # applied INSIDE ``MemoirConfig`` (the before-validator), so the
+        # precedence rule has exactly one home and no consumer re-reads
+        # the environment.
+        config_dict["memoir"] = processed_config["memoir"]
     if "skill_evolution" in processed_config:
         # Drop keys whose YAML value is ``null`` (None). pydantic-settings
         # treats an explicitly-passed init kwarg — even ``None`` — as taking

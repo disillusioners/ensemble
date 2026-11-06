@@ -13,7 +13,7 @@ from daemon import checkpoint_metrics as cm
 
 
 class TestVocabularyVersion:
-    def test_the_version_is_five(self) -> None:
+    def test_the_version_is_six(self) -> None:
         """P2-M8 — the bump rode this lane.
 
         The marker rode 1 → 2 with the central-metrics-v1 lane (the F7
@@ -23,12 +23,13 @@ class TestVocabularyVersion:
         bump contract requires the marker to move), 3 → 4 with the
         nest-anomaly-report lane (the SAME axis again — the
         ``nest-report`` WRITE category joined the tool-category label
-        set) and 4 → 5 with the SAME lane's Phase 3 (the SAME axis a
-        second time — the ``nest-report-read`` PRIVILEGED READ category
-        joined; two commits, never one 3 → 5 jump).  The P2-M8 mutation
+        set), 4 → 5 with that lane's Phase 3 (the ``nest-report-read``
+        PRIVILEGED READ category joined) and 5 → 6 with the
+        memoir-store-v1 lane (the ``memoir`` privileged category (#19)
+        joined the tool-category label set).  The P2-M8 mutation
         (the marker left at 1) still REDS this pin.
         """
-        assert cm.VOCABULARY_VERSION == 5
+        assert cm.VOCABULARY_VERSION == 6
 
     def test_the_version_is_an_integer(self) -> None:
         assert isinstance(cm.VOCABULARY_VERSION, int)

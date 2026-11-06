@@ -827,11 +827,17 @@ def test_privileged_category_set_is_pinned() -> None:
     ``tests/integration/test_service_tool_flag_off_byte_identical.py``,
     ``tests/unit/tools/test_secrets_registration.py``,
     ``tests/unit/test_board_registration.py``,
-    ``tests/unit/test_self_alarm_registration.py`` and
-    ``tests/unit/test_instance_ops_registration.py``
-    (the SAME-PR RULE per D18 / A14). This integration-layer sanity
-    pin duplicates the set check to ensure the OFF flag test runs in
-    a category universe where the trio is the canonical set.
+    ``tests/unit/test_self_alarm_registration.py``,
+    ``tests/unit/test_instance_ops_registration.py``,
+    ``tests/unit/test_wedge_capture_registration.py``,
+    ``tests/unit/test_notify_user_registration.py`` and
+    ``tests/unit/test_metrics_read_registration.py``
+    (the SAME-PR RULE per D18 / A14; the census was re-derived by grep
+    at the memoir ceremony, 2026-11-05 — the previous "TEN sites … 15
+    EDIT sites" claim omitted three files and undercounted the pins).
+    This integration-layer sanity pin duplicates the set check to ensure
+    the OFF flag test runs in a category universe where the trio is the
+    canonical set.
     """
     assert PRIVILEGED_TOOL_CATEGORIES == frozenset(
         {
@@ -920,6 +926,12 @@ def test_privileged_category_set_is_pinned() -> None:
         # access path, and every tool body ALSO carries its own
         # agent_id gate.
         "nest-report-read",
+        # memoir (2026-11-05, memoir-store-v1 lane): the ``memoir``
+        # category — ari's durable episodic memory + keepsake
+        # governance. opt-in-only (PRIVILEGED entry #18); the ari
+        # allow entry is the only access path, and every tool body
+        # ALSO carries its own factory-captured agent_id gate.
+        "memoir",
 }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "

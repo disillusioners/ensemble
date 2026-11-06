@@ -98,6 +98,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # agent_id gate.
 "metrics-read",
 "nest-report-read",
+    # memoir (2026-11-05, memoir-store-v1 lane): the ``memoir``
+    # category — ari's durable episodic memory + keepsake governance.
+    # opt-in-only (PRIVILEGED entry #18); the ari allow entry is the
+    # only access path, and every tool body ALSO carries its own
+    # factory-captured agent_id gate.
+    "memoir",
 })
 
 
@@ -174,11 +180,11 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_eighteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_nineteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_eighteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
+    def test_the_set_has_nineteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 19
 
 
 # ── A13: the attribute pin + the default-deny behavioral leg ───────────────

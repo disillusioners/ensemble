@@ -1,0 +1,447 @@
+# architecture-recommendation.md — Memoir Store v1 — Phase B architect adjudication
+
+**Lane:** `feature/ari-memoir-store` @ worktree `/home/nea/ensemble-src-wt-memoir-store`, base `1f6898ae2` (plan base `63032008b`).
+**Adjudication date:** 2026-11-05. **Adjudicator:** architect (Phase B, house planning lane: planner ✅ → architect → reviewer council → fresh approver).
+**Inputs adjudicated:** `design.md` (413L, blessed 2026-11-04), `decisions.md` (R1–R4, DD-1..DD-20, P-1..P-7), `roadmap.md`, `flag-dispositions.md` (14 PROPOSED dispositions, 254L), `plan-overview.md` + `phase0..8-plan.md`.
+**Authority:** `decisions.md` §6 — R1–R4 > blessed design > plan > code. This document is **layer 2**: it adjudicates the plan's dispositions, amends the plan, and records surgical deviations in `decisions.md` §4. **It does not re-bless the design** (P-4) and does not touch R1–R4 (P-5).
+
+---
+
+## 1. Verdict
+
+> ## SOUND-WITH-AMENDMENTS
+>
+> **14 dispositions adjudicated: 4 ADOPT · 9 ADOPT-AS-AMENDED · 1 CONFIRMED-NO-ROW (P-7 anchor drift).**
+> **43 amendments issued — 12 🔴 BLOCKING (must land before Phase C implementation), 29 🟡, 2 🟢.**
+
+The blessed design and the plan's architecture are sound. Every structural decision the planner made survives adjudication: the queue-is-NULL embedding trick, the per-row embedding identity columns, reject-don't-evict admission, the two-layer gate, the once-per-instance discipline, the mirror-not-reuse persona lane, and the three-artifact PG materialization path.
+
+**The 12 blocking amendments are not redesigns — they are unwritten mechanics.** Each is a place where the plan as written produces **silently wrong behaviour rather than a loud failure**:
+
+| # | Blocking amendment | Silent failure it prevents |
+|---|---|---|
+| 1 | PG lexical-ranker SQL argument order (AM-1) | hybrid recall's lexical half raises `UndefinedFunction` **on PG only** — the SQLite fallback stays green, so the defect would surface in production |
+| 2 | Write-path purity pin (AM-12) | an inline embedder call on `memoir_write` reintroduces the latency tax DD-20 forbids — with no pin to stop it |
+| 3 | Once-flag write site → the consumer (AM-22) | the graph path **discards** the persistent half (`daemon/graph.py:8524-8532`); a builder-written flag consumes the flag on a discarded block ⇒ **the briefing is permanently lost, silently, for that instance** |
+| 4 | Embed request timeout (AM-28) | the house client sets none ⇒ the SDK's **600 s** default applies; a slow-drip lane stalls the tick for 10 minutes |
+| 5 | Dedicated executor for the embed (AM-29) | `asyncio.to_thread` pins a **shared default-executor** worker for the full timeout; 1,351 `to_thread` sites share that pool with LLM/compaction traffic |
+| 6 | Write-back failure counts as an attempt (AM-30) | a successful embed whose DB write fails re-embeds **forever** — never terminal, never reported |
+| 7 | Dimension mismatch is terminal (AM-31) | the house cosine **silently zips to the shorter side** ⇒ a 3072-dim vector scored against a 1536-dim query returns confident nonsense |
+| 8 | Gate order = auth-first (AM-16) | an unauthorized caller learns the knob's state; the plan asserts an order the exemplar's code does not implement |
+| 9 | `memoir_timeline` parameter rename (AM-42) | `from`/`to` are **Python keywords** — the blessed signature is unimplementable literally |
+| 10 | Knob garbage ⇒ fail-closed (AM-25) | a present-but-garbage value silently enables (or, on the house precedent, silently re-enables) a surface that writes **append-only, never-hard-deleted first-person narrative** |
+| 11 | Persona approve seam carries the human-lane guard (AM-17) | a mirror of only the transition vocabulary makes DD-9 **decorative**: the first v2 submitter reaches `approved` with no human in the loop |
+| 12 | Generated-column expression form (AM-8) | the one-arg `to_tsvector(body)` is **STABLE** and PostgreSQL rejects it (*"generation expression is not immutable"*) — the ALTER fails and the PG boot fails with it; the two-arg `to_tsvector('english', …)` form is **immutable** and legal |
+
+**Independent verification performed by the architect** (read-only; local dev PG 16.15 over socket peer auth; **no writes, no prod contact**; ambient `POSTGRES_*` points at remote prod `10.44.0.2/ensemble_prod` — never touched):
+
+```
+ts_rank_cd(tsvector, tsquery)        -> i     ← the ONLY 2-arg form; no (tsquery, tsvector)
+to_tsvector(regconfig, text)         -> i     ← IMMUTABLE: legal in a STORED generated expr
+to_tsvector(text)                    -> s     ← STABLE: PG rejects it as a generation expr
+PRIVILEGED_TOOL_CATEGORIES           = 17     ← #16 notify-user, #17 metrics-read ⇒ memoir = #18
+```
+
+---
+
+## 2. Method
+
+Three-dimension parallel fan-out (one execution skill per worker, no competitive fan-out, no council — the house lane's reviewer council runs *after* this document):
+
+| Worker | Skill | Focus | Verdict returned |
+|---|---|---|---|
+| `78bc579d` | `data-flow-design` | schema keystone, write-path purity, RRF arithmetic, access-stats | **DEFECT** — 1 🔴 runtime defect + 6 🟡 gaps + 3 🟢 |
+| `34df821f` | `structural-design` | gates, registration census, persona lane, knob truth table, attribution | **SOUND-WITH-AMENDMENTS** — 3 🔴 / 7 🟡 / 2 🟢, 0 refuted |
+| `8afcbae5` | `resilience-design` | worker lifecycle, lane degradation, briefing seam, boot ordering | **SOUND-WITH-AMENDMENTS** — 5 🔴 / 9 🟡 / 2 🟢 |
+
+All three returned `Skill loaded:` confirmations (no DEGRADED run). Their anchors were re-verified against the worktree; where a worker's line number was wrong, it is corrected here under P-7 (lead-vs-truth, not a deviation).
+
+---
+
+## 3. Flag ruling table — all 14
+
+| # | Flag | **Ruling** | Substance of the ruling | Amendments |
+|---|---|---|---|---|
+| **1** | Exact keepsake pin-cap integer | **ADOPT** | Cap = **12 count** PLUS a second admission bound: the **4,000-token** stable keepsake zone (house estimator). Both bounds must hold; the rejection names the binding constraint and the current pins; never evicts. Rationale: a count cap alone does not make "never truncated" true — 12 × a legal ~2,800-token body ≫ the zone. 4,000/12 ≈ 333 tokens per keepsake = a natural "must never be lost" moment. | AM-43 |
+| **2** | Pin attribution mechanism | **ADOPT-AS-AMENDED** | Required `actor: Literal["empress","emperor"]` on `memoir_pin` and on `memoir_write(keepsake=true)` — a **CLAIM**, never derived. **`memoir_unpin` keeps the blessed `(id)` signature** (no column exists to record an unpin actor; a column would touch the blessed column list). The house provenance class (`daemon/tools/provenance.py`) is surfaced in the tool result and the briefing line, so a wrong claim is **detectable at write time**. A durable governance ledger is **deferred to v2**. Turn-provenance derivation and a second `memoir_pin_as_emperor` tool rejected. | AM-23, AM-24 |
+| **3** | Briefing budget arithmetic (two unit systems) | **ADOPT-AS-AMENDED** — **BLESSED-TEXT DEVIATION** | Tokens are the planning unit (house `estimate_tokens`, `daemon/loader.py:1027`); stable zone **pre-bounded by admission** (persona ≤2,000 tokens, keepsakes ≤4,000 tokens total) and never truncated; dynamic zone ≤3,000 tokens, oldest-dropped-first; **hard absolute section ceiling 24,000 characters**, derived from the admitted stable worst case (6,000 tokens ≈ 24k chars). The design's "~12k chars" survives as the **nominal** size. → **DR-1**. | AM-38, AM-43 |
+| **4** | `inner_soul` anchor drift | **CONFIRMED — NO §4 ROW** (P-7) | Re-grep confirms the implementation target is the `_should_redirect_to_rag` **predicate** (`:316-362`) and its **two call sites** (`:716`, `:777`), not the `:232-278` classification block; the factory-captured `agent_id` is in scope at both. P-7 re-grep note — no deviation, no row. **Plus:** there is **no compaction-hoist membership set** to add (the hoist is truthy-keyed on any `context_kind`). | AM-40 |
+| **5** | `stars` normalization | **ADOPT** | Store **verbatim** (the v2 star-table's alias merge is a v2 identity problem); the v2 normalization rule (casefold / trim / collapse whitespace / per-write dedupe) is **documented now**; input bounds (≤16 entries × ≤120 chars) are **request-shape hygiene, not normalization** — they change no string's content. | — |
+| **6** | Episode mutability partition | **ADOPT** | Three-way partition, enforced **structurally**: record columns written once at INSERT; each operational family has **exactly one named repository writer**; **no general-purpose update method exists**; `tsv` is DB-derived. Proof = repository-surface test + a grep pin that no `UPDATE` touches `body`/`title`/`importance`/`stars`. | AM-14, AM-15 |
+| **7** | Embedding worker identity + durability | **ADOPT-AS-AMENDED** | The **shape stands**: dedicated lifespan asyncio task, `embedding IS NULL` **is** the queue (no side table), boot catch-up by construction, bounded retries, greppable per-tick counters. **Additions (all blocking or material):** request timeout 30 s/5 s connect; dedicated executor, sequential embeds; write-back failure counts as an attempt; dimension mismatch = per-row terminal; 401/403 = permanent + latch immediately; knob re-read per tick; model-drift disclosure at the recall surface; **no automatic backfill in v1**; tick-counter semantics defined; per-row atomic write of the four embedding columns. → the flag's real fear ("semantic recall silently misses N episodes") is closed **only** by the recall-footer disclosure. | AM-28..AM-36 |
+| **8** | Persona version table vs the `prompt_version` human lane | **ADOPT-AS-AMENDED** — **BLESSED-TEXT DEVIATION** | **Option A** (the plan's): v1 = read-only persona, seed born `approved` with `source='seed'`, **no v1 edit path** (the five-tool surface §5.4 is binding). **Plus the load-bearing amendment:** the dormant approve seam ships the **human-lane guard** (`auth_method == "session"` ⇒ else `HumanLaneRequiredError`), ~15 lines, no new surface — so DD-9 is *safe-by-construction* for the v2 lane, not *safe-by-a-grep-pin*. → **DR-2**. | AM-17 |
+| **9** | Once-per-instance vs long-lived instances | **ADOPT** | DD-11 stands (it is binding; the flag asks for a decision with rationale, not a redesign). Three corrections to the planner's analysis: (a) the briefing **does** fire on a **scheduler-sourced** wake — the seam runs on every turn; L4 governs the **message stamp**, not the **context block**, so L4 is not violated; (b) the planner's "attribution visible at every wake" overstates — the briefing is once **per instance**; (c) the once-flag **write site** must be the consumer, not the builder (AM-22). Accommodations: the recall/timeline affordance closing line (byte-pinned); the flag is read fresh each turn (revive-safe); the v2 alarm-wake refresh inherits the L4 constraint (never "fix" the bare-HUMAN stamp). Disclosed residual: a long-lived instance's dynamic zone goes stale with **no signal**. | AM-22, AM-37, AM-38 |
+| **10** | `memoir_timeline(q?)` semantics | **ADOPT-AS-AMENDED** | **Filter-then-rank**: `since`/`until` (inclusive, on `event_at`, indexed range scan) filter the candidate set; `q` then applies the **lexical-only** ranker over that set; absent `q` ⇒ `event_at DESC`. **No** cosine, **no** RRF, **no** recency prior, **no** keepsake priority — the recency prior would actively distort a historical window. Timeline writes **no** stats. **Amendment: the `k?` parameter is DROPPED** — phase4 D4.6 added it without authority; §5.4's three-parameter signature stands, and timeline is bounded by the **shared** recall envelope instead. | AM-1, AM-42 |
+| **11** | Recall result budget | **ADOPT-AS-AMENDED** | `k` default **5**, hard max **20** (out-of-range ⇒ typed refusal, not a silent clamp); per-episode body clamp **1,200 tokens** with the house truncation marker; total envelope **≤6,000 tokens** with **ranked-drop** (head results stay whole) + a count/hint footer; enforced on the **shipped projection** with a final re-check before return (the metrics-read M-1 doctrine: trim measures shipped bytes, never raw rows). **Amendment:** the marked-id set must equal the **shipped** projection exactly (post-clamp, post-drop) — asserted by equality, not containment. Plus the embedding-identity disclosure (flag #7). | AM-14, AM-33 |
+| **12** | Tool-count wording / pin-ceremony census | **ADOPT-AS-AMENDED** | Category `memoir` = PRIVILEGED **#18** (architect-verified: the set is 17 today, #16 `notify-user`, #17 `metrics-read`); **5 tools / 4 families** (pin/unpin share one). **Amendment — the planner's 11-site enumeration is INCOMPLETE:** the ceremony must **derive the set by grep** (AM-18) — at adjudication time the tree carried 6 count pins + 5 exact-set pins + **13 `EXPECTED_PRIVILEGED_SET` occurrences across 7 files** (the buckets overlap by file, so files and sites are different numbers) + the **ari allow-trailing-set pin** (`tests/unit/test_board_registration.py:285` — `["self-alarm","view-write","board-link","mcp_rpc","wedge-capture","notify-user"]`), all bumped in **ONE commit**, with `"memoir"` appended at the END of ari's allow array. **That census is dated evidence, not a target**: the ceremony greps and bumps every hit it finds. The registry's own prose census is stale and is corrected in the same commit. **Amendment:** the prompt-artifact re-stamp touches **only `agents/ari/tools_note.md`** (`meta.json` is not in the 161-line baseline). **Addition:** an FC9 prompt-budget measurement is required (measure, don't judge). | AM-18, AM-19, AM-20 |
+| **13** | Kill-switch OFF semantics + env polarity | **ADOPT-AS-AMENDED** — **BLESSED-TEXT DEVIATION** | **OFF = the whole personality**: tools refuse `memoir_disabled`; the briefing is not built (and the memory is **unreadable** — no other read path exists in v1, stated plainly); the worker parks; the `inner_soul` ari branch is **still taken** and returns the loud not-recorded notice (never the RAG void); the data is untouched. **Polarity:** unset ⇒ **config default ON** — admissible **only because the default is never silent** (one WARNING per boot naming the var and the resolved state; the state must be discoverable without reading logs). Present-but-unparseable ⇒ **INDETERMINATE ⇒ fail CLOSED (OFF) + boot WARNING** — a deliberate, recorded **divergence from `notify_user`**, whose garbage handling repairs to the default (= ON) and is therefore **fail-open**. → **DR-3**. | AM-25, AM-26, AM-27 |
+| **14** | PG materialization path | **ADOPT-AS-AMENDED** | The three-artifact decomposition is **SOUND and empirically validated** on PG 16.15: `.sql` = SQLite-path DDL + permanent audit record (runner is SQLite-only, `daemon/migrations/runner.py:837-842`); PG tables = model registration immediately before `create_all` (`daemon/manager.py:975`); PG `tsv` + GIN = idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` in the `_ensure_postgres_columns` ensure (**function at `:8055`**, executed `:9555-9557`, called `:997` PG-gated; house precedent `:9481-9484`). The planner's `:838-883` anchor is a **comment block**, not the function (P-7). **Amendments:** the `.sql` must declare `embedding TEXT` **and** `stars TEXT` (house rule: every string column is TEXT on both drivers); the `tsv` expression MUST use the **two-arg** `to_tsvector('english', …)` form (the one-arg form is STABLE and PG rejects it as a generation expression); the ensure is **ONE transaction over ONE shared statement list** (`:8269` → `:9554-9557`, executed by `_ensure_postgres_columns` itself) with no per-statement try/except — house fail-loud stands (`:8259-8265`), so a failure in ANY entry aborts the whole ensure and the boot: statement **order is not a containment measure**, and the memoir statements are placed in the list for auditability only; the boot order must be pinned; `memoir_syntheses.source_episode_ids` typed `JSONBType` (design §4.4 says `[]`) ⇒ §4 row. | AM-6, AM-7, AM-8, AM-9, AM-10, AM-11 |
+
+---
+
+## 4. Deviation records (surgical, per P-4)
+
+### DR-1 — Flag #3 · briefing budget: the "~12k chars" figure is superseded by a 24,000-char absolute ceiling
+
+**Design says:** zone caps in **tokens** (persona ≤2,000 + keepsakes ≤4,000 stable; dynamic ≤3,000) **and** a hard section cap of "~12k chars" (`design.md` §8.2). Read literally the stable zone alone (6,000 tokens ≈ 24k chars) exceeds the char cap. **The design explicitly delegates the reconciliation to Phase B** ("their reconciliation is explicitly a Phase B duty").
+**Reality forces:** the two systems cannot both bind; one normalized budget model must exist.
+
+**Adjudication:** tokens are the planning unit (the house estimator `estimate_tokens`, `daemon/loader.py:1027`, tiktoken cl100k — already a house dependency, no new dep). The stable zone is **pre-bounded by admission** — persona content ≤2,000 tokens (enforced when a persona version is approved; the §11 seed satisfies it), keepsakes ≤4,000 tokens **total** (enforced at pin admission, flag #1). The stable zone is **never truncated**, therefore it must be pre-bounded such that it can never overflow the final ceiling; hence the final ceiling is sized for the stable zone's own admitted worst case: **6,000 tokens ≈ 24,000 characters**. **Hard absolute section cap: 24,000 characters.** The "~12k" figure is retained as the **nominal** size (typical fill ≈ 10–14k chars).
+
+**Rationale for the deviation (why this reading, not the other):**
+- The design writes "~12k" — a *tilde*, on a figure it explicitly *anchors* on the critical-notes tiered-selector family. An anchor is a magnitude cousin, not a byte ceiling on a **new** block. The plan's Option A (12k-truth) shrinks the keepsake budget to ~1,000 tokens (≈83 tokens per pin at 12 pins — one sentence each) and the persona to ~1,500 tokens: a "who we are" document and a gutted keepsake shelf. That starves precisely the content the feature exists to carry, and it breaks the "never truncated" promise *at the other end* — a 12-pin shelf can no longer hold 12 keepsakes.
+- The counter-argument — "zone-starving at 12k" — is the argument **against** Option A, not for it. Recorded here so the next reader sees it was weighed, not missed.
+- The ceiling carries ~15% headroom over the 6,000-token worst case (real English averages <4 chars/token; titles and pin reasons are short). A dedicated pin asserts the arithmetic.
+
+**Render-time backstop (binding):** the stable zone is never truncated. If the stable zone alone exceeds 24,000 chars (a pin predating the budget rule, or estimator drift): emit the stable zone **in full**, drop the dynamic zone entirely, and append `[…stable zone is N chars — M over the 24,000-char ceiling; pin admission exceeded its budget]`. If it exceeds **48,000 chars**: withhold the block entirely (return `None`, do not write the once-flag) and log `WARNING [Memoir] briefing withheld — stable zone N chars exceeds the 48,000-char absolute bound`. "Never truncated" and "hard ceiling" are reconciled by the *outcome*, never by truncating the stable zone.
+
+**Supersedes:** `design.md` §8.2's "~12k chars" figure only. Everything else in §8.2 (two zones, stable-never-truncated, dynamic oldest-first) keeps standing.
+
+### DR-2 — Flag #8 · persona: v1 ships read-only persona, and the dormant approve seam carries the human-lane guard
+
+**Design says:** §4.3 — persona edits land `PENDING` and take effect only on **human-lane approval**, with the `prompt_versions` `pending_approval` precedent cited; §5.4 lists **five** callable tools, **no** persona tool; §14 item 8 asks whether the lane is reused, mirrored, or newly built.
+**Reality forces:** `prompt_versions` is coupled to prompt-cache invalidation, selection machinery, and the prompt-versioning UI — the persona is Ari's **self**, not a prompt artifact. And a mirror of only the **transition vocabulary** — without the lane guard — makes DD-9 **decorative**: the first v2 submitter reaches `approved` on a valid transition with no human in the loop.
+
+**Adjudication — Option A (the plan's disposition) PLUS the load-bearing amendment:**
+- **Mirror, do not reuse.** `memoir_persona_versions` carries its own `status` state machine with the **same transition vocabulary** as `prompt_versions` (`draft→pending_approval→approved|rejected|draft`, `draft→archived`), enforced in the memoir repository.
+- **v1 ships NO persona-edit write path.** §5.4's five-tool surface is binding; the six-tool and REST-route options are rejected: each re-opens five independent surfaces at once (§5.4's tool list, the "four families" wording, the 18/5/4 census, an FC9 prompt-budget delta, and a new auth scope or a sixth schema) **for zero v1 capability** — and Option B *without* a human-lane guard is strictly worse than Option A, because it creates a submitter with no approver.
+- **The approve seam ships the human-lane guard anyway** (AM-16): `approve()` raises `HumanLaneRequiredError` unless `actor.auth_method == "session"` — the house discriminator (`daemon/services/prompt_version_service.py:678-716`), ~15 lines, no new surface, no blessed-text change. This converts the dormant seam from *safe because nothing can reach it* to *safe because reaching it without a session actor raises*.
+- The §11 seed is born `approved` with `source='seed'`, byte-pinned to the design's fenced block.
+
+**What "dormant machinery" means operationally (binding for v2):** the repository exposes `submit()` / `approve()` / `reject()`; `submit()` has **no caller in v1** (no tool, no route); `approve()` refuses any actor whose `auth_method != "session"`; the mirrored `VALID_TRANSITIONS` is the second, defence-in-depth layer. A v2 lane inherits the lane guard explicitly.
+
+**Supersedes:** nothing in §4.3 or §5.4 — this decision *strengthens* DD-9 within the blessed text. It is recorded because it resolves an open item (§14 item 8) and because the ruling constrains the v2 lane.
+
+### DR-3 — Flag #13 · kill-switch: default-ON with a loud unset, and fail-closed on garbage (a recorded divergence from the house precedent)
+
+**Design says:** §5.3 / DD-15 — `ENSEMBLE_MEMOIR_ENABLED`, **fail-closed**. The design's own reading (recorded, not ruled): *"fail-closed constrains how an **indeterminate** value is treated — an unset/unknown value must not enable the surface. The exact default-vs-env-variable polarity is **not fixed** by the blessed text"* (§14 item 13).
+**Reality forces:** the house precedent (`notify_user`) resolves garbage **fail-OPEN** — a `ValidationError` is repaired to the validated fallback, which *is* the default (`True`). And a **mis-spelled variable name** is indistinguishable from unset — unpreventable by any knob design.
+
+**Adjudication — the implementable reading of DD-15:**
+> *"Fail-closed governs **indeterminate** values: a present, non-empty, unparseable value MUST NOT enable the surface — it disables it and logs loudly. The **unset** case is not indeterminate: it resolves to the documented config default, and the blessed text leaves the polarity open. Unset ⇒ ON is therefore compatible with DD-15 **only if the default is never silent**."*
+
+**Knob truth table Phase C must implement** (single authority: a Pydantic `MemoirConfig(BaseSettings)` with `env_prefix="ENSEMBLE_MEMOIR_"`, resolved through the model — never hand-parsed, `notify_user.py:110-115`; read at **call time**, `:366-368`, so an operator can flip without a restart):
+
+| `ENSEMBLE_MEMOIR_ENABLED` | Resolved | Surface | Log (once/boot) |
+|---|---|---|---|
+| absent | config default (**ON** in v1) | ENABLED | **WARNING** — "unset — memoir surface ENABLED by default; set `ENSEMBLE_MEMOIR_ENABLED=false` to disable" |
+| empty string | = absent | ENABLED | as above |
+| `true/1/yes/on/t/y` (any case) | true | ENABLED | INFO |
+| `false/0/no/off/f/n` (any case) | false | DISABLED | INFO (the refusal names the var) |
+| any other present value | **INDETERMINATE** | **DISABLED (fail closed)** | **WARNING** naming the var, the rejected value, and the canonical spelling |
+| unparseable and the fallback also fails | — | DISABLED | ERROR |
+
+**Rationale:**
+- **Default ON**, because the memory *is* the feature and a default-dark memory would ship the very leak it exists to cure (DD-16's whole point) — the first deploy would show "memory recording is disabled — this content was NOT recorded" as the normal experience. The house carries two default-ON kill-switch precedents (`notify_user`, `mission_strand_heal`).
+- **Garbage ⇒ fail closed**, because DD-15's clause attaches to the indeterminate case, and the cost asymmetry is severe: notify's mis-set knob leaves a **bounded, rate-limited, audited chat message**; a mis-set memoir knob leaves **unbounded, append-only, never-hard-deleted first-person narrative rows**. This is a **deliberate divergence from `notify_user`** and is recorded as such.
+- **The residual is recorded as accepted**: a misspelled var *name* ≡ unset ⇒ the surface is ON and only the boot WARNING distinguishes it. Mitigation is **loudness, not prevention** — hence the per-boot WARNING, the discoverable resolved state, and the rule that the state must be visible without reading logs.
+
+**OFF semantics (operator-facing contract, stated not implied):** tools refuse `memoir_disabled`; the briefing is not built and the memory is **unreadable** (no other read path exists in v1); the embedding worker parks; the `inner_soul` ari branch is **still taken** and returns the loud not-recorded notice; **the data is untouched** (rows stay; the kill-switch is not a delete).
+
+**Supersedes:** nothing in §5.3/DD-15's letter; it *fixes* the polarity the blessed text deliberately left open, and it records the divergence from the notify precedent.
+
+### DR-4 — Flag #10 · `memoir_timeline` parameter names: `from`/`to` ⇒ `since`/`until`
+
+**Design says:** §5.4 — `memoir_timeline(from?, to?, q?)`.
+**Reality forces:** `from` and `to` are **Python keywords**; the blessed signature is unimplementable literally as a Python parameter list.
+
+**Adjudication:** expose the parameters as **`since`** and **`until`** (ISO-8601 strings, UTC-normalised; `until` **inclusive**), with `since` ≤ `until` validated by the tool. The model's semantics are unchanged — this is a name binding, not a behaviour change.
+
+### DR-5 — Retrieval arithmetic binding (RRF specification)
+
+**Design says:** §7 — RRF(k=60) over {BM25(tsv), cosine(embedding)}, tie-break by stored `importance`, then a recency prior `× exp(−idle_days/τ)`, τ=180 d, never applied to keepsakes.
+**Reality forces:** the design fixes the *formula* but not the arithmetic that makes it implementable — candidate pool, rank origin, tie handling, absent-ranker semantics, the final comparator, the idle basis, and the float-determinism rule.
+
+**Adjudication:** see AM-2 .. AM-5 (candidate pool 100 per ranker; 1-based per-ranker **competition** ranks; absent ranker ⇒ the term is *absent*, not zero-scored — the design's degradation sentence governs; the final comparator is **total**; the idle basis is `now − coalesce(last_accessed_at, created_at)`; `RRF_K = 60` is a module constant, not a config knob; summation order fixed, no rounding). **AM-1 is a defect correction, not a choice:** the plan's `ts_rank_cd(plainto_tsquery(...), tsv)` does not exist in PostgreSQL and is corrected to `ts_rank_cd(tsv, plainto_tsquery('english', :q))` (architect-verified on PG 16.15).
+
+### DR-6 — `memoir_syntheses.source_episode_ids` typing
+
+**Design says:** §4.4 — `source_episode_ids[]` (citations).
+**Plan types it:** `JSONBType` (JSON).
+
+**Adjudication:** `JSONBType` stands for v1 — the table is schema-only and EMPTY (DD-2), so the array-vs-JSON distinction has zero behavioural effect, and the dual-driver JSON type keeps the `.sql` SQLite-valid. Recorded so the divergence from §4.4's sketch is not rediscovered as a "defect" later; if v2 writes citations, the type may be revisited under the same dual-driver constraint.
+
+---
+
+## 5. Amendments (AM-1 .. AM-43)
+
+Severity: 🔴 **BLOCKING** — must land before Phase C implementation starts. 🟡 material. 🟢 clarification.
+
+### A · Schema & persistence (Phase 1) — the P1 keystone
+
+- **AM-1 🔴** — Correct the PG lexical-ranker SQL in **two** plan files (`phase2-plan.md` D2.2, `flag-dispositions.md` #10): `SELECT id, ts_rank_cd(tsv, plainto_tsquery('english', :q)) AS score FROM memoir_episodes WHERE tsv @@ plainto_tsquery('english', :q) ORDER BY score DESC LIMIT :cand`. **`tsvector` is the first argument** — PG has no `ts_rank_cd(tsquery, tsvector)` overload (architect-verified on PG 16.15; the reversed form raises `psycopg.errors.UndefinedFunction`). As written, the lexical half of hybrid recall fails **on PG only** — the SQLite Python-BM25 fallback keeps green, so the defect would surface in production.
+- **AM-2 🟡** — Define `:cand`: **100 per ranker**, module constant `MEMOIR_RANK_CANDIDATES`. Rationale: recall returns k ≤ 20; a rank-1 hit contributes 1/61 ≈ 0.0164 and a rank-100 hit 1/160 ≈ 0.00625, so 100 candidates capture ≥96 % of the achievable RRF mass while keeping the PG scan bounded. The two pools are **independent**; their union is the candidate set.
+- **AM-3 🟡** — RRF rank convention: **1-based, per-ranker, local**; within a ranker rows are sorted by `(score DESC, id ASC)` and assigned **competition ranks** (equal scores share a rank; the next distinct score skips: 1, 2, 2, 4). A row absent from a ranker's list contributes **no term** for that ranker — *"absent"* means the term is missing, **not** that the row scores 0; design §7's degradation sentence ("neither dropped nor zero-scored") governs the prose.
+- **AM-4 🟡** — The final comparator must be **total**: `(-prior_multiplied_score DESC, importance DESC, event_at DESC, id ASC)`. The prior multiplies the fused score for non-keepsakes (keepsake multiplier = 1.0), so it **may** reorder rows that importance separated — intended, and importance is re-applied after multiplication. Idle basis = `now − coalesce(last_accessed_at, created_at)`; design §7's `idle = now − last_accessed_at` is shorthand and is **NULL-unsafe** for a never-recalled row. `id ASC` makes pagination stable.
+- **AM-5 🟢** — `RRF_K = 60` is a **module constant**, not a config knob (a fusion constant, not a budget; the flag-#3 model governs rendered-token budgets only). Sum the terms in a **fixed ranker order** (lexical, then semantic) so float addition is deterministic; do **not** round (rounding manufactures ties and breaks monotonicity).
+- **AM-6 🟡** — The `.sql` must declare **`embedding TEXT`** *and* `stars TEXT` (house rule: every string column is TEXT on both drivers). The model's SQLite DDL emits `JSON` affinity — benign under SQLite dynamic typing, but the two artifacts must not be read as equivalent; pin it.
+- **AM-7 🟡** — `StarsListType` contract: `impl = JSON`, `cache_ok = True`, `load_dialect_impl` → `dialect.type_descriptor(ARRAY(Text()))` on PG / `JSON()` otherwise, with **identity** `process_bind_param` / `process_result_value` returning a **Python list on both drivers** (never a pre-serialized JSON string — that would be re-encoded on PG). The column stays **nullable** (`None` ≠ `[]`); **never** a mutable default (`default=None` / `default_factory`); element type `Text()` so PG renders `TEXT[]` (house "never VARCHAR"). Architect-verified round-trip on both drivers for `["Emperor","the Emperor"]`, `None`, `[]`.
+- **AM-8 🔴** — The `tsv` expression MUST use the **two-arg** `to_tsvector('english', coalesce(title,'') || ' ' || body)` form. Architect-verified on PG 16.15: `to_tsvector(regconfig, text)` is **immutable** (legal in a `GENERATED … STORED` expression) while `to_tsvector(text)` is **stable** and PG rejects it (*"generation expression is not immutable"*). No cast is required (`'english'::regconfig` is equivalent and may be used for clarity). Version floor PG 12+; the house PG is **16.15** ⇒ no floor risk.
+- **AM-9 🟡** — **The ensure is ONE transaction over ONE shared statement list** — the list is built at `daemon/manager.py:8269` and executed by `_ensure_postgres_columns`'s own loop at `:9554-9557`, with **no per-statement try/except** and documented fail-loud semantics (`:8259-8265`: *"this method does NOT catch exceptions … startup aborts … Better to fail loudly at startup than to"*). **Consequence (delta re-review): a failure in ANY entry — the memoir statements OR an inherited lane's — rolls back the whole ensure and aborts the boot. Statement ORDER is therefore NOT a containment measure; placing the memoir statements last does NOT reduce the blast radius.** The first draft of this amendment wrongly implied that ordering protected the other lanes; that was an artefact of reading the shared list as if it were lane-owned. Placement in the list is a **readability/ownership** choice (memoir statements in the memoir block, after the inherited project-skill-loader entries, for auditability) — do not rely on position for safety. The adopted posture is the house fail-loud one: a failed `tsv` ALTER aborts boot loudly rather than shipping a half-indexed table. If a memoir-specific failure must not block other lanes' ensures, that requires **per-statement isolation inside the shared ensure** — a house-pattern change, **routed out of this lane** rather than smuggled into it. **Q6 containment ruling (2026-11-05): NO lane-owned containment** — the lane's DDL rides the shared fail-loud ensure and the blast radius is carried as a **recorded and PROVEN** risk rather than engineered away (§12; `decisions.md` §4 row 17). The blast radius is **proved inductively by the W8 mechanism** (scratch frozen-binary boot with one deliberately invalid memoir ensure statement, plus structural pins asserting no per-statement try/except and a single `begin()`) — specified in §12.
+- **AM-10 🟡** — Anchor correction (P-7): `_ensure_postgres_columns` is **defined** at **`daemon/manager.py:8055`** (its body runs to `:10164`), builds its statement list at `:8269`, and executes it at **`:9554-9557`** (`with self._engine.begin() as conn: for stmt in statements: conn.execute(text(stmt))`); it is called at `:997` (PG-gated). The `:838-883` range is a **comment block**, not the function. **Clarification (delta re-review):** the project-skill-loader statements at `:9500-9522` are **entries in this same shared list**, executed by this same loop — the PSL lane added statements to `_ensure_postgres_columns`; it does **not** own a separate ensure loop. (AST-verified: `:9481`, `:9500`, `:9522`, `:9545`, `:9555` all resolve to the `_ensure_postgres_columns` def; the only other `for stmt in statements` in the file is at `:10279`, in a different method.) House precedent for a column added to a `create_all`-created table: `ALTER TABLE … ADD COLUMN IF NOT EXISTS` at `:9481-9484` (`secrets_audit.context`). The "brand-new tables need no mirror" comment does **not** apply to `tsv` — the mirror is the *creation path* for a column the ORM cannot express on SQLite, not a belt for the table.
+- **AM-11 🟡** — Boot order must be pinned: (1) model registration → (2) `create_all` (`:975`) → (3) migration runner (`:980`) → (4) `_ensure_postgres_columns` (`:997`, incl. the memoir `tsv` ALTER + GIN) → (5) persona seed (after (2)) → (6) `api.py` lifespan: the worker task starts **LAST**. The seed is an INSERT into `memoir_persona`, so it **cannot** run before (2). The seed is **knob-independent** (the knob gates surfaces, not the substrate).
+
+### B · Write path & repository purity (Phases 2 & 4) — DD-20
+
+- **AM-12 🔴** — DD-20 needs an **assertable pin**, or a Phase C implementer can inline the embedder with nothing to stop it: `daemon/tools/memoir.py` contains **zero** references to the embedder, to `client.embeddings`, or to `store_embedding`; the write body performs **exactly one** `insert_episode`; no `await` of the embedding worker appears in the tool module; the embedder is reachable **only** from the worker module. Mutation leg: insert an inline `await embed(...)` in the write body ⇒ the pin goes RED.
+- **AM-13 🟡** — Fix the ONE INSERT's **exact column set** in the plan: `id, agent_id, title, body, created_at, event_at, importance, stars, is_keepsake, pinned_by, pinned_reason, pinned_at, embedding=NULL, embedding_model=NULL, embedding_dims=NULL, embedded_at=NULL, embedding_attempts=0, embedding_error=NULL, last_accessed_at=NULL, access_count=0, superseded_by=NULL`. `tsv` is DB-generated and is **not** in the INSERT. `keepsake=true` needs **no second statement** — the pin columns are part of the same row, so the pin-admission **SELECT**s (`count_pins`, `keepsake_zone_tokens`) are reads that do not violate ONE INSERT.
+- **AM-14 🟡** — `mark_recalled` must mark **exactly the ids in the shipped projection** (post-clamp, post-ranked-drop). Episodes dropped for budget are not returned and must **not** be marked. Assert **equality** of the marked-id list and the rendered-id list, not containment.
+- **AM-15 🟡** — Per-row write-back of the four embedding columns must be **one atomic column-targeted UPDATE** (`embedding`, `embedding_model`, `embedding_dims`, `embedded_at` set together). A partial write leaves `embedding IS NULL AND embedded_at IS NULL` true ⇒ the row is re-embedded **forever**. The pending predicate and the write must be one statement.
+
+### C · Tool surface, gates, registration (Phase 4)
+
+- **AM-16 🔴** — The gate **ORDER** must be **auth-first**, matching the exemplar's *code* (`notify_user.py`: authorization `:701-707` → knob `:715-731`), not the plan's kill-switch-first (D4.2). Sequence: (1) `_is_memoir_authorized(caller_agent_id)` → `memoir_agent_unknown` / `memoir_not_authorized`; (2) kill-switch → `memoir_disabled`; (3) argument validation; (4) any DB touch. Rationale: an unauthorized caller learns nothing about the knob's state. The exemplar's own comment calls the knob "the outermost gate" — a comment/code mismatch **inside the exemplar**; do not copy the comment.
+- **AM-17 🔴** — The **human-lane guard** ships in v1 (DR-2): the persona repository's approve seam raises `HumanLaneRequiredError` unless `actor.auth_method == "session"` (house discriminator, `daemon/services/prompt_version_service.py:678-716`; the router maps it to `403 HUMAN_LANE_REQUIRED`). `submit()` has no caller in v1; `approve()` refuses any non-session actor. Without this, DD-9 is decorative the moment v2 adds a submitter.
+- **AM-18 🟡** — The registration ceremony must **derive** the pin set by grepping (the registry's own instruction, `_tool_registry.py:357-366`) — not trust any prose, including this one. **Operative instruction:** `grep -rn "PRIVILEGED_TOOL_CATEGORIES" tests/ --include=*.py | grep -E "== *17|== *frozenset|EXPECTED_PRIVILEGED_SET"`, plus the ari allow-trailing-array pin in `tests/unit/test_board_registration.py`; bump **every** hit to 18 in **ONE commit** (the v0.26.2 ruling), with `"memoir"` appended at the **END** of ari's allow array. The registry's own prose census ("FIVE phase-local pins … SIXTEEN assertion sites across TEN files") is stale — correct it in the same commit. **Dated evidence, NOT a target (delta re-review):** at adjudication time (2026-11-05, tree @ `63032008b`) the tree carried 6 `len(PRIVILEGED_TOOL_CATEGORIES) == 17` count pins (6 files, 1 each), 5 `PRIVILEGED_TOOL_CATEGORIES == frozenset({…})` exact-set pins (5 files, 1 each — note the form is `== frozenset(`, which a `== 17`-shaped grep does **not** match), **13 `EXPECTED_PRIVILEGED_SET` occurrences across 7 files** (several files carry BOTH a count pin and one or more EXPECTED comparisons, and one file carries BOTH an exact-set pin and an EXPECTED comparison — so **files and sites are different numbers and the buckets overlap**), plus the ari trailing-array pin: **≈25 assertion sites across 11 distinct files**. An earlier draft of this amendment undercounted the EXPECTED bucket as 4 — the corrected figure is above. **The requirement is "every hit the grep finds", NOT the number here**: a count that differs from this note is **not** a tree defect and must never block the ceremony.
+- **AM-19 🟡** — The prompt-artifact re-stamp touches **ONE file**: `agents/ari/tools_note.md` (in the 161-line baseline). **`agents/ari/meta.json` is not in the baseline** — the planner's "meta.json + tools_note edits" wording is wrong; the count stays 161.
+- **AM-20 🟡** — **FC9 prompt-budget measurement** is required and currently absent: measure ari's resolved toolset before/after with the house formula (`estimate_tokens(system prompt) + Σ estimate_tokens(convert_to_openai_tool(t))`, tiktoken `cl100k_base`, `json.dumps(…, sort_keys=True, separators=(",",":"))`), evaluating both `growth_tokens ≤ max(10_000, 0.25×baseline)` and `growth_pct ≤ 0.25`. A breach makes **narrowing the grant the default**, not a judgement call. The blast is small (5 tools vs plane's 177) — but the house rule is measure, don't judge.
+- **AM-21 🟡** — **Refusal vocabulary must be enumerated** in the plan (Phase C would otherwise invent it): a frozen `memoir_*` code set with an import-time fail-loud assertion, mirroring notify's 12-code family — `memoir_disabled`, `memoir_agent_unknown`, `memoir_not_authorized`, `memoir_reason_required`, `memoir_actor_required`, `memoir_invalid_actor`, `memoir_keepsake_cap_reached`, `memoir_not_found`, `memoir_not_a_keepsake`, `memoir_importance_out_of_range`, `memoir_body_too_long`, `memoir_budget_exceeded`, `memoir_internal_error`. Envelope: `Error: {tool} REFUSED — reason={code}: {message}`. **Tools never raise** (notify's ADR-005 rule).
+- **AM-22 🔴** — The **once-flag write site** must be the **consumer**, not the builder. `daemon/graph.py:8524-8532` **discards** the persistent half (*"the messaging path already prepended those messages to `graph_input`"*), and `daemon/services/instance_messaging.py:4825-4826` skips the orchestrator on `is_retry`; the `project_injected` flag is written by the **messaging path** (`:4239-4242`). If the memoir flag is written inside the builder, the graph path consumes the flag on a block that is thrown away ⇒ **the briefing is permanently lost, silently, for that instance**. Rule: `assemble_context_messages` **builds only**; the flag write happens in `instance_messaging.py` after the persistent half is confirmed to contain the memoir block. Pin: drop the block from the persistent half ⇒ the flag **must** stay unset.
+- **AM-23 🟡** — **Result shapes and argument types must be specified now** (Phase C would guess): `memoir_write` returns `{episode_id, created_at, event_at, is_keepsake, pinned_by?, semantic_status: "pending"}` — the embedding-pending note **is** part of the result, because the write never blocks on the embedding and the model must be told the semantic index lags. `memoir_recall` / `memoir_timeline` return one fixed episode projection (id, title, body, created_at, event_at, importance, stars, is_keepsake, pinned_by, last_accessed_at) + the budget footer (exact bytes pinned). `event_at` = ISO-8601 string, UTC-normalised (house timezone Asia/Ho_Chi_Minh — state the conversion). `stars` = `list[str]`, flat, unnormalised. `importance` 1–10, default 5. `keepsake=true` ⇒ `reason` **and** `actor` conditionally required (one refusal code each). `memoir_pin` on an already-pinned episode = **re-pin** (overwrite + tool-result note); `memoir_unpin` on a non-keepsake = **idempotent no-op**.
+- **AM-24 🟡** — Pin-attribution corroboration without a schema change: the required `actor` is the **claim**; the house provenance class (`daemon/tools/provenance.py` — `direct` / `inherited` / `""`) is surfaced in the **tool result** and the **briefing keepsake line**, so a wrong claim is **detectable at write time** rather than only once per instance. A durable per-pin governance ledger is **deferred to v2** (a fifth table would change the blessed four-table design).
+
+### D · Kill-switch (Phases 3, 4, 5, 6)
+
+- **AM-25 🔴** — The knob has **ONE authority** (Pydantic `MemoirConfig(BaseSettings)`, `env_prefix="ENSEMBLE_MEMOIR_"`, `enabled: bool = True`), resolved **through the model, never hand-parsed** (`notify_user.py:110-115`). Present-but-unparseable ⇒ **INDETERMINATE ⇒ fail CLOSED (OFF)** + a boot WARNING naming the var, the rejected value, and the canonical spelling — a deliberate, recorded **divergence from `notify_user`**, whose garbage handling repairs to the default (= ON) and is therefore **fail-open**.
+- **AM-26 🟡** — "Unset ⇒ ON" is admissible **only because the default is never silent**: emit **one WARNING per boot** naming the exact var and the resolved state, and make the resolved state discoverable **without reading logs** (at minimum in the tool's `tool_help` text; ideally on the health/readiness surface). A misspelled var *name* ≡ unset — unpreventable; the residual is **accepted, loud-only**, and recorded.
+- **AM-27 🟡** — The knob is read at **call time**, not only at boot: the worker re-reads it **every tick** (park with a log line, keep the task alive so re-enable needs no restart) and the briefing re-reads it **per assembly**. Flag #13's "OFF ⇒ the task is never started" covers boot only.
+
+### E · Embedding worker (Phase 3)
+
+- **AM-28 🔴** — The embed call MUST carry a **request timeout**. The house client sets none (`daemon/services/skill_embedding_service.py:196-205`) ⇒ the SDK default applies (`httpx.Timeout(timeout=600, connect=5.0)`) — a 600 s stall per call, and the failover `wall_clock_cap_s` fires only **between** attempts (`llm_failover.py:176-182`). Rule: client `httpx.Timeout(timeout=30.0, connect=5.0)`; per-call budget **30 s**; the tick's total embed budget **≤45 s**.
+- **AM-29 🔴** — Use a **dedicated executor**, not the shared default: module-level `ThreadPoolExecutor(max_workers=2, thread_name_prefix="memoir-embed")` (house precedent `daemon/services/db_offload.py:75,272`). `asyncio.to_thread` for the embed call is **forbidden**: the default executor is `min(32, cpu+4)` workers shared with 1,351 `to_thread`/`run_in_executor` sites carrying LLM and compaction traffic (house rule at `daemon/mcp/stdio_wrapper.py:123-126`, `daemon/mcp/warmup_pool.py:112-114`), and a cancelled `to_thread` does **not** free the worker. Embeds are **sequential** (batch cap 8 = 8 rows in sequence, not 8 concurrent calls). Pin: assert the thread-name prefix.
+- **AM-30 🔴** — **Write-back failure counts as an attempt.** D3.5 counts attempts only on embed failure; a successful embed whose DB write fails leaves `embedding IS NULL` and `attempts=0` ⇒ infinite re-embed, never terminal, never reported. Rule: `record_embedding_attempt` is called on **any** per-row failure (embed **or** write-back); ≥5 ⇒ terminal.
+- **AM-31 🔴** — **Dimension mismatch is a per-row TERMINAL, not a silent zip.** The house cosine "silently zips to the shorter side" (`skill_embedding_service.py:634-659`) ⇒ a 3072-dim vector scored against a 1536-dim query returns confident nonsense, and per-row `embedding_model` does not cover a same-model-id/different-dims case. Rule: (a) the worker compares `len(vector)` against the configured dimensions (the `EMBEDDING_*` family, `daemon/config.py:4374-4397`) and on mismatch records a **terminal** error (`embedding_dimensions_mismatch: expected=1536 got=3072`) and stores **nothing**; (b) the semantic ranker filters `WHERE embedding IS NOT NULL AND embedding_model = :model AND embedding_dims = :dims`.
+- **AM-32 🟡** — **Error classification** must be explicit: **401/403 = permanent** ⇒ the row goes terminal immediately (no 5-attempt burn against a dead credential) **and** the tick counts as an all-fail tick ⇒ the lane-down latch engages on the first occurrence; other 4xx (not 408/429) = permanent per row; **429 / 408 / 5xx / connection errors = transient**. The house classifier lives at **`daemon/llm_error_classifier.py`** — there is **no** `daemon/services/llm_error_classifier.py` (the path in the first draft of this amendment was wrong). Its `RETRYABLE_STATUS_CODES` (`:23`) is `{429, 500, 502, 503, 504, 520, 521, 522, 523, 524}` — **it does NOT contain 408** (`is_retryable_status_code(408)` → False). The memoir transient set is therefore **`RETRYABLE_STATUS_CODES | {408}`** — a **lane-local widening** (408 Request Timeout is transient: the server timed out waiting for the request); the shared house constant is left untouched (widening it is a house-pattern change, out of scope). **The worker must test membership in that set EXPLICITLY and must not call `is_retryable_status_code()` alone** — the house helper classifies 408 as permanent, which would burn the row's terminal budget on a transient error. Use the house classifier for exception-SHAPE classification (`classify_transient_apierror_body`) and the explicit status set for the HTTP-status decision.
+- **AM-33 🟡** — **Model-identity drift must be observable at the agent surface** (this is the closure of flag #7's stated fear): `memoir_recall`'s footer MUST carry `active_model=<id>` and `embedding_excluded=<N>` (candidates skipped for identity/dims mismatch), with a partial-recall note when N > 0. The per-tick line is an **operator** surface only. **No automatic backfill ships in v1**; the operator requeue (clear `embedding_attempts`/`embedding_error`) is documented in the runbook.
+- **AM-34 🟡** — **Tick-line semantics must be defined** so a mutation leg can assert honesty: `E` = rows that failed **this tick**; `M` = **total** terminal rows in the table. Each event gets its own greppable line: latch engaged, terminal transition, knob park, dimension mismatch, write-back failure. The task is stored as `app.state.memoir_embedding_worker_task` (naming precedent `api.py:2788`); the tick interval is **read per tick** so an operator can slow it during an incident.
+- **AM-35 🟡** — The loop body MUST be wrapped `try/except Exception` (re-raising `CancelledError`) so a failed tick does **not** kill the task — the house contract (`daemon/api.py:4588-4592`, "a single failed cycle is not fatal. The next tick will retry"). Shutdown = cancel + await (`:3585-3596`).
+- **AM-36 🟡** — The worker must be **driver-agnostic** (the lane supports SQLite and PG): the scan/update SQL must not reference `tsv`. On SQLite there is no `tsv` and the lexical ranker is Python BM25; the embedding columns and their UPDATE are driver-neutral.
+
+### F · Briefing seam (Phase 5)
+
+- **AM-37 🟡** — The once-flag **read** must be **off-loop** (`await asyncio.to_thread(instance_repository.get, instance_id)`, the shape at `context_messages.py:373`). The cited `_is_project_injected` precedent (`daemon/graph.py:952-982`) performs a **synchronous** on-loop read inside `async def assemble` — copying it adds a new on-loop DB read per turn (the routed incident class).
+- **AM-38 🟡** — The briefing's DB reads need a **deadline**: each read wrapped in `asyncio.wait_for(…, timeout=10)` (house class: `BOOT_DB_TIMEOUT_S = 10`, `daemon/constants.py:70`); **whole-build budget ≤ 5 s**; on timeout → **degrade** (no block, no flag write), never delay the turn — the turn is the product, the briefing is a wake. The snapshot-digest precedent swallows *exceptions* but has **no timeout**, so a hung DB hangs the turn today; do not copy that hole.
+- **AM-39 🟡** — **Persona missing** (the seed failed at boot, or a migrated DB) ⇒ render the stable zone as keepsakes-only, prefixed `[persona unavailable — no approved persona version]`, and **do** write the once-flag (the block was delivered; the persona is a separate gap). A **seed failure at boot must not abort boot** — log `WARNING [Memoir] persona seed failed: <exc>` and continue (the persona is content, not schema).
+- **AM-40 🟢** — There is **no compaction-hoist membership set** to add: the hoist is **truthy-keyed on any `context_kind`** (`daemon/_content_hardening.py:227-250`). Stamping `context_kind="memoir"` is the whole change. The plan's cite of `:388` as the "hoisted bucket" is a **lead, not a site** (P-7) — an implementer must not go hunting for a set.
+- **AM-41 🟡** — The boot smoke must add the **embedding-endpoint fence** the standing conventions do not cover: scrub `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` **per-variable** (the `env -u POSTGRES_*` glob form is a silent no-op) or point them at a dead local port; pin `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` **explicitly** (never `env -u` it); per-variable PG scrub; `ENSEMBLE_SELF_ENV=sandbox` + throwaway scratch DB + binary COPY to a scratch dir; and assert the **worker task census** — exactly one with the knob ON, **zero** with `ENSEMBLE_MEMOIR_ENABLED=false` pinned explicitly (because unset ⇒ ON).
+
+- **AM-42 🔴** — `memoir_timeline`'s parameters must be renamed: the blessed §5.4 signature is `memoir_timeline(from?, to?, q?)`, and **`from` / `to` are Python keywords** — the signature is unimplementable literally. Expose **`since`** and **`until`** (ISO-8601 strings, UTC-normalised; `until` **inclusive**), validate `since ≤ until` in the tool, and record the rename in `decisions.md` §4 (DR-4). Model semantics are unchanged — this is a name binding, not a behaviour change.
+- **AM-43 🟡** — Render-time defence for the stable zone (the backstop behind DR-1): the stable zone is **never truncated**. If the stable zone alone exceeds **24,000 chars** (a pin predating the budget rule, or estimator drift): emit the stable zone **in full**, drop the dynamic zone entirely, and append `[…stable zone is N chars — M over the 24,000-char ceiling; pin admission exceeded its budget]`. If it exceeds **48,000 chars**: withhold the block entirely (return `None`, do **not** write the once-flag) and log `WARNING [Memoir] briefing withheld — stable zone N chars exceeds the 48,000-char absolute bound`. "Never truncated" and "hard ceiling" are reconciled by the *outcome*, never by truncating the stable zone.
+
+---
+
+## 6. R1–R4 compliance verification (P-5: not adjudicable downward)
+
+| Ruling | Compliance | Evidence / caveat |
+|---|---|---|
+| **R1** — kingdom-level only; no federation/sync; the Constella door must not be foreclosed | ✅ **COMPLIANT** | No sync, no federation, no cross-kingdom surface anywhere in the plan set. The schema (relational rows + JSONB embeddings + flat `stars` + `superseded_by`) **does not** foreclose the v3 markdown+hash mirror: the DB row remains the truth, and a mirror exports from it. The one thing v1 must not lose is the *raw* star mention — hence flag #5's rule ("capture the mention EXACTLY as the writer phrased it, because alias evidence lives in the phrasing"). The persona seed living in a code constant (not the `.sql`) is provenance, not a format lock — the row is still exportable. |
+| **R2** — keepsake governance is BOTH: user-via-Ari and Ari-via-tool; `pinned_by ∈ {empress, emperor}` | ✅ **COMPLIANT** | Flag #2's ruling keeps both paths legitimate and records which. The `actor` claim + the repository CHECK on `pinned_by` + the briefing-visible attribution satisfy the ruling without narrowing it. The durable per-pin ledger is deferred to v2 — recorded as a residual, not a narrowing. |
+| **R3** — rolling roadmap: build v1, plan v2+v3, plan v4 when v2 starts | ✅ **COMPLIANT** | The plan builds v1 only; the syntheses table ships empty (DD-2), stars ship flat (DD-19), no LLM importance scoring (DD-5), no per-turn reinjection (DD-11), no `memoir_about` (DD-4). The v2 alarm-wake refresh is roadmap'd and inherits the L4 constraint (never "fix" the bare-HUMAN scheduler stamp). |
+| **R4** — learn-not-adopt: no new external memory dependency; Postgres only; no graph DB; no new service | ✅ **COMPLIANT** | Confirmed by inspection: `TypeDecorator` + `ARRAY(Text())` are **SQLAlchemy**; `ts_rank_cd` / `plainto_tsquery` / `to_tsvector` are **stock PG core** (no extension — the house PG carries citext, pgcrypto, plpgsql, postgis; **no FTS extension**, and none is needed); the token estimator is **tiktoken cl100k**, already a house dependency (`daemon/loader.py:1027`); the embedding client is the **existing** `openai` SDK against the **existing** LLM lane and the shared `EMBEDDING_*` config family; the constellation layer is SQL joins in the **cold path** (no graph DB). **One policing item for Phase C:** the worker must reuse the house client and must **not** introduce a new HTTP/embedding dependency (AM-28 fixes the timeout on the *existing* client). |
+
+**No R1–R4 item was narrowed, waived, or re-litigated by this adjudication** — nothing in the 43 amendments touches the Emperor's rulings (P-5 respected).
+
+---
+
+## 7. Risks
+
+- 🔴 **The hybrid recall's lexical half fails on PG exactly as the plan writes it** (AM-1). Left unamended, the defect is invisible on SQLite and in dev, and surfaces only on the operative driver.
+- 🔴 **The briefing can be permanently lost for an instance, with no error, no log, and no user-visible symptom** (AM-22). Ari simply never "remembers" who she is. This is the flag #9 failure the planner did not foresee.
+- 🔴 **The embedding lane can pin shared default-executor workers for 600 s each** (AM-28, AM-29) — the exact coupling the house's own MCP code warns about. With the default pool at 12–20 workers and 1,351 `to_thread` sites, a memoir batch could stall the daemon's LLM and compaction traffic.
+- 🟡 **Dimension mismatch produces silently wrong rankings** (AM-31) — not an error, a wrong answer with a confidence score attached.
+- 🟡 **Mis-attribution is detectable, not prevented** (AM-24) — the honest strength of the governance record in v1: the claim is auditable, the model is the authority. A durable ledger is a v2 item.
+- 🟡 **The knob's misspelling residual is unpreventable** (AM-26) — accepted, loud-only. The cost asymmetry (a chat message vs unbounded append-only narrative rows) is what forces the fail-closed garbage rule.
+- 🟡 **A long-lived instance's dynamic zone goes stale with no signal** — by design (DD-11), disclosed, and the v2 alarm-wake refresh is the designated fix.
+- 🟢 **The plan's own pin-ceremony census was incomplete** (AM-18) — the registry's prose and the planner's list both undercount; the ceremony must grep. A missed pin site would redden future whole-tree gates, not corrupt behaviour.
+
+---
+
+## 8. Routed to the reviewer council's attention
+
+1. **AM-1 and AM-22 are the two amendments with production-only or silent-failure failure modes.** They should be verified by a reviewer that reads the corrected SQL and the flag-write site against the *code*, not against the plan prose.
+2. **AM-1's proof is external to the repo.** The `ts_rank_cd(tsquery, tsvector)` form was refuted by the architect against a live PG 16.15 catalogue. The council should note that this evidence is a **runtime** fact, not a doc claim.
+3. **AM-16 is a divergence from the house exemplar's own comment** (the comment says the knob is the outermost gate; the code checks auth first). The council should confirm the ruling picks **code** over comment — the house rule is that recorded line numbers and comments are leads.
+4. **AM-25 is a deliberate divergence from `notify_user`** (fail-closed garbage vs the house's fail-open repair). The council should confirm the divergence is justified by DD-15's letter and by the cost asymmetry, or overrule it.
+5. **The plan files themselves remain stale.** This document adjudicates; `phase2/3/4/5-plan.md` still carry the uncorrected text. Phase C must implement **from this document**, and the plan files should be folded to match before implementation starts (a fold is a planner-lane action; the architect does not rewrite them).
+6. **The two blessed-text deviations** (DR-1's 24,000-char ceiling, DR-3's polarity) are the only places the blessed design's *literal* text is superseded. Both are surgical (P-4) and both are recorded in `decisions.md` §4.
+7. **Q6 (containment) was decided by the architect after the plan council split** (council record `6601b15a`, APPROVE-WITH-ADVISORIES, 1C/10W/13A, two-model convergence, decision expressly routed to the architect). The ruling is **no lane-owned containment** — the memoir DDL rides the house's single all-or-nothing, fail-loud `_ensure_postgres_columns`, and the consequence (a memoir DDL failure aborts the whole daemon boot AND rolls back every inherited lane's ensure statement in the same transaction) is **recorded in `decisions.md` §4 row 17 and proved by the W8 induction mechanism** rather than engineered away. The council's coding-model objection was upheld as a REAL risk and discharged by proof + a required risk-register row — see §12 for the reasoning, the W8 specification, and the falsification condition.
+
+---
+
+## 9. Phase C gate — what must be true before implementation starts
+
+| # | Gate condition |
+|---|---|
+| G1 | The 12 🔴 amendments are folded into `phase2/3/4/5-plan.md` (or implemented from this document verbatim) and a reviewer has confirmed each against the code. |
+| G2 | `decisions.md` §4 carries the 16 adjudication rows; `design.md` §8.2's "~12k chars" is superseded per DR-1. |
+| G3 | The four `flags` that touch blessed text — #3 (ceiling), #8 (persona lane), #10 (`since`/`until`), #13 (polarity) — are visible to the reviewer council and the fresh approver as **deviations**, not as quiet plan edits. |
+| G4 | The registration ceremony's pin set is **re-derived by grep at implementation time** (AM-18) — the count in this document is evidence, not a specification. |
+| G5 | The boot-smoke fence list includes the **embedding endpoint** (AM-41) and the standing conventions (sweep pin, per-variable PG scrub, sandbox env, scratch DB, binary copy, live-fence byte equality). |
+| G6 | No new dependency, no new service, no graph DB, no pgvector, no federation/sync (R1/R4) — asserted by a grep-assertion sweep in Phase C's acceptance. |
+
+---
+
+## 10. Artifact index
+
+| Artifact | Status |
+|---|---|
+| `.agents/shared/planning/ari-memoir-store/architecture-recommendation.md` | this document — Phase B architect adjudication (14 rulings, 43 amendments, 6 deviation records), **plus the 2026-11-05 delta re-review (§11)** |
+| `decisions.md` §4 | 16 adjudication rows appended (13 flag resolutions + 3 additional bindings); **3 rows clarified in the delta re-review** (rows 6, 11, 13) |
+| `design.md` | **unmodified** — the supersessions are recorded in `decisions.md` §4 (P-4: adjudication is surgical, and the record is the log) |
+| `roadmap.md` | **unmodified** — binding input |
+| `flag-dispositions.md` | **modified by the PLANNER's fold** (`4d5b43637`), not by the architect — banner "STATUS: SUPERSEDED BY ADJUDICATION", a per-flag ADJUDICATION annotation on each of the 14 flags pointing at the ruling and the adjudicated plan text, §16's draft rows marked HISTORICAL, and the **AM-1-sanctioned §10 SQL correction** applied. The proposal text is otherwise preserved as the audit trail. *(The earlier "unmodified" line described the architect's own action, not the lane's fold.)* |
+| `plan-overview.md` + `phase0-8-plan.md` | **modified by the PLANNER's fold** (`4d5b43637`) — the plan set now carries the architect's rulings and the 43 amendments. The planner owns the plan set; the architect does not edit it |
+
+---
+## 11. Delta re-review — 2026-11-05 (post-fold)
+
+Triggered by the plan fold `4d5b43637` ("Phase B plan fold — architect rulings + 43 amendments applied"), which surfaced defects in **the architect's own documents**. Each finding was re-verified against the tree before ruling; the fold's proposed resolutions were accepted only where the evidence supported them.
+
+| Finding | Disposition | Substance |
+|---|---|---|
+| **FN-1** — `AM-32` cited `daemon/services/llm_error_classifier.py` (no such file); the house retryable set lacks 408 while the ruling classes 408 transient | **ADOPT** (planner's resolution) + path fix | The classifier is at **`daemon/llm_error_classifier.py`**; `RETRYABLE_STATUS_CODES` (`:23`) = `{429, 500, 502, 503, 504, 520, 521, 522, 523, 524}` — **no 408**, so `is_retryable_status_code(408)` is False. The memoir transient set is **`RETRYABLE_STATUS_CODES | {408}`** (lane-local widening; the house constant is untouched), and the worker must test membership **explicitly** — calling the house helper alone would make 408 permanent and burn the row's terminal budget on a transient error. |
+| **FN-2** — `AM-10`'s "executed :9555-9557" said to be the project-skill-loader lane's own ensure loop | **AMEND** (premise corrected, anchors confirmed) | AST proof: `_ensure_postgres_columns` is `def` at **:8055** with `end_lineno` **:10164**; `:9481`, `:9500`, `:9522`, `:9545`, `:9555` all resolve **inside** it, and the file's only other `for stmt in statements` is at `:10279` (a different method). The PSL statements at `:9500-9522` are **entries in that method's own shared list** — the PSL lane owns **no** separate ensure loop, so the leader's premise is factually wrong and the doc's anchors stand. The amendment gains an explicit clarification. **Consequence (new):** the scrutiny exposed a defect in **my own AM-9** — the list executes in **ONE transaction** with no per-statement try/except, so a failure in any entry (memoir's or an inherited lane's) rolls back the whole ensure and aborts boot ⇒ **statement order is NOT a containment measure**. AM-9's "keep the memoir statements LAST" clause is **OVERRULED** and replaced with the accurate statement (placement is for auditability; per-statement isolation would be a house-pattern change, routed out of this lane). |
+| **FN-3** — `AM-18` counted 4 `EXPECTED_PRIVILEGED_SET` comparison sites; grep shows more | **AMEND** | Re-grep at `63032008b`: **13 occurrences across 7 files** (the earlier draft's "4" was wrong; the leader's "6 files" also undercounts). The amendment now states the **derive-by-grep instruction as operative** and carries the census as **dated evidence explicitly marked "not a target"**, with the overlap caveat (several files carry both a count pin and EXPECTED comparisons; one carries both an exact-set pin and an EXPECTED comparison ⇒ **files ≠ sites**, buckets overlap) and the exact grep to run. Requirement: "every hit the grep finds", not the number here. |
+| **FN-4** — §6 said "nothing in the 41 amendments touches the Emperor's rulings" against a 43-amendment headline | **ADOPT** | Reconciled to **43**. (The only other "41" tokens in the document are the amendment ID **AM-41**, which is correct.) |
+| **FN-5 / FN-6** | — | not raised; nothing to dispose. |
+| **FN-7** — the flag #4 ruling cross-referenced **AM-33** (the recall footer) for the compaction-hoist point | **ADOPT** | Corrected to **AM-40** (the hoist amendment: the hoist is truthy-keyed on any `context_kind`, so there is **no** membership set to add). The substance was already correct in the row text and in the folded plan. |
+
+**Net effect on the rulings:** the 14 rulings, the 43-amendment set and the 6 deviation records are **unchanged in substance**; this delta re-review corrected **references, one path, one classification set, and one over-reaching mitigation clause** (AM-9). No §4 row's *ruling* changed — three rows were **clarified** to carry the corrected anchors and the non-target census wording (rows 6, 11, 13).
+
+## 12. Q6 — containment ruling for the memoir ensure DDL (2026-11-05)
+
+**Trigger:** the plan council (record `6601b15a` — APPROVE-WITH-ADVISORIES, 1C/10W/13A, two-model convergence) split on the AM-9 posture and **expressly routed the decision to the architect**. The lane's other AM-1/AM-16/AM-22/AM-25 rulings were CONFIRMED against code by the council and are unchanged.
+
+### 12.1 The contested facts (verified by both councilors, and independently re-verified by the architect)
+
+- The lane adds **DDL** (memoir `tsv` + GIN) to the house's single **all-or-nothing** `_ensure_postgres_columns`: `def` at `daemon/manager.py:8055` (body to `:10164`), statement list built at `:8269`, executed by that method's **own** loop at `:9554-9557` (`with self._engine.begin() as conn: for stmt in statements: conn.execute(text(stmt))`) — **one transaction, no per-statement try/except**.
+- The method's own docstring is the house contract (`:8259-8265`): *"Failure semantics: this method does NOT catch exceptions. If any statement fails (permission denied, connection lost, SQL syntax error, table missing), the exception propagates and startup aborts. **Better to fail loudly at startup than to continue and crash on the first query that references the missing column.** `IF NOT EXISTS` makes the idempotent case a no-op, so there's nothing to swallow."*
+- The inherited statement list is **large** — `task.last_heartbeat_at`, `task.auto_continued_at`, `source_configs.autostart`, `instance_ui_prefs.icon_tag`, `instances.agent_tag`, `message_queue…`, `mcp_servers…`, `instance_execution_leases` (+indexes), `infra_assets` GIN, `secrets_audit.context`, and the project-skill-loader tables/indexes. A memoir failure rolls back **all** of it.
+- The plan pinned the whole-daemon boot abort as correct behaviour **with no risk-register row** — the council's legitimate criticism.
+
+### 12.2 Ruling
+
+> **ACCEPT NO-CONTAINMENT (governor-recommended).** The lane's DDL rides the shared fail-loud ensure; the lane does **not** carry lane-owned containment. The blast radius is **recorded plainly** (`decisions.md` §4 row 17) and **proved inductively** (W8), not engineered away. Per-statement isolation inside the shared ensure is **routed out** as a house-pattern change.
+
+### 12.3 Rationale
+
+The coding councilor's objection is **real** and is upheld as a risk: a memoir-specific DDL failure costs the whole ensemble's availability and rolls back unrelated lanes' schema work. It is discharged by **proof + disclosure**, not by a second mechanism, because the alternative costs more, permanently, than the event it insures against. (1) **The house's own documented reasoning lands on this lane's side**: the docstring's stated reason for fail-loud is *"better to fail loudly at startup than to continue and crash on the first query that references the missing column"* — and a missing `tsv` column is **exactly** that crash class, since the PG lexical ranker queries `tsv`. Option (b) would, for this lane alone, choose "continue and crash later" against the house's own words. (2) **The likelihood floor is very low and the triggers are not memoir-specific**: the DDL is simple, idempotent (`IF NOT EXISTS`), verified on the house PG 16.15, against a brand-new uncontended table, with the boot order pinned (`create_all` `:975` → ensure `:997`) so the table exists; permission-denied is implausible (the same connection already ALTERs a dozen tables), connection-lost breaks everything rather than memoir, and a syntax error is excluded by verification. (3) **The consequence is loud, bounded and recoverable**: boot abort with the offending statement named; the rollback is **FIX-LOSS only** — every inherited statement is idempotent and the whole set re-applies on the next boot after the fix. (4) **Option (b) would be the first per-lane DDL-tolerance carve-out in this method's history** (the `except Exception` sites in `manager.py` are all boot-epoch, compaction and probe contexts, none a DDL-policy exception), and it would make the house's single fail-loud seam conditional on a lane — inviting N divergent DDL failure policies. (5) **Option (b)'s fallback is not free**: a PG-without-`tsv` lexical path is a **third** ranker variant (Python BM25 over a fetched corpus) alongside PG `ts_rank_cd` and SQLite BM25 — new code, new test surface, and **cross-boot ranking instability** for a memory store whose whole point is consistent recall. (6) **The kill-switch does not protect the boot under either option** (the substrate is knob-independent by flags #13/#14), so (b) buys "the daemon boots with a degraded memoir" rather than "the operator has a way out" — a degraded-but-booting state that must then be surfaced forever (the house has a scar with exactly that class: metrics families DARK while publishing LIVE series). **Falsification condition (recorded):** if the house's install base ever includes PostgreSQL **older than 12** (no generated columns) or managed/multi-tenant PG where a memoir DDL failure is materially more likely, lane-owned containment becomes the correct posture and **must be re-ruled**.
+
+### 12.4 W8 — the required proof mechanism (planner folds into `phase1-plan.md` AC3 and `phase7-plan.md` D7.6)
+
+**W8.1 — Induction (scratch only; never the live tree, install, or journal).** In a scratch PG database, from a **frozen-binary COPY** in a scratch root, with `ENSEMBLE_SELF_ENV=sandbox`, a **per-variable** PG env scrub (never `env -u POSTGRES_*`), `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` **pinned explicitly** (never `env -u`), and the standing live-fence byte assertions (state.json PRE==MID==POST, `current->` symlink untouched, no promote-journal write), make the memoir ensure **fail deterministically**: replace the memoir `tsv` statement **in the scratch copy only** with one that parses but cannot execute — e.g. `ALTER TABLE memoir_episodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (no_such_imm_function(title)) STORED`. The scratch copy + scratch root derivation are **mandatory**, not optional: a frozen binary's path derivation resolves the **live** install root, so a staged boot smoke is not isolated.
+
+**W8.2 — Observations (these assertions turn the blast radius from a claim into a proof).**
+1. **Boot FAILS** — the daemon never reaches `readyz`; the process/unit exits non-zero.
+2. The failure **names the offending memoir statement** (the error surfaces the statement text).
+3. **No partial memoir schema survives** — `tsv` is absent after the failed boot (the transaction rolled back).
+4. **The inherited lanes' statements did NOT commit either** — assert the ABSENCE of a sentinel another lane's statement would have added. **This is the assertion that makes the collateral-rollback half of the blast radius a proof rather than a claim.**
+5. The **live fence holds** — state.json byte-identical PRE/MID/POST, symlink untouched, zero live contact.
+
+**W8.3 — Structural pins (mutation-verified; keeps the property durable).**
+1. The shared ensure contains **exactly one** `with self._engine.begin() as conn:` wrapper around the per-statement execute loop (assert exactly one `begin()` in the statement-execution block).
+2. The statement-execution loop has **no per-statement try/except** (assert no `try:` between the loop header and `conn.execute(text(stmt))`).
+3. The memoir `tsv`/GIN statements are **present in that same shared list**.
+4. **Mutation legs:** (i) wrap the per-statement execute in a try/except ⇒ the structural pin **and** W8.2-1 flip RED; (ii) open a second `begin()` ⇒ (1) flips RED; (iii) remove the memoir statements from the list ⇒ (3) flips RED.
+
+**W8.4 — Non-regression (the proof must be two-sided).** The same scratch boot with the memoir statements **valid** ⇒ boot succeeds, `tsv` + GIN exist and populate on INSERT, and the inherited lanes' statements **do** commit (the shared ensure still does its job).
+
+**W8.5 — Disclosure.** W8's outcome is the **proof** of the blast radius named in `decisions.md` §4 row 17 — it is the **adopted posture, not a defect**. The gate evidence must state the observed blast radius (whole-boot abort + collateral rollback of the shared transaction) verbatim; a run showing any **different** outcome (e.g. the daemon booting with a half-applied ensure) is **RED** and blocks.
+
+### 12.5 Required risk-register row (planner folds into `plan-overview.md` §6)
+
+| ID | Risk | Impact | Mitigation |
+|----|------|--------|------------|
+| **R10** | **A memoir ensure-DDL failure aborts the whole daemon boot and rolls back the shared ensure** — the memoir `tsv` + GIN statements ride the house's single all-or-nothing `_ensure_postgres_columns` transaction (`daemon/manager.py:8055` def / `:8269` list / `:9554-9557` execute; no per-statement try/except; fail-loud by design `:8259-8265`). A memoir-specific failure therefore rolls back the inherited lanes' ensure statements in the same transaction AND aborts boot; the kill-switch governs the surface, not the schema, so it does **not** protect the boot. | **HIGH** impact — whole-ensemble availability loss until an operator fixes it and reboots. **LOW** likelihood — idempotent simple DDL, PG 16.15 verified, the new table is uncontended, boot order pinned; the realistic triggers (permission denied, connection lost, syntax error, table missing) are either non-memoir-specific or already excluded by the ordering and the verification. | **ADOPTED POSTURE: no lane-owned containment** (Q6 architect ruling; `decisions.md` §4 row 17) — per-statement isolation inside the shared ensure is a house-pattern change, routed OUT. Mitigations: the failure is **loud and diagnosable** (boot abort naming the statement); **W8 inductively PROVES** the blast radius (scratch boot + one deliberately invalid memoir statement + structural pins) instead of asserting it in prose; the rollback is **FIX-LOSS only** and every inherited statement is idempotent, so the shared ensure re-applies on the next boot; the operator lever for the **surface** remains the kill-switch. **Residual (recorded, not mitigated):** the kill-switch does not protect the boot — a broken memoir DDL is unbootable until the release or the DB is fixed. **Falsification condition:** a PG < 12 or managed/multi-tenant install base re-opens this ruling (lane-owned containment becomes correct). |
+
+---
+
+## 13. V-1 — refusal-vocabulary ruling (Phase C, 2026-11-05) — **USER-RULED**
+
+### 13.0 Authority
+
+The **Emperor, as OWNER of the memoir tool surface**, ruled on 2026-11-05 — verbatim:
+
+> *"as the OWNER of the memoir tool surface, I rule that TRUTHFULNESS OF THE ERROR OUTWEIGHS THE FROZEN COUNT — at pre-release, before anything ships and before any pin/compat burden exists, authorizing a 19th code for a genuine user-input error is cheap; shipping a code that calls a user mistake an 'internal error' is a permanent lie in the contract, and my own future instances will read those errors and mis-learn from them. So: if an existing code (or a best-fit 19th) can say 'empty/invalid query' honestly, take it — authorize the 19th if necessary. Keep 18 ONLY if one of them is genuinely honest for this case. Record the ruling in decisions.md either way, and keep the pin/coverage consequences explicit in the ceremony notes."*
+
+This **supersedes** the architect's earlier "prefer minimum churn" steer, and it supersedes the *authority* of the architect's own same-day V-1 ruling (which had reached the same disposition on architecture grounds). The disposition is unchanged; **the authority is now the surface's owner**, and the audit below is the reasoning the ruling required.
+
+### 13.1 The audit — all 18 codes tested for a GENUINELY honest fit
+
+| # | Code | Honest for an empty/whitespace `memoir_recall` query? | Why |
+|---|---|---|---|
+| 1 | `memoir_disabled` | **NO** | Names the knob, not the input — and the knob gate fires *before* argument validation, so it cannot even be reached for this case. |
+| 2 | `memoir_agent_unknown` | **NO** | Identity failure. |
+| 3 | `memoir_not_authorized` | **NO** | Identity/authority failure. |
+| 4 | `memoir_reason_required` | **NO** | Right *family* ("required field"), **wrong field** — it tells the model its PIN REASON is missing and invites a wrong retry. |
+| 5 | `memoir_actor_required` | **NO** | Right family, wrong field (actor). |
+| 6 | `memoir_invalid_actor` | **NO** | Wrong field. |
+| 7 | `memoir_keepsake_cap_reached` | **NO** | Domain rule (pin admission). |
+| 8 | `memoir_not_found` | **NO** | Id-lookup failure. |
+| 9 | `memoir_not_a_keepsake` | **NO** | Domain rule (unpin). |
+| 10 | `memoir_importance_out_of_range` | **NO** | Wrong field. |
+| 11 | `memoir_body_too_long` | **NO** | Wrong field (write path). |
+| 12 | `memoir_budget_exceeded` | **NO** | Names the **output** envelope (recall results), not the input. |
+| 13 | `memoir_internal_error` | **NO** | Claims a bug/agency failure where the caller sent `""` — **precisely the permanent lie the ruling forbids**. |
+| 14 | `memoir_k_out_of_range` | **NO** | Right family, **wrong parameter** — `k` is valid in this request. |
+| 15 | `memoir_invalid_window` | **NO** | `since`/`until` are *timeline* parameters; recall has no window. |
+| 16 | `memoir_title_too_long` | **NO** | Wrong field. |
+| 17 | `memoir_stars_out_of_bounds` | **NO** | Wrong field. |
+| 18 | `memoir_invalid_event_at` | **NO** | Wrong field. |
+
+> **AUDIT RESULT: 0 of 18 honest.** The near-misses are all *adjacent, not honest*: the "required-field" pair names the wrong field, the "argument" pair names the wrong parameter, and the catch-all names the wrong **agency**. Each would misroute the model's retry — which is exactly what "my own future instances will read those errors and mis-learn from them" describes.
+
+### 13.2 Ruling — the 19th code
+
+> **`MEMOIR_CODE_QUERY_REQUIRED = "memoir_query_required"`** — mapped **identity** from the retrieval service's `query_required`.
+
+- **Name**: the "required" sub-family (`memoir_reason_required`, `memoir_actor_required`) — the family style, and it says exactly what is true: a required input was empty.
+- **Rejected: generic `memoir_invalid_argument`** — a dumping ground that re-creates today's mislabelling class at a nicer label, and the one member of the set that would never say anything specific.
+- **Rejected: silent reinterpretation** of an empty query as "most recent" — masks a caller bug *and* smuggles `memoir_timeline` semantics into `memoir_recall` (the exact "two tools, two expectations" error flag #10 warns against).
+- **The predicate is already right**: `daemon/services/memoir_retrieval.py:374` — `clean_query = (query or "").strip()` / `if not clean_query: raise MemoirRecallError("query_required", "the recall query must not be empty")` — covers **empty and whitespace**. No tool-side pre-validation is added: D4.8's philosophy is that the tool never re-derives a bound, it maps the service's code onto the vocabulary.
+
+### 13.3 Mechanical fix list — verbatim for the dev
+
+**`daemon/tools/memoir.py`**
+1. Add the constant beside its siblings (`:174`, after `MEMOIR_CODE_INVALID_EVENT_AT`): `MEMOIR_CODE_QUERY_REQUIRED = "memoir_query_required"`.
+2. Add **one** member to the `MEMOIR_CODES` frozenset (`:178-199`).
+3. `:201`: `assert len(MEMOIR_CODES) == 18` → `== 19`; `:202` message `"EXACTLY 18 codes"` → `"EXACTLY 19 codes"`.
+4. `:42` docstring: "must match the 18 exactly" → **19**.
+5. `:53-58` docstring: the mapping table gains *"the recall-service `query_required` → `memoir_query_required`"*; the sentence *"A service code with NO frozen counterpart (`query_required`) falls back to `memoir_internal_error` …"* loses its now-mapped example → *"A service code with NO frozen counterpart falls back to `memoir_internal_error` with the TRUE message preserved — the vocabulary is frozen, so the tool never invents a code (the same fallback covers every unexpected internal failure)."*
+6. `_RECALL_CODE_MAP` (beside `:340`): add `"query_required": MEMOIR_CODE_QUERY_REQUIRED`.
+7. `:344-346` comment: drop the `query_required` example, keep "any future service code with no frozen counterpart".
+8. **No `__all__` change** — `__all__` exports the `MEMOIR_CODES` *set*, not the individual constants (the test imports module-level names directly).
+
+**`tests/unit/test_memoir_tools_unit.py`**
+9. Import block (`:47-60`): add `MEMOIR_CODE_QUERY_REQUIRED`.
+10. `:170` test name `test_the_import_time_assertion_freezes_eighteen_codes` → `…_freezes_nineteen_codes`; `:171` `== 18` → `== 19`.
+11. `:410` test: rename `test_a_blank_recall_query_falls_back_to_the_catch_all` → `test_a_blank_recall_query_refuses_with_query_required`; rewrite the docstring (it is no longer a fallback — it is the honest code); assert `MEMOIR_CODE_QUERY_REQUIRED` (keep `assert "empty" in result`). **This assertion IS the pin** and is mutation-meaningful: reverting item 6 turns it RED.
+
+**`daemon/services/memoir_retrieval.py`** — **no change** (it already emits `query_required` with the true message and trims the predicate).
+
+**Optional (cheap, not required)**: an 11th leg in `test/packs/memoir_mutation_matrix_test.py` that deletes the `_RECALL_CODE_MAP` entry ⇒ item 11 must go RED.
+
+### 13.4 Instrument census — who carries the count (the ruling's explicit question)
+
+| Instrument | Carries the `MEMOIR_CODES` count? | Detail |
+|---|---|---|
+| `daemon/tools/memoir.py:201` import-time assertion | **YES** | item 3 |
+| `tests/unit/test_memoir_tools_unit.py:171` + the test **name** ("eighteen") | **YES** | item 10 — the name carries the count in prose and must flip too |
+| **MT-01** (`test/packs/metrics_read_mutation_matrix_test.py:92-93`) | **NO** | Its literal is `assert len(PRIVILEGED_TOOL_CATEGORIES) == 18` → `== 17` — the **category** count. It never references `MEMOIR_CODES`; unaffected. |
+| `test/packs/memoir_mutation_matrix_test.py` (10 legs) | **NO** | Zero references to `MEMOIR_CODES`, `query_required`, or `memoir_internal_error`. |
+| Any shell pack (`test/packs/*memoir*.sh`) | **NO** | Repo-wide grep: no pack references `MEMOIR_CODES`. |
+| A separate frozen-set "coverage table" | **Does not exist** | Coverage is the per-code unit-test set; the new code's coverage row is item 11. |
+| `agents/.prompt-artifacts.sha256` | **NO** | The ari doctrine mentions `memoir_disabled` as an example but does **not** enumerate the set ⇒ baseline stays 161/161. |
+
+**The refusal-code set is a separate, module-local frozen set.** That is precisely why 18 → 19 never reaches the surfaces the Phase-4 registration ceremony settled.
+
+### 13.5 Ceremony-notes text — VERBATIM for the Phase-8 fold
+
+> **V-1 refusal-vocabulary consequence (user-ruled 2026-11-05; `decisions.md` §4 row 18).** This release ships the refusal vocabulary at **19 codes**, not 18: `memoir_query_required` was authorized by the Emperor — owner of the memoir tool surface — because no existing code was honest for an empty/whitespace `memoir_recall` query (audit: **0 of 18 honest**; every near-miss names a different *field* or a different *parameter*, and `memoir_internal_error` claims a bug where the caller sent an empty string). The 18 → 19 bump is **release-local and self-contained**: it touches **only** `daemon/tools/memoir.py` (the constant, one frozenset member, the import-time `assert len(MEMOIR_CODES) == 19`, the docstring count and mapping table, the `_RECALL_CODE_MAP` identity entry) and `tests/unit/test_memoir_tools_unit.py` (the import, the count pin **and its test name**, and the inverted empty-query test). It does **NOT** touch the `PRIVILEGED_TOOL_CATEGORIES` census (#18 of 18), the 5-tool / 4-family counts, `DYNAMIC_TOOL_NAMES` / `KNOWN_TOOL_NAMES`, the prompt-artifact baseline (`agents/.prompt-artifacts.sha256` stays 161/161 — the ari doctrine does not enumerate the set), **MT-01** (`test/packs/metrics_read_mutation_matrix_test.py:92-93` carries the *category* count 18 → 17, not the refusal-code count, and is unaffected), or the memoir mutation matrix (its 10 legs reference no code). **Ceremony acceptance therefore does NOT re-run MT-01 for this change and does NOT re-stamp the prompt baseline; it DOES require the memoir tools unit pack green** — the inverted empty-query test is the pin, and it is mutation-meaningful (reverting the `_RECALL_CODE_MAP` entry turns it RED) — **plus a `grep` census showing `len(MEMOIR_CODES) == 19` as the only count-bearing literal on this set.** Rollback posture is unchanged (no schema, no migration delta): a rollback reverts the vocabulary to 18 and degrades the empty-query refusal to `memoir_internal_error` — **fix-loss only, no data effect**.
+
+Recorded in `decisions.md` §4 row 18.
+
+---
+
+*Phase B architect adjudication. Verdict SOUND-WITH-AMENDMENTS; 14 flags ruled (4 ADOPT / 9 ADOPT-AS-AMENDED / 1 CONFIRMED-no-row); 43 amendments (12 blocking); 6 deviation records; R1–R4 verified compliant. Adjudicated 2026-11-05 on `feature/ari-memoir-store` @ `63032008b`. Addenda: §11 delta re-review (post plan-fold `4d5b43637`), §12 Q6 containment ruling (plan council record `6601b15a`), and §13 V-1 refusal-vocabulary ruling (Phase C, **user-ruled**; `decisions.md` §4 rows 1–18).*
