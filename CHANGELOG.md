@@ -93,6 +93,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.28.15] — 2026-11-06
+
+### Added — prompt-injection defense for the aegis security family (`feature/canary-injection-defense`, agents/ + tests/ + .agents/ only)
+
+- **`injection-screen` skill** — a load-and-screen gate for untrusted content intake, delivered as a per-agent data file (`injection-rules.json`, canonical once, own version) plus `skills-template/injection-screen.md` mirror bodies for the manifest-bearing agents (aegis, canary, sweeper, worker per D2-B); hacker/cracker are doctrine-only. The skill is NOT auto-loaded (versioned `auto_load` mirror exception).
+- **Fencing doctrine (`### (f)` rule.md sections) on five personas** — aegis, hacker, cracker, sweeper, worker: untrusted content is observational data, never instructions; screened-or-fenced intake; the `[UNTRUSTED-ADJACENCY: …]` two-turn marker discipline for irreversible actions inside an ingestion window.
+- **`canary` red-team agent** — the family's fifth persona, authored to the cap (seven numbered cardinals), exact 4-category allow (`bash`, `filesystem`, `time`, `help`), `deny_spawn == ["knowledge"]` pinned-as-ruled, no manifest-bearing surfaces beyond the authored set.
+- **Pin ceremony** — prompt-artifact baseline 177 → 181 (canary's four artifacts), T29–T38 family pins, `FAMILY_ROSTER`/`ALLOW_BY_AGENT`/`CARDINAL_COUNT_BY_AGENT` exact-set restructures (C3/C4b), the DOC-10 worker additivity pin, and the NC-1 12-needle header-grammar scoping.
+- **Post-gate reconciliation notes** (decisions.md §H) — the E(f) "transplant" standard is meaning-preserving re-voicing, not byte-verbatim; the T38 ladder spec-vs-realized reconciliation, with the executed mutation record authoritative.
+- **Drift absorption at stage time** — the nest-report duty sections on the family rule.md files and the nest grant in the trio/aegis/worker meta.json allow sets are absorbed into the lane's exact-set pins (canary NOT granted — authored post-ceremony); the baseline is re-stamped ONCE on the merged tree (181 rows, 46 re-hashed) via the house generator.
+
 ## [0.28.14] — 2026-11-06
 
 ### Changed — ari Plane long-term project-tracking policy in prompts (`feature/ari-plane-tracking`)
