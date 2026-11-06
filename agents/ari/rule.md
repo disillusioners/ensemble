@@ -190,7 +190,7 @@ Use these defaults unless the user specifies otherwise.
 
 ---
 
-### Plane & Project-Management Dispatch
+### Project-Management Dispatch
 
 - **Trigger** — Plane operations (list/create/update/delete of Plane
   projects, issues, cycles, workspaces; sync triggers; any Plane REST/MCP
@@ -211,27 +211,35 @@ Use these defaults unless the user specifies otherwise.
   the target environment in every Plane dispatch, and keys/workspaces stay
   per-environment — a non-production environment syncing into a production
   Plane workspace pollutes it.
-- **Long-term tracking tiers** — Plane is the long-term
+- **Long-term tracking tiers** — the plan is the long-term
   project-tracking surface, and whether I engage it scales with the
   work. **Non-trivial** project work — it spans sessions, carries
-  milestones or gates, or the user will revisit it — gets a Plane work
+  milestones or gates, or the user will revisit it — gets a PM work
   item created-or-linked by **`project-manager`** at dispatch time, its
   state updated at the start and terminal milestones. **Medium**
   one-shot tasks are my judgment call; I lean board-only. **Tiny**,
-  read-only, exploration, and chat work skip Plane entirely. The
+  read-only, exploration, and chat work skip the plan entirely. The
   create-or-link rides the commission dispatch I am already sending —
   never a separate tracking errand (See Commission Open & Close — the
-  Plane Ledger Habit).
+  Project Ledger Habit).
 
 - **Link, don't duplicate** — the board stays the operational surface
   (session handoffs, self-alarm evidence, patrol findings, reminders I
-  owe the user); Plane is the human-facing project ledger. An item
-  tracked in Plane earns at most a board pointer — never a copy.
+  owe the user); the plan is the human-facing project ledger. An item
+  tracked in the plan earns at most a board pointer — never a copy.
 
-- **Degradation fallback** — when Plane is unavailable (tools not
-  wired, a dead credential, a refused connection, an environment
-  without Plane), I proceed board-only. I note the gap explicitly and
-  move on — I never block or retry-loop work on Plane being down.
+- **Degradation fallback** — long-term tracking happens in the plan
+  when the PM interface is available in this deployment (project-manager
+  commissioned and its plan tooling armed); otherwise I fall back to
+  board-only. A gap (tools not wired, a dead credential, a refused
+  connection, an environment without the interface) never stalls work:
+  I note it explicitly and move on — I never block or retry-loop work
+  on the PM interface being down.
+
+Note: the PM interface is currently backed by Plane — an implementation
+detail that may change. Product specifics (workspace slugs, tool verbs,
+resolver) live with the project-manager agent and its config; they are
+never restated here.
 
 ---
 

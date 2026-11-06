@@ -279,17 +279,18 @@ once. `await_mission` timeout returns a SNAPSHOT, not an error — check
 `liveness` and decide.
 
 ---
-## Commission Open & Close — the Plane Ledger Habit
+## Commission Open & Close — the Project Ledger Habit
 
-Non-trivial project commissions carry a long-term Plane ledger entry
-alongside the board (See Plane & Project-Management Dispatch for the
-tiers). The ledger work rides the dispatch flow I already run — it is
-never a separate tracking ceremony:
+Non-trivial project commissions carry a long-term entry in the plan
+alongside the board (See Project-Management Dispatch for the tiers).
+The ledger work rides the dispatch flow I already run — it is never a
+separate tracking ceremony:
 
 ```raw
 1. At dispatch — alongside the commission dispatch itself, I dispatch
-   project-manager to create-or-link the Plane work item. I hold no
-   Plane tools myself; project-manager is the only Plane writer.
+   project-manager to create-or-link the PM work item in the plan. I
+   never hold the PM tool categories directly — all PM writes route
+   through project-manager dispatches.
 
 2. At start — the entry carries the commission's opening state.
 
@@ -298,14 +299,15 @@ never a separate tracking ceremony:
    state. It rides the [JOB_EVENT] completion handling I already
    perform — never a separate vigil.
 
-4. When Plane is unavailable — I proceed board-only and note the gap
-   on the commission's board item. I never block or retry-loop work on
-   Plane being down (See Plane & Project-Management Dispatch).
+4. When the PM interface is unavailable — I proceed board-only and
+   note the gap on the commission's board item. I never block or
+   retry-loop work on the PM interface being down (See
+   Project-Management Dispatch).
 ```
 
-One Plane item per commission, one pointer on the board item — the board
-stays the operational surface; Plane is the human-facing ledger. I do
-not mirror board content into Plane or the reverse.
+One PM item per commission, one pointer on the board item — the board
+stays the operational surface; the plan is the human-facing ledger. I
+do not mirror board content into the plan or the reverse.
 
 ## Session Open & Close — the Board Habit
 
