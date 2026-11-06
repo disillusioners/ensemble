@@ -3891,10 +3891,6 @@ class TestInjectionScreenCorpusHygiene:
         assert covered_ids == {f"INJ-{i:02d}" for i in range(1, 19)}, (
             "every rule id needs >= 1 positive fixture"
         )
-        per_category = {}
-        for case in positives:
-            for rid in case["expected_rules"]:
-                per_category.setdefault(rid.split("-")[0] + "-" + rid.split("-")[1], set())
         # count positives per rule CATEGORY via the data file's mapping
         data = json.loads(INJECTION_RULES.read_text(encoding="utf-8"))
         cat_of = {r["rule_id"]: r["category"] for r in data["rules"]}
@@ -4372,14 +4368,20 @@ class TestScannerExecution:
 
         scratch = Path(tempfile.mkdtemp(prefix="canary-t38-"))
         release = self._release_root()
-        cwds = {"repo-root": REPO_ROOT, "tmp": scratch}
-        if release is not None:
-            cwds["install-release-root"] = release
+        assert release is not None, (
+            "the ruled three-CWD set requires the install-release root "
+            "(~/agents-ensemble/releases/v*) — the leg must fail loudly on a "
+            "host without it, never silently degrade to 2 CWDs (A7)"
+        )
+        cwds = {"repo-root": REPO_ROOT, "tmp": scratch, "install-release-root": release}
         outputs = {}
         for label, cwd in cwds.items():
             proc = self._run(cwd)
             assert proc.returncode == 0, f"{label}: rc={proc.returncode} {proc.stderr[-300:]}"
             outputs[label] = proc.stdout
+        assert len(outputs) == 3, (
+            f"the realized CWD count is {len(outputs)}, the ruled set is 3"
+        )
         assert len(set(outputs.values())) == 1, (
             f"the three-CWD runs diverge: {[(k, len(v)) for k, v in outputs.items()]}"
         )
