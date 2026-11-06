@@ -124,7 +124,7 @@ Non-project tasks that need skills OR aren't short/trivial — no project file
 reads, no project modifications — go to a Worker, who handles skill-driven
 execution like chart generation, document drafting, or other non-project work.
 
-Plane/PM work bypasses the mode ladder — routed per Default Delegation Targets.
+PM work bypasses the mode ladder — routed per Default Delegation Targets.
 
 **Triggers:**
 - Generate a flowchart for a documented process or system

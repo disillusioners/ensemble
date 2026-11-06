@@ -1440,14 +1440,16 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/charter/skills-template/install-mermaid-cli.md": "ee43576c9b9d746c8ce6563c85ed289567e9fcebadc75c0bd7ede417aaaa667e",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "fcd6f4612d6077a81fe521341e6e2332d1f5da31880d3fc710decbc0579fedbf",
     "agents/_prompt_system/innate-skills/chart/skill.md": "fa29084d7dc0f86c87d667ef46dcfc060fa11e20e0b647295cdd75ff43353515",
-    # agents/ari/workflow.md re-pinned 2026-11-06 (ari-pm-terminology):
-    # implementation-agnostic reword of the PM-tracking sections per user
-    # feedback (Discord 2026-11-06): "Plane" wording → generic plan/PM
-    # wording, ZERO behavior change; section renamed to "Commission Open &
-    # Close — the Project Ledger Habit".
-    # Prior value 281de549be046b01dd2455f56678dc2206c42a74d6700f665fcfa163c6e8cd15.
-    # Prior re-pin note: ari-plane-tracking (long-term tracking doctrine).
-    "agents/ari/workflow.md": "468f4f1c43d175b9126adaf2a58d913d4b0146dda339c34ff5b27dd490b36c44",
+    # agents/ari/workflow.md re-pinned 2026-11-06 (ari-pm-terminology-RESIDUAL):
+    # whole-file genericization of the LAST residual product mentions outside
+    # the behavioural sections — the Triage Decision Matrix row (and its
+    # example quote) now say "PM operations" / "the project".  Pure wording:
+    # no rule, ordering, or behavioural change.  Brief: ari-pm-terminology-
+    # residual; authority = the ari_plane_tracking_policy.terminology_principle
+    # (prompt-level generic, implementation named ONCE in rule.md).
+    # Prior value 468f4f1c43d175b9126adaf2a58d913d4b0146dda339c34ff5b27dd490b36c44.
+    # Prior re-pin note: ari-pm-terminology (PM-tracking section reword).
+    "agents/ari/workflow.md": "a0f5a382f6683c921e059ebde791363847ab824a20b2795ce5dd33b18f3a542b",
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
     # daemon/sources/registry.py re-pinned 2026-11-05 (nest-anomaly-report phase 5
@@ -1492,15 +1494,17 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # ceremony, so the pinned content-sha256 moved with the real bytes.
     # Prior value ce96896142f568c480a2f92b9b92fa0775be641d877fa386205d8438d55b21b4.
     "agents/architect/rule.md": "ba53247b1e2095ba3776a7d23713c9b796927575647cb15e99842fe54b779a73",
-    # agents/ari/rule.md re-pinned 2026-11-06 (ari-pm-terminology):
-    # implementation-agnostic reword of the three long-term-tracking policy
-    # bullets per user feedback (Discord 2026-11-06): "Plane" wording →
-    # generic plan/PM wording + the single concise Plane backing note,
-    # ZERO behavior change; section heading renamed to
-    # "Project-Management Dispatch".
-    # Prior value d1df71e1c3471d5938c6aa10ad2e39f31f0d8d64f791ff7e04b91dd2d5500bde.
-    # Prior re-pin note: ari-plane-tracking (long-term tracking doctrine).
-    "agents/ari/rule.md": "a133f840703f7dabe6d6910e660a6febe1e0a8adb8a83e42b1497d122851a0de",
+    # agents/ari/rule.md re-pinned 2026-11-06 (ari-pm-terminology-RESIDUAL):
+    # whole-file genericization — the Default Delegation Targets row and the
+    # four Project-Management Dispatch bullets (Trigger / Topology / Scope
+    # split / Environment discipline) lost their residual product wording and
+    # their backticked implementation verb names.  The section now carries
+    # EXACTLY ONE occurrence: the sanctioned backing note.  Pure wording: no
+    # rule, ordering, or behavioural change.  Brief: ari-pm-terminology-
+    # residual.
+    # Prior value a133f840703f7dabe6d6910e660a6febe1e0a8adb8a83e42b1497d122851a0de.
+    # Prior re-pin note: ari-pm-terminology (PM-tracking section reword).
+    "agents/ari/rule.md": "8063c9ce005d300f34b10fac2b81c3f00ca0756720cb05858dcc3e1a594a2e6d",
     "agents/coder/soul.md": "6263b648cfee8eeb84bb90361687e45728bc8bdae60702e965a84a23a1b46968",
     # agents/developer/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
     # C8): the duty section was APPENDED to this file by the phase-5 duty
