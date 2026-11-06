@@ -1,0 +1,4 @@
+worktree_venv_python_exists=false
+python_used=/home/nea/ensemble-src/.venv/bin/python
+sys_executable=/home/nea/ensemble-src/.venv/bin/python
+pwd=/home/nea/ensemble-src-wt-ari-plane

@@ -1,0 +1,24 @@
+ari-plane-tracking G4 minimality + hygiene summary — assembled from /tmp/ari-plane-gate logs + evidence-worker verification (2026-11-06).
+
+--- git show --stat --oneline 5ab2009c0 (verbatim) ---
+5ab2009c0 feat(ari): bake Plane long-term tracking policy into prompts
+ agents/.prompt-artifacts.sha256        |  4 ++--
+ agents/ari/rule.md                     | 21 +++++++++++++++++++++
+ agents/ari/workflow.md                 | 27 +++++++++++++++++++++++++++
+ tests/test_chart_image_delivery_e2e.py | 32 ++++++++++++++------------------
+ 4 files changed, 64 insertions(+), 20 deletions(-)
+
+--- Full numstat (verbatim) ---
+2	2	agents/.prompt-artifacts.sha256
+21	0	agents/ari/rule.md
+27	0	agents/ari/workflow.md
+14	18	tests/test_chart_image_delivery_e2e.py
+
+--- Path-exclusion diff (command + result) ---
+$ git diff --name-only 5ab2009c0^ 5ab2009c0 -- daemon/ scripts/ frontend/ plugins/
+(empty output)
+→ exclusions rc=0, empty = PASS (G4-static.log: excl_rc=0)
+
+--- Porcelain ---
+pre-evidence-commit porcelain: 0 lines (empty) — verified by the evidence worker at gate start (STEP 1), before archive/doc/commit.
+post-commit porcelain: verified 0 lines (checked after commit).

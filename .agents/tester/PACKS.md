@@ -1,3 +1,16 @@
+## ari-plane-tracking prompt gate — ariplane_prompt_gate (2026-11-06) PASS / GO
+Scope: prompt-only lane gate (G1 baseline, G2 guard set, G3 base↔tip census, G4 hygiene). Fences: PY=/home/nea/ensemble-src/.venv/bin/python cwd=worktree; per-var scrub `env -u PORT -u ENSEMBLE_SELF_ENV -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL`; `timeout 240/300` + `--timeout=120`; `-p no:cacheprovider -p no:randomly`; no worktree writes; no live contact.
+Invocations:
+1. scripts/protection/generate_prompt_artifact_baseline.py --check → exit 0 (OK — 177)
+2. pytest tests/test_chart_image_delivery_e2e.py -k test_phase_d_does_not_modify_sealed_artifacts → 1P
+3. pytest tests/unit/test_anomaly_report_duty_prompts.py → 19P
+4. pytest tests/unit/test_instance_ops_prompt_layer.py → 3P
+5. pytest tests/unit/tools/test_mission_watch_prompts.py → 15P (commission path typo corrected)
+6. pytest tests/unit/test_plane_prompt_verb_check.py → 9P (commission path typo corrected)
+7. pytest tests/test_chart_image_delivery_audit.py → 46P
+8. Census: spec plan.md §3.3 suite at 17413bca5 (git-archive scratch) ↔ 5ab2009c0 → FAILED sets identical (10 ids), net-new ∅
+Last run: 2026-11-06 — PASS. Evidence: RESULTS/2026-11-06-ari-plane-tracking-functional-gate.md + EVIDENCE/ari-plane-tracking-gate/
+
 ## Commission nest-anomaly-report (wi-2d691ed2) — TESTER-GATE FIX CYCLE: B3 pack REGISTRATIONS (AM-12/AM-13 → AM-16 gate-verifiable) (2026-11-05, fix lane `feature/nest-anomaly-report`)
 
 > **What this block registers.** Blocker **B3**: the AM-12 pins existed and were mutation-meaningful
