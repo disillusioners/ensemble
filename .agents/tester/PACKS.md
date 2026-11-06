@@ -1,3 +1,36 @@
+<!-- canary-p5-functional-gate-begin -->
+## Commission canary-injection-defense — P5 FUNCTIONAL GATE registration (2026-11-06, verification @ `08bcbef2e` (A–H legs) → `1c1739439` (post-fix-cycle) → `bcd08d2b6` (mutation record); TRUE base `24ba60462`; RESULTS: 2026-11-06-canary-injection-defense-functional-gate.md + 2026-11-06-canary-injection-defense-mutation-record.md)
+
+> **What this block registers.** The P5 gate's executed corpus (Gates A–H + Gate M / NC-1) for the
+> canary-injection-defense lane. **No new pack scripts are committed by this gate** — recurring
+> coverage lives in the lane's own family test file (collected by every whole-tree sweep); this is
+> the one-shot registry, keep-both with the P4 block (file bottom) and the aegis-family Gate B row
+> above (2026-11-05) — newest-first honored.
+>
+> **Gate outcome (for the record):** **GO — net-new deterministic reds 0** (CMD-level FAILED-list
+> diff vs TRUE base `24ba60462`; the 5 prompt-integrity reds proven SAME-FILE-SET with the id-shift
+> mechanism derived from the lane's own file additions; all reds isolated 3×). Every disclosure is
+> routed/pre-existing; none lane-caused and live at HEAD. **Fences (every run):** interpreter
+> `/home/nea/ensemble-src/.venv/bin/python` (main-venv + cwd=worktree, `daemon.__file__`
+> worktree-proven); per-variable env scrub (`env -u POSTGRES_DB -u POSTGRES_USER -u
+> POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT -u DATABASE_URL`); `PYTHONDONTWRITEBYTECODE=1`;
+> `-q -p no:cacheprovider`; `timeout` wrappers; zero live contact (:9797/:8079 untouched); logs
+> `/tmp/canary-p5/`.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `canary_p5_corpus_HEAD` / `canary_p5_corpus_BASE` | CMD1–CMD5 IDENTICAL both legs: CMD1 `tests/unit/agents/` · CMD2 `tests/test_chart_image_delivery_e2e.py` · CMD3 `test_plane_agent_surface_census.py + test_tool_category_artifact.py` · CMD4 `tests/unit/test_report_integrity_prompts.py` · CMD5 `tests/unit/tools/test_prompt_section_reference_integrity.py`; `timeout 1800 <py> -m pytest <targets> -q -p no:cacheprovider` + `tee` logs. HEAD = worktree @ `08bcbef2e`; BASE = detached `/tmp/canary-p5-base` @ `24ba60462` (teardown verified: tip intact, porcelain 0, pruned) | CMD1 447→608P (+161 = lane pins) · CMD2 identical id (same 4 sha-mismatch rows) · CMD3 24=24 · CMD4 52P/23S→52P/24S (+1 skip = canary empty-team exemption) · CMD5 5F/1582P→5F/1630P same-file-set · all reds isolated 3× (deterministic) | 2026-11-06 @ `08bcbef2e` / `24ba60462` | **PASS — net-new 0** |
+| `canary_p5_gateBCF` | B: `TestPhaseDDoesNotModifySealedArtifacts` · C: `test_plane_agent_surface_census.py` + `DISCLOSED_READ_HOLDERS` read FROM THE FILE · F: `git diff 97b76e20e..HEAD -- .agents/shared/metrics/tool-categories.json` + `test_tool_category_artifact.py` | B sealed class 1 red = exactly the 4 base-stale rows (blob-proven pre-existing; no re-pin owed; zero `daemon/` diff) · C 15/15, holders still `{"watcher"}` · F byte-unchanged 3 ways (0 names / 0 bytes / sha identical), artifact test 9/9 | 2026-11-06 | **B PASS-W-DISCLOSURE · C PASS · F PASS** |
+| `canary_p5_gateD` | D-1 `test_report_integrity_prompts.py` incl. `-rs` skip assertion · D-2 `test_prompt_section_reference_integrity.py` · D-3 NC-1 needle sweep (12 needles scoped to the header grammar) | D-1 canary SKIP asserted verbatim (empty-team exemption, `test_report_integrity_prompts.py:242`) · D-2 5F/1630P every red pre-existing developer/charter · D-3 12 needles scoped, **0 prose hits** on lane bodies | 2026-11-06 | **PASS** |
+| `canary_p5_gateE` | boot-scan (source-mode, scratch port + sweep pin + per-var scrub) · skills/canonical-home legs · T38 realized three-CWD leg · six must-not-claim matrix (soul / rule.md / workflow §8 / hand-off report) | (a–e) PASS @ `08bcbef2e`; **(f) FAIL-as-landed → fix cycle `1c1739439`** (§7.6 sentence transplanted to `rule.md:17` + `workflow.md:37`; baseline re-stamp 181, generator `--check` exit 0) → re-gate **556/0**, NC-1 needles 0 on new prose · T38 three-CWD digests byte-equal `2bf0e68a…` ×3 + both-axis monotonicity refusals (exit 3) | 2026-11-06 | **PASS-WITH-DISCLOSURE (fix cycle tester-gate-owned, disclosed for fold-time delta review)** |
+| `canary_p5_gateGH` | G: count re-derivation from the real tree · H: two-control scope + privacy (COMMITTED-range complement; secret scan `sk-(proj\|ant)-` + private-key needles on the diff FILE, positive AND negative controls) | G tracked 379 (find 380 = 1 ignored `.pyc`, disclosed) · dirs 44 · rules-json 1 · baseline 181 · H complement empty (31 = 23 planning + 4 approver + 1 tidier + 1 RESULTS + 2 adjust), personas byte-identical, scan 0/0 both controls | 2026-11-06 | **PASS / PASS** |
+| `canary_p5_gateM` (CER-08) | per-leg scoped suite `timeout 900 <py> -m pytest tests/unit/agents/test_aegis_security_family.py -q -p no:cacheprovider`; 8 plants, predictions written BEFORE planting, restore `git checkout -- <path>` + porcelain 0 between legs | **M1–M8 executed @ `1c1739439`, M7 mandatory** (same-version mirror byte-drift, no bump): 7/8 exact-match predictions; M4 honest mismatch (`test_worker_untouched` NOT red — additivity pin is commit-relative, lane-ADDED-line mutations produce no deletions vs LANE_BASE) recorded, never papered over; baseline 556 → final green 556 | 2026-11-06 @ `1c1739439` | **FLOOR MET** — full record: `RESULTS/2026-11-06-canary-injection-defense-mutation-record.md` |
+| fix-cycle commit | `1c1739439` fix(canary): §7.6 limits sentence at rule.md + hand-off report (Gate E(f); transplant from workflow.md:78; baseline re-stamp 181) | tester-gate-owned persona-text fix; no new doctrine | 2026-11-06 | **LANDED** |
+| doc-fold commit | `573602d23` test(docs): family-suite header docstring refresh (T31–T38 + tidier classes, 181-row baseline) | docstring-only, AST-verified, suite 556 post-fold | 2026-11-06 | **LANDED** |
+| mutation-record commit | `bcd08d2b6` test(evidence): P5 mutation record (executed M1–M8 + CER-08 + M-floor) | the executed record is authoritative (impl-history recovery disclosed inside) | 2026-11-06 | **LANDED** |
+
+<!-- canary-p5-functional-gate-end -->
+
 <!-- v02812-staged-verification-begin -->
 ## Commission VERIFIED — INDEPENDENT STAGED-RELEASE VERIFICATION `v0.28.12` (`aegis-security-family`) @ staged release `/home/nea/agents-ensemble/releases/v0.28.12` — 🟢 **STAGED-VERIFIED — CEREMONY-READY (NO promote)** (2026-11-05)
 
