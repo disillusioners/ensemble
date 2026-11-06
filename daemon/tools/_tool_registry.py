@@ -300,6 +300,18 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # ``tools.allow: ["nest-report"]`` grant lands in the phase-5
     # ceremony.
     "report_anomaly",
+    # memoir (2026-11-05, memoir-store-v1 lane): the five memoir tools —
+    # created by the create_memoir_tools() factory
+    # (daemon/tools/memoir.py). Factory-built (not import-time
+    # registered), so they belong in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #18) — opt-in
+    # only, never default-granted; the ari-only runtime gate lives in
+    # the tool bodies (DD-13 — the factory-captured agent id).
+    "memoir_write",
+    "memoir_pin",
+    "memoir_unpin",
+    "memoir_recall",
+    "memoir_timeline",
 })
 
 
@@ -342,20 +354,16 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # the W4 leader decision, reviewer council 2026-10-02).
 #
 # SAME-PR RULE (D18/A14): the set is pinned by exact-equality asserts at
-# ELEVEN sites — five inline ``frozenset({...})`` literals + six
-# ``EXPECTED_PRIVILEGED_SET`` constants — plus a
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at EIGHT
-# phase-local pins — plus ONE mutation-pack find/replace STRING pair
+# every pin site — five inline ``frozenset({...})`` literals + the
+# ``EXPECTED_PRIVILEGED_SET`` definitions — plus a
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at EACH
+# phase-local pin — plus ONE mutation-pack find/replace STRING pair
 # (``test/packs/metrics_read_mutation_matrix_test.py`` MT-01 — derived
 # from the live constant at pack-import time so a count bump cannot
-# stale it) — NINETEEN assertion sites across THIRTEEN test files
-# (11 exact-set + 8 count) plus the pack (re-grepped with BOTH greps —
-# ``PRIVILEGED_TOOL_CATEGORIES == frozenset`` AND
-# ``== EXPECTED_PRIVILEGED_SET`` AND ``len(PRIVILEGED_TOOL_CATEGORIES)``
-# — on the nest-anomaly-report lane tip, 2026-11-05; the earlier
-# ``TEN/SIXTEEN`` figures were the ari-voice-lane snapshot and went
-# stale when the nest-report phase-1 pack added a seventh AND an
-# eighth count pin).
+# stale it).  The site/file census is re-derived BY GREP at every
+# lane ceremony (the three greps at the end of this block) — the
+# numbers below are the 2026-11-06 memoir-merge derivation, never a
+# frozen literal to copy forward.
 # Adding or
 # removing a category REQUIRES updating ALL of them in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
@@ -378,18 +386,18 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # pin — added 2026-10-22; exact-set AND count) and
 # ``tests/unit/test_notify_user_registration.py`` (the ari-voice pin —
 # added 2026-10-25; exact-set AND count) and
-# ``tests/unit/test_metrics_read_registration.py`` (the metrics-read
-# pin — added 2026-11-03; exact-set AND count) and
+# ``tests/unit/test_metrics_read_registration.py`` (the metrics pin —
+# added 2026-11-03; exact-set AND count) and
 # ``tests/unit/test_anomaly_report_tool_registration.py`` (the
 # nest-report WRITE-tool pin — added 2026-11-05; count) and
 # ``tests/unit/tools/test_nest_report_read_registration.py`` (the
-# nest-report-read pin — added 2026-11-05; exact-set AND count).
-# The seven count pins assert
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == 18`` as of the nest-report-read
-# entry.  SEPARATELY, ONE allow-array TRAILING-ENTRY pin (the ari
-# ``tools.allow`` ARRAY-ORDER discipline,
-# ``tests/unit/test_board_registration.py:280-291``) keeps the per-agent
-# grant arrays ordered; it pins ARRAY ORDER, not the set.
+# nest-report-read pin — added 2026-11-05; exact-set AND count) and
+# ``tests/unit/test_memoir_registration.py`` (the memoir pin —
+# added 2026-11-06; exact-set AND count).  SEPARATELY, ONE
+# allow-array TRAILING-ENTRY pin (the ari ``tools.allow``
+# ARRAY-ORDER discipline, ``tests/unit/test_board_registration.py``)
+# keeps the per-agent grant arrays ordered; it pins ARRAY ORDER,
+# not the set.
 #
 # DERIVE THE PIN SET BY GREPPING THE TREE — do NOT trust this prose:
 #   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ test/ --include=*.py
@@ -652,11 +660,13 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # list bypasses the category gate, so the tool body ALSO carries
     # an ``agent_id == "ari"`` runtime gate. Both gates are required;
     # neither substitutes for the other.
-    # SAME-PR pin updates at the TEN files carrying the SIXTEEN
-    # assertion sites (10 exact-set + 5 count + 1 allow-array
-    # trailing-entry pin — re-grepped on tip 9098df432, ari-voice lane)
-    # are mandatory (this entry ships in the SAME commit as those bumps
-    # — the set must never be red between two commits).
+    # SAME-PR pin updates at the ELEVEN files carrying the EIGHTEEN
+    # assertion sites (5 exact-set + 6 EXPECTED_PRIVILEGED_SET
+    # definitions + 6 count + 1 allow-array trailing-entry pin —
+    # re-derived by grep at the memoir ceremony, 2026-11-05; the
+    # memoir-store lane corrected this census) are mandatory (this entry
+    # ships in the SAME commit as those bumps — the set must never be red
+    # between two commits).
     "notify-user",
     # metrics-read (2026-11-03, metrics-agent-tools lane): the THREE
     # read-only metric-registry tools — created by the
@@ -708,6 +718,26 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # mandatory (this entry ships in the SAME commit as those bumps
     # — the set must never be red between two commits).
     "nest-report-read",
+    # memoir (2026-11-05, memoir-store-v1 lane; MERGED as entry #19 on the
+    # nest-anomaly lineage, 2026-11-06): ari's durable episodic memory +
+    # keepsake governance — the FIVE tools of design §5.4, created by the
+    # create_memoir_tools() factory (daemon/tools/memoir.py). PRIVILEGED
+    # entry #19 of PRIVILEGED_TOOL_CATEGORIES (18 -> 19 after the
+    # nest-report-read entry): the empty-allow inherit universe must NOT
+    # auto-grant authority over ari's durable first-person narrative
+    # (append-only, never hard-deleted). Explicit ``tools.allow: ["memoir"]``
+    # on ari is the only access path — ARI-EXACTLY (R2), and every tool body
+    # ALSO carries its own factory-captured agent_id gate (DD-13 — the layer
+    # prompt content cannot bend; a LITERAL tool name in an allow list
+    # bypasses the category gate outright). The kill-switch
+    # (``ENSEMBLE_MEMOIR_ENABLED``) is fail-closed on indeterminate values
+    # (DR-3) and is read AT CALL TIME (D4.16), behind the auth gate (AM-16's
+    # auth-first order — an unauthorized caller learns nothing about the
+    # knob's state). The write path performs exactly ONE insert
+    # (AM-12/D4.11 — the embedder is reachable only from the worker module);
+    # keepsakes are capped (12 pins / a 4,000-token zone) and NEVER evicted
+    # (DD-3).
+    "memoir",
 })
 
 
@@ -1210,6 +1240,10 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # immediately); an agent with an EXPLICIT allow list receives it in
     # the phase-5 grant ceremony.  The privileged set and its pin sites
     # stay UNTOUCHED.
+    # memoir (2026-11-05, memoir-store-v1 lane): ari's durable episodic
+    # memory + keepsake governance. PRIVILEGED category (entry #18 of
+    # PRIVILEGED_TOOL_CATEGORIES): ari's durable first-person narrative
+    # must never reach the empty-allow inherit universe.
     #
     # The value MUST be a ``daemon.tools.*`` path — the AST scanner
     # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
@@ -1219,6 +1253,20 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # (``report_anomaly``) — the house pattern (``self-alarm`` →
     # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
     "nest-report": "daemon.tools.nest_report",
+    #
+    # memoir (2026-11-05, memoir-store-v1 lane; merged 2026-11-06):
+    # ari's durable episodic memory + keepsake governance. PRIVILEGED
+    # category (entry #19 of PRIVILEGED_TOOL_CATEGORIES): ari's durable
+    # first-person narrative must never reach the empty-allow inherit
+    # universe.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``. The category
+    # key is the exact tool-family word ``memoir`` (D4.1 — never
+    # "memoir-store" / "ari-memoir"); the tool names are snake_case
+    # (``memoir_write``/``memoir_pin``/``memoir_unpin``/
+    # ``memoir_recall``/``memoir_timeline``).
+    "memoir": "daemon.tools.memoir",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1742,6 +1790,18 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # runtime agent gate lives in the tool bodies.
     "anomaly_clusters",
     "anomaly_report_detail",
+    # memoir (2026-11-05, memoir-store-v1 lane): the five memoir tools —
+    # created by the create_memoir_tools() factory
+    # (daemon/tools/memoir.py). Factory-built (not import-time
+    # registered), so they belong in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #18) — opt-in
+    # only, never default-granted; the ari-only runtime gate lives in
+    # the tool bodies.
+    "memoir_write",
+    "memoir_pin",
+    "memoir_unpin",
+    "memoir_recall",
+    "memoir_timeline",
     "terminate_instance",
     "time",
     "todo_clear",

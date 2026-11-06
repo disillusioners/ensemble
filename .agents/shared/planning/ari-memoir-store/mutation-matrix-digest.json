@@ -1,0 +1,139 @@
+{
+  "digest": "2e04948a37e627af8891640a0f620027be07e6127898970e3e0737d742d22633",
+  "legs": [
+    {
+      "green_node_counts": {
+        "failed": null,
+        "passed": 32
+      },
+      "green_rc": 0,
+      "guard": "tests/unit/test_memoir_retrieval_unit.py",
+      "guard_kind": "pytest",
+      "label": "k-slice-removed",
+      "porcelain_clean_after": true,
+      "red_marker": "test_k_caps_the_shipped_episode_count_on_a_larger_corpus",
+      "red_node": "FAILED tests/unit/test_memoir_retrieval_unit.py::test_k_caps_the_shipped_episode_count_on_a_larger_corpus",
+      "red_node_counts": {
+        "failed": 1,
+        "passed": 31
+      },
+      "red_rc": 1,
+      "restore_byte_identical": true,
+      "status": "OK"
+    },
+    {
+      "green_node_counts": {
+        "failed": null,
+        "passed": 14
+      },
+      "green_rc": 0,
+      "guard": "tests/unit/test_memoir_write_purity_unit.py",
+      "guard_kind": "pytest",
+      "label": "admission-after-insert",
+      "porcelain_clean_after": true,
+      "red_marker": "test_the_admission_reads_precede_the_insert_in_the_source",
+      "red_node": "FAILED tests/unit/test_memoir_write_purity_unit.py::test_the_admission_reads_precede_the_insert_in_the_source",
+      "red_node_counts": {
+        "failed": 2,
+        "passed": 12
+      },
+      "red_rc": 1,
+      "restore_byte_identical": true,
+      "status": "OK"
+    },
+    {
+      "green_node_counts": {
+        "failed": null,
+        "passed": 40
+      },
+      "green_rc": 0,
+      "guard": "tests/unit/test_memoir_embedding_worker_unit.py",
+      "guard_kind": "pytest",
+      "label": "stall-warning-removed",
+      "porcelain_clean_after": true,
+      "red_marker": "test_a_starved_window_warns_after_n_stalled_ticks",
+      "red_node": "FAILED tests/unit/test_memoir_embedding_worker_unit.py::test_a_starved_window_warns_after_n_stalled_ticks",
+      "red_node_counts": {
+        "failed": 1,
+        "passed": 39
+      },
+      "red_rc": 1,
+      "restore_byte_identical": true,
+      "status": "OK"
+    },
+    {
+      "green_node_counts": {
+        "failed": null,
+        "passed": 45
+      },
+      "green_rc": 0,
+      "guard": "tests/unit/test_memoir_tools_unit.py",
+      "guard_kind": "pytest",
+      "label": "v1-recall-map-entry-deleted",
+      "porcelain_clean_after": true,
+      "red_marker": "test_a_blank_recall_query_refuses_with_query_required",
+      "red_node": "FAILED tests/unit/test_memoir_tools_unit.py::TestTheRefusalMatrix::test_a_blank_recall_query_refuses_with_query_required",
+      "red_node_counts": {
+        "failed": 1,
+        "passed": 44
+      },
+      "red_rc": 1,
+      "restore_byte_identical": true,
+      "status": "OK"
+    },
+    {
+      "green_node_counts": {
+        "failed": null,
+        "passed": 40
+      },
+      "green_rc": 0,
+      "guard": "tests/unit/test_memoir_knob_truth_table.py",
+      "guard_kind": "pytest",
+      "label": "knob-garbage-repaired",
+      "porcelain_clean_after": true,
+      "red_marker": "test_indeterminate_value_fails_closed",
+      "red_node": "FAILED tests/unit/test_memoir_knob_truth_table.py::test_indeterminate_value_fails_closed",
+      "red_node_counts": {
+        "failed": 2,
+        "passed": 38
+      },
+      "red_rc": 1,
+      "restore_byte_identical": true,
+      "status": "OK"
+    },
+    {
+      "green_node_counts": null,
+      "green_rc": 0,
+      "guard": "test/packs/memoir_inner_soul_redirect_test.sh",
+      "guard_kind": "script",
+      "label": "non-ari-redirect-widened",
+      "porcelain_clean_after": true,
+      "red_marker": "non-ari-byte-identity",
+      "red_node": "",
+      "red_node_counts": null,
+      "red_rc": 1,
+      "restore_byte_identical": true,
+      "status": "OK"
+    },
+    {
+      "green_node_counts": {
+        "failed": null,
+        "passed": 17
+      },
+      "green_rc": 0,
+      "guard": "tests/unit/test_memoir_briefing_unit.py",
+      "guard_kind": "pytest",
+      "label": "keepsake-template-drifted",
+      "porcelain_clean_after": true,
+      "red_marker": "test_keepsake_line_template_exact_bytes",
+      "red_node": "FAILED tests/unit/test_memoir_briefing_unit.py::test_keepsake_line_template_exact_bytes",
+      "red_node_counts": {
+        "failed": 2,
+        "passed": 15
+      },
+      "red_rc": 1,
+      "restore_byte_identical": true,
+      "status": "OK"
+    }
+  ]
+}

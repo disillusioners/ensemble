@@ -65,16 +65,20 @@ user intent.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from .upgrade_journal import parse_iso_utc
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "EMPTY_PROVENANCE",
     "ProvenanceVerdict",
     "capture_provenance_class",
+    "capture_provenance_class_name",
     "capture_user_source",
     "lookup_provenance_field",
     "restart_provenance",
@@ -163,6 +167,34 @@ def capture_provenance_class(
         }
     except Exception:  # defensive — capture is best-effort
         return dict(EMPTY_PROVENANCE)
+
+
+def capture_provenance_class_name(manager: "Any", instance_id: str) -> str:
+    """The provenance CLASS as a bare string — the memoir lane's ONE read.
+
+    The memoir tool results (``memoir_write`` / ``memoir_pin``) and the
+    wake briefing all surface "which user-origin window shape carried
+    this turn" beside a pin CLAIM (D4.10 / AM-24). Before this helper
+    each consumer carried its own copy of the same try/swallow; a second
+    computation of one fact is exactly the drift class this module
+    exists to prevent (tidier A11/M9).
+
+    Returns ``""`` whenever no live window exists (the honest absence —
+    ``direct`` / ``inherited`` / ``""`` are the only renderable values).
+    A swallow with NO trace would hide an unexpected failure, so the
+    exception path logs a WARNING before returning the empty class (the
+    capture itself is documented defensive).
+    """
+    try:
+        capture = capture_provenance_class(manager, instance_id)
+        return str(capture.get("provenance_class") or "")
+    except Exception as exc:  # noqa: BLE001 — best-effort corroboration
+        logger.warning(
+            "provenance class capture failed instance=%s: %s",
+            instance_id,
+            type(exc).__name__,
+        )
+        return ""
 
 
 @dataclass

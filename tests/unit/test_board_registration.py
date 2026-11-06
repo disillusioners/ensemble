@@ -110,6 +110,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # agent_id gate.
 "metrics-read",
 "nest-report-read",
+    # memoir (2026-11-05, memoir-store-v1 lane): the ``memoir``
+    # category — ari's durable episodic memory + keepsake governance.
+    # opt-in-only (PRIVILEGED entry #18); the ari allow entry is the
+    # only access path, and every tool body ALSO carries its own
+    # factory-captured agent_id gate.
+    "memoir",
 })
 
 #: The ONLY agent allowed to hold the board category.
@@ -199,7 +205,7 @@ class TestPrivilegedCategory:
     def test_board_is_in_the_privileged_set(self) -> None:
         assert BOARD_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_eighteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_nineteen_entries(self) -> None:
         """The set is exact — the phase-2 commit moved this pin with the
         tenth entry (``self-alarm``) and the phase-3 commit moved it
         again with the eleventh + twelfth (``view-write`` /
@@ -220,7 +226,7 @@ class TestPrivilegedCategory:
         "ninth entry" is a property of the SET SIZE at the time of the
         phase-1 commit and of the registry's literal order afterwards;
         the comment block in the registry records the ordinal."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 18
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 19
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")
@@ -273,6 +279,10 @@ class TestAllowLists:
         appended AFTER the board may follow it) is unchanged; the SET
         grew by one entry.
 
+        The memoir-store lane (2026-11-05) appended ``memoir`` at the END
+        of ari's array — the trailing set grew by one entry again, and
+        the INTENT is unchanged.
+
         NOTE (user ruling 2026-10-20): the board categories are
         ARI-ONLY, so leader's array no longer carries ``board`` (nor
         ``board-link``) at all — the trailing discipline is asserted
@@ -283,15 +293,13 @@ class TestAllowLists:
             # "wedge-capture" — the SAME-PR trailing discipline (only
             # categories appended after the board may follow it) holds;
             # the set grew by one entry again.
-            # nest-anomaly-report phase 5 / C9 (2026-11-05): the
-            # "nest-report" category appended after "notify-user" — the
-            # SAME discipline, the set grew by one entry AGAIN.  The
-            # pin's INTENT is unchanged: only the categories appended
-            # AFTER the board may follow it, and "nest-report" IS such a
-            # category.  Prior value: the 6-entry set
-            # ["self-alarm", "view-write", "board-link", "mcp_rpc",
-            # "wedge-capture", "notify-user"].
-            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "nest-report"],
+            # ari-voice (2026-10-25): "notify-user" appended after
+            # "wedge-capture". nest-anomaly-report phase 5 / C9
+            # (2026-11-05) appended "nest-report"; memoir-store-v1
+            # (2026-11-06) appended "memoir". The pin's INTENT is
+            # unchanged: only the categories appended AFTER the board
+            # may follow it.
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "nest-report", "memoir"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)

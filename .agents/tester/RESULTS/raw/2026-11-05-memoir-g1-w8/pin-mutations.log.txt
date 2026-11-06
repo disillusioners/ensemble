@@ -1,0 +1,33 @@
+=== baseline (expect GREEN) ===
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3 passed, 1 warning in 0.61s
+=== M-i: try/except plant (expect RED) ===
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_memoir_ensure_structure.py::test_the_statement_loop_has_no_per_statement_try_except
+1 failed, 2 passed, 1 warning in 0.69s
+M-i pin rc=1
+RESTORE_OK
+=== M-ii: second begin() (expect RED) ===
+mutation second_begin applied and AST-valid
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_memoir_ensure_structure.py::test_the_shared_ensure_block_uses_exactly_one_transaction
+1 failed, 2 passed, 1 warning in 0.67s
+M-ii pin rc=1
+RESTORE_OK
+=== M-iii: memoir statements removed (expect RED) ===
+unexpected entry start: '                "ALTER TABLE memoir_episodes ADD COLUMN IF NOT EXISTS tsv "\n'
+mutation remove_memoir applied and AST-valid
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_memoir_ensure_structure.py::test_the_memoir_tsv_and_gin_statements_ride_the_shared_list
+1 failed, 2 passed, 1 warning in 0.70s
+M-iii pin rc=1
+RESTORE_OK
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3 passed, 1 warning in 0.60s

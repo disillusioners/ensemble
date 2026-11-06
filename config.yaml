@@ -572,6 +572,29 @@ notify_user:
   # D6 size cap — rejected BEFORE resolution/dispatch (single-chunk).
   max_chars: 2000
 
+# Memoir Store Settings (phase 0 — the kill-switch knob).
+# Field names mirror daemon/config.py:MemoirConfig exactly.
+# Env vars override these via the ENSEMBLE_MEMOIR_* prefix (auto-covered
+# by tests/conftest.py::_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")).
+#
+# The kill-switch is the WHOLE memoir personality: false means the tools
+# refuse (memoir_disabled), the briefing is not built and the memory is
+# unreadable, the embedding worker parks, and the DATA is untouched.
+#
+# UNSET resolves to the default below (ON in v1) and is never silent —
+# one WARNING per boot names ENSEMBLE_MEMOIR_ENABLED. A present value
+# that is not a recognised boolean is INDETERMINATE and fails CLOSED
+# (the memoir surface stays OFF); it is never repaired to the default.
+memoir:
+  # Kill-switch (DR-3). true = the memoir surface is live.
+  enabled: true
+  # Embedding worker tick interval, seconds (the knob is re-read EVERY tick).
+  embedding_tick_s: 60
+  # Maximum rows embedded per tick (embeds are sequential).
+  embedding_batch_cap: 8
+  # Expected embedding dimensionality (a per-row mismatch is terminal).
+  embedding_dimensions: 1536
+
 # Skill Evolution System Settings
 # Field names mirror daemon/config.py:SkillEvolutionConfig exactly.
 # Any env var listed in .env.example (SKILL_EVOLUTION_*) overrides these.
