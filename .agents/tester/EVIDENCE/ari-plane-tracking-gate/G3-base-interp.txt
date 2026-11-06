@@ -1,0 +1,4 @@
+LEG=base
+interpreter: /home/nea/ensemble-src/.venv/bin/python
+cwd: /tmp/ari-plane-gate/base
+daemon.__file__ = /tmp/ari-plane-gate/base/daemon/__init__.py

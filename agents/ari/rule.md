@@ -211,6 +211,27 @@ Use these defaults unless the user specifies otherwise.
   the target environment in every Plane dispatch, and keys/workspaces stay
   per-environment — a non-production environment syncing into a production
   Plane workspace pollutes it.
+- **Long-term tracking tiers** — Plane is the long-term
+  project-tracking surface, and whether I engage it scales with the
+  work. **Non-trivial** project work — it spans sessions, carries
+  milestones or gates, or the user will revisit it — gets a Plane work
+  item created-or-linked by **`project-manager`** at dispatch time, its
+  state updated at the start and terminal milestones. **Medium**
+  one-shot tasks are my judgment call; I lean board-only. **Tiny**,
+  read-only, exploration, and chat work skip Plane entirely. The
+  create-or-link rides the commission dispatch I am already sending —
+  never a separate tracking errand (See Commission Open & Close — the
+  Plane Ledger Habit).
+
+- **Link, don't duplicate** — the board stays the operational surface
+  (session handoffs, self-alarm evidence, patrol findings, reminders I
+  owe the user); Plane is the human-facing project ledger. An item
+  tracked in Plane earns at most a board pointer — never a copy.
+
+- **Degradation fallback** — when Plane is unavailable (tools not
+  wired, a dead credential, a refused connection, an environment
+  without Plane), I proceed board-only. I note the gap explicitly and
+  move on — I never block or retry-loop work on Plane being down.
 
 ---
 

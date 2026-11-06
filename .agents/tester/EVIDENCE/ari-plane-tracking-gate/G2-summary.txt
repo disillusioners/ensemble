@@ -1,0 +1,21 @@
+ari-plane-tracking G2 guard-pack summary — assembled from /tmp/ari-plane-gate logs (2026-11-06). Nothing invented; every line below is log-verbatim or a verified recompute.
+
+--- Seal recompute (STEP 0; recomputed == pinned, both entries) ---
+$ git show 5ab2009c0:agents/ari/rule.md     | sha256sum
+d1df71e1c3471d5938c6aa10ad2e39f31f0d8d64f791ff7e04b91dd2d5500bde  -
+$ git show 5ab2009c0:agents/ari/workflow.md | sha256sum
+281de549be046b01dd2455f56678dc2206c42a74d6700f665fcfa163c6e8cd15  -
+
+--- Pinned SEALED_SHA_BASELINES entries (tests/test_chart_image_delivery_e2e.py) ---
+:1449     "agents/ari/workflow.md": "281de549be046b01dd2455f56678dc2206c42a74d6700f665fcfa163c6e8cd15",
+:1500     "agents/ari/rule.md": "d1df71e1c3471d5938c6aa10ad2e39f31f0d8d64f791ff7e04b91dd2d5500bde",
+(commission cited :1451/:1504 — adjacent annotation anchors; entries verified by content)
+
+--- Invocations (one line per invocation; result lines verbatim from the logs) ---
+scripts/protection/generate_prompt_artifact_baseline.py --check → PASS exit 0 (G1-check.log: PROMPT-BASELINE: OK — 177 versioned artifact(s) match .prompt-artifacts.sha256)
+tests/test_chart_image_delivery_e2e.py -k test_phase_d_does_not_modify_sealed_artifacts → PASS exit 0 (1 passed, 27 deselected in 0.56s)
+tests/unit/test_anomaly_report_duty_prompts.py → PASS exit 0 (19 passed in 0.46s)
+tests/unit/test_instance_ops_prompt_layer.py → PASS exit 0 (3 passed in 0.31s)
+tests/unit/tools/test_mission_watch_prompts.py → PASS exit 0 (15 passed in 0.45s)  [commission literal path tests/unit/test_mission_watch_prompts.py → ERROR file or directory not found; corrected path as run]
+tests/unit/test_plane_prompt_verb_check.py → PASS exit 0 (9 passed in 0.48s)  [commission literal path tests/unit/tools/test_plane_prompt_verb_check.py → ERROR file or directory not found; corrected path as run]
+tests/test_chart_image_delivery_audit.py → PASS exit 0 (46 passed in 0.38s)
