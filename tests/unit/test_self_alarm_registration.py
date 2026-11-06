@@ -221,10 +221,10 @@ class TestPrivilegedCategory:
     def test_self_alarm_is_in_the_privileged_set(self) -> None:
         assert SELF_ALARM_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_nineteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_twenty_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_nineteen_members(self) -> None:
+    def test_the_set_has_twenty_members(self) -> None:
         assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
 
 

@@ -171,10 +171,10 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_has_nineteen_members(self) -> None:
+    def test_the_set_has_twenty_members(self) -> None:
         assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
 
-    def test_the_category_is_entry_nineteen(self) -> None:
+    def test_the_category_follows_metrics_read(self) -> None:
         """The category was appended AFTER ``metrics-read`` (entry #17).
 
         The registry literal carries a comment block between the two

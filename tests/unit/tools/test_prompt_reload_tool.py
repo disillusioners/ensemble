@@ -322,23 +322,33 @@ class TestGoldenReport:
             },
         )
 
-    def test_golden_shape(self) -> None:
+    def test_golden_shape_bytes(self) -> None:
+        """A4 (leader ruling): BYTE-comparable, not substring — the frozen
+        D14 report is asserted whole (AC3.3/AC4.9)."""
         out = toolmod._render_report(self._result())
-        assert MARKER_RE.search(out).group(1) == OUTCOME_RELOADED
-        assert "prompt_reload reloaded — " in out
-        assert "release: v0.29.0 (current_matches_running=true, daemon_version=0.29.0)" in out
-        assert "manifest: ok(6 checked, 0 unmanifested-skipped)" in out
-        assert "manager_instances: 1->0" in out
-        assert "persona diff: +2/-1 lines, 100→140 bytes" in out
-        assert "headings added: ## New Section" in out
-        assert "files: 1 changed of 2 in the loader read set" in out
-        assert "soul.md: sha256 aaa… → bbb…" in out
-        # F7 honesty mark rides the db row (D15).
-        assert pr.S10_A_TOOLS_NOTE_DEAD in out
-        # F8 non-promise + next-turn + provider cache (D16/D17/AM-4).
-        assert pr.S10_C_DISPLAY_DIVERGENCE in out
-        assert pr.S10_D_NEXT_TURN in out
-        assert pr.S10_E_PROVIDER_CACHE in out
+        expected = (
+            "prompt_reload reloaded — Reloaded: prompt files changed — "
+            "recomposed and the cached graph was popped.\n"
+            "release: v0.29.0 (current_matches_running=true, daemon_version=0.29.0)\n"
+            "manifest: ok(6 checked, 0 unmanifested-skipped)\n"
+            "db_fingerprint: deadbeef (mcp_tool_names_source=empty, was_cached=true)\n"
+            "manager_instances: 1->0\n"
+            "persona diff: +2/-1 lines, 100→140 bytes\n"
+            "headings added: ## New Section\n"
+            "files: 1 changed of 2 in the loader read set\n"
+            "  soul.md: sha256 aaa… → bbb…\n"
+            "  db row: tools_note (CORE, selected=v3) — "
+            + pr.S10_A_TOOLS_NOTE_DEAD
+            + "\n"
+            + pr.S10_C_DISPLAY_DIVERGENCE
+            + "\n"
+            + pr.S10_D_NEXT_TURN
+            + "\n"
+            + pr.S10_E_PROVIDER_CACHE
+            + "\n"
+            "[PROMPT-RELOADED outcome=reloaded next_turn=true]"
+        )
+        assert out == expected
 
     def test_tier_c_renders_unavailable_not_a_guess(self) -> None:
         result = self._result()
@@ -363,6 +373,44 @@ class TestGoldenReport:
         diff = pr._persona_diff("", "\n".join(f"## H{i}" for i in range(15)))
         assert len(diff["headings_added"]) == 11
         assert diff["headings_added"][-1] == "…and 5 more"
+
+
+# ── AC3.4/W3 — the honesty-mark PRODUCER (M6 plant site) ────────────────────
+
+
+class TestHonestyMarkProducer:
+    def test_db_row_states_emit_the_canonical_marks(self) -> None:
+        """W3 (leader ruling): M6's honesty plant was VACUOUS — no test
+        called the PRODUCER. This one does: real-shaped effective rows
+        for ``tools_note`` / ``user`` / ``growth`` must carry S10-a /
+        S10-b; a row without a known defect carries no mark."""
+        rows = [
+            SimpleNamespace(
+                artifact="tools_note",
+                artifact_class="CORE",
+                selected_version_id="v3",
+            ),
+            SimpleNamespace(artifact="user", artifact_class="MEMORY", selected_version_id=None),
+            SimpleNamespace(artifact="growth", artifact_class="MEMORY", selected_version_id=None),
+            SimpleNamespace(artifact="rule", artifact_class="CORE", selected_version_id="v7"),
+        ]
+        states = pr._db_row_states(rows)
+        by_artifact = {s["artifact"]: s for s in states}
+        assert by_artifact["tools_note"]["honesty"] == pr.S10_A_TOOLS_NOTE_DEAD
+        assert by_artifact["user"]["honesty"] == pr.S10_B_USER_GROWTH_NOT_IN_PROMPT
+        assert by_artifact["growth"]["honesty"] == pr.S10_B_USER_GROWTH_NOT_IN_PROMPT
+        assert "honesty" not in by_artifact["rule"]
+        # The marks ride the rendered report too.
+        result = pr.PromptRefreshResult(
+            outcome=OUTCOME_NO_CHANGE,
+            code=None,
+            message="m",
+            diff={"persona_diff": "unavailable", "files": []},
+            provenance={"db_rows": states, "current_matches_running": "unknown"},
+        )
+        rendered = toolmod._render_report(result)
+        assert pr.S10_A_TOOLS_NOTE_DEAD in rendered
+        assert pr.S10_B_USER_GROWTH_NOT_IN_PROMPT in rendered
 
 
 # ── AC3.8 — canonical literals, one per S10 id, zero paraphrase families ────

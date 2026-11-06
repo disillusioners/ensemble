@@ -147,7 +147,7 @@ class TestTheCategory:
         # prompt-reload (2026-11-06) entered as #20 after memoir.
         assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
 
-    def test_the_derived_set_is_exactly_the_nineteen_entries(self) -> None:
+    def test_the_derived_set_is_exactly_the_twenty_entries(self) -> None:
         """The expected set is DERIVED (the registry's own literal), never
         hardcoded from a prose census."""
         derived = _registry_literal_members()

@@ -208,7 +208,7 @@ class TestPrivilegedCategory:
     def test_board_is_in_the_privileged_set(self) -> None:
         assert BOARD_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_nineteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_twenty_entries(self) -> None:
         """The set is exact — the phase-2 commit moved this pin with the
         tenth entry (``self-alarm``) and the phase-3 commit moved it
         again with the eleventh + twelfth (``view-write`` /
