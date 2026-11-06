@@ -172,7 +172,7 @@ class TestPrivilegedCategory:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
     def test_the_set_has_nineteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 19
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
 
     def test_the_category_is_entry_nineteen(self) -> None:
         """The category was appended AFTER ``metrics-read`` (entry #17).

@@ -43,7 +43,8 @@
       "wedge-capture",
       "notify-user",
       "nest-report",
-      "memoir"
+      "memoir",
+  "prompt-reload"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

@@ -241,7 +241,12 @@ def _cardinality_cap() -> int:
 #: target and MUST stay declarable or the fold target itself falls out of
 #: the vocabulary).  The catalog's §14.4 row is amended in the ledger
 #: phase.
-VOCABULARY_VERSION: int = 6
+#: **7** (prompt-reload, 2026-11-06) — the tool-category vocabulary gained
+#: ``prompt-reload`` (privileged entry #20, ari-exactly), so the frozen
+#: artifact label set grew 60 → 61 and the vocabulary version bumps with
+#: the regeneration (F-1 trap class: the artifact and this constant move
+#: in the SAME change).
+VOCABULARY_VERSION: int = 7
 
 
 # ─── Registration-time family metadata (AM-3) ───────────────────────────────

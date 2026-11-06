@@ -116,6 +116,9 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # only access path, and every tool body ALSO carries its own
     # factory-captured agent_id gate.
     "memoir",
+    # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-reload",
 })
 
 #: The ONLY agent allowed to hold the board category.
@@ -226,7 +229,7 @@ class TestPrivilegedCategory:
         "ninth entry" is a property of the SET SIZE at the time of the
         phase-1 commit and of the registry's literal order afterwards;
         the comment block in the registry records the ordinal."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 19
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")
@@ -296,10 +299,11 @@ class TestAllowLists:
             # ari-voice (2026-10-25): "notify-user" appended after
             # "wedge-capture". nest-anomaly-report phase 5 / C9
             # (2026-11-05) appended "nest-report"; memoir-store-v1
-            # (2026-11-06) appended "memoir". The pin's INTENT is
+            # (2026-11-06) appended "memoir"; prompt-reload
+            # (2026-11-06) appended "prompt-reload". The pin's INTENT is
             # unchanged: only the categories appended AFTER the board
             # may follow it.
-            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "nest-report", "memoir"],
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "nest-report", "memoir", "prompt-reload"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)
