@@ -413,10 +413,14 @@ class TestTheBudget:
         the TOOL-CATEGORY label set (the metrics-agent-tools lane
         registered the ``metrics-read`` privileged category, so the
         frozen label set changed and the bump contract requires the
-        marker to move).  The F7 op enum's own annex (``{aget, other}``)
-        did NOT move, and the op-enum pins in this file still hold.
+        marker to move) and 3 → 4 for the same TOOL-CATEGORY vocabulary
+        (the memoir-store-v1 lane registered the ``memoir`` privileged
+        category (#18), so the frozen label set changed and the bump
+        contract requires the marker to move).  The F7 op enum's own
+        annex (``{aget, other}``) did NOT move, and the op-enum pins in
+        this file still hold.
         """
-        assert cm.VOCABULARY_VERSION == 3
+        assert cm.VOCABULARY_VERSION == 4
 
     def test_each_family_stays_inside_its_declared_band(self) -> None:
         specs = registry.registered_families()

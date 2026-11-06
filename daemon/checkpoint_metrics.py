@@ -199,6 +199,17 @@ def _cardinality_cap() -> int:
 #: The frozen vocabulary version.  Any change to a frozen vocabulary set
 #: bumps this integer (the F0.4/A24 bump contract).
 #:
+#: **4** (memoir-store-v1 lane, 2026-11-06) — the TOOL-CATEGORY
+#: vocabulary gained the ``memoir`` privileged category (#18), so the
+#: frozen label set changed and the bump contract requires the marker to
+#: move.  The derived artifact ``.agents/shared/metrics/tool-categories.json``
+#: is REGENERATED from the registry by the artifact pack's own generator
+#: mode (``ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=<path>``) — never
+#: hand-edited.  The F7 checkpoint ``op`` enum is UNCHANGED by this bump
+#: (its own vocabulary still reads ``{aget, other}``), and the
+#: instance_status, sweep_lane, and mcp_roster vocabularies are unchanged
+#: as well.
+#:
 #: **3** (metrics-agent-tools lane, 2026-11-03) — the TOOL-CATEGORY
 #: vocabulary gained the ``metrics-read`` privileged category (the lane's
 #: Phase-2 registration, ``daemon/tools/_tool_registry.py``), so the
@@ -215,7 +226,7 @@ def _cardinality_cap() -> int:
 #: target and MUST stay declarable or the fold target itself falls out of
 #: the vocabulary).  The catalog's §14.4 row is amended in the ledger
 #: phase.
-VOCABULARY_VERSION: int = 3
+VOCABULARY_VERSION: int = 4
 
 
 # ─── Registration-time family metadata (AM-3) ───────────────────────────────

@@ -288,6 +288,10 @@ class TestToolCategoryArtifact:
             "and copy it over (and bump VOCABULARY_VERSION)"
         )
         assert on_disk["count"] == derived["count"] == len(derived["categories"])
+        assert on_disk["vocabulary_version"] == derived["vocabulary_version"] == VOCABULARY_VERSION, (
+            "the artifact's embedded version is a COPY of the constant — a set "
+            "change must bump the constant and regenerate"
+        )
 
     def test_artifact_is_sorted_distinct_and_non_empty(self) -> None:
         """The artifact list is sorted, distinct and non-empty."""

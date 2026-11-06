@@ -62,5 +62,5 @@
   "count": 58,
   "reserved": "other",
   "source": "daemon/tools/_tool_registry.py CATEGORY_MODULES + @register_tool_category call sites",
-  "vocabulary_version": 3
+  "vocabulary_version": 4
 }

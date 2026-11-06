@@ -13,17 +13,20 @@ from daemon import checkpoint_metrics as cm
 
 
 class TestVocabularyVersion:
-    def test_the_version_is_three(self) -> None:
+    def test_the_version_is_four(self) -> None:
         """P2-M8 — the bump rode this lane.
 
         The marker rode 1 → 2 with the central-metrics-v1 lane (the F7
         op-enum narrowing) and 2 → 3 with the metrics-agent-tools lane
         (the TOOL-CATEGORY vocabulary gained the ``metrics-read``
         privileged category, so the frozen label set changed and the
-        bump contract requires the marker to move).  The P2-M8 mutation
-        (the marker left at 1) still REDS this pin.
+        bump contract requires the marker to move) and 3 → 4 with the
+        memoir-store-v1 lane (the TOOL-CATEGORY vocabulary gained the
+        ``memoir`` privileged category (#18), so the frozen label set
+        changed and the bump contract requires the marker to move).  The
+        P2-M8 mutation (the marker left at 1) still REDS this pin.
         """
-        assert cm.VOCABULARY_VERSION == 3
+        assert cm.VOCABULARY_VERSION == 4
 
     def test_the_version_is_an_integer(self) -> None:
         assert isinstance(cm.VOCABULARY_VERSION, int)
