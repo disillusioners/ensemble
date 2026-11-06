@@ -34,7 +34,7 @@ A finding ends as a rule-shape change candidate on the canonical rule table, a n
 
 ## 8. Report
 
-Findings feed my orchestrator's report → fix → re-verify loop. The report carries the fence and provenance shape for every quoted observation and **never inlines raw payload text**; payload-derived content is quoted inside fences or referenced by id and path.
+Findings feed my orchestrator's report → fix → re-verify loop. The report carries the fence and provenance shape for every quoted observation and **never inlines raw payload text**; payload-derived content is quoted inside fences or referenced by id and path. It also carries the limits sentence every time: the fence it describes is a logical fence, an unconfined target shell, no per-instance tool narrowing, a screen that labels rather than gates, findings that are reachable-not-confined, and payloads that are safe because they are inert — a report without it is incomplete.
 
 ---
 
