@@ -317,8 +317,15 @@ def build_block(
     error=None,
     forced_verdict=None,
     forced_confidence=None,
+    sha256_hex=None,
+    byte_count=None,
 ):
-    """Assemble one fenced block. ``raw`` is the original payload bytes."""
+    """Assemble one fenced block. ``raw`` is the original payload bytes.
+
+    ``sha256_hex``/``byte_count`` override the derived header digest and
+    size (SK-17: the header describes the ORIGINAL payload even when the
+    transported body is cut, e.g. the oversized error fence).
+    """
     text = raw.decode("utf-8", errors="replace")
     cut_text, _, _ = truncate_utf8(text)
     body, escaped_count = escape_lines(cut_text)
@@ -332,8 +339,8 @@ def build_block(
         ("verdict", verdict),
         ("confidence", confidence),
         ("source", source),
-        ("sha256", hashlib.sha256(raw).hexdigest()),
-        ("bytes", str(len(raw))),
+        ("sha256", sha256_hex if sha256_hex is not None else hashlib.sha256(raw).hexdigest()),
+        ("bytes", str(byte_count if byte_count is not None else len(raw))),
         ("truncated", "true" if truncated else "false"),
         ("escaped", str(escaped_count)),
         ("rules", rules_field),
@@ -354,7 +361,14 @@ def build_block(
 
 
 def error_fence(raw, code, source, classifier="heuristic", channel=None, origin=None):
-    """SK-23: any internal failure still emits a complete fence, never clean."""
+    """SK-23: any internal failure still emits a complete fence, never clean.
+
+    SK-17: the header hash and byte count describe the WHOLE original
+    payload; when the input is unprocessable only the transported body is
+    kept small, never the digest.
+    """
+    sha256_hex = hashlib.sha256(raw).hexdigest()
+    byte_count = len(raw)
     if len(raw) > HARD_INPUT_CEILING:
         raw = raw[:1000]  # keep the fence small; the payload is unprocessable
     return (
@@ -370,6 +384,8 @@ def error_fence(raw, code, source, classifier="heuristic", channel=None, origin=
             error=code,
             forced_verdict="suspect",
             forced_confidence="none",
+            sha256_hex=sha256_hex,
+            byte_count=byte_count,
         ),
         code,
     )
@@ -505,11 +521,15 @@ def screen_bytes(
 ):
     """Returns (block, exit_code). Exit 3 = refused downgrade (SK-11)."""
     if len(raw) > HARD_INPUT_CEILING:
-        return error_fence(raw, "content-too-large", source, origin=origin)
+        return error_fence(
+            raw, "content-too-large", source, channel=channel, origin=origin
+        )
     try:
         _, compiled = load_rules()
     except RuleTableError:
-        return error_fence(raw, "rule-table-unreadable", source, origin=origin)
+        return error_fence(
+            raw, "rule-table-unreadable", source, channel=channel, origin=origin
+        )
     try:
         text = raw.decode("utf-8")
         encoded_len = len(raw)
@@ -521,7 +541,6 @@ def screen_bytes(
         fired = evaluate_rules(text, compiled)
         heur_verdict = aggregate_verdict(fired)
         heur_confidence = aggregate_confidence(fired)
-        truncated = len(raw) > FENCE_MAX_BYTES
         cut_text, retained_bytes, truncated = truncate_utf8(text)
     except Exception:
         return error_fence(raw, "scan-failed", source, channel=channel, origin=origin)

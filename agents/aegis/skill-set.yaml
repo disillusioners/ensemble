@@ -6,7 +6,7 @@ skills:
     category: planning
     description: "Engagement scoping, severity taxonomy, finding record, sandbox layout + self-owned check, report format, re-verify doctrine"
   - name: injection-screen
-    version: "1.0.0"
+    version: "1.0.1"
     auto_load: false
     category: security
     description: "Prompt-injection screen: fence + provenance header + heuristic verdict for untrusted content; run the shipped scanner, stdout is the fenced block"
