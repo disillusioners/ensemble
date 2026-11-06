@@ -878,7 +878,7 @@ architect may re-rank. Disposition defaults to **OPEN** — none is silently abs
 |---|---|---|---|
 | G0 — architect review | **rules D1–D7 + C1–C4** | **COMPLETE — 2026-11-05** (ruling commit `f6d11c232`; `architecture-recommendation.md`) | architect |
 | G1 — plan council | the plan set against the ruled slots | **FOLD r2 LANDED — round-1 REJECTED → council residues C-1/C-2 folded r2 (§C-bis table council rows + §C-bis.4); delta re-check PENDING** | plan council |
-| G2 — approver | execution-layer blockers | **REJECTED (iteration 001 — 7 blockers: architecture 1–3, phases 4–7; the requirements layer APPROVED CLEAN, ~45 census claims re-derived) → AMENDED (AM-1/AM-2 @ `cc6303308`) → FOLD LANDED (approver-001 fold — §C-bis.5 B1–B7 + non-blocking batch) → iteration 002 PENDING (cap 3)** — 2026-11-05 | approver |
+| G2 — approver | execution-layer blockers | **REJECTED (iteration 001 — 7 blockers: architecture 1–3, phases 4–7; the requirements layer APPROVED CLEAN, ~45 census claims re-derived) → AMENDED (AM-1/AM-2 @ `cc6303308`) → FOLD LANDED (approver-001 fold — §C-bis.5 B1–B7 + non-blocking batch) → REJECTED (iteration 002 — 15 aggregated blockers; folds B1–B15 + AM-3/AM-4 landed @ `4c6fdd248`/`950b16202`) → APPROVED (iteration 003 FINAL, cap 3 consumed — APPROVED-WITH-NOTES @ `24ba60462`; all 15 iteration-002 blockers verified CLOSED on disk; tracking file `.agents/approver/canary-injection-defense-tracking.md` is authoritative for the verdict)** — 2026-11-05 | approver |
 | G3 — code council | implementation | PENDING | code council |
 | G4 — tidier | hygiene pass | PENDING | tidier |
 | G5 — functional gate | the aegis **A–H** pattern + `PACKS.md` registration (B4) | PENDING | tester |
