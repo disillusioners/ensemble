@@ -3497,7 +3497,12 @@ def _scanner_module():
         "injection_scan_under_test", INJECTION_SCANNER
     )
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    _prev = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = _prev
     return module
 
 
@@ -3925,3 +3930,171 @@ class TestDoctrineAnchorMatrix:
         assert "the load is mine to perform" not in rule, (
             f"{agent} must not carry a load duty (auto_load: true, or doctrine-only)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Canary injection-screen lane (commission canary-injection-defense, P3).
+# T35 — the canary meta pins (leaf team under adopted ruling D1-A, the AM-1
+# exact allow set, the pinned-as-ruled deny_spawn, the registry round-trip);
+# T36 — the campaign-log/report shape, the scratch-root vocabulary, the
+# pre-flight six, the intake map, and the canonical-home declaration. The
+# shared registry probe gains canary at P4's four-constant fold; the probe
+# below is canary's own so it is green the moment the persona lands.
+# ---------------------------------------------------------------------------
+
+_CANARY_REGISTRY_PROBE = (
+    "import json\n"
+    "from pathlib import Path\n"
+    "from daemon.registry import ToolFilter, get_registry\n"
+    "reg = get_registry()\n"
+    "aid = 'canary'\n"
+    "assert reg.exists(aid), f'{aid} not in registry'\n"
+    "meta = json.loads(Path(f'agents/{aid}/meta.json').read_text())\n"
+    "tf = ToolFilter.model_validate(meta['tools'])\n"
+    "assert set(tf.allow or []) == set(meta['tools']['allow']), aid\n"
+    "assert set(tf.deny or []) == set(meta['tools']['deny']), aid\n"
+    "assert set(tf.deny_spawn or []) == set(meta['tools'].get('deny_spawn', [])), aid\n"
+    "print('canary registry probe OK')\n"
+)
+
+CANARY_DIR = AGENTS_DIR / "canary"
+CANARY_ALLOW = frozenset({"bash", "filesystem", "time", "help"})
+CANARY_WORKFLOW = (CANARY_DIR / "workflow.md").read_text(encoding="utf-8")
+CANARY_SOUL = (CANARY_DIR / "soul.md").read_text(encoding="utf-8")
+CANARY_TOOLS_NOTE = (CANARY_DIR / "tools_note.md").read_text(encoding="utf-8")
+
+
+class TestCanaryMetaPins:
+    """T35 — canary's meta is the D1-A lean leaf shape with the AM-1 exact
+    allow set; every assertion is per-agent exact, never a shared 6-set."""
+
+    def test_t35_canary_leaf_team_empty(self):  # T35 (D1-A leaf)
+        assert _meta("canary")["team_members"] == [], (
+            "canary holds zero instance tools under adopted ruling D1-A"
+        )
+
+    def test_t35_canary_allow_set_exact(self):  # T35 (AM-1 exact set)
+        allow = set(_meta("canary")["tools"]["allow"])
+        assert allow == CANARY_ALLOW, (
+            f"canary allow drifted: {sorted(allow)} (proc = NC-4 background "
+            "persistence; self = AM-1 durable self-behavior-write channel)"
+        )
+
+    def test_t35_canary_deny_write_fence(self):  # T35 (deny ⊇ write fence)
+        deny = set(_meta("canary")["tools"].get("deny", []))
+        assert {"write_file", "edit_file"} <= deny
+
+    def test_t35_canary_deny_spawn_pinned_as_ruled(self):  # T35 (B5)
+        assert _meta("canary")["tools"].get("deny_spawn") == ["knowledge"], (
+        "deny_spawn == ['knowledge'] is PINNED AS RULED (dead-by-construction "
+        "defence-in-depth, never a 'KB lookup' justification)"
+        )
+
+    def test_t35_leaf_trio_allow_sets_individual(self):  # T35 (per-agent exact)
+        expected = {
+            "hacker": {"bash", "proc", "filesystem", "time", "help", "self"},
+            "cracker": {"bash", "proc", "filesystem", "time", "help", "self"},
+            "sweeper": {"bash", "proc", "filesystem", "time", "help", "self"},
+            "canary": CANARY_ALLOW,
+        }
+        for agent, want in expected.items():
+            got = set(_meta(agent)["tools"]["allow"])
+            assert got == want, f"{agent} allow drifted: {sorted(got)}"
+
+    def test_t35_no_privileged_no_chart_no_mcp(self):  # T35 (closed-universe hazards)
+        allow = set(_meta("canary")["tools"]["allow"])
+        assert allow & PRIVILEGED_CATEGORIES == frozenset()
+        for hazard in ("chart", "mcp", "mcp_full_access", "job", "instance_read",
+                       "instance_ops", "plane", "self", "proc"):
+            assert hazard not in allow, f"canary must not hold {hazard!r}"
+
+    def test_t35_canary_queue_and_model(self):  # T35 (the shared pins' two fields)
+        meta = _meta("canary")
+        assert meta["default_queue"] == "system_parallel_queue"
+        assert meta["llm_model"] == "coding"
+
+    def test_t35_canary_registry_round_trip(self):  # T35 (the fail-open guard)
+        result = subprocess.run(
+            [sys.executable, "-c", _CANARY_REGISTRY_PROBE],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=180,
+        )
+        assert result.returncode == 0, (
+            f"canary tools block does not round-trip (a parse failure sets the "
+            f"filter to all-tools-allowed = privilege escalation):\n{result.stderr[-2000:]}"
+        )
+
+
+class TestCanaryCampaignShape:
+    """T36 — the campaign log and report shape: the scratch-root vocabulary,
+    the FIRER'S attestation, the teardown on every exit path, the pre-flight
+    six, the intake map, and the canonical-home declaration."""
+
+    def test_t36_campaign_log_schema_fields(self):  # T36 (B8 + the FIRER attests)
+        for field in ("expected_action_class", "inertness_attested_by: aegis",
+                      "attested_at", "scratch_root_removed_at"):
+            assert field in CANARY_WORKFLOW, f"campaign log vocabulary missing: {field}"
+
+    def test_t36_teardown_on_every_exit_path(self):  # T36 (B8: abort path too)
+        assert "every exit path" in CANARY_WORKFLOW
+        assert re.search(r"`trap`|`finally`", CANARY_WORKFLOW), (
+            "the teardown must be installed as a trap/finally before the first fire"
+        )
+        assert CANARY_WORKFLOW.index("every exit path") < CANARY_WORKFLOW.index(
+            "scratch_root_removed_at"
+        ), "the teardown vocabulary must precede the removal stamp"
+
+    def test_t36_report_never_inlines_payload_text(self):  # T36 (CAG-12 shape)
+        assert "never inlines raw payload text" in CANARY_WORKFLOW
+
+    def test_t36_preflight_six_items(self):  # T36 (G3.10 incl. the scratch-project clause)
+        for clause in ("Dev identity asserted", "Dev database asserted",
+                       "non-poisoned pin", "Self-owned parentage",
+                       "Synthetic payload only", "NEVER spawned with a live project id"):
+            assert clause in CANARY_WORKFLOW, f"pre-flight clause missing: {clause}"
+
+    def test_t36_off_repo_store_pattern(self):  # T36 (G3.7)
+        assert "$HOME/.local/state/aegis/engagements/<engagement-id>/" in CANARY_WORKFLOW
+        assert "never committed" in CANARY_WORKFLOW
+        assert "recorded path, never glob" in CANARY_WORKFLOW
+        assert "reachable, not confined" in CANARY_WORKFLOW
+
+    def test_t36_intake_map_complete(self):  # T36 (G3.6: the canonical 12)
+        for surface_id in ("bash", "read_file", "grep", "mcp", "context", "child_report",
+                           "read_context", "explore", "job_event", "skill", "chat", "plane"):
+            assert surface_id in CANARY_WORKFLOW, f"intake map missing {surface_id}"
+        for leg in ("legs 1, 2, 3 and 5", "comparison baseline"):
+            assert leg in CANARY_WORKFLOW, f"the v1 campaign legs missing: {leg}"
+
+    def test_t36_must_not_claims_present(self):  # T36 (NC-5 six items)
+        assert "What I Do Not Claim" in CANARY_SOUL
+        for claim in ("not sandboxed", "bash is not denied", "no such per-instance",
+                      "not enforcement", "reachable, not confined",
+                      "safe because they are inert"):
+            assert claim.replace("**", "") in CANARY_SOUL.replace("**", ""), (
+                f"must-not-claim missing from the persona: {claim}"
+            )
+
+    def test_t36_canonical_home_declared(self):  # T36 (guide §2 single home)
+        assert "canonical copy of the injection-screen skill is mine" in CANARY_TOOLS_NOTE
+        for mirror in ("aegis", "worker", "sweeper"):
+            assert mirror in CANARY_TOOLS_NOTE
+        assert "version bump" in CANARY_TOOLS_NOTE
+
+
+class TestCanaryReportIntegrityPosture:
+    """G3.8 — canary is a leaf under adopted ruling D1-A, so the house
+    report-scrutiny guidance is SKIPPED by the empty-team exemption. The leg
+    asserts the skip's mechanical basis, so a future D1 change flips it
+    deliberately instead of silently."""
+
+    def test_t36_empty_team_skip_basis(self):  # T36 (D1-A report-integrity posture)
+        assert _meta("canary")["team_members"] == [], (
+            "canary must be an empty-team leaf for the scrutiny-guidance "
+            "exemption to hold (a spawn right flips this leg deliberately)"
+        )
+        joined = CANARY_SOUL + "\n" + (CANARY_DIR / "rule.md").read_text(encoding="utf-8")
+        for snippet in ("[REPORT SANITY:", "interim, not completion", "send_message"):
+            assert snippet not in joined, (
+                f"canary carries scrutiny boilerplate {snippet!r} — an empty-team "
+                "leaf is exempt, and the boilerplate must not appear either way"
+            )
