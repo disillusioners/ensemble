@@ -626,8 +626,21 @@ else
 fi
 
 if [ "${MEMOIR_G3_KEEP_SCRATCH:-0}" != "1" ] && [ -d "$S" ]; then
-  rm -rf "$S"
-  if [ -d "$S" ]; then fail L5c4 "scratch root $S survived rm"; else pass L5c4 "scratch root removed"; fi
+  rm -rf "$S" 2>/dev/null || true
+  if [ -d "$S" ]; then
+    # A child dying mid-teardown can race the first rm (2026-11-06 02:15
+    # run: the mock python was mid-death and the tree survived). One
+    # graced retry, then a LOUD fail — never a silent leftover.
+    sleep 2
+    rm -rf "$S" 2>/dev/null || true
+    if [ -d "$S" ]; then
+      fail L5c4 "scratch root $S survived TWO rm passes — investigate the writer before deleting"
+    else
+      pass L5c4 "scratch root removed (second pass needed — first raced a dying child)"
+    fi
+  else
+    pass L5c4 "scratch root removed"
+  fi
 fi
 
 if [ "$FAILED" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
