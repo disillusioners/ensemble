@@ -37,5 +37,5 @@
     ],
     "deny_spawn": ["knowledge"]
   },
-  "team_members": ["hacker", "cracker", "sweeper", "worker"]
+  "team_members": ["hacker", "cracker", "sweeper", "worker", "canary"]
 }

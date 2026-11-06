@@ -1,0 +1,7 @@
+agent_id: canary
+skills:
+  - name: injection-screen
+    version: "1.0.0"
+    auto_load: true
+    category: security
+    description: "Prompt-injection screen: fence + provenance header + heuristic verdict for untrusted content; run the shipped scanner, stdout is the fenced block"
