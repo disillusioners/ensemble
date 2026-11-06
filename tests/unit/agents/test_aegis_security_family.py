@@ -20,8 +20,8 @@ Design notes that matter to every leg:
   to exercise the shipped guards for real — the four containment classes
   named below, plus the T30(b) unset-pin and corpus-write legs.
 * **The council / fix-round-3 classes.** Seven classes were added after the
-  T1–T30 blocks and are named here so the file's shape is discoverable
-  from its header: ``TestCorpusContainmentExecuted`` (round-2 C-1/W-2 — the
+  T1–T30 blocks by the aegis-security-family lane's council rounds and
+  are named here so the file's shape is discoverable from its header: ``TestCorpusContainmentExecuted`` (round-2 C-1/W-2 — the
   cracker's corpus containment matrix, executed under ``/bin/sh``),
   ``TestCompoundContainmentMatrix`` (round-3 C-1 — the compound
   symlink-then-``..`` class, executed under ``/bin/dash`` and ``/bin/bash``),
@@ -48,9 +48,24 @@ Design notes that matter to every leg:
   ``HARD_BLOCKER``). The same split holds for the corpus-path guard: a
   static call-site leg plus an executed leg that really refuses an
   out-of-sandbox path.
-* **The baseline leg asserts file-exists + exactly-177 rows** (AM-11): the
-  generator's ``--check`` exits 0 both when clean AND when the file is
-  absent, so ``rc=0`` alone proves nothing.
+* **The canary-injection-defense classes (T31–T38 + tidier).** Thirteen
+  further classes were added after the T1–T30 blocks by the
+  canary-injection-defense lane (P1–P4 plus its code-council folds):
+  ``TestDoctrineAnchorMatrix`` (T31 — the fencing-doctrine anchor matrix
+  over the six screened personas plus canary's carve-outs),
+  ``TestInjectionScreenFenceContract`` (T32), ``TestInjectionScreenParser``
+  (T33), ``TestInjectionScreenCorpusGroundTruth`` (T34 — every corpus
+  case's ``expected_verdict``/``expected_confidence``/``expected_rules``
+  consumed), ``TestCanaryMetaPins`` (T35), ``TestCanaryCampaignShape`` and
+  ``TestCanaryReportIntegrityPosture`` (T36), ``TestInjectionMirrorRoster``
+  (the mirror-identity, version-parity and auto_load-polarity pins),
+  ``TestInjectionScreenCorpusHygiene`` (T37), ``TestScannerExecution``
+  (T38 — the committed scanner over the ruled three-CWD set), and the
+  tidier rec-2 pins ``TestErrorFenceHashCoversFullPayload`` (A1) and
+  ``TestErrorFenceChannelUniformity`` (A2).
+* **The baseline leg asserts file-exists + exactly-181 rows** (AM-11: 177
+  base + canary's 4 prompt files): the generator's ``--check`` exits 0 both
+  when clean AND when the file is absent, so ``rc=0`` alone proves nothing.
 """
 
 from __future__ import annotations
