@@ -34,7 +34,7 @@ Three gates:
         ``_stable_id_for("completion_check_note", instance_id=...)``
         raises ``ValueError`` (the ``completion_check_note`` row was
         removed from the canonical id-format table; supported kinds are
-        now exactly four: ``project``, ``shared_meta_kv``,
+        now exactly five: ``project``, ``shared_meta_kv``,
         ``attestation_nudge``, ``attestation_final_report_reminder``).
 
   S3 — whole-tree census (independent of the dev's pins)
@@ -169,13 +169,14 @@ _WITNESS_DOCSTRING_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 # Confirmation of the _stable_id_for error message — the kind is now
-# rejected. The four surviving kinds are project, shared_meta_kv,
-# attestation_nudge, attestation_final_report_reminder.
+# rejected. The five surviving kinds are project, shared_meta_kv,
+# attestation_nudge, attestation_final_report_reminder, memoir.
 _STABLE_ID_SUPPORTED_KINDS: tuple[str, ...] = (
     "project",
     "shared_meta_kv",
     "attestation_nudge",
     "attestation_final_report_reminder",
+    "memoir",
 )
 
 
@@ -741,9 +742,9 @@ class TestS2RuntimeZeroNotePlusKindRetirement:
       S2b — direct retirement negative: ``_stable_id_for(
             "completion_check_note", instance_id=...)`` raises
             ``ValueError`` — the kind was REMOVED from the canonical
-            id-format table; supported kinds are now exactly four:
+            id-format table; supported kinds are now exactly five:
             ``project``, ``shared_meta_kv``, ``attestation_nudge``,
-            ``attestation_final_report_reminder``.
+            ``attestation_final_report_reminder``, ``memoir``.
     """
 
     def test_s2a_bd_with_pending_shaped_turn_zero_messages_injected(self):
@@ -1157,12 +1158,12 @@ class TestFamilySeparationContractPins:
             f"{ATTESTATION_BUNDLED_REMINDER[:120]!r}"
         )
 
-    def test_stable_id_supported_kinds_are_exactly_four(self):
-        """The four surviving kinds are exactly ``project``,
+    def test_stable_id_supported_kinds_are_exactly_five(self):
+        """The five surviving kinds are exactly ``project``,
         ``shared_meta_kv``, ``attestation_nudge``,
-        ``attestation_final_report_reminder``. If a fifth kind is
-        added (or one is removed), the kind-retirement contract is
-        broken."""
+        ``attestation_final_report_reminder``, ``memoir``. If a
+        sixth kind is added (or one is removed), the kind-retirement
+        contract is broken."""
         # Probe via the error message — the supported-kinds list
         # is the canonical message string.
         try:

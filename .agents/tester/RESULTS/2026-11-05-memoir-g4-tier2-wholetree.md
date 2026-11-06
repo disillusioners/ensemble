@@ -189,3 +189,91 @@ Both are production/lane-side misses, not test-side quick-fixes (one is a contra
 `memoir_gate_tier2` registered (keep-both, newest-first) with per-partition outer timeouts documented (5-min cap class for individual packs; the gate-level 90-min advisory is the tier budget per ensure.md § Gate Tiers — disclosed as a tier-2 pack override class).
 EOF
 echo "RESULTS doc written"; wc -l .agents/tester/RESULTS/2026-11-05-memoir-g4-tier2-wholetree.md
+---
+
+# RE-VERIFICATION (narrow) — 2026-11-06 (post companion-surface fixes)
+
+**House pattern:** combined document — the FAIL header above stays; this section carries the re-verification verdict (v0.28.13 ceremony-note precedent). The FAIL header is the original evidence; this section is the closing evidence.
+
+## Fixes applied (test-side / machine output only — no production edits)
+
+1. **LCANCHECK PIN** — `tests/integration/test_lcancheck_family_separation.py`:
+   - `_STABLE_ID_SUPPORTED_KINDS` tuple: added `"memoir"` (fifth kind).
+   - Test renamed `test_stable_id_supported_kinds_are_exactly_four` -> `..._exactly_five`; docstrings "four" -> "five".
+   - Production already documents the fifth kind (`daemon/services/context_messages.py`, CONTEXT_KIND_MEMOIR / `memoir:{agent_id}`) — pin moved to match production intent. Test-side only. Lockstep family check: only this file asserts the contract (grep confirmed no other file references STABLE_ID_SUPPORTED_KINDS/exactly_four); no lockstep edits needed.
+2. **TOOL-CATEGORIES ARTIFACT** — regenerated via the house generator (NEVER hand-edited):
+   - Command: `ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=/tmp/tool-categories.json uv run python -m pytest tests/unit/tools/test_tool_category_artifact.py -q` then `cp /tmp/tool-categories.json .agents/shared/metrics/tool-categories.json`.
+   - Result: count 57 -> 58, `memoir` present True. Drift check now 9 passed (was 2 failed). VOCABULARY_VERSION stays 3 (production constant `daemon/checkpoint_metrics.py:218`; not sealed — sealed-set check: no SEALED_SHA_BASELINES references VOCABULARY_VERSION or checkpoint_metrics -> nothing to re-pin; bump 3->4 is a lane-side ceremony under freeze rule P-1, routed followup).
+
+## Narrow re-verification evidence
+
+### (a) The 3 deterministic nodes -> GREEN (3x each, fenced, isolated, HEAD)
+
+| node | runs | result |
+|------|------|--------|
+| `test_lcancheck_family_separation::...::test_stable_id_supported_kinds_are_exactly_five` | 3/3 | PASS (rc=0) |
+| `test_tool_category_artifact::...::test_artifact_covers_every_registered_category` | 3/3 | PASS (rc=0) |
+| `test_tool_category_artifact::...::test_artifact_is_generated_from_the_tool_registry` | 3/3 | PASS (rc=0) |
+
+### (b) All 15 net-new ids on HEAD (post-fix)
+
+- The 3 above: GREEN (3x).
+- The other 12 untouched ids: 11/11 PASS in isolation (one transient rc=1 re-run -> PASS); none touched by my edits, isolation status matches the matrix (chunk-context flakes). Re-run of `test_tier1_sibling_owned_row_skipped` confirmed PASS.
+- Combined: 15/15 GREEN in isolation on HEAD.
+
+### (c) Lockstep families touched
+
+- lcancheck lockstep: only `test_lcancheck_family_separation.py` asserts the contract -> no other edits. Full lcancheck file re-run implied by the node green.
+- tool_category artifact: full pack re-run 9/9 PASS.
+- inner_soul-16: files unchanged (`test_memory_integration.py`, `test_inner_soul_compaction.py` not touched) -> byte-identical line stands; digest `9fea2dcbd506a5139eaae14091a872a7f4f000dde171aa74b09e59f7cbec2e52` cited (not re-run).
+
+### (d) Final net-new table (revised)
+
+| metric | before fix | after fix |
+|--------|-----------|-----------|
+| deterministic net-new | 3 | **0** |
+| flaky (chunk-context) | 11 | 11 (unchanged — not lane-added, not quarantined) |
+| pre-existing (incl. reason-drift test_api x2) | 521 | 521 |
+| genuine fixed | 0 | 0 |
+| net-new line-level | 15 | 0 (the 3 fixed nodes flipped to green; the 12 were never deterministic) |
+
+`+N/-N` fingerprint: +305 collected (unchanged; all 15 memoir test files), -0. The 3 companion-surface misses are closed; their test-side edits are path-scoped in the commit below.
+
+### (e) Artifact generator line + seal check
+
+- Generator: `ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=/tmp/tool-categories.json uv run python -m pytest tests/unit/tools/test_tool_category_artifact.py -q` -> `/tmp/tool-categories.json` (count 58, version 3, memoir present).
+- Seal check: no SEALED_SHA_BASELINES references VOCABULARY_VERSION or checkpoint_metrics -> nothing to re-pin. VOCABULARY_VERSION bump 3->4 is a lane-side ceremony (freeze rule P-1), routed followup.
+
+## Final verdict
+
+**PASS-WITH-NOTES** — deterministic net-new = 0. The 3 F-1 companion-surface misses are closed (test-side pin update + machine-generated artifact regeneration). 11 flaky (chunk-context xdist-shard) ids remain as routed residue (listed below); they did not flip the verdict and are not lane-added.
+
+## Flaky 11 (routed residue, not quarantined, not absorbed into Tier-1)
+
+Chunk-context / order-sensitive nodes (1/3 or 0/3 in isolation at one or both legs, red in xdist shards). Listed with 3x evidence from the matrix (head/base fails):
+
+| # | node | head 3x | base 3x | 3x evidence |
+|---|------|---------|---------|-------------|
+| 1 | `test_job_feedback_observer::...::test_tier1_sibling_owned_row_skipped` | 1/3 | 0/3 | head rc=1x1; base 0/3 |
+| 2 | `test_atomic_dequeue::...::test_dequeue_with_instance_filter_under_concurrency` | 0/3 | 0/3 | 0/3 both |
+| 3 | `test_atomic_status_transitions::...::test_retry_concurrent_double_call_only_one_increments` | 1/3 | 0/3 | head rc=1x1 |
+| 4 | `test_resource_monitor_self_cost::test_attribution_on_holds_p1_budget` | 0/3 | 0/3 | 0/3 both |
+| 5 | `test_auto_kill_integration::...::test_sibling_alive_row_skipped_by_terminal_lane` | 1/3 | 1/3 | 1/3 both |
+| 6 | `test_mcp_tool_timeout::...::test_tool_node_handles_timeout` | 0/3 | 0/3 | 0/3 both |
+| 7 | `test_plane_sync::...::test_request_includes_authorization_header` | 0/3 | 0/3 | 0/3 both |
+| 8 | `test_plane_sync::...::test_never_logs_api_key` | 0/3 | 0/3 | 0/3 both |
+| 9 | `test_archive_lifecycle::...::test_archive_old_memories_moves_old_files` | 0/3 | 0/3 | 0/3 both |
+| 10 | `test_archive_lifecycle::...::test_archive_old_memories_returns_count` | 0/3 | 0/3 | 0/3 both |
+| 11 | `test_chart_tools_reuse_integration::...::test_error_charter_revives_then_respawns_on_second_failure` | 1/3 | 0/3 | head rc=1x1 |
+| (extra) | `test_manager_shutdown::...::test_durable_sweep_sibling_alive_skip_and_dead_writer_swept` | 1/3 | 0/3 | head rc=1x1 |
+
+(Note: 12 chunk-context-flaky ids including manager_shutdown; the 11 in the table are the net-new-adjacent ones from the matrix net-new set; manager_shutdown is from the "fixed" set but is also flaky. No house flake-ledger file exists — entries recorded here per adjudication Q2.)
+
+## Commits
+
+- Fix commit 1: `test(memoir): G4 re-verification after companion fixes` (lcancheck pin + tool-categories.json artifact) — pending below.
+- Evidence: `RESULTS/2026-11-05-memoir-g4-tier2-wholetree.md` (this doc, combined FAIL + re-verification).
+
+## New HEAD
+
+`feature/ari-memoir-store` @ latest (re-verify commit) on top of `9dda08ddc` (original gate commit `test(memoir): G4 tier-2 whole-tree gate + registration`). Clean porcelain. Base worktree removed; scratch PG stopped + data dir removed.
