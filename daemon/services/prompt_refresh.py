@@ -862,6 +862,8 @@ async def _refresh_impl(
     provenance["manager_instances"] = f"{before_count}->{after_count}"
     provenance["hash_mtime_divergence"] = cache_busted
     provenance["cache_busted"] = cache_busted
+    provenance["fingerprint_changed"] = fingerprint_changed
+    provenance["hash_divergence"] = hash_divergence
     provenance["baseline_present"] = baseline is not None
     provenance["parity_ok"] = parity_ok
     provenance["claim_guard"] = "held" if claim_ok else "skew-or-absent"

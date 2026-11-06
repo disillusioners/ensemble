@@ -236,8 +236,22 @@ def create_prompt_reload_tools(
         """Refresh MY system prompt from the active agent definition; the new persona takes effect on my NEXT turn. Use tool_help("prompt_reload") for details."""
         try:
             # Layer 3 — the in-body agent gate (auth-first: an
-            # unauthorized caller touches nothing else).
+            # unauthorized caller touches nothing else). The denial is
+            # still a terminal path → the D24 INFO line fires (code=-:
+            # the authorization class deliberately carries no code).
             if caller_agent_id != PROMPT_RELOAD_AUTHORIZED_AGENT:
+                from ..services.prompt_refresh import (
+                    OUTCOME_REFUSED,
+                    PromptRefreshResult,
+                )
+
+                denial = PromptRefreshResult(
+                    outcome=OUTCOME_REFUSED,
+                    code=None,
+                    message="non-ari caller",
+                    provenance={"agent_id": caller_agent_id},
+                )
+                _emit_info_line(denial, caller_instance_id, caller_agent_id)
                 return _not_ari(caller_agent_id)
 
             # Kill-switch — per call, in-body (AM-11).
