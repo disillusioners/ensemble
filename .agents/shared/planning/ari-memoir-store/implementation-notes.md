@@ -161,13 +161,23 @@ BELOW by label only, with NO invented detail.
   `WARNING stats_write_failed:<ExcType>`), pinned. RESIDUAL, disclosed:
   the shipped footer was measured BEFORE the write (it must be, to price
   the envelope), so on this path the footer still says
-  `stats_updated=true` while the result fields say False.
+  `stats_updated=true` while the result fields say False. v2 shape
+  (routed polish row): a conditional footer append on the failure path —
+  append a correction line to the footer when `stats_updated` is False.
+- NEW-4 FIXED (2026-11-06, pre-gate): the `memoir_recall._full_doc_`
+  stats claim is qualified — the "episodes returned are exactly the
+  episodes marked as accessed" claim now carries the failed-stats
+  exception (result still returned, nothing marked,
+  `stats_updated=false` / `marked_ids=[]`, `stats_write_failed`
+  WARNING logged). Doc-only, zero behavior; `memoir_timeline._full_doc_`
+  untouched.
 
 ### Deferred follow-ups (labels only — the report's per-item detail could not be transcribed)
 
 | Label | What is known | Action now |
 |---|---|---|
 | **H2** BM25 consolidation | Production lexical path is PG `ts_rank_cd`; the SQLite path is the dev fallback. | NOT attempted: ranking equivalence was not provable under the lane's time budget. Divergence recorded; route as its own follow-up. |
+| **NEW-3 v2** | Per-recall WARNING on a steadily degraded semantic lane (`daemon/services/memoir_retrieval.py:747/:779/:796`): one WARNING per recall. | Optional dampener v2: one-shot or rate-limited WARNING if volume proves noisy. |
 | **M4** constant consolidation | The "readers" status is DISPUTED in the rulings. | NOT consolidated: no reader-verified constant identified. Record. |
 | **M1 / M2 / M7** | Prose that describes PRE-FIX behaviour. | Not located by label (no report). Doc-only; needs the report or a reviewer pass to point at the exact sentences. Recorded, NOT guessed. |
 | **M3** | Unknown detail (report absent). | Follow-up. |

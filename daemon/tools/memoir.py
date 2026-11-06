@@ -1182,7 +1182,10 @@ def create_memoir_tools(
         "20 — an out-of-range k is REFUSED, never silently clamped. The "
         "budgeted result carries a fixed footer (counts, rank basis, "
         "embedding disclosure, stats flag) — the episodes returned are "
-        "exactly the episodes marked as accessed; anything dropped for "
+        "exactly the episodes marked as accessed, EXCEPT when the stats "
+        "write fails: the result is still returned, nothing is marked "
+        "(`stats_updated=false`, `marked_ids=[]`), and a "
+        "`stats_write_failed` WARNING is logged; anything dropped for "
         "budget is named in the footer, never silently lost. The timeline "
         "tool (not this one) is the right read when you know WHEN." + shared_tail
     )
