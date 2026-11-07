@@ -524,6 +524,30 @@ class POKService:
         except Exception:  # pragma: no cover - defensive
             return {e.id for e in entries}
 
+    # B5 selector reuse — ZERO POK-invented weights. Maps POK rows
+    # onto the selector's note-dict shape (``category=domain``,
+    # ``summary=body``, ``reference=slug``, ``priority='high'`` so the
+    # pinned/floor ordering is deterministic), runs
+    # :func:`select_critical_notes_for_injection` with its DEFAULT
+    # :class:`SelectionConfig` (the configurable fusion
+    # weights/threshold surface — boot-installed overrides flow through
+    # the same install seam), then maps the survivors back. Pinned
+    # bypass is the selector's own D2 rule.
+    def rank_for_view(
+        self,
+        rows: list[ProjectOperatingKnowledge],
+        query: str,
+        query_embedding: list[float] | None,
+        embeddings_map: dict[str, list[float]] | None = None,
+    ) -> list[ProjectOperatingKnowledge]:
+        """The :func:`~daemon.services.pok_injection.admit_view`
+        ``rank_fn`` adapter (positional rows/query/embedding/map — the
+        map is optional; ``_rank_with_selector`` self-supplies it from
+        the repo when absent)."""
+        return self._rank_with_selector(
+            rows, query=query, query_embedding=query_embedding
+        )
+
     def _rank_with_selector(
         self,
         rows: list[ProjectOperatingKnowledge],

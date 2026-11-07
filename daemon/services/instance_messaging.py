@@ -4962,6 +4962,47 @@ class InstanceMessagingService:
                         f"in place)"
                     )
 
+                # ── POK once-flag (POK Phase 1, T6 — the AM-22 discipline) ──
+                # THE WRITE SITE IS THE CONSUMER. ``assemble_context_messages``
+                # BUILDS ONLY: the graph path discards the persistent half,
+                # so a builder-written flag would consume the flag on a
+                # thrown-away block. The flag is written HERE — inside
+                # ``if not is_retry:`` AFTER the assemble call — and ONLY
+                # after the returned persistent half is CONFIRMED to carry
+                # the POK block (``context_kind == "pok"`` or stable id
+                # ``pok:{project_id}``). Write shape mirrors the memoir
+                # once-flag above (``asyncio.to_thread(set_metadata, …)``).
+                # A failed write is swallowed: the seam reads the flag
+                # fresh each assembly and the stable id supersedes in
+                # place, so the failure self-heals next turn.
+                try:
+                    from .context_messages import (  # noqa: PLC0415
+                        POK_INJECTION_FLAG,
+                    )
+                    from .pok_injection import (  # noqa: PLC0415
+                        pok_block_present,
+                    )
+
+                    if pok_block_present(_persistent_msgs):
+                        await asyncio.to_thread(
+                            self._manager._instance_repository.set_metadata,
+                            instance_id,
+                            POK_INJECTION_FLAG,
+                            True,
+                        )
+                        logger.info(
+                            f"[POK] operating-knowledge block delivered for "
+                            f"{instance_id[:8]}... — once-flag "
+                            f"({POK_INJECTION_FLAG}) written"
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        f"[POK] once-flag write failed for "
+                        f"{instance_id[:8]}...: {exc} — the block may "
+                        f"re-deliver next turn (the stable id supersedes "
+                        f"in place)"
+                    )
+
                 # ── Auto-load REPLACE sweep (C3 leak fix) ────────────────
                 # A ``<meta>`` REPLACE that dropped skills may have
                 # invalidated the turn-1 checkpointed

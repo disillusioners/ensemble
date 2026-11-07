@@ -53,6 +53,7 @@ from daemon import constants as _constants
 from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.config import _resolve_kv_ambient_system_default_enabled
 from daemon.loader import estimate_tokens
+from .pok_injection import POK_BLOCK_TITLE, POK_HEADER_LINE, POK_INJECTION_FLAG
 from .skill_metrics_service import REPLACED_SKILLS_METADATA_KEY
 
 # Phase-2 selector lazy import keeps the module-level surface
@@ -138,6 +139,17 @@ CONTEXT_KIND_SNAPSHOT_DIGEST = "snapshot_digest"
 # supersedes in place. The block is BUILT here but the once-flag is
 # written by the CONSUMER (``instance_messaging.py``, D5.4/AM-22).
 CONTEXT_KIND_MEMOIR = "memoir"
+
+# POK Phase 1 (project-operating-knowledge, 2026-11-07): the
+# audience-scoped operating-knowledge block kind. Stable message id
+# ``pok:{project_id}`` — one block per PROJECT (the audience
+# dimension is per-view admission state, not per-block identity), so
+# ``add_messages`` supersedes in place on a re-delivery. The block is
+# BUILT here; the once-per-instance flag (``pok_injected``) is written
+# by the CONSUMER (``instance_messaging.py``) after the persistent
+# half is confirmed to carry it (the AM-22 discipline — a builder-
+# written flag would consume the flag on a graph-discarded half).
+CONTEXT_KIND_POK = "pok"
 _AMBIENT_KV_FRESH: bool | None = None
 _AMBIENT_KV_FRESH_BOOT_LOG_EMITTED = False
 
@@ -510,12 +522,167 @@ async def _maybe_memoir_briefing_message(
         return None
 
 
+# ── POK context block (project-operating-knowledge Phase 1, T6) ───────────
+#
+# The AUDIENCE-DIMENSIONED operating-knowledge block (ER-1 /
+# §4.5.1): ``build_pok_context_message`` renders an ALREADY-ADMITTED
+# view (the admission pipeline lives in
+# ``daemon/services/pok_injection.py`` — audience filter FIRST, then
+# pinned ∪ family-ordered, F5 rider, per-view 8/2,900 wrapper-
+# inclusive). The seam (``_maybe_pok_context_message``) owns the
+# gates: default project → no block (AC10 negative leg); once-flag
+# READ fresh each assembly (revive-safe) — the flag is WRITTEN by the
+# consumer (``instance_messaging.py``), never here. Degradation:
+# never-raise — a store failure yields ``None`` + WARNING (no block,
+# no flag write; the next turn retries).
+
+
+def build_pok_context_message(
+    entries: list[Any],
+    project_id: str,
+    *,
+    omitted: int = 0,
+) -> HumanMessage | None:
+    """Render the ``[SYSTEM CONTEXT: Project Operating Knowledge]`` block.
+
+    Args:
+        entries: The ADMITTED view — a list of
+            :class:`~daemon.services.pok_injection.ViewEntry` (already
+            audience-filtered, pinned-ordered, F5-bounded). Each
+            entry's ``render()`` applies the fixed list-item template +
+            newline flattening + ``escape_for_context_block`` (the
+            A-29 render-side fence).
+        project_id: The project the block belongs to — the stable id
+            suffix (``pok:{project_id}``), so ``add_messages``
+            supersedes in place on a re-delivery.
+        omitted: The F5 tail remainder (renders the count-up line when
+            > 0).
+
+    Returns ``None`` when ``entries`` is empty (no empty-host noise —
+    the shared_meta_kv precedent). BUILDS ONLY: never writes the
+    once-per-instance flag (AM-22 discipline).
+    """
+    if not entries:
+        return None
+    lines: list[str] = [POK_HEADER_LINE]
+    for entry in entries:
+        rendered = entry.render()
+        if rendered:
+            lines.append(rendered)
+    if omitted > 0:
+        n = omitted
+        lines.append(
+            f"({n} more entr{'y' if n == 1 else 'ies'} not shown — use "
+            "pok_query for the full view)"
+        )
+    return _make_context_message(
+        kind=CONTEXT_KIND_POK,
+        title=POK_BLOCK_TITLE,
+        content="\n".join(lines),
+        id_=_stable_id_for("pok", project_id=project_id),
+    )
+
+
+async def _maybe_pok_context_message(
+    instance_id: str,
+    project_id: str | None,
+    agent_meta: Any,
+    manager: Any,
+    instance_repository: Any,
+    user_query: str = "",
+) -> HumanMessage | None:
+    """The POK seam: gates → fresh read → per-view admission → builder.
+
+    Runs on EVERY assembly (turn-1 AND the refresh branch): the
+    once-flag is read fresh, so a turn-1 flag-write failure (or a
+    store-down turn) delivers on the next turn — the memoir-seam
+    lifecycle (D5.11). The caller (``assemble_context_messages``)
+    passes the project only when it is NON-default and resolved; the
+    default-project gate is enforced here too (AC10 negative leg,
+    belt-and-braces).
+    """
+    if not project_id:
+        return None
+    from daemon import constants as _constants
+
+    if (
+        project_id == _constants.SYSTEM_DEFAULT_PROJECT_ID
+        or getattr(agent_meta, "id", None) is None
+    ):
+        # The id gate is not a POK gate per se — agent_meta.id is
+        # required for the audience mapping (factory-captured
+        # agent_id); without it the view cannot be resolved.
+        return None
+
+    repo = (
+        instance_repository
+        if instance_repository is not None
+        else getattr(manager, "_instance_repository", None)
+    )
+    engine = getattr(manager, "_engine", None)
+    if repo is None or engine is None:
+        return None
+
+    # Once-flag read (off-loop, fresh — revive-safe). UNWRITTEN →
+    # deliver; written → the block is already checkpointed.
+    try:
+        flag = await asyncio.to_thread(
+            _read_instance_metadata, repo, instance_id, POK_INJECTION_FLAG
+        )
+    except Exception as exc:  # noqa: BLE001 — degraded read delivers nothing
+        logger.warning(
+            "[ContextMessages] POK once-flag read failed for "
+            f"{instance_id[:8]}...: {exc} — no block this turn"
+        )
+        return None
+    if flag:
+        return None
+
+    try:
+        from .pok_injection import admit_view  # noqa: PLC0415 — cycle-neutral
+        from .pok_service import POKService  # noqa: PLC0415
+
+        def _build_sync() -> HumanMessage | None:
+            service = POKService(engine)
+            rows = service._repo.list_entries(project_id, statuses=("active",))
+            if not rows:
+                return None
+            result = admit_view(
+                rows,
+                agent_id=getattr(agent_meta, "id", None),
+                query=user_query or "",
+                embeddings_map=service._repo.embeddings_map(project_id),
+                rank_fn=service.rank_for_view,
+            )
+            return build_pok_context_message(
+                result.entries, project_id, omitted=result.omitted
+            )
+
+        return await asyncio.to_thread(_build_sync)
+    except Exception as exc:  # noqa: BLE001 — §4.9 never-raise
+        logger.warning(
+            "[ContextMessages] POK block build failed for "
+            f"{instance_id[:8]}...: {exc} — no block, no flag write"
+        )
+        return None
+
+
+def _read_instance_metadata(repo: Any, instance_id: str, key: str) -> Any:
+    """Off-loop instance-metadata read (the memoir flag-read shape)."""
+    row = repo.get(instance_id)
+    if row is None:
+        return None
+    meta = getattr(row, "instance_metadata", None) or {}
+    return meta.get(key)
+
+
 def _stable_id_for(
     kind: str,
     *,
     instance_id: str | None = None,
     context_key: str | None = None,
     agent_id: str | None = None,
+    project_id: str | None = None,
 ) -> str:
     """Compose the deterministic stable id for a refreshable block.
 
@@ -634,10 +801,23 @@ def _stable_id_for(
                 "_stable_id_for('memoir') requires agent_id"
             )
         return f"memoir:{agent_id}"
+    if kind == "pok":
+        # POK Phase 1 (2026-11-07): the operating-knowledge block is
+        # keyed per PROJECT — the audience dimension varies the
+        # ADMISSION per view, but the block identity is the project
+        # (stable id ``pok:{project_id}``; §4.5.1 the ari seam shares
+        # this id within its own instance-context namespace). The
+        # suffix IS the project the knowledge belongs to, so supersede
+        # granularity matches data granularity.
+        if not project_id:
+            raise ValueError(
+                "_stable_id_for('pok') requires project_id"
+            )
+        return f"pok:{project_id}"
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
         "for 'project', 'shared_meta_kv', 'attestation_nudge', "
-        "'attestation_final_report_reminder', and 'memoir' blocks"
+        "'attestation_final_report_reminder', 'memoir', and 'pok' blocks"
     )
 
 
@@ -2228,6 +2408,24 @@ async def assemble_context_messages(
         )
         if memoir_msg is not None:
             persistent_after_inject.append(memoir_msg)
+
+        # ── POK refresh (POK Phase 1, T6) — PERSISTENT, every-turn gate ──
+        # The once-flag is read FRESH each assembly (this refresh branch
+        # INCLUDED): a turn-1 store-down (no block built → no flag
+        # written) delivers HERE on the next turn — the memoir-seam
+        # lifecycle. BUILD ONLY — the consumer writes the flag after
+        # confirming the block landed in the persistent half (AM-22).
+        # Non-default projects only (the seam's inner gate).
+        pok_refresh_msg = await _maybe_pok_context_message(
+            instance_id=instance_id,
+            project_id=project_id,
+            agent_meta=agent_meta,
+            manager=manager,
+            instance_repository=instance_repository,
+            user_query=user_query,
+        )
+        if pok_refresh_msg is not None:
+            persistent_after_inject.append(pok_refresh_msg)
         return (persistent_after_inject, [])
 
     persistent_msgs: list[HumanMessage] = []
@@ -2328,6 +2526,27 @@ async def assemble_context_messages(
             kv_msg = build_shared_meta_kv_message(kv_metadata, stable_id=_stable_id_for("shared_meta_kv", context_key=context_key))
             if kv_msg is not None:
                 persistent_msgs.append(kv_msg)
+
+        # ── POK operating-knowledge block (POK Phase 1, T6) — PERSISTENT ──
+        # Non-default projects only (the default-project leg is inside
+        # the seam — belt-and-braces). The seam reads the once-flag
+        # FRESH each assembly (a turn-1 flag-write failure delivers on
+        # the next turn); the flag is WRITTEN by the consumer
+        # (instance_messaging.py) after the persistent half is
+        # confirmed to carry the block (AM-22 discipline). Stable id
+        # ``pok:{project_id}``. The audience filter + per-view
+        # admission live in pok_injection (ER-1.2 — filter FIRST, then
+        # the pinned ∪ family semantics WITHIN the visible set).
+        pok_msg = await _maybe_pok_context_message(
+            instance_id=instance_id,
+            project_id=project_id,
+            agent_meta=agent_meta,
+            manager=manager,
+            instance_repository=instance_repository,
+            user_query=user_query,
+        )
+        if pok_msg is not None:
+            persistent_msgs.append(pok_msg)
 
     # ── 2. Shared context (RAG) message — PERSISTENT ──
     # Gate the entire RAG path on ``context_injection.heuristic_match_shared_md_files``
@@ -2561,6 +2780,8 @@ __all__ = [
     "CONTEXT_KIND_SHARED_META_KV",
     "CONTEXT_KIND_SNAPSHOT_DIGEST",
     "CONTEXT_KIND_MEMOIR",
+    "CONTEXT_KIND_POK",
+    "POK_INJECTION_FLAG",
     "SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS",
     # Pure builder functions
     "build_project_context_message",
@@ -2570,6 +2791,7 @@ __all__ = [
     "build_auto_load_skills_message",
     "auto_load_skills_message_id",
     "build_skills_message",
+    "build_pok_context_message",
     # Snapshot digest seam (PR4 — read/consume side)
     "render_snapshot_digest_body",
     "cap_snapshot_digest_for_injection",
