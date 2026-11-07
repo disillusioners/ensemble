@@ -618,7 +618,7 @@ class TestClaimGuard:
             )
             h = _hl.sha256()
             for key in sorted(rs):
-                h.update(pr._sha256_file(rs[key]).encode())
+                h.update(pr._file_sha256(rs[key]).encode())
             return "DISK:" + h.hexdigest()
 
         def _compose(agent_id, agent_dir, cache, mcp, version_tag=None, is_custom_agent=False):
@@ -644,7 +644,7 @@ class TestClaimGuard:
         # The recorded baseline describes the SAME compose's inputs: the
         # per-file disk hashes.
         recorded_hashes, _fp = pr._BASELINE_MAP[("ari", None, ())]
-        actual_disk_hashes = {k: pr._sha256_file(p) for k, p in read_set.items()}
+        actual_disk_hashes = {k: pr._file_sha256(p) for k, p in read_set.items()}
         assert recorded_hashes == actual_disk_hashes, (
             "the baseline must describe the inputs of the compose that "
             "produced the served persona — never a separate later disk read"

@@ -27,10 +27,14 @@ Mechanism (leader ruling R1, probe-validated):
   fingerprint as a TUPLE against the process-local baseline map
   (AM-8/D5; Rev-3 B1/B4): no baseline → ``unproven`` (force-like);
   files+db equal → ``no_change`` (never pops); db-only change →
-  ``reloaded_db`` (F4 honored AT the reload); hashes-differ with the
-  loader's own mtime check provably stale → ``PromptCache.invalidate``
-  BEFORE composing (a stale loader cache serves the old persona on the
-  NEXT RESTORE too — ``force=true`` cannot cure it).
+  ``reloaded_db`` (F4 honored AT the reload); hashes-differ →
+  ``reloaded``. The loader-cache bust is a CORRECTNESS mechanism, not
+  only a report flag (N1/D27): whenever the shared cache entry's bytes
+  are unprovable — a COLD process (no baseline) holding a live entry,
+  or the warm hash/mtime-divergence shape — ``PromptCache.invalidate``
+  fires BEFORE composing, because the loader's mtime-only cache-hit
+  would otherwise serve the old persona on the NEXT RESTORE too
+  (``force=true`` cannot cure it).
 * eviction — the probe-validated BARE POP ``manager.instances.pop(id,
   None)`` (P3). NO seam guard (AM-7/D22: the instances dict is unlocked
   across a 12-site mutation census with awaitless critical spans; a
@@ -62,7 +66,6 @@ notify-exact generic ``ERROR:`` envelope, not a REFUSED code.
 from __future__ import annotations
 
 import difflib
-import hashlib
 import json
 import logging
 import re
@@ -78,6 +81,14 @@ from ..loader import (
     _compute_db_versions_fingerprint,
     _get_prompt_version_repo,
     _resolve_innate_skill_paths,
+)
+# stdlib-only sibling (zero daemon imports of its own — no cycle): the
+# ONE file-sha256 helper and the manifest reader come from here.
+from .release_manifest import (
+    ManifestError,
+    _file_sha256,
+    load_release_manifest,
+    verify_paths,
 )
 
 logger = logging.getLogger(__name__)
@@ -461,14 +472,6 @@ def _manifest_relpath(agent_dir_name: str, key: str) -> str:
     return f"{agent_dir_name}/{key}"
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 # ── AM-14 mcp_tool_names parity (private reach W3-authorized) ───────────────
 
 
@@ -609,7 +612,7 @@ async def refresh_instance_prompt(
     try:
         provenance.update(_release_provenance())
         return await _refresh_impl(manager, instance_id, force, provenance)
-    except Exception as exc:  # noqa: BLE001 — typed FAILED envelope, never raise
+    except Exception:  # noqa: BLE001 — typed FAILED envelope, never raise
         logger.exception("prompt_reload internal error for %s", instance_id)
         return _refused(
             CODE_INTERNAL_ERROR,
@@ -723,15 +726,13 @@ async def _refresh_impl(
     # served persona came from a stale CACHE HIT, poisoning the map so
     # every later call reported `no_change` while serving stale bytes.
     read_set = _loader_read_set(resolved_dir, agent_file_meta)
-    compose_input_hashes = {key: _sha256_file(path) for key, path in read_set.items()}
+    compose_input_hashes = {key: _file_sha256(path) for key, path in read_set.items()}
     compose_input_mtimes = {key: path.stat().st_mtime for key, path in read_set.items()}
 
     # ── Manifest verification (D3/AM-2/AM-3) ────────────────────────────────
     if manifest_mode == "skip-dev":
         provenance["manifest"] = "absent(dev)"
     else:
-        from .release_manifest import ManifestError, load_release_manifest, verify_paths
-
         release_root = resolved_dir.parent.parent
         try:
             manifest = load_release_manifest(release_root)
@@ -864,11 +865,10 @@ async def _refresh_impl(
                 "cold_process_cannot_prove_entry_bytes"
             )
         elif files_changed:
-            stored_mtimes = snapshot_entry[2]
             file_keys_match = {
-                key: value for key, value in stored_mtimes.items() if key != FP_KEY
+                key: value for key, value in snapshot_mtimes.items() if key != FP_KEY
             } == compose_input_mtimes
-            fp_match = stored_mtimes.get(FP_KEY) == db_fingerprint
+            fp_match = snapshot_mtimes.get(FP_KEY) == db_fingerprint
             if file_keys_match and fp_match:
                 hash_mtime_divergence = True
                 prompt_cache.invalidate(agent_id, mcp_names, version_tag)

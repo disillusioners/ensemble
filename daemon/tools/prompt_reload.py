@@ -275,9 +275,9 @@ def create_prompt_reload_tools(
             )
             _emit_info_line(result, caller_instance_id, caller_agent_id)
             if result.code is not None:
-                if result.code in {
-                    "prompt_reload_internal_error",
-                }:
+                from ..services.prompt_refresh import FAILURE_CODES
+
+                if result.code in FAILURE_CODES:
                     return _failure(result.code, result.message)
                 return _refusal(result.code, result.message)
             return _render_report(result)
