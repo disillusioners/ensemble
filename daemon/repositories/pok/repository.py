@@ -12,7 +12,8 @@ What lives here (mechanics only, no policy):
   ``uq_pok_active_slug`` makes dual-active structurally impossible,
   so the txn is the only safe ordering);
 * the curator flip (pinned / disputed / archived / audience /
-  audience_agents) with the forward-only archived guard;
+  audience_agents / source_tier — the tier flip is Phase 2, trust-tier
+  addendum T-3) with the forward-only archived guard;
 * access/verify counters (query-path bookkeeping);
 * the embeddings-companion CRUD (upsert / map / delete).
 
@@ -190,6 +191,7 @@ class POKRepository:
         archived: bool | None = None,
         audience: str | None = None,
         audience_agents: Any = UNSET,
+        source_tier: Any = UNSET,
     ) -> ProjectOperatingKnowledge | None:
         """Apply curator flips (pok_curate).
 
@@ -200,6 +202,10 @@ class POKRepository:
         distinguish "leave unchanged" (default) from "clear back to
         NULL" (pass an empty list). A non-empty list is JSON-encoded
         at this boundary.
+        ``source_tier`` (Phase 2 — trust-tier addendum T-3) uses the
+        same UNSET sentinel; unlike ``audience_agents`` there is no
+        clear-to-NULL form — the only writable values are the
+        vocabulary members ('agent' | 'curated'), validated upstream.
         """
         with Session(self._engine) as session:
             row = session.get(ProjectOperatingKnowledge, entry_id)
@@ -218,6 +224,8 @@ class POKRepository:
                 row.audience_agents = (
                     json.dumps(list(audience_agents)) if audience_agents else None
                 )
+            if source_tier is not UNSET:
+                row.source_tier = source_tier
             row.updated_at = _utc_now_iso()
             session.add(row)
             session.commit()

@@ -8,19 +8,27 @@ IN-BODY role gates from the FACTORY-CAPTURED ``agent_id``
 
 * :func:`pok_upsert` — any agent on a non-default project writes;
   the writer STATES the audience classification at capture
-  (default ``operation`` — the channel's genre). Write-time fence +
+  (default ``operation`` — the channel's genre) and MAY state the
+  trust tier (Phase 2, addendum T-1: ``source_tier`` default
+  ``agent``; ``curated`` is leader/PM-only). Write-time fence +
   escape-aware budget + exact-dup echo + dispute-laundering guard +
   supersede transaction + admission caps (64-active
-  refuse-never-evict; family >3). Supersede-of-PINNED is
-  leader/PM-only.
+  refuse-never-evict; family >3). Supersede-of-PINNED or
+  -of-CURATED is leader/PM-only (the guard predicate widened in
+  Phase 2, addendum T-3; an omitted tier on supersede INHERITS the
+  target's tier).
 * :func:`pok_query` — ONE step, project-scoped, selector-reuse.
-  UNIVERSAL READ INVARIANT (ER-1.4): NO audience filter — every
-  agent on the project reads every entry; the audience dimension
-  gates ACTIVE injection only. Family chains in slug order; pinned
-  bypass; typed errors; embedding lag surfaced.
+  UNIVERSAL READ INVARIANT (ER-1.4, generalized by addendum T-4):
+  NO audience filter and NO tier filter — every agent on the
+  project reads every entry; audience and source_tier gate ACTIVE
+  injection only. Family chains in slug order; pinned bypass;
+  typed errors; embedding lag surfaced; ``[CURATED]`` renders in
+  the lineage surface only (no in-block marker in v1).
 * :func:`pok_curate` — leader/PM only (pinned | disputed | archived
-  | audience | audience_agents). Pin cap 2 PER PROJECT; disputed
-  suppresses injection but stays readable; archived forward-only.
+  | audience | audience_agents | source_tier — the tier flip is
+  Phase 2, both directions, addendum T-3). Pin cap 2 PER PROJECT;
+  disputed suppresses injection but stays readable; archived
+  forward-only.
 
 PROJECT SCOPING (server-side): every tool resolves the CALLING
 instance's project from the instance row (the
@@ -59,11 +67,13 @@ CATEGORY_NAME = "pok"
 CATEGORY_DOC = (
     "Project operating knowledge (POK) — ordered operating procedures "
     "per project. pok_upsert writes a fenced single-paragraph fact "
-    "(stating its audience: operation | implementation | both); "
-    "pok_query reads ALL entries of the project (universal read — "
-    "audience never filters a read); pok_curate (leader / "
-    "project-manager only) pins, disputes, archives, or reclassifies "
-    "audience."
+    "(stating its audience: operation | implementation | both; "
+    "optionally source_tier: agent | curated — curated is leader / "
+    "project-manager only); pok_query reads ALL entries of the "
+    "project (universal read — audience and tier never filter a "
+    "read); pok_curate (leader / project-manager only) pins, "
+    "disputes, archives, reclassifies audience, or flips the trust "
+    "tier."
 )
 
 
@@ -165,6 +175,7 @@ def create_pok_tools(
         domain: str = "other",
         provenance: str = "observed",
         audience: str = "operation",
+        source_tier: str | None = None,
     ) -> dict:
         """Write one operating-knowledge fact for THIS project.
 
@@ -180,10 +191,18 @@ def create_pok_tools(
           operation → {ari, leader, devops}; implementation →
           {leader, developer}; both → every agent on the project.
           Curator-narrow override is pok_curate's ``audience_agents``.
+        - ``source_tier`` (default 'agent'): omit for agent-captured
+          facts. ``'curated'`` marks a dev-curated immutable
+          reference (a guideline) and is LEADER / PROJECT-MANAGER
+          ONLY — one call captures a curated guideline. Non-curators
+          passing 'curated' are refused (pok_tier_requires_curator).
+          On a supersede, an omitted tier INHERITS the target's tier
+          (content refresh never reclassifies authority); tier flips
+          on a live row are pok_curate's ``source_tier``.
         - Same slug + same content = no-op echo. Same slug + changed
           content = SUPERSEDE (the prior row flips superseded with
           its lineage wire; the successor starts unpinned).
-          Superseding a PINNED entry requires leader /
+          Superseding a PINNED or CURATED entry requires leader /
           project-manager.
         - Admission is refuse-never-evict: at 64 active entries the
           call refuses naming the archive cure; a family's 4th
@@ -211,6 +230,7 @@ def create_pok_tools(
                 domain=domain,
                 provenance=provenance,
                 audience=audience,
+                source_tier=source_tier,
                 agent_id=captured_agent_id,
                 project_name=project_name,
                 escape_fn=escape_for_context_block,
@@ -219,12 +239,14 @@ def create_pok_tools(
             return _err(exc.code, exc.message, **exc.details)
         entry = outcome.entry
         logger.info(
-            "[POK] upsert action=%s slug=%s project=%s by=%s audience=%s",
+            "[POK] upsert action=%s slug=%s project=%s by=%s audience=%s "
+            "tier=%s",
             outcome.action,
             entry.slug,
             project_id,
             captured_agent_id or "unknown",
             entry.audience,
+            entry.source_tier,
         )
         return {
             "action": outcome.action,
@@ -232,6 +254,7 @@ def create_pok_tools(
             "slug": entry.slug,
             "domain": entry.domain,
             "audience": entry.audience,
+            "source_tier": entry.source_tier,
             "status": entry.status,
             "created_by_agent": entry.created_by_agent,
             **(
@@ -301,6 +324,7 @@ def create_pok_tools(
                 "status": e.status,
                 "disputed": e.disputed,
                 "pinned": e.pinned,
+                "source_tier": e.source_tier,
                 "provenance": e.provenance,
                 "created_by_agent": e.created_by_agent,
                 "verify_count": e.verify_count,
@@ -309,12 +333,24 @@ def create_pok_tools(
             }
             chain = outcome.lineage.get(e.slug)
             if chain:
+                # The lineage surface is where [CURATED] renders
+                # (trust-tier addendum T-4 — query lineage only; the
+                # ACTIVE-injection block carries NO in-block marker in
+                # v1, the band position signals status). Universal read
+                # across tiers: source_tier is visible to every agent,
+                # it never filters a read.
                 item["lineage"] = [
                     {
                         "id": r.id,
                         "status": r.status,
                         "superseded_by_id": r.superseded_by_id,
                         "body": r.body,
+                        "source_tier": r.source_tier,
+                        **(
+                            {"marker": "[CURATED]"}
+                            if r.source_tier == "curated"
+                            else {}
+                        ),
                     }
                     for r in chain
                 ]
@@ -344,6 +380,7 @@ def create_pok_tools(
         archived: bool | None = None,
         audience: str | None = None,
         audience_agents: list[str] | None = None,
+        source_tier: str | None = None,
     ) -> dict:
         """Curate THIS project's operating knowledge (leader /
         project-manager ONLY).
@@ -361,6 +398,11 @@ def create_pok_tools(
           curator narrowing. ``audience_agents`` REPLACES the
           audience's default set when non-empty; pass [] to clear
           back to the default set.
+        - ``source_tier``: trust-tier reclassification, both
+          directions ('agent' ↔ 'curated'). 'curated' marks a
+          dev-curated immutable reference — it renders in the
+          dedicated curated band (cap 2 per view) and requires
+          curator authority to supersede.
         """
         svc = _service()
         if svc is None:
@@ -392,13 +434,15 @@ def create_pok_tools(
                 archived=archived,
                 audience=audience,
                 audience_agents=audience_agents,
+                source_tier=source_tier,
                 project_name=project_name,
             )
         except POKError as exc:
             return _err(exc.code, exc.message, **exc.details)
         logger.info(
             "[POK] curate slug=%s project=%s by=%s "
-            "pinned=%s disputed=%s archived=%s audience=%s audience_agents=%s",
+            "pinned=%s disputed=%s archived=%s audience=%s audience_agents=%s "
+            "tier=%s",
             row.slug,
             project_id,
             captured_agent_id,
@@ -407,6 +451,7 @@ def create_pok_tools(
             row.status,
             row.audience,
             row.audience_agents,
+            row.source_tier,
         )
         return {
             "action": "curated",
@@ -417,6 +462,7 @@ def create_pok_tools(
             "status": row.status,
             "audience": row.audience,
             "audience_agents": row.audience_agents,
+            "source_tier": row.source_tier,
         }
 
     return [pok_upsert, pok_query, pok_curate]

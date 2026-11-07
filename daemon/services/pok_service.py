@@ -54,9 +54,11 @@ from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories.pok.models import (
     POK_AUDIENCES,
     POK_DEFAULT_AUDIENCE,
+    POK_DEFAULT_SOURCE_TIER,
     POK_DOMAINS,
     POK_FAMILY_SLUG_PATTERN,
     POK_PROVENANCE_VALUES,
+    POK_SOURCE_TIERS,
     POK_STATUSES,
     ProjectOperatingKnowledge,
 )
@@ -236,6 +238,7 @@ class POKService:
         domain: str = POK_DOMAINS[-1],
         provenance: str = "observed",
         audience: str = POK_DEFAULT_AUDIENCE,
+        source_tier: str | None = None,
         agent_id: str,
         project_name: str | None = None,
         escape_fn: Any = None,
@@ -246,6 +249,15 @@ class POKService:
         ``escape_fn`` is :func:`escape_for_context_block` passed by the
         tool layer (lazy-import discipline keeps this module
         cycle-neutral with ``context_messages``).
+
+        ``source_tier`` (Phase 2 — trust-tier addendum T-1) is the
+        OPTIONAL trust-tier statement at capture: omit (``None``) →
+        ``'agent'``; a curator may pass ``'curated'`` (the ≤2-call
+        capture — one pok_upsert seeds a guideline). A NON-curator
+        passing ``'curated'`` is refused (``pok_tier_requires_
+        curator``). The tier never changes via a no-op dup echo —
+        tier-flip is a ``pok_curate`` parameter, never a pok_upsert
+        verb (addendum T-3).
         """
         # 1. scope predicate (A-5) — typed refusal, write direction.
         if is_default_project(project_id, project_name):
@@ -285,6 +297,32 @@ class POKService:
                 f"{POK_AUDIENCES} (stated at capture, default "
                 f"{POK_DEFAULT_AUDIENCE!r} — Emperor ruling ER-1)",
             )
+        # 2.5 trust-tier statement (Phase 2 — addendum T-1): vocabulary
+        # check, then the AUTHORITY gate. The gate fires BEFORE any
+        # content/dedup check — the refusal is about authority, not
+        # effect (a non-curator is refused even when the write would
+        # have been a no-op dup). Omitted → 'agent' (the Phase-1
+        # default; every Phase-1 caller is byte-unchanged).
+        if source_tier is None:
+            effective_tier = POK_DEFAULT_SOURCE_TIER
+        else:
+            if source_tier not in POK_SOURCE_TIERS:
+                raise POKError(
+                    "pok_source_tier_invalid",
+                    "source_tier must be one of "
+                    f"{POK_SOURCE_TIERS} (omitted → "
+                    f"{POK_DEFAULT_SOURCE_TIER!r} — trust-tier addendum "
+                    "T-1)",
+                )
+            if source_tier == "curated" and not is_curator(agent_id):
+                raise POKError(
+                    "pok_tier_requires_curator",
+                    "source_tier='curated' requires a curator (leader / "
+                    "project-manager) — attribution "
+                    f"{agent_id!r} is not a curator (attribution ≠ "
+                    "authorization)",
+                )
+            effective_tier = source_tier
         # 3. write-time fence (A-29).
         fence = fence_check(body)
         if fence is not None:
@@ -307,6 +345,10 @@ class POKService:
         prior = self._repo.get_by_slug(project_id, slug, status="active")
         if prior is not None:
             if normalize_body(prior.body) == normalize_body(body):
+                # Exact-dup no-op echo (Phase-1 behavior): the tier
+                # never changes here — authority reclassification is
+                # curation (pok_curate source_tier), never a write
+                # verb (addendum T-3).
                 return UpsertOutcome(action="no-op", entry=prior)
             return self._supersede(
                 prior=prior,
@@ -316,6 +358,7 @@ class POKService:
                 domain=domain,
                 provenance=provenance,
                 audience=audience,
+                source_tier=source_tier,
                 agent_id=agent_id,
             )
         # 6. dispute-laundering guard: the same normalized body cannot
@@ -370,6 +413,7 @@ class POKService:
             superseded_by_id=None,
             content_sha256=content_hash(body),
             created_by_agent=agent_id or "unknown",
+            source_tier=effective_tier,
         )
         self._repo.insert(entry)
         return UpsertOutcome(action="created", entry=entry)
@@ -384,21 +428,39 @@ class POKService:
         domain: str,
         provenance: str,
         audience: str,
+        source_tier: str | None,
         agent_id: str,
     ) -> UpsertOutcome:
         """The supersede leg of the write path.
 
         SUPERSEDE-OF-PINNED → leader/PM only (``pok_pinned_requires_
-        curator``); the successor starts unpinned (re-pin is an
-        explicit curator act). Family admission counts the successor
-        against the family bound; the prior row leaves ``active`` in
-        the SAME transaction it enters ``superseded``.
+        curator``). Phase 2 (trust-tier addendum T-3) WIDENS the guard
+        predicate: ``prior.pinned OR prior.source_tier == 'curated'``
+        is curator-only — a CURATED target refuses with
+        ``pok_curated_requires_curator`` (naming mirrors the pinned
+        refusal; a pinned echo stays byte-identical with Phase 1).
+        The successor starts unpinned (re-pin is an explicit curator
+        act). TIER INHERITANCE: an omitted ``source_tier`` INHERITS
+        the target's tier — content refresh never demotes/promotes
+        accidentally; an explicit curator param overrides.
+        Family admission counts the successor against the family
+        bound; the prior row leaves ``active`` in the SAME transaction
+        it enters ``superseded``.
         """
         if prior.pinned and not is_curator(agent_id):
             raise POKError(
                 "pok_pinned_requires_curator",
                 f"entry {slug!r} is PINNED — superseding it requires a "
                 "curator (leader / project-manager); attribution "
+                f"{agent_id!r} is not a curator (attribution ≠ "
+                "authorization)",
+            )
+        if prior.source_tier == "curated" and not is_curator(agent_id):
+            raise POKError(
+                "pok_curated_requires_curator",
+                f"entry {slug!r} is CURATED (the dev-curated immutable "
+                "reference) — superseding it requires a curator "
+                "(leader / project-manager); attribution "
                 f"{agent_id!r} is not a curator (attribution ≠ "
                 "authorization)",
             )
@@ -409,6 +471,10 @@ class POKService:
         # move here, so no pok_family_full refusal exists on this
         # path; the NEW-slug admission path above owns that refusal.
         prior_id = prior.id
+        # TIER INHERITANCE (addendum T-3): omitted → inherit the
+        # target's tier; an explicit curator-validated param overrides
+        # (the curator gate already ran in ``upsert`` for 'curated').
+        effective_tier = source_tier if source_tier is not None else prior.source_tier
         successor = ProjectOperatingKnowledge(
             project_id=project_id,
             slug=slug,
@@ -422,6 +488,7 @@ class POKService:
             superseded_by_id=None,
             content_sha256=content_hash(body),
             created_by_agent=agent_id or "unknown",
+            source_tier=effective_tier,
         )
         self._repo.supersede_and_insert(prior, successor)
         return UpsertOutcome(
@@ -649,6 +716,7 @@ class POKService:
         archived: bool | None = None,
         audience: str | None = None,
         audience_agents: list[str] | None = None,
+        source_tier: str | None = None,
         project_name: str | None = None,
     ) -> ProjectOperatingKnowledge:
         """Curator flips. The leader/PM gate is enforced HERE from the
@@ -657,6 +725,12 @@ class POKService:
         Pin cap 2 PER PROJECT (``pok_pin_cap``). Archived is
         forward-only (``pok_already_archived`` / ``pok_unarchive_``).
         ``audience_agents=[]`` clears back to the default set.
+
+        ``source_tier`` (Phase 2 — trust-tier addendum T-3): curator-only
+        tier flip, both directions (agent↔curated). Omitted (``None``)
+        leaves the tier unchanged. Non-curator flips are refused at the
+        gate above (``pok_curator_required``) — authority
+        reclassification is curation, the established in-place pattern.
         """
         if is_default_project(project_id, project_name):
             raise POKError(
@@ -683,6 +757,13 @@ class POKService:
                     "pok_audience_agents_invalid",
                     f"audience_agents must be agent-id strings; bad: {bad}",
                 )
+        if source_tier is not None and source_tier not in POK_SOURCE_TIERS:
+            raise POKError(
+                "pok_source_tier_invalid",
+                f"source_tier must be one of {POK_SOURCE_TIERS} "
+                "(omitted leaves the tier unchanged — trust-tier "
+                "addendum T-3)",
+            )
         row = self._repo.get_by_slug(project_id, slug, status=None)
         if row is None or row.status == "superseded":
             raise POKError(
@@ -726,6 +807,7 @@ class POKService:
             audience_agents=(
                 audience_agents if audience_agents is not None else UNSET
             ),
+            source_tier=source_tier if source_tier is not None else UNSET,
         )
 
     def _count_pinned(self, project_id: str) -> int:
