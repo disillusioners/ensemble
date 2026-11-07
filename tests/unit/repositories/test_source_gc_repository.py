@@ -157,6 +157,23 @@ class TestP1ChatFence:
 # P2 — enabled fence
 # ---------------------------------------------------------------------------
 
+class TestChatFenceDestructiveTeeth:
+    """W2: the destructive entry point must refuse a chat row even when
+    enabled=False (so the enabled leg cannot be the one that saves it)."""
+
+    def test_chat_row_enabled_false_refused_non_scheduler(self, repo, shared_sqlite_engine, now):
+        with Session(shared_sqlite_engine) as s:
+            s.add(SourceConfig(source_id="chat-disabled", source_type="telegram",
+                               name="cd", config={}, enabled=False, status="stopped",
+                               updated_at=(now - timedelta(days=40)).isoformat()))
+            s.commit()
+        r = repo.gc_archive_and_delete(source_id="chat-disabled", now=now, retention_days=1)
+        assert r.deleted is False
+        assert r.skipped_reason == "non_scheduler", r.skipped_reason
+        # row survives
+        with Session(shared_sqlite_engine) as s:
+            assert s.get(SourceConfig, "chat-disabled") is not None
+
 class TestP2EnabledFence:
     def test_enabled_true_excluded(self, repo, seeded_engine, now):
         # flip one scheduler row to enabled=true; must not be collected
