@@ -1452,15 +1452,15 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/ari/workflow.md": "a0f5a382f6683c921e059ebde791363847ab824a20b2795ce5dd33b18f3a542b",
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
-    # daemon/sources/registry.py re-pinned 2026-11-05 (nest-anomaly-report phase 5
-    # / C8): this row was ALREADY STALE at the lane's base — base-proven drift
-    # (the seal-map staleness re-pin ceremony the aegis lane recorded); the file's
-    # content landed in 0428c936e (refactor: mission-records PR1 hygiene pass)
-    # WITHOUT a re-pin. The value is recomputed from the real file bytes; this
-    # lane changed NO content in this file.
-    # Prior value f90c57f73bffd28e4a1992049d617d7bb791b8d792807308b40d2720d9edf624.
-    # Prior re-pin note: resource-cost-control O4.
-    "daemon/sources/registry.py": "1f18a51d44dffa52f80138e6bb7773726ff9e697674de3b748170ff190f54178",
+    # daemon/sources/registry.py re-pinned 2026-11-07 (wi-b97ec302 sources-
+    # pagination fix): the fix legitimately changed this file — boot auto-start
+    # paging past the page cap + stale-running row reconciliation, closing a
+    # data-growth latent defect — so the pinned content-sha256 moved with the
+    # real bytes (lane commit 799679a94).
+    # Prior value 1f18a51d44dffa52f80138e6bb7773726ff9e697674de3b748170ff190f54178.
+    # Prior re-pin note: nest-anomaly-report phase 5 / C8 (seal-map staleness
+    # re-pin ceremony; content landed in 0428c936e without a re-pin).
+    "daemon/sources/registry.py": "a51da1bd3f66cf6504ac81a271de6f2687e4620f351b0f225984510dcbee1448",
     "daemon/sources/dispatcher.py": "4282ddc0396f9103ff7e14af9077c721d29e5329fac702ad3dfbfafd7083e53a",
     "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
     # Phase B — 7 daemon files + slack-setup.md (8).
@@ -1469,15 +1469,15 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # to this file still trips the tripwire.
     "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
-    # daemon/constants.py re-pinned 2026-11-05 (nest-anomaly-report phase 5 / C8):
-    # this row was ALREADY STALE at the lane's base — base-proven drift (the
-    # seal-map staleness re-pin ceremony the aegis lane recorded); the file's
-    # content landed in b03872e39 (fix: report-delivery obligation visibility —
-    # parts 1+2 atomic) WITHOUT a re-pin. The value is recomputed from the real
-    # file bytes; this lane changed NO content in this file.
-    # Prior value 464a2459fb4c91c6a1add2bc6bafc3b1242415996597f4e16bef44b3387c8e92.
-    # Prior re-pin note: db-pool-idle-txn lane, Phase 3/Δ3.
-    "daemon/constants.py": "5dd9bfa3e56db333d4cac92b78bba133ef26a327c6810312d819cd6e437a47b7",
+    # daemon/constants.py re-pinned 2026-11-07 (wi-b97ec302 sources-pagination
+    # fix): the fix legitimately added SOURCE_CONFIG_PAGE_SIZE /
+    # SOURCE_LIST_HARD_MAX (sources-registry boot-paging caps — data-growth
+    # latent defect), so the pinned content-sha256 moved with the real bytes
+    # (lane commit 799679a94).
+    # Prior value 5dd9bfa3e56db333d4cac92b78bba133ef26a327c6810312d819cd6e437a47b7.
+    # Prior re-pin note: nest-anomaly-report phase 5 / C8 (seal-map staleness
+    # re-pin ceremony; content landed in b03872e39 without a re-pin).
+    "daemon/constants.py": "21cd744a2eb80c52ce67e782640a6886415690875997f20cb62763f99cfc3c7e",
     # Phase C — 20 agent canonical-home files
     # agents/approver/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
     # C8): the duty section was APPENDED to this file by the phase-5 duty
