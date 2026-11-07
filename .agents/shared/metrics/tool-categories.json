@@ -41,6 +41,7 @@
     "proc",
     "project",
     "project_history",
+    "prompt-reload",
     "question",
     "rag",
     "scheduling",
@@ -61,8 +62,8 @@
     "view-write",
     "wedge-capture"
   ],
-  "count": 60,
+  "count": 61,
   "reserved": "other",
   "source": "daemon/tools/_tool_registry.py CATEGORY_MODULES + @register_tool_category call sites",
-  "vocabulary_version": 6
+  "vocabulary_version": 7
 }

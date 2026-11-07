@@ -338,7 +338,7 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly nineteen categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly twenty categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
@@ -366,7 +366,7 @@ class TestPrivilegedCategoryRegistryShape:
     (the fifth exact-set pin added by the iteration-002 council B2
     correction)."""
 
-    def test_privileged_categories_contains_nineteen_entries(self) -> None:
+    def test_privileged_categories_contains_twenty_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
@@ -491,6 +491,9 @@ class TestPrivilegedCategoryRegistryShape:
         # allow entry is the only access path, and every tool body
         # ALSO carries its own factory-captured agent_id gate.
         "memoir",
+    # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-reload",
 })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

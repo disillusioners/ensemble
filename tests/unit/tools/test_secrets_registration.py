@@ -306,6 +306,9 @@ class TestStaticRegistrationChecklist:
         # allow entry is the only access path, and every tool body
         # ALSO carries its own factory-captured agent_id gate.
         "memoir",
+    # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-reload",
 })
 
 

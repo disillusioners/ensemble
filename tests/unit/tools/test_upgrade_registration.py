@@ -99,8 +99,8 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_nineteen_entries(self) -> None:
-        """The default-deny set is exactly nineteen entries —
+    def test_privileged_categories_is_exactly_twenty_entries(self) -> None:
+        """The default-deny set is exactly twenty entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``secrets``,
         ``settings``, ``board``, ``self-alarm``,
@@ -240,6 +240,9 @@ class TestStaticRegistrationChecklist:
         # allow entry is the only access path, and every tool body
         # ALSO carries its own factory-captured agent_id gate.
         "memoir",
+    # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-reload",
 })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

@@ -208,6 +208,11 @@ if TYPE_CHECKING:
     from .services.task_processor import TaskProcessor
     from .services.stale_task_recovery import StaleTaskRecovery
     from .services.mcp_service import McpService
+    # prompt-reload lane (2026-11-06): return type of the thin
+    # ``refresh_instance_prompt`` delegate — TYPE_CHECKING-only (the
+    # runtime import is function-local in the delegate; a module-level
+    # import risks the manager↔services cycle).
+    from .services.prompt_refresh import PromptRefreshResult
     # Pool orchestration moved out of InstanceManager (Phase B,
     # chat-lane-followups). TYPE_CHECKING-only — the runtime import
     # happens in __init__ after the class body is fully defined (the
@@ -7162,6 +7167,11 @@ class InstanceManager:
                 f"(>{ttl}s old)"
             )
         return len(stale)
+
+    async def refresh_instance_prompt(self, instance_id: str, *, force: bool = False) -> "PromptRefreshResult":
+        """Reload the calling instance's system prompt on its NEXT turn (R8)."""
+        from .services.prompt_refresh import refresh_instance_prompt
+        return await refresh_instance_prompt(self, instance_id, force=force)
 
     def _release_cached_instance(self, instance_id: str) -> None:
         """Release in-memory graph for a cached/non-active instance after TTL expires.

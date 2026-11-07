@@ -932,6 +932,9 @@ def test_privileged_category_set_is_pinned() -> None:
         # allow entry is the only access path, and every tool body
         # ALSO carries its own factory-captured agent_id gate.
         "memoir",
+    # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-reload",
 }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "

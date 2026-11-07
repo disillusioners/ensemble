@@ -290,6 +290,7 @@ from .board_link import create_board_link_tools
 from .wedge_capture import create_wedge_capture_tools
 from .notify_user import create_notify_user_tools
 from .metrics_read import create_metrics_read_tools
+from .prompt_reload import create_prompt_reload_tools
 from .nest_report import create_nest_report_tools
 from .nest_report_read import create_nest_report_read_tools
 from .memoir import create_memoir_tools
@@ -6774,6 +6775,36 @@ Returns:
             current_instance_id=current_instance_id,
             agent_id=agent_id,
             agent_tag=version_tag,
+        )
+    )
+
+    # ── Prompt-reload tool (prompt-reload lane, 2026-11-06) ──────────────
+    # Same critical list-append pattern as the notify-user / memoir
+    # extends above: decorator-only registration is SILENTLY INVISIBLE —
+    # this extend is the third step of the three-step registration seam
+    # (decorator + registry entries + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # The category is PRIVILEGED (entry #20): ari reloading its OWN
+    # persona mid-session is a privileged self-mutation. The ari-only
+    # audience is spelled by the ``tools.allow: ["prompt-reload"]``
+    # entry (agents/ari/meta.json) AND the tool body's SECOND,
+    # independent factory-captured agent_id gate — a LITERAL tool name
+    # in an allow list bypasses the category gate, so the category
+    # alone cannot spell the audience. The kill-switch is per-call
+    # (AM-11): the tool is constructed unconditionally and refuses
+    # typed ``prompt_reload_disabled`` when switched off — registration
+    # is SWITCH-STATE-INDEPENDENT.
+    tools.extend(
+        create_prompt_reload_tools(
+            manager,
+            current_instance_id=current_instance_id,
+            agent_id=agent_id,
         )
     )
 

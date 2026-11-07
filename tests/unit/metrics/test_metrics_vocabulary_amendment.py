@@ -24,12 +24,14 @@ class TestVocabularyVersion:
         nest-anomaly-report lane (the SAME axis again — the
         ``nest-report`` WRITE category joined the tool-category label
         set), 4 → 5 with that lane's Phase 3 (the ``nest-report-read``
-        PRIVILEGED READ category joined) and 5 → 6 with the
+        PRIVILEGED READ category joined), 5 → 6 with the
         memoir-store-v1 lane (the ``memoir`` privileged category (#19)
-        joined the tool-category label set).  The P2-M8 mutation
-        (the marker left at 1) still REDS this pin.
+        joined the tool-category label set) and 6 → 7 with the
+        prompt-reload lane (the ``prompt-reload`` PRIVILEGED category
+        (#20, ari-exactly) joined the tool-category label set).  The
+        P2-M8 mutation (the marker left at 1) still REDS this pin.
         """
-        assert cm.VOCABULARY_VERSION == 6
+        assert cm.VOCABULARY_VERSION == 7
 
     def test_the_version_is_an_integer(self) -> None:
         assert isinstance(cm.VOCABULARY_VERSION, int)

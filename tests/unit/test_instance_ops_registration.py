@@ -134,6 +134,9 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # only access path, and every tool body ALSO carries its own
     # factory-captured agent_id gate.
     "memoir",
+    # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-reload",
 })
 
 
@@ -209,11 +212,11 @@ class TestPrivilegedCategory:
         assert READ_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
         assert ACT_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_nineteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_twenty_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_nineteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 19
+    def test_the_set_has_twenty_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
 
 
 class TestAllowLists:

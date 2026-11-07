@@ -1,3 +1,36 @@
+<!-- prompt-reload-functional-gate-begin -->
+## Commission prompt-reload — FUNCTIONAL GATE registration (2026-11-07, gate @ `5b34e6857a192af87b1bb80ebedf397b110a7c99` post-tidier; TRUE base `8eba09c20e2fa5b0b54296712e15ac0df599856f`; harness `/home/nea/ensemble-src-wt-prompt-reload-harness` detached @ HEAD, B3-ordered, restored 379/379; RESULTS: 2026-11-07-prompt-reload-functional-gate.md)
+
+> **What this block registers.** The L1–L9 + M1–M6 gate corpus + whole-tree regression for the
+> prompt-reload lane. **No new pack scripts committed** — the lane's four unit packs + the artifact
+> pack are the recurring surface; the harness E2E scaffolding is one-shot under `/tmp/pr-gate-e2e/`.
+> Keep-both with the canary block below — newest-first honored.
+>
+> **Gate outcome (for the record):** **GO-WITH-DISCLOSURES — net-new behavior regressions 0**;
+> 2 deterministic lane-caused STALE TEST PINS (`VOCABULARY_VERSION == 6` in
+> `tests/unit/metrics/test_metrics_vocabulary_amendment.py:32` +
+> `test_metrics_family_adjudication.py:440`; fold sites + memoir precedent `b73805dc4` recorded in
+> RESULTS) are the named PRE-STAGE CONDITION; +1 flake (isolation-green 3×). All functional legs
+> PASS incl. first-live-execution E2E (sentinel lands on NEXT turn; completing turn keeps OLD
+> persona; L-c `reloaded_db` + REAL pop + DB content carried; L-d BOTH forms live; M6 five pairs).
+> **Fences (every run):** lane venv `cpython-3.13.15`, CWD=tree under test (`daemon.__file__`
+> proven per leg); per-variable `POSTGRES_*`/`EMBEDDING_*` scrub (never `env -u POSTGRES_*`);
+> `ENSEMBLE_SELF_ENV=dev` + `DAEMON_PORT=8079` + `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned
+> on all daemon boots; throwaway PG `ensemble_gate_pr_e2e` dropped after; zero :9797/`ensemble_prod`
+> contact; logs `/tmp/pr-gate-*`.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `prompt_reload_primitive_unit` | `timeout 300 .venv/bin/python -m pytest tests/unit/services/test_prompt_refresh_primitive.py -q --timeout=120 -p no:cacheprovider` (fenced env) | 42 nodes — L2 semantics, L4 fixtures, L8 L-a/L-b/L-c unit, L-d warm + cold N1, claim-guard, pop-seam, guard-absence, INFO enum | 2026-11-07 @ `5b34e6857` | **PASS 42/42** |
+| `prompt_reload_refusals_unit` | same shape, `tests/unit/tools/test_prompt_reload_refusals.py` | 15 nodes — L3 ladder: 9 REFUSED codes dedicated + FAILED envelope + non-ari ERROR shape + not_ari absent + was_cached | 2026-11-07 | **PASS 15/15** |
+| `prompt_reload_tool_unit` | same shape, `tests/unit/tools/test_prompt_reload_tool.py` | 20 nodes — marker ×5/token/zero-on-refusal, golden bytes, D24 INFO order, S10 literals, no_change wording | 2026-11-07 | **PASS 20/20** |
+| `prompt_reload_pins_unit` | same shape, `tests/unit/tools/test_prompt_reload_pins.py` | 13 nodes — privileged 20, ari allow 36, registration surface, construction seam (real-env switch states) | 2026-11-07 | **PASS 13/13** |
+| `prompt_reload_artifact_check` | `timeout 300 .venv/bin/python -m pytest tests/unit/tools/test_tool_category_artifact.py -q -p no:cacheprovider` + house generator check | artifact 61 @ vv7, generator-derived, prompt-reload present | 2026-11-07 | **PASS 9/9 + generator OK** |
+| `prompt_reload_census_static` | greps + `scripts/protection/generate_prompt_artifact_baseline.py --check` (CWD=tree) | privileged 20 / ari allow 36 / VOCAB const 7 / baseline 181 / L7 forbidden-mechanism greps / delegate shape | 2026-11-07 (both B3 points) | **PASS 8/8 ×2** |
+| `prompt_reload_e2e_harness` | one-shot: fenced daemon boot (CWD=harness) + stub LLM :18079 + driver (scaffolding `/tmp/pr-gate-e2e/`, not committed) | L1 a–h sentinel E2E (first live run), L2 i–iii, L7 runtime, L8 L-c + L-d warm/cold live, S10-j live, G1–G4 ad-hoc probes; restore 379/379 + baseline 181 re-asserted | 2026-11-07 | **PASS 12/13 legs + S10-j live-disclosed** |
+| `prompt_reload_mutation_matrix` | plant → `timeout 300` target-pack run → digest → revert → GREEN rerun (10 cycles) | M1–M6 (M6 = five per-outcome pairs); RED digests mutually distinct; post-sanity 99/99 | 2026-11-07 | **PASS 6/6 meaningful** |
+| `prompt_reload_wholetree` | 13 serial partitions (no xdist) × both legs, same commands byte-faithful; BASE reduced to 12 failure-bearing partitions (tester-authorized, disclosed) | HEAD 23,267 (23010P/164F/23E) vs BASE 22,834 executed; FAILED-diff + 3× isolation; baseline 181 @ HEAD | 2026-11-07 @ `5b34e6857` / `8eba09c20` | **PASS-WITH-DISCLOSURES — net-new behavior 0; 2 stale pins (pre-stage fold) + 1 flake** |
+<!-- prompt-reload-functional-gate-end -->
 <!-- canary-p5-functional-gate-begin -->
 ## Commission canary-injection-defense — P5 FUNCTIONAL GATE registration (2026-11-06, verification @ `08bcbef2e` (A–H legs) → `1c1739439` (post-fix-cycle) → `bcd08d2b6` (mutation record); TRUE base `24ba60462`; RESULTS: 2026-11-06-canary-injection-defense-functional-gate.md + 2026-11-06-canary-injection-defense-mutation-record.md)
 

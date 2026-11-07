@@ -312,6 +312,15 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "memoir_unpin",
     "memoir_recall",
     "memoir_timeline",
+    # prompt-reload (2026-11-06, prompt-reload lane): the ONE
+    # ari-self-service prompt refresh tool — created by the
+    # create_prompt_reload_tools() factory
+    # (daemon/tools/prompt_reload.py). Factory-built (not import-time
+    # registered), so it belongs in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #20) —
+    # opt-in only, never default-granted; the ari-only runtime gate
+    # lives in the tool body (factory-captured agent_id).
+    "prompt_reload",
 })
 
 
@@ -738,6 +747,28 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # keepsakes are capped (12 pins / a 4,000-token zone) and NEVER evicted
     # (DD-3).
     "memoir",
+    # prompt-reload (2026-11-06, prompt-reload lane): ari's mid-session
+    # SELF prompt refresh — the ONE tool of the ``prompt-reload``
+    # category, created by the create_prompt_reload_tools() factory
+    # (daemon/tools/prompt_reload.py). PRIVILEGED entry #20 of
+    # PRIVILEGED_TOOL_CATEGORIES (19 -> 20 after the memoir entry): the
+    # tool evicts the CALLING instance's cached graph so the next
+    # dispatch cold-restores onto a freshly composed persona — the
+    # empty-allow inherit universe must NOT auto-grant that authority
+    # (an agent reloading its OWN prompt mid-session is a privileged
+    # self-mutation, and the resolution/validation surface reads the
+    # release manifest + prompt-versions DB). Explicit
+    # ``tools.allow: ["prompt-reload"]`` on ari is the only access
+    # path — ARI-EXACTLY (R5), and the tool body ALSO carries its own
+    # factory-captured agent_id gate (the notify-user precedent — a
+    # LITERAL tool name in an allow list bypasses the category gate
+    # outright). The kill-switch (``ENSEMBLE_PROMPT_RELOAD_ENABLED``)
+    # is read AT CALL TIME (AM-11) and the tool STAYS REGISTERED under
+    # any switch state (refusal-at-call, never construction-absence).
+    # SAME-PR pin updates at every file carrying the privileged-set /
+    # count assertion sites (re-derive the census BY GREP at the
+    # ceremony — see the SAME-PR RULE block above) are mandatory.
+    "prompt-reload",
 })
 
 
@@ -1267,6 +1298,15 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # (``memoir_write``/``memoir_pin``/``memoir_unpin``/
     # ``memoir_recall``/``memoir_timeline``).
     "memoir": "daemon.tools.memoir",
+    # prompt-reload (2026-11-06, prompt-reload lane): ari's mid-session
+    # self prompt refresh. PRIVILEGED category (entry #20 of
+    # PRIVILEGED_TOOL_CATEGORIES): see the set's comment block. The
+    # value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; the
+    # category key is KEBAB-case (``prompt-reload``) while the tool
+    # name is snake_case (``prompt_reload``) — the house pattern
+    # (``notify-user`` → ``notify_user``).
+    "prompt-reload": "daemon.tools.prompt_reload",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1823,6 +1863,9 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "watch_jobs",
     "watch_mission",
     "write_file",
+    # Factory-built (prompt-reload lane, 2026-11-06) — see
+    # DYNAMIC_TOOL_NAMES for the registration note.
+    "prompt_reload",
 })
 
 
