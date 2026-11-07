@@ -1,11 +1,11 @@
 # POK — Project Operating Knowledge — Decision Record (decisions.md)
 
-**Companion artifact to:** `architecture-recommendation.md` **v3.3** in this directory — this record derives from it and cites it.
-**Tree:** v0.29.0 @ 7426e0d8a, worktree `feature/project-operating-knowledge` (fenced dev).
-**Status: DESIGN ONLY — implementation is NOT authorized.** The Emperor decides D1, D3–D5 + P-1; **D2 is DECIDED** (allowlist, A-36). Markdown-only; the giter commits later.
-**Revision note:** round-1 (v2); round-2 (v3); C1+W5 (v3.1); F1+F3 (v3.2); **leader disposition B1–B8 (v3.3)** — see `discharge-round-1.md` / `discharge-round-2.md` + appendices B/C. Forced choices: A-26…A-32, A-33 (C1/W5), A-34 (F1/F3), **A-35 (leader disposition), A-36 (D2 allowlist decided)**.
+**Companion artifact to:** `architecture-recommendation.md` **v3.4** in this directory — this record derives from it and cites it.
+**Tree:** canon authored @ 7426e0d8a; this amendment on `feature/project-operating-knowledge-ruling` @ 5672f055c. Fenced dev; markdown-only; the giter finalizes.
+**Status: DESIGN ONLY — implementation is NOT authorized.** Pending: **D1 (implementation go — split/audience model DECIDED by ER-1)**, D3–D5 + P-1 + Phase 1.5; **D2 DECIDED** (allowlist, A-36).
+**Revision note:** round-1 (v2); round-2 (v3); C1+W5 (v3.1); F1+F3 (v3.2); leader disposition B1–B8 (v3.3); **Emperor-ruling fold (v3.4 — ER-1)**. See `discharge-round-1.md` / `discharge-round-2.md` + appendices B/C/D.
 
-**ID conventions:** `A-n` = decided-so-far (cites architecture §s). `D1–D5` = decisions (D2 now DECIDED; D1/D3/D4/D5 PENDING EMPEROR). `P-1` = implementation precondition. `C-n` = boundaries. "D7" = the standing proxy `coding`-alias DEFECT id.
+**ID conventions:** `A-n` = decided-so-far. `ER-n` = EMPEROR RULING (decided by the Emperor; highest authority in this record). `D1–D5` = decision status. `P-1` = implementation precondition. `C-n` = boundaries. "D7" = the standing proxy `coding`-alias DEFECT id.
 
 ---
 
@@ -13,23 +13,23 @@
 
 ### Canon & storage
 
-**A-1 — Canon A: DB-canon, daemon-side, new surface.** (§3; §9.) Reuse bar: *no incumbent can deliver GUARANTEED INJECTION OF ORDERED PROCEDURES to every agent on a non-default project* — mechanism-backed (A-26), bounded under pinning (A-33), proven on rows AND chars **including the `_make_context_message` wrapper** (A-35-B1: 2,811 ≤ 2,900).
+**A-1 — Canon A: DB-canon, daemon-side, new surface.** (§3; §9.) Reuse bar: *no incumbent can deliver GUARANTEED INJECTION OF ORDERED PROCEDURES to the agents that need them* — mechanism-backed (A-26), bounded under pinning (A-33), wrapper-inclusive (A-35-B1), **and audience-scoped per ER-1 (per-view bounds hold — filter precedes admission)**.
 
-**A-2 — Storage shape.** Two tables (§4.1): `project_operating_knowledge` (id; `project_id` NO FK; slug ≤44; CHECK `domain`/`provenance`; CHECK `status ∈ active|superseded|archived` — archived REACHABLE via `pok_curate(archived=True)`; `disputed`; `superseded_by_id` WIRED; `content_sha256`; factory-captured author; timestamps; counts; `pinned`) + embeddings companion. `UNIQUE PARTIAL INDEX uq_pok_active_slug (project_id, slug) WHERE status='active'`. Two additive `.sql`; CHECKs on the SQLModel table + mirrored in the audit files.
+**A-2 — Storage shape.** Two tables (§4.1): `project_operating_knowledge` (id; `project_id` NO FK; slug ≤44; CHECK `domain`/`provenance`; CHECK `status ∈ active|superseded|archived`; **CHECK `audience ∈ operation|implementation|both` + `audience_agents` curator-override list — ER-1**; `disputed`; `superseded_by_id` WIRED; `content_sha256`; factory-captured author; timestamps; counts; `pinned`) + embeddings companion. `UNIQUE PARTIAL INDEX uq_pok_active_slug (project_id, slug) WHERE status='active'`. Two additive `.sql`; CHECKs on the SQLModel table + mirrored in the audit files.
 
-**A-3 — Genre split (definitive), no genre migrates.** (§4.1.)
+**A-3 — Genre split (definitive), no genre migrates.** (§4.1.) **The split CONFIRMED by ER-1: POK (operating knowledge) vs the Related-Project record — two surfaces, deliberately.**
 
 ### Write path
 
-**A-4 — ≤2-call capture + guards.** `pok_upsert(slug, body, domain, provenance)`: slug `[a-z0-9-]` ≤44 (`pok_slug_oversize`); exact-dup `content_sha256` → no-op echo; normalized-hash dispute-laundering guard (`pok_disputed_content`); else supersede txn; upsert onto disputed flips superseded; **upsert onto ARCHIVED flips superseded (forward-only, never resurrects) + fresh guarded active row**. Write-time fence: `pok_body_structural_token` (newline / leading `#` at body start / `[SYSTEM CONTEXT:` / ```). Escape-aware budget: `len(escape_for_context_block(body)) ≤ 240` (`pok_body_oversize`). (§4.2.)
+**A-4 — ≤2-call capture + guards.** `pok_upsert(slug, body, domain, provenance, audience='operation')` — **the writer states the audience at capture; default `operation`** (ER-1). Slug ≤44 (`pok_slug_oversize`); exact-dup no-op echo; normalized-hash dispute guard (`pok_disputed_content`); supersede txn; disputed flip; archived flip (forward-only). Fence: `pok_body_structural_token` (newline / leading `#` at body start / `[SYSTEM CONTEXT:` / ```). Escape budget: `len(escape_for_context_block(body)) ≤ 240` (`pok_body_oversize`). (§4.2.)
 
-**A-5 — Writers, scope predicate, attribution.** Non-default project only (`project_id != SYSTEM_DEFAULT_PROJECT_ID`; `project_normalizer.py:6-45`; `instance_lifecycle.py:1895`; constants `:596-597`; `api.py:2656`; mirrors `context_messages.py:2248/:2272`). Default → block suppressed; typed `pok_default_project_unsupported` / `pok_no_project`. Attribution = factory-captured `agent_id` — **attribution ≠ authorization**.
+**A-5 — Writers, scope predicate, attribution.** Non-default project only (`project_id != SYSTEM_DEFAULT_PROJECT_ID`; `project_normalizer.py:6-45`; `instance_lifecycle.py:1895`; `constants.py:596-597`; `api.py:2656`; mirrors `context_messages.py:2248/:2272`). Default → block suppressed; typed refusals. Attribution = factory-captured `agent_id` — **attribution ≠ authorization**; **audience mapping ALSO by factory-captured `agent_id` (ER-1 — the proven in-body pattern).**
 
-**A-6 — Admission + sizing.** Active cap 64 refuse-never-evict (refusal names oldest-least-verified + archive cure); each family member consumes one slot; family admission >3 active → `pok_family_full`. `POK_BODY_MAX_CHARS=240` **escaped**; `POK_SLUG_MAX_CHARS=44`; `POK_PIN_CAP_PER_PROJECT=2`; `POK_FAMILY_MAX=3` (2×3 = 6 ≤ 8).
+**A-6 — Admission + sizing.** Active cap 64 refuse-never-evict (curable via archive; **per PROJECT, not per audience**); family admission >3 → `pok_family_full`. Body 240 **escaped**; slug ≤44; pin 2; family-max 3 (2×3 = 6 ≤ 8). **Block budget 8/2,900 is PER-VIEW (ER-1).**
 
 ### Update / curate / currency
 
-**A-7 — Append-with-supersede ONLY; the txn IS the design.** (§4.3.)
+**A-7 — Append-with-supersede ONLY; the txn IS the design.**
 
 **A-8 — Currency.** `last_verified_at` at write; same-content re-upsert refreshes. `pok_verify` DEFERRED to phase 2; v1 = 3 tools. Decay `exp(-idle/30d)` + `[stale Nd]`. Embedding-lag: BM25-only + `embedding_lag: true`.
 
@@ -38,60 +38,50 @@
 | Operation | Non-pinned | Pinned |
 |---|---|---|
 | `pok_upsert` (supersede) | any project-linked agent | leader/PM only → `pok_pinned_requires_curator` |
-| `pok_curate(pinned / disputed / archived)` | leader/PM only | leader/PM only |
+| `pok_curate(pinned / disputed / archived / **audience / audience_agents**)` | leader/PM only | leader/PM only |
 | `pok_verify` | phase 2 | phase 2 |
 
-`pok_curate(slug, pinned=None, disputed=None, archived=None)` — pin cap 2 (`pok_pin_cap`); dispute suppresses injection, stays readable; archive frees the active slot, row readable. Recording: typed echo + `ens_system_log` WARNING; no DB refusal ledger. Suspected-wrong protocol unchanged.
+`pok_curate` — pin cap 2 **PER PROJECT (not per audience; a pinned entry renders in every audience view that can see it — ER-1 consistency note)**; dispute suppresses injection, stays readable; archive frees the slot, row readable; **audience reclassification/narrowing curator-only (ER-1)**. Recording: typed echo + `ens_system_log` WARNING. Suspected-wrong protocol unchanged.
 
 ### Trust / provenance
 
-**A-10 — declared|observed inline; `[DISPUTED]`; ranking = decay × observed × access; lineage always rendered; pinned rows BYPASS the retrieval threshold in `pok_query` (A-35-B5).** (§4.4, §4.6.)
+**A-10 — declared|observed inline; `[DISPUTED]`; ranking = decay × observed × access; lineage always rendered; pinned rows BYPASS the retrieval threshold.**
 
 ### Injection layer
 
-**A-11 — Block shape + ordering + fence + pinned-drag + wrapper-inclusive cap.** Block `## Project Operating Knowledge`; builder + ~7 touch-points; placement by code site. Membership: pinned tier first (≤2 pins; a pinned member CARRIES ITS WHOLE FAMILY — adjacent, slug order, at the pinned position; doubly-pinned family counted ONCE on rows AND chars), then ranked actives, **F5 rider: stop where rendered chars would exceed `POK_BLOCK_MAX_CHARS` OR entries would exceed 8; tail counts remainder**. **B3: the fact-5/6 contrast is ONE family (`deploy-01/02`) — one-sided render structurally unreachable.** **F3: excluded rows never render — survivors drag contiguously; pinned-member exclusion cancels the drag; zero survivors → nothing.** **B1 arithmetic (FULL rendered block incl. wrapper):** entry ≤332 (escaped body 240 + derived overhead 92); content worst 2,764; **wrapper 47 (CONTEXT_PREFIX 17 + title 27 + CONTEXT_SUFFIX 3, `context_messages.py:75-76/:181-182`; precedent `:205-230`) → 2,811 ≤ `POK_BLOCK_MAX_CHARS = 2,900`**; pinned 2,138+47 = 2,185 ≤ 2,900. Stable id `pok:{project_id}` day 1; v1 once-per-instance; opt-out `pok_inactive`; once-flag writes ONLY on successful render.
+**A-11 — Block shape + ordering + fence + pinned-drag + wrapper-inclusive cap — **PER-VIEW** (ER-1).** Block `## Project Operating Knowledge`; builder + the working-agent touch-points **+ the ari dispatch-context seam (the 8th touch-point class)**. Membership: **audience filter FIRST** (visible set per the agent's `agent_id`), then pinned tier (≤2 pins, family drag, doubly-pinned counted once on rows AND chars) → ranked actives → F5 rider (stop at chars OR entries; tail counts). **B3 contrast family atomic; F3: excluded rows never render — audience-INVISIBLE = excluded-for-that-view (survivors contiguous; pinned-member exclusion cancels the drag; zero visible survivors → no render in that view).** B1 arithmetic holds per-view: entry ≤332; content worst 2,764; wrapper 47 → **2,811 ≤ 2,900**; pinned 2,185 ≤ 2,900 (the visible set is a subset — the project-wide worst bounds every view). Once-flag on success only. Stable id `pok:{project_id}` (instance-scoped namespace); opt-out `pok_inactive`.
 
 ### Retrieval layer
 
-**A-12 — `pok_query` — SELECTOR REUSE (B5, decided).** No invented fusion weights (the v3.x "0.4·BM25+0.6·cos ≥ 0.25" is DELETED — it exists in no code; weights are configuration). Reuse `daemon/services/critical_notes_selector.py` + `critical_notes_selection_orchestrator.py` (configurable `fusion_bm25_weight`/`fusion_vector_weight`/`fusion_threshold`). **Pinned rows BYPASS the threshold (pinned-always-returns, mirroring blueprint core forced 1.0); the threshold applies to non-pinned rows only.** Family chains in slug order; exclusions per F3; archived on explicit request; server-side scope; typed errors; lag surfaced. **AC3: ALL 8 dogfood slugs retrievable by their own natural query.**
+**A-12 — `pok_query` — selector reuse + pinned bypass + the UNIVERSAL-READ INVARIANT (ER-1).** Reuse `critical_notes_selector.py` + `critical_notes_selection_orchestrator.py` (configurable weights/threshold; the invented 0.4/0.6/0.25 is DELETED). **UNIVERSAL READ: `pok_query` returns ALL entries of the project to ANY agent on it, regardless of audience tags — injection is curated; reading is free.** Family chains in slug order; status-based exclusions per F3 (audience NEVER filters retrieval); archived on explicit request; server-side scope; typed errors; lag surfaced. AC3: ALL 8 slugs retrievable by their own natural query.
 
 ### Sizing constants
 
-**A-13 —** body 240 (**escaped**) · slug ≤44 · entry ≤332 · active 64 (curable via archive) · pin 2 · family-max 3 · **block 2,900 (FULL rendered block incl. wrapper 47c — B1)** / 8 · retrieval = selector-configured threshold, non-pinned only (B5) · window 30d. (§4.7.)
+**A-13 —** body 240 (escaped) · slug ≤44 · entry ≤332 · active 64 (per project) · pin 2 (per project) · family-max 3 · **block 2,900 full-render PER-VIEW** / 8 · threshold = selector-configured, non-pinned only · window 30d.
 
 ### REQUIRED same-lane companion
 
-**A-14 — Metadata: v1 ships the ALLOWLIST variant (D2 DECIDED — A-36).** Named ALLOWLIST renders VERBATIM: `ari_plane_tracking_policy`, `plane_workspace_discipline`, `deferred_key_rotation`, `deferred_key_rotation_f7_addition`, `upgrade_policy`, `upgrade_workflow_preference`, `blueprint_active`, `dependency_self_install_philosophy`, `self_provisioning_directive`, `opendesign_decisions`, the `plugin_*` policy keys, `staged_release_v0290_ceremony_notes` (leader-maintained; refinable, NAMED here). All non-allowlisted: 2000c/key, 16384c block, omitted-count tail. **No new read tool** — the allowlist IS the recovery path; forensic keys via `project_get` (5 privileged agents), stated honestly. **Economics, two bases (reconciled):** metadata dict 279,810B/69 keys; whole project JSON 408,809B; 279,810/408,809 = **68.4 %**; the "82 %" share-of-head figure is withdrawn as a computed claim (unstated denominator). **AC12** re-measures live and recomputes both bases. (§4.8.)
+**A-14 — Metadata ALLOWLIST (D2 DECIDED) — UNAFFECTED by ER-1.** Named allowlist verbatim (`ari_plane_tracking_policy` … `staged_release_v0290_ceremony_notes`); non-allowlisted 2000c/key + 16384c block + omitted-count tail; no new read tool. Economics two-bases (279,810 B / 408,809 B / 68.4 %); AC12 re-measures. **ER-1 touches POK only.**
 
 ### Rejected carriers
 
-**A-15 —** (§6; ten stores + non-carrier rows; 16-row map)
-1. File-canon — friction/probability/anchor/security.
-2. Critical-notes — references ARE injected (`:1030-1040`); rejection on field-caps + writer + selection.
-3. Blueprint — async writer + turn-1 gate + no supersede; genre ban = prompt-doc.
-4. Project-skill files / DB tier — opt-in 11/40, max-2.
-5. Metadata-JSONB — uncapped, no lineage.
-6. Memoir extension — scope/writer/genre.
-7. Board — no injection.
-8. Shared Meta KV — tree-scoped `context_key`; 4096 cap; per-tree friction; no retrieval/lifecycle; 28/40 allow-grants (29 mentions incl. critic deny). Donates stable-id refresh + escape fence + cap-after-escape.
-9. `infra_assets` — no injection seam; 3 grants + deny; asset genre; history≠currency.
-10. Prompt-memory — agent-scoped persona; filename index.
+**A-15 —** (§6; ten stores + non-carriers; sixteen map rows) — file-canon; critical-notes; blueprint; skill-loader tiers; metadata-JSONB; memoir; board; shared_meta_kv (true grounds); infra_assets; prompt-memory. Plus two DECISION-declined injection-model alternatives: C1-(C) family-scoped pins; **unified single-audience block (declined by the Emperor — ER-1)**.
 
 ### Reuse verdict
 
-**A-16 —** Carries/borrowed per §7 (incl. **the critical-notes selector reuse — B5**; KV cap-after-escape). NEW: table pair; `pok` category + 3 tools v1; builder + touch-points; metadata allowlist renderer. Registration: `TOOL_REQUIRED_AGENTS` none; `VOCABULARY_VERSION` 6→7; artifact 60→61; ordinal-free (privileged ordinal 19). **B7: PG registration = models imported in `daemon/manager.py`'s pre-create_all block (~:928-987, `# register before create_all`; create_all is the PG source-of-truth `:129/:931/:942/:956/:980`); same-commit re-pins: `tests/unit/metrics/test_metrics_vocabulary_amendment.py` + `tests/unit/tools/test_tool_category_artifact.py`.** **B4 grant-sweep integrity (normative):** watcher excluded (empty allow = inherit-all, `_tool_registry.py:326-340` — NEVER append); `"nest-report"` stays LAST — insert `"pok"` before it; pin test `tests/unit/test_anomaly_report_grant_pins.py`; sweep = 40 registered, 39 non-empty allows.
+**A-16 —** Carries/borrowed per §7 (selector reuse included). NEW: table pair (+audience fields); `pok` category + 3 tools v1 (+ audience params); builder + working-agent touch-points **+ ari seam**; allowlist renderer. Registration: `TOOL_REQUIRED_AGENTS` none; `VOCABULARY_VERSION` 6→7; artifact 60→61; ordinal-free. B7 PG registration (manager.py pre-create_all) + re-pins. **B4 sweep rules** (watcher excluded; `nest-report` LAST; pin test tripwire; 40 registered / 39 non-empty allows).
 
 ### Seam rulings
 
-**A-17 —** (i) NEW block; (ii) per-block cap sufficient, metadata companion (allowlist-shaped); (iii) once-per-instance v1 + query freshness, flag on success only; (iv) guidelines phase-2 tier.
+**A-17 —** (i) NEW block; (ii) per-block cap sufficient, allowlist companion; (iii) once-per-instance v1 + query freshness — **the ari seam assembles per dispatch (fresh read)**; (iv) guidelines phase-2 tier.
 
 ### Leader adjudications
 
-**A-18 —** v2 stand; v3 ordering/fence/archive; v3.1 drag bound; v3.2 char keystone + F3; **v3.3 leader disposition (A-35).**
+**A-18 —** v2 stand; v3 ordering/fence/archive; v3.1 drag bound; v3.2 char keystone + F3; v3.3 leader disposition; **v3.4 Emperor ruling folded (ER-1) — delivery audience-scoped; ari seam; universal read.**
 
 ### Migration
 
-**A-19 —** W-3 Option (a) first-class llmproxy project row — **dev now; LIVE in Phase 1.5 (B2)**. Payload re-slugged (B3): `pipeline-01/02/03` + **`deploy-01-daoduc-backup` / `deploy-02-ensem-dev-primary` (atomic contrast family)** + 3 unordered; pin = `pipeline-03-deploy-order-daoduc-backup-first` (44c, the bound-setting slug). All 8 slugs re-checked against `^([a-z][a-z0-9]*)-(\d{2})-(.+)$` — pipeline ✓, deploy ✓, others unordered (the old `^(.*)` regex would have mis-parsed `model-catalogs-19-…`; fixed). Bodies 54–93c. **Dev proof ≠ live truth: the walkthrough is true in dev after Phase 1; live only after Phase 1.5 step 3.**
+**A-19 —** W-3 Option (a) project row (dev now; live in Phase 1.5). Payload classified per ER-1: **both** = `artifact-is-container-image`, `pipeline-01-merge-master-triggers-image-ci`, `healthz-in-cluster-only`; **operation** = `pipeline-02`, `pipeline-03` (pinned), `deploy-01`, `deploy-02`, `model-catalogs-19-vs-22-not-drift`; **implementation** = none in this payload (honest — it is operational knowledge). Views: ari/leader/devops see 8; developer sees 3. Bodies 54–93c. Dev proof ≠ live truth (Phase 1.5).
 
 ### Deliberately NOT built
 
@@ -101,55 +91,44 @@
 
 ### Round-2 forced choices
 
-**A-26 — Ordering: slug families + atomic adjacent rendering.** `<family>-<NN>-<slug>`; **regex `^([a-z][a-z0-9]*)-(\d{2})-(.+)$` (tightened per B3 — family = one hyphen-free token; the old `^(.*)` form mis-parsed hyphenated slugs)**; atomic admission, slug-order adjacency, never split; query chains in order.
+**A-26 — Ordering: slug families + atomic adjacent rendering** (regex `^([a-z][a-z0-9]*)-(\d{2})-(.+)$`, tightened per B3). **A-27 — Archive verb in v1.** **A-28 — `pok_query` pinned-BYPASS.** **A-29 — Content fence: two layers.** **A-30 — KV true grounds + layer rows.** **A-31 — Once-flag on success only.** **A-32 — Precision corrections.**
 
-**A-27 — Archive verb in v1.** `pok_curate(archived=True)` frees the slot; row readable.
+### FINAL FOLD (council round 3) — C1 + W5
 
-**A-28 — `pok_query` pinned-BYPASS (revised per B5).** Pinned rows always return (threshold bypass, mirroring blueprint core 1.0); threshold applies to non-pinned only. (The v3 "pinned score bonus" is superseded by the bypass.)
+**A-33 — C1 option (A) family-carries-to-pin; W5 escaped-body budget; advisories (i)–(iii) adopted.**
 
-**A-29 — Content fence: two layers.** Write-time typed rejection + render-time escape/flatten. Fenced-verbatim.
+### MECHANICAL FOLD — F1 + F3
 
-**A-30 — KV rejection on true grounds + layer rows.** shared_meta_kv (§2.10), prompt-memory (§2.13), DB-skill tier (§2.9).
+**A-34 — F1 Option A (slug 44 / entry 332; block value superseded by A-35-B1's wrapper-inclusive 2,900); F3 exclusion×drag ruled; F4–F8 dispositioned.**
 
-**A-31 — Once-flag on success only.**
+### LEADER DISPOSITION — B1–B8
 
-**A-32 — Precision corrections.** References-injected; blueprint prompt-doc; memoir census; carrier phrasing; 54–93c; infra 3+deny; 7-facts superset.
+**A-35 —** B1 wrapper-inclusive 2,900; B2 Phase 1.5 live seeding; B3 atomic contrast family + tightened regex; B4 sweep integrity; B5 selector reuse + pinned bypass; B6+B8 allowlist (D2); B7 PG registration + AC9 materialization; notes (row-1 quantifier; economics two-bases; recurrence closed).
 
-### FINAL FOLD (council round 3) — C1 + W5 + advisories
+**A-36 — D2 DECIDED: v1 = ALLOWLIST variant** (A-14); uniform cap = phase-2 option.
 
-**A-33 — C1 option (A) family-carries-to-pin** (member-pin semantics preserved; (C) rejected — contradicts the dogfood's own member pin, adds indirection, same bound needed). Rows bound PIN(2)×FAM(3)=6≤8. **W5:** escaped-body budget (`len(escape_for_context_block(body)) ≤ 240`). Advisories (i)–(iii) adopted (archived re-upsert forward-only; "leading `#` at body start"; memoir census 4 occurrences / 3 files in `daemon/repositories/memoir/`).
+---
 
-### MECHANICAL FOLD (controller re-check) — F1 + F3 + advisories
+## (ER) EMPEROR RULINGS
 
-**A-34 — F1 Option A** (slug 44 / entry 332 / block 2,800 — **block value superseded by A-35-B1's 2,900 wrapper-inclusive**). **F3 exclusion×drag ruled** (excluded rows never render; survivors drag contiguously; pinned-member exclusion cancels the drag; zero survivors → nothing). F4/F5/F6 folded; F7 skipped (sealed history); F8 moot.
-
-### LEADER DISPOSITION (approver cap reached) — B1–B8
-
-**A-35 — leader decisions, implemented without re-litigation:**
-- **B1 — DEFINE THE LHS.** `POK_BLOCK_MAX_CHARS` measures the **FULL rendered block INCLUDING the `_make_context_message` wrapper**: `CONTEXT_PREFIX` 17 (`[SYSTEM CONTEXT: `) + title 27 + `CONTEXT_SUFFIX` 3 (`]\n\n`) = **47c** (`context_messages.py:75-76/:181-182`; in-file wrapper-cost precedent `_SNAPSHOT_DIGEST_WRAPPER_TOKENS` `:205-230`). Content 2,764 + 47 = **2,811 → `POK_BLOCK_MAX_CHARS = 2,900`** (89c slack); pinned 2,138 + 47 = **2,185 ≤ 2,900**. No "proven" claim without the wrapper.
-- **B2 — LIVE SEEDING step named.** Phase 1 = dev dogfood proof. **Phase 1.5 — live seeding** (owner leader/devops; gate: after the next promote carries the schema): (a) create the llmproxy project row on the LIVE install; (b) seed the 8 slugs via `pok_upsert` against prod through the tool lane; (c) verify with a fresh leader spawn on the live daemon. **Stated plainly: until Phase 1.5 runs, the walkthrough is TRUE IN DEV ONLY — the honest boundary, not a claim of done.**
-- **B3 — atomic contrast family.** `deploy-01-daoduc-backup` + `deploy-02-ensem-dev-primary` = ONE family → half-delivery structurally impossible. All 8 slugs re-checked against the tightened family regex; `model-catalogs-19-…` correctly unordered (old regex mis-parse fixed).
-- **B4 — grant-sweep integrity (normative).** (1) `agents/watcher/meta.json` empty allow = inherit-all (`_tool_registry.py:326-340`) — NEVER append; exclude watcher (it inherits `pok`); (2) `"nest-report"` remains LAST — insert `"pok"` BEFORE it; (3) sweep = 40 registered / 39 non-empty allows; pin test `tests/unit/test_anomaly_report_grant_pins.py` is the tripwire.
-- **B5 — retrieval concrete.** (a) pinned rows BYPASS the threshold; (b) the invented "0.4·BM25+0.6·cos ≥ 0.25" is DELETED (exists in no code) — reuse `critical_notes_selector.py` + `critical_notes_selection_orchestrator.py` (configurable fusion weights/threshold); (c) AC3 asserts ALL 8 slugs retrievable by their own natural query.
-- **B6+B8 — metadata allowlist in v1 (D2 DECIDED).** Named allowlist renders verbatim; non-allowlisted capped 2000c/key + 16384c block + omitted-count tail; NO new read tool (allowlist is the recovery path; `project_get` for forensic keys, 5 privileged agents, stated honestly); AC6 fails if any allowlisted key is absent/truncated; AC15's dead-pointer requirement replaced. **D2: DECIDED — allowlist for v1; uniform deferred as a phase-2 option.** (A-36.)
-- **B7 — PG registration surface named.** Models imported in `daemon/manager.py`'s pre-create_all block (~:928-987; `SQLModel.metadata.create_all` is the PG source-of-truth `:129/:931/:942/:956/:980`). **AC9 asserts PG MATERIALIZATION** (scratch-PG boot shows both tables), not merely two `.sql` files with no FK. Same-commit re-pins: `tests/unit/metrics/test_metrics_vocabulary_amendment.py`, `tests/unit/tools/test_tool_category_artifact.py` (leader-named bare paths resolve here).
-- **Notes folded:** §2 row 1 quantifier corrected ("all agents whose instance carries a non-default `project_id`"); economics reconciled on two bases (68.4 % of whole JSON; "82 %" withdrawn as a computed claim; AC12 re-measures); recurrence acknowledged — B5/B6 were iteration-002 notes carried rather than folded and returned as blockers; B7 recurs the round-001 registration class — all three are now folded as decisions above, not restated as residuals.
-
-**A-36 — D2 DECIDED: v1 ships the ALLOWLIST variant** (A-14); the uniform per-key-cap shape is a deferred phase-2 option. A residual presented as open must be genuinely open — this one is closed.
+**ER-1 — Injection model: SPLIT + AUDIENCE + ARI SEAM + UNIVERSAL READ.** *(Emperor ruling, 2026-11-07, source: Discord — verbatim intent: "we should split [operating knowledge vs project record]. Ari you need know operation one (to control the leader, aegis,… teams), also agent like devops need know. The dev team actually need know the implementation major, and operation is also need (not all the case). It's for active injection — if agent want read them they can read any.")*
+1. **SPLIT CONFIRMED** — the two-surface structure (POK vs the Related-Project record) stands. **A unified-block alternative was offered and DECLINED — considered-and-declined, decider: the Emperor.**
+2. **Audience dimension** — entry field `operation` | `implementation` | `both`; default ACTIVE-injection audiences: operation → {ari, leader, devops} (**leader included — it runs the ops lanes**); implementation → {leader, developer}; both → every agent on the project. Curator narrowing via `audience_agents`. **Per-agent block budget (8 / 2,900) is a PER-AUDIENCE effective slice; admission = audience filter FIRST, then the existing semantics within the visible set; every bound holds per-view.** Audience mapping by factory-captured agent_id.
+3. **Ari delivery seam** — Ari holds the OPERATION slice at dispatch time (today Ari receives no project injection); the seam sits where Ari's dispatch/work context is assembled for a target project; gates: non-default project, operation audience, same budget/fence/family semantics; per-dispatch fresh read.
+4. **Universal read (invariant)** — `pok_query` returns ALL entries to ANY agent on the project, regardless of audience tags. Injection is curated; reading is free.
+Landed: arch §4.1/§4.2/§4.3/§4.5/§4.5.1/§4.6/§11/§13/§14; decisions A-2/A-4/A-5/A-6/A-9/A-11/A-12/A-19 + this row; plan §2/§4.1/§4.5/AC22–AC24/§9; Appendix D.
 
 ---
 
 ## (B) DECISIONS — status
 
-**D1 — PENDING EMPEROR.** Ratify canon A + the new surface. Flip condition unchanged.
-**D2 — DECIDED (leader, v3.3): v1 = ALLOWLIST variant** (A-14/A-36); uniform cap = phase-2 option.
-**D3 — PENDING (user un-park go; phase 2; wi-d2abe4f7).**
-**D4 — PENDING (second-model corroboration post-D7).**
-**D5 — PENDING (critical-notes hygiene lane; cap already 200).**
-**P-1 — implementation precondition:** dev llmproxy project row (Phase 1); **Phase 1.5** = live row + live seeding (leader/devops-owned, gated on the next promote carrying the schema).
+**D1 — AMENDED: the split/audience model is DECIDED by ER-1; D1's remaining open content is the IMPLEMENTATION GO.** *(Emperor ruling, 2026-11-07, source: Discord.)*
+**D2 — DECIDED (leader, v3.3): v1 = ALLOWLIST variant** (A-14/A-36).
+**D3 — PENDING** (guidelines un-park; wi-d2abe4f7). **D4 — PENDING** (corroboration post-D7). **D5 — PENDING** (notes hygiene lane).
+**P-1 — precondition:** dev llmproxy project row (Phase 1). **Phase 1.5** = live row + live seeding incl. the ari-dispatch verification (leader/devops-owned, gated on the next promote carrying the schema).
 
 ---
 
 ## (C) Boundaries
 
-- **C-1** Markdown only; no code/migrations/commits. **C-2** Fenced dev only; prod not probed (AC12 gates the live measurement; live seeding is Phase 1.5, leader/devops-owned). **C-3** No genre migration.
+- **C-1** Markdown only; no code/migrations/commits (the giter finalizes). **C-2** Fenced dev only; prod not probed (AC12 gates the live measurement; live seeding is Phase 1.5). **C-3** No genre migration. **C-4** *(ER-1 discipline)* the audience dimension gates ACTIVE injection ONLY — never retrieval.
