@@ -54,7 +54,12 @@ POK_TABLES = (
     "project_operating_knowledge_embeddings",
 )
 
-#: The §4.1 column set, verbatim (readiness constraint 1).
+#: The §4.1 column set, verbatim (readiness constraint 1) PLUS the
+#: Phase-2 additive trust-tier column (``source_tier``, trust-tier
+#: addendum T-1 — the sanctioned additive schema evolution; the
+#: Phase-1 CREATE TABLE text is never amended, the column arrives via
+#: ``20261107_110003_add_pok_source_tier.sql`` / ``_ensure_postgres_
+#: columns`` / the model field).
 POK_EXPECTED_COLUMNS = {
     "id",
     "project_id",
@@ -76,6 +81,7 @@ POK_EXPECTED_COLUMNS = {
     "access_count",
     "last_accessed_at",
     "pinned",
+    "source_tier",
 }
 
 POK_EMBEDDINGS_EXPECTED_COLUMNS = {"id", "entry_id", "embedding", "created_at"}
@@ -174,6 +180,36 @@ def _sql_create_columns(path: str) -> set[str]:
     return cols
 
 
+def _sql_additive_columns(table: str) -> set[str]:
+    """Column names added to ``table`` by LATER additive migrations
+    (``ALTER TABLE <table> ADD COLUMN <name> ...`` in the UP sections
+    of ``daemon/migrations/versions/*.sql``). The two-artifact rule
+    covers the FULL evolved schema: create-table columns ∪ additive
+    ALTER columns (Phase 2 — the trust-tier column arrives this way;
+    the checksummed Phase-1 CREATE TABLE is never amended).
+    """
+    import pathlib
+
+    versions = pathlib.Path("daemon/migrations/versions")
+    cols: set[str] = set()
+    for path in sorted(versions.glob("*.sql")):
+        text_src = path.read_text(encoding="utf-8")
+        if "-- DOWN" in text_src:
+            up = text_src.split("-- UP", 1)[1].split("-- DOWN", 1)[0]
+        else:
+            up = text_src
+        for raw_line in up.splitlines():
+            line = raw_line.strip().rstrip(",").rstrip(";")
+            if line.startswith("--"):
+                line = line.lstrip("- ").strip()
+            m = re.match(
+                rf"ALTER TABLE {re.escape(table)} ADD COLUMN (\w+)", line, re.IGNORECASE
+            )
+            if m:
+                cols.add(m.group(1))
+    return cols
+
+
 class TestPokPgMaterialization:
     def test_ac9_both_tables_materialize(self, pg_engine) -> None:
         """AC9: the scratch-PG boot (create_all) lands BOTH tables."""
@@ -204,14 +240,21 @@ class TestPokPgMaterialization:
 
     def test_sql_and_pg_agree_column_for_column(self, pg_engine) -> None:
         """Two-artifact rule: the .sql canonical DDL and the PG
-        create_all agree on the column sets (drift = defect)."""
-        main_sql_cols = _sql_create_columns(POK_SQL_FILES[0])
+        create_all agree on the column sets (drift = defect). The
+        SQL side is the FULL EVOLVED schema: the CREATE TABLE columns
+        ∪ the additive-ALTER columns (Phase 2 — trust-tier addendum
+        T-1; the Phase-1 CREATE TABLE text is never amended)."""
+        main_sql_cols = _sql_create_columns(POK_SQL_FILES[0]) | _sql_additive_columns(
+            POK_TABLES[0]
+        )
         main_pg_cols = set(_pg_columns(pg_engine, POK_TABLES[0]))
         assert main_sql_cols == main_pg_cols, (
             f"main table .sql↔PG drift: sql-only={main_sql_cols - main_pg_cols} "
             f"pg-only={main_pg_cols - main_sql_cols}"
         )
-        emb_sql_cols = _sql_create_columns(POK_SQL_FILES[1])
+        emb_sql_cols = _sql_create_columns(POK_SQL_FILES[1]) | _sql_additive_columns(
+            POK_TABLES[1]
+        )
         emb_pg_cols = set(_pg_columns(pg_engine, POK_TABLES[1]))
         assert emb_sql_cols == emb_pg_cols
 
@@ -229,6 +272,9 @@ class TestPokPgMaterialization:
             assert value in blob, f"provenance CHECK missing {value!r}"
         for value in ("active", "superseded", "archived"):
             assert value in blob, f"status CHECK missing {value!r}"
+        # Phase 2 (trust-tier addendum T-1): the FIFTH vocabulary
+        for value in ("agent", "curated"):
+            assert value in blob, f"source_tier CHECK missing {value!r}"
 
     def test_pg_rejects_out_of_vocab_audience(self, pg_engine) -> None:
         """The audience CHECK actually FIRES on PG."""
@@ -241,6 +287,61 @@ class TestPokPgMaterialization:
                 "VALUES ('ac9-neg', 'p1', 'ac9-neg', 'b', 'h', 'ag', "
                 "'t', 't', 'everyone')",
             )
+
+    def test_pg_source_tier_default_and_check_fire(self, pg_engine) -> None:
+        """Phase 2 (trust-tier addendum T-1), materialized on PG: the
+        column defaults to 'agent' on insert (the DEFAULT satisfies
+        the CHECK), an explicit 'curated' passes, and an
+        out-of-vocabulary value FIRES the CHECK."""
+        base = (
+            "INSERT INTO project_operating_knowledge "
+            "(id, project_id, slug, body, content_sha256, "
+            "created_by_agent, created_at, updated_at{tier}) "
+            "VALUES (:id, 'p-ac9-tier', :slug, :body, :sha, 'ag', 't', 't'{val})"
+        )
+        with pg_engine.connect() as conn:
+
+            def _tier_of(row_id: str) -> str:
+                return conn.execute(
+                    text(
+                        "SELECT source_tier FROM project_operating_knowledge "
+                        "WHERE id = :rid"
+                    ),
+                    {"rid": row_id},
+                ).fetchone()[0]
+
+            # 1. omitted tier → DEFAULT 'agent'
+            _pg_exec(
+                pg_engine,
+                base.format(tier="", val=""),
+                {"id": "ac9-tier-a", "slug": "tier-def", "body": "b", "sha": "h1"},
+            )
+            assert _tier_of("ac9-tier-a") == "agent"
+            # 2. explicit 'curated' passes
+            _pg_exec(
+                pg_engine,
+                base.format(tier=", source_tier", val=", 'curated'"),
+                {"id": "ac9-tier-b", "slug": "tier-cur", "body": "b", "sha": "h2"},
+            )
+            assert _tier_of("ac9-tier-b") == "curated"
+            # 3. out-of-vocabulary FIRES the CHECK
+            with pytest.raises(Exception):
+                conn.execute(  # noqa: S101 — the refusal IS the assertion
+                    text(
+                        "INSERT INTO project_operating_knowledge "
+                        "(id, project_id, slug, body, content_sha256, "
+                        "created_by_agent, created_at, updated_at, source_tier) "
+                        "VALUES ('ac9-tier-c', 'p-ac9-tier', 'tier-bad', 'b', "
+                        "'h3', 'ag', 't', 't', 'tier')"
+                    )
+                )
+                conn.rollback()
+            conn.rollback()
+        # teardown of this leg's rows
+        _pg_exec(
+            pg_engine,
+            "DELETE FROM project_operating_knowledge WHERE project_id = 'p-ac9-tier'",
+        )
 
     def test_partial_unique_index_materialized_and_binding(self, pg_engine) -> None:
         """uq_pok_active_slug exists WITH the partial predicate and
