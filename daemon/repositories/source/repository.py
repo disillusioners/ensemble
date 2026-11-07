@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -13,10 +15,82 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, col
 
-from .models import SourceConfig, InstanceMapping, ProcessedMessage, ScheduleExecution, SourceStatus, ExecutionStatus
+from .models import (
+    SourceConfig,
+    InstanceMapping,
+    ProcessedMessage,
+    ScheduleExecution,
+    ScheduleExecutionArchive,
+    SourceConfigArchive,
+    SourceStatus,
+    ExecutionStatus,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+# W3 (plan council, binding) — per-source-id first-warning latch for the
+# archive-PK collision path (AM-3). Collisions are REACHABLE (the generic
+# REST create path accepts ``source_type="scheduler"`` with a
+# caller-supplied id) and PERMANENT (an archived terminal row is never
+# re-collectable), so without the latch the sweep would re-WARN hourly
+# ≈ 24 noise lines/day forever. FIRST collision per id → WARNING +
+# counted; the SAME id on later ticks → counted SILENTLY. The latch
+# resets on daemon restart (acceptable: bounded by collided ids only).
+# Lives at the IntegrityError catch site (this module) per phase4 §2
+# AM-3 / decisions.md D1 AM-3.
+_ARCHIVE_COLLISION_WARNED: set[str] = set()
+
+# Terminal statuses the GC may collect (phase4 §5 predicate leg 3 —
+# 'error' is EXCLUDED per SP-5/LEADER RULING 3: an error row preserves
+# misconfigured-but-wanted intent; next user touch rewrites status).
+_GC_TERMINAL_STATUSES = ("stopped", "cancelled")
+
+
+@dataclass
+class GcCandidate:
+    """One collectable scheduler row as selected by ``gc_find_candidates``.
+
+    ``config_json`` is ``json.dumps()`` of the LIVE config dict and is
+    the SOLE reconstruction input for a restored schedule (advisory C —
+    no restore API exists in v1; update-of-missing raises). The
+    one-shot|cron shape is derived at SERVICE layer from the config
+    keys (``run_at`` / ``schedule`` — scheduler.py:511/:513), not here.
+    """
+
+    source_id: str
+    name: str
+    status: str
+    updated_at: str
+    age_days: float
+    config_json: str
+
+
+@dataclass
+class GcRowResult:
+    """Outcome of ONE ``gc_archive_and_delete`` attempt (per-source).
+
+    ``skipped_reason`` values: ``not_found`` · ``non_scheduler`` ·
+    ``enabled`` · ``non_terminal_status`` · ``unparseable_updated_at`` ·
+    ``not_old_enough`` · ``raced`` (the advisory-A DELETE matched 0 rows
+    — a concurrent resume re-stamped the row) · ``archive_id_collision``
+    (AM-3: a stale archive row already holds this id). ``error`` carries
+    the exception text for the collision case; all other skips leave it
+    ``None``. ``dry_run=True`` + ``skipped_reason=None`` means the
+    predicate re-assert PASSED and the row WOULD have been collected.
+    """
+
+    source_id: str
+    deleted: bool = False
+    dry_run: bool = False
+    archived_config: bool = False
+    archived_executions: int = 0
+    deleted_mappings: int = 0
+    deleted_processed: int = 0
+    deleted_executions: int = 0
+    skipped_reason: str | None = None
+    error: str | None = None
 
 
 class SQLModelSourceRepository:
@@ -543,6 +617,301 @@ class SQLModelSourceRepository:
                 "source_id": source_id,
                 "name": source_config.name
             }
+
+    # ==================== Source-GC Operations ====================
+
+    @staticmethod
+    def _gc_parse_age_seconds(
+        updated_at: str | None, now: datetime
+    ) -> float | None:
+        """Parse a ``updated_at`` ISO stamp into an age in seconds.
+
+        Returns ``None`` when the stamp is missing or unparseable — the
+        caller SKIPS + counts (fail-MISS: never delete on unprovable
+        age). A naive parsed stamp is attached UTC under the documented
+        assume-UTC policy (``daemon/services/timestamps.py`` doctrine).
+        """
+        if not updated_at:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(updated_at))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age = now - parsed
+        return age.total_seconds()
+
+    def gc_find_candidates(
+        self,
+        *,
+        retention_days: int,
+        now: datetime,
+        limit: int,
+    ) -> tuple[list[GcCandidate], int]:
+        """Select collectable scheduler rows for one GC tick.
+
+        Predicate (phase4 §5 — single source of truth, repo layer):
+        ``source_type == 'scheduler' AND enabled == False AND status IN
+        ('stopped','cancelled') AND age(now - fromisoformat(updated_at))
+        > retention_days``. The type/enabled/status legs prefilter in
+        SQL; the AGE leg evaluates in Python against the parsed
+        ``updated_at`` (103-row scale). Unparseable/missing age →
+        SKIP + count (fail-MISS). ``ORDER BY updated_at ASC`` (AM-2):
+        oldest-first, so the batch cap defers the NEWEST rows
+        deterministically.
+
+        Args:
+            retention_days: Age threshold in days. Re-checked >= 1
+                here (the config knob is fail-fast ``ge=1``; the repo
+                does not trust its callers).
+            now: Timezone-aware reference instant for the age math.
+            limit: Batch cap for this tick (``>= 1``).
+
+        Returns:
+            ``(candidates, skipped_unparseable)`` — at most ``limit``
+            candidates, oldest ``updated_at`` first, plus the number of
+            prefiltered rows whose age could not be proven.
+        """
+        retention_days = max(1, int(retention_days))
+        limit = max(1, int(limit))
+        with Session(self.engine) as session:
+            stmt = (
+                select(SourceConfig)
+                .where(SourceConfig.source_type == "scheduler")
+                .where(SourceConfig.enabled == False)  # noqa: E712 — SQL prefilter leg
+                .where(
+                    col(SourceConfig.status).in_(_GC_TERMINAL_STATUSES)
+                )
+                .order_by(col(SourceConfig.updated_at).asc())
+                .limit(limit)
+            )
+            rows = list(session.exec(stmt))
+
+        candidates: list[GcCandidate] = []
+        skipped_unparseable = 0
+        for row in rows:
+            age_seconds = self._gc_parse_age_seconds(row.updated_at, now)
+            if age_seconds is None:
+                skipped_unparseable += 1
+                continue
+            if age_seconds <= retention_days * 86400.0:
+                # Within retention — not collectable. SQL cannot do
+                # this leg soundly (ISO TEXT comparison), so rows that
+                # fail it are simply dropped here (not "skips" — they
+                # are not GC-eligible yet).
+                continue
+            candidates.append(
+                GcCandidate(
+                    source_id=row.source_id,
+                    name=row.name,
+                    status=row.status,
+                    updated_at=row.updated_at,
+                    age_days=age_seconds / 86400.0,
+                    config_json=json.dumps(row.config or {}),
+                )
+            )
+        return candidates, skipped_unparseable
+
+    def gc_count_error_rows(self) -> int:
+        """Count scheduler rows parked at ``status='error'`` (SP-5/AM-7).
+
+        Cheap ``COUNT(*)`` telemetry for the sweep report — the
+        phase-9.3-planner revisit trigger reads this instead of
+        folklore. Error rows are NEVER collected (excluded by the
+        terminal-status leg); this counter only OBSERVES them.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(SourceConfig)
+                .where(SourceConfig.source_type == "scheduler")
+                .where(SourceConfig.status == SourceStatus.ERROR.value)
+            )
+            return len(list(session.exec(stmt)))
+
+    def gc_archive_and_delete(
+        self,
+        *,
+        source_id: str,
+        now: datetime,
+        retention_days: int = 14,
+        dry_run: bool = False,
+    ) -> GcRowResult:
+        """Archive + delete ONE scheduler source row (ONE transaction).
+
+        NEVER trusts the earlier ``gc_find_candidates`` SELECT (AM-1
+        critical): inside the single transaction the row is re-read
+        under ``with_for_update`` (house idiom,
+        ``instance/repository.py:1988-1992``; renders no lock on SQLite
+        per :1949-1954) and ALL FOUR predicate legs are re-asserted
+        from the locked row — source_type, ``enabled == False``,
+        terminal status, and the AGE re-parsed from the FRESH
+        ``updated_at``. A resume that landed between candidacy and this
+        call re-stamps ``updated_at`` and/or flips ``enabled``; the
+        re-assert (plus the advisory-A ``updated_at`` pin on the final
+        DELETE, whose 0-rowcount ⇒ raced-skip) makes such a row
+        skipped+counted instead of silently deleted.
+
+        Archive INSERTs are PLAIN and fail-loud (AM-3 — NEVER
+        ``ON CONFLICT``): a colliding id means a STALE archive row for
+        a re-created source, and absorbing the fresh snapshot silently
+        would be audit corruption. ``IntegrityError`` → rollback →
+        FIRST collision per source_id warns loudly via the
+        ``_ARCHIVE_COLLISION_WARNED`` latch, later ticks for the same
+        id count silently (W3) → skipped, sweep continues.
+
+        Deletes run child-first (``delete_source_config`` :522-534
+        parity): instance_mappings → processed_messages (parity no-op
+        today — scheduler sources produce zero rows; kept for parity)
+        → schedule_executions → source_config. The final DELETE
+        additionally pins ``enabled = false AND status IN (terminal)
+        AND updated_at = :locked_value`` (advisory A) — rowcount 0 ⇒
+        raced-skip ⇒ rollback, NOTHING archived.
+
+        Not-found → skipped, never raise. ``dry_run=True`` performs the
+        full locked re-assert and reports the outcome WITHOUT writing
+        (``deleted=False`` + ``dry_run=True`` + ``skipped_reason=None``
+        = the row WOULD be collected).
+
+        Signature note (recorded in the lane implementation-notes): the
+        plan's binding signature is ``(*, source_id, now, dry_run)``,
+        but its own AM-1 four-leg re-assert includes the AGE leg
+        (P16's "drop a leg → RED" mutation needs it to have teeth), and
+        an age check needs a retention threshold the signature does not
+        carry. ``retention_days`` is therefore an ADDITIVE keyword with
+        the shipped default (14) as the fail-closed fallback — the
+        service always passes the live knob; plan-signature callers
+        keep working and still get the age leg at production-default
+        strength.
+        """
+        result = GcRowResult(source_id=source_id)
+        with Session(self.engine) as session:
+            locked = session.get(SourceConfig, source_id, with_for_update=True)
+            if locked is None:
+                result.skipped_reason = "not_found"
+                return result
+
+            # --- AM-1: re-assert ALL FOUR legs from the locked row ---
+            if locked.source_type != "scheduler":
+                result.skipped_reason = "non_scheduler"
+                return result
+            if locked.enabled:
+                result.skipped_reason = "enabled"
+                return result
+            if locked.status not in _GC_TERMINAL_STATUSES:
+                result.skipped_reason = "non_terminal_status"
+                return result
+            retention_days = max(1, int(retention_days))
+            age_seconds = self._gc_parse_age_seconds(locked.updated_at, now)
+            if age_seconds is None:
+                result.skipped_reason = "unparseable_updated_at"
+                return result
+            if age_seconds <= retention_days * 86400.0:
+                result.skipped_reason = "not_old_enough"
+                return result
+
+            if dry_run:
+                result.dry_run = True
+                return result
+
+            # --- Archive INSERTs: PLAIN, fail-loud (AM-3) ---
+            executions = list(
+                session.exec(
+                    select(ScheduleExecution).where(
+                        ScheduleExecution.schedule_id == source_id
+                    )
+                )
+            )
+            try:
+                session.add(
+                    SourceConfigArchive(
+                        source_id=locked.source_id,
+                        source_type=locked.source_type,
+                        name=locked.name,
+                        config=json.dumps(locked.config or {}),
+                        enabled=bool(locked.enabled),
+                        autostart=bool(locked.autostart),
+                        status=locked.status,
+                        error_message=locked.error_message,
+                        created_at=locked.created_at,
+                        updated_at=locked.updated_at,
+                        archived_at=now.isoformat(),
+                    )
+                )
+                for execution in executions:
+                    session.add(
+                        ScheduleExecutionArchive(
+                            execution_id=execution.execution_id,
+                            schedule_id=execution.schedule_id,
+                            triggered_at=execution.triggered_at,
+                            instance_id=execution.instance_id,
+                            status=execution.status,
+                            error_message=execution.error_message,
+                            completed_at=execution.completed_at,
+                            archived_at=now.isoformat(),
+                        )
+                    )
+                session.flush()
+            except IntegrityError as collision_err:
+                session.rollback()
+                result.skipped_reason = "archive_id_collision"
+                result.error = str(collision_err)
+                if source_id not in _ARCHIVE_COLLISION_WARNED:
+                    _ARCHIVE_COLLISION_WARNED.add(source_id)
+                    logger.warning(
+                        f"[SourcesGC] archive id collision — stale archive "
+                        f"row for a re-created source: source_id={source_id} "
+                        f"(re-create with a FRESH id or purge the stale "
+                        f"archive row); skipped"
+                    )
+                # Same id on a later tick: counted silently (no log line).
+                return result
+
+            # --- Child-first deletes (delete_source_config parity) ---
+            result.deleted_mappings = session.exec(
+                sql_delete(InstanceMapping).where(
+                    InstanceMapping.source_id == source_id
+                )
+            ).rowcount
+            result.deleted_processed = session.exec(
+                sql_delete(ProcessedMessage).where(
+                    ProcessedMessage.source_id == source_id
+                )
+            ).rowcount
+            result.deleted_executions = session.exec(
+                sql_delete(ScheduleExecution).where(
+                    ScheduleExecution.schedule_id == source_id
+                )
+            ).rowcount
+
+            # --- Final DELETE with the advisory-A pinned WHERE ---
+            delete_stmt = sql_delete(SourceConfig).where(
+                SourceConfig.source_id == source_id,
+                SourceConfig.enabled == False,  # noqa: E712 — predicate pin
+                col(SourceConfig.status).in_(_GC_TERMINAL_STATUSES),
+                SourceConfig.updated_at == locked.updated_at,
+            )
+            deleted_count = session.exec(delete_stmt).rowcount
+            if not deleted_count:
+                # Raced-skip: a concurrent writer re-stamped the row
+                # between the locked read and this DELETE (closes the
+                # SQLite micro-window — with_for_update renders no lock
+                # there). Roll back; archive NOTHING.
+                session.rollback()
+                result.skipped_reason = "raced"
+                return result
+
+            session.commit()
+
+            result.deleted = True
+            result.archived_config = True
+            result.archived_executions = len(executions)
+            logger.info(
+                f"[SourcesGC] collected source: source_id={source_id} "
+                f"executions={len(executions)} "
+                f"mappings={result.deleted_mappings}"
+            )
+            return result
 
     # ==================== Instance Mapping Operations ====================
 
