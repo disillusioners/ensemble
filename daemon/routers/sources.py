@@ -444,6 +444,19 @@ async def update_source(source_id: str, source_update: SourceUpdate, request: Re
         enabled=updated_enabled,
         autostart=updated_autostart,
     )
+    if updated is None:
+        # Leader-authorized fence carve-out (source-gc, W7 follow-up):
+        # update_source_config returns None when the row vanished during
+        # the update (concurrent delete; StaleDataError -> None). Mirror
+        # the house 404 shape used above for a missing source instead of
+        # letting _source_to_info(None) raise AttributeError -> HTTP 500.
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
     
     return _source_to_info(updated)
 

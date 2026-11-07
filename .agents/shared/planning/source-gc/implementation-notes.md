@@ -241,6 +241,33 @@ Updated: the operator watches the work-log for
 latched-collision ids (permanently uncollectable without operator action)
 remain eligible, and RETENTION can be restored.
 
+
+## Leader authorization — routers/sources.py None-guard (fence carve-out)
+
+AUTHORIZATION: explicit leader authorization for a single confined hunk in
+`daemon/routers/sources.py` (otherwise NOT-TOUCHED).
+
+Rationale: the AttributeError-500 is SELF-INTRODUCED by our W7 change
+(`update_source_config` now catches `StaleDataError` -> `None`; the REST
+`update_source` path called `_source_to_info(updated)` with no None check,
+so a vanished row now raises AttributeError -> HTTP 500 instead of a clean
+404). The NOT-TOUCHED fence existed to coordinate against the
+sources-regression lane, whose work is now merged + staged as v0.29.2 —
+so the coordination rationale for fencing routers/sources.py has lapsed.
+
+Scope: ONE hunk, immediately after the `update_source_config` call in
+`update_source`: `if updated is None:` -> raise the house 404 shape
+(`HTTPException(404, ErrorResponse(code=ErrorCodes.SOURCE_NOT_FOUND,
+message=f"Source not found: {source_id}").model_dump())`), mirroring the
+other 404 sites in the same file. Nothing else in the file changed.
+
+Fence status: FENCED-EXCEPT-SANCTIONED-HUNK. P11 now pins the sanctioned
+hunk by exact line content and asserts the NOT-TOUCHED diff over both the
+pre-merge span (6b571771d..2c6b7ab94 -> empty) and the post-merge span
+(<latest first-parent merge>..HEAD -> exactly the sanctioned hunk or empty
+if a future drift sync absorbs it) stays EXACTLY the sanctioned hunk. Any
+additional drift REDs; removing the guard REDs the file pin.
+
 ## Self-verification
 
 - Repo pack: 27 passed (tests/unit/repositories/test_source_gc_repository.py)

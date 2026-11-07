@@ -638,22 +638,108 @@ class TestRacedSkip:
         assert r.deleted is True
 
 class TestP11BootNoBehaviorChange:
-    def test_sources_and_constants_unchanged_vs_base(self):
+    """P11: the lane's own diff over the NOT-TOUCHED paths is empty, EXCEPT
+    the single leader-sanctioned None-guard hunk in daemon/routers/sources.py.
+
+    Condition 1 (file pin): the sanctioned guard must be PRESENT in the
+    current file, contiguous and exact — removing it REDs regardless of
+    history/merge absorption.
+    Condition 2 (history pin): the lane diff over the NOT-TOUCHED paths in
+    BOTH spans — pre-merge 6b571771d..2c6b7ab94 and post-merge
+    <latest first-parent merge>..HEAD — must be EMPTY except for exactly
+    the sanctioned hunk in daemon/routers/sources.py. Any additional drift
+    REDs. The post-merge base advances automatically past a future drift
+    sync, so an absorbed hunk does not re-red spuriously (the file pin
+    keeps its teeth). The hunk is pinned by exact line CONTENT, never by
+    line numbers / hunk headers.
+    """
+
+    NOT_TOUCHED_PATHS = [
+        "daemon/sources/registry.py",
+        "daemon/sources/cleanup.py",
+        "daemon/constants.py",
+        "daemon/manager.py",
+        "daemon/services/scheduling_service.py",
+        "daemon/routers/sources.py",
+        "frontend/",
+    ]
+    PRE_MERGE_SPAN = "6b571771d..2c6b7ab94"
+    SANCTIONED_PATH = "daemon/routers/sources.py"
+
+    # The EXACT added lines of the leader-sanctioned None guard (content
+    # pin, indentation preserved; diff '+' prefixes stripped). The file
+    # pin requires these contiguous; the history pin requires this list
+    # to equal the added-line set when the hunk is inside the span.
+    SANCTIONED_HUNK_LINES = [
+        "    if updated is None:",
+        "        # Leader-authorized fence carve-out (source-gc, W7 follow-up):",
+        "        # update_source_config returns None when the row vanished during",
+        "        # the update (concurrent delete; StaleDataError -> None). Mirror",
+        "        # the house 404 shape used above for a missing source instead of",
+        "        # letting _source_to_info(None) raise AttributeError -> HTTP 500.",
+        "        raise HTTPException(",
+        "            status_code=404,",
+        "            detail=ErrorResponse(",
+        "                code=ErrorCodes.SOURCE_NOT_FOUND,",
+        "                message=f\"Source not found: {source_id}\"",
+        "            ).model_dump()",
+        "        )",
+    ]
+
+    @staticmethod
+    def _git(*args):
         import subprocess
-        try:
-            out = subprocess.run(
-                ["git", "diff", "--stat", "6b571771d..2c6b7ab94", "--",
-                 "daemon/sources/", "daemon/constants.py"],
-                capture_output=True, text=True, check=False,
-            )
-        except FileNotFoundError:
-            pytest.skip("git not available")
-        # The lane's OWN commit span (6b571771d -> our pre-merge tip
-        # 2c6b7ab94) must touch zero files under the NOT-TOUCHED sealed
-        # paths. A two-dot diff against HEAD would absorb the foreign
-        # drift synced in by the v0.29.2 merge (registry.py +98,
-        # constants.py +14) and re-red spuriously — that drift is
-        # legitimate (sources-regression lane) and is NOT ours. The
-        # lane-only span is the truthful basis.
-        stat = out.stdout.strip()
-        assert stat == "", f"unexpected diff in sealed paths:\n{stat}"
+        return subprocess.run(
+            ["git", *args], capture_output=True, text=True, check=False
+        ).stdout
+
+    def test_sanctioned_guard_present_in_file(self):
+        # File-state pin: the sanctioned hunk must be present, contiguous,
+        # and exact. Removing/altering a line REDs. This survives a future
+        # drift sync that absorbs the hunk into a later merge.
+        text = open(self.SANCTIONED_PATH).read()
+        expected_block = "\n".join(self.SANCTIONED_HUNK_LINES)
+        assert expected_block in text, (
+            "the leader-sanctioned None guard is missing or was altered in "
+            f"{self.SANCTIONED_PATH}"
+        )
+
+    def test_pre_merge_span_empty_over_not_touched(self):
+        out = self._git(
+            "diff", "--stat", self.PRE_MERGE_SPAN, "--", *self.NOT_TOUCHED_PATHS
+        )
+        assert out.strip() == "", f"unexpected pre-merge drift in NOT-TOUCHED paths:\n{out}"
+
+    def test_post_merge_span_exactly_sanctioned_hunk(self):
+        merge = self._git(
+            "rev-list", "--first-parent", "--merges", "-1", "HEAD"
+        ).strip()
+        assert merge, "no first-parent merge found"
+        span = f"{merge}..HEAD"
+        others = [p for p in self.NOT_TOUCHED_PATHS
+                  if p != self.SANCTIONED_PATH]
+        out_others = self._git("diff", "--stat", span, "--", *others)
+        assert out_others.strip() == "", (
+            f"unexpected post-merge drift in NOT-TOUCHED paths:\n{out_others}"
+        )
+
+        diff = self._git(
+            "diff", "--unified=0", span, "--", self.SANCTIONED_PATH
+        )
+        if diff.strip() == "":
+            # hunk predates the latest merge (absorbed) — acceptable; the
+            # file pin above keeps its teeth.
+            return
+        added = [
+            line[1:] for line in diff.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+        removed = [
+            line[1:] for line in diff.splitlines()
+            if line.startswith("-") and not line.startswith("---")
+        ]
+        assert removed == [], f"sanctioned hunk must be additive-only; removed={removed!r}"
+        assert added == self.SANCTIONED_HUNK_LINES, (
+            "daemon/routers/sources.py diff is not EXACTLY the sanctioned "
+            f"None-guard hunk.\nadded={added!r}"
+        )
