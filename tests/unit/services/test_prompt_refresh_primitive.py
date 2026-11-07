@@ -392,6 +392,15 @@ class TestTupleDecision:
         assert ("ari", "tag1", ()) not in pr._BASELINE_MAP
         newest = f"tag{pr._BASELINE_MAX_ENTRIES + 1}"
         assert ("ari", newest, ()) in pr._BASELINE_MAP
+        # No-promote (N6 commission): re-recording an EXISTING key must
+        # NOT move it to the FIFO back — an LRU-style container would
+        # silently pass the bound/eviction asserts above.
+        head = ("ari", "tag2", ())
+        assert next(iter(pr._BASELINE_MAP)) == head  # the oldest is the head
+        pr._record_baseline(head, {"soul.md": "h"}, "")
+        assert next(iter(pr._BASELINE_MAP)) == head  # unchanged — FIFO, not LRU
+        pr._record_baseline(("ari", "fresh", ()), {"soul.md": "h"}, "")
+        assert head not in pr._BASELINE_MAP  # evicted oldest-first despite the re-record
 
 
 # ── AM-8 — the stale-cache bust (hash/mtime divergence) ─────────────────────
