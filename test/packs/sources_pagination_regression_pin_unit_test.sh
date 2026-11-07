@@ -33,11 +33,10 @@ if [ ! -x ".venv/bin/pytest" ]; then
   exit 1
 fi
 
+EXIT_CODE=0
 timeout 300s .venv/bin/pytest \
   tests/unit/test_sources_pagination_regression_pin.py \
-  --tb=short -q -p no:cacheprovider 2>&1
-
-EXIT_CODE=$?
+  --tb=short -q -p no:cacheprovider 2>&1 || EXIT_CODE=$?
 
 if [ "$EXIT_CODE" -eq 124 ]; then
   echo "RESULT: TIMEOUT"

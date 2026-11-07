@@ -70,6 +70,7 @@ import daemon.repositories.source.models  # noqa: F401  (register source tables)
 from daemon.constants import SOURCE_CONFIG_PAGE_SIZE, SOURCE_LIST_HARD_MAX
 from daemon.repositories.source.models import SourceConfig as SourceConfigRow
 from daemon.repositories.source.repository import SQLModelSourceRepository
+from daemon.routers.schedules import router as schedules_router
 from daemon.routers.sources import router as sources_router
 from daemon.services import scheduling_service as svc
 from daemon.sources.registry import SourceRegistry
@@ -103,6 +104,43 @@ def _make_scratch_engine(path) -> Engine:
     )
 
 
+def _add_source_row(
+    session: Session,
+    *,
+    source_id: str,
+    source_type: str,
+    name: str,
+    config: dict,
+    created_at: str,
+    credentials: str | None = None,
+    enabled: bool = False,
+    autostart: bool = True,
+    status: str = "stopped",
+) -> None:
+    """Queue one ``SourceConfigRow`` on ``session`` (caller owns commit).
+
+    Shared seeding seam for every leg — a new required column has ONE
+    place to change. Defaults carry the inert-scheduler tombstone shape;
+    ``updated_at`` mirrors ``created_at`` and ``error_message`` stays
+    ``None`` at every site (both held by all four historical callers).
+    """
+    session.add(
+        SourceConfigRow(
+            source_id=source_id,
+            source_type=source_type,
+            name=name,
+            config=config,
+            credentials=credentials,
+            enabled=enabled,
+            autostart=autostart,
+            status=status,
+            error_message=None,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+    )
+
+
 def _seed_tombstone(eng: Engine, index: int) -> str:
     """Seed one inert scheduler tombstone (the self-alarm re-arm shape).
 
@@ -118,21 +156,17 @@ def _seed_tombstone(eng: Engine, index: int) -> str:
     else:
         enabled, status = True, "stopped"
     source_id = f"scheduler-tomb-{index:03d}"
+    stamp = _created_at(TOMBSTONE_BASE_DAY + index)
     with Session(eng) as session:
-        session.add(
-            SourceConfigRow(
-                source_id=source_id,
-                source_type="scheduler",
-                name=f"self-alarm:tomb-{index:03d}",
-                config={"kind": "one_shot", "armed_at": _created_at(TOMBSTONE_BASE_DAY + index)},
-                credentials=None,
-                enabled=enabled,
-                autostart=True,
-                status=status,
-                error_message=None,
-                created_at=_created_at(TOMBSTONE_BASE_DAY + index),
-                updated_at=_created_at(TOMBSTONE_BASE_DAY + index),
-            )
+        _add_source_row(
+            session,
+            source_id=source_id,
+            source_type="scheduler",
+            name=f"self-alarm:tomb-{index:03d}",
+            config={"kind": "one_shot", "armed_at": stamp},
+            created_at=stamp,
+            enabled=enabled,
+            status=status,
         )
         session.commit()
     return source_id
@@ -141,20 +175,16 @@ def _seed_tombstone(eng: Engine, index: int) -> str:
 def _seed_discord_row(eng: Engine) -> str:
     """Seed the legacy discord chat row — OLDEST, enabled, autostart, running."""
     with Session(eng) as session:
-        session.add(
-            SourceConfigRow(
-                source_id=DISCORD_ID,
-                source_type="discord",
-                name="my-discord-bot",
-                config={"polling_enabled": True, "default_agent": "developer"},
-                credentials='{"bot_token": "scratch-not-real"}',
-                enabled=True,
-                autostart=True,
-                status="running",
-                error_message=None,
-                created_at=_created_at(0),
-                updated_at=_created_at(0),
-            )
+        _add_source_row(
+            session,
+            source_id=DISCORD_ID,
+            source_type="discord",
+            name="my-discord-bot",
+            config={"polling_enabled": True, "default_agent": "developer"},
+            credentials='{"bot_token": "scratch-not-real"}',
+            created_at=_created_at(0),
+            enabled=True,
+            status="running",
         )
         session.commit()
     return DISCORD_ID
@@ -163,20 +193,14 @@ def _seed_discord_row(eng: Engine) -> str:
 def _seed_webhook_row(eng: Engine, source_id: str) -> str:
     """Seed a disabled stale-running webhook row (registered-adapter spare leg)."""
     with Session(eng) as session:
-        session.add(
-            SourceConfigRow(
-                source_id=source_id,
-                source_type="webhook",
-                name="webhook-stale",
-                config={"secret": "x"},
-                credentials=None,
-                enabled=False,
-                autostart=True,
-                status="running",
-                error_message=None,
-                created_at=_created_at(TOMBSTONE_BASE_DAY + TOMBSTONE_COUNT),
-                updated_at=_created_at(TOMBSTONE_BASE_DAY + TOMBSTONE_COUNT),
-            )
+        _add_source_row(
+            session,
+            source_id=source_id,
+            source_type="webhook",
+            name="webhook-stale",
+            config={"secret": "x"},
+            status="running",
+            created_at=_created_at(TOMBSTONE_BASE_DAY + TOMBSTONE_COUNT),
         )
         session.commit()
     return source_id
@@ -334,20 +358,14 @@ class TestSourcesListPagination:
             over = SOURCE_LIST_HARD_MAX + 5
             with Session(eng) as session:
                 for i in range(over):
-                    session.add(
-                        SourceConfigRow(
-                            source_id=f"clamp-{i:04d}",
-                            source_type="scheduler",
-                            name=f"clamp-{i:04d}",
-                            config={},
-                            credentials=None,
-                            enabled=False,
-                            autostart=False,
-                            status="stopped",
-                            error_message=None,
-                            created_at=_created_at(TOMBSTONE_BASE_DAY + i),
-                            updated_at=_created_at(TOMBSTONE_BASE_DAY + i),
-                        )
+                    _add_source_row(
+                        session,
+                        source_id=f"clamp-{i:04d}",
+                        source_type="scheduler",
+                        name=f"clamp-{i:04d}",
+                        config={},
+                        created_at=_created_at(TOMBSTONE_BASE_DAY + i),
+                        autostart=False,
                     )
                 session.commit()
             repo = SQLModelSourceRepository(eng)
@@ -471,8 +489,6 @@ class TestSameSeamCompletion:
     async def test_schedules_endpoint_returns_all_scheduler_rows(self, repro_db):
         """(d) GET /api/schedules sees all 105 tombstones (old cap hid 5)."""
         app = FastAPI()
-        from daemon.routers.schedules import router as schedules_router
-
         app.include_router(schedules_router, prefix="/api")
         app.state.manager = SimpleNamespace(
             _source_repository=repro_db, source_registry=None
