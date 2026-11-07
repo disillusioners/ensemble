@@ -594,6 +594,26 @@ class TestAcT3AuthorityLattice:
         assert not is_curator("")
         assert not is_curator(None)
 
+    def test_no_op_dup_echo_never_reclassifies_tier(self, svc_env) -> None:
+        """Tier-flip is a pok_curate parameter, NEVER a write verb
+        (addendum T-3): an exact-dup upsert — even a curator passing
+        an explicit tier — echoes the active row with its tier
+        UNCHANGED."""
+        svc = svc_env.svc
+        svc.upsert(
+            project_id="p1", slug="plain-01-fact", body="stable content",
+            agent_id="worker",
+        )
+        out = svc.upsert(
+            project_id="p1",
+            slug="plain-01-fact",
+            body="stable content",
+            source_tier="curated",
+            agent_id="leader",
+        )
+        assert out.action == "no-op"
+        assert out.entry.source_tier == "agent"
+
 
 # ═══════════════════════════════ AC-T4 ═══════════════════════════════════
 

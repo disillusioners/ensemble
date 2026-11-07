@@ -1,3 +1,39 @@
+<!-- pok-phase2-trust-tier-gate-begin -->
+## Commission POK Phase 2 — guidelines TRUST TIER (D3 un-park) registration (2026-11-07, lane `feature/project-operating-knowledge` @ `4594241b7` + docs/rider commits; Phase-1 landed through `7207a6360`; owner: coder pok-impl-20261107)
+
+> **What this block registers.** The trust-tier addendum implementation
+> (T-1..T-7, architect-authored `trust-tier-addendum.md` @ `d241c3338`):
+> the additive `source_tier` column (agent|curated, CHECK-closed on BOTH
+> artifacts + `_ensure_postgres_columns` — the v0.25.4-era ensure
+> precedent, live-PG evolution path), the curator-gated write/flip
+> semantics (`pok_tier_requires_curator` / `pok_curated_requires_curator`
+> / tier INHERITANCE on supersede), the curated injection band (cap 2 PER
+> VIEW, no drag, SHARED 8/2,900 budget — named worst case 6 pinned-family
+> + 2 curated = 8 rows → 2,811 ≤ 2,900, the standing derivation pinned),
+> `[CURATED]` in the pok_query lineage surface only, the no-backfill
+> seeding contract, and the board-note handoff content
+> (`board-note-wi-d2abe4f7.md`, disposition `D3-folded-into-POK`; ari
+> owns the board write). T-7 honored: parameters-only — zero new
+> tools/categories, NO `VOCABULARY_VERSION` bump, no tool-categories.json
+> regen, no B4 sweep, no `TOOL_REQUIRED_AGENTS`. Keep-both with the
+> Phase-1 blocks below — newest-first honored.
+>
+> **Fences (every run):** worktree venv (`.venv/bin/python`),
+> per-variable env scrub on every invocation (`env -u POSTGRES_HOST -u
+> POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD` —
+> never `env -u POSTGRES_*`; the ambient shell carries PROD PG vars —
+> env-poison family, anomaly 101a02e4), explicit test paths,
+> `timeout`-bounded, serial, no whole-tree pytest, zero :9797 contact.
+> AsyncMock census: ZERO new awaits — every touched callable is sync
+> (pinned by a census leg). The breaker proof (ALTER + DEFAULT-satisfies-
+> CHECK on throwaway SQLite) ran BEFORE the migration landed and is
+> encoded as an AC-T1 leg.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `pok_trust_tier_unit` | `timeout 300 env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD .venv/bin/python -m pytest tests/unit/services/test_pok_trust_tier_unit.py -q` | 40 nodes — AC-T1 (6: .sql↔SQLModel CHECK mirror `ck_pok_source_tier`; DEFAULT 'agent' on insert; the throwaway-SQLite breaker proof encoded — Phase-1 row byte-unchanged + tier 'agent', curated passes, out-of-vocab FIRES, NULL bites; the ensure-entry source pin; column named `source_tier` NOT `tier`), AC-T2 (7: `pok_tier_requires_curator` service+tool; `pok_curated_requires_curator`; pinned echo byte-identical with Phase 1; `pok_curator_required` on non-curator tier-flip service+tool; `pok_source_tier_invalid` both tools), AC-T3 (7: leader upsert/supersede-inherit/flip curated; PM same; explicit param overrides inheritance; developer refused both directions; default path untouched; curator predicate pinned), AC-T4 (5: named worst case 8 rows ≤2,900 with 47+40+8×333+60=2,811 pinned; cap 2/view remainder-ranked; audience-invisible curated excluded-for-view; no curated drag; pinned drag consumes curated member once), AC-T5 (3: universal read across tiers; `source_tier` per entry + `[CURATED]` lineage marker only; agent lineage no marker), AC-T6 (3: curator seeds per slug ONE call; 240-escaped budget boundary incl. the W5 '&' 6× inflation leg; no-backfill grep — zero INSERT + zero guideline text in ANY migration .sql), AC-T7 (5: board-note disposition/mechanism/sha/seeding-status/pointers, whitespace-normalized), census + echo (3: zero new awaits; tier never derived from created_by_agent; no-op dup echo never reclassifies tier) | 2026-11-07 @ `4594241b7` | **PASS 39/39** |
+| `pok_trust_tier_mutation_matrix` | plant → targeted pack run → revert → GREEN rerun (per-pin cycles; file backups, never git-checkout on uncommitted state) | M-T-1 model CHECK dropped → AC-T1 mirror leg REDs · M-T-2 `pok_tier_requires_curator` raise removed → AC-T2 REDs · M-T-3 widened supersede guard dropped → AC-T2 curated-supersede RED · M-T-4 curated cap 2→4 → AC-T4 cap leg REDs · M-T-5 tier inheritance removed → AC-T3 inherit leg REDs · M-T-6 lineage `[CURATED]` marker stripped → AC-T5 REDs · M-T-7 no-op dup allowed to reclassify tier → design-faithful echo leg · M-T-8 migration CHECK widened to accept 'tier' → AC-T1 .sql leg REDs | 2026-11-07 | **PASS 7/7 executed + 1 structural (echo leg re-verified GREEN by the pack)** |
+<!-- pok-phase2-trust-tier-gate-end -->
 <!-- pok-phase1-core-surface-gate-begin -->
 ## Commission POK Phase 1 core surface — FUNCTIONAL GATE registration (2026-11-07, lane `feature/project-operating-knowledge` @ `f8202ba6a` + test commits; base `6b571771d`, readiness note `4a6370b40`; owner: coder pok-impl-20261107)
 
