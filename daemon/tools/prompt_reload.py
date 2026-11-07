@@ -42,12 +42,18 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+
+if TYPE_CHECKING:
+    # Annotation-only (from __future__ import annotations keeps these
+    # lazy strings) — the runtime prompt_refresh imports stay
+    # function-local so call-time monkeypatching keeps working.
+    from ..services.prompt_refresh import PromptRefreshResult
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +110,9 @@ def _not_ari(agent_id: str) -> str:
     )
 
 
-def _emit_info_line(result: Any, instance_id: str, agent_id: str) -> None:
+def _emit_info_line(
+    result: PromptRefreshResult, instance_id: str, agent_id: str
+) -> None:
     """The ONE frozen INFO line (D24/AM-15) — counts/flags only, never
     persona or diff content. Fired on EVERY terminal path."""
     from ..services.prompt_refresh import format_info_line
@@ -127,7 +135,7 @@ def _emit_info_line(result: Any, instance_id: str, agent_id: str) -> None:
     )
 
 
-def _render_report(result: Any) -> str:
+def _render_report(result: PromptRefreshResult) -> str:
     """The D14 frozen report shape — abbreviated diff + provenance."""
     from ..services.prompt_refresh import (
         PROMPT_RELOADED_MARKER,

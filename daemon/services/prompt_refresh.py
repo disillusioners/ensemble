@@ -61,6 +61,15 @@ Refusal vocabulary (AM-6/D6 — FINAL, 9 REFUSED + 1 FAILED): see
 :data:`REFUSAL_CODES` / :data:`FAILURE_CODES`. ``not_ari`` is
 deliberately ABSENT — the tool's layer-3 non-ari check returns the
 notify-exact generic ``ERROR:`` envelope, not a REFUSED code.
+
+Size note: this module is deliberately ONE cohesive unit — the whole
+validate → compose → compare → pop primitive plus its pinned
+outcome/refusal vocabulary, the S10 disclosure literals, provenance
+assembly, the tier-b/tier-c diff, and the frozen INFO line all live
+here so the AM-12 manager delegate stays a skeleton and every
+pin-anchored surface stays reviewable in a single file. The ~1k-line
+size is the floor of that cohesion, not sprawl; splitting would
+scatter the pinned contract across modules.
 """
 
 from __future__ import annotations
