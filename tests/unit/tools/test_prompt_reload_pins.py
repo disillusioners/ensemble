@@ -155,7 +155,6 @@ class TestTheConstructionSeam:
     def test_tool_constructed_switch_state_independent(self) -> None:
         """AM-11 — registration identical under kill-switch ON and OFF;
         only the per-call refusal differs (proven in the refusal pack)."""
-        import asyncio
         import os
 
         from daemon.tools.prompt_reload import create_prompt_reload_tools
