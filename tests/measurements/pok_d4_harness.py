@@ -45,6 +45,7 @@ from pok_d4_payload_fixture import (  # noqa: E402
     POK_DESIGN_METADATA_BASIS_BYTES,
     POK_DESIGN_WHOLE_JSON_BASIS_BYTES,
     build_project_dict,
+    build_project_dict_visible,
     recompute_bases,
 )
 
@@ -182,7 +183,8 @@ def _json_block(data: dict) -> str:
 
 def run_before() -> None:
     os.makedirs(METRICS_DIR, exist_ok=True)
-    fixture = build_project_dict()
+    fixture = build_project_dict_visible()  # renderer-input shape (notes dropped)
+    fixture_full = build_project_dict()     # full record (design bases anchor)
     dev_real = fetch_dev_real_payload()
 
     # Vendored-vs-live equality proof (pre-edit they MUST match byte-for-byte).
@@ -210,7 +212,10 @@ def run_before() -> None:
         "fixture": {
             "source": "tests/measurements/pok_d4_payload_fixture.py (design-calibrated)",
             **measure(fixture, fixture_precap),
-            **recompute_bases(fixture),
+            "metadata_basis_bytes": recompute_bases(fixture_full)["metadata_basis_bytes"],
+            "whole_json_basis_bytes": recompute_bases(fixture_full)["whole_json_basis_bytes"],
+            "renderer_visible_basis_bytes": recompute_bases(fixture_full)["renderer_visible_basis_bytes"],
+            "ratio_percent": recompute_bases(fixture_full)["ratio_percent"],
             "metadata_keys": len(fixture["metadata"]),
         },
         "design_recorded": {
@@ -238,7 +243,8 @@ def run_before() -> None:
 def run_after() -> None:
     import re
 
-    fixture = build_project_dict()
+    fixture = build_project_dict_visible()  # renderer-input shape
+    fixture_full = build_project_dict()
     dev_real = fetch_dev_real_payload()
 
     baseline_raw = open(BASELINE_PATH).read()
@@ -290,7 +296,10 @@ def run_after() -> None:
             "before": {k: baseline["fixture"][k] for k in ("section_bytes", "section_est_tokens")},
             "after": measure(fixture, fixture_after),
             "before_recomputed_via_vendored": measure(fixture, fixture_precap),
-            **recompute_bases(fixture),
+            "metadata_basis_bytes": recompute_bases(fixture_full)["metadata_basis_bytes"],
+            "whole_json_basis_bytes": recompute_bases(fixture_full)["whole_json_basis_bytes"],
+            "renderer_visible_basis_bytes": recompute_bases(fixture_full)["renderer_visible_basis_bytes"],
+            "ratio_percent": recompute_bases(fixture_full)["ratio_percent"],
             "metadata_keys": len(fixture["metadata"]),
             "non_allowlisted_keys": capped_keys,
             "omitted_count_tail": omitted_count,

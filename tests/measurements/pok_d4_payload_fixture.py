@@ -58,19 +58,19 @@ _ALLOWLISTED_VALUES: dict[str, object] = {
             "Track the ari plane via nest-report only; never hand-relay.",
             "Ari dispatch context is assembled fresh per dispatch.",
         ]
-        + [f"ari-tracking-rule-{i:02d}: keep the lane observable" for i in range(1, 25)]
+        + [f"ari-tracking-rule-{i:02d}: keep the lane observable" for i in range(1, 9)]
     ),
     "plane_workspace_discipline": (
         "One plane workspace per lane; the worktree is the unit of isolation. "
         "Never commit on the shared checkout; never merge from the coder role. "
-        + "Workspace discipline: fence env, scrub variables, assert the target. " * 6
+        + "Workspace discipline: fence env, scrub variables, assert the target. " * 2
     ),
     "deferred_key_rotation": _policy_object(
         [
             "Rotate deferred keys on the next promote window.",
             "Rotation is ledgered under upgrade_policy; never ad-hoc.",
         ]
-        + [f"deferred-key-{i:03d}: staged for rotation" for i in range(1, 21)]
+        + [f"deferred-key-{i:03d}: staged for rotation" for i in range(1, 9)]
     ),
     "deferred_key_rotation_f7_addition": (
         "F7 addition: deferred rotation now covers the proxy credential set. "
@@ -83,7 +83,7 @@ _ALLOWLISTED_VALUES: dict[str, object] = {
             "Every upgrade carries a rollback adjudication note.",
             "Schema changes are additive; FKs are rollback-inert omissions.",
         ]
-        + [f"upgrade-rule-{i:02d}: promote-gated" for i in range(1, 31)]
+        + [f"upgrade-rule-{i:02d}: promote-gated" for i in range(1, 11)]
     ),
     "upgrade_workflow_preference": (
         "Preferred workflow: stage → gate pack → Tier-2 dual-side → promote. "
@@ -95,7 +95,7 @@ _ALLOWLISTED_VALUES: dict[str, object] = {
             "Active blueprint: ensemble core surface v3.4.",
             "Blueprint file refs are render-time hints, never pointers.",
         ]
-        + [f"blueprint-section-{i:02d}: tracked" for i in range(1, 16)]
+        + [f"blueprint-section-{i:02d}: tracked" for i in range(1, 9)]
     ),
     "dependency_self_install_philosophy": (
         "Agents may self-install dev-scoped dependencies inside their worktree "
@@ -113,11 +113,11 @@ _ALLOWLISTED_VALUES: dict[str, object] = {
             "ADR-11 merged the project context message shape.",
             "ADR-7 dropped XML fences; escaping is defense-in-depth.",
         ]
-        + [f"opendesign-decision-{i:03d}: recorded in the decision log" for i in range(1, 41)]
+        + [f"opendesign-decision-{i:03d}: recorded in the decision log" for i in range(1, 13)]
     ),
     "staged_release_v0290_ceremony_notes": (
         "v0290 ceremony notes (ALLOWLISTED recovery path — render verbatim). "
-        + "Ceremony step: gate → pack → dual-side tier-2 → promote → probe. " * 40
+        + "Ceremony step: gate → pack → dual-side tier-2 → promote → probe. " * 12
     ),
 }
 
@@ -129,7 +129,7 @@ _PLUGIN_VALUES: dict[str, object] = {
             "Staleness is detected at promote, not at boot.",
         ]
     ),
-    "plugin_install_allowlist": [f"plugin-allow-{i:02d}" for i in range(1, 21)],
+    "plugin_install_allowlist": [f"plugin-allow-{i:02d}" for i in range(1, 9)],
     "plugin_channel_pin": "canary",
 }
 
@@ -227,7 +227,6 @@ _TINY_VALUES: dict[str, object] = {
 # ── the exact-size calibration filler (closes basis-1 at runtime) ────────────
 _FILLER_METADATA_KEY = "metadata_basis_calibration_filler"
 
-
 def _filler_string_value(n: int) -> str:
     return "calibration-filler " * (n // len("calibration-filler ")) + "x" * (
         n % len("calibration-filler ")
@@ -267,73 +266,131 @@ def build_metadata() -> dict:
 
 
 # ── the structural (non-metadata) project record ─────────────────────────────
-_FILLER_DESCRIPTION_HEAD = (
-    "llmproxy live project record reconstruction. "
-    "Structural filler closes basis-2 (whole JSON) at the design-recorded "
-    "408,809 B. Content synthetic; size distribution design-faithful. "
-)
+#
+# DESIGN-FAITHFUL BASIS MAPPING (stated, and why it changed once):
+# The design records the whole-project-JSON basis at 408,809 B against a
+# metadata basis of 279,810 B (68.4 % head-share). The remainder
+# (~129 KB) is carried here as ``critical_notes`` — the known-big content
+# of the live llmproxy row — NOT as structural prose: the renderer
+# (pre-existing ADR-11 behavior) drops ``critical_notes`` before dumping,
+# so basis-2 = the FULL record dump incl. notes, while the RENDERER-
+# VISIBLE payload is metadata + modest structural fields. On that
+# visible payload the §4.8 block cap is actually reachable, which is the
+# design's arithmetic. The first fixture draft put the remainder into
+# ``description`` — structurally faithful to "big row" but unfaithful to
+# the cap arithmetic; corrected (see lane report).
+
+_STRUCTURAL: dict[str, object] = {
+    "project_id": "83da04de-0000-4000-8000-000000000001",
+    "name": "llmproxy",
+    "project_type": "general",
+    "status": "active",
+    "main_directory": "/home/nea/agents-ensemble",
+    "related_directories": [
+        "/home/nea/agents-ensemble/daemon",
+        "/home/nea/agents-ensemble/tests",
+        "/home/nea/agents-ensemble/docs",
+    ],
+    "job_queue_paused": False,
+    "tags": ["live", "proxy", "llm"],
+    "shortnames": ["llm"],
+    "relationships": {"instances": [], "agents": ["leader", "devops", "ari"]},
+    "creator_instance_id": "00000000-0000-4000-8000-000000000000",
+    "creator_agent_id": "leader",
+    "created_at": "2026-09-01T00:00:00.000000+00:00",
+    "updated_at": "2026-11-07T00:00:00.000000+00:00",
+}
+
+
+def _critical_notes_payload(pad_to: int) -> list[dict]:
+    """Critical-notes list sized to carry the full-record remainder."""
+    head = (
+        "Live llmproxy critical-note reconstruction (renderer DROPS this "
+        "key pre-dump — ADR-11). Carries the design-recorded whole-row "
+        "remainder so basis-2 lands exactly at 408,809 B."
+    )
+    note_fixed = {
+        "id": "note-0001",
+        "created_at": "2026-10-01T00:00:00.000000+00:00",
+        "updated_at": "2026-10-01T00:00:00.000000+00:00",
+        "source_agent": "leader",
+        "category": "convention",
+        "priority": "high",
+        "reference": "docs/runbook.md",
+        "pinned": False,
+        "pinned_at": None,
+        "pinned_by": None,
+        "superseded_by_id": None,
+        "last_reviewed_at": None,
+        "detail_ref": None,
+    }
+    notes = [dict(note_fixed, summary=head)]
+    # Probe-costing: measure the exact serialized cost of one padded note,
+    # then size the pad so the FULL record hits the design basis exactly.
+    # Basis method is PG-text style (json.dumps, ensure_ascii, default
+    # separators) for BOTH bases — consistent with basis-1 and with the
+    # design's octet_length(...::text) measurements (indent=2 would
+    # double-count nesting indentation).
+    probe = dict(_STRUCTURAL)
+    probe["metadata"] = build_metadata()
+    probe["critical_notes"] = [dict(note_fixed, summary=head)]
+    base = len(json.dumps(probe, ensure_ascii=True))
+    probe["critical_notes"] = [dict(note_fixed, summary=head + "x" * 1000)]
+    cost_per_x = (len(json.dumps(probe, ensure_ascii=True)) - base) / 1000
+    assert cost_per_x == 1, "critical-note pad cost model broken"
+    n = pad_to - base
+    if n < 0:
+        raise ValueError(f"fixed fixture content exceeds the design basis: {base}")
+    notes[0]["summary"] = head + "x" * n
+    return notes
 
 
 def build_project_dict() -> dict:
-    """The full ``to_dict()``-shaped payload (renderer input), basis-2 calibrated.
+    """The FULL project record (basis-2 calibrated to exactly 408,809 B).
 
-    The renderer drops ``critical_notes`` before dumping — this fixture is
-    already in the post-drop shape the renderer sees.
+    ``critical_notes`` is INCLUDED here (basis-2 = full-record dump, the
+    design's head-share denominator). Use :func:`build_project_dict_visible`
+    for the renderer-input shape (notes dropped).
     """
-    metadata = build_metadata()
-    project: dict[str, object] = {
-        "project_id": "83da04de-0000-4000-8000-000000000001",
-        "name": "llmproxy",
-        "project_type": "general",
-        "status": "active",
-        "main_directory": "/home/nea/agents-ensemble",
-        "related_directories": [
-            "/home/nea/agents-ensemble/daemon",
-            "/home/nea/agents-ensemble/tests",
-            "/home/nea/agents-ensemble/docs",
-        ],
-        "job_queue_paused": False,
-        "tags": ["live", "proxy", "llm"],
-        "shortnames": ["llm"],
-        "metadata": metadata,
-        "relationships": {"instances": [], "agents": ["leader", "devops", "ari"]},
-        "creator_instance_id": "00000000-0000-4000-8000-000000000000",
-        "creator_agent_id": "leader",
-        "created_at": "2026-09-01T00:00:00.000000+00:00",
-        "updated_at": "2026-11-07T00:00:00.000000+00:00",
-    }
-    # Runtime calibration: size the description filler so basis-2 lands
-    # EXACTLY on the design-recorded 408,809 B (renderer serialization form).
-    # The per-char cost is measured empirically (probe filler) rather than
-    # hand-derived — exact by construction.
-    base = len(json.dumps(project, indent=2, ensure_ascii=True))
-    headroom = POK_DESIGN_WHOLE_JSON_BASIS_BYTES - base
-    if headroom < len(_FILLER_DESCRIPTION_HEAD) + 8:
-        raise ValueError(f"fixture structural content exceeds the design basis: {base}")
-    probe = dict(project)
-    probe["description"] = _FILLER_DESCRIPTION_HEAD
-    cost_with_head = len(json.dumps(probe, indent=2, ensure_ascii=True)) - base
-    probe["description"] = _FILLER_DESCRIPTION_HEAD + "x" * 1000
-    cost_per_x = (
-        len(json.dumps(probe, indent=2, ensure_ascii=True)) - base - cost_with_head
-    ) / 1000
-    assert cost_per_x == 1, "description filler cost model broken"
-    n = headroom - cost_with_head
-    project["description"] = _FILLER_DESCRIPTION_HEAD + "x" * n
-    got = len(json.dumps(project, indent=2, ensure_ascii=True))
+    project: dict[str, object] = dict(_STRUCTURAL)
+    project["metadata"] = build_metadata()
+    project["critical_notes"] = _critical_notes_payload(POK_DESIGN_WHOLE_JSON_BASIS_BYTES)
+    got = len(json.dumps(project, ensure_ascii=True))
     assert got == POK_DESIGN_WHOLE_JSON_BASIS_BYTES, f"basis-2 calibration failed: {got}"
     for ch in ("&", "<", ">"):
-        assert ch not in json.dumps(project, indent=2, ensure_ascii=True), "escape-inflating char"
+        assert ch not in json.dumps(project, ensure_ascii=True), "escape-inflating char"
+    return project
+
+
+def build_project_dict_visible() -> dict:
+    """The RENDERER-INPUT shape: full record minus ``critical_notes``.
+
+    The pre-existing renderer drops ``critical_notes`` before dumping;
+    this is the payload the §4.8 caps actually see. Its whole-JSON size
+    is recorded as ``RENDERER_VISIBLE_BASIS_BYTES`` by :func:`recompute_bases`.
+    """
+    project = build_project_dict()
+    project.pop("critical_notes", None)
     return project
 
 
 def recompute_bases(project: dict) -> dict:
-    """AC12 two-basis recompute on a payload (method per the module docstring)."""
+    """AC12 two-basis recompute on a payload (method per the module docstring).
+
+    Both design bases are PG-text style (``json.dumps(..., ensure_ascii=True)``,
+    default separators ≈ ``octet_length(...::text)``) so they are mutually
+    consistent and anchor-exact. ``renderer_visible_basis_bytes`` is the
+    notes-dropped payload in the renderer's own ``indent=2`` form — what
+    actually ships pre-cap (informational, not a design anchor).
+    """
     meta_basis = len(json.dumps(project.get("metadata", {}), ensure_ascii=True))
-    json_basis = len(json.dumps(project, indent=2, ensure_ascii=True))
+    json_basis = len(json.dumps(project, ensure_ascii=True))
+    visible = {k: v for k, v in project.items() if k != "critical_notes"}
+    visible_basis = len(json.dumps(visible, indent=2, ensure_ascii=True))
     return {
         "metadata_basis_bytes": meta_basis,
         "whole_json_basis_bytes": json_basis,
+        "renderer_visible_basis_bytes": visible_basis,
         "ratio_percent": round(meta_basis / json_basis * 100, 2),
         "design_metadata_basis_bytes": POK_DESIGN_METADATA_BASIS_BYTES,
         "design_whole_json_basis_bytes": POK_DESIGN_WHOLE_JSON_BASIS_BYTES,
