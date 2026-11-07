@@ -21,6 +21,15 @@ injection is curated; reading is free). ``audience_agents`` (TEXT
 NULL, JSON-encoded list at the boundary) is the curator-set narrow
 override — when present it REPLACES the default audience set.
 
+TRUST TIER (Phase 2 — addendum T-1, 2026-11-07): ``source_tier``
+∈ {agent, curated} is the WRITE/MUTATION AUTHORITY class (the fifth
+independent axis — ⊥ provenance ⊥ pinned ⊥ audience ⊥ status).
+``curated`` = the dev-curated immutable reference; writes/flips are
+curator-only (leader/PM per A-9). NEVER derived from
+``created_by_agent`` (A-5: attribution ≠ authorization). Gates the
+ACTIVE-injection curated band + supersede authority ONLY — never
+retrieval (addendum T-4: universal read across tiers).
+
 NO FOREIGN KEY anywhere (§4.1): ``project_id`` is plain TEXT;
 ``superseded_by_id`` is plain TEXT WIRED at the application layer
 (the supersede transaction maintains the chain — the column is not
@@ -79,6 +88,15 @@ POK_PROVENANCE_VALUES: tuple[str, ...] = ("declared", "observed")
 #: ``archived`` is REACHABLE only via pok_curate (forward-only flip —
 #: never un-archive).
 POK_STATUSES: tuple[str, ...] = ("active", "superseded", "archived")
+#: Trust tier (Phase 2 — trust-tier addendum T-1): the write/mutation
+#: AUTHORITY class of the row. ``curated`` = the dev-curated immutable
+#: reference (the parked guidelines); writes/flips touching it are
+#: curator-only (leader/PM per A-9). The FIFTH independent axis on a
+#: row (⊥ provenance ⊥ pinned ⊥ audience ⊥ status); NEVER derived from
+#: ``created_by_agent`` (A-5: attribution ≠ authorization). Gates the
+#: ACTIVE-injection curated band + supersede authority ONLY — never
+#: retrieval (addendum T-4: universal read across tiers).
+POK_SOURCE_TIERS: tuple[str, ...] = ("agent", "curated")
 
 #: Default audience classification at capture (§4.2 — the channel's
 #: genre).
@@ -86,6 +104,10 @@ POK_DEFAULT_AUDIENCE = "operation"
 POK_DEFAULT_DOMAIN = "other"
 POK_DEFAULT_PROVENANCE = "observed"
 POK_DEFAULT_STATUS = "active"
+#: Default trust tier at capture (addendum T-1 — every Phase-1 call
+#: signature and every post-dogfood row stays byte-unchanged; zero
+#: behavior change without opt-in).
+POK_DEFAULT_SOURCE_TIER = "agent"
 
 #: Slug-family ordering regex (§4.5): ``<family>-<NN>-<slug>`` —
 #: lowercase head, two-digit ordinal, free tail. Single source for
@@ -121,6 +143,10 @@ class ProjectOperatingKnowledge(SQLModel, table=True):
         CheckConstraint(
             "status IN ('active','superseded','archived')",
             name="ck_pok_status",
+        ),
+        CheckConstraint(
+            "source_tier IN ('agent','curated')",
+            name="ck_pok_source_tier",
         ),
         # Dual-active structurally impossible (§4.1). The partial
         # predicate keeps exactly ONE active row per (project_id, slug);
@@ -223,6 +249,19 @@ class ProjectOperatingKnowledge(SQLModel, table=True):
     pinned: bool = Field(
         default=False,
         sa_column=Column("pinned", Boolean, nullable=False, server_default=false()),
+    )
+    # Trust tier (addendum T-1, Phase 2): write/mutation AUTHORITY class
+    # ⊥ provenance ⊥ pinned ⊥ audience ⊥ status. DEFAULT 'agent' ⇒ every
+    # Phase-1 call signature + every post-dogfood row stays byte-unchanged.
+    # NEVER derived from created_by_agent (A-5: attribution ≠ authorization).
+    source_tier: str = Field(
+        default=POK_DEFAULT_SOURCE_TIER,
+        sa_column=Column(
+            "source_tier",
+            Text,
+            nullable=False,
+            server_default=POK_DEFAULT_SOURCE_TIER,
+        ),
     )
 
 

@@ -8361,6 +8361,20 @@ class InstanceManager:
           never auto-applies it):
           ``daemon/migrations/versions/
           20261019_120822_alter_resource_monitor_booleans.sql``.
+        - project_operating_knowledge.source_tier (POK Phase 2
+          trust-tier addendum T-1, 2026-11-07): the write/mutation
+          AUTHORITY column (agent | curated; curated =
+          dev-curated-immutable-reference, curator-only writes per
+          A-9). Phase 2 lands post-Phase-1-promote ⇒ live PG already
+          has the table, so the additive column arrives via the
+          idempotent ADD COLUMN IF NOT EXISTS below (fresh PG
+          databases get it from the model field via create_all; the
+          CHECK is mirrored on both sides). SQLite counterpart:
+          ``daemon/migrations/versions/
+          20261107_110003_add_pok_source_tier.sql``. The DEFAULT
+          'agent' satisfies the CHECK, so the backfill of every
+          Phase-1 row is byte-preserving (proven on a throwaway
+          SQLite before landing).
 
         When a new column needs this treatment: add the IF NOT EXISTS
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
@@ -9701,6 +9715,32 @@ class InstanceManager:
             (
                 "CREATE INDEX IF NOT EXISTS idx_memoir_episodes_tsv "
                 "ON memoir_episodes USING GIN (tsv)"
+            ),
+            # ── POK Phase 2 — trust tier (addendum T-1, 2026-11-07) ──
+            # ``project_operating_knowledge.source_tier`` — the
+            # write/mutation AUTHORITY class (agent | curated;
+            # ``curated`` = the dev-curated immutable reference band,
+            # write/supersede/flip curator-only per A-9). Phase 2 lands
+            # POST-Phase-1-promote ⇒ the live PG table already exists
+            # and ``create_all`` cannot add columns to existing tables,
+            # so the column arrives HERE (the v0.25.4-era ensure
+            # precedent for a column added to a create_all-created
+            # table). Fresh PG databases get it from the model field
+            # (``daemon/repositories/pok/models.py``, CHECK mirrored in
+            # ``__table_args__``). SQLite counterpart:
+            # ``daemon/migrations/versions/20261107_110003_add_pok_
+            # source_tier.sql`` (the runner is a NO-OP on PG). The
+            # DEFAULT 'agent' backfills every Phase-1 row in place —
+            # the DEFAULT satisfies the CHECK (proven empirically on a
+            # throwaway SQLite before landing; the fresh-SQLite breaker
+            # lesson). Named ``source_tier`` NOT ``tier``: the admission
+            # vocabulary owns "tier". ZERO guideline content anywhere in
+            # the migration lane — seeding is the tool lane (addendum
+            # T-5), never SQL backfill.
+            (
+                "ALTER TABLE project_operating_knowledge ADD COLUMN IF NOT EXISTS "
+                "source_tier TEXT NOT NULL DEFAULT 'agent' "
+                "CHECK (source_tier IN ('agent', 'curated'))"
             ),
         ]
         with self._engine.begin() as conn:
