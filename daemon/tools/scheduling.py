@@ -16,6 +16,7 @@ CALLING agent via the factory closure (precedent:
   echoed verbatim in every create/update response.
 * Cancel is TERMINAL (history preserved, hidden from default list);
   pause/resume via ``task_schedule_update(paused=...)`` is RESUMABLE.
+  GC DISCLOSURE (source-gc, board wi-ed230eb4): pause (resumable; a schedule left paused past the default 14d retention is garbage-collected — history archived, config removed; resume before then is untouched. To protect a paused schedule, raise SERVICES_SOURCES_GC_TERMINAL_RETENTION_DAYS; recovery after a reap is manual, from the archive.)
 * Every echo surface returns BOTH ``next_run_at_local`` (in the
   schedule's timezone) AND ``next_run_at_utc``.
 """
@@ -233,7 +234,7 @@ def create_scheduling_tools(
         message: Annotated[str | None, Field(default=None, description="Replace the fired message")]
         when: Annotated[str | None, Field(default=None, description="New trigger time (ISO 8601 for once; 'HH:MM' for daily/weekly)")]
         timezone: Annotated[str | None, Field(default=None, description="IANA timezone; re-interprets wall-clock times in this timezone")]
-        paused: Annotated[bool | None, Field(default=None, description="true = pause (resumable); false = resume")]
+        paused: Annotated[bool | None, Field(default=None, description="true = pause (resumable; a schedule left paused past the default 14d retention is garbage-collected — history archived, config removed; resume before then is untouched. To protect a paused schedule, raise SERVICES_SOURCES_GC_TERMINAL_RETENTION_DAYS; recovery after a reap is manual, from the archive.); false = resume")]
         priority: Annotated[int | None, Field(default=None, ge=1, le=10, description="Job priority 1-10")]
 
     @register_tool_category("scheduling")
@@ -244,7 +245,7 @@ def create_scheduling_tools(
         message: Annotated[str | None, Field(default=None, description="Replace the fired message")] = None,
         when: Annotated[str | None, Field(default=None, description="New trigger time (ISO 8601 for once; 'HH:MM' for daily/weekly)")] = None,
         timezone: Annotated[str | None, Field(default=None, description="IANA timezone; re-interprets wall-clock times in this timezone")] = None,
-        paused: Annotated[bool | None, Field(default=None, description="true = pause (resumable); false = resume")] = None,
+        paused: Annotated[bool | None, Field(default=None, description="true = pause (resumable; a schedule left paused past the default 14d retention is garbage-collected — history archived, config removed; resume before then is untouched. To protect a paused schedule, raise SERVICES_SOURCES_GC_TERMINAL_RETENTION_DAYS; recovery after a reap is manual, from the archive.); false = resume")] = None,
         priority: Annotated[int | None, Field(default=None, ge=1, le=10, description="Job priority 1-10")] = None,
     ) -> dict:
         """Update a scheduled task (reschedule / re-message / pause / resume). Use tool_help("task_schedule_update") for details."""
