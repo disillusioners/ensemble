@@ -338,7 +338,7 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly nineteen categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly twenty categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
