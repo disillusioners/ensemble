@@ -313,6 +313,39 @@ class TestTypedEchoTaxonomy:
         assert v2["action"] == "superseded"
         assert v2["superseded_id"] == v1["id"]
 
+    def test_concurrent_same_slug_returns_typed_conflict(self, tool_env) -> None:
+        """A3 (council fold): a concurrent same-slug loser (the unique
+        partial index fires) surfaces as the TYPED ``pok_slug_conflict``
+        envelope — never a raw IntegrityError traceback."""
+        import sqlalchemy
+
+        tools = create_pok_tools(
+            _manager(tool_env, "p1", "developer"),
+            current_instance_id="inst-1",
+            agent_id="developer",
+        )
+        # seed one row so the supersede leg is reachable
+        tools[0].invoke({"slug": "race-a", "body": "v1"})
+        # monkeypatch the repo insert to raise a real IntegrityError
+        import sqlalchemy
+
+        from daemon.repositories.pok import repository as repo_mod
+
+        orig_insert = repo_mod.POKRepository.insert
+
+        def boom(self, entry):
+            raise sqlalchemy.exc.IntegrityError(
+                "INSERT ...", {}, Exception("UNIQUE constraint failed")
+            )
+
+        repo_mod.POKRepository.insert = boom
+        try:
+            out = tools[0].invoke({"slug": "race-new", "body": "v2 differs"})
+        finally:
+            repo_mod.POKRepository.insert = orig_insert
+        assert out.get("code") == "pok_slug_conflict", out
+        assert "error" in out
+
     def test_noop_echo_note(self, tool_env) -> None:
         tools = create_pok_tools(
             _manager(tool_env, "p1", "developer"),

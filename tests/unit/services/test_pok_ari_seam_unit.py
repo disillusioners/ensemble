@@ -32,7 +32,7 @@ from daemon.repositories.pok.models import (
 )
 from daemon.services.pok_ari_seam import (
     ARI_AGENT_ID,
-    POK_ARI_SEAM_LAST_PROJECT,
+    POK_ARI_SEAM_INJECTED_PROJECTS,
     POK_ARI_SEAM_SOURCE,
     maybe_inject_ari_pok_block,
 )
@@ -83,6 +83,13 @@ def pok_env(monkeypatch):
         slug="impl-01-tests-first",
         body="The test suite runs before merge.",
         audience="implementation",
+        agent_id="developer",
+    )
+    service.upsert(
+        project_id="p2",
+        slug="pipeline-01-b-ci",
+        body="Project B CI triggers on push.",
+        audience="both",
         agent_id="developer",
     )
 
@@ -194,7 +201,44 @@ class TestAc24AriSeamPositiveLeg:
                 project_id="p1",
             )
         )
-        assert pok_env.metadata[POK_ARI_SEAM_LAST_PROJECT] == "p1"
+        assert pok_env.metadata[POK_ARI_SEAM_INJECTED_PROJECTS] == ["p1"]
+
+    def test_interleaving_a_then_b_then_a_injects_once_per_project(
+        self, pok_env
+    ) -> None:
+        """W1 (council fold): dispatch A→B→A must NOT re-inject A.
+        The single-slot shape re-injected A on the third dispatch;
+        the set shape suppresses the duplicate."""
+        asyncio.run(
+            maybe_inject_ari_pok_block(
+                manager=pok_env.manager,
+                current_instance_id="ari-inst-1",
+                caller_agent_id="ari",
+                project_id="p1",
+            )
+        )
+        asyncio.run(
+            maybe_inject_ari_pok_block(
+                manager=pok_env.manager,
+                current_instance_id="ari-inst-1",
+                caller_agent_id="ari",
+                project_id="p2",
+            )
+        )
+        asyncio.run(
+            maybe_inject_ari_pok_block(
+                manager=pok_env.manager,
+                current_instance_id="ari-inst-1",
+                caller_agent_id="ari",
+                project_id="p1",
+            )
+        )
+        # exactly one injection per project — A and B, never A twice
+        assert len(pok_env.injections) == 2
+        assert sorted(pok_env.metadata[POK_ARI_SEAM_INJECTED_PROJECTS]) == [
+            "p1",
+            "p2",
+        ]
 
 
 class TestAc24AriSeamNegativeLegs:
@@ -310,7 +354,7 @@ class TestAc24AriSeamNegativeLegs:
         )
         # the metadata slot stays UNWRITTEN (AM-22: write after the
         # confirmed delivery) → the next dispatch retries
-        assert POK_ARI_SEAM_LAST_PROJECT not in pok_env.metadata
+        assert POK_ARI_SEAM_INJECTED_PROJECTS not in pok_env.metadata
 
 
 class TestAsyncCensus:

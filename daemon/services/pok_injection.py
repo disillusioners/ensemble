@@ -232,9 +232,16 @@ class ViewEntry:
 
         body = (self.row.body or "").replace("\r", " ").replace("\n", " ").strip()
         body = escape_for_context_block(body)
+        # A2 (council fold, 2026-11-07): slug-slot defense-in-depth
+        # at RENDER time (the minimal choice — no schema CHECK, so no
+        # dev-vs-live PG schema drift; the write fence already
+        # validates [a-z0-9-], but legacy/pre-bound rows are flattened
+        # here so a forged slug cannot carry structure). Flattening is
+        # a no-op for any tool-written slug.
+        slug = (self.row.slug or "").replace("\r", "").replace("\n", "").strip()
         mark = self.stale.render() if self.stale is not None else ""
         return POK_ENTRY_TEMPLATE.format(
-            slug=self.row.slug,
+            slug=slug,
             domain=self.row.domain,
             audience=self.row.audience,
             stale=mark,

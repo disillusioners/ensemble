@@ -35,7 +35,11 @@ Usage (from the worktree root, worktree venv, env-scrubbed invocation):
         .venv/bin/python scripts/pok/seed_llmproxy_payload.py
 
 NEVER ``env -u 'POSTGRES_*'`` (shell glob — silent no-op). Per-variable
-scrubs only.
+scrubs only — they are HYGIENE (keep ambient POSTGRES_* from being
+read), NOT the fence. The REAL fence is in-code: the file-only env
+source (parse .env, never os.environ), the SELF_ENV=dev assert,
+and the current_database()/current_user() asserts below — those are
+what make a non-dev DB structurally unreachable.
 """
 
 from __future__ import annotations

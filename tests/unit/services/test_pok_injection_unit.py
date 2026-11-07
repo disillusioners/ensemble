@@ -201,6 +201,33 @@ class TestAc11PinnedTier:
         result = admit_view(rows, agent_id="ari", now=NOW)
         assert [v.tier for v in result.entries] == ["pinned"]
 
+    def test_worst_admitted_view_true_worst_row(self) -> None:
+        """A1 + A11 (council fold): the TRUE worst-case row — a
+        44-char slug + a stale-marked (45d) body at the 240-char
+        escaped ceiling. Per-entry render = 332 (240 escaped body +
+        92 overhead, the §4.5 derived ceiling). 8 of them still fit
+        inside the wrapper-inclusive 2,900 bound (header 40 + 8×333 +
+        tail 60 = 2,764 + wrapper 47 = 2,811 ≤ 2,900)."""
+        from datetime import timedelta
+
+        slug = "a" * 44
+        body = "x" * 240
+        old = (NOW - timedelta(days=45)).isoformat()
+        rows = [
+            _row(f"{slug}-{i:02d}", audience="both", body=body, verified=old)
+            for i in range(8)
+        ]
+        result = admit_view(rows, agent_id="ari", now=NOW)
+        assert len(result.entries) == 8
+        for v in result.entries:
+            assert v.stale is not None
+        block = render_pok_block(result)
+        full = f"[SYSTEM CONTEXT: {POK_BLOCK_TITLE}]\n\n{block}"
+        assert len(full) <= 2_900
+        # per-entry render ceiling holds even with the stale mark
+        for v in result.entries:
+            assert len(v.render()) <= 332
+
     def test_worst_admitted_view_under_2900_full_render(self) -> None:
         """AC11 char leg: 8 max-entropy entries (240-char escaped
         bodies) still render under the wrapper-inclusive cap."""
@@ -334,6 +361,17 @@ class TestAc5Decay:
     def test_fresh_row_gets_no_mark(self) -> None:
         rows = [_row("fresh-01-a", audience="both", verified=NOW.isoformat())]
         result = admit_view(rows, agent_id="ari", now=NOW)
+        assert result.entries[0].stale is None
+
+    def test_natural_stamp_is_fresh(self) -> None:
+        """W3 (frozen A-8) natural-stamp leg: a row whose
+        ``last_verified`` came from the service's own insert stamp
+        (no DB-planted timestamp) is NOT stale — the decay machinery
+        has a real clock to read."""
+        from daemon.services.pok_service import _utc_now_iso
+
+        row = _row("nat-01-a", audience="both", verified=_utc_now_iso())
+        result = admit_view([row], agent_id="ari", now=NOW)
         assert result.entries[0].stale is None
 
     def test_never_verified_row_is_not_stale(self) -> None:

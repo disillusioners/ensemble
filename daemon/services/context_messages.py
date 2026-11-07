@@ -697,6 +697,7 @@ def _stable_id_for(
     ``shared_meta_kv``        ``kv:{context_key}``                            ``context_key``
     ``attestation_nudge``     ``attestation_nudge:{instance_id}``             ``instance_id``
     ``memoir``                ``memoir:{agent_id}``                           ``agent_id``
+    ``pok``                   ``pok:{project_id}``                            ``project_id``
     ========================  =============================================  =========================
 
     ``context_key`` is the FULL resolved tree-root partition key — the
@@ -2674,8 +2675,18 @@ async def assemble_context_messages(
                 manager=manager,
             )
         )
-        project_msg = build_project_context_message(
-            project, selected_critical_notes, history_entries,
+        # W4 (council fold, 2026-11-07): the builder runs the
+        # section-cap re-render loop (POK §4.8 stage 2 — a
+        # bounded-but-synchronous while loop over the overflow keys)
+        # inside _format_project_json_section. Run it off the event
+        # loop so a large/over-cap project metadata payload cannot
+        # stall the agent-node async cycle; the fetch above already
+        # ran via asyncio.to_thread.
+        project_msg = await asyncio.to_thread(
+            build_project_context_message,
+            project,
+            selected_critical_notes,
+            history_entries,
             instance_id=instance_id,
             notes_pre_ordered=notes_pre_ordered,
         )

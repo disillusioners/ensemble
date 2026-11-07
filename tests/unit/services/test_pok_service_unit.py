@@ -549,6 +549,30 @@ class TestAc3Ac23UniversalRead:
         assert row.access_count == 1
         assert row.last_accessed_at is not None
 
+    def test_insert_stamps_last_verified_naturally(self, svc: POKService) -> None:
+        """W3 (frozen A-8): a freshly inserted row carries a
+        ``last_verified`` stamp — no DB-planted timestamp needed for
+        the decay machinery to have a real clock to read."""
+        out = svc.upsert(project_id="p1", slug="fresh-a", body="fresh fact", agent_id="d")
+        row = svc._repo.get(out.entry.id)
+        assert row.last_verified is not None
+        assert row.last_verified == out.entry.last_verified
+
+    def test_noop_echo_refreshes_last_verified(self, svc: POKService) -> None:
+        """W3 (frozen A-8): the exact-dup no-op echo REFRESHES
+        ``last_verified`` (restarts the staleness clock), so decay is
+        reachable naturally — a row goes stale only if it is never
+        re-echoed for POK_VERIFY_WINDOW_DAYS."""
+        import time as _t
+
+        out = svc.upsert(project_id="p1", slug="echo-a", body="echo body", agent_id="d")
+        first = svc._repo.get(out.entry.id).last_verified
+        _t.sleep(0.01)
+        echo = svc.upsert(project_id="p1", slug="echo-a", body="echo body", agent_id="d")
+        assert echo.action == "no-op"
+        second = svc._repo.get(out.entry.id).last_verified
+        assert second is not None and second > first
+
     def test_normalization_semantics(self) -> None:
         assert normalize_body("  A  B  ") == "a b"
         assert normalize_body("A\tB") == "a b"

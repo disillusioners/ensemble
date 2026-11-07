@@ -62,7 +62,7 @@ from daemon.repositories.pok.models import (
     POK_STATUSES,
     ProjectOperatingKnowledge,
 )
-from daemon.repositories.pok.repository import POKRepository, UNSET
+from daemon.repositories.pok.repository import POKRepository, UNSET, _utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -356,7 +356,15 @@ class POKService:
                 # Exact-dup no-op echo (Phase-1 behavior): the tier
                 # never changes here — authority reclassification is
                 # curation (pok_curate source_tier), never a write
-                # verb (addendum T-3).
+                # verb (addendum T-3). Frozen A-8 (W3): the no-op echo
+                # REFRESHES last_verified (the staleness clock restarts
+                # on a re-stated fact), so [stale Nd] decay is
+                # reachable naturally — a row goes stale only if it is
+                # never re-echoed for POK_VERIFY_WINDOW_DAYS.
+                prior.last_verified = _utc_now_iso()
+                prior.updated_at = _utc_now_iso()
+                # persist the stamp via the repo's session-free helper
+                self._repo.stamp_last_verified(prior.id)
                 return UpsertOutcome(action="no-op", entry=prior)
             return self._supersede(
                 prior=prior,
@@ -422,8 +430,20 @@ class POKService:
             content_sha256=content_hash(body),
             created_by_agent=agent_id or "unknown",
             source_tier=effective_tier,
+            last_verified=_utc_now_iso(),
         )
-        self._repo.insert(entry)
+        try:
+            self._repo.insert(entry)
+        except Exception as exc:  # noqa: BLE001 — integrity race → typed
+            if "IntegrityError" in type(exc).__name__ or "UNIQUE" in str(exc).upper():
+                raise POKError(
+                    "pok_slug_conflict",
+                    "a concurrent write landed the same active slug — "
+                    "re-read via pok_query and retry (the unique partial "
+                    "index uq_pok_active_slug guards dual-active)",
+                    slug=slug,
+                ) from exc
+            raise
         return UpsertOutcome(action="created", entry=entry)
 
     def _supersede(
@@ -498,7 +518,17 @@ class POKService:
             created_by_agent=agent_id or "unknown",
             source_tier=effective_tier,
         )
-        self._repo.supersede_and_insert(prior, successor)
+        try:
+            self._repo.supersede_and_insert(prior, successor)
+        except Exception as exc:  # noqa: BLE001 — integrity race → typed
+            if "IntegrityError" in type(exc).__name__ or "UNIQUE" in str(exc).upper():
+                raise POKError(
+                    "pok_slug_conflict",
+                    "a concurrent supersede landed on the same active "
+                    "slug — re-read via pok_query and retry",
+                    slug=slug,
+                ) from exc
+            raise
         return UpsertOutcome(
             action="superseded", entry=successor, superseded_id=prior_id
         )

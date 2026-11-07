@@ -62,10 +62,13 @@ from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 
 logger = logging.getLogger(__name__)
 
-#: The instance-metadata key recording the LAST project this instance's
-#: seam injected (the semantic stable-id namespace: one block per
-#: project). A re-dispatch to the same project never re-injects.
-POK_ARI_SEAM_LAST_PROJECT = "pok_ari_seam_last_project"
+#: The instance-metadata key recording the SET of projects this
+#: instance's seam has injected (the semantic stable-id namespace:
+#: one block per project — a per-project slot SET, not a single
+#: slot, so dispatch A→B→A never re-injects A). Frozen A-? (W1,
+#: council fold 2026-11-07): the prior single-slot shape re-injected
+#: A on the third dispatch; the set shape suppresses the duplicate.
+POK_ARI_SEAM_INJECTED_PROJECTS = "pok_ari_seam_injected_projects"
 
 #: The injection-lane provenance marker (the ``source`` stamp —
 #: ``internal_agent:<origin>`` is the house shape for agent-tool
@@ -123,10 +126,10 @@ async def maybe_inject_ari_pok_block(
             return
 
         # Semantic stable id: once per (instance, project).
-        last_project = await asyncio.to_thread(
-            _read_last_project, instance_repository, current_instance_id
+        injected = await asyncio.to_thread(
+            _read_injected_projects, instance_repository, current_instance_id
         )
-        if last_project == project_id:
+        if project_id in injected:
             return
 
         # Fresh per-dispatch read → the operation-audience view (the
@@ -181,13 +184,15 @@ async def maybe_inject_ari_pok_block(
             current_instance_id[:8],
         )
 
-        # Record the namespace slot AFTER a confirmed injection (the
-        # AM-22 discipline — a failed write retries next dispatch).
+        # Record the project in the injected SET (idempotent — a
+        # re-dispatch that somehow got past the gate above cannot
+        # duplicate the entry). Written AFTER a confirmed injection
+        # (the AM-22 discipline — a failed write retries next dispatch).
         try:
             await asyncio.to_thread(
-                instance_repository.set_metadata,
+                _append_injected_project,
+                instance_repository,
                 current_instance_id,
-                POK_ARI_SEAM_LAST_PROJECT,
                 project_id,
             )
         except Exception as exc:  # noqa: BLE001 — self-heals next dispatch
@@ -205,10 +210,26 @@ async def maybe_inject_ari_pok_block(
         )
 
 
-def _read_last_project(instance_repository: Any, instance_id: str) -> str | None:
+def _read_injected_projects(instance_repository: Any, instance_id: str) -> list[str]:
     row = instance_repository.get(instance_id)
     if row is None:
-        return None
+        return []
     meta = getattr(row, "instance_metadata", None) or {}
-    value = meta.get(POK_ARI_SEAM_LAST_PROJECT)
-    return str(value) if value else None
+    value = meta.get(POK_ARI_SEAM_INJECTED_PROJECTS)
+    if not isinstance(value, list):
+        return []
+    return [str(v) for v in value if v]
+
+
+def _append_injected_project(
+    instance_repository: Any, instance_id: str, project_id: str
+) -> None:
+    row = instance_repository.get(instance_id)
+    meta = getattr(row, "instance_metadata", None) if row is not None else None
+    meta = dict(meta or {})
+    injected = [str(v) for v in (meta.get(POK_ARI_SEAM_INJECTED_PROJECTS) or []) if v]
+    if project_id not in injected:
+        injected.append(project_id)
+    instance_repository.set_metadata(
+        instance_id, POK_ARI_SEAM_INJECTED_PROJECTS, injected
+    )
