@@ -61,6 +61,22 @@ from sqlmodel import Field, SQLModel
 
 from daemon.repositories.infra.types import JSONBType
 
+__all__ = [
+    "POK_AUDIENCES",
+    "POK_DEFAULT_AUDIENCE",
+    "POK_DEFAULT_DOMAIN",
+    "POK_DEFAULT_PROVENANCE",
+    "POK_DEFAULT_SOURCE_TIER",
+    "POK_DEFAULT_STATUS",
+    "POK_DOMAINS",
+    "POK_FAMILY_SLUG_PATTERN",
+    "POK_PROVENANCE_VALUES",
+    "POK_SOURCE_TIERS",
+    "POK_STATUSES",
+    "ProjectOperatingKnowledge",
+    "ProjectOperatingKnowledgeEmbedding",
+]
+
 
 def _new_uuid() -> str:
     return str(uuid.uuid4())

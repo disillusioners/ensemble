@@ -35,11 +35,14 @@ namespace): the injection lane drains tool-path entries with fresh
 drain-time ids (no stable-id channel exists on
 ``Manager.set_injection``), so the contract is honored SEMANTICALLY —
 the seam injects ONCE per (instance, project), tracked in the
-instance metadata (``pok_ari_seam_last_project``). Re-dispatches to
-the SAME project do not re-inject (the block is already in Ari's
-checkpoint; identical content; pok_query refreshes mid-lane); a
-dispatch to a DIFFERENT project injects that project's block — one
-block per project, never duplicated.
+instance metadata as the per-project SET
+``pok_ari_seam_injected_projects`` (W1, council fold 2026-11-07 — the
+earlier single-slot ``pok_ari_seam_last_project`` re-injected A on an
+A→B→A dispatch). Re-dispatches to the SAME project do not re-inject
+(the block is already in Ari's checkpoint; identical content;
+pok_query refreshes mid-lane); a dispatch to a DIFFERENT project
+injects that project's block — one block per project, never
+duplicated.
 
 DELIVERY: ``Manager.set_injection`` (the RAM lane — job_create runs
 mid-turn, so the block lands on Ari's next LLM call within the same
@@ -59,6 +62,13 @@ from typing import Any
 
 from daemon import constants as _constants
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+
+__all__ = [
+    "ARI_AGENT_ID",
+    "POK_ARI_SEAM_INJECTED_PROJECTS",
+    "POK_ARI_SEAM_SOURCE",
+    "maybe_inject_ari_pok_block",
+]
 
 logger = logging.getLogger(__name__)
 
