@@ -227,6 +227,13 @@ DESIGN (S10-n): "no baseline ⇒ don't refresh" would fail exactly in
 the post-restart scenario the tool exists to serve. Pop ≈ 0.02 ms and
 idempotent.
 
+**Operator note:** on that first call you will see one extra
+`cache_busted=true` (structured provenance reason:
+`cold_process_cannot_prove_entry_bytes`) **per process per agent** —
+expected behavior, not a defect: the cold path busts the shared cache
+entry so the recompose reads disk truth (N1/D27). Measured cost of the
+bust ≈ 3.6 ms.
+
 ## Honesty notes (known, routed — NOT fixed here)
 
 - **F7(i)** — `tools_note` DB overrides are DEAD (the loader composes
