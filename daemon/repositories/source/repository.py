@@ -11,7 +11,7 @@ from sqlalchemy import delete as sql_delete, insert, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select, col
+from sqlmodel import Session, select, col, func
 
 from .models import SourceConfig, InstanceMapping, ProcessedMessage, ScheduleExecution, SourceStatus, ExecutionStatus
 
@@ -456,8 +456,6 @@ class SQLModelSourceRepository:
         and PostgreSQL). Used by the LIST surfaces so a paged response can
         carry the untruncated ``total`` alongside the returned page.
         """
-        from sqlmodel import func
-
         with Session(self.engine) as session:
             stmt = select(func.count()).select_from(SourceConfig)
             if enabled is not None:
@@ -465,7 +463,6 @@ class SQLModelSourceRepository:
             if status is not None:
                 stmt = stmt.where(SourceConfig.status == status)
             return int(session.exec(stmt).one())
-
 
     def update_source_status(
         self,

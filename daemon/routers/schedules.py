@@ -106,7 +106,9 @@ async def list_schedules(request: Request, include_cancelled: bool = False):
     # Page past the repository page cap — the cap is a page size, not a
     # completeness contract (wi-b97ec302: newer inert rows evicted the
     # oldest chat rows from the old implicit 100-row page 1).
-    all_sources: list = []
+    from daemon.repositories.source.models import SourceConfig as SourceConfigRow
+
+    all_sources: list[SourceConfigRow] = []
     offset = 0
     while True:
         page = await asyncio.to_thread(

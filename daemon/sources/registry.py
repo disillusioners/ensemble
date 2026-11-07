@@ -3,7 +3,9 @@
 Module size rationale (M7, tidier pass 2026-09-19): this file
 owns the cross-source routing surface — adapter registration,
 ``_handle_message`` ingest routing (live-injection + durable
-fallthrough), and per-provider mapping-metadata construction.
+fallthrough), per-provider mapping-metadata construction, and
+boot lifecycle (auto-start page-through + stale-running
+reconciliation, wi-b97ec302).
 Routing logic is interleaved with mapping-metadata construction
 so a naive split would scatter state — the seam is the
 three-clause invariant helper, not a file boundary.
@@ -23,7 +25,9 @@ from daemon.constants import (
     INJECTION_ELIGIBLE_STATUSES,
     ROUTING_ENVELOPE_KEYS,
     SOURCE_CONFIG_PAGE_SIZE,
+    SOURCE_CONFIG_SCAN_MAX_ROWS,
 )
+from daemon.repositories.source.models import SourceConfig as SourceConfigRow
 from daemon.services.mission_record_service import (
     attach_founding_message_fail_open,
     resolve_or_mint_fail_open,
@@ -363,7 +367,7 @@ class SourceRegistry:
         # ordering is load-bearing (see start_all docstring).
         await self._reconcile_stale_running(scheduled_ids)
 
-    async def _load_all_configs(self, status: str | None = None) -> list:
+    async def _load_all_configs(self, status: str | None = None) -> list[SourceConfigRow]:
         """Load every matching source config, paging past the repository page cap.
 
         The repository's ``list_source_configs`` default returns ONE page
@@ -373,8 +377,8 @@ class SourceRegistry:
         never wedge boot.
         """
         page_size = SOURCE_CONFIG_PAGE_SIZE
-        max_rows = page_size * 200  # ceiling: 100k rows — far above any real deployment
-        configs: list = []
+        max_rows = SOURCE_CONFIG_SCAN_MAX_ROWS  # anti-wedge ceiling — far above any real deployment
+        configs: list[SourceConfigRow] = []
         offset = 0
         while offset < max_rows:
             page = await asyncio.to_thread(

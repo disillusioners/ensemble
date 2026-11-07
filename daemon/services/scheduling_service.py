@@ -947,8 +947,10 @@ async def list_schedules(
     rows can evict older ones from a single default page (wi-b97ec302),
     so this read must observe every row before filtering.
     """
+    from daemon.repositories.source.models import SourceConfig as SourceConfigRow
+
     repo = _require_repo()
-    rows: list = []
+    rows: list[SourceConfigRow] = []
     offset = 0
     while True:
         page = await asyncio.to_thread(

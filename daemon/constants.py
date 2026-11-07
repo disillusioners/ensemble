@@ -155,6 +155,7 @@ CHAT_SOURCE_PREFIXES: tuple[str, ...] = ("telegram:", "slack:", "discord:")
 # proven exonerated by same-data repro on the prior build).
 SOURCE_CONFIG_PAGE_SIZE: int = 500   # fixed page size for "read every row" scans
 SOURCE_LIST_HARD_MAX: int = 1000     # safety ceiling for any single LIST page
+SOURCE_CONFIG_SCAN_MAX_ROWS: int = 100_000  # anti-wedge ceiling for "read every row" page-through scans
 
 # ── Rate Limits (messages_per_second, burst_size) ─────────────────────────────────
 TELEGRAM_RATE_LIMIT: tuple[int, int] = (30, 30)  # Telegram: 30 msg/sec
