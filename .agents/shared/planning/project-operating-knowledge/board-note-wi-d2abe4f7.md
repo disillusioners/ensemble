@@ -34,10 +34,11 @@ tier on content supersede INHERITS the target's tier (refresh never
 reclassifies authority).
 
 **Finalization sha:** the final commit of the tier implementation is
-`4594241b716d8f20db21f114b87ca2ebc6f64673` (branch
+`595fafd7c4a3e7eb4faef3295af2fc57423d06c7` (branch
 `feature/project-operating-knowledge`; the tier spans
 `194d2d9f5` schema → `a6f3566ef` semantics → `1db11e430` curated
-band → `4594241b7` the AC-T1..T7 test pack).
+band → `4594241b7` + `25811a5c8` the AC-T1..T7 gate pack (40 legs,
+mutation matrix 8/8) → `595fafd7c` the PG-materialization extension).
 
 ## Seeding status
 
