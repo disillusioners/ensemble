@@ -183,3 +183,69 @@ class ScheduleExecution(SQLModel, table=True):
             "error_message": self.error_message,
             "completed_at": self.completed_at,
         }
+
+
+class ScheduleExecutionArchive(SQLModel, table=True):
+    """Archive copy of a reaped schedule's execution history (source-gc).
+
+    Written by ``SQLModelSourceRepository.gc_archive_and_delete`` in the
+    SAME transaction that deletes the live rows (copy-then-delete,
+    decisions.md D1-final). NO FK to the table it records (plain TEXT
+    ids — house archive precedent, memoir template); ``instance_id``
+    survives the unmapped ``instance_mappings`` delete so the
+    schedule→instance linkage is not lost (architect §3 disclosure).
+    """
+
+    __tablename__ = "schedule_executions_archive"
+    __table_args__ = (
+        Index(
+            "idx_schedule_executions_archive_schedule_id",
+            "schedule_id",
+        ),
+        Index(
+            "idx_schedule_executions_archive_archived_at",
+            "archived_at",
+        ),
+    )
+
+    execution_id: str = Field(primary_key=True)
+    schedule_id: str
+    triggered_at: str | None = None
+    instance_id: str | None = None
+    status: str | None = None
+    error_message: str | None = None
+    completed_at: str | None = None
+    archived_at: str
+
+
+class SourceConfigArchive(SQLModel, table=True):
+    """Archive copy of a reaped source config row (source-gc).
+
+    ``config`` is the JSON-serialized snapshot of the live config dict
+    and is the SOLE reconstruction input for a restored schedule
+    (advisory C — no restore API exists in v1; update-of-missing
+    raises). NO ``credentials`` column (AM-4): scheduler rows carry
+    ``credentials=None`` always, and chat credentials can never enter
+    this GC's reachable set — an always-NULL column would be a
+    pointless second secret surface.
+    """
+
+    __tablename__ = "source_configs_archive"
+    __table_args__ = (
+        Index(
+            "idx_source_configs_archive_archived_at",
+            "archived_at",
+        ),
+    )
+
+    source_id: str = Field(primary_key=True)
+    source_type: str | None = None
+    name: str | None = None
+    config: str | None = None
+    enabled: bool | None = None
+    autostart: bool | None = None
+    status: str | None = None
+    error_message: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    archived_at: str
