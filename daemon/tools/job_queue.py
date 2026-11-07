@@ -1586,6 +1586,34 @@ def create_job_tools(
             # the agent uses the returned ``job_id`` as the
             # ``watch_mission`` handle. Additive-only: ``to_dict()`` is
             # returned verbatim otherwise.
+            # ── POK ari-dispatch seam (G-2 / §4.5.1, POK Phase 1 T7) ──
+            # Ari's dispatch surface IS this tool (job_create with a
+            # target project). After the enqueue is REAL: inject the
+            # operation-audience POK block into the caller's context —
+            # fresh per-dispatch read (Ari is long-lived/reused),
+            # gates = caller is the factory-captured ari + target
+            # non-default (AC24 negative leg), same budget/fence/family
+            # semantics, once per (instance, project) — the semantic
+            # ``pok:{project_id}`` namespace (see pok_ari_seam.py).
+            # BEST-EFFORT, never-raise: the dispatch result is NEVER
+            # touched by a seam failure.
+            try:
+                from ..services.pok_ari_seam import (  # noqa: PLC0415
+                    maybe_inject_ari_pok_block,
+                )
+
+                await maybe_inject_ari_pok_block(
+                    manager=manager,
+                    current_instance_id=current_instance_id,
+                    caller_agent_id=caller_agent_id,
+                    project_id=normalized_project_id,
+                )
+            except Exception as seam_exc:  # noqa: BLE001 — defensive
+                logger.warning(
+                    "[POK:Degraded] ari seam call failed: %s — dispatch "
+                    "result untouched",
+                    seam_exc,
+                )
             response = job_item.to_dict()
             if getattr(job_item, "instance_id", None):
                 response["mission_id"] = job_item.instance_id
