@@ -164,3 +164,53 @@ Both controller defects discharged: **F1 Option A** (slug 44 / entry 332 / block
 ### Verdict
 
 All 8 leader dispositions implemented; the two decisions (B3 family shape; B5 retrieval reuse) are landed as normative text with receipts; D2 closed; the live-vs-dev boundary is stated plainly. The set is ready for the scoped spot-check, then commit + report to the Emperor.
+
+
+---
+
+## APPENDIX D — Emperor-Ruling Fold (docs-only, bounded; 2026-11-07)
+
+**Ruling (verbatim intent, Discord 2026-11-07):** "we should split [operating knowledge vs project record]. Ari you need know operation one (to control the leader, aegis,… teams), also agent like devops need know. The dev team actually need know the implementation major, and operation is also need (not all the case). It's for active injection — if agent want read them they can read any."
+**Fold site:** `feature/project-operating-knowledge-ruling` @ 5672f055c (the committed canon rode latest; anchors re-verified at this tree: wrapper `context_messages.py:75-76`, escape `:699`, swallow `:5083`, selector files present, pre-create_all block present). Markdown only; no commits — the giter finalizes. Provenance stamp "Emperor ruling, 2026-11-07, source: Discord" on every amendment site (arch §1/§4.1/§4.2/§4.3/§4.5/§4.5.1/§4.6/§11/§13/§14; decisions ER-1 + amended A-rows; plan §2/§4.1/§4.5/AC22–24/§9).
+
+### What the fold landed
+
+| Ruling element | Landed as | Docs |
+|---|---|---|
+| **1. SPLIT CONFIRMED** — two surfaces stand (POK vs Related-Project record); **unified-block alternative offered and DECLINED — considered-and-declined, decider: the Emperor** | Recorded in the audience subsection + §6 rejected-alternatives (decision-declined class) + ER-1.1 | arch §4.5.1/§6; dec ER-1/A-3 |
+| **2. Audience dimension** — `audience ∈ {operation, implementation, both}` schema field + curator `audience_agents` narrow override; default ACTIVE-injection audiences **operation → {ari, leader, devops} (leader INCLUDED)**, **implementation → {leader, developer}**, **both → every agent on the project**; **per-agent budget (8 / 2,900 full-render) is a PER-AUDIENCE effective slice; audience filter FIRST, then the existing admission semantics within the visible set; every closed-form bound holds per-view (the visible set is a subset — the project-wide worst bounds every view); pin cap stays PER PROJECT (a pinned entry renders in every audience view that can see it); audience mapping by factory-captured agent_id** | Schema fields; §4.5.1 normative admission rule; §4.7 per-view constants; AC22 | arch §4.1/§4.5.1/§4.7; dec A-2/A-6/A-9/A-11/ER-1.2; plan §4.1/AC22 |
+| **3. Ari delivery seam** — structural fact recorded (today the Related-Project block injects only into project-linked working agents; Ari receives NO project injection); **Ari holds the OPERATION slice at dispatch time**: the seam sits where Ari's dispatch/work context is assembled for a target project; gates: non-default project, operation audience, same budget/fence/family semantics; **per-dispatch fresh read** (Ari is long-lived/reused — per-dispatch assembly IS the freshness mechanism; `pok_query` mid-lane); stable id `pok:{project_id}` within Ari's instance namespace; **the 8th touch-point class** | New seam subsection + file-table row + phase gates + AC24 | arch §4.5.1/§7/§10; plan §4.2/§4.5b/AC24 |
+| **4. Universal passive read — INVARIANT** — `pok_query` returns ALL entries of the project to ANY agent on it, regardless of audience tags; injection is curated, reading is free ("if agent want read them they can read any") | §4.6 invariant; AC3 re-scoped; AC23; C-4 boundary | arch §4.6; dec A-12/ER-1.4/C-4; plan AC3/AC23/§2 |
+
+### Dogfood classification (assigned honestly)
+
+| slug | audience | why |
+|---|---|---|
+| `artifact-is-container-image` | **both** | artifact truth — universal for anyone touching the project |
+| `pipeline-01-merge-master-triggers-image-ci` | **both** | devs must merge-to-master knowingly; ops must know nothing ships without CI (the ruling's own hint case) |
+| `pipeline-02-verify-image-tag-digest-feature` | **operation** | post-build verification ritual |
+| `pipeline-03-deploy-order-daoduc-backup-first` | **operation** | deploy order — pinned |
+| `deploy-01-daoduc-backup` | **operation** | Helm v28 mechanism |
+| `deploy-02-ensem-dev-primary` | **operation** | plain-kubectl mechanism |
+| `healthz-in-cluster-only` | **both** | environment property — false-negative hazard for anyone probing, devs included |
+| `model-catalogs-19-vs-22-not-drift` | **operation** | deploy-drift triage |
+
+Resulting views: **ari/leader/devops → 8; developer → 3 (artifact, CI-trigger, healthz); worker → 3 (both-only)**. Honest note: this payload is operational knowledge — **zero `implementation` facts yet**; future implementation facts slot into the same field.
+
+### Consistency requirements honored
+
+- **Closed-form bounds per-view:** the audience filter PRECEDES admission; each view is a subset of the project set, so the project-wide worst (2,811 ≤ 2,900 full-render; pinned 2,185; rows 6 ≤ 8) bounds every view — stated, not re-derived.
+- **Pin cap stays PER PROJECT** (not per audience); a pinned entry renders in every audience view that can see it (stated in §4.3/§4.7/A-9).
+- **Metadata-cap companion UNAFFECTED** — stated in §4.8 (the ruling touches POK only; the Related-Project record, its allowlist, and its caps are unchanged).
+- **AC legs added:** AC22 (audience-filtered injection: devops 8 / developer 3 / worker both-only / leader all); AC23 (universal read); AC24 (ari seam: dispatch-time operation block; no block on the default project).
+- **AC18/AC1 scoped per-view** — the spine 01→02→03 assertion holds fully in the operation view; restricted views render visible family members contiguously.
+
+### Consistency tensions hit (recorded, resolved by rule — not breaks)
+
+1. **Mixed-audience family:** `pipeline` = {01 both, 02 operation, 03 operation}. In a developer's view the family renders ONLY step 01 (audience-invisible members are excluded-for-view — the F3 semantics extended naturally). Intentional (devs need the CI trigger, not the deploy spine); AC18 amended to assert per-view.
+2. **Worker audience:** workers/gaia/tester etc. are in NO default audience set → they see `both` entries only. This is the ruling's shape ("dev team need implementation major… not all the case" — the operation slice is for the controlling/ops roles); universal read keeps everything reachable. Flagged for the Emperor's awareness in case a broader default was intended — the design follows the ruling text.
+3. **AC2 re-scoped:** the original "worker receives the same block" leg is now false by design (worker sees the both-only view); replaced with the view-correct assertion.
+
+### Verdict
+
+The ruling is folded as amendments with provenance at every site; nothing settled was reopened (canon, storage, fence, bounds, selector reuse, allowlist, sweep rules all stand; the only semantic changes are the audience dimension on ACTIVE injection, the ari seam, and the universal-read invariant). Ready for the giter to finalize (no commits by this pass).
