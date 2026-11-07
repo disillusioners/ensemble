@@ -31,22 +31,31 @@ fold batch failed to stage).
 ## 2. DISCLOSE-ONLY — no code change (ceremony material)
 
 Recorded in `7404949ef` as "W2 + A4/A8/A10 are DISCLOSE-ONLY (ceremony
-material, no code changes)". They exist **only** as identifiers in that commit
-body; no planning doc, PACKS row, or receipt in this tree states their
-substance.
+material, no code changes)". The four identifiers were originally
+substance-less (see the gap note below); they have since been filled in
+from the code-council report during the final micro-fold
+(`6cc250e9c` + `0ae815e08`), plus the D-3/D-4/D-5/M9/M10/M11/L11-13
+disclosures relayed in the same micro-fold batch.
 
-| Id | Substance | Status |
+| Id | Substance (one line) | Status |
 |---|---|---|
-| W2 | **OPEN — substance not reconstructable from any committed artifact.** | ACTION: the leader holds the code-council report; paste the one-line finding here before the ceremony so the disclosure is auditable. |
-| A4 | **OPEN — same.** | ACTION: as above. |
-| A8 | **OPEN — same.** | ACTION: as above. |
-| A10 | **OPEN — same.** | ACTION: as above. |
+| W2 | Per-dispatch assembly is the design's freshness mechanism (§4.5.1); the ari-seam adaptation delivers the operation view ONCE per (instance×project) — no refresh on repeat dispatches, and post-compaction suppression applies. Routed: restore the freshness mechanism via the `set_injection` stable-id/supersede channel in Phase 2. | DISCLOSE (no code) |
+| A4 | `pok_curate` pin-cap-2 check-then-act TOCTOU — two concurrent curators can overshoot to 3. Curator-only, bounded (≤3). | DISCLOSE (no code) |
+| A8 | Per-entry overhead comment assumes a 10-digit stale mark; a 6-digit day-mark costs 15-16c — the 332c/entry bound still holds inside the 92c slack. | DISCLOSE (no code) |
+| A10 | Every `pok_query` pays an up-to-64-row bookkeeping UPDATE + an N+1 lineage walk; the insertion path does not. v1 acceptable; Phase-2 perf pass. | DISCLOSE (no code) |
+| D-3 | `POK_ARI_SEAM_INJECTED_PROJECTS` is an unbounded set (typical usage is one project per instance; optional cap/LRU is a Phase-2 option). | DISCLOSE (no code) |
+| D-4 | No-op-echo in-memory `last_verified` may trail the DB re-stamp (conservative — clock-skew only). | DISCLOSE (no code) |
+| D-5 | A11 asserts ≤2,900 + per-entry ≤332, not the exact 2,803. | DISCLOSE (no code) |
+| M9 | `stamp_last_verified` return value is discarded — in-memory state advertises "refreshed" even if the row vanished. | DISCLOSE (no code) |
+| M10 | `ensure_embedding` never-raise docstring vs `upsert_embedding` outside the try + sync-in-async (dormant — the hook is not yet invoked). | DISCLOSE (no code) |
+| M11 | Query-path read/rank is unwrapped; embedding-lag swallowing hides the lag. | DISCLOSE (no code) |
+| L11-13 | Unwrapped laundering scan; raw exception text in agent-visible envelopes; no counter on the degraded path. | DISCLOSE (no code) |
 
-> A disclosure whose only record is a commit body is not durable: commit
-> messages are not grepped by the ceremony gates and are not part of any
-> promote payload. Recording the identifiers here converts "four unknown
-> labels" into an explicit, checkable gap — the substance still has to be
-> pasted in by whoever holds the council report.
+> The four originally-OPEN rows (W2/A4/A8/A10) were substance-less at
+> `7404949ef` time; their substance was reconstructed from the
+> code-council report during the final micro-fold and recorded here so the
+> disclosure is auditable without reading git history. The additional
+> D-3/D-4/D-5/M9/M10/M11/L11-13 rows are the micro-fold's own disclose set.
 
 ## 3. Record-integrity correction — the pack-run claim
 
