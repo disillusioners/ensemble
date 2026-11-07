@@ -294,6 +294,7 @@ from .prompt_reload import create_prompt_reload_tools
 from .nest_report import create_nest_report_tools
 from .nest_report_read import create_nest_report_read_tools
 from .memoir import create_memoir_tools
+from .pok import create_pok_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools, create_kms_tools, create_mcp_env_tools
 from .system import create_system_tools
@@ -6775,6 +6776,27 @@ Returns:
             current_instance_id=current_instance_id,
             agent_id=agent_id,
             agent_tag=version_tag,
+        )
+    )
+
+    # ── POK tools (project-operating-knowledge Phase 1, 2026-11-07) ────
+    # Same critical list-append pattern as the memoir extend above:
+    # decorator-only registration is SILENTLY INVISIBLE — this extend
+    # is the third step of the three-step registration seam
+    # (decorator + CATEGORY_MODULES entry + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_
+    # full_docs`` and ``_apply_tool_filter`` (which applies the
+    # per-agent allow list). The category is NON-privileged — the B4
+    # sweep's ``tools.allow: ["pok"]`` entries are the grant surface;
+    # the in-body role gates (curate → leader/PM) come from the
+    # factory-captured ``agent_id`` (attribution ≠ authorization).
+    tools.extend(
+        create_pok_tools(
+            manager,
+            current_instance_id=current_instance_id,
+            agent_id=agent_id,
         )
     )
 

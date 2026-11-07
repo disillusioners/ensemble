@@ -1123,6 +1123,18 @@ def scan_tools_for_full_docs(tools: list) -> None:
 CATEGORY_MODULES: dict[str, str | list[str]] = {
     "bash": "daemon.tools.bash",
     "critical_notes": "daemon.tools.critical_notes",
+    # POK Phase 1 (project-operating-knowledge, Emperor GO
+    # 2026-11-07) — the three project operating-knowledge tools
+    # (pok_upsert / pok_query / pok_curate). NON-privileged: grants
+    # flow through the per-agent ``tools.allow: ["pok"]`` entries
+    # landed by the B4 sweep (40-agent class; watcher excluded —
+    # empty allow inherits-all); authorization differences are
+    # IN-BODY role gates from the factory-captured agent_id
+    # (attribution ≠ authorization): any project-linked agent
+    # writes/reads; leader / project-manager curates. The value MUST
+    # be a ``daemon.tools.*`` path — the AST scanner resolves the
+    # value as ``daemon/tools/<parts[2:]>.py``.
+    "pok": "daemon.tools.pok",
     "project_history": "daemon.tools.project_history",
     "filesystem": "daemon.tools.filesystem",
     "time": "daemon.tools.time",
