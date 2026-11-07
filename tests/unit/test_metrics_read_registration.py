@@ -13,7 +13,7 @@ This pack pins:
   boot);
 * (b) the category is in ``PRIVILEGED_TOOL_CATEGORIES``;
 * (c) the frozenset LENGTH is 18 (nest-report-read joined 2026-11-05);
-* (d) the set is EXACTLY the nineteen entries;
+* (d) the set is EXACTLY the twenty entries;
 * (e) both tool-name universes (``DYNAMIC_TOOL_NAMES`` +
   ``KNOWN_TOOL_NAMES``) carry all three names;
 * (f) the AST scanner finds all three ``@tool`` functions (decorator-only

@@ -9,7 +9,7 @@ construction) is proven END-TO-END here, in the instance_ops shape:
 * (c) the frozenset LENGTH is 18 (nest-report-read joined 2026-11-05 as
   the eighteenth member; metrics-read joined 2026-11-03; nest-report-read
   joined 2026-11-05; memoir joined 2026-11-06 as the NINETEENTH);
-* (d) the set is EXACTLY the nineteen entries (pin);
+* (d) the set is EXACTLY the twenty entries (pin);
 * (e) ``CATEGORY_MODULES["notify-user"]`` resolves to a
   ``daemon.tools.*`` path (the AST scanner resolves the value as
   ``daemon/tools/<parts[2:]>.py`` — a ``daemon.services.*`` value is

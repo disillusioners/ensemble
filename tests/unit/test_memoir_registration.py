@@ -10,7 +10,7 @@ construction) is proven END-TO-END here, in the notify-user shape:
 * (c) the frozenset LENGTH is 19 (memoir joined 2026-11-05 as the
   eighteenth member; the nest-anomaly lineage's nest-report-read landed
   first at merge time, so memoir ships as entry #19);
-* (d) the set is EXACTLY the nineteen entries — and the expected set is
+* (d) the set is EXACTLY the twenty entries — and the expected set is
   DERIVED BY GREP AT TEST TIME (the registry's own literal, cross-checked
   against every pin file's literal), never hardcoded from prose;
 * (e) ``CATEGORY_MODULES["memoir"]`` resolves to a ``daemon.tools.*``
@@ -33,7 +33,7 @@ construction) is proven END-TO-END here, in the notify-user shape:
 
 THE CEREMONY SELF-VERIFICATION (the pin that outlives the ceremony):
 every count pin says 18; every exact-set literal (the registry's own +
-every pin file's) carries the SAME nineteen members; the ari allow array
+every pin file's) carries the SAME twenty members; the ari allow array
 ENDS with ``"memoir"``; and the standing mutation instrument's MT-01
 literals are LOCKSTEPPED (find 18 / replace 17 — never 18/18, which
 would make the mutation vacuous).

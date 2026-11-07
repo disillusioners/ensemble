@@ -129,12 +129,26 @@ Error: prompt_reload FAILED — reason=<code>: <message>
 - Unchanged inputs → `no_change`, NO pop, NO cache bust; the full
   provenance is still returned (the no-op path is the free dry-run).
 - `force=true` → pops even when unchanged (`forced_reload`).
-- A provably-stale loader cache (`hashes differ` while the loader's
-  mtime check would still hit) is BUSTED via
-  `PromptCache.invalidate` BEFORE composing — `force=true` alone cannot
-  cure a stale cache (the cache-hit would serve the old persona on the
-  next restore too). The report shows `cache_busted=true` +
-  `hash_mtime_divergence=true`.
+- **`cache_busted` means "the shared cache entry was invalidated"** —
+  it is BOTH a reporting observable AND a correctness mechanism. The
+  loader's cache-hit serves the cached persona whenever the stored and
+  current file mtimes are EQUAL (no content hash, no re-read), so an
+  mtime-preserving edit is invisible to it and the bust is the only
+  cure (`force=true` cannot cure a stale cache — the next restore would
+  serve the stale persona too). Two branches:
+  - **warm, files changed, loader-mtime-equality would still hit** →
+    bust + `hash_mtime_divergence=true` (the provable stale-cache
+    shape);
+  - **cold (no baseline in this process) + a live entry** → bust, but
+    `hash_mtime_divergence=false` (the entry's bytes are unprovable, not
+    provably divergent — no fabricated divergence claim). Busting makes
+    the compose read disk truth and keeps the recorded baseline honest
+    (it always describes the inputs of the compose that produced the
+    persona actually served — FIFO record, refreshed in place, never a
+    separate later disk read).
+- The baseline map is **FIFO, not LRU** (a refresh does not promote a
+  key); eviction is graceful — a lost record yields `unproven` on the
+  next call, which recomposes + pops.
 
 ## Kill-switch
 

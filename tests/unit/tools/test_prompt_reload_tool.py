@@ -246,6 +246,8 @@ class TestInfoLine:
         match = INFO_LINE_RE.match(lines[0])
         assert match.group("outcome") == "refused"
         assert match.group("code") == "prompt_reload_disabled"
+        # N5 pin: the explicit unknown marker for primitive-origin refusals.
+        assert "manager_instances=?->?" in lines[0]
 
     async def test_info_line_on_non_ari(self, caplog) -> None:
         manager = StubManager()

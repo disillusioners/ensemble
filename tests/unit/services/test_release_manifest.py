@@ -121,6 +121,25 @@ class TestReader:
         assert verdict.skipped_unmanifested == 0
         assert any("ari/knowledge.md" in s for s in verdict.unexpected_skips)
 
+    def test_skip_class_is_relative_to_the_agent_dir(self, tmp_path: Path) -> None:
+        """N2 truth table: the skip class is ``<agent>/memories/...`` —
+        an agent literally NAMED ``memories`` must not have its own
+        artifacts classed skippable."""
+        (tmp_path / "manifest.json").write_text(
+            '{"agents_manifest": {}}', encoding="utf-8"
+        )
+        manifest = load_release_manifest(tmp_path)
+        # <agent>/memories/<file> IS skippable.
+        inside = verify_paths(tmp_path, manifest, ["ari/memories/x.md"])
+        assert inside.ok
+        assert inside.skipped_unmanifested == 1
+        assert inside.unexpected_skips == ()
+        # An agent dir named "memories": its own artifacts are NOT.
+        agent_named_memories = verify_paths(tmp_path, manifest, ["memories/soul.md"])
+        assert not agent_named_memories.ok
+        assert agent_named_memories.skipped_unmanifested == 0
+        assert any("memories/soul.md" in s for s in agent_named_memories.unexpected_skips)
+
     def test_mismatch_detected_on_tampered_file(self, tmp_path: Path) -> None:
         release_root = _stage_release(tmp_path)
         entries = _agent_manifest_entries(release_root)

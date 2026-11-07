@@ -379,6 +379,20 @@ class TestTupleDecision:
         await _run(manager)
         assert len(pr._BASELINE_MAP) == 1
 
+    def test_baseline_map_is_bounded_and_fifo_evicted(self) -> None:
+        """N6: the baseline map's bound is pinned (production-only refs
+        otherwise) — 256 entries, FIFO eviction of the OLDEST key."""
+        assert pr._BASELINE_MAX_ENTRIES == 256
+        pr._BASELINE_MAP.clear()
+        for i in range(pr._BASELINE_MAX_ENTRIES + 2):
+            pr._record_baseline(("ari", f"tag{i}", ()), {"soul.md": "h"}, "")
+        assert len(pr._BASELINE_MAP) == pr._BASELINE_MAX_ENTRIES
+        # The two oldest keys were evicted; the newest survives.
+        assert ("ari", "tag0", ()) not in pr._BASELINE_MAP
+        assert ("ari", "tag1", ()) not in pr._BASELINE_MAP
+        newest = f"tag{pr._BASELINE_MAX_ENTRIES + 1}"
+        assert ("ari", newest, ()) in pr._BASELINE_MAP
+
 
 # ── AM-8 — the stale-cache bust (hash/mtime divergence) ─────────────────────
 
@@ -530,9 +544,14 @@ class TestClaimGuard:
         assert result.diff["persona_diff"] == "unavailable"
         assert "no persona delta is claimed" in result.message
 
-    async def test_w2_cold_start_never_busts_a_healthy_cache(self) -> None:
-        """W2 (leader ruling): with no baseline there is no stale claim —
-        a healthy shared cache must NOT be invalidated on cold start."""
+    async def test_n1_cold_start_busts_a_live_entry_so_the_compose_reads_disk(self) -> None:
+        """N1.1 (leader-ratified Candidate A — REWRITES the old W2
+        ``invalidations == []`` pin, which encoded the defect): with no
+        baseline the entry's bytes are UNPROVABLE (an mtime-preserving
+        edit is invisible to the loader's mtime-only cache-hit), so the
+        cold path MUST bust the live entry — ``cache_busted`` is a
+        correctness mechanism, not only a report flag. ``hash_mtime_
+        divergence`` stays False (no fabricated divergence — W1)."""
         manager = StubManager()
         read_set = pr._loader_read_set(
             ARI_DIR, json.loads((ARI_DIR / "meta.json").read_text())
@@ -554,10 +573,73 @@ class TestClaimGuard:
 
         result = await _run(manager, persona="P_old")
         assert result.outcome == OUTCOME_UNPROVEN
-        assert invalidations == []  # never busted
-        assert result.provenance["cache_busted"] is False
-        assert result.provenance["hash_mtime_divergence"] is False
-        assert cache_key in manager.prompt_cache._cache  # entry intact
+        assert len(invalidations) == 1  # the cold path MUST bust
+        assert result.provenance["cache_busted"] is True
+        assert result.provenance["hash_mtime_divergence"] is False  # no fabrication
+        assert (
+            result.provenance["cache_busted_reason"]
+            == "cold_process_cannot_prove_entry_bytes"
+        )
+
+    async def test_n1_cold_regression_served_persona_AND_baseline_match_disk(self) -> None:
+        """N1.5 deeper regression: cold + a live snapshot entry + an
+        mtime-PRESERVING edit ⇒ the served persona must equal DISK truth
+        AND the recorded baseline must describe that same compose's
+        inputs (the N1 poisoning: recording disk hashes beside a
+        cache-served stale persona makes every later call report
+        `no_change` while serving stale)."""
+        import hashlib as _hl
+
+        manager = StubManager()
+        read_set = pr._loader_read_set(
+            ARI_DIR, json.loads((ARI_DIR / "meta.json").read_text())
+        )
+        # The "mtime-preserving edit": the entry carries the CURRENT
+        # mtimes (so the loader's cache-hit would fire) but stale bytes.
+        preserved_mtimes = {k: p.stat().st_mtime for k, p in read_set.items()}
+        cache_key = manager.prompt_cache._make_key("ari", [], None)
+        manager.prompt_cache._cache[cache_key] = (
+            "STALE_PRE_EDIT_PERSONA", 1, {**preserved_mtimes, pr.FP_KEY: ""},
+        )
+        manager.instances["iid-1"] = (object(), str(ARI_DIR))
+
+        def _disk_digest() -> str:
+            rs = pr._loader_read_set(
+                ARI_DIR, json.loads((ARI_DIR / "meta.json").read_text())
+            )
+            h = _hl.sha256()
+            for key in sorted(rs):
+                h.update(pr._sha256_file(rs[key]).encode())
+            return "DISK:" + h.hexdigest()
+
+        def _compose(agent_id, agent_dir, cache, mcp, version_tag=None, is_custom_agent=False):
+            key = cache._make_key(agent_id, mcp, version_tag)
+            if key in cache._cache:  # loader cache-hit shape (mtime equality)
+                prompt, tokens, _ = cache._cache[key]
+                return prompt, tokens
+            persona = _disk_digest()  # the compose reads disk truth
+            cache.set(agent_id, persona, 1, {**preserved_mtimes, pr.FP_KEY: ""}, mcp, version_tag)
+            return persona, 1
+
+        with patch.object(pr, "_release_provenance", lambda: _dev_provenance()), patch(
+            "daemon.manager.load_and_cache_prompt", _compose
+        ):
+            await refresh_instance_prompt(manager, "iid-1")
+
+        expected_disk = _disk_digest()
+        served = manager.prompt_cache._cache[cache_key][0]
+        assert served == expected_disk, (
+            "the served persona must equal DISK truth — a cache-served "
+            f"stale persona is the N1 defect (served={served[:32]}…)"
+        )
+        # The recorded baseline describes the SAME compose's inputs: the
+        # per-file disk hashes.
+        recorded_hashes, _fp = pr._BASELINE_MAP[("ari", None, ())]
+        actual_disk_hashes = {k: pr._sha256_file(p) for k, p in read_set.items()}
+        assert recorded_hashes == actual_disk_hashes, (
+            "the baseline must describe the inputs of the compose that "
+            "produced the served persona — never a separate later disk read"
+        )
 
 
 # ── AC1.7 — pop semantics (P3/AM-7/D22) ─────────────────────────────────────
