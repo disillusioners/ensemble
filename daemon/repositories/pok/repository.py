@@ -268,6 +268,22 @@ class POKRepository:
             session.commit()
             return True
 
+    def stamp_last_verified(self, entry_id: str, *, now: str | None = None) -> bool:
+        """Frozen A-8 (W3): stamp ``last_verified`` (no count bump) —
+        the no-op echo path. Restarts the staleness clock so ``[stale Nd]``
+        decay is reachable naturally (a row goes stale only if it is
+        never re-echoed for POK_VERIFY_WINDOW_DAYS)."""
+        stamp = now or _utc_now_iso()
+        with Session(self._engine) as session:
+            row = session.get(ProjectOperatingKnowledge, entry_id)
+            if row is None:
+                return False
+            row.last_verified = stamp
+            row.updated_at = stamp
+            session.add(row)
+            session.commit()
+            return True
+
     def oldest_least_verified_active(
         self, project_id: str, *, exclude_ids: Sequence[str] = ()
     ) -> ProjectOperatingKnowledge | None:
