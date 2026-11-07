@@ -69,27 +69,43 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from daemon.repositories.pok.models import (
     POK_FAMILY_SLUG_PATTERN,
     ProjectOperatingKnowledge,
 )
-
-logger = logging.getLogger(__name__)
-
 # ── §4.7 sizing constants (imported from the service module's single
-#    source; re-exported here so the render arithmetic measures the
-#    same bytes the tools enforce) ──────────────────────────────────────
-from daemon.services.pok_service import (  # noqa: E402
+#    source so the render arithmetic measures the same bytes the tools
+#    enforce) ──────────────────────────────────────────────────────────
+from daemon.services.pok_service import (
     POK_BLOCK_MAX_CHARS,
     POK_BLOCK_MAX_ENTRIES,
     POK_CURATED_CAP_PER_VIEW,
-    POK_ENTRY_RENDER_MAX_CHARS,
-    POK_FAMILY_MAX,
     POK_PIN_CAP_PER_PROJECT,
     POK_VERIFY_WINDOW_DAYS,
 )
+
+__all__ = [
+    "AdmissionResult",
+    "DEFAULT_AUDIENCE_SETS",
+    "POK_BLOCK_TITLE",
+    "POK_ENTRY_TEMPLATE",
+    "POK_FAMILY_RE",
+    "POK_HEADER_LINE",
+    "POK_INJECTION_FLAG",
+    "POK_TAIL_TEMPLATE",
+    "StaleMark",
+    "ViewEntry",
+    "admit_view",
+    "effective_audience_agents",
+    "pok_block_present",
+    "render_pok_block",
+    "row_is_visible",
+    "stale_days",
+]
+
+logger = logging.getLogger(__name__)
 
 #: The once-per-instance metadata key. Written by the CONSUMER
 #: (``instance_messaging.py``, the AM-22 discipline), read fresh by
@@ -274,7 +290,7 @@ def admit_view(
     agent_id: str | None,
     query: str = "",
     query_embedding: list[float] | None = None,
-    rank_fn: Any = None,
+    rank_fn: Callable[..., Any] | None = None,
     now: datetime | None = None,
     project_id: str | None = None,
     embeddings_map: dict[str, list[float]] | None = None,
