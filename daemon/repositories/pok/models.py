@@ -47,7 +47,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, text
+from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, false, text
 from sqlmodel import Field, SQLModel
 
 from daemon.repositories.infra.types import JSONBType
@@ -146,11 +146,15 @@ class ProjectOperatingKnowledge(SQLModel, table=True):
     slug: str = Field(sa_column=Column("slug", Text, nullable=False))
     domain: str = Field(
         default=POK_DEFAULT_DOMAIN,
-        sa_column=Column("domain", Text, nullable=False),
+        sa_column=Column(
+            "domain", Text, nullable=False, server_default=POK_DEFAULT_DOMAIN
+        ),
     )
     audience: str = Field(
         default=POK_DEFAULT_AUDIENCE,
-        sa_column=Column("audience", Text, nullable=False),
+        sa_column=Column(
+            "audience", Text, nullable=False, server_default=POK_DEFAULT_AUDIENCE
+        ),
     )
     # JSON-encoded list[str] of agent ids at the service boundary;
     # NULL = use the audience's default set (§4.5.1).
@@ -160,14 +164,24 @@ class ProjectOperatingKnowledge(SQLModel, table=True):
     body: str = Field(sa_column=Column("body", Text, nullable=False))
     provenance: str = Field(
         default=POK_DEFAULT_PROVENANCE,
-        sa_column=Column("provenance", Text, nullable=False),
+        sa_column=Column(
+            "provenance",
+            Text,
+            nullable=False,
+            server_default=POK_DEFAULT_PROVENANCE,
+        ),
     )
     status: str = Field(
         default=POK_DEFAULT_STATUS,
-        sa_column=Column("status", Text, nullable=False),
+        sa_column=Column(
+            "status", Text, nullable=False, server_default=POK_DEFAULT_STATUS
+        ),
     )
     disputed: bool = Field(
-        default=False, sa_column=Column("disputed", Boolean, nullable=False)
+        default=False,
+        sa_column=Column(
+            "disputed", Boolean, nullable=False, server_default=false()
+        ),
     )
     # WIRED at the application layer (supersede txn) — deliberately
     # NOT a ForeignKey (§4.1).
@@ -192,16 +206,23 @@ class ProjectOperatingKnowledge(SQLModel, table=True):
         default=None, sa_column=Column("last_verified", Text, nullable=True)
     )
     verify_count: int = Field(
-        default=0, sa_column=Column("verify_count", Integer, nullable=False)
+        default=0,
+        sa_column=Column(
+            "verify_count", Integer, nullable=False, server_default="0"
+        ),
     )
     access_count: int = Field(
-        default=0, sa_column=Column("access_count", Integer, nullable=False)
+        default=0,
+        sa_column=Column(
+            "access_count", Integer, nullable=False, server_default="0"
+        ),
     )
     last_accessed_at: Optional[str] = Field(
         default=None, sa_column=Column("last_accessed_at", Text, nullable=True)
     )
     pinned: bool = Field(
-        default=False, sa_column=Column("pinned", Boolean, nullable=False)
+        default=False,
+        sa_column=Column("pinned", Boolean, nullable=False, server_default=false()),
     )
 
 

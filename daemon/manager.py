@@ -995,6 +995,19 @@ class InstanceManager:
             MemoirPersonaVersion,
             MemoirSynthesis,
         )
+        # POK Phase 1 (project-operating-knowledge, Emperor GO
+        # 2026-11-07): register the 2 lane tables BEFORE create_all so
+        # the PG boot path lands them on existing PG databases
+        # (SQLModel.metadata.create_all is the PG source-of-truth per
+        # the app_settings / resource_monitor / board / bash_spawn /
+        # PSL / memoir precedent). Brand-new tables ⇒ NO
+        # ``_ensure_postgres_columns`` mirror; SQLite path is the
+        # Phase-1 .sql files (20261107_110001 / 20261107_110002).
+        # B7: AC9 = scratch-PG boot materializes BOTH tables.
+        from .repositories.pok.models import (  # noqa: F401  # pok P1: register before create_all
+            ProjectOperatingKnowledge,
+            ProjectOperatingKnowledgeEmbedding,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
