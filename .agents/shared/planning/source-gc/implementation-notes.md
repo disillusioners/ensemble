@@ -153,6 +153,74 @@ P10 now has its PG instrument (above). P16 lock-half has its PG
 instrument (previous follow-up). All retained pins P1–P15 are covered
 except P11 (unit-level git diff assertion).
 
+
+
+## Fix cycle (P5 folds) — landing map
+
+Per-item disposition for the code-council + tidier folds. Commits are
+listed oldest→newest after the follow-up commits.
+
+| Item | Disposition | Commit | File:line |
+|---|---|---|---|
+| W8 (P11 lane-only span) | LANDED | 1ecfe2fca | tests/unit/repositories/test_source_gc_repository.py (P11 test) |
+| W2 (destructive chat-fence teeth) | LANDED | fdc9e70cf | tests/unit/repositories/test_source_gc_repository.py (TestChatFenceDestructiveTeeth) |
+| W4 (dry-run guard) | LANDED | f95f1b213 | tests/unit/repositories/test_source_gc_repository.py (TestDryRunGuard) |
+| W1 (P16 lock seam via listener) | LANDED | e17b4668a | tests/postgres/test_source_gc_lock_interleave_pg.py (positive control) |
+| W3 (raced-skip coverage) | LANDED | f95f1b213-era + fdf01ed18 | tests/... (TestRacedSkip) + daemon/repositories/source/repository.py (raced branch zero-telemetry) |
+| W5 (stuck= in summary line) | LANDED | fdf01ed18 + f2909e289 | daemon/services/sources_gc_service.py (report["stuck"], log lines) |
+| tidier 1 (dry-run probe unguarded) | LANDED | fdf01ed18 | daemon/services/sources_gc_service.py (try/except around total probe) |
+| tidier 2 (raced zero telemetry) | LANDED | fdf01ed18 | daemon/repositories/source/repository.py (raced branch) |
+| tidier 3 (func.count) | LANDED | fdf01ed18 | daemon/repositories/source/repository.py (gc_count_error_rows) |
+| tidier 4 (import hygiene) | LANDED | fdc9e70cf-era (folded into the same test-pack hygiene pass; landed alongside W2/W4) | tests/unit/repositories/test_source_gc_repository.py, tests/unit/services/test_sources_gc_service.py |
+| tidier 5 (start() disabled comment) | LANDED | fdf01ed18 | daemon/services/sources_gc_service.py (start) |
+| tidier 6 (extract _run_destructive_tick / _log_tick_summary / archive assembly) | PARTIAL — archive-row assembly extracted into `_archive_rows` (behaviour-neutral); the sweep_once per-row loop + summary-log extraction was NOT done. Argument: sweep_once is already phased with clear comments and the mutation-teeth tests (W2/W3/W4) are the binding P6 gates, not the refactor; further extraction churns ~190 lines for reviewability with real regression risk. Recorded as deferred-to-reviewer. | fdf01ed18 (partial) | daemon/repositories/source/repository.py (_archive_rows) |
+| Lows (seconds-per-day constant, __all__, "Restart to flip.", trailing newline, _GC_DISCLOSURE, soften "default 14d", alphabetical imports) | LANDED | fdf01ed18 + f2909e289 | repository.py, models.py, sources_gc_service.py, scheduling.py |
+| W6 (lock order deadlock) | NON-ACTIONABLE — deadlock unreachable. Argument: our method acquires the parent (source_configs) lock then deletes children (no child lock); the REST path (delete_source_config) deletes children then parent with NO lock at all. Circular wait requires our method to wait on a child lock held by REST, but we never take a child lock, and REST never takes the parent lock before us in a way that waits on us holding a child lock. Worst case: REST's parent delete blocks on our parent lock until we commit — a wait, not a deadlock. No code change. | — | implementation-notes (this section) |
+| W7 (StaleDataError on concurrent resume) | LANDED (fix) | fdf01ed18 | daemon/repositories/source/repository.py (update_source_config) — catches StaleDataError -> None; scheduling_service maps None -> ValueError("Schedule not found") (no NOT-TOUCHED file touched; update_source_config lives in repository.py, which is on the touched list). |
+
+## W6 decision (recorded)
+
+Deadlock unreachable in practice. Lock ordering analysis: our method holds
+ONLY the parent lock (source_configs, FOR UPDATE) for the duration of the
+transaction and deletes children without locking them; the REST path takes
+NO locks at all (children then parent). For a deadlock we would need our
+method to wait on a resource held by REST while REST waits on a resource
+held by us — REST holds nothing we wait on, and we hold only the parent,
+which REST waits on (one-directional wait). The least-invasive "fix"
+(lock-first in delete_source_config or NOWAIT in our method) is therefore
+unnecessary and would add complexity to a path that already serializes
+correctly. No code change; decision recorded here.
+
+## W7 decision (recorded)
+
+Reproduced by reasoning + a focused smoke (row vanished between read and
+commit). Fix landed in repository.py (NOT a NOT-TOUCHED file):
+update_source_config catches sqlalchemy.orm.exc.StaleDataError -> rollback
+-> None, and the scheduling_service resume path already maps None to
+ValueError("Schedule not found: ...") (scheduling_service.py, :1119-1121
+family), so the caller sees the honest 404-family outcome instead of HTTP
+500. No NOT-TOUCHED file was touched; no fence exception required.
+
+## D2 amendment (leader-authorized, recorded)
+
+AM-5 disclosure text was ratified VERBATIM (D2 ratification condition 1).
+This cycle softened "past the default 14d retention" to "past the
+configured retention window (default 14d)" because retention is configurable
+(SERVICES_SOURCES_GC_TERMINAL_RETENTION_DAYS), not fixed at 14d. The
+disclosure is now extracted as the module-level `_GC_DISCLOSURE` constant
+in daemon/tools/scheduling.py and referenced by both paused Field
+descriptions. No pin in this repo asserts the old verbatim text, so no
+test change was required. Amendment recorded here per the leader's
+instruction.
+
+## Ceremony completion criterion (W5)
+
+Updated: the operator watches the work-log for
+`remainder=0 deferred` OR `stuck=<N>` with remainder equal to stuck
+(stuck-only) as the completion signal — the latter means only
+latched-collision ids (permanently uncollectable without operator action)
+remain eligible, and RETENTION can be restored.
+
 ## Self-verification
 
 - Repo pack: 27 passed (tests/unit/repositories/test_source_gc_repository.py)

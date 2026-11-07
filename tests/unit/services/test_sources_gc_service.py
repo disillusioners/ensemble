@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from daemon.services.sources_gc_service import SourcesGcService
+from daemon.repositories.source.repository import GcCandidate
 
 
 def _make_repo_mock(*, candidates=(), skipped_unparseable=0, error_rows=0):
@@ -25,7 +25,6 @@ def _make_repo_mock(*, candidates=(), skipped_unparseable=0, error_rows=0):
 
 
 def _cand(sid, age_days=20.0):
-    from daemon.repositories.source.repository import GcCandidate
     return GcCandidate(source_id=sid, name=sid, status="stopped",
                        updated_at="2026-10-18T00:00:00+00:00",
                        age_days=age_days, config_json='{"run_at": "2026-01-01T00:00:00+00:00"}')

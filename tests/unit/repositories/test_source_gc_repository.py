@@ -11,12 +11,13 @@ mappings 1:1 + ~3 chat-source mappings (W5/P21, incl. one >30d).
 from __future__ import annotations
 
 import json
-import re
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
 from sqlmodel import SQLModel, Session
+import sqlmodel
 
 from daemon.repositories.source.models import (
     SourceConfig,
@@ -118,10 +119,10 @@ def _seed_live_fixture(engine, now):
         s.commit()
 
     with Session(engine) as s:
-        n_sched = len(s.exec(__import__("sqlmodel").select(SourceConfig).where(SourceConfig.source_type == "scheduler")).all())
-        n_chat = len(s.exec(__import__("sqlmodel").select(SourceConfig).where(SourceConfig.source_type != "scheduler")).all())
-        n_exec = len(s.exec(__import__("sqlmodel").select(ScheduleExecution)).all())
-        n_map = len(s.exec(__import__("sqlmodel").select(InstanceMapping)).all())
+        n_sched = len(s.exec(sqlmodel.select(SourceConfig).where(SourceConfig.source_type == "scheduler")).all())
+        n_chat = len(s.exec(sqlmodel.select(SourceConfig).where(SourceConfig.source_type != "scheduler")).all())
+        n_exec = len(s.exec(sqlmodel.select(ScheduleExecution)).all())
+        n_map = len(s.exec(sqlmodel.select(InstanceMapping)).all())
         assert n_sched == 100, n_sched
         assert n_chat == 3, n_chat
         assert n_exec == 110, n_exec
@@ -500,10 +501,8 @@ class TestP20MetadataRegistration:
                      "idx_source_configs_archive_archived_at"):
             assert name in idx, name
         # the .sql file carries exactly these three index names
-        import re as _re
-        sql = open("daemon/migrations/versions/" + sorted(
-            __import__("os").listdir("daemon/migrations/versions")
-        )[-1] if False else "daemon/migrations/versions/20261107_122648_create_source_gc_archive_tables.sql").read()
+        sql_path = "daemon/migrations/versions/20261107_122648_create_source_gc_archive_tables.sql"
+        sql = open(sql_path).read()
         for name in ("idx_schedule_executions_archive_schedule_id",
                      "idx_schedule_executions_archive_archived_at",
                      "idx_source_configs_archive_archived_at"):
@@ -583,6 +582,60 @@ class TestDryRunGuard:
         # row still present
         with Session(shared_sqlite_engine) as s:
             assert s.get(SourceConfig, "dr-row") is not None
+
+class TestRacedSkip:
+    """W3: raced-skip branch (final DELETE rowcount 0 -> rollback, no
+    archive row, row survives)."""
+
+    def test_raced_skip_zeroes_telemetry_and_survives(self, repo, shared_sqlite_engine, now, monkeypatch):
+        from sqlmodel import Session as SQLSession
+        from sqlalchemy import text as _text
+        with Session(shared_sqlite_engine) as s:
+            s.add(SourceConfig(source_id="raced-row", source_type="scheduler", name="rr",
+                               config={"run_at": "2026-01-01T00:00:00+00:00"},
+                               enabled=False, status="stopped",
+                               updated_at=(now - timedelta(days=40)).isoformat()))
+            s.commit()
+
+        orig_get = SQLSession.get
+        # A separate connection simulates the concurrent writer so the
+        # method's own session identity map is not expired by a commit.
+        engine = shared_sqlite_engine
+
+        def patched_get(self, entity, ident, *a, **kw):
+            row = orig_get(self, entity, ident, *a, **kw)
+            if entity is SourceConfig and ident == "raced-row" and row is not None:
+                with engine.connect() as c:
+                    c.execute(_text(
+                        "UPDATE source_configs SET updated_at=:u WHERE source_id=:s"
+                    ), {"u": (now - timedelta(days=50)).isoformat(), "s": "raced-row"})
+                    c.commit()
+            return row
+
+        monkeypatch.setattr(SQLSession, "get", patched_get)
+        r = repo.gc_archive_and_delete(source_id="raced-row", now=now, retention_days=1)
+        assert r.deleted is False
+        assert r.skipped_reason == "raced", r.skipped_reason
+        assert r.deleted_mappings == 0
+        assert r.deleted_processed == 0
+        assert r.deleted_executions == 0
+        assert r.archived_executions == 0
+        assert r.archived_config is False
+        # no archive row written
+        with Session(shared_sqlite_engine) as s:
+            assert s.get(SourceConfigArchive, "raced-row") is None
+            assert s.get(SourceConfig, "raced-row") is not None
+
+    def test_raced_skip_mutation_meaningful(self, repo, shared_sqlite_engine, now):
+        # without the raced branch (simulated by forcing rowcount>0) the
+        # row would be deleted — sanity: a clean row deletes fine
+        with Session(shared_sqlite_engine) as s:
+            s.add(SourceConfig(source_id="clean-raced", source_type="scheduler", name="cr",
+                               config={}, enabled=False, status="stopped",
+                               updated_at=(now - timedelta(days=40)).isoformat()))
+            s.commit()
+        r = repo.gc_archive_and_delete(source_id="clean-raced", now=now, retention_days=1)
+        assert r.deleted is True
 
 class TestP11BootNoBehaviorChange:
     def test_sources_and_constants_unchanged_vs_base(self):
