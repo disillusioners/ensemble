@@ -30,9 +30,9 @@
 | 5 | `deploy-01-daoduc-backup` | deploy-01 | environment | operation | The backup deployment is a Helm release; rollouts and rollbacks move by Helm revision number. (93c) | 68a80f90-detail + 6dcc0ed9 |
 | 6 | `deploy-02-ensem-dev-primary` | deploy-02 | environment | operation | The primary deployment is plain kubectl apply; no Helm — roll forward by applying manifests. (92c) | 68a80f90-detail |
 | 7 | `healthz-in-cluster-only` | (unordered) | verify | both | Health answers only in-cluster; an outside probe gets 404 — false-negative, not an outage. (90c) | 68a80f90-detail |
-| 8 | `model-catalogs-19-vs-22-not-drift` | (unordered) | catalog | operation | Model catalogs differ per environment (19 vs 16); a count difference is config, not drift. (90c) | 14b4bbdc |
+| 8 | `model-catalogs-19-vs-22-not-drift` | (unordered) | catalog | operation | Catalogs differ: primary 22 vs backup 19 — config, not drift; primary-only agentic-Main, deepseek, opendesign-flash, quick-main; backup-only coding-free (problematic). (167c — leader-mandated delta-shape exemption, ≤240 fence budget held) | 14b4bbdc + 14b4bbbc (stale 10-20 lineage) · fresh probe 2026-11-07T11:51:42Z, /tmp/pok_models_primary.json + /tmp/pok_models_backup.json |
 
-All bodies: single paragraph, fence-clean (no newline / leading `#` / `[SYSTEM CONTEXT:` / backticks), escape-aware budget ≤240 trivially (no `&`/`<`/`>` in any body), §11 bound 54–93c held (89–93c). Families: `pipeline` 01→02→03 ordered spine; `deploy` 01/02 ordered atomic contrast pair; 1/7/8 unordered. Views (ER-1): ari/leader/devops → 8; developer → 3 (rows 1, 2, 7).
+All bodies: single paragraph, fence-clean (no newline / leading `#` / `[SYSTEM CONTEXT:` / backticks), escape-aware budget ≤240 trivially (no `&`/`<`/`>` in any body), §11 sizing 54–93c held on entries 1–7 (89–93c) — **entry 8 is the 2026-11-07 leader-mandated exemption** (fresh-probe delta shape cannot fit 93c; ceiling = the fence's 240-escaped budget; final length 167c FLAGGED per the mandate). Families: `pipeline` 01→02→03 ordered spine; `deploy` 01/02 ordered atomic contrast pair; 1/7/8 unordered. Views (ER-1): ari/leader/devops → 8; developer → 3 (rows 1, 2, 7).
 
 ## Insert receipts — run 1 (2026-11-07T11:44:14Z, action=created × 8)
 
@@ -47,7 +47,18 @@ All bodies: single paragraph, fence-clean (no newline / leading `#` / `[SYSTEM C
 | healthz-in-cluster-only | `411d4441-c8ef-49ec-ad6d-02f278be6217` | both | agent | 11:44:14.513226 |
 | model-catalogs-19-vs-22-not-drift | `cba42550-56bc-432d-a3be-63cb9af60bd8` | operation | agent | 11:44:14.535288 |
 
-**Total: 8 active entries** (store-wide `count(*) = 8`), attribution `leader` on every row, `provenance=observed`, `source_tier=agent` (Phase-2 default — tier statements are curator calls and none were made at capture), `status=active`.
+**Total: 8 active entries** (store-wide `count(*) = 8` at run 1), attribution `leader` on every row, `provenance=observed`, `source_tier=agent` (Phase-2 default — tier statements are curator calls and none were made at capture), `status=active`.
+
+## Data-fix receipt — run 3 (2026-11-07T11:56:41Z, the 22/19 fresh-probe correction)
+
+Leader ruling (fresh probe 2026-11-07T11:51:42Z): primary `llm.ensem.dev` = 22, backup `llm.daoduc.org` = 19 — the design's "19-vs-22" is today's fact; the 10-20 note counts (19 vs 16) are stale. Slug STRING stays design-verbatim (verified byte-identical post-edit). Counts + delta independently verified against the raw probe artifacts before the write (primary-only `{agentic-Main, deepseek, opendesign-flash, quick-main}`; backup-only `{coding-free}`).
+
+| slug | action | old entry id (→ superseded) | new entry id (active) | at (UTC) |
+|---|---|---|---|---|
+| model-catalogs-19-vs-22-not-drift | **supersede** | `cba42550-56bc-432d-a3be-63cb9af60bd8` | `dab0ae27-409f-4b45-984a-1e9fe75d6a7e` | 11:56:41.319647 |
+| *(the other 7 slugs)* | **no-op** ×7 | — | (ids unchanged from run 1) | 11:56:41 |
+
+Append-with-supersede wiring verified in-store: old row `status=superseded`, `superseded_by_id=dab0ae27-409f-4b45-984a-1e9fe75d6a7e` (flipped at 11:56:41.320117); store now 9 rows = 8 active + 1 superseded; pin on pipeline-03 untouched. Run 4 (immediately after) echoes **8× no-op** on the new state — the re-runnable guarantee holds post-fix.
 
 ## Pin receipt — `pok_curate` (§4.5 row 4)
 
@@ -59,9 +70,9 @@ All bodies: single paragraph, fence-clean (no newline / leading `#` / `[SYSTEM C
 | original pin | run 1, ≈2026-11-07T11:44:14Z (in-place curate — no history row) |
 | re-assert (run 2) | `updated_at=2026-11-07T11:44:31.687282+00:00` — the standing pinned state |
 
-## Idempotency proof — run 2 (re-runnable; Phase-1.5 replay depends on it)
+## Idempotency proof — runs 2 and 4 (re-runnable; Phase-1.5 replay depends on it)
 
-Second run of the same script: project row looked up (never re-created), all 8 slugs echoed **`action=no-op`** (exact-dup, tier unchanged, zero new rows — entry ids byte-identical to run 1), pin re-asserted, post-write verify `8/8`. Append-with-supersede makes re-runs safe by construction.
+Re-runs of the same script: project row looked up (never re-created), every slug whose active body matches echoes **`action=no-op`** (exact-dup, tier unchanged, zero new rows), pin re-asserted, post-write verify `8/8`. Run 2 proved it for the original payload; run 4 proved it again for the post-fix state (all 8 no-op, model-catalogs echoing on its new id `dab0ae27-409f-4b45-984a-1e9fe75d6a7e`). Append-with-supersede makes re-runs safe by construction — a fact change takes the supersede path exactly once, then stabilizes.
 
 ## Schema materialization (dev)
 

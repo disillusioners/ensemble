@@ -10,9 +10,12 @@ invented facts. Provenance: ``observed`` for every entry (§4.5).
 Every body satisfies the write-time fence (single paragraph, no leading
 ``#``, no ``[SYSTEM CONTEXT:``, no backticks, no newlines) and the
 escape-aware budget (``len(escape_for_context_block(body)) <= 240``)
-trivially; each is also held to the §11 per-body bound of 54–93
-characters. The runner (``seed_llmproxy_payload.py``) re-validates all of
-this with the REAL service-layer fences before any write.
+trivially; each is also held to the §11 per-body SIZING bound of 54–93
+characters — with ONE leader-mandated exemption (entry 8, 2026-11-07:
+the fresh-probe delta shape cannot fit 93c; its ceiling is the write
+fence's 240-escaped budget, `body_bound=240`, final length FLAGGED in
+the receipt doc). The runner re-validates all of this with the REAL
+service-layer fences before any write.
 
 Per-entry family/audience table (§11 verbatim):
 
@@ -34,6 +37,14 @@ ordered spine) and ``deploy`` (01/02, the ordered atomic CONTRAST pair:
 backup Helm vs primary plain-kubectl). Entries 1, 7, 8 are unordered.
 Resulting views (ER-1): ari/leader/devops (operation ∪ both) → all 8;
 developer (implementation ∪ both) → 3 (entries 1, 2, 7).
+
+ENTRY-8 FACT BASIS (2026-11-07 leader ruling, FRESH PROBE 11:51:42Z):
+primary ``llm.ensem.dev`` = 22 models, backup ``llm.daoduc.org`` = 19 —
+the design's "19-vs-22" is TODAY's factual contrast; the 10-20 critical
+note (19 vs 16, ids 14b4bbbc/14b4bbdc) is STALE, superseded by the probe.
+Counts/delta verified against the raw artifacts ``/tmp/pok_models_primary.json``
++ ``/tmp/pok_models_backup.json`` (counted, never transcribed). The slug
+STRING stays design-verbatim (ruling: correct, must not change).
 
 STATUS: dev-proven (ensemble_dev, Phase 3 dogfood), LIVE-GATED — Phase 1.5
 live replay runs this same module against the live llmproxy project row
@@ -71,6 +82,15 @@ class SeedEntry:
     body: str
     #: critical-note id(s) whose substance the body synthesizes.
     source_note_ids: tuple[str, ...]
+    #: §11 payload SIZING is 54–93c. A leader-mandated exemption may raise
+    #: one entry's ceiling (entry 8, 2026-11-07: the mandated delta shape
+    #: cannot fit 93c — ceiling raised to the write fence's 240-escaped
+    #: budget; final length FLAGGED in the receipt). Default stays 93.
+    body_bound: int = 93
+    #: ANNOTATION-ONLY observation citation (timestamp + raw probe artifact
+    #: paths) — never injected; POK bodies carry facts, lineage lives here
+    #: and in the receipts doc (seed-payload-llmproxy.md).
+    probe_ref: str = ""
 
 
 SEED_ENTRIES: tuple[SeedEntry, ...] = (
@@ -148,11 +168,28 @@ SEED_ENTRIES: tuple[SeedEntry, ...] = (
         slug="model-catalogs-19-vs-22-not-drift",
         domain="catalog",
         audience="operation",
+        # 2026-11-07 leader ruling (FRESH PROBE 11:51:42Z): primary
+        # llm.ensem.dev = 22 models, backup llm.daoduc.org = 19 — the
+        # design's "19-vs-22" IS today's factual contrast; the 10-20
+        # note (19 vs 16) is STALE. Slug stays DESIGN-VERBATIM. Delta
+        # shape verified against the raw probe artifacts (counted, not
+        # transcribed): primary-only {agentic-Main, deepseek,
+        # opendesign-flash, quick-main}; backup-only {coding-free} —
+        # the known problematic proxy-side row (D7 morning item).
+        # Stale-note lineage: 14b4bbbc/14b4bbdc (10-20 counts,
+        # superseded by this probe).
         body=(
-            "Model catalogs differ per environment (19 vs 16); a count "
-            "difference is config, not drift."
+            "Catalogs differ: primary 22 vs backup 19 — config, not "
+            "drift; primary-only agentic-Main, deepseek, "
+            "opendesign-flash, quick-main; backup-only coding-free "
+            "(problematic)."
         ),
-        source_note_ids=("14b4bbdc",),
+        source_note_ids=("14b4bbdc", "14b4bbbc"),
+        body_bound=240,
+        probe_ref=(
+            "observed 2026-11-07T11:51:42Z via /tmp/pok_models_primary.json "
+            "(primary, 22) + /tmp/pok_models_backup.json (backup, 19)"
+        ),
     ),
 )
 

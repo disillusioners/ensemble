@@ -232,10 +232,11 @@ def _validate_payload() -> None:
                 f"REFUSED (budget) {entry.slug}: escaped {escaped} > "
                 f"{POK_BODY_MAX_CHARS}"
             )
-        if not 54 <= len(entry.body) <= 93:
+        if not 54 <= len(entry.body) <= entry.body_bound:
             raise SystemExit(
-                f"REFUSED (§11 bound) {entry.slug}: body is {len(entry.body)}c, "
-                "bound is 54–93c"
+                f"REFUSED (body bound) {entry.slug}: body is {len(entry.body)}c, "
+                f"bound is 54-{entry.body_bound}c (§11 sizing 93; entry-8 "
+                "leader-mandated delta-shape exemption rides body_bound)"
             )
         if len(entry.slug) > POK_SLUG_MAX_CHARS:
             raise SystemExit(f"REFUSED (slug) {entry.slug}: > {POK_SLUG_MAX_CHARS}c")
