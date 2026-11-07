@@ -279,6 +279,17 @@ def build_metadata() -> dict:
 # design's arithmetic. The first fixture draft put the remainder into
 # ``description`` — structurally faithful to "big row" but unfaithful to
 # the cap arithmetic; corrected (see lane report).
+#
+# RIDER (leader ruling #2, 2026-11-07): the ``/home/nea/agents-ensemble``
+# paths below (main_directory + related_directories) are INERT FENCED
+# FIXTURE DATA — the string is never contacted, resolved, stat'ed, or
+# walked by anything in this module or its harness; it exists only so
+# the basis calibration lands EXACTLY on the pinned 408,809 B whole-
+# project JSON record (POK_DESIGN_WHOLE_JSON_BASIS_BYTES). The lane
+# that produced this fixture ran under the zero-live-contact fence
+# (9797 / /home/nea/agents-ensemble / ensemble_prod are LIVE); the
+# path literal is calibration payload, NOT a probe target. Change ZERO
+# payload bytes when editing — comment/docstring only.
 
 _STRUCTURAL: dict[str, object] = {
     "project_id": "83da04de-0000-4000-8000-000000000001",
