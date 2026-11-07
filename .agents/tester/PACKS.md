@@ -31,6 +31,35 @@
 | `pok_pg_materialization` | `timeout 300 env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD .venv/bin/python -m pytest tests/postgres/test_pok_tables_pg.py --override-ini="addopts=" -m postgres -q` (serial) | 9 nodes — AC9: BOTH tables materialize on the fenced scratch PG; §4.1 column set; .sql↔PG two-artifact agreement; all four CHECK vocabularies (incl. the ER-1 audience CHECK) + it FIRES; `uq_pok_active_slug` partial index materialized + binding (dual-active IntegrityErrors; supersede frees); zero FKs (rollback-inert, materialized); B7 metadata registry | 2026-11-07 @ `5d1f3d79a` | **PASS 9/9** |
 | `pok_ceremony_pins` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_pok_grant_pins.py tests/unit/test_anomaly_report_grant_pins.py tests/unit/tools/test_tool_category_artifact.py tests/unit/metrics/test_metrics_vocabulary_amendment.py -q` | 45 nodes — the B4 grant walk (45 explicit / 46 meta; watcher exempt; insert-before ordering; canary append-end; ari tail preserved), vocab==8, artifact==62+pok, the re-pinned allow-array constants (gaia/sketcher/critic/board-registration ari set), the seal map | 2026-11-07 @ `16b4e70b2` | **PASS 45/45** |
 | `pok_mutation_matrix` | plant → targeted pack run → revert → GREEN rerun (per-pin cycles; file backups, never git-checkout on uncommitted state) | M-POK-1 remove grant → walk REDs (2) · M-POK-2 move off nest-report adjacency → ordering REDs · M-POK-3 artifact count 61 → REDs · M-POK-4 VOCAB 7 → REDs (3) · M-POK-5 gaia constant reverted → REDs (2) · baseline-red→green evidence: 4 pre-existing tripwire drifts + seal map + artifact drift | 2026-11-07 | **PASS 5/5 active + 6 baseline-red legs** |
+<!-- pok-phase1-metadata-cap-gate-begin -->
+## Commission POK Phase 1 — metadata ALLOWLIST companion (readiness task 8, D4) registration (2026-11-07, lane `feature/project-operating-knowledge` @ `0befdf0b4`; owner: coder pok-impl-20261107 — second-coder lane)
+
+> **What this block registers.** The §4.8/A-14 Related-Project metadata ALLOWLIST + caps
+> in `_format_project_json_section` (additive to the metadata-section renderer only) and
+> the BEFORE/AFTER measurement harness (leader G-4 widening: BOTH framings delivered).
+> Allowlist = the frozen 12 key families verbatim (11 exact + `plugin_*` prefix;
+> `staged_release_*_composition` deliberately the cap TARGET — flagged discrepancy
+> carried to the leader). Caps: 2,000c/key serialized + 16,384c full-render block incl.
+> wrapper + count-only `_omitted_metadata_keys` tail INSIDE the fence (no dead
+> pointers; allowlist binds over the block cap — AC6/AC15). Harness:
+> `tests/measurements/pok_d4_harness.py` (`--phase before|after`) + design-calibrated
+> fixture (`pok_d4_payload_fixture.py`, bases pinned EXACTLY to the recorded live
+> 279,810 B / 408,809 B / 68.4 %); artifacts in `.agents/shared/metrics/pok-metadata-cap-{baseline,after}.md`.
+> Keep-both with the core-surface block below — newest-first honored.
+>
+> **Fences (every run):** worktree venv (`.venv/bin/python`), explicit test paths,
+> `timeout`-bounded, serial, no whole-tree pytest, zero :9797 contact; the harness's
+> dev-real leg runs READ-ONLY against `ensemble_dev` with per-variable env scrubs
+> (`env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER -u
+> POSTGRES_PASSWORD` — never `env -u POSTGRES_*`) + fence assert before connect.
+> AsyncMock census: N/A — the capped renderer is fully synchronous (no new awaits).
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `pok_metadata_cap_unit` | `timeout 300 .venv/bin/python -m pytest tests/unit/services/test_pok_metadata_cap_unit.py -q` | 23 nodes — AC6 (named allowlisted key verbatim untruncated — fails if absent/truncated; all 11 exact families + `plugin_*` prefix verbatim; non-allowlisted 2,000c/key serialized + explicit remainder marker; short values pass through; 16,384c block cap on the FULL render incl. wrapper; omitted-count tail exact; no tail when nothing omitted), AC15 (allowlist = recovery path under cap pressure; dropped names ABSENT — count-only tail, no dead pointers; truncated keys carry the marker), AC12 mechanism (fixture two-basis recompute lands exactly on 279,810 / 408,809 / 68.45 %; render determinism), regression (no-metadata & small-metadata byte-identical to the pre-cap renderer; input dict never mutated; `plugins_*` boundary NOT allowlisted; `staged_release_*_composition` capped vs ceremony_notes verbatim — the decided-interpretation pin; `critical_notes` still dropped; non-dict metadata ignored; cap constants + allowlist size pinned; the design-calibrated fixture leg 352,991 B → ≤16,384 B with 49 omitted) | 2026-11-07 @ `0befdf0b4` | **PASS 23/23** |
+| `pok_metadata_cap_regression` | `timeout 600 .venv/bin/python -m pytest tests/unit/test_context_messages.py tests/unit/services/test_context_messages_stable_id.py tests/unit/services/test_kv_ambient_fresh_c3.py -q` | the touched file's pre-existing regression surface (the renderer sits inside `build_project_context_message`) — no behavior change below the caps | 2026-11-07 @ `0befdf0b4` | **PASS 140 passed / 1 skipped** |
+| `pok_metadata_cap_mutation_matrix` | plant → targeted pack run → revert → GREEN rerun (per-pin cycles; file backups, never git-checkout on uncommitted state) | M-D4-1 `ari_plane_tracking_policy` off the allowlist → AC6 verbatim leg REDs · M-D4-2 per-key cap 2,000→10⁷ → cap leg REDs · M-D4-3 block cap 16,384→10⁷ → block-cap leg REDs · M-D4-4 tail-key assignment removed → tail leg REDs · M-D4-5 allowlisted keys join the droppable set → AC15 recovery leg REDs · M-D4-6 prefix widened `plugin`→matches `plugins_*` → boundary leg REDs · M-D4-7 tail names the dropped keys → no-dead-pointer leg REDs · M-D4-8 marker stripped (bare 2,000c cut) → marker leg REDs | 2026-11-07 | **PASS 8/8** |
+<!-- pok-phase1-metadata-cap-gate-end -->
 <!-- pok-phase1-core-surface-gate-end -->
 <!-- v0291-staged-verification-begin -->
 ## v0.29.1 STAGED VERIFICATION registration (2026-11-07; staged tree `24e098245f9afc481c1824d5974ebb6b6f812bcf`; binary `99c5c144…f115532b` 4-way; tag `2c06196b1` PUSHED; origin/latest == staged tree; RESULTS: 2026-11-07-v0291-staged-verification.md)
