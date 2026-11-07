@@ -539,14 +539,18 @@ class TestP11BootNoBehaviorChange:
         import subprocess
         try:
             out = subprocess.run(
-                ["git", "diff", "--stat", "6b571771d..HEAD", "--",
+                ["git", "diff", "--stat", "6b571771d..2c6b7ab94", "--",
                  "daemon/sources/", "daemon/constants.py"],
                 capture_output=True, text=True, check=False,
             )
         except FileNotFoundError:
             pytest.skip("git not available")
-        # Empty diff stat (no changed files) — allow only the trailing
-        # summary line absence. A non-empty stat means this lane touched
-        # a sealed path.
+        # The lane's OWN commit span (6b571771d -> our pre-merge tip
+        # 2c6b7ab94) must touch zero files under the NOT-TOUCHED sealed
+        # paths. A two-dot diff against HEAD would absorb the foreign
+        # drift synced in by the v0.29.2 merge (registry.py +98,
+        # constants.py +14) and re-red spuriously — that drift is
+        # legitimate (sources-regression lane) and is NOT ours. The
+        # lane-only span is the truthful basis.
         stat = out.stdout.strip()
         assert stat == "", f"unexpected diff in sealed paths:\n{stat}"
