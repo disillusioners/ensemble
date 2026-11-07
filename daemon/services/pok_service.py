@@ -79,6 +79,14 @@ POK_ACTIVE_CAP_PER_PROJECT = 64
 #: pin admission cap — PER PROJECT (pins render in every audience view
 #: that can see the entry).
 POK_PIN_CAP_PER_PROJECT = 2
+#: curated-band admission cap — PER VIEW (trust-tier addendum T-2):
+#: at most 2 curated rows admitted into the curated band of one
+#: agent's view, INSIDE the shared 8-entry / 2,900c budget (no
+#: separate slice). Named worst case 6 pinned-family + 2 curated
+#: = 8 rows → 2,811 ≤ 2,900 — identical to the standing §4.5:110
+#: derivation (the bound is a function of admitted count × entry
+#: ceiling, not of which band supplied the entries).
+POK_CURATED_CAP_PER_VIEW = 2
 #: family admission bound.
 POK_FAMILY_MAX = 3
 #: FULL rendered block incl. wrapper — PER-VIEW (audience filter

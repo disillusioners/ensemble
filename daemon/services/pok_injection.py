@@ -19,23 +19,39 @@ Pipeline (order is load-bearing):
 2. **Exclusions within the visible set** (F3 extended): disputed
    rows are excluded-for-view (suppress injection, stay readable);
    an audience-INVISIBLE member is an excluded row FOR THAT VIEW.
+   Phase 2 (trust-tier addendum T-2/T-4): an audience-invisible
+   CURATED row is likewise an excluded row FOR THAT VIEW — no
+   curated drag, no cross-view leakage.
 3. **Pinned tier first** (≤2 pins, PER PROJECT): a pinned member
    carries its whole visible family adjacent in slug order at the
    pinned position; a doubly-pinned family is counted ONCE on rows
    AND chars; a pinned-member exclusion CANCELS the drag.
-4. **Ranked actives**: the remaining visible rows in selector-fusion
+4. **CURATED BAND** (Phase 2 — trust-tier addendum T-2): curated
+   rows of the visible set in slug order, cap 2 PER VIEW, NO family
+   drag (each curated row is its own unit — a curated member does
+   NOT pull its family; the family's other members stay ranked
+   candidates), all INSIDE the shared 8-entry / 2,900c budget (no
+   separate slice). Non-fitting curated units are skipped
+   (pinned-tier precedent). No ranking boost (rejected Option A —
+   B5/A-12 prohibit POK-invented weights): band placement, not a
+   tier multiplier. NO in-block [CURATED] marker in v1 (conservative
+   default — band position signals status; the 332c entry ceiling
+   stays exact).
+5. **Ranked actives**: the remaining visible rows in selector-fusion
    rank (B5 reuse — zero POK-invented weights; the turn-1 user
    query drives the fusion, the ari seam passes the empty query and
    the selector's floor supplies the deterministic baseline), with
    the 30-day decay rank-down (``[stale Nd]`` — ranks down, never
-   drops).
-5. **F5 rider**: stop where rendered chars would exceed
+   drops). A family containing an already-band-admitted member
+   renders its REMAINING visible members as one ranked unit (the
+   band admits single rows only).
+6. **F5 rider**: stop where rendered chars would exceed
    ``POK_BLOCK_MAX_CHARS`` (2,900, FULL block wrapper-inclusive) or
    entries would exceed ``POK_BLOCK_MAX_ENTRIES`` (8); the tail
-   counts the remainder. Families atomic throughout — a family is
-   admitted whole (visible members contiguous in slug order) or not
-   at all; zero visible survivors → the family does not render in
-   that view.
+   counts the remainder. Families atomic throughout the ranked scan
+   — a family is admitted whole (visible members contiguous in slug
+   order) or not at all; zero visible survivors → the family does
+   not render in that view.
 
 NEVER-RAISE contract (§4.9): every public entry returns a result
 object; all store failures degrade to "no block" + WARNING (the
@@ -68,6 +84,7 @@ logger = logging.getLogger(__name__)
 from daemon.services.pok_service import (  # noqa: E402
     POK_BLOCK_MAX_CHARS,
     POK_BLOCK_MAX_ENTRIES,
+    POK_CURATED_CAP_PER_VIEW,
     POK_ENTRY_RENDER_MAX_CHARS,
     POK_FAMILY_MAX,
     POK_PIN_CAP_PER_PROJECT,
@@ -199,7 +216,10 @@ class ViewEntry:
 
     row: ProjectOperatingKnowledge
     stale: StaleMark | None = None
-    tier: str = "ranked"  # "pinned" | "ranked"
+    # "pinned" | "curated" (Phase 2 curated band) | "ranked" — the
+    # band position carries the curated status in-block (addendum
+    # T-4: NO in-block [CURATED] marker in v1).
+    tier: str = "ranked"
 
     def render(self) -> str:
         # Content fence (A-29 render side): flatten newlines FIRST,
@@ -356,9 +376,40 @@ def admit_view(
             if fam is not None:
                 consumed_fams.add(fam)
 
-        # 4. RANKED ACTIVES: non-pinned candidates in selector-fusion
-        #    rank; the decay ranks down WITHIN the ranked list (stable
-        #    partition, order preserved within each side — AC5).
+        # 3.5 CURATED BAND (Phase 2 — trust-tier addendum T-2):
+        #     curated rows of the visible set, slug order, cap 2 PER
+        #     VIEW, NO family drag, SHARED budget. Rows already
+        #     admitted by the pinned drag (a pinned family may carry
+        #     a curated member — the drag consumes it) are skipped.
+        #     Non-fitting units are skipped (pinned-tier precedent —
+        #     the band keeps trying later rows until the cap or the
+        #     pool is exhausted). The band admits SINGLE rows: a
+        #     curated member does NOT pull its family (no curated
+        #     drag — the family's other members remain ranked
+        #     candidates, consumed-aware below).
+        curated_pool = sorted(
+            (
+                r
+                for r in candidates
+                if r.source_tier == "curated" and r.id not in consumed_ids
+            ),
+            key=lambda r: r.slug,
+        )
+        curated_admitted = 0
+        for crow in curated_pool:
+            if curated_admitted >= POK_CURATED_CAP_PER_VIEW:
+                break
+            n, c = _unit_cost([crow])
+            if not _fits(n, c):
+                continue
+            _admit([crow], tier="curated")
+            consumed_ids.add(crow.id)
+            curated_admitted += 1
+
+        # 4. RANKED ACTIVES: non-pinned, non-band candidates in
+        #    selector-fusion rank; the decay ranks down WITHIN the
+        #    ranked list (stable partition, order preserved within
+        #    each side — AC5).
         ranked_pool = [r for r in candidates if r.id not in consumed_ids]
         if rank_fn is not None:
             try:
@@ -393,7 +444,15 @@ def admit_view(
             if fam is not None:
                 if fam in consumed_fams or fam in emitted_fams:
                     continue
-                members = families.get(fam, [row])
+                members = [
+                    m for m in families.get(fam, [row]) if m.id not in consumed_ids
+                ]
+                if not members:
+                    # Every visible member already admitted by a band
+                    # (curated single-row admissions) — nothing left
+                    # to emit for this family.
+                    emitted_fams.add(fam)
+                    continue
                 emitted_fams.add(fam)
             else:
                 if row.id in consumed_ids:
