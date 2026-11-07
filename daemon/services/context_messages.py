@@ -1295,6 +1295,111 @@ def _format_history_section(history_entries: list[dict]) -> str:
     return "\n".join(rendered) + "\n"
 
 
+# ─── POK D2 — Related-Project metadata ALLOWLIST + caps (arch §4.8 / A-14) ─────
+
+# The 12 §4.8 key families, VERBATIM: 11 exact names + the ``plugin_*``
+# prefix family. Allowlisted metadata values render VERBATIM, untruncated
+# (the recovery path — AC6/AC15). Widening the allowlist is a deliberate
+# one-line data change HERE (e.g. adding a prefix to
+# ``POK_METADATA_ALLOWLIST_PREFIXES``) — the cap logic reads only these
+# two constants. NOTE: ``staged_release_*_composition`` records are the
+# cap TARGET (the bulk being cut) and are deliberately NOT allowlisted;
+# only ``staged_release_v0290_ceremony_notes`` is named by the design.
+POK_METADATA_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "ari_plane_tracking_policy",
+        "plane_workspace_discipline",
+        "deferred_key_rotation",
+        "deferred_key_rotation_f7_addition",
+        "upgrade_policy",
+        "upgrade_workflow_preference",
+        "blueprint_active",
+        "dependency_self_install_philosophy",
+        "self_provisioning_directive",
+        "opendesign_decisions",
+        "staged_release_v0290_ceremony_notes",
+    }
+)
+POK_METADATA_ALLOWLIST_PREFIXES: tuple[str, ...] = ("plugin_",)
+
+# Non-allowlisted metadata values cap at 2,000 serialized chars per key
+# (truncation marker appended, design "2000c/key"). The whole rendered
+# section caps at 16,384 chars measured on the FULL render (header +
+# fence + escaped payload + closing fence — the §4.9 "full block incl.
+# wrapper" precedent). Keys that cannot fit are OMITTED entirely and
+# counted in a synthetic tail key — never stubbed (no dead pointers).
+POK_METADATA_KEY_CAP_CHARS: int = 2_000
+POK_METADATA_SECTION_CAP_CHARS: int = 16_384
+POK_METADATA_OMITTED_TAIL_KEY: str = "_omitted_metadata_keys"
+POK_METADATA_TRUNCATION_MARKER: str = "…[truncated +{omitted}c]"
+
+
+def _is_pok_allowlisted_metadata_key(key: str) -> bool:
+    """§4.8 allowlist membership: exact names + the ``plugin_`` prefix family."""
+    return key in POK_METADATA_ALLOWLIST or key.startswith(POK_METADATA_ALLOWLIST_PREFIXES)
+
+
+def _cap_pok_metadata_value(value: Any) -> Any:
+    """Cap one non-allowlisted metadata value at ``POK_METADATA_KEY_CAP_CHARS``.
+
+    Values whose serialized form fits pass through UNCHANGED (identity
+    preserved). Oversize values are truncated on their serialized form and
+    carry an explicit remainder marker — the value stays a JSON string so
+    the fenced dump remains parseable, and the marker states what was cut
+    (no silent loss, no dead pointer).
+    """
+    try:
+        serialized = json.dumps(value, ensure_ascii=True)
+    except (TypeError, ValueError):
+        serialized = str(value)
+    if len(serialized) <= POK_METADATA_KEY_CAP_CHARS:
+        return value
+    omitted = len(serialized) - POK_METADATA_KEY_CAP_CHARS
+    return serialized[:POK_METADATA_KEY_CAP_CHARS] + POK_METADATA_TRUNCATION_MARKER.format(
+        omitted=omitted
+    )
+
+
+def _apply_pok_metadata_caps(project_dict: Any) -> Any:
+    """Stage 1 — per-key caps on non-allowlisted ``metadata`` values.
+
+    Returns the ORIGINAL object untouched when there is no ``metadata``
+    dict or nothing needed capping (the empty/small-metadata path stays
+    byte-identical to the pre-cap renderer). Never mutates the input
+    (it may be ``vars(project)`` — live object state).
+    """
+    if not isinstance(project_dict, dict):
+        return project_dict
+    metadata = project_dict.get("metadata")
+    if not isinstance(metadata, dict) or not metadata:
+        return project_dict
+    capped: dict[str, Any] = {}
+    changed = False
+    for key, value in metadata.items():
+        if _is_pok_allowlisted_metadata_key(key):
+            capped[key] = value
+            continue
+        new_value = _cap_pok_metadata_value(value)
+        changed = changed or (new_value is not value)
+        capped[key] = new_value
+    if not changed:
+        return project_dict
+    out = dict(project_dict)
+    out["metadata"] = capped
+    return out
+
+
+def _copy_with_metadata_dropped(project_dict: dict, dropped_keys: set[str]) -> dict:
+    """Copy of ``project_dict`` whose ``metadata`` omits ``dropped_keys``."""
+    out: dict[str, Any] = {}
+    for key, value in project_dict.items():
+        if key == "metadata" and isinstance(value, dict):
+            out[key] = {k: v for k, v in value.items() if k not in dropped_keys}
+        else:
+            out[key] = value
+    return out
+
+
 def _format_project_json_section(project: Any, critical_notes: list[dict]) -> str:
     """Render the ``## Related Project`` JSON block for the builder.
 
@@ -1313,6 +1418,18 @@ def _format_project_json_section(project: Any, critical_notes: list[dict]) -> st
         Markdown subsection text starting with the ``## Related
         Project`` header followed by a fenced JSON dump, or an empty
         string when ``project`` is ``None``.
+
+    POK §4.8 metadata caps (A-14/D2): the ``metadata`` dict inside the
+    payload is allowlist-gated — the 12 §4.8 key families render
+    VERBATIM untruncated; non-allowlisted values cap at
+    ``POK_METADATA_KEY_CAP_CHARS`` (2,000) serialized chars per key
+    with an explicit remainder marker; the FULL rendered section caps
+    at ``POK_METADATA_SECTION_CAP_CHARS`` (16,384) incl. wrapper
+    (original-order greedy: overflow non-allowlisted keys are dropped
+    from the end and counted in the ``_omitted_metadata_keys`` tail —
+    no dead pointers; allowlisted keys are never dropped, AC6/AC15).
+    Payloads with no ``metadata`` (or nothing to cap) render
+    byte-identically to the pre-cap renderer.
     """
     if project is None:
         return ""
@@ -1333,7 +1450,49 @@ def _format_project_json_section(project: Any, critical_notes: list[dict]) -> st
         project_dict = {k: v for k, v in project_dict.items() if k != "critical_notes"}
 
     try:
-        payload = json.dumps(project_dict, indent=2, ensure_ascii=True)
+        # POK §4.8 stage 1 — per-key caps on non-allowlisted metadata
+        # values (no-op byte-identically when metadata is small/clean).
+        project_dict = _apply_pok_metadata_caps(project_dict)
+
+        metadata: Any = (
+            project_dict.get("metadata") if isinstance(project_dict, dict) else None
+        )
+        variable_keys: list[str] = (
+            [
+                key
+                for key in metadata
+                if not _is_pok_allowlisted_metadata_key(key)
+            ]
+            if isinstance(metadata, dict) and metadata
+            else []
+        )
+
+        # POK §4.8 stage 2 — whole-section block cap (16,384 chars measured
+        # on the FULL rendered section incl. wrapper, escaped payload
+        # included). Selection is original-order greedy: the EARLIEST
+        # non-allowlisted keys survive; overflow keys are dropped from the
+        # END and counted in the synthetic tail key. Allowlisted keys are
+        # NEVER dropped or truncated (AC6/AC15 — the allowlist is the
+        # recovery path and binds over the block cap).
+        final_dict: Any = project_dict
+        dropped = 0
+        while isinstance(metadata, dict) and metadata and variable_keys:
+            if dropped:
+                trial = _copy_with_metadata_dropped(
+                    project_dict, set(variable_keys[len(variable_keys) - dropped :])
+                )
+                trial[POK_METADATA_OMITTED_TAIL_KEY] = dropped
+            else:
+                trial = project_dict
+            rendered = json.dumps(trial, indent=2, ensure_ascii=True)
+            rendered = escape_for_context_block(rendered)
+            section = "## Related Project\n\n```json\n" + rendered + "\n```\n"
+            if len(section) <= POK_METADATA_SECTION_CAP_CHARS or dropped == len(variable_keys):
+                final_dict = trial
+                break
+            dropped += 1
+
+        payload = json.dumps(final_dict, indent=2, ensure_ascii=True)
     except (TypeError, ValueError) as exc:
         logger.warning(f"[ContextMessages] Failed to serialize project dict: {exc}")
         return ""
