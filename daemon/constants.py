@@ -143,6 +143,19 @@ COMPLETION_GATE_ESCALATED_DISPLAY: str = "completed (gate escalated — unverifi
 # pins (``webhook:gh-hook`` / ``whatsapp:1234`` → False).
 CHAT_SOURCE_PREFIXES: tuple[str, ...] = ("telegram:", "slack:", "discord:")
 
+# ── Source config listing bounds (wi-b97ec302) ────────────────────────────
+# ``list_source_configs`` pages with ``ORDER BY created_at DESC LIMIT n``
+# and its historical default was ``limit=100``. That cap is a page size,
+# NOT a completeness contract: once inert one-shot scheduler rows (each
+# re-arm writes a fresh row with a newer ``created_at`` and the row is
+# never deleted) grew past 100, the oldest chat rows were evicted from
+# page 1 — boot auto-start and both list surfaces silently stopped seeing
+# them. Data-growth-triggered latent defect (present since the 2026-03
+# default-limit wiring; NOT a release regression — the release window was
+# proven exonerated by same-data repro on the prior build).
+SOURCE_CONFIG_PAGE_SIZE: int = 500   # fixed page size for "read every row" scans
+SOURCE_LIST_HARD_MAX: int = 1000     # safety ceiling for any single LIST page
+
 # ── Rate Limits (messages_per_second, burst_size) ─────────────────────────────────
 TELEGRAM_RATE_LIMIT: tuple[int, int] = (30, 30)  # Telegram: 30 msg/sec
 WEBHOOK_RATE_LIMIT: tuple[int, int] = (100, 100)  # Webhook: 100 req/sec

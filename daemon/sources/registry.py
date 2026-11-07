@@ -19,7 +19,11 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from daemon.constants import INJECTION_ELIGIBLE_STATUSES, ROUTING_ENVELOPE_KEYS
+from daemon.constants import (
+    INJECTION_ELIGIBLE_STATUSES,
+    ROUTING_ENVELOPE_KEYS,
+    SOURCE_CONFIG_PAGE_SIZE,
+)
 from daemon.services.mission_record_service import (
     attach_founding_message_fail_open,
     resolve_or_mint_fail_open,
@@ -283,14 +287,27 @@ class SourceRegistry:
         if not registered, and schedules auto-start for all enabled,
         autostart sources. Auto-started sources are delayed by
         AUTOSTART_DELAY_SECONDS to let the service settle on boot.
+
+        Every row is observed: configs are paged with a fixed page size
+        (SOURCE_CONFIG_PAGE_SIZE) instead of a single default-limited
+        repository call — the repository's page cap is a page size, not a
+        completeness contract, and >100 newer inert rows evicted the
+        oldest chat rows from page 1 (wi-b97ec302; data-growth-triggered
+        latent defect, not a release regression). After the per-row
+        decisions, a reconciliation pass flips stale ``running`` rows this
+        boot did NOT schedule/start back to ``stopped``
+        (:meth:`_reconcile_stale_running`) — the ordering is load-bearing
+        (a pre-loop sweep would flip running→stopped and the per-row
+        guard would then skip auto-start for rows this boot must start).
         """
         logger.info("Loading and scheduling auto-start for enabled adapters...")
         self._stopping = False
         
-        # Load configs from database
-        configs = await asyncio.to_thread(self._source_repo.list_source_configs)
+        # Load ALL configs from database (fixed-size pages until a short page).
+        configs = await self._load_all_configs()
         
         scheduled_count = 0
+        scheduled_ids: set[str] = set()
         for config in configs:
             if not config.enabled:
                 logger.debug(f"Skipping disabled source: {config.source_id}")
@@ -334,12 +351,81 @@ class SourceRegistry:
             
             # Schedule a delayed auto-start (1 minute after service boot)
             self._schedule_autostart(source_id)
+            scheduled_ids.add(source_id)
             scheduled_count += 1
         
         logger.info(
             f"Scheduled auto-start for {scheduled_count} adapters "
             f"(delayed {self.AUTOSTART_DELAY_SECONDS}s)"
         )
+
+        # Reconcile stale running rows AFTER the per-row decisions above —
+        # ordering is load-bearing (see start_all docstring).
+        await self._reconcile_stale_running(scheduled_ids)
+
+    async def _load_all_configs(self, status: str | None = None) -> list:
+        """Load every matching source config, paging past the repository page cap.
+
+        The repository's ``list_source_configs`` default returns ONE page
+        (ORDER BY created_at DESC LIMIT 100); callers that must observe
+        every row page with a fixed size until a short page. A hard row
+        ceiling bounds the loop so a misbehaving repository double can
+        never wedge boot.
+        """
+        page_size = SOURCE_CONFIG_PAGE_SIZE
+        max_rows = page_size * 200  # ceiling: 100k rows — far above any real deployment
+        configs: list = []
+        offset = 0
+        while offset < max_rows:
+            page = await asyncio.to_thread(
+                self._source_repo.list_source_configs, None, status, page_size, offset
+            )
+            configs.extend(page)
+            if len(page) < page_size:
+                return configs
+            offset += page_size
+        logger.warning(
+            "Source config paging hit the %s-row ceiling; the remainder was not loaded",
+            max_rows,
+        )
+        return configs
+
+    async def _reconcile_stale_running(self, scheduled_ids: set[str]) -> None:
+        """Flip DB rows still ``running`` that this boot did not schedule/start.
+
+        ``stop_all`` persists nothing (``persist_status=False``), so after
+        an unclean shutdown the ``source_configs`` table can keep rows
+        stuck at ``status='running'`` with no live adapter behind them.
+        Rows this boot scheduled (about to be started) or that are already
+        registered are spared. Runs best-effort: any failure logs a
+        warning and NEVER blocks boot.
+        """
+        try:
+            protected = scheduled_ids | set(self._adapters.keys())
+            running_rows = await self._load_all_configs(status=SourceStatus.RUNNING.value)
+            reconciled = 0
+            for row in running_rows:
+                if row.source_id in protected:
+                    continue
+                try:
+                    await asyncio.to_thread(
+                        self._source_repo.update_source_status,
+                        row.source_id,
+                        SourceStatus.STOPPED.value,
+                    )
+                    reconciled += 1
+                except Exception as row_error:
+                    logger.warning(
+                        "Failed to reconcile stale running source %s: %s",
+                        row.source_id,
+                        row_error,
+                    )
+            if reconciled:
+                logger.info(
+                    "Reconciled %d stale running source rows to stopped", reconciled
+                )
+        except Exception as sweep_error:
+            logger.warning("Source status reconciliation skipped: %s", sweep_error)
 
     def _schedule_autostart(self, source_id: str) -> None:
         """Schedule a delayed auto-start for a source.

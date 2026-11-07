@@ -424,7 +424,16 @@ class SQLModelSourceRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> list[SourceConfig]:
-        """List source configurations with optional filters."""
+        """List source configurations with optional filters.
+
+        ``limit``/``offset`` page ONE window of rows ordered
+        ``created_at DESC``. The default ``limit=100`` is a page size for
+        paged callers — it is NOT a completeness contract: callers that
+        must observe EVERY row (boot auto-start, unpaged listings) page
+        with a fixed page size (``SOURCE_CONFIG_PAGE_SIZE``) until a short
+        page instead of relying on this default (wi-b97ec302: >100 newer
+        inert scheduler rows evicted the oldest chat rows from page 1).
+        """
         with Session(self.engine) as session:
             stmt = select(SourceConfig)
             
@@ -435,6 +444,28 @@ class SQLModelSourceRepository:
             
             stmt = stmt.order_by(col(SourceConfig.created_at).desc()).offset(offset).limit(limit)
             return list(session.exec(stmt))
+
+    def count_source_configs(
+        self,
+        enabled: bool | None = None,
+        status: str | None = None,
+    ) -> int:
+        """Count source configurations with the same filters as ``list_source_configs``.
+
+        Dialect-safe aggregate (plain ``COUNT(*)`` — identical on SQLite
+        and PostgreSQL). Used by the LIST surfaces so a paged response can
+        carry the untruncated ``total`` alongside the returned page.
+        """
+        from sqlmodel import func
+
+        with Session(self.engine) as session:
+            stmt = select(func.count()).select_from(SourceConfig)
+            if enabled is not None:
+                stmt = stmt.where(SourceConfig.enabled == enabled)
+            if status is not None:
+                stmt = stmt.where(SourceConfig.status == status)
+            return int(session.exec(stmt).one())
+
 
     def update_source_status(
         self,
