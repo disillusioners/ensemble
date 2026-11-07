@@ -239,6 +239,9 @@ def create_pok_tools(
             )
         except POKError as exc:
             return _err(exc.code, exc.message, **exc.details)
+        except Exception as exc:  # noqa: BLE001 — M13
+            logger.exception("pok_upsert store error")
+            return _err("pok_store_error", f"POK store error: {type(exc).__name__}")
         entry = outcome.entry
         logger.info(
             "[POK] upsert action=%s slug=%s project=%s by=%s audience=%s "
@@ -315,6 +318,9 @@ def create_pok_tools(
             )
         except POKError as exc:
             return _err(exc.code, exc.message, **exc.details)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("pok_query store error")
+            return _err("pok_store_error", f"POK store error: {type(exc).__name__}")
         entries = []
         for e in outcome.entries:
             item = {
@@ -441,6 +447,12 @@ def create_pok_tools(
             )
         except POKError as exc:
             return _err(exc.code, exc.message, **exc.details)
+        except Exception as exc:  # noqa: BLE001 — M13
+            logger.exception("pok_curate store error")
+            return _err("pok_store_error", f"POK store error: {type(exc).__name__}")
+        # M12: curate() can return None — guard the dereference.
+        if row is None:
+            return _err("pok_not_found", f"entry {slug!r} vanished during curate")
         logger.info(
             "[POK] curate slug=%s project=%s by=%s "
             "pinned=%s disputed=%s archived=%s audience=%s audience_agents=%s "

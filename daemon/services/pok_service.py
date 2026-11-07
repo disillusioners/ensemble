@@ -253,6 +253,35 @@ class QueryOutcome:
 # ── the service ───────────────────────────────────────────────────────────
 
 
+def _is_slug_unique_violation(exc: BaseException) -> bool:
+    """D-1/H2 (council micro-fold, 2026-11-07): narrow the
+    ``uq_pok_active_slug`` race discriminator. ONLY a unique
+    violation on the slug-partial index counts as ``pok_slug_conflict``;
+    everything else (NOT NULL, FK, CHECK, generic) is RE-RAISED so it
+    is never mislabeled.
+
+    * PostgreSQL: pgcode 23505 (unique_violation) AND the constraint
+      name ``uq_pok_active_slug`` in the message (or the word "slug").
+    * SQLite / generic: a UNIQUE message that names "slug" (the house
+      message is "UNIQUE constraint failed: …slug"), OR the literal
+      index name. A NOT NULL / CHECK violation never contains "slug"
+      and is therefore rejected here.
+    """
+    msg = str(exc).upper()
+    orig = getattr(exc, "orig", None)
+    pgcode = getattr(orig, "pgcode", None)
+    if pgcode == "23505":
+        # unique_violation — but only the slug index qualifies
+        if "UQ_POK_ACTIVE_SLUG" in msg or "SLUG" in msg:
+            return True
+        return False
+    if "UQ_POK_ACTIVE_SLUG" in msg:
+        return True
+    if "UNIQUE" in msg and "SLUG" in msg:
+        return True
+    return False
+
+
 class POKService:
     """Write/query/curate policy over one engine-passed repository."""
 
@@ -355,12 +384,15 @@ class POKService:
                     "authorization)",
                 )
             effective_tier = source_tier
-        # 3. write-time fence (A-29).
+        # 3. strip FIRST, then the write-time fence (M8, council
+        # micro-fold 2026-11-07): what is stored is what was
+        # refusal-checked. Previously the fence ran on the raw body and
+        # a leading-whitespace bypass (e.g. "  #foo") slipped through.
+        body = body.strip()
         fence = fence_check(body)
         if fence is not None:
             raise fence
         # 4. escape-aware budget (W5): measure AFTER escaping.
-        body = body.strip()
         if escape_fn is None:
             from daemon.services.context_messages import (
                 escape_for_context_block as escape_fn,  # noqa: PLC0415
@@ -459,15 +491,15 @@ class POKService:
         try:
             self._repo.insert(entry)
         except Exception as exc:  # noqa: BLE001 — integrity race → typed
-            if "IntegrityError" in type(exc).__name__ or "UNIQUE" in str(exc).upper():
-                raise POKError(
-                    "pok_slug_conflict",
-                    "a concurrent write landed the same active slug — "
-                    "re-read via pok_query and retry (the unique partial "
-                    "index uq_pok_active_slug guards dual-active)",
-                    slug=slug,
-                ) from exc
-            raise
+            if not _is_slug_unique_violation(exc):
+                raise  # re-raise: NOT a slug conflict (D-1/H2)
+            raise POKError(
+                "pok_slug_conflict",
+                "a concurrent write landed the same active slug — "
+                "re-read via pok_query and retry (the unique partial "
+                "index uq_pok_active_slug guards dual-active)",
+                slug=slug,
+            ) from exc
         return UpsertOutcome(action="created", entry=entry)
 
     def _supersede(
@@ -545,14 +577,14 @@ class POKService:
         try:
             self._repo.supersede_and_insert(prior, successor)
         except Exception as exc:  # noqa: BLE001 — integrity race → typed
-            if "IntegrityError" in type(exc).__name__ or "UNIQUE" in str(exc).upper():
-                raise POKError(
-                    "pok_slug_conflict",
-                    "a concurrent supersede landed on the same active "
-                    "slug — re-read via pok_query and retry",
-                    slug=slug,
-                ) from exc
-            raise
+            if not _is_slug_unique_violation(exc):
+                raise  # re-raise: NOT a slug conflict (D-1/H2)
+            raise POKError(
+                "pok_slug_conflict",
+                "a concurrent supersede landed on the same active "
+                "slug — re-read via pok_query and retry",
+                slug=slug,
+            ) from exc
         return UpsertOutcome(
             action="superseded", entry=successor, superseded_id=prior_id
         )
@@ -881,6 +913,13 @@ class POKService:
 
     # ── embeddings companion (lazy-mint hook) ────────────────────────────
 
+    # WIRED-BUT-DORMANT (M10, council micro-fold 2026-11-07):
+    # the embedding hook is design-required (schema + service
+    # presence) but no caller invokes it yet — the lazy-mint path
+    # lands in a later phase. Drift-risk mitigation: this comment
+    # marks the dormancy so a future reader does not assume the
+    # hook is live. upsert_embedding (the sync primitive) is the
+    # real entry point; ensure_embedding wraps it with never-raise.
     async def ensure_embedding(self, entry_id: str) -> bool:
         """Best-effort single-entry embedding mint (the write-path
         hook). ``False`` = lag (the entry reads BM25-only until the

@@ -335,7 +335,7 @@ class TestTypedEchoTaxonomy:
 
         def boom(self, entry):
             raise sqlalchemy.exc.IntegrityError(
-                "INSERT ...", {}, Exception("UNIQUE constraint failed")
+                "INSERT ...", {}, Exception("UNIQUE constraint failed: project_operating_knowledge.project_id, project_operating_knowledge.slug")
             )
 
         repo_mod.POKRepository.insert = boom
@@ -345,6 +345,33 @@ class TestTypedEchoTaxonomy:
             repo_mod.POKRepository.insert = orig_insert
         assert out.get("code") == "pok_slug_conflict", out
         assert "error" in out
+
+    def test_unrelated_integrity_error_is_not_mislabeled(self, tool_env) -> None:
+        """D-1/H2: a NOT NULL violation is NOT mislabeled
+        ``pok_slug_conflict`` — it surfaces as ``pok_store_error``."""
+        import sqlalchemy
+
+        from daemon.repositories.pok import repository as repo_mod
+
+        orig_insert = repo_mod.POKRepository.insert
+
+        def boom(self, entry):
+            raise sqlalchemy.exc.IntegrityError(
+                "INSERT ...", {}, Exception("NOT NULL constraint failed: domain")
+            )
+
+        repo_mod.POKRepository.insert = boom
+        try:
+            tools = create_pok_tools(
+                _manager(tool_env, "p1", "developer"),
+                current_instance_id="inst-1",
+                agent_id="developer",
+            )
+            out = tools[0].invoke({"slug": "unrel-a", "body": "body"})
+        finally:
+            repo_mod.POKRepository.insert = orig_insert
+        assert out.get("code") != "pok_slug_conflict", out
+        assert out.get("code") == "pok_store_error", out
 
     def test_noop_echo_note(self, tool_env) -> None:
         tools = create_pok_tools(

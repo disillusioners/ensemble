@@ -343,6 +343,27 @@ class TestAc18Ordering:
 # ── AC5: the decay ───────────────────────────────────────────────────────
 
 
+class TestSlugSlotFlatten:
+    """D-2 (council micro-fold): render-time slug flatten (A2)."""
+
+    def test_evil_slug_is_flattened_no_fake_line(self) -> None:
+        row = _row("evil\nFAKE", audience="both", body="body")
+        result = admit_view([row], agent_id="ari", now=NOW)
+        block = render_pok_block(result)
+        # flattened: no newline survives; "FAKE" is mid-line, never a
+        # line of its own
+        assert "\nFAKE" not in block
+        assert not any(line.strip() == "FAKE" for line in block.splitlines())
+        assert "evil" in block and "FAKE" in block
+
+    def test_tool_valid_slug_renders_byte_unchanged(self) -> None:
+        slug = "pipeline-01-merge-master-triggers-image-ci"
+        row = _row(slug, audience="both", body="body")
+        result = admit_view([row], agent_id="ari", now=NOW)
+        block = render_pok_block(result)
+        assert slug in block
+
+
 class TestAc5Decay:
     def test_stale_mark_renders_and_ranks_down_never_drops(self) -> None:
         old = (NOW - timedelta(days=45)).isoformat()

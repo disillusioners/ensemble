@@ -118,6 +118,23 @@ def _load_worktree_env() -> dict[str, str]:
             continue
         key, _, value = line.partition("=")
         env[key.strip()] = value.strip()
+    # M14 (council micro-fold, 2026-11-07): fail-closed on missing or
+    # partial .env keys — a stray/partial .env must never drive a
+    # write with a defaulted/empty credential.
+    required = (
+        "ENSEMBLE_SELF_ENV",
+        "POSTGRES_HOST",
+        "POSTGRES_PORT",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+    )
+    missing = [k for k in required if not env.get(k)]
+    if missing:
+        raise SystemExit(
+            f"REFUSED: {ENV_PATH} is missing required keys {missing} "
+            "— fix the worktree .env (per-variable, never `env -u POSTGRES_*`)"
+        )
     return env
 
 
@@ -349,13 +366,15 @@ def _seed(engine, project_id: str) -> None:
 def main() -> None:
     env = _load_worktree_env()
     engine = _build_engine(env)
-    _assert_dev(engine)
-    _ensure_pok_tables(engine)
-    project_id, created = _resolve_or_create_project(engine)
-    _validate_payload()
-    _seed(engine, project_id)
-    engine.dispose()
-    print("[done] seed complete (re-run = exact-dup no-op echo per slug)")
+    try:
+        _assert_dev(engine)
+        _ensure_pok_tables(engine)
+        project_id, created = _resolve_or_create_project(engine)
+        _validate_payload()
+        _seed(engine, project_id)
+        print("[done] seed complete (re-run = exact-dup no-op echo per slug)")
+    finally:
+        engine.dispose()
 
 
 if __name__ == "__main__":
