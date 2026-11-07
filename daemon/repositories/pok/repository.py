@@ -27,20 +27,17 @@ txn maintains the lineage wire.
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Sequence
 
-from sqlalchemy import text as sa_text  # noqa: F401  (kept for parity)
 from sqlmodel import Session, select
 
 from daemon.repositories.pok.models import (
-    POK_STATUSES,
     ProjectOperatingKnowledge,
     ProjectOperatingKnowledgeEmbedding,
 )
 
-logger = logging.getLogger(__name__)
+__all__ = ["POKRepository", "UNSET"]
 
 
 def _utc_now_iso() -> str:
