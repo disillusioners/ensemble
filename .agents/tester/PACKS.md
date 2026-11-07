@@ -1,3 +1,26 @@
+<!-- v0291-staged-verification-begin -->
+## v0.29.1 STAGED VERIFICATION registration (2026-11-07; staged tree `24e098245f9afc481c1824d5974ebb6b6f812bcf`; binary `99c5c144…f115532b` 4-way; tag `2c06196b1` PUSHED; origin/latest == staged tree; RESULTS: 2026-11-07-v0291-staged-verification.md)
+
+> **Outcome:** **STAGED-VERIFIED PASS-WITH-NOTES — ceremony-ready.** S1 PASS (4-way sha; manifest delta
+> exactly 5 scalars + 1 agents-map file `ari/meta.json`; migration census 122==122 CArchiveReader both
+> binaries; payload source-less; baseline 181 both trees) · S2 PASS (isolated FROZEN boot: scratch
+> release-mirror, `env -i` allowlist, SWEEP=0 pinned, SELF_ENV=sandbox, private scratch PG cluster;
+> **frozen registry proof — all 44 agent_dirs under the mirror's `agents/`, zero source paths**;
+> prompt_reload staged-present/live-absent; roster 20/20; artifact v7/61 triple-identity; allow 36;
+> SIGTERM rc=143; state.json `a1460853…` PRE==MID==POST; network census loopback-only) · S3
+> PASS-WITH-NOTES (module symbols +3/0; VOCAB 7v6 via bytecode dis — 3.14 `LOAD_SMALL_INT` gotcha
+> KB-recorded; marker literals code-object-level) · S4 PASS (symlink/state.json/scripts-pin
+> ARM-CLEAN/retention 6 candidate v0.28.13/promote command; livez 0.29.0 one disclosed GET).
+> Official run 2 after two worker-side probe bugs (MEI-selection gotcha KB-recorded). Keep-both with
+> the prompt-reload gate block below — newest-first honored.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `v0291_sv_integrity` | read-only: 4-way sha re-hash, sidecar parse, tag peel local+origin, manifest scalar+map diff, CArchiveReader migration census both binaries, payload source-less probes, baseline `--check` ×2 trees | S1 #1–8 | 2026-11-07 @ `24e098245` | **PASS 8/8** |
+| `v0291_sv_smoke_frozen` | one-shot: scratch release-mirror boot of the COPIED frozen binary (`env -i` allowlist, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned, `ENSEMBLE_SELF_ENV=sandbox`, private scratch PG16.15 cluster, scratch port 10097, mock LLM) + assertion set a–g; scaffolding `/tmp/pr-sv-v0291/` | S2 a–g incl. frozen-registry headline proof + roster/artifact/meta + teardown + live fence | 2026-11-07 (official run 2) | **PASS a–g** |
+| `v0291_sv_oneway` | PYZ TOC symbol census staged-vs-live + bytecode `dis` VOCAB probe + code-object consts | S3 #9–11 | 2026-11-07 | **PASS-WITH-NOTES** |
+| `v0291_sv_ceremony` | read-only: current symlink, state.json fields+sha, scripts-pin ancestry (`84df6b55c` ⊇ floor `2147c0298` rc=0), retention census, promote command, one disclosed livez GET | S4 #12–17 | 2026-11-07 | **PASS 6/6** |
+<!-- v0291-staged-verification-end -->
 <!-- prompt-reload-functional-gate-begin -->
 ## Commission prompt-reload — FUNCTIONAL GATE registration (2026-11-07, gate @ `5b34e6857a192af87b1bb80ebedf397b110a7c99` post-tidier; TRUE base `8eba09c20e2fa5b0b54296712e15ac0df599856f`; harness `/home/nea/ensemble-src-wt-prompt-reload-harness` detached @ HEAD, B3-ordered, restored 379/379; RESULTS: 2026-11-07-prompt-reload-functional-gate.md)
 
