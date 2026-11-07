@@ -82,6 +82,7 @@ from daemon.services.context_messages import (  # noqa: E402
 
 from payload_llmproxy import (  # noqa: E402  (local data module)
     PINNED_SLUG,
+    POK_ENTRY_BODY_BOUND_DEFAULT,
     SEED_AGENT_ID,
     SEED_ENTRIES,
     TARGET_PROJECT_DESCRIPTION,
@@ -237,10 +238,18 @@ def _validate_payload() -> None:
                 f"{POK_BODY_MAX_CHARS}"
             )
         if not 54 <= len(entry.body) <= entry.body_bound:
+            exempt = (
+                ""
+                if entry.body_bound == POK_ENTRY_BODY_BOUND_DEFAULT
+                else (
+                    f" (ceiling raised to {entry.body_bound}c by the "
+                    "leader-mandated delta-shape exemption)"
+                )
+            )
             raise SystemExit(
                 f"REFUSED (body bound) {entry.slug}: body is {len(entry.body)}c, "
-                f"bound is 54-{entry.body_bound}c (§11 sizing 93; entry-8 "
-                "leader-mandated delta-shape exemption rides body_bound)"
+                f"bound is 54-{entry.body_bound}c "
+                f"(§11 sizing {POK_ENTRY_BODY_BOUND_DEFAULT}){exempt}"
             )
         if len(entry.slug) > POK_SLUG_MAX_CHARS:
             raise SystemExit(f"REFUSED (slug) {entry.slug}: > {POK_SLUG_MAX_CHARS}c")

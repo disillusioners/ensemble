@@ -71,6 +71,11 @@ TARGET_PROJECT_DESCRIPTION = (
 #: Write attribution (curator-of-record per plan §4.5) — enables the pin.
 SEED_AGENT_ID = "leader"
 
+#: §11 per-entry body sizing for unflagged entries (54–93c). An entry may
+#: raise its OWN ``SeedEntry.body_bound`` under a leader-mandated exemption
+#: (entry 8, 2026-11-07); the runner reports the two cases distinctly.
+POK_ENTRY_BODY_BOUND_DEFAULT = 93
+
 
 @dataclass(frozen=True)
 class SeedEntry:
@@ -86,7 +91,7 @@ class SeedEntry:
     #: one entry's ceiling (entry 8, 2026-11-07: the mandated delta shape
     #: cannot fit 93c — ceiling raised to the write fence's 240-escaped
     #: budget; final length FLAGGED in the receipt). Default stays 93.
-    body_bound: int = 93
+    body_bound: int = POK_ENTRY_BODY_BOUND_DEFAULT
     #: ANNOTATION-ONLY observation citation (timestamp + raw probe artifact
     #: paths) — never injected; POK bodies carry facts, lineage lives here
     #: and in the receipts doc (seed-payload-llmproxy.md).
