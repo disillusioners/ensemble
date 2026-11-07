@@ -288,7 +288,17 @@ def _record_baseline(
     hashes: dict[str, str],
     db_fingerprint: str,
 ) -> None:
-    """Write one baseline record, evicting the OLDEST past the size bound."""
+    """Write one baseline record, evicting the OLDEST past the size bound.
+
+    FIFO, not LRU (N4): re-recording an existing key does NOT promote it;
+    eviction is graceful because a lost record only yields ``unproven`` on
+    the next call (which recomposes + pops).
+
+    INVARIANT (N1.4): ``hashes`` MUST be the same pre-compose snapshot
+    that fed the decision tuple — the record must always describe the
+    inputs of the compose that produced the persona actually served.
+    Never pass a hashes map sourced from a separate/later disk read.
+    """
     _BASELINE_MAP[key] = (hashes, db_fingerprint)
     while len(_BASELINE_MAP) > _BASELINE_MAX_ENTRIES:
         _BASELINE_MAP.pop(next(iter(_BASELINE_MAP)), None)
@@ -703,10 +713,18 @@ async def _refresh_impl(
             provenance,
         )
 
-    # ── Read-set derivation + hashes (AM-1/AM-8) ────────────────────────────
+    # ── Read-set derivation + THE compose-input snapshot (AM-1/AM-8/N1) ─────
+    # Hashes + mtimes are captured ONCE, immediately before the decision
+    # and compose below, and this SAME snapshot feeds BOTH the decision
+    # tuple and the baseline record. INVARIANT (N1.4): a baseline must
+    # always describe the inputs of the compose that produced the persona
+    # actually served — never a separate later disk read. The N1 defect
+    # was exactly that: `_record_baseline` recorded DISK hashes while the
+    # served persona came from a stale CACHE HIT, poisoning the map so
+    # every later call reported `no_change` while serving stale bytes.
     read_set = _loader_read_set(resolved_dir, agent_file_meta)
-    current_hashes = {key: _sha256_file(path) for key, path in read_set.items()}
-    current_mtimes = {key: path.stat().st_mtime for key, path in read_set.items()}
+    compose_input_hashes = {key: _sha256_file(path) for key, path in read_set.items()}
+    compose_input_mtimes = {key: path.stat().st_mtime for key, path in read_set.items()}
 
     # ── Manifest verification (D3/AM-2/AM-3) ────────────────────────────────
     if manifest_mode == "skip-dev":
@@ -810,7 +828,7 @@ async def _refresh_impl(
     # ── Baseline-map consult + tuple decision (D5 — hash-based, AM-8) ───────
     baseline_key = (agent_id, version_tag, tuple(sorted(mcp_names)))
     baseline = _BASELINE_MAP.get(baseline_key)
-    files_changed = baseline is None or baseline[0] != current_hashes
+    files_changed = baseline is None or baseline[0] != compose_input_hashes
     # fingerprint_changed (Advisory 8): the DB operand differs from the
     # baseline's stored value; false on unproven (no baseline to compare).
     fingerprint_changed = (
@@ -822,22 +840,40 @@ async def _refresh_impl(
     hash_mtime_divergence = False
     cache_busted = False
 
-    # Stale-cache bust (AM-8): files changed WHILE a baseline exists and
-    # the loader's own mtime+fingerprint equality would still HIT → the
-    # cache provably serves the stale persona on THIS compose AND the
-    # next restore. W2: cold start (no baseline) NEVER busts a healthy
-    # shared cache — there is no stale claim to make without a baseline.
-    if baseline is not None and files_changed and snapshot_entry is not None:
-        stored_mtimes = snapshot_entry[2]
-        file_keys_match = {
-            key: value for key, value in stored_mtimes.items() if key != FP_KEY
-        } == current_mtimes
-        fp_match = stored_mtimes.get(FP_KEY) == db_fingerprint
-        if file_keys_match and fp_match:
-            hash_mtime_divergence = True
+    # Stale-cache bust (AM-8 / N1 — leader-ratified Candidate A). The
+    # loader's cache-hit (loader.py:1466) serves the cached persona
+    # whenever ``stored_mtimes == current_mtimes`` — NO content hash, NO
+    # re-read — so an mtime-preserving edit is invisible to it and the
+    # bust is the ONLY cure. ``cache_busted`` therefore means "the shared
+    # cache entry was invalidated": a REPORTING observable AND a
+    # CORRECTNESS mechanism (gating this on the baseline removed the
+    # cure — N1). Two branches:
+    #   (b) COLD (no baseline) + a live entry ⇒ we cannot prove the
+    #       entry's bytes match disk ⇒ MUST bust so the compose reads
+    #       disk truth (this is the already-documented "recompose + pop"
+    #       path). ``hash_mtime_divergence`` stays False — no fabricated
+    #       divergence claim (W1's over-report stays closed).
+    #   (a) warm + files changed + the loader's mtime/fingerprint
+    #       equality would still HIT ⇒ provably stale ⇒ bust and REPORT
+    #       ``hash_mtime_divergence=True``.
+    if snapshot_entry is not None:
+        if baseline is None:
             prompt_cache.invalidate(agent_id, mcp_names, version_tag)
             cache_busted = True
-            provenance["cache_busted_reason"] = "hash_mtime_divergence"
+            provenance["cache_busted_reason"] = (
+                "cold_process_cannot_prove_entry_bytes"
+            )
+        elif files_changed:
+            stored_mtimes = snapshot_entry[2]
+            file_keys_match = {
+                key: value for key, value in stored_mtimes.items() if key != FP_KEY
+            } == compose_input_mtimes
+            fp_match = stored_mtimes.get(FP_KEY) == db_fingerprint
+            if file_keys_match and fp_match:
+                hash_mtime_divergence = True
+                prompt_cache.invalidate(agent_id, mcp_names, version_tag)
+                cache_busted = True
+                provenance["cache_busted_reason"] = "hash_mtime_divergence"
 
     # ── Compose (R2 — through daemon.manager, the test patch seam) ──────────
     from ..manager import load_and_cache_prompt
@@ -904,9 +940,9 @@ async def _refresh_impl(
         diff = _tier_c_diff()
 
     file_rows = []
-    for key in sorted(current_hashes):
+    for key in sorted(compose_input_hashes):
         before = baseline[0].get(key) if baseline else None
-        after = current_hashes[key]
+        after = compose_input_hashes[key]
         file_rows.append(
             {
                 "path": key,
@@ -933,7 +969,12 @@ async def _refresh_impl(
     provenance["claim_guard"] = "held" if claim_ok else "skew-or-absent"
 
     # ── Baseline write (Advisory 2 — every successful fill seeds it) ────────
-    _record_baseline(baseline_key, dict(current_hashes), db_fingerprint)
+    # N1.4 INVARIANT: the record MUST derive from the SAME snapshot that
+    # fed the decision/compose above — never a later, separate disk read.
+    # The bust branches (above) guarantee the compose served DISK truth in
+    # every case where the entry's bytes were unprovable, so this snapshot
+    # describes exactly the inputs of the persona actually served.
+    _record_baseline(baseline_key, dict(compose_input_hashes), db_fingerprint)
 
     message = _outcome_message(outcome, files_changed, fingerprint_changed, cache_busted)
     return PromptRefreshResult(

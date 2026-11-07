@@ -23,13 +23,17 @@ Contract (AM-2, frozen):
   (the demo v0.16.3 manifest predates ``plugins_manifest``).
 * ``verify_paths(release_root, manifest, relpaths)`` — verify the
   on-disk sha256 of each requested path against the manifest map.
-  REQUESTED-BUT-UNMANIFESTED paths are SKIP, never mismatch (Advisory
-  2: ``memories/*.md`` is inside the loader's read set but has ZERO
-  entries in the real ``agents_manifest`` — 379 entries, 0 memories,
-  verified against releases/v0.29.0). "On disk, not in manifest" is
-  NEVER a mismatch for requested-path checks; the strict whole-tree
-  mode is a different (default-OFF) policy that this module does not
-  implement.
+  Unmanifested requested paths are governed by an ALLOW-LIST: inside
+  the agent-dir-relative class ``<agent>/memories/`` they are SKIP
+  (Advisory 2: ``memories/*.md`` is inside the loader's read set but has
+  ZERO entries in the real ``agents_manifest`` — 379 entries, 0
+  memories, verified against releases/v0.29.0); anywhere else an
+  unmanifested requested path is a REFUSAL-grade ``unexpected_skips``
+  finding (C1 — a skip must never be laundered as benign). Manifested
+  paths must exist on disk with a matching sha256. "On disk, not in
+  manifest" is NEVER a mismatch for requested-path checks; the strict
+  whole-tree mode is a different (default-OFF) policy that this module
+  does not implement.
 
 NO tree walk (only the caller-requested paths are opened), NO
 ``daemon.tools`` import, NO daemon imports at all — stdlib only, so
@@ -136,15 +140,24 @@ def _file_sha256(path: Path) -> str:
 
 
 def _in_skippable_class(relpath: str, prefixes: tuple[str, ...]) -> bool:
-    """True when ``relpath`` sits inside an allow-listed skip class.
+    """True when ``relpath`` sits inside an allow-listed skip class
+    WITHIN an agent directory (``<agent>/<class>/...``).
 
-    The prefixes name DIRECTORY segments (e.g. ``memories/``), and
-    agents/-relative paths carry the agent dir first
-    (``ari/memories/x.md``) — so match on segment boundaries, not on
-    ``str.startswith``.
+    N2 (leader ruling): the class is matched RELATIVE to the agent dir —
+    never on the absolute first segment. The previous segment-anywhere
+    match classed the artifacts of an agent literally named ``memories``
+    (``memories/soul.md``) as skippable — the same class of defect as C1.
+    Truth table (pinned): ``ari/memories/x.md`` → skippable;
+    ``memories/soul.md`` → NOT skippable.
     """
-    padded = f"/{relpath.strip('/')}/"
-    return any(f"/{prefix.strip('/')}/" in padded for prefix in prefixes)
+    parts = [part for part in relpath.strip("/").split("/") if part]
+    if len(parts) < 3:  # need at least <agent>/<class>/<file>
+        return False
+    for prefix in prefixes:
+        class_parts = [part for part in prefix.strip("/").split("/") if part]
+        if class_parts and parts[1 : 1 + len(class_parts)] == class_parts:
+            return True
+    return False
 
 
 def verify_paths(
