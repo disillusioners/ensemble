@@ -95,6 +95,8 @@ from croniter import croniter
 from croniter import CroniterBadCronError
 from pydantic import BaseModel, Field
 
+from daemon.constants import SOURCE_CONFIG_PAGE_SIZE
+
 logger = logging.getLogger(__name__)
 
 # The source_configs.source_type value every scheduler row carries. The
@@ -939,11 +941,25 @@ async def list_schedules(
     Filters: ``status`` (exact row status), ``project_id`` (config-JSON
     key match), ``caller_agent_id`` (caller-scoped — matches
     ``config.agent``). ``include_cancelled=True`` un-hides cancelled
-    rows. The repository page cap is 100 rows (``list_source_configs``
-    default) — operator-scale, not a scan surface.
+    rows. Rows are paged with a fixed page size until a short page: the
+    repository's ``list_source_configs`` default is a PAGE of rows
+    (``created_at DESC``), not a completeness contract — newer inert
+    rows can evict older ones from a single default page (wi-b97ec302),
+    so this read must observe every row before filtering.
     """
+    from daemon.repositories.source.models import SourceConfig as SourceConfigRow
+
     repo = _require_repo()
-    rows = await asyncio.to_thread(repo.list_source_configs, None, status)
+    rows: list[SourceConfigRow] = []
+    offset = 0
+    while True:
+        page = await asyncio.to_thread(
+            repo.list_source_configs, None, status, SOURCE_CONFIG_PAGE_SIZE, offset
+        )
+        rows.extend(page)
+        if len(page) < SOURCE_CONFIG_PAGE_SIZE:
+            break
+        offset += SOURCE_CONFIG_PAGE_SIZE
     items: list[ScheduleListItem] = []
     for row in rows:
         if getattr(row, "source_type", None) != SCHEDULER_SOURCE_TYPE:
