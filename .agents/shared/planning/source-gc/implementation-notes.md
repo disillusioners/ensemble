@@ -96,7 +96,31 @@ start: HEAD == 49dc5f514, whose ancestry includes 6b571771d).
 (unchanged). Touch set verified: daemon/sources/*, daemon/constants.py,
 daemon/manager.py untouched; seal scope empty per plan §5.
 
-## Commit list (in order)
+## P16 lock-half — PG interleave leg (added on follow-up)
+
+New file: `tests/postgres/test_source_gc_lock_interleave_pg.py` (2 nodes,
+PG-gated via `@pytest.mark.postgres`; deselected by default — confirmed
+`37 passed, 2 deselected` when run alongside the unit packs).
+
+W2 branch status: LEG WRITTEN AND EXECUTED LOCALLY (PASS, 2/2 in 4.20s
+against the throwaway `ensemble_test` DB at localhost:5432). Result:
+- `test_p16_lock_interleave_blocks_resume_then_degrades_to_not_found`:
+  connection A acquired `SELECT ... FOR UPDATE` on the row, connection B's
+  resume `UPDATE` blocked with a lock-timeout ("canceling statement due
+  to lock timeout"), A committed the GC delete, B retried and found the
+  row gone, and `gc_archive_and_delete` reported `skipped_reason="not_found"`
+  on the gone row.
+- `test_p16_positive_control_uncontended_deletes_cleanly`: an
+  un-contended collectable row deleted cleanly under the same lock path
+  (`deleted=True`, `archived_config=True`, archive row landed).
+
+Executable command for the tester phase (no PG env vars set → skip):
+    PG_TEST_DB=ensemble_test PG_TEST_USER=ensemble PG_TEST_PASSWORD=ensemble_dev \\
+      pytest tests/postgres/test_source_gc_lock_interleave_pg.py -m postgres \\
+      -p no:cacheprovider -o addopts=
+
+No other files touched; no refactors; no test rewrites. Unit packs remain
+unchanged (37 passed).
 
 - ① d36e341ea — feat: source-gc archive tables (migration + models, 3-site index lockstep)
 - ② dc76082be — feat: source-GC repo methods (gc_find_candidates / gc_archive_and_delete / gc_count_error_rows)
