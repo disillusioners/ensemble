@@ -198,8 +198,29 @@ def test_p16_positive_control_uncontended_deletes_cleanly(pg_engine):
     under the same lock path (gc_archive_and_delete → deleted=True)."""
     now = datetime.now(timezone.utc)
     repo = SQLModelSourceRepository(pg_engine)
-    res = repo.gc_archive_and_delete(
-        source_id=POSITIVE_ID, now=now, retention_days=RETENTION_DAYS
+
+    # W1: prove the REAL method emits FOR UPDATE (not a hand-written
+    # SELECT ... FOR UPDATE in the test). A before_cursor_execute listener
+    # records every statement; at least one must contain "FOR UPDATE".
+    # Removing with_for_update=True from gc_archive_and_delete makes this
+    # RED (mutation-meaningful).
+    emitted: list[str] = []
+
+    def _listener(conn, cursor, statement, parameters, context, executemany):
+        emitted.append(statement)
+
+    from sqlalchemy import event
+    event.listen(pg_engine, "before_cursor_execute", _listener)
+    try:
+        res = repo.gc_archive_and_delete(
+            source_id=POSITIVE_ID, now=now, retention_days=RETENTION_DAYS
+        )
+    finally:
+        event.remove(pg_engine, "before_cursor_execute", _listener)
+
+    assert any("FOR UPDATE" in (st or "").upper() for st in emitted), (
+        "gc_archive_and_delete must emit a FOR UPDATE (with_for_update=True); "
+        f"emitted={emitted!r}"
     )
     assert res.deleted is True, res
     assert res.skipped_reason is None, res
