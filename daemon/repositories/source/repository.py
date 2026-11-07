@@ -906,11 +906,12 @@ class SQLModelSourceRepository:
             result.deleted = True
             result.archived_config = True
             result.archived_executions = len(executions)
-            logger.info(
-                f"[SourcesGC] collected source: source_id={source_id} "
-                f"executions={len(executions)} "
-                f"mappings={result.deleted_mappings}"
-            )
+            # NO per-row INFO here — the §8 observability contract is
+            # FINAL: the tick summary line (§8.3, emitted by the
+            # service) is the record, per-row lines are WARNING-only
+            # (§8.6), and the durable trace is the archive tables
+            # (§8.7). A mass-collect tick would otherwise flood the
+            # log with one line per source.
             return result
 
     # ==================== Instance Mapping Operations ====================
