@@ -217,3 +217,142 @@ def test_p16_positive_control_uncontended_deletes_cleanly(pg_engine):
             {"sid": POSITIVE_ID},
         ).fetchone()
     assert arch is not None
+
+CHILD_FIRST_ID = "child-first-row"
+
+
+@pytest.fixture(autouse=True)
+def _clean_child_first(pg_engine):
+    # extend the existing autouse _clean is already defined above; this is a
+    # separate autouse for the child-first seed/cleanup so the third node
+    # stays self-contained.
+    with pg_engine.begin() as conn:
+        conn.execute(text("DELETE FROM schedule_executions WHERE schedule_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+        conn.execute(text("DELETE FROM schedule_executions_archive WHERE schedule_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+        conn.execute(text("DELETE FROM instance_mappings WHERE source_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+        conn.execute(text("DELETE FROM source_configs WHERE source_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+        conn.execute(text("DELETE FROM source_configs_archive WHERE source_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+    # seed collectable row + children
+    now = datetime.now(timezone.utc)
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO source_configs (source_id, source_type, name, config, "
+                "credentials, enabled, autostart, status, error_message, "
+                "created_at, updated_at) VALUES "
+                "(:sid, 'scheduler', :sid, '{}'::jsonb, NULL, false, true, "
+                "'stopped', NULL, :now, :upd)"
+            ),
+            {
+                "sid": CHILD_FIRST_ID,
+                "now": now.isoformat(),
+                "upd": (now - timedelta(days=40)).isoformat(),
+            },
+        )
+        for i in range(3):
+            conn.execute(
+                text(
+                    "INSERT INTO schedule_executions (execution_id, schedule_id, "
+                    "triggered_at, instance_id, status, error_message, completed_at) "
+                    "VALUES (:eid, :sid, :trig, NULL, 'completed', NULL, :comp)"
+                ),
+                {
+                    "eid": f"cf-exec-{i}",
+                    "sid": CHILD_FIRST_ID,
+                    "trig": (now - timedelta(days=40)).isoformat(),
+                    "comp": (now - timedelta(days=39)).isoformat(),
+                },
+            )
+        conn.execute(
+            text(
+                "INSERT INTO instance_mappings (mapping_id, source_id, "
+                "external_user_id, agent_instance_id, agent_id, agent_dir, "
+                "mapping_metadata, last_message_at, created_at) VALUES "
+                "(:mid, :sid, 'u1', 'inst1', 'a', 'd', '{}'::jsonb, :lm, :ca)"
+            ),
+            {
+                "mid": "cf-map-1",
+                "sid": CHILD_FIRST_ID,
+                "lm": (now - timedelta(days=40)).isoformat(),
+                "ca": (now - timedelta(days=40)).isoformat(),
+            },
+        )
+    yield
+    with pg_engine.begin() as conn:
+        conn.execute(text("DELETE FROM schedule_executions WHERE schedule_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+        conn.execute(text("DELETE FROM schedule_executions_archive WHERE schedule_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+        conn.execute(text("DELETE FROM instance_mappings WHERE source_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+        conn.execute(text("DELETE FROM source_configs WHERE source_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+        conn.execute(text("DELETE FROM source_configs_archive WHERE source_id = :sid"),
+                     {"sid": CHILD_FIRST_ID})
+
+
+@pytest.mark.postgres
+def test_p10_child_first_fk_order_under_real_pg(pg_engine):
+    """P10 (retained pin) — child-first delete order under REAL PG FKs.
+
+    Seed a collectable scheduler source with BOTH children
+    (``schedule_executions`` x3 + ``instance_mappings`` x1). The live
+    models declare these FKs NOT NULL + NO ACTION
+    (``daemon/repositories/source/models.py:113`` instance_mappings.source_id
+    FK -> source_configs, :168 schedule_executions.schedule_id FK ->
+    source_configs; both NOT NULL, NO ACTION). If the delete ran parent
+    first, PostgreSQL would raise ForeignKeyViolation and the row would
+    survive. A clean ``deleted=True`` completion IS the order proof.
+
+    (Mutation leg lives tester-side per house practice: swapping the
+    delete order in ``gc_archive_and_delete`` makes this node RED.)
+
+    Asserts:
+      (a) completes deleted=True with correct child counts (3 executions,
+          1 mapping) — FK-violation would have aborted the txn;
+      (b) both archive rows landed 1:1 (config + 3 executions);
+      (c) live children + parent are gone.
+    """
+    now = datetime.now(timezone.utc)
+    repo = SQLModelSourceRepository(pg_engine)
+    res = repo.gc_archive_and_delete(
+        source_id=CHILD_FIRST_ID, now=now, retention_days=RETENTION_DAYS
+    )
+    assert res.deleted is True, res
+    assert res.skipped_reason is None, res
+    assert res.deleted_executions == 3, res
+    assert res.deleted_mappings == 1, res
+    assert res.archived_config is True
+    assert res.archived_executions == 3, res
+
+    with pg_engine.connect() as conn:
+        parent = conn.execute(
+            text("SELECT source_id FROM source_configs WHERE source_id = :sid"),
+            {"sid": CHILD_FIRST_ID},
+        ).fetchone()
+        assert parent is None, "parent must be gone"
+        live_execs = conn.execute(
+            text("SELECT count(*) FROM schedule_executions WHERE schedule_id = :sid"),
+            {"sid": CHILD_FIRST_ID},
+        ).scalar()
+        assert live_execs == 0, "live executions must be gone"
+        live_maps = conn.execute(
+            text("SELECT count(*) FROM instance_mappings WHERE source_id = :sid"),
+            {"sid": CHILD_FIRST_ID},
+        ).scalar()
+        assert live_maps == 0, "live mappings must be gone"
+        arch_cfg = conn.execute(
+            text("SELECT source_id FROM source_configs_archive WHERE source_id = :sid"),
+            {"sid": CHILD_FIRST_ID},
+        ).fetchone()
+        assert arch_cfg is not None, "config archive row must land"
+        arch_execs = conn.execute(
+            text("SELECT count(*) FROM schedule_executions_archive WHERE schedule_id = :sid"),
+            {"sid": CHILD_FIRST_ID},
+        ).scalar()
+        assert arch_execs == 3, f"expected 3 archived executions, got {arch_execs}"

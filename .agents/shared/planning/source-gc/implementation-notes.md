@@ -129,6 +129,30 @@ unchanged (37 passed).
 - ⑤ a123bf746 — test: source-gc P1-P21 unit packs (repo + service layers)
 - ⑥ (this commit) — docs: implementation notes
 
+## P10 child-first FK order — PG leg (added on second follow-up)
+
+New node in `tests/postgres/test_source_gc_lock_interleave_pg.py`:
+`test_p10_child_first_fk_order_under_real_pg` (3 nodes total now).
+
+Seeds a collectable scheduler source with BOTH children (3
+`schedule_executions` + 1 `instance_mappings`) under real PostgreSQL FK
+enforcement (models.py:113 + :168, NOT NULL, NO ACTION). Runs
+`gc_archive_and_delete` and asserts: (a) `deleted=True` with
+`deleted_executions=3`, `deleted_mappings=1` (clean completion IS the
+order proof — a wrong order would raise ForeignKeyViolation and abort the
+txn); (b) archive rows landed 1:1 (config + 3 executions); (c) live
+children + parent are gone.
+
+Executed locally: PASS (3/3 in 5.07s against ensemble_test).
+
+## P7 coverage mapping (verifier disclosure closure)
+
+P7 (batch cap) is adjudicated COVERED by P17's
+`test_cap_defers_newest` (repo pack) — no separate instrument added.
+P10 now has its PG instrument (above). P16 lock-half has its PG
+instrument (previous follow-up). All retained pins P1–P15 are covered
+except P11 (unit-level git diff assertion).
+
 ## Self-verification
 
 - Repo pack: 27 passed (tests/unit/repositories/test_source_gc_repository.py)
