@@ -61,6 +61,8 @@ from ..services.pok_service import (
 )
 from ._tool_registry import register_tool_category
 
+__all__ = ["CATEGORY_DOC", "CATEGORY_NAME", "create_pok_tools"]
+
 logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "pok"
@@ -122,7 +124,7 @@ def create_pok_tools(
     *,
     current_instance_id: str = "",
     agent_id: str = "",
-) -> list:
+) -> list[Any]:
     """Build the three POK tools for one instance/agent.
 
     ``agent_id`` is the FACTORY-CAPTURED attribution + the in-body
