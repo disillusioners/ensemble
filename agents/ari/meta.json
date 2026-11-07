@@ -44,7 +44,7 @@
       "notify-user",
       "nest-report",
       "memoir",
-  "prompt-reload"
+      "prompt-reload"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },
