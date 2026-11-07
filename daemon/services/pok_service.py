@@ -43,11 +43,10 @@ surface; the injection path has its own swallow contract in
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from daemon import constants as _constants
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
@@ -63,6 +62,31 @@ from daemon.repositories.pok.models import (
     ProjectOperatingKnowledge,
 )
 from daemon.repositories.pok.repository import POKRepository, UNSET, _utc_now_iso
+
+__all__ = [
+    "CURATOR_AGENT_IDS",
+    "POKError",
+    "POKService",
+    "POK_ACTIVE_CAP_PER_PROJECT",
+    "POK_BLOCK_MAX_CHARS",
+    "POK_BLOCK_MAX_ENTRIES",
+    "POK_BODY_MAX_CHARS",
+    "POK_CURATED_CAP_PER_VIEW",
+    "POK_ENTRY_RENDER_MAX_CHARS",
+    "POK_FAMILY_MAX",
+    "POK_FAMILY_RE",
+    "POK_PIN_CAP_PER_PROJECT",
+    "POK_SLUG_MAX_CHARS",
+    "POK_SLUG_PATTERN",
+    "POK_VERIFY_WINDOW_DAYS",
+    "QueryOutcome",
+    "UpsertOutcome",
+    "content_hash",
+    "fence_check",
+    "is_curator",
+    "is_default_project",
+    "normalize_body",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +273,7 @@ class POKService:
         source_tier: str | None = None,
         agent_id: str,
         project_name: str | None = None,
-        escape_fn: Any = None,
+        escape_fn: Callable[[str], str] | None = None,
     ) -> UpsertOutcome:
         """The write path: fence → budgets → scope → dedup/launder →
         admission → supersede-or-insert.
