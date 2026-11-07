@@ -1,3 +1,37 @@
+<!-- pok-phase1-core-surface-gate-begin -->
+## Commission POK Phase 1 core surface — FUNCTIONAL GATE registration (2026-11-07, lane `feature/project-operating-knowledge` @ `f8202ba6a` + test commits; base `6b571771d`, readiness note `4a6370b40`; owner: coder pok-impl-20261107)
+
+> **What this block registers.** The Phase-1 core-surface pack set (readiness tasks 1–7):
+> storage (2 additive .sql + SQLModel pair + repository + service), PG registration (B7/AC9),
+> the three tools (`pok_upsert`/`pok_query`/`pok_curate`, category `pok` NON-privileged, B4
+> sweep 45/46 — watcher excluded, canary append-end, ari insert-before-nest-report), the
+> F-1 ceremony (artifact 61→62 + `VOCABULARY_VERSION` 7→8, D-1 re-derived mechanically: the
+> design's 6→7 / 60→61 were stale), the audience-dimensioned per-view injection
+> (ER-1/§4.5.1 — filter FIRST, pinned ∪ family-ordered, F5 rider, 8/2,900 per-view,
+> never-raise §4.9), and the ari-lane delivery seam (G-2 — site pinned at
+> `job_create`, `daemon/tools/job_queue.py`; gates = factory-captured ari + non-default
+> target; fresh per-dispatch read; semantic `pok:{project_id}` namespace). Keep-both with
+> the v0.29.1 staged-verification block below — newest-first honored.
+>
+> **Fences (every run):** worktree venv (`.venv/bin/python`, `uv sync --frozen`), explicit
+> test paths, `timeout`-bounded; the PG pack runs with the per-variable env scrub
+> (`env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER -u
+> POSTGRES_PASSWORD` — never `env -u POSTGRES_*`) against the shared allowlist-fenced
+> scratch DB (`ensemble_test`; `ensemble_dev`/`ensemble_prod` are FORBIDDEN names in the
+> conftest fence). Serial runs; no whole-tree pytest; zero :9797 contact. Scope note:
+> AC15/AC6/AC12 legs are the metadata-allowlist surface (readiness task 8 — a second
+> coder's lane) and are intentionally NOT here.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `pok_service_unit` | `timeout 300 .venv/bin/python -m pytest tests/unit/services/test_pok_service_unit.py -q` | 41 nodes — AC3 (universal read, pinned rank-1), AC4 (supersede txn; dual-active structurally impossible; lineage walk), AC10 (default-project typed refusals both directions + name fallback), AC14 (embedding lag surfaced, never fatal), AC16 (disputed readable + laundering guard + archived forward-only), AC19 (64-cap refuse → archive cure → succeed; family/pin caps), AC20 (escape-aware sizing both legs), AC17 write fence (4 tokens + empty + slug rules + audience vocabulary) | 2026-11-07 @ `f8202ba6a`+ | **PASS 41/41** |
+| `pok_injection_unit` | `timeout 300 .venv/bin/python -m pytest tests/unit/services/test_pok_injection_unit.py -q` | 35 nodes — AC2 (worker both-only view; project isolation), AC5 (stale renders, ranks down, never drops), AC11 (spine ordered at the pinned tier; worst view ≤2,900 wrapper-inclusive; 332/92 entry arithmetic), AC13 (store-down degrade + rank_fn failure fallback), AC17 render leg (forged header renders inert — flattening + line-anchored inertness), AC18 (F3 exclusions, family atomic, doubly-pinned once, unordered slugs, F5 tail), AC22 (the five audience views: ari/leader/devops 8, developer 3, worker 3 — each ≤8/2,900), wrapper=47 pinned | 2026-11-07 | **PASS 35/35** |
+| `pok_ari_seam_unit` | `timeout 300 .venv/bin/python -m pytest tests/unit/services/test_pok_ari_seam_unit.py -q` | 12 nodes — AC24: operation view carried at dispatch (wrapper + impl filtered + budget), fresh-read per-dispatch, once-per-(instance, project) namespace, negative legs (default project by id AND by name, no project, non-ari, empty project), store-down + injection-lane-down never-raise (AM-22 unwritten slot → retry), AsyncMock census (seam is a real coroutine; callees sync) | 2026-11-07 | **PASS 12/12** |
+| `pok_tools_unit` | `timeout 300 .venv/bin/python -m pytest tests/unit/tools/test_pok_tools_unit.py -q` | 19 nodes — registration surface (3 tools; `pok` in CATEGORY_MODULES; NOT privileged), server-side scoping (no project_id arg; caller row resolves; unlinked refuses), AC10 tool-level ×3, two-layer gate (any agent writes; universal query; curate leader/PM only), attribution = factory-captured id, typed echo taxonomy (fence/budget/store-unavailable/family/pin-cap codes), supersede/no-op echoes, query result shape | 2026-11-07 | **PASS 19/19** |
+| `pok_pg_materialization` | `timeout 300 env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD .venv/bin/python -m pytest tests/postgres/test_pok_tables_pg.py --override-ini="addopts=" -m postgres -q` (serial) | 9 nodes — AC9: BOTH tables materialize on the fenced scratch PG; §4.1 column set; .sql↔PG two-artifact agreement; all four CHECK vocabularies (incl. the ER-1 audience CHECK) + it FIRES; `uq_pok_active_slug` partial index materialized + binding (dual-active IntegrityErrors; supersede frees); zero FKs (rollback-inert, materialized); B7 metadata registry | 2026-11-07 @ `5d1f3d79a` | **PASS 9/9** |
+| `pok_ceremony_pins` | `timeout 300 .venv/bin/python -m pytest tests/unit/test_pok_grant_pins.py tests/unit/test_anomaly_report_grant_pins.py tests/unit/tools/test_tool_category_artifact.py tests/unit/metrics/test_metrics_vocabulary_amendment.py -q` | 45 nodes — the B4 grant walk (45 explicit / 46 meta; watcher exempt; insert-before ordering; canary append-end; ari tail preserved), vocab==8, artifact==62+pok, the re-pinned allow-array constants (gaia/sketcher/critic/board-registration ari set), the seal map | 2026-11-07 @ `16b4e70b2` | **PASS 45/45** |
+| `pok_mutation_matrix` | plant → targeted pack run → revert → GREEN rerun (per-pin cycles; file backups, never git-checkout on uncommitted state) | M-POK-1 remove grant → walk REDs (2) · M-POK-2 move off nest-report adjacency → ordering REDs · M-POK-3 artifact count 61 → REDs · M-POK-4 VOCAB 7 → REDs (3) · M-POK-5 gaia constant reverted → REDs (2) · baseline-red→green evidence: 4 pre-existing tripwire drifts + seal map + artifact drift | 2026-11-07 | **PASS 5/5 active + 6 baseline-red legs** |
+<!-- pok-phase1-core-surface-gate-end -->
 <!-- v0291-staged-verification-begin -->
 ## v0.29.1 STAGED VERIFICATION registration (2026-11-07; staged tree `24e098245f9afc481c1824d5974ebb6b6f812bcf`; binary `99c5c144…f115532b` 4-way; tag `2c06196b1` PUSHED; origin/latest == staged tree; RESULTS: 2026-11-07-v0291-staged-verification.md)
 
