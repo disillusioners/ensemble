@@ -16,6 +16,8 @@ All functional legs L1–L9 + M1–M6 **PASS** (first live execution of this cod
 - `tests/unit/metrics/test_metrics_family_adjudication.py:440` — same fold
 3× isolation RED at HEAD, passes at base `8eba09c20`; `git diff 8eba09c20 5b34e6857 -- tests/unit/metrics/` is EMPTY (the lane's 14-file pin census missed these two sites). Precedent: memoir lane edited both files on its 5→6 bump.
 
+> **RESOLVED (leader ruling 2026-11-07, option (b)):** the fold was authorized to the tester-gate and executed in the post-ruling rider commit on `feature/prompt-reload` (this same date); both nodes re-verified green.
+
 ---
 
 ## Leg results
@@ -66,6 +68,8 @@ Marker exactly-once ×5 (`no_change`, `reloaded`, `reloaded_db`, `forced_reload`
 
 ### S10-j — Multi-instance shared-cache edge — **EXECUTED LIVE, contract-shape disclosed**
 Reload via instance A pops **only A**; sibling B (same agent) does NOT auto-refresh — B serves its cached persona until its own cold restore or its own `force=true` (proven live: B's forced reload → next turn serves CURRENT disk persona). This is the designed T1.7 per-instance-pop shape; the council's "synthetic sibling refill" premise has NO dedicated unit node (closest: `test_w1_warm_cache_cold_process_is_unproven_tier_c_never_exact`, synthetic cache refill). Negative-expectation finding, not a defect.
+
+> **Leader ruling 2026-11-07: ACCEPTED as the contract.** Per-instance pop is the designed R4/T1.7 self-only scope (leader ruling from the design phase); the council's sibling-auto-refresh premise was its expectation, not a plan requirement. Ari is a singleton front-door session — no live-sibling case exists in practice. The sibling-semantics pin stays on the routed-followups list.
 
 ### Whole-tree regression — **PASS-WITH-DISCLOSURES (net-new behavior regressions: 0)**
 - Corpus `tests/unit` both legs: HEAD **23,267** nodes (23010P/164F/23E/69S/1x) vs BASE `8eba09c20e2fa…` **23,160** collected / 22,834 executed. HEAD-only files = the 5 lane test files (107 nodes, ALL GREEN); BASE-only 0. Execution delta 433 fully reconciled (326 skipped TOOLS-3 + 107 HEAD-only).
