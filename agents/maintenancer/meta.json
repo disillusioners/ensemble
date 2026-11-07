@@ -21,7 +21,7 @@
       "wedge-capture",
       "metrics-read",
       "nest-report-read",
-      "nest-report"
+      "pok", "nest-report"
     ],
     "deny": ["git_commit", "edit_file", "write_file"]
   },

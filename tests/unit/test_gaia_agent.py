@@ -32,7 +32,7 @@ GAIA_AGENT_DIR = Path(__file__).parent.parent.parent / "agents" / "gaia"
 # non-privileged anomaly-reporting write category) was appended by the
 # grant ceremony.  Prior value: ["bash", "proc", "filesystem", "help",
 # "system"] (5 entries).
-GAIA_TOOLS_ALLOW = ["bash", "proc", "filesystem", "help", "system", "nest-report"]
+GAIA_TOOLS_ALLOW = ["bash", "proc", "filesystem", "help", "system", "pok", "nest-report"]
 
 # Tool categories for synthetic filter-resolution tests (mirrors the shape of the
 # real registry's categories; keeps the negative fixtures self-contained).

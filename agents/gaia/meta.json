@@ -10,7 +10,7 @@
   "tags": ["environment", "terraform", "mcps-client", "infrastructure"],
   "innate_skills": ["todo"],
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "help", "system", "nest-report"]
+    "allow": ["bash", "proc", "filesystem", "help", "system", "pok", "nest-report"]
   },
   "llm_model": null,
   "team_members": []

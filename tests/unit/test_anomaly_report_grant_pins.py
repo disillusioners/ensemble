@@ -55,11 +55,27 @@ CATEGORY = "nest-report"
 #: MERGE-FIRST step (origin/latest 97b76e20e — the v0.28.12 aegis
 #: release) added FOUR agents (``aegis`` / ``cracker`` / ``hacker`` /
 #: ``sweeper``), each with a NON-EMPTY allow list and therefore each
-#: granted mechanically by the SAME append.
+#: granted mechanically by the SAME append.  45 / 46 after the POK
+#: Phase-1 lane's mechanical re-derivation (2026-11-07): ``canary``
+#: arrived after the last sweep WITHOUT the retroactive grant — it
+#: counts toward the meta denominator but stays a documented
+#: nest-report exception (its POK grant is the append-end exception).
 EXPECTED_EXPLICIT = 44
-EXPECTED_TOTAL_META = 45
+EXPECTED_TOTAL_META = 46
 #: The ONE agent that inherits instead of carrying an explicit entry.
 INHERITANCE_EXCEPTIONS: frozenset[str] = frozenset({"watcher"})
+#: Agents whose NON-EMPTY allow predates their sweep class and
+#: deliberately carries NO ``nest-report`` entry (the POK B4 sweep
+#: grants them ``pok`` via the append-end exception only — never a
+#: retroactive nest-report).  ``canary`` arrived post-sweep (2026-11,
+#: 4-entry allow, no nest-report); the grant walk skips it BY NAME.
+NEST_REPORT_LATE_ARRIVALS: frozenset[str] = frozenset({"canary"})
+#: The agents whose allow carries legitimate entries AFTER the grant —
+#: the "grant is last" trailing discipline never applied to them.
+#: ``ari`` (2026-11-06 prompt-reload lane): memoir + prompt-reload sit
+#: after ``nest-report``; the POK sweep inserts BEFORE ``nest-report``
+#: (mid-array), preserving that tail.
+GRANT_NOT_LAST_EXCEPTIONS: frozenset[str] = frozenset({"ari"})
 
 #: The re-pinned allow-array constants — the file, the constant name and
 #: the value the constant MUST carry after the grant.
@@ -74,13 +90,16 @@ ALLOW_ARRAY_CONSTANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "mcp_rpc",
             "wedge-capture",
             "notify-user",
+            "pok",
             "nest-report",
+            "memoir",
+            "prompt-reload",
         ),
     ),
     (
         "tests/unit/test_gaia_agent.py",
         "GAIA_TOOLS_ALLOW",
-        ("bash", "proc", "filesystem", "help", "system", "nest-report"),
+        ("bash", "proc", "filesystem", "help", "system", "pok", "nest-report"),
     ),
     (
         "tests/unit/agents/test_sketcher_agent.py",
@@ -92,6 +111,7 @@ ALLOW_ARRAY_CONSTANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "od.save",
             "image",
             "dynamic-skill",
+            "pok",
             "nest-report",
         ),
     ),
@@ -172,6 +192,11 @@ class TestTheGrantCompletenessWalk:
             allow = _allow(agent_dir)
             if not allow:
                 continue
+            if agent_dir.name in NEST_REPORT_LATE_ARRIVALS:
+                # canary-class: non-empty allow that predates its sweep
+                # class — granted ``pok`` by append-end ONLY, never a
+                # retroactive nest-report (see the module docstring).
+                continue
             if CATEGORY not in allow:
                 missing.append(agent_dir.name)
         assert not missing, (
@@ -181,11 +206,14 @@ class TestTheGrantCompletenessWalk:
 
     def test_the_grant_is_the_last_element(self) -> None:
         """The trailing-order discipline — the grant is APPENDED, never
-        reordered into the middle."""
+        reordered into the middle (ari-class tails exempt: memoir +
+        prompt-reload legitimately follow ``nest-report`` there)."""
         offenders = []
         for agent_dir in _agent_dirs():
             allow = _allow(agent_dir)
             if not allow or CATEGORY not in allow:
+                continue
+            if agent_dir.name in GRANT_NOT_LAST_EXCEPTIONS:
                 continue
             if allow[-1] != CATEGORY:
                 offenders.append((agent_dir.name, allow[-1]))
@@ -267,27 +295,38 @@ class TestTheRepinnedAllowArrayConstants:
                 )
 
     def test_the_ari_trailing_set_is_exactly_the_seven(self) -> None:
+        """Re-derived 2026-11-07 (POK Phase 1 B4 sweep): the pinned
+        literal mirrors ``test_board_registration.py``'s ari allow
+        constant. History: 6 entries (pre-grant) → 7 (nest-report
+        appended) → 9 (memoir + prompt-reload joined, 2026-11-06) →
+        10 (``pok`` inserted BEFORE ``nest-report`` — the sweep's
+        insert-before rule, the memoir/prompt-reload tail preserved)."""
         source = (REPO_ROOT / "tests/unit/test_board_registration.py").read_text(
             encoding="utf-8"
         )
         assert (
             '"ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", '
-            '"wedge-capture", "notify-user", "nest-report"],' in source
+            '"wedge-capture", "notify-user", "pok", "nest-report", '
+            '"memoir", "prompt-reload"],' in source
         ), (
-            "the ari trailing set must be the 7-entry set (the 6-entry "
-            "pre-grant value + the appended grant)"
+            "the ari trailing set must carry pok inserted BEFORE "
+            "nest-report with the memoir/prompt-reload tail intact "
+            "(the 10-entry re-derived value)"
         )
 
-    def test_the_gaia_constant_is_exactly_the_six(self) -> None:
+    def test_the_gaia_constant_is_exactly_the_seven(self) -> None:
+        """Re-derived 2026-11-07 (POK B4 sweep): 5 entries (pre-grant)
+        → 6 (nest-report appended) → 7 (``pok`` inserted before
+        ``nest-report``)."""
         source = (REPO_ROOT / "tests/unit/test_gaia_agent.py").read_text(
             encoding="utf-8"
         )
         assert (
             'GAIA_TOOLS_ALLOW = ["bash", "proc", "filesystem", "help", '
-            '"system", "nest-report"]' in source
+            '"system", "pok", "nest-report"]' in source
         ), (
-            "GAIA_TOOLS_ALLOW must be the 6-entry set (the 5-entry "
-            "pre-grant value + the appended grant)"
+            "GAIA_TOOLS_ALLOW must carry pok inserted BEFORE nest-report "
+            "(the 7-entry re-derived value)"
         )
 
     def test_the_sketcher_constant_is_exactly_the_seven(self) -> None:
@@ -313,6 +352,7 @@ class TestTheRepinnedAllowArrayConstants:
                 "od.save",
                 "image",
                 "dynamic-skill",
+                "pok",
                 "nest-report",
             }
         ), f"EXPECTED_ALLOW is {sorted(found)}"
@@ -327,10 +367,10 @@ class TestTheRepinnedAllowArrayConstants:
         ):
             source = (REPO_ROOT / rel).read_text(encoding="utf-8")
             assert (
-                '["read_file", "image", "design", "nest-report"]' in source
+                '["read_file", "image", "design", "pok", "nest-report"]' in source
             ), (
                 f"{rel} — the critic's exact allow assertion must carry the "
-                "appended grant"
+                "appended grant (pok inserted before nest-report)"
             )
 
 

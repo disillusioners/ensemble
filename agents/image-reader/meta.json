@@ -10,6 +10,6 @@
   "innate_skills": [],
   "team_members": [],
   "tools": {
-    "allow": ["time", "self", "help", "knowledge", "mcp", "context", "nest-report"]
+    "allow": ["time", "self", "help", "knowledge", "mcp", "context", "pok", "nest-report"]
   }
 }

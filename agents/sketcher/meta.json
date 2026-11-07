@@ -19,7 +19,7 @@
       "od.save",
       "image",
       "dynamic-skill",
-      "nest-report"
+      "pok", "nest-report"
     ]
   },
   "context_injection": {

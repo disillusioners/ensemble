@@ -22,7 +22,7 @@
             "help",
             "instance",
             "commit_docs_validated",
-          "nest-report"
+          "pok", "nest-report"
         ]
     },
     "team_members": [

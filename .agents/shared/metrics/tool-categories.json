@@ -38,6 +38,7 @@
     "notify-user",
     "plane",
     "plane_sync",
+    "pok",
     "proc",
     "project",
     "project_history",
@@ -62,8 +63,8 @@
     "view-write",
     "wedge-capture"
   ],
-  "count": 61,
+  "count": 62,
   "reserved": "other",
   "source": "daemon/tools/_tool_registry.py CATEGORY_MODULES + @register_tool_category call sites",
-  "vocabulary_version": 7
+  "vocabulary_version": 8
 }

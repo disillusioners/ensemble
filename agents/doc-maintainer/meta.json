@@ -21,7 +21,7 @@
             "shared_meta_kv",
             "time",
             "help",
-          "nest-report"
+          "pok", "nest-report"
         ]
     }
 }

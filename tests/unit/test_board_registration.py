@@ -303,7 +303,7 @@ class TestAllowLists:
             # (2026-11-06) appended "prompt-reload". The pin's INTENT is
             # unchanged: only the categories appended AFTER the board
             # may follow it.
-            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "nest-report", "memoir", "prompt-reload"],
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "pok", "nest-report", "memoir", "prompt-reload"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)

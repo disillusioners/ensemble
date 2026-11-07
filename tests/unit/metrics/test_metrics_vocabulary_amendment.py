@@ -13,7 +13,7 @@ from daemon import checkpoint_metrics as cm
 
 
 class TestVocabularyVersion:
-    def test_the_version_is_six(self) -> None:
+    def test_the_version_is_eight(self) -> None:
         """P2-M8 — the bump rode this lane.
 
         The marker rode 1 → 2 with the central-metrics-v1 lane (the F7
@@ -26,12 +26,16 @@ class TestVocabularyVersion:
         set), 4 → 5 with that lane's Phase 3 (the ``nest-report-read``
         PRIVILEGED READ category joined), 5 → 6 with the
         memoir-store-v1 lane (the ``memoir`` privileged category (#19)
-        joined the tool-category label set) and 6 → 7 with the
+        joined the tool-category label set), 6 → 7 with the
         prompt-reload lane (the ``prompt-reload`` PRIVILEGED category
-        (#20, ari-exactly) joined the tool-category label set).  The
-        P2-M8 mutation (the marker left at 1) still REDS this pin.
+        (#20, ari-exactly) joined the tool-category label set) and
+        7 → 8 with the project-operating-knowledge Phase 1 lane (the
+        ``pok`` NON-privileged category joined; artifact 61 → 62 —
+        both numbers re-derived mechanically at the tree, the design's
+        6→7 / 60→61 were stale).  The P2-M8 mutation (the marker left
+        at 1) still REDS this pin.
         """
-        assert cm.VOCABULARY_VERSION == 7
+        assert cm.VOCABULARY_VERSION == 8
 
     def test_the_version_is_an_integer(self) -> None:
         assert isinstance(cm.VOCABULARY_VERSION, int)

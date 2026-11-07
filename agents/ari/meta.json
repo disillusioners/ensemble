@@ -42,7 +42,7 @@
       "mcp_rpc",
       "wedge-capture",
       "notify-user",
-      "nest-report",
+      "pok", "nest-report",
       "memoir",
       "prompt-reload"
     ],

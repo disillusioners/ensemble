@@ -76,6 +76,11 @@ SYSTEM_INTERNAL_TOKENS = (
 # closed-allow fence is WIDENED by exactly this one category; see the
 # FORBIDDEN_ALLOW note below.  Prior value: the 6-entry set
 # {od.generate, od.compose_brief, od.lint, od.save, image, dynamic-skill}.
+#
+# POK Phase 1 (project-operating-knowledge, 2026-11-07): the "pok"
+# category joined via the B4 sweep — inserted BEFORE "nest-report"
+# (the sweep's insert-before rule, never a reorder).  Prior value: the
+# 7-entry set ending {"nest-report"}.
 EXPECTED_ALLOW = {
     "od.generate",
     "od.compose_brief",
@@ -83,6 +88,7 @@ EXPECTED_ALLOW = {
     "od.save",
     "image",
     "dynamic-skill",
+    "pok",
     "nest-report",
 }
 
@@ -587,7 +593,7 @@ class TestCriticAgentNit2:
         meta = _critic_meta()
         assert meta["id"] == "critic"
         assert meta["team_members"] == []
-        assert meta["tools"]["allow"] == ["read_file", "image", "design", "nest-report"]
+        assert meta["tools"]["allow"] == ["read_file", "image", "design", "pok", "nest-report"]
         deny = set(meta["tools"]["deny"])
         for token in (
             "bash", "proc", "instance", "service", "midflight",

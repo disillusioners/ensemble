@@ -246,7 +246,21 @@ def _cardinality_cap() -> int:
 #: artifact label set grew 60 → 61 and the vocabulary version bumps with
 #: the regeneration (F-1 trap class: the artifact and this constant move
 #: in the SAME change).
-VOCABULARY_VERSION: int = 7
+#:
+#: **8** (project-operating-knowledge Phase 1, 2026-11-07) — the
+#: tool-category vocabulary gained the ``pok`` NON-privileged category
+#: (the lane's Phase-1 registration, ``daemon/tools/_tool_registry.py``
+#: CATEGORY_MODULES + ``daemon/tools/pok.py`` call site), so the frozen
+#: artifact label set grew 61 → 62 and the vocabulary version bumps
+#: with the regeneration (F-1 trap class: the artifact and this
+#: constant move in the SAME change). D-1 drift note: the design docs
+#: said "6→7 / 60→61" — BOTH were stale at implementation time
+#: (prompt-reload 9fbb3ad46 had already consumed them); the numbers
+#: were re-derived mechanically at this tree (checkpoint_metrics = 7,
+#: artifact = 61/7 before this lane). The F7 checkpoint ``op`` enum is
+#: UNCHANGED by this bump (its own vocabulary still reads
+#: ``{aget, other}``).
+VOCABULARY_VERSION: int = 8
 
 
 # ─── Registration-time family metadata (AM-3) ───────────────────────────────

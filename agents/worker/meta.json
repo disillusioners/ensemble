@@ -33,7 +33,7 @@
       "snapshot_create",
       "snapshot_search",
       "secrets",
-      "nest-report"
+      "pok", "nest-report"
     ]
   },
   "context_injection": {

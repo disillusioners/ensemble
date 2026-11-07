@@ -9,7 +9,7 @@
   "llm_model": "vision",
   "innate_skills": [],
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "context", "shared_meta_kv", "service", "nest-report"]
+    "allow": ["bash", "proc", "filesystem", "context", "shared_meta_kv", "service", "pok", "nest-report"]
   },
   "team_members": []
 }

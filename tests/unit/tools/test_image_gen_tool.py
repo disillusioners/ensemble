@@ -1088,7 +1088,7 @@ class TestRegistryAndAllowlist:
         meta = json.loads(
             (Path(__file__).resolve().parents[3] / "agents" / "critic" / "meta.json").read_text()
         )
-        assert meta["tools"]["allow"] == ["read_file", "image", "design", "nest-report"]
+        assert meta["tools"]["allow"] == ["read_file", "image", "design", "pok", "nest-report"]
         assert "image_save" in (meta["tools"].get("deny") or [])
 
 

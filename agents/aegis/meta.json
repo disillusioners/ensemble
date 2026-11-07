@@ -26,7 +26,7 @@
       "midflight",
       "dynamic-skill",
       "todo",
-      "nest-report"
+      "pok", "nest-report"
     ],
     "deny": [
       "write_file",
