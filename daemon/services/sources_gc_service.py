@@ -53,6 +53,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from daemon.services.timestamps import now_utc_iso
+from daemon.repositories.source.repository import (
+    _ARCHIVE_COLLISION_WARNED as _ARCHIVE_COLLISION_LATCH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +79,6 @@ _DRY_RUN_ROW_LINES_MAX = 5
 # lane implementation-notes.
 _TOTAL_PROBE_LIMIT = 100_000
 
-_SECONDS_PER_DAY = 86400
 
 
 def _schedule_shape(config: dict[str, Any]) -> str:
@@ -190,6 +192,12 @@ class SourcesGcService:
         schedules NO task — no sweeps will run (§8.1).
         """
         if not self._enabled:
+            # Deliberate deviation from the TmpImageCleanupService
+            # exemplar: that service has NO disabled branch (amendment
+            # #15 HARD POLICY — always-on infrastructure). This lane
+            # deletes CONFIG ROWS, not regenerable files, so it ships a
+            # kill-switch (strand-heal counter-precedent class) and
+            # therefore needs the disabled log line (§8.1).
             logger.info(
                 "[SourcesGC] disabled "
                 "(SERVICES_SOURCES_GC_ENABLED=false) — no sweeps will run"
@@ -289,6 +297,7 @@ class SourcesGcService:
             "skipped_unparseable": 0,
             "observed_error_rows": 0,
             "remainder": 0,
+            "stuck": 0,
             "duration_s": 0.0,
             "sample": [],
             "rows": [],
@@ -326,19 +335,32 @@ class SourcesGcService:
         if self._dry_run:
             # §8.2 — dry-run ticks ALWAYS log (counts + skip counters +
             # remainder + ≤5 per-row reason lines). NO writes here.
-            total_probe, _ = await asyncio.to_thread(
-                self._source_repo.gc_find_candidates,
-                retention_days=self._retention_days,
-                now=now,
-                limit=_TOTAL_PROBE_LIMIT,
-            )
-            remainder = max(0, len(total_probe) - len(candidates))
+            try:
+                total_probe, _ = await asyncio.to_thread(
+                    self._source_repo.gc_find_candidates,
+                    retention_days=self._retention_days,
+                    now=now,
+                    limit=_TOTAL_PROBE_LIMIT,
+                )
+                remainder = max(0, len(total_probe) - len(candidates))
+                stuck = sum(
+                    1 for c in total_probe
+                    if c.source_id in _ARCHIVE_COLLISION_LATCH
+                )
+            except Exception:  # noqa: BLE001
+                # The probe is telemetry, not the work — a probe failure
+                # must not fail the dry-run tick that already reported
+                # its candidate set. Mirror the post-tick probe's
+                # fail-soft (remainder=-1).
+                remainder = -1
+                stuck = 0
             report["remainder"] = remainder
+            report["stuck"] = stuck
             logger.info(
                 f"[SourcesGC] dry-run: candidates={len(candidates)} "
                 f"skipped_unparseable={skipped_unparseable} "
                 f"observed_error_rows={observed_error_rows} "
-                f"remainder={remainder} deferred"
+                f"remainder={remainder} deferred stuck={stuck}"
             )
             for candidate in candidates[:_DRY_RUN_ROW_LINES_MAX]:
                 try:
@@ -411,10 +433,15 @@ class SourcesGcService:
                 limit=_TOTAL_PROBE_LIMIT,
             )
             report["remainder"] = len(post_probe)
+            report["stuck"] = sum(
+                1 for c in post_probe
+                if c.source_id in _ARCHIVE_COLLISION_LATCH
+            )
         except Exception:  # noqa: BLE001
             # The probe is telemetry, not the work — a probe failure
             # must not fail the tick that already collected.
             report["remainder"] = -1
+            report["stuck"] = 0
 
         work_done = (
             report["collected"] > 0
@@ -439,6 +466,7 @@ class SourcesGcService:
                 f"skipped_unparseable={skipped_unparseable} "
                 f"observed_error_rows={observed_error_rows} "
                 f"remainder={report['remainder']} deferred "
+                f"stuck={report['stuck']} "
                 f"duration_s={time.monotonic() - sweep_started:.3f} "
                 f"sample=[{', '.join(report['sample'])}]"
             )

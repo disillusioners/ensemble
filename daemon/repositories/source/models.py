@@ -249,3 +249,15 @@ class SourceConfigArchive(SQLModel, table=True):
     created_at: str | None = None
     updated_at: str | None = None
     archived_at: str
+
+
+__all__ = [
+    "SourceStatus",
+    "ExecutionStatus",
+    "SourceConfig",
+    "InstanceMapping",
+    "ProcessedMessage",
+    "ScheduleExecution",
+    "ScheduleExecutionArchive",
+    "SourceConfigArchive",
+]

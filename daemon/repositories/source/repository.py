@@ -13,6 +13,7 @@ from sqlalchemy import delete as sql_delete, insert, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import Session, select, col, func
 
 from .models import (
@@ -28,6 +29,11 @@ from .models import (
 
 
 logger = logging.getLogger(__name__)
+
+
+# Single source of truth for the seconds-per-day conversion used by the
+# GC age math (tidier low: kill the hardcoded 86400.0 split).
+_SECONDS_PER_DAY = 86400
 
 
 # W3 (plan council, binding) — per-source-id first-warning latch for the
@@ -212,7 +218,20 @@ class SQLModelSourceRepository:
                 source_config.autostart = autostart
             
             source_config.updated_at = datetime.now(timezone.utc).isoformat()
-            session.commit()
+            try:
+                session.commit()
+            except StaleDataError:
+                # W7: a concurrent GC delete (or any other writer that
+                # removed the row) between our read and commit makes the
+                # ORM flush target a vanished row. Treat as "not found" so
+                # the caller (scheduling_service resume path) maps it to
+                # the honest 404-family outcome instead of HTTP 500.
+                session.rollback()
+                logger.info(
+                    f"Source config vanished during update (concurrent "
+                    f"delete): source_id={source_id}"
+                )
+                return None
             session.refresh(source_config)
             
             logger.info(f"Updated source config: source_id={source_id}")
@@ -723,7 +742,7 @@ class SQLModelSourceRepository:
             if age_seconds is None:
                 skipped_unparseable += 1
                 continue
-            if age_seconds <= retention_days * 86400.0:
+            if age_seconds <= retention_days * _SECONDS_PER_DAY:
                 # Within retention — not collectable. SQL cannot do
                 # this leg soundly (ISO TEXT comparison), so rows that
                 # fail it are simply dropped here (not "skips" — they
@@ -735,7 +754,7 @@ class SQLModelSourceRepository:
                     name=row.name,
                     status=row.status,
                     updated_at=row.updated_at,
-                    age_days=age_seconds / 86400.0,
+                    age_days=age_seconds / _SECONDS_PER_DAY,
                     config_json=json.dumps(row.config or {}),
                 )
             )
@@ -750,12 +769,55 @@ class SQLModelSourceRepository:
         terminal-status leg); this counter only OBSERVES them.
         """
         with Session(self.engine) as session:
-            stmt = (
-                select(SourceConfig)
-                .where(SourceConfig.source_type == "scheduler")
-                .where(SourceConfig.status == SourceStatus.ERROR.value)
+            stmt = select(func.count()).select_from(SourceConfig).where(
+                SourceConfig.source_type == "scheduler",
+                SourceConfig.status == SourceStatus.ERROR.value,
             )
-            return len(list(session.exec(stmt)))
+            return int(session.exec(stmt).one())
+
+    def _archive_rows(self, session, locked, now):
+        """Assemble + add the archive rows for one source (no commit).
+
+        Returns the list of live ``ScheduleExecution`` rows archived so
+        the caller can count them. Raises ``IntegrityError`` on an
+        archive-PK collision (AM-3) — the caller owns the catch.
+        """
+        executions = list(
+            session.exec(
+                select(ScheduleExecution).where(
+                    ScheduleExecution.schedule_id == locked.source_id
+                )
+            )
+        )
+        session.add(
+            SourceConfigArchive(
+                source_id=locked.source_id,
+                source_type=locked.source_type,
+                name=locked.name,
+                config=json.dumps(locked.config or {}),
+                enabled=bool(locked.enabled),
+                autostart=bool(locked.autostart),
+                status=locked.status,
+                error_message=locked.error_message,
+                created_at=locked.created_at,
+                updated_at=locked.updated_at,
+                archived_at=now.isoformat(),
+            )
+        )
+        for execution in executions:
+            session.add(
+                ScheduleExecutionArchive(
+                    execution_id=execution.execution_id,
+                    schedule_id=execution.schedule_id,
+                    triggered_at=execution.triggered_at,
+                    instance_id=execution.instance_id,
+                    status=execution.status,
+                    error_message=execution.error_message,
+                    completed_at=execution.completed_at,
+                    archived_at=now.isoformat(),
+                )
+            )
+        return executions
 
     def gc_archive_and_delete(
         self,
@@ -834,7 +896,7 @@ class SQLModelSourceRepository:
             if age_seconds is None:
                 result.skipped_reason = "unparseable_updated_at"
                 return result
-            if age_seconds <= retention_days * 86400.0:
+            if age_seconds <= retention_days * _SECONDS_PER_DAY:
                 result.skipped_reason = "not_old_enough"
                 return result
 
@@ -843,42 +905,11 @@ class SQLModelSourceRepository:
                 return result
 
             # --- Archive INSERTs: PLAIN, fail-loud (AM-3) ---
-            executions = list(
-                session.exec(
-                    select(ScheduleExecution).where(
-                        ScheduleExecution.schedule_id == source_id
-                    )
-                )
-            )
+            # The row assembly lives in ``_archive_rows`` (behaviour-
+            # neutral extraction, tidier fold 6) so the IntegrityError
+            # catch below stays the single owner of the collision path.
             try:
-                session.add(
-                    SourceConfigArchive(
-                        source_id=locked.source_id,
-                        source_type=locked.source_type,
-                        name=locked.name,
-                        config=json.dumps(locked.config or {}),
-                        enabled=bool(locked.enabled),
-                        autostart=bool(locked.autostart),
-                        status=locked.status,
-                        error_message=locked.error_message,
-                        created_at=locked.created_at,
-                        updated_at=locked.updated_at,
-                        archived_at=now.isoformat(),
-                    )
-                )
-                for execution in executions:
-                    session.add(
-                        ScheduleExecutionArchive(
-                            execution_id=execution.execution_id,
-                            schedule_id=execution.schedule_id,
-                            triggered_at=execution.triggered_at,
-                            instance_id=execution.instance_id,
-                            status=execution.status,
-                            error_message=execution.error_message,
-                            completed_at=execution.completed_at,
-                            archived_at=now.isoformat(),
-                        )
-                    )
+                executions = self._archive_rows(session, locked, now)
                 session.flush()
             except IntegrityError as collision_err:
                 session.rollback()
@@ -924,8 +955,15 @@ class SQLModelSourceRepository:
                 # Raced-skip: a concurrent writer re-stamped the row
                 # between the locked read and this DELETE (closes the
                 # SQLite micro-window — with_for_update renders no lock
-                # there). Roll back; archive NOTHING.
+                # there). Roll back; archive NOTHING. Zero the per-row
+                # telemetry: the child deletes above were rolled back, so
+                # reporting them would claim rolled-back deletions (tidier).
                 session.rollback()
+                result.deleted_mappings = 0
+                result.deleted_processed = 0
+                result.deleted_executions = 0
+                result.archived_executions = 0
+                result.archived_config = False
                 result.skipped_reason = "raced"
                 return result
 
@@ -1281,3 +1319,10 @@ class SQLModelSourceRepository:
                 .order_by(col(ScheduleExecution.triggered_at).desc())
             )
             return list(session.exec(stmt))
+
+
+__all__ = [
+    "SQLModelSourceRepository",
+    "GcCandidate",
+    "GcRowResult",
+]
