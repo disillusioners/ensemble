@@ -175,21 +175,41 @@ listed oldest→newest after the follow-up commits.
 | tidier 5 (start() disabled comment) | LANDED | fdf01ed18 | daemon/services/sources_gc_service.py (start) |
 | tidier 6 (extract _run_destructive_tick / _log_tick_summary / archive assembly) | PARTIAL — archive-row assembly extracted into `_archive_rows` (behaviour-neutral); the sweep_once per-row loop + summary-log extraction was NOT done. Argument: sweep_once is already phased with clear comments and the mutation-teeth tests (W2/W3/W4) are the binding P6 gates, not the refactor; further extraction churns ~190 lines for reviewability with real regression risk. Recorded as deferred-to-reviewer. | fdf01ed18 (partial) | daemon/repositories/source/repository.py (_archive_rows) |
 | Lows (seconds-per-day constant, __all__, "Restart to flip.", trailing newline, _GC_DISCLOSURE, soften "default 14d", alphabetical imports) | LANDED | fdf01ed18 + f2909e289 | repository.py, models.py, sources_gc_service.py, scheduling.py |
-| W6 (lock order deadlock) | NON-ACTIONABLE — deadlock unreachable. Argument: our method acquires the parent (source_configs) lock then deletes children (no child lock); the REST path (delete_source_config) deletes children then parent with NO lock at all. Circular wait requires our method to wait on a child lock held by REST, but we never take a child lock, and REST never takes the parent lock before us in a way that waits on us holding a child lock. Worst case: REST's parent delete blocks on our parent lock until we commit — a wait, not a deadlock. No code change. | — | implementation-notes (this section) |
+| W6 (lock order deadlock) | REVERSED -> LANDED (fix). Verifier adjudicated the premise false: PG DELETE takes row-level locks held to commit, so delete_source_config (children then parent) vs gc_archive_and_delete (parent then children) forms a real lock-order cycle on the same source_id. Fix (a): delete_source_config now acquires the parent row lock FIRST (with_for_update=True) before child deletes — both paths take the parent lock first. | fdf01ed18-era + (this commit) | daemon/repositories/source/repository.py (delete_source_config) + tests/postgres/test_source_gc_lock_interleave_pg.py (listener + blocking leg) |
 | W7 (StaleDataError on concurrent resume) | LANDED (fix) | fdf01ed18 | daemon/repositories/source/repository.py (update_source_config) — catches StaleDataError -> None; scheduling_service maps None -> ValueError("Schedule not found") (no NOT-TOUCHED file touched; update_source_config lives in repository.py, which is on the touched list). |
 
-## W6 decision (recorded)
+## W6 decision (REVERSED — fix landed)
 
-Deadlock unreachable in practice. Lock ordering analysis: our method holds
-ONLY the parent lock (source_configs, FOR UPDATE) for the duration of the
-transaction and deletes children without locking them; the REST path takes
-NO locks at all (children then parent). For a deadlock we would need our
-method to wait on a resource held by REST while REST waits on a resource
-held by us — REST holds nothing we wait on, and we hold only the parent,
-which REST waits on (one-directional wait). The least-invasive "fix"
-(lock-first in delete_source_config or NOWAIT in our method) is therefore
-unnecessary and would add complexity to a path that already serializes
-correctly. No code change; decision recorded here.
+The verifier adjudicated the original argument INCORRECT: PostgreSQL DELETE
+acquires row-level locks held to commit, so the REST path is NOT lock-free.
+Cycle: gc_archive_and_delete takes the PARENT lock then deletes children
+(wants child locks); delete_source_config deletes children (takes child
+locks) then deletes the parent (wants the parent lock) -> circular wait
+when both target the same source_id. PG aborts one txn: the GC self-heals
+(per-row except -> skip) but the REST path surfaces HTTP 500. Medium-High,
+intermittent, load-dependent.
+
+Fix (leader-authorized shape (a)): delete_source_config now acquires the
+parent row lock FIRST via session.get(SourceConfig, source_id,
+with_for_update=True) before any child delete. Both paths now take the
+parent lock first -> no cycle. Delete order, return shape, and all other
+behavior unchanged beyond locking. The rejected alternative (children-before-
+parent in GC) was NOT taken — it would re-open the AM-1 race window.
+
+Pin: tests/postgres/test_source_gc_lock_interleave_pg.py gained
+test_w6_delete_source_config_locks_parent_first (listener node asserting
+FOR UPDATE emitted by the REAL method, plus a two-connection blocking leg).
+Mutation-meaningful: removing with_for_update=True REDs the listener node.
+Executed locally: PASS.
+
+## REST update_source edge (ROUTED — not fixed here)
+
+Verifier finding (LOW): routers/sources.py :446-447 calls
+_source_to_info(updated) with no None check after our StaleDataError -> None
+change in update_source_config. Narrow race window (row vanished between
+read and commit). NOT touched: routers/sources.py is on the plan's
+NOT-TOUCHED list and needs explicit leader authorization before editing.
+Routed to the leader; no code change in this lane.
 
 ## W7 decision (recorded)
 

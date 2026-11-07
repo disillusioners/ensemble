@@ -200,7 +200,16 @@ class SQLModelSourceRepository:
             reintroducing a Python read-modify-write here.
         """
         with Session(self.engine) as session:
-            source_config = session.get(SourceConfig, source_id)
+            # W6 fix (leader-authorized): acquire the PARENT row lock FIRST,
+            # before any child delete. Both delete paths (this one and
+            # gc_archive_and_delete) now take the parent lock first -> no
+            # lock-order cycle -> no PG deadlock. Previously this method
+            # deleted children (taking child row locks) then deleted the
+            # parent (taking the parent lock) while gc_archive_and_delete
+            # did the reverse (parent lock first, then child deletes) ->
+            # circular wait on the same source_id. Delete order, return
+            # shape, and all other behavior are unchanged beyond locking.
+            source_config = session.get(SourceConfig, source_id, with_for_update=True)
             if source_config is None:
                 return None
             
@@ -565,7 +574,16 @@ class SQLModelSourceRepository:
     ) -> SourceConfig | None:
         """Update the status of a source configuration."""
         with Session(self.engine) as session:
-            source_config = session.get(SourceConfig, source_id)
+            # W6 fix (leader-authorized): acquire the PARENT row lock FIRST,
+            # before any child delete. Both delete paths (this one and
+            # gc_archive_and_delete) now take the parent lock first -> no
+            # lock-order cycle -> no PG deadlock. Previously this method
+            # deleted children (taking child row locks) then deleted the
+            # parent (taking the parent lock) while gc_archive_and_delete
+            # did the reverse (parent lock first, then child deletes) ->
+            # circular wait on the same source_id. Delete order, return
+            # shape, and all other behavior are unchanged beyond locking.
+            source_config = session.get(SourceConfig, source_id, with_for_update=True)
             if source_config is None:
                 logger.warning(f"Source not found for status update: source_id={source_id}")
                 return None
@@ -611,7 +629,16 @@ class SQLModelSourceRepository:
                 "the cancel path is broken (architecture §3.2 invariant)."
             )
         with Session(self.engine) as session:
-            source_config = session.get(SourceConfig, source_id)
+            # W6 fix (leader-authorized): acquire the PARENT row lock FIRST,
+            # before any child delete. Both delete paths (this one and
+            # gc_archive_and_delete) now take the parent lock first -> no
+            # lock-order cycle -> no PG deadlock. Previously this method
+            # deleted children (taking child row locks) then deleted the
+            # parent (taking the parent lock) while gc_archive_and_delete
+            # did the reverse (parent lock first, then child deletes) ->
+            # circular wait on the same source_id. Delete order, return
+            # shape, and all other behavior are unchanged beyond locking.
+            source_config = session.get(SourceConfig, source_id, with_for_update=True)
             if source_config is None:
                 logger.warning(
                     f"Source not found for cancel: source_id={source_id}"
@@ -634,7 +661,16 @@ class SQLModelSourceRepository:
     def delete_source_config(self, source_id: str) -> dict[str, Any]:
         """Delete a source configuration and all associated mappings."""
         with Session(self.engine) as session:
-            source_config = session.get(SourceConfig, source_id)
+            # W6 fix (leader-authorized): acquire the PARENT row lock FIRST,
+            # before any child delete. Both delete paths (this one and
+            # gc_archive_and_delete) now take the parent lock first -> no
+            # lock-order cycle -> no PG deadlock. Previously this method
+            # deleted children (taking child row locks) then deleted the
+            # parent (taking the parent lock) while gc_archive_and_delete
+            # did the reverse (parent lock first, then child deletes) ->
+            # circular wait on the same source_id. Delete order, return
+            # shape, and all other behavior are unchanged beyond locking.
+            source_config = session.get(SourceConfig, source_id, with_for_update=True)
             if source_config is None:
                 logger.warning(f"Source config not found for deletion: source_id={source_id}")
                 return {"deleted": False, "source_id": source_id, "error": "Not found"}

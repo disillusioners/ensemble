@@ -377,3 +377,192 @@ def test_p10_child_first_fk_order_under_real_pg(pg_engine):
             {"sid": CHILD_FIRST_ID},
         ).scalar()
         assert arch_execs == 3, f"expected 3 archived executions, got {arch_execs}"
+
+
+DELETE_LOCK_ID = "delete-lock-row"
+
+
+@pytest.fixture(autouse=True)
+def _clean_delete_lock(pg_engine):
+    with pg_engine.begin() as conn:
+        conn.execute(text("DELETE FROM instance_mappings WHERE source_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(text("DELETE FROM schedule_executions WHERE schedule_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(text("DELETE FROM processed_external_messages WHERE source_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(text("DELETE FROM source_configs WHERE source_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+    now = datetime.now(timezone.utc)
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO source_configs (source_id, source_type, name, config, "
+                "credentials, enabled, autostart, status, error_message, "
+                "created_at, updated_at) VALUES "
+                "(:sid, 'scheduler', :sid, '{}'::jsonb, NULL, false, true, "
+                "'stopped', NULL, :now, :upd)"
+            ),
+            {
+                "sid": DELETE_LOCK_ID,
+                "now": now.isoformat(),
+                "upd": (now - timedelta(days=40)).isoformat(),
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO instance_mappings (mapping_id, source_id, "
+                "external_user_id, agent_instance_id, agent_id, agent_dir, "
+                "mapping_metadata, last_message_at, created_at) VALUES "
+                "(:mid, :sid, 'u1', 'inst1', 'a', 'd', '{}'::jsonb, :lm, :ca)"
+            ),
+            {
+                "mid": "dl-map-1",
+                "sid": DELETE_LOCK_ID,
+                "lm": (now - timedelta(days=40)).isoformat(),
+                "ca": (now - timedelta(days=40)).isoformat(),
+            },
+        )
+    yield
+    with pg_engine.begin() as conn:
+        conn.execute(text("DELETE FROM instance_mappings WHERE source_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(text("DELETE FROM schedule_executions WHERE schedule_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(text("DELETE FROM processed_external_messages WHERE source_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(text("DELETE FROM source_configs WHERE source_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+
+
+@pytest.mark.postgres
+def test_w6_delete_source_config_locks_parent_first(pg_engine):
+    """W6 fix: delete_source_config acquires the parent row lock FIRST.
+
+    (a) A before_cursor_execute listener over the REAL method asserts
+    FOR UPDATE is emitted on the parent read (same shape as the W1
+    node). Removing with_for_update=True makes this RED.
+    (b) Two-connection blocking leg: conn A holds the parent FOR UPDATE;
+    delete_source_config in a thread blocks until A commits.
+    """
+    now = datetime.now(timezone.utc)
+    repo = SQLModelSourceRepository(pg_engine)
+
+    # (a) listener over the real method
+    emitted: list[str] = []
+
+    def _listener(conn, cursor, statement, parameters, context, executemany):
+        emitted.append(statement)
+
+    from sqlalchemy import event
+    event.listen(pg_engine, "before_cursor_execute", _listener)
+    try:
+        res = repo.delete_source_config(DELETE_LOCK_ID)
+    finally:
+        event.remove(pg_engine, "before_cursor_execute", _listener)
+
+    assert res.get("deleted") is True, res
+    assert any("FOR UPDATE" in (st or "").upper() for st in emitted), (
+        "delete_source_config must emit FOR UPDATE on the parent read; "
+        f"emitted={emitted!r}"
+    )
+
+
+@pytest.mark.postgres
+def test_w6_delete_source_config_locks_parent_first_blocking(pg_engine):
+    """W6 fix (b): two-connection blocking leg.
+
+    conn A holds the parent FOR UPDATE; delete_source_config in a thread
+    must block until A commits (proving the lock is actually taken).
+    """
+    now = datetime.now(timezone.utc)
+    repo = SQLModelSourceRepository(pg_engine)
+
+    # re-seed a fresh row (part (a) may have deleted it)
+    with pg_engine.begin() as conn:
+        conn.execute(text("DELETE FROM instance_mappings WHERE source_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(text("DELETE FROM schedule_executions WHERE schedule_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(text("DELETE FROM processed_external_messages WHERE source_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(text("DELETE FROM source_configs WHERE source_id = :sid"),
+                     {"sid": DELETE_LOCK_ID})
+        conn.execute(
+            text(
+                "INSERT INTO source_configs (source_id, source_type, name, config, "
+                "credentials, enabled, autostart, status, error_message, "
+                "created_at, updated_at) VALUES "
+                "(:sid, 'scheduler', :sid, '{}'::jsonb, NULL, false, true, "
+                "'stopped', NULL, :now, :upd)"
+            ),
+            {
+                "sid": DELETE_LOCK_ID,
+                "now": now.isoformat(),
+                "upd": (now - timedelta(days=40)).isoformat(),
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO instance_mappings (mapping_id, source_id, "
+                "external_user_id, agent_instance_id, agent_id, agent_dir, "
+                "mapping_metadata, last_message_at, created_at) VALUES "
+                "(:mid, :sid, 'u1', 'inst1', 'a', 'd', '{}'::jsonb, :lm, :ca)"
+            ),
+            {
+                "mid": "dl-map-2",
+                "sid": DELETE_LOCK_ID,
+                "lm": (now - timedelta(days=40)).isoformat(),
+                "ca": (now - timedelta(days=40)).isoformat(),
+            },
+        )
+
+    lock_acquired = threading.Event()
+    delete_done = threading.Event()
+    delete_result: dict = {}
+
+    def worker():
+        with pg_engine.connect() as conn:
+            with conn.begin():
+                conn.execute(
+                    text("SELECT source_id FROM source_configs "
+                         "WHERE source_id = :sid FOR UPDATE"),
+                    {"sid": DELETE_LOCK_ID},
+                )
+                lock_acquired.set()
+                time.sleep(2.0)  # hold the lock briefly
+
+    def _do_delete():
+        try:
+            delete_result["res"] = repo.delete_source_config(DELETE_LOCK_ID)
+        except Exception as exc:  # noqa: BLE001
+            delete_result["exc"] = str(exc)
+        finally:
+            delete_done.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    assert lock_acquired.wait(timeout=10), "A never acquired the row lock"
+
+    dt = threading.Thread(target=_do_delete, daemon=True)
+    dt.start()
+
+    # While A holds the lock, the delete must not have completed.
+    assert not delete_done.wait(timeout=0.5), (
+        "delete_source_config did not block on the held parent lock"
+    )
+
+    t.join(timeout=10)
+    assert delete_done.wait(timeout=10), "delete did not complete after release"
+    dt.join(timeout=10)
+
+
+
+    # The delete either blocked (lock wait) and then succeeded after release,
+    # or completed after A released. Either way the row is gone now.
+    with pg_engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT source_id FROM source_configs WHERE source_id = :sid"),
+            {"sid": DELETE_LOCK_ID},
+        ).fetchone()
+    assert row is None, "row must be gone after the (possibly blocked) delete"
