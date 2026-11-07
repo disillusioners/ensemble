@@ -551,6 +551,39 @@ class TestP21ChatMappingsIntact:
 # P11 — boot-no-behavior-change (git diff --stat)
 # ---------------------------------------------------------------------------
 
+class TestDryRunGuard:
+    """W4: dry_run=True leaves the row + children + both archive tables
+    byte-for-count unchanged."""
+
+    def test_dry_run_no_writes(self, repo, shared_sqlite_engine, now):
+        with Session(shared_sqlite_engine) as s:
+            s.add(SourceConfig(source_id="dr-row", source_type="scheduler", name="dr",
+                               config={"run_at": "2026-01-01T00:00:00+00:00"},
+                               enabled=False, status="stopped",
+                               updated_at=(now - timedelta(days=40)).isoformat()))
+            s.add(ScheduleExecution(execution_id="dr-exec", schedule_id="dr-row", status="completed"))
+            s.commit()
+        # counts before
+        def counts():
+            with Session(shared_sqlite_engine) as s:
+                from sqlmodel import select, func
+                n_src = len(s.exec(select(SourceConfig).where(SourceConfig.source_id == "dr-row")).all())
+                n_exec = len(s.exec(select(ScheduleExecution).where(ScheduleExecution.schedule_id == "dr-row")).all())
+                n_acfg = len(s.exec(select(SourceConfigArchive).where(SourceConfigArchive.source_id == "dr-row")).all())
+                n_aexec = len(s.exec(select(ScheduleExecutionArchive).where(ScheduleExecutionArchive.schedule_id == "dr-row")).all())
+                return n_src, n_exec, n_acfg, n_aexec
+        before = counts()
+        assert before == (1, 1, 0, 0)
+        r = repo.gc_archive_and_delete(source_id="dr-row", now=now, retention_days=1, dry_run=True)
+        assert r.dry_run is True
+        assert r.deleted is False
+        assert r.skipped_reason is None
+        after = counts()
+        assert after == before, (before, after)
+        # row still present
+        with Session(shared_sqlite_engine) as s:
+            assert s.get(SourceConfig, "dr-row") is not None
+
 class TestP11BootNoBehaviorChange:
     def test_sources_and_constants_unchanged_vs_base(self):
         import subprocess
