@@ -1723,6 +1723,12 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "project_set_status",
     "project_set_tags",
     "project_unlink",
+    # POK Phase 1 (project-operating-knowledge, 2026-11-07): the three
+    # project operating-knowledge tools (daemon/tools/pok.py — the
+    # 'pok' non-privileged category; B4 sweep grants via tools.allow).
+    "pok_upsert",
+    "pok_query",
+    "pok_curate",
     "project_update",
     "queue_create",
     "queue_list",
