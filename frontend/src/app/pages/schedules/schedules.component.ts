@@ -1,4 +1,4 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
@@ -9,6 +9,7 @@ import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatCheckboxModule } from '@angular/material/checkbox';
 import { SchedulerService } from '../../services/scheduler.service';
 import { ApiService } from '../../services/api.service';
 import { ScheduleCardComponent } from '../../components/schedule-card/schedule-card.component';
@@ -16,6 +17,11 @@ import { ScheduleDetailDrawerComponent } from '../../components/schedule-detail-
 import { ScheduleCreateDialogComponent, ScheduleCreateDialogResult } from '../../components/schedule-create-dialog/schedule-create-dialog.component';
 import { SearchableSelectComponent, SearchableSelectOption } from '../../components';
 import { Schedule, ScheduleStatus, ScheduleType } from '../../models/scheduler.model';
+import {
+  readShowTerminalPreference,
+  splitByTerminalVisibility,
+  writeShowTerminalPreference,
+} from '../../models/terminal-visibility.model';
 import { Agent } from '../../models';
 
 type ActionType = 'start' | 'stop';
@@ -34,6 +40,7 @@ type ActionType = 'start' | 'stop';
     MatSnackBarModule,
     MatDialogModule,
     MatTooltipModule,
+    MatCheckboxModule,
     ScheduleCardComponent,
     ScheduleDetailDrawerComponent,
     SearchableSelectComponent
@@ -59,20 +66,48 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   readonly statusFilter = signal<ScheduleStatus | 'all'>('all');
   readonly typeFilter = signal<ScheduleType | 'all'>('all');
 
+  // ── Terminal-row visibility ("Show completed & cancelled") ──────────
+  // Default-ACTIVE view: terminal schedules (stopped/cancelled one-shot
+  // alarms) are hidden unless the user opts in. Preference persists
+  // across page loads via the shared localStorage key — the SAME key
+  // the /sources surface uses (terminal-visibility.model).
+  readonly showTerminal = signal<boolean>(false);
+  private showTerminalRestored = false;
+
+  constructor() {
+    // Restore the persisted preference exactly once, on first
+    // construction (house pattern — cf. SkillsComponent "Active only").
+    effect(() => {
+      if (this.showTerminalRestored) return;
+      this.showTerminalRestored = true;
+      this.showTerminal.set(readShowTerminalPreference(localStorage));
+    });
+  }
+
+  // ONE pass over the UNFILTERED list drives both the hidden count and
+  // the active-only subset; the stats badges below keep reading
+  // `schedules()` directly, so counts stay truthful for ALL rows.
+  private readonly terminalSplit = computed(() =>
+    splitByTerminalVisibility(this.schedules(), this.showTerminal()),
+  );
+  readonly hiddenTerminalCount = computed<number>(() => this.terminalSplit().hiddenTerminal);
+
   // Computed values
   readonly filteredSchedules = computed((): Schedule[] => {
-    let filtered: Schedule[] = this.schedules();
-    
+    // Stage 1 — terminal visibility (BEFORE the chip/type filters, so
+    // the default active-only view applies unless the user opted in).
+    let filtered: Schedule[] = this.terminalSplit().visible;
+
     const statusVal = this.statusFilter();
     if (statusVal !== 'all') {
       filtered = filtered.filter((s: Schedule) => s.status === statusVal);
     }
-    
+
     const typeVal = this.typeFilter();
     if (typeVal !== 'all') {
       filtered = filtered.filter((s: Schedule) => s.config.type === typeVal);
     }
-    
+
     return filtered;
   });
 
@@ -164,6 +199,11 @@ export class SchedulesComponent implements OnInit, OnDestroy {
 
   protected onTypeFilterChange(type: ScheduleType | 'all'): void {
     this.typeFilter.set(type);
+  }
+
+  protected onShowTerminalChange(checked: boolean): void {
+    this.showTerminal.set(checked);
+    writeShowTerminalPreference(localStorage, checked);
   }
 
   protected onClearFilters(): void {

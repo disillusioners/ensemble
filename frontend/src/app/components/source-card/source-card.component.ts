@@ -56,6 +56,7 @@ export class SourceCardComponent {
       case 'running': return 'Running';
       case 'error': return 'Error';
       case 'starting': return 'Starting';
+      case 'cancelled': return 'Cancelled';
       default: return 'Stopped';
     }
   }

@@ -1,7 +1,10 @@
 // Scheduler Models for Frontend
 
 // Schedule status type
-export type ScheduleStatus = 'running' | 'stopped';
+// `cancelled` mirrors the wire (daemon/models/source.py SourceStatus —
+// ADR-007 terminal state). GET /api/schedules hides cancelled rows by
+// default, but the type must still admit the value for wire truth.
+export type ScheduleStatus = 'running' | 'stopped' | 'cancelled';
 
 // Schedule type (how the schedule is configured)
 export type ScheduleType = 'cron' | 'interval' | 'one-time';
