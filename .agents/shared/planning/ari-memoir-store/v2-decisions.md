@@ -2,8 +2,8 @@
 
 **Lane:** `feature/memoir-v2-reflecting-mind` @ worktree `/home/nea/ensemble-src-wt-memoir-v2`  
 **Base commit:** `f49006b922492f72ca032c56e26d20468f7a3afd` (branched from `origin/latest`)  
-**Status:** **PHASE A — BLESSED SCOPE CAPTURE & ARCHITECT INTAKE.** Scope ratified by Emperor on **2026-11-09**.  
-**Companions:** `v2-plan-overview.md` (the v2 implementation plan), `v2-research-findings.md` (technical digest), `v4-federated-sketch.md` (sibling deliverable on disk — R3 discharge, committed together in this lane).  
+**Status:** **PHASE B — ADJUDICATED IMPLEMENTATION SPECIFICATION.** Scope ratified by Emperor on 2026-11-09; architect adjudication folded from `v2-architecture-recommendation.md` (commit `3cdbcb712`).  
+**Companions:** `v2-plan-overview.md` (the v2 implementation plan), `v2-architecture-recommendation.md` (Level-4 authority), `v2-research-findings.md` (technical digest), `v4-federated-sketch.md` (sibling deliverable on disk — R3 discharge, committed together in this lane).  
 **Predecessor artifacts (FROZEN):** The 24 v1 planning documents under `.agents/shared/planning/ari-memoir-store/` remain frozen and are superseded only to the extent stated in this document.
 
 ---
@@ -25,11 +25,11 @@ The constitutional rulings R1–R4 from 2026-11-04 remain the supreme authority 
 Level 1: R1–R4 (Emperor, 2026-11-04)
 Level 2: Blessed v2 Scope Directive (Emperor, 2026-11-09)
 Level 3: Sibling R3 Constraint (v4-federated-sketch.md §5 KEEP-V2-OPEN checklist)
-Level 4: Architect Adjudication of Open Questions (architecture enrichment)
+Level 4: Architect Adjudication (v2-architecture-recommendation.md — 9 rulings, 7 addenda)
 Level 5: This Plan Set (v2-plan-overview.md, v2-phaseN-plan.md, v2-decisions.md)
 Level 6: Code Implementation
 ```
-Any proposal violating Levels 1–2 is invalid by construction.
+Any proposal violating Levels 1–2 is invalid by construction. Level 4 supersedes Level 5 surgically (P-4).
 
 ---
 
@@ -42,107 +42,85 @@ Any proposal violating Levels 1–2 is invalid by construction.
 | **P-3** | Deviations and architectural choices are adjudicated by the **architect**, not by the implementing worker. |
 | **P-4** | Adjudication is **surgical**: it supersedes only the specific clause addressed; all other frozen and blessed text stands. |
 | **P-5** | Constitutional rulings R1–R4 cannot be adjudicated downward by any architect. Only the Emperor can modify R1–R4. |
-| **P-6** | Open questions carried into implementation live in §4 below as `PENDING-ARCHITECT` entries and must be resolved before implementation phases close. |
+| **P-6** | Open questions carried into implementation live in §4 below and are marked `RESOLVED` once adjudicated by the architect. |
 | **P-7** | Recorded line numbers are dated leads — **grep at use time**. Anchor drift is not a design deviation; it requires a re-grep and a dated note. |
 
 ---
 
-## 3. Decisions Embedded in Blessed v2 Scope (Attributed & Indexed)
+## 3. Decisions Log (Attributed & Indexed)
 
-| # | Decision (as blessed) | Alternative NOT Taken | Reason / Architectural Grounding |
+| # | Decision | Alternative NOT Taken | Reason / Architectural Grounding |
 |---|---|---|---|
 | **V2-1** | **Scope Ruling:** Blessed v2 scope (2026-11-09) is authoritative. Items from v1 roadmap's v2 sketch not in blessed scope (`memoir_thread`, dedicated domain taxonomy, searchable archive) are **deferred to v3**, NOT silently dropped. | Build `memoir_thread` and archive tier now; OR silently drop them. | Rolling roadmap doctrine (R3): scope discipline requires explicit deferral. Epistemic links between episodes are already captured via `memoir_line` and synthesis citations (`source_episode_ids`). |
 | **V2-2** | **No Graph Database (R4):** Constellation is implemented via 3 relational tables (`memoir_star`, `memoir_star_alias`, `memoir_line`) using 1–2 hop SQL joins. | Graph DB (Neo4j, Memgraph, etc.) or embedded vector graph. | Constitutional ruling R4: Postgres only; no new external memory services. 1–2 hop relational queries suffice at personal scale. |
 | **V2-3** | **Cold-Path Graph Drawing:** Constellation nodes and edges are updated ONLY during background reflection passes, never during hot `memoir_write`. | Real-time graph indexing on every write. | Preserves DD-20 invariant: hot append must never block the conversation turn. Graph consolidation cost scales with change, not corpus size. |
 | **V2-4** | **LightRAG M4 Two-Tier Star Descriptions:** Plain join of episode fragments while small; LLM summarization into a consolidated entity card only after fragment thresholds are reached. | LLM summarize on every mention; OR never summarize (raw concatenation forever). | Balances token cost and card coherence. Small entities don't need expensive LLM calls; large entities need coherent condensation. |
-| **V2-5** | **The Dream Dual-Cadence Reflection:** (a) In-day idle-debounce with warm-up doubling (`1→2→4→8→N` base 60s); (b) Nightly bounded pass (ReMe `auto_dream` shape: 2-day lookback, strict caps). | Fixed periodic cron (e.g. hourly); OR continuous background loop. | A fixed cron over-reflects on quiet days and under-reflects on busy days. Debounce matches reflection rhythm to conversation activity while nightly pass bounds costs. |
+| **V2-5** | **The Dream Dual-Cadence Reflection:** (a) In-day idle-debounce with warm-up doubling (`1→2→4→8→16` base 60s, ceiling 960s) + force-fire at 3600s; (b) Nightly bounded pass (ReMe `auto_dream` shape: 2-day lookback, strict caps, 02:00–04:00 UTC). Trigger is DERIVED per tick (`SUM(COALESCE(poignancy, importance)) >= 25`), deleting rolling counter state. | Fixed periodic cron (e.g. hourly); OR continuous background loop; OR in-memory counter. | A fixed cron over-reflects on quiet days and under-reflects on busy days. Debounce matches reflection rhythm to conversation activity. Derived sum is restart-durable (§3-A1). |
 | **V2-6** | **Citations Mandate on Syntheses:** Every synthesis row in `memoir_syntheses` MUST populate `source_episode_ids` with a non-empty JSON list of episode UUIDs. | Freehand synthesis claims without citations. | Provenance is non-negotiable. Ari must be able to answer "what do I believe, and *how did I come to believe it*?" Forensic traceability. |
-| **V2-7** | **Dual Retrieval in `memoir_recall`:** Recall queries return both matching episodes and matching syntheses in clearly typed, distinct blocks within the byte-pinned envelope. | Separate `memoir_recall_syntheses` tool; OR synthesize on the fly at recall time. | Reuses existing caller ergonomics. A single memory recall should surface both raw narrative memories and consolidated beliefs. |
+| **V2-7** | **Dual Retrieval in `memoir_recall`:** Recall queries return both matching episodes and matching syntheses in clearly typed, distinct blocks within the byte-pinned envelope. Lane OFF preserves byte-identical v1 output. | Separate `memoir_recall_syntheses` tool; OR synthesize on the fly at recall time. | Reuses existing caller ergonomics. A single memory recall should surface both raw narrative memories and consolidated beliefs. |
 | **V2-8** | **`memoir_about` Refusal Mapping:** Map all `memoir_about` error conditions onto the existing 19-code refusal vocabulary (`MEMOIR_CODES`). | Add a 20th error code (e.g. `memoir_star_not_found`). | Preserves the frozen 19-code contract (`assert len(MEMOIR_CODES) == 19`), avoiding widespread test churn across dozens of assertion sites. |
 | **V2-9** | **The Persona Gate (JEV):** Reflection may propose persona updates, but only when changes represent `conflict`, `boundary_change`, or `new_rule`. All proposals land `pending_approval` and require HUMAN session approval (`auth_method == "session"`). | Auto-apply persona edits; OR allow live model to edit self directly. | The Hy-Memory production scar: a live model freehand-editing its durable self drifts into incoherence. Human oversight preserves identity stability. |
-| **V2-10** | **Asynchronous Poignancy Scoring:** Episode importance is scored 1–10 by an LLM in a background worker (`MemoirPoignancyWorker`), defaulting to 5 at write time. | Synchronous LLM scoring during `memoir_write`. | Preserves DD-20 hot-path latency. The conversation turn completes in milliseconds; poignancy arrives seconds later in the background. |
+| **V2-10** | **Asynchronous Poignancy Scoring & Importance Ruling (§3-A2):** `importance` stays WRITE-FROZEN (authored record preserved); LLM score (1–10) lands in a NEW `poignancy INTEGER NULL` column; all v2 consumers read effective importance = `COALESCE(poignancy, importance)`. Default 5 at write time. | Overwriting `importance` in place. | Overwriting `importance` REDs the frozen `RECORD_COLUMNS` purity pin and corrupts authored historical judgment. COALESCE preserves capability semantically (§3-A2). |
 | **V2-11** | **Keepsake Proposals Governance:** Reflection proposes candidate keepsakes (poignancy ≥ 8); surfaced via briefing proposals zone + at most ONE gentle `notify_user` per day. Never auto-pinned. | Automatic pinning by the model; OR frequent chat notifications. | Ruling R2: pin authority belongs exclusively to Empress and Emperor. Anti-spam constraint protects chat ergonomics. |
 | **V2-12** | **Isolated Subsystem Kill-Switches (DR-3):** Discrete environment variables for reflection, poignancy, and wake-refresh, each replicating the DR-3 truth table (fail-closed on unparseable garbage). | One global `ENSEMBLE_MEMOIR_ENABLED` switch for everything. | Allows surgical isolation during incidents (e.g. disable reflection LLM calls without disabling memory recall or episodic storage). |
-| **V2-13** | **Ingestion of v4 Backward Design Pressure (`v4-federated-sketch.md` §5):** Adopt the 6 architectural constraints of the KEEP-V2-OPEN checklist: (1) Deterministic star canonicalization (canonical name is a deterministic function of the alias set + type); (2) Well-formed, fully-cited supersedes chains (the conflict-resolution primitive); (3) Two-axis time (`created_at` / `event_at` or `first_seen_at` / `last_touched_at`) on all new v2 tables; (4) Vocabulary discipline: keep episode `stars` column distinct from `memoir_star` entity rows in schema, code, and docs; (5) Heat and access stats are strictly kingdom-local; (6) All rendered artifacts must round-trip a markdown+hash mirror expression. | Ignore future v4 federation constraints; invent freeform canonical names; drop two-axis time. | Constitutional ruling R3: "crafting into future correct and improve the present plan." Decisions made cheaply now prevent costly schema demolition in v3/v4. |
+| **V2-13** | **Ingestion of v4 Backward Design Pressure (`v4-federated-sketch.md` §5):** Adopt the 6 architectural constraints of the KEEP-V2-OPEN checklist: (1) Deterministic star canonicalization; (2) Well-formed, fully-cited supersedes chains; (3) Two-axis time; (4) Vocabulary discipline: episode `stars` column vs `memoir_star` entity rows; (5) Heat and access stats are strictly kingdom-local; (6) All rendered artifacts must round-trip a markdown+hash mirror expression. | Ignore future v4 federation constraints; invent freeform canonical names; drop two-axis time. | Constitutional ruling R3: "crafting into future correct and improve the present plan." Decisions made cheaply now prevent costly schema demolition in v3/v4. |
+| **V2-14** | **Cutover-Bounded Legacy Seed & Opt-In Backfill (§3-A3 / Register #5):** Seed pre-existing episodes via `UPDATE memoir_episodes SET poignancy_status='legacy' WHERE poignancy_status IS NULL AND created_at < '<CUTOVER_ISO_LITERAL>'`. Opt-in backfill via `MEMOIR_POIGNANCY_BACKFILL_MAX=0` (default disabled). | Full-history automatic backfill on startup. | Mass-scoring history is an LLM storm (drain ceiling 43k/day), violates the write-frozen record contract, and instantly floods the reflection trigger sum with stale events. |
+| **V2-15** | **Atomic Supersession `supersede_with(old_id, new_row)` (§3-A2 / Register #6):** One single-transaction repository writer performing insert of new synthesis + updating old-row `superseded_by` pointer + new-row `supersedes` back-pointer in ONE `engine.begin()`. | Two-call shape (`create_synthesis` then `mark_superseded`). | Two-call shape leaves an unlinked fork if the process dies between calls, violating the v4 conflict-resolution invariant. |
+| **V2-16** | **Three-Class Numeric Knob Governance & Shared Before-Validator (DR-3 / §3-A4 / Register #12):** ONE shared `_classify_numeric` helper in `daemon/config.py` consumed by `mode="before"` Pydantic validator on every v2 numeric field. Three classes: Enabled flags (unset ON, garbage fail-closed OFF); Budget bounds (unset aggregate warning, garbage clamp to default); Cadence tunables (unset default, garbage default + warning). Never boot-abort. | Bare `Field(gt=...)` on numerics (pre-existing boot-abort defect, anomaly `33028b27`). | Bare `Field` raises `ValidationError` and aborts boot on unparseable numeric env vars, violating DR-3. |
+| **V2-17** | **Synthesis Insertion Dedup Key (§2-Q3 / Register #13):** Check `sha256(claim_normalized + sorted(source_episode_ids))` before inserting synthesis claims. | Inserting without content dedup. | Converts at-least-once reflection retries into safe no-ops instead of duplicate claim proliferation. |
+| **V2-18** | **Briefing Proposals Zone Trim-Rung Priority (§3-A6 / Register #14):** Proposals zone is its OWN measured section (≤ 1000 chars). Explicit trim-rung order: fit dynamic → trim dynamic → trim proposals (weakest first) → rung-2 withhold (>48k). | Inserting proposals into stable text or unmeasured zone. | Prevents proposals from prematurely tripping the 24,000-character ceiling and silently wiping all dynamic episodes. |
+| **V2-19** | **Durable Reflection State & Per-Episode Watermark (§3-A1 / Register #15):** Durable tracking via `memoir_episodes.reflected_at` timestamp + `memoir_reflection_state` row (`id='ari'`, `last_nightly_date`, `claimed_at`). | Storing rolling counters in memory; OR polling un-indexed history. | Restart-safe, idempotent, and self-clearing upon pass completion. |
+| **V2-20** | **JEV Candidate Parking on Gate Failure (§2-Q4 / Register #16):** If the JEV classifier fails (LLM down or parse error), park the candidate record (`synthesis_id`, `attempts`, `last_error`) and retry next pass; terminalize after 5 attempts as `terminal:gate_unavailable`. | Defaulting to `none` on failure. | Defaulting to `none` silently drops candidate persona changes. Parking provides visibility and resilience. |
+| **V2-21** | **Plain SQLite `ADD COLUMN` in Migration File (§3-A5 / Register #1):** The `.sql` migration file must use plain `ADD COLUMN` (never `ADD COLUMN IF NOT EXISTS`). | Using `ADD COLUMN IF NOT EXISTS` in the `.sql` migration file. | `ADD COLUMN IF NOT EXISTS` is a hard syntax error in SQLite and breaks `MigrationError` discovery. Precedent: POK `20261107_110003`. |
+| **V2-22** | **Constellation Fragment Count & Cooldown Watermark (§2-Q5 / Register #9, #18):** Fragments measured as `COUNT(*)` of `memoir_line` rows (distinct citing episodes, never `SUM(mention_count)`). Add `memoir_star.description_as_of DATETIME NULL` to carry the 24h cooldown and v4 derivation watermark. | Measuring mentions via `SUM(mention_count)`; OR overloading `last_touched_at` for cooldown. | A single repetitive episode must not alone graduate a star. `last_touched_at` updates on any touch, making it unusable as a summarization cooldown clock. |
+| **V2-23** | **Notification Ledger Consumed Only on Accepted Send (§3-A4 / Register #17):** The 1/day proposal notification ledger consumes its daily slot ONLY when `notify_user` successfully dispatches. | Consuming the slot on refusal or attempt. | An unbound background session or temporary refusal would permanently starve chat notifications for that calendar day. |
+| **V2-24** | **Nightly-Before-In-Day Sequential Ordering (§3-A1 / Register #19):** Inside the reflection worker tick, the nightly pass gate runs FIRST, advancing episode `reflected_at` marks before in-day evaluation. | In-day evaluation before nightly; OR concurrent passes. | Nightly consolidation advances the cursor, leaving the in-day branch with sum < 25 so it idles cleanly. Sequential execution prevents pass collisions by construction. |
+| **V2-25** | **`memoir_about` Zero-Episode Empty Dossier Success (§2-Q7):** A resolved star with zero linked episodes returns an empty-dossier SUCCESS render (sections say "none"), NOT `memoir_not_found`. | Returning `memoir_not_found` when a star has no episodes. | V-1 truthfulness bar: `memoir_not_found` mislabels an existing entity as absent. |
 
 ---
 
-## 4. Open Architect Questions & Adjudication Log
+## 4. Architect Adjudication Log (Q1–Q9 Resolved)
 
-The following 9 items are carried into the architect enrichment phase. Each item states the dilemma, candidate options, verified evidence, and the recommended planning baseline.
+All 9 questions are formally adjudicated per Level-4 authority (`v2-architecture-recommendation.md` §1 and §2):
 
-### V2-Q1: Wake-Refresh Delivery Lane (Carried as PENDING-ARCHITECT)
-- **Question:** How should the wake briefing be refreshed on self-alarm wakes into an existing session?
-- **Candidate Options:**
-  - *Option A (Alarm Template Compose):* Modify `compose_alarm_message` in `self_alarm_service.py` / `scheduler.py` to inject the briefing into the alarm message text.
-  - *Option B (Parallel Stamped Refresh Block — RECOMMENDED):* Add `_maybe_memoir_refresh_message` in `context_messages.py` beside `_maybe_memoir_briefing_message`, evaluated at both assembly sites (:2564–2570 and :2928–2934), emitting a new `CONTEXT_KIND_MEMOIR_REFRESH`.
-- **Evidence:**
-  - L4 Landmine: Scheduler wakes are deliberately unstamped bare `MessageType.HUMAN` to preserve attestation source U (`constants.py:1376-1399`, pinned by `test_source_stamp_never_stamped_guards.py`). Touching the alarm template violates this product ruling and freezes memory at alarm ARM time.
-  - Precedent: Option B mirrors the POK refresh pattern (`_maybe_pok_context_message` in `context_messages.py:2572-2588`), which successfully performs per-turn context re-evaluation without touching message stamps.
-- **Recommended Adjudication:** **Adopt Option B.** Clean context block, evaluated at wake time, compaction-hoistable, zero interference with human message attestation.
+### V2-Q1: Wake-Refresh Delivery Lane — **RESOLVED: Adopt Option B, Amended (§1-Q1, §2-Q1)**
+- **Adjudication:** Adopt parallel stamped refresh block (`CONTEXT_KIND_MEMOIR_REFRESH`, stable id `memoir_refresh:{instance_id}`, **no once-flag**) evaluated at both context assembly sites (:2564–2570 and :2928–2934 in `daemon/services/context_messages.py`).
+- **Amendment:** Thread a new `wake_source: str | None` parameter from dispatch (`instance_messaging.py:4005-4029`) through `assemble_context_messages` to the refresh builder. Gate: `agent_id == "ari"` → `ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED` → `wake_source == "scheduler"`. Do NOT use `instance_metadata.original_source` (first-write only). Option A is rejected because scheduler wakes must remain unstamped bare `MessageType.HUMAN` to preserve attestation source U (L4 product ruling).
 
-### V2-Q2: Poignancy Reflection Triggering & Warm-Up Curve Constants (Carried as PENDING-ARCHITECT)
-- **Question:** What are the exact triggering thresholds for cumulative importance and the idle-debounce doubling parameters?
-- **Candidate Options:**
-  - Option A: Static fixed thresholds.
-  - Option B: Dynamic adaptive curves.
-- **Evidence:**
-  - Generative Agents literature recommends cumulative importance ~15–25 to trigger reflection. In ensemble, episodes range 1–10.
-  - Base idle debounce: 60s is standard for interactive pauses. Doubling `1→2→4→8→16` gives intervals of 60s, 120s, 240s, 480s, 960s (ceiling 16 minutes).
-- **Recommended Constants:**
-  - `MEMOIR_REFLECTION_TRIGGER_IMPORTANCE_SUM = 25` (e.g. ~3 high-importance episodes or ~5 average episodes trigger reflection).
-  - `MEMOIR_REFLECTION_IDLE_BASE_S = 60.0`
-  - `MEMOIR_REFLECTION_IDLE_CEILING_S = 960.0`
-  - Warm-up factor: doubles on new episode arrival during active debounce; resets to base after reflection completes.
+### V2-Q2: Poignancy Reflection Triggering & Warm-Up — **RESOLVED: Adopt Constants, Amend Mechanism (§1-Q2, §2-Q2)**
+- **Adjudication:** Adopt numbers: `MEMOIR_REFLECTION_TRIGGER_IMPORTANCE_SUM = 25`, base debounce 60s, doubling on arrival to ceiling 960s, reset to base after pass. Add `MEMOIR_REFLECTION_FORCE_FIRE_S = 3600.0` to eliminate indefinite deferral under continuous conversational load.
+- **Mechanism Amendment:** Replace in-memory rolling counter with DERIVED SUM per tick: `SELECT COALESCE(SUM(COALESCE(poignancy, importance)), 0), MAX(created_at) FROM memoir_episodes WHERE agent_id=:ari AND reflected_at IS NULL AND created_at >= now()-interval '2 days'`. Delete V2-D 4.5 delta-notify (`score - 5`). Derived sum is restart-durable and self-resets when episodes are marked `reflected_at`.
 
-### V2-Q3: Budget Numerology for Reflection Passes (Carried as PENDING-ARCHITECT)
-- **Question:** What are the hard upper bounds on synthesis output, scan windows, and execution budgets per pass?
-- **Recommended Constants:**
-  - `MEMOIR_REFLECTION_MAX_SYNTHESES_PER_PASS = 5` (bounds database write volume).
-  - `MEMOIR_SYNTHESIS_MAX_CHARS = 1000` (~250 tokens per claim).
-  - `MEMOIR_REFLECTION_SCAN_WINDOW_DAYS = 2` (bounds episode intake to ~48 hours).
-  - `MEMOIR_REFLECTION_MAX_LLM_CALLS_PER_PASS = 4` (1 episode batch synthesis, 1 star consolidation, 1 JEV classification, 1 keepsake check).
-  - `MEMOIR_REFLECTION_TICK_BUDGET_S = 60.0` (with per-call `httpx.Timeout(45.0, connect=5.0)`).
-  - Nightly pass bounds: Max 30 episodes evaluated; scheduled during off-peak window (02:00–04:00 UTC).
+### V2-Q3: Budget Numerology for Reflection Passes — **RESOLVED: Adopt Numbers + Binding Enforcement Table (§1-Q3, §2-Q3)**
+- **Adjudication:** Adopt binding enforcement table:
+  1. Max syntheses / pass: 5 (accept-loop post-validate / pre-insert; keep committed).
+  2. Max chars / synthesis: 1000 (**REJECT the row**, never truncate; truncation alters meaning).
+  3. Max LLM calls / pass: 4 (**increment at dispatch**, JEV classifier counts towards call cap).
+  4. Tick budget: 60.0s (per-item pre-dispatch break; defer remainder).
+  5. Timeout: `httpx.Timeout(45.0, connect=5.0)`.
+  6. Scan window: 2 days (SQL predicate).
+  7. Nightly cap: 30 episodes (scan `LIMIT 30`, window 02:00–04:00 UTC).
+  8. Dedup key: `sha256(claim_normalized + sorted(source_episode_ids))` enforced on insert to ensure crash-safe at-least-once idempotence.
 
-### V2-Q4: JEV Classifier Placement & Execution Strategy (Carried as PENDING-ARCHITECT)
-- **Question:** Where does the JEV classifier live, and should it run as a single combined LLM call with synthesis or a separate pipeline step?
-- **Recommended Architecture:**
-  - Place in `daemon/services/memoir_persona_gate.py` called by `memoir_reflection_service.py`.
-  - Two-stage execution:
-    1. *Stage 1 (Rule-based filter):* Compute diff between candidate persona belief and current approved persona text. If text delta is formatting, whitespace, or verbatim substring overlap -> classify as `reinforcement` or `none` and exit immediately (zero LLM calls).
-    2. *Stage 2 (LLM Classifier):* If text introduces novel behavioral claims, invoke LLM classifier with prompt returning `{category: conflict|boundary_change|new_rule|reinforcement|none, reasoning: "..."}`.
-  - Run as a separate modular call AFTER synthesis. Only executed if reflection produced a candidate persona belief.
+### V2-Q4: JEV Classifier Placement & Write Purity — **RESOLVED: Adopt Placement, Amend Failure Parking (§1-Q4, §2-Q4)**
+- **Adjudication:** Place in `daemon/services/memoir_persona_gate.py`, called by `memoir_reflection_service.py`. Two-stage: rule-based filter (zero LLM calls on trivial diffs) -> LLM classifier. Exercised strictly from reflection SERVICE layer, never tool module (`daemon/tools/memoir.py` stays read/append pure).
+- **Amendment:** On classifier failure, do NOT default to `none` (silently lossy); PARK candidate (`synthesis_id`, `attempts`, `last_error`), retry next pass, terminalize at 5 attempts as `terminal:gate_unavailable`.
 
-### V2-Q5: Constellation Two-Tier Thresholds (LightRAG M4 Pattern) (Carried as PENDING-ARCHITECT)
-- **Question:** At what fragment count and character volume does star description graduate from plain-join to LLM summarization?
-- **Recommended Constants:**
-  - `MEMOIR_STAR_SUMMARY_MIN_FRAGMENTS = 5` mentions/lines.
-  - `MEMOIR_STAR_SUMMARY_MIN_CHARS = 1200` characters total.
-  - `MEMOIR_STAR_SUMMARY_COOLDOWN_HOURS = 24` (do not re-summarize an already-summarized star unless at least 24 hours have passed and new mentions exist).
-  - Below threshold: `memoir_about` simply joins recent episode excerpts.
-  - Above threshold: Background reflection summarizes into a concise entity card (~300 words).
+### V2-Q5: Constellation Two-Tier Thresholds — **RESOLVED: Adopt Thresholds, Amend Carriers (§1-Q5, §2-Q5)**
+- **Adjudication:** Adopt thresholds: 5 fragments, 1200 characters, 24h cooldown, tier-2 card ~300 words.
+- **Amendments:**
+  1. Fragments = `COUNT(*)` of distinct `memoir_line` rows (citing episodes), never `SUM(mention_count)`.
+  2. Add `memoir_star.description_as_of DATETIME NULL` to carry the 24h cooldown and v4 derivation watermark. Below threshold, `memoir_about` plain-joins excerpts; `description_as_of` remains NULL until first tier-2 summarization.
 
-### V2-Q6: Cost-Bound Composition Without a Global Cost Ledger (Carried as PENDING-ARCHITECT)
-- **Question:** How do we guarantee reflection stays within budget given that ensemble lacks a per-service USD cost ledger table?
-- **Recommended Composed Bound:**
-  1. Structural clamps: `max_syntheses` (5) + `max_chars` (1000) + `max_llm_calls` (4) + `timeout` (45s) + `tick_budget` (60s).
-  2. Software token meter: Use `daemon.loader.estimate_tokens` (`cl100k_base` tiktoken) inside the worker to meter prompt and completion tokens.
-  3. Structured logging: Log every pass tick: `[MemoirReflection] pass=completed units=K prompt_tokens=X comp_tokens=Y duration=Z.Zs`.
+### V2-Q6: Cost-Bound Composition Without a Cost Ledger — **RESOLVED: Adopt Composed Bounds (§1-Q6, §2-Q6)**
+- **Adjudication:** Adopt structural clamps + `daemon.loader.estimate_tokens` metering (cl100k tiktoken) + structured per-pass log line: `[MemoirReflection] pass=completed units=K prompt_tokens=X comp_tokens=Y duration=Z.Zs syntheses=S kept=D dropped=R`. Clamp-then-meter. No ledger table (unblessed write surface). Cross-restart cost queries are a v3 boundary.
 
-### V2-Q7: `memoir_about` Refusal Vocabulary Mapping (Carried as PENDING-ARCHITECT)
-- **Question:** Should `memoir_about` map onto the existing 19-code frozen vocabulary or introduce a 20th code?
-- **Recommended Adjudication:** **Map onto existing 19 codes.**
-  - Star not found -> `memoir_not_found`
-  - Empty star argument -> `memoir_query_required`
-  - Invalid / too long star name -> `memoir_stars_out_of_bounds`
-  - Disabled / Unauthorized / Internal -> `memoir_disabled`, `memoir_not_authorized`, `memoir_internal_error`.
-  - Preserves the frozen contract `assert len(MEMOIR_CODES) == 19` without opening a high-churn V-1 truthfulness bar across dozens of tests.
+### V2-Q7: `memoir_about` Refusal Vocabulary Mapping — **RESOLVED: Adopt Frozen 19 Mapping (§1-Q7, §2-Q7)**
+- **Adjudication:** Map onto existing 19 codes in `MEMOIR_CODES`: star not found -> `memoir_not_found`; empty star -> `memoir_query_required`; star >100 chars -> `memoir_stars_out_of_bounds`; disabled/unauthorized/internal -> their respective codes.
+- **Edge Rule:** A resolved star with zero linked episodes returns an **empty-dossier SUCCESS render**, NOT `memoir_not_found` (V-1 truthfulness bar). `assert len(MEMOIR_CODES) == 19` untouched.
 
-### V2-Q8: Scope Ruling on Wider Roadmap Items (Carried as RECORDED-DECISION)
-- **Ruling:** The blessed scope (2026-11-09) governs v2. `memoir_thread` (episode-to-episode continuity) is deferred to v3 because episode-to-star lines (`memoir_line`) and synthesis citations (`source_episode_ids`) already provide episodic connectivity. Searchable archive tier is explicitly v3 per `roadmap.md`. These deferrals are recorded here under R3.
+### V2-Q8: Scope Boundaries on Wider Roadmap Items — **RESOLVED: Adopt as Recorded (§1-Q8, §2-Q8)**
+- **Adjudication:** Blessed scope governs. `memoir_thread` and searchable archive tier are deferred to v3 under R3 rolling doctrine. No amendment.
 
-### V2-Q9: Foreign Belief Import Semantics as CORROBORATE-Class Act (ADVISORY — PENDING-ARCHITECT)
-- **Question:** Should the v4 sketch's §2 import-semantics rule ("a foreign belief lands as a NEW local synthesis row citing the foreign original — an import is a CORROBORATE-class act") land NOW as a one-line structural constraint on v2's syntheses writer, or remain unratified v4 design pressure?
-- **Evidence:** `v4-federated-sketch.md` §2 notes that foreign beliefs must never be silently copied into local chains; each kingdom's chain stays kingdom-local and gains a citable cross-kingdom edge. In v2, the synthesis writer is being created fresh.
-- **Recommended Adjudication:** **Carry as ADVISORY constraint.** Encode a one-line validation rule in `MemoirSynthesesRepository`: an imported/corroborated belief must cite its source. This costs one sentence in the code and specification, adds zero architectural overhead, and forecloses nothing for v3/v4.
+### V2-Q9: Foreign Belief Import Semantics — **RESOLVED: Adopt as Advisory One-Liner (§1-Q9, §2-Q9)**
+- **Adjudication:** Lands now as an advisory writer-level convention in `MemoirSynthesesRepository`: an imported foreign belief is a NEW local synthesis row, verb `CORROBORATE`, citing the foreign original. Chains remain kingdom-local; no silent copies. No v2 execution machinery (no federation exists in v2, R1).
