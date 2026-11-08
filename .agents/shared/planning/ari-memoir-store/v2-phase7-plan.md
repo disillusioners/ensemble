@@ -2,7 +2,7 @@
 
 **File:** `v2-phase7-plan.md`  
 **Depends on:** Phases 1–6 (`v2-phase1-plan.md` through `v2-phase6-plan.md`).  
-**Flags / Decisions consumed:** All v2 decisions, W8 blast radius proof, R10/R11 hazards, V2-12, V2-13 (`v4-federated-sketch.md`), §3-A7 mutation matrix.
+**Flags / Decisions consumed:** All v2 decisions, W8 blast radius proof, R10/R11 hazards, V2-12, V2-13 (`v4-federated-sketch.md`), §3-A7 mutation matrix, SF8 interpreter pin.
 
 ---
 
@@ -12,13 +12,14 @@ Deliver end-to-end integration verification, safety gate enforcement, documentat
 1. Execute the comprehensive cross-driver test battery: fresh SQLite boot verifying clean migration discovery and execution + real PostgreSQL boot validating `create_all`, `_ensure_postgres_columns` idempotence, and index utilization. Update ensure census pins: `test_memoir_retrieval_pg.py` stays 2; `test_memoir_pg_corpus.py` flips 2→4 (Register #8).
 2. Execute the **W8 Ensure Blast Radius Test Induction** proving inductively on a scratch database that a memoir ensure DDL failure cleanly aborts boot and rolls back the shared transaction without partial corruption.
 3. Execute the **7 Mutation-Verified Safety Pins (§3-A7)** across kill-switches, budget clamps, 19-code freeze, notification/refresh dedup, supersede chains, legacy seed, and record-column purity.
-4. Execute end-to-end boot smoke with the **3-Worker Boot Census (§3-A7 / Register #15)**: verifying that `MemoirEmbeddingWorker`, `MemoirReflectionWorker`, and `MemoirPoignancyWorker` spawn on their own `app.state` tasks with dedicated executors, respond independently to kill-switches within 1 tick, and start cleanly with unset knobs (unset⇒ON visibility).
-5. Enforce strict tester-lane hazard fences:
+4. Execute end-to-end boot smoke with the **3-Worker Boot Census (§3-A7)** (Optional #5): verifying that `MemoirEmbeddingWorker`, `MemoirReflectionWorker`, and `MemoirPoignancyWorker` spawn on their own `app.state` tasks with dedicated executors, respond independently to kill-switches within 1 tick, and start cleanly with unset knobs (unset⇒ON visibility).
+5. **Boot Smoke Isolation (SF8):** Boot smoke must execute using the WORKTREE VENV INTERPRETER (`/home/nea/ensemble-src-wt-memoir-v2/.venv/bin/python -m daemon`), NEVER invoking a frozen binary executable in `releases/`. (The binary's path derivation resolves the LIVE install root; its 90s `gc_pending_actions` sweep could prune a live ceremony's nonce). Include a ceremony-coordination caveat line.
+6. Enforce strict tester-lane hazard fences:
    - Scrub `POSTGRES_*` environment variables per-variable (never `env -u POSTGRES_*` globs, Critical Note occ#8).
    - Explicitly pin `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` in all boot smoke scripts.
-6. Verify that sibling deliverable `v4-federated-sketch.md` is present on disk and committed together with this planning suite.
-7. Verify documentation and metrics: regenerate `.agents/shared/metrics/tool-categories.json`, confirm `agents/ari/tools_note.md` re-stamping, and assert that tool category ordinals are dynamically grep-derived.
-8. Package the staged release via `scripts/upgrade/stage.sh` into `releases/v0.29.X/` (coordinated as `v0.29.8+` via Shared Meta KV census), verify the 4-way SHA-256 manifest match, cut the git tag, and hand off to the Emperor (**NO live promote**).
+7. Verify that sibling deliverable `v4-federated-sketch.md` is present on disk and committed together with this planning suite.
+8. Verify documentation and metrics: regenerate `.agents/shared/metrics/tool-categories.json`, confirm `agents/ari/tools_note.md` re-stamping, and assert that tool category ordinals are dynamically grep-derived.
+9. Package the staged release via `scripts/upgrade/stage.sh` into `releases/v0.29.X/` (coordinated as `v0.29.8+` via Shared Meta KV census), verify the 4-way SHA-256 manifest match, cut the git tag, and hand off to the Emperor (**NO live promote**).
 
 ---
 
@@ -33,6 +34,7 @@ Deliver end-to-end integration verification, safety gate enforcement, documentat
 | **V2-D 7.5** | Staging only, NO live promote: Stage release via `scripts/upgrade/stage.sh` and cut annotated git tag. Promotion belongs exclusively to the Emperor's 3-factor ceremony. | Constitutional upgrade protocol: Ari and implementing workers cannot promote live software autonomously. Promotion requires user attestation. | Running `promote.sh live` autonomously. |
 | **V2-D 7.6** | Sibling deliverable `v4-federated-sketch.md` committed together: Sibling deliverable is present on disk and verified before staging. | R3 rolling doctrine discharge: v4 design pressure is recorded and committed as part of the v2 milestone. | Committing v4 sketch in a separate detached PR. |
 | **V2-D 7.7** | Ensure census pin update asymmetry (§3-A5 / Register #8): `test_memoir_retrieval_pg.py:98-104` stays at 2 (narrow filter on `tsv`/`GIN`); `test_memoir_pg_corpus.py:115-123` flips 2→4 (broad filter on `memoir_episodes` matches both new ensure entries). | Test filters are asymmetric; updating both to 3 or 4 blindly is a defect. | Arbitrarily editing both pins to 3. |
+| **V2-D 7.8** | Boot-smoke interpreter pin to worktree venv (SF8): Execute boot smoke strictly via `/home/nea/ensemble-src-wt-memoir-v2/.venv/bin/python -m daemon`, NEVER a frozen binary. | A frozen binary resolves `<INSTALL_DIR>/releases`, binding the live promote journal where its 90s `gc_pending_actions` sweep can prune a live ceremony nonce. | Executing against frozen binary in releases directory. |
 
 ---
 
@@ -44,8 +46,8 @@ Deliver end-to-end integration verification, safety gate enforcement, documentat
   - Verifies that `20261109_..._create_memoir_v2_tables.sql` parses and executes cleanly with plain `ADD COLUMN` statements.
   - Verifies that all string columns are `TEXT` and dynamic JSON typing works without errors.
 - **PostgreSQL Engine (House PG 16.15):**
-  - Verifies that `create_all` generates `memoir_star`, `memoir_star_alias`, `memoir_line`, `memoir_reflection_state`.
-  - Verifies that `_ensure_postgres_columns` adds the four columns and executes the legacy seed idempotently.
+  - Verifies that `create_all` generates `memoir_star`, `memoir_star_alias`, `memoir_line`, `memoir_reflection_state`, `memoir_proposal_ledger`.
+  - Verifies that `_ensure_postgres_columns` adds the four columns (with `TIMESTAMPTZ` typing for `reflected_at`) and executes the legacy seed idempotently.
   - Verifies ensure census pins: `test_memoir_retrieval_pg.py` == 2, `test_memoir_pg_corpus.py` == 4.
   - Verifies GIN and B-Tree index utilization with `EXPLAIN`.
   - Verifies CHECK constraints reject out-of-bounds `star_type` and negative `heat`.
@@ -70,8 +72,10 @@ The mutation driver (`test/packs/memoir_mutation_matrix_test.py` + `mutation-mat
 6. **Backfill seed cutover:** Widening legacy seed predicate to bare-NULL marks post-cutover rows legacy -> RED.
 7. **Record-column purity vs poignancy:** Making `record_poignancy_score` write to `importance` trips `RECORD_COLUMNS` purity pin -> RED.
 
-### 3.4 3-Worker Boot Census in Boot Smoke
-Boot smoke starts the daemon under `ENSEMBLE_SELF_ENV=sandbox` and asserts:
+### 3.4 3-Worker Boot Census & Interpreter Isolation (SF8)
+Boot smoke starts the daemon under `ENSEMBLE_SELF_ENV=sandbox` using `/home/nea/ensemble-src-wt-memoir-v2/.venv/bin/python -m daemon`:
+- **Isolation Pin:** Invocation uses worktree venv python directly. NEVER invoke frozen binary from `releases/`.
+- **Ceremony-coordination caveat:** Live promote ceremonies running concurrently are protected from nonce eviction by bypassing frozen binary path resolution.
 - Worker 1: `MemoirEmbeddingWorker` running on `app.state.memoir_embedding_worker_task`, thread prefix `memoir-embed`.
 - Worker 2: `MemoirReflectionWorker` running on `app.state.memoir_reflection_worker_task`, thread prefix `memoir-reflect`.
 - Worker 3: `MemoirPoignancyWorker` running on `app.state.memoir_poignancy_worker_task`, thread prefix `memoir-poignancy`.
@@ -88,7 +92,7 @@ Boot smoke starts the daemon under `ENSEMBLE_SELF_ENV=sandbox` and asserts:
 | **T7.2** | Execute cross-driver integration tests on fresh SQLite and real PostgreSQL; verify ensure census pins (retrieval_pg=2, pg_corpus=4). | Schema, models, and queries verified identical across both database engines; census pins pass. | `tests/postgres/test_memoir_v2_pg.py` | T7.1 | R1, R10 | AC2 |
 | **T7.3** | Execute W8 ensure blast radius test induction on a scratch PostgreSQL instance. | Proves single-transaction rollback and diagnostic output on simulated ensure DDL failure. | `tests/postgres/test_memoir_v2_ensure_blast_radius.py` | T7.2 | R1 | AC3 |
 | **T7.4** | Execute the 7 mutation-verified safety pins via `test/packs/memoir_mutation_matrix_test.py`. | All 7 mutation legs flip RED on intentional defect, restore cleanly to GREEN; digest generated. | `test/packs/memoir_mutation_matrix_test.py` | T7.3 | — | AC4 |
-| **T7.5** | Execute end-to-end boot smoke with 3-worker census under `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`. | All 3 background workers spawn; dedicated thread prefixes verified; kill-switches park/resume independently. | `test/packs/memoir_v2_boot_smoke.sh` | T7.4 | R11 | AC5 |
+| **T7.5** | Execute end-to-end boot smoke with 3-worker census under `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` using the worktree venv interpreter (`.venv/bin/python -m daemon`) (SF8). | All 3 background workers spawn; dedicated thread prefixes verified; live ceremony nonce protected from path-binding gc ticks; kill-switches park/resume independently. | `test/packs/memoir_v2_boot_smoke.sh` | T7.4 | R11 | AC5 |
 | **T7.6** | Update metrics via `checkpoint_metrics.py`, verify `agents/ari/tools_note.md` re-stamp, verify `v4-federated-sketch.md` on disk, and execute `stage.sh` for v0.29.8+. | `releases/v0.29.X/` created; manifest valid; tag cut and pushed; zero live promotion performed. | `scripts/upgrade/stage.sh`, `agents/ari/tools_note.md` | T7.5 | R12 | AC6 |
 
 ---
@@ -100,8 +104,8 @@ Boot smoke starts the daemon under `ENSEMBLE_SELF_ENV=sandbox` and asserts:
 | **AC1** | Cross-suite unit pass: All v1 and v2 unit tests green; refusal vocabulary remains exactly 19 codes; `MEMOIR_TOOL_NAMES` holds exactly 6 tools. |
 | **AC2** | Cross-driver parity & census pins: SQLite migration executes cleanly with plain `ADD COLUMN`; PostgreSQL boot materializes all tables, columns, and indexes; ensure census pin `test_memoir_retrieval_pg.py` == 2, `test_memoir_pg_corpus.py` == 4. |
 | **AC3** | W8 Ensure Blast Radius: Malformed ensure statement in scratch PG boot fails loud, names the invalid statement, rolls back the entire transaction, and leaves zero partial schema artifacts. |
-| **AC4** | The 7 Mutation Pins (§3-A7): All 7 mutation legs proven (kill-switch truth tables, budget clamps, 19-code freeze, notification/refresh dedup, supersede chains, legacy seed, record-column purity vs poignancy). |
-| **AC5** | Boot smoke 3-worker census: Daemon boots in sandbox; all 3 worker threads log their respective tick lines on own executors (`memoir-embed`, `memoir-reflect`, `memoir-poignancy`); toggling `ENSEMBLE_MEMOIR_REFLECTION_ENABLED="false"` parks reflection worker while others continue. |
+| **AC4** | The 7 Mutation Pins (§3-A7): All 7 mutation legs proven (kill-switch truth tables, budget clamps, 19-code freeze, notification/refresh dedup, supersede chains, legacy seed cutover, and record-column purity vs poignancy). |
+| **AC5** | Boot smoke 3-worker census & venv isolation (SF8): Daemon boots in sandbox using `.venv/bin/python -m daemon` (never frozen binary); all 3 worker threads log their respective tick lines on own executors (`memoir-embed`, `memoir-reflect`, `memoir-poignancy`); live ceremony nonces preserved; toggling `ENSEMBLE_MEMOIR_REFLECTION_ENABLED="false"` parks reflection worker while others continue. |
 | **AC6** | Staged release integrity: `scripts/upgrade/stage.sh` succeeds; release directory matches manifest SHA-256; annotated git tag `v0.29.X` created; `v4-federated-sketch.md` included in release commit; `current` symlink remains untouched on live system. |
 
 ---
@@ -112,7 +116,7 @@ Boot smoke starts the daemon under `ENSEMBLE_SELF_ENV=sandbox` and asserts:
 - `test/packs/memoir_v2_real_pg_pack.sh`: Real PostgreSQL integration test suite with asymmetric census pin assertions.
 - `test/packs/memoir_v2_ensure_induction_pack.sh`: W8 ensure single-transaction blast radius test induction.
 - `test/packs/memoir_v2_mutation_matrix_test.sh`: 7-leg mutation verification runner.
-- `test/packs/memoir_v2_boot_smoke_pack.sh`: End-to-end daemon boot smoke with 3-worker census and kill-switch verification.
+- `test/packs/memoir_v2_boot_smoke_pack.sh`: End-to-end daemon boot smoke with 3-worker census, venv isolation, and kill-switch verification.
 
 ---
 
@@ -125,3 +129,4 @@ Boot smoke starts the daemon under `ENSEMBLE_SELF_ENV=sandbox` and asserts:
 - **V2-D 7.4:** Dynamic version slot coordination.
 - **V2-D 7.6:** Sibling deliverable `v4-federated-sketch.md` inclusion.
 - **V2-D 7.7 / §3-A5:** Asymmetric ensure census pin reconciliation (retrieval_pg=2, pg_corpus=4).
+- **V2-D 7.8 / SF8:** Worktree venv interpreter pin for boot-smoke isolation.
