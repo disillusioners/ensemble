@@ -1,3 +1,24 @@
+<!-- source-gc-functional-gate-begin -->
+## Commission source-gc — FUNCTIONAL GATE (P6) registration (2026-11-08; gate @ HEAD `7b6fa2cdf`, TRUE base `b21bbb87f` (v0.29.2 = origin/latest — dispatcher's `f0f3e1724` already contains the impl, corrected); evidence `/tmp/sgc-g135-re/` · `/tmp/sgc-g4/` · `/tmp/sgc-g78/` · `/tmp/sgc-g6/`; RESULTS: 2026-11-08-source-gc-functional-gate.md; LESSONS: 2026-11-08-source-gc-migration-comment-semicolon.md)
+
+> **Outcome: NO-GO — one deterministic lane-caused defect.** G1/G2/G3/G5/G7/G8 ALL PASS (original symptom closed both
+> directions on a live-sized dev fixture; dry-run provably non-destructive; all 5 fences; real-daemon REST shrink
+> 105→8; seal tripwire 35/0; A10 paused-deferred ceremony resolves by message_id). G4 mutation matrix: 23 unit legs
+> (20 discriminating RED→GREEN) + 3 PG legs all discriminating; 2 pin-coverage findings routed (F2 AM-10 thread-identity
+> unpinned — material; F1 P15 marker-latch leg weak). **G6 Tier-2 whole-tree FAIL: 5 deterministic net-new reds, single
+> root cause = `20261107_122648_create_source_gc_archive_tables.sql:92` trailing comment contains `;` → runner
+> statement-split shatters → `near "chat": syntax error` on EVERY fresh SQLite boot (PG unaffected via create_all —
+> why the PG/dev-DB legs never saw it); the file's own RUNTIME-SPLITTER NOTE promises "no semicolon in any comment" —
+> violated.** 1-line fix shape provided (remove the `;` / promote to full-line) + suggested corpus pin; scoped Tier-1
+> re-gate (5 ids + fresh-SQLite full-dir boot) runs when the lane lands the fix. Flake ledger: 3 (+1 unstable shape),
+> all pre-existing classes. Wedge incident `b7423ea5`: original A+D workers re-dispatched once each.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `source_gc_repository_unit` | `timeout 300 <venv>/python -m pytest tests/unit/repositories/test_source_gc_repository.py -q --timeout=120 -p no:cacheprovider` (fenced env, per-variable `POSTGRES_*` scrubs) | 33 nodes — predicate legs, AM-1 re-assert + `updated_at` WHERE-pin, AM-2 ordering, AM-3 archive + W3 latch, AM-9 windows, AM-11 lockstep, W2/W3/W4 teeth, P3/P4/P8/P9/P21 | 2026-11-08 @ `7b6fa2cdf` | **PASS 33/33** |
+| `source_gc_service_unit` | same shape, `tests/unit/services/test_sources_gc_service.py` | 10 nodes — sweep loop, counters truthfulness, P13 kill-switch, P14 first-tick, P15 log discipline + marker | 2026-11-08 @ `7b6fa2cdf` | **PASS 10/10** |
+| `source_gc_lock_interleave_pg` | `timeout 300 <venv>/python -m pytest tests/postgres/test_source_gc_lock_interleave_pg.py -q --timeout=120 -p no:cacheprovider` (SERIAL — no xdist; throwaway PG with `PG_TEST_ALLOWED_DBS` exact-name; DB dropped after) | 5 nodes — P16 two-connection interleave + W1 `before_cursor_execute` FOR-UPDATE listener discriminator, P10 child-first FK order, W6 parent-first lock | 2026-11-08 @ `7b6fa2cdf` | **PASS 5/5** ×3 (+3/3 mutation legs RED→GREEN) |
+<!-- source-gc-functional-gate-end -->
 <!-- v0291-staged-verification-begin -->
 ## v0.29.1 STAGED VERIFICATION registration (2026-11-07; staged tree `24e098245f9afc481c1824d5974ebb6b6f812bcf`; binary `99c5c144…f115532b` 4-way; tag `2c06196b1` PUSHED; origin/latest == staged tree; RESULTS: 2026-11-07-v0291-staged-verification.md)
 
