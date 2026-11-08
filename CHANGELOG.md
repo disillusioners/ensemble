@@ -93,6 +93,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.29.3] — 2026-11-08
+
+### Added — `source-gc`: removal of unused schedules and their `source_configs` rows (`feature/source-gc`, board wi-ed230eb4)
+
+- **Archive tables** (`daemon/migrations/versions/20261107_122648_create_source_gc_archive_tables.sql`, `daemon/repositories/source/models.py`) — `source_configs_archive` + `schedule_executions_archive`: additive-only (2× CREATE TABLE IF NOT EXISTS, no FK, no ALTER; `config_json` is the sole reconstruction input for a restored schedule; DOWN never executes — runner SQLite-only, PG via `create_all` on new-binary boot).
+- **Repository GC methods** (`daemon/repositories/source/repository.py`) — `gc_find_candidates` (terminal scheduler rows past retention; `error` excluded per SP-5 leader ruling), `gc_archive_and_delete` (archive → delete child-first → delete parent, `updated_at`-re-assert guarded against the resume race; per-source-id first-warning latch on archive-PK collision), `gc_count_error_rows`.
+- **`SourcesGcService`** (`daemon/services/sources_gc_service.py`) — one GC subsystem inside the existing cleanup family: loop sweep + knobs (`SERVICES_SOURCES_GC_TERMINAL_RETENTION_DAYS` floor 7, optional one-boot `SERVICES_SOURCES_GC_DRY_RUN=true` observe mode) + api.py start/shutdown seams. SP-1 recipe: observe → arm → verify `remainder=0 deferred OR stuck-only` (+2 restarts for the knob flips).
+- **Tool disclosures** (`daemon/tools/scheduling.py`) — D2 uniform-rule pause disclosure (verbatim AM-5 strings); paused recurring schedules ARE reaped at retention (default 14d) — recovery is manual from the archive.
+- **W7 None-guard** (`daemon/routers/sources.py`) — 404 (not 500) when a row vanishes between update read and write (leader-authorized fence carve-out).
+- **Tests** — unit packs (repository 46 + service 13), migration corpus pin, PG-gated legs (lock interleave, child-first FK order). Evidence: `.agents/tester/RESULTS/2026-11-08-source-gc-functional-gate.md` (scoped re-gate GO @ fadb2dde1).
+
 ## [0.29.1] — 2026-11-07
 
 ### Added — `prompt_reload`: Ari's mid-session prompt refresh (`feature/prompt-reload`)
