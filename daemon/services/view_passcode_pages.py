@@ -1,8 +1,9 @@
 """Public-lane page templates (P2 of live-view-passcode).
 
-The five pages the public-lane router serves — interstitial,
-failure, locked, 429 rate-limit, and the explicit
-"secure-context required" notice — share the same shell:
+The seven pages the public-lane router serves — interstitial,
+failure, locked, 429 rate-limit, explicit "secure-context
+required" notice, uniform-404 not-found, and origin-gate-403
+forbidden — share the same shell:
 
 * zero JavaScript (architecture-recommendation.md D11:129,
   phase2-plan.md D9 / T2.7)

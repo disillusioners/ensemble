@@ -98,6 +98,14 @@ cap is re-checked against the fstat, not the prior stat) →
 intervening growth). The same shape is used in
 ``daemon/routers/tmp_images.py`` for the sidecar-MIME
 substrate.
+
+Size rationale (~2914 lines, refreshed 2026-11-08): this router is
+the sole HTTP surface of the live-views subsystem; route-registration
+order is load-bearing (mounted directly on ``app`` before the SPA
+catch-all); gate, pages, and origin logic live beside the route family
+to keep the security boundary cohesive. The file sits in the 1000–3000
+band (the band obligation applies) and any future extraction would
+preserve the unified registration order.
 """
 
 from __future__ import annotations
@@ -112,7 +120,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 if TYPE_CHECKING:
+    from daemon.auth.context import AuthContext
+    from daemon.repositories.view_passcodes.models import LiveViewPasscode
     from daemon.services.live_views import LiveViewsService, ResolvedTarget
+    from daemon.services.view_passcode_service import ViewPasscodeService
 
 logger = logging.getLogger(__name__)
 
@@ -1454,7 +1465,7 @@ def _resolve_verify_rate_limiter(request: Request):
     return limiter
 
 
-async def resolve_views_session(request: Request):
+async def resolve_views_session(request: Request) -> "AuthContext | None":
     """Resolve the operator session behind a /views request — R1 seam.
 
     Views-session-bypass (2026-11-08). Returns the
@@ -2066,12 +2077,13 @@ def build_router() -> APIRouter:
         # 2026-11-08. A valid operator session serves the view
         # DIRECTLY — the same resolution envelope the granted-cookie
         # path above returns, entered BEFORE the locked check (a
-        # session outranks a grant cookie: "lockout gates the entry
-        # lane, not established grants", ADR D5:68 — and the bypass
-        # mints NOTHING: no grant cookie is written on GET, the
-        # write-amplification pin stands). Absent / stale / garbage
-        # sessions resolve to None ⇒ EXACTLY the anonymous flow
-        # below (locked page / interstitial), unchanged.
+        # valid session, like an established grant cookie, outranks
+        # lockout: "lockout gates the entry lane, not established
+        # grants", ADR D5:68 — and the bypass mints NOTHING: no
+        # grant cookie is written on GET, the write-amplification
+        # pin stands). Absent / stale / garbage sessions resolve to
+        # None ⇒ EXACTLY the anonymous flow below (locked page /
+        # interstitial), unchanged.
         if await resolve_views_session(request) is not None:
             try:
                 return service.resolve_for_instance(
@@ -2168,13 +2180,13 @@ def build_router() -> APIRouter:
 
     async def _grant_success_response(
         request: Request,
-        passcode_service,
-        row,
+        passcode_service: "ViewPasscodeService",
+        row: "LiveViewPasscode",
         *,
         root_name: str,
         rel_path: str,
         ip: str,
-        actor: "str | None",
+        actor: str | None,
     ) -> Response:
         """Mint the grant cookie + 303 — the SINGLE success block.
 
@@ -2600,12 +2612,14 @@ def build_router() -> APIRouter:
         # 2026-11-08. A valid operator session renders the board
         # directly (``None`` = granted) — the same render the
         # granted-cookie path gets: 200, ``page_headers`` (no-store
-        # + nonce CSP). Entered BEFORE the locked check (a session
-        # outranks a grant cookie, ADR D5:68 posture). NO grant is
-        # minted on GET — the write-amplification pin stands; the
-        # board keeps gating future anonymous sessions by passcode.
-        # A stale / garbage session resolves to ``None`` ⇒ the
-        # anonymous flow below, byte-identical.
+        # + nonce CSP). Entered BEFORE the locked check (a valid
+        # session, like an established grant cookie, outranks lockout:
+        # "lockout gates the entry lane, not established grants",
+        # ADR D5:68 posture). NO grant is minted on GET — the
+        # write-amplification pin stands; the board keeps gating
+        # future anonymous sessions by passcode. A stale / garbage
+        # session resolves to ``None`` ⇒ the anonymous flow below,
+        # byte-identical.
         if await resolve_views_session(request) is not None:
             return None
         if _row_locked(row):
