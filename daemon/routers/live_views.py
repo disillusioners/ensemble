@@ -878,6 +878,14 @@ def _authority_host_port(value: str) -> tuple[str, int | None] | None:
     a scheme. Lowercased host; explicit port or ``None``. IPv6 literals
     arrive bracketed (``urlsplit`` handles the brackets). Unparseable /
     hostless input returns ``None`` (fail closed at the caller).
+
+    FIX-3 (fix-iteration 1, 2026-11-08 — MINOR-3): a MALFORMED port
+    (unparseable / out-of-range ⇒ ``urlsplit`` raises ``ValueError``)
+    fails closed FOR THE ANCHOR — ``None`` for the whole value, never
+    a portless host that would ride the portless↔explicit
+    compatibility in :func:`_host_matches`. The honest portless
+    spellings (bare ``host``, scheme-default browser origins) keep
+    their elision; explicit-vs-explicit stays strict.
     """
     value = (value or "").strip()
     if not value:
@@ -894,7 +902,10 @@ def _authority_host_port(value: str) -> tuple[str, int | None] | None:
     try:
         port = parts.port
     except ValueError:
-        port = None
+        # Malformed / out-of-range port — the anchor cannot be
+        # interpreted, so it vouches for NOTHING (FIX-3 fail
+        # closed; the old mapping to portless opened the gate).
+        return None
     return host, port
 
 
@@ -904,6 +915,12 @@ def _origin_url_host_port(value: str) -> tuple[str, int | None] | None:
     ``urlsplit`` handles the scheme, the authority, and anything after
     the authority (path/query are irrelevant here). Lowercased host;
     explicit port or ``None``. Hostless values return ``None``.
+
+    FIX-3 symmetry (fix-iteration 1, 2026-11-08): a malformed /
+    out-of-range port fails closed for the whole value — an origin
+    whose port cannot be interpreted is unparseable, and the old
+    portless mapping would have ridden the portless↔explicit
+    compatibility the other way.
     """
     try:
         parts = urlsplit((value or "").strip())
@@ -915,7 +932,7 @@ def _origin_url_host_port(value: str) -> tuple[str, int | None] | None:
     try:
         port = parts.port
     except ValueError:
-        port = None
+        return None
     return host, port
 
 
@@ -956,15 +973,16 @@ def _host_matches(
 def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
     """Derive the SERVER-SIDE trusted-host universe for the views gate.
 
-    Four legs (R2, views-session-bypass 2026-11-08) — every entry is a
-    server-derivable host, never a client-invented allowlist entry:
+    Four legs (R2, views-session-bypass 2026-11-08; FIX-1 hardening
+    same day) — every entry is a server-derivable host, never a
+    client-invented allowlist entry:
 
     (a) the request ``Host`` header — the primary anchor;
     (b) the FIRST ``X-Forwarded-Host`` value — the fronting-proxy
-        anchor (comma-list; the first value is the client-facing
-        host, the same precedence the C-2 middleware lane uses);
+        anchor — ONLY when the operator declared a proxy front;
     (c) the RFC 7239 ``Forwarded`` ``host=`` parameter (first element)
-        — the standardized spelling of (b);
+        — the standardized spelling of (b) — under the SAME
+        operator-declared-proxy-front gate;
     (d) the operator-audience trusted-host set —
         :func:`daemon.auth.cookie.parse_operator_audience` over
         ``auth.allowed_origins`` + ``auth.external_redirect_base`` +
@@ -974,6 +992,27 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
         against an internal Host. Portless by construction (bare
         hosts) — port-compatible with any origin port for the same
         host spelling.
+
+    FIX-1 (fix-iteration 1, 2026-11-08 — MAJOR-1 self-anchoring
+    trust): legs (b)/(c) are CLIENT headers; trusting them
+    unconditionally let any request carry its own trust anchor
+    (``X-Forwarded-Host: <matching my cross Origin>`` — browser-
+    reachable where the auth-OFF CORS posture safelists the header).
+    They are now gated on the operator having DECLARED a proxy
+    front: ``auth.live_view_external_base_url_fallback`` set — the
+    lifespan one-shot copy of ``live_views.external_base_url``
+    (env ``ENSEMBLE_LIVE_VIEWS_EXTERNAL_BASE_URL``), read through
+    the SAME accessor :func:`parse_operator_audience` uses
+    (cookie.py:332-372 family — no fresh config parse). This is
+    exactly the C-2c condition the auth lane's
+    :func:`daemon.auth.cookie.validate_browser_lane_origin` applies
+    to ``X-Forwarded-Proto`` trust (middleware/auth.py:621-647) —
+    the docstring lineage below ``_same_host_origin_check`` is TRUE
+    as of this change. Unset ⇒ legs (b)/(c) contribute NOTHING and
+    the gate rests on Host (a) + the operator audience (d) alone;
+    set ⇒ they contribute as before (the operator told us a proxy
+    rewrites Host, so the forwarded spellings are the real
+    client-facing host).
 
     A request may carry several of these at once (proxy chains); the
     gate accepts if the Origin host matches ANY of them.
@@ -987,36 +1026,51 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
         if parsed is not None:
             trusted.append(parsed)
 
-    xfh = headers.get("x-forwarded-host")
-    if xfh:
-        first_value = xfh.split(",")[0].strip()
-        if first_value:
-            parsed = _authority_host_port(first_value)
-            if parsed is not None:
-                trusted.append(parsed)
+    # FIX-1 proxy-front declaration — the operator's one signal that
+    # Host is NOT the client-facing spelling and the forwarded
+    # headers are authoritative. Read via the SAME getattr seam
+    # parse_operator_audience uses; absent attr / unset value ⇒
+    # undeclared (legs b/c inert).
+    auth_config = getattr(request.app.state, "auth_config", None)
+    proxy_front_declared = False
+    if auth_config is not None:
+        external_base = getattr(
+            auth_config,
+            "live_view_external_base_url_fallback",
+            None,
+        )
+        proxy_front_declared = bool(external_base)
 
-    forwarded = headers.get("forwarded")
-    if forwarded:
-        # RFC 7239 first element only (the element closest to the
-        # client-facing edge); ``host=`` is case-insensitive and its
-        # value may be quoted.
-        first_element = forwarded.split(",")[0]
-        for piece in first_element.split(";"):
-            piece = piece.strip()
-            if piece.lower().startswith("host="):
-                raw_value = piece[len("host="):].strip()
-                if (
-                    len(raw_value) >= 2
-                    and raw_value.startswith('"')
-                    and raw_value.endswith('"')
-                ):
-                    raw_value = raw_value[1:-1]
-                parsed = _authority_host_port(raw_value)
+    if proxy_front_declared:
+        xfh = headers.get("x-forwarded-host")
+        if xfh:
+            first_value = xfh.split(",")[0].strip()
+            if first_value:
+                parsed = _authority_host_port(first_value)
                 if parsed is not None:
                     trusted.append(parsed)
-                break
 
-    auth_config = getattr(request.app.state, "auth_config", None)
+        forwarded = headers.get("forwarded")
+        if forwarded:
+            # RFC 7239 first element only (the element closest to the
+            # client-facing edge); ``host=`` is case-insensitive and its
+            # value may be quoted.
+            first_element = forwarded.split(",")[0]
+            for piece in first_element.split(";"):
+                piece = piece.strip()
+                if piece.lower().startswith("host="):
+                    raw_value = piece[len("host="):].strip()
+                    if (
+                        len(raw_value) >= 2
+                        and raw_value.startswith('"')
+                        and raw_value.endswith('"')
+                    ):
+                        raw_value = raw_value[1:-1]
+                    parsed = _authority_host_port(raw_value)
+                    if parsed is not None:
+                        trusted.append(parsed)
+                    break
+
     if auth_config is not None:
         from daemon.auth.cookie import parse_operator_audience
 
@@ -1054,15 +1108,22 @@ def _same_host_origin_check(request: Request) -> bool:
     * ``Origin`` present (even empty-string ⇒ treat as absent):
       judge the ORIGIN; ``Referer`` is not consulted (C-2 precedence:
       Origin first, Referer only when Origin absent).
-    * Literal ``"null"`` (case-insensitive) ⇒ ALLOW — top-level form
-      navigation and sandboxed frames legitimately send it.
+    * Literal ``"null"`` (case-insensitive) ⇒ ALLOW — UNLESS the
+      browser attests ``Sec-Fetch-Site: cross-site`` (FIX-2: the
+      null-allow is the live defect fix for top-level navigation,
+      but ``null`` is also what a cross-site sandboxed-iframe form
+      POST sends; ``Sec-Fetch-Site`` is browser-set and
+      JS-unforgeable — absent header (older browsers) keeps the
+      live fix).
     * Present, non-null, parseable ⇒ ALLOW iff the origin's host
       matches ANY server-derivable trusted host (:func:`_views_trusted_hosts`)
-      under :func:`_host_matches` semantics.
+      under :func:`_host_matches` semantics. FIX-1: the forwarded
+      anchors (b)/(c) participate ONLY when the operator declared a
+      proxy front (``live_view_external_base_url_fallback`` set).
     * Present, non-null, UNPARSEABLE ⇒ REJECT (the old strip-parse
       also failed these as ordinary inequalities).
     * Present, non-null, NO trusted host derivable at all (no Host
-      header, no XFH, no Forwarded host, empty operator audience)
+      header, no gated-forward anchors, empty operator audience)
       ⇒ REJECT — fail closed; the tautology guard. A gate with no
       server-side anchor cannot vouch for anything.
 
@@ -1091,6 +1152,19 @@ def _same_host_origin_check(request: Request) -> bool:
         # 403 on every same-tab form POST from a sandboxed or
         # data-URL context; anonymous users got it from
         # top-level navigations that serialize to ``null``).
+        #
+        # FIX-2 (fix-iteration 1, 2026-11-08 — MAJOR-2): ``null`` is
+        # ALSO what a CROSS-SITE sandboxed-iframe form POST sends —
+        # the bare null-allow re-opened that CSRF class (a 10-strike
+        # grind durably locks a shared view; no preflight needed).
+        # Discriminator: the browser-set ``Sec-Fetch-Site`` header
+        # (JS-unforgeable). REJECT iff it attests ``cross-site``;
+        # allow when the header is ABSENT (older browsers — this is
+        # what preserves the live fix) or attests same-origin /
+        # same-site / none (top-level navigation).
+        sec_fetch_site = (headers.get("sec-fetch-site") or "").strip().lower()
+        if sec_fetch_site == "cross-site":
+            return False
         return True
     origin_parsed = _origin_url_host_port(value)
     if origin_parsed is None:
@@ -1317,6 +1391,16 @@ async def resolve_views_session(request: Request):
     exception from the store — yields ``None`` and the request proceeds
     EXACTLY as anonymous. A session problem NEVER produces a forbidden,
     a 401, or an error page on the views surface.
+
+    Store-write cost / session-lifetime coupling (FIX-5 note,
+    fix-iteration 1): ``validate_session`` defaults to ``touch=True``,
+    and the touch is minute-batched in the repository
+    (``TOUCH_MIN_INTERVAL_SECONDS = 60``, auth_session/repository.py:68)
+    ⇒ at most ONE session-store write per minute per session — a
+    passcode-view GET with a session costs ≤1 write/min, not one per
+    request. Under auth ``sliding_renewal=true`` that same touch also
+    EXTENDS the login expiry (sliding sessions): operator view-browsing
+    deliberately keeps the login alive. Both couplings are intentional.
     """
     from daemon.auth.cookie import SESSION_COOKIE_NAME
 
@@ -2158,8 +2242,6 @@ def build_router() -> APIRouter:
         """
         from daemon.services.view_passcode_service import (
             VerifyOutcome,
-            issue_grant_cookie,
-            parse_grant_cookie,
         )
 
         # Service presence — fail-closed (uniform 404) on
