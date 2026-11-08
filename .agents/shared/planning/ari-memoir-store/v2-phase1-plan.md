@@ -2,7 +2,7 @@
 
 **File:** `v2-phase1-plan.md`  
 **Depends on:** Predecessor v1 schema (`20261105_102821_create_memoir_tables.sql`).  
-**Flags / Decisions consumed:** DR-6, DD-2, DD-18, V2-2, V2-10, V2-13 (`v4-federated-sketch.md` §5), V2-14, V2-15, V2-20, V2-21, V2-22, V2-26 (C1), V2-28 (C3), V2-29 (SF2), V2-33 (SF11).
+**Flags / Decisions consumed:** DR-6, DD-2, DD-18, V2-2, V2-10, V2-13 (`v4-federated-sketch.md` §5), V2-14, V2-15, V2-20, V2-21, V2-22, V2-26 (C1), V2-28 (C3), V2-29 (SF2), V2-33 (SF11), V2-36 (W2).
 
 ---
 
@@ -32,8 +32,8 @@ Deliver the persistent database substrate for Memoir Store v2:
 | **V2-D 1.8** | Atomic supersession writer: `supersede_with(old_id, new_row)` in `MemoirSynthesesRepository` executes insert + old-row `superseded_by` pointer + new-row `supersedes` back-pointer in ONE `engine.begin()` (§3-A2 / Register #6). | Two-call create+mark pattern leaves an unlinked fork if the process dies between calls, violating the v4 conflict-resolution invariant. | Two separate repository calls (`create_synthesis` then `mark_superseded`). |
 | **V2-D 1.9** | Synthesis dedup key & per-agent window check (SF4 / V2-30): Normalization = NFC + whitespace-collapse + casefold; dedup enforced against active un-superseded syntheses within the 2-day reflection window (`WHERE agent_id=:ari AND created_at >= now()-interval '2 days' AND superseded_by IS NULL`). | Scale rationale: Reflection operates over a bounded 2-day window (~dozens of claims). In-window check is instantaneous (<1ms) and avoids altering pre-staged `memoir_syntheses` table (honoring DD-2). | Adding indexed column to pre-staged table; OR skipping dedup. |
 | **V2-D 1.10** | Ensure census pin update asymmetry (§3-A5 / Register #8): `test_memoir_retrieval_pg.py:98-104` (filters on `memoir_episodes` AND (`tsv` OR `GIN`)) STAYS at 2. `test_memoir_pg_corpus.py:115-123` (filters on `memoir_episodes` only) flips 2→4 (due to the 2 new memoir entries). | The two test files use asymmetric SQL filters; updating both to 3 or 4 blindly is a defect. | Updating both assertions blindly to 3. |
-| **V2-D 1.11** | Durable Proposal Ledger Table in Phase 1 (C3 / Leader ruling 2026-11-09 / V2-28): Create `memoir_proposal_ledger` (`id`, `agent_id`, `episode_id`, `proposal_date`, `proposed_at`, `notification_status`, `notified_at`, `reason`, `created_at`) in Phase 1. | Restart-safe 1/day notification tracking and keepsake candidate staging is a blessed requirement; in-memory state is ruled out. | In-memory ledger; ad-hoc metadata file. |
-| **V2-D 1.12** | `memoir_line.last_pass_id TEXT NULL` upsert guard (SF2 / V2-29): Add `last_pass_id` column to `memoir_line` to ensure mid-pass crash re-extractions do not double-increment mention counts. | Upsert increments `mention_count` only when `last_pass_id IS DISTINCT FROM :pass_id`, providing restart idempotence. | Plain `+= 1` on conflict without pass check. |
+| **V2-D 1.11** | Durable Proposal Ledger Table in Phase 1 (C3 / Leader ruling 2026-11-09 / V2-28 / W2): Create `memoir_proposal_ledger` (`id`, `agent_id`, `episode_id`, `proposal_date`, `proposed_at`, `notification_status`, `notified_at`, `reason`, `created_at`) with `uq_memoir_proposal_agent_episode UNIQUE (agent_id, episode_id)` in Phase 1. Stamped `notification_status='sent'` enforces restart-safe 1/day notification constraint, while the unique constraint enforces once-ever-per-episode proposal tracking (W2 / V2-36). | Restart-safe 1/day notification constraint and once-ever proposal tracking are blessed requirements; in-memory state is ruled out. | In-memory ledger; ad-hoc metadata file. |
+| **V2-D 1.12** | `memoir_line.last_pass_id TEXT NULL` upsert guard (SF2 / V2-29 / Suggestion #8): Add `last_pass_id` column to `memoir_line` to ensure mid-pass crash re-extractions do not double-increment mention counts. Precondition note (VERIFY-AT-IMPLEMENTATION): SQLite syntax support for `IS DISTINCT FROM` (or `CASE WHEN ...` fallback) must be verified against host SQLite version on a throwaway SQLite database during implementation (per 20260714_000001 house lesson; do NOT write unverified version claims as fact). Dialect-neutral fallback: `(memoir_line.last_pass_id IS NULL OR memoir_line.last_pass_id != :pass_id)`. | Upsert increments `mention_count` only when `last_pass_id IS DISTINCT FROM :pass_id` (or dialect fallback), providing restart idempotence. | Plain `+= 1` on conflict without pass check. |
 
 ---
 
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS memoir_reflection_state (
     claimed_at DATETIME
 );
 
--- 5. memoir_proposal_ledger: Durable keepsake proposal and notification ledger (C3)
+-- 5. memoir_proposal_ledger: Durable keepsake proposal and notification ledger (C3 / W2)
 CREATE TABLE IF NOT EXISTS memoir_proposal_ledger (
     id TEXT NOT NULL PRIMARY KEY,
     agent_id TEXT NOT NULL,
@@ -138,7 +138,7 @@ DROP TABLE IF EXISTS memoir_reflection_state;
 - `upsert_star(agent_id, name, star_type, description=None, event_at=None) -> MemoirStar`: Upserts a canonical star. If existing, updates `last_touched_at = max(existing, event_at)`.
 - `add_alias(agent_id, star_id, alias) -> MemoirStarAlias`: Binds alias string (e.g. "my dear", "the Emperor") to canonical star id.
 - `resolve_star(agent_id, query_name) -> MemoirStar | None`: Resolves by canonical name OR alias.
-- `record_line(agent_id, star_id, episode_id, event_at, pass_id=None) -> MemoirLine`: Upserts an episodic mention line. If conflict on `(star_id, episode_id)`, increments `mention_count` only if `last_pass_id IS DISTINCT FROM pass_id`, updating `last_mentioned_at` and `last_pass_id`.
+- `record_line(agent_id, star_id, episode_id, event_at, pass_id=None) -> MemoirLine`: Upserts an episodic mention line. If conflict on `(star_id, episode_id)`, increments `mention_count` only if `last_pass_id IS DISTINCT FROM pass_id` (or fallback `last_pass_id IS NULL OR last_pass_id != pass_id`), updating `last_mentioned_at` and `last_pass_id`.
 - `get_star_card(agent_id, star_id) -> dict`: Returns star record, all aliases, recent mention lines, and 1-hop neighbor stars.
 - `increment_heat(agent_id, star_id, amount=1.0) -> float`: Atomically increments stored heat accumulator upon explicit recall.
 - `update_star_description(agent_id, star_id, description, as_of_ts) -> bool`: Updates description and sets `description_as_of = as_of_ts`.
@@ -159,10 +159,10 @@ DROP TABLE IF EXISTS memoir_reflection_state;
 
 | ID | Task | Outcome (testable) | Touchpoints | Depends on | Risks carried | AC |
 |----|------|--------------------|-------------|------------|---------------|----|
-| **T1.1** | Create migration `.sql` file in `daemon/migrations/versions/` with DDL for `memoir_star`, `memoir_star_alias`, `memoir_line` (with `last_pass_id`), `memoir_reflection_state`, `memoir_proposal_ledger`, and four plain `ADD COLUMN` statements + space-separated legacy seed UPDATE. | Migration runner applies cleanly on fresh SQLite; prefix is unique; down section drops indexes and tables in reverse order. | `daemon/migrations/versions/20261109_..._create_memoir_v2_tables.sql` | — | R10 | AC1 |
+| **T1.1** | Create migration `.sql` file in `daemon/migrations/versions/` with DDL for `memoir_star`, `memoir_star_alias`, `memoir_line` (with `last_pass_id`), `memoir_reflection_state`, `memoir_proposal_ledger` (with `UNIQUE(agent_id, episode_id)`), and four plain `ADD COLUMN` statements + space-separated legacy seed UPDATE. | Migration runner applies cleanly on fresh SQLite; prefix is unique; down section drops indexes and tables in reverse order. | `daemon/migrations/versions/20261109_..._create_memoir_v2_tables.sql` | — | R10 | AC1 |
 | **T1.2** | Define SQLModel classes `MemoirStar`, `MemoirStarAlias`, `MemoirLine`, `MemoirReflectionState`, and `MemoirProposalLedger` in `daemon/repositories/memoir/models.py`; update `MemoirEpisode` with `poignancy_status`, `poignancy`, `poignancy_attempts`, and `reflected_at`. | Models importable; `__table_args__` match DDL byte-identically; constraints match; 3-site index lockstep verified. | `daemon/repositories/memoir/models.py` | T1.1 | — | AC2 |
 | **T1.3** | Register new models in `daemon/manager.py:920-975` before `create_all`; add TWO new ensure entries (multi-clause DDL ALTER with `TIMESTAMPTZ` + DML legacy seed) into `_ensure_postgres_columns`. | Fresh Postgres boot creates all 5 new tables + adds 4 columns to `memoir_episodes`; re-boot is completely idempotent. | `daemon/manager.py` | T1.2 | R1 | AC3 |
-| **T1.4** | Implement `MemoirConstellationRepository` with star upsert, alias binding, line recording with `last_pass_id` guard, heat scoring, `description_as_of` updates, and 1-hop network joins. | Unit tests pass for alias resolution, duplicate handling, crash-recovery pass idempotence, and 1-hop neighbor queries. | `daemon/repositories/memoir/constellation_repository.py` | T1.2 | R9 | AC4 |
+| **T1.4** | Implement `MemoirConstellationRepository` with star upsert, alias binding, line recording with `last_pass_id` guard, heat scoring, `description_as_of` updates, and 1-hop network joins. Verify SQLite `IS DISTINCT FROM` vs fallback (Suggestion #8). | Unit tests pass for alias resolution, duplicate handling, crash-recovery pass idempotence, and 1-hop neighbor queries. | `daemon/repositories/memoir/constellation_repository.py` | T1.2 | R9 | AC4 |
 | **T1.5** | Implement `MemoirSynthesesRepository` enforcing non-empty `source_episode_ids`, valid verbs, normalized in-window dedup check, and atomic `supersede_with` writer. | Writing without citations raises `ValueError`; dedup returns existing row; `supersede_with` links both rows atomically. | `daemon/repositories/memoir/syntheses_repository.py` | T1.2 | R2 | AC5 |
 | **T1.6** | Cross-driver schema verification: throwaway SQLite test (with cutover fixture row verifying `' ' < 'T'` safety) + real-PG test; update ensure census assertions (`retrieval_pg` stays 2, `pg_corpus` flips 2→4). | Tests verify table creation, index presence, CHECK constraint enforcement, and ensure idempotence on both engines. | `tests/unit/test_memoir_v2_schema.py`, `tests/postgres/test_memoir_v2_schema_pg.py` | T1.3, T1.4, T1.5 | R1 | AC6 |
 
@@ -205,6 +205,7 @@ DROP TABLE IF EXISTS memoir_reflection_state;
 - **V2-22 / §2-Q5:** `description_as_of` cooldown carrier on `memoir_star`.
 - **V2-26 / C1:** `TIMESTAMPTZ` typing for `reflected_at` in Postgres ensure.
 - **V2-28 / C3:** Durable `memoir_proposal_ledger` table.
-- **V2-29 / SF2:** `memoir_line.last_pass_id` crash-recovery upsert guard.
+- **V2-29 / SF2:** `memoir_line.last_pass_id` crash-recovery upsert guard with SQLite `IS DISTINCT FROM` precondition note (Suggestion #8).
 - **V2-30 / SF4:** NFC claim normalization and per-agent window dedup.
 - **V2-33 / SF11:** Space-separated storage format `'2026-11-09 00:00:00'` cutover literal.
+- **V2-36 / W2:** Proposal once-everness per episode enforced by `UNIQUE(agent_id, episode_id)`.

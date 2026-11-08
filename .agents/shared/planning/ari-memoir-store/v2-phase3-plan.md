@@ -2,7 +2,7 @@
 
 **File:** `v2-phase3-plan.md`  
 **Depends on:** Phase 1 (`v2-phase1-plan.md`), Phase 2 (`v2-phase2-plan.md`).  
-**Flags / Decisions consumed:** V2-3, V2-4, V2-8, V2-13 (`v4-federated-sketch.md` §5), V2-22, V2-25, V2-27 (C2), V2-31 (SF7), V2-34 (SF3).
+**Flags / Decisions consumed:** V2-3, V2-4, V2-8, V2-13 (`v4-federated-sketch.md` §5), V2-22, V2-25, V2-27 (C2), V2-31 (SF7), V2-34 (SF3, Suggestion #11).
 
 ---
 
@@ -16,16 +16,16 @@ Deliver the cold-path Constellation graph layer and the entity-centric retrieval
    - *Tier 2 (Grown):* LLM summarization into a coherent entity card (~300 words) when thresholds are exceeded and cooldown has elapsed.
    - **Fragments definition:** `COUNT(*)` of distinct `memoir_line` rows (distinct citing episodes), never `SUM(mention_count)` (§2-Q5 / Register #18).
    - **Cooldown carrier:** `memoir_star.description_as_of DATETIME NULL` carries the 24h cooldown and v4 derivation watermark (§2-Q5 / Register #9).
-4. Implement two-part star heat model (SF3 / V2-34):
+4. Implement two-part star heat model (SF3 / V2-34 / Suggestion #11):
    - Stored accumulator in `memoir_star.heat` incremented ONLY on explicit-recall hits (`memoir_recall`, `memoir_about`; background extraction ≠ access).
-   - Recency decay computed dynamically at RENDER time from `last_touched_at`: `effective_heat = stored_heat * exp(-decay_lambda * (now - last_touched_at))`. Stays strictly kingdom-local.
+   - Recency decay computed dynamically at RENDER time from `last_touched_at`: `effective_heat = round(stored_heat * math.exp(-MEMOIR_HEAT_DECAY_LAMBDA * days_idle), 2)` with `MEMOIR_HEAT_DECAY_LAMBDA = 0.005` (~138 days half-life). Stays strictly kingdom-local.
 5. Constellation LLM cost accounting (SF7 / V2-31): Separate pass budget `MEMOIR_CONSTELLATION_MAX_LLM_CALLS_PER_PASS = 2` (max 1 extraction, max 1 tier-2 card summarization) using `invoke_raw_with_failover`, decoupled from Phase 2's 4-call synthesis cap.
 6. Implement the `memoir_about(star: str)` tool:
    - Registers in the existing privileged category `memoir`.
    - Adheres to the two-layer gate (ari-only factory identity + runtime kill-switch).
    - Returns a structured dossier: canonical name, star type, description, recent linked episodes, and 1-hop neighbor stars.
    - Maps all refusal conditions onto the frozen 19-code refusal vocabulary.
-   - **Zero-episode edge rule:** A resolved star with ZERO linked episodes returns an **empty-dossier SUCCESS render** (sections say "none"), NOT `memoir_not_found` (§2-Q7 / Register #25).
+   - **Zero-episode edge rule:** A resolved star with ZERO linked episodes returns an **empty-dossier SUCCESS render** (sections say "none"), NOT `memoir_not_found` (§2-Q7).
 7. Execute the complete tool registration ceremony and re-stamp `agents/ari/tools_note.md`.
 
 ---
@@ -36,7 +36,7 @@ Deliver the cold-path Constellation graph layer and the entity-centric retrieval
 |----|----------|------------------------------|-----------------------|
 | **V2-D 3.1** | Cold-path extraction during reflection: Constellation nodes and edges are updated ONLY during background reflection passes, never on the hot `memoir_write` path. | DD-20 invariant: hot append must never block conversation turns. Graph consolidation cost scales with change volume rather than total corpus size. | Synchronous graph extraction during `memoir_write`. |
 | **V2-D 3.2** | LightRAG M4 two-tier description thresholds: `MEMOIR_STAR_SUMMARY_MIN_FRAGMENTS = 5`, `MEMOIR_STAR_SUMMARY_MIN_CHARS = 1200`, `MEMOIR_STAR_SUMMARY_COOLDOWN_HOURS = 24`. **Fragments = `COUNT(*)` of distinct `memoir_line` rows, never `SUM(mention_count)`** (§2-Q5 / Register #18). Cooldown carried by `memoir_star.description_as_of` (§2-Q5 / Register #9). | One heavily re-mentioned episode must not alone graduate a star. Accumulate across observations, synthesize over coverage. `last_touched_at` updates on every touch and cannot carry a summarization cooldown clock. | `SUM(mention_count)` (allows 1 repetitive episode to trigger summarization); OR using `last_touched_at` for cooldown. |
-| **V2-D 3.3** | Two-part heat model (SF3 / V2-34): Stored accumulator in `memoir_star.heat` incremented ONLY on explicit recall (`memoir_recall`, `memoir_about`); recency decay computed dynamically at RENDER time from `last_touched_at`. Background extraction ≠ access (DD-12). Kingdom-local per `v4-federated-sketch.md` §5. | Incrementing heat during background extraction; OR baking static decay into DB updates; OR syncing heat across kingdoms. |
+| **V2-D 3.3** | Two-part heat model & named decay constant (SF3 / V2-34 / Suggestion #11): Stored accumulator in `memoir_star.heat` incremented ONLY on explicit recall (`memoir_recall`, `memoir_about`); recency decay computed dynamically at RENDER time via `MEMOIR_HEAT_DECAY_LAMBDA = 0.005`. Background extraction ≠ access (DD-12). Kingdom-local per `v4-federated-sketch.md` §5. | Incrementing heat during background extraction; OR baking static decay into DB updates; OR syncing heat across kingdoms. |
 | **V2-D 3.4** | `memoir_about` joins the existing `memoir` category: category count stays unchanged; ari's `tools.allow: ["memoir"]` automatically covers it. | Creating a new `constellation` tool category (churns privileged category pins and agent meta configs). |
 | **V2-D 3.5** | Frozen 19-code refusal mapping: Map `memoir_about` error conditions onto existing `MEMOIR_CODES`: star not found -> `memoir_not_found`; empty star param -> `memoir_query_required`; star name too long -> `memoir_stars_out_of_bounds`. | Adding a 20th error code (`memoir_star_not_found`). Preserves `assert len(MEMOIR_CODES) == 19` and avoids touching the V-1 truthfulness bar. |
 | **V2-D 3.6** | Zero-episode star returns empty-dossier SUCCESS (§2-Q7): If a star exists in `memoir_star` but currently has zero linked episodes, render a valid empty dossier (sections report "none"), NOT `memoir_not_found`. | Returning `memoir_not_found` for zero-episode stars. | V-1 truthfulness bar: returning `memoir_not_found` when the entity exists mislabels real data as missing. |
@@ -55,12 +55,12 @@ Deliver the cold-path Constellation graph layer and the entity-centric retrieval
 2. **Narrative Extraction Fallback:** When `stars` is empty, bounded LLM extraction identifies entities and maps aliases. Budgeted under `MEMOIR_CONSTELLATION_MAX_LLM_CALLS_PER_PASS = 2` using `invoke_raw_with_failover`.
 3. **Deterministic Canonicalization:** Canonical star name is derived as `strip().casefold()`; display name preserves canonical casing; aliases link surface variants.
 
-#### Two-Part Heat Model (SF3)
+#### Two-Part Heat Model (SF3 / Suggestion #11)
 - **Stored Component:** `memoir_star.heat` stores the integer/float hit counter.
   - Incremented by `+1.0` on explicit recall hits in `memoir_recall` and `memoir_about`.
   - Background extraction, seeding, and reflection passes NEVER increment `heat` (`extraction != access`, DD-12).
 - **Dynamic Render Component:** At query time, `effective_heat` is calculated:
-  `effective_heat = round(stored_heat * math.exp(-0.005 * days_idle), 2)` where `days_idle = (now - last_touched_at).total_seconds() / 86400.0`.
+  `effective_heat = round(stored_heat * math.exp(-MEMOIR_HEAT_DECAY_LAMBDA * days_idle), 2)` where `MEMOIR_HEAT_DECAY_LAMBDA = 0.005` (~138 days half-life) and `days_idle = (now - last_touched_at).total_seconds() / 86400.0`.
   Stored heat stays home; neither stored heat nor decay is ever synced across kingdoms (`v4-federated-sketch.md` §5).
 
 ### 3.2 `memoir_about` Tool Signature & Gate Order
@@ -107,10 +107,10 @@ Neighbor Stars (1-hop):
 
 | ID | Task | Outcome (testable) | Touchpoints | Depends on | Risks carried | AC |
 |----|------|--------------------|-------------|------------|---------------|----|
-| **T3.1** | Implement `MemoirConstellationService` in `daemon/services/memoir_constellation_service.py` with entity extraction (heuristic + bounded LLM) and deterministic alias linking. | Service parses `episodes.stars[]` and narrative text; creates/updates `memoir_star` and `memoir_line` with `last_pass_id` guard. | `daemon/services/memoir_constellation_service.py` | P1 | R9 | AC1 |
+| **T3.1** | Implement `MemoirConstellationService` in `daemon/services/memoir_constellation_service.py` with entity extraction (heuristic + bounded LLM fallback, Suggestion #3) and deterministic alias linking. | Service parses `episodes.stars[]` and narrative text; creates/updates `memoir_star` and `memoir_line` with `last_pass_id` guard. | `daemon/services/memoir_constellation_service.py` | P1 | R9 | AC1 |
 | **T3.1b** | Implement bounded historical seed pass (C2 / Leader ruling 2026-11-09): Nightly pass scans unreflected backlog oldest-first (`ORDER BY created_at ASC LIMIT 30`) seeding Constellation from v1 corpus. | Pre-cutover episodes extracted into Constellation; "The Emperor" queryable on day 1 under existing 30-episode/budget caps. | `daemon/services/memoir_reflection_worker.py`, `daemon/services/memoir_constellation_service.py` | T3.1, P2 | — | AC7 |
 | **T3.2** | Implement LightRAG M4 two-tier description synthesizer measuring fragments as `COUNT(*)` of lines and updating `description_as_of` within 2-call constellation budget. | Entities with <5 distinct citing episodes join raw snippets; entities with ≥5 distinct episodes trigger LLM summarization with 24h cooldown. | `daemon/services/memoir_constellation_service.py` | T3.1 | R3 | AC2 |
-| **T3.3** | Implement `memoir_about` tool in `daemon/tools/memoir.py` with two-layer gate, two-part heat scoring, frozen 19-code refusal mapping, and zero-episode empty-dossier success render. | Calling tool with valid star returns formatted card; zero-episode star returns empty-dossier success; missing/invalid star returns mapped refusal codes without raising exceptions. | `daemon/tools/memoir.py` | P1, T3.2 | — | AC3 |
+| **T3.3** | Implement `memoir_about` tool in `daemon/tools/memoir.py` with two-layer gate, two-part heat scoring (`MEMOIR_HEAT_DECAY_LAMBDA = 0.005`), frozen 19-code refusal mapping, and zero-episode empty-dossier success render. | Calling tool with valid star returns formatted card; zero-episode star returns empty-dossier success; missing/invalid star returns mapped refusal codes without raising exceptions. | `daemon/tools/memoir.py` | P1, T3.2 | — | AC3 |
 | **T3.4** | Update tool registration in `daemon/tools/_tool_registry.py` and `MEMOIR_TOOL_NAMES` frozenset in `daemon/tools/memoir.py`. | `MEMOIR_TOOL_NAMES` holds 6 tools; tool factory instantiates `memoir_about` for Ari; denied for other agents. | `daemon/tools/memoir.py`, `daemon/tools/_tool_registry.py` | T3.3 | R7 | AC4 |
 | **T3.5** | Regenerate checkpoint metrics and re-stamp `agents/ari/tools_note.md` with updated memoir tool documentation. | `checkpoint_metrics.py` generates updated JSON; `tools_note.md` accurately documents `memoir_about`. | `agents/ari/tools_note.md`, `.agents/shared/metrics/tool-categories.json` | T3.4 | — | AC5 |
 | **T3.6** | Implement test packs for constellation service, fragment counting, description thresholds, heat scoring, zero-episode success, refusal mapping, and tool registration. | Unit and integration tests pass with 100% assertion coverage; mutation legs verified. | `tests/unit/test_memoir_constellation.py`, `tests/unit/test_memoir_about_tool.py` | T3.3, T3.4 | — | AC6 |
@@ -150,4 +150,4 @@ Neighbor Stars (1-hop):
 - **V2-25 / §2-Q7:** Zero-episode empty-dossier success render.
 - **V2-27 / C2:** Bounded one-time seed pass from v1 corpus.
 - **V2-31 / SF7:** Constellation 2-call LLM budget cap.
-- **V2-34 / SF3:** Two-part heat model (stored accumulator + render-time decay).
+- **V2-34 / SF3 / Suggestion #11:** Two-part heat model (stored accumulator + render-time decay with `MEMOIR_HEAT_DECAY_LAMBDA = 0.005`).
