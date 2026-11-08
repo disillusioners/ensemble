@@ -46,13 +46,13 @@ export class SchedulerService {
     if (includeCancelled === true) {
       params = params.set('include_cancelled', 'true');
     }
+    // NOTE: errors deliberately PROPAGATE (no catchError swallow). The
+    // single production caller (SchedulesComponent.loadSchedules) owns
+    // a token-guarded error branch; swallowing here would convert a
+    // failure into an empty list and keep that branch dead.
     return this.http.get<ScheduleListResponse>(this.API_BASE, { params }).pipe(
       tap((response) => this.schedules.set(response.schedules)),
-      map((response) => response.schedules),
-      catchError((err) => {
-        this.error.set(err.message || 'Failed to fetch schedules');
-        return of([] as Schedule[]);
-      })
+      map((response) => response.schedules)
     );
   }
 

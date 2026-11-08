@@ -207,6 +207,130 @@ describe('SchedulesComponent — terminal-toggle follow-up behavior', () => {
     expect(component.totalCount()).toBe(2);
   });
 
+  // ── error ordering (review follow-up 🟡2 — service swallow removed) ──
+  // listSchedules no longer converts HTTP failures into a stale ``of([])``
+  // emission: errors PROPAGATE to the component's token-guarded error
+  // branch. A superseded failure must stay silent; a current-token
+  // failure must surface (the error UI is live again).
+
+  it('a STALE request failing AFTER the fresh one succeeded never surfaces the error (rows intact)', () => {
+    window.localStorage.setItem(SHOW_TERMINAL_STORAGE_KEY, 'true');
+    mount();
+
+    // Chain A (toggle ON, token 1) in flight; flipping OFF issues chain B.
+    fixture.detectChanges();
+    const staleReq = httpMock.expectOne('/api/schedules?include_cancelled=true');
+
+    component.onShowTerminalChange(false);
+    fixture.detectChanges();
+    const freshReq = httpMock.expectOne('/api/schedules');
+
+    // FRESH lands first and is accepted.
+    freshReq.flush(BARE_PAGE);
+    fixture.detectChanges();
+    expect(component.error()).toBeNull();
+    expect(component.filteredSchedules().map((s) => s.id)).toEqual(['live-1']);
+    expect(component.hiddenTerminalCount()).toBe(1);
+
+    // …THEN the stale chain A FAILS. Superseded token → the guard must
+    // drop it: no error surface, shared list stays last-known.
+    staleReq.flush('kaboom', { status: 500, statusText: 'Internal Server Error' });
+    fixture.detectChanges();
+
+    expect(component.error()).toBeNull();
+    expect(component.schedules().map((s) => s.id)).toEqual(['live-1', 'done-1']);
+    expect(component.filteredSchedules().map((s) => s.id)).toEqual(['live-1']);
+    expect(component.hiddenTerminalCount()).toBe(1);
+  });
+
+  it('a CURRENT-token failure surfaces the error UI (the token-guarded error branch is live)', () => {
+    mount();
+    fixture.detectChanges();
+
+    const req = httpMock.expectOne('/api/schedules');
+    req.flush('backend exploded', { status: 500, statusText: 'Internal Server Error' });
+    fixture.detectChanges();
+
+    expect(component.error()).toContain('500');
+    expect(component.loading()).toBe(false);
+    expect(component.isEmptyState()).toBe(false);
+
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('Failed to load schedules');
+    expect(text).toContain('Try Again');
+  });
+
+  // ── stale-lands-FIRST ordering (review follow-up 🟡1 — baseline seed) ─
+  // ``acceptedRows ??= schedules()`` at request start guarantees the
+  // drop branch ALWAYS has last-known rows to re-assert — closing both
+  // edge windows: stale-before-any-accept and error-baseline wipe.
+
+  it('after a flip the STALE response landing FIRST re-asserts last-known rows, then the fresh response settles the final list', () => {
+    mount();
+    fixture.detectChanges();
+    httpMock.expectOne('/api/schedules').flush(BARE_PAGE);
+    fixture.detectChanges();
+    expect(component.schedules().map((s) => s.id)).toEqual(['live-1', 'done-1']);
+
+    // Flip ON (chain A in flight), then immediately OFF (chain B).
+    component.onShowTerminalChange(true);
+    fixture.detectChanges();
+    const staleReq = httpMock.expectOne('/api/schedules?include_cancelled=true');
+
+    component.onShowTerminalChange(false);
+    fixture.detectChanges();
+    const freshReq = httpMock.expectOne('/api/schedules');
+
+    // The STALE WITH-param page lands FIRST: the drop branch must
+    // re-assert the last-known rows, not leak the superseded page.
+    staleReq.flush(FULL_PAGE);
+    fixture.detectChanges();
+
+    expect(component.schedules().map((s) => s.id)).toEqual(['live-1', 'done-1']);
+    expect(component.filteredSchedules().map((s) => s.id)).toEqual(['live-1']);
+    expect(component.hiddenTerminalCount()).toBe(1);
+
+    // …then the FRESH bare page lands and settles the final state.
+    freshReq.flush(BARE_PAGE);
+    fixture.detectChanges();
+
+    expect(component.schedules().map((s) => s.id)).toEqual(['live-1', 'done-1']);
+    expect(component.filteredSchedules().map((s) => s.id)).toEqual(['live-1']);
+    expect(component.hiddenTerminalCount()).toBe(1);
+  });
+
+  it('stale-before-any-accept: the seed makes the first superseded drop restore the empty baseline (no stale leak)', () => {
+    window.localStorage.setItem(SHOW_TERMINAL_STORAGE_KEY, 'true');
+    mount();
+
+    // Chain A (token 1) never answered; the flip issues chain B (token
+    // 2) — at that instant the seed snapshots the still-empty baseline.
+    fixture.detectChanges();
+    const staleReq = httpMock.expectOne('/api/schedules?include_cancelled=true');
+
+    component.onShowTerminalChange(false);
+    fixture.detectChanges();
+    const freshReq = httpMock.expectOne('/api/schedules');
+
+    // The stale WITH-param page lands FIRST — before ANY acceptance.
+    // Without the baseline seed the superseded page would leak into the
+    // shared list (the drop branch had nothing to re-assert).
+    staleReq.flush(FULL_PAGE);
+    fixture.detectChanges();
+
+    expect(component.schedules().map((s) => s.id)).toEqual([]);
+    expect(component.hiddenTerminalCount()).toBe(0);
+    expect(component.error()).toBeNull();
+
+    // The fresh bare page then settles the real state.
+    freshReq.flush(BARE_PAGE);
+    fixture.detectChanges();
+
+    expect(component.schedules().map((s) => s.id)).toEqual(['live-1', 'done-1']);
+    expect(component.filteredSchedules().map((s) => s.id)).toEqual(['live-1']);
+    expect(component.hiddenTerminalCount()).toBe(1);
+  });
+
   // ── 🟡3 EAGER init ────────────────────────────────────────────────────
 
   it('stored "true" → initial showTerminal() is true and the FIRST fetch carries the param', () => {

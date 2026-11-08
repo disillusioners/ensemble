@@ -1,4 +1,4 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy, effect } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
@@ -211,6 +211,16 @@ export class SchedulesComponent implements OnInit, OnDestroy {
     // through the existing client-side terminal filter below, so the
     // visible subset, hidden-count line and stats stay truthful.
     const token = ++this.loadToken;
+    // Baseline seed: every request re-anchors the re-assert snapshot to
+    // the last-known rows, so ANY stale drop — including one landing
+    // before any acceptance, or around an error — restores last-known
+    // state instead of leaving a superseded page stuck in the shared
+    // list (the service tap writes it before the token check runs).
+    // Read OUTSIDE the reactive context (loadSchedules runs inside the
+    // constructor effect): tracking this read would make the effect
+    // depend on the shared schedules signal and re-fetch on every
+    // accepted page.
+    this.acceptedRows ??= untracked(() => this.schedules());
     this.schedulerService.listSchedules(this.showTerminal()).subscribe({
       next: (rows) => {
         if (token !== this.loadToken) {
