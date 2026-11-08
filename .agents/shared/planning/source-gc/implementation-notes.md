@@ -268,6 +268,61 @@ pre-merge span (6b571771d..2c6b7ab94 -> empty) and the post-merge span
 if a future drift sync absorbs it) stays EXACTLY the sanctioned hunk. Any
 additional drift REDs; removing the guard REDs the file pin.
 
+
+## Tester-gate fix round (2026-11-08)
+
+BLOCKING FIX — migration comment semicolon (G6 root cause):
+- `20261107_122648_create_source_gc_archive_tables.sql:92` — the trailing
+  comment's inner `;` ("...always NULL; chat rows unreachable") shattered
+  the runner's statement split (runner strips FULL-LINE comments only,
+  splits on `;`) -> `sqlite3.OperationalError near "chat"` -> MigrationError
+  on every fresh SQLite boot. FIXED: reworded to "always NULL, chat rows
+  unreachable". Two additional in-comment `;` in the same file (docstring
+  lines 14 + 37 — FULL-LINE comments, inert for the splitter but violating
+  the LESSONS durable rule) also cleaned (reworded, no `;`).
+- CHECKSUM/LEDGER CAUTION verified: the runner's ledger records checksum
+  informationally (sha256 stored on the schema_migrations row at apply
+  time) but NEVER verifies a recorded checksum against the file on later
+  boots, and the pending filter is version-only (get_pending_migrations
+  filters on `version not in applied`) — editing an already-applied file
+  is ledger-safe. OUR file never successfully applied on SQLite (it errored)
+  and the PG runner is a structural no-op, so the edit touches no applied
+  ledger anywhere. No OTHER lane's migration file was edited.
+
+COMPANION PIN (per the tester's LESSONS):
+- tests/migration/test_migration_comment_semicolon.py (4 nodes):
+  corpus scan — no `;` inside any TRAILING (inline) comment in any .sql
+  under daemon/migrations/versions/ (the actual shatter class; full-line
+  comments are stripped by the runner before the split and are inert).
+  SCOPING: pre-fix census = 353 full-line-comment `;` lines across ~100
+  pre-existing files, ZERO trailing-comment `;` outside our file. The
+  full-line population is NOT fixed (checksum risk on files that DID
+  apply; and inert for this defect class) — documented here as the
+  allowlist rationale (house residue-gate pattern). OUR file is held to
+  the stricter standard (no `;` in ANY comment, asserted directly).
+  Plus: the DOWN block's commented `-- DROP ...;` lines are documented
+  as FULL-LINE comments (inert shape) so a future editor doesn't
+  "fix" them into an unparseable form.
+  Plus: fresh-SQLite full-dir boot proof node (the LESSONS method —
+  blocker ledger-pre-marked; asserts the source-gc archive file applies
+  and both tables materialize).
+  Corpus-scan verdict: TRAILING offenders = 0 (clean).
+
+PIN FOLD 1 (F2 material — AM-10 to_thread off-loop):
+- tests/unit/services/test_sources_gc_service.py (TestToThreadOffLoop,
+  2 nodes): captures threading.get_ident() inside the mocked repo calls;
+  sweep runs under asyncio.run (loop on the test main thread); asserts
+  find + count (dry-run) AND the destructive per-row call each ran on a
+  thread != the loop thread. Mutation-proven: replacing ANY of the three
+  to_thread calls with a direct call REDs (ident collapses onto the loop).
+
+PIN FOLD 2 (F2/F1 — P15 marker latch):
+- TestFirstDestructiveMarkerLatch: the latch is proven across THREE
+  consecutive work-carrying ticks (one candidate each) — exactly ONE
+  marker line total. Mutation-proven: removing the latch-set line
+  (`self._first_destructive_logged = True`) yields a marker on EVERY
+  work tick (3 markers) -> RED.
+
 ## Self-verification
 
 - Repo pack: 27 passed (tests/unit/repositories/test_source_gc_repository.py)

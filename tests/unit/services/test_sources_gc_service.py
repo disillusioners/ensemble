@@ -24,6 +24,22 @@ def _make_repo_mock(*, candidates=(), skipped_unparseable=0, error_rows=0):
     return repo
 
 
+
+def _res_deleted(sid):
+    r = MagicMock()
+    r.deleted = True
+    r.dry_run = False
+    r.archived_config = True
+    r.archived_executions = 0
+    r.deleted_mappings = 0
+    r.deleted_processed = 0
+    r.deleted_executions = 0
+    r.skipped_reason = None
+    r.error = None
+    r.source_id = sid
+    return r
+
+
 def _cand(sid, age_days=20.0):
     return GcCandidate(source_id=sid, name=sid, status="stopped",
                        updated_at="2026-10-18T00:00:00+00:00",
@@ -260,3 +276,145 @@ class TestServiceCollisionSurface:
         rep = asyncio.run(svc.sweep_once())
         assert rep["rows"][0]["skipped_reason"] == "archive_id_collision"
         assert rep["collected"] == 0
+
+
+# ---------------------------------------------------------------------------
+# F2 — AM-10 to_thread off-loop contract + P15 marker-latch strengthening
+# ---------------------------------------------------------------------------
+
+import threading
+
+
+class TestToThreadOffLoop:
+    """AM-10: BOTH repo calls from the sweep execute OFF the event-loop thread.
+
+    Captures ``threading.get_ident()`` inside the mocked repo calls; the
+    sweep runs under ``asyncio.run`` (loop on the test main thread), so a
+    captured ident equal to the loop's ident means the call ran ON the
+    loop — the exact class v0.27.14 cured and AM-10 forbids.
+    Discriminating: replacing either ``asyncio.to_thread`` with a direct
+    call REDs (the ident collapses onto the loop's).
+    """
+
+    def _run(self, repo, dry_run):
+        svc = SourcesGcService(repo, interval_seconds=3600, retention_days=14,
+                               batch_cap=25, dry_run=dry_run, enabled=True)
+        self._svc = svc
+        find_idents = []
+        count_idents = []
+        row_idents = []
+        real_find = repo.gc_find_candidates
+        real_count = repo.gc_count_error_rows
+        real_del = repo.gc_archive_and_delete
+
+        def find_wrap(*a, **kw):
+            find_idents.append(threading.get_ident())
+            return real_find(*a, **kw)
+
+        def count_wrap():
+            count_idents.append(threading.get_ident())
+            return real_count()
+
+        def del_wrap(*a, **kw):
+            row_idents.append(threading.get_ident())
+            return real_del(*a, **kw)
+
+        repo.gc_find_candidates = find_wrap
+        repo.gc_count_error_rows = count_wrap
+        repo.gc_archive_and_delete = del_wrap
+        svc._find_idents = find_idents
+        svc._count_idents = count_idents
+        svc._row_call_idents = row_idents
+        asyncio.run(svc.sweep_once())
+        # the "captured ident" shape: whichever call actually fired
+        all_idents = find_idents + count_idents + row_idents
+        return all_idents[-1] if all_idents else None
+
+    def test_destructive_path_repo_calls_off_loop(self):
+        from daemon.repositories.source.repository import GcCandidate
+        cand = GcCandidate(source_id="a", name="a", status="stopped",
+                           updated_at="x", age_days=20.0, config_json="{}")
+        repo = MagicMock()
+        repo.gc_find_candidates = MagicMock(return_value=([cand], 0))
+        repo.gc_count_error_rows = MagicMock(return_value=0)
+        # post-probe find returns empty (tick drained everything)
+        repo.gc_find_candidates.side_effect = [([cand], 0), ([], 0)]
+        res = MagicMock()
+        res.deleted = True
+        res.dry_run = False
+        res.archived_config = True
+        res.archived_executions = 0
+        res.deleted_mappings = 0
+        res.deleted_processed = 0
+        res.deleted_executions = 0
+        res.skipped_reason = None
+        res.error = None
+        res.source_id = "a"
+        repo.gc_archive_and_delete = MagicMock(return_value=res)
+
+        loop_ident = threading.get_ident()
+        repo_ident = self._run(repo, dry_run=False)
+        assert repo_ident is not None
+        assert repo_ident != loop_ident, (
+            "repo call ran ON the event-loop thread (AM-10 violation)"
+        )
+        # The DESTRUCTIVE per-row call must ALSO be off-loop (AM-10 wraps
+        # BOTH calls; a single-thread pin could miss a direct destructive
+        # call when the find call still runs in a worker).
+        row_idents = self._svc._row_call_idents
+        assert row_idents, "destructive per-row call never fired"
+        assert all(i != loop_ident for i in row_idents), (
+            "gc_archive_and_delete ran ON the event-loop thread (AM-10 violation)"
+        )
+
+    def test_dry_run_repo_calls_off_loop(self):
+        repo = MagicMock()
+        repo.gc_find_candidates = MagicMock(return_value=([], 0))
+        repo.gc_count_error_rows = MagicMock(return_value=0)
+        loop_ident = threading.get_ident()
+        repo_ident = self._run(repo, dry_run=True)
+        assert repo_ident is not None
+        assert repo_ident != loop_ident, (
+            "repo call ran ON the event-loop thread (AM-10 violation)"
+        )
+        # BOTH dry-run calls off-loop (find + count).
+        assert self._svc._find_idents, "find call never fired"
+        assert all(i != loop_ident for i in self._svc._find_idents)
+        assert self._svc._count_idents, "count call never fired"
+        assert all(i != loop_ident for i in self._svc._count_idents)
+
+
+class TestFirstDestructiveMarkerLatch:
+    """P15 strengthening: the marker latch must hold across ticks.
+
+    Removing ``self._first_destructive_logged = True`` (or the guard)
+    makes the marker emit on EVERY destructive work tick — this test
+    asserts the discriminating observable: exactly ONE marker across
+    multiple work-carrying ticks. Proved by mutation: latch removal ->
+    2 markers -> RED.
+    """
+
+    def test_marker_exactly_once_across_three_work_ticks(self, caplog):
+        repo = MagicMock()
+        repo.gc_count_error_rows = MagicMock(return_value=0)
+        # 3 ticks, each carrying work (1 candidate each) + drained probe
+        repo.gc_find_candidates = MagicMock(side_effect=[
+            ([_cand("a")], 0), ([], 0),
+            ([_cand("b")], 0), ([], 0),
+            ([_cand("c")], 0), ([], 0),
+        ])
+        repo.gc_archive_and_delete = MagicMock(side_effect=[
+            _res_deleted(sid) for sid in ("a", "b", "c")
+        ])
+        svc = SourcesGcService(repo, interval_seconds=3600, retention_days=14,
+                               batch_cap=25, dry_run=False, enabled=True)
+        with caplog.at_level(logging.INFO, logger="daemon.services.sources_gc_service"):
+            asyncio.run(svc.sweep_once())
+            asyncio.run(svc.sweep_once())
+            asyncio.run(svc.sweep_once())
+        markers = [r for r in caplog.records
+                   if "first destructive sweep performed" in r.getMessage()]
+        assert len(markers) == 1, (
+            f"marker must emit exactly once; got {len(markers)} "
+            "(latch removed or never set)"
+        )

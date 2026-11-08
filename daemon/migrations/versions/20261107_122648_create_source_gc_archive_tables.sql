@@ -11,7 +11,7 @@
 --   * ``source_configs_archive`` — the full config snapshot of the reaped
 --     source. ``config`` holds the JSON-serialized snapshot and is the
 --     SOLE reconstruction input for a restored schedule (advisory C —
---     no restore API exists in v1; recovery after a reap is MANUAL).
+--     no restore API exists in v1 — recovery after a reap is MANUAL).
 --
 -- DUAL-DRIVER NOTES
 --   - SQLite (this file): runs via the .sql migration runner on every
@@ -34,7 +34,7 @@
 --     P20 unit pin's assertion).
 --   - NO ``credentials`` column (AM-4): scheduler rows carry
 --     ``credentials=None`` always (zero credential references in the
---     scheduler adapter); chat credentials that exist are Fernet
+--     scheduler adapter) — chat credentials that exist are Fernet
 --     ciphertext at rest and can never enter this GC's reachable set.
 --     Always-NULL column = pointless second secret surface.
 --
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS source_configs_archive (
     created_at    TEXT,
     updated_at    TEXT,
     archived_at   TEXT NOT NULL
-);                               -- AM-4: NO credentials column (scheduler rows are always NULL; chat rows unreachable)
+);                               -- AM-4: NO credentials column (scheduler rows are always NULL, chat rows unreachable)
 CREATE INDEX IF NOT EXISTS idx_source_configs_archive_archived_at
     ON source_configs_archive (archived_at);
 -- DOWN (never executes on rollback): children first
