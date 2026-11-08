@@ -1,0 +1,38 @@
+/home/nea/ensemble-src-wt-views-session-bypass/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-views-session-bypass/.venv/lib/python3.14/site-packages/pydantic_settings/sources/base.py", line 548, in __call__
+    field_value = self.prepare_field_value(field_name, field, field_value, value_is_complex)
+  File "/home/nea/ensemble-src-wt-views-session-bypass/.venv/lib/python3.14/site-packages/pydantic_settings/sources/providers/env.py", line 131, in prepare_field_value
+    raise e
+  File "/home/nea/ensemble-src-wt-views-session-bypass/.venv/lib/python3.14/site-packages/pydantic_settings/sources/providers/env.py", line 128, in prepare_field_value
+    value = self.decode_complex_value(field_name, field, value)
+  File "/home/nea/ensemble-src-wt-views-session-bypass/.venv/lib/python3.14/site-packages/pydantic_settings/sources/base.py", line 194, in decode_complex_value
+    return json.loads(value)
+           ~~~~~~~~~~^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/__init__.py", line 352, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-views-session-bypass/.agents/tester/RESULTS/assets/2026-11-09-views-session-bypass/g2g8/mint_views.py", line 30, in <module>
+    lv_service = LiveViewsService(config=LiveViewsConfig(), tmp_image_store=store)
+                                         ~~~~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src-wt-views-session-bypass/.venv/lib/python3.14/site-packages/pydantic_settings/main.py", line 242, in __init__
+    super().__init__(**__pydantic_self__.__class__._settings_build_values(sources, init_kwargs))
+                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src-wt-views-session-bypass/.venv/lib/python3.14/site-packages/pydantic_settings/main.py", line 465, in _settings_build_values
+    source_state = source()
+  File "/home/nea/ensemble-src-wt-views-session-bypass/.venv/lib/python3.14/site-packages/pydantic_settings/sources/base.py", line 550, in __call__
+    raise SettingsError(
+        f'error parsing value for field "{field_name}" from source "{self.__class__.__name__}"'
+    ) from e
+pydantic_settings.exceptions.SettingsError: error parsing value for field "roots" from source "EnvSettingsSource"

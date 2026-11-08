@@ -1,0 +1,2 @@
+# fence: /tmp/lvg2g8.u92DgQ
+daemon boot: 2026-11-08T22:31:57Z pid 389019
