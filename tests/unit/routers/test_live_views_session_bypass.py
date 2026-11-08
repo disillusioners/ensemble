@@ -864,13 +864,33 @@ class TestOriginGateNavigationCorrect:
         assert f"{GRANT_COOKIE_NAME}=" in resp.headers.get("set-cookie", "")
 
     def test_correct_code_apex_origin_www_host_grants(
-        self, client: TestClient, in_memory_store, cipher
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
     ):
         """Obligation 2 — www/apex reconciliation: Origin names the
         apex, the Host header carries www (fronting divergence the
-        raw-Host check always 403'd)."""
+        raw-Host check always 403'd). RE-HOMED (G2.7/FIX-9): the
+        www name is now operator-VOUCHED (audience
+        ``https://www.example.com``) — the raw Host is no longer an
+        unconditional anchor, so the reconciliation runs under the
+        audience vouch: the Host name is vouched ⇒ leg (a) anchors
+        it; the apex Origin www-folds onto that anchor."""
+        cfg = on_auth_config(
+            allowed_origins=["https://www.example.com"],
+            external_redirect_base="https://www.example.com",
+        )
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=auth_stub, auth_config=cfg,
+        )
+        anchored = TestClient(app, follow_redirects=False)
         plaintext = _mint(in_memory_store, cipher)
-        resp = client.post(
+        resp = anchored.post(
             _VIEW_PATH,
             data={"code": plaintext},
             headers={
@@ -990,12 +1010,28 @@ class TestOriginGateNavigationCorrect:
         assert resp.status_code == 303
 
     def test_case_insensitive_and_default_port_normalized(
-        self, client: TestClient, in_memory_store, cipher
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
     ):
         """R2 comparison semantics — scheme/case/default-port are
-        non-participating."""
+        non-participating. RE-HOMED (G2.7/FIX-9): runs under the
+        default operator audience (``{testserver}``) so the Host
+        name is VOUCHED — this is also the ANCHORED-Host grant pin:
+        a vouched Host==Origin shape grants; the unanchored shape
+        rejects (TestHostVouchingG27)."""
+        cfg = on_auth_config()  # audience hosts = {testserver}
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=auth_stub, auth_config=cfg,
+        )
+        anchored = TestClient(app, follow_redirects=False)
         plaintext = _mint(in_memory_store, cipher)
-        resp = client.post(
+        resp = anchored.post(
             _VIEW_PATH,
             data={"code": plaintext},
             headers={
@@ -1049,7 +1085,27 @@ class TestOriginGateUnit:
 
     def test_origin_precedence_over_referer(self):
         """C-2 precedence: Origin judges; a mismatching Referer is
-        NOT consulted when Origin matches."""
+        NOT consulted when Origin matches. FLIPPED (G2.7/FIX-9): the
+        Host name must now be operator-VOUCHED for the same-origin
+        leg — the positive shape runs under a vouching audience; the
+        UNVOUCHED identical shape is the rebinding self-match and
+        rejects (pinned alongside)."""
+        vouching = SimpleNamespace(
+            allowed_origins=["https://example.com"],
+            external_redirect_base=None,
+            live_view_external_base_url_fallback=None,
+        )
+        request = _mock_request(
+            {
+                "Host": "example.com",
+                "Origin": "https://example.com",
+                "Referer": "https://evil.example/x",
+            },
+            auth_config=vouching,
+        )
+        assert _same_host_origin_check(request) is True
+        # G2.7 — the SAME shape with NO vouching: attacker-controlled
+        # Host+Origin self-match ⇒ reject.
         request = _mock_request(
             {
                 "Host": "example.com",
@@ -1057,14 +1113,23 @@ class TestOriginGateUnit:
                 "Referer": "https://evil.example/x",
             }
         )
-        assert _same_host_origin_check(request) is True
+        assert _same_host_origin_check(request) is False
 
     def test_referer_fallback_when_origin_absent(self):
+        """FLIPPED (G2.7/FIX-9): the positive shape runs under a
+        vouching audience (www-folds onto the vouched apex); the
+        evil-Referer negative is unchanged."""
+        vouching = SimpleNamespace(
+            allowed_origins=["https://example.com"],
+            external_redirect_base=None,
+            live_view_external_base_url_fallback=None,
+        )
         request = _mock_request(
             {
                 "Host": "example.com",
                 "Referer": "https://www.example.com/page?q=1#frag",
-            }
+            },
+            auth_config=vouching,
         )
         assert _same_host_origin_check(request) is True
         request = _mock_request(
@@ -1386,7 +1451,9 @@ class TestDeclaredBaseAnchors:
             )
         }
         assert "declared-a.example" in hosts_a
-        assert "internal-svc" in hosts_a  # leg (a) intact
+        # G2.7/FIX-9 — the unvouched raw Host name no longer anchors
+        # itself (not in the namespace audience, not loopback-peer).
+        assert "internal-svc" not in hosts_a
 
         # Source B — service declaration ONLY (no auth config at
         # all): auth-OFF posture, audience leg structurally absent.
@@ -1396,6 +1463,7 @@ class TestDeclaredBaseAnchors:
             )
         }
         assert "declared-b.example" in hosts_b
+        assert "internal-svc" not in hosts_b  # G2.7: unvouched Host
 
         # Port-bearing declaration — the anchor carries the explicit
         # port (explicit-vs-explicit strictness downstream).
@@ -1404,21 +1472,23 @@ class TestDeclaredBaseAnchors:
         )
         assert ("views.example.com", 8443) in trusted_port
 
-        # Malformed declaration — contributes NOTHING (fail closed),
-        # the rest of the anchor set survives.
+        # Malformed declaration — contributes NOTHING (fail closed).
         hosts_malformed = {
             h for h, _p in _views_trusted_hosts(
                 _mock_request(headers, service=_service("https://bad host:"))
             )
         }
-        assert "internal-svc" in hosts_malformed
+        assert "bad host" not in hosts_malformed
+        assert "internal-svc" not in hosts_malformed  # G2.7: unvouched
 
-        # Neither source ⇒ neither declared host present.
+        # Neither source ⇒ neither declared host present, and the
+        # unvouched raw Host contributes nothing (G2.7).
         hosts_none = {
             h for h, _p in _views_trusted_hosts(_mock_request(headers))
         }
         assert "declared-a.example" not in hosts_none
         assert "declared-b.example" not in hosts_none
+        assert "internal-svc" not in hosts_none
 
 class TestSelfAnchoringTrustGating:
     """FIX-1 (MAJOR-1) — legs (b)/(c) trust NOTHING unless the
@@ -1521,7 +1591,10 @@ class TestSelfAnchoringTrustGating:
         }
         assert "views.example.com" not in hosts_unset
         assert "fwd.example.com" not in hosts_unset
-        assert "internal-svc" in hosts_unset  # leg (a) still anchors
+        # G2.7/FIX-9 — the raw client Host is NO longer an
+        # unconditional anchor: an unvouched internal name (not in
+        # the audience, not a declared base) contributes nothing.
+        assert "internal-svc" not in hosts_unset
         assert "testserver" in hosts_unset  # leg (d) audience intact
 
         set_cfg = on_auth_config()
@@ -1540,7 +1613,15 @@ class TestSelfAnchoringTrustGating:
 class TestWwwPrefixAbuseMatrix:
     """T1 — the www-equivalence folds ONE ``www.`` label and is
     suffix-safe: lookalike hosts that merely CONTAIN the trusted
-    name are rejected."""
+    name are rejected.
+
+    RE-HOMED (G2.7/FIX-9): each row now runs on a client whose
+    AUDIENCE VOUCHES the row's Host name — under the vouch gate an
+    unanchored lookalike rejects at the HOST stage (before the
+    www/parsing comparison runs), which made the www/suffix/prefix
+    parsing mutants pass vacuously. Anchored, the parsing is what
+    decides — mut_www / mut_suffix / mut_startswith discriminate
+    again."""
 
     @pytest.mark.parametrize(
         ("host", "origin"),
@@ -1552,11 +1633,26 @@ class TestWwwPrefixAbuseMatrix:
         ],
     )
     def test_lookalike_hosts_rejected(
-        self, client: TestClient, in_memory_store, cipher,
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
         host: str, origin: str,
     ):
+        cfg = on_auth_config(
+            allowed_origins=[f"https://{host}"],
+            external_redirect_base=f"https://{host}",
+        )
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=auth_stub, auth_config=cfg,
+        )
+        anchored = TestClient(app, follow_redirects=False)
         plaintext = _mint(in_memory_store, cipher)
-        resp = client.post(
+        resp = anchored.post(
             _VIEW_PATH,
             data={"code": plaintext},
             headers={
@@ -1642,17 +1738,71 @@ class TestSecFetchSiteDiscriminator:
 
 class TestPortSemantics:
     """T4 — port normalization is elision-honest and malformed-port
-    fail-closed (FIX-3)."""
+    fail-closed (FIX-3), RE-HOMED under anchored fixtures after
+    G2.7 (FIX-9): the unanchored Host==Origin self-match shapes
+    these pins used are now REJECTS (the raw client Host is no
+    longer an unconditional trust anchor), so the elision/strict
+    coverage lives on a DECLARED-BASE-VOUCHED Host."""
 
-    def test_portless_host_vs_explicit_origin_port_elides(
+    @staticmethod
+    def _declared_client(
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        declared_base: str,
+    ) -> TestClient:
+        """A client whose declared base vouches the test's Host name
+        (the sanctioned post-construction fallback writer)."""
+        cfg = on_auth_config()  # audience = {testserver} only
+        cfg.live_view_external_base_url_fallback = declared_base
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=auth_stub, auth_config=cfg,
+        )
+        return TestClient(app, follow_redirects=False)
+
+    def test_portless_host_vs_explicit_origin_port_self_match_now_rejected(
         self, client: TestClient, in_memory_store, cipher
     ):
-        """PIN of current behavior: a portless Host against an
-        explicit (scheme-default-shaped) origin port is compatible —
-        browsers omit default ports, fronting hosts rarely carry
-        them; elision is the disclosed behavior."""
+        """FLIPPED (G2.7/FIX-9) — the OLD permissive pin asserted 303
+        here: a portless Host against an explicit origin port on an
+        UNANCHORED name self-matched. The raw Host is attacker-
+        controlled on a rebinding victim; an unvouched name is no
+        anchor ⇒ 403. The elision behavior itself is re-homed under
+        an anchored fixture below."""
         plaintext = _mint(in_memory_store, cipher)
         resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "example.com",
+                "Origin": "https://example.com:8443",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+    def test_portless_elision_preserved_under_declared_anchor(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """RE-HOMED elision pin: Host ∈ declared base (vouched) +
+        explicit origin port ⇒ portless↔explicit elision still
+        grants (the FIX-3 disclosed behavior survives, anchored)."""
+        anchored = self._declared_client(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub, "https://example.com",
+        )
+        plaintext = _mint(in_memory_store, cipher)
+        resp = anchored.post(
             _VIEW_PATH,
             data={"code": plaintext},
             headers={
@@ -1711,6 +1861,94 @@ class TestPortSemantics:
         )
         assert resp.status_code == 403
 
+    @staticmethod
+    def _service_declared_client(
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        declared_base: str,
+    ) -> TestClient:
+        """A client whose declared base arrives via the SERVICE
+        source — deliberately NOT the auth fallback, which
+        ``parse_operator_audience`` absorbs PORTLESSLY into leg (d)
+        (a portless anchor elides with any origin port and would
+        void the strictness under test)."""
+        cfg = on_auth_config()  # audience = {testserver} only
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=auth_stub, auth_config=cfg,
+            live_views_external_base_url=declared_base,
+        )
+        return TestClient(app, follow_redirects=False)
+
+    def test_malformed_host_port_fails_closed_anchored(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """FIX-3 discriminator under an ANCHORED fixture (G2.7
+        re-home): a port-bearing declared base vouches
+        ``example.com``; a malformed Host port leaves the Host
+        unparseable ⇒ UNVOUCHED ⇒ no leg-(a) anchor ⇒ the explicit
+        origin port :9999 mismatches the declared :8443 anchor ⇒
+        403. Under the mut_port mutant (malformed → portless) the
+        Host WOULD vouch portlessly and elide ⇒ 303 — this pin
+        fails there."""
+        anchored = self._service_declared_client(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub, "https://example.com:8443",
+        )
+        plaintext = _mint(in_memory_store, cipher)
+        resp = anchored.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "example.com:notaport",
+                "Origin": "https://example.com:9999",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+    def test_malformed_origin_port_fails_closed_anchored(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """mut_originport discriminator under an ANCHORED fixture
+        (G2.7 re-home): vouched Host (declared :8443) + malformed
+        ORIGIN port ⇒ the origin is unparseable ⇒ 403. Under the
+        mutant (malformed origin port → portless) the origin would
+        elide against the :8443 anchor ⇒ 303 — this pin fails
+        there."""
+        anchored = self._service_declared_client(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub, "https://example.com:8443",
+        )
+        plaintext = _mint(in_memory_store, cipher)
+        resp = anchored.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "example.com:8443",
+                "Origin": "https://example.com:notaport",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
     def test_explicit_vs_explicit_mismatch_rejected(
         self, client: TestClient, in_memory_store, cipher
     ):
@@ -1727,11 +1965,47 @@ class TestPortSemantics:
         )
         assert resp.status_code == 403
 
-    def test_explicit_vs_explicit_match_grants(
+    def test_explicit_vs_explicit_match_self_match_now_rejected(
         self, client: TestClient, in_memory_store, cipher
     ):
+        """FLIPPED (G2.7/FIX-9) — the OLD permissive pin asserted 303
+        for an unanchored explicit-vs-explicit Host==Origin
+        self-match; the raw Host is no longer an unconditional
+        anchor ⇒ 403. The strictness coverage is re-homed under an
+        anchored fixture below."""
         plaintext = _mint(in_memory_store, cipher)
         resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "example.com:8443",
+                "Origin": "https://example.com:8443",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+    def test_explicit_vs_explicit_match_preserved_under_declared_anchor(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """RE-HOMED explicit-vs-explicit pin: Host ∈ declared base
+        (port-bearing declaration ⇒ port-bearing vouch anchor) +
+        identical explicit origin port ⇒ 303; strictness (a
+        DIFFERENT explicit port) stays rejected by the existing
+        mismatch pin above."""
+        anchored = self._service_declared_client(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub, "https://example.com:8443",
+        )
+        plaintext = _mint(in_memory_store, cipher)
+        resp = anchored.post(
             _VIEW_PATH,
             data={"code": plaintext},
             headers={
@@ -1986,3 +2260,233 @@ class TestViewWriteCoveredByConstruction:
         assert resp.status_code == 403
         row = in_memory_store.get_row("reports", "page2.html")
         assert row.failed_attempts == 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# G2.7 / FIX-9 — Host anchor requires operator vouching
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestHostVouchingG27:
+    """G2.7 (anomaly 2c719281) — the DNS-rebinding self-match exploit.
+
+    ``Host: evil.example`` + ``Origin: https://evil.example`` (BOTH
+    values attacker-controlled on a rebinding victim) used to
+    self-match via the unconditional Host anchor and mint a FULL
+    view_grant. FIX-9 mirrors the auth lane's ``host_is_trusted``
+    hardening: leg (a) anchors the Host ONLY when its name is
+    operator-vouched (audience ∪ declared bases ∪ the loopback
+    carve). Mutation-pinned via ``mut_rawhost`` (restore
+    unconditional Host trust ⇒ the reject pin MUST fail).
+    """
+
+    def test_g2_7_rebinding_self_match_rejected_no_strikes(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """THE G2.7 reject pin — the exact tester exploit shape:
+        Host evil.example + Origin https://evil.example, no anchors
+        ⇒ 403, HTML for the browser, ZERO strikes consumed (the
+        gate precedes the compare)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "evil.example",
+                "Origin": "https://evil.example",
+                "X-Forwarded-Proto": "https",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+        assert resp.headers["content-type"].startswith("text/html")
+        assert "evil.example" not in resp.text  # no origin echo
+        row = in_memory_store.get_row("planning", _VIEW_REL)
+        assert row is not None and row.failed_attempts == 0
+
+    def test_anchored_host_grant_via_declared_base(
+        self, proxy_front_client: TestClient,
+        in_memory_store, cipher,
+    ):
+        """Anchored-Host grant — Host==Origin with the Host ∈ the
+        declared base ⇒ 303 (the strict contract still admits the
+        vouched self-shape)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = proxy_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "elsewhere.example",
+                "Origin": "https://elsewhere.example",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    @staticmethod
+    def _loopback_client(
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+    ) -> TestClient:
+        """Unconfigured dev posture (auth-OFF, no declarations) with
+        a LOOPBACK TCP peer — the carve's sound-by-construction
+        gate."""
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=None, auth_config=None,
+        )
+        return TestClient(
+            app, follow_redirects=False, client=("127.0.0.1", 54321)
+        )
+
+    def test_loopback_carve_grants_real_same_origin(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """Degradation (iii) — unconfigured DIRECT loopback access:
+        a REAL same-origin browser form POST keeps working via the
+        carve (exact loopback Host name + loopback TCP peer — the
+        sound-by-construction fallback; a remote rebinding victim
+        can never connect FROM loopback)."""
+        anchored = self._loopback_client(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+        )
+        plaintext = _mint(in_memory_store, cipher)
+        resp = anchored.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "localhost:9797",
+                "Origin": "http://localhost:9797",
+                # The secure-context gate (D6:79) is orthogonal to
+                # the origin gate — the harness convention (XFP
+                # header) isolates the carve under test.
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    @pytest.mark.parametrize(
+        "host",
+        ["localhost.evil.example", "127.0.0.1.evil.example"],
+    )
+    def test_loopback_lookalikes_rejected_even_from_loopback(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        in_memory_store: _InMemoryPasscodeStore,
+        host: str,
+    ):
+        """The carve is EXACT-name only (C-2b mirror): loopback
+        LOOKALIKES fail even with a loopback peer."""
+        anchored = self._loopback_client(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+        )
+        plaintext = _mint(in_memory_store, cipher)
+        resp = anchored.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": host,
+                "Origin": f"https://{host}",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+    def test_loopback_carve_requires_loopback_peer(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """The carve's soundness gate: a LOOPBACK-lookalike-less
+        exact loopback Host+Origin from a NON-loopback peer (the
+        TestClient default ``testclient`` peer is not loopback) is
+        REJECTED — a remote client can send ``Host: localhost`` and
+        ``Origin: http://localhost`` but cannot make its peer
+        loopback (the C-2a argument, views-lane mirror)."""
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=None, auth_config=None,
+        )
+        remote = TestClient(app, follow_redirects=False)
+        plaintext = _mint(in_memory_store, cipher)
+        resp = remote.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "localhost:9797",
+                "Origin": "http://localhost:9797",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+    def test_degradation_iv_unconfigured_non_loopback_real_origin(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Degradation (iv) — the INTENDED strict-contract
+        degradation: unconfigured NON-loopback direct access
+        (default testclient peer — bare-IP/LAN shape, no audience,
+        no declared base): a same-origin POST with a REAL Origin now
+        REJECTS (the cure is the operator declaring a base or an
+        audience)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "testserver",
+                "Origin": "https://testserver",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+        row = in_memory_store.get_row("planning", _VIEW_REL)
+        assert row.failed_attempts == 0
+
+    def test_degradation_iv_absent_and_null_origin_still_pass(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Degradation (iv) boundary — the headerless and null
+        flows are UNCHANGED on the same unconfigured non-loopback
+        posture: absent Origin ⇒ allow; null Origin (no
+        cross-site attestation) ⇒ allow. Both grant."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        plaintext_null = _mint(
+            in_memory_store, cipher,
+            rel_path="ens/feat/design/mockups/pricing.html",
+        )
+        resp = client.post(
+            "/views/public/planning/ens/feat/design/mockups/pricing.html",
+            data={"code": plaintext_null},
+            headers={
+                "Origin": "null",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303

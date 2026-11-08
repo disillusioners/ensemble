@@ -1010,14 +1010,46 @@ def _host_matches(
     return o_port == t_port
 
 
+def _views_exact_loopback_name(host_name: str) -> bool:
+    """EXACT loopback names only — the C-2b mirror for the views carve.
+
+    ``localhost``, ``127.0.0.1``, ``::1`` — IPv6 arrives bracketed
+    (strip before compare). The 127.0.0.0/8 blanket and every
+    lookalike (``localhost.evil.example``, ``127.0.0.1.evil.example``,
+    other 127.x spellings) FAIL here — same exactness discipline as
+    :func:`daemon.auth.cookie._host_is_localhost` (private there;
+    mirrored here so the views lane keeps its one-file dependency
+    surface on cookie.py's PUBLIC seam, :func:`peer_is_loopback`).
+    """
+    h = (host_name or "").strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    return h in ("localhost", "127.0.0.1", "::1")
+
+
 def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
     """Derive the SERVER-SIDE trusted-host universe for the views gate.
 
-    Four legs (R2, views-session-bypass 2026-11-08; FIX-1 hardening
-    same day) — every entry is a server-derivable host, never a
-    client-invented allowlist entry:
+    Legs (R2, views-session-bypass 2026-11-08; FIX-1/FIX-7/FIX-8
+    hardening; G2.7/FIX-9 host-vouching — every entry is a
+    server-derivable host, never a client-invented allowlist entry):
 
-    (a) the request ``Host`` header — the primary anchor;
+    (a) the request ``Host`` header — CONDITIONAL since G2.7 (FIX-9,
+        2026-11-09): an anchor ONLY when the HOST NAME is
+        operator-vouched — audience membership, a declared-base
+        host, or the loopback carve. The raw Host header is
+        attacker-controlled on a DNS-rebinding victim: without this
+        gate, ``Host: evil.example`` + ``Origin:
+        https://evil.example`` self-matched and minted a FULL view
+        grant. This mirrors the auth lane's ``host_is_trusted``
+        hardening (``daemon/auth/cookie.py:249`` comparator
+        ``:232-329``, derived at
+        ``daemon/middleware/auth.py:535-537``) that the views gate
+        never carried over. Vouch check = exact lowercased name
+        membership (mirrors the auth lane; the ORIGIN comparison
+        keeps the www/port folding — a vouched-name anchor
+        participates in the same comparisons as every other
+        anchor);
     (b) the FIRST ``X-Forwarded-Host`` value — the fronting-proxy
         anchor — ONLY when the operator declared a proxy front;
     (c) the RFC 7239 ``Forwarded`` ``host=`` parameter (first element)
@@ -1027,63 +1059,59 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
         :func:`daemon.auth.cookie.parse_operator_audience` over
         ``auth.allowed_origins`` + ``auth.external_redirect_base`` +
         the one-shot ``live_view_external_base_url_fallback`` copy.
-        This is the leg that reconciles an apex-origin form POST
-        against a www-host front, and the configured external base
-        against an internal Host. Portless by construction (bare
-        hosts) — port-compatible with any origin port for the same
-        host spelling.
+        Portless by construction (bare hosts) — port-compatible with
+        any origin port for the same host spelling;
+    (e) the DECLARED base's own host (FIX-8) — the auth-fallback
+        and/or ``live_views.external_base_url`` hosts;
+    (f) the loopback carve (G2.7/FIX-9) — the SOUND-BY-CONSTRUCTION
+        fallback the commission prescribed: the Host name is an
+        EXACT loopback spelling AND the TCP peer is loopback (a
+        remote rebinding victim can never connect FROM loopback).
+        The auth lane's carve additionally requires the dev gate
+        (``allow_insecure_cookie``); that gate does NOT port to the
+        views lane — the lane must serve unconfigured dev access
+        with auth OFF (no AuthConfig to read the knob from) — so
+        the peer gate carries the soundness alone, exactly as the
+        commission's fallback specifies.
 
-    FIX-1 (fix-iteration 1, 2026-11-08 — MAJOR-1 self-anchoring
-    trust): legs (b)/(c) are CLIENT headers; trusting them
-    unconditionally let any request carry its own trust anchor
-    (``X-Forwarded-Host: <matching my cross Origin>`` — browser-
-    reachable where the auth-OFF CORS posture safelists the header).
-    They are now gated on the operator having DECLARED a proxy
-    front: ``auth.live_view_external_base_url_fallback`` set — the
-    lifespan one-shot copy of ``live_views.external_base_url``
-    (env ``ENSEMBLE_LIVE_VIEWS_EXTERNAL_BASE_URL``), read through
-    the SAME accessor :func:`parse_operator_audience` uses
-    (cookie.py:332-372 family — no fresh config parse). This is
-    exactly the C-2c condition the auth lane's
-    :func:`daemon.auth.cookie.validate_browser_lane_origin` applies
-    to ``X-Forwarded-Proto`` trust (middleware/auth.py:621-647) —
-    the docstring lineage below ``_same_host_origin_check`` is TRUE
-    as of this change. Unset ⇒ legs (b)/(c) contribute NOTHING and
-    the gate rests on Host (a) + the operator audience (d) alone;
-    set ⇒ they contribute as before (the operator told us a proxy
-    rewrites Host, so the forwarded spellings are the real
-    client-facing host).
+    FIX-1: legs (b)/(c) are CLIENT headers gated on the operator
+    having DECLARED a proxy front (``auth.live_view_external_base_url_fallback``
+    set — the lifespan one-shot copy of ``live_views.external_base_url``,
+    env ``ENSEMBLE_LIVE_VIEWS_EXTERNAL_BASE_URL`` — the SAME accessor
+    :func:`parse_operator_audience` uses). This is the C-2c condition
+    the auth lane applies to ``X-Forwarded-Proto`` trust.
 
-    FIX-7 (fix-iteration 2, 2026-11-08): a SECOND operator
-    declaration source — ``live_views.external_base_url`` set,
-    read through
-    :attr:`LiveViewsService.declared_external_base_url` (the raw
-    tier-1 override; the resolved chain is request-derived and
-    never counts). Why a second source: the auth fallback's sole
-    writer sits inside ``if config.auth.enabled`` (daemon/api.py:2937),
-    so auth-OFF behind a Host-rewriting proxy could never declare a
-    front. DECLARATION = auth fallback set OR the service-declared
-    base set; both unset ⇒ undeclared, legs (b)/(c) inert (the
-    closed exploit stays closed).
+    FIX-7: the second declaration source — ``live_views.external_base_url``
+    set (read through
+    :attr:`LiveViewsService.declared_external_base_url`, the raw
+    tier-1 override; the resolved chain is request-derived and never
+    counts). The auth fallback's sole writer sits inside
+    ``if config.auth.enabled`` (daemon/api.py:2937); without this
+    source an auth-OFF deployment behind a Host-rewriting proxy
+    could never declare a front.
+
+    FIX-8: the declared base's own host joins the anchor set — the
+    operator's declared origin must be accepted without a forwarded
+    header, and the set must be self-sufficient where the audience
+    leg is absent (auth-OFF has no auth config to absorb through).
+
+    DEGRADATION CONTRACT (G2.7/FIX-9): with NO vouching configured
+    (no audience, no declared base) and a non-loopback peer, a
+    same-origin POST carrying a REAL Origin now REJECTS — the
+    intended strict-contract degradation (cure: the operator
+    declares a base or audience). Absent-Origin and null-Origin
+    flows are UNCHANGED (both allow before the anchor set is
+    consulted), and loopback peers keep working via the carve.
 
     A request may carry several of these at once (proxy chains); the
     gate accepts if the Origin host matches ANY of them.
     """
     trusted: list[tuple[str, int | None]] = []
     headers = request.headers
-
-    host_header = headers.get("host")
-    if host_header:
-        parsed = _authority_host_port(host_header)
-        if parsed is not None:
-            trusted.append(parsed)
-
-    # FIX-1 proxy-front declaration — the operator's one signal that
-    # Host is NOT the client-facing spelling and the forwarded
-    # headers are authoritative. Read via the SAME getattr seam
-    # parse_operator_audience uses; absent attr / unset value ⇒
-    # undeclared (legs b/c inert).
     auth_config = getattr(request.app.state, "auth_config", None)
+
+    # ── the operator-vouch universe (computed FIRST — the Host
+    # anchor's vouch check needs it; G2.7/FIX-9) ──────────────────
     declared_bases: list[str] = []
     if auth_config is not None:
         external_base = getattr(
@@ -1121,6 +1149,48 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
         if declared_base:
             declared_bases.append(declared_base)
     proxy_front_declared = bool(declared_bases)
+
+    audience_hosts: frozenset[str] = frozenset()
+    if auth_config is not None:
+        from daemon.auth.cookie import parse_operator_audience
+
+        try:
+            audience_hosts, _audience_origins = parse_operator_audience(
+                auth_config
+            )
+        except Exception:  # noqa: BLE001 — a malformed audience is inert
+            audience_hosts = frozenset()
+
+    # G2.7/FIX-9 vouch names: the audience names ∪ the declared-base
+    # hosts. Exact lowercased NAME membership only (auth-lane mirror).
+    vouched_names: set[str] = set(audience_hosts)
+    declared_anchors: list[tuple[str, int | None]] = []
+    for declared_base_value in declared_bases:
+        declared_anchor = _declared_base_anchor(declared_base_value)
+        if declared_anchor is not None:
+            declared_anchors.append(declared_anchor)
+            vouched_names.add(declared_anchor[0])
+
+    # Loopback carve — peer-gated (sound by construction: a remote
+    # rebinding victim never connects FROM loopback) + exact-name
+    # gated on the HOST side below.
+    from daemon.auth.cookie import peer_is_loopback
+
+    peer_loopback = peer_is_loopback(request.scope.get("client"))
+
+    # ── leg (a): the Host header — CONDITIONALLY anchored
+    # (G2.7/FIX-9). A vouched name only. ──────────────────────────
+    host_header = headers.get("host")
+    if host_header:
+        parsed = _authority_host_port(host_header)
+        if parsed is not None:
+            host_name = parsed[0]
+            host_vouched = host_name in vouched_names or (
+                peer_loopback and _views_exact_loopback_name(host_name)
+            )
+            if host_vouched:
+                trusted.append(parsed)
+
     if proxy_front_declared:
         # FIX-8 (fix-iteration 3, 2026-11-08): the DECLARED base's
         # own host joins the anchor set — the operator's declared
@@ -1136,10 +1206,8 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
         # reviewed adjudication: the forwarded-original-host
         # topology the R2 ruling asked to honor; C-2c house
         # precedent shape).
-        for declared_base_value in declared_bases:
-            declared_anchor = _declared_base_anchor(declared_base_value)
-            if declared_anchor is not None:
-                trusted.append(declared_anchor)
+        for declared_anchor in declared_anchors:
+            trusted.append(declared_anchor)
         xfh = headers.get("x-forwarded-host")
         if xfh:
             first_value = xfh.split(",")[0].strip()
@@ -1169,19 +1237,13 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
                         trusted.append(parsed)
                     break
 
-    if auth_config is not None:
-        from daemon.auth.cookie import parse_operator_audience
-
-        try:
-            audience_hosts, _audience_origins = parse_operator_audience(
-                auth_config
-            )
-        except Exception:  # noqa: BLE001 — a malformed audience is inert
-            audience_hosts = frozenset()
-        for audience_host in sorted(audience_hosts):
-            normalized = _authority_host_port(audience_host)
-            if normalized is not None:
-                trusted.append(normalized)
+    # ── leg (d): the operator audience hosts (parse hoisted above —
+    # G2.7/FIX-9 needs it for the Host-vouch check before this
+    # point; the append behavior is unchanged). ────────────────────
+    for audience_host in sorted(audience_hosts):
+        normalized = _authority_host_port(audience_host)
+        if normalized is not None:
+            trusted.append(normalized)
 
     return trusted
 
@@ -1220,10 +1282,12 @@ def _same_host_origin_check(request: Request) -> bool:
       proxy front (``live_view_external_base_url_fallback`` set).
     * Present, non-null, UNPARSEABLE ⇒ REJECT (the old strip-parse
       also failed these as ordinary inequalities).
-    * Present, non-null, NO trusted host derivable at all (no Host
-      header, no gated-forward anchors, empty operator audience)
-      ⇒ REJECT — fail closed; the tautology guard. A gate with no
-      server-side anchor cannot vouch for anything.
+    * Present, non-null, NO trusted host derivable at all (no
+      VOUCHED Host anchor — G2.7/FIX-9: the raw Host is an anchor
+      only under operator vouching — no gated-forward anchors,
+      empty operator audience, no declared base, no loopback
+      carve) ⇒ REJECT — fail closed; the tautology guard. A gate
+      with no server-side anchor cannot vouch for anything.
 
     Sole callsite: the ``_public_post`` gate #4. The auth lane
     (``daemon/middleware/auth.py`` → ``daemon/auth/cookie.py``) is
