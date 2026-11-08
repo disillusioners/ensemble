@@ -1401,6 +1401,196 @@ class TestSecondDeclarationSource:
         assert not unset_service.declared_external_base_url
 
 
+class TestDeclaredBaseAnchors:
+    """FIX-8 (NEW-ISSUE-1r, fix-iteration 3) — the DECLARED base's
+    own host joins the trust anchor set next to legs (a)/(d).
+
+    Fixes the half-broken topology FIX-7 enabled: under auth-OFF +
+    ``external_base_url`` set, the operator's declared Origin (no
+    forwarded header) was 403'd because nothing supplied the
+    declared host (the audience leg needs an auth config to absorb
+    through). The anchor is server-side by construction — the value
+    comes from operator config, never a request header.
+    """
+
+    def test_declared_base_origin_grants_when_auth_off(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """P1 — THE functional fix (currently 403, must be 303):
+        auth-OFF + ``external_base_url`` declared + the declared
+        Origin, NO forwarded headers ⇒ grant."""
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=None, auth_config=None,
+            live_views_external_base_url="https://views.example.com",
+        )
+        client = TestClient(app, follow_redirects=False)
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert f"{GRANT_COOKIE_NAME}=" in resp.headers.get("set-cookie", "")
+
+    def test_declared_base_origin_grants_auth_on_service_source(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """P2 — anchor self-sufficiency under auth-ON, MUTATION-
+        DISCRIMINATING from leg (d): the declared base arrives via
+        the SERVICE source (``external_base_url``), which
+        ``parse_operator_audience`` never absorbs (it reads only the
+        auth config — FIX-6 severance discipline). Audience here is
+        the testserver family only; Host is testserver; NO forwarded
+        headers — ``elsewhere.example`` can ONLY enter via the
+        FIX-8 declared anchor. Deleting the declared-anchor block
+        must fail this test."""
+        cfg = on_auth_config()  # audience = {testserver}; fallback unset
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=auth_stub, auth_config=cfg,
+            live_views_external_base_url="https://elsewhere.example",
+        )
+        client = TestClient(app, follow_redirects=False)
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Origin": "https://elsewhere.example",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_undeclared_probes_still_closed(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """P3 — re-assert alongside the new pins: with NO declaration
+        anywhere, echoed forwarded anchors STILL 403 with zero
+        strikes (FIX-1/FIX-7 closures undisturbed by FIX-8)."""
+        plaintext = _mint(in_memory_store, cipher)
+        for extra in (
+            {"X-Forwarded-Host": "evil.example"},
+            {"Forwarded": 'for=10.0.0.9;host="evil.example"'},
+        ):
+            resp = client.post(
+                _VIEW_PATH,
+                data={"code": plaintext},
+                headers={
+                    **extra,
+                    "Origin": "https://evil.example",
+                    "X-Forwarded-Proto": "https",
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code == 403, extra
+        row = in_memory_store.get_row("planning", _VIEW_REL)
+        assert row.failed_attempts == 0
+
+    def test_trust_set_contains_declared_host_both_sources(self):
+        """P4 — unit pin: the declared HOST is in the trust set under
+        BOTH declaration sources, absent otherwise; port-bearing
+        declaration anchors carry the port; malformed declarations
+        contribute nothing (FIX-3 discipline)."""
+        from daemon.routers.live_views import _views_trusted_hosts
+        from daemon.services.live_views import LiveViewsService
+        from starlette.requests import Request as StarletteRequest
+
+        def _request(headers, *, auth_config=None, service=None):
+            scope = {
+                "type": "http",
+                "headers": [
+                    (k.lower().encode(), v.encode())
+                    for k, v in headers.items()
+                ],
+                "app": SimpleNamespace(
+                    state=SimpleNamespace(
+                        auth_config=auth_config,
+                        live_views_service=service,
+                    )
+                ),
+            }
+            return StarletteRequest(scope)
+
+        def _service(base: str | None):
+            cfg = LiveViewsConfig()
+            if base is not None:
+                cfg.external_base_url = base
+            return LiveViewsService(
+                config=cfg,
+                project_workdir_by_shortname_resolver=lambda _s: None,
+            )
+
+        headers = {"Host": "internal-svc:8079"}
+
+        # Source A — auth fallback ONLY. The namespace auth config
+        # carries no allowed_origins ⇒ the audience parse is inert ⇒
+        # the declared host enters ONLY via the FIX-8 anchor
+        # (mutation-discriminating for the auth-fallback source).
+        ns_auth = SimpleNamespace(
+            live_view_external_base_url_fallback=(
+                "https://declared-a.example"
+            ),
+        )
+        hosts_a = {
+            h for h, _p in _views_trusted_hosts(
+                _request(headers, auth_config=ns_auth)
+            )
+        }
+        assert "declared-a.example" in hosts_a
+        assert "internal-svc" in hosts_a  # leg (a) intact
+
+        # Source B — service declaration ONLY (no auth config at
+        # all): auth-OFF posture, audience leg structurally absent.
+        hosts_b = {
+            h for h, _p in _views_trusted_hosts(
+                _request(headers, service=_service("https://declared-b.example"))
+            )
+        }
+        assert "declared-b.example" in hosts_b
+
+        # Port-bearing declaration — the anchor carries the explicit
+        # port (explicit-vs-explicit strictness downstream).
+        trusted_port = _views_trusted_hosts(
+            _request(headers, service=_service("https://views.example.com:8443"))
+        )
+        assert ("views.example.com", 8443) in trusted_port
+
+        # Malformed declaration — contributes NOTHING (fail closed),
+        # the rest of the anchor set survives.
+        hosts_malformed = {
+            h for h, _p in _views_trusted_hosts(
+                _request(headers, service=_service("https://bad host:"))
+            )
+        }
+        assert "internal-svc" in hosts_malformed
+
+        # Neither source ⇒ neither declared host present.
+        hosts_none = {
+            h for h, _p in _views_trusted_hosts(_request(headers))
+        }
+        assert "declared-a.example" not in hosts_none
+        assert "declared-b.example" not in hosts_none
+
+
 # ─────────────────────────────────────────────────────────────────
 # R1 direct lane — middleware-gated composition
 # ─────────────────────────────────────────────────────────────────

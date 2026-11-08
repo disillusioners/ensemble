@@ -947,6 +947,35 @@ def _www_equivalent(host: str) -> str:
     return host
 
 
+def _declared_base_anchor(
+    declared_base: str,
+) -> tuple[str, int | None] | None:
+    """The declared external base's OWN host as a trust anchor (FIX-8).
+
+    fix-iteration 3 (2026-11-08): when a proxy front is DECLARED
+    (auth ``live_view_external_base_url_fallback`` OR
+    ``live_views.external_base_url`` via
+    ``LiveViewsService.declared_external_base_url``), the declared
+    base's host joins the trust anchor set next to legs (a)/(d) —
+    the operator's own declared origin must be accepted WITHOUT a
+    forwarded header, and the anchor set must be self-sufficient
+    where the audience leg is absent (auth-OFF:
+    ``parse_operator_audience`` needs an auth config and has no
+    auth-fallback to absorb). Parses ``urlsplit(value).netloc``
+    through :func:`_authority_host_port` — malformed / hostless /
+    bad-port values contribute NOTHING (the FIX-3 fail-closed
+    discipline; a declaration that cannot be parsed never becomes
+    an anchor). OPERATOR CONFIG ONLY by construction — the value
+    comes from the declaration sources, never from a request
+    header.
+    """
+    try:
+        netloc = urlsplit((declared_base or "").strip()).netloc
+    except ValueError:
+        return None
+    return _authority_host_port(netloc)
+
+
 def _host_matches(
     origin: tuple[str, int | None],
     trusted: tuple[str, int | None],
@@ -1044,7 +1073,7 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
     # parse_operator_audience uses; absent attr / unset value ⇒
     # undeclared (legs b/c inert).
     auth_config = getattr(request.app.state, "auth_config", None)
-    proxy_front_declared = False
+    declared_bases: list[str] = []
     if auth_config is not None:
         external_base = getattr(
             auth_config,
@@ -1052,37 +1081,54 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
             None,
         )
         if external_base:
-            proxy_front_declared = True
-    if not proxy_front_declared:
-        # FIX-7 (fix-iteration 2, 2026-11-08): SECOND operator-
-        # declaration source — ``live_views.external_base_url`` set.
-        # The auth fallback above has exactly ONE writer
-        # (daemon/api.py:2937) inside ``if config.auth.enabled:``, so
-        # an auth-OFF deployment behind a Host-rewriting proxy could
-        # never declare a front and the forwarded legs were dead
-        # code in that posture (legit forwarded POSTs 403'd). This
-        # source is OPERATOR CONFIG ONLY — read through the service's
-        # DECLARATION accessor (``declared_external_base_url``: the
-        # raw tier-1 override). The resolved chain
-        # (``public_base()``: host-capture / bind tiers) is
-        # request-derived and is deliberately NOT consulted — using
-        # it would let client-shaped evidence declare a front and
-        # re-open the self-anchoring class FIX-1 closed. Service
-        # unwired / property absent / value unset ⇒ STILL
-        # undeclared.
-        live_views_service = getattr(
-            request.app.state, "live_views_service", None
+            declared_bases.append(external_base)
+    # FIX-7 (fix-iteration 2, 2026-11-08): SECOND operator-
+    # declaration source — ``live_views.external_base_url`` set.
+    # The auth fallback above has exactly ONE writer
+    # (daemon/api.py:2937) inside ``if config.auth.enabled:``, so
+    # an auth-OFF deployment behind a Host-rewriting proxy could
+    # never declare a front and the forwarded legs were dead
+    # code in that posture (legit forwarded POSTs 403'd). This
+    # source is OPERATOR CONFIG ONLY — read through the service's
+    # DECLARATION accessor (``declared_external_base_url``: the
+    # raw tier-1 override). The resolved chain
+    # (``public_base()``: host-capture / bind tiers) is
+    # request-derived and is deliberately NOT consulted — using
+    # it would let client-shaped evidence declare a front and
+    # re-open the self-anchoring class FIX-1 closed. Service
+    # unwired / property absent / value unset ⇒ STILL
+    # undeclared.
+    live_views_service = getattr(
+        request.app.state, "live_views_service", None
+    )
+    if live_views_service is not None:
+        declared_base = getattr(
+            live_views_service,
+            "declared_external_base_url",
+            None,
         )
-        if live_views_service is not None:
-            declared_base = getattr(
-                live_views_service,
-                "declared_external_base_url",
-                None,
-            )
-            if declared_base:
-                proxy_front_declared = True
-
+        if declared_base:
+            declared_bases.append(declared_base)
+    proxy_front_declared = bool(declared_bases)
     if proxy_front_declared:
+        # FIX-8 (fix-iteration 3, 2026-11-08): the DECLARED base's
+        # own host joins the anchor set — the operator's declared
+        # origin (``Origin: https://<declared-host>``, no forwarded
+        # header) must be accepted, and the anchor set must be
+        # self-sufficient where the audience leg is absent (auth-OFF
+        # has no auth config for ``parse_operator_audience`` to
+        # absorb the base through). Each declared value parses via
+        # :func:`_declared_base_anchor`; unparseable declarations
+        # contribute nothing (FIX-3 fail-closed discipline). This is
+        # an ADDITION to legs (a)/(d), never a replacement — legs
+        # (b)/(c) stay boolean-licensed by the declaration (the
+        # reviewed adjudication: the forwarded-original-host
+        # topology the R2 ruling asked to honor; C-2c house
+        # precedent shape).
+        for declared_base_value in declared_bases:
+            declared_anchor = _declared_base_anchor(declared_base_value)
+            if declared_anchor is not None:
+                trusted.append(declared_anchor)
         xfh = headers.get("x-forwarded-host")
         if xfh:
             first_value = xfh.split(",")[0].strip()
