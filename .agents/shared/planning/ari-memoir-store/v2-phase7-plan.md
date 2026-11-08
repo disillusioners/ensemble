@@ -46,7 +46,7 @@ Deliver end-to-end integration verification, safety gate enforcement, documentat
   - Verifies that `20261109_..._create_memoir_v2_tables.sql` parses and executes cleanly with plain `ADD COLUMN` statements.
   - Verifies that all string columns are `TEXT` and dynamic JSON typing works without errors.
 - **PostgreSQL Engine (House PG 16.15):**
-  - Verifies that `create_all` generates `memoir_star`, `memoir_star_alias`, `memoir_line`, `memoir_reflection_state`, `memoir_proposal_ledger`.
+  - Verifies that `create_all` generates `memoir_star`, `memoir_star_alias`, `memoir_line`, `memoir_reflection_state`, `memoir_proposal_ledger`, `memoir_jev_ledger`.
   - Verifies that `_ensure_postgres_columns` adds the four columns (with `TIMESTAMPTZ` typing for `reflected_at`) and executes the legacy seed idempotently.
   - Verifies ensure census pins: `test_memoir_retrieval_pg.py` == 2, `test_memoir_pg_corpus.py` == 4.
   - Verifies GIN and B-Tree index utilization with `EXPLAIN`.

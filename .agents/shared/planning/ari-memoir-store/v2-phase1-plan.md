@@ -9,8 +9,8 @@
 ## 1. Objective
 
 Deliver the persistent database substrate for Memoir Store v2:
-1. Create the Constellation relational tables (`memoir_star`, `memoir_star_alias`, `memoir_line`), `memoir_reflection_state`, and the durable proposal ledger table `memoir_proposal_ledger` (C3 / Leader ruling 2026-11-09) via ONE dedicated `.sql` migration file in `daemon/migrations/versions/`.
-2. Evolve `memoir_episodes` via four plain `ADD COLUMN` statements in the `.sql` migration file (`poignancy_status`, `poignancy`, `poignancy_attempts`, `reflected_at`) and one cutover-bounded legacy seed `UPDATE` using the space-separated storage format `'2026-11-09 00:00:00'` (SF11 / V2-33).
+1. Create the Constellation relational tables (`memoir_star`, `memoir_star_alias`, `memoir_line`), `memoir_reflection_state`, the durable proposal ledger table `memoir_proposal_ledger` (C3 / Leader ruling 2026-11-09), and the durable JEV candidate retry ledger `memoir_jev_ledger` (B2) via ONE dedicated `.sql` migration file in `daemon/migrations/versions/`.
+2. Evolve `memoir_episodes` via four plain `ADD COLUMN` statements in the `.sql` migration file (`poignancy_status`, `poignancy`, `poignancy_attempts`, `reflected_at`) and one cutover-bounded legacy seed `UPDATE` using the space-separated storage format `'2026-11-09 00:00:00'` (SF11 / V2-33). Explicitly include `poignancy_status` with literal NULL in `MEMOIR_INSERT_SQL` and deliberately amend the purity pin (B7 / V2-42).
 3. Register new SQLModel classes in `daemon/repositories/memoir/models.py` and hook them into `daemon/manager.py` before `create_all`.
 4. In `daemon/manager.py:_ensure_postgres_columns`, add TWO new ensure entries: (1) DDL multi-clause with `TIMESTAMPTZ` typing for `reflected_at` (C1 / V2-26) and `IF NOT EXISTS` clauses; (2) DML cutover-bounded legacy seed `UPDATE`.
 5. Implement `MemoirConstellationRepository` for entity/alias management, line recording with `last_pass_id` crash-recovery idempotence (SF2 / V2-29), heat calculation, cooldown watermarks, and 1-hop neighborhood queries.
@@ -22,9 +22,9 @@ Deliver the persistent database substrate for Memoir Store v2:
 
 | ID | Decision | Rationale (verified anchors) | Rejected Alternatives |
 |----|----------|------------------------------|-----------------------|
-| **V2-D 1.1** | ONE dedicated `.sql` migration file `YYYYMMDD_HHMMSS_create_memoir_v2_tables.sql` using **PLAIN `ADD COLUMN`** (no `IF NOT EXISTS`) for SQLite syntax compatibility (POK `20261107_110003` precedent; §3-A5 / Register #1). SQLite requires one column per ALTER statement (4 plain ALTERs) plus the cutover-bounded legacy seed UPDATE. 126-file house migration convention (dated evidence `daemon/migrations/versions/`). | `ADD COLUMN IF NOT EXISTS` is a hard syntax error in SQLite and fails `MigrationError`. The migration runner tolerates column-exists collisions on fresh SQLite databases. All string columns declared `TEXT`. | `ADD COLUMN IF NOT EXISTS` in `.sql` (breaks SQLite boots). |
-| **V2-D 1.2** | Constellation tables, `memoir_reflection_state`, and `memoir_proposal_ledger` created on Postgres via model registration immediately before `SQLModel.metadata.create_all(self._engine)` in `daemon/manager.py:975-997` (POK precedent). Brand-new tables need **NO** `_ensure_postgres_columns` entry. | `create_all` is the authoritative Postgres table creation mechanism for new tables. Brand-new tables registered before `create_all` do not require ensure entries. | Adding CREATE TABLE IF NOT EXISTS to `_ensure_postgres_columns`. |
-| **V2-D 1.3** | Postgres column evolution via TWO ensure entries in `_ensure_postgres_columns`: (1) Multi-clause DDL: `ALTER TABLE memoir_episodes ADD COLUMN IF NOT EXISTS poignancy_status TEXT, ADD COLUMN IF NOT EXISTS poignancy INTEGER, ADD COLUMN IF NOT EXISTS poignancy_attempts INTEGER NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS reflected_at TIMESTAMPTZ;` (C1: must use `TIMESTAMPTZ` to match model; manager.py:8396/8410 precedent); (2) DML legacy seed: `UPDATE memoir_episodes SET poignancy_status='legacy' WHERE poignancy_status IS NULL AND created_at < '2026-11-09 00:00:00';` (SF11 / V2-33). | `DATETIME` is SQLite-specific and causes DDL syntax errors on Postgres. Postgres supports multiple `IF NOT EXISTS` clauses in a single ALTER statement. Space-separated timestamp prevents SQLite lexicographic comparison bug. | `DATETIME` in PG ensure (causes boot abort); ISO-8601 `'T'` literal in seed. |
+| **V2-D 1.1** | ONE dedicated `.sql` migration file `YYYYMMDD_HHMMSS_create_memoir_v2_tables.sql` using **PLAIN `ADD COLUMN`** (no `IF NOT EXISTS`) for SQLite syntax compatibility (POK `20261107_110003` precedent; §3-A5 / Register #1). SQLite requires one column per ALTER statement (4 plain ALTERs) plus the cutover-bounded legacy seed UPDATE. 127 files at ceremony time (126 at plan time, dated evidence `daemon/migrations/versions/`; Suggestion #o3). | `ADD COLUMN IF NOT EXISTS` is a hard syntax error in SQLite and fails `MigrationError`. The migration runner tolerates column-exists collisions on fresh SQLite databases. All string columns declared `TEXT`. | `ADD COLUMN IF NOT EXISTS` in `.sql` (breaks SQLite boots). |
+| **V2-D 1.2** | Constellation tables, `memoir_reflection_state`, `memoir_proposal_ledger` (C3), and `memoir_jev_ledger` (B2 / V2-38) created on Postgres via model registration immediately before `SQLModel.metadata.create_all(self._engine)` in `daemon/manager.py:975-997` (POK precedent). Brand-new tables need **NO** `_ensure_postgres_columns` entry. | `create_all` is the authoritative Postgres table creation mechanism for new tables. Brand-new tables registered before `create_all` do not require ensure entries. | Adding CREATE TABLE IF NOT EXISTS to `_ensure_postgres_columns`. |
+| **V2-D 1.3** | Postgres column evolution via TWO ensure entries in `_ensure_postgres_columns`: (1) Multi-clause DDL: `ALTER TABLE memoir_episodes ADD COLUMN IF NOT EXISTS poignancy_status TEXT, ADD COLUMN IF NOT EXISTS poignancy INTEGER, ADD COLUMN IF NOT EXISTS poignancy_attempts INTEGER NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS reflected_at TIMESTAMPTZ;` (C1 / Suggestion #o1: must use `TIMESTAMPTZ` to match SQLModel `DateTime(timezone=True)` on model); (2) DML legacy seed: `UPDATE memoir_episodes SET poignancy_status='legacy' WHERE poignancy_status IS NULL AND created_at < '2026-11-09 00:00:00';` (SF11 / V2-33). | `DATETIME` is SQLite-specific and causes DDL syntax errors on Postgres. Postgres supports multiple `IF NOT EXISTS` clauses in a single ALTER statement. Space-separated timestamp prevents SQLite lexicographic comparison bug. | `DATETIME` in PG ensure (causes boot abort); ISO-8601 `'T'` literal in seed. |
 | **V2-D 1.4** | `poignancy_attempts INTEGER NOT NULL DEFAULT 0` column created in Phase 1 (Register #2). | Phase 4 worker query and retry/terminal logic depend on this column. Missing column in Phase 1 would break Phase 4 migrations. | Adding attempts column late in Phase 4. |
 | **V2-D 1.5** | Model-bound CHECK constraints via `__table_args__`: `star_type IN ('person', 'project', 'place', 'concept', 'domain')`, `heat >= 0.0`, `notification_status IN ('pending', 'sent', 'failed')`. | SQLModel `Field()` does not emit CHECK constraints; on PG, tables are constructed from models, so `__table_args__` is the only way CHECK constraints reach the database. | Relying on migration SQL alone for CHECK constraints. |
 | **V2-D 1.6** | Two-axis time discipline across all new tables (`v4-federated-sketch.md` §5): `created_at` (write time) + `first_seen_at` / `last_touched_at` (event time). | Preserves DD-7 and satisfies the R3 backward constraint for future v3/v4 delta reconciliation. | Single timestamp columns (`created_at` only). |
@@ -34,6 +34,8 @@ Deliver the persistent database substrate for Memoir Store v2:
 | **V2-D 1.10** | Ensure census pin update asymmetry (§3-A5 / Register #8): `test_memoir_retrieval_pg.py:98-104` (filters on `memoir_episodes` AND (`tsv` OR `GIN`)) STAYS at 2. `test_memoir_pg_corpus.py:115-123` (filters on `memoir_episodes` only) flips 2→4 (due to the 2 new memoir entries). | The two test files use asymmetric SQL filters; updating both to 3 or 4 blindly is a defect. | Updating both assertions blindly to 3. |
 | **V2-D 1.11** | Durable Proposal Ledger Table in Phase 1 (C3 / Leader ruling 2026-11-09 / V2-28 / W2): Create `memoir_proposal_ledger` (`id`, `agent_id`, `episode_id`, `proposal_date`, `proposed_at`, `notification_status`, `notified_at`, `reason`, `created_at`) with `uq_memoir_proposal_agent_episode UNIQUE (agent_id, episode_id)` in Phase 1. Stamped `notification_status='sent'` enforces restart-safe 1/day notification constraint, while the unique constraint enforces once-ever-per-episode proposal tracking (W2 / V2-36). | Restart-safe 1/day notification constraint and once-ever proposal tracking are blessed requirements; in-memory state is ruled out. | In-memory ledger; ad-hoc metadata file. |
 | **V2-D 1.12** | `memoir_line.last_pass_id TEXT NULL` upsert guard (SF2 / V2-29 / Suggestion #8): Add `last_pass_id` column to `memoir_line` to ensure mid-pass crash re-extractions do not double-increment mention counts. Precondition note (VERIFY-AT-IMPLEMENTATION): SQLite syntax support for `IS DISTINCT FROM` (or `CASE WHEN ...` fallback) must be verified against host SQLite version on a throwaway SQLite database during implementation (per 20260714_000001 house lesson; do NOT write unverified version claims as fact). Dialect-neutral fallback: `(memoir_line.last_pass_id IS NULL OR memoir_line.last_pass_id != :pass_id)`. | Upsert increments `mention_count` only when `last_pass_id IS DISTINCT FROM :pass_id` (or dialect fallback), providing restart idempotence. | Plain `+= 1` on conflict without pass check. |
+| **V2-D 1.13** | Durable `memoir_jev_ledger` Table Creation in Phase 1 (B2 / V2-38): Create 6th table in Phase 1 migration: `memoir_jev_ledger` (`id`, `agent_id`, `synthesis_id`, `classification`, `attempts`, `last_error`, `status`, `created_at`, `updated_at`) with `UNIQUE (agent_id, synthesis_id)`. Stamped `status IN ('pending', 'drafted', 'terminal')` stores JEV classification metadata and candidate retry state. | Storing retry state on `MemoirPersonaVersion` (impossible before draft creation); in-memory retry queue. | Durable table provides restart-safe home for candidate retries when classification fails or diff is unbuildable, preventing silent drops and recording `terminal:gate_unavailable` / `terminal:unbuildable_diff` after 5 attempts. |
+| **V2-D 1.14** | Explicit `poignancy_status` in `MEMOIR_INSERT_SQL` & Purity Pin Update (B7 / V2-42 / Leader ruling 2026-11-09): `MEMOIR_INSERT_SQL` (`repository.py:386-398`) explicitly includes `poignancy_status` with a literal `NULL` in the VALUES clause. The purity pin (`test_memoir_write_purity_unit.py:154-176`) is deliberately amended to the new byte-exact column list as an evidence trail. | Leaving `poignancy_status` out of INSERT statement; relying on column-default accident. | Explicit column in INSERT statement eliminates reliance on column-default accident. Updating purity pin deliberately provides documented evidence trail. |
 
 ---
 
@@ -109,17 +111,34 @@ CREATE TABLE IF NOT EXISTS memoir_proposal_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_memoir_proposal_ledger_date ON memoir_proposal_ledger (agent_id, proposal_date);
 
--- 6. Evolution of memoir_episodes: PLAIN ADD COLUMN statements (SQLite-safe, Register #1)
+-- 6. memoir_jev_ledger: Durable JEV classification and candidate retry ledger (B2 / V2-38)
+CREATE TABLE IF NOT EXISTS memoir_jev_ledger (
+    id TEXT NOT NULL PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    synthesis_id TEXT NOT NULL REFERENCES memoir_syntheses(id),
+    classification TEXT NOT NULL CHECK (classification IN ('conflict', 'boundary_change', 'new_rule', 'reinforcement', 'none')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'drafted', 'terminal')),
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_memoir_jev_synthesis UNIQUE (agent_id, synthesis_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memoir_jev_status ON memoir_jev_ledger (agent_id, status);
+
+-- 7. Evolution of memoir_episodes: PLAIN ADD COLUMN statements (SQLite-safe, Register #1)
 ALTER TABLE memoir_episodes ADD COLUMN poignancy_status TEXT;
 ALTER TABLE memoir_episodes ADD COLUMN poignancy INTEGER;
 ALTER TABLE memoir_episodes ADD COLUMN poignancy_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memoir_episodes ADD COLUMN reflected_at DATETIME;
 
--- 7. Cutover-bounded legacy seed UPDATE (Register #5 / SF11 space-separated literal)
+-- 8. Cutover-bounded legacy seed UPDATE (Register #5 / SF11 space-separated literal)
 UPDATE memoir_episodes SET poignancy_status = 'legacy' WHERE poignancy_status IS NULL AND created_at < '2026-11-09 00:00:00';
 
 -- DOWN: Order-safe additive rollback (child tables dropped before parent tables;
 -- column additions are additive-only and retained in standard forward-only migration posture).
+DROP INDEX IF EXISTS idx_memoir_jev_status;
+DROP TABLE IF EXISTS memoir_jev_ledger;
 DROP INDEX IF EXISTS idx_memoir_proposal_ledger_date;
 DROP TABLE IF EXISTS memoir_proposal_ledger;
 DROP INDEX IF EXISTS idx_memoir_line_agent;
@@ -132,7 +151,28 @@ DROP TABLE IF EXISTS memoir_star;
 DROP TABLE IF EXISTS memoir_reflection_state;
 ```
 
-### 3.2 Repository Contracts
+### 3.2 Repository Contracts & Purity Protocol
+
+#### `MEMOIR_INSERT_SQL` Purity Contract (B7 / V2-42 / Leader ruling 2026-11-09)
+`MEMOIR_INSERT_SQL` in `daemon/repositories/memoir/repository.py:386-398` explicitly adds `poignancy_status` to its column list and literal `NULL` to its `VALUES` clause:
+```sql
+INSERT INTO memoir_episodes (
+    id, agent_id, title, body, created_at, event_at, importance, stars,
+    is_keepsake, pinned_by, pinned_reason, pinned_at,
+    embedding, embedding_model, embedding_dims, embedded_at,
+    embedding_attempts, embedding_error,
+    last_accessed_at, access_count, superseded_by,
+    poignancy_status
+) VALUES (
+    :id, :agent_id, :title, :body, :created_at, :event_at, :importance, :stars,
+    :is_keepsake, :pinned_by, :pinned_reason, :pinned_at,
+    NULL, NULL, NULL, NULL,
+    0, NULL,
+    NULL, 0, NULL,
+    NULL
+)
+```
+The purity pin `test_memoir_write_purity_unit.py:154-176` is deliberately amended to this byte-exact column list as an evidence trail, eliminating reliance on column-default accidents.
 
 #### `MemoirConstellationRepository` (`daemon/repositories/memoir/constellation_repository.py`)
 - `upsert_star(agent_id, name, star_type, description=None, event_at=None) -> MemoirStar`: Upserts a canonical star. If existing, updates `last_touched_at = max(existing, event_at)`.
@@ -159,9 +199,9 @@ DROP TABLE IF EXISTS memoir_reflection_state;
 
 | ID | Task | Outcome (testable) | Touchpoints | Depends on | Risks carried | AC |
 |----|------|--------------------|-------------|------------|---------------|----|
-| **T1.1** | Create migration `.sql` file in `daemon/migrations/versions/` with DDL for `memoir_star`, `memoir_star_alias`, `memoir_line` (with `last_pass_id`), `memoir_reflection_state`, `memoir_proposal_ledger` (with `UNIQUE(agent_id, episode_id)`), and four plain `ADD COLUMN` statements + space-separated legacy seed UPDATE. | Migration runner applies cleanly on fresh SQLite; prefix is unique; down section drops indexes and tables in reverse order. | `daemon/migrations/versions/20261109_..._create_memoir_v2_tables.sql` | — | R10 | AC1 |
-| **T1.2** | Define SQLModel classes `MemoirStar`, `MemoirStarAlias`, `MemoirLine`, `MemoirReflectionState`, and `MemoirProposalLedger` in `daemon/repositories/memoir/models.py`; update `MemoirEpisode` with `poignancy_status`, `poignancy`, `poignancy_attempts`, and `reflected_at`. | Models importable; `__table_args__` match DDL byte-identically; constraints match; 3-site index lockstep verified. | `daemon/repositories/memoir/models.py` | T1.1 | — | AC2 |
-| **T1.3** | Register new models in `daemon/manager.py:920-975` before `create_all`; add TWO new ensure entries (multi-clause DDL ALTER with `TIMESTAMPTZ` + DML legacy seed) into `_ensure_postgres_columns`. | Fresh Postgres boot creates all 5 new tables + adds 4 columns to `memoir_episodes`; re-boot is completely idempotent. | `daemon/manager.py` | T1.2 | R1 | AC3 |
+| **T1.1** | Create migration `.sql` file in `daemon/migrations/versions/` with DDL for `memoir_star`, `memoir_star_alias`, `memoir_line` (with `last_pass_id`), `memoir_reflection_state`, `memoir_proposal_ledger` (with `UNIQUE(agent_id, episode_id)`), `memoir_jev_ledger` (B2 / V2-38), and four plain `ADD COLUMN` statements + space-separated legacy seed UPDATE. | Migration runner applies cleanly on fresh SQLite; prefix is unique; down section drops indexes and tables in reverse order. | `daemon/migrations/versions/20261109_..._create_memoir_v2_tables.sql` | — | R10 | AC1 |
+| **T1.2** | Define SQLModel classes `MemoirStar`, `MemoirStarAlias`, `MemoirLine`, `MemoirReflectionState`, `MemoirProposalLedger`, and `MemoirJevLedger` in `daemon/repositories/memoir/models.py`; update `MemoirEpisode` with `poignancy_status`, `poignancy`, `poignancy_attempts`, and `reflected_at`. Explicitly add `poignancy_status` with literal NULL to `MEMOIR_INSERT_SQL` and update purity pin (B7 / V2-42). | Models importable; `__table_args__` match DDL byte-identically; constraints match; 3-site index lockstep verified; purity pin asserts new byte-exact column list. | `daemon/repositories/memoir/models.py`, `daemon/repositories/memoir/repository.py` | T1.1 | — | AC2 |
+| **T1.3** | Register new models in `daemon/manager.py:920-975` before `create_all`; add TWO new ensure entries (multi-clause DDL ALTER with `TIMESTAMPTZ` + DML legacy seed) into `_ensure_postgres_columns`. | Fresh Postgres boot creates all 6 new tables + adds 4 columns to `memoir_episodes`; re-boot is completely idempotent. | `daemon/manager.py` | T1.2 | R1 | AC3 |
 | **T1.4** | Implement `MemoirConstellationRepository` with star upsert, alias binding, line recording with `last_pass_id` guard, heat scoring, `description_as_of` updates, and 1-hop network joins. Verify SQLite `IS DISTINCT FROM` vs fallback (Suggestion #8). | Unit tests pass for alias resolution, duplicate handling, crash-recovery pass idempotence, and 1-hop neighbor queries. | `daemon/repositories/memoir/constellation_repository.py` | T1.2 | R9 | AC4 |
 | **T1.5** | Implement `MemoirSynthesesRepository` enforcing non-empty `source_episode_ids`, valid verbs, normalized in-window dedup check, and atomic `supersede_with` writer. | Writing without citations raises `ValueError`; dedup returns existing row; `supersede_with` links both rows atomically. | `daemon/repositories/memoir/syntheses_repository.py` | T1.2 | R2 | AC5 |
 | **T1.6** | Cross-driver schema verification: throwaway SQLite test (with cutover fixture row verifying `' ' < 'T'` safety) + real-PG test; update ensure census assertions (`retrieval_pg` stays 2, `pg_corpus` flips 2→4). | Tests verify table creation, index presence, CHECK constraint enforcement, and ensure idempotence on both engines. | `tests/unit/test_memoir_v2_schema.py`, `tests/postgres/test_memoir_v2_schema_pg.py` | T1.3, T1.4, T1.5 | R1 | AC6 |
@@ -173,8 +213,8 @@ DROP TABLE IF EXISTS memoir_reflection_state;
 | ID | Criterion |
 |---|---|
 | **AC1** | Migration discovery accepts the new `.sql` file without prefix collision; every CREATE TABLE carries `IF NOT EXISTS`; all ALTER TABLE statements use plain `ADD COLUMN` (zero `IF NOT EXISTS` in `.sql`); all string columns are `TEXT`; DOWN section exists with additive-rollback note; fresh SQLite execution executes cleanly. |
-| **AC2** | SQLModel metadata contains `memoir_star`, `memoir_star_alias`, `memoir_line`, `memoir_reflection_state`, `memoir_proposal_ledger`; `__table_args__` enforce constraints; `MemoirEpisode` carries `poignancy_status` (TEXT NULL), `poignancy` (INTEGER NULL), `poignancy_attempts` (INTEGER NOT NULL DEFAULT 0), and `reflected_at` (TIMESTAMPTZ NULL). |
-| **AC3** | Real-PG boot creates the five tables; the four new columns appear on `memoir_episodes` (with `reflected_at` typed `TIMESTAMPTZ`); pre-existing rows before cutover date flip `poignancy_status = 'legacy'`; re-running boot is completely idempotent. `test_memoir_retrieval_pg.py` stays 2; `test_memoir_pg_corpus.py` flips 2→4. |
+| **AC2** | SQLModel metadata contains `memoir_star`, `memoir_star_alias`, `memoir_line`, `memoir_reflection_state`, `memoir_proposal_ledger`, `memoir_jev_ledger`; `__table_args__` enforce constraints; `MemoirEpisode` carries `poignancy_status` (TEXT NULL), `poignancy` (INTEGER NULL), `poignancy_attempts` (INTEGER NOT NULL DEFAULT 0), and `reflected_at` (TIMESTAMPTZ NULL); `MEMOIR_INSERT_SQL` explicitly contains `poignancy_status` (literal NULL in VALUES). |
+| **AC3** | Real-PG boot creates the six tables; the four new columns appear on `memoir_episodes` (with `reflected_at` typed `TIMESTAMPTZ`); pre-existing rows before cutover date flip `poignancy_status = 'legacy'`; re-running boot is completely idempotent. `test_memoir_retrieval_pg.py` stays 2; `test_memoir_pg_corpus.py` flips 2→4. |
 | **AC4** | `MemoirConstellationRepository`: Alias lookup resolves to canonical star; alias collision raises unique constraint refusal; re-recording a line with same `pass_id` leaves `mention_count` unchanged; distinct `pass_id` increments `mention_count`; updating description sets `description_as_of`; 1-hop query returns connected stars within 50ms. |
 | **AC5** | `MemoirSynthesesRepository`: Attempting to create a synthesis with `source_episode_ids=[]` or `None` is refused with `ValueError`; duplicate synthesis within 2-day window returns existing row without double-write; `supersede_with` executes insert and both pointers in one transaction. |
 | **AC6 (Mutation)** | Removing citation check from `create_synthesis` flips AC5 RED; swapping `star_type` CHECK order flips AC2 RED; changing `.sql` to `ADD COLUMN IF NOT EXISTS` breaks SQLite execution and flips AC1 RED; using ISO-8601 `'T'` in seed UPDATE misclassifies cutover fixture and flips AC3 RED. |
