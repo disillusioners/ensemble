@@ -38,13 +38,20 @@ export const SHOW_TERMINAL_STORAGE_KEY = 'ensemble.sources.showTerminal';
 export const TERMINAL_ROW_STATUSES = ['stopped', 'cancelled'] as const;
 
 /**
+ * The terminal vocabulary as a literal union — DERIVED from
+ * {@link TERMINAL_ROW_STATUSES} so the list and the type can never
+ * drift apart (one vocabulary, one encoding).
+ */
+export type TerminalRowStatus = (typeof TERMINAL_ROW_STATUSES)[number];
+
+/**
  * True when the row's status is terminal under the house vocabulary
  * (the daemon's boot auto-start skip set: ``stopped`` + ``cancelled``).
  * Unknown statuses are NOT terminal — an unrecognized status must not
  * be hidden by default.
  */
 export function isTerminalRowStatus(status: string): boolean {
-  return status === 'stopped' || status === 'cancelled';
+  return (TERMINAL_ROW_STATUSES as readonly string[]).includes(status);
 }
 
 /** Result of splitting a row list by terminal visibility. */

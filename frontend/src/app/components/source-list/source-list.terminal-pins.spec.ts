@@ -12,10 +12,6 @@ import { join } from 'path';
 const dir = join(__dirname, '.');
 const componentSrc = readFileSync(join(dir, 'source-list.component.ts'), 'utf-8');
 const templateSrc = readFileSync(join(dir, 'source-list.html'), 'utf-8');
-const modelSrc = readFileSync(
-  join(__dirname, '../../models/terminal-visibility.model.ts'),
-  'utf-8',
-);
 
 describe('SourceListComponent — terminal-visibility wiring (pins)', () => {
   describe('model consumption', () => {

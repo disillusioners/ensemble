@@ -30,7 +30,6 @@ export class SchedulerService {
   // Signals for state
   readonly schedules = signal<Schedule[]>([]);
   readonly executions = signal<ScheduleExecution[]>([]);
-  readonly loading = signal(false);
   readonly error = signal<string | null>(null);
 
   /**
@@ -196,17 +195,6 @@ export class SchedulerService {
         throw err;
       })
     );
-  }
-
-  /**
-   * Helper to refresh schedules list
-   */
-  refreshSchedules(): void {
-    this.loading.set(true);
-    this.listSchedules().subscribe({
-      next: () => this.loading.set(false),
-      error: () => this.loading.set(false),
-    });
   }
 
   /**

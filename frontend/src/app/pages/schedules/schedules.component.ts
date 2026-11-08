@@ -188,6 +188,19 @@ export class SchedulesComponent implements OnInit, OnDestroy {
     this.schedulerService.clearError();
   }
 
+  // ── Response supersede (flip-race guard) ─────────────────────────────
+  // A fast ON→OFF flip re-issues the fetch while the previous request is
+  // still in flight; unguarded, the stale ``include_cancelled`` response
+  // can land LAST and transiently overcount the "N hidden" line. The
+  // token below is captured at subscribe-time and EVERY delivery is
+  // checked before any state write. The shared list itself is written
+  // by the service's tap (upstream of this handler), so a superseded
+  // delivery that already landed is synchronously re-asserted back to
+  // the winning page within the same emission pass — signal/effect
+  // observers only ever see the final value.
+  private loadToken = 0;
+  private acceptedRows: Schedule[] | null = null;
+
   private loadSchedules(): void {
     this.loading.set(true);
     this.error.set(null);
@@ -197,11 +210,21 @@ export class SchedulesComponent implements OnInit, OnDestroy {
     // request). Fetched rows (cancelled included when present) flow
     // through the existing client-side terminal filter below, so the
     // visible subset, hidden-count line and stats stay truthful.
+    const token = ++this.loadToken;
     this.schedulerService.listSchedules(this.showTerminal()).subscribe({
-      next: () => {
+      next: (rows) => {
+        if (token !== this.loadToken) {
+          // Superseded: drop it. The service tap already wrote this
+          // stale page into the shared signal — re-assert the winner's
+          // page so the stale payload never sticks.
+          if (this.acceptedRows) this.schedules.set(this.acceptedRows);
+          return;
+        }
+        this.acceptedRows = rows;
         this.loading.set(false);
       },
       error: (err: Error) => {
+        if (token !== this.loadToken) return; // superseded — never clobber fresher state
         console.error('Failed to load schedules:', err);
         this.error.set(err.message || 'Failed to load schedules');
         this.loading.set(false);
@@ -221,9 +244,8 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   }
 
   protected onRefresh(): void {
-    // Re-issue through the toggle-aware load (NOT the service's bare
-    // refreshSchedules()) so a refresh never silently re-hides the
-    // cancelled rows the user opted into.
+    // Re-issue through the toggle-aware load so a refresh never
+    // silently re-hides the cancelled rows the user opted into.
     this.loadSchedules();
   }
 

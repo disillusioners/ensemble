@@ -170,6 +170,43 @@ describe('SchedulesComponent — terminal-toggle follow-up behavior', () => {
     expect(component.hiddenTerminalCount()).toBe(1);
   });
 
+  // ── flip-race supersede guard ─────────────────────────────────────────
+  // A fast ON→OFF flip must not let the stale WITH-param response land
+  // LAST and transiently overcount the "N hidden" line (honest counts).
+
+  it('a DELAYED stale WITH-param response flushed AFTER the fresh bare one is superseded (no hidden-count overcount)', () => {
+    window.localStorage.setItem(SHOW_TERMINAL_STORAGE_KEY, 'true');
+    mount();
+
+    // Initial load: toggle ON → WITH-param request (the soon-stale chain A).
+    fixture.detectChanges();
+    const staleReq = httpMock.expectOne('/api/schedules?include_cancelled=true');
+
+    // Fast flip OFF → the effect re-issues BARE (chain B) while A is
+    // still in flight.
+    component.onShowTerminalChange(false);
+    fixture.detectChanges();
+    const freshReq = httpMock.expectOne('/api/schedules');
+    expect(freshReq.request.params.keys()).toEqual([]);
+
+    // The fresh response lands FIRST and the page settles active-only.
+    freshReq.flush(BARE_PAGE);
+    fixture.detectChanges();
+    expect(component.showTerminal()).toBe(false);
+    expect(component.filteredSchedules().map((s) => s.id)).toEqual(['live-1']);
+    expect(component.hiddenTerminalCount()).toBe(1);
+
+    // …THEN the DELAYED stale response arrives. Superseded: it must NOT
+    // overwrite the shared list or double the hidden count.
+    staleReq.flush(FULL_PAGE);
+    fixture.detectChanges();
+
+    expect(component.schedules().map((s) => s.id)).toEqual(['live-1', 'done-1']);
+    expect(component.filteredSchedules().map((s) => s.id)).toEqual(['live-1']);
+    expect(component.hiddenTerminalCount()).toBe(1);
+    expect(component.totalCount()).toBe(2);
+  });
+
   // ── 🟡3 EAGER init ────────────────────────────────────────────────────
 
   it('stored "true" → initial showTerminal() is true and the FIRST fetch carries the param', () => {
