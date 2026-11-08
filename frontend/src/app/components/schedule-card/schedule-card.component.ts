@@ -82,7 +82,10 @@ export class ScheduleCardComponent {
   statusIcon = computed(() => {
     switch (this.schedule().status) {
       case 'running': return 'play_circle';
-      case 'stopped': return 'stop_circle';
+      case 'stopped':
+      case 'cancelled':
+        // Terminal peers share the icon — cancelled is not a live state.
+        return 'stop_circle';
       default: return 'help';
     }
   });

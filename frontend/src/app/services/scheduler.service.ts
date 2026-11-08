@@ -35,9 +35,19 @@ export class SchedulerService {
 
   /**
    * GET /api/schedules
+   *
+   * `includeCancelled` appends the ALREADY-EXISTING backend read param
+   * ``?include_cancelled=true`` (daemon/routers/schedules.py —
+   * "cancelled schedules are HIDDEN by default") ONLY when true: the
+   * toggle-OFF fetch stays a bare request with the API's default
+   * behavior unchanged. ``false`` is never sent over the wire.
    */
-  listSchedules(): Observable<Schedule[]> {
-    return this.http.get<ScheduleListResponse>(this.API_BASE).pipe(
+  listSchedules(includeCancelled?: boolean): Observable<Schedule[]> {
+    let params = new HttpParams();
+    if (includeCancelled === true) {
+      params = params.set('include_cancelled', 'true');
+    }
+    return this.http.get<ScheduleListResponse>(this.API_BASE, { params }).pipe(
       tap((response) => this.schedules.set(response.schedules)),
       map((response) => response.schedules),
       catchError((err) => {

@@ -1,4 +1,4 @@
-import { Component, signal, computed, inject, OnInit, DestroyRef, effect } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, DestroyRef } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
@@ -47,20 +47,12 @@ export class SourceListComponent implements OnInit {
 
   // ── Terminal-row visibility ("Show completed & cancelled") ──────────
   // Default-ACTIVE view: terminal rows (stopped/cancelled) are hidden
-  // unless the user opts in. Preference persists across page loads via
-  // the shared localStorage key (terminal-visibility.model).
-  readonly showTerminal = signal<boolean>(false);
-  private showTerminalRestored = false;
-
-  constructor() {
-    // Restore the persisted preference exactly once, on first
-    // construction (house pattern — cf. SkillsComponent "Active only").
-    effect(() => {
-      if (this.showTerminalRestored) return;
-      this.showTerminalRestored = true;
-      this.showTerminal.set(readShowTerminalPreference(localStorage));
-    });
-  }
+  // unless the user opts in. EAGER initialization: the persisted
+  // preference is read at field-init (no restore pass, no guard
+  // flag, no one-render flash — the very first render already reflects
+  // the stored choice). Shared localStorage key with /schedules
+  // (terminal-visibility.model).
+  readonly showTerminal = signal(readShowTerminalPreference(localStorage));
 
   // ONE pass over the UNFILTERED list: the visible subset and the
   // hidden-terminal count are derived together, so the

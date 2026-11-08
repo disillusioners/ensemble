@@ -68,19 +68,21 @@ export class SchedulesComponent implements OnInit, OnDestroy {
 
   // ── Terminal-row visibility ("Show completed & cancelled") ──────────
   // Default-ACTIVE view: terminal schedules (stopped/cancelled one-shot
-  // alarms) are hidden unless the user opts in. Preference persists
-  // across page loads via the shared localStorage key — the SAME key
-  // the /sources surface uses (terminal-visibility.model).
-  readonly showTerminal = signal<boolean>(false);
-  private showTerminalRestored = false;
+  // alarms) are hidden unless the user opts in. EAGER initialization:
+  // the persisted preference is read at field-init (no restore effect,
+  // no guard flag, no one-render flash — the very first render already
+  // reflects the stored choice). Same shared localStorage key as the
+  // /sources surface (terminal-visibility.model).
+  readonly showTerminal = signal(readShowTerminalPreference(localStorage));
 
   constructor() {
-    // Restore the persisted preference exactly once, on first
-    // construction (house pattern — cf. SkillsComponent "Active only").
+    // The schedules fetch REACTS to the toggle (include_cancelled
+    // gating): every flip re-issues the request — ON →
+    // ``?include_cancelled=true``, OFF → bare default request. The
+    // first effect run IS the initial load, and eager init above means
+    // that first request already respects the stored preference.
     effect(() => {
-      if (this.showTerminalRestored) return;
-      this.showTerminalRestored = true;
-      this.showTerminal.set(readShowTerminalPreference(localStorage));
+      this.loadSchedules();
     });
   }
 
@@ -115,9 +117,31 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   readonly isEmptyState = computed((): boolean => 
     !this.loading() && this.schedules().length === 0 && !this.error()
   );
-  readonly isFilteredEmpty = computed((): boolean => 
+  readonly isFilteredEmpty = computed((): boolean =>
     !this.loading() && this.filteredSchedules().length === 0 && this.schedules().length > 0
   );
+
+  /**
+   * Emptiness caused by the TERMINAL stage: the filtered view is empty
+   * ONLY because the active-only terminal filter hid the rows that
+   * would otherwise match the current chip/type filters (toggle OFF,
+   * but matching rows EXIST in the full list). In exactly that case
+   * "clear all filters" cannot reveal them — only the toggle can — so
+   * the empty copy points at the toggle instead. A genuine filter miss
+   * (no row matches even before the terminal stage) keeps the original
+   * copy.
+   */
+  readonly isTerminalStageEmpty = computed((): boolean => {
+    if (this.showTerminal()) return false;
+    if (this.filteredSchedules().length > 0) return false;
+    const statusVal = this.statusFilter();
+    const typeVal = this.typeFilter();
+    return this.schedules().some((s: Schedule) => {
+      if (statusVal !== 'all' && s.status !== statusVal) return false;
+      if (typeVal !== 'all' && s.config.type !== typeVal) return false;
+      return true;
+    });
+  });
 
   // Computed stats
   readonly activeCount = computed((): number => 
@@ -154,7 +178,9 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   );
 
   ngOnInit(): void {
-    this.loadSchedules();
+    // The schedule list is loaded by the constructor effect (its first
+    // run IS the initial load — keeps the fetch single-sourced and
+    // reactive to the toggle). Agents are a plain one-shot load.
     this.loadAgents();
   }
 
@@ -166,7 +192,12 @@ export class SchedulesComponent implements OnInit, OnDestroy {
     this.loading.set(true);
     this.error.set(null);
 
-    this.schedulerService.listSchedules().subscribe({
+    // include_cancelled gating: the toggle decides whether the fetch
+    // asks the backend for cancelled rows (ON → param, OFF → bare
+    // request). Fetched rows (cancelled included when present) flow
+    // through the existing client-side terminal filter below, so the
+    // visible subset, hidden-count line and stats stay truthful.
+    this.schedulerService.listSchedules(this.showTerminal()).subscribe({
       next: () => {
         this.loading.set(false);
       },
@@ -190,7 +221,10 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   }
 
   protected onRefresh(): void {
-    this.schedulerService.refreshSchedules();
+    // Re-issue through the toggle-aware load (NOT the service's bare
+    // refreshSchedules()) so a refresh never silently re-hides the
+    // cancelled rows the user opted into.
+    this.loadSchedules();
   }
 
   protected onStatusFilterChange(status: ScheduleStatus | 'all'): void {

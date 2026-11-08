@@ -76,6 +76,9 @@ export class ScheduleDetailDrawerComponent {
       case 'running':
         return 'primary';
       case 'stopped':
+      case 'cancelled':
+        // Terminal peers read the same color — cancelled is NOT active
+        // (it used to fall through to 'primary' and look live).
         return 'warn';
       default:
         return 'primary';

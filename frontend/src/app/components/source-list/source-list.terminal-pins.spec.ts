@@ -25,13 +25,16 @@ describe('SourceListComponent — terminal-visibility wiring (pins)', () => {
       expect(componentSrc).toContain('writeShowTerminalPreference');
     });
 
-    it('default toggle state is ACTIVE-only (false)', () => {
-      expect(componentSrc).toMatch(/readonly showTerminal = signal<boolean>\(false\)/);
+    it('toggle state is EAGERLY initialized from storage at field-init (no one-render flash)', () => {
+      expect(componentSrc).toMatch(
+        /readonly showTerminal = signal\(readShowTerminalPreference\(localStorage\)\)/,
+      );
     });
 
-    it('restores the persisted preference on first construction (reads storage)', () => {
+    it('no restore machinery remains (guard flag gone, effect import gone)', () => {
+      expect(componentSrc).not.toMatch(/showTerminalRestored/);
+      expect(componentSrc).not.toContain('effect');
       expect(componentSrc).toContain('readShowTerminalPreference(localStorage)');
-      expect(componentSrc).toMatch(/showTerminalRestored/);
     });
 
     it('toggle handler writes to localStorage (persistence on toggle)', () => {
