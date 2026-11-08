@@ -212,3 +212,69 @@ Final state: `git status --porcelain` empty; `git diff --stat` empty; HEAD `c4c2
 ## Code changes by this gate
 
 **None.** No source edits, no fixes, no pushes. Scratch DB objects/projects created and deleted with cleanup proofs. The only repo delta is this evidence document (+ PACKS.md gate block), committed as a docs commit on the branch.
+
+---
+---
+
+# RE-GATE (scoped) — fix cycle `2fd03c030` + `6ecbe84b9` over gate-evidence `aefd7f2db`
+
+**Date:** 2026-11-08 · **Tip under test:** `6ecbe84b9` (exactly 2 commits over `aefd7f2db`) · 3 scoped worker instances (l1, pins, q2q3) · all fences held (worktree-venv import proof, per-variable ambient LIVE-poison scrub — `PORT=9797`/`POSTGRES_DB=ensemble_prod`/`ENSEMBLE_SELF_ENV=live` present in worker shells and never inherited, `current_database()` asserts, zero :9797/live contact, no daemon boot, scratch cleaned, porcelain verified).
+
+## RE-GATE VERDICT: **PASS — both FAIL legs closed; overall gate verdict for staging: PASS-WITH-DISCLOSURES**
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| R1 — L1 re-run | **CLOSES-FAIL** | empty-query admits **8/8** visible to ari/leader/devops (omitted=0), developer/worker exactly the 3 `both` rows; `artifact-is-container-image` admitted in **all five** views; pinned tier (family drag 01→02→03), deploy pair adjacent (pos 6,7); real renders **1,332c / 498c** ≤ 2,900; BEFORE/AFTER reproduced by module-swap on the same rows (old: 5/961c/artifact-absent) |
+| R2 — pin re-points | **CONFIRMED (16/16 sites, zero weakenings)** | all 14 + Q3 pair preserve the assertion form (exact-set stays `==`-exact; count stays `==`; one site STRENGTHENED 2→3 assertions; wedge-capture re-anchored same operator); all previously-red nodes GREEN; packs 45/48/42/21/40 PASS; mutation RED→GREEN sha-proven |
+| R3 — Q2 corpus under fence | **CONFIRMED** | 6-node family completes: 1P / 5 graceful deterministic FAILs (`ScriptedChatModel exhausted` — script-depth fragility), **zero wedges, zero process death**, ≈18s aggregate; fence registered as autouse fixture + mutation contract; runnable fence pins green (resolver 52/52, wiring 1/1); **adjudication below** |
+| R4 — Q3 arithmetic | **CONFIRMED** | base 50 / HEAD 49 / common 47 / base-only 3 (`test_lcan_legacy_checkpoint` drift-pin `[s1..s3]`) / net-new 2 — recomputed exactly via comm; **both net-new GREEN at tip** (1.57s / 1.56s) ⇒ **NET-NEW INTEGRATION REDS = 0** |
+| R5 — diff confinement | **CONFINED** | 19 files / 4 claimed categories only (admission rank + its tests; 9 pin files; 5 attestation fence files; the 2 Q3 fixes); **no** planning-doc / migration / tool-registry / meta.json / FE churn; 1 contamination disclosure (below) |
+
+## R1 detail — L1 closed on the real system
+
+- Real path (`list_entries` → `admit_view(query="")` → `build_pok_context_message`): ari/leader/devops = **8 admitted / 0 omitted / 1,332c** (identical order ×3 runs); developer/worker = **3 / 0 / 498c**. Admitted order: pinned family 01→02→03 (pipeline-03 `[PIN]`) → ranked healthz → model-catalogs → deploy-01 → deploy-02 → artifact. `msg.id = pok:3f401aa9-…`, `context_kind=pok`.
+- **Real Ari seam** (`maybe_inject_ari_pok_block`, caller=ari, llmproxy target): fired via `set_injection` (source `internal_agent:pok_ari_seam`), **byte-identical** to the builder output, all 8 slugs. `_maybe_pok_context_message` confirmed for ari + developer, empty and realistic query, once-flag/default-project negatives.
+- Determinism: `_deterministic_rank` key `(stale?, provenance!=observed, -access, -verify, slug)` — 6 level probes + 4-level combined case PASS; expected order independently re-derived = observed (`MATCH: True`). Seed rows' `deploy-01`(acc 9) before `deploy-02`(acc 10) is the **family-atomic slug-order rule**, consistent. Decay inert today (`last_verified` NULL on all 8 — restored snapshot); verified synthetically.
+- Overflow (scratch, 13 visible > 8): budget holds (8 admitted, 2,466c worst-case ≤ 2,900; entry cap binds, char cap is backstop); fusion `rank_fn` invoked ONLY here — **0 calls** on all five real views; overflow deterministic 3/3.
+- **Disclosures (R1):** (a) the fix's claimed 823c/340c are **fixture-only** numbers (pack's synthetic §11 payload) — real rows render 1,332c/498c; both ≤2,900, documentation-scope mismatch only; (b) overflow arbitration is a *promotion of the fusion-named subset to the front* (empty query ⇒ floor-2 promoted, rest deterministic) — consistent with "arbitrates ONLY overflow/ties" but weaker than full fusion ordering; recorded, not a defect.
+
+## R2 detail — re-points, not weakenings
+
+- Per-node before/after quoted for all load-bearing sites (table in worker report; logs `/tmp/pok-regate-item2/logs/`). Zero occurrences of `==`→`>=`, superset substitution, skip/deselect, try/except swallow, corpus narrowing.
+- **Wedge-capture attribution NON-LANE, proven:** site counts by revision — `639b7129b` (old pin) = 20, **TRUE BASE `6b571771d` = 30**, pre-fix `c4c2293fa` = 30, tip = 30; the +10 landed in 6 commits all ancestor-proven before the POK lane; `git log 6b571771d..6ecbe84b9 -- <boot-pass file>` empty.
+- **Classification correction (original gate, disclosed):** this node's original "net-new" classification was most plausibly a **method artifact** — the old pin was *relative* (head vs git-pinned `639b7129b`), and the base-side `git archive` extraction has no `.git`, so the test could not execute as-green there ("green/absent at base" bucket). With attribution now proven non-lane and the pin re-anchored to `== 30`, the original 14-node net-new count stands corrected to **13 lane-relevant + 1 method-artifact** (fixed either way; verdict unchanged).
+- Pin-file re-runs: aegis 556P, designer_rewire 25P, kb-writer 23P, memoir 20P, prompt-reload 13P, nest-report 21P, wedge-capture 29P, metrics 26P+1F (the FAILED node is the documented pre-existing `LANE_BASE=644c2bfa` G4 debt — introducing commit `b36e3f34e` ancestor-proven before TRUE BASE; untouched by the fix).
+- Mutation spot-proof: `AEGIS_ALLOW` −"pok" → targeted RED (`Extra items in the left set:`) → sha-verified byte restore → GREEN.
+- Node-count arithmetic reconciliation: the fix re-pointed **15 distinct node ids / 16 pin sites** (the original gate's prose "nest-report ×2" was one node's two assertion legs).
+
+## R3 detail — Q2 corpus + adjudication
+
+- Corpus (nodes from the gate's deselect ledger, fence `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=off`, serial, per-node `timeout 1500`): n5 PASSED (2.47s); n1/n2/n3/n4/n6 FAILED **graceful** (2.9–3.6s each, rc=1) on `IndexError: ScriptedChatModel exhausted` — script-depth fragility (judge-off flow consumes one more scripted turn than authored), already flagged for the attestation owner; **no wedge, no process death, ≈18s aggregate**.
+- Fence registration = autouse `_fused_judge_off` fixture across the 5 attestation files + an explicit mutation contract in the commit message ("remove the fixture → the 5 nodes wedge again"); runnable pins: `test_attestation_judge_resolver.py` **52/52**, `test_attestation_judge_wiring.py::test_judge_not_called_when_env_kill_switch_off_real_resolver` **1/1**.
+- **ADJUDICATION (recorded verdict, superseding the original gate's hypothesis):** the original gate classified the 6-node family as a "HEAD-side regression class (graceful at base → wedge at HEAD)" from a single unfenced probe. The re-gate evidence overturns that: (i) the lane's `/tmp/q3-base-integration.log` full-integration base run **completed** in 825.82s (49F/1075P/24S/485D/1E, no kill); (ii) the lane's unfenced base probe shows a **bounded 30s pytest-timeout exit (rc=1) with Timeout stack — a deterministic process exit, not a wedge**; (iii) the re-gate's independent fence-on base probe (fresh `git archive 6b571771d`, `daemon.__file__` proven) reproduces **base ≡ HEAD**: same graceful `ScriptedChatModel exhausted` failure in 4.93s with `event=leader_completion_gate_fused_judge_disabled` logged. **Verdict: PRE-EXISTING, endpoint-dependent (unfenced judge path × 30s thread-timeout), NOT POK-lane-introduced.** The original "wedge at HEAD" observation was an unfenced-condition artifact of the probe, not a lane regression. Routed to the attestation owner as script-depth fragility under the judge-off flow.
+
+## R4 detail — arithmetic + fixes
+
+- Recomputed via `comm` on normalized red sets: base 50 / HEAD 49 / **common 47** / base-only 3 (`test_drift_pin_surfaces_branch_head_for_forensics[s1|s2|s3]`) / **net-new 2** (`test_stable_id_supported_kinds_are_exactly_five`, `test_real_meta_allow_is_exact_category_set`). Both net-new **GREEN at tip** (`6ecbe84b9`, fence-appropriate env, serial): 1P/1.57s, 1P/1.56s. **NET-NEW INTEGRATION REDS = 0 at tip.**
+- The 47 common reds stand base-proven (unchanged by the fix cycle — confinement confirmed); they remain standing integration debt outside this lane's blast radius.
+
+## R5 detail — confinement
+
+`git log aefd7f2db..6ecbe84b9` = exactly 2 commits; `git diff --name-status` = 19 files, all in the four claimed categories (admission-rank surface `daemon/services/pok_injection.py` + its test; 9 unit pin files; 5 attestation integration fence files; the 2 Q3 test fixes + PACKS.md count re-stamps). Out-of-scope sweep CLEAN: no `planning/project-operating-knowledge/` edits, no `daemon/migrations/versions/`, no `_tool_registry.py`/`tool-categories.json`/`agents/*/meta.json`, no FE.
+
+## Re-gate disclosures (routed)
+
+1. **`install-audit.jsonl` contamination in `2fd03c030`** — +33 foreign designer-lane `kms_issue` rows committed inside the fix commit, unmentioned in its message (CONCURRENT-COMMIT hazard class; benign content, no secret material). Leader's call on a cleanup lane.
+2. **PACKS.md `pok_injection_unit` was stale again (39 vs 42)** — the fix commit added the 3 L1 nodes after re-pointing the row; **re-stamped to 42/42 in this docs commit** (L11 defect class recurring; the fix lane should re-count in the same commit that adds nodes).
+3. **Concurrent-writer anomaly `f166ab14`** (L1 worker, reported via report_anomaly): `tests/unit/agents/test_aegis_security_family.py` transiently held PRE-FIX content (no `"pok"`) at 07:07:00Z, byte-identical to HEAD again by 07:07:36Z; zero repo writes by the worker; HEAD never moved. A third writer is active on this worktree — the CONCURRENT-COMMIT hazard class; flag to the lane owner before any further commits.
+4. R1 fixture-vs-real char counts (823/340 claimed vs 1,332/498 real) — fix-lane docs should cite the real-row numbers.
+5. Wedge-capture classification correction (R2) — original 14 → 13 lane-relevant + 1 method-artifact (git-archive base cannot execute relative-git pins; future base-side runs must treat git-dependent pins as UNVERIFIABLE-at-archive-base, not green).
+6. `test_metrics_family_adjudication` G4 inherited red re-confirmed pre-existing (ancestor-proven) — still reddens every whole-tree gate until the metrics-family lane re-points `LANE_BASE`.
+
+## Re-gate verdict
+
+- **Item 1 (L1): CLOSES-FAIL.** **Item 2 (pins): CONFIRMED re-points.** **Item 3 (Q2): CONFIRMED + family reclassified pre-existing (adjudication recorded).** **Item 4 (Q3): CONFIRMED, net-new integration reds = 0.** **Item 5 (confinement): CONFINED.**
+- **Overall gate verdict for staging: PASS-WITH-DISCLOSURES** — the two original FAIL legs (L1, L10) are closed on independent evidence; the 11 standing legs are unaffected (diff confined to the claimed surfaces); remaining disclosures are routed/documentation-class, none blocking. The 47 common integration reds and the metrics G4 red remain standing pre-existing debt outside this lane.
+
+*Re-gate evidence: worker reports + logs at `/tmp/pok-regate-l1/`, `/tmp/pok-regate-item2/logs/`, `/tmp/pok-regate-fence/`; base probe extraction `/tmp/pok-regate-base-20261108/` (kept as scratch).*
+
