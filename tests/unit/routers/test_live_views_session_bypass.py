@@ -321,8 +321,13 @@ def _build_app(
     auth_stub: _StubAuthService | None = None,
     auth_config=None,
     with_middleware: bool = False,
+    live_views_external_base_url: str | None = None,
 ) -> FastAPI:
     cfg = LiveViewsConfig()
+    if live_views_external_base_url is not None:
+        # FIX-7: the second operator-declaration source — the
+        # ``live_views.external_base_url`` knob itself.
+        cfg.external_base_url = live_views_external_base_url
     workdir = filesystem_root_dir
     cfg.roots["planning"] = LiveViewsRootConfig(
         type="project_scoped",
@@ -705,8 +710,10 @@ class TestOriginGateUnit:
         from daemon.routers.live_views import _views_trusted_hosts
 
         declared = on_auth_config()
+        # FIX-6: declared host ≠ the Forwarded host under test —
+        # ``edge.example.com`` must enter ONLY via the Forwarded leg.
         declared.live_view_external_base_url_fallback = (
-            "https://edge.example.com"
+            "https://elsewhere.example"
         )
         request, _ = self._request(
             {
@@ -1246,6 +1253,154 @@ class TestViewWriteCoveredByConstruction:
         assert row.failed_attempts == 0
 
 
+class TestSecondDeclarationSource:
+    """FIX-7 (NEW-ISSUE-1) — auth-OFF behind a Host-rewriting proxy
+    can now declare the front via ``live_views.external_base_url``
+    (the auth fallback's single writer sits inside
+    ``if config.auth.enabled``, so auth-OFF previously had NO
+    declaration path and the forwarded legs were dead code).
+    HARD CONSTRAINTS pinned: OPERATOR CONFIG ONLY (never a client
+    header); undeclared ⇒ legs (b)/(c) stay INERT (the closed
+    self-anchoring exploit stays closed)."""
+
+    def _authoff_client(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        external_base: str | None,
+    ) -> TestClient:
+        """A TRUE auth-OFF app shape: NO auth_service, NO
+        auth_config on app.state — only the live-views declaration
+        varies."""
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=None, auth_config=None,
+            live_views_external_base_url=external_base,
+        )
+        return TestClient(app, follow_redirects=False)
+
+    def test_xfh_honored_when_auth_off_external_base_declared(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        client = self._authoff_client(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            "https://views.example.com",
+        )
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "views.example.com, internal:8079",
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_forwarded_honored_when_auth_off_external_base_declared(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        client = self._authoff_client(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            "https://views.example.com",
+        )
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "Forwarded": 'for=10.0.0.9;host="views.example.com";proto=https',
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_forwarded_rejected_when_auth_off_undeclared(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """The closed exploit stays closed: auth-OFF + NO declaration
+        anywhere ⇒ an echoed forwarded anchor 403s (legs inert)."""
+        client = self._authoff_client(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            None,
+        )
+        plaintext = _mint(in_memory_store, cipher)
+        for forwarded_headers in (
+            {
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "evil.example",
+                "Origin": "https://evil.example",
+            },
+            {
+                "Host": "internal-svc:8079",
+                "Forwarded": 'for=10.0.0.9;host="evil.example"',
+                "Origin": "https://evil.example",
+            },
+        ):
+            resp = client.post(
+                _VIEW_PATH,
+                data={"code": plaintext},
+                headers={
+                    **forwarded_headers,
+                    "X-Forwarded-Proto": "https",
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code == 403, forwarded_headers
+        row = in_memory_store.get_row("planning", _VIEW_REL)
+        assert row.failed_attempts == 0  # gates preceded the compare
+
+    def test_declared_external_base_accessor_is_raw_config(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """The accessor returns the RAW operator config — not the
+        resolved chain (host-capture / bind tiers must never count
+        as a declaration)."""
+        from daemon.services.live_views import LiveViewsService
+
+        cfg = LiveViewsConfig()
+        cfg.external_base_url = "https://views.example.com"
+        service = LiveViewsService(
+            config=cfg,
+            project_workdir_by_shortname_resolver=lambda _s: None,
+        )
+        assert service.declared_external_base_url == (
+            "https://views.example.com"
+        )
+
+        unset_cfg = LiveViewsConfig()
+        unset_service = LiveViewsService(
+            config=unset_cfg,
+            project_workdir_by_shortname_resolver=lambda _s: None,
+        )
+        # Unset config ⇒ None (or ''), NEVER a resolved/host-captured
+        # base — the declaration is the operator's, nothing else.
+        assert not unset_service.declared_external_base_url
+
+
 # ─────────────────────────────────────────────────────────────────
 # R1 direct lane — middleware-gated composition
 # ─────────────────────────────────────────────────────────────────
@@ -1354,7 +1509,15 @@ def proxy_front_client(
     ``AuthConfig._strip_non_env_fields``).
     """
     cfg = on_auth_config()
-    cfg.live_view_external_base_url_fallback = "https://views.example.com"
+    # FIX-6 (pin-vacuity): the declared front host MUST differ from
+    # the forwarded/Origin host under test — parse_operator_audience
+    # absorbs the fallback into leg (d), so an identical host would
+    # let every leg-(b) test pass via the AUDIENCE leg (the
+    # reviewer's mut_xfh_only mutant scored 66/66). With
+    # ``elsewhere.example`` declared, ``views.example.com`` can only
+    # enter the trust set through the forwarded leg itself —
+    # deleting leg (b) must fail these tests.
+    cfg.live_view_external_base_url_fallback = "https://elsewhere.example"
     app = _build_app(
         filesystem_root_dir, passcode_service, cipher, limiter,
         auth_stub=auth_stub, auth_config=cfg,
@@ -1484,14 +1647,17 @@ class TestSelfAnchoringTrustGating:
         assert "testserver" in hosts_unset  # leg (d) audience intact
 
         set_cfg = on_auth_config()
+        # FIX-6: declared host ≠ forwarded hosts under test — each
+        # forwarded anchor must enter ONLY via its own leg.
         set_cfg.live_view_external_base_url_fallback = (
-            "https://views.example.com"
+            "https://elsewhere.example"
         )
         hosts_set = {
             h for h, _p in _views_trusted_hosts(_request(common, set_cfg))
         }
-        assert "views.example.com" in hosts_set
-        assert "fwd.example.com" in hosts_set
+        assert "views.example.com" in hosts_set  # via leg (b) ONLY
+        assert "fwd.example.com" in hosts_set  # via leg (c) ONLY
+        assert "elsewhere.example" in hosts_set  # via leg (d)
 
 
 class TestWwwPrefixAbuseMatrix:

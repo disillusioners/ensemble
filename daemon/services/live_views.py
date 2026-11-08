@@ -675,6 +675,25 @@ class BaseURLResolver:
             return None
         return f"{scheme}://{host_part}"
 
+    @property
+    def declared_external_base_url(self) -> str | None:
+        """The OPERATOR-DECLARED external base — raw tier-1 override ONLY.
+
+        FIX-7 (views-session-bypass fix-iteration 2, 2026-11-08): the
+        read-only declaration accessor for the views origin gate's
+        second proxy-front declaration source. This is the raw
+        ``external_base_url`` constructor value (validated/normalized)
+        — NEVER the resolved chain: :meth:`resolve`'s tier-2
+        (Host-capture auto-detect) and tier-3 (bind evidence) are
+        REQUEST-DERIVED and must never count as an operator
+        declaration (that would re-open the self-anchoring trust
+        class FIX-1 closed). :meth:`public_base` is the
+        resolved-chain accessor for URL minting; THIS property is
+        the declaration accessor for trust decisions. ``None`` /
+        empty ⇒ the operator declared nothing.
+        """
+        return self._external_base_url
+
     def resolve(self) -> str | None:
         """Return the base URL (no trailing slash) or None.
 
@@ -938,6 +957,19 @@ class LiveViewsService:
         trustworthy base yet", i.e. a path-relative URL.
         """
         return self._base_url_resolver.resolve() or ""
+
+    @property
+    def declared_external_base_url(self) -> str | None:
+        """The operator-DECLARED ``live_views.external_base_url`` (or None).
+
+        FIX-7 read-only seam (views-session-bypass fix-iteration 2,
+        2026-11-08): the views origin gate's second proxy-front
+        declaration source. Delegates to the resolver's DECLARATION
+        accessor — the raw tier-1 operator config only; the resolved
+        chain (:meth:`public_base` / host-capture / bind tiers) is
+        request-derived and must never be read as a declaration.
+        """
+        return self._base_url_resolver.declared_external_base_url
 
     def resolve_for_instance(
         self,

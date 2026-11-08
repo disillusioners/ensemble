@@ -1014,6 +1014,18 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
     rewrites Host, so the forwarded spellings are the real
     client-facing host).
 
+    FIX-7 (fix-iteration 2, 2026-11-08): a SECOND operator
+    declaration source — ``live_views.external_base_url`` set,
+    read through
+    :attr:`LiveViewsService.declared_external_base_url` (the raw
+    tier-1 override; the resolved chain is request-derived and
+    never counts). Why a second source: the auth fallback's sole
+    writer sits inside ``if config.auth.enabled`` (daemon/api.py:2937),
+    so auth-OFF behind a Host-rewriting proxy could never declare a
+    front. DECLARATION = auth fallback set OR the service-declared
+    base set; both unset ⇒ undeclared, legs (b)/(c) inert (the
+    closed exploit stays closed).
+
     A request may carry several of these at once (proxy chains); the
     gate accepts if the Origin host matches ANY of them.
     """
@@ -1039,7 +1051,36 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
             "live_view_external_base_url_fallback",
             None,
         )
-        proxy_front_declared = bool(external_base)
+        if external_base:
+            proxy_front_declared = True
+    if not proxy_front_declared:
+        # FIX-7 (fix-iteration 2, 2026-11-08): SECOND operator-
+        # declaration source — ``live_views.external_base_url`` set.
+        # The auth fallback above has exactly ONE writer
+        # (daemon/api.py:2937) inside ``if config.auth.enabled:``, so
+        # an auth-OFF deployment behind a Host-rewriting proxy could
+        # never declare a front and the forwarded legs were dead
+        # code in that posture (legit forwarded POSTs 403'd). This
+        # source is OPERATOR CONFIG ONLY — read through the service's
+        # DECLARATION accessor (``declared_external_base_url``: the
+        # raw tier-1 override). The resolved chain
+        # (``public_base()``: host-capture / bind tiers) is
+        # request-derived and is deliberately NOT consulted — using
+        # it would let client-shaped evidence declare a front and
+        # re-open the self-anchoring class FIX-1 closed. Service
+        # unwired / property absent / value unset ⇒ STILL
+        # undeclared.
+        live_views_service = getattr(
+            request.app.state, "live_views_service", None
+        )
+        if live_views_service is not None:
+            declared_base = getattr(
+                live_views_service,
+                "declared_external_base_url",
+                None,
+            )
+            if declared_base:
+                proxy_front_declared = True
 
     if proxy_front_declared:
         xfh = headers.get("x-forwarded-host")
