@@ -1865,6 +1865,35 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # source-gc (board wi-ed230eb4, 2026-11-07) — unused-terminal-
+    # schedule GC sweep. The collectable predicate (scheduler +
+    # disabled + terminal + age) lives at the REPO layer and is NOT
+    # widenable from here; this wiring only constructs + starts the
+    # service over the manager's source repository (the same
+    # accessor the sources router uses). Knobs FAIL FAST at boot
+    # via pydantic Field(ge=1); the ENABLED kill-switch is the
+    # strand-heal counter-precedent class (terminalizing-write lane
+    # ships a panic-off lever). Same first-tick-immediate family
+    # shape as the tmp-image sweep above: the first tick runs
+    # IMMEDIATELY inside _run (sweep before the first sleep), so
+    # the boot-time sweep needs no separate synchronous pre-tick.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.sources_gc_service import SourcesGcService
+
+    sources_gc = SourcesGcService(
+        manager._source_repository,
+        enabled=config.services.sources_gc_enabled,
+        dry_run=config.services.sources_gc_dry_run,
+        interval_seconds=config.services.sources_gc_interval_seconds,
+        retention_days=(
+            config.services.sources_gc_terminal_retention_days
+        ),
+        batch_cap=config.services.sources_gc_batch_cap,
+    )
+    sources_gc.start()
+    app.state.sources_gc = sources_gc
+
+    # ─────────────────────────────────────────────────────────────
     # live-view subsystem (Phase 1, 2026-10-07) — build the
     # LiveViewsService NOW (after the manager is alive so the
     # project-resolver closure can read the live project repo,
@@ -3974,6 +4003,20 @@ async def lifespan(app: FastAPI):
                 f"TmpImageCleanupService shutdown error: {e}"
             )
         app.state.tmp_image_cleanup = None
+
+    # --- SourcesGcService shutdown (source-gc, board wi-ed230eb4) ---
+    # Stop the GC sweep BEFORE the manager shuts down so no tick is
+    # mid-transaction when the DB connection closes. getattr-guarded
+    # so a partial startup failure (service never stored) is a
+    # silent no-op; WARNING on stop failure (mirrors the
+    # tmp_image_cleanup shutdown shape).
+    sources_gc = getattr(app.state, "sources_gc", None)
+    if sources_gc is not None:
+        try:
+            await sources_gc.stop()
+        except Exception as e:
+            logger.warning(f"SourcesGcService shutdown error: {e}")
+        app.state.sources_gc = None
 
     # --- PlaneSyncWatchdogService shutdown (Phase 3) ---
     # Stop the periodic re-drive sweep BEFORE the manager shuts down

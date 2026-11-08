@@ -1,3 +1,21 @@
+<!-- source-gc-functional-gate-begin -->
+## Commission source-gc — FUNCTIONAL GATE (P6) registration (2026-11-08; gate @ HEAD `7b6fa2cdf`, TRUE base `b21bbb87f` (v0.29.2 = origin/latest — dispatcher's `f0f3e1724` already contains the impl, corrected); evidence `/tmp/sgc-g135-re/` · `/tmp/sgc-g4/` · `/tmp/sgc-g78/` · `/tmp/sgc-g6/`; RESULTS: 2026-11-08-source-gc-functional-gate.md; LESSONS: 2026-11-08-source-gc-migration-comment-semicolon.md)
+
+> **Outcome (UPDATED by scoped re-gate @ `fadb2dde1`, same day): GO — blocking fix verified independently** (5/5 original reds
+> GREEN; fresh-SQLite full-dir boot clean in an independent harness, 115 applied, both archive tables; exact-defect replant
+> reproduces the boot failure AND the corpus REDs via its boot node; rider `205e08602` untouched below the fix). F1 CLOSED,
+> F2 4/5-closed; new pin-strength findings **F-A (scan shape-blind to spaced trailing `;` — boot node carries the teeth)**,
+> **F-B (full-line `;` negative space open — inert to the runner; docstring overclaims)**, **F-C (AM-10 S5 :429 site
+> unpinned)** — ROUTED to the pin owner, non-blocking. Original-run record below unchanged (NO-GO at `7b6fa2cdf`, G6 FAIL).
+> G1/G2/G3/G5/G7/G8 ALL PASS; G4 matrix as recorded; flake ledger 3 (+1 shape), pre-existing classes; wedge `b7423ea5`.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `source_gc_repository_unit` | `timeout 300 <venv>/python -m pytest tests/unit/repositories/test_source_gc_repository.py -q --timeout=120 -p no:cacheprovider` (fenced env, per-variable `POSTGRES_*` scrubs) | 33 nodes — predicate legs, AM-1 re-assert + `updated_at` WHERE-pin, AM-2 ordering, AM-3 archive + W3 latch, AM-9 windows, AM-11 lockstep, W2/W3/W4 teeth, P3/P4/P8/P9/P21 | 2026-11-08 @ `7b6fa2cdf` | **PASS 33/33** |
+| `source_gc_service_unit` | same shape, `tests/unit/services/test_sources_gc_service.py` | 13 nodes (re-gate `fadb2dde1`: 10 + AM-10 thread-identity ×2 + P15 marker-latch ×1) — sweep loop, counters, P13 kill-switch, P14 first-tick, P15 log discipline + marker + latch | 2026-11-08 @ `fadb2dde1` (re-gate) | **PASS 13/13** (50 combined w/ corpus; F-C: S5 :429 site unpinned — routed) |
+| `source_gc_migration_corpus` | `timeout 300 <venv>/python -m pytest tests/migration/test_migration_comment_semicolon.py -q --timeout=120 -p no:cacheprovider` | 4 nodes — trailing-comment scan (corpus-wide, zero exemptions), per-file stricter standard, DOWN posture, fresh-SQLite full-dir boot incl. source-gc archive tables | 2026-11-08 @ `fadb2dde1` | **PASS 4/4** (defect replant RED via the boot node; F-A scan shape-blindness + F-B full-line negative space — routed) |
+| `source_gc_lock_interleave_pg` | `timeout 300 <venv>/python -m pytest tests/postgres/test_source_gc_lock_interleave_pg.py -q --timeout=120 -p no:cacheprovider` (SERIAL — no xdist; throwaway PG with `PG_TEST_ALLOWED_DBS` exact-name; DB dropped after) | 5 nodes — P16 two-connection interleave + W1 `before_cursor_execute` FOR-UPDATE listener discriminator, P10 child-first FK order, W6 parent-first lock | 2026-11-08 @ `7b6fa2cdf` | **PASS 5/5** ×3 (+3/3 mutation legs RED→GREEN) |
+<!-- source-gc-functional-gate-end -->
 <!-- v0291-staged-verification-begin -->
 ## v0.29.1 STAGED VERIFICATION registration (2026-11-07; staged tree `24e098245f9afc481c1824d5974ebb6b6f812bcf`; binary `99c5c144…f115532b` 4-way; tag `2c06196b1` PUSHED; origin/latest == staged tree; RESULTS: 2026-11-07-v0291-staged-verification.md)
 
