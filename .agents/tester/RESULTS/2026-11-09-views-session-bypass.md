@@ -61,3 +61,13 @@ Pre-verified staging inputs (all still valid for the post-fix re-run): slot v0.2
 - `assets/2026-11-09-views-session-bypass/g2g8/` — G2…G8.txt, R5.txt, RUN-ENVIRONMENT.txt, boot/mint/session logs, all probe scripts (mirrored `/tmp/g2g8-evidence/`)
 - Logs: `/tmp/g7_lane74.log`, `/tmp/g7_surface.log`, `/tmp/coregates.log`
 - Anomaly: `report_anomaly` id `2c719281` (G2.7, major)
+
+## Addendum (same session): branch movement + tip-state hardening
+
+The branch moved past the commissioned SHA mid-lane (giter polish, all disclosed): `87c350578` → `91d1617e2` (style folds on the 2 daemon files — the exact overlays G1 proved AST-identical) → `9bb0651dd` (lane-test consolidation: 5 defs → 2 parametrized, 74→74 nodes) → `4a5a9582b` (tidier notes) → `24924ce08` (this report's tester docs commit).
+
+- **G2.7 STILL PRESENT AT TIP — proven, not inferred:** `_views_trusted_hosts` (sha256 `eb7802c4c137bc1f…`) and `_same_host_origin_check` (sha256 `6b2d5fb69ec90f9f…`) byte-identical between `87c350578` and HEAD; the production diff vs the verified SHA is docstrings/comments/annotations/`TYPE_CHECKING` imports only (AST proof + per-hunk audit + `py_compile` OK; `daemon/services/live_views.py` untouched branch-wide).
+- **Lane pack re-run at tip `24924ce08`: PASS 74/74 (5.04s)** — the consolidation is empirically node-preserving and green (`/tmp/g7_lane74_tip.log`). Notably this pack is NOT ambient-`ENSEMBLE_AUTH_*`-sensitive (green with the live door.ensem.dev vars present); the per-variable scrub stays default policy anyway.
+- Surface files **zero-diff at tip** → the 196/196 remains a byte-faithful measurement of the shipping tree.
+- **Test-suite posture at tip:** no test anywhere asserts rejection of a matching non-testserver Host/Origin pair; the two permissive pins survive (`test_portless_host_vs_explicit_origin_port_elides` :1647, `test_explicit_vs_explicit_match_grants` :1730) — the G2.7 fix must flip/update pins alongside the gate, and the review council's "stated threat model" should be re-scoped to explicitly include or exclude host-capture.
+- 26 evidence files (`assets/…/g1/logs/` 25 + `g2g8/boot.log`) are gitignore-excluded (`logs/`, `*.log`) — disk-resident at the stable worktree path, NOT force-added (gitignore policy call left to the leader); fail-closed secret scans ran clean over staged AND excluded evidence.
