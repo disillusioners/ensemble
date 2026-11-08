@@ -1,22 +1,19 @@
 <!-- source-gc-functional-gate-begin -->
 ## Commission source-gc — FUNCTIONAL GATE (P6) registration (2026-11-08; gate @ HEAD `7b6fa2cdf`, TRUE base `b21bbb87f` (v0.29.2 = origin/latest — dispatcher's `f0f3e1724` already contains the impl, corrected); evidence `/tmp/sgc-g135-re/` · `/tmp/sgc-g4/` · `/tmp/sgc-g78/` · `/tmp/sgc-g6/`; RESULTS: 2026-11-08-source-gc-functional-gate.md; LESSONS: 2026-11-08-source-gc-migration-comment-semicolon.md)
 
-> **Outcome: NO-GO — one deterministic lane-caused defect.** G1/G2/G3/G5/G7/G8 ALL PASS (original symptom closed both
-> directions on a live-sized dev fixture; dry-run provably non-destructive; all 5 fences; real-daemon REST shrink
-> 105→8; seal tripwire 35/0; A10 paused-deferred ceremony resolves by message_id). G4 mutation matrix: 23 unit legs
-> (20 discriminating RED→GREEN) + 3 PG legs all discriminating; 2 pin-coverage findings routed (F2 AM-10 thread-identity
-> unpinned — material; F1 P15 marker-latch leg weak). **G6 Tier-2 whole-tree FAIL: 5 deterministic net-new reds, single
-> root cause = `20261107_122648_create_source_gc_archive_tables.sql:92` trailing comment contains `;` → runner
-> statement-split shatters → `near "chat": syntax error` on EVERY fresh SQLite boot (PG unaffected via create_all —
-> why the PG/dev-DB legs never saw it); the file's own RUNTIME-SPLITTER NOTE promises "no semicolon in any comment" —
-> violated.** 1-line fix shape provided (remove the `;` / promote to full-line) + suggested corpus pin; scoped Tier-1
-> re-gate (5 ids + fresh-SQLite full-dir boot) runs when the lane lands the fix. Flake ledger: 3 (+1 unstable shape),
-> all pre-existing classes. Wedge incident `b7423ea5`: original A+D workers re-dispatched once each.
+> **Outcome (UPDATED by scoped re-gate @ `fadb2dde1`, same day): GO — blocking fix verified independently** (5/5 original reds
+> GREEN; fresh-SQLite full-dir boot clean in an independent harness, 115 applied, both archive tables; exact-defect replant
+> reproduces the boot failure AND the corpus REDs via its boot node; rider `205e08602` untouched below the fix). F1 CLOSED,
+> F2 4/5-closed; new pin-strength findings **F-A (scan shape-blind to spaced trailing `;` — boot node carries the teeth)**,
+> **F-B (full-line `;` negative space open — inert to the runner; docstring overclaims)**, **F-C (AM-10 S5 :429 site
+> unpinned)** — ROUTED to the pin owner, non-blocking. Original-run record below unchanged (NO-GO at `7b6fa2cdf`, G6 FAIL).
+> G1/G2/G3/G5/G7/G8 ALL PASS; G4 matrix as recorded; flake ledger 3 (+1 shape), pre-existing classes; wedge `b7423ea5`.
 
 | Pack | Invocation | Scope | Last run | Status |
 |---|---|---|---|---|
 | `source_gc_repository_unit` | `timeout 300 <venv>/python -m pytest tests/unit/repositories/test_source_gc_repository.py -q --timeout=120 -p no:cacheprovider` (fenced env, per-variable `POSTGRES_*` scrubs) | 33 nodes — predicate legs, AM-1 re-assert + `updated_at` WHERE-pin, AM-2 ordering, AM-3 archive + W3 latch, AM-9 windows, AM-11 lockstep, W2/W3/W4 teeth, P3/P4/P8/P9/P21 | 2026-11-08 @ `7b6fa2cdf` | **PASS 33/33** |
-| `source_gc_service_unit` | same shape, `tests/unit/services/test_sources_gc_service.py` | 10 nodes — sweep loop, counters truthfulness, P13 kill-switch, P14 first-tick, P15 log discipline + marker | 2026-11-08 @ `7b6fa2cdf` | **PASS 10/10** |
+| `source_gc_service_unit` | same shape, `tests/unit/services/test_sources_gc_service.py` | 13 nodes (re-gate `fadb2dde1`: 10 + AM-10 thread-identity ×2 + P15 marker-latch ×1) — sweep loop, counters, P13 kill-switch, P14 first-tick, P15 log discipline + marker + latch | 2026-11-08 @ `fadb2dde1` (re-gate) | **PASS 13/13** (50 combined w/ corpus; F-C: S5 :429 site unpinned — routed) |
+| `source_gc_migration_corpus` | `timeout 300 <venv>/python -m pytest tests/migration/test_migration_comment_semicolon.py -q --timeout=120 -p no:cacheprovider` | 4 nodes — trailing-comment scan (corpus-wide, zero exemptions), per-file stricter standard, DOWN posture, fresh-SQLite full-dir boot incl. source-gc archive tables | 2026-11-08 @ `fadb2dde1` | **PASS 4/4** (defect replant RED via the boot node; F-A scan shape-blindness + F-B full-line negative space — routed) |
 | `source_gc_lock_interleave_pg` | `timeout 300 <venv>/python -m pytest tests/postgres/test_source_gc_lock_interleave_pg.py -q --timeout=120 -p no:cacheprovider` (SERIAL — no xdist; throwaway PG with `PG_TEST_ALLOWED_DBS` exact-name; DB dropped after) | 5 nodes — P16 two-connection interleave + W1 `before_cursor_execute` FOR-UPDATE listener discriminator, P10 child-first FK order, W6 parent-first lock | 2026-11-08 @ `7b6fa2cdf` | **PASS 5/5** ×3 (+3/3 mutation legs RED→GREEN) |
 <!-- source-gc-functional-gate-end -->
 <!-- v0291-staged-verification-begin -->

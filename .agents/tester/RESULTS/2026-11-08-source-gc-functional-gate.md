@@ -1,5 +1,7 @@
 # source-gc FUNCTIONAL GATE (P6) — G1–G8
 
+> **READ THE RE-GATE SECTION — the operative verdict lives there.** The header below records the ORIGINAL gate run (NO-GO, G6 FAIL at `7b6fa2cdf`). The blocking fix landed at `fadb2dde1`; the scoped re-gate (executed 2026-11-08 by the same mutation-matrix worker, independently) flipped the verdict — see `# RE-GATE (scoped)` at the bottom.
+
 - **Commission:** source-gc (board wi-ed230eb4) — unused scheduler schedules + their source rows GC-removed.
 - **Lane:** `feature/source-gc` @ HEAD `7b6fa2cdf` (worktree `/home/nea/ensemble-src-wt-source-gc`, fenced dev `.env` → `ensemble_dev`).
 - **TRUE base for regression diffs:** `b21bbb87f` (v0.29.2 bump = `origin/latest`; merge-base verified). **Base correction:** the dispatch's `f0f3e1724` carries a wrong parenthetical ("our lane's code commits sit above it") — `daemon/services/sources_gc_service.py` is created at `a6b181ead` which sits BELOW the sync-merge, so `f0f3e1724` already contains the impl and would have HIDDEN impl-caused regressions. Both the G1(a) base leg and the G6 whole-tree base leg ran at `b21bbb87f`.
@@ -100,3 +102,32 @@ The runner strips full-line comments but leaves **trailing** comments, then spli
 
 ## Scope Decision
 Gate scoped to the lane's surface per blast radius (16-file lane diff, `daemon/api.py` touched → Tier-2 whole-tree for G6; all other legs scoped to the lane packs/fixtures). Full-suite beyond the house corpus was not warranted and not run; the default corpus IS the house whole-tree corpus (34.8k nodes/leg). Base correction (`b21bbb87f`, not `f0f3e1724`) applied to G1(a) and G6 — disclosed at the top of this artifact.
+
+---
+
+# RE-GATE (scoped) — @ `fadb2dde1` — **GO**
+
+**Executor:** worker `88ec1fda` (revived; same instance that ran the G4 matrix and filed F1/F2 — it re-verified its own findings). Scratch worktree `ensemble-src-wt-sgc-regate` @ `fadb2dde1`, porcelain-empty + removed; lane worktree read-only throughout; evidence `/tmp/sgc-regate-*`. Flake ledger: zero.
+
+| Leg | Verdict | Evidence |
+|---|---|---|
+| **R0** lineage | **PASS** | `fadb2dde1 → 205e08602 → 7b6fa2cdf`; fix commit touches exactly 4 files (implementation-notes, migration .sql, corpus pin, service pack), **zero `.agents/tester/` hits**; `git diff 205e08602 fadb2dde1 -- .agents/tester/` EMPTY (rider untouched); lane porcelain clean |
+| **R1** the 5 original red ids | **PASS — 5/5 GREEN** | one scoped run, 17.5s (board-runner full-dir, dup-prefix fresh boot, both legacy-ledger-shadow ids, prompt-version parity) |
+| **R2** fresh-SQLite FULL-DIR boot (independent harness, not the pack node) | **PASS** | `/tmp/sgc-regate-r2.py`: blocker `20260714_000001` pre-marked via `MigrationFile.parse` + `_persist_ledger_row`; real `run_pending_migrations()` over the full dir → **no MigrationError, 115 applied incl. `20261107_122648`, both archive tables + all 3 indexes + ledger row** |
+| **R3a-i** replant the EXACT original defect (spaced trailing `;` at :92) | **PASS — corpus RED + boot error reproduced** | pack RED via `TestFreshSqliteFullDirBoot::…source_gc_archive`; independent repro verbatim `Migration 20261107_122648 failed: (sqlite3.OperationalError) near "chat": syntax error`; restored GREEN. **But the two comment-SCAN nodes stayed GREEN under the exact defect → finding F-A** |
+| **R3a-ii** new full-line `;` offender | **finding F-B** | corpus stays GREEN — the docstring's "stricter no-;-in-any-comment per-file standard" is NOT implemented; full-line class excluded by CLASS exemption (rationale documented; inert to the runner — R3a-ii's boot node passing under the plant proves inertness) |
+| **R3b** AM-10 per-site | **4/5 discriminating — F2 PARTIALLY CLOSED (finding F-C)** | S1:308, S2:314, S3:339, S4:384 each RED their node individually; **S5:429 (post-probe) — NO node REDs** (pin composes `all_idents` across find+count+row; order destroyed, `[-1]` always S4's ident). 0/5 → 4/5 coverage |
+| **R3c** P15 latch | **PASS — F1 CLOSED** | exact gate mutation (latch dropped) → `TestFirstDestructiveMarkerLatch::test_marker_exactly_once_across_three_work_ticks` RED (3 markers/3 ticks); restored GREEN |
+| **R3d** baseline count | **50 = 46 unit + 4 corpus** | dev's "unit total 50" reproduces only with the migration corpus folded in (unit packs alone = 46); combined unmutated run 50 passed (40.9s) |
+| **R4** allowlist scoping | **PASS-with-notes** | trailing-class scan corpus-wide with ZERO exemptions (no blanket skip); the 353-offender set is a CLASS exclusion (full-line never scanned), not an enumerated allowlist — new full-line violations silently absorbed (F-B) |
+
+## Re-gate findings (pin-strength, ROUTED — non-blocking)
+
+- **F-A — scan shape-blind to the exact historical defect:** `_TRAILING_COMMENT_RE` matches only no-space trailing comments; the spaced `-- …; …` shape yields no segment → both scan nodes GREEN under the exact replant. **Family teeth hold end-to-end via the BOOT node** (replant REDs it, and any new migration with that shape shatters the boot the node performs) — so protection exists, attribution is just not at the scan layer. Latent specimen: `20260927_000001…sql:30` (spaced trailing `;`, runner-skipped file — never boots). Pin owner: widen the regex to spaced trailing comments.
+- **F-B — full-line negative space open:** a new full-line-comment `;` REDs nothing (proven by plant). Inert to the runner by construction, but the pin docstring overclaims ("stricter standard … new violations of either shape RED" — false for full-line). Pin owner: implement the claimed scan or fix the docstring.
+- **F-C — AM-10 S5 hole:** the post-probe `to_thread` site (:429) has no per-site discrimination (assertion-shape order bug in the pin). Pin owner: assert per-site idents, not a composed `[-1]`.
+- Census-method deltas disclosed (B: 351 lines/77 files vs dev 353/~100 — counting method; our file's 5 remaining full-line `;` are the DOWN block's mandatory `-- DROP …;` lines, required by the pin's third node). Dev-report discrepancies (50-count composition; "each to_thread removal REDs individually" false for S5; "either shape RED" false for full-line) are recorded here — the underlying fix and boot protection are real and independently verified.
+
+## SCOPED VERDICT: **GO** (with F-A/F-B/F-C routed to the pin owner)
+
+The blocking defect class is closed and independently proven dead: 5/5 original reds GREEN, fresh-SQLite full-dir boot clean in a harness that is not the lane's own, the exact defect replant reproduces the boot failure AND the corpus catches it (via the boot node), rider `205e08602` untouched below the fix. F-A/F-B/F-C are pin-strength gaps — they weaken WHERE the alarm sounds, not WHETHER the artifact works; none reintroduces the defect class or blocks the release. The giter may stage.
