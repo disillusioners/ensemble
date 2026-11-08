@@ -151,6 +151,64 @@ class TestAc22AudienceViews:
                 )
                 assert len(full) <= 2_900, f"{viewer}: {len(full)} chars"
 
+    def test_l1_budget_bound_deterministic_empty_query_admits_all_visible(
+        self,
+    ) -> None:
+        """L1 (gate FAIL fix, leader ruling option (a)): the §11
+        payload's operation∪both views admit ALL 8 visible rows under
+        the EMPTY query (the ari-seam default) — the fusion threshold
+        never gates a set that fits the budget. Per-view budgets hold.
+        L2 re-measure: the per-view char counts GROW past the old
+        5-entry 961c (by design — more entries admitted); the budget
+        property (≤8 entries, ≤2,900c incl. wrapper) is the
+        non-regressing invariant."""
+        for viewer in ("ari", "leader", "devops"):
+            result = admit_view(_payload_rows(), agent_id=viewer, now=NOW)
+            assert len(result.entries) == 8, (
+                f"{viewer}: admitted {len(result.entries)}, expected ALL 8"
+            )
+            assert result.omitted == 0
+            block = render_pok_block(result)
+            full = f"[SYSTEM CONTEXT: {POK_BLOCK_TITLE}]\n\n{block}"
+            assert len(full) <= 2_900
+        for viewer in ("developer", "worker"):
+            result = admit_view(_payload_rows(), agent_id=viewer, now=NOW)
+            assert len(result.entries) == 3
+            assert result.omitted == 0
+        # re-measured L2 per-view numbers (this run's truth, reported):
+        sizes = {}
+        for viewer in ("ari", "developer"):
+            r = admit_view(_payload_rows(), agent_id=viewer, now=NOW)
+            b = render_pok_block(r)
+            sizes[viewer] = len(b)
+        print(f"L1 re-measured per-view content chars: {sizes}")
+
+    def test_l1_deterministic_order_ignores_query_for_small_sets(
+        self,
+    ) -> None:
+        """L1: fusion scoring arbitrates ONLY overflow — a visible set
+        that fits the budget is ordered by the §4.4 deterministic key
+        regardless of the query; the artifact fact (never admitted
+        under any query before the fix) renders in the default view."""
+        result = admit_view(_payload_rows(), agent_id="ari", now=NOW)
+        slugs = {v.row.slug for v in result.entries}
+        assert "artifact-is-container-image" in slugs
+
+    def test_l1_deterministic_key_observed_before_declared_and_access_mass(
+        self,
+    ) -> None:
+        from datetime import timedelta
+
+        old = (NOW - timedelta(days=45)).isoformat()
+        rows = [
+            _row("solo-a", audience="both", body="declared", verified=old),
+            _row("solo-b", audience="both", body="observed", verified=old),
+        ]
+        rows[0].provenance = "declared"
+        rows[1].provenance = "observed"
+        result = admit_view(rows, agent_id="ari", now=NOW)
+        assert [v.row.slug for v in result.entries] == ["solo-b", "solo-a"]
+
     def test_ac2_project_isolation_other_project_gets_nothing(self) -> None:
         """AC2 leg 2: an agents-ensemble worker receives nothing — the
         rows belong to project p1; an admission over ANOTHER project's

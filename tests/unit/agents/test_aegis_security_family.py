@@ -119,10 +119,15 @@ PROMPT_SURFACE = ("soul.md", "rule.md", "workflow.md", "tools_note.md")
 # "all 47 agents"): every explicitly-allow-listed agent — the aegis family
 # included — carries "nest-report" as the LAST allow entry. The expectation
 # set moves; the EXACT-set discipline does not.
+# Re-pointed AGAIN at the POK B4 sweep (POK Phase 1 commit 16b4e70b2,
+# 2026-11-07; gate-FAIL L10 fix cycle 2026-11-08): the sweep inserted
+# "pok" BEFORE "nest-report" in every non-empty allow (mechanism
+# confirmed by the tester: the aegis meta.json one-line diff
+# "nest-report" -> "pok", "nest-report"). Provenance: agents/aegis/meta.json.
 AEGIS_ALLOW = frozenset({
     "instance", "bash", "proc", "filesystem", "time", "self", "help",
     "context", "shared_meta_kv", "knowledge", "mcp", "question",
-    "midflight", "dynamic-skill", "todo", "nest-report",
+    "midflight", "dynamic-skill", "todo", "pok", "nest-report",
 })
 AEGIS_DENY = frozenset({
     "write_file", "edit_file", "terminate_instance", "pause_instance",
@@ -137,10 +142,12 @@ AEGIS_DENY = frozenset({
 #                re-preferences canary survives the campaign (self-hypnosis).
 #                Removed MECHANICALLY, not doctrinally.
 ALLOW_BY_AGENT = {
-    "hacker":  frozenset({"bash", "proc", "filesystem", "time", "help", "self", "nest-report"}),
-    "cracker": frozenset({"bash", "proc", "filesystem", "time", "help", "self", "nest-report"}),
-    "sweeper": frozenset({"bash", "proc", "filesystem", "time", "help", "self", "nest-report"}),
-    "canary":  frozenset({"bash", "filesystem", "time", "help"}),
+    # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): trio =
+    # insert-before-nest-report; canary = append-end (no nest-report).
+    "hacker":  frozenset({"bash", "proc", "filesystem", "time", "help", "self", "pok", "nest-report"}),
+    "cracker": frozenset({"bash", "proc", "filesystem", "time", "help", "self", "pok", "nest-report"}),
+    "sweeper": frozenset({"bash", "proc", "filesystem", "time", "help", "self", "pok", "nest-report"}),
+    "canary":  frozenset({"bash", "filesystem", "time", "help", "pok"}),
 }
 
 # ---- C4b: the cardinal pin becomes PER-AGENT (was `== 7` for all).
@@ -4073,7 +4080,10 @@ _CANARY_REGISTRY_PROBE = (
 )
 
 CANARY_DIR = AGENTS_DIR / "canary"
-CANARY_ALLOW = frozenset({"bash", "filesystem", "time", "help"})
+# "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): canary arrived
+# post-sweep with no nest-report; its grant is the append-end
+# exception (agents/canary/meta.json).
+CANARY_ALLOW = frozenset({"bash", "filesystem", "time", "help", "pok"})
 CANARY_WORKFLOW = (CANARY_DIR / "workflow.md").read_text(encoding="utf-8")
 CANARY_SOUL = (CANARY_DIR / "soul.md").read_text(encoding="utf-8")
 CANARY_TOOLS_NOTE = (CANARY_DIR / "tools_note.md").read_text(encoding="utf-8")
@@ -4109,9 +4119,10 @@ class TestCanaryMetaPins:
         expected = {
             # [2026-11-06 drift-merge] trio absorbs the nest-report grant (nest
             # ceremony, leader ruling "all 47 agents"); canary NOT granted.
-            "hacker": {"bash", "proc", "filesystem", "time", "help", "self", "nest-report"},
-            "cracker": {"bash", "proc", "filesystem", "time", "help", "self", "nest-report"},
-            "sweeper": {"bash", "proc", "filesystem", "time", "help", "self", "nest-report"},
+            # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2).
+            "hacker": {"bash", "proc", "filesystem", "time", "help", "self", "pok", "nest-report"},
+            "cracker": {"bash", "proc", "filesystem", "time", "help", "self", "pok", "nest-report"},
+            "sweeper": {"bash", "proc", "filesystem", "time", "help", "self", "pok", "nest-report"},
             "canary": CANARY_ALLOW,
         }
         for agent, want in expected.items():

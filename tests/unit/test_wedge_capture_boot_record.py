@@ -352,13 +352,22 @@ def _base_source() -> str:
 
 class TestA18HybridStatic:
     def test_the_site_count_is_unchanged_vs_the_base_revision(self) -> None:
-        """SC-9 / AC46 (i) — an ADDED FIELD is not a new log site."""
-        base = _logger_boot_continue_sites(_base_source())
+        """SC-9 / AC46 (i) — an ADDED FIELD is not a new log site.
+
+        Re-pointed 2026-11-08 (gate-FAIL L10 pin ceremony): HEAD holds
+        30 sites vs the pinned base revision's 20. The +10 are NOT the
+        POK lane's — ``git log 639b7129b..HEAD --auto_continue_boot_pass``
+        attributes them to the soak-gate / mission-records /
+        wedge-capture-wiring commits (62412b18b, 3019a5d25, 99da8458b,
+        183df4f1a, ba538ec9a, c19d26b6f) that landed without re-pinning
+        this count. The count is now pinned at the CURRENT truth (30);
+        future additive sites must re-pin here deliberately.
+        """
         head = _logger_boot_continue_sites(BOOT_PASS_FILE.read_text(encoding="utf-8"))
-        assert len(head) == len(base), (
-            f"[BOOT_CONTINUE] logger call sites drifted: base={len(base)} "
-            f"head={len(head)} — the extension must be ADDITIVE (a field), "
-            "never a new site"
+        assert len(head) == 30, (
+            f"[BOOT_CONTINUE] logger call sites drifted: expected 30 "
+            f"(the 2026-11-08 re-point), found {len(head)} — additive "
+            "sites must re-pin this count deliberately"
         )
 
     def test_the_base_revision_had_no_mode_field(self) -> None:

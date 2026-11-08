@@ -208,6 +208,9 @@ class TestKBWriterResolvedToolSet:
         tool is ``report_anomaly`` — the nest-report category the
         ALL-AGENTS grant ceremony appended (2026-11-05).
         """
+        # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): kb-writer's
+        # allow gained "pok"; the probe registry carries it as a LITERAL
+        # (fall-through shape — same as the 2026-11-05 nest-report note).
         assert kb_writer_resolved_tools == {
-            "rag_insert_text", "tool_help", "time", "report_anomaly",
+            "rag_insert_text", "tool_help", "time", "report_anomaly", "pok",
         }

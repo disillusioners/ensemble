@@ -98,6 +98,27 @@ def _enforce_mode(monkeypatch):
     monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_MODE", "enforce")
     monkeypatch.setenv("WATCHOVER_ENABLED", "false")
 
+@pytest.fixture(autouse=True)
+def _fused_judge_off(monkeypatch):
+    """Q2 fence (council fix cycle, 2026-11-08): the fused judge's real
+    LLM streaming call (12s+ per verdict, 180s read bound) outruns the
+    30s pytest-timeout whenever the endpoint stalls, and the
+    thread-method watchdog then ``os._exit(1)``s the ENTIRE pytest
+    process (the L10 "wedge" family — base-proven NOT lane-introduced;
+    the same death shape reproduces at TRUE BASE 6b571771d). These
+    tests pin nudge/escalation semantics, not judge verdicts, so the
+    judge is fenced OFF here via the sanctioned kill-switch + the
+    Pattern-C resolver reset (restart-recoverable in production, none
+    of this gate's assertions read judge fields)."""
+    from daemon.services.attestation_judge_resolver import (
+        reset_llm_judge_resolver_for_tests,
+    )
+
+    monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED", "false")
+    reset_llm_judge_resolver_for_tests()
+    yield
+    reset_llm_judge_resolver_for_tests()
+
 
 def _seed_instance(engine, instance_id, parent_id, status):
     """Insert an Instance row directly (no InstanceHierarchy table needed).

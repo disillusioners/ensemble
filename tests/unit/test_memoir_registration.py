@@ -355,7 +355,10 @@ class TestTheAriOnlyAllowList:
             "the board trailing pin must end with prompt-reload "
             "(the prompt-reload lane, 2026-11-06, appended after memoir)"
         )
-        assert '"notify-user", "nest-report", "memoir"' in source
+        # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): the board
+        # pin's ari literal gained "pok" between "notify-user" and
+        # "nest-report" — the adjacency this pin matches moved with it.
+        assert '"notify-user", "pok", "nest-report", "memoir"' in source
 
 
 class TestTheCeremonySelfVerification:

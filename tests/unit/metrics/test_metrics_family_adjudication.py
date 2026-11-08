@@ -440,7 +440,10 @@ class TestTheBudget:
         (``{aget, other}``)
         did NOT move, and the op-enum pins in this file still hold.
         """
-        assert cm.VOCABULARY_VERSION == 7
+        # "pok" re-point 2026-11-08 (POK Phase 1 F-1 ceremony, commit
+        # 16b4e70b2): the sanctioned 7 -> 8 bump; this file's op-enum
+        # annex pins are untouched.
+        assert cm.VOCABULARY_VERSION == 8
 
     def test_each_family_stays_inside_its_declared_band(self) -> None:
         specs = registry.registered_families()

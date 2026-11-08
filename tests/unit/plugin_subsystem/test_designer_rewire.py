@@ -316,9 +316,14 @@ class TestCriticToolsResolveNit2:
     can never pass because the `image` category resolves to FOUR tools
     incl. image_save — the explicit deny strips it."""
 
+    # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): critic's
+    # allow gained "pok" (insert-before-nest-report). The probe
+    # registry carries the pok category as a LITERAL (same fall-through
+    # shape the 2026-11-05 nest-report note describes for unscanned
+    # factories) — re-pointed to the ACTUAL resolved truth.
     EXPECTED_RESOLVED = {
         "read_file", "image_get", "image_list", "explain_image",
-        "compare_images", "report_anomaly",
+        "compare_images", "report_anomaly", "pok",
     }
 
     def test_critic_tools_resolve(self):

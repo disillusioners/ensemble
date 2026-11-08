@@ -179,6 +179,26 @@ def stale_days(row: ProjectOperatingKnowledge, *, now: datetime | None = None) -
     return None
 
 
+def _deterministic_rank(
+    rows: list[ProjectOperatingKnowledge], *, now: datetime | None = None
+) -> list[ProjectOperatingKnowledge]:
+    """The §4.4 deterministic admission ordering: decay ranks down
+    (fresh first, stale after — AC5, never drops); observed provenance
+    ranks before declared; then access mass (access_count, then
+    verify_count, both DESC); then slug ASC for total determinism.
+    Pure + stable — the same rows always produce the same order."""
+    def _key(row: ProjectOperatingKnowledge):
+        return (
+            1 if stale_days(row, now=now) is not None else 0,
+            0 if row.provenance == "observed" else 1,
+            -(row.access_count or 0),
+            -(row.verify_count or 0),
+            row.slug,
+        )
+
+    return sorted(rows, key=_key)
+
+
 def effective_audience_agents(row: ProjectOperatingKnowledge) -> set[str] | None:
     """The effective audience set for ACTIVE injection.
 
@@ -429,30 +449,49 @@ def admit_view(
             consumed_ids.add(crow.id)
             curated_admitted += 1
 
-        # 4. RANKED ACTIVES: non-pinned, non-band candidates in
-        #    selector-fusion rank; the decay ranks down WITHIN the
-        #    ranked list (stable partition, order preserved within
-        #    each side — AC5).
+        # 4. RANKED ACTIVES — BUDGET-BOUND DETERMINISTIC (leader
+        #    ruling 2026-11-08, option (a); gate FAIL L1 fix). The
+        #    design's admission text (arch §4.5: "pinned tier first
+        #    ... -> ranked actives (disputed excluded) -> F5 rider";
+        #    §4.4: "ranking = decay x observed x access" — a
+        #    DETERMINISTIC formula) does NOT mandate a fusion
+        #    threshold here: the fusion selector is the RETRIEVAL
+        #    mechanism (§4.6 / readiness constraint 6, pok_query),
+        #    and §4.5's own worst-case arithmetic presumes the block
+        #    FILLS to 8 entries. Therefore: order the ranked pool by
+        #    the §4.4 deterministic key (decay rank-down, then
+        #    observed-before-declared, then access/verify mass, then
+        #    slug for total determinism) and FILL TO BUDGET. The
+        #    fusion rank_fn arbitrates ONLY when the visible set
+        #    EXCEEDS the entry budget (overflow/tie-break) — it never
+        #    gates a set that fits. (AC5: decay still ranks down,
+        #    never drops.)
         ranked_pool = [r for r in candidates if r.id not in consumed_ids]
-        if rank_fn is not None:
+        overflow = len(ranked_pool) + used_rows > POK_BLOCK_MAX_ENTRIES
+        fusion_rank: list[ProjectOperatingKnowledge] | None = None
+        if overflow and rank_fn is not None:
             try:
-                ranked = list(
+                fusion_rank = list(
                     rank_fn(ranked_pool, query, query_embedding, embeddings_map or {})
                 )
             except Exception as exc:  # noqa: BLE001 — §4.9 never-raise
                 logger.warning(
                     "[POK:Degraded] rank_fn failed (%s) — falling back "
-                    "to slug order",
+                    "to the deterministic order",
                     exc,
                 )
-                ranked = sorted(ranked_pool, key=lambda r: r.slug)
-        else:
-            ranked = sorted(ranked_pool, key=lambda r: r.slug)
-        fresh: list[ProjectOperatingKnowledge] = []
-        stale_pool: list[ProjectOperatingKnowledge] = []
-        for row in ranked:
-            (stale_pool if stale_days(row, now=now) is not None else fresh).append(row)
-        ranked = fresh + stale_pool
+                fusion_rank = None
+        ranked = _deterministic_rank(ranked_pool, now=now)
+        if fusion_rank is not None:
+            # deterministic order, fusion-reordered WITHIN the
+            # equivalent decay class (the fusion list's relative order
+            # rides on top; the stale rank-down partition still holds)
+            fusion_pos = {r.id: i for i, r in enumerate(fusion_rank)}
+            fresh = [r for r in ranked if stale_days(r, now=now) is None]
+            stale = [r for r in ranked if stale_days(r, now=now) is not None]
+            fresh.sort(key=lambda r: fusion_pos.get(r.id, len(fusion_rank)))
+            stale.sort(key=lambda r: fusion_pos.get(r.id, len(fusion_rank)))
+            ranked = fresh + stale
 
         # 5. F5 ADMISSION over UNITS: each ranked row expands to its
         #    unit (a family's FIRST-ranked member carries the whole

@@ -181,11 +181,15 @@ class TestTheAriOnlyAllowList:
         )
         allow = meta.get("tools", {}).get("allow", []) or []
         assert CATEGORY in allow
+        # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): prompt-reload
+        # REMAINS the LAST entry (the sweep inserts BEFORE nest-report,
+        # mid-array — the trailing discipline is untouched); the array
+        # length grew 36 -> 37.
         assert allow[-1] == CATEGORY, (
             "the prompt-reload entry must be the LAST entry of ari's allow "
             "array (the trailing-entry discipline)"
         )
-        assert len(allow) == 36
+        assert len(allow) == 37
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []

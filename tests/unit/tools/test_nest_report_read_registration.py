@@ -269,9 +269,15 @@ class TestTheGrants:
         mis-ordered array is caught mechanically) is unchanged: the order
         is now pinned END-TO-END.
         """
+        # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): the sweep
+        # inserts "pok" BEFORE "nest-report", so the end-to-end order is
+        # now [..., "nest-report-read", "pok", "nest-report"] for the
+        # three phase-3 holders. The intent (mis-ordered arrays caught
+        # mechanically) is unchanged.
         for agent in ("maintenancer", "devops", "wanderer"):
             allow = _agent_meta(agent)["tools"]["allow"]
-            assert allow[-2] == CATEGORY, (agent, allow[-3:])
+            assert allow[-3] == CATEGORY, (agent, allow[-3:])
+            assert allow[-2] == "pok", (agent, allow[-3:])
             assert allow[-1] == "nest-report", (agent, allow[-3:])
 
 
