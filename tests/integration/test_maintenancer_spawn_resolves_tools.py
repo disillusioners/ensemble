@@ -176,6 +176,10 @@ class TestRealMaintenancerMetaShape:
             # still ahead (phase 5 appends the WRITE category
             # "nest-report" AFTER it).
             "nest-report-read",
+            # "pok" (POK B4 sweep 16b4e70b2, re-point 2026-11-08 — the
+            # Q3 net-new pair): the sweep inserts BEFORE "nest-report"
+            # (mid-array), so "nest-report" stays the LAST element.
+            "pok",
             # nest-report (2026-11-05, nest-anomaly-report lane phase 5):
             # the WRITE anomaly-store category — appended AFTER the read
             # category by the grant ceremony, so it is the array's LAST

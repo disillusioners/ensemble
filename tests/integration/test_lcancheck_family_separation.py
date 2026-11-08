@@ -171,12 +171,17 @@ _WITNESS_DOCSTRING_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # Confirmation of the _stable_id_for error message — the kind is now
 # rejected. The five surviving kinds are project, shared_meta_kv,
 # attestation_nudge, attestation_final_report_reminder, memoir.
+# "pok" re-point 2026-11-08 (POK Phase 1, commit 52dab516c + the Q3
+# net-new pair): the pok block's stable id ``pok:{project_id}`` is the
+# SIXTH supported kind (the _stable_id_for table grew; the family-
+# separation contract now covers six kinds).
 _STABLE_ID_SUPPORTED_KINDS: tuple[str, ...] = (
     "project",
     "shared_meta_kv",
     "attestation_nudge",
     "attestation_final_report_reminder",
     "memoir",
+    "pok",
 )
 
 
