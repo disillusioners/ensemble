@@ -1,3 +1,24 @@
+<!-- v0293-staged-verification-begin -->
+## v0.29.3 STAGED VERIFICATION registration (2026-11-08; staged tree `8730bfb8a…`; binary `4de6200f…b086` 4-way independently recomputed; tag `v0.29.3` = `2e24f5ec3` PUSHED, peels local+origin; origin/latest == staged tree; RESULTS: 2026-11-08-v0293-staged-verification.md)
+
+> **Outcome: STAGED-VERIFIED PASS — CEREMONY-READY.** S1 6/6 (4-way sha; sidecar git_head=8730bfb8a dirty=false; tag
+> peel ×2; migration census source 123 / embedded 123 with `20261107_122648` present-staged / absent-live v0.29.1
+> (122) → delta exactly +1; payload source-less; PROMPT-BASELINE 181 ×2 trees) · S2 isolated frozen-binary boot 12/12
+> (copy-to-scratch, SELF_ENV=sandbox + SWEEP=0 pinned, env -i allowlist, throwaway PG created→dropped, banner v0.29.3,
+> livez/readyz 200, **[SourcesGC] started at shipped defaults**, archive tables + 3 indexes on scratch PG, empty-DB
+> first tick no-op SILENT §8.5, SIGTERM rc=143, state.json fence `528af13c…` PRE==MID==POST) · S3 one-way bytecode proof
+> (service module + symbols, 5 knob fields, AM-5 strings, W7 None-guard marshal-sha/instruction-flow + source hunk,
+> positive control non-vacuous) · S4 ceremony inputs (promote provably not executed; scripts-pin 84df6b55c ⊇ floor
+> 2147c0298 ARM-CLEAN; retention 8 dirs machinery-owned; v0.29.2 tag peels → b21bbb87f ⊆ 8730bfb8a — one ceremony
+> carries both lanes) · S5 six disclosures, none blocking. Promote command + lineage in the RESULTS artifact.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `v0293_sv_integrity` | read-only: 4-way sha re-hash, sidecar parse, tag peel local+origin, source+embedded migration census (CArchiveReader py3.14, both binaries), payload source-less probes, PROMPT-BASELINE --check ×2 trees | S1.1–S1.6 | 2026-11-08 @ `8730bfb8a` | **PASS 6/6** |
+| `v0293_sv_smoke_frozen` | one-shot: scratch boot of the COPIED frozen binary (`env -i` allowlist, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned, `ENSEMBLE_SELF_ENV=sandbox`, throwaway PG `ensemble_smoke_sgc_sv` dropped after, scratch port 10093) + 12 assertions + state.json PRE==MID==POST fence | S2 | 2026-11-08 | **PASS 12/12** |
+| `v0293_sv_oneway` | bytecode-level (py3.14 reader): staged-vs-live module/symbol/const census + W7 instruction-flow discriminator + positive control | S3 | 2026-11-08 | **PASS** |
+| `v0293_sv_ceremony` | read-only: current symlink, state.json promote fields, scripts-pin ancestry (ARM-CLEAN), retention census, v0.29.2 ancestor proof, one disclosed livez GET | S4 | 2026-11-08 | **PASS** |
+<!-- v0293-staged-verification-end -->
 <!-- source-gc-functional-gate-begin -->
 ## Commission source-gc — FUNCTIONAL GATE (P6) registration (2026-11-08; gate @ HEAD `7b6fa2cdf`, TRUE base `b21bbb87f` (v0.29.2 = origin/latest — dispatcher's `f0f3e1724` already contains the impl, corrected); evidence `/tmp/sgc-g135-re/` · `/tmp/sgc-g4/` · `/tmp/sgc-g78/` · `/tmp/sgc-g6/`; RESULTS: 2026-11-08-source-gc-functional-gate.md; LESSONS: 2026-11-08-source-gc-migration-comment-semicolon.md)
 
