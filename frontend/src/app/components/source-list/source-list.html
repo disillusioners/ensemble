@@ -25,6 +25,18 @@
     </div>
   </div>
 
+  <!-- Terminal-row visibility toggle ("Show completed & cancelled") -->
+  <div class="terminal-toggle-bar">
+    <mat-checkbox
+      [checked]="showTerminal()"
+      (change)="onShowTerminalChange($event.checked)">
+      Show completed &amp; cancelled
+    </mat-checkbox>
+    @if (!showTerminal() && hiddenTerminalCount() > 0) {
+      <span class="hidden-terminal-count">{{ hiddenTerminalCount() }} completed/cancelled hidden</span>
+    }
+  </div>
+
   <!-- Loading -->
   @if (isLoading() && sources().length === 0) {
     <div class="loading-container">
@@ -53,10 +65,10 @@
     </div>
   }
 
-  <!-- Sources Grid -->
-  @if (sources().length > 0) {
+  <!-- Sources Grid (visible subset — active rows by default) -->
+  @if (visibleSources().length > 0) {
     <div class="sources-grid">
-      @for (source of sources(); track source.source_id) {
+      @for (source of visibleSources(); track source.source_id) {
         <app-source-card
           [source]="source"
           (start)="onStartSource($event)"

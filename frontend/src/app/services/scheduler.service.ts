@@ -30,20 +30,29 @@ export class SchedulerService {
   // Signals for state
   readonly schedules = signal<Schedule[]>([]);
   readonly executions = signal<ScheduleExecution[]>([]);
-  readonly loading = signal(false);
   readonly error = signal<string | null>(null);
 
   /**
    * GET /api/schedules
+   *
+   * `includeCancelled` appends the ALREADY-EXISTING backend read param
+   * ``?include_cancelled=true`` (daemon/routers/schedules.py —
+   * "cancelled schedules are HIDDEN by default") ONLY when true: the
+   * toggle-OFF fetch stays a bare request with the API's default
+   * behavior unchanged. ``false`` is never sent over the wire.
    */
-  listSchedules(): Observable<Schedule[]> {
-    return this.http.get<ScheduleListResponse>(this.API_BASE).pipe(
+  listSchedules(includeCancelled?: boolean): Observable<Schedule[]> {
+    let params = new HttpParams();
+    if (includeCancelled === true) {
+      params = params.set('include_cancelled', 'true');
+    }
+    // NOTE: errors deliberately PROPAGATE (no catchError swallow). The
+    // single production caller (SchedulesComponent.loadSchedules) owns
+    // a token-guarded error branch; swallowing here would convert a
+    // failure into an empty list and keep that branch dead.
+    return this.http.get<ScheduleListResponse>(this.API_BASE, { params }).pipe(
       tap((response) => this.schedules.set(response.schedules)),
-      map((response) => response.schedules),
-      catchError((err) => {
-        this.error.set(err.message || 'Failed to fetch schedules');
-        return of([] as Schedule[]);
-      })
+      map((response) => response.schedules)
     );
   }
 
@@ -186,17 +195,6 @@ export class SchedulerService {
         throw err;
       })
     );
-  }
-
-  /**
-   * Helper to refresh schedules list
-   */
-  refreshSchedules(): void {
-    this.loading.set(true);
-    this.listSchedules().subscribe({
-      next: () => this.loading.set(false),
-      error: () => this.loading.set(false),
-    });
   }
 
   /**

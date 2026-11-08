@@ -1,4 +1,4 @@
-import { Component, signal, inject, OnInit, DestroyRef } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, DestroyRef } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
@@ -7,10 +7,16 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
+import { MatCheckboxModule } from '@angular/material/checkbox';
 import { ApiService } from '../../services/api.service';
 import { SourceCardComponent } from '../source-card/source-card.component';
 import { AddSourceModalComponent } from '../add-source-modal/add-source-modal.component';
 import { EditSourceModalComponent } from '../edit-source-modal/edit-source-modal.component';
+import {
+  readShowTerminalPreference,
+  splitByTerminalVisibility,
+  writeShowTerminalPreference,
+} from '../../models/terminal-visibility.model';
 import type { Source, SourceCreate, SourceUpdate } from '../../models';
 
 @Component({
@@ -23,6 +29,7 @@ import type { Source, SourceCreate, SourceUpdate } from '../../models';
     MatProgressSpinnerModule,
     MatIconModule,
     MatButtonModule,
+    MatCheckboxModule,
     SourceCardComponent
   ],
   templateUrl: './source-list.html',
@@ -37,6 +44,30 @@ export class SourceListComponent implements OnInit {
 
   readonly sources = signal<Source[]>([]);
   readonly isLoading = signal(false);
+
+  // ── Terminal-row visibility ("Show completed & cancelled") ──────────
+  // Default-ACTIVE view: terminal rows (stopped/cancelled) are hidden
+  // unless the user opts in. EAGER initialization: the persisted
+  // preference is read at field-init (no restore pass, no guard
+  // flag, no one-render flash — the very first render already reflects
+  // the stored choice). Shared localStorage key with /schedules
+  // (terminal-visibility.model).
+  readonly showTerminal = signal(readShowTerminalPreference(localStorage));
+
+  // ONE pass over the UNFILTERED list: the visible subset and the
+  // hidden-terminal count are derived together, so the
+  // "N completed/cancelled hidden" line is always truthful for ALL
+  // rows, never just the rendered subset.
+  private readonly terminalSplit = computed(() =>
+    splitByTerminalVisibility(this.sources(), this.showTerminal()),
+  );
+  readonly visibleSources = computed<Source[]>(() => this.terminalSplit().visible);
+  readonly hiddenTerminalCount = computed<number>(() => this.terminalSplit().hiddenTerminal);
+
+  protected onShowTerminalChange(checked: boolean): void {
+    this.showTerminal.set(checked);
+    writeShowTerminalPreference(localStorage, checked);
+  }
 
   ngOnInit(): void {
     console.log('SourceListComponent ngOnInit called');

@@ -62,9 +62,16 @@
         (ngModelChange)="onTypeFilterChange($event)">
       </app-searchable-select>
 
+      <mat-checkbox
+        class="terminal-toggle-checkbox"
+        [checked]="showTerminal()"
+        (change)="onShowTerminalChange($event.checked)">
+        Show completed &amp; cancelled
+      </mat-checkbox>
+
       @if (hasActiveFilters()) {
-        <button 
-          mat-button 
+        <button
+          mat-button
           (click)="onClearFilters()"
           class="clear-filters-btn">
           <mat-icon>clear</mat-icon>
@@ -73,6 +80,13 @@
       }
     </div>
   </div>
+
+  <!-- Honest hidden-count line: the view never looks empty-by-accident -->
+  @if (!showTerminal() && hiddenTerminalCount() > 0) {
+    <div class="hidden-terminal-line">
+      {{ hiddenTerminalCount() }} completed/cancelled hidden
+    </div>
+  }
 
   <!-- Main Content with Drawer -->
   <mat-drawer-container class="schedules-drawer-container" [hasBackdrop]="true">
@@ -128,10 +142,16 @@
       @if (isFilteredEmpty()) {
         <div class="empty-container">
           <mat-icon class="empty-icon">filter_list_off</mat-icon>
-          <h3>No schedules match your filters</h3>
-          <p>Try adjusting your filters or 
-            <button mat-button color="primary" (click)="onClearFilters()">clear all filters</button>
-          </p>
+          @if (isTerminalStageEmpty()) {
+            <!-- The terminal stage hid the matching rows: clearing filters
+                 cannot reveal them, so point at the toggle instead. -->
+            <h3>Nothing visible for these filters — toggle on "Show completed &amp; cancelled" to reveal hidden rows</h3>
+          } @else {
+            <h3>No schedules match your filters</h3>
+            <p>Try adjusting your filters or 
+              <button mat-button color="primary" (click)="onClearFilters()">clear all filters</button>
+            </p>
+          }
         </div>
       }
 

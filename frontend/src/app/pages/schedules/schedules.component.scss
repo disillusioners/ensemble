@@ -143,7 +143,19 @@
         color: var(--text-color, #e0e0e0);
       }
     }
+
+    .terminal-toggle-checkbox {
+      font-size: 0.875rem;
+      color: var(--text-secondary, #9e9e9e);
+    }
   }
+}
+
+// Honest hidden-count line under the filter bar
+.hidden-terminal-line {
+  font-size: 0.8125rem;
+  color: var(--text-secondary, #9e9e9e);
+  margin: 0 0 0.75rem 0;
 }
 
 // Drawer Container

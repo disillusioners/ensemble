@@ -1,4 +1,4 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
@@ -9,6 +9,7 @@ import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatCheckboxModule } from '@angular/material/checkbox';
 import { SchedulerService } from '../../services/scheduler.service';
 import { ApiService } from '../../services/api.service';
 import { ScheduleCardComponent } from '../../components/schedule-card/schedule-card.component';
@@ -16,6 +17,11 @@ import { ScheduleDetailDrawerComponent } from '../../components/schedule-detail-
 import { ScheduleCreateDialogComponent, ScheduleCreateDialogResult } from '../../components/schedule-create-dialog/schedule-create-dialog.component';
 import { SearchableSelectComponent, SearchableSelectOption } from '../../components';
 import { Schedule, ScheduleStatus, ScheduleType } from '../../models/scheduler.model';
+import {
+  readShowTerminalPreference,
+  splitByTerminalVisibility,
+  writeShowTerminalPreference,
+} from '../../models/terminal-visibility.model';
 import { Agent } from '../../models';
 
 type ActionType = 'start' | 'stop';
@@ -34,6 +40,7 @@ type ActionType = 'start' | 'stop';
     MatSnackBarModule,
     MatDialogModule,
     MatTooltipModule,
+    MatCheckboxModule,
     ScheduleCardComponent,
     ScheduleDetailDrawerComponent,
     SearchableSelectComponent
@@ -59,20 +66,50 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   readonly statusFilter = signal<ScheduleStatus | 'all'>('all');
   readonly typeFilter = signal<ScheduleType | 'all'>('all');
 
+  // ── Terminal-row visibility ("Show completed & cancelled") ──────────
+  // Default-ACTIVE view: terminal schedules (stopped/cancelled one-shot
+  // alarms) are hidden unless the user opts in. EAGER initialization:
+  // the persisted preference is read at field-init (no restore effect,
+  // no guard flag, no one-render flash — the very first render already
+  // reflects the stored choice). Same shared localStorage key as the
+  // /sources surface (terminal-visibility.model).
+  readonly showTerminal = signal(readShowTerminalPreference(localStorage));
+
+  constructor() {
+    // The schedules fetch REACTS to the toggle (include_cancelled
+    // gating): every flip re-issues the request — ON →
+    // ``?include_cancelled=true``, OFF → bare default request. The
+    // first effect run IS the initial load, and eager init above means
+    // that first request already respects the stored preference.
+    effect(() => {
+      this.loadSchedules();
+    });
+  }
+
+  // ONE pass over the UNFILTERED list drives both the hidden count and
+  // the active-only subset; the stats badges below keep reading
+  // `schedules()` directly, so counts stay truthful for ALL rows.
+  private readonly terminalSplit = computed(() =>
+    splitByTerminalVisibility(this.schedules(), this.showTerminal()),
+  );
+  readonly hiddenTerminalCount = computed<number>(() => this.terminalSplit().hiddenTerminal);
+
   // Computed values
   readonly filteredSchedules = computed((): Schedule[] => {
-    let filtered: Schedule[] = this.schedules();
-    
+    // Stage 1 — terminal visibility (BEFORE the chip/type filters, so
+    // the default active-only view applies unless the user opted in).
+    let filtered: Schedule[] = this.terminalSplit().visible;
+
     const statusVal = this.statusFilter();
     if (statusVal !== 'all') {
       filtered = filtered.filter((s: Schedule) => s.status === statusVal);
     }
-    
+
     const typeVal = this.typeFilter();
     if (typeVal !== 'all') {
       filtered = filtered.filter((s: Schedule) => s.config.type === typeVal);
     }
-    
+
     return filtered;
   });
 
@@ -80,9 +117,31 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   readonly isEmptyState = computed((): boolean => 
     !this.loading() && this.schedules().length === 0 && !this.error()
   );
-  readonly isFilteredEmpty = computed((): boolean => 
+  readonly isFilteredEmpty = computed((): boolean =>
     !this.loading() && this.filteredSchedules().length === 0 && this.schedules().length > 0
   );
+
+  /**
+   * Emptiness caused by the TERMINAL stage: the filtered view is empty
+   * ONLY because the active-only terminal filter hid the rows that
+   * would otherwise match the current chip/type filters (toggle OFF,
+   * but matching rows EXIST in the full list). In exactly that case
+   * "clear all filters" cannot reveal them — only the toggle can — so
+   * the empty copy points at the toggle instead. A genuine filter miss
+   * (no row matches even before the terminal stage) keeps the original
+   * copy.
+   */
+  readonly isTerminalStageEmpty = computed((): boolean => {
+    if (this.showTerminal()) return false;
+    if (this.filteredSchedules().length > 0) return false;
+    const statusVal = this.statusFilter();
+    const typeVal = this.typeFilter();
+    return this.schedules().some((s: Schedule) => {
+      if (statusVal !== 'all' && s.status !== statusVal) return false;
+      if (typeVal !== 'all' && s.config.type !== typeVal) return false;
+      return true;
+    });
+  });
 
   // Computed stats
   readonly activeCount = computed((): number => 
@@ -119,7 +178,9 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   );
 
   ngOnInit(): void {
-    this.loadSchedules();
+    // The schedule list is loaded by the constructor effect (its first
+    // run IS the initial load — keeps the fetch single-sourced and
+    // reactive to the toggle). Agents are a plain one-shot load.
     this.loadAgents();
   }
 
@@ -127,15 +188,53 @@ export class SchedulesComponent implements OnInit, OnDestroy {
     this.schedulerService.clearError();
   }
 
+  // ── Response supersede (flip-race guard) ─────────────────────────────
+  // A fast ON→OFF flip re-issues the fetch while the previous request is
+  // still in flight; unguarded, the stale ``include_cancelled`` response
+  // can land LAST and transiently overcount the "N hidden" line. The
+  // token below is captured at subscribe-time and EVERY delivery is
+  // checked before any state write. The shared list itself is written
+  // by the service's tap (upstream of this handler), so a superseded
+  // delivery that already landed is synchronously re-asserted back to
+  // the winning page within the same emission pass — signal/effect
+  // observers only ever see the final value.
+  private loadToken = 0;
+  private acceptedRows: Schedule[] | null = null;
+
   private loadSchedules(): void {
     this.loading.set(true);
     this.error.set(null);
 
-    this.schedulerService.listSchedules().subscribe({
-      next: () => {
+    // include_cancelled gating: the toggle decides whether the fetch
+    // asks the backend for cancelled rows (ON → param, OFF → bare
+    // request). Fetched rows (cancelled included when present) flow
+    // through the existing client-side terminal filter below, so the
+    // visible subset, hidden-count line and stats stay truthful.
+    const token = ++this.loadToken;
+    // Baseline seed: every request re-anchors the re-assert snapshot to
+    // the last-known rows, so ANY stale drop — including one landing
+    // before any acceptance, or around an error — restores last-known
+    // state instead of leaving a superseded page stuck in the shared
+    // list (the service tap writes it before the token check runs).
+    // Read OUTSIDE the reactive context (loadSchedules runs inside the
+    // constructor effect): tracking this read would make the effect
+    // depend on the shared schedules signal and re-fetch on every
+    // accepted page.
+    this.acceptedRows ??= untracked(() => this.schedules());
+    this.schedulerService.listSchedules(this.showTerminal()).subscribe({
+      next: (rows) => {
+        if (token !== this.loadToken) {
+          // Superseded: drop it. The service tap already wrote this
+          // stale page into the shared signal — re-assert the winner's
+          // page so the stale payload never sticks.
+          if (this.acceptedRows) this.schedules.set(this.acceptedRows);
+          return;
+        }
+        this.acceptedRows = rows;
         this.loading.set(false);
       },
       error: (err: Error) => {
+        if (token !== this.loadToken) return; // superseded — never clobber fresher state
         console.error('Failed to load schedules:', err);
         this.error.set(err.message || 'Failed to load schedules');
         this.loading.set(false);
@@ -155,7 +254,9 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   }
 
   protected onRefresh(): void {
-    this.schedulerService.refreshSchedules();
+    // Re-issue through the toggle-aware load so a refresh never
+    // silently re-hides the cancelled rows the user opted into.
+    this.loadSchedules();
   }
 
   protected onStatusFilterChange(status: ScheduleStatus | 'all'): void {
@@ -164,6 +265,11 @@ export class SchedulesComponent implements OnInit, OnDestroy {
 
   protected onTypeFilterChange(type: ScheduleType | 'all'): void {
     this.typeFilter.set(type);
+  }
+
+  protected onShowTerminalChange(checked: boolean): void {
+    this.showTerminal.set(checked);
+    writeShowTerminalPreference(localStorage, checked);
   }
 
   protected onClearFilters(): void {

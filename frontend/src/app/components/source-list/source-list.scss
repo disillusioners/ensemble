@@ -51,6 +51,20 @@ $accent-blue: #3b82f6;
   gap: 0.75rem;
 }
 
+// Terminal-row visibility toggle bar
+.terminal-toggle-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+
+.hidden-terminal-count {
+  font-size: 0.8125rem;
+  color: $text-secondary;
+}
+
 .back-btn {
   display: flex;
   align-items: center;

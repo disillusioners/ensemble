@@ -437,7 +437,10 @@ export interface SSEEvent {
 }
 
 // Source types
-export type SourceStatus = 'stopped' | 'starting' | 'running' | 'error';
+// `cancelled` is a real wire value (ADR-007 terminal state, distinct
+// from resumable pause — daemon/models/source.py). It was missing here,
+// which mistyped every cancelled row the /sources list returns.
+export type SourceStatus = 'stopped' | 'starting' | 'running' | 'error' | 'cancelled';
 export type SourceType = 'telegram' | 'webhook' | 'whatsapp' | 'discord' | 'slack' | 'scheduler';
 
 export interface Source {
