@@ -1,17 +1,29 @@
-import { ApplicationConfig, provideBrowserGlobalErrorListeners } from '@angular/core';
+import {
+  ApplicationConfig,
+  inject,
+  provideAppInitializer,
+  provideBrowserGlobalErrorListeners,
+} from '@angular/core';
 import { provideRouter } from '@angular/router';
-import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
 import { provideAnimations } from '@angular/platform-browser/animations';
 import { provideMarkdown, MERMAID_OPTIONS } from 'ngx-markdown';
 
 import { routes } from './app.routes';
+import { authRedirectInterceptor } from './services/auth-redirect.interceptor';
+import { SessionService } from './services/session.service';
 
 export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
     provideRouter(routes),
-    provideHttpClient(),
+    // 401 AUTH_REQUIRED (and the followed-302 HTML shape) funnel into ONE
+    // full-navigation login redirect — see services/auth-redirect.ts.
+    provideHttpClient(withInterceptors([authRedirectInterceptor])),
     provideAnimations(),
+    // Session bootstrap: probe /api/auth/me BEFORE the root renders so
+    // cold/deep-link unauthenticated visits go to login, not raw 401s.
+    provideAppInitializer(() => inject(SessionService).init()),
     provideMarkdown({
       mermaidOptions: {
         provide: MERMAID_OPTIONS,
@@ -30,6 +42,6 @@ export const appConfig: ApplicationConfig = {
           securityLevel: 'strict',
         },
       },
-    })
-  ]
+    }),
+  ],
 };
