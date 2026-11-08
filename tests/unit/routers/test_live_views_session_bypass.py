@@ -1,0 +1,1321 @@
+"""R1-R5 tests — views session bypass + origin gate + never-JSON-on-humans.
+
+views-session-bypass (2026-11-08), task 20261109-views-session-bypass.
+Mirrors the P2 pattern at ``test_live_views_public_lane.py`` (fresh
+FastAPI app, services on ``app.state``, no DB / manager / lifespan)
+and covers the five requirements of the commission:
+
+* R1 session bypass — ``resolve_views_session`` + the POST/GET/board
+  lane entry legs (valid operator session ⇒ grant + 303 / content
+  render, no passcode, no rate-limit / lockout / origin interference;
+  stale/garbage ⇒ EXACTLY anonymous).
+* R2 navigation-correct origin gate — ``Origin: null`` allow,
+  www/apex reconciliation, forwarded hosts, operator audience,
+  tautology fail-closed, cross-origin 403 (no attempt consumed).
+* R3 never-JSON-on-human-pages — Accept discrimination: HTML 404 /
+  403 for ``text/html`` navigations, byte-identical JSON envelopes
+  for everyone else; 429 / locked flip to JSON only on an EXPLICIT
+  ``application/json`` accept.
+* R4 anonymous-unchanged — the wrong-code failure page stays the
+  HTML form re-render for every accept shape.
+* R5 view_write covered-by-construction — the tool's pages are
+  served by the SAME ``/views/public`` handlers asserted here (no
+  separate route family exists; asserted structurally).
+
+Direct-lane composition (R1 requirement 5): the
+``/views/<root>/<rel>`` family is UNTAGGED ⇒ oauth2-protected
+(pinned by ``test_auth_public_lane_tag.py``); a valid session cookie
+dispatches through ``AuthMiddleware`` and serves; a garbage cookie
+falls to the 401 / 302 contracts. Asserted here with the middleware
+mounted on the test app.
+"""
+
+from __future__ import annotations
+
+import pathlib
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Optional
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from daemon.auth.context import AuthContext
+from daemon.auth.cookie import SESSION_COOKIE_NAME
+from daemon.config import LiveViewsConfig, LiveViewsRootConfig
+from daemon.middleware.auth import AuthMiddleware
+from daemon.routers.live_views import (
+    _same_host_origin_check,
+    build_router,
+)
+from daemon.services.live_views import LiveViewsService
+from daemon.services.view_passcode_service import (
+    GRANT_COOKIE_NAME,
+    ViewPasscodeCipher,
+    ViewPasscodeService,
+    VerifyRateLimiter,
+    generate_passcode,
+)
+from tests.helpers.auth_fixture import on_auth_config
+
+from daemon.repositories.view_passcodes.models import (
+    LIVE_VIEW_PASSCODE_STRIKE_CEILING,
+)
+
+_TEST_FERNET_KEY: bytes = (
+    b"Z6gPqrtSzfIcd1aVvbiGoeY9N-99lxx7dx1lzh4fDoE="
+)
+
+_VIEW_PATH = "/views/public/planning/ens/feat/design/mockups/landing.html"
+_VIEW_REL = "ens/feat/design/mockups/landing.html"
+
+
+@pytest.fixture(autouse=True)
+def _scrub_live_operator_env(monkeypatch):
+    """Hermetic env — the ambient shell carries LIVE operator auth vars.
+
+    The 2026-11-08 worktree shell exports ``ENSEMBLE_AUTH_*`` (live
+    discovery/issuer/client). Any ``AuthConfig`` construction in these
+    tests must not see them (the discovery-vs-issuer origin validator
+    refuses the mix). Scrubbed per-variable — the ``env -u POSTGRES_*``
+    glob idiom is a silent no-op.
+    """
+    for var in (
+        "ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE",
+        "ENSEMBLE_AUTH_ISSUER",
+        "ENSEMBLE_AUTH_DISCOVERY_URL",
+        "ENSEMBLE_AUTH_CLIENT_ID",
+        "ENSEMBLE_AUTH_CLIENT_SECRET",
+        "ENSEMBLE_AUTH_ALLOWED_ORIGINS",
+        "ENSEMBLE_AUTH_ENABLED",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Service / fixture scaffolding (mirror of the P2 public-lane file)
+# ─────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _PasscodeRow:
+    """SQLModel-shape row (same shape the P2 file pins)."""
+
+    id: str
+    root_name: str
+    rel_path: str
+    wrapped_passcode: bytes
+    generation: int
+    failed_attempts: int
+    locked: bool
+    created_at: str
+    last_attempt_at: Optional[str] = None
+
+
+class _InMemoryPasscodeStore:
+    """In-memory passcode store (same surface the P2 file pins)."""
+
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, str], _PasscodeRow] = {}
+
+    def upsert(
+        self,
+        root_name: str,
+        rel_path: str,
+        *,
+        wrapped_passcode: bytes,
+        generation: int = 1,
+        failed_attempts: int = 0,
+        locked: bool = False,
+    ) -> _PasscodeRow:
+        key = (root_name, rel_path)
+        existing = self.rows.get(key)
+        if existing is None:
+            row = _PasscodeRow(
+                id=f"row-{len(self.rows)+1}",
+                root_name=root_name,
+                rel_path=rel_path,
+                wrapped_passcode=wrapped_passcode,
+                generation=generation,
+                failed_attempts=failed_attempts,
+                locked=locked,
+                created_at="2026-11-08T00:00:00Z",
+                last_attempt_at=None,
+            )
+            self.rows[key] = row
+        else:
+            existing.wrapped_passcode = wrapped_passcode
+            existing.generation = generation
+            existing.failed_attempts = failed_attempts
+            existing.locked = locked
+            row = existing
+        return row
+
+    def get_row(
+        self, root_name: str, rel_path: str
+    ) -> Optional[_PasscodeRow]:
+        return self.rows.get((root_name, rel_path))
+
+
+class _InMemoryStorePort:
+    """Adapter exposing the methods the router surface touches."""
+
+    def __init__(
+        self,
+        store: _InMemoryPasscodeStore,
+        cipher: ViewPasscodeCipher,
+    ) -> None:
+        self._store = store
+        self._cipher = cipher
+        self.audit_rows: list[dict] = []
+
+    def get_row(self, root_name: str, rel_path: str) -> Optional[dict]:
+        return self._store.get_row(root_name, rel_path)
+
+    def insert_with_audit(
+        self, row: dict, *, actor: Optional[str] = None
+    ) -> dict:
+        self._store.rows[(row["root_name"], row["rel_path"])] = row
+        return row
+
+    def refresh_with_audit(
+        self,
+        root_name: str,
+        rel_path: str,
+        new_wrapped_passcode: bytes,
+        new_generation: int,
+        *,
+        actor: Optional[str] = None,
+    ) -> Optional[dict]:
+        row = self._store.get_row(root_name, rel_path)
+        if row is None:
+            return None
+        row.wrapped_passcode = new_wrapped_passcode
+        row.generation = new_generation
+        row.failed_attempts = 0
+        row.locked = False
+        return row
+
+    def record_failure_with_audit(
+        self,
+        root_name: str,
+        rel_path: str,
+        *,
+        actor: Optional[str] = None,
+        ip_hmac: Optional[str] = None,
+    ) -> tuple[int, bool]:
+        row = self._store.get_row(root_name, rel_path)
+        if row is None:
+            return (-1, False)
+        if row.locked:
+            return (row.failed_attempts, True)
+        row.failed_attempts += 1
+        if row.failed_attempts >= LIVE_VIEW_PASSCODE_STRIKE_CEILING:
+            row.locked = True
+        return (row.failed_attempts, row.locked)
+
+    def append_audit(
+        self,
+        *,
+        root_name: str,
+        rel_path: str,
+        generation: int,
+        action: str,
+        actor: Optional[str] = None,
+        ip_hmac: Optional[str] = None,
+    ) -> None:
+        self.audit_rows.append(
+            {
+                "action": action,
+                "root_name": root_name,
+                "rel_path": rel_path,
+                "generation": generation,
+                "actor": actor,
+                "ip_hmac": ip_hmac,
+            }
+        )
+
+
+class _StubAuthService:
+    """Session-store stand-in — the same seam the middleware uses.
+
+    ``validate_session`` returns an :class:`AuthContext` for the ids in
+    ``valid`` and ``None`` for everything else (absent / expired /
+    replayed collapse to anonymous — the production contract).
+    """
+
+    def __init__(self, valid: set[str]) -> None:
+        self.valid = set(valid)
+        self.calls: list[str] = []
+
+    async def validate_session(
+        self,
+        session_id: str,
+        *,
+        client_ip: str | None = None,
+        touch: bool = True,
+    ) -> AuthContext | None:
+        self.calls.append(session_id)
+        if session_id in self.valid:
+            return AuthContext(
+                subject="operator-test",
+                scopes={"jobs:read"},
+                auth_method="session",
+                expires_at="2099-01-01T00:00:00Z",
+            )
+        return None
+
+
+@pytest.fixture
+def filesystem_root_dir(tmp_path: pathlib.Path) -> pathlib.Path:
+    workdir = tmp_path / "project"
+    mockup = workdir / ".agents" / "shared" / "planning" / "feat" / "design" / "mockups"
+    mockup.mkdir(parents=True)
+    (mockup / "landing.html").write_text("<h1>Landing</h1>")
+    return workdir
+
+
+@pytest.fixture
+def cipher() -> ViewPasscodeCipher:
+    return ViewPasscodeCipher(encryption_key=_TEST_FERNET_KEY)
+
+
+@pytest.fixture
+def in_memory_store() -> _InMemoryPasscodeStore:
+    return _InMemoryPasscodeStore()
+
+
+@pytest.fixture
+def passcode_service(
+    cipher: ViewPasscodeCipher,
+    in_memory_store: _InMemoryPasscodeStore,
+) -> ViewPasscodeService:
+    service = ViewPasscodeService.__new__(ViewPasscodeService)
+    service._engine = None
+    service._cipher = cipher
+    service._store = _InMemoryStorePort(in_memory_store, cipher)
+    return service
+
+
+@pytest.fixture
+def limiter() -> VerifyRateLimiter:
+    return VerifyRateLimiter(capacity=50, refill_per_minute=50)
+
+
+@pytest.fixture
+def tight_limiter() -> VerifyRateLimiter:
+    return VerifyRateLimiter(capacity=3, refill_per_minute=1)
+
+
+@pytest.fixture
+def auth_stub() -> _StubAuthService:
+    return _StubAuthService({"sess-op-valid"})
+
+
+def _build_app(
+    filesystem_root_dir: pathlib.Path,
+    passcode_service: ViewPasscodeService,
+    cipher: ViewPasscodeCipher,
+    limiter: VerifyRateLimiter,
+    auth_stub: _StubAuthService | None = None,
+    auth_config=None,
+    with_middleware: bool = False,
+) -> FastAPI:
+    cfg = LiveViewsConfig()
+    workdir = filesystem_root_dir
+    cfg.roots["planning"] = LiveViewsRootConfig(
+        type="project_scoped",
+        path=".agents/shared/planning",
+        required_rel_subpath=["design", "mockups"],
+        allowed_extensions=["html", "mmd", "mermaid", "md"],
+    )
+    service = LiveViewsService(
+        config=cfg,
+        project_workdir_by_shortname_resolver=lambda shortname: (
+            str(workdir) if shortname == "ens" else None
+        ),
+    )
+    app = FastAPI()
+    app.include_router(build_router())
+    app.state.live_views_service = service
+    app.state.view_passcode_service = passcode_service
+    app.state.view_passcode_cipher = cipher
+    app.state.view_passcode_grant_ttl_seconds = 86400
+    app.state.verify_rate_limiter = limiter
+    if auth_stub is not None:
+        app.state.auth_service = auth_stub
+    if auth_config is not None:
+        app.state.auth_config = auth_config
+    if with_middleware:
+        # The production registration order (daemon/api.py): the
+        # /views/public prefix tag lands AFTER include_router — the
+        # middleware derives its public set from these attributes.
+        from daemon.auth.route_meta import tag_routes_by_path
+
+        tag_routes_by_path(app, path_prefix="/views/public")
+        app.add_middleware(AuthMiddleware, auth_config=auth_config)
+    return app
+
+
+@pytest.fixture
+def client(
+    filesystem_root_dir: pathlib.Path,
+    passcode_service: ViewPasscodeService,
+    cipher: ViewPasscodeCipher,
+    limiter: VerifyRateLimiter,
+    auth_stub: _StubAuthService,
+) -> TestClient:
+    """The anonymous-flow client — auth_service wired (R1 posture:
+    a deployment with auth ON), NO auth_config (audience empty on
+    purpose so the origin gate's trusted set is the Host-only leg
+    unless a test opts in)."""
+    app = _build_app(
+        filesystem_root_dir, passcode_service, cipher, limiter,
+        auth_stub=auth_stub,
+    )
+    return TestClient(app, follow_redirects=False)
+
+
+@pytest.fixture
+def audience_client(
+    filesystem_root_dir: pathlib.Path,
+    passcode_service: ViewPasscodeService,
+    cipher: ViewPasscodeCipher,
+    limiter: VerifyRateLimiter,
+    auth_stub: _StubAuthService,
+) -> TestClient:
+    """Client with an operator audience configured (R2 leg d)."""
+    cfg = on_auth_config(
+        allowed_origins=["https://audience.example"],
+        external_redirect_base="https://portal.example",
+    )
+    app = _build_app(
+        filesystem_root_dir, passcode_service, cipher, limiter,
+        auth_stub=auth_stub, auth_config=cfg,
+    )
+    return TestClient(app, follow_redirects=False)
+
+
+def _mint(
+    in_memory_store: _InMemoryPasscodeStore,
+    cipher: ViewPasscodeCipher,
+    root_name: str = "planning",
+    rel_path: str = _VIEW_REL,
+    *, locked: bool = False,
+) -> str:
+    plaintext = generate_passcode()
+    wrapped = cipher.wrap(plaintext.encode("ascii"))
+    in_memory_store.upsert(
+        root_name, rel_path, wrapped_passcode=wrapped, locked=locked
+    )
+    return plaintext
+
+
+# ─────────────────────────────────────────────────────────────────
+# R2 — origin gate (navigation-correct)
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestOriginGateNavigationCorrect:
+    """The live defect + the reconciliation legs (R2)."""
+
+    def test_correct_code_origin_null_grants_303(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Obligation 1 — the LIVE DEFECT repro: a top-level
+        navigation serializes ``Origin: null``; the old raw
+        Host-inequality 403'd every legit form POST. Now: 303 +
+        grant cookie."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Origin": "null",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        cookie_header = resp.headers.get("set-cookie", "")
+        assert f"{GRANT_COOKIE_NAME}=" in cookie_header
+        assert "HttpOnly" in cookie_header
+        assert "Secure" in cookie_header
+        assert "SameSite=Lax" in cookie_header
+
+    def test_correct_code_no_origin_grants_303_control(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Obligation 8 — the control: no Origin at all ⇒ 303
+        (unchanged by the rewrite)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert f"{GRANT_COOKIE_NAME}=" in resp.headers.get("set-cookie", "")
+
+    def test_correct_code_apex_origin_www_host_grants(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Obligation 2 — www/apex reconciliation: Origin names the
+        apex, the Host header carries www (fronting divergence the
+        raw-Host check always 403'd)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "www.example.com",
+                "Origin": "https://example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_cross_origin_evil_gets_html_403_no_attempt(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Obligation 3 — a genuine cross-origin POST is rejected
+        with an HTML 403 for a browser (text/html accept), never
+        JSON, and the origin gate STILL precedes the compare (no
+        strike consumed)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Origin": "https://evil.example",
+                "X-Forwarded-Proto": "https",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+        assert resp.headers["content-type"].startswith("text/html")
+        assert "evil.example" not in resp.text  # no origin echo
+        assert _VIEW_REL not in resp.text  # no path disclosure
+        assert "application/json" not in resp.headers.get(
+            "content-type", ""
+        )
+        row = in_memory_store.get_row("planning", _VIEW_REL)
+        assert row is not None and row.failed_attempts == 0
+
+    def test_cross_origin_evil_json_accept_keeps_json_envelope(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """R3 — the programmatic shape keeps the historical JSON
+        envelope byte-for-byte."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Origin": "https://evil.example",
+                "X-Forwarded-Proto": "https",
+                "Accept": "application/json",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+        assert resp.json() == {"error": "forbidden"}
+
+    def test_x_forwarded_host_first_value_trusted(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """R2 leg (b) — behind a fronting proxy the browser-facing
+        host rides XFH, not the internal Host."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "views.example.com, internal:8079",
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_rfc7239_forwarded_host_trusted(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """R2 leg (c) — the standardized Forwarded spelling."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "Forwarded": 'for=10.0.0.9;host="views.example.com";proto=https',
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_operator_audience_host_trusted(
+        self, audience_client: TestClient, in_memory_store, cipher
+    ):
+        """R2 leg (d) — the operator audience (allowed_origins +
+        external base) reconciles a portal-origin POST against an
+        unrelated Host."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = audience_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "Origin": "https://portal.example/some/page",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_case_insensitive_and_default_port_normalized(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """R2 comparison semantics — scheme/case/default-port are
+        non-participating."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "TESTSERVER",
+                "Origin": "HTTP://TestServer:80",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_explicit_port_mismatch_rejected(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Port-normalized ≠ port-blind: two EXPLICIT distinct ports
+        are different trust anchors."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "example.com:8443",
+                "Origin": "https://example.com:9999",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+
+class TestOriginGateUnit:
+    """Direct function-level pins on ``_same_host_origin_check``."""
+
+    @staticmethod
+    def _request(headers: dict[str, str], auth_config=None):
+        from daemon.routers.live_views import _views_trusted_hosts
+
+        scope = {
+            "type": "http",
+            "headers": [
+                (k.lower().encode(), v.encode())
+                for k, v in headers.items()
+            ],
+            "app": SimpleNamespace(
+                state=SimpleNamespace(auth_config=auth_config)
+            ),
+        }
+        # Build a real Request without a full ASGI cycle.
+        from starlette.requests import Request as StarletteRequest
+
+        return StarletteRequest(scope), _views_trusted_hosts
+
+    def test_both_absent_allows(self):
+        request, _ = self._request({"Host": "example.com"})
+        assert _same_host_origin_check(request) is True
+
+    def test_no_host_and_empty_audience_rejects_present_origin(self):
+        """Tautology guard: NO trusted host derivable ⇒ a present
+        non-null origin is REJECTED (fail closed); absent origin
+        still passes."""
+        request, _ = self._request({"Origin": "https://example.com"})
+        assert _same_origin_helper(request) is False
+        request, _ = self._request({})
+        assert _same_origin_helper(request) is True
+
+    def test_origin_null_allows_regardless_of_anchor(self):
+        request, _ = self._request({"Origin": "null"})
+        assert _same_origin_helper(request) is True
+        request, _ = self._request({"Origin": "NULL"})
+        assert _same_origin_helper(request) is True
+
+    def test_origin_precedence_over_referer(self):
+        """C-2 precedence: Origin judges; a mismatching Referer is
+        NOT consulted when Origin matches."""
+        request, _ = self._request(
+            {
+                "Host": "example.com",
+                "Origin": "https://example.com",
+                "Referer": "https://evil.example/x",
+            }
+        )
+        assert _same_origin_helper(request) is True
+
+    def test_referer_fallback_when_origin_absent(self):
+        request, _ = self._request(
+            {
+                "Host": "example.com",
+                "Referer": "https://www.example.com/page?q=1#frag",
+            }
+        )
+        assert _same_origin_helper(request) is True
+        request, _ = self._request(
+            {
+                "Host": "example.com",
+                "Referer": "https://evil.example/page",
+            }
+        )
+        assert _same_origin_helper(request) is False
+
+    def test_unparseable_origin_rejected(self):
+        request, _ = self._request(
+            {"Host": "example.com", "Origin": ":::not-a-url:::"}
+        )
+        assert _same_origin_helper(request) is False
+
+    def test_forwarded_host_first_element_only(self):
+        """Only the FIRST Forwarded element's host= is trusted — the
+        client-appendable later elements never join the anchor set."""
+        from daemon.routers.live_views import _views_trusted_hosts
+
+        request, _ = self._request(
+            {
+                "Host": "internal:8079",
+                "Forwarded": 'for=10.0.0.1;host="edge.example.com", '
+                'for=10.0.0.2;host="evil.example.com"',
+            }
+        )
+        hosts = {h for h, _p in _views_trusted_hosts(request)}
+        assert "edge.example.com" in hosts
+        assert "evil.example.com" not in hosts
+
+
+def _same_origin_helper(request) -> bool:
+    """The production callsite shape — the gate is a pure function of
+    the request; this indirection exists so the unit tests above can
+    call it without importing a second name."""
+    return _same_host_origin_check(request)
+
+
+# ─────────────────────────────────────────────────────────────────
+# R1 — session bypass
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestSessionBypassPost:
+    """Valid session on the verify POST ⇒ grant + 303 without a
+    passcode, immune to gates #1/#3/#4."""
+
+    def _post(self, client: TestClient, **headers):
+        return client.post(
+            _VIEW_PATH, headers=headers, follow_redirects=False
+        )
+
+    def test_valid_session_cookie_grants_303_full_attributes(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Obligation 5 — the cookie form; the grant carries the
+        SAME attributes a passcode POST mints."""
+        _mint(in_memory_store, cipher)
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.post(
+            _VIEW_PATH,
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        cookie_header = resp.headers.get("set-cookie", "")
+        assert f"{GRANT_COOKIE_NAME}=" in cookie_header
+        assert "HttpOnly" in cookie_header
+        assert "Secure" in cookie_header
+        assert "SameSite=Lax" in cookie_header
+        assert "Max-Age=86400" in cookie_header
+        assert (
+            "Path=/views/public/planning/ens/feat/design/mockups/landing.html"
+            in cookie_header
+        )
+        assert resp.headers["location"].endswith(_VIEW_PATH)
+
+    def test_session_bypasses_locked_short_circuit(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """R1(a) — no lockout interference: a LOCKED row still
+        grants for a session holder (lockout gates the ENTRY lane,
+        not established trust; the session outranks a grant)."""
+        _mint(in_memory_store, cipher, locked=True)
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.post(
+            _VIEW_PATH,
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_session_bypasses_origin_gate(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """R1(a) — no origin interference: cross-origin evil Origin
+        + valid session ⇒ 303 (the session IS the authority)."""
+        _mint(in_memory_store, cipher)
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.post(
+            _VIEW_PATH,
+            headers={
+                "Origin": "https://evil.example",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_session_bypasses_rate_limiter(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        tight_limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """R1(a) — no rate-limit interference: a drained bucket
+        still grants for a session holder."""
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher,
+            tight_limiter, auth_stub=auth_stub,
+        )
+        client = TestClient(app, follow_redirects=False)
+        _mint(in_memory_store, cipher)
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.post(
+            _VIEW_PATH,
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_session_with_unminted_row_uniform_404(
+        self, client: TestClient, in_memory_store: _InMemoryPasscodeStore
+    ):
+        """R1(b) — information-leak parity: an unminted path yields
+        the SAME uniform 404 for a session holder as for the
+        anonymous prober (JSON envelope under the */* accept)."""
+        assert len(in_memory_store.rows) == 0
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.post(
+            _VIEW_PATH,
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "view not found"}
+        assert len(in_memory_store.rows) == 0  # no row minted
+
+    def test_session_grant_appends_actor_audit(
+        self, client: TestClient, in_memory_store, cipher, passcode_service
+    ):
+        """The session lane records the operator subject as the
+        audit ``actor`` (closed action set unchanged)."""
+        _mint(in_memory_store, cipher)
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.post(
+            _VIEW_PATH,
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        port = passcode_service._store
+        grants = [
+            a for a in port.audit_rows if a["action"] == "grant"
+        ]
+        assert grants and grants[-1]["actor"] == "operator-test"
+
+
+class TestSessionBypassGet:
+    """Valid session on GET ⇒ content directly; NO grant minted."""
+
+    def test_valid_session_serves_view_no_interstitial_no_grant(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Obligation 4 — the logged-in defect's GET face: content
+        200, no interstitial, and NO view_grant cookie minted on
+        GET (write-amplification pin)."""
+        _mint(in_memory_store, cipher)
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.get(_VIEW_PATH)
+        assert resp.status_code == 200
+        assert "Landing" in resp.text
+        assert "Enter passcode" not in resp.text
+        assert GRANT_COOKIE_NAME not in resp.headers.get("set-cookie", "")
+
+    def test_valid_session_serves_locked_view_on_get(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """A session outranks the locked page on GET too."""
+        _mint(in_memory_store, cipher, locked=True)
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.get(_VIEW_PATH)
+        assert resp.status_code == 200
+        assert "Landing" in resp.text
+        assert "locked" not in resp.text.lower()
+
+    def test_valid_session_unminted_row_uniform_404(
+        self, client: TestClient, in_memory_store: _InMemoryPasscodeStore
+    ):
+        """R1(b) — GET parity: unminted path ⇒ the same uniform 404
+        a sessionless prober gets."""
+        assert len(in_memory_store.rows) == 0
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.get(_VIEW_PATH)
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "view not found"}
+
+    def test_valid_session_board_renders_no_interstitial(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """R1 board lane — valid session ⇒ the board RENDER (200,
+        page headers, no-store), no interstitial, no grant minted.
+        The board backend is unwired here ⇒ the explicit
+        unavailable notice — which is STILL the post-gate render,
+        proving the gate opened."""
+        _mint(
+            in_memory_store, cipher,
+            root_name="board", rel_path="index.html",
+        )
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.get("/views/public/board/index.html")
+        assert resp.status_code == 200
+        assert "Work board" in resp.text
+        assert "Enter passcode" not in resp.text
+        assert GRANT_COOKIE_NAME not in resp.headers.get("set-cookie", "")
+        assert resp.headers["cache-control"] == "no-store"
+
+    def test_anonymous_board_still_interstitial(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """R4 — the anonymous board flow is unchanged."""
+        _mint(
+            in_memory_store, cipher,
+            root_name="board", rel_path="index.html",
+        )
+        resp = client.get("/views/public/board/index.html")
+        assert resp.status_code == 200
+        assert "Enter passcode" in resp.text
+
+
+class TestStaleGarbageSessionIsAnonymous:
+    """Obligation 6 — stale / garbage / absent ensemble_sid ⇒ the
+    EXACT anonymous flow; the session itself NEVER forbidden."""
+
+    def test_garbage_session_get_renders_interstitial(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        _mint(in_memory_store, cipher)
+        client.cookies.set(SESSION_COOKIE_NAME, "garbage-sid")
+        resp = client.get(_VIEW_PATH)
+        assert resp.status_code == 200
+        assert "Enter passcode" in resp.text
+
+    def test_garbage_session_post_requires_passcode(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """No code + garbage session ⇒ the anonymous no-code
+        failure page (NOT 403, NOT 303)."""
+        _mint(in_memory_store, cipher)
+        client.cookies.set(SESSION_COOKIE_NAME, "garbage-sid")
+        resp = client.post(
+            _VIEW_PATH,
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 200
+        assert "Enter passcode" in resp.text
+
+    def test_garbage_session_correct_code_still_grants(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """The anonymous chain works byte-identically under a
+        garbage session cookie (Origin null included)."""
+        plaintext = _mint(in_memory_store, cipher)
+        client.cookies.set(SESSION_COOKIE_NAME, "garbage-sid")
+        resp = client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={"Origin": "null", "X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    def test_no_auth_service_wired_is_anonymous(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """auth_service unwired (auth OFF / early traffic) ⇒ the
+        bypass seam is inert — pure anonymous flow."""
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=None,
+        )
+        client = TestClient(app, follow_redirects=False)
+        _mint(in_memory_store, cipher)
+        client.cookies.set(SESSION_COOKIE_NAME, "sess-op-valid")
+        resp = client.get(_VIEW_PATH)
+        assert resp.status_code == 200
+        assert "Enter passcode" in resp.text
+
+
+# ─────────────────────────────────────────────────────────────────
+# R3 — never JSON on human pages
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestNeverJsonOnHumanPages:
+    """Accept discrimination on the miss / throttle / lock shapes."""
+
+    def test_unminted_html_accept_html_404_no_path_leak(
+        self, client: TestClient
+    ):
+        """Obligation 9a — Accept: text/html ⇒ the HTML 404 page,
+        no path leakage."""
+        resp = client.get(
+            "/views/public/planning/ens/feat/design/mockups/never_minted.html",
+            headers={"Accept": "text/html,application/xhtml+xml"},
+        )
+        assert resp.status_code == 404
+        assert resp.headers["content-type"].startswith("text/html")
+        body = resp.text
+        assert "never_minted" not in body
+        assert "planning" not in body
+        assert "ens/" not in body
+        assert "view not found" in body.lower() or "not found" in body.lower()
+
+    def test_unminted_wildcard_accept_json_byte_identical(
+        self, client: TestClient, in_memory_store: _InMemoryPasscodeStore
+    ):
+        """Obligation 9b — Accept: */* ⇒ the historical JSON
+        envelope byte-for-byte."""
+        resp = client.get(
+            "/views/public/planning/ens/feat/design/mockups/never_minted.html",
+            headers={"Accept": "*/*"},
+        )
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "view not found"}
+        assert resp.headers["content-type"].startswith("application/json")
+
+    def test_unminted_explicit_json_accept_json_envelope(
+        self, client: TestClient
+    ):
+        """Obligation 9b — Accept: application/json ⇒ the same JSON
+        envelope."""
+        resp = client.get(
+            "/views/public/planning/ens/feat/design/mockups/never_minted.html",
+            headers={"Accept": "application/json"},
+        )
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "view not found"}
+
+    def test_wrong_code_html_form_never_json(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Obligation 7 — wrong code ⇒ the HTML form re-render under
+        EVERY accept shape; never application/json."""
+        plaintext = _mint(in_memory_store, cipher)
+        for accept in (
+            "text/html,application/xhtml+xml",
+            "*/*",
+            "application/json",
+        ):
+            resp = client.post(
+                _VIEW_PATH,
+                data={"code": "wrong0"},
+                headers={
+                    "Accept": accept,
+                    "X-Forwarded-Proto": "https",
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/html")
+            assert 'name="code"' in resp.text  # the form marker
+            assert "not recognised" in resp.text
+
+    def test_rate_limit_429_html_for_browser_json_for_api(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        tight_limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+        in_memory_store: _InMemoryPasscodeStore,
+    ):
+        """R3 — 429: browsers (text/html) and the historical ``*/*``
+        shape keep the HTML notice; an explicit application/json
+        client gets the JSON envelope. Neither discloses the strike
+        count."""
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher,
+            tight_limiter, auth_stub=auth_stub,
+        )
+        _mint(in_memory_store, cipher)
+        html_client = TestClient(app, follow_redirects=False)
+        for _ in range(4):
+            html_client.post(
+                _VIEW_PATH,
+                data={"code": "wrong0"},
+                headers={
+                    "Accept": "text/html,application/xhtml+xml",
+                    "X-Forwarded-Proto": "https",
+                },
+                follow_redirects=False,
+            )
+        resp = html_client.post(
+            _VIEW_PATH,
+            data={"code": "wrong0"},
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 429
+        assert resp.headers["content-type"].startswith("text/html")
+
+        api_client = TestClient(app, follow_redirects=False)
+        resp = api_client.post(
+            _VIEW_PATH,
+            data={"code": "wrong0"},
+            headers={
+                "Accept": "application/json",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 429
+        assert resp.json() == {"error": "rate limited"}
+
+    def test_locked_html_for_wildcard_json_for_api(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """R3 — the locked short-circuit: ``*/*`` (the historical
+        shape) keeps the HTML locked page; explicit application/json
+        gets the envelope. No strike-count disclosure in either."""
+        _mint(in_memory_store, cipher)
+        for _ in range(LIVE_VIEW_PASSCODE_STRIKE_CEILING):
+            client.post(
+                _VIEW_PATH,
+                data={"code": "wrong0"},
+                headers={"X-Forwarded-Proto": "https"},
+                follow_redirects=False,
+            )
+        resp = client.get(
+            _VIEW_PATH, headers={"Accept": "*/*"}
+        )
+        assert resp.status_code == 200
+        assert "locked" in resp.text.lower()
+
+        resp = client.get(
+            _VIEW_PATH, headers={"Accept": "application/json"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"error": "view locked"}
+
+    def test_mermaid_asset_500_stays_json(self, client: TestClient):
+        """R3 scope guard — the script-consumed asset envelope is
+        untouched (a corrupted asset fails the fetch, the wrapper
+        degrades; an HTML page here would break the script
+        consumer)."""
+        from daemon.services import live_views as lv
+
+        original = lv._vendored_mermaid_asset
+
+        def _boom():
+            raise FileNotFoundError("no asset")
+
+        lv._vendored_mermaid_asset = _boom
+        try:
+            resp = client.get(
+                "/views/public/assets/mermaid/mermaid.min.js",
+                headers={"Accept": "text/html"},
+            )
+        finally:
+            lv._vendored_mermaid_asset = original
+        assert resp.status_code == 500
+        assert resp.json() == {"error": "asset unavailable"}
+
+
+# ─────────────────────────────────────────────────────────────────
+# R5 — view_write covered by construction
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestViewWriteCoveredByConstruction:
+    """R5 — ``view_write`` owns NO HTTP surface: it writes the file
+    + mints the passcode (agent tool); the serving rides the SAME
+    ``/views/public`` handlers every R1/R2/R3 fix changed.
+    Structurally: (1) no view_write route family exists on the
+    router; (2) a reports-root page flows through the same POST
+    verify + GET gates asserted above."""
+
+    def test_no_view_write_route_family_on_router(self):
+        from daemon.routers.live_views import build_router as _br
+
+        paths = {getattr(r, "path", "") for r in _br().routes}
+        assert not any("view_write" in p or "view-write" in p for p in paths)
+        # The whole /views surface is exactly the direct family +
+        # the public family + the asset alias — view_write adds no
+        # route of its own (its pages ARE public-lane pages).
+        assert paths == {
+            "/views/assets/mermaid/mermaid.min.js",
+            "/views/public/assets/mermaid/mermaid.min.js",
+            "/views/public/board/index.html",
+            "/views/public/{root_name}/{rel_path:path}",
+            "/views/{root_name}/{rel_path:path}",
+        }
+
+    def test_reports_root_page_rides_same_gates(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """A view_write-shaped page (reports root, minted passcode)
+        verifies through the SAME POST handler: Origin null (the
+        R2 defect shape) ⇒ 303; cross-origin evil ⇒ 403 with no
+        attempt consumed."""
+        plaintext = generate_passcode()
+        wrapped = cipher.wrap(plaintext.encode("ascii"))
+        in_memory_store.upsert(
+            "reports", "page.html", wrapped_passcode=wrapped
+        )
+        resp = client.post(
+            "/views/public/reports/page.html",
+            data={"code": plaintext},
+            headers={"Origin": "null", "X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert f"{GRANT_COOKIE_NAME}=" in resp.headers.get("set-cookie", "")
+
+        plaintext2 = generate_passcode()
+        wrapped2 = cipher.wrap(plaintext2.encode("ascii"))
+        in_memory_store.upsert(
+            "reports", "page2.html", wrapped_passcode=wrapped2
+        )
+        resp = client.post(
+            "/views/public/reports/page2.html",
+            data={"code": plaintext2},
+            headers={
+                "Origin": "https://evil.example",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+        row = in_memory_store.get_row("reports", "page2.html")
+        assert row.failed_attempts == 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# R1 direct lane — middleware-gated composition
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestDirectLaneSessionComposition:
+    """The direct lane ``/views/<root>/<rel>`` is UNTAGGED ⇒
+    oauth2-protected. A valid session cookie dispatches through
+    ``AuthMiddleware`` and serves; a garbage cookie falls to the
+    401 (json) / 302 (browser) contracts — composing with the
+    fe-spa-401-login-redirect lane already in this base."""
+
+    @pytest.fixture
+    def mw_client(
+        self,
+        filesystem_root_dir: pathlib.Path,
+        passcode_service: ViewPasscodeService,
+        cipher: ViewPasscodeCipher,
+        limiter: VerifyRateLimiter,
+        auth_stub: _StubAuthService,
+    ) -> TestClient:
+        cfg = on_auth_config()
+        app = _build_app(
+            filesystem_root_dir, passcode_service, cipher, limiter,
+            auth_stub=auth_stub, auth_config=cfg, with_middleware=True,
+        )
+        return TestClient(
+            app, base_url="http://testserver", follow_redirects=False
+        )
+
+    def test_valid_session_serves_direct_lane(
+        self, mw_client: TestClient
+    ):
+        resp = mw_client.get(
+            "/views/planning/ens/feat/design/mockups/landing.html",
+            cookies={SESSION_COOKIE_NAME: "sess-op-valid"},
+            headers={"Accept": "application/json"},
+        )
+        assert resp.status_code == 200
+        assert "Landing" in resp.text
+
+    def test_no_session_json_accept_is_401(
+        self, mw_client: TestClient
+    ):
+        resp = mw_client.get(
+            "/views/planning/ens/feat/design/mockups/landing.html",
+            headers={"Accept": "application/json"},
+        )
+        assert resp.status_code == 401
+
+    def test_no_session_browser_accept_redirects_to_login(
+        self, mw_client: TestClient
+    ):
+        """The fe-spa-401 composition: a browser-shaped request with
+        no session 302s to the login route with a return_to."""
+        resp = mw_client.get(
+            "/views/planning/ens/feat/design/mockups/landing.html",
+            headers={"Accept": "text/html,application/xhtml+xml"},
+        )
+        assert resp.status_code == 302
+        assert resp.headers["location"].startswith("/api/auth/login")
+
+    def test_garbage_session_json_accept_is_401(
+        self, mw_client: TestClient, auth_stub: _StubAuthService
+    ):
+        resp = mw_client.get(
+            "/views/planning/ens/feat/design/mockups/landing.html",
+            cookies={SESSION_COOKIE_NAME: "garbage-sid"},
+            headers={"Accept": "application/json"},
+        )
+        assert resp.status_code == 401
+        assert "garbage-sid" in auth_stub.calls
+
+    def test_public_lane_untouched_by_middleware(
+        self, mw_client: TestClient
+    ):
+        """The public lane passes the middleware untouched (no 401
+        shape change, no session requirement) — the exemption is
+        structural, unaffected by this commission."""
+        resp = mw_client.get(
+            _VIEW_PATH, headers={"Accept": "application/json"}
+        )
+        assert resp.status_code in (200, 303, 404)
+        assert resp.status_code != 401
