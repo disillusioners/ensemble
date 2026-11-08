@@ -134,6 +134,11 @@ class SourceListResponse(BaseModel):
     """Response for listing message sources."""
 
     sources: list[SourceInfo] = Field(..., description="List of configured sources")
+    total: int = Field(
+        default=0,
+        description="Total number of configured sources matching the query (untruncated — "
+        "compare against len(sources) to detect truncation when limit/offset paging)",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={

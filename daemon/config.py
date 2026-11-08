@@ -2784,6 +2784,86 @@ class ServicesConfig(BaseSettings):
             "SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_BATCH_CAP."
         ),
     )
+    # source-gc (board wi-ed230eb4, Emperor directive 2026-11-07):
+    # knobs for ``SourcesGcService`` — the sweep that archives +
+    # deletes unused terminal scheduler rows (``source_configs`` rows
+    # that are ``source_type='scheduler' AND enabled=false AND status
+    # IN (stopped,cancelled)`` past the retention window; the
+    # predicate is repo-level and NOT widenable from here). Kill
+    # switch INCLUDED (strand-heal counter-precedent class): this
+    # lane deletes CONFIG ROWS, not regenerable files, so the
+    # tmp-image no-kill-switch HARD POLICY does not apply — a panic
+    # off lever is warranted for a terminalizing-write lane.
+    sources_gc_enabled: bool = Field(
+        default=True,
+        description=(
+            "source-gc (2026-11-07): whether ``SourcesGcService`` "
+            "runs at all. Default TRUE. When False the service "
+            "schedules NO sweep task (a complete no-op). Override "
+            "via SERVICES_SOURCES_GC_ENABLED."
+        ),
+    )
+    sources_gc_dry_run: bool = Field(
+        default=False,
+        description=(
+            "source-gc (2026-11-07): report-only mode — every tick "
+            "logs the candidate set + counters and writes NOTHING. "
+            "Default FALSE (destructive-on-promote per LEADER RULING "
+            "2; the fences are the repo-level predicate + the AM-1 "
+            "race-safe txn + this knob family). Set true for the "
+            "SP-1 promote recipe's one-boot observe pass. Restart to "
+            "flip. Override via SERVICES_SOURCES_GC_DRY_RUN."
+        ),
+    )
+    sources_gc_interval_seconds: int = Field(
+        default=3600,
+        ge=1,
+        description=(
+            "source-gc (2026-11-07): how often ``SourcesGcService`` "
+            "runs its sweep tick (seconds). Default 3600s — hourly "
+            "(deletion latency <= retention + interval; the scan is "
+            "a cheap indexed SELECT at live scale). Floor 1s; "
+            "out-of-range values FAIL FAST AT BOOT via pydantic "
+            "ValidationError. Restart to flip. Override via "
+            "SERVICES_SOURCES_GC_INTERVAL_SECONDS."
+        ),
+    )
+    sources_gc_terminal_retention_days: int = Field(
+        default=14,
+        ge=1,
+        description=(
+            "source-gc (2026-11-07): terminal-retention window — a "
+            "scheduler row that is disabled AND stopped/cancelled "
+            "for longer than this many days is archived + deleted. "
+            "Default 14. The SP-1 promote recipe temporarily sets 7 "
+            "(floor 7 — do NOT go lower: resume-after-reap is a "
+            "bare 'Schedule not found' ValueError, "
+            "scheduling_service.py:989-991, so a reaped 3-day-old "
+            "paused schedule is a broken promise); restore 14 after "
+            "the collect window (completion signal: "
+            "'remainder=0 deferred' in the work-log). A very large "
+            "value effectively disables collection without removing "
+            "the service. NOTE: a paused schedule past this window "
+            "IS collected — raise this knob to protect one "
+            "(disclosure in daemon/tools/scheduling.py). Floor 1; "
+            "out-of-range values FAIL FAST AT BOOT. Restart to "
+            "flip. Override via "
+            "SERVICES_SOURCES_GC_TERMINAL_RETENTION_DAYS."
+        ),
+    )
+    sources_gc_batch_cap: int = Field(
+        default=25,
+        ge=1,
+        description=(
+            "source-gc (2026-11-07): the maximum number of rows "
+            "collected per sweep tick (oldest-first; the newest "
+            "defer to the next tick). Default 25 — the SP-1 recipe "
+            "arithmetic assumes it (~4 hourly ticks clear the ~100 "
+            "row backlog within ~4h). Floor 1; out-of-range values "
+            "FAIL FAST AT BOOT. Override via "
+            "SERVICES_SOURCES_GC_BATCH_CAP."
+        ),
+    )
     # clipboard-image-chat Phase 1 / Task 2b (architect amendment #3):
     # hard cap on the tmp-image store's total disk usage. The store
     # performs a walkdir sum BEFORE each write and raises

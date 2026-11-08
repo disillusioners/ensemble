@@ -6,7 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from daemon.constants import DEFAULT_SCHEDULE_EXECUTIONS_LIMIT, MAX_SCHEDULE_EXECUTION_LIMIT
+from daemon.constants import (
+    DEFAULT_SCHEDULE_EXECUTIONS_LIMIT,
+    MAX_SCHEDULE_EXECUTION_LIMIT,
+    SOURCE_CONFIG_PAGE_SIZE,
+)
 from daemon.models import (
     ErrorCodes,
     ErrorResponse,
@@ -99,7 +103,22 @@ async def list_schedules(request: Request, include_cancelled: bool = False):
     "did I actually cancel X?" path.)
     """
     manager = _get_manager(request)
-    all_sources = await asyncio.to_thread(manager._source_repository.list_source_configs)
+    # Page past the repository page cap — the cap is a page size, not a
+    # completeness contract (wi-b97ec302: newer inert rows evicted the
+    # oldest chat rows from the old implicit 100-row page 1).
+    from daemon.repositories.source.models import SourceConfig as SourceConfigRow
+
+    all_sources: list[SourceConfigRow] = []
+    offset = 0
+    while True:
+        page = await asyncio.to_thread(
+            manager._source_repository.list_source_configs,
+            None, None, SOURCE_CONFIG_PAGE_SIZE, offset,
+        )
+        all_sources.extend(page)
+        if len(page) < SOURCE_CONFIG_PAGE_SIZE:
+            break
+        offset += SOURCE_CONFIG_PAGE_SIZE
     schedules = []
     for src in all_sources:
         if src.source_type == "scheduler":

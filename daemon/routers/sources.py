@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from daemon.models import (
     DeleteResponse,
@@ -22,7 +22,11 @@ from daemon.models import (
     SourceUpdate,
 )
 from daemon.auth.decorators import scope_required
-from daemon.constants import CHAT_SOURCE_PREFIXES, MAX_CREDENTIALS_SIZE
+from daemon.constants import (
+    CHAT_SOURCE_PREFIXES,
+    MAX_CREDENTIALS_SIZE,
+    SOURCE_LIST_HARD_MAX,
+)
 from daemon.routers.schemas import JobValidationError
 from daemon.utils import parse_utc_datetime, validate_instance_mode
 
@@ -124,12 +128,35 @@ def _source_to_info(source) -> SourceInfo:
 
 
 @router.get("", response_model=SourceListResponse, dependencies=[scope_required("sources:write")])
-async def list_sources(request: Request):
-    """List all configured message sources."""
+async def list_sources(
+    request: Request,
+    limit: int | None = Query(default=None, ge=1, description="Page size; clamped to the hard max when larger"),
+    offset: int = Query(default=0, ge=0, description="Rows to skip before the first returned row"),
+):
+    """List all configured message sources.
+
+    Correctness first: the DEFAULT call (no params) returns every source
+    up to ``SOURCE_LIST_HARD_MAX`` — nothing is hidden by a silent page
+    cap (wi-b97ec302: >100 newer inert rows evicted the oldest chat rows
+    from the old implicit 100-row page). Ordering is stable
+    (``created_at DESC``). ``total`` always carries the UNTRUNCATED row
+    count, so ``len(sources) < total`` reveals truncation.
+
+    Pagination: explicit ``limit``/``offset`` page the same ordering. A
+    ``limit`` above ``SOURCE_LIST_HARD_MAX`` is CLAMPED to the hard max
+    (deliberate choice over 422: with ``total`` in the response a clamp
+    can never silently hide rows; structural errors — ``limit < 1``,
+    ``offset < 0`` — are 422 via query validation).
+    """
     manager = _get_manager(request)
-    sources_data = await asyncio.to_thread(manager._source_repository.list_source_configs)
+    repo = manager._source_repository
+    effective_limit = SOURCE_LIST_HARD_MAX if limit is None else min(limit, SOURCE_LIST_HARD_MAX)
+    sources_data, total = await asyncio.gather(
+        asyncio.to_thread(repo.list_source_configs, None, None, effective_limit, offset),
+        asyncio.to_thread(repo.count_source_configs),
+    )
     sources = [_source_to_info(src) for src in sources_data]
-    return SourceListResponse(sources=sources)
+    return SourceListResponse(sources=sources, total=total)
 
 
 @router.post("", response_model=SourceInfo, status_code=201, dependencies=[scope_required("sources:write")])
@@ -417,6 +444,19 @@ async def update_source(source_id: str, source_update: SourceUpdate, request: Re
         enabled=updated_enabled,
         autostart=updated_autostart,
     )
+    if updated is None:
+        # Leader-authorized fence carve-out (source-gc, W7 follow-up):
+        # update_source_config returns None when the row vanished during
+        # the update (concurrent delete; StaleDataError -> None). Mirror
+        # the house 404 shape used above for a missing source instead of
+        # letting _source_to_info(None) raise AttributeError -> HTTP 500.
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
     
     return _source_to_info(updated)
 

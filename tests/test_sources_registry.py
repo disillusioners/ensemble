@@ -665,9 +665,14 @@ async def test_delayed_start_starts_adapter_after_delay(mock_manager):
 
     await registry.start_all()
 
-    # Let the scheduled task run
-    task = registry._autostart_tasks["src-1"]
-    await task
+    # Let the scheduled task run. With AUTOSTART_DELAY_SECONDS=0 the
+    # boot-tail reconciliation sweep (wi-b97ec302) yields to the loop
+    # after scheduling, so the task can complete — and pop itself from
+    # _autostart_tasks — before start_all returns. Await it only when it
+    # is still pending; either way the adapter must have been started.
+    task = registry._autostart_tasks.get("src-1")
+    if task is not None:
+        await task
 
     registry.start_adapter.assert_awaited_once_with("src-1")
     assert "src-1" not in registry._autostart_tasks

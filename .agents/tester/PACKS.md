@@ -1,3 +1,42 @@
+<!-- v0293-staged-verification-begin -->
+## v0.29.3 STAGED VERIFICATION registration (2026-11-08; staged tree `8730bfb8a…`; binary `4de6200f…b086` 4-way independently recomputed; tag `v0.29.3` = `2e24f5ec3` PUSHED, peels local+origin; origin/latest == staged tree; RESULTS: 2026-11-08-v0293-staged-verification.md)
+
+> **Outcome: STAGED-VERIFIED PASS — CEREMONY-READY.** S1 6/6 (4-way sha; sidecar git_head=8730bfb8a dirty=false; tag
+> peel ×2; migration census source 123 / embedded 123 with `20261107_122648` present-staged / absent-live v0.29.1
+> (122) → delta exactly +1; payload source-less; PROMPT-BASELINE 181 ×2 trees) · S2 isolated frozen-binary boot 12/12
+> (copy-to-scratch, SELF_ENV=sandbox + SWEEP=0 pinned, env -i allowlist, throwaway PG created→dropped, banner v0.29.3,
+> livez/readyz 200, **[SourcesGC] started at shipped defaults**, archive tables + 3 indexes on scratch PG, empty-DB
+> first tick no-op SILENT §8.5, SIGTERM rc=143, state.json fence `528af13c…` PRE==MID==POST) · S3 one-way bytecode proof
+> (service module + symbols, 5 knob fields, AM-5 strings, W7 None-guard marshal-sha/instruction-flow + source hunk,
+> positive control non-vacuous) · S4 ceremony inputs (promote provably not executed; scripts-pin 84df6b55c ⊇ floor
+> 2147c0298 ARM-CLEAN; retention 8 dirs machinery-owned; v0.29.2 tag peels → b21bbb87f ⊆ 8730bfb8a — one ceremony
+> carries both lanes) · S5 six disclosures, none blocking. Promote command + lineage in the RESULTS artifact.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `v0293_sv_integrity` | read-only: 4-way sha re-hash, sidecar parse, tag peel local+origin, source+embedded migration census (CArchiveReader py3.14, both binaries), payload source-less probes, PROMPT-BASELINE --check ×2 trees | S1.1–S1.6 | 2026-11-08 @ `8730bfb8a` | **PASS 6/6** |
+| `v0293_sv_smoke_frozen` | one-shot: scratch boot of the COPIED frozen binary (`env -i` allowlist, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned, `ENSEMBLE_SELF_ENV=sandbox`, throwaway PG `ensemble_smoke_sgc_sv` dropped after, scratch port 10093) + 12 assertions + state.json PRE==MID==POST fence | S2 | 2026-11-08 | **PASS 12/12** |
+| `v0293_sv_oneway` | bytecode-level (py3.14 reader): staged-vs-live module/symbol/const census + W7 instruction-flow discriminator + positive control | S3 | 2026-11-08 | **PASS** |
+| `v0293_sv_ceremony` | read-only: current symlink, state.json promote fields, scripts-pin ancestry (ARM-CLEAN), retention census, v0.29.2 ancestor proof, one disclosed livez GET | S4 | 2026-11-08 | **PASS** |
+<!-- v0293-staged-verification-end -->
+<!-- source-gc-functional-gate-begin -->
+## Commission source-gc — FUNCTIONAL GATE (P6) registration (2026-11-08; gate @ HEAD `7b6fa2cdf`, TRUE base `b21bbb87f` (v0.29.2 = origin/latest — dispatcher's `f0f3e1724` already contains the impl, corrected); evidence `/tmp/sgc-g135-re/` · `/tmp/sgc-g4/` · `/tmp/sgc-g78/` · `/tmp/sgc-g6/`; RESULTS: 2026-11-08-source-gc-functional-gate.md; LESSONS: 2026-11-08-source-gc-migration-comment-semicolon.md)
+
+> **Outcome (UPDATED by scoped re-gate @ `fadb2dde1`, same day): GO — blocking fix verified independently** (5/5 original reds
+> GREEN; fresh-SQLite full-dir boot clean in an independent harness, 115 applied, both archive tables; exact-defect replant
+> reproduces the boot failure AND the corpus REDs via its boot node; rider `205e08602` untouched below the fix). F1 CLOSED,
+> F2 4/5-closed; new pin-strength findings **F-A (scan shape-blind to spaced trailing `;` — boot node carries the teeth)**,
+> **F-B (full-line `;` negative space open — inert to the runner; docstring overclaims)**, **F-C (AM-10 S5 :429 site
+> unpinned)** — ROUTED to the pin owner, non-blocking. Original-run record below unchanged (NO-GO at `7b6fa2cdf`, G6 FAIL).
+> G1/G2/G3/G5/G7/G8 ALL PASS; G4 matrix as recorded; flake ledger 3 (+1 shape), pre-existing classes; wedge `b7423ea5`.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `source_gc_repository_unit` | `timeout 300 <venv>/python -m pytest tests/unit/repositories/test_source_gc_repository.py -q --timeout=120 -p no:cacheprovider` (fenced env, per-variable `POSTGRES_*` scrubs) | 33 nodes — predicate legs, AM-1 re-assert + `updated_at` WHERE-pin, AM-2 ordering, AM-3 archive + W3 latch, AM-9 windows, AM-11 lockstep, W2/W3/W4 teeth, P3/P4/P8/P9/P21 | 2026-11-08 @ `7b6fa2cdf` | **PASS 33/33** |
+| `source_gc_service_unit` | same shape, `tests/unit/services/test_sources_gc_service.py` | 13 nodes (re-gate `fadb2dde1`: 10 + AM-10 thread-identity ×2 + P15 marker-latch ×1) — sweep loop, counters, P13 kill-switch, P14 first-tick, P15 log discipline + marker + latch | 2026-11-08 @ `fadb2dde1` (re-gate) | **PASS 13/13** (50 combined w/ corpus; F-C: S5 :429 site unpinned — routed) |
+| `source_gc_migration_corpus` | `timeout 300 <venv>/python -m pytest tests/migration/test_migration_comment_semicolon.py -q --timeout=120 -p no:cacheprovider` | 4 nodes — trailing-comment scan (corpus-wide, zero exemptions), per-file stricter standard, DOWN posture, fresh-SQLite full-dir boot incl. source-gc archive tables | 2026-11-08 @ `fadb2dde1` | **PASS 4/4** (defect replant RED via the boot node; F-A scan shape-blindness + F-B full-line negative space — routed) |
+| `source_gc_lock_interleave_pg` | `timeout 300 <venv>/python -m pytest tests/postgres/test_source_gc_lock_interleave_pg.py -q --timeout=120 -p no:cacheprovider` (SERIAL — no xdist; throwaway PG with `PG_TEST_ALLOWED_DBS` exact-name; DB dropped after) | 5 nodes — P16 two-connection interleave + W1 `before_cursor_execute` FOR-UPDATE listener discriminator, P10 child-first FK order, W6 parent-first lock | 2026-11-08 @ `7b6fa2cdf` | **PASS 5/5** ×3 (+3/3 mutation legs RED→GREEN) |
+<!-- source-gc-functional-gate-end -->
 <!-- pok-functional-gate-20261107-begin -->
 ## Commission POK implementation — FUNCTIONAL GATE registration (2026-11-07/08, lane `feature/project-operating-knowledge` @ `c4c2293fa`, base `6b571771d`; owner: tester pok functional gate; RESULTS: 2026-11-07-pok-functional-gate.md)
 
@@ -4523,3 +4562,11 @@ Lane `feature/ari-memoir-store` (base `1f6898ae2`, head `6a99391eb`). Tier-2 who
 | `memoir_gate_tier2` | HEAD leg: `cd <HEAD_WT> && timeout 180 .venv/bin/python -m pytest --collect-only -q tests/ --ignore=tests/packs --ignore=tests/e2e/test_context_injection_hybrid.py > nodes.txt` (collect, 180 s); per-shard: `timeout 1750 env … bash -c '<FENCE_BODY>; mapfile -t NODEIDS < "$SHARD"; exec .venv/bin/python -m pytest -p no:cacheprovider "${NODEIDS[@]}" -q --tb=line -rEf'` (11 shards × 2 sides); PG partition: `timeout 2400 … --override-ini="addopts=" -m postgres --timeout=120` (serial); 3× matrix: `timeout 240 .venv/bin/python -m pytest <node> -q --tb=line -p no:cacheprovider --timeout=120` | Whole-tree dual-side: sweep shards (11 per side, file-boundary, mrpr sizing, xdist `-n auto` within leg) + PG partition (serial) + 3× isolated re-run of delta nodes (no xdist). LLM fence: `OPENAI_BASE_URL=http://127.0.0.1:9/v1`, retries=1, `OPENAI_REQUEST_TIMEOUT=5`. Per-variable scrub (never `env -u POSTGRES_*` glob). Scratch PG on `memoir_g4_scratch` (port 11666, `/tmp`, stopped+removed at teardown). | 2026-11-06 | **PASS-WITH-NOTES (re-verified 2026-11-06: deterministic net-new 0 after companion fixes — lcancheck pin + tool-categories.json artifact regenerated; 11 flaky routed residue)** (lcancheck exactly_four + tool_category_artifact ×2). 521 pre-existing (inner_soul 16 byte-identical both sides, digest `9fea2dc…`); 6 line-level "fixed" = chunk-context flakes (0 genuine); flaky bucket 11 ids. Closure exact (33,617/33,312). BARE-ID digests: base `028c41df…`, head `55cccdfa…`. 90-min advisory breached (~115 min; reported loudly). |
 
 > **House override class (disclosed):** the gate-level 90-min tier budget is the tier-2 advisory per ensure.md § Gate Tiers — NOT the 5-min per-pack cap (which still governs individual packs). This pack composes shards (each under its own `timeout 1750`/`timeout 240`/`timeout 2400` inner guard); the tier budget is the override class for the gate leg. Each shard retains dual-layer timeout (command-level `timeout` + script-internal `--timeout=120`). No pack-level cap was raised.
+
+## Lane packs 2026-11-07 — wi-b97ec302 sources pagination regression (data-growth latent defect)
+
+Lane `fix/wi-b97ec302-sources-regression` (base `6b571771d`). Root cause: `SQLModelSourceRepository.list_source_configs` defaults `limit=100` (`ORDER BY created_at DESC`) and the boot loader + LIST surfaces called it with the default, so >100 newer inert one-shot scheduler rows evicted the oldest chat rows from page 1. DATA-GROWTH-TRIGGERED LATENT DEFECT (latent since the 2026-03 default-limit wiring) — NOT a v0.29.1-introduced regression; the release window is exonerated by the tester's same-data repro on v0.29.0.
+
+| Pack | Invocation | Scope | Status |
+|---|---|---|---|
+| `sources_pagination_regression_pin_unit_test` (NEW) | `timeout 300 bash test/packs/sources_pagination_regression_pin_unit_test.sh` (wrapper → `tests/unit/test_sources_pagination_regression_pin.py`, 14 nodes; scratch file-backed SQLite `tmp_path`/NullPool — no daemon boot, no PG, no ports, no live contact; needs `.venv` in the tree) | (a) boot loader observes rows past the old implicit 100-row cap and schedules the oldest discord chat row + the repository paging contract (explicit limit=500 → 106 rows; default → 100, oldest evicted); (b) `GET /api/sources` default = full list up to hard max with untruncated `total`, explicit `limit`/`offset` pages, `limit`>hard-max CLAMPS (documented choice), structurally invalid params 422 (clamp leg seeds 1005 rows); (c) post-boot reconciliation: stale running rows not scheduled flip to `stopped`, scheduled + registered rows spared (ordering load-bearing), sweep failure never blocks boot; (d) `GET /api/schedules` + `scheduling_service.list_schedules` observe every row (105 > old cap discriminates), pre-existing filters intact | ✅ PASS 14/14 (GREEN leg, ~38-43s) + MUTATION LEG 4-RED/10-GREEN (restore the old single default-limited `start_all` call → `TestBootLoaderPaging::test_boot_loader_schedules_oldest_discord_row`, `TestStaleRunningReconciliation::{test_stale_running_rows_flip_to_stopped, test_scheduled_row_is_spared_running_status, test_sweep_failure_never_blocks_boot}` RED — the evicted discord row is neither started nor protected); fix restored byte-identical (sha-verified) before commit. Mutation FAILED-set sha256 `7360f63ec343a04d884906515e3852050d8f959fc36d83b9691823a2fbebdfdf` |
