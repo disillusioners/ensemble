@@ -24,6 +24,7 @@ Timeout             ``DECISION_TIMEOUT_S``       per-lane budget (5 s)
 USD ceiling         ``DECISION_COST_CEILING_USD``  50.0 (global)
 Token ceiling       ``DECISION_TOKEN_CEILING``    10 000 000 (global)
 Rate table          ``DECISION_PRICING_USD_PER_MILLION_TOKENS``  ``{}``
+Cost floor          ``DECISION_COST_FLOOR_PER_ATTEMPT_USD``  0.0005 (per attempt)
 ==================  ==========================  ======================
 
 **THE TWO QUESTIONS ARE SEPARATE (Q2 — the leader's reconciliation).**
@@ -109,6 +110,7 @@ from typing import Any, Mapping
 
 __all__ = [
     "DEFAULT_COST_CEILING_USD",
+    "DEFAULT_COST_FLOOR_PER_ATTEMPT_USD",
     "DEFAULT_DECISION_MODEL",
     "DEFAULT_TOKEN_CEILING",
     "DEFAULT_TIMEOUT_S",
@@ -138,6 +140,12 @@ DEFAULT_COST_CEILING_USD = 50.0
 #: 10 M tokens/month is ~4 M tokens/day at the S1 cadence.
 DEFAULT_TOKEN_CEILING = 10_000_000
 
+#: D3 — the per-attempt conservative cost floor (USD). Applied to any
+#: socket-reaching attempt that carries no usage. Conservative: the
+#: S1 lane's typical call is well under a cent; the floor errs high
+#: enough that timeout-only traffic still accrues toward the ceiling.
+DEFAULT_COST_FLOOR_PER_ATTEMPT_USD = 0.0005
+
 
 @dataclass(frozen=True)
 class DecisionConfig:
@@ -161,6 +169,14 @@ class DecisionConfig:
     timeout_s: float = DEFAULT_TIMEOUT_S
     cost_ceiling_usd: float = DEFAULT_COST_CEILING_USD
     token_ceiling: int = DEFAULT_TOKEN_CEILING
+    #: D3 — the per-attempt conservative floor. Applied to any
+    #: ``reached_socket`` outcome that carries NO usage (a timeout, a
+    #: disconnect-after-send, a malformed envelope): the attempt bills
+    #: server-side even though the client never saw a response, so the
+    #: ceiling accrues the floor rather than zero. Operator-configured
+    #: in the same home as the per-model rate table — never a hardcoded
+    #: constant. ``0.0`` disables the floor.
+    cost_floor_per_attempt_usd: float = DEFAULT_COST_FLOOR_PER_ATTEMPT_USD
     pricing_usd_per_million_tokens: Mapping[str, float] = field(default_factory=dict)
     global_enabled: bool = False
     seams: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
@@ -223,8 +239,12 @@ class DecisionConfig:
         answer at resolution time.
         """
         resolved_env: Mapping[str, str] = os.environ if env is None else env
-        the_source = resolved_env if source is None else source
-        config = cls.from_source(the_source)
+        # The VALUES come from the injected source, then the DECISION_*
+        # env, then the OPENAI_* env. A house object with EMPTY fields
+        # must not shadow an env value, so the composite carries only
+        # the source's NON-EMPTY values over the env.
+        composite = _composite_source(source, resolved_env)
+        config = cls.from_source(composite)
         return replace(
             config,
             explicitly_configured=cls.has_explicit_decision_signal(
@@ -273,10 +293,10 @@ class DecisionConfig:
         """
 
         def field(*names: str) -> Any:
-            """The first present candidate (lowercase field first)."""
+            """The first NON-EMPTY candidate (lowercase field first)."""
             for name in names:
                 value = _resolve(source, name)
-                if value is not None:
+                if value is not None and value != "":
                     return value
             return None
 
@@ -302,6 +322,13 @@ class DecisionConfig:
             token_ceiling=_positive_int(
                 field("token_ceiling", "DECISION_TOKEN_CEILING"),
                 DEFAULT_TOKEN_CEILING,
+            ),
+            cost_floor_per_attempt_usd=_non_negative_float(
+                field(
+                    "cost_floor_per_attempt_usd",
+                    "DECISION_COST_FLOOR_PER_ATTEMPT_USD",
+                ),
+                DEFAULT_COST_FLOOR_PER_ATTEMPT_USD,
             ),
             pricing_usd_per_million_tokens=_rate_table(
                 field(
@@ -387,6 +414,36 @@ def _raw_yaml_decision_block() -> Any:
         return raw_yaml_decision()
     except Exception:  # noqa: BLE001
         return None
+
+
+def _composite_source(source: Any, env: Mapping[str, str]) -> dict[str, Any]:
+    """A mapping view: the env, with the source's NON-EMPTY fields on top.
+
+    A house config object carries ``api_key = ""`` until an operator sets
+    it; treating that empty string as a value would SHADOW the
+    ``DECISION_API_KEY`` env signal and break the reuse fallback. Only
+    the source's non-empty values win.
+    """
+    merged: dict[str, Any] = dict(env)
+    if source is None:
+        return merged
+    if isinstance(source, Mapping):
+        for key, value in source.items():
+            if value is not None and value != "":
+                merged[str(key)] = value
+        return merged
+    for name in dir(source):
+        if name.startswith("_"):
+            continue
+        try:
+            value = getattr(source, name)
+        except Exception:  # noqa: BLE001 — a property may raise
+            continue
+        if callable(value):
+            continue
+        if value is not None and value != "":
+            merged[name] = value
+    return merged
 
 
 def _resolve(source: Any, path: str) -> Any:
@@ -518,6 +575,21 @@ def _positive_int(raw: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def _non_negative_float(raw: Any, default: float) -> float:
+    """Parse a NON-NEGATIVE float, falling back to ``default``.
+
+    ``0.0`` is a legal value (it DISABLES the D3 per-attempt floor), so
+    this parser must accept it — unlike :func:`_positive_float`.
+    """
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
 
 
 def _rate_table(raw: Any) -> dict[str, float]:

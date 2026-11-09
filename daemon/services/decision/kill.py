@@ -199,7 +199,14 @@ class AppSettingKillStore:
         self._engine = engine
 
     async def get(self, key: str) -> str | None:
-        """Read one raw value (off-loop)."""
+        """Read one raw value (off-loop).
+
+        D2 — a read ERROR is RE-RAISED so the resolver's fail-closed
+        ``switch_unreadable`` branch is REACHABLE in production. Only
+        "no row" returns ``None``; a broken engine, a dropped table or
+        a connection failure raises, and the resolver maps that to
+        OFF + a ``switch_unreadable`` suppressed row.
+        """
         from daemon.services.db_offload import offload
 
         return await offload(self._read_sync, key)
@@ -213,6 +220,13 @@ class AppSettingKillStore:
     # ── the off-loop bodies (no session across an await boundary) ──────
 
     def _read_sync(self, key: str) -> str | None:
+        """Read one raw value — RAISING on a read error (D2).
+
+        "No row" returns ``None`` (a legitimate empty tier). Any other
+        failure — a broken engine, a dropped table, a connection
+        failure — is RE-RAISED so the resolver's fail-closed
+        ``switch_unreadable`` branch is reachable in production.
+        """
         from sqlmodel import Session, select
 
         from daemon.models.app_settings import AppSetting
@@ -229,14 +243,8 @@ class AppSettingKillStore:
                 except (ValueError, TypeError):
                     return row.value_json
                 return decoded if isinstance(decoded, str) else str(decoded)
-        except Exception as exc:  # noqa: BLE001 — the store never raises
-            logger.warning(
-                "decision kill store read failed for %s: %s: %s",
-                key,
-                type(exc).__name__,
-                exc,
-            )
-            return None
+        except Exception:
+            raise
 
     def _write_sync(self, key: str, value: str) -> None:
         from datetime import datetime, timezone
@@ -355,6 +363,11 @@ class KillChannelResolver:
         # the cache is invalidated by the WRITE path, not by a timer.
         self._cache_ttl = max(0.0, float(cache_ttl_s))
         self._cache: dict[str, tuple[float, SwitchState]] = {}
+        # D2 (council obligation 8): a seam whose WRITE did not read back
+        # as written is POISONED — the store's value is untrustworthy, so
+        # every subsequent read resolves UNREADABLE ⇒ OFF. Cleared by an
+        # explicit invalidate()/reverify() (an operator retry).
+        self._poisoned: set[str] = set()
 
     # ── read ────────────────────────────────────────────────────────────
 
@@ -370,6 +383,10 @@ class KillChannelResolver:
         reports ``readable=False`` (the caller raises a
         ``switch_unreadable`` suppression and makes NO call).
         """
+        if seam_id in self._poisoned:
+            # D2 — a failed write left this seam's store value
+            # untrustworthy: resolve UNREADABLE ⇒ OFF (never the stale ON).
+            return SwitchState(readable=False)
         cached = self._cached(seam_id)
         if cached is not None:
             return cached
@@ -395,8 +412,20 @@ class KillChannelResolver:
         (``set_override`` / ``clear_override``) so a kill written
         through the live channel takes effect on the NEXT consult.
 
+        An explicit ``invalidate()`` is also an operator RETRY: it
+        clears a D2 write-failure poison so the next consult re-reads
+        the store.
+
         ``seam_id=None`` invalidates every cached seam.
         """
+        self._drop_cache(seam_id)
+        if seam_id is None:
+            self._poisoned.clear()
+        else:
+            self._poisoned.discard(seam_id)
+
+    def _drop_cache(self, seam_id: str | None = None) -> None:
+        """Drop the CACHE only — the poison survives (D2)."""
         if seam_id is None:
             self._cache.clear()
             return
@@ -611,10 +640,21 @@ class KillChannelResolver:
             else:
                 verified[key] = True
 
+        # D2 — a write that did not land poisons the seam: the stored
+        # value cannot be trusted, so subsequent reads resolve UNREADABLE
+        # ⇒ OFF until an operator retries.
+        if mismatched:
+            if seam_id:
+                self._poisoned.add(seam_id)
+            if global_enabled is not None:
+                self._poisoned.update(
+                    {GLOBAL_ENABLED_KEY, "__global_poison__"}
+                )
         # The write-path invalidation (L5): the next consult re-resolves.
-        self.invalidate(seam_id)
+        # The CACHE is dropped here; a poison set above SURVIVES.
+        self._drop_cache(seam_id)
         if global_enabled is not None:
-            self.invalidate(None)
+            self._drop_cache(None)
         return WriteResult(
             ok=not mismatched,
             verified=verified,
@@ -642,7 +682,7 @@ class KillChannelResolver:
                     stage=DecisionStage.SHADOW,
                 )
             )
-        self.invalidate(None)
+        self._drop_cache(None)
         ok = all(result.ok for result in results)
         verified: dict[str, bool] = {}
         mismatched: tuple[str, ...] = ()
@@ -750,7 +790,7 @@ class KillChannelResolver:
                 exc,
             )
             return SeedOutcome(key=key, seeded=False, reason="write failed")
-        self.invalidate(None)
+        self._drop_cache(None)
         return SeedOutcome(key=key, seeded=True, reason="seeded")
 
     async def reverify(self, seam_ids: Sequence[str]) -> list[ReverifyOutcome]:

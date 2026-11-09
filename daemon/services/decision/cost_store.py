@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
@@ -58,6 +59,15 @@ class AppSettingCostAccumulator(CostAccumulator):
     ) -> None:
         self._engine = engine
         self._period_getter = period_getter or _current_utc_month
+        # COST-LEDGER ATOMICITY (council fold-now advisory): the
+        # increment is a read-modify-write, so it is SERIALIZED through
+        # ONE process-level lock. The daemon is single-process
+        # (``uvicorn`` default ``workers=1`` — the same invariant the
+        # settings service relies on), so one lock is the full
+        # correctness argument: without it, concurrent consults lose
+        # deltas and the month-to-date spend UNDERCOUNTS — and the
+        # ceiling binds on exactly that quantity.
+        self._lock = threading.Lock()
 
     async def record(
         self, seam_id: str, *, usd: float, tokens: int
@@ -82,10 +92,36 @@ class AppSettingCostAccumulator(CostAccumulator):
     def _record_sync(
         self, period: str, seam_id: str, usd: float, tokens: int
     ) -> CostTotals:
+        """Read-modify-write the month ledger — SERIALIZED (atomicity).
+
+        Held under ONE process-level lock: the daemon is single-process
+        (``uvicorn`` ``workers=1``), so the lock is the full correctness
+        argument for concurrent consults. Without it, two concurrent
+        read-modify-writes both read the OLD total and one delta is
+        LOST — the month-to-date spend undercounts, and the ceiling
+        binds on that undercounted quantity.
+        """
         from sqlmodel import Session, select
 
         key = f"decision_cost_ledger_{period}"
         now_iso = datetime.now(timezone.utc).isoformat()
+
+        with self._lock:
+            return self._record_locked(
+                key, period, seam_id, usd, tokens, now_iso
+            )
+
+    def _record_locked(
+        self,
+        key: str,
+        period: str,
+        seam_id: str,
+        usd: float,
+        tokens: int,
+        now_iso: str,
+    ) -> CostTotals:
+        """The lock-held body of :meth:`_record_sync`."""
+        from sqlmodel import Session, select
 
         with Session(self._engine) as session:
             row = session.exec(
@@ -200,21 +236,34 @@ class SettingsServiceKillStore(KillStore):
         self._fallback = fallback_store
 
     async def get(self, key: str) -> str | None:
+        """Read one raw value — RAISING when BOTH tiers fail (D2).
+
+        The settings tier is tried first; on failure the fallback store
+        is tried. If the fallback ALSO fails (or is absent), the error
+        is RE-RAISED so the resolver's fail-closed ``switch_unreadable``
+        branch is reachable in production. Only "no row in either
+        tier" returns ``None``.
+        """
         service = self._getter()
+        settings_error: Exception | None = None
         if service is not None and hasattr(service, "get_overrides"):
             try:
                 overrides = await offload(service.get_overrides)
                 if key in overrides:
                     val = overrides[key]
                     return str(val) if val is not None else None
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
+                settings_error = exc
                 logger.warning(
                     "[SettingsServiceKillStore] get_overrides failed for %s: %s",
                     key,
                     exc,
                 )
         if self._fallback is not None:
+            # The fallback store re-raises its own read errors (D2).
             return await self._fallback.get(key)
+        if settings_error is not None:
+            raise settings_error
         return None
 
     async def set(self, key: str, value: str) -> None:

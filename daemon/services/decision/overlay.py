@@ -444,9 +444,7 @@ class DecisionOverlay:
         self._consults[seam_id] = self._consults.get(seam_id, 0) + 1
 
         # ── the CONSULT gate (FLAG12) ────────────────────────────────
-        import sys as _dbg
         state = await self._kill.read_state(seam_id)
-        print("GATE", seam_id, "readable", state.readable, "global", state.global_on, "seam", state.seam_on, "configured", self._is_configured(), file=_dbg.stderr, flush=True)
         if not state.readable:
             return self._suppressed(
                 seam_id,
@@ -564,6 +562,7 @@ class DecisionOverlay:
             seam_id,
             usd=result.cost_usd,
             tokens=result.total_tokens or 0,
+            reached_socket=result.reached_socket,
             heuristic_outcome=heuristic_outcome,
             mode=mode,
             state=state,
@@ -665,18 +664,26 @@ class DecisionOverlay:
         *,
         usd: float,
         tokens: int,
+        reached_socket: bool,
         heuristic_outcome: Any,
         mode: str,
         state: Any,
     ) -> None:
-        """Meter one attempt and evaluate the ceiling (L8).
+        """Meter one attempt and evaluate the ceiling (L8 + D3).
 
-        Three paths, in order:
+        Four paths, in order:
 
         1. the provider REPORTED a cost → the USD accumulator;
         2. no reported cost, but an OPERATOR rate exists for the model
            → the tokens are converted → the USD accumulator;
-        3. neither → the consult is metered in TOKENS, a
+        3. the attempt REACHED THE SOCKET but carries no usage (a
+           timeout, a disconnect-after-send, a malformed envelope) →
+           the OPERATOR-CONFIGURED per-attempt conservative floor → the
+           USD accumulator (D3: a timeout still bills — the cheapest
+           adversarial trick is to be slow, and a zero floor lets
+           timeout-only traffic bypass BOTH the USD ceiling and the
+           token fail-safe forever);
+        4. neither → the consult is metered in TOKENS, a
            ``pricing_unconfigured`` suppressed row is emitted, and the
            TOKEN ceiling is the fail-safe.
         """
@@ -686,6 +693,16 @@ class DecisionOverlay:
             rate = self._config.rate_for(self._config.model)
             if rate is not None and tokens > 0:
                 spend = (float(tokens) / 1_000_000.0) * float(rate)
+                priced = True
+        if spend <= 0.0 and tokens <= 0 and reached_socket:
+            # D3 — the conservative floor: the attempt reached the
+            # socket (it bills server-side) but carried NO usage at all
+            # (a timeout, a disconnect-after-send, a malformed
+            # envelope). An attempt that DID report tokens is metered on
+            # the L8 token path instead — it does not lack usage.
+            floor = float(self._config.cost_floor_per_attempt_usd)
+            if floor > 0:
+                spend = floor
                 priced = True
 
         try:

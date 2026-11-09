@@ -92,6 +92,8 @@ ALLOWED_DAEMON_DIFF = (
     "daemon/services/decision/__init__.py",
     "daemon/services/decision/client.py",
     "daemon/services/decision/config.py",
+    "daemon/services/decision/cost_store.py",
+    "daemon/services/decision/factory.py",
     "daemon/services/decision/kill.py",
     "daemon/services/decision/metrics.py",
     "daemon/services/decision/overlay.py",
@@ -99,6 +101,38 @@ ALLOWED_DAEMON_DIFF = (
     "daemon/services/decision/registry.py",
     "daemon/services/decision/shadow.py",
     "daemon/services/decision/types.py",
+    # The decision lane's OTHER daemon surfaces (D4): the wiring round's
+    # two call-site edits and the two files the lane's production wiring
+    # lives in. These are NOT producer modules for the metrics census —
+    # they are the decision lane's own integration points.
+    "daemon/services/settings_service.py",
+    "daemon/services/snapshot_search_service.py",
+    "daemon/manager.py",
+    "daemon/config.py",
+)
+
+#: The DECISION LANE's own daemon files (D4) — the set this pin must
+#: prove is FULLY covered by ``ALLOWED_DAEMON_DIFF``. A file in here
+#: that is NOT allowlisted is a LANE-CAUSED offender and REDS the pin.
+LANE_OWNED_DAEMON = frozenset(
+    {
+        "daemon/services/decision/__init__.py",
+        "daemon/services/decision/client.py",
+        "daemon/services/decision/config.py",
+        "daemon/services/decision/cost_store.py",
+        "daemon/services/decision/factory.py",
+        "daemon/services/decision/kill.py",
+        "daemon/services/decision/metrics.py",
+        "daemon/services/decision/overlay.py",
+        "daemon/services/decision/port.py",
+        "daemon/services/decision/registry.py",
+        "daemon/services/decision/shadow.py",
+        "daemon/services/decision/types.py",
+        "daemon/services/settings_service.py",
+        "daemon/services/snapshot_search_service.py",
+        "daemon/manager.py",
+        "daemon/config.py",
+    }
 )
 
 #: The wiring package's root (the new module).
@@ -259,8 +293,20 @@ class TestNoProducerInstrumentation:
         daemon_changes = [
             path for path in changed if path.startswith("daemon/") and not path.startswith(WIRING_ROOT)
         ]
-        for path in daemon_changes:
-            assert path in ALLOWED_DAEMON_DIFF, path
+        # D4 — FULL ENUMERATION (the original loop asserted the FIRST
+        # offender and stopped, so a lane-caused offender could hide
+        # behind a pre-existing one — the "0 offenders" misread).
+        offenders = [
+            path for path in daemon_changes if path not in ALLOWED_DAEMON_DIFF
+        ]
+        lane_offenders = [path for path in offenders if path in LANE_OWNED_DAEMON]
+        pre_existing = [path for path in offenders if path not in LANE_OWNED_DAEMON]
+        assert lane_offenders == [], (
+            "LANE-CAUSED offenders — a decision-lane file missing from "
+            f"ALLOWED_DAEMON_DIFF: {lane_offenders}\n"
+            f"(PRE-EXISTING offenders, other lanes, {len(pre_existing)}): "
+            f"{pre_existing}"
+        )
 
     def test_the_wiring_package_never_touches_a_foreign_metric(self) -> None:
         """P4-M2 — an increment on somebody else's counter must go RED."""

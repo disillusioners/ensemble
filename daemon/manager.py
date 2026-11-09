@@ -2869,52 +2869,28 @@ class InstanceManager:
             self._snapshot_repo,
             snapshot_embedding_service=self._snapshot_embedding_service,
         )
-        # Decision Module (P1, shadow-only) — overlay wiring
-        from daemon.services.decision.client import DecisionClient
-        from daemon.services.decision.config import DecisionConfig as CoreDecisionConfig
-        from daemon.services.decision.cost_store import (
-            AppSettingCostAccumulator,
-            SettingsServiceKillStore,
-            build_s1_seam_record,
-        )
-        from daemon.services.decision.kill import AppSettingKillStore, KillChannelResolver
-        from daemon.services.decision.overlay import DecisionOverlay
-        from daemon.services.decision.registry import SeamRegistry
-        from daemon.services.decision.shadow import ShadowWriter
+        # Decision Module (P1, shadow-only) — overlay wiring.
+        # D1: the PRODUCTION construction goes through the SINGLE named
+        # factory, which stamps the configured predicate from the
+        # EXPLICIT decision signal (resolve_values, not from_source).
+        from daemon.services.decision.factory import build_decision_overlay
+        from daemon.services.decision.kill import AppSettingKillStore
 
-        core_dec_cfg = CoreDecisionConfig.from_source(self.config.decision)
-        self._decision_cost_accumulator = AppSettingCostAccumulator(self._engine)
-        self._decision_client = DecisionClient(core_dec_cfg)
-        self._decision_registry = SeamRegistry(
-            client=self._decision_client, config=core_dec_cfg
-        )
-        self._decision_registry.register(build_s1_seam_record())
-
-        self._decision_fallback_kill_store = AppSettingKillStore(self._engine)
-        self._decision_kill_store = SettingsServiceKillStore(
-            lambda: self._settings_service,
-            fallback_store=self._decision_fallback_kill_store,
-        )
-
-        def _decision_override_writer(k: str, v: Any, u: str | None = None) -> Any:
-            if self._settings_service is not None:
-                return self._settings_service.set_override(k, v, u)
-            return self._decision_fallback_kill_store._write_sync(k, str(v))
-
-        self._decision_kill_resolver = KillChannelResolver(
-            self._decision_kill_store,
-            yaml_snapshot=core_dec_cfg,
-            override_writer=_decision_override_writer,
-        )
-        self._decision_shadow_writer = ShadowWriter()
-        self._decision_overlay = DecisionOverlay(
-            registry=self._decision_registry,
-            kill=self._decision_kill_resolver,
-            shadow_writer=self._decision_shadow_writer,
-            config=core_dec_cfg,
-            accumulator=self._decision_cost_accumulator,
+        _dec = build_decision_overlay(
+            engine=self._engine,
+            house_decision_config=self.config.decision,
+            settings_service_getter=lambda: self._settings_service,
             board_service=self._board_service,
         )
+        self._decision_config = _dec.config
+        self._decision_cost_accumulator = _dec.accumulator
+        self._decision_client = _dec.client
+        self._decision_registry = _dec.registry
+        self._decision_fallback_kill_store = AppSettingKillStore(self._engine)
+        self._decision_kill_store = _dec.kill_store
+        self._decision_kill_resolver = _dec.kill_resolver
+        self._decision_shadow_writer = _dec.shadow_writer
+        self._decision_overlay = _dec.overlay
         self._snapshot_search_service = SnapshotSearchService(
             snapshot_repo=self._snapshot_repo,
             embedding_service=self._snapshot_embedding_service,

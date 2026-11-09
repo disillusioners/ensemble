@@ -752,8 +752,9 @@ class DecisionClient:
         """Build a POST-CALL suppression outcome.
 
         The socket WAS reached (the proxy refused the request), so the
-        attempt is counted and its conservative cost estimate is billed
-        — a suppressed consult is never free once a call was made.
+        attempt is COUNTED. The cost fields stay at zero here — the
+        overlay applies the operator-configured per-attempt floor (D3)
+        when an attempt reaches the socket but carries no usage.
         """
         return ClientOutcome(
             answer=None,
