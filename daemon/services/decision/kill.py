@@ -26,6 +26,26 @@ env tier is the BOOT SEED only: ``boot_seed`` writes it into the store
 **only where the store has no existing value**, so the DB tier wins from
 the first boot onward and **a kill is never undone by a restart**.
 
+**THE WRITE PATH.** Switch writes (the boot seed AND the auto-trip's
+both-keys write) go through the sanctioned
+``SettingsService.set_override`` path — the operator-visible, audited,
+invalidation-hooking path. ``set_override`` is REGISTRY-GATED (an
+unregistered key raises ``UnknownManagedKeyError``) and VALIDATES
+before writing, so the three overlay switch keys MUST be registered in
+``MANAGED_KEYS`` by the wiring round before this path can carry them.
+
+⚠️ ``set_override`` itself writes NO audit line — the audit line is the
+ROUTER's (``daemon/routers/settings.py``: ``[Settings] db override set
+key=%s value=%r subject=%s``). A daemon-side write (the boot seed, the
+auto-trip) therefore writes the row but emits no router audit line, so
+this module emits its own line in the SAME format — one grep covers
+both surfaces.
+
+``set_override`` is SYNCHRONOUS (it opens its own Session), so it is
+run OFF the event loop through ``daemon.services.db_offload.offload``
+(the house sync-DB seam — the router uses ``asyncio.to_thread`` for
+the same reason).
+
 **THE RESOLVED-STATE CACHE (L5).** "Read per consult" must NOT be a
 synchronous DB read per consult: ``get_overrides()`` opens a NEW
 Session and queries EVERY call with no cache, and it is SYNC — a sync
@@ -320,12 +340,17 @@ class KillChannelResolver:
         store: KillStore,
         *,
         env: Mapping[str, str] | None = None,
-        yaml_snapshot: Mapping[str, Any] | None = None,
+        yaml_snapshot: Any = None,
         cache_ttl_s: float = 0.0,
+        override_writer: Callable[[str, Any, str | None], Any] | None = None,
     ) -> None:
         self._store = store
         self._env: Mapping[str, str] = os.environ if env is None else env
-        self._yaml: Mapping[str, Any] = yaml_snapshot or {}
+        self._yaml: Any = yaml_snapshot
+        # The sanctioned write path — ``SettingsService.set_override``
+        # (SYNC; the wiring round binds it). ``None`` ⇒ the writes go
+        # straight to the store (the pre-wiring path).
+        self._override_writer = override_writer
         # The resolved-state cache (L5). ``cache_ttl_s`` is 0 by default:
         # the cache is invalidated by the WRITE path, not by a timer.
         self._cache_ttl = max(0.0, float(cache_ttl_s))
@@ -476,11 +501,50 @@ class KillChannelResolver:
         if env_value is not None and str(env_value).strip():
             return str(env_value), "env"
 
-        yaml_value = self._yaml.get(key)
+        yaml_value = self._yaml_tier().get(key)
         if yaml_value is not None:
             return str(yaml_value), "yaml"
 
         return None, "default"
+
+    def _yaml_tier(self) -> Mapping[str, Any]:
+        """The yaml tier, keyed by the store keys.
+
+        Accepts a plain mapping (keyed by the store keys) OR the house
+        config object — its ``yaml_switch_tier()`` renders the same
+        mapping (the decision module's ``DecisionConfig`` provides it).
+        """
+        tier = self._yaml
+        if tier is None:
+            return {}
+        renderer = getattr(tier, "yaml_switch_tier", None)
+        if callable(renderer):
+            try:
+                rendered = renderer()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "decision switch yaml tier failed (non-fatal): %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                return {}
+            return rendered if isinstance(rendered, Mapping) else {}
+        if isinstance(tier, Mapping):
+            return tier
+        # A HOUSE config object (the wiring round's ``Config.decision``):
+        # ``global_enabled`` + the ``seams`` sub-model.
+        try:
+            from daemon.services.decision.config import seam_switch_tier
+
+            rendered = seam_switch_tier(tier)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "decision switch yaml tier failed (non-fatal): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return {}
+        return rendered
 
     # ── write ───────────────────────────────────────────────────────────
 
@@ -516,7 +580,7 @@ class KillChannelResolver:
 
         for key, value in pending:
             try:
-                await self._store.set(key, value)
+                await self._write_value(key, value)
             except Exception as exc:  # noqa: BLE001 — the store never raises
                 logger.warning(
                     "decision switch write failed for %s: %s: %s",
@@ -624,6 +688,30 @@ class KillChannelResolver:
                 )
         return outcomes
 
+    async def _write_value(self, key: str, raw: str) -> None:
+        """Write one switch value through the SANCTIONED path.
+
+        With an ``override_writer`` bound (``SettingsService.set_override``)
+        the write goes there — registry-gated, validated, operator-
+        visible — and an audit line is emitted in the router's format
+        (``set_override`` itself does not audit). Without one, the
+        write goes straight to the store (the pre-wiring path).
+        """
+        writer = self._override_writer
+        if writer is None:
+            await self._store.set(key, raw)
+            return
+        typed = _typed_value(key, raw)
+        from daemon.services.db_offload import offload
+
+        await offload(writer, key, typed, None)
+        logger.info(
+            "[Settings] db override set key=%s value=%r subject=%s",
+            key,
+            typed,
+            "auth-off",
+        )
+
     async def _seed_one(
         self, key: str, raw: str, what: str
     ) -> SeedOutcome:
@@ -653,7 +741,7 @@ class KillChannelResolver:
         else:
             value = raw.strip()
         try:
-            await self._store.set(key, value)
+            await self._write_value(key, value)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "decision boot seed write failed for %s: %s: %s",
@@ -711,6 +799,19 @@ class KillChannelResolver:
         for outcome in outcomes:
             metrics.record_switch_reverify(outcome.seam_id, outcome.outcome)
         return outcomes
+
+
+def _typed_value(key: str, raw: str) -> Any:
+    """The registry-typed value for a store key.
+
+    ``set_override`` validates against the managed key's declared type
+    (``int`` for the ``_enabled`` keys, ``str`` for the ``_stage``
+    key), so the value handed to it must carry that type — the store
+    keeps the string form.
+    """
+    if key.endswith("_enabled"):
+        return 1 if raw == "1" else 0
+    return raw
 
 
 def _parse_enabled(raw: str) -> bool | None:

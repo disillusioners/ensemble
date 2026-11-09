@@ -26,6 +26,31 @@ Token ceiling       ``DECISION_TOKEN_CEILING``    10 000 000 (global)
 Rate table          ``DECISION_PRICING_USD_PER_MILLION_TOKENS``  ``{}``
 ==================  ==========================  ======================
 
+**THE CANONICAL CONTRACT (the wiring round's namespace).** The house
+``Config.decision`` is a ``DecisionConfig(BaseSettings)`` with
+``env_prefix="DECISION_"``, so its FIELD names are LOWERCASE and its
+env names are the uppercase ones above:
+
+============================  ======================================
+Field (on ``Config.decision``)  Type / default
+============================  ======================================
+``base_url``                   ``str = ""``
+``api_key``                    ``str = ""``
+``model``                      ``str = ""``
+``timeout_s``                  ``float = 5.0``
+``cost_ceiling_usd``           ``float = 50.0``
+``token_ceiling``              ``int = 10_000_000``
+``pricing_usd_per_million_tokens``  ``str = ""`` (a JSON object string)
+``global_enabled``             ``bool = False``
+``seams``                      a sub-model:
+                                ``snapshot_l3_selection_enabled: bool = False``
+                                ``snapshot_l3_selection_stage: str = "shadow"``
+============================  ======================================
+
+The managed-key ``config_path`` chains are ``decision.global_enabled``,
+``decision.seams.snapshot_l3_selection_enabled`` and
+``decision.seams.snapshot_l3_selection_stage``.
+
 Reuse rules (non-negotiable, ``thin-client.md`` §3):
 
 1. **No new key material** — the credential defaults to the existing
@@ -64,7 +89,13 @@ __all__ = [
     "DEFAULT_TOKEN_CEILING",
     "DEFAULT_TIMEOUT_S",
     "DecisionConfig",
+    "GLOBAL_ENABLED_KEY",
+    "seam_switch_tier",
 ]
+
+
+#: The global master's store key (the yaml tier's key too).
+GLOBAL_ENABLED_KEY = "decision_global_enabled"
 
 
 #: The purpose-id literal (IP-1) — the allowlist member with no other
@@ -106,6 +137,8 @@ class DecisionConfig:
     cost_ceiling_usd: float = DEFAULT_COST_CEILING_USD
     token_ceiling: int = DEFAULT_TOKEN_CEILING
     pricing_usd_per_million_tokens: Mapping[str, float] = field(default_factory=dict)
+    global_enabled: bool = False
+    seams: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     # ── resolution ──────────────────────────────────────────────────────
 
@@ -116,13 +149,13 @@ class DecisionConfig:
         return cls.from_source(source)
 
     @classmethod
-    def from_source(cls, source: Mapping[str, Any]) -> "DecisionConfig":
+    def from_source(cls, source: Any) -> "DecisionConfig":
         """Resolve from an injected house config object or mapping.
 
         The injected object is the wiring round's ``Config.decision``
-        namespace (L6). It is read by ATTRIBUTE (the house config is an
-        object) or by KEY (a plain mapping) — the same object, two
-        shapes.
+        namespace (L6) — read by its LOWERCASE field names, with the
+        uppercase env names as a tolerant fallback and the ``OPENAI_*``
+        reuse rules applied underneath.
 
         The reuse rules are applied EXACTLY as the house's own
         purpose-bound-model precedent does
@@ -130,32 +163,58 @@ class DecisionConfig:
         ``base_url = (src.get("DECISION_BASE_URL") or src.get("OPENAI_BASE_URL") or "").strip()``
         — REUSE, never mint — and ``OPENAI_MODEL`` is NEVER read.
         """
-        getter = _make_getter(source)
-        base_url = (
-            _clean(getter("DECISION_BASE_URL")) or _clean(getter("OPENAI_BASE_URL"))
+
+        def field(*names: str) -> Any:
+            """The first present candidate (lowercase field first)."""
+            for name in names:
+                value = _resolve(source, name)
+                if value is not None:
+                    return value
+            return None
+
+        base_url = _clean(field("base_url", "DECISION_BASE_URL")) or _clean(
+            field("OPENAI_BASE_URL")
         )
-        api_key = _clean(getter("DECISION_API_KEY")) or _clean(getter("OPENAI_API_KEY"))
-        raw_model = getter("DECISION_MODEL")
-        model = (
-            DEFAULT_DECISION_MODEL
-            if raw_model is None
-            else _clean(raw_model)
+        api_key = _clean(field("api_key", "DECISION_API_KEY")) or _clean(
+            field("OPENAI_API_KEY")
         )
+        raw_model = field("model", "DECISION_MODEL")
+        model = DEFAULT_DECISION_MODEL if raw_model is None else _clean(raw_model)
         return cls(
             base_url=base_url.rstrip("/"),
             api_key=api_key,
             model=model,
-            timeout_s=_positive_float(getter("DECISION_TIMEOUT_S"), DEFAULT_TIMEOUT_S),
+            timeout_s=_positive_float(
+                field("timeout_s", "DECISION_TIMEOUT_S"), DEFAULT_TIMEOUT_S
+            ),
             cost_ceiling_usd=_positive_float(
-                getter("DECISION_COST_CEILING_USD"), DEFAULT_COST_CEILING_USD
+                field("cost_ceiling_usd", "DECISION_COST_CEILING_USD"),
+                DEFAULT_COST_CEILING_USD,
             ),
             token_ceiling=_positive_int(
-                getter("DECISION_TOKEN_CEILING"), DEFAULT_TOKEN_CEILING
+                field("token_ceiling", "DECISION_TOKEN_CEILING"),
+                DEFAULT_TOKEN_CEILING,
             ),
             pricing_usd_per_million_tokens=_rate_table(
-                getter("DECISION_PRICING_USD_PER_MILLION_TOKENS")
+                field(
+                    "pricing_usd_per_million_tokens",
+                    "DECISION_PRICING_USD_PER_MILLION_TOKENS",
+                )
             ),
+            global_enabled=_as_bool(
+                field("global_enabled", "DECISION_GLOBAL_ENABLED")
+            ),
+            seams=_seam_tier(source),
         )
+
+    def yaml_switch_tier(self) -> dict[str, Any]:
+        """The YAML tier of the switch ladder, keyed by the STORE keys.
+
+        The kill resolver's ladder is DB > env > yaml > default; this
+        mapping is the yaml tier (``decision_global_enabled``,
+        ``decision_seam_<flat>_enabled``, ``decision_seam_<flat>_stage``).
+        """
+        return seam_switch_tier(self)
 
     # ── derived state ───────────────────────────────────────────────────
 
@@ -203,13 +262,92 @@ class DecisionConfig:
 # ── resolution helpers ──────────────────────────────────────────────────
 
 
-def _make_getter(source: Any) -> Any:
-    """A ``get(name)`` callable over a mapping OR an object."""
+def _resolve(source: Any, path: str) -> Any:
+    """Walk a DOTTED path over an object or a mapping.
+
+    ``None`` when any step is absent — the caller then falls back to
+    the next candidate name.
+    """
     if source is None:
-        return lambda name: None
-    if isinstance(source, Mapping):
-        return lambda name: source.get(name)
-    return lambda name: getattr(source, name, None)
+        return None
+    node: Any = source
+    for part in path.split("."):
+        if node is None:
+            return None
+        if isinstance(node, Mapping):
+            node = node.get(part)
+        else:
+            node = getattr(node, part, None)
+    return node
+
+
+def _as_bool(raw: Any) -> bool:
+    """A tolerant boolean read (a bool, or the usual textual tokens)."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return False
+
+
+def seam_switch_tier(source: Any) -> dict[str, Any]:
+    """Render a house config object into the switch ladder's YAML tier.
+
+    The house ``Config.decision`` exposes ``global_enabled`` and a
+    ``seams`` sub-model whose fields are ``<flat>_enabled`` /
+    ``<flat>_stage`` (e.g. ``snapshot_l3_selection_enabled``). The tier
+    is keyed by the STORE keys, which is what the kill resolver reads.
+    """
+    tier: dict[str, Any] = {}
+    global_enabled = _resolve(source, "global_enabled")
+    if global_enabled is not None:
+        tier[GLOBAL_ENABLED_KEY] = "1" if _as_bool(global_enabled) else "0"
+    for flat, values in _seam_tier(source).items():
+        enabled = values.get("enabled")
+        stage = values.get("stage")
+        if enabled is not None:
+            tier[f"decision_seam_{flat}_enabled"] = "1" if enabled else "0"
+        if stage is not None:
+            tier[f"decision_seam_{flat}_stage"] = str(stage)
+    return tier
+
+
+def _seam_tier(source: Any) -> dict[str, dict[str, Any]]:
+    """Read the ``seams`` sub-model into the per-seam yaml tier.
+
+    The sub-model exposes ``<flat>_enabled`` / ``<flat>_stage`` pairs
+    (e.g. ``snapshot_l3_selection_enabled``). The tier is keyed by the
+    FLATTENED seam id.
+    """
+    seams = _resolve(source, "seams")
+    if seams is None:
+        return {}
+    if isinstance(seams, Mapping):
+        items = list(seams.items())
+    else:
+        items = [
+            (name, getattr(seams, name)) for name in dir(seams) if not name.startswith("_")
+        ]
+    tier: dict[str, dict[str, Any]] = {}
+    for name, value in items:
+        # Shape (b): the resolved mapping form — flat → {enabled, stage}.
+        if isinstance(value, Mapping) and (
+            "enabled" in value or "stage" in value
+        ):
+            entry = tier.setdefault(str(name), {})
+            if "enabled" in value:
+                entry["enabled"] = _as_bool(value["enabled"])
+            if "stage" in value:
+                entry["stage"] = value["stage"]
+            continue
+        # Shape (a): the house sub-model form — <flat>_enabled/_stage.
+        if name.endswith("_enabled"):
+            tier.setdefault(name[: -len("_enabled")], {})["enabled"] = _as_bool(value)
+        elif name.endswith("_stage"):
+            tier.setdefault(name[: -len("_stage")], {})["stage"] = value
+    return tier
 
 
 def _clean(value: Any) -> str:

@@ -29,6 +29,7 @@ from daemon.services.decision.kill import (
     seam_enabled_key,
     seam_stage_key,
 )
+from daemon.services.decision.types import DecisionStage
 from tests.unit.decision.helpers import RowCapture, make_config, smart_handler
 
 
@@ -193,3 +194,95 @@ async def test_the_store_keys_use_the_underscore_flattened_seam_id() -> None:
         == "decision_seam_snapshot_l3_selection_stage"
     )
     assert seam_env_name("snapshot.l3.selection") == "DECISION_SEAM_SNAPSHOT_L3_SELECTION"
+
+
+# ── the sanctioned write path (SettingsService.set_override) ──────────
+
+
+async def test_the_switch_write_goes_through_the_override_writer() -> None:
+    """The write path is the operator-visible ``set_override`` seam.
+
+    ``set_override`` is registry-gated and validates the value against
+    the managed key's declared type, so the value handed to it must be
+    the REGISTRY-typed one (an int for the ``_enabled`` keys, a string
+    for the ``_stage`` key) — not the store's raw string form.
+    """
+    calls: list[tuple[str, Any, str | None]] = []
+
+    def writer(key: str, value: Any, updated_by: str | None) -> None:
+        calls.append((key, value, updated_by))
+
+    store = _CountingStore(_on())
+    kill = KillChannelResolver(store, env={}, override_writer=writer)
+    await kill.write("snapshot.l3.selection", enabled=False)
+    await kill.write("snapshot.l3.selection", stage=DecisionStage.SHADOW)
+    keys = {key for key, _v, _u in calls}
+    assert keys == {
+        "decision_seam_snapshot_l3_selection_enabled",
+        "decision_seam_snapshot_l3_selection_stage",
+    }
+    typed = {key: value for key, value, _u in calls}
+    assert typed["decision_seam_snapshot_l3_selection_enabled"] == 0
+    assert typed["decision_seam_snapshot_l3_selection_stage"] == "shadow"
+
+
+async def test_the_daemon_side_write_emits_its_own_audit_line(caplog) -> None:
+    """``set_override`` does NOT audit — the ROUTER does.
+
+    A daemon-side write (the boot seed, the auto-trip) would therefore
+    write the row silently, so this module emits a line in the router's
+    own format — one grep covers both surfaces.
+    """
+    import logging
+
+    def writer(key: str, value: Any, updated_by: str | None) -> None:
+        return None
+
+    store = _CountingStore(_on())
+    kill = KillChannelResolver(store, env={}, override_writer=writer)
+    with caplog.at_level(logging.INFO, logger="daemon.services.decision.kill"):
+        await kill.write("snapshot.l3.selection", enabled=False)
+    assert any(
+        "[Settings] db override set key=decision_seam_snapshot_l3_selection_enabled"
+        in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_the_yaml_tier_may_come_from_the_house_config() -> None:
+    """The yaml tier is the house config's ``yaml_switch_tier()``."""
+    from daemon.services.decision.config import DecisionConfig
+
+    class _Seams:
+        snapshot_l3_selection_enabled = True
+        snapshot_l3_selection_stage = "deciding"
+
+    class _House:
+        global_enabled = True
+        seams = _Seams()
+
+    store = _CountingStore({})
+    kill = KillChannelResolver(store, env={}, yaml_snapshot=_House())
+    state = await kill.read_state("snapshot.l3.selection")
+    assert state.global_on is True
+    assert state.seam_on is True
+    assert state.stage is DecisionStage.SHADOW or state.stage.value == "deciding"
+
+
+async def test_the_config_renders_the_yaml_switch_tier() -> None:
+    """The config's yaml tier is keyed by the STORE keys."""
+    from daemon.services.decision.config import DecisionConfig
+
+    class _Seams:
+        snapshot_l3_selection_enabled = True
+        snapshot_l3_selection_stage = "deciding"
+
+    class _House:
+        global_enabled = True
+        seams = _Seams()
+
+    config = DecisionConfig.from_source(_House())
+    tier = config.yaml_switch_tier()
+    assert tier["decision_global_enabled"] == "1"
+    assert tier["decision_seam_snapshot_l3_selection_enabled"] == "1"
+    assert tier["decision_seam_snapshot_l3_selection_stage"] == "deciding"
