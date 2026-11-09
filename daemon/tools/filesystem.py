@@ -94,11 +94,23 @@ CATEGORY_DOC = """\
 Read, write, edit, and search files and directories.
 
 **Rules**:
-- `workdir` is required when `path` is relative. If `path` is absolute (e.g. `/abs/path`
-  on Unix or `C:\\path\\to\\file` on Windows), `workdir` is REQUIRED for the WALK tools
-  (`glob_files`, `grep_files`) — they walk unbounded trees and need an explicit scope.
-  For the file tools (`read_file`, `write_file`, `edit_file`) and `list_directory`,
-  `workdir` may be omitted for absolute paths and the path is used as-is.
+- **Scoped agents** (an agent that declares a bounded `read_scope`, e.g. the
+  skill-keeper's `"project"`): the four READ tools (`read_file`, `list_directory`,
+  `glob_files`, `grep_files`) accept **relative paths only**. The base is the
+  **daemon-resolved trusted workdir** — the instance's project directory, bound by
+  the tool factory — and the `workdir` argument is **not accepted** for a scoped
+  agent (it is refused; an agent-supplied base could move its own boundary). An
+  ABSOLUTE path is refused, a relative path that escapes the anchor is refused,
+  and the `.env` family is refused at any depth (never readable, never listed,
+  never matched by a search) — this is the credential-hazard class the scope
+  exists to deny.
+- **Undeclared agents** (the default — every other agent): the legacy semantics
+  below are unchanged. `workdir` is required when `path` is relative. If `path` is
+  absolute (e.g. `/abs/path` on Unix or `C:\\path\\to\\file` on Windows), `workdir` is
+  REQUIRED for the WALK tools (`glob_files`, `grep_files`) — they walk unbounded
+  trees and need an explicit scope. For the file tools (`read_file`, `write_file`,
+  `edit_file`) and `list_directory`, `workdir` may be omitted for absolute paths
+  and the path is used as-is.
 - When `path` is relative, it is resolved against `workdir` and must stay within it.
 - WALK tools (`glob_files`, `grep_files`) further require the resolved root to be within
   the workdir OR an allowed temp dir. Absolute roots outside the workdir (e.g. bare
@@ -904,6 +916,12 @@ def list_directory(
     # B3: the read call site opts into the declared read scope (the
     # ambient caller identity is bound by the scope-aware wrapper in
     # ``daemon/tools/instance.py``). Undeclared ⇒ no scope ⇒ unchanged.
+    # D-N7: the enumerating twin of the read surface. The listing must
+    # not leak credential-hazard NAMES either — `_scope_filter_entries`
+    # drops them for a SCOPED agent only (names, never content, but the
+    # name is itself the hazard: it tells the agent the file exists and
+    # where). Undeclared agents get the untouched entry list.
+    list_scope = declared_read_scope(current_caller_agent_id())
     dir_path, err = _resolve_within_workdir(path, workdir, current_caller_agent_id())
     if err:
         return err
@@ -918,7 +936,12 @@ def list_directory(
         entries = []
         for entry in sorted(dir_path.iterdir()):
             name = entry.name
-            
+
+            # D-N7: a SCOPED agent never sees a denied basename — not
+            # even as a NAME (and regardless of ``show_hidden``).
+            if list_scope and _is_scope_denied_basename(entry.name):
+                continue
+
             # Skip hidden files unless requested
             if not show_hidden and name.startswith("."):
                 continue

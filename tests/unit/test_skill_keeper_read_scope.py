@@ -779,3 +779,116 @@ def dotenv_tree(tmp_path: Path) -> str:
         "[project]\nname='fixture'\n", encoding="utf-8"
     )
     return str(root)
+
+
+# =============================================================================
+# D-N7 — `list_directory` must not ENUMERATE denied basenames
+# =============================================================================
+#
+# The `.env` fix closed the READ surface; the listing surface was the
+# sibling it left open. `list_directory(show_hidden=True)` still printed
+# `.env` / `.env.local` — names only, never content, but the NAME is
+# itself the hazard: it tells the agent the credential file exists and
+# where. The fix filters entries through `_is_scope_denied_basename` for
+# a SCOPED agent only; undeclared agents are byte-identical to base.
+
+
+class TestListDirectoryDoesNotEnumerateDeniedBasenames:
+    def test_a_scoped_agent_does_not_see_dotenv_names_with_show_hidden(
+        self, dotenv_tree
+    ):
+        """The reviewer's probe: `show_hidden=True` enumerated `.env`."""
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["list_directory"].invoke(
+            {"path": ".", "show_hidden": True}
+        )
+        rows = {line.strip() for line in result.splitlines() if line.strip()}
+        for denied in (".env", ".env.local"):
+            assert denied not in rows, (
+                f"a scoped agent must not see the denied name {denied!r}: {result!r}"
+            )
+
+    def test_a_scoped_agent_does_not_see_dotenv_names_without_show_hidden(
+        self, dotenv_tree
+    ):
+        """The rule is not a `show_hidden` consequence — it holds always."""
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["list_directory"].invoke(
+            {"path": ".", "show_hidden": False}
+        )
+        rows = {line.strip() for line in result.splitlines() if line.strip()}
+        assert ".env" not in rows and ".env.local" not in rows, (
+            f"a scoped agent must not see the denied names: {result!r}"
+        )
+
+    def test_a_scoped_agent_does_not_see_a_nested_dotenv(self, dotenv_tree):
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["list_directory"].invoke(
+            {"path": "frontend", "show_hidden": True}
+        )
+        rows = {line.strip() for line in result.splitlines() if line.strip()}
+        assert ".env" not in rows, (
+            f"a nested `.env` must not be enumerated: {result!r}"
+        )
+
+    def test_a_scoped_agent_still_lists_ordinary_entries(self, dotenv_tree):
+        """Non-vacuity: the filter must not empty the listing."""
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["list_directory"].invoke(
+            {"path": ".", "show_hidden": True}
+        )
+        assert "pyproject.toml" in result, (
+            f"ordinary entries must still be listed: {result!r}"
+        )
+
+    def test_an_undeclared_agent_still_sees_the_dotenv_name(self, dotenv_tree):
+        """The unchanged-behavior twin — base listing is untouched."""
+        tools = _build_tools("coder", dotenv_tree)
+        result = tools["list_directory"].invoke(
+            {"path": ".", "workdir": dotenv_tree, "show_hidden": True}
+        )
+        rows = {line.strip() for line in result.splitlines() if line.strip()}
+        assert ".env" in rows, (
+            f"a non-declaring agent's listing must be unchanged: {result!r}"
+        )
+        assert ".env.local" in rows
+
+
+# =============================================================================
+# D-N8 — the CATEGORY_DOC states the REAL contract
+# =============================================================================
+#
+# DOC-ONLY: zero behavior change. The pin exists because the old text
+# told agents `workdir` is REQUIRED for absolute-path walks — which
+# contradicts the shipped scoped-agent policy (an explicit `workdir` is
+# REJECTED there; the anchor is factory-bound). A wrong doc is a wrong
+# instruction to every agent that reads the category help.
+
+
+class TestCategoryDocStatesTheRealContract:
+    def test_the_doc_describes_the_scoped_agent_policy(self):
+        from daemon.tools import filesystem
+
+        doc = filesystem.CATEGORY_DOC
+        assert "Scoped agents" in doc, (
+            "the category doc must describe the scoped-agent read policy"
+        )
+        assert "daemon-resolved trusted workdir" in doc, (
+            "the doc must name the trusted anchor as the read base"
+        )
+        assert "not accepted" in doc, (
+            "the doc must state that the `workdir` argument is refused for "
+            "a scoped agent"
+        )
+        assert ".env" in doc, (
+            "the doc must name the credential-hazard basename rule"
+        )
+
+    def test_the_doc_keeps_the_undeclared_agent_semantics(self):
+        from daemon.tools import filesystem
+
+        doc = filesystem.CATEGORY_DOC
+        assert "Undeclared agents" in doc, (
+            "the legacy (undeclared) semantics must stay documented — the "
+            "fleet default is unchanged"
+        )

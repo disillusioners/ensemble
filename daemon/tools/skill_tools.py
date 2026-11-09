@@ -399,7 +399,14 @@ def create_skill_tools(
         lines.append(f"# {getattr(file_skill, 'name', '<unknown>')}")
         lines.append("")
         lines.append(f"- address: {getattr(file_skill, 'address', '')}")
-        lines.append(f"- id: {getattr(file_skill, 'id', '')}")
+        # E3.3 (board wi-d340f16c bullet 3 — display hygiene): the
+        # agent-facing ``- id:`` line must carry the CONSUMABLE address
+        # (``pf:<ns>:<name>``), never the internal ``pf-<sha16>``
+        # pseudo-id. The pseudo-id stays available ADDITIVELY under
+        # ``- pseudo_id:`` (the internal key continuity the injection
+        # path and the embedding rows depend on).
+        lines.append(f"- id: {getattr(file_skill, 'address', '')}")
+        lines.append(f"- pseudo_id: {getattr(file_skill, 'id', '')}")
         lines.append(f"- namespace: {getattr(file_skill, 'namespace', '')}")
         lines.append(f"- project_id: {getattr(file_skill, 'project_id', '')}")
         lines.append(f"- root_path: {root}")
@@ -1257,9 +1264,13 @@ Note:
                     "method; falling back to log-only"
                 )
                 dispatch_method = None
-        short_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
+        # E3.1 (board wi-d340f16c bullet 1 — display hygiene): echo the
+        # FULL id, never the 8-hex prefix. The 8-hex form is NOT
+        # ``skill_view``-consumable, so an agent that copies it back into
+        # ``skill_view`` fails (the wi-76d89e11 verbatim-id contract).
+        echo_id = skill_id if isinstance(skill_id, str) else str(skill_id)
         lines: list[str] = [
-            f"\U0001f4dd Skill fix request recorded for skill '{short_id}'.",
+            f"\U0001f4dd Skill fix request recorded for skill '{echo_id}'.",
             "",
             "User-reported issue:",
             "---",
@@ -1372,14 +1383,14 @@ Behavior:
 Returns:
     A multi-line response. Dispatched::
 
-        📝 Skill fix request recorded for skill '<short_id>'.
+        📝 Skill fix request recorded for skill '<skill_id>'.
         ... issue / suggested-fix fences ...
         ✅ Dispatched: Tier-3 skill_evolution job <job_id> was admitted
         — the skill-keeper agent will pick it up from the job queue.
 
     Gate refused (lane disabled or cooldown)::
 
-        📝 Skill fix request recorded for skill '<short_id>'.
+        📝 Skill fix request recorded for skill '<skill_id>'.
         ... issue / suggested-fix fences ...
         ⛔ NOT dispatched: the skill-evolution admission lane is
         disabled (kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off, or
@@ -1488,7 +1499,10 @@ Returns:
                 )
         project_id = _get_project_id()
         agent_id = _get_agent_id()
-        short_id = skill_id[:8] if isinstance(skill_id, str) and skill_id else str(skill_id)
+        # E3.2 (board wi-d340f16c bullet 2 — display hygiene): echo the
+        # FULL id, never the 8-hex prefix (same verbatim-id contract as
+        # the fix path).
+        echo_id = skill_id if isinstance(skill_id, str) and skill_id else str(skill_id)
         try:
             applied_ok = await metrics_service.record_feedback(
                 skill_id=skill_id,
@@ -1523,11 +1537,11 @@ Returns:
                 else ""
             )
             return (
-                f"\u2705 Feedback recorded for skill {short_id}... "
+                f"\u2705 Feedback recorded for skill {echo_id}... "
                 f"Applied={applied}.{usefulness_line} Note: {note!r}.{improvement_line}"
             )
         return (
-            f"\u26a0\ufe0f No usage record found for skill {short_id}... "
+            f"\u26a0\ufe0f No usage record found for skill {echo_id}... "
             "Feedback cannot be applied."
         )
 
@@ -1591,11 +1605,11 @@ Returns:
     On a record update (``metrics_service.record_feedback(...)``
     returned ``True``)::
 
-        ✅ Feedback recorded for skill <short_id>... Applied=<applied>. [Usefulness: <n>/10.] Note: '<note>'. [Improvement: '<improvement_note>']
+        ✅ Feedback recorded for skill <skill_id>... Applied=<applied>. [Usefulness: <n>/10.] Note: '<note>'. [Improvement: '<improvement_note>']
 
     When the service returns ``False`` (no usage record to stamp)::
 
-        ⚠️ No usage record found for skill <short_id>... Feedback cannot be applied.
+        ⚠️ No usage record found for skill <skill_id>... Feedback cannot be applied.
 
     When ``manager._skill_metrics_service`` is absent (Phase-wiring
     in progress)::
