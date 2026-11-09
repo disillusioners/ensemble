@@ -60,6 +60,7 @@ from daemon.repositories.memoir.models import MemoirEpisode, MemoirLine, MemoirS
 from daemon.services.memoir_reflection_service import (
     MEMOIR_CONSTELLATION_MAX_LLM_CALLS_PER_PASS,
     MEMOIR_STAR_TYPES,
+    ConstellationBudgetRequiredError,
     ConstellationCallBudget,
 )
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc
@@ -79,6 +80,23 @@ MEMOIR_STAR_TYPES_LOCAL = MEMOIR_STAR_TYPES
 
 
 @dataclass(frozen=True)
+class ConstellationEdge:
+    """ONE resolved constellation edge — NOT yet written.
+
+    The extraction SPLITS into "resolve" (this dataclass) and "write"
+    (:meth:`MemoirConstellationService.write_edges`) so the caller can
+    write the edges inside ITS OWN transaction: the pass unit commits
+    the constellation edges AND the per-episode reflection watermark
+    together (the crash window of V2-29 / A2).
+    """
+
+    agent_id: str
+    star_id: str
+    episode_id: str
+    event_at: datetime | None
+
+
+@dataclass(frozen=True)
 class DossierRender:
     """The rendered dossier + the fetch outcome (the heat gate's input).
 
@@ -87,10 +105,12 @@ class DossierRender:
     MUST NOT let the caller inflate the star's heat (V2-D 3.3 honesty):
     a lookup that could not read its episodes is NOT a hit.
 
-    ``episode_count`` is the number of CONNECTED EPISODES actually
-    rendered — 0 for an empty card AND for a failed fetch.  The caller
-    gates the heat increment on ``episode_count > 0``, so ONE condition
-    covers both the empty-card rule (ND-23) and the failed-fetch rule.
+    ``episode_count`` is the number of LIVE CONNECTED EPISODES actually
+    rendered — 0 for an empty card, for a failed fetch AND for a card
+    whose episode rows were DELETED (R3: a deleted dossier is not a
+    hit).  The caller gates the heat increment on ``episode_count > 0``,
+    so ONE condition covers the empty-card rule (ND-23), the
+    failed-fetch rule and the deleted-episode rule.
     """
 
     text: str
@@ -294,15 +314,54 @@ class MemoirConstellationService:
         EVERY chunk, so a multi-chunk pass can never exceed the cap.
         The heuristic seed is FREE — it never consumes the budget, and
         the budget never blocks it.
+
+        THE LLM PATHS REQUIRE A BUDGET (V2-31): an unbudgeted LLM call
+        is a cost-control bypass, so a ``None`` budget REFUSES the
+        fallback extraction and the Tier-2 summarization (loudly, never
+        silently).
+
+        THE STANDALONE PATH: this method resolves the edges, writes them
+        and runs the Tier-2 phase.  The reflection pass uses
+        :meth:`collect_edges` + :meth:`write_edges` instead, so it can
+        commit the edges together with the per-episode watermark and run
+        the Tier-2 phase ONCE, after every chunk's extraction.
+        """
+        edges = self.collect_edges(
+            chunk,
+            llm_caller=llm_caller,
+            agent_id=agent_id,
+            now=now,
+            budget=budget,
+        )
+        written = self.write_edges(edges, pass_id=pass_id)
+        # THE TIER-2 PHASE (V2-D 3.2): at most ONE summarization per
+        # pass, taken under the tier-2 purpose of the shared budget.
+        self.summarize_qualifying(
+            llm_caller=llm_caller, agent_id=agent_id, now=now, budget=budget
+        )
+        return written
+
+    def collect_edges(
+        self,
+        chunk: Sequence[Any],
+        *,
+        llm_caller: Callable[[str], str] | None = None,
+        agent_id: str | None = None,
+        now: datetime | None = None,
+        budget: ConstellationCallBudget | None = None,
+    ) -> list[ConstellationEdge]:
+        """Resolve the chunk's mentions into EDGES (no line row written).
+
+        The canonical star upsert and the alias binding happen HERE (in
+        their own transaction); the returned edges are written by
+        :meth:`write_edges` — inside the caller's transaction when the
+        caller owns one (the reflection pass unit).
         """
         if self._repo is None:
-            return 0
+            return []
         agent = agent_id or self._agent_id
-        if pass_id is None:
-            pass_id = f"reflect-{uuid.uuid4().hex[:12]}"
         caller = llm_caller if llm_caller is not None else self._llm_caller
-        moment = now or self._clock()
-        written = 0
+        edges: list[ConstellationEdge] = []
         empty_episodes = []
         for ep in chunk:
             stars = getattr(ep, "stars", None) or []
@@ -312,78 +371,148 @@ class MemoirConstellationService:
                     star = self._find_or_create_star(agent, name, stype, event_at)
                     if star is None:
                         continue
-                    try:
-                        self._repo.record_line(
-                            agent, star.id, getattr(ep, "id", ""), event_at=event_at, pass_id=pass_id
+                    edges.append(
+                        ConstellationEdge(
+                            agent_id=agent,
+                            star_id=star.id,
+                            episode_id=str(getattr(ep, "id", "") or ""),
+                            event_at=event_at,
                         )
-                        written += 1
-                    except Exception:  # noqa: BLE001
-                        pass
+                    )
             else:
                 empty_episodes.append(ep)
 
         # LLM fallback for episodes with empty stars[].
         # THE PER-PASS BUDGET (V2-D 3.9): the call is taken AT DISPATCH
         # and only when the budget still has room — the heuristic seed
-        # above is untouched by the budget.
-        if empty_episodes and caller is not None and (
-            budget is None or budget.take()
-        ):
-            try:
-                raw = caller(self._extraction_prompt(chunk))
-                mentions = self._parse_envelope(raw, kind="mentions")
-            except Exception:  # noqa: BLE001
-                mentions = None
-            if mentions:
-                chunk_ids = {getattr(ep, "id", "") for ep in chunk}
-                for m in mentions:
-                    eid = str(m.get("episode_id") or "")
-                    name = str(m.get("name") or "").strip()
-                    if not eid or not name:
-                        continue
-                    if eid not in chunk_ids:
-                        continue
-                    ep = next((e for e in chunk if getattr(e, "id", "") == eid), None)
-                    if ep is not None and (getattr(ep, "stars", None) or []):
-                        continue  # already handled heuristically
-                    st = str(m.get("star_type") or "concept").strip().lower()
-                    if st not in MEMOIR_STAR_TYPES:
-                        st = "concept"
-                    event_at = getattr(ep, "event_at", None) if ep else None
-                    if event_at is None and ep is not None:
-                        event_at = getattr(ep, "created_at", None)
-                    star = self._find_or_create_star(agent, name, st, event_at)
-                    if star is None:
-                        continue
-                    try:
-                        self._repo.record_line(
-                            agent, star.id, eid, event_at=event_at, pass_id=pass_id
+        # above is untouched by the budget.  The budget is ALSO the
+        # PER-PURPOSE cap (F-2): at most ONE extraction call per pass,
+        # so a Tier-2-heavy pass can never starve the extraction.
+        if empty_episodes and caller is not None:
+            if budget is None:
+                # V2-31: an unbudgeted LLM call is a cost-control
+                # bypass — REFUSE it loudly instead of taking the call.
+                raise ConstellationBudgetRequiredError(
+                    "the constellation LLM extraction requires a per-pass "
+                    "budget (budget=None is REFUSED — an unbudgeted LLM "
+                    "call bypasses the V2-31 cost control)"
+                )
+            if budget.take("extraction"):
+                try:
+                    raw = caller(self._extraction_prompt(chunk))
+                    mentions = self._parse_envelope(raw, kind="mentions")
+                except Exception:  # noqa: BLE001
+                    mentions = None
+                if mentions:
+                    chunk_ids = {getattr(ep, "id", "") for ep in chunk}
+                    for m in mentions:
+                        eid = str(m.get("episode_id") or "")
+                        name = str(m.get("name") or "").strip()
+                        if not eid or not name:
+                            continue
+                        if eid not in chunk_ids:
+                            continue
+                        ep = next((e for e in chunk if getattr(e, "id", "") == eid), None)
+                        if ep is not None and (getattr(ep, "stars", None) or []):
+                            continue  # already handled heuristically
+                        st = str(m.get("star_type") or "concept").strip().lower()
+                        if st not in MEMOIR_STAR_TYPES:
+                            st = "concept"
+                        event_at = getattr(ep, "event_at", None) if ep else None
+                        if event_at is None and ep is not None:
+                            event_at = getattr(ep, "created_at", None)
+                        star = self._find_or_create_star(agent, name, st, event_at)
+                        if star is None:
+                            continue
+                        edges.append(
+                            ConstellationEdge(
+                                agent_id=agent,
+                                star_id=star.id,
+                                episode_id=eid,
+                                event_at=event_at,
+                            )
                         )
-                        written += 1
-                    except Exception:  # noqa: BLE001
-                        pass
+        return edges
 
-        # Tier-2 summarization: at most one star per pass.
-        self._maybe_tier2(chunk, agent, caller, moment, budget=budget)
+    def write_edges(
+        self,
+        edges: Sequence[ConstellationEdge],
+        *,
+        pass_id: str | None = None,
+        session: Any = None,
+    ) -> int:
+        """Write the resolved edges as ``memoir_line`` rows.
+
+        THE ``last_pass_id`` GUARD (V2-29 / SF2) lives in the
+        repository: a re-run of the SAME pass id is a no-op, a distinct
+        pass id increments ``mention_count``.
+
+        When ``session`` is given, the CALLER owns the transaction: the
+        edges ride that session and are NOT committed here (the pass
+        unit commits the edges together with the per-episode watermark).
+        """
+        if self._repo is None or not edges:
+            return 0
+        stamp = pass_id
+        if stamp is None:
+            # The PRODUCTION site (the reflection pass) mints the DURABLE
+            # pass id; this fallback is for the standalone callers only.
+            stamp = f"reflect-{uuid.uuid4().hex[:12]}"
+        written = 0
+        for edge in edges:
+            if not edge.episode_id or not edge.star_id:
+                continue
+            try:
+                self._repo.record_line(
+                    edge.agent_id,
+                    edge.star_id,
+                    edge.episode_id,
+                    event_at=edge.event_at,
+                    pass_id=stamp,
+                    session=session,
+                )
+                written += 1
+            except Exception:  # noqa: BLE001
+                pass
         return written
 
-    # aliases
-    extract_entities = extract
-    extract_from_chunk = extract
-    extract_constellation = extract
-    process_chunk = extract
-    process_episode = extract
-
-    def _maybe_tier2(
+    def summarize_qualifying(
         self,
-        chunk: Sequence[Any],
-        agent: str,
-        caller: Callable[[str], str] | None,
-        now: datetime,
+        *,
+        llm_caller: Callable[[str], str] | None = None,
+        agent_id: str | None = None,
+        now: datetime | None = None,
         budget: ConstellationCallBudget | None = None,
-    ) -> None:
-        if self._repo is None or caller is None:
-            return
+    ) -> bool:
+        """THE TIER-2 PHASE (V2-D 3.2 / 3.9): ONE summarization per pass.
+
+        THE TRUE INVARIANT (F-2): the shared per-pass pool holds TWO
+        calls, split into at most ONE extraction call and at most ONE
+        Tier-2 summarization (the per-purpose caps).  The Tier-2 call is
+        taken AT DISPATCH and only for a star that QUALIFIES (the
+        threshold + the 24h cooldown), so a non-qualifying star never
+        burns the budget.
+
+        THE ORDERING (F-2): the reflection pass runs this phase AFTER
+        every chunk's extraction, so a Tier-2-qualified star can never
+        starve the extraction of its budget unit.
+
+        Returns:
+            ``True`` when a summarization was dispatched.
+        """
+        if self._repo is None:
+            return False
+        agent = agent_id or self._agent_id
+        caller = llm_caller if llm_caller is not None else self._llm_caller
+        if caller is None:
+            return False
+        if budget is None:
+            raise ConstellationBudgetRequiredError(
+                "the constellation Tier-2 summarization requires a per-pass "
+                "budget (budget=None is REFUSED — an unbudgeted LLM call "
+                "bypasses the V2-31 cost control)"
+            )
+        moment = now or self._clock()
         # Collect candidate stars from the chunk's lines.
         try:
             with Session(self._repo.engine) as session:
@@ -393,7 +522,7 @@ class MemoirConstellationService:
                     .distinct()
                 ).all()
         except Exception:  # noqa: BLE001
-            return
+            return False
         # Pick first qualifying star.
         for sid in star_ids:
             star = None
@@ -404,20 +533,19 @@ class MemoirConstellationService:
                 star = None
             if star is None or star.agent_id != agent:
                 continue
-            if not self.needs_tier2(star, now=now):
+            if not self.needs_tier2(star, now=moment):
                 continue
-            # THE PER-PASS BUDGET (V2-D 3.9): the Tier-2 summarization is
-            # ONE LLM call, taken AT DISPATCH — the star only qualifies
-            # AFTER the threshold check, so a non-qualifying star never
-            # burns the budget.
-            if budget is not None and not budget.take():
-                return
+            # THE PER-PASS BUDGET (V2-D 3.9) + THE PER-PURPOSE CAP (F-2):
+            # ONE Tier-2 call per pass, taken AT DISPATCH.
+            if not budget.take("tier2"):
+                return False
             # summarize
             try:
-                self.summarize_star(star.id, agent_id=agent, llm_caller=caller, now=now)
+                self.summarize_star(star.id, agent_id=agent, llm_caller=caller, now=moment)
             except Exception:  # noqa: BLE001
                 pass
-            return  # at most one per pass
+            return True
+        return False
 
     # ── two-tier description ─────────────────────────────────────────────
 
@@ -593,10 +721,15 @@ class MemoirConstellationService:
                     )
                     title = "(untitled)"
                     ep = session.get(MemoirEpisode, eid)
-                    if ep is not None:
-                        title = getattr(ep, "title", None) or "(untitled)"
-                        if getattr(ep, "event_at", None) is not None:
-                            when = ep.event_at
+                    if ep is None:
+                        # THE EPISODE ROW IS GONE (deleted): the line is a
+                        # DANGLING edge — the dossier must not render it
+                        # and the heat must not accrue for it (R3: a
+                        # deleted dossier is not a hit).
+                        continue
+                    title = getattr(ep, "title", None) or "(untitled)"
+                    if getattr(ep, "event_at", None) is not None:
+                        when = ep.event_at
                     date_str = ""
                     if when is not None:
                         try:
@@ -611,6 +744,11 @@ class MemoirConstellationService:
                 "incremented"
             )
             return ["- (none)"], 0, False
+        if not episode_lines:
+            # The card HAS lines, but NOT ONE of them points at a live
+            # episode (they were all deleted) — the dossier is empty and
+            # the heat MUST NOT move (R3).
+            return ["- (none)"], 0, True
         return episode_lines, len(episode_lines), True
 
     def render_dossier(
@@ -676,21 +814,15 @@ class MemoirConstellationService:
             episode_count=episode_count,
         )
 
-    # ── seeding helper ───────────────────────────────────────────────────
-
-    def seed_from_episodes(
-        self,
-        episodes: Sequence[Any],
-        *,
-        pass_id: str | None = None,
-        llm_caller: Callable[[str], str] | None = None,
-        agent_id: str | None = None,
-    ) -> int:
-        return self.extract(
-            episodes, pass_id=pass_id, llm_caller=llm_caller, agent_id=agent_id
-        )
-    seed = seed_from_episodes
-    seed_pass = seed_from_episodes
+    # ── the seeding helper ──────────────────────────────────────────────
+    #
+    # THE DEAD ALIASES ARE GONE (R1): ``seed_from_episodes`` /
+    # ``seed`` / ``seed_pass`` were callable-looking entry points to the
+    # extraction — a bypassable path around the mandated per-pass cost
+    # control (V2-31) and around the durable pass id (F-3).  The
+    # historical seed is the NIGHTLY PASS itself (it walks the
+    # pre-cutover backlog oldest-first under the nightly cap), so there
+    # is no separate seed API to call.
 
 
 __all__ = [
@@ -699,6 +831,7 @@ __all__ = [
     "MEMOIR_STAR_SUMMARY_COOLDOWN_HOURS",
     "MEMOIR_HEAT_DECAY_LAMBDA",
     "MEMOIR_CONSTELLATION_MAX_LLM_CALLS_PER_PASS",
+    "ConstellationEdge",
     "DossierRender",
     "MemoirConstellationService",
 ]

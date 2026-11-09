@@ -44,23 +44,36 @@ if [ -z "$PY" ]; then
 fi
 echo "Interpreter: $PY"
 
-TARGET="tests/unit/test_memoir_about_tool.py"
-if [ ! -f "$TARGET" ]; then
-  echo "RESULT: FAIL (missing test module '$TARGET' — the leg would be vacuous)"
-  exit 1
-fi
+# The pack covers TWO modules: the ``memoir_about`` tool surface AND the
+# heat gate (V2-D 3.3) that the tool implements.  The heat-honesty leg
+# lives in the constellation MODULE (it needs the constellation fixtures),
+# so it is named EXPLICITLY here — a pack-orphaned leg is invisible to a
+# pack-only tester.
+TARGETS=(
+  "tests/unit/test_memoir_about_tool.py"
+  "tests/unit/test_memoir_constellation.py::TestTheHeatHonesty"
+)
+for t in "${TARGETS[@]}"; do
+  # A target may name a NODE (``file::Class``); the existence guard
+  # checks the FILE part only.
+  target_file="${t%%::*}"
+  if [ ! -f "$target_file" ]; then
+    echo "RESULT: FAIL (missing test module '$target_file' — the leg would be vacuous)"
+    exit 1
+  fi
+done
 
 # The MEASURED node count at the pin (2026-11-09, this worktree):
-# TestTheGateOrder (10 incl. the 4-way parametrize) + TestTheZeroEpisodeStar
-# (2) + TestThePopulatedDossier (3) + TestHeatMath (4) +
-# TestTheFrozenVocabulary (2) + TestRegistration (6).
-EXPECTED_PASSED_N=27
+# test_memoir_about_tool.py (27) + TestTheHeatHonesty (2).
+EXPECTED_PASSED_N=29
 
 # Layer 2 watchdog — keep under the caller's outer cap.
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-280}"
 LOG="${TMPDIR:-/tmp}/${PACK_NAME}.log"
 
-timeout "${TIMEOUT_S}" "${PY}" -m pytest "${TARGET}" \
+timeout "${TIMEOUT_S}" "${PY}" -m pytest \
+  "tests/unit/test_memoir_about_tool.py" \
+  "tests/unit/test_memoir_constellation.py::TestTheHeatHonesty" \
   -q --tb=short -p no:randomly --override-ini="addopts=" 2>&1 | tee "${LOG}"
 EXIT_CODE=${PIPESTATUS[0]}
 if [ "$EXIT_CODE" -eq 124 ]; then

@@ -74,12 +74,12 @@ a second copy.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import time
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Sequence
@@ -113,6 +113,12 @@ MEMOIR_REFLECTION_MAX_LLM_CALLS_PER_PASS = 4
 
 #: The DECOUPLED constellation-extraction budget (V2-31 / SF7).
 MEMOIR_CONSTELLATION_MAX_LLM_CALLS_PER_PASS = 2
+
+#: The PER-PURPOSE cap of the constellation budget (F-2 / V2-D 3.9).
+#: V2-D 3.9 splits the pass's TWO constellation calls into "max 1
+#: extraction, max 1 tier-2 card summarization" — so each PURPOSE may
+#: spend at most ONE call of the shared pool.
+MEMOIR_CONSTELLATION_MAX_CALLS_PER_PURPOSE_PER_PASS = 1
 
 #: The per-pass wall-clock budget (§3.2).
 MEMOIR_REFLECTION_TICK_BUDGET_S = 60.0
@@ -165,6 +171,16 @@ _REFUSAL_MARKERS: tuple[str, ...] = (
 )
 
 
+class ConstellationBudgetRequiredError(RuntimeError):
+    """Raised when an LLM path is taken WITHOUT a per-pass budget.
+
+    V2-31 makes the constellation's LLM calls a MANDATED cost control:
+    every call must be counted against the pass's budget.  A caller that
+    reaches an LLM path with ``budget=None`` has found a bypass — the
+    call is REFUSED loudly instead of being taken silently.
+    """
+
+
 class ConstellationCallBudget:
     """The PER-PASS LLM-call budget of the constellation layer (V2-D 3.9).
 
@@ -175,6 +191,14 @@ class ConstellationCallBudget:
     object is created per pass and threaded through EVERY chunk
     invocation; each LLM call takes one unit from it.
 
+    THE SHARED POOL + THE PER-PURPOSE CAPS (F-2): the pool holds TWO
+    calls and each PURPOSE ("extraction", "tier2") may spend at most
+    ONE of them.  The per-purpose cap is what makes the split of V2-D
+    3.9 REAL: with a shared pool alone, a Tier-2-heavy pass could
+    spend BOTH calls on Tier-2 and leave the extraction with ZERO
+    (the council's own probe produced "2 tier-2 calls, 0 extraction",
+    which defeats the T3.1b seed).
+
     THE HEURISTIC IS FREE.  The ``stars[]`` seed never touches this
     object — only the LLM fallback extraction and the Tier-2
     summarization consume it.  Blocking the LLM work must NEVER block
@@ -184,22 +208,43 @@ class ConstellationCallBudget:
     dispatched counts, even if it failed.
     """
 
-    __slots__ = ("limit", "used")
+    __slots__ = ("limit", "used", "per_purpose_limit", "purpose_used")
 
-    def __init__(self, limit: int) -> None:
+    def __init__(
+        self,
+        limit: int,
+        *,
+        per_purpose_limit: int = MEMOIR_CONSTELLATION_MAX_CALLS_PER_PURPOSE_PER_PASS,
+    ) -> None:
         self.limit = max(0, int(limit))
+        self.per_purpose_limit = max(0, int(per_purpose_limit))
         self.used = 0
+        self.purpose_used: dict[str, int] = {}
 
     @property
     def remaining(self) -> int:
-        """The calls still available in this pass."""
+        """The calls still available in this pass (the shared pool)."""
         return max(0, self.limit - self.used)
 
-    def take(self) -> bool:
-        """Consume ONE call; ``False`` when the budget is spent."""
+    def remaining_for(self, purpose: str) -> int:
+        """The calls still available for ONE purpose."""
+        used = int(self.purpose_used.get(purpose, 0))
+        return max(0, self.per_purpose_limit - used)
+
+    def take(self, purpose: str = "unspecified") -> bool:
+        """Consume ONE call of ``purpose``; ``False`` when it is refused.
+
+        The call is refused when EITHER the shared pool OR the
+        per-purpose cap is spent — the pool is the pass's ceiling and
+        the per-purpose cap is V2-D 3.9's split of that ceiling.
+        """
         if self.used >= self.limit:
             return False
+        used = int(self.purpose_used.get(purpose, 0))
+        if used >= self.per_purpose_limit:
+            return False
         self.used += 1
+        self.purpose_used[purpose] = used + 1
         return True
 
 
@@ -594,6 +639,15 @@ class MemoirReflectionService:
         notes: list[str] = []
         stop_reason = ""
 
+        # THE DURABLE PASS IDENTITY (F-3): minted ONCE, HERE, at the
+        # PRODUCTION site — and REPRODUCIBLE across a crash-retry of the
+        # SAME pass (the anchor episode is the pass's oldest considered
+        # episode, so a retry that reconsiders it mints the SAME stamp
+        # and the ``last_pass_id`` guard treats the re-run as the same
+        # pass instead of inflating ``mention_count``).  A per-chunk
+        # uuid (the old mint) could NEVER bind the guard in production.
+        pass_id = durable_pass_id(self._settings.agent_id, cadence, episodes)
+
         chunks = self._compose_chunks(episodes)
         for chunk in chunks:
             # ── the TICK BUDGET — the per-item pre-dispatch check ──────
@@ -637,6 +691,20 @@ class MemoirReflectionService:
                 # failure): the chunk is NOT marked — it is re-considered
                 # next pass, and the dedup key makes the re-run safe.
                 notes.append("batch_parse_failed")
+                # THE CONSTELLATION EXTRACTION STILL RUNS (R2): the
+                # ``stars[]`` seed is the PRIMARY mechanism, so a
+                # permanently-failing synthesis batch must NOT starve
+                # the constellation.  The chunk is NOT considered, so its
+                # episodes are NOT marked here — the next pass retries
+                # them (and the durable pass id makes that retry a
+                # no-op for the mention counts).
+                lines += self._extract_constellation(
+                    chunk,
+                    now=now,
+                    budget=constellation_budget,
+                    pass_id=pass_id,
+                    mark_ids=(),
+                ) or 0
                 continue
             marked_episode_ids.extend(episode.id for episode in chunk)
             chunk_ids = {episode.id for episode in chunk}
@@ -701,9 +769,55 @@ class MemoirReflectionService:
             # every chunk (the ``stars[]`` seed is the primary
             # mechanism), and the LLM half stops on its OWN per-pass
             # budget — the counter IS the budget's counter.
+            #
+            # THE PASS UNIT (F-3): the constellation edges AND the
+            # per-episode watermark of the chunk's CONSIDERED episodes
+            # land in ONE transaction — the crash window of V2-29 / A2
+            # (edges written, marks not) is closed.
             if self._constellation is not None:
-                lines += self._extract_constellation(
-                    chunk, now=now, budget=constellation_budget
+                written = self._extract_constellation(
+                    chunk,
+                    now=now,
+                    budget=constellation_budget,
+                    pass_id=pass_id,
+                    mark_ids=[
+                        episode.id
+                        for episode in chunk
+                        if episode.id not in unmarked_episode_ids
+                    ],
+                )
+                if written is None:
+                    # THE UNIT FAILED: the edges rolled back with the
+                    # marks, so the chunk's episodes must NOT be marked —
+                    # the next pass has to retry them (marking them would
+                    # lose the seed for good).
+                    unmarked_episode_ids.update(
+                        episode.id for episode in chunk
+                    )
+                else:
+                    lines += written
+
+        # ── THE TIER-2 PHASE (F-2) — AFTER every chunk's extraction ────
+        # THE EXTRACTION-FIRST ORDERING: the Tier-2 summarization runs
+        # once, at the END of the pass, so a Tier-2-qualified star can
+        # never take the extraction's budget unit (the council's probe
+        # produced "2 tier-2 calls, 0 extraction" under the old
+        # per-chunk order).  The per-purpose cap allows ONE Tier-2 call
+        # per pass.
+        if self._constellation is not None:
+            try:
+                self._constellation_service(now).summarize_qualifying(
+                    llm_caller=self._llm_caller,
+                    agent_id=self._settings.agent_id,
+                    now=now,
+                    budget=constellation_budget,
+                )
+            except ConstellationBudgetRequiredError:
+                raise
+            except Exception:  # noqa: BLE001 — never fail the pass
+                logger.warning(
+                    "[MemoirReflection] the Tier-2 summarization failed — "
+                    "the pass continues"
                 )
 
         duration = self._monotonic() - started
@@ -1042,53 +1156,92 @@ class MemoirReflectionService:
 
     # ── the constellation extraction (V2-31, the decoupled budget) ─────
 
+    def _constellation_service(self, now: datetime) -> Any:
+        """The constellation SERVICE for this pass (the local import keeps
+        the two service modules free of an import cycle)."""
+        from daemon.services.memoir_constellation_service import (
+            MemoirConstellationService,
+        )
+
+        return MemoirConstellationService(
+            self._constellation,
+            llm_caller=self._llm_caller,
+            clock=lambda: now,
+            agent_id=self._settings.agent_id,
+        )
+
     def _extract_constellation(
         self,
         chunk: Sequence[Any],
         *,
         now: datetime,
         budget: ConstellationCallBudget | None = None,
-    ) -> int:
+        pass_id: str | None = None,
+        mark_ids: Sequence[str] = (),
+    ) -> int | None:
         """Extract star mentions and write constellation LINES.
 
         Delegates to :class:`MemoirConstellationService` so the heuristic
         ``stars[]`` seed is the PRIMARY mechanism and the LLM extraction
         is the FALLBACK (V2-D 3.1 / 3.9).  The pass id is always explicit
-        (the phase-1 crash-recovery guard).
+        (the durable pass identity, F-3).
 
         The ``budget`` is the PASS's LLM-call budget — it is threaded
         through EVERY chunk so the cap holds across the whole pass (the
         heuristic seed never consumes it).
+
+        THE PASS UNIT (F-3): the edges AND the per-episode watermark of
+        the chunk's CONSIDERED episodes are written in ONE transaction —
+        the constellation repository's ``record_line`` and the reflection
+        repository's ``mark_reflected`` ride the SAME session.  The
+        atomicity scope is the PROCESSED EPISODES' unit (the chunk), NOT
+        the whole pass: a crash rolls back the chunk's edges together
+        with its marks, so a retry can never leave a written edge behind
+        an unwritten watermark (the window V2-29 / A2 exist to close).
+
+        Returns:
+            The number of edges written, or ``None`` when the unit
+            FAILED — the caller must then leave the chunk's episodes
+            UNMARKED (their edges rolled back, so the next pass has to
+            retry them; marking them would lose the seed).
         """
         if self._constellation is None:
             return 0
         try:
-            from daemon.services.memoir_constellation_service import (
-                MemoirConstellationService,
-            )
-
-            svc = MemoirConstellationService(
-                self._constellation,
-                llm_caller=self._llm_caller,
-                clock=lambda: now,
+            svc = self._constellation_service(now)
+            # RESOLVE first (the star upserts are their own
+            # transactions), then WRITE inside the unit's transaction.
+            edges = svc.collect_edges(
+                chunk,
                 agent_id=self._settings.agent_id,
+                now=now,
+                budget=budget,
             )
-            return int(
-                svc.extract(
-                    chunk,
-                    pass_id=f"reflect-{uuid.uuid4().hex[:12]}",
-                    agent_id=self._settings.agent_id,
-                    now=now,
-                    budget=budget,
-                )
+            stamp = pass_id or durable_pass_id(
+                self._settings.agent_id, "unknown", ()
             )
+            with self._reflection.unit_of_work() as session:
+                written = svc.write_edges(edges, pass_id=stamp, session=session)
+                if mark_ids:
+                    self._reflection.mark_reflected(
+                        mark_ids, reflected_at=now, session=session
+                    )
+            return int(written)
+        except ConstellationBudgetRequiredError:
+            # V2-31: an unbudgeted LLM call is a cost-control bypass —
+            # it REFUSES loudly (the pass fails; the bypass is visible).
+            logger.error(
+                "[MemoirReflection] the constellation extraction reached an "
+                "LLM path WITHOUT a budget — the call is REFUSED (V2-31)"
+            )
+            raise
         except Exception as exc:  # noqa: BLE001 — never fail the pass
             logger.warning(
                 "[MemoirReflection] the constellation extraction failed "
-                "(%s) — the pass continues",
+                "(%s) — the pass continues and the chunk stays UNMARKED",
                 type(exc).__name__,
             )
-            return 0
+            return None
 
     # ── the house LLM lane ──────────────────────────────────────────────
 
@@ -1407,6 +1560,48 @@ def _as_utc(value: datetime | None) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def durable_pass_id(agent_id: str, cadence: str, episodes: Sequence[Any]) -> str:
+    """THE DURABLE PASS IDENTITY (F-3) — minted at the PRODUCTION site.
+
+    THE GUARD MUST BE BINDABLE: the ``last_pass_id`` crash-recovery
+    guard (V2-29 / SF2) only protects a re-run when the re-run carries
+    the SAME stamp.  A per-chunk uuid can NEVER bind it — the retry of a
+    crashed pass mints a NEW stamp and inflates ``mention_count``.
+
+    THE IDENTITY IS DERIVED, NOT RANDOM: it is a digest of the agent,
+    the cadence and the pass's ANCHOR episode (the OLDEST episode the
+    pass considered).  The anchor is durable state — it is the same
+    episode after a crash-retry, because the crashed pass never marked
+    it — so the retry mints the SAME id and the guard treats the re-run
+    as the same pass.
+
+    THE TRADE-OFF (disclosed): two passes that consider the SAME anchor
+    episode share the identity, so the second one does not inflate the
+    mention counts.  That is the CONSERVATIVE direction (the guard
+    under-counts, it never over-counts), and it is the price of a
+    durable identity without a new persisted column.
+
+    Args:
+        agent_id: The agent the pass belongs to.
+        cadence: The pass cadence ("nightly" / "in_day") — two cadences
+            over the same anchor are two DIFFERENT passes.
+        episodes: The episodes the pass considered, OLDEST FIRST.
+
+    Returns:
+        The pass id, e.g. ``reflect-<16 hex chars>``.
+    """
+    anchor = ""
+    for episode in episodes or ():
+        candidate = str(getattr(episode, "id", "") or "")
+        if candidate:
+            anchor = candidate
+            break
+    digest = hashlib.sha256(
+        f"{agent_id}|{cadence}|{anchor}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"reflect-{digest}"
 
 
 def outcome_considered_episodes(

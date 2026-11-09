@@ -373,3 +373,201 @@ lane's `llm_config`, the FAILOVER CLIENT's `max_retries=0` (a
 carry-in), and now the poignancy builder. The house rule that follows:
 **a pin that reads a value must be pinned at the value's CONSUMER, and
 the consumer's own gate (`is_configured`) is the assertion.**
+
+---
+
+## 11. F-2 — the per-purpose split of the constellation budget
+
+### The leader's ruling (verbatim)
+
+> F-2 (leader ruling: split per-purpose counters<=1 / tier2<=1 +
+> extraction-first ordering; false 'at most one per pass' comments)
+
+### What the code did (the defect)
+
+V2-D 3.9 caps the constellation at **"max 1 extraction, max 1 tier-2 card
+summarization per PASS"**. The code implemented ONE shared pool of TWO
+calls with **no per-purpose cap**, and the Tier-2 summarization ran
+INSIDE the per-chunk extraction. Two consequences, both observed by the
+council's own probe:
+
+* a Tier-2-heavy pass could spend BOTH calls on Tier-2 and leave the
+  extraction with ZERO — the probe produced **"2 tier-2 calls, 0
+  extraction"**, which defeats the T3.1b seed (the extraction is the
+  fallback that writes the stars);
+* the comments claimed an invariant the code did not have ("Tier-2
+  summarization: at most one star per pass" / "return  # at most one per
+  pass") — the cap was per INVOCATION, not per pass.
+
+### What shipped
+
+1. **The per-purpose counters** — `ConstellationCallBudget` now carries a
+   shared pool (2) AND a per-purpose cap
+   (`MEMOIR_CONSTELLATION_MAX_CALLS_PER_PURPOSE_PER_PASS = 1`).
+   `take(purpose)` refuses when EITHER the pool OR the purpose's cap is
+   spent. The purposes are `"extraction"` and `"tier2"`.
+2. **The extraction-first ordering** — the Tier-2 phase is now a
+   SEPARATE, PASS-LEVEL phase that runs AFTER every chunk's extraction
+   (`MemoirConstellationService.summarize_qualifying`). The per-chunk
+   `extract()` no longer summarizes; the standalone path calls the phase
+   itself so its behaviour is unchanged.
+3. **The comments now state the true invariant** — the cap is "at most
+   ONE extraction call and at most ONE Tier-2 summarization per PASS",
+   and the ordering guarantee is written down at both call sites.
+
+### The receipts (the legs are not vacuous)
+
+| Recipe | Mutation | Red node |
+|---|---|---|
+| M1c | the per-purpose cap removed | `TestThePerPurposeBudget::test_a_second_extraction_in_the_same_pass_is_refused` (`assert 2 == 1`) |
+| M1b | the pre-fix shape (no per-purpose cap + the per-chunk Tier-2) | `TestThePerPurposeBudget::test_the_extraction_is_taken_before_the_tier2` (`assert 0 == 1` — the council's probe reproduced verbatim) and `test_a_second_tier2_in_the_same_pass_is_refused` (`assert 2 == 1`) |
+
+**THE FINDING (disclosed):** with the per-purpose cap in place, the
+per-chunk Tier-2 is **not observable on its own** — the cap alone
+already forbids the second Tier-2 call, so the ordering is a SECOND
+defence rather than the load-bearing one. The M1b receipt therefore
+removes BOTH (the full pre-fix shape) to show the pack catches the
+defect class; a receipt for the per-chunk Tier-2 alone is IMPOSSIBLE by
+construction and is NOT claimed.
+
+---
+
+## 12. F-3 — the durable pass identity and the atomic pass unit
+
+### The leader's ruling (verbatim)
+
+> F-3 (leader ruling: FIX not waiver — durable pass id minted per pass
+> not per chunk, edges+reflected_at in ONE transaction, crash-then-retry
+> leg via PRODUCTION site; the guard was inert because the unit leg
+> hand-supplied a stable id)
+
+### What the code did (the defect)
+
+* the pass id was minted **per chunk**
+  (`memoir_reflection_service.py`, `f"reflect-{uuid.uuid4().hex[:12]}"`),
+  so a crash-retry re-processed the same work under a NEW stamp and the
+  `last_pass_id` guard (V2-29 / SF2) — which only binds when the stamp
+  is STABLE — inflated `mention_count`;
+* `record_line` committed per edge and `commit_pass` marked the
+  watermark in a **separate transaction**, so a crash between them left
+  an edge without its mark: exactly the window V2-29 / A2 exist to
+  close;
+* the unit leg passed only because it **hand-supplied** a stable pass id
+  (the guard-blindness class: the guard needed a value the production
+  path could never provide).
+
+### What shipped
+
+1. **The durable identity, minted at the PRODUCTION site** —
+   `durable_pass_id(agent_id, cadence, episodes)` derives
+   `reflect-<16 hex>` from the agent, the cadence and the pass's
+   **ANCHOR episode** (its oldest considered episode). The anchor is
+   durable state: a crashed pass never marked it, so the retry mints
+   the SAME id and the guard binds. The mint lives in `_run_pass` — the
+   production pass loop — and is threaded into EVERY chunk.
+   **No new column, no migration:** the identity is DERIVED, not
+   persisted.
+   *THE TRADE-OFF (disclosed):* two passes that consider the same anchor
+   episode share the identity, so the second one does not inflate the
+   mention counts. That is the conservative direction (the guard
+   under-counts, it never over-counts) and it is the price of a durable
+   identity without a schema change.
+2. **The atomic pass unit** — `MemoirReflectionRepository.unit_of_work()`
+   opens ONE transaction; the constellation edges
+   (`record_line(..., session=…)`) and the per-episode watermark
+   (`mark_reflected(..., session=…)`) ride the SAME session. The
+   atomicity scope is the **processed episodes' unit (the chunk)**, not
+   the whole pass — the lane's partial-commit posture stands.
+   **A FAILED unit leaves the chunk UNMARKED** (the edges rolled back,
+   so the next pass has to retry them; marking them would lose the
+   seed). This is the one behaviour change the unit forced, and it is
+   enforced by `unmarked_episode_ids`.
+3. **The star resolution moved OUT of the unit** — the canonical upsert
+   and the alias binding are their own transactions (they happen before
+   the unit opens), so the unit never nests a commit inside its
+   transaction. The price: a crash between the resolution and the unit
+   leaves an orphan star (a star with no lines) — harmless, and the
+   retry fills it.
+
+### The receipts
+
+| Recipe | Mutation | Red node |
+|---|---|---|
+| F-3a | the per-chunk random mint restored (`os.urandom(6).hex()` — the same shape as the old per-chunk `uuid4`) | `TestTheDurablePassIdentity::test_the_retry_of_the_same_pass_reuses_the_identity` (`assert 'reflect-8ab4151164e7' == 'reflect-a6482bef57d9'` — the retry minted a NEW stamp) |
+| F-3b | the edges and the marks written in SEPARATE transactions | `TestTheDurablePassIdentity::test_the_edges_roll_back_with_the_marks` (the orphan edge survived the failed unit) |
+
+Both legs mint their ids **through the production site** — the test
+never hands the pass an id.
+
+---
+
+## 13. F-4 — the mutation recipes live HERE, not in a commit message
+
+The lane standard: a mutation recipe is **node name + observed RED
+marker + restore proof**, and it belongs in this file. A commit message
+is not a durable home: it is not greppable, it is not in the tree of
+the NEXT phase, and it disappears with the reflog.
+
+### The five phase-3 recipes that lived only in a commit message
+
+Migrated from `f15a0bb7b`'s commit body ("AC6 mutation proofs (all
+reverted; sha256 before == after)") and from the phase-3 delta's
+review receipts:
+
+| # | Recipe | Node | Observed RED marker | Restore |
+|---|---|---|---|---|
+| 1 | AC6 (a) — fragments measured via `SUM(mention_count)` | `TestTwoTier::test_one_heavily_mentioned_episode_stays_tier_1` | `assert 10 == 1` | sha256-identical |
+| 2 | AC6 (b) — `memoir_not_found` for zero-episode stars | `TestTheZeroEpisodeStar::test_a_zero_episode_star_renders_an_empty_dossier_success` | the REFUSED code leaked into the empty-dossier success | sha256-identical |
+| 3 | AC6 (c) — heat incremented during background extraction | `TestExtractionAndAlias::test_background_extraction_never_increments_heat` | `assert 1.0 == 0.0` | sha256-identical |
+| 4 | M1 — the constellation budget is per CHUNK (not per pass) | `TestThePerPassCallBudget::test_a_multi_chunk_pass_spends_at_most_two_constellation_llm_calls` | `assert 3 <= 2` (the pass spent 3 constellation calls against the cap of 2) | sha256-identical |
+| 5 | M2b — a FAILED connected-episode fetch still increments the heat | `TestTheHeatHonesty::test_a_failed_episode_fetch_renders_but_leaves_the_heat_alone` | `assert 1.0 == 0.0` | sha256-identical |
+
+**THE COUNT (a correction):** the phase-3 commit body carried **three**
+recipes (the AC6 trio above); the delta's two (M1, M2b) carried the
+count to five. All five are here — and the delta's two were NOT in any
+commit body (the delta commit `e76fef843` has an EMPTY body), so their
+recipes existed only in the reviewer's report.
+
+### The close-out recipes (this commit)
+
+| Recipe | Mutation | Red node |
+|---|---|---|
+| M1b | the pre-fix shape (no per-purpose cap + the per-chunk Tier-2) | `test_the_extraction_is_taken_before_the_tier2` (`assert 0 == 1`) + `test_a_second_tier2_in_the_same_pass_is_refused` (`assert 2 == 1`) |
+| M1c | the per-purpose cap removed | `test_a_second_extraction_in_the_same_pass_is_refused` (`assert 2 == 1`) |
+| R1 | the LLM paths take an unbudgeted call again | `TestTheBudgetRefusal::test_the_llm_extraction_is_refused_without_a_budget` + `test_the_tier2_summarization_is_refused_without_a_budget` |
+| R2 | the synthesis parse failure skips the constellation extraction again | `TestTheSeedSurvivesAParseFailure::test_a_failed_synthesis_batch_still_seeds_the_constellation` (`assert None is not None` — the star was never written) |
+| R3 | a DELETED episode still counts as a hit | `TestTheHeatHonesty::test_a_deleted_episode_does_not_accrue_heat` (`assert 1.0 == 0.0`) |
+| F-3a | the per-chunk random mint | `test_the_retry_of_the_same_pass_reuses_the_identity` (the retry minted a NEW stamp) |
+| F-3b | the edges and the marks in separate transactions | `test_the_edges_roll_back_with_the_marks` (the orphan edge survived) |
+
+Every receipt restores the mutated file **byte-identically** (the
+sha256 is captured before the mutation and re-checked after the
+restore) and re-runs the pack to GREEN.
+
+---
+
+## 14. The LANE RULE this close-out adopted (and it starts NOW)
+
+**A delta's own legs land selector-registered and re-pinned IN THE SAME
+COMMIT.**
+
+The phase-3 delta added two legs — `TestThePerPassCallBudget` and
+`TestTheHeatHonesty` — and registered NEITHER in a pack selector. A
+tester running only the four packs would have **PASSED with both
+regressions restored**: the budget regression and the heat regression
+were invisible to the gate. The packs now name both classes EXPLICITLY
+and their node-count pins move in the same commit as the legs.
+
+The node-count pins that moved with this close-out (measured with
+`--collect-only`, not estimated):
+
+| Pack | Before | After |
+|---|---|---|
+| `memoir_v2_constellation_service_test` | 6 | 17 |
+| `memoir_v2_about_tool_test` | 27 | 29 |
+
+The two close-out classes (`TestThePerPurposeBudget`,
+`TestTheDurablePassIdentity`, `TestTheBudgetRefusal`,
+`TestTheSeedSurvivesAParseFailure`) are named in the constellation
+pack's selector as well — a leg that no pack selects is a leg the gate
+cannot see.

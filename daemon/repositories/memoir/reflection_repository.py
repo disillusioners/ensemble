@@ -53,8 +53,9 @@ concurrent claimants can never both win.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Sequence
 
 from sqlalchemy import func, insert, or_, update
 from sqlalchemy.exc import IntegrityError
@@ -195,15 +196,23 @@ class MemoirReflectionRepository:
         episode_ids: Sequence[str],
         *,
         reflected_at: datetime | None = None,
+        session: Session | None = None,
     ) -> int:
         """Mark episodes as CONSIDERED by a reflection pass.
 
         ONE column-targeted UPDATE — the watermark has exactly one named
         writer (this method), mirroring the ``embedded_at`` precedent.
 
+        THE ``session`` OPTION (F-3): when a session is given, the mark
+        rides THAT session and is NOT committed here — the caller owns
+        the transaction, so the watermark can land in the SAME
+        transaction as the constellation edges of the pass unit (the
+        crash window of V2-29 / A2).
+
         Args:
             episode_ids: The episodes the pass consumed.
             reflected_at: The watermark stamp (the pass timestamp).
+            session: An optional caller-owned session (the pass unit).
 
         Returns:
             The number of rows actually updated.
@@ -212,14 +221,38 @@ class MemoirReflectionRepository:
         if not id_list:
             return 0
         stamp = reflected_at or now_utc()
-        with Session(self.engine) as session:
+        if session is not None:
             result = session.execute(
                 update(MemoirEpisode)
                 .where(MemoirEpisode.id.in_(id_list))
                 .values(reflected_at=stamp)
             )
-            session.commit()
+            session.flush()
             return int(result.rowcount or 0)
+        with Session(self.engine) as own:
+            result = own.execute(
+                update(MemoirEpisode)
+                .where(MemoirEpisode.id.in_(id_list))
+                .values(reflected_at=stamp)
+            )
+            own.commit()
+            return int(result.rowcount or 0)
+
+    @contextmanager
+    def unit_of_work(self) -> Iterator[Session]:
+        """ONE transaction for the pass UNIT (F-3).
+
+        The caller writes the unit's constellation edges AND the
+        per-episode watermark through the yielded session, so both land
+        together: a crash rolls them back as one, and the watermark can
+        never advance ahead of the edges it claims.
+
+        The ATOMICITY SCOPE is the processed episodes' unit (the chunk),
+        NOT the whole pass — the lane's partial-commit posture stands.
+        """
+        with Session(self.engine) as session:
+            with session.begin():
+                yield session
 
     def known_episode_ids(
         self, agent_id: str, episode_ids: Sequence[str]

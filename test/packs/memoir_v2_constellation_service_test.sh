@@ -50,15 +50,24 @@ if [ ! -f "$TARGET" ]; then
 fi
 
 # The MEASURED node count at the pin (2026-11-09, this worktree):
-# TestExtractionAndAlias (5) + TestSeed (1).
-EXPECTED_PASSED_N=6
+# TestExtractionAndAlias (5) + TestSeed (1) + TestThePerPassCallBudget (1)
+# + TestTheHeatHonesty (2) + TestThePerPurposeBudget (3)
+# + TestTheDurablePassIdentity (2) + TestTheBudgetRefusal (2)
+# + TestTheSeedSurvivesAParseFailure (1).
+#
+# THE DELTA'S OWN LEGS ARE SELECTOR-REGISTERED (the pack-orphan class):
+# TestThePerPassCallBudget and TestTheHeatHonesty were selected by NO
+# pack, so a tester running only the packs would have PASSED with both
+# regressions restored.  The selector below names them EXPLICITLY and the
+# node-count pin moves IN THE SAME COMMIT as the legs.
+EXPECTED_PASSED_N=17
 
 # Layer 2 watchdog — keep under the caller's outer cap.
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-280}"
 LOG="${TMPDIR:-/tmp}/${PACK_NAME}.log"
 
 timeout "${TIMEOUT_S}" "${PY}" -m pytest "${TARGET}" \
-  -k "TestExtractionAndAlias or TestSeed" \
+  -k "TestExtractionAndAlias or TestSeed or TestThePerPassCallBudget or TestTheHeatHonesty or TestThePerPurposeBudget or TestTheDurablePassIdentity or TestTheBudgetRefusal or TestTheSeedSurvivesAParseFailure" \
   -q --tb=short -p no:randomly --override-ini="addopts=" 2>&1 | tee "${LOG}"
 EXIT_CODE=${PIPESTATUS[0]}
 if [ "$EXIT_CODE" -eq 124 ]; then

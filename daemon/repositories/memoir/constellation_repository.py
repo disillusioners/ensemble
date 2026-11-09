@@ -243,6 +243,7 @@ class MemoirConstellationRepository:
         episode_id: str,
         event_at: datetime | None = None,
         pass_id: str | None = None,
+        session: Session | None = None,
     ) -> MemoirLine:
         """Record ONE episodic mention of a star.
 
@@ -253,6 +254,11 @@ class MemoirConstellationRepository:
 
         The guard is evaluated in SQL with ``IS DISTINCT FROM`` — the
         plan's form (V2-D 1.12), VERIFIED on the host SQLite.
+
+        THE ``session`` OPTION (F-3): when a session is given, the edge
+        rides THAT session and is NOT committed here — the caller owns
+        the transaction, so the edge can land in the SAME transaction as
+        the per-episode reflection watermark (the pass unit).
         """
         if not agent_id:
             raise ValueError("agent_id is required")
@@ -264,50 +270,92 @@ class MemoirConstellationRepository:
         event = _as_utc(event_at) or now_utc()
         written_at = now_utc()
 
-        with Session(self.engine) as session:
-            line = session.exec(
-                select(MemoirLine).where(
-                    MemoirLine.star_id == star_id,
-                    MemoirLine.episode_id == episode_id,
-                )
-            ).first()
-            if line is None:
-                line = MemoirLine(
-                    id=uuid.uuid4().hex,
-                    agent_id=agent_id,
-                    star_id=star_id,
-                    episode_id=episode_id,
-                    mention_count=1,
-                    last_pass_id=pass_id,
-                    first_mentioned_at=event,
-                    last_mentioned_at=event,
-                    created_at=written_at,
-                )
-                session.add(line)
-                session.commit()
-                session.refresh(line)
-                return line
+        if session is not None:
+            return self._write_line(
+                session,
+                agent_id,
+                star_id,
+                episode_id,
+                event,
+                written_at,
+                pass_id,
+                commit=False,
+            )
+        with Session(self.engine) as own:
+            return self._write_line(
+                own,
+                agent_id,
+                star_id,
+                episode_id,
+                event,
+                written_at,
+                pass_id,
+                commit=True,
+            )
 
-            distinct = session.execute(
-                select(MemoirLine.last_pass_id.is_distinct_from(pass_id)).where(
-                    MemoirLine.id == line.id
-                )
-            ).scalar()
-            if not distinct:
-                # SAME PASS — the re-run is a no-op. The row is left
-                # completely untouched: the guard exists so a crashed
-                # pass can be replayed without distorting the counts.
-                session.refresh(line)
-                return line
-
-            current = _as_utc(line.last_mentioned_at)
-            line.mention_count = line.mention_count + 1
-            line.last_mentioned_at = event if current is None or event > current else current
-            line.last_pass_id = pass_id
+    def _write_line(
+        self,
+        session: Session,
+        agent_id: str,
+        star_id: str,
+        episode_id: str,
+        event: datetime,
+        written_at: datetime,
+        pass_id: str | None,
+        *,
+        commit: bool,
+    ) -> MemoirLine:
+        """The guard-aware edge upsert (one session, one commit)."""
+        line = session.exec(
+            select(MemoirLine).where(
+                MemoirLine.star_id == star_id,
+                MemoirLine.episode_id == episode_id,
+            )
+        ).first()
+        if line is None:
+            line = MemoirLine(
+                id=uuid.uuid4().hex,
+                agent_id=agent_id,
+                star_id=star_id,
+                episode_id=episode_id,
+                mention_count=1,
+                last_pass_id=pass_id,
+                first_mentioned_at=event,
+                last_mentioned_at=event,
+                created_at=written_at,
+            )
             session.add(line)
-            session.commit()
+            if commit:
+                session.commit()
+            else:
+                session.flush()
             session.refresh(line)
             return line
+
+        distinct = session.execute(
+            select(MemoirLine.last_pass_id.is_distinct_from(pass_id)).where(
+                MemoirLine.id == line.id
+            )
+        ).scalar()
+        if not distinct:
+            # SAME PASS — the re-run is a no-op. The row is left
+            # completely untouched: the guard exists so a crashed
+            # pass can be replayed without distorting the counts.
+            if commit:
+                session.refresh(line)
+            return line
+
+        current = _as_utc(line.last_mentioned_at)
+        line.mention_count = line.mention_count + 1
+        line.last_mentioned_at = event if current is None or event > current else current
+        line.last_pass_id = pass_id
+        session.add(line)
+        if commit:
+            session.commit()
+        else:
+            session.flush()
+        session.refresh(line)
+        return line
 
     # ── the read surface ─────────────────────────────────────────────────
 
