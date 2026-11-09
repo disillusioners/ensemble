@@ -477,8 +477,12 @@ PYEOF
 ' \
 "daemon/tools/filesystem.py" \
 '        return _resolve_within_scope(path, scope)
+
+    if _is_absolute_path(path):
 ' \
 '        return _resolve_within_scope(path, scope, workdir)
+
+    if _is_absolute_path(path):
 ' \
 "daemon/tools/filesystem.py" \
 '    anchor = _trusted_scope_anchor()
@@ -502,6 +506,42 @@ PYEOF
         return None, (
             f"ERROR: read scope {scope!r} permits RELATIVE reads only, "
 '
+
+  # M-B3f (iteration 2 — D-N1) — the WALK tools lose the scope binding.
+  #
+  # glob_files / grep_files were bound through `_make_workdir_aware` ONLY,
+  # so `_resolve_search_root` bounded the walk against the AGENT-SUPPLIED
+  # `workdir` — the same anchor bug D1 had, on the keeper's own bound
+  # surface. `grep_files(pattern=<canary>, path=<out-of-anchor>,
+  # workdir="/")` returned LIVE CONTENT. Unwrapping the two tools restores
+  # that hole ⇒ the content-exfiltration pin MUST go RED.
+  leg "M-B3f" "daemon/tools/instance.py" \
+'    glob_files_aware = _make_read_scope_aware(
+        _make_workdir_aware(glob_files, get_current_workdir),
+        get_current_caller_agent_id,
+        get_trusted_workdir,
+    )
+    grep_files_aware = _make_read_scope_aware(
+        _make_workdir_aware(grep_files, get_current_workdir),
+        get_current_caller_agent_id,
+        get_trusted_workdir,
+    )
+' \
+'    glob_files_aware = _make_workdir_aware(glob_files, get_current_workdir)
+    grep_files_aware = _make_workdir_aware(grep_files, get_current_workdir)
+' \
+"$PIN_FILE::TestWalkToolsAreScoped::test_no_content_exfiltration_via_any_walk_vector"
+
+  # M-B3g (iteration 2 — D-N2) — the credential-hazard basename rule is
+  # DROPPED. The anchor IS the project repo, so "relative-only" alone
+  # permits `read_file(".env")` — the exact file the scope exists to deny
+  # (it returned the live credential block in the re-adjudication).
+  leg "M-B3g" "daemon/tools/filesystem.py" \
+'_SCOPE_DENIED_BASENAMES: frozenset[str] = frozenset({".env"})
+' \
+'_SCOPE_DENIED_BASENAMES: frozenset[str] = frozenset()
+' \
+"$PIN_FILE::TestCredentialBasenameRule::test_read_file_refuses_the_repo_dotenv_relative"
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"

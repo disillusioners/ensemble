@@ -449,16 +449,15 @@ PYEOF
   # self-test REDs it.
   leg "M-B1g" "tests/unit/test_skill_keeper_confinement.py" \
 '            derivations = _target_derivations(target, scope_nodes)
-            if any(
-                marker in text
-                for text in derivations
-                for marker in _TEMP_TARGET_MARKERS
-            ):
+            if _is_temp_derivation(derivations):
                 temp = True
 ' \
 '            derivations = _target_derivations(target, scope_nodes)
-            body = ast.unparse(fnode)
-            if any(marker in body for marker in _TEMP_TARGET_MARKERS):
+            _body = ast.unparse(fnode)
+            if any(
+                marker in _body
+                for marker in ("gettempdir", "TemporaryDirectory", "tempfile.")
+            ):
                 temp = True
 ' \
 "$PIN_FILE::TestResolverLeg::test_a_project_write_is_not_downgraded_by_a_gettempdir_mention"
@@ -473,6 +472,51 @@ PYEOF
     return out  # M-B1h PLANT: the write primitives are not recognised
 ' \
 "$PIN_FILE::TestResolverLeg::test_the_classifier_catches_an_open_and_print_write"
+
+  # M-B1i (iteration 2 — D-N3) — the DESTRUCTIVE / directory-creation
+  # coverage is dropped again (the D2 rewrite had narrowed the primitive
+  # list and silently lost what the pre-rewrite classifier had:
+  # `shutil.move` / `shutil.rmtree` / `os.makedirs` all reported `[]`).
+  # The restored-primitive pin MUST go RED.
+  leg "M-B1i" "tests/unit/test_skill_keeper_confinement.py" \
+'            elif recv_name == "shutil" and attr in _SHUTIL_TARGET_FIRST:
+                target = sub.args[0] if sub.args else _kwarg(sub, "path")
+                out.append((target, sub))
+            elif recv_name == "os" and attr in _OS_TARGET_FIRST:
+                out.append((sub.args[0] if sub.args else None, sub))
+            elif recv_name == "os" and attr in _OS_TARGET_SECOND:
+                out.append((sub.args[1] if len(sub.args) > 1 else None, sub))
+' \
+'' \
+"$PIN_FILE::TestResolverLeg::test_the_classifier_catches_the_restored_destructive_primitives"
+
+  # M-B1j (iteration 2 — D-N4) — the temp-vs-project decision degrades
+  # back to a SUBSTRING test over the unparsed target, so a PROJECT write
+  # whose path LITERAL contains a marker is downgraded to the temp class.
+  # The literal-marker pin MUST go RED (and the genuine-temp pin stays
+  # GREEN, which is what makes this leg discriminating rather than blunt).
+  leg "M-B1j" "tests/unit/test_skill_keeper_confinement.py" \
+'    for node in nodes:
+        if not isinstance(node, ast.Call):
+            continue
+        name = _receiver_name(node.func).split(".")[-1]
+        if name in _TEMP_API_NAMES:
+            return True
+    return False
+' \
+'    for node in nodes:
+        try:
+            text = ast.unparse(node)
+        except Exception:
+            text = ""
+        if any(
+            marker in text
+            for marker in ("gettempdir", "TemporaryDirectory", "tempfile.")
+        ):
+            return True
+    return False
+' \
+"$PIN_FILE::TestResolverLeg::test_a_project_write_with_a_marker_literal_is_project"
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
