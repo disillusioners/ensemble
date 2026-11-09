@@ -13,6 +13,8 @@ and ``OPENAI_MODEL`` is NEVER read.
 
 from __future__ import annotations
 
+import warnings
+
 from dataclasses import dataclass
 
 from daemon.services.decision.config import (
@@ -202,3 +204,34 @@ def test_the_headers_carry_the_bearer_and_the_proxy_app() -> None:
     assert headers["Authorization"] == "Bearer k"
     assert headers["x-proxy-app"] == "ensemble"
     assert headers["Accept"] == "application/json"
+
+
+def test_seam_tier_enumeration_does_not_touch_deprecated_instance_attrs() -> None:
+    """Regression pin: enumerating a pydantic seams model must not access
+    instance-level ``model_fields`` / ``model_computed_fields`` (deprecated
+    in Pydantic V2.11, removed in V3.0). Reverting to ``dir()``-walking
+    would re-trigger PydanticDeprecatedSince211.
+    """
+    from pydantic.warnings import PydanticDeprecatedSince211
+
+    from daemon.config import DecisionSeamsConfig
+    from daemon.services.decision.config import seam_switch_tier
+
+    seams = DecisionSeamsConfig(
+        snapshot_l3_selection_enabled=True,
+        snapshot_l3_selection_stage="deciding",
+    )
+    source = type("House", (), {"global_enabled": True, "seams": seams})()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("error", PydanticDeprecatedSince211)
+        tier = seam_switch_tier(source)
+
+    assert tier == {
+        "decision_global_enabled": "1",
+        "decision_seam_snapshot_l3_selection_enabled": "1",
+        "decision_seam_snapshot_l3_selection_stage": "deciding",
+    }
+    assert not any(
+        issubclass(w.category, PydanticDeprecatedSince211) for w in caught
+    )

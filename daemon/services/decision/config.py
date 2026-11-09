@@ -327,9 +327,27 @@ def _seam_tier(source: Any) -> dict[str, dict[str, Any]]:
     if isinstance(seams, Mapping):
         items = list(seams.items())
     else:
-        items = [
-            (name, getattr(seams, name)) for name in dir(seams) if not name.startswith("_")
-        ]
+        # Enumerate the DECLARED fields from the model CLASS, never from
+        # the instance: instance-level ``model_fields`` /
+        # ``model_computed_fields`` are deprecated (Pydantic V2.11) and go
+        # away in V3. Non-model objects (plain classes / dataclasses)
+        # carry no ``model_fields``; enumerate their public attributes via
+        # ``__dict__`` instead of ``dir()`` so we never walk into the
+        # deprecated instance-level attributes.
+        model_fields = getattr(type(seams), "model_fields", None)
+        if model_fields is not None:
+            names = list(model_fields)
+        else:
+            names = []
+            owners = [type(seams)] + list(type(seams).__mro__)
+            owners.append(seams)
+            for owner in owners:
+                d = getattr(owner, "__dict__", None)
+                if d is not None:
+                    for name in d:
+                        if not name.startswith("_") and name not in names:
+                            names.append(name)
+        items = [(name, getattr(seams, name)) for name in names]
     tier: dict[str, dict[str, Any]] = {}
     for name, value in items:
         # Shape (b): the resolved mapping form — flat → {enabled, stage}.
