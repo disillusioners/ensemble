@@ -15,6 +15,8 @@ second category and a second allowlist seam, both of which have bitten
 this codebase before.
 """
 
+import contextvars
+import json
 import os
 import re
 import stat
@@ -194,24 +196,161 @@ def _resolve_target_path(
     return guard._resolve_target(path)
 
 
+# ---------------------------------------------------------------------------
+# B3 — the per-agent READ SCOPE (Phase-1 plan §6 B3, DS-15)
+# ---------------------------------------------------------------------------
+#
+# Opt-in, default-OFF. An agent that does NOT declare a ``read_scope``
+# in its ``meta.json`` keeps TODAY's behavior byte-for-byte — the
+# fleet-wide default stays deferred (D8 res.9). The only declared
+# scope in Phase 1 is ``"project"`` (skill-keeper).
+#
+# WHY the identity and not the scope value: the ambient binding carries
+# the CALLING AGENT'S IDENTITY (bound by the scope-aware wrapper in
+# ``daemon/tools/instance.py``, row 17b). The declared scope is then
+# READABLE at the enforcement site. The agent can never widen its own
+# scope — the binding is made by the factory, not by tool arguments.
+
+#: The ambient calling agent identity for the CURRENT tool call.
+_CURRENT_CALLER_AGENT_ID: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("ensemble_caller_agent_id", default=None)
+)
+
+#: The only scope value Phase 1 defines. A DECLARED scope (any value)
+#: means "bounded" — the declaration is the opt-in, the value names the
+#: boundary in the refusal message.
+READ_SCOPE_PROJECT = "project"
+
+#: agent_id → declared read scope (``None`` = undeclared = unbounded).
+#: The meta.json read is per-agent constant; the tool-call path must
+#: not re-read it on every call.
+_READ_SCOPE_CACHE: dict[str, str | None] = {}
+
+
+def set_caller_agent_id(agent_id: str | None):
+    """Bind the calling agent's identity for the current tool call.
+
+    Returns a token to hand back to :func:`reset_caller_agent_id`.
+    """
+    return _CURRENT_CALLER_AGENT_ID.set(agent_id or None)
+
+
+def reset_caller_agent_id(token) -> None:
+    """Restore the previous caller identity binding."""
+    _CURRENT_CALLER_AGENT_ID.reset(token)
+
+
+def current_caller_agent_id() -> str | None:
+    """Return the calling agent's identity for the current tool call."""
+    return _CURRENT_CALLER_AGENT_ID.get()
+
+
+def declared_read_scope(agent_id: str | None) -> str | None:
+    """Return the agent's declared read scope, or ``None`` when undeclared.
+
+    The declaration lives in ``agents/<name>/meta.json`` as
+    ``"read_scope"`` (top level) or ``tools.read_scope``. Absent ⇒
+    ``None`` ⇒ unbounded ⇒ today's behavior.
+    """
+    if not agent_id:
+        return None
+    cached = _READ_SCOPE_CACHE.get(agent_id, ...)
+    if cached is not ...:
+        return cached
+    scope = _load_declared_read_scope(agent_id)
+    _READ_SCOPE_CACHE[agent_id] = scope
+    return scope
+
+
+def _load_declared_read_scope(agent_id: str) -> str | None:
+    from .prompt_artifacts import get_agents_roots
+
+    for root in get_agents_roots():
+        meta_path = root / agent_id / "meta.json"
+        try:
+            if not meta_path.is_file():
+                continue
+            raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict):
+            return None
+        scope = raw.get("read_scope")
+        if scope is None:
+            tools_cfg = raw.get("tools")
+            if isinstance(tools_cfg, dict):
+                scope = tools_cfg.get("read_scope")
+        if isinstance(scope, str) and scope.strip():
+            return scope.strip().lower()
+        return None
+    return None
+
+
+def _read_scope_refusal(
+    target: Path,
+    workdir: str | None,
+    scope: str,
+) -> str | None:
+    """Return an error string when the absolute target escapes the scope.
+
+    A DECLARED scope means the agent may only read INSIDE its project
+    workdir. An absolute path outside that boundary is refused — this
+    is the credential-hazard class (the repo ``.env``, ``~/.ssh/*``,
+    ``/proc/self/environ``, another agent's directory) the keeper's
+    residual read reach exposed.
+    """
+    if not workdir or not workdir.strip():
+        return (
+            f"ERROR: read scope {scope!r} forbids reading absolute paths "
+            "outside the project workdir, and no workdir was declared."
+        )
+    try:
+        base = Path(workdir).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        return f"ERROR: invalid workdir for read scope: {exc}"
+    try:
+        resolved = target.resolve()
+    except (OSError, RuntimeError) as exc:
+        return f"ERROR: Invalid absolute path: {exc}"
+    if WorkspaceGuard._normed_contains(base, resolved):
+        return None
+    return (
+        f"ERROR: read scope {scope!r} forbids reading outside the project "
+        f"workdir ({base}); {resolved} is outside it."
+    )
+
+
 def _resolve_within_workdir(
     path: str,
     workdir: str | None,
+    scope_agent_id: str | None = None,
 ) -> tuple[Path | None, str | None]:
     """Resolve *path* and verify it stays within *workdir* (when relative).
 
     Combines ``_resolve_target_path`` with the boundary check, so callers get
     a single (target, err) tuple and can't forget to apply the boundary check.
 
+    ``scope_agent_id`` is the OPT-IN read-scope hook (B3). When it is
+    ``None`` — the write/edit call paths and every agent that declares
+    no scope — the behavior is byte-identical to the pre-scope resolver.
+    Only the READ call sites pass it.
+
     Returns:
         (target_path, error). On error, target_path is None. For absolute
-        paths the boundary check is intentionally skipped.
+        paths the boundary check is intentionally skipped UNLESS the
+        caller opted into a declared read scope.
     """
     if _is_absolute_path(path):
         try:
-            return Path(path).expanduser(), None
+            resolved = Path(path).expanduser()
         except (OSError, RuntimeError) as e:
             return None, f"ERROR: Invalid absolute path: {e}"
+        scope = declared_read_scope(scope_agent_id)
+        if scope:
+            scope_err = _read_scope_refusal(resolved, workdir, scope)
+            if scope_err:
+                return None, scope_err
+        return resolved, None
 
     if not workdir or not workdir.strip():
         return (
@@ -593,7 +732,10 @@ def list_directory(
     show_hidden: bool = False
 ) -> str:
     """List directory contents. Use tool_help("list_directory") for details."""
-    dir_path, err = _resolve_within_workdir(path, workdir)
+    # B3: the read call site opts into the declared read scope (the
+    # ambient caller identity is bound by the scope-aware wrapper in
+    # ``daemon/tools/instance.py``). Undeclared ⇒ no scope ⇒ unchanged.
+    dir_path, err = _resolve_within_workdir(path, workdir, current_caller_agent_id())
     if err:
         return err
 
@@ -667,7 +809,10 @@ def read_file(
     limit: int = 2000,
 ) -> str:
     """Read file contents. Use tool_help("read_file") for details."""
-    file_path, err = _resolve_within_workdir(path, workdir)
+    # B3: the read call site opts into the declared read scope (the
+    # ambient caller identity is bound by the scope-aware wrapper in
+    # ``daemon/tools/instance.py``). Undeclared ⇒ no scope ⇒ unchanged.
+    file_path, err = _resolve_within_workdir(path, workdir, current_caller_agent_id())
     if err:
         return err
 
