@@ -155,6 +155,16 @@ def test_openai_model_is_never_read() -> None:
 
 def test_an_explicitly_empty_model_disables_the_lane() -> None:
     """D1 — an EXPLICITLY EMPTY ``DECISION_MODEL`` is NOT configured."""
+    # No explicit decision signal (only OPENAI_* inherited) AND an
+    # explicitly empty model ⇒ the lane is NOT configured.
+    config = DecisionConfig.from_env({"DECISION_MODEL": "   "})
+    assert config.model == ""
+    assert config.is_configured() is False
+
+    # With an explicit signal present, an empty model keeps the lane
+    # NOT configured at the value level (the client pre-flight maps
+    # it to a ``not_configured`` suppression — the model emptiness is
+    # a separate check from the configured predicate).
     config = DecisionConfig.from_env(
         {
             "DECISION_BASE_URL": "https://proxy.test/v1",
@@ -163,7 +173,7 @@ def test_an_explicitly_empty_model_disables_the_lane() -> None:
         }
     )
     assert config.model == ""
-    assert config.configured is False
+    assert config.is_configured() is True
 
 
 def test_the_defaults_are_the_ratified_figures() -> None:

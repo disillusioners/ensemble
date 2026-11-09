@@ -53,6 +53,7 @@ __all__ = [
     "VERDICT_AGREE",
     "VERDICT_DISAGREE",
     "VERDICT_NO_OVERLAY",
+    "VERDICT_UNANSWERED",
 ]
 
 
@@ -209,9 +210,15 @@ class OverlayOutcome(str, Enum):
 
 
 #: The shadow row's verdict vocabulary (``controls-and-phasing.md`` §2.6).
+#: The METRIC ``verdict`` label keeps its three values
+#: {agree, disagree, no_overlay} — ``VERDICT_UNANSWERED`` lives in the
+#: SHADOW LOG's verdict field ONLY (FIX A: no new metric label value,
+#: so the zero-headroom band stays 411); the unanswered consult is
+#: COUNTED under the existing ``unmatched_answer`` failure class.
 VERDICT_AGREE = "agree"
 VERDICT_DISAGREE = "disagree"
 VERDICT_NO_OVERLAY = "no_overlay"
+VERDICT_UNANSWERED = "unanswered"
 
 
 # ── Request shapes (thin-client.md §2, PX-2) ──────────────────────────────

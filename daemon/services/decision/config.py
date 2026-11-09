@@ -26,6 +26,30 @@ Token ceiling       ``DECISION_TOKEN_CEILING``    10 000 000 (global)
 Rate table          ``DECISION_PRICING_USD_PER_MILLION_TOKENS``  ``{}``
 ==================  ==========================  ======================
 
+**THE TWO QUESTIONS ARE SEPARATE (Q2 — the leader's reconciliation).**
+
+* **``is_configured()``** — the CONFIGURED predicate. It requires an
+  **EXPLICIT decision signal**: ``DECISION_BASE_URL`` or
+  ``DECISION_API_KEY`` present in the environment, **OR** a ``decision:``
+  block in ``config.yaml`` (the house accessor
+  ``daemon/config.py:7210::raw_yaml_decision``). **Merely inheriting
+  ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` does NOT make the module
+  configured.**
+* **``resolve_values()``** — the VALUE resolver. Once CONFIGURED, the
+  values may fall back (``DECISION_API_KEY`` value ← ``OPENAI_API_KEY``;
+  ``DECISION_BASE_URL`` value ← ``OPENAI_BASE_URL``). Reuse-not-mint
+  holds.
+* **``DECISION_MODEL`` defaults to ``"decision"``** (L6 stands).
+
+Why this is not cosmetic: the ``decision`` row routes to a **PAID
+upstream** (``api.openai.com``). Under a pure-L6 reading, an operator
+who flips only ``decision_seam_snapshot_l3_selection_enabled=1`` begins
+spending money on EVERY consult with nothing else provisioned. Under
+the reconciliation the same flip produces **NO CALL** and a suppressed
+``not_configured`` row. The USD 50/month ceiling is the ratified
+control and the per-seam default-OFF is the primary belt; this is the
+**second belt**.
+
 **THE CANONICAL CONTRACT (the wiring round's namespace).** The house
 ``Config.decision`` is a ``DecisionConfig(BaseSettings)`` with
 ``env_prefix="DECISION_"``, so its FIELD names are LOWERCASE and its
@@ -80,7 +104,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 __all__ = [
@@ -90,6 +114,7 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
     "DecisionConfig",
     "GLOBAL_ENABLED_KEY",
+    "has_explicit_decision_signal",
     "seam_switch_tier",
 ]
 
@@ -139,18 +164,101 @@ class DecisionConfig:
     pricing_usd_per_million_tokens: Mapping[str, float] = field(default_factory=dict)
     global_enabled: bool = False
     seams: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    #: True only when an EXPLICIT decision signal was present at
+    #: resolution time (``DECISION_BASE_URL`` / ``DECISION_API_KEY`` in
+    #: the env, or a ``decision:`` block in config.yaml). The VALUES may
+    #: still have fallen back to ``OPENAI_*`` — that is the POINT of
+    #: keeping the two questions separate.
+    explicitly_configured: bool = False
+
+    # ── the two questions (Q2) ──────────────────────────────────────────
+
+    @classmethod
+    def has_explicit_decision_signal(
+        cls,
+        *,
+        env: Mapping[str, str] | None = None,
+        yaml_block: Any = None,
+    ) -> bool:
+        """True only when an EXPLICIT decision signal is present.
+
+        * ``DECISION_BASE_URL`` or ``DECISION_API_KEY`` in the
+          environment — the DECISION_* names, NOT their ``OPENAI_*``
+          counterparts;
+        * OR a ``decision:`` block in ``config.yaml`` — read through the
+          house accessor ``daemon/config.py:7210::raw_yaml_decision``
+          (``None`` when the file has no ``decision:`` section).
+
+        Merely INHERITING ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` is
+        NOT a signal: the ``decision`` row routes to a PAID upstream,
+        so an operator who never opted in must never be billed.
+        """
+        resolved_env: Mapping[str, str] = os.environ if env is None else env
+        if _clean(_resolve(resolved_env, "DECISION_BASE_URL")):
+            return True
+        if _clean(_resolve(resolved_env, "DECISION_API_KEY")):
+            return True
+        block = yaml_block if yaml_block is not None else _raw_yaml_decision_block()
+        if isinstance(block, Mapping) and bool(block):
+            return True
+        if block is not None and not isinstance(block, Mapping):
+            # A non-mapping section is still a literally-present section.
+            return True
+        return False
+
+    @classmethod
+    def resolve_values(
+        cls,
+        *,
+        env: Mapping[str, str] | None = None,
+        source: Any = None,
+        yaml_block: Any = None,
+    ) -> "DecisionConfig":
+        """The VALUE resolver — the reuse fallbacks, never the predicate.
+
+        Once :meth:`is_configured` is true, the values may fall back
+        (``DECISION_API_KEY`` value ← ``OPENAI_API_KEY``;
+        ``DECISION_BASE_URL`` value ← ``OPENAI_BASE_URL``). The returned
+        object carries ``explicitly_configured`` — the predicate's
+        answer at resolution time.
+        """
+        resolved_env: Mapping[str, str] = os.environ if env is None else env
+        the_source = resolved_env if source is None else source
+        config = cls.from_source(the_source)
+        return replace(
+            config,
+            explicitly_configured=cls.has_explicit_decision_signal(
+                env=resolved_env, yaml_block=yaml_block
+            ),
+        )
+
+    def is_configured(self) -> bool:
+        """The CONFIGURED predicate — an EXPLICIT decision signal.
+
+        Merely inheriting the ``OPENAI_*`` values is not enough: the
+        ``decision`` row routes to a PAID upstream, so a module the
+        operator never opted into must never be consulted (and never
+        billed).
+        """
+        return self.explicitly_configured
 
     # ── resolution ──────────────────────────────────────────────────────
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "DecisionConfig":
-        """Resolve from the environment alone (the standalone path)."""
-        source: Mapping[str, str] = os.environ if env is None else env
-        return cls.from_source(source)
+        """Resolve from the environment alone (the standalone path).
+
+        Thin wrapper over :meth:`resolve_values`.
+        """
+        return cls.resolve_values(env=env)
 
     @classmethod
     def from_source(cls, source: Any) -> "DecisionConfig":
-        """Resolve from an injected house config object or mapping.
+        """Resolve the VALUES from an injected house config object.
+
+        The VALUES only — the configured predicate lives in
+        :meth:`is_configured` / :meth:`has_explicit_decision_signal`
+        and is stamped by :meth:`resolve_values`.
 
         The injected object is the wiring round's ``Config.decision``
         namespace (L6) — read by its LOWERCASE field names, with the
@@ -260,6 +368,25 @@ class DecisionConfig:
 
 
 # ── resolution helpers ──────────────────────────────────────────────────
+
+
+def _raw_yaml_decision_block() -> Any:
+    """The house ``decision:`` yaml section — ``raw_yaml_decision()``.
+
+    ``daemon/config.py:7210`` returns the RAW processed ``decision``
+    section dict from the most recent ``load_config()`` call, or
+    ``None`` when the loaded file had no ``decision:`` section (or
+    ``load_config`` has not run). Imported lazily so a standalone use
+    (a test, a tool) never drags the house config module in.
+    """
+    try:
+        from daemon.config import raw_yaml_decision
+    except Exception:  # noqa: BLE001 — the accessor is optional here
+        return None
+    try:
+        return raw_yaml_decision()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _resolve(source: Any, path: str) -> Any:

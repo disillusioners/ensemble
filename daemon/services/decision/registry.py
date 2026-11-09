@@ -221,6 +221,7 @@ class FencedResult:
     total_tokens: int | None = None
     usage: Mapping[str, Any] | None = None
     candidate_ids: tuple[str, ...] = ()
+    unanswered_questions: tuple[str, ...] = ()
     provisioning_state: ProvisioningState | None = None
     verdict: str = VERDICT_NO_OVERLAY
     selection_overlap_ratio: float | None = None
@@ -489,6 +490,7 @@ class SeamRegistry:
                 usage=client_outcome.usage,
                 reached_socket=client_outcome.reached_socket,
                 candidate_ids=candidate_ids,
+                unanswered_questions=client_outcome.unanswered_questions,
                 provisioning_state=client_outcome.provisioning_state,
             )
 

@@ -96,6 +96,9 @@ class ClientOutcome:
             NEVER invented).
         total_tokens: The metered tokens from the ``usage`` block
             (``None`` when the block is absent).
+        unanswered_questions: The question names with NO matching
+            answer — an explicit UNANSWERED outcome (FIX A), never
+            dropped and never substituted.
         usage: The proxy's ``usage`` block, when present.
         provisioning_state: The provisioning verdict to apply, or
             ``None`` for "UNCHANGED" (a 502 never moves it).
@@ -110,6 +113,7 @@ class ClientOutcome:
     latency_s: float = 0.0
     cost_usd: float = 0.0
     total_tokens: int | None = None
+    unanswered_questions: tuple[str, ...] = ()
     usage: Mapping[str, Any] | None = None
     provisioning_state: ProvisioningState | None = None
     http_status: int | None = None
@@ -247,11 +251,18 @@ class DecisionClient:
         short-circuits BEFORE any socket is opened, so no cost is
         incurred (``thin-client.md`` §6).
         """
-        if not self._config.model:
+        # Q2 — the CONFIGURED predicate is an EXPLICIT decision signal
+        # (DECISION_BASE_URL / DECISION_API_KEY in the env, or a
+        # ``decision:`` yaml block). Merely INHERITING the OPENAI_*
+        # values is not enough: the decision row routes to a PAID
+        # upstream, so an operator who never opted in must never be
+        # consulted — and never billed.
+        if not self._config.is_configured():
             return self._suppressed(SuppressionReason.NOT_CONFIGURED)
-        if not self._config.base_url:
-            return self._suppressed(SuppressionReason.NOT_CONFIGURED)
-        if not self._config.api_key:
+        # Rows 1-3 of §6 — the emptiness checks are SEPARATE from the
+        # configured predicate: a configured module with a missing base
+        # URL / key / model is still not_configured.
+        if not self._config.base_url or not self._config.api_key or not self._config.model:
             return self._suppressed(SuppressionReason.NOT_CONFIGURED)
 
         raw_input = request.input
@@ -529,6 +540,32 @@ class DecisionClient:
                     cost_usd=cost,
                 )
 
+        # COMPLETENESS (FIX A) — the join is BY NAME, never by index, and
+        # a question with NO matching answers[].name is recorded as an
+        # explicit UNANSWERED outcome: never dropped, never substituted
+        # with another question's answer. The OPENAI adapter is a
+        # byte-faithful pass-through, so completeness is NOT guaranteed
+        # there (the System One adapter synthesizes a refusal for a
+        # missing answer — pkg/decision/typesafe.go:424-427 — so this
+        # branch is defensive but real).
+        unanswered = tuple(
+            question.name
+            for question in request.questions
+            if question.name not in by_name
+        )
+        if unanswered:
+            return self._failure(
+                FailureClass.UNMATCHED_ANSWER,
+                latency_s=latency,
+                reached_socket=True,
+                http_status=200,
+                usage=usage,
+                cost_usd=cost,
+                unanswered_questions=unanswered,
+            )
+
+        # The join is BY NAME — the answer whose name matches the
+        # question we asked, never a positional pick.
         first = request.questions[0].name
         raw_answer = by_name.get(first)
         if raw_answer is None:
@@ -645,6 +682,7 @@ class DecisionClient:
         usage: Mapping[str, Any] | None = None,
         cost_usd: float = 0.0,
         total_tokens: int | None = None,
+        unanswered_questions: tuple[str, ...] = (),
         provisioning_state: ProvisioningState | None = None,
     ) -> ClientOutcome:
         """Build a failure outcome (never raises)."""
@@ -655,6 +693,7 @@ class DecisionClient:
             latency_s=latency_s,
             cost_usd=cost_usd,
             total_tokens=total_tokens,
+            unanswered_questions=unanswered_questions,
             usage=usage,
             provisioning_state=provisioning_state,
             http_status=http_status,

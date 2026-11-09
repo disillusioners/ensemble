@@ -74,6 +74,7 @@ from daemon.services.decision.registry import FencedResult, SeamRegistry
 from daemon.services.decision.shadow import ShadowRow, ShadowWriter
 from daemon.services.decision.types import (
     VERDICT_NO_OVERLAY,
+    VERDICT_UNANSWERED,
     DecisionAnswer,
     DecisionStage,
     FailureClass,
@@ -478,7 +479,9 @@ class DecisionOverlay:
                 state=state,
             )
 
-        if not self._config.configured:
+        # Q2 — the CONFIGURED predicate is an EXPLICIT decision signal,
+        # never the inherited OPENAI_* values (a PAID upstream).
+        if not self._config.is_configured():
             return self._suppressed(
                 seam_id,
                 heuristic_outcome,
@@ -567,6 +570,15 @@ class DecisionOverlay:
 
         if result.failure_class is not None:
             failure = result.failure_class.value
+            # FIX A — an unanswered question is an EXPLICIT outcome: the
+            # shadow row's verdict carries "unanswered" (the metric's
+            # verdict label keeps its three values — no new label value,
+            # so the zero-headroom band stays 411) and the consult is
+            # COUNTED under the existing ``unmatched_answer`` class.
+            unanswered = bool(
+                result.failure_class is FailureClass.UNMATCHED_ANSWER
+                and result.unanswered_questions
+            )
             metrics.record_failure(seam_id, failure, mode)
             if mode == "deciding":
                 # R-B: fallbacks_total == failures_total, scoped to
@@ -582,7 +594,9 @@ class DecisionOverlay:
                 mode,
                 overlay=None,
                 heuristic=heuristic_outcome,
-                verdict=VERDICT_NO_OVERLAY,
+                verdict=(
+                    VERDICT_UNANSWERED if unanswered else VERDICT_NO_OVERLAY
+                ),
                 latency_ms=int(result.latency_s * 1000),
                 failure_class=failure,
                 reason="",
