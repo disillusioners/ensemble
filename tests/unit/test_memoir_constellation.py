@@ -30,6 +30,13 @@ What this suite pins:
   ``MEMOIR_REFLECTION_NIGHTLY_CAP`` episode cap, seeds the Constellation
   from the historical ``stars[]``, and the seeded star is queryable
   through ``memoir_about`` with its historical episode line.
+* **the PER-PASS LLM-call budget (V2-D 3.9)**: the constellation cap is
+  a PASS cap, never a per-chunk cap — a multi-chunk pass spends at most
+  TWO constellation LLM calls (extraction + Tier-2) in total, and the
+  heuristic ``stars[]`` seed is NEVER blocked by a spent budget;
+* **the heat gate (V2-D 3.3)**: a FAILED connected-episode fetch renders
+  the fail-soft ``(none)`` dossier but does NOT increment the stored
+  heat — a lookup that could not read its episodes is not a hit.
 
 Every DB touch runs over an in-memory SQLite engine built from the
 SQLModel metadata (the phase-1/phase-2 suite precedent). The engine is
@@ -47,6 +54,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
 from sqlmodel import Session, SQLModel, StaticPool, create_engine, func, select
 
 from daemon.repositories.memoir.constellation_repository import (
@@ -465,10 +473,18 @@ class TestTwoTier:
             row = session.get(MemoirStar, star.id)
             assert row.description == "first summary"  # the cached summary
 
-    def test_tier2_is_capped_at_one_summarization_per_pass(
+    def test_tier2_is_capped_at_one_summarization_per_extraction_invocation(
         self, repo, constellation_repo
     ):
-        """Two qualifying stars ⇒ still exactly ONE summarization per pass."""
+        """Two qualifying stars ⇒ still exactly ONE summarization per
+        EXTRACTION INVOCATION.
+
+        SCOPE (the rename is the fix): this leg drives ONE ``extract()``
+        call — it proves the per-INVOCATION cap ("at most one star is
+        summarized per chunk invocation").  The PER-PASS cap (the
+        budget that spans the chunks of a whole reflection pass) is
+        ``TestThePerPassCallBudget`` below.
+        """
         hot_ids = self._five_episodes_over_1200_chars(repo, "Hot Star")
         cold_ids = self._five_episodes_over_1200_chars(repo, "Cold Star")
         caller = CountingCaller()
@@ -566,3 +582,218 @@ class TestSeed:
         assert "(none)\n" not in result.split("Connected Episodes")[1].split(
             "Neighbor Stars"
         )[0]
+
+
+# ── the PER-PASS LLM-call budget (V2-D 3.9) ───────────────────────────────
+
+
+class ConstellationCountingCaller:
+    """A fake LLM caller that counts the CONSTELLATION calls only.
+
+    The reflection engine uses ONE caller for the synthesis AND for the
+    constellation, so the counter classifies the prompt: the extraction
+    prompt, the Tier-2 prompt and the synthesis prompt are three
+    different texts.
+    """
+
+    def __init__(self) -> None:
+        self.extraction_calls = 0
+        self.summarize_calls = 0
+        self.synthesis_calls = 0
+
+    @property
+    def constellation_calls(self) -> int:
+        """Every LLM call the CONSTELLATION made (extraction + Tier-2)."""
+        return self.extraction_calls + self.summarize_calls
+
+    def __call__(self, prompt: str) -> str:
+        if "You extract ENTITY MENTIONS" in prompt:
+            self.extraction_calls += 1
+            return '{"episodes": [], "mentions": []}'
+        if "Summarize the following memory excerpts" in prompt:
+            self.summarize_calls += 1
+            return "a coherent ~300 word card"
+        self.synthesis_calls += 1
+        return '{"episodes": [], "syntheses": []}'
+
+
+def _seed_a_tier2_star(repo, constellation_repo, tag: str, *, created_at):
+    """Seed ONE Tier-2-QUALIFIED star (5 fragments, >1200 chars).
+
+    The seed episodes sit OUTSIDE the in-day scan window (they are
+    created long ago), so the reflection pass never CONSIDERS them —
+    only their constellation lines matter (the Tier-2 candidate scan
+    reads the LINES, not the pass).
+    """
+    ids = []
+    for index in range(MEMOIR_STAR_SUMMARY_MIN_FRAGMENTS):
+        ids.append(
+            _episode(
+                repo,
+                f"ep-{tag}-{index}",
+                body=("the sovereign ruled on many matters " * 10) + str(index),
+                stars=[tag],
+                created_at=created_at + timedelta(minutes=index),
+            )
+        )
+    _svc(constellation_repo).extract(
+        [
+            _stand_in(
+                eid,
+                stars=[tag],
+                body="x" * 300,
+                event_at=created_at,
+            )
+            for eid in ids
+        ],
+        pass_id=f"seed-{tag}",
+        now=NOW,
+    )
+    return ids
+
+
+class TestThePerPassCallBudget:
+    """THE CONSTELLATION BUDGET IS PER PASS (V2-D 3.9), NOT PER CHUNK.
+
+    One pass dispatches MANY chunks, and ONE chunk invocation can make
+    TWO LLM calls (the fallback extraction + the Tier-2 summarization).
+    A per-chunk counter therefore let a two-chunk pass reach FOUR calls
+    against a cap of TWO.  The budget is now ONE object per pass, and
+    every chunk threads it.
+
+    THE HEURISTIC IS FREE: the ``stars[]`` seed never consumes the
+    budget, so a spent budget never blocks the primary mechanism.
+    """
+
+    def test_a_multi_chunk_pass_spends_at_most_two_constellation_llm_calls(
+        self, repo, constellation_repo
+    ):
+        # TWO Tier-2-qualified stars: with a per-chunk counter each of
+        # the two chunks could spend TWO calls (extraction + Tier-2),
+        # so the pass reached FOUR against a cap of TWO.
+        _seed_a_tier2_star(
+            repo,
+            constellation_repo,
+            "Hot Star",
+            created_at=NOW - timedelta(days=30),
+        )
+        _seed_a_tier2_star(
+            repo,
+            constellation_repo,
+            "Cold Star",
+            created_at=NOW - timedelta(days=30),
+        )
+        # TWO untagged episodes (the LLM fallback needs them) and ONE
+        # tagged episode (the heuristic seed).
+        for index in range(3):
+            _episode(
+                repo,
+                f"ep-plain-{index}",
+                body="an untagged memory that only the extractor can resolve",
+                stars=None if index < 2 else ["Heuristic Star"],
+                created_at=NOW - timedelta(hours=3 - index),
+            )
+
+        caller = ConstellationCountingCaller()
+        service = _reflection_service(
+            repo.engine,
+            constellation_repo,
+            llm_caller=caller,
+            # One episode per chunk ⇒ THREE chunks in ONE pass.
+            max_prompt_tokens=1,
+        )
+        outcome = service.run_in_day_pass(now=NOW)
+
+        # THE CAP: at most TWO constellation LLM calls for the WHOLE pass.
+        assert caller.constellation_calls <= 2
+        # The budget was SPENT on real work, not skipped: the first chunk
+        # took the extraction and the Tier-2 summarization.
+        assert caller.extraction_calls == 1
+        assert caller.summarize_calls == 1
+        # The metered truth agrees with the caller.
+        assert outcome.constellation_calls == 2
+        # THE HEURISTIC IS FREE: the tagged episode was extracted even
+        # though the budget was spent by the time its chunk ran.
+        heuristic_star = constellation_repo.resolve_star(AGENT, "Heuristic Star")
+        assert heuristic_star is not None
+        assert (
+            _svc(constellation_repo).fragments_count(heuristic_star.id, AGENT) == 1
+        )
+
+
+# ── the heat gate (V2-D 3.3): a FAILED fetch is NOT a hit ─────────────────
+
+
+def _stored_heat(engine, star_id: str) -> float:
+    with Session(engine) as session:
+        row = session.get(MemoirStar, star_id)
+        return float(row.heat)
+
+
+def _seed_a_populated_star(repo, constellation_repo, tag: str = "The Emperor"):
+    """One star with TWO connected episodes (the populated-card shape)."""
+    ids = []
+    for index in range(2):
+        ids.append(
+            _episode(
+                repo,
+                f"ep-{tag}-{index}",
+                body="a moment worth keeping",
+                stars=[tag],
+                created_at=NOW - timedelta(days=2 - index),
+                title=f"ruling {index}",
+            )
+        )
+    _svc(constellation_repo).extract(
+        [
+            _stand_in(
+                eid,
+                stars=[tag],
+                body="a moment worth keeping",
+                event_at=NOW - timedelta(days=2),
+            )
+            for eid in ids
+        ],
+        pass_id="seed-populated",
+        now=NOW,
+    )
+    return ids
+
+
+class TestTheHeatHonesty:
+    """THE HEAT GATE (V2-D 3.3): a FAILED fetch is NOT a hit.
+
+    The stored accumulator moves ONLY on an explicit recall that really
+    READ the episodes.  A fetch that fails renders the fail-soft
+    ``(none)`` text and MUST NOT inflate the heat.
+    """
+
+    async def test_a_failed_episode_fetch_renders_but_leaves_the_heat_alone(
+        self, repo, constellation_repo, engine, monkeypatch
+    ):
+        monkeypatch.delenv("ENSEMBLE_MEMOIR_ENABLED", raising=False)
+        _seed_a_populated_star(repo, constellation_repo)
+        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        assert _stored_heat(engine, star.id) == 0.0
+
+        # THE FAULT: the episode table is gone ⇒ the connected-episode
+        # fetch fails while the CARD read still works.
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE memoir_episodes"))
+
+        manager = SimpleNamespace(_engine=engine, config=None)
+        tools = {
+            tool_obj.name: tool_obj
+            for tool_obj in create_memoir_tools(
+                manager,
+                current_instance_id="inst-heat",
+                agent_id=AGENT,
+            )
+        }
+        result = await tools["memoir_about"].ainvoke({"star": "The Emperor"})
+        # The dossier STILL renders (fail-soft) — the tool never raises.
+        assert "REFUSED" not in result
+        assert "=== STAR: The Emperor" in result
+        assert "(none)" in result.split("Connected Episodes (recent):")[1]
+        # THE HONESTY GUARD: the stored heat did NOT move.
+        assert _stored_heat(engine, star.id) == 0.0

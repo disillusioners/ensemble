@@ -4,7 +4,7 @@ Phase 4 of the Memoir Store v1 lane (plan:
 ``.agents/shared/planning/ari-memoir-store/phase4-plan.md`` — the whole
 phase; decisions D4.1-D4.16).
 
-Five callable tools, four families (pin/unpin are one family):
+Six callable tools, four families (pin/unpin are one family):
 
 * ``memoir_write(text, title?, importance?, event_at?, stars?, keepsake?,
   reason?, actor?)`` — THE HOT APPEND. One INSERT; the write never blocks
@@ -24,10 +24,14 @@ Five callable tools, four families (pin/unpin are one family):
   NO ``k`` parameter (the §5.4 signature is binding; the window bounds are
   named ``since``/``until`` because ``from``/``to`` are Python keywords —
   AM-42). The timeline writes NO access stats (DD-12).
+* ``memoir_about(star)`` — the CONSTELLATION card for one entity: the
+  canonical identity, the two-tier description, the connected episodes and
+  the 1-hop neighbours. The stored heat moves ONLY on a real hit — an
+  empty card (ND-23) and a FAILED episode fetch are both NOT hits.
 
 THE GATE ORDER IS AUTH-FIRST (D4.2/AM-16, following the exemplar's CODE,
 not its comment) and lives in ONE helper (``_gate`` — the tidier H1: the
-five bodies had drifted into three spellings of the same refusal):
+six bodies had drifted into three spellings of the same refusal):
 
 1. ``_is_memoir_authorized(caller_agent_id)`` — the FACTORY-CAPTURED
    ``agent_id`` (DD-13: never a caller-supplied scoping key) ⇒
@@ -129,12 +133,12 @@ from .memoir_knob import memoir_enabled, memoir_reflection_enabled, memoir_tool_
 logger = logging.getLogger(__name__)
 
 # Size rationale (~1,170 lines, refreshed 2026-11-05): the memoir TOOL
-# surface is one module because the five tools share ONE refusal
+# surface is one module because the six tools share ONE refusal
 # vocabulary, ONE gate (``_gate``), ONE provenance read and ONE help
 # template set — the cohesion is the frozen D4.8 contract, not a
-# missing extraction. The bulk is the five Pydantic input schemas +
+# missing extraction. The bulk is the six Pydantic input schemas +
 # their agent-facing field prose (the description text IS the tool's
-# contract and must live beside the schema it describes) and the five
+# contract and must live beside the schema it describes) and the six
 # ``_full_doc_`` bodies; neither is delegated-worthy behaviour. The
 # behaviours themselves are thin: each body gates, validates, makes ONE
 # repository/service call, and renders. If this file grows a sixth
@@ -298,7 +302,7 @@ _RECALL_CODE_MAP: dict[str, str] = {
 def _is_memoir_authorized(agent_id: str) -> bool:
     """Is this agent allowed to call the memoir tools?
 
-    ONE shared helper, called by ALL FIVE tool bodies — the set lives in
+    ONE shared helper, called by ALL SIX tool bodies — the set lives in
     exactly one place (the ``_is_metrics_authorized`` shape,
     ``daemon/tools/metrics_read.py:403-414``).
 
@@ -317,7 +321,7 @@ def _refuse(label: str, code: str, message: str) -> str:
 
 
 #: The kill-switch refusal's consequence clause — ONE template, one
-#: per-tool action noun (tidier H1). The five bodies had drifted into
+#: per-tool action noun (tidier H1). The six bodies had drifted into
 #: three spellings ("nothing was recorded" / "nothing was changed" /
 #: "the memory is unreadable while disabled"); the template keeps the
 #: wording action-specific without duplicating the sentence.
@@ -327,7 +331,7 @@ _DISABLED_CONSEQUENCE_TEMPLATE = "nothing was {action}"
 def _gate(label: str, action: str, agent_id: str, manager: Any) -> str | None:
     """The SHARED gates 1-2 of D4.2 — auth FIRST, then the kill-switch.
 
-    Called by ALL FIVE tool bodies (the ``_is_memoir_authorized`` habit,
+    Called by ALL SIX tool bodies (the ``_is_memoir_authorized`` habit,
     extended): the order and the wording live HERE, once. Auth-first
     means an unauthorized caller learns NOTHING about the knob's state
     and touches no DB (D4.2/AM-16).
@@ -587,7 +591,7 @@ def create_memoir_tools(
     agent_id: str = "",
     agent_tag: str | None = None,
 ) -> list:
-    """Build the five memoir tools for one instance/agent.
+    """Build the six memoir tools for one instance/agent.
 
     Args:
         manager: The ``InstanceManager`` — the tools read ONLY its
@@ -604,7 +608,7 @@ def create_memoir_tools(
         agent_tag: The caller's version tag (signature parity; unused).
 
     Returns:
-        A list of the five ``@tool``-decorated callables. NO
+        A list of the six ``@tool``-decorated callables. NO
         ``*_if_available`` wrapper (D4.6): a degraded boot leaves the
         tools PRESENT and loudly refusing.
     """
@@ -1291,104 +1295,26 @@ def create_memoir_tools(
                         f"star not found: {star_name}",
                     )
                 card = repo.get_star_card(caller_agent_id, star_row.id)
-                lines = card.get("lines") or []
-                has_episodes = len(lines) > 0
                 from daemon.services.memoir_constellation_service import (
                     MemoirConstellationService,
                 )
 
-                effective = MemoirConstellationService.effective_heat(
-                    getattr(star_row, "heat", 0.0),
-                    getattr(star_row, "last_touched_at", None),
-                )
-                aliases = [
-                    a.get("alias")
-                    for a in (card.get("aliases") or [])
-                    if a.get("alias")
-                ]
-                episode_lines: list[str] = []
-                if has_episodes:
-                    try:
-                        from sqlmodel import Session as _S
-                        from daemon.repositories.memoir.models import MemoirEpisode
-
-                        with _S(repo.engine) as session:
-                            for line in lines[:10]:
-                                eid = line.get("episode_id")
-                                ep = session.get(MemoirEpisode, eid)
-                                title = "(untitled)"
-                                when = line.get("last_mentioned_at") or line.get(
-                                    "first_mentioned_at"
-                                )
-                                if ep is not None:
-                                    title = getattr(ep, "title", None) or "(untitled)"
-                                    if getattr(ep, "event_at", None) is not None:
-                                        when = ep.event_at
-                                date_str = ""
-                                if when is not None:
-                                    try:
-                                        from daemon.services.timestamps import (
-                                            coerce_to_aware_utc,
-                                        )
-
-                                        date_str = coerce_to_aware_utc(when).date().isoformat()
-                                    except Exception:  # noqa: BLE001
-                                        date_str = str(when)
-                                episode_lines.append(f"- [{date_str}] {title}")
-                    except Exception:  # noqa: BLE001
-                        pass
-                if not episode_lines:
-                    episode_lines = ["- (none)"]
-                neighbor_lines: list[str] = []
-                for n in (card.get("neighbors") or [])[:10]:
-                    neighbor_lines.append(
-                        f"- {n.get('name')} ({n.get('star_type', 'concept')})"
-                    )
-                if not neighbor_lines:
-                    neighbor_lines = ["- (none)"]
-                aliases_text = ", ".join(aliases) if aliases else "(none)"
-                description = getattr(star_row, "description", "") or "(none)"
-                first_seen = getattr(star_row, "first_seen_at", None)
-                last_touched = getattr(star_row, "last_touched_at", None)
-                summary_as_of = getattr(star_row, "description_as_of", None)
-                first_str = (
-                    first_seen.date().isoformat()
-                    if hasattr(first_seen, "date")
-                    else str(first_seen)
-                )
-                last_str = (
-                    last_touched.date().isoformat()
-                    if hasattr(last_touched, "date")
-                    else str(last_touched)
-                )
-                summary_str = (
-                    summary_as_of.isoformat()
-                    if hasattr(summary_as_of, "isoformat")
-                    else (str(summary_as_of) if summary_as_of else "(none)")
-                )
-                name = getattr(star_row, "name", star_name)
-                stype = getattr(star_row, "star_type", "concept")
-                dossier = (
-                    f"=== STAR: {name} (type: {stype}, heat: {effective}) ===\n"
-                    f"Aliases: {aliases_text}\n"
-                    f"First Seen: {first_str} | Last Touched: {last_str} | "
-                    f"Summary As Of: {summary_str}\n"
-                    f"\n"
-                    f"Description:\n{description}\n"
-                    f"\n"
-                    f"Connected Episodes (recent):\n"
-                    + "\n".join(episode_lines)
-                    + "\n"
-                    f"\n"
-                    f"Neighbor Stars (1-hop):\n"
-                    + "\n".join(neighbor_lines)
-                )
-                if has_episodes:
+                # THE ONE FORMATTER (the drift fix): the SERVICE renders
+                # the dossier — the tool keeps no second inline renderer
+                # (two formatters drift).  The render carries the fetch
+                # verdict, so the heat gate below can be honest.
+                svc = MemoirConstellationService(repo, agent_id=caller_agent_id)
+                render = svc.render_dossier(star_row, card)
+                # THE HEAT GATE (V2-D 3.3): the stored accumulator moves
+                # ONLY on a REAL hit — an EMPTY card (ND-23) and a FAILED
+                # episode fetch are both NOT hits, so the fail-soft
+                # "(none)" render never inflates the heat.
+                if render.episode_count > 0:
                     try:
                         repo.increment_heat(caller_agent_id, star_row.id, 1.0)
                     except Exception:  # noqa: BLE001
                         pass
-                return dossier
+                return render.text
 
             return await asyncio.to_thread(_sync)
         except Exception:  # noqa: BLE001

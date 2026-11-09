@@ -47,6 +47,7 @@ import json
 import logging
 import math
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Sequence
 
@@ -59,6 +60,7 @@ from daemon.repositories.memoir.models import MemoirEpisode, MemoirLine, MemoirS
 from daemon.services.memoir_reflection_service import (
     MEMOIR_CONSTELLATION_MAX_LLM_CALLS_PER_PASS,
     MEMOIR_STAR_TYPES,
+    ConstellationCallBudget,
 )
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc
 
@@ -74,6 +76,26 @@ MEMOIR_HEAT_DECAY_LAMBDA = 0.005
 
 #: Star-type vocabulary (re-exported for convenience).
 MEMOIR_STAR_TYPES_LOCAL = MEMOIR_STAR_TYPES
+
+
+@dataclass(frozen=True)
+class DossierRender:
+    """The rendered dossier + the fetch outcome (the heat gate's input).
+
+    ``fetch_ok`` is TRUE only when the CONNECTED-EPISODE fetch
+    SUCCEEDED.  A failed fetch renders the fail-soft ``(none)`` text but
+    MUST NOT let the caller inflate the star's heat (V2-D 3.3 honesty):
+    a lookup that could not read its episodes is NOT a hit.
+
+    ``episode_count`` is the number of CONNECTED EPISODES actually
+    rendered — 0 for an empty card AND for a failed fetch.  The caller
+    gates the heat increment on ``episode_count > 0``, so ONE condition
+    covers both the empty-card rule (ND-23) and the failed-fetch rule.
+    """
+
+    text: str
+    fetch_ok: bool
+    episode_count: int
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -113,7 +135,6 @@ class MemoirConstellationService:
         self._llm_caller = llm_caller
         self._clock = clock or now_utc
         self._agent_id = agent_id
-        self._last_pass_llm_calls = 0
 
     # ── repository access ────────────────────────────────────────────────
 
@@ -126,10 +147,6 @@ class MemoirConstellationService:
         return self._repo
 
     # ── canonicalization ─────────────────────────────────────────────────
-
-    @staticmethod
-    def canonical_name(name: Any) -> str:
-        return str(name or "").strip().casefold()
 
     def _find_star_by_casefold(self, agent_id: str, surface: str) -> Any:
         if self._repo is None:
@@ -266,10 +283,17 @@ class MemoirConstellationService:
         llm_caller: Callable[[str], str] | None = None,
         agent_id: str | None = None,
         now: datetime | None = None,
+        budget: ConstellationCallBudget | None = None,
     ) -> int:
         """Extract star mentions from a chunk; return lines written.
 
         Heuristic primary (stars[]); LLM fallback when stars[] empty.
+
+        THE BUDGET IS PER PASS (V2-D 3.9): the ``budget`` object is the
+        pass's remaining LLM-call allowance and is threaded through
+        EVERY chunk, so a multi-chunk pass can never exceed the cap.
+        The heuristic seed is FREE — it never consumes the budget, and
+        the budget never blocks it.
         """
         if self._repo is None:
             return 0
@@ -299,7 +323,12 @@ class MemoirConstellationService:
                 empty_episodes.append(ep)
 
         # LLM fallback for episodes with empty stars[].
-        if empty_episodes and caller is not None:
+        # THE PER-PASS BUDGET (V2-D 3.9): the call is taken AT DISPATCH
+        # and only when the budget still has room — the heuristic seed
+        # above is untouched by the budget.
+        if empty_episodes and caller is not None and (
+            budget is None or budget.take()
+        ):
             try:
                 raw = caller(self._extraction_prompt(chunk))
                 mentions = self._parse_envelope(raw, kind="mentions")
@@ -335,7 +364,7 @@ class MemoirConstellationService:
                         pass
 
         # Tier-2 summarization: at most one star per pass.
-        self._maybe_tier2(chunk, agent, caller, moment)
+        self._maybe_tier2(chunk, agent, caller, moment, budget=budget)
         return written
 
     # aliases
@@ -351,6 +380,7 @@ class MemoirConstellationService:
         agent: str,
         caller: Callable[[str], str] | None,
         now: datetime,
+        budget: ConstellationCallBudget | None = None,
     ) -> None:
         if self._repo is None or caller is None:
             return
@@ -376,6 +406,12 @@ class MemoirConstellationService:
                 continue
             if not self.needs_tier2(star, now=now):
                 continue
+            # THE PER-PASS BUDGET (V2-D 3.9): the Tier-2 summarization is
+            # ONE LLM call, taken AT DISPATCH — the star only qualifies
+            # AFTER the threshold check, so a non-qualifying star never
+            # burns the budget.
+            if budget is not None and not budget.take():
+                return
             # summarize
             try:
                 self.summarize_star(star.id, agent_id=agent, llm_caller=caller, now=now)
@@ -527,45 +563,83 @@ class MemoirConstellationService:
 
     # ── dossier rendering ────────────────────────────────────────────────
 
+    def _episode_lines(
+        self, lines: Sequence[dict[str, Any]]
+    ) -> tuple[list[str], int, bool]:
+        """The CONNECTED-EPISODES block, its count, and the fetch verdict.
+
+        THE FETCH IS ONE UNIT (the honesty guard): a failure anywhere
+        discards the block and reports ``fetch_ok = False``, so the
+        caller renders the fail-soft ``(none)`` text and does NOT inflate
+        the star's heat.  A per-line swallow would make a partial failure
+        indistinguishable from a success — the heat gate could not tell
+        them apart, so the fetch is deliberately all-or-nothing.
+
+        An EMPTY card never fetches (there is nothing to read) and is
+        NOT a failure — it is the ND-23 "empty lookup" case.
+        """
+        if not lines:
+            return ["- (none)"], 0, True
+        if self._repo is None:
+            # NO REPOSITORY ⇒ the episodes could NOT be read ⇒ not a hit.
+            return ["- (none)"], 0, False
+        episode_lines: list[str] = []
+        try:
+            with Session(self._repo.engine) as session:
+                for line in lines[:10]:
+                    eid = line.get("episode_id")
+                    when = line.get("last_mentioned_at") or line.get(
+                        "first_mentioned_at"
+                    )
+                    title = "(untitled)"
+                    ep = session.get(MemoirEpisode, eid)
+                    if ep is not None:
+                        title = getattr(ep, "title", None) or "(untitled)"
+                        if getattr(ep, "event_at", None) is not None:
+                            when = ep.event_at
+                    date_str = ""
+                    if when is not None:
+                        try:
+                            date_str = coerce_to_aware_utc(when).date().isoformat()
+                        except Exception:  # noqa: BLE001
+                            date_str = str(when)
+                    episode_lines.append(f"- [{date_str}] {title}")
+        except Exception:  # noqa: BLE001 — the fail-soft fetch
+            logger.warning(
+                "[MemoirConstellation] the connected-episode fetch failed — "
+                "the dossier renders the fail-soft text and the heat is NOT "
+                "incremented"
+            )
+            return ["- (none)"], 0, False
+        return episode_lines, len(episode_lines), True
+
     def render_dossier(
         self,
         star: Any,
         card: dict[str, Any],
         *,
         now: datetime | None = None,
-    ) -> str:
+    ) -> DossierRender:
+        """Render the star dossier — THE ONE FORMATTER.
+
+        The ``memoir_about`` tool delegates here instead of keeping a
+        second inline renderer (two formatters drift).  The fetch
+        outcome travels WITH the text so the caller can gate the heat
+        increment honestly (V2-D 3.3).
+        """
         now = now or self._clock()
-        aliases = [a.get("alias") for a in card.get("aliases", []) if a.get("alias")]
+        aliases = [
+            a.get("alias")
+            for a in (card.get("aliases") or [])
+            if a.get("alias")
+        ]
         lines = card.get("lines", []) or []
         neighbors = card.get("neighbors", []) or []
         effective = self.effective_heat(
             getattr(star, "heat", 0.0), getattr(star, "last_touched_at", None), now=now
         )
-        # connected episodes: fetch titles
-        episode_lines: list[str] = []
-        if self._repo is not None:
-            for line in lines[:10]:
-                eid = line.get("episode_id")
-                when = line.get("last_mentioned_at") or line.get("first_mentioned_at")
-                title = None
-                try:
-                    with Session(self._repo.engine) as session:
-                        ep = session.get(MemoirEpisode, eid)
-                        if ep is not None:
-                            title = getattr(ep, "title", None) or "(untitled)"
-                            if getattr(ep, "event_at", None) is not None:
-                                when = ep.event_at
-                except Exception:  # noqa: BLE001
-                    pass
-                date_str = ""
-                if when is not None:
-                    try:
-                        date_str = _as_utc(when).date().isoformat() if hasattr(when, "date") else str(when)
-                    except Exception:  # noqa: BLE001
-                        date_str = str(when)
-                episode_lines.append(f"- [{date_str}] {title or '(untitled)'}")
-        if not episode_lines:
-            episode_lines = ["- (none)"]
+        # connected episodes: fetch the titles + the fetch verdict.
+        episode_lines, episode_count, fetch_ok = self._episode_lines(lines)
         neighbor_lines: list[str] = []
         for n in neighbors[:10]:
             name = n.get("name")
@@ -596,7 +670,11 @@ class MemoirConstellationService:
             f"\n"
             f"Neighbor Stars (1-hop):\n" + "\n".join(neighbor_lines)
         )
-        return dossier
+        return DossierRender(
+            text=dossier,
+            fetch_ok=fetch_ok,
+            episode_count=episode_count,
+        )
 
     # ── seeding helper ───────────────────────────────────────────────────
 
@@ -621,6 +699,7 @@ __all__ = [
     "MEMOIR_STAR_SUMMARY_COOLDOWN_HOURS",
     "MEMOIR_HEAT_DECAY_LAMBDA",
     "MEMOIR_CONSTELLATION_MAX_LLM_CALLS_PER_PASS",
+    "DossierRender",
     "MemoirConstellationService",
 ]
 

@@ -4,7 +4,7 @@
 The three-step registration seam (decorator + registry entries +
 construction) is proven END-TO-END here, in the notify-user shape:
 
-* (a) the AST discovery finds the five memoir tools in the category
+* (a) the AST discovery finds the six memoir tools in the category
   module;
 * (b) the category is in ``PRIVILEGED_TOOL_CATEGORIES``;
 * (c) the frozenset LENGTH is 19 (memoir joined 2026-11-05 as the
@@ -17,7 +17,7 @@ construction) is proven END-TO-END here, in the notify-user shape:
   path (the AST scanner resolves the value as
   ``daemon/tools/<parts[2:]>.py`` — a ``daemon.services.*`` value is
   never discovered and the drift pin fails at boot);
-* (f) ``DYNAMIC_TOOL_NAMES`` + ``KNOWN_TOOL_NAMES`` carry the five
+* (f) ``DYNAMIC_TOOL_NAMES`` + ``KNOWN_TOOL_NAMES`` carry the six
   tool names (factory-built, not import-time registered);
 * (g) the ``create_instance_tools`` extend is greppable in source AND
   precedes ``create_help_tool`` / ``scan_tools_for_full_docs`` /
@@ -181,12 +181,12 @@ class TestTheCategory:
         assert CATEGORY_MODULES.get(CATEGORY) == MODULE
         assert MODULE.startswith("daemon.tools.")
 
-    def test_the_five_tool_names_are_known(self) -> None:
+    def test_the_six_tool_names_are_known(self) -> None:
         for name in TOOL_NAMES:
             assert name in DYNAMIC_TOOL_NAMES, name
             assert name in KNOWN_TOOL_NAMES, name
 
-    def test_the_module_imports_cleanly_and_carries_the_five_tools(self) -> None:
+    def test_the_module_imports_cleanly_and_carries_the_six_tools(self) -> None:
         from daemon.tools.memoir import (
             MEMOIR_CATEGORY_KEY,
             MEMOIR_TOOL_NAMES,
@@ -244,14 +244,14 @@ class TestTheRegistrationWiring:
         allow list bypasses the category gate, so the body gate is
         mandatory. The tidier's Batch-A consolidation moved the gates
         into ONE shared ``_gate`` helper: the count is now on the
-        DELEGATION call shape — every one of the five bodies must gate
+        DELEGATION call shape — every one of the six bodies must gate
         on the factory-captured id by delegating to ``_gate``."""
         source = (REPO_ROOT / "daemon" / "tools" / "memoir.py").read_text(
             encoding="utf-8"
         )
         assert (
             source.count("refusal = _gate(label,") == 6
-        ), "every one of the five bodies must gate on the captured id"
+        ), "every one of the six bodies must gate on the captured id"
         assert source.count("def _gate(label: str, action: str, agent_id: str, manager: Any) -> str | None:") == 1, (
             "the shared gate helper must exist exactly once"
         )

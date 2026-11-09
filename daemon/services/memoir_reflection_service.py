@@ -165,6 +165,44 @@ _REFUSAL_MARKERS: tuple[str, ...] = (
 )
 
 
+class ConstellationCallBudget:
+    """The PER-PASS LLM-call budget of the constellation layer (V2-D 3.9).
+
+    THE BUDGET IS PER PASS, NOT PER CHUNK.  V2-D 3.9 caps the
+    constellation at "max 1 extraction, max 1 tier-2 card summarization
+    per PASS", and ONE pass dispatches MANY chunks — so the cap must be
+    counted against the pass, never against a single chunk.  ONE budget
+    object is created per pass and threaded through EVERY chunk
+    invocation; each LLM call takes one unit from it.
+
+    THE HEURISTIC IS FREE.  The ``stars[]`` seed never touches this
+    object — only the LLM fallback extraction and the Tier-2
+    summarization consume it.  Blocking the LLM work must NEVER block
+    the heuristic extraction (the primary mechanism).
+
+    The count is taken AT DISPATCH (the house rule): a call that was
+    dispatched counts, even if it failed.
+    """
+
+    __slots__ = ("limit", "used")
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(0, int(limit))
+        self.used = 0
+
+    @property
+    def remaining(self) -> int:
+        """The calls still available in this pass."""
+        return max(0, self.limit - self.used)
+
+    def take(self) -> bool:
+        """Consume ONE call; ``False`` when the budget is spent."""
+        if self.used >= self.limit:
+            return False
+        self.used += 1
+        return True
+
+
 @dataclass(frozen=True)
 class ReflectionSettings:
     """One pass's resolved settings (re-read every tick by the worker).
@@ -545,7 +583,12 @@ class MemoirReflectionService:
         rejected = 0
         duplicates = 0
         llm_calls = 0
-        constellation_calls = 0
+        # THE PER-PASS CONSTELLATION BUDGET (V2-D 3.9): ONE object for
+        # the whole pass.  Every chunk threads the SAME budget, so the
+        # cap is a PASS cap — a multi-chunk pass can never exceed it.
+        constellation_budget = ConstellationCallBudget(
+            int(settings.constellation_max_llm_calls_per_pass)
+        )
         lines = 0
         deferred = 0
         notes: list[str] = []
@@ -654,11 +697,14 @@ class MemoirReflectionService:
                     rejected += 1
 
             # ── the constellation extraction — its OWN budget (V2-31) ──
-            if self._constellation is not None and constellation_calls < int(
-                settings.constellation_max_llm_calls_per_pass
-            ):
-                constellation_calls += 1
-                lines += self._extract_constellation(chunk, now=now)
+            # THE HEURISTIC SEED IS FREE: the extraction ALWAYS runs for
+            # every chunk (the ``stars[]`` seed is the primary
+            # mechanism), and the LLM half stops on its OWN per-pass
+            # budget — the counter IS the budget's counter.
+            if self._constellation is not None:
+                lines += self._extract_constellation(
+                    chunk, now=now, budget=constellation_budget
+                )
 
         duration = self._monotonic() - started
         outcome = PassOutcome(
@@ -670,7 +716,7 @@ class MemoirReflectionService:
             syntheses_rejected=rejected,
             syntheses_duplicate=duplicates,
             llm_calls=llm_calls,
-            constellation_calls=constellation_calls,
+            constellation_calls=constellation_budget.used,
             lines_written=lines,
             deferred=deferred,
             duration_s=duration,
@@ -996,13 +1042,23 @@ class MemoirReflectionService:
 
     # ── the constellation extraction (V2-31, the decoupled budget) ─────
 
-    def _extract_constellation(self, chunk: Sequence[Any], *, now: datetime) -> int:
+    def _extract_constellation(
+        self,
+        chunk: Sequence[Any],
+        *,
+        now: datetime,
+        budget: ConstellationCallBudget | None = None,
+    ) -> int:
         """Extract star mentions and write constellation LINES.
 
         Delegates to :class:`MemoirConstellationService` so the heuristic
         ``stars[]`` seed is the PRIMARY mechanism and the LLM extraction
         is the FALLBACK (V2-D 3.1 / 3.9).  The pass id is always explicit
         (the phase-1 crash-recovery guard).
+
+        The ``budget`` is the PASS's LLM-call budget — it is threaded
+        through EVERY chunk so the cap holds across the whole pass (the
+        heuristic seed never consumes it).
         """
         if self._constellation is None:
             return 0
@@ -1023,6 +1079,7 @@ class MemoirReflectionService:
                     pass_id=f"reflect-{uuid.uuid4().hex[:12]}",
                     agent_id=self._settings.agent_id,
                     now=now,
+                    budget=budget,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — never fail the pass
