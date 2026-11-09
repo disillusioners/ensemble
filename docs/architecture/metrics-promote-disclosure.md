@@ -91,13 +91,14 @@
 > (`daemon/services/metrics_census.py:323-335` returned "enabled", the door reads it as "gated
 > off"), so the `census_gated` reason fired exactly when the census was running and publishing.
 > **The door's availability verdict was WRONG for these three wherever the capture and the census
-> ran.** **BOTH ARE FIXED** (skill-system-revival Phase 1, workstream A): **R-i (`capture_active`) —
-> FIXED** at `daemon/api.py:2571-2586` (a late-binding `capture_active` resolver reading the
-> wedge-capture PROCESS FACT, `app.state.wedge_capture_watchdog is not None`, resolved per read —
-> the watchdog is created AFTER the provider is constructed); **R-ii (the census `gated`
-> polarity) — FIXED** at `daemon/services/metrics_census.py:343` (the `gated` property now
-> returns `not self._gate()`, so it carries the gated-OFF sense its own docstring declares).
-> After the fix,
+> ran.** **BOTH ARE FIXED** (skill-system-revival Phase 1, workstream A).
+> **R-i:** wire `capture_active` — **FIXED** at `daemon/api.py:2571-2586` (a late-binding
+> `capture_active` resolver reading the wedge-capture PROCESS FACT,
+> `app.state.wedge_capture_watchdog is not None`, resolved per read — the watchdog is created
+> AFTER the provider is constructed).
+> **R-ii:** the census's `gated` polarity — **FIXED** at `daemon/services/metrics_census.py:343`
+> (the `gated` property now returns `not self._gate()`, so it carries the gated-OFF sense its own
+> docstring declares). After the fix,
 > **F1/F3 report `live` whenever the wedge-capture watchdog is live** (and `dark` with
 > `capture_off` when it is not), and **F6 reports `live` whenever the census is enabled AND
 > running AND publishing** (and `dark` with `census_gated` / `census_not_running` /
