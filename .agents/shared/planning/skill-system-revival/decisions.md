@@ -770,6 +770,8 @@ viable) — that is a product decision on a public endpoint, not an implementati
 
 **What remains an implementation decision (open item E-7):** the exact hook point and the process-once suppression mechanism, resolved by the **developer** at implementation start. The plan fixes the constraints: after `:1034`, before the first injection can occur, idempotent, never inside the ensure list.
 
+**Resolved site (E-7 answered):** resolved site `daemon/manager.py:2786` (after `_wire_skill_injection_capability_gate()`, strictly after `_ensure_postgres_columns()` at `:1034`; never inside the ensure list).
+
 **What would reverse it.** A boot-order change that moves the skill-services block earlier than the ensure list — then the site must move with it.
 
 ---
@@ -785,6 +787,26 @@ viable) — that is a product decision on a public endpoint, not an implementati
 - **F-25 (E3 acceptance bundling):** the board acceptance covers the **3 real bullets only**; the leader-judgment cleanups are labelled and pinned separately so the board closure is falsifiable on its own.
 
 **What would reverse it.** Nothing — these are house-standard gate items.
+
+---
+
+## DS-55 — R5 ratified: normalize-only desync rule
+
+**Context.** E4's implementation disclosed `R5` (the normalize-only desync rule: normalize the single `(False,'ab_testing')` desync row; never flip an active row) beyond the plan's R1/R2/R3.
+
+**Ruling.** RATIFIED as a disclosed E4 rule — the desync row is a real integrity defect, normalize-only cannot strand an A/B test (it touches no active row), and it was disclosed in the module docstring + PACKS.md rather than smuggled in. Ratified by: the Leader (2026-11-09).
+
+**What would reverse it.** Evidence that a normalize-only write can strand an A/B test or that R5 ever matches an active row.
+
+---
+
+## DS-54 — The brake amendment: ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED (a PLAN AMENDMENT)
+
+**Context.** The plan ruled "no gate" for the E4 boot pass. NEW information the ruling did not account for: shipping the pass ungated means it runs on LIVE's next boot at promote — writing a receipt into live's data_dir (~52 refused entries) and normalizing 1 row in the live `skills` table with nobody having armed anything. A boot-time write to production data absent explicit enablement violates the lane's core discipline, even though it deactivates nothing.
+
+**Ruling.** `ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED`, default 0/off, absent=off, fully inert when off (no receipt, no row change, no enumeration); it becomes a named Phase-2 lever armed alongside the capture switch. Ratified by: the Leader (2026-11-09), explicitly overturning the plan's no-gate ruling.
+
+**What would reverse it.** A ruling that boot-time data-dir writes and row normalization are acceptable in the absence of enablement (it is not expected).
 
 ---
 

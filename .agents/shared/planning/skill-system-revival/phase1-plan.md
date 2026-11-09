@@ -577,7 +577,7 @@ Options weighed: **(a)** a new `daemon/migrations/versions/*.sql` file; **(b)** 
 **Census re-confirmation of the mechanism.** The census makes the operator-script vehicle **even more clearly right**: the lever is a dual-column atomicity concern (set both `is_active` and `status` in one transaction) — a **code-level** concern, not a migration concern. A `.sql` file cannot express a transactional multi-column update that must also be reversible and idempotent across boots. The mechanism ruling stands (DS-10 / DS-24).
 
 **⇒ E4 ships BOTH, with a clear division of labour:**
-- **E4.1 — the shipped reconciliation** (code, in the release): an idempotent boot-time reconciliation that applies rules R1/R2/R3 and **deactivates** matching rows (`is_active=False`, `status='inactive'` — `daemon/repositories/skill/repository.py:383-396` `deactivate()` is the sanctioned writer), writing an **audit receipt** (row id, name, rule id, before/after `is_active`/`status`, timestamp). It **never hard-deletes** and **never re-activates**. It is a **no-op** when no row matches (the steady state after the first pass).
+- **E4.1 — the shipped reconciliation** (code, in the release): an idempotent boot-time reconciliation that applies rules R1/R2/R3 plus `R5` (the normalize-only desync rule) and **deactivates** matching rows (`is_active=False`, `status='inactive'` — `daemon/repositories/skill/repository.py:383-396` `deactivate()` is the sanctioned writer), writing an **audit receipt** (row id, name, rule id, before/after `is_active`/`status`, timestamp). The boot pass is gated by `ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED` (default 0 / off; named Phase-2 lever armed alongside capture switch); when OFF, the pass is fully inert (no receipt, no row change, no refusal enumeration, deactivator not constructed). It **never hard-deletes** and **never re-activates**. It is a **no-op** when no row matches (the steady state after the first pass).
 - **E4.2 — the operator script** (`scripts/audit/skill_stale_deactivate.py`): dry-run-by-default; `--apply` to execute; `--reactivate <receipt.json>` to **reverse** (the receipt carries the pre-values). It is the pre-flight verification (run before the promote) and the reversal (run after).
 - **E4.3 — the injection-side defence** (the "before F can inject" guarantee): the search/injection path **excludes** rows that match R1 (same-name active shadowing in an unresolved A/B group) — so even if the reconciliation has not run yet, **nothing stale can be injected**. This is the belt; E4.1/E4.2 are the braces. (The injection path is `daemon/services/skill_injection_service.py:371-431` → `SkillSearchService.search` → the candidate selection; the exact filter site is the implementer's to choose, with a pin that proves an R1-shaped row is never injected.)
 - **E4.4 — the reversal record**: every row touched is recorded (§16's evidence list).
@@ -593,7 +593,8 @@ Options weighed: **(a)** a new `daemon/migrations/versions/*.sql` file; **(b)** 
 6. R2 (6 captured) = already inactive, **NO-OP** (confirmed, not flipped). R3 (gate-runner copies) = **DO NOT EXIST (0 rows)** — the commission's premise is refuted and stated. `9e79ccad` = active, no A/B group, no duplicate evidence → **NOT stale, no flip**. `76e3e1a7a` = **NOT FOUND**.
 7. The 2 IDENTICAL-content families (dev-strategy, staged-binary-boot-smoke): **no content-logic remediation** — only a duplicate-row decision.
 8. The pair-resolver **handles the 27 pairs**: for a pair, declare the winner on `skill_ab_tests` (`resolved_at` + `winner_skill_id`) and deactivate the loser, as **ONE reversible unit** with a receipt recording the prior state of **BOTH** the test row and the skill rows. **NO winners are declared in Phase 1** — the winner decision is an open item for the orchestrator. C-6 is **ANSWERED** (27 families / 54 rows / 32 divergence); the remaining open item is the **WINNER DECISION**.
-9. The mechanism never sits inside the `_ensure_postgres_columns` one-transaction ensure list (critical note 48a7f77f: any entry's failure aborts boot) — it runs as a **separate, idempotent boot step** at its candidate wiring site `daemon/manager.py:2759`-adjacent (the skill-services init block, which runs **after** `_ensure_postgres_columns()` at `:1034` and after `run_pending_migrations()` at `:1017`). The exact hook point + process-once suppression are an implementation decision (open item E-7).
+9. The mechanism never sits inside the `_ensure_postgres_columns` one-transaction ensure list (critical note 48a7f77f: any entry's failure aborts boot) — it runs as a **separate, idempotent boot step** at the resolved site `daemon/manager.py:2786` (after `_wire_skill_injection_capability_gate()`, strictly after `_ensure_postgres_columns()` at `:1034` and after `run_pending_migrations()` at `:1017`). (E-7 resolved and answered).
+10. The boot pass is gated by `ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED` (default 0 / off; absent=off): when OFF, the pass is fully inert (no receipt, no row change, no refusal enumeration, deactivator not constructed); when ON (1/true/yes/on), it executes; invalid env value renders the pass inert and boot continues (fail-soft; M-E4k).
 
 **Pins + mutation legs (registered pack `skill_stale_deactivation_unit_test`, NEW).**
 - **M-E4a**: make the reconciliation a no-op → RED (the **refusal-receipt discriminator** pin — it asserts the receipt shows R1 REFUSED-BY-GUARD and still ACTIVE, not a deactivation).
@@ -603,6 +604,7 @@ Options weighed: **(a)** a new `daemon/migrations/versions/*.sql` file; **(b)** 
 - **M-E4e**: make the script's `--apply` path available without a dry-run → RED (the dry-run-default pin).
 - **M-E4f**: drop a row from the receipt → RED (the receipt-completeness pin).
 - **M-E4g**: make the reconciliation run twice and change state the second time → RED (the idempotence pin).
+- **M-E4k**: flip the resolver default to ON → RED (the inert-by-default brake pin; assert no receipt and deactivator not constructed when flag absent).
 
 ---
 
@@ -969,7 +971,7 @@ The runbook document itself (`phase2-runbook.md`) is written **after** implement
 | **E-4** | **Which agents** get `skill_injection: true` when F's payload is armed | §F — the manifest is per-axis and per-agent; the flip is a Phase-2 act |
 | **E-5** | Whether the **capture→evolution diversity gap** is acceptable to close in Phase 2 | §E2 — Phase 1 makes the path ready; only a live run proves it |
 | **E-6** | **Which variant wins** in each of the 27 stranded A/B pairs (code-fix, dev-strategy, git-commit, plan-creation, …) | §E4 (Ruling E) — the recommended default (newer evolved generation wins) is a **RECOMMENDATION ONLY**, not an executed action. The winner decision has real quality consequences and belongs to the orchestrator. |
-| **E-7** | **E4.1's exact hook point + process-once suppression** | §9 E4 / §17 #27 — the candidate wiring site is LOCATED (`daemon/manager.py:2759`-adjacent, the skill-services init block, strictly after `_ensure_postgres_columns()` at `:1034`); the exact hook and the "run once per process" mechanism are an **implementation** decision, resolved by the **developer** at implementation start. Constraints fixed by the plan: after `:1034`, before the first injection can occur, idempotent, never inside the ensure list. |
+| **E-7** | **E4.1's exact hook point + process-once suppression** | **ANSWERED (resolved in code).** Resolved wiring site is `daemon/manager.py:2786` (after `_wire_skill_injection_capability_gate()`, strictly after `_ensure_postgres_columns()` at `:1034`, outside the one-transaction ensure list, fail-soft); suppression is file-backed via receipt in `<data_dir>` (reconciliation skips processed `(skill_id, rule_id)` pairs). |
 
 ---
 
@@ -1041,6 +1043,7 @@ The runbook document itself (`phase2-runbook.md`) is written **after** implement
 | 23 | `daemon/tools/skill_tools.py`, `skill_evolution_tools.py` | `1202-1214`, `242-244`, `480-560` | one shared P7 refusal helper + a verbatim-agreement pin | E3 |
 | 24 | `daemon/repositories/skill/repository.py` | `383-396` | (no change — `deactivate()` is the sanctioned writer; **read-only**) | E4 |
 | 25 | `daemon/services/skill_stale_reconciliation.py` | **NEW** | the idempotent boot-time reconciliation (rules R1/R2/R3) + the audit receipt | E4 |
+| 25b | `daemon/services/skill_deactivation.py` + `daemon/manager.py` | `daemon/services/skill_deactivation.py:126`, `daemon/manager.py:5731` | the `ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED` brake (default 0/off; off-by-absence; fully inert when off; named Phase-2 lever) | E4 |
 | 26 | `daemon/services/skill_injection_service.py` / `skill_search_service.py` | `371-431` (the candidate selection) | exclude R1-shaped rows from `injected`/`low_match` | E4.3 |
 | 27 | `scripts/audit/skill_stale_deactivate.py` | **NEW** | the dry-run-first operator script + the `--reactivate` reversal | E4.2 |
 | 28 | `daemon/services/skill_capture_observability.py` (or an extension of the existing observability surface) | **NEW** | the D signals + the daemon-side anomaly trigger | D |
@@ -1127,7 +1130,7 @@ The runbook document itself (`phase2-runbook.md`) is written **after** implement
 | C-20 | D retention | `structured-log sink` | §8 D4 | F-10 | DS-19 | **Y** |
 | C-21 | D detector producer | daemon-side detector -> `AnomalyService.accept_report` (`anomaly_service.py:692-718`) | §8 D3 rule 1 + §8 D2 | F-11 | DS-17 | **Y** |
 | C-22 | F flag precision | dynamic lane gated: `instance_messaging.py:4311`, `context_messages.py:2536` | §10 "What the flag actually gates" | F-12 | — | **Y** |
-| C-23 | E4.1 wiring site | `daemon/manager.py:2759`-adjacent; after `_ensure_postgres_columns()` `:1034`; never inside the ensure list | §9 E4 acceptance 9 + §17 #27 + §16.3 E-7 | F-16 | — | **Y** |
+| C-23 | E4.1 wiring site | resolved site `daemon/manager.py:2786` (after `_wire_skill_injection_capability_gate()`, strictly after `_ensure_postgres_columns()` at `:1034`; never inside the ensure list) | §9 E4 acceptance 9 + §17 #27 + §16.3 E-7 | F-16 | DS-51 | **Y** |
 | C-24 | E4 acceptance | REFUSES an A/B-guarded row (proven) + receipt enumerates `refused-by-guard` (both ids + test id) + R1 verified still active | §9 E4 acceptance 1-3 | F-2 | DS-44 | **Y** |
 | C-25 | E4 pair-resolver | `resolved_at` + `winner_skill_id`; deactivate loser as ONE reversible unit with a receipt; NO winners in Phase 1 | §9 E4 Ruling E + Acceptance 8 | F-2 | DS-44 | **Y** |
 | C-26 | F identity dedupe | at most ONE variant per `(name, project_id)`; highest generation, ties by id | §10 "Identity dedupe at the injection boundary" + M-F6 | — | DS-48 | **Y** |
@@ -1135,6 +1138,8 @@ The runbook document itself (`phase2-runbook.md`) is written **after** implement
 | C-28 | net-new-reds protocol | `grep '^FAILED'` only; `intersection of the three red sets` over >=3 runs; NET-NEW MUST BE 0 | §13.2 | — | DS-26, DS-35 | **Y** |
 | C-29 | premise corrections | `P1-P4` | §3 | — | — | **Y** |
 | C-30 | I5 REST PATCH dual-column | `daemon/routers/skills.py:931-933` (the pop-and-translate site) / `M-I5-a` (the mutation leg) | §17 #31 | — (implementation-found, not a plan item) | DS-53 | **Y** |
+| C-31 | E4 stale-deactivation brake | `ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED` (default 0 / off; absent=off; fully inert when off) | §9 E4 Acceptance 10 | — | DS-54 | **Y** |
+| C-32 | E4 R5 desync rule | `R5` (the normalize-only desync rule) | §9 E4.1 | — | DS-55 | **Y** |
 
 **Re-verification protocol (mechanical).** On every revision, run, per row: extract every backticked token from the "exact string" cell, then for EACH token run `grep -nF "<token>" phase1-plan.md` and `grep -nF "<token>" decisions.md`; each token must return >=1 hit in **BOTH** files, and the §19 row's disposition must match the body. A token whose only plan hit is the ledger row itself is **self-referential and proves nothing** — the contract string must also appear on a **body** line. (Stronger form, used by the independent verifier: the tokens of a row should co-occur on at least one body line and on at least one `decisions.md` line — the plan holds that stricter form too.) **A row whose string is absent from the body is OPEN, regardless of what §19 claims.** This is the gate that was missing in rev 3 and rev 4.
 
