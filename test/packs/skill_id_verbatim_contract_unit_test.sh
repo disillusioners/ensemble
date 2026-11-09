@@ -129,6 +129,7 @@ MUTABLE_FILES=(
   "daemon/services/skill_injection_service.py"
   "daemon/services/project_skill_source/service.py"
   "daemon/services/skill_search_service.py"
+  "daemon/tools/skill_evolution_tools.py"
 )
 
 _pristine_key() { printf '%s' "$1" | sha256sum | cut -d' ' -f1 | cut -c1-16; }
@@ -214,6 +215,10 @@ run_pytest() {
 
 PIN_FILE="tests/tools/test_skill_id_verbatim_contract.py"
 SIBLING_FILE="tests/tools/test_skill_tools_pf_surface.py"
+# Phase-1 workstream B2 (the lane gate) — the plan body claimed this
+# pack already ran this file; it did NOT (the claim was stale). The
+# B2 mutation legs live inside it.
+LANE_GATE_FILE="tests/unit/test_skill_evolution_lane_gate.py"
 
 # --- phase 0: the IMPORT GUARD (mandatory — pin-spec.md §H, W5) -----------
 # The pack MUST prove that ``import daemon`` resolves to THIS checkout
@@ -274,7 +279,7 @@ check_budget "after phase 0"
 # --- phase 1: the pin + the sibling corpus --------------------------------
 echo "--- phase 1: the contract pin ---"
 PHASE1_LOG="$FAKE_HOME/phase1.log"
-run_pytest "$PIN_FILE" "$SIBLING_FILE" >"$PHASE1_LOG" 2>&1
+run_pytest "$PIN_FILE" "$SIBLING_FILE" "$LANE_GATE_FILE" >"$PHASE1_LOG" 2>&1
 PHASE1_RC=$?
 tail -3 "$PHASE1_LOG"
 echo "[timer] phase 1 done: $(elapsed_s)s elapsed / budget ${BUDGET_S}s"
@@ -460,6 +465,70 @@ PYEOF
         return True
 ' \
     "$PIN_FILE::TestProjectFileDiscriminatorParity"
+
+  # ---------------------------------------------------------------------
+  # Phase-1 workstream B2 — the inline skill_evolve lane gate.
+  # ---------------------------------------------------------------------
+
+  # M-B2a — the lane check is DELETED. With the lane OFF the tool must
+  # refuse; without the check it reaches the service → RED.
+  leg "M-B2a" "daemon/tools/skill_evolution_tools.py" \
+'        lane_reason = _evolution_lane_refusal_reason(manager)
+        if lane_reason is not None:
+            return _lane_refusal(lane_reason)
+
+' \
+'' \
+"$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_lane_off_returns_the_honest_refusal_envelope"
+
+  # M-B2b — the check is INVERTED (`if lane_enabled: refuse`). With the
+  # lane OFF nothing is refused and the service is reached → RED.
+  leg "M-B2b" "daemon/tools/skill_evolution_tools.py" \
+'        if lane_reason is not None:
+            return _lane_refusal(lane_reason)
+' \
+'        if lane_reason is None:
+            return _lane_refusal(lane_reason)
+' \
+"$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_lane_off_returns_the_honest_refusal_envelope"
+
+  # M-B2c — the check reads the kill-switch DIRECTLY instead of the
+  # manager accessor. The accessor is the SINGLE resolution point; the
+  # accessor-consulted pin → RED.
+  leg "M-B2c" "daemon/tools/skill_evolution_tools.py" \
+'    lane_probe = getattr(manager, "is_skill_evolution_lane_enabled", None)
+    if not callable(lane_probe):
+        return "lane state accessor absent (fail-closed)"
+    try:
+        if bool(lane_probe()):
+            return None
+    except Exception as probe_err:  # noqa: BLE001 — fail-closed on purpose
+        return f"lane state probe failed ({probe_err}) (fail-closed)"
+    return (
+        "kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off / "
+        "evolution_lane_enabled=False"
+    )
+' \
+'    import os as _os
+
+    if _os.environ.get("ENSEMBLE_SKILL_EVOLUTION_ENABLED", "0") == "1":
+        return None
+    return (
+        "kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off / "
+        "evolution_lane_enabled=False"
+    )
+' \
+"$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_the_manager_accessor_is_the_single_resolution_point"
+
+  # M-B2d — the refusal envelope CLAIMS SUCCESS. A refusal that reads
+  # like a success is a FALSE PASS → RED.
+  leg "M-B2d" "daemon/tools/skill_evolution_tools.py" \
+'    "NO skill-keeper job was created and no skill was modified — "
+    "this message is the only record of the request."
+' \
+'    "Evolution complete: the skill was evolved successfully."
+' \
+"$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_refusal_envelope_never_claims_success"
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
