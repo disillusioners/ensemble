@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import tool
 
 from daemon.services.project_skill_source.model import is_pf_address
+import daemon.services.skill_capture_observability as observability
 from daemon.services.skill_job_dispatcher import (
     SKILL_CAPTURE_KILL_SWITCH_ENV,
     _resolve_capture_enabled,
@@ -519,6 +520,34 @@ the returned payload is a JSON metrics document.
         # service — the service records nothing, no job is enqueued,
         # no LLM is invoked.
         if not _resolve_capture_enabled():
+            # Resolve originating agent_id from the instance row if available
+            # (same instance-row read pattern as the post-gate block below).
+            agent_id = None
+            try:
+                inst_repo = getattr(manager, "_instance_repository", None)
+                if inst_repo is not None:
+                    origin_row = inst_repo.get(instance_id)
+                    if origin_row is not None:
+                        agent_id = getattr(origin_row, "agent_id", None)
+            except Exception:
+                agent_id = None
+
+            # C2 tools-lane seam (observability completion): count and record
+            # the capture-lane-off ADMISSION refusal before building the envelope.
+            # Never raises into the tool lane.
+            try:
+                observability.record_capture_lane_disabled_refusal(
+                    agent_id=agent_id,
+                    task_message=task_message,
+                    prompt_source="skill_execute_capture",
+                )
+            except Exception as exc:  # pragma: no cover — tool lane containment
+                logger.warning(
+                    "[SkillEvolution] capture-lane-off refusal record failed (%s: %s) — "
+                    "the tool refusal is unaffected",
+                    type(exc).__name__, exc,
+                )
+
             envelope = {
                 "skipped": True,
                 "reason": (

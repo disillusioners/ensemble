@@ -15,7 +15,10 @@
 # the fix-admission gauge), M-m4 (the public counters accessor) and
 # M-C1 (the anomaly service resolves through the REAL production
 # holder chain — metrics service → dispatcher → job service → instance
-# manager → anomaly service).
+# manager → anomaly service) — plus FIX WAVE 2: the C2 tools-lane seam
+# (skill_execute_capture capture_lane_off refusal increments counter and
+# writes sink record without raw prompt; containment try/except) and the
+# anomaly-service deferred vocabulary import trap pins (4).
 #
 # Timeout: 2 minutes (120s).
 set -euo pipefail
@@ -33,6 +36,7 @@ EXIT_CODE=0
 
 timeout 120s .venv/bin/pytest \
   tests/services/test_skill_capture_observability.py \
+  tests/unit/test_skill_revival_wave2_pins.py \
   --tb=short -q 2>&1 || EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 124 ]; then
