@@ -51,7 +51,10 @@ if [ ! -f "$TARGET" ]; then
 fi
 
 # The MEASURED node count at the pin (2026-11-09, this worktree).
-EXPECTED_PASSED_N=21
+# MOVED 21 -> 23 by the phase-2 lane: the concurrent double-claim
+# guard's two legs (the loud second supersede + the rival-writer
+# rowcount race) were added to this module.
+EXPECTED_PASSED_N=23
 
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-300}"
 LOG="${TMPDIR:-/tmp}/memoir_v2_syntheses_repo.log"

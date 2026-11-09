@@ -2903,6 +2903,87 @@ async def lifespan(app: FastAPI):
             "ENSEMBLE_MEMOIR_ENABLED and restart to enable"
         )
 
+    # ─────────────────────────────────────────────────────────────
+    # Memoir Store v2 — the REFLECTION worker ("the dream"), phase 2
+    # (plan: v2-phase2-plan.md T2.3; flags V2-5, V2-24, V2-35).
+    #
+    # The SAME shape as the embedding worker above: a lifespan task on
+    # ``app.state``, a DEDICATED single-thread executor
+    # (``memoir-reflect``), a per-tick knob re-read with park/resume,
+    # and a cancel+await in the shutdown sequence below.
+    #
+    # The lane's own kill-switch (``ENSEMBLE_MEMOIR_REFLECTION_ENABLED``)
+    # is read at BOOT to decide whether the task is created at all; a
+    # RUNNING worker parks per tick instead (D3.12's shape). A failure
+    # to start is ADVISORY: the daemon boots without the dream.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.memoir_reflection_service import (
+        MemoirReflectionService,
+    )
+    from daemon.services.memoir_reflection_worker import (
+        MemoirReflectionWorker,
+    )
+    from daemon.repositories.memoir.constellation_repository import (
+        MemoirConstellationRepository,
+    )
+    from daemon.repositories.memoir.reflection_repository import (
+        MemoirReflectionRepository,
+    )
+    from daemon.repositories.memoir.syntheses_repository import (
+        MemoirSynthesesRepository,
+    )
+    from daemon.tools.memoir_knob import resolve_memoir_reflection_knob
+
+    _reflection_boot_knob = resolve_memoir_reflection_knob(config)
+    if _reflection_boot_knob.enabled:
+        try:
+            _reflection_engine = manager.engine
+            _reflection_service = MemoirReflectionService(
+                reflection_repository=MemoirReflectionRepository(_reflection_engine),
+                syntheses_repository=MemoirSynthesesRepository(_reflection_engine),
+                constellation_repository=MemoirConstellationRepository(
+                    _reflection_engine
+                ),
+                config=config,
+                llm_config={
+                    "base_url": getattr(config.llm, "base_url", None),
+                    "api_key": getattr(config.llm, "api_key", None),
+                    "model": getattr(config.llm, "model", None),
+                },
+            )
+            memoir_reflection_worker = MemoirReflectionWorker(
+                _reflection_service,
+                config=config,
+            )
+            memoir_reflection_worker_task = asyncio.create_task(
+                memoir_reflection_worker.run(),
+                name="memoir-reflection-worker",
+            )
+            # Strong references — the naming precedent is
+            # ``app.state.memoir_embedding_worker_task`` above.
+            app.state.memoir_reflection_worker_task = memoir_reflection_worker_task
+            app.state.memoir_reflection_worker = memoir_reflection_worker
+            daemon_logger.info(
+                "[MemoirReflect] worker started: interval="
+                f"{getattr(config.memoir_reflection, 'tick_interval_s', 30)}s "
+                "thread=memoir-reflect"
+            )
+        except Exception as memoir_reflect_boot_exc:  # noqa: BLE001 — advisory
+            app.state.memoir_reflection_worker_task = None
+            app.state.memoir_reflection_worker = None
+            daemon_logger.warning(
+                f"[MemoirReflect] worker failed to start (the recall keeps "
+                f"its v1 shape): {memoir_reflect_boot_exc}"
+            )
+    else:
+        app.state.memoir_reflection_worker_task = None
+        app.state.memoir_reflection_worker = None
+        daemon_logger.info(
+            "[MemoirReflect] worker not started: the reflection knob is OFF "
+            f"at boot (resolution={_reflection_boot_knob.resolution}); flip "
+            "ENSEMBLE_MEMOIR_REFLECTION_ENABLED and restart to enable"
+        )
+
 
     # ─────────────────────────────────────────────────────────────
     # OAuth2 auth background machinery (Phase 2, T2.4/T2.8).
@@ -3715,6 +3796,23 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"[MemoirEmbed] worker shutdown error: {e}")
         app.state.memoir_embedding_worker_task = None
+
+    # Stop the Memoir Store v2 reflection worker ("the dream", phase 2
+    # T2.3): cancel + await — the same shape as the embedding worker
+    # above. The worker's loop re-raises CancelledError, so the await
+    # returns promptly; an in-flight pass is bounded by the per-call
+    # timeout and abandoned cleanly (the executor is daemon-lifetime).
+    if hasattr(app.state, "memoir_reflection_worker_task"):
+        reflection_task = app.state.memoir_reflection_worker_task
+        if reflection_task is not None and not reflection_task.done():
+            reflection_task.cancel()
+            try:
+                await reflection_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"[MemoirReflect] worker shutdown error: {e}")
+        app.state.memoir_reflection_worker_task = None
 
 
     # Stop the A3 promote-txn hold's release driver (soak-gate-mcp-warmup).

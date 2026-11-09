@@ -45,6 +45,7 @@ from .models import (
     MemoirSynthesis,
     StarsListType,
 )
+from .reflection_repository import MemoirReflectionRepository
 from .repository import MemoirPersonaRepository, MemoirTransitionError
 from .seed import MEMOIR_PERSONA_SEED, MEMOIR_SEED_AGENT_ID, seed_persona_if_absent
 from .syntheses_repository import MemoirSynthesesRepository
@@ -65,6 +66,7 @@ __all__ = [
     "MemoirPersonaRepository",
     "MemoirPersonaVersion",
     "MemoirProposalLedger",
+    "MemoirReflectionRepository",
     "MemoirReflectionState",
     "MemoirStar",
     "MemoirStarAlias",

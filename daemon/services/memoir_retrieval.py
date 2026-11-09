@@ -127,6 +127,19 @@ MEMOIR_QUERY_EMBED_TIMEOUT_S = 5.0
 #: The recall budget (D2.10 / adjudication row 10).
 MEMOIR_RECALL_DEFAULT_K = 5
 MEMOIR_RECALL_MAX_K = 20
+
+#: The DUAL-RECALL syntheses cap (V2-D 2.4 / §3.3): how many active
+#: beliefs the recall envelope may carry. The syntheses are the HEAD of
+#: the envelope, so the cap is small by design — a recall that returned
+#: fifty beliefs would be a ledger, not a memory.
+MEMOIR_RECALL_MAX_SYNTHESES = 5
+
+#: The header of the syntheses section (§3.3).
+MEMOIR_SYNTHESES_SECTION_HEADER = "--- SYNTHESES ---"
+
+#: The header that separates the episodes from the beliefs (only
+#: rendered when a syntheses section is present).
+MEMOIR_EPISODES_SECTION_HEADER = "--- EPISODES ---"
 MEMOIR_RECALL_BODY_TOKEN_CLAMP = 1200
 MEMOIR_RECALL_TOKEN_BUDGET = 6000
 
@@ -170,6 +183,14 @@ class MemoirRecallResult:
     embedding_excluded: int = 0
     missing_embedding: int = 0
     semantic_enabled: bool = False
+    #: The DUAL-RECALL arm (V2-D 2.4 / §3.3): the active syntheses that
+    #: matched the query, strongest first. EMPTY in the v1 lane (and in
+    #: the reflection lane when it is OFF), so the v1 surface is
+    #: byte-identical.
+    syntheses: list[dict[str, Any]] = field(default_factory=list)
+    #: How many syntheses the envelope DROPPED for budget (the weakest
+    #: tail is dropped first). Zero in the v1 lane.
+    syntheses_dropped: int = 0
 
 
 # ── the pure arithmetic (the hand-computed fixture's subject) ─────────────
@@ -260,6 +281,45 @@ def render_episode(projection: dict[str, Any]) -> str:
     )
 
 
+def render_synthesis(synthesis: dict[str, Any]) -> str:
+    """The SHIPPED text of ONE synthesis (V2-D 2.4 / §3.3).
+
+    The shape is ``[synthesis:ID] (verb, confidence=…) claim`` followed
+    by the ``sources:`` line — the belief first (what she believes),
+    then its provenance (how she came to believe it). The provenance is
+    not decoration: V2-6 makes the citations mandatory, and an
+    uncited belief is a rumour.
+    """
+    confidence = synthesis.get("confidence")
+    confidence_text = (
+        f"{float(confidence):.2f}" if confidence is not None else "n/a"
+    )
+    sources = synthesis.get("source_episode_ids") or []
+    sources_text = ", ".join(str(item) for item in sources)
+    return "\n".join(
+        [
+            f"[synthesis:{synthesis.get('id')}] "
+            f"({synthesis.get('verb')}, confidence={confidence_text}) "
+            f"{synthesis.get('claim') or ''}",
+            f"  sources: {sources_text}",
+        ]
+    )
+
+
+def render_syntheses_section(syntheses: Sequence[dict[str, Any]]) -> str:
+    """The syntheses SECTION — the head of the dual-recall envelope.
+
+    The section is OMITTED entirely when there is nothing to say: a
+    recall with zero matching beliefs carries no ``--- SYNTHESES ---``
+    header at all (the footer still reports ``syntheses=0``).
+    """
+    if not syntheses:
+        return ""
+    blocks = [MEMOIR_SYNTHESES_SECTION_HEADER]
+    blocks.extend(render_synthesis(item) for item in syntheses)
+    return "\n".join(blocks)
+
+
 def _estimate_tokens(text: str) -> int:
     """The house token estimator (``daemon/loader.py``).
 
@@ -317,9 +377,23 @@ class MemoirRetrievalService:
         embedding_dims: int | None = None,
         config: Any = None,
         now_fn: Callable[[], datetime] | None = None,
+        syntheses_repository: Any = None,
+        reflection_enabled: Callable[[], bool] | None = None,
+        constellation_repository: Any = None,
     ) -> None:
         self.repository = repository
         self._config = config
+        #: THE DUAL-RECALL ARM (V2-D 2.4 / §3.3). The repository is
+        #: OPTIONAL: without it (or without the reflection lane being
+        #: ON) the service produces BYTE-IDENTICAL v1 output — no
+        #: syntheses section, no footer token.
+        self._syntheses_repository = syntheses_repository
+        #: The lane check — a CALLABLE, so the knob is read per recall
+        #: (the house call-time read) and never cached.
+        self._reflection_enabled = reflection_enabled
+        #: The constellation repository — the source of the star heat
+        #: increment (W5).
+        self._constellation_repository = constellation_repository
         # Resolve identity defaults only when a config is available
         # (production path). Without config (tests / degraded boots) keep
         # None so the service stays lexical-only and hermetic. An
@@ -416,13 +490,23 @@ class MemoirRetrievalService:
         fused = fuse_rankings(lexical, semantic)
         ranked = self._rank(fused, by_id)
 
-        shipped, dropped, body_tokens, footer, total_tokens = self._apply_budget(
-            ranked,
-            rank_basis="rrf",
-            missing_embedding=missing_embedding,
-            embedding_excluded=embedding_excluded,
-            semantic_used=self._semantic_enabled() and not self._embed_call_failed,
-            count=count,
+        # THE DUAL-RECALL ARM (§3.3). The syntheses are the HEAD of the
+        # envelope, so they are queried FIRST — but they only exist when
+        # the reflection lane is ON. With the lane OFF (or without a
+        # syntheses repository) the list is EMPTY and the whole v1 path
+        # below is byte-identical.
+        syntheses = self._match_syntheses(agent_id, clean_query)
+
+        shipped, dropped, body_tokens, footer, total_tokens, kept_syntheses, syntheses_dropped = (
+            self._apply_budget(
+                ranked,
+                rank_basis="rrf",
+                missing_embedding=missing_embedding,
+                embedding_excluded=embedding_excluded,
+                semantic_used=self._semantic_enabled() and not self._embed_call_failed,
+                count=count,
+                syntheses=syntheses,
+            )
         )
         rendered_ids = [episode["id"] for episode in shipped]
 
@@ -451,6 +535,12 @@ class MemoirRetrievalService:
                 marked_ids = []
                 stats_updated = False
 
+        # THE HEAT INCREMENT (W5): an explicit recall hit is an act of
+        # attention — the stars the RETURNED episodes cite get their heat
+        # incremented. It is a bookkeeping write: a failure NEVER
+        # destroys the recall (the same rule as the stats write above).
+        self._increment_star_heat(agent_id, shipped)
+
         return MemoirRecallResult(
             episodes=shipped,
             footer=footer,
@@ -465,6 +555,8 @@ class MemoirRetrievalService:
             embedding_excluded=embedding_excluded,
             missing_embedding=missing_embedding,
             semantic_enabled=self._semantic_enabled() and not self._embed_call_failed,
+            syntheses=kept_syntheses,
+            syntheses_dropped=syntheses_dropped,
         )
 
     def timeline(
@@ -502,9 +594,11 @@ class MemoirRetrievalService:
             agent_id, since=since, until=until, query=q
         )
         ranked = list(rows)
-        shipped, dropped, body_tokens, footer, total_tokens = self._apply_budget(
-            ranked,
-            rank_basis="timeline_lexical" if (q or "").strip() else "timeline",
+        shipped, dropped, body_tokens, footer, total_tokens, _kept, _dropped = (
+            self._apply_budget(
+                ranked,
+                rank_basis="timeline_lexical" if (q or "").strip() else "timeline",
+            )
         )
         return MemoirRecallResult(
             episodes=shipped,
@@ -864,7 +958,16 @@ class MemoirRetrievalService:
         embedding_excluded: int = 0,
         semantic_used: bool = False,
         count: int | None = None,
-    ) -> tuple[list[dict[str, Any]], int, int, str, int]:
+        syntheses: Sequence[dict[str, Any]] | None = None,
+    ) -> tuple[
+        list[dict[str, Any]],
+        int,
+        int,
+        str,
+        int,
+        list[dict[str, Any]],
+        int,
+    ]:
         """The budget enforcement on the SHIPPED projection (D2.10).
 
         The K-SLICE first (C-1): when ``count`` is set, only the first
@@ -881,10 +984,35 @@ class MemoirRetrievalService:
         RE-CHECK — the footer is part of the shipped bytes, so the
         envelope is re-measured with it in place and the tail is dropped
         again if the footer pushed the total over.
+
+        THE DUAL-RECALL EXTENSION (§3.3): when ``syntheses`` is present
+        the section is the HEAD of the envelope, so it is measured FIRST
+        and the episodes get what is left. The tail-drop ORDER is
+        load-bearing: the EPISODES are dropped FIRST and only then is
+        the WEAKEST synthesis dropped (the syntheses are ordered
+        strongest-first, so the tail is the weakest).
+
+        THE v1 PATH IS UNTOUCHED: with no syntheses the arithmetic is
+        identical to the v1 service and the footer carries no
+        ``syntheses=`` token — the envelope is byte-identical.
         """
         candidates: list[Any] = list(ranked)
         if count is not None:
             candidates = candidates[:count]
+        # ── the syntheses head ─────────────────────────────────────────
+        kept_syntheses = list(syntheses or [])
+        syntheses_dropped = 0
+        # The footer's ``syntheses=`` token rides the LANE, not the match
+        # count: with the lane ON and zero matches the footer reports
+        # ``syntheses=0``; with the lane OFF there is no token at all
+        # (the v1 footer is byte-identical).
+        synth_count_token: int | None = None
+        if syntheses is not None:
+            synth_count_token = len(kept_syntheses)
+
+        synth_text = render_syntheses_section(kept_syntheses)
+        synth_tokens = _estimate_tokens(synth_text) if synth_text else 0
+
         shipped: list[dict[str, Any]] = []
         shipped_texts: list[str] = []
         body_tokens = 0
@@ -892,7 +1020,7 @@ class MemoirRetrievalService:
             projection = self._project(row)
             text = render_episode(projection)
             tokens = _estimate_tokens(text)
-            if body_tokens + tokens > MEMOIR_RECALL_TOKEN_BUDGET:
+            if synth_tokens + body_tokens + tokens > MEMOIR_RECALL_TOKEN_BUDGET:
                 break  # RANKED-DROP — the head stays whole
             shipped.append(projection)
             shipped_texts.append(text)
@@ -908,8 +1036,9 @@ class MemoirRetrievalService:
             embedding_excluded=embedding_excluded,
             semantic_used=semantic_used,
             semantic_reason=self._semantic_reason,
+            syntheses_count=synth_count_token,
         )
-        total_tokens = body_tokens + _estimate_tokens(footer)
+        total_tokens = synth_tokens + body_tokens + _estimate_tokens(footer)
 
         # THE FINAL RE-CHECK: the footer is shipped too, so the envelope is
         # re-measured with it in place. Removing this check lets the
@@ -929,10 +1058,167 @@ class MemoirRetrievalService:
                 embedding_excluded=embedding_excluded,
                 semantic_used=semantic_used,
                 semantic_reason=self._semantic_reason,
+                syntheses_count=synth_count_token,
             )
-            total_tokens = body_tokens + _estimate_tokens(footer)
+            total_tokens = synth_tokens + body_tokens + _estimate_tokens(footer)
 
-        return shipped, dropped, body_tokens, footer, total_tokens
+        # THE SYNTHESES TAIL-DROP: the episodes are gone and the envelope
+        # is STILL over — now the WEAKEST synthesis goes (the list is
+        # strongest-first, so the tail is the weakest). The footer is
+        # re-measured after every drop.
+        while (
+            total_tokens > MEMOIR_RECALL_TOKEN_BUDGET
+            and kept_syntheses
+        ):
+            kept_syntheses.pop()
+            syntheses_dropped += 1
+            synth_count_token = len(kept_syntheses)
+            synth_text = render_syntheses_section(kept_syntheses)
+            synth_tokens = _estimate_tokens(synth_text) if synth_text else 0
+            footer = self._footer(
+                episodes=len(shipped),
+                dropped=dropped,
+                body_tokens=body_tokens,
+                rank_basis=rank_basis,
+                missing_embedding=missing_embedding,
+                embedding_excluded=embedding_excluded,
+                semantic_used=semantic_used,
+                semantic_reason=self._semantic_reason,
+                syntheses_count=synth_count_token,
+            )
+            total_tokens = synth_tokens + body_tokens + _estimate_tokens(footer)
+
+        return (
+            shipped,
+            dropped,
+            body_tokens,
+            footer,
+            total_tokens,
+            kept_syntheses,
+            syntheses_dropped,
+        )
+
+    # ── the dual-recall arm (§3.3) ──────────────────────────────────────
+
+    def _match_syntheses(
+        self, agent_id: str, query: str
+    ) -> list[dict[str, Any]] | None:
+        """The matching ACTIVE syntheses — or ``None`` when the lane is OFF.
+
+        ``None`` means "the dual-recall lane is not in play": the caller
+        then produces BYTE-IDENTICAL v1 output — no syntheses section
+        and no ``syntheses=`` footer token. An EMPTY LIST means "the lane
+        is ON and nothing matched": the footer reports ``syntheses=0``
+        and the section is omitted.
+
+        THE LANE DECIDES THE TOKEN, NOT THE MATCH COUNT: with the lane ON
+        the footer always carries ``syntheses=M`` (M may be 0), and with
+        the lane OFF it carries no token at all. A service that is built
+        WITHOUT a syntheses repository therefore reports ``syntheses=0``
+        — honest ("no beliefs were surfaced") and CONSISTENT with a
+        fully wired service, which is what keeps the v1 byte-pin
+        (the tool's footer vs a directly built service's footer) stable
+        across the lane.
+
+        The lane check is a CALL-TIME read (the house shape): flipping
+        the environment between two recalls changes the answer without a
+        restart.
+        """
+        if not self._lane_enabled():
+            return None
+        if self._syntheses_repository is None:
+            return []
+        try:
+            rows = self._syntheses_repository.search_active(
+                agent_id, query, MEMOIR_RECALL_MAX_SYNTHESES
+            )
+        except Exception as exc:  # noqa: BLE001 — never lose the recall
+            logger.warning(
+                "[MemoirRecall] the syntheses lookup failed (%s) — the "
+                "recall continues without the beliefs",
+                type(exc).__name__,
+            )
+            return []
+        return [
+            {
+                "id": row.id,
+                "claim": row.claim,
+                "verb": row.verb,
+                "confidence": row.confidence,
+                "source_episode_ids": list(row.source_episode_ids or []),
+            }
+            for row in rows
+        ]
+
+    def _lane_enabled(self) -> bool:
+        """Is the DUAL-RECALL lane ON? (a call-time read, never cached)
+
+        The injected callable wins (the tool layer passes the knob); with
+        no callable the SHARED knob authority decides — the same source
+        the embedding worker reads.
+        """
+        if self._reflection_enabled is not None:
+            try:
+                return bool(self._reflection_enabled())
+            except Exception as exc:  # noqa: BLE001 — a knob never breaks a read
+                logger.warning(
+                    "[MemoirRecall] the reflection lane check failed (%s) — "
+                    "the recall runs in its v1 shape",
+                    type(exc).__name__,
+                )
+                return False
+        try:
+            # The knob module is imported LAZILY: the tool layer imports
+            # this module, so a module-level import would close a cycle
+            # (``daemon.tools.__init__`` -> ... -> ``daemon.tools.memoir``
+            # -> this module).
+            from daemon.tools.memoir_knob import resolve_memoir_reflection_knob
+
+            return bool(resolve_memoir_reflection_knob(self._config).enabled)
+        except Exception as exc:  # noqa: BLE001 — a knob never breaks a read
+            logger.warning(
+                "[MemoirRecall] the reflection knob could not be resolved "
+                "(%s) — the recall runs in its v1 shape",
+                type(exc).__name__,
+            )
+            return False
+
+    def _increment_star_heat(
+        self, agent_id: str, shipped: Sequence[dict[str, Any]]
+    ) -> None:
+        """THE HEAT INCREMENT (W5): an explicit recall hit is attention.
+
+        Every star cited by a RETURNED episode gets its stored heat
+        incremented through
+        :meth:`MemoirConstellationRepository.increment_heat`.
+
+        A star that does not exist (or a repository that is not wired)
+        NEVER breaks the recall — the heat is a bookkeeping write, not
+        the product (the same rule as the access-stats write).
+        """
+        if self._constellation_repository is None or not shipped:
+            return
+        names: list[str] = []
+        for episode in shipped:
+            for name in episode.get("stars") or []:
+                text = str(name).strip()
+                if text and text not in names:
+                    names.append(text)
+        if not names:
+            return
+        for name in names:
+            try:
+                star = self._constellation_repository.resolve_star(agent_id, name)
+                if star is None:
+                    continue
+                self._constellation_repository.increment_heat(agent_id, star.id)
+            except Exception as exc:  # noqa: BLE001 — never lose the recall
+                logger.warning(
+                    "[MemoirRecall] the heat increment failed for %r (%s) — "
+                    "the recall result is kept",
+                    name,
+                    type(exc).__name__,
+                )
 
     @staticmethod
     def _project(row: Any) -> dict[str, Any]:
@@ -968,6 +1254,7 @@ class MemoirRetrievalService:
         embedding_excluded: int = 0,
         semantic_used: bool = False,
         semantic_reason: str = "",
+        syntheses_count: int | None = None,
     ) -> str:
         """The recall footer (D2.10 / D2.11).
 
@@ -976,6 +1263,13 @@ class MemoirRetrievalService:
         stats flag. When episodes were skipped for an identity/dims
         mismatch, a PARTIAL-RECALL note rides along — a silent partial
         recall is indistinguishable from a complete one.
+
+        THE ``syntheses=`` TOKEN (V2-D 2.4 / §3.3): the token appears
+        ONLY when the dual-recall lane is ON (``syntheses_count`` is not
+        ``None``). With the lane OFF the footer is BYTE-IDENTICAL to the
+        v1 footer — the v1 envelope is a frozen surface and a token that
+        appears and disappears with a feature flag would make every
+        consumer's byte-pin unstable.
         """
         kind = "memoir_recall" if rank_basis == "rrf" else "memoir_timeline"
         note = " note=partial_recall" if embedding_excluded > 0 else ""
@@ -983,6 +1277,9 @@ class MemoirRetrievalService:
         # shipped (so a recall with no shipped episode marked nothing),
         # and a timeline never marks at all.
         stats_flag = rank_basis == "rrf" and episodes > 0
+        synth_token = (
+            "" if syntheses_count is None else f" syntheses={int(syntheses_count)}"
+        )
         return (
             f"[{kind}: episodes={episodes} dropped={dropped} "
             f"body_tokens={body_tokens} budget={MEMOIR_RECALL_TOKEN_BUDGET} "
@@ -992,5 +1289,6 @@ class MemoirRetrievalService:
             f"active_model={self.embedding_model or 'none'} "
             f"embedding_excluded={embedding_excluded} "
             f"stats_updated={'true' if stats_flag else 'false'}"
+            f"{synth_token}"
             f"{note}]"
         )

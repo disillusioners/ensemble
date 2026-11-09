@@ -430,7 +430,26 @@ def test_stars_column_has_no_mutable_default():
 
 
 def test_the_syntheses_table_has_no_writer_in_the_tree():
-    """DD-2 — the table is schema-only and EMPTY in v1."""
+    """DD-2 (v1) RETIRED BY PHASE 2 — the table is no longer write-less.
+
+    THE PIN MOVED, AND THE MOVE IS THE PLAN: phase 2 of the Memoir Store
+    v2 lane (``.agents/shared/planning/ari-memoir-store/v2-phase2-plan.md``
+    §1, objective 2) exists to ACTIVATE the syntheses layer — "Deliver
+    the Reflection Engine ('The Dream') and **activate the Syntheses
+    layer**". The v1 clause ("the table is schema-only and EMPTY in v1")
+    was a TRUE statement about v1 and a FALSE statement about the tree
+    that phase 2 ships.
+
+    THE STRONGER PIN (what replaces it): the writer set is EXACTLY
+    known — the ONE named writer (the syntheses repository) plus the
+    schema/audit records and the readers. A NEW writer (a stray module
+    that inserts rows behind the repository's back) still flips this RED.
+
+    THE RAW-SQL CLAUSE IS UNCHANGED: no module may write the table with
+    a literal SQL statement — every write goes through the repository,
+    so the dedup key, the citation guard and the atomic supersession are
+    never bypassed.
+    """
     result = subprocess.run(
             ["git", "grep", "-l", "memoir_syntheses", "--", "daemon/"],
         cwd=REPO_ROOT,
@@ -439,21 +458,28 @@ def test_the_syntheses_table_has_no_writer_in_the_tree():
         timeout=60,
     )
     hits = [line for line in result.stdout.splitlines() if line.strip()]
-    # Only the model, the package export, the manager's registration and
-    # the audit-record .sql may reference the table. A WRITER would add
-    # another file.
+    # The model, the package export, the manager's registration, the ONE
+    # named writer (the syntheses repository), the reflection service
+    # (the engine that CALLS the writer) and the audit-record .sql files.
     allowed = {
         "daemon/repositories/memoir/models.py",
         "daemon/repositories/memoir/__init__.py",
         "daemon/manager.py",
-        # The .sql is the persistent AUDIT RECORD of the schema change
-        # (DD-18) — it CREATES the empty table and never writes a row.
+        # THE NAMED WRITER — the only module that writes a synthesis row.
+        "daemon/repositories/memoir/syntheses_repository.py",
+        # The engine that calls the writer (it never writes directly).
+        "daemon/services/memoir_reflection_service.py",
+        # The .sql files are the persistent AUDIT RECORD of the schema
+        # changes (DD-18) — they CREATE the table and never write a row.
         "daemon/migrations/versions/20261105_102821_create_memoir_tables.sql",
+        "daemon/migrations/versions/20261109_021154_create_memoir_v2_tables.sql",
     }
     unexpected = [hit for hit in hits if hit.split(":")[0] not in allowed]
     assert not unexpected, f"memoir_syntheses is referenced by: {unexpected}"
 
-    # And no SQL writer anywhere in the shipped tree.
+    # And no RAW SQL writer anywhere in the shipped tree — every write
+    # goes through the repository (so the dedup key, the citation guard
+    # and the atomic supersession are never bypassed).
     for needle in (
         "INSERT INTO memoir_syntheses",
         "UPDATE memoir_syntheses",

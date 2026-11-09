@@ -67,6 +67,7 @@ would read.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -74,6 +75,7 @@ from pydantic import ValidationError
 
 from daemon.config import (
     MEMOIR_ENABLED_ENV_VAR,
+    MEMOIR_FALSY_VALUES,
     MEMOIR_RESOLUTION_CONFIG,
     MEMOIR_RESOLUTION_DEFAULT,
     MEMOIR_RESOLUTION_ERROR,
@@ -81,7 +83,10 @@ from daemon.config import (
     MEMOIR_RESOLUTION_EXPLICIT_ON,
     MEMOIR_RESOLUTION_INDETERMINATE,
     MEMOIR_RESOLUTION_UNPARSEABLE,
+    MEMOIR_REFLECTION_ENABLED_ENV_VAR,
+    MEMOIR_TRUTHY_VALUES,
     MemoirConfig,
+    MemoirReflectionConfig,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -401,11 +406,216 @@ def memoir_tool_help(config: "Config | None" = None) -> str:
     )
 
 
+# ── the v2 REFLECTION lane kill-switch (phase 2, T2.4) ────────────────────
+#
+# A SECOND, ISOLATED lane switch — NOT a clone of the global knob
+# resolver (N1 / V2-D 4.9: the CLASSIFIER is shared, the RESOLVER is
+# per-lane). The reflection lane is a SUBSET of the memoir surface: the
+# v1 surface can be ON while the reflection lane is OFF, and the two
+# switches are read independently.
+#
+# THE TRUTH TABLE (the §3-A4 Enabled-flags class):
+#
+# | `ENSEMBLE_MEMOIR_REFLECTION_ENABLED` | Resolved | Lane | Log |
+# |---|---|---|---|
+# | absent | ON (the constitutional default) | ENABLED | WARNING — "unset — the reflection lane is ENABLED by default" |
+# | empty string | = absent | ENABLED | as above |
+# | `true`/`1`/`yes`/`on`/`t`/`y` | true | ENABLED | INFO |
+# | `false`/`0`/`no`/`off`/`f`/`n` | false | DISABLED | INFO |
+# | any other present value | INDETERMINATE | **DISABLED (fail closed)** | WARNING naming the var and the rejected value |
+#
+# The CLASSIFICATION happens INSIDE the model
+# (:class:`daemon.config.MemoirReflectionConfig`, mechanism N-2 — the
+# same mechanism the v1 knob uses), so this module NEVER classifies a
+# raw string itself and NEVER raises.
+
+
+@dataclass(frozen=True)
+class MemoirReflectionKnobState:
+    """The resolved REFLECTION-lane state plus its provenance.
+
+    The shape mirrors :class:`MemoirKnobState` so a health surface can
+    render both with one code path.
+    """
+
+    enabled: bool
+    resolution: str
+    source: str
+    rejected_value: str | None
+    message: str
+    log_level: str
+
+
+def resolve_memoir_reflection_knob(
+    config: "Config | None" = None,
+) -> MemoirReflectionKnobState:
+    """Resolve the REFLECTION-lane kill-switch NOW (call-time read).
+
+    The classification is the model's (mechanism N-2); this function
+    reads the resolved value and reports its provenance. It NEVER
+    raises: an unresolvable lane resolves to DISABLED (fail closed).
+
+    Args:
+        config: The resolved daemon configuration, when the caller has
+            one. Its ``memoir_reflection`` section is the config tier;
+            ``None`` means the section is built from the environment
+            alone.
+
+    Returns:
+        The resolved :class:`MemoirReflectionKnobState`.
+    """
+    raw = os.environ.get(MEMOIR_REFLECTION_ENABLED_ENV_VAR)
+    env_present = raw is not None and bool(raw.strip())
+
+    try:
+        if config is not None:
+            section = getattr(config, "memoir_reflection", None)
+        else:
+            section = None
+        if section is None:
+            section = MemoirReflectionConfig()
+        enabled = bool(section.enabled)
+    except Exception as exc:  # noqa: BLE001 — a knob never raises
+        message = (
+            f"[MemoirReflect] {MEMOIR_REFLECTION_ENABLED_ENV_VAR} could not "
+            f"be resolved ({exc}) — the reflection lane is DISABLED (fail "
+            f"closed)"
+        )
+        state = MemoirReflectionKnobState(
+            enabled=False,
+            resolution=MEMOIR_RESOLUTION_ERROR,
+            source="none",
+            rejected_value=None,
+            message=message,
+            log_level="ERROR",
+        )
+        _emit_reflection_once(state)
+        return state
+
+    if env_present:
+        lowered = raw.strip().lower()
+        if lowered in MEMOIR_FALSY_VALUES:
+            message = (
+                f"[MemoirReflect] {MEMOIR_REFLECTION_ENABLED_ENV_VAR}=false — "
+                f"the reflection lane is DISABLED (the worker parks and the "
+                f"dual-recall envelope stays at its v1 shape)"
+            )
+            resolution = MEMOIR_RESOLUTION_EXPLICIT_OFF
+            log_level = "INFO"
+        elif lowered in MEMOIR_TRUTHY_VALUES:
+            message = (
+                f"[MemoirReflect] {MEMOIR_REFLECTION_ENABLED_ENV_VAR}=true — "
+                f"the reflection lane is ENABLED"
+            )
+            resolution = MEMOIR_RESOLUTION_EXPLICIT_ON
+            log_level = "INFO"
+        else:
+            message = (
+                f"[MemoirReflect] {MEMOIR_REFLECTION_ENABLED_ENV_VAR}="
+                f"{raw!r} is not a recognised boolean — the reflection lane "
+                f"is DISABLED (fail closed); accepted spellings are "
+                f"true/false, 1/0, yes/no, on/off, t/f, y/n"
+            )
+            resolution = MEMOIR_RESOLUTION_INDETERMINATE
+            log_level = "WARNING"
+        state = MemoirReflectionKnobState(
+            enabled=enabled,
+            resolution=resolution,
+            source="env",
+            rejected_value=raw if resolution == MEMOIR_RESOLUTION_INDETERMINATE else None,
+            message=message,
+            log_level=log_level,
+        )
+        _emit_reflection_once(state)
+        _warn_unset_budget_knobs(section)
+        return state
+
+    # The env tier is ABSENT: the model's constitutional default decides
+    # (ON), and the unset case is LOUD — "unset ⇒ ON" is admissible only
+    # because it is never silent.
+    message = (
+        f"[MemoirReflect] {MEMOIR_REFLECTION_ENABLED_ENV_VAR} is unset — the "
+        f"reflection lane is ENABLED by default; set "
+        f"`{MEMOIR_REFLECTION_ENABLED_ENV_VAR}=false` to disable it"
+    )
+    state = MemoirReflectionKnobState(
+        enabled=enabled,
+        resolution=MEMOIR_RESOLUTION_DEFAULT,
+        source="config",
+        rejected_value=None,
+        message=message,
+        log_level="WARNING",
+    )
+    _emit_reflection_once(state)
+    _warn_unset_budget_knobs(section)
+    return state
+
+
+def _warn_unset_budget_knobs(section: Any) -> None:
+    """The AGGREGATE budget warning — every UNSET budget knob, named.
+
+    §3-A4: a budget knob that is UNSET is never silent — ONE warning
+    names EVERY unset budget knob (so the operator sees the full
+    governance surface in one line instead of one line per knob). The
+    cadence tunables stay SILENT (tuning, not governance).
+
+    The warning is emitted from HERE — the knob module owns the
+    operator-facing log lines (the house precedent) — and the model only
+    RECORDS which knobs are unset.
+    """
+    unset = tuple(getattr(section, "_unset_budget_knobs", ()) or ())
+    if not unset:
+        return
+    _emit_reflection_once(
+        MemoirReflectionKnobState(
+            enabled=True,
+            resolution=MEMOIR_RESOLUTION_DEFAULT,
+            source="config",
+            rejected_value=None,
+            message=(
+                f"[MemoirReflect] the reflection budget knobs are unset and "
+                f"use their constitutional defaults: {', '.join(sorted(unset))} "
+                f"(unset budget knobs are never silent; set them to tune the "
+                f"lane)"
+            ),
+            log_level="WARNING",
+        )
+    )
+
+
+def _emit_reflection_once(state: MemoirReflectionKnobState) -> None:
+    """Emit the reflection-lane line ONCE per boot (the log guard).
+
+    Keyed by the message, so a repeated resolution stays quiet while a
+    CHANGED value re-warns. The resolved VALUE is never memoized here.
+    """
+    if state.message in _EMITTED:
+        return
+    _EMITTED.add(state.message)
+    logger.log(
+        logging.ERROR
+        if state.log_level == "ERROR"
+        else (logging.WARNING if state.log_level == "WARNING" else logging.INFO),
+        state.message,
+    )
+
+
+def memoir_reflection_enabled(config: "Config | None" = None) -> bool:
+    """``True`` when the REFLECTION lane is live. Read at CALL TIME.
+
+    This is the function the reflection worker and the dual-recall
+    surface call. It NEVER caches the value.
+    """
+    return resolve_memoir_reflection_knob(config).enabled
+
+
 __all__ = [
     "MemoirKnobState",
+    "MemoirReflectionKnobState",
     "emit_boot_state",
     "memoir_enabled",
     "memoir_knob_state",
+    "memoir_reflection_enabled",
     "memoir_tool_help",
     "reset_boot_log_state",
     "resolve_memoir_knob",

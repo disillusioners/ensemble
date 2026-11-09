@@ -33,15 +33,36 @@ rationale is that a reflection pass operates over a bounded window
 (~dozens of claims), so the in-window check is instantaneous and the
 table needs no new indexed column.
 
+THE PHASE-2 DEDUP KEY (V2-17 / §3.2) is stricter: the composite
+``sha256(claim_norm + sorted(source_episode_ids))``. It is computed by
+:func:`synthesis_dedup_key` and used by :meth:`find_duplicate` — the
+"skip insert, return the existing row" idempotency path that turns an
+at-least-once reflection retry into a safe no-op. The table still needs
+no new column (DD-2): the key is computed in Python over the same
+bounded in-window set.
+
 THE WINDOW CUTOFF IS COMPUTED IN PYTHON, not in SQL: the plan's
 ``now() - interval '2 days'`` is PostgreSQL syntax and SQLite has no
 ``interval``, so the cutoff is bound as a parameter. That keeps the
 predicate EXACTLY equivalent on both drivers.
+
+THE FOREIGN-BELIEF IMPORT CONVENTION (SF10 / V2-Q9, advisory): an
+imported belief — a belief that originated OUTSIDE Ari's own episodes —
+lands as a ``CORROBORATE``-class local synthesis row that CITES the
+original source (the local episode that carries the imported belief).
+It is ADVISORY: there is NO v2 validation machinery that checks whether
+the foreign belief is true, and none is planned for v2. The convention
+is a WRITER convention, documented here so a future writer (human or
+machine) lands an import the same way every time: the verb says what
+the import IS (corroboration of an existing belief, not the creation of
+a new one), and the citations say where it came from.
 """
 
 from __future__ import annotations
 
 import logging
+import hashlib
+import re
 import unicodedata
 import uuid
 from datetime import datetime, timedelta
@@ -51,6 +72,7 @@ from sqlalchemy import insert, update
 from sqlmodel import Session, select
 
 from daemon.repositories.memoir.models import SYNTHESIS_VERBS, MemoirSynthesis
+from daemon.repositories.memoir.repository import as_aware_utc
 from daemon.services.timestamps import now_utc
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -86,6 +108,23 @@ def normalize_claim(claim: str) -> str:
         raise ValueError("claim must be a string")
     normalized = unicodedata.normalize("NFC", claim)
     return " ".join(normalized.split()).casefold()
+
+
+def synthesis_dedup_key(claim: str, source_episode_ids: Sequence[str]) -> str:
+    """The PHASE-2 composite dedup key (V2-17 / §3.2).
+
+    ``sha256(claim_norm + sorted(sources))`` — the claim normalized by
+    :func:`normalize_claim` and the source episode ids SORTED, so the
+    key is independent of the order the writer listed the citations in.
+
+    The key makes a reflection retry IDEMPOTENT: the same claim over
+    the same sources is the same belief, no matter how many times the
+    pass re-runs after a crash.
+    """
+    normalized = normalize_claim(claim)
+    sources = sorted({str(item) for item in (source_episode_ids or [])})
+    payload = normalized + "|" + ",".join(sources)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class MemoirSynthesesRepository:
@@ -187,6 +226,11 @@ class MemoirSynthesesRepository:
             KeyError: when the old synthesis does not exist for this
                 agent, or is already superseded (re-superseding would
                 overwrite the earlier pointer and lose the chain).
+            RuntimeError: when the old row was claimed by ANOTHER writer
+                between the read and the write (the concurrent
+                double-claim guard). The transaction rolls back — the
+                new row is not left orphaned — and the failure is LOUD
+                rather than a silent double-link.
         """
         if not agent_id:
             raise ValueError("agent_id is required")
@@ -233,11 +277,26 @@ class MemoirSynthesesRepository:
             new_values["supersedes"] = old_synthesis_id
             new_values["superseded_by"] = None
             conn.execute(insert(table).values(**new_values))
-            conn.execute(
+            # THE CONCURRENT-DOUBLE-CLAIM GUARD (phase-2 hardening): the
+            # old-row UPDATE carries ``WHERE superseded_by IS NULL``, so
+            # the pointer is written ONLY if nobody else claimed the row
+            # in the meantime. The read above is a hint, NOT the
+            # arbitration — two writers can pass it concurrently, and
+            # only the UPDATE's predicate decides the winner. A rowcount
+            # of 0 means somebody else won the race: the whole
+            # transaction rolls back (the new row is NOT left orphaned)
+            # and the caller is told LOUDLY.
+            pointer = conn.execute(
                 update(table)
-                .where(table.c.id == old_synthesis_id)
+                .where(table.c.id == old_synthesis_id, table.c.superseded_by.is_(None))
                 .values(superseded_by=new_id)
             )
+            if int(pointer.rowcount or 0) != 1:
+                raise RuntimeError(
+                    f"synthesis {old_synthesis_id!r} was claimed by another "
+                    f"writer before this transaction committed — the "
+                    f"supersession was refused (no fork was left behind)"
+                )
 
         with Session(self.engine) as session:
             row = session.get(MemoirSynthesis, new_id)
@@ -247,6 +306,110 @@ class MemoirSynthesesRepository:
             return row
 
     # ── the reads ────────────────────────────────────────────────────────
+
+    def find_duplicate(
+        self,
+        agent_id: str,
+        claim: str,
+        source_episode_ids: Sequence[str] | None,
+    ) -> MemoirSynthesis | None:
+        """Return the in-window ACTIVE row with the SAME dedup key.
+
+        The PHASE-2 idempotency path (V2-17 / §3.2): the composite key
+        is ``sha256(claim_norm + sorted(source_episode_ids))``. A
+        reflection pass that re-runs after a crash asks this question
+        first — a hit means "this belief already exists", so the pass
+        SKIPS the insert and returns the existing row instead of
+        growing a second copy of the same claim.
+
+        The window is the same 2-day scan window the writer uses, and
+        only ACTIVE (un-superseded) rows count: a superseded belief is
+        history, and re-writing it would resurrect it.
+        """
+        if not agent_id:
+            return None
+        if source_episode_ids is None or len(list(source_episode_ids)) == 0:
+            return None
+        target = synthesis_dedup_key(claim, source_episode_ids)
+        cutoff = now_utc() - timedelta(days=MEMOIR_SYNTHESIS_DEDUP_WINDOW_DAYS)
+        with Session(self.engine) as session:
+            rows = session.exec(
+                select(MemoirSynthesis)
+                .where(
+                    MemoirSynthesis.agent_id == agent_id,
+                    MemoirSynthesis.created_at >= cutoff,
+                    MemoirSynthesis.superseded_by.is_(None),
+                )
+                .order_by(MemoirSynthesis.created_at.desc())
+                .limit(MEMOIR_SYNTHESIS_DEDUP_SCAN_CAP)
+            ).all()
+        for row in rows:
+            existing = synthesis_dedup_key(
+                row.claim, list(row.source_episode_ids or [])
+            )
+            if existing == target:
+                return row
+        return None
+
+    def search_active(
+        self,
+        agent_id: str,
+        query: str,
+        limit: int = MEMOIR_SYNTHESIS_LIST_LIMIT,
+    ) -> list[MemoirSynthesis]:
+        """Return the ACTIVE syntheses whose claim MATCHES the query.
+
+        The dual-recall arm (§3-A6 / V2-D 2.4): the recall surfaces the
+        consolidated beliefs that answer the query, ahead of the raw
+        episodes.
+
+        The match is LEXICAL and driver-agnostic: the query is split
+        into tokens and a row matches when ANY token of length >= 2
+        appears in its claim (case-insensitive). A claim shorter than a
+        token cannot answer a query about that token, and a query with
+        no usable token matches nothing.
+
+        The rows are ordered by CONFIDENCE DESC (the strongest belief
+        first) with the creation time as the tie-break — the order the
+        recall renders and the order the envelope's tail-drop consumes
+        (the weakest synthesis is the one at the tail).
+        """
+        if not agent_id or not query:
+            return []
+        tokens = [
+            token
+            for token in re.split(r"[^\w]+", query.casefold(), flags=re.UNICODE)
+            if len(token) >= 2
+        ]
+        if not tokens:
+            return []
+        limit = max(0, int(limit))
+        if limit == 0:
+            return []
+        with Session(self.engine) as session:
+            rows = session.exec(
+                select(MemoirSynthesis)
+                .where(
+                    MemoirSynthesis.agent_id == agent_id,
+                    MemoirSynthesis.superseded_by.is_(None),
+                )
+                .limit(MEMOIR_SYNTHESIS_DEDUP_SCAN_CAP)
+            ).all()
+        lowered_query = query.casefold()
+        matched = [
+            row
+            for row in rows
+            if any(token in (row.claim or "").casefold() for token in tokens)
+        ]
+        matched.sort(
+            key=lambda row: (
+                -(float(row.confidence) if row.confidence is not None else 0.0),
+                -(as_aware_utc(row.created_at).timestamp()
+                  if as_aware_utc(row.created_at) else 0.0),
+                row.id,
+            )
+        )
+        return matched[:limit]
 
     def get_synthesis(self, synthesis_id: str) -> MemoirSynthesis | None:
         """Return ONE synthesis by id, or ``None``."""
@@ -308,4 +471,5 @@ __all__ = [
     "MEMOIR_SYNTHESIS_LIST_LIMIT",
     "MemoirSynthesesRepository",
     "normalize_claim",
+    "synthesis_dedup_key",
 ]

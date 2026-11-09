@@ -302,3 +302,97 @@ def test_the_active_listing_honours_its_limit(repo):
     for index in range(5):
         repo.create_synthesis("ari", f"claim number {index}", ["ep1"], "CREATE", 0.5)
     assert len(repo.list_active_syntheses("ari", limit=2)) == 2
+
+
+# ── the concurrent double-claim guard (the phase-2 hardening) ───────────
+#
+# The reviewer note: "Phase 2 gives syntheses their first real writers;
+# add the concurrency-leg test (second supersede attempt on the same old
+# row must fail loudly, not silently double-link)."
+#
+# The hardening: the old-row UPDATE carries ``WHERE superseded_by IS
+# NULL`` and ASSERTS the affected rowcount is 1 — the read above it is a
+# hint, not the arbitration.
+
+
+def test_a_second_supersede_on_the_same_old_row_fails_loudly(repo):
+    """The second attempt is REFUSED — never a silent double-link."""
+    old = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    first = repo.supersede_with(
+        "ari",
+        old.id,
+        {
+            "claim": "the Emperor is very patient",
+            "source_episode_ids": ["ep1"],
+            "verb": "REFINE",
+            "confidence": 0.95,
+        },
+    )
+    with pytest.raises((ValueError, RuntimeError)) as excinfo:
+        repo.supersede_with(
+            "ari",
+            old.id,
+            {
+                "claim": "the Emperor is impatient",
+                "source_episode_ids": ["ep1"],
+                "verb": "CORRECT",
+                "confidence": 0.6,
+            },
+        )
+    assert "supersed" in str(excinfo.value).lower()
+    # NO FORK: the chain still has exactly two rows and one pointer.
+    rows = repo.list_active_syntheses("ari", limit=50)
+    assert len(rows) == 1
+    assert rows[0].id == first.id
+    assert rows[0].supersedes == old.id
+
+
+def test_the_pointer_update_is_guarded_by_the_superseded_by_predicate(
+    engine, repo
+):
+    """THE RACE: a rival writer claims the row between the read and the
+    write ⇒ the update affects ZERO rows ⇒ the writer fails LOUDLY and
+    the transaction rolls back (no orphan, no double-link)."""
+    from sqlalchemy import event, text as sql_text
+
+    old = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    fired = {"n": 0}
+
+    def _rival_claims_the_row(conn, cursor, statement, parameters, context, executemany):
+        if fired["n"] == 0 and statement.lstrip().upper().startswith(
+            "UPDATE MEMOIR_SYNTHESES"
+        ):
+            fired["n"] += 1
+            # The RIVAL writer wins the row between our SELECT and our
+            # UPDATE — the exact interleaving the guard exists for.
+            conn.execute(
+                sql_text(
+                    "UPDATE memoir_syntheses SET superseded_by='rival' WHERE id=:id"
+                ),
+                {"id": old.id},
+            )
+
+    event.listen(engine, "before_cursor_execute", _rival_claims_the_row)
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            repo.supersede_with(
+                "ari",
+                old.id,
+                {
+                    "claim": "the Emperor is very patient",
+                    "source_episode_ids": ["ep1"],
+                    "verb": "REFINE",
+                    "confidence": 0.95,
+                },
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", _rival_claims_the_row)
+
+    assert fired["n"] == 1, "the rival writer never ran"
+    assert "claimed by another writer" in str(excinfo.value)
+    # THE ROLLBACK: the new row was NOT orphaned, and the old row keeps
+    # its pointer (the rival's claim rolled back with the transaction).
+    all_rows = repo.list_active_syntheses("ari", limit=50)
+    assert len(all_rows) == 1
+    assert all_rows[0].id == old.id
+    assert all_rows[0].superseded_by is None

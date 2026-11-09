@@ -103,6 +103,9 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ..config import MEMOIR_ENABLED_ENV_VAR
+from ..repositories.memoir.constellation_repository import (
+    MemoirConstellationRepository,
+)
 from ..repositories.memoir.models import PIN_ACTORS
 from ..repositories.memoir.repository import (
     MemoirAdmissionError,
@@ -110,14 +113,18 @@ from ..repositories.memoir.repository import (
     MemoirWriteError,
     as_aware_utc,
 )
+from ..repositories.memoir.syntheses_repository import MemoirSynthesesRepository
 from ..services.memoir_retrieval import (
+    MEMOIR_EPISODES_SECTION_HEADER,
     MEMOIR_RECALL_DEFAULT_K,
+    MEMOIR_SYNTHESES_SECTION_HEADER,
     MemoirRecallError,
     MemoirRetrievalService,
+    render_synthesis,
 )
 from ..services.timestamps import now_utc, to_utc_iso
 from ._tool_registry import register_tool_category
-from .memoir_knob import memoir_enabled, memoir_tool_help
+from .memoir_knob import memoir_enabled, memoir_reflection_enabled, memoir_tool_help
 
 logger = logging.getLogger(__name__)
 
@@ -391,11 +398,40 @@ def _memoir_service_for(manager: Any) -> MemoirRetrievalService | None:
     module stays PURE and passes no embedder symbol. The caller's config
     is forwarded so the service can resolve the LLM fallback and the
     memoir embedding dimensions; ``None`` config degrades to lexical-only.
+
+    THE DUAL-RECALL ARM (V2-D 2.4 / §3.3): the syntheses repository and
+    the reflection-lane check are attached HERE — the ONE place that
+    builds the service. The lane check is a CALL-TIME read (the house
+    knob shape), so flipping ``ENSEMBLE_MEMOIR_REFLECTION_ENABLED``
+    changes the next recall's envelope without a restart. With the lane
+    OFF the service produces BYTE-IDENTICAL v1 output.
     """
     repo = _memoir_repository_for(manager)
     if repo is None:
         return None
-    return MemoirRetrievalService(repo, config=getattr(manager, "config", None))
+    engine = getattr(manager, "_engine", None)
+    config = getattr(manager, "config", None)
+    syntheses_repository = None
+    constellation_repository = None
+    if engine is not None:
+        try:
+            syntheses_repository = MemoirSynthesesRepository(engine)
+            constellation_repository = MemoirConstellationRepository(engine)
+        except Exception as exc:  # noqa: BLE001 — never break the read
+            logger.warning(
+                "[Memoir] the dual-recall repositories could not be built "
+                "(%s) — the recall runs in its v1 shape",
+                type(exc).__name__,
+            )
+            syntheses_repository = None
+            constellation_repository = None
+    return MemoirRetrievalService(
+        repo,
+        config=config,
+        syntheses_repository=syntheses_repository,
+        reflection_enabled=lambda: memoir_reflection_enabled(config),
+        constellation_repository=constellation_repository,
+    )
 
 
 def _map_write_error(exc: MemoirWriteError, label: str) -> str:
@@ -509,6 +545,18 @@ def _render_episode_block(projection: dict[str, Any]) -> str:
         f"  last_accessed_at: {projection.get('last_accessed_at') or '(never)'}",
     ]
     return "\n".join(lines)
+
+
+def _render_synthesis_block(synthesis: dict[str, Any]) -> str:
+    """One shipped synthesis, rendered for the tool result (§3.3).
+
+    The shape is ``[synthesis:ID] (verb, confidence=…) claim`` plus a
+    ``sources:`` line — the belief and its provenance. The rendering
+    lives in the SERVICE (``render_synthesis``) so the bytes the budget
+    measured and the bytes the tool ships cannot drift apart; this
+    wrapper only splits the section header off.
+    """
+    return render_synthesis(synthesis)
 
 
 def create_memoir_tools(
@@ -1055,6 +1103,21 @@ def create_memoir_tools(
                 f"{result.dropped} dropped for budget, "
                 f"rank={result.rank_basis}"
             )
+            # THE DUAL-RECALL ENVELOPE (V2-D 2.4 / §3.3): the beliefs
+            # LEAD — the syntheses section renders FIRST and the episode
+            # blocks follow it byte-identically. With the reflection lane
+            # OFF there is no section at all and the envelope is the v1
+            # envelope, byte for byte.
+            syntheses = list(getattr(result, "syntheses", None) or [])
+            if syntheses:
+                synth_blocks = "\n".join(
+                    _render_synthesis_block(synthesis) for synthesis in syntheses
+                )
+                return (
+                    f"{header}\n{MEMOIR_SYNTHESES_SECTION_HEADER}\n"
+                    f"{synth_blocks}\n{MEMOIR_EPISODES_SECTION_HEADER}\n"
+                    f"{blocks}\n{result.footer}"
+                ).strip()
             return f"{header}\n{blocks}\n{result.footer}".strip()
         except MemoirRecallError as exc:
             return _map_recall_error(exc, label)
