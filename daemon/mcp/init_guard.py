@@ -160,7 +160,7 @@ JOURNAL_EVENT = "mcp_server_state"
 #: through verbatim, and the result stays valid JSON the OLD launcher
 #: generation can also validate. Entries exist only per TRANSITION, so
 #: N=20 is generous headroom while bounding the class at N × servers.
-JOURNAL_HISTORY_MAX_PER_SERVER = 20
+JOURNAL_HISTORY_MAX_PER_SERVER: int = 20
 
 
 class McpServerQuarantined(RuntimeError):
@@ -585,39 +585,51 @@ def _trim_mcp_journal_history(_uj: Any, install_dir: Any) -> bool:
     structurally — ADR-034), so the output stays valid JSON the OLD
     launcher generation can also validate. Returns True iff a write
     happened. Best-effort by contract: ANY failure (torn journal,
-    unreadable, write error) is swallowed — the cap is hygiene, never a
-    reason to break the transition write that already succeeded.
+    unreadable, write error) is swallowed WITH a WARNING — the cap is
+    hygiene, never a reason to break the transition write that already
+    succeeded. The WARNING names the phase (read/write) and carries the
+    exception class + reason, so a torn journal reads as the DAEMON's
+    view (JSON parse — ``JournalTorn``), distinguishable from the
+    launcher's balance-check view of the same document.
     """
+    phase = "read"
     try:
         data = _uj.journal_read(install_dir)
-    except Exception:  # noqa: BLE001 — hygiene never raises
-        return False
-    history = data.get("history")
-    if not isinstance(history, list):
-        return False
-    # Reverse walk: an mcp row survives iff fewer than N mcp rows for its
-    # server come AFTER it. Non-mcp rows (and non-dict junk rows) always
-    # survive at their original positions — order of survivors is
-    # preserved, so the trim is a pure subsequence shrink.
-    seen_after: dict[str, int] = {}
-    keep = [True] * len(history)
-    for idx in range(len(history) - 1, -1, -1):
-        entry = history[idx]
-        if not isinstance(entry, dict) or entry.get("event") != JOURNAL_EVENT:
-            continue
-        server = _mcp_entry_server_key(entry)
-        count = seen_after.get(server, 0)
-        if count >= JOURNAL_HISTORY_MAX_PER_SERVER:
-            keep[idx] = False
-            continue
-        seen_after[server] = count + 1
-    trimmed = [entry for idx, entry in enumerate(history) if keep[idx]]
-    if len(trimmed) == len(history):
-        return False
-    data["history"] = trimmed
-    try:
+        history = data.get("history")
+        if not isinstance(history, list):
+            return False
+        # Reverse walk: an mcp row survives iff fewer than N mcp rows for its
+        # server come AFTER it. Non-mcp rows (and non-dict junk rows) always
+        # survive at their original positions — order of survivors is
+        # preserved, so the trim is a pure subsequence shrink.
+        seen_after: dict[str, int] = {}
+        keep = [True] * len(history)
+        for idx in range(len(history) - 1, -1, -1):
+            entry = history[idx]
+            if (
+                not isinstance(entry, dict)
+                or entry.get("event") != JOURNAL_EVENT
+            ):
+                continue
+            server = _mcp_entry_server_key(entry)
+            count = seen_after.get(server, 0)
+            if count >= JOURNAL_HISTORY_MAX_PER_SERVER:
+                keep[idx] = False
+                continue
+            seen_after[server] = count + 1
+        trimmed = [entry for idx, entry in enumerate(history) if keep[idx]]
+        if len(trimmed) == len(history):
+            return False
+        data["history"] = trimmed
+        phase = "write"
         _uj.journal_write(install_dir, data)
-    except Exception:  # noqa: BLE001 — hygiene never raises
+    except Exception as exc:  # noqa: BLE001 — hygiene never raises
+        logger.warning(
+            "MCP journal history trim skipped (%s failed): %s: %s",
+            phase,
+            type(exc).__name__,
+            exc,
+        )
         return False
     return True
 
@@ -646,20 +658,17 @@ def _write_journal(server: str, state: str, detail: str) -> None:
         # after the append. The new entry is the newest row of its server
         # and can never be its own trim victim. Best-effort: the append is
         # already durable — a trim failure must not fail the transition.
-        try:
-            _trim_mcp_journal_history(_uj, install_dir)
-        except Exception as exc:  # noqa: BLE001 — hygiene never raises
-            logger.warning(
-                "MCP journal history trim failed (server=%s state=%s): %s",
-                server,
-                state,
-                exc,
-            )
+        # The helper NEVER raises (its whole body sits in one try that
+        # logs a WARNING and returns False), so no caller-side guard is
+        # needed — the old caller-side warning here was provably dead.
+        _trim_mcp_journal_history(_uj, install_dir)
     except Exception as exc:  # noqa: BLE001 — observability never breaks init
         logger.warning(
-            "MCP state-transition journal write failed (server=%s state=%s): %s",
+            "MCP state-transition journal write failed (server=%s state=%s): "
+            "%s: %s",
             server,
             state,
+            type(exc).__name__,
             exc,
         )
 
