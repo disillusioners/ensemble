@@ -1395,6 +1395,27 @@ class SkillEvolutionService:
                 # trusted to report itself. The raw prompt is never
                 # included; only ids and counts.
                 observability.record_deviation()
+                # m2 — the SINK record carries the deviation flag (the
+                # flag was declared but never set by any producer, so
+                # the sink's deviation column was dead). The record
+                # carries ids + counts ONLY — never a prompt.
+                observability.append_run_record(
+                    observability.build_run_record(
+                        stage="deviation",
+                        run_id=observability.new_run_id(),
+                        agent_id=None,
+                        prompt_source="evolution",
+                        outcome="refused",
+                        refusal_reason="forced_resolve_below_sample_size",
+                        deviation=True,
+                        extra={
+                            "ab_test_group": ab_test_group,
+                            "comparisons": comparisons,
+                            "ab_sample_size": sample_size,
+                            "winner_id": winner_id,
+                        },
+                    )
+                )
                 await observability.emit_lane_anomaly(
                     category=observability.CATEGORY_LANE_DEVIATION,
                     description=(

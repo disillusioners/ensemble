@@ -173,6 +173,8 @@ from .repositories.mcps_gateway.repository import McpGatewayAuditRepository
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import (
+    DEFAULT_FIX_BURST_CAP,
+    DEFAULT_FIX_BURST_WINDOW_SECONDS,
     EVOLUTION_TYPE_FIX,
     SKILL_EVOLUTION_KILL_SWITCH_ENV,
     SkillJobDispatcher,
@@ -7928,6 +7930,20 @@ class InstanceManager:
             _raw_cooldown = getattr(
                 _skill_evo_cfg, "fix_cooldown_seconds", None
             )
+            # M1 (fix wave 1): the DURABLE burst-cap knobs must REACH
+            # the dispatcher. They used to be read by nobody — the
+            # config field and its documented env alias were DEAD, and
+            # the dispatcher silently used its module defaults. The
+            # explicit-0-survives discipline of ``fix_cooldown_seconds``
+            # applies here too: an ABSENT/None value falls back to the
+            # dispatcher's default, while an EXPLICIT 0 SURVIVES (the
+            # config contract: "0 disables the cap").
+            _raw_burst_cap = getattr(
+                _skill_evo_cfg, "fix_burst_cap", None
+            )
+            _raw_burst_window = getattr(
+                _skill_evo_cfg, "fix_burst_window_seconds", None
+            )
             self._skill_job_dispatcher = SkillJobDispatcher(
                 job_service=service,
                 queue_repo=queue_repo,
@@ -7949,12 +7965,25 @@ class InstanceManager:
                 fix_cooldown_seconds=(
                     int(_raw_cooldown) if _raw_cooldown is not None else 1800
                 ),
+                fix_burst_cap=(
+                    int(_raw_burst_cap)
+                    if _raw_burst_cap is not None
+                    else DEFAULT_FIX_BURST_CAP
+                ),
+                fix_burst_window_seconds=(
+                    int(_raw_burst_window)
+                    if _raw_burst_window is not None
+                    else DEFAULT_FIX_BURST_WINDOW_SECONDS
+                ),
             )
             logger.info(
                 "SkillJobDispatcher wired to manager "
-                "(evolution_lane_enabled=%s, fix_cooldown_seconds=%s)",
+                "(evolution_lane_enabled=%s, fix_cooldown_seconds=%s, "
+                "fix_burst_cap=%s, fix_burst_window_seconds=%s)",
                 self._skill_job_dispatcher._evolution_lane_enabled,
                 self._skill_job_dispatcher._fix_cooldown_seconds,
+                self._skill_job_dispatcher._fix_burst_cap,
+                self._skill_job_dispatcher._fix_burst_window_seconds,
             )
 
         # Wire the metrics service's job dispatcher handle so the

@@ -87,7 +87,10 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from daemon.services.skill_job_dispatcher import SkillJobDispatcher
+from daemon.services.skill_job_dispatcher import (
+    SkillFixBurstCapRefused,
+    SkillJobDispatcher,
+)
 from daemon.services.project_skill_source.model import ADDRESS_PREFIX
 from daemon.services.skill_store_service import SkillStoreService
 from daemon.services.skill_search_service import SkillSearchService
@@ -1359,11 +1362,15 @@ async def post_fix(
         ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` off /
         ``SkillEvolutionConfig.evolution_lane_enabled=False`` — the
         default — or the per-skill FIX cooldown is active): no job
-        exists, so a 202 would be a lie.
+        exists, so a 202 would be a lie. **429 Too Many Requests**
+        when the DURABLE re-fix burst cap refused the admission
+        (M2 — the lane is ON, the cap refused; a 429 is the truthful
+        status for a cap refusal and is never a 5xx).
 
     Raises:
-        HTTPException: 400 on ``ValueError``; 503 when the lane is
-        gated off (``job_id is None``); 500 on unexpected failure.
+        HTTPException: 400 on ``ValueError``; 429 on a burst-cap
+            refusal; 503 when the lane is gated off (``job_id is
+            None``); 500 on unexpected failure.
     """
     # A14 (architect, MUST, 2026-10-31 — P7 hole): ``pf:`` addresses
     # are REFUSED before any dispatch. This endpoint dispatches with
@@ -1425,6 +1432,25 @@ async def post_fix(
         )
     except HTTPException:
         raise
+    except SkillFixBurstCapRefused as e:
+        # M2 (fix wave 1) — the DURABLE burst-cap refusal is a
+        # DESIGNED refusal, not an internal error: the evolution lane
+        # is ON and the CAP refused the admission. Before this branch
+        # the exception fell through to the generic ``except Exception``
+        # -> HTTP 500 + a traceback, which told the operator "the
+        # server broke" instead of "the cap refused you".
+        #
+        # 429 Too Many Requests: the truthful status for a rate/cap
+        # refusal (the request is retryable LATER, once the window
+        # rolls over) — and it does NOT lie about the lane state the
+        # way a 503 ("service unavailable") would.
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": str(e),
+                "reason": "fix_burst_cap",
+            },
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": str(e)})
     except Exception as e:

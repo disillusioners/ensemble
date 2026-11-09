@@ -47,7 +47,6 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -594,9 +593,40 @@ class SkillJobDispatcher:
                 return candidate
         return None
 
+    async def _lookup_idempotent_job(self, idempotency_key: str) -> Any | None:
+        """Return the job that ALREADY holds this idempotency key (if any).
+
+        The m3 read side: a FIX admission whose key is already held by a
+        live job COLLAPSES onto that job (the DB's dedup) and mints no
+        new row — so the admission counters must not move. The lookup
+        goes through the job service's PUBLIC ``repository`` property
+        (the same accessor the durable burst-cap ledger uses).
+
+        Returns:
+            The existing :class:`JobItem` (or ``None``). ``None`` is
+            also returned when no repository is reachable — the caller
+            then counts the admission (fail-OPEN toward counting, and
+            documented in the caller).
+        """
+        repo = getattr(self._job_service, "repository", None)
+        finder = getattr(repo, "find_by_idempotency_key", None)
+        if not callable(finder):
+            return None
+        try:
+            return await asyncio.to_thread(finder, idempotency_key)
+        except Exception as err:  # noqa: BLE001 — fail-open toward counting
+            logger.warning(
+                "SkillJobDispatcher: idempotency pre-check failed "
+                "(%s: %s) — the admission is counted as usual",
+                type(err).__name__, err,
+            )
+            return None
+
     async def _check_fix_burst_cap(
         self,
         skill_id: str,
+        *,
+        run_id: str | None = None,
     ) -> SkillFixBurstCapRefused | None:
         """Check the DURABLE FIX burst cap for one skill.
 
@@ -685,6 +715,7 @@ class SkillJobDispatcher:
         observability.append_run_record(
             observability.build_run_record(
                 stage="admission",
+                run_id=run_id,
                 outcome="refused",
                 refusal_reason="fix_burst_cap",
                 extra={
@@ -825,6 +856,11 @@ class SkillJobDispatcher:
                 announced as an anomaly row before it is raised.
         """
         # ── 1. Kill-switch gate ──────────────────────────────────
+        # The run id is minted BEFORE the gate: a REFUSED admission is
+        # still an ATTEMPT and must be correlatable with its refusal
+        # record (m2 — a refused record must never carry a silent
+        # ``run_id=None``).
+        run_id = observability.new_run_id()
         # Belt-and-braces single chokepoint: env wins, config default
         # otherwise (default OFF). Covers EVERY producer — including
         # jobs already-queued and re-dispatched after a flag flip is
@@ -851,6 +887,7 @@ class SkillJobDispatcher:
             observability.append_run_record(
                 observability.build_run_record(
                     stage="admission",
+                    run_id=run_id,
                     agent_id=None,
                     prompt_source="evolution",
                     outcome="refused",
@@ -884,6 +921,7 @@ class SkillJobDispatcher:
                     observability.append_run_record(
                         observability.build_run_record(
                             stage="admission",
+                            run_id=run_id,
                             agent_id=None,
                             prompt_source="evolution",
                             outcome="refused",
@@ -914,11 +952,24 @@ class SkillJobDispatcher:
         # the ``skill_fix`` envelope, which would be a lie — the lane
         # is ON, the CAP refused.
         if is_fix and self._fix_burst_cap > 0:
-            refusal = await self._check_fix_burst_cap(skill_id)
+            refusal = await self._check_fix_burst_cap(skill_id, run_id=run_id)
             if refusal is not None:
                 raise refusal
 
         message = f"Evolve skill {skill_id}. Type: {evolution_type}. Direction: {direction}"
+        idempotency_key = (
+            f"skill_fix:{normalized_project_id}:{skill_id}" if is_fix else None
+        )
+        # m3 — a FIX admission can COLLAPSE onto a live job (the
+        # idempotency dedup). A dedup hit mints NO NEW ROW, so it must
+        # NOT move the admission counters (the durable DB count is the
+        # reference). The pre-existing holder of the key is read BEFORE
+        # the enqueue: if the enqueue returns THAT job, the row was
+        # already there (a dedup hit); if it returns a different id, a
+        # NEW row was minted.
+        preexisting_job = None
+        if idempotency_key is not None:
+            preexisting_job = await self._lookup_idempotent_job(idempotency_key)
         job_id = await self._enqueue_skill_keeper_job(
             project_id,
             JOB_TYPE_EVOLUTION,
@@ -928,9 +979,7 @@ class SkillJobDispatcher:
                 "evolution_type": evolution_type,
                 "direction": direction,
             },
-            idempotency_key=(
-                f"skill_fix:{normalized_project_id}:{skill_id}" if is_fix else None
-            ),
+            idempotency_key=idempotency_key,
         )
         if is_fix and job_id:
             # Stamp the cooldown on BOTH outcomes (fresh row or
@@ -941,7 +990,20 @@ class SkillJobDispatcher:
         if job_id:
             # D: the admitted-run counter + the re-fix-rate gauge (the
             # number of FIX admissions per skill per window).
-            observability.record_admission(is_fix=is_fix)
+            #
+            # m3 — counted ONLY when a new row was actually minted. A
+            # dedup hit (the enqueue returned the PRE-EXISTING job for
+            # this idempotency key) added no row, so counting it would
+            # make the process-local gauge drift ABOVE the durable
+            # count. A dedup hit is NOT a refusal either (the
+            # admission was accepted — it collapsed onto a live job),
+            # so it touches neither counter.
+            dedup_hit = (
+                preexisting_job is not None
+                and getattr(preexisting_job, "job_id", None) == job_id
+            )
+            if not dedup_hit:
+                observability.record_admission(is_fix=is_fix)
         return job_id
 
     # ── Public API: CAPTURED flow ───────────────────────────────────
@@ -979,6 +1041,10 @@ class SkillJobDispatcher:
             silently without dispatching.
         """
         # ── Kill-switch gate ─────────────────────────────────────
+        # The run id is minted BEFORE the gate so a REFUSED admission
+        # still carries one (m2 — a refusal record must never carry a
+        # silent ``run_id=None``).
+        run_id = observability.new_run_id()
         # Belt-and-braces: even though the metrics-service gate at
         # ``SkillMetricsService._check_capture_eligibility`` is the
         # primary "skip the trigger entirely" check, this gate covers
@@ -998,6 +1064,7 @@ class SkillJobDispatcher:
             observability.append_run_record(
                 observability.build_run_record(
                     stage="admission",
+                    run_id=run_id,
                     agent_id=_task_detail(task_details, "agent_id"),
                     prompt_source=prompt_source,
                     task_message=_task_detail(task_details, "task_message"),
@@ -1011,7 +1078,6 @@ class SkillJobDispatcher:
         # D: the per-run observability stamps — a stable run id, the
         # prompt SOURCE (which producer minted the run) and the prompt
         # SHAPE (never the prompt text itself — DS-18).
-        run_id = uuid.uuid4().hex
         agent_id = _task_detail(task_details, "agent_id")
         shape = observability.prompt_shape(
             _task_detail(task_details, "task_message"), agent_id

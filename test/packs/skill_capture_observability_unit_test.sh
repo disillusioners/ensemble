@@ -8,7 +8,14 @@
 # M-D2 (the DAEMON announces a keeper deviation), M-D3 (the new
 # observability fields carry a SHAPE, never the raw prompt — the F7
 # credential lesson) and M-D4 (the admission-refusal and
-# execution-refusal signals are NEVER merged).
+# execution-refusal signals are NEVER merged) — plus the FIX WAVE 1
+# corrections: M-C2 (the metrics lane's ready-to-serve seam counts AND
+# records), M-m2 (the sink carries the deviation flag; a refused
+# admission still carries a run id), M-m3 (a dedup hit does not move
+# the fix-admission gauge), M-m4 (the public counters accessor) and
+# M-C1 (the anomaly service resolves through the REAL production
+# holder chain — metrics service → dispatcher → job service → instance
+# manager → anomaly service).
 #
 # Timeout: 2 minutes (120s).
 set -euo pipefail

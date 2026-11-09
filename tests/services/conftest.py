@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool, QueuePool
+from sqlalchemy.pool import QueuePool
 from sqlmodel import SQLModel, create_engine
 
 
@@ -55,7 +55,7 @@ from sqlmodel import SQLModel, create_engine
 #   * the database is FILE-BACKED (``tmp_path``) — ``:memory:`` plus a
 #     non-shared pool would hand every connection its OWN database, so
 #     the data would not be shared;
-#   * the pool is ``NullPool`` — every session gets its OWN connection,
+#   * the pool is ``QueuePool`` — every session gets its OWN connection,
 #     so concurrent operations can never interleave transactions on a
 #     single connection;
 #   * ``journal_mode=WAL`` + ``busy_timeout`` — the three concurrent
@@ -69,7 +69,18 @@ from sqlmodel import SQLModel, create_engine
 SERVICES_DB_FILENAME = "skill-services.db"
 
 #: SQLite busy timeout (milliseconds) for the concurrent write fan-out.
+#: This is the value that MATTERS for the flake: it is the wait a
+#: writer applies when it finds the database locked. It is applied as a
+#: ``PRAGMA busy_timeout`` on EVERY connection (the pool hands out
+#: fresh connections) AND mirrored into the driver's connect
+#: ``timeout`` below, so the two can never disagree (m1 — the old
+#: fixture carried a 30 s connect timeout that the 5 s pragma
+#: silently overrode, i.e. a dead value).
 SQLITE_BUSY_TIMEOUT_MS = 5000
+
+#: The same timeout in SECONDS — the form the sqlite3 driver takes as
+#: its connect ``timeout``.
+SQLITE_BUSY_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000.0
 
 #: Pool sizing — the A/B resolve fan-out opens at most 3 concurrent
 #: sessions (deactivate + resolve + update); the pool hands each of them
@@ -131,7 +142,10 @@ def engine(tmp_path: Path):
     """
     engine = create_engine(
         f"sqlite:///{tmp_path / SERVICES_DB_FILENAME}",
-        connect_args={"check_same_thread": False, "timeout": 30.0},
+        connect_args={
+            "check_same_thread": False,
+            "timeout": SQLITE_BUSY_TIMEOUT_SECONDS,
+        },
         poolclass=QueuePool,
         pool_size=SQLITE_POOL_SIZE,
         max_overflow=SQLITE_POOL_OVERFLOW,

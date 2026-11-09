@@ -31,6 +31,63 @@ _JOB_TYPE_EVOLUTION = "skill_evolution"
 _EVOLUTION_TYPE_FIX = "FIX"
 
 
+def build_fix_admission_count_statement(
+    *,
+    is_postgres: bool,
+    skill_id: str,
+    since_iso: str,
+) -> Any:
+    """Build the durable FIX-admission COUNT statement for ONE dialect.
+
+    The statement is built by a MODULE-LEVEL function (not inline in
+    the repository method) for exactly one reason: the PostgreSQL
+    branch of the dialect split had ZERO coverage, because every test
+    runs on SQLite — a mutation of the PG branch alone left the whole
+    pin set green while PostgreSQL is the PRODUCTION dialect. With the
+    builder extracted, a pin can compile the statement for BOTH
+    dialects WITHOUT touching a database (``sqlalchemy.dialect``
+    compilers are pure) and assert that the PostgreSQL branch really
+    uses the ``->>`` operator while the SQLite branch really uses
+    ``json_extract``.
+
+    Dialect split (the house convention — mirrors
+    ``daemon/repositories/task/repository.py:2410-2422``): ``metadata``
+    is ``JSONBType`` — ``JSONB`` on PostgreSQL (the ``->>`` operator
+    exists) and ``JSON``/TEXT on SQLite (where ``->>`` does NOT exist —
+    ``json_extract`` is the SQLite spelling).
+
+    Args:
+        is_postgres: Which dialect's branch to build.
+        skill_id: The skill identity (the metadata ``skill_id``).
+        since_iso: Inclusive lower bound on ``created_at`` (ISO-8601
+            string — the column is a text ISO timestamp).
+
+    Returns:
+        A ``SELECT count(*)`` statement over ``job_queue_items``.
+    """
+    if is_postgres:
+        skill_expr = JobItem.job_metadata["skill_id"].as_string()
+        evolution_expr = (
+            JobItem.job_metadata["evolution_type"].as_string()
+        )
+    else:
+        skill_expr = func.json_extract(
+            JobItem.job_metadata, "$.skill_id"
+        )
+        evolution_expr = func.json_extract(
+            JobItem.job_metadata, "$.evolution_type"
+        )
+    return (
+        select(func.count())
+        .select_from(JobItem)
+        .where(JobItem.job_type == _JOB_TYPE_EVOLUTION)
+        .where(skill_expr == skill_id)
+        .where(evolution_expr == _EVOLUTION_TYPE_FIX)
+        .where(JobItem.created_at >= since_iso)
+        .where(JobItem.deleted_at.is_(None))
+    )
+
+
 # ── Legacy status → AdmissionState read-path translation ───────────────────
 # Phase 7b: the ``JobStatus`` enum was removed. This map translates
 # legacy status filter values (still accepted by ``list()`` /
@@ -646,26 +703,10 @@ class JobRepository:
         """
         with SQLModelSession(self.engine) as db_session:
             is_postgres = db_session.bind.dialect.name == "postgresql"
-            if is_postgres:
-                skill_expr = JobItem.job_metadata["skill_id"].as_string()
-                evolution_expr = (
-                    JobItem.job_metadata["evolution_type"].as_string()
-                )
-            else:
-                skill_expr = func.json_extract(
-                    JobItem.job_metadata, "$.skill_id"
-                )
-                evolution_expr = func.json_extract(
-                    JobItem.job_metadata, "$.evolution_type"
-                )
-            stmt = (
-                select(func.count())
-                .select_from(JobItem)
-                .where(JobItem.job_type == _JOB_TYPE_EVOLUTION)
-                .where(skill_expr == skill_id)
-                .where(evolution_expr == _EVOLUTION_TYPE_FIX)
-                .where(JobItem.created_at >= since_iso)
-                .where(JobItem.deleted_at.is_(None))
+            stmt = build_fix_admission_count_statement(
+                is_postgres=is_postgres,
+                skill_id=skill_id,
+                since_iso=since_iso,
             )
             return int(db_session.exec(stmt).one())
 

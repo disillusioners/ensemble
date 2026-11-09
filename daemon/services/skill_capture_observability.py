@@ -9,31 +9,65 @@ WHAT IS OBSERVABLE TODAY vs WHAT PHASE 2 TURNS ON
 ----------------------------------------------------
 The commission asks for this marking explicitly (phase1-plan §8 D3
 ruling 3). It is reproduced here because this module is where an
-operator looks first:
+operator looks first.
 
 ======================================  =====================  =====================
 Signal                                  Observable today        Turns on in Phase 2
 ======================================  =====================  =====================
-Capture ADMISSION counters              YES — the counter      the counter's *non-zero*
-                                        increments even when   admission rate
-                                        the switch is OFF (the
-                                        refusal path is where
-                                        the counter lives)
+Capture ADMISSION counters              PARTIAL — the           the counter's *non-zero*
+                                        dispatcher's OWN        admission rate
+                                        capture-lane-off gate
+                                        counts the refusal, but
+                                        the PRODUCTION capture
+                                        refusal site
+                                        (skill_metrics_service
+                                        .py:595-596 — the
+                                        metrics lane) returns
+                                        BEFORE that gate is
+                                        reached, so the
+                                        "capture_lane_off"
+                                        counter needs the
+                                        metrics-lane wiring
+                                        before it moves in
+                                        production (C2 — see
+                                        record_capture_lane_
+                                        disabled_refusal)
 EXECUTION-refusal rows                  YES —                  the population size
-                                        ``terminal_reason=
-                                        'lane_disabled'`` is
+                                        terminal_reason=       the refused-execution
+                                        'lane_disabled' is     rate
                                         written regardless
-Deviation detection + auto-anomaly      YES — the detector     the anomaly *rate*
-                                        reads tool-call
-                                        records, not the lane
-                                        state
+Deviation detection + auto-anomaly      YES — the D3 forced-   the anomaly *rate*
+                                        resolve guard fires
+                                        the daemon-side trigger
+                                        and announces through
+                                        the production anomaly
+                                        holder chain (metrics
+                                        service -> job dispatcher
+                                        -> job service -> instance
+                                        manager -> anomaly
+                                        service); the SINK
+                                        record carries
+                                        deviation=true
 Re-fix rate                             YES — counts           the burst signature
                                         admissions (zero while
                                         the lane is OFF)
 Keeper transcript retention             NO — the 168 h TTL     Phase 2 must extend or
                                         destroys it           harvest retention
-                                                                BEFORE the first flip
+                                                                 BEFORE the first flip
 ======================================  =====================  =====================
+
+HONESTY NOTE (C2 — the "observable today" column is NOT a claim that
+every counter moves in production today): the "capture_lane_off"
+ADMISSION counter is incremented by the dispatcher's own capture gate
+(SkillJobDispatcher.enqueue_capture) and by the public helper
+record_capture_lane_disabled_refusal — but the PRODUCTION capture flow
+enters through SkillMetricsService._check_capture_eligibility, whose
+capture-lane-off refusal returns BEFORE the dispatcher is ever reached.
+That call site lives in the METRICS lane
+(daemon/services/skill_metrics_service.py), which this module's lane
+does not own, so the wiring is PENDING the metrics lane's edit. The
+helper is the ready-to-serve seam for that edit; the exact patch text
+is carried in the fix-wave report.
 
 D1 — THE REFUSAL SEMANTICS (do not conflate, decisions.md DS-19)
 ------------------------------------------------------------------
@@ -76,6 +110,7 @@ import hashlib
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -196,6 +231,36 @@ def counters() -> CaptureLaneCounters:
     return _COUNTERS
 
 
+def counters_snapshot() -> dict[str, Any]:
+    """THE public READ surface for the capture-lane counters.
+
+    This is the accessor the metrics registry read site calls when the
+    metrics lane publishes the capture-lane signals (phase1-plan §8 D2
+    names "a metrics gauge (the metrics registry is the house's counter
+    surface)" as the landing place — the registry itself lives in the
+    METRICS lane, so this module owns the VALUE and the metrics lane
+    owns the READ SITE).
+
+    Returns:
+        A JSON-safe dict snapshot (see
+        :meth:`CaptureLaneCounters.snapshot`) — never the live
+        counter object, so a caller cannot mutate the counters.
+    """
+    return _COUNTERS.snapshot()
+
+
+def new_run_id() -> str:
+    """Mint ONE run id — the correlation handle of a capture/evolution run.
+
+    The run id is minted BEFORE the admission gate so that a REFUSED
+    admission still carries one (a refusal is an ATTEMPT, and the
+    attempt must be correlatable with the refusal record). The id is
+    also stamped into the admitted job's metadata, so the sink record
+    and the job row can be joined.
+    """
+    return uuid.uuid4().hex
+
+
 def reset_counters() -> None:
     """Reset every counter (test helper — never called in production)."""
     _COUNTERS.admission_refusals.clear()
@@ -231,6 +296,66 @@ def record_admission(*, is_fix: bool = False) -> None:
 def record_deviation() -> None:
     """Count ONE detected keeper deviation."""
     _COUNTERS.deviations += 1
+
+
+def record_capture_lane_disabled_refusal(
+    *,
+    agent_id: Any = None,
+    task_message: Any = None,
+    prompt_source: str | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Count AND record a capture-lane-OFF ADMISSION refusal.
+
+    **This is the seam the METRICS lane calls.** The production capture
+    refusal lives at ``SkillMetricsService._check_capture_eligibility``
+    (``daemon/services/skill_metrics_service.py:595-596`` — the
+    ``if not _resolve_capture_enabled(): return None`` guard). That
+    file belongs to the metrics lane, so the CALL SITE cannot be edited
+    from the observability lane; this helper is the ready-to-serve
+    counterpart: the metrics owner calls it at the refusal site and
+    BOTH the counter and the sink record are written.
+
+    What it does (in order):
+
+    1. increments ``admission_refusals['capture_lane_off']`` — the
+       ADMISSION-refusal counter (DS-19: never merged with the
+       EXECUTION-refusal counter);
+    2. appends ONE sink record (``stage='admission'``,
+       ``outcome='refused'``, ``refusal_reason='capture_lane_off'``)
+       carrying the prompt SHAPE only — never the raw prompt
+       (DS-18 / the F7 credential lesson).
+
+    Args:
+        agent_id: The originating agent id, when known.
+        task_message: The raw prompt text — used ONLY to derive the
+            SHAPE (length bucket + sha256 prefix); it is never copied
+            into the record.
+        prompt_source: Which producer minted the attempt.
+        run_id: The attempt's run id (minted before the gate).
+
+    NEVER raises — an observability write must not break the capture
+    path (the same contract as :func:`append_run_record`).
+    """
+    try:
+        record_admission_refusal("capture_lane_off")
+        append_run_record(
+            build_run_record(
+                stage="admission",
+                run_id=run_id,
+                agent_id=agent_id,
+                prompt_source=prompt_source,
+                task_message=task_message,
+                outcome="refused",
+                refusal_reason="capture_lane_off",
+            )
+        )
+    except Exception as err:  # noqa: BLE001 — observability NEVER breaks the lane
+        logger.warning(
+            "skill-capture-observability: capture-lane-off refusal "
+            "record failed (%s: %s) — the capture lane is unaffected",
+            type(err).__name__, err,
+        )
 
 
 # ── The sink (D4 — structured log, schema-free, restart-free read side) ──
@@ -417,23 +542,76 @@ def resolve_anomaly_service(*holders: Any) -> Any | None:
     return None
 
 
-try:  # the closed vocabulary (imported once, module level)
-    from daemon.services.metrics_query.wiring.vocab import ANOMALY_CATEGORIES
-except Exception:  # pragma: no cover — import guard
-    ANOMALY_CATEGORIES: tuple[str, ...] = (  # type: ignore[no-redef]
-        "tool-failure",
-        "performance",
-        "resource-exhaustion",
-        "loop-stall",
-        "wedge-suspected",
-        "data-corruption",
-        "auth-permission",
-        "external-dependency",
-        "mcp-failure",
-        "llm-provider",
-        "queue-scheduling",
-        "environment-config",
-        "other",
+# ── The closed anomaly vocabulary (resolved LAZILY) ─────────────────────
+#
+# The canonical vocabulary lives in the METRICS lane
+# (``daemon/services/metrics_query/wiring/vocab.py``). Importing it — or
+# ANY module of the wiring package — REGISTERS the phase's metric
+# families in the process-wide registry (the package's ``__init__``
+# calls ``register_w1_adapters`` / ``register_w2_adapters`` /
+# ``register_w3_adapters``). That is an IMPORT-TIME side effect, and
+# this module sat ON the exposition capture's import path (the capture
+# runs in a FRESH interpreter that imports the metrics modules): the
+# registry measured 18 families at base and 70 with the eager import,
+# which broke the committed exposition artifact.
+#
+# The import is therefore DEFERRED to the point of use — the category
+# canonicalisation path — so a module that merely IMPORTS this surface
+# registers nothing. The fallback tuple keeps the module usable when
+# the metrics package is unavailable.
+
+#: The frozen fallback vocabulary (used when the metrics package cannot
+#: be imported). Mirrors ``ANOMALY_CATEGORIES`` at
+#: ``daemon/services/metrics_query/wiring/vocab.py``.
+_ANOMALY_CATEGORIES_FALLBACK: tuple[str, ...] = (
+    "tool-failure",
+    "performance",
+    "resource-exhaustion",
+    "loop-stall",
+    "wedge-suspected",
+    "data-corruption",
+    "auth-permission",
+    "external-dependency",
+    "mcp-failure",
+    "llm-provider",
+    "queue-scheduling",
+    "environment-config",
+    "other",
+)
+
+
+def _resolve_anomaly_categories() -> tuple[str, ...]:
+    """Resolve the closed anomaly vocabulary (at the point of use).
+
+    The canonical list lives in the METRICS lane; importing it (or any
+    module of the wiring package) registers the phase's metric families
+    in the process-wide registry — an import-time side effect. The
+    import is therefore made HERE, on the canonicalisation path only.
+
+    Returns:
+        The closed vocabulary tuple (the canonical list when the metrics
+        package is importable, the frozen fallback otherwise).
+    """
+    try:  # the closed vocabulary (imported at the point of use)
+        from daemon.services.metrics_query.wiring.vocab import (
+            ANOMALY_CATEGORIES,
+        )
+        return tuple(ANOMALY_CATEGORIES)
+    except Exception:  # pragma: no cover — import guard
+        return _ANOMALY_CATEGORIES_FALLBACK
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 — expose ``ANOMALY_CATEGORIES`` WITHOUT an eager import.
+
+    The public attribute is kept (the pins read
+    ``observability.ANOMALY_CATEGORIES``), but it is resolved on FIRST
+    ACCESS — so importing this module registers nothing.
+    """
+    if name == "ANOMALY_CATEGORIES":
+        return _resolve_anomaly_categories()
+    raise AttributeError(
+        f"module {__name__!r} has no attribute {name!r}"
     )
 
 
@@ -444,8 +622,13 @@ def _canonical_category(category: str) -> str:
     ``daemon/services/metrics_query/wiring/vocab.py``); ``other`` is the
     reserved fold target. An unknown category is folded — never
     invented.
+
+    The vocabulary is resolved AT THIS POINT (the only place it is
+    used) — see :func:`_resolve_anomaly_categories` for why the import
+    is not made at module level.
     """
-    if category in ANOMALY_CATEGORIES:
+    categories = _resolve_anomaly_categories()
+    if category in categories:
         return category
     return CATEGORY_FALLBACK
 
@@ -538,6 +721,14 @@ def build_run_record(
     The record carries the run id → agent → prompt source → prompt
     SHAPE → outcome → refusal → deviation flag chain. The raw prompt
     text is NEVER included (DS-18).
+
+    ``run_id`` semantics (explicit, never a silent ``None``): the run
+    id is minted BEFORE the admission gate (see
+    :func:`new_run_id`), so an ADMISSION record — refused OR admitted
+    — always carries one. A record with ``run_id=None`` therefore
+    means "this record was minted OUTSIDE an admission attempt" (e.g.
+    a cap-check error, or a deviation announcement) — not "the run id
+    was forgotten".
     """
     record: dict[str, Any] = {
         "stage": stage,

@@ -52,6 +52,20 @@ if [ "$EXIT_CODE" -eq 0 ]; then
     --tb=short -q 2>&1 || EXIT_CODE=$?
 fi
 
+# ── Leg 3b — the FIX WAVE 1 pins (M1 config wiring · M2 route · M3
+#            dialect) + the G equivalence pin leg ──────────────────────
+#   * tests/unit/test_skill_revival_fix_wave1_pins.py — the M1
+#     (config knob reaches the dispatcher), M2 (a designed refusal is
+#     not an HTTP 500) and M3 (the PostgreSQL branch of the E1 dialect
+#     split) pins;
+#   * the M-m5 experiment-equivalence pin lives in the G pin file
+#     (leg 2) — it needs the services fixture, so it cannot move.
+if [ "$EXIT_CODE" -eq 0 ]; then
+  timeout 120s .venv/bin/pytest \
+    tests/unit/test_skill_revival_fix_wave1_pins.py \
+    --tb=short -q 2>&1 || EXIT_CODE=$?
+fi
+
 # ── Leg 4 — the G acceptance (>= 3 consecutive FULL-FILE-SET greens) ──
 if [ "$EXIT_CODE" -eq 0 ]; then
   G_RUNS=3
