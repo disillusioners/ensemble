@@ -1554,3 +1554,284 @@ class TestSwitchTokenAlignment:
         assert d.EVOLUTION_TYPE_FIX == "FIX"
         assert d.EVOLUTION_TYPE_DERIVED == "DERIVED"
         assert d.EVOLUTION_TYPE_CAPTURED == "CAPTURED"
+
+
+# =============================================================================
+# B2 — the INLINE ``skill_evolve`` lane gate (Phase-1 plan §6 B2, DS-14)
+# =============================================================================
+
+
+class TestInlineEvolveLaneGate:
+    """B2 — the inline Tier-3 path is gated on the SAME lane resolution
+    point the job-level path uses.
+
+    The hole (Phase-0 facts A9): ``daemon/tools/skill_evolution_tools.py``
+    called ``SkillEvolutionService.evolve_skill(...)`` INLINE with NO lane
+    check, and the keeper's ``tools.allow`` includes the ``skill-evolution``
+    category — so a running keeper could perform a Tier-3 mutation while
+    BOTH kill-switches were OFF (the live state since 2026-10-22).
+
+    Posture:
+    * **Single resolution point** — the lane state is read through
+      ``manager.is_skill_evolution_lane_enabled`` (the accessor the job
+      dispatcher, the metric-scan fallback and the job processor's
+      execution-time check all use). The tool module never reads the
+      kill-switch itself.
+    * **Fail-closed** — an absent accessor or a raising probe REFUSES.
+    * **Truthful refusal** — the envelope says NO job was created and
+      NEVER claims success.
+    * **Tier-2 carve-out** — ``skill_analyze`` stays ungated (D1's
+      deliberate carve-out).
+
+    LANE SIMULATION: the lane state is simulated by INJECTING the manager
+    accessor (``MagicMock(return_value=...)``). The
+    ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` environment variable is NEVER
+    set, unset or exported by these pins — the resolution happens in the
+    production accessor, which is stubbed at its boundary.
+    """
+
+    @staticmethod
+    def _tools(manager: Any) -> dict[str, Any]:
+        from daemon.tools.skill_evolution_tools import create_skill_evolution_tools
+
+        return {
+            getattr(t, "name", None): t
+            for t in create_skill_evolution_tools(manager, "inst-b2")
+        }
+
+    @staticmethod
+    def _manager(lane_enabled: bool | None) -> Any:
+        """A manager whose lane accessor returns ``lane_enabled``."""
+        manager = MagicMock()
+        if lane_enabled is None:
+            # Accessor ABSENT — the fail-closed probe case.
+            del manager.is_skill_evolution_lane_enabled
+        else:
+            manager.is_skill_evolution_lane_enabled = MagicMock(
+                return_value=lane_enabled
+            )
+        return manager
+
+    @staticmethod
+    def _service() -> Any:
+        service = MagicMock()
+        service.evolve_skill = AsyncMock(
+            return_value={"new_skill_id": "skill-new", "skipped": False}
+        )
+        service.analyze_skill = AsyncMock(
+            return_value={"should_evolve": True, "evolution_type": "FIX"}
+        )
+        return service
+
+    @staticmethod
+    async def _call_evolve(tools: dict[str, Any]) -> str:
+        return await tools["skill_evolve"].ainvoke(
+            {
+                "skill_id": "skill-under-test",
+                "evolution_type": "FIX",
+                "direction": "tighten error handling",
+            }
+        )
+
+    # -- the OFF leg ------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_lane_off_returns_the_honest_refusal_envelope(self):
+        """Lane OFF ⇒ the tool refuses with the ``skill_fix``-shaped
+        envelope and the service is NEVER reached."""
+        manager = self._manager(False)
+        service = self._service()
+        manager._skill_evolution_service = service
+
+        result = await self._call_evolve(self._tools(manager))
+
+        assert "NO skill-keeper job was created" in result, (
+            f"the refusal must state that no job was created: {result!r}"
+        )
+        service.evolve_skill.assert_not_awaited()
+        service.evolve_skill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lane_off_creates_no_skill_row(self):
+        """Lane OFF ⇒ NO skill row is created or modified.
+
+        This leg wires a REAL ``SkillEvolutionService`` over a REAL
+        in-memory SQLite ``SkillRepository`` and asserts the ``skills``
+        table is still EMPTY after the refused call — the acceptance
+        criterion in the plan's own words ("no skill row is created or
+        modified"), checked at the DB, not at a mock.
+
+        Non-vacuity: the ON leg (``test_lane_on_proceeds_to_the_service``)
+        proves the same call site DOES reach the service when the lane is
+        open — the gate is the only thing standing between the call and
+        the mutation.
+        """
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel, Session
+
+        import daemon.repositories.skill.models  # noqa: F401 — table registration
+        from daemon.config import SkillEvolutionConfig
+        from daemon.repositories.skill.repository import SkillRepository
+        from daemon.services.skill_evolution_service import SkillEvolutionService
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(engine)
+
+        service = SkillEvolutionService(
+            skill_repo=SkillRepository(engine),
+            lineage_repo=MagicMock(),
+            usage_repo=MagicMock(),
+            embedding_service=MagicMock(),
+            metrics_service=MagicMock(),
+            ab_test_repo=MagicMock(),
+            config=SkillEvolutionConfig(),
+            llm_config={},
+        )
+        manager = self._manager(False)
+        manager._skill_evolution_service = service
+
+        result = await self._call_evolve(self._tools(manager))
+
+        assert "NO skill-keeper job was created" in result
+        from daemon.repositories.skill.models import Skill
+        from sqlmodel import select
+
+        with Session(engine) as session:
+            assert len(session.exec(select(Skill)).all()) == 0, (
+                "the refused inline evolve must not create a skill row"
+            )
+
+    @pytest.mark.asyncio
+    async def test_refusal_envelope_never_claims_success(self):
+        """Truthfulness pin (M-B2d).
+
+        A refusal that reads like a success is a FALSE PASS: the agent
+        would believe the skill was evolved. The envelope must carry the
+        honest markers and NONE of the success markers.
+        """
+        manager = self._manager(False)
+        manager._skill_evolution_service = self._service()
+
+        result = await self._call_evolve(self._tools(manager))
+
+        assert "NOT executed" in result
+        assert "NO skill-keeper job was created" in result
+        for forbidden in (
+            "✅",
+            "Dispatched:",
+            "was admitted",
+            "Evolution complete",
+            "successfully",
+            "has been evolved",
+        ):
+            assert forbidden not in result, (
+                f"the refusal envelope must not claim success: {forbidden!r}"
+            )
+
+    # -- the ON leg (the inline path behaves exactly as today) ------------
+
+    @pytest.mark.asyncio
+    async def test_lane_on_proceeds_to_the_service(self):
+        """Lane ON ⇒ the inline path behaves EXACTLY as before the gate."""
+        manager = self._manager(True)
+        service = self._service()
+        manager._skill_evolution_service = service
+
+        result = await self._call_evolve(self._tools(manager))
+
+        service.evolve_skill.assert_awaited_once_with(
+            "skill-under-test", "FIX", "tighten error handling"
+        )
+        assert "NO skill-keeper job was created" not in result
+        assert "new_skill_id" in result
+
+    @pytest.mark.asyncio
+    async def test_the_manager_accessor_is_the_single_resolution_point(self):
+        """Single-resolution-point pin (M-B2c).
+
+        The gate MUST consult ``manager.is_skill_evolution_lane_enabled``
+        — the accessor every other lane check uses. A second resolution
+        path (reading the kill-switch directly) is how the switch
+        semantics drift, and it is what this pin forbids.
+        """
+        manager = self._manager(True)
+        manager._skill_evolution_service = self._service()
+
+        await self._call_evolve(self._tools(manager))
+
+        manager.is_skill_evolution_lane_enabled.assert_called_once_with()
+
+    def test_the_tool_module_never_resolves_the_switch_itself(self):
+        """Single-resolution-point pin, static half (M-B2c).
+
+        The tool module must not import the dispatcher's switch
+        resolver nor read the environment directly: the accessor is the
+        ONLY resolution point.
+        """
+        import daemon.tools.skill_evolution_tools as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        for forbidden in (
+            "is_evolution_lane_enabled",
+            "SKILL_EVOLUTION_KILL_SWITCH_ENV",
+            "_resolve_evolution_enabled",
+            "os.environ",
+            "os.getenv",
+        ):
+            assert forbidden not in source, (
+                f"the tool module must not resolve the switch itself "
+                f"(found {forbidden!r})"
+            )
+
+    # -- the fail-closed legs ---------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_absent_accessor_refuses_fail_closed(self):
+        """An ABSENT accessor refuses — never admits."""
+        manager = self._manager(None)
+        service = self._service()
+        manager._skill_evolution_service = service
+
+        result = await self._call_evolve(self._tools(manager))
+
+        assert "NO skill-keeper job was created" in result
+        assert "fail-closed" in result
+        service.evolve_skill.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_raising_accessor_refuses_fail_closed(self):
+        """A RAISING probe refuses — never admits."""
+        manager = self._manager(False)
+        manager.is_skill_evolution_lane_enabled = MagicMock(
+            side_effect=RuntimeError("probe exploded")
+        )
+        service = self._service()
+        manager._skill_evolution_service = service
+
+        result = await self._call_evolve(self._tools(manager))
+
+        assert "NO skill-keeper job was created" in result
+        assert "fail-closed" in result
+        service.evolve_skill.assert_not_awaited()
+
+    # -- the Tier-2 carve-out ---------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_skill_analyze_is_not_gated(self):
+        """D1's deliberate carve-out: Tier-2 analysis stays UNGATED."""
+        manager = self._manager(False)
+        service = self._service()
+        manager._skill_evolution_service = service
+
+        tools = self._tools(manager)
+        result = await tools["skill_analyze"].ainvoke(
+            {"skill_id": "skill-under-test"}
+        )
+
+        service.analyze_skill.assert_awaited_once()
+        assert "NO skill-keeper job was created" not in result
