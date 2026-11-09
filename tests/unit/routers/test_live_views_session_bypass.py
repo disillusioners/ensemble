@@ -2822,3 +2822,57 @@ class TestForwardedConstraintK10:
             follow_redirects=False,
         )
         assert resp.status_code == 303
+
+    def test_k8_multi_vhost_strict_contract(
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
+    ):
+        """K8 — the MULTI-VHOST strict contract, disclosed and pinned
+        (loop-2 cleanup NOTE-1): a declared front requires EVERY
+        forwarded client-facing host to be DECLARED. A second vhost
+        of the same front (here ``other.example.com`` alongside the
+        declared ``views.example.com``) is neither vouched nor
+        anchored ⇒ 403, ZERO strikes, NO grant cookie. The remedy is
+        a declaration (audience / external base /
+        live_views.external_base_url) — never a client-side
+        workaround.
+
+        DISCRIMINATING: under ``mut_fwd_canary`` (the pre-FIX-10
+        blob, where the forwarded value anchors again) and under
+        ``mut_veto_missing`` (veto deleted, forwarded value anchors
+        again) the forwarded vhost WOULD anchor ⇒ 303 ⇒ this pin
+        fails there.
+        """
+        plaintext = _mint(in_memory_store, cipher)
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "other.example.com",
+                "Origin": "https://other.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+        assert GRANT_COOKIE_NAME not in resp.headers.get("set-cookie", "")
+        row = in_memory_store.get_row("planning", _VIEW_REL)
+        assert row is not None and row.failed_attempts == 0
+
+        # The DECLARING side stays green: a declared client-facing
+        # host of the same front grants (K3's shape, re-asserted here
+        # so the contract reads as a pair).
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "views.example.com",
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert f"{GRANT_COOKIE_NAME}=" in resp.headers.get("set-cookie", "")

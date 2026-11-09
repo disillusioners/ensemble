@@ -1202,6 +1202,15 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
     front the forwarded headers are ignored entirely (the FIX-1
     inertness — unchanged).
 
+    OPERATOR CONTRACT — MULTI-VHOST (disclosed, loop-2 cleanup
+    2026-11-09): a declared front requires EVERY forwarded
+    client-facing host to be DECLARED. A front that serves more than
+    one vhost rejects the undeclared ones (403 — the undeclared
+    vhost is neither vouched nor anchored) until the operator
+    declares each of them (``auth.allowed_origins`` /
+    ``auth.external_redirect_base`` / ``live_views.external_base_url``).
+    The remedy is a declaration, never a client-side workaround.
+
     LINEAGE: iteration-0 topology legs (b)/(c) → FIX-1 declaration
     gating → FIX-10 constraint → provable redundancy → REMOVAL.
 
