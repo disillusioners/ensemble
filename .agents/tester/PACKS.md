@@ -987,7 +987,7 @@ Last run: 2026-11-06 — PASS. Evidence: RESULTS/2026-11-06-ari-plane-tracking-f
 
 | Pack | Invocation (same fences) | Nodes | Last run |
 |---|---|---|---|
-| `metrics_query_provider` | `… -m pytest tests/unit/metrics/test_metrics_query_provider.py …` | **70** (registered 66; +4 via `61e5c6b30` +2, `b9d07dd4d` +2) | 2026-11-02 ✅ |
+| `metrics_query_provider` | `… -m pytest tests/unit/metrics/test_metrics_query_provider.py …` | **71** (registered 66; +4 via `61e5c6b30` +2, `b9d07dd4d` +2; **+1 via the skill-system-revival Phase-1 A2 leg** — the real-sampler gate-state pin was split into an enabled-case LIVE pin, a disabled-case `census_gated` pin, and an order pin whose fixture now seeds the corrected `gated` sense; re-measured `--collect-only` 2026-11-09) | 2026-11-09 ✅ |
 | `metrics_history_ring` | `… tests/unit/metrics/test_metrics_history_ring.py …` | **32** (registered 28; +4 via `61e5c6b30`) | 2026-11-02 ✅ |
 | `metrics_sampler` | `… tests/unit/metrics/test_metrics_sampler.py …` | **21** (registered 20; +1 via `61e5c6b30`) | 2026-11-02 ✅ |
 | `metrics_registry_narrowing` | `… tests/unit/metrics/test_metrics_registry_narrowing.py …` | 12 | 2026-11-02 ✅ |
