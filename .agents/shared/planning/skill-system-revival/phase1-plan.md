@@ -821,6 +821,12 @@ Options weighed: **(a)** a new `daemon/migrations/versions/*.sql` file; **(b)** 
 - decisive experiment (**verbatim in the pack**): normal **11P/1F** vs inline-monkey-patch **12P/0F** — same tree, same interpreter 3.14.7, same command, **ONLY the thread hop differs**
 - ⇒ this **confirms AND NOW EXPLAINS** pre-existing QUARANTINE.md rows **45, 56, 90** (their prior diagnosis was hypothesis-only)
 - At minimum also on the list: QUARANTINE.md rows **89, 76, 74, 82** (the `20260714_000001` SQLite-migration family — the same family as the 3 base reds). *After G lands, rows 45/56/90 are re-adjudicated and removed* (§11) — the list is re-versioned at that moment, and the removal is recorded in `PACKS.md`/the tester evidence.
+- **ADDITION (2026-11-09, workstream A / round-3 implementation evidence) — a SECOND StaticPool flake node:**
+  - node: `tests/integration/test_skill_evolution_e2e.py::TestSkillABTesting::test_ab_test_resolves_when_threshold_met`
+  - mechanism: **that file's OWN engine fixture** at `tests/integration/test_skill_evolution_e2e.py:91-102` — `create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)` — i.e. **exactly the class G fixed in `tests/services/conftest.py`** (DS-29: one shared DBAPI connection + the concurrent `asyncio.to_thread` resolve fan-out → `session.get` returns `None` → the loser is never deactivated). G's fix was applied to `tests/services/conftest.py` **only**; this file carries its own fixture and was never in G's scope.
+  - evidence: **isolated base 3-failed / 10 runs vs head 1-failed / 10 runs** (same command, same interpreter 3.14.7, same fence) — the **BASE rate is HIGHER than the head rate**, so the node is **pre-existing** and is NOT net-new for this lane. Failing assertion: `assert loser.is_active is False` (`assert True is False`).
+  - disposition: **QUARANTINE CANDIDATE** — classify it, never count it as net-new. The formal `.agents/tester/QUARANTINE.md` row is the **TESTER's** call (that file is the tester lane's, not this lane's); this entry records the classification + evidence so it is not silently dropped.
+  - what would remove it: applying G's file-backed / non-shared-pool fixture to `tests/integration/test_skill_evolution_e2e.py` (a test-harness fix, not a production change).
 
 **Evidence pack (durable, committed — the tester lane inherits it; do NOT re-create or duplicate it).**
 - Primary (raw of record, outside the repo): `/home/nea/skill-revival-base-evidence-20261109-0813Z/`
@@ -1137,7 +1143,7 @@ The runbook document itself (`phase2-runbook.md`) is written **after** implement
 | C-27 | G acceptance | `FULL-FILE-SET` | §11 Acceptance 1 | — | DS-37 | **Y** |
 | C-28 | net-new-reds protocol | `grep '^FAILED'` only; `intersection of the three red sets` over >=3 runs; NET-NEW MUST BE 0 | §13.2 | — | DS-26, DS-35 | **Y** |
 | C-29 | premise corrections | `P1-P4` | §3 | — | — | **Y** |
-| C-30 | I5 REST PATCH dual-column | `daemon/routers/skills.py:931-933` (the pop-and-translate site) / `M-I5-a` (the mutation leg) | §17 #31 | — (implementation-found, not a plan item) | DS-53 | **Y** |
+| C-30 | I5 REST PATCH dual-column | `daemon/routers/skills.py:931-933` (the pop-and-translate site) / `M-I5-a` (the mutation leg) | §17 item 31 (numbered list) — **NOT** `§17 #31`, which collides with §18 row 31 (`job_processor.py`, the D lane) | — (implementation-found, not a plan item) | DS-53, DS-56 | **Y** |
 | C-31 | E4 stale-deactivation brake | `ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED` (default 0 / off; absent=off; fully inert when off) | §9 E4 Acceptance 10 | — | DS-54 | **Y** |
 | C-32 | E4 R5 desync rule | `R5` (the normalize-only desync rule) | §9 E4.1 | — | DS-55 | **Y** |
 

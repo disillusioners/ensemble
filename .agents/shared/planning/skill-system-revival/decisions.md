@@ -810,4 +810,34 @@ viable) — that is a product decision on a public endpoint, not an implementati
 
 ---
 
+## DS-56 — Round-3 additions: the I5 REST citation form and the second StaticPool quarantine node
+
+**Context.** The consolidated review of rounds 2+3 raised two documentation defects that are pinned here so they
+cannot be re-dropped: (i) §17 now carries BOTH a numbered LIST whose item 31 is the I5 disclosure AND a change-list
+TABLE whose row 31 is `daemon/services/skill_job_processor.py` (the D lane's execution-refusal work) — a bare
+"§17 #31" therefore names two different things; (ii) a flake observed while exercising the workstream-A touched set
+(`tests/integration/test_skill_evolution_e2e.py::TestSkillABTesting::test_ab_test_resolves_when_threshold_met`, failing
+assertion `assert loser.is_active is False` → `assert True is False`) was classified in a chat report only, i.e. a
+**silently dropped classification** — the §13.2 quarantine list must carry it durably or the next reader will count it
+as net-new.
+
+**Ruling.** (i) Every citation of the I5 disclosure uses the unambiguous form **`§17 item 31 (numbered list)`** — the
+table row is cited as `§18 row 31`. (ii) The node is added to `phase1-plan.md` §13.2's **named quarantine list** as a
+**QUARANTINE CANDIDATE** with its mechanism (`tests/integration/test_skill_evolution_e2e.py:91-102` — that file's OWN
+`StaticPool` + `:memory:` engine fixture, i.e. the exact class G fixed in `tests/services/conftest.py`, never applied
+to this file) and its evidence (isolated **base 3-failed / 10 runs vs head 1-failed / 10 runs** — the base rate is
+HIGHER, so it is pre-existing). The formal `.agents/tester/QUARANTINE.md` row remains the **TESTER's** call.
+
+**Why.** (i) An ambiguous anchor is an unverifiable anchor: the §19.1 protocol greps the cited location, and "#31"
+would send a reader to the D lane's file row. (ii) The house rule is "base-proven debt is DISCLOSED, never hidden" —
+a classification that lives only in a chat message is not a disclosure. Adding it to the existing list adds **no
+§19.1 row** (it is a classification entry, not a gated criterion) — re-running the mechanical protocol after this
+edit reports an unchanged row count, `ALL_IDENTICAL=YES`.
+
+**What would reverse it.** (i) A §17 restructure that removes the numbering collision (then the plain anchor becomes
+unambiguous again). (ii) A test-harness fix that gives `tests/integration/test_skill_evolution_e2e.py` a file-backed,
+non-shared pool — the flake then disappears and the entry is removed with it.
+
+---
+
 *End of the decision log. Companion plan: `phase1-plan.md`.*
