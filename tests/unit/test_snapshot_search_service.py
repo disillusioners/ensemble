@@ -1414,6 +1414,15 @@ class TestStage3FailOpenContract:
             "the malformed-response site did not log — the malformed "
             "case was not handled where it belongs"
         )
+        # INTENTIONAL PIN: coupling to the absence of "LLM select failed"
+        # is the only way to prove local-vs-bubbled handling.
+        # Adjudication record: at BASE, a malformed response produced NO
+        # log line at all (the except at :410 never fired — malformed was
+        # a normal `return []`), so the fix STRICTLY ADDS observability
+        # for that class. The absence of an "LLM select failed" line
+        # therefore pins a TRUE, PRE-EXISTING property — it is not a
+        # regression the fix introduced. A reviewer's contrary claim was
+        # OVERTURNED on this evidence.
         assert not [
             r for r in caplog.records if "LLM select failed" in r.getMessage()
         ], (
@@ -1555,7 +1564,7 @@ class TestSelectorPromptCarriesTheFusedScore:
             expected[snap.id] = bm25 + best_cos
 
         pairs = re.findall(
-            r"id=(\S+)[^\n]*?stage2_score=([-+0-9.eE]+)", prompt
+            r"(?m)^- id=(\S+)\s.*stage2_score=([-+0-9.eE]+)", prompt
         )
         found = dict(pairs)
         assert found, (

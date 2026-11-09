@@ -20,7 +20,7 @@ Three-stage hybrid paralleling
    cost discipline). Beyond the cap the pipeline degrades
    gracefully to BM25+cosine+tag-overlap order.
 
-Graceful degradation (same shape as the skill side):
+Graceful degradation (same outcome as the skill side):
 
 * Stage 2 failure (embedding API down or per-candidate error) →
   fall back to BM25+tag-overlap order.
@@ -371,9 +371,10 @@ class SnapshotSearchService:
                 #
                 # SCORE-SCALE OPACITY NOTE (Wave 2a review fold-in):
                 # this fallback's scores live on the TAG-OVERLAP
-                # scale (bounded, ≈[0, 1]), NOT the happy path's
-                # composite scale (``bm25 + cosine``, unbounded —
-                # see ``_embedding_rerank``). The two branches are
+                # scale (integer count of overlapping tags as float,
+                # 0..N, unbounded), NOT the happy path's composite
+                # scale (``bm25 + cosine``, unbounded — see
+                # ``_embedding_rerank``). The two branches are
                 # therefore never comparable to each other, and the
                 # switch is silent by design — only the ORDER within
                 # one path is meaningful, and no score value ever
@@ -592,7 +593,7 @@ class SnapshotSearchService:
         BM25+cosine+tag-overlap order.
 
         The chat-completion prompt lists each candidate's
-        ``title`` + ``task_summary`` + ``tags`` + its
+        ``title`` + ``summary`` + ``tags`` + its
         ``stage2_score`` (NOT the full digest — too verbose for a
         short context window). The model returns JSON
         ``{"selected": [<id>, ...]}``; unmapped ids are dropped
@@ -601,8 +602,9 @@ class SnapshotSearchService:
         Args:
             query: User search text (echoed back to the LLM so
                 it can ground its relevance calls).
-            reranked: ``(snapshot, composite_score)`` pairs from
-                stage 2, in descending composite order.
+            reranked: ``(snapshot, stage2_score)`` pairs from
+                stage 2, in descending order (see the SCALE NOTE
+                below for the branch-dependent scale semantics).
             limit: Maximum snapshots to return.
             client: Optional pre-built OpenAI-compatible client
                 (test seam).
@@ -631,13 +633,16 @@ class SnapshotSearchService:
         #
         # SCALE NOTE (``stage2_score``): the value below is the
         # stage-2 score of the candidate.  On the happy path that is
-        # the composite ``bm25 + cosine`` (unbounded); on the
-        # stage-2 embedding-FAILURE path the WHOLE list is replaced
-        # with tag-overlap-scale values (bounded) — see the opacity
-        # note in ``search``.  The two scales are NOT comparable and
-        # are NOT normalized here.  Within ONE prompt every value
-        # comes from ONE branch (the fallback replaces the list
-        # wholesale), so intra-prompt comparison stays consistent.
+        # the composite ``bm25 + cosine`` (unbounded), or ``bm25 + 0.0``
+        # when a candidate lacks cached embeddings (where a rendered
+        # 0.0 cosine contribution means "no embedding cached", not
+        # "semantically dissimilar"); on the stage-2 embedding-FAILURE
+        # path the WHOLE list is replaced with tag-overlap-scale values
+        # (unbounded integer count) — see the opacity note in ``search``.
+        # The two scales are NOT comparable and are NOT normalized here.
+        # Within ONE prompt every value comes from ONE branch (the
+        # fallback replaces the list wholesale), so intra-prompt
+        # comparison stays consistent.
         lines: list[str] = []
         for snap, score in candidates:
             sid = getattr(snap, "id", "?")
