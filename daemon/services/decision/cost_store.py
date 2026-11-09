@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 
 from daemon.models.app_settings import AppSetting
 from daemon.services.db_offload import offload
+from daemon.services.decision.logging_safe import log_exception
 from daemon.services.decision.kill import KillStore
 from daemon.services.decision.overlay import CostAccumulator, CostTotals
 from daemon.services.decision.port import extract_snapshot_ids
@@ -49,6 +50,24 @@ class AppSettingCostAccumulator(CostAccumulator):
     404s it — operator-invisible and un-editable.
     Keyed by month ('YYYY-MM') so each calendar month naturally starts fresh.
     All DB operations run off the event loop via ``daemon.services.db_offload``.
+
+    **KNOWN LIMITATION — THE LOCK'S GRANULARITY (council round 4,
+    fold-now item 5; a documented limitation, NOT a defect).** The
+    read-modify-write is serialized by ONE process-level lock, and the
+    lock's granularity is the LEDGER ROW (one ``decision_cost_ledger_{period}``
+    row), while the LOCK ITSELF is process-wide: records for DIFFERENT
+    periods, and for different seams inside one period, serialize on the
+    SAME lock. The correctness argument is unaffected — the daemon is
+    single-process (``uvicorn`` ``workers=1``), so one lock is the full
+    argument, and the lock SPANS the whole read-modify-write (the
+    council's (e)/(a) pins and the mutation matrix establish the
+    behaviour). What the granularity costs is THROUGHPUT: the ceiling
+    binds on a month-to-date total that a burst of consults updates
+    serially. The limit is accepted deliberately: a per-row lock (or a
+    SQL-side ``UPDATE ... SET total = total + $1``) would trade a
+    correctness-critical invariant for a throughput gain the P1 traffic
+    profile does not need. Revisit only if the consult rate makes the
+    serialization measurable.
     """
 
     def __init__(
@@ -252,10 +271,12 @@ class SettingsServiceKillStore(KillStore):
                     return str(val) if val is not None else None
             except Exception as exc:
                 settings_error = exc
-                logger.warning(
-                    "[SettingsServiceKillStore] get_overrides failed for %s: %s",
-                    key,
+                log_exception(
+                    logger,
+                    logging.WARNING,
+                    "[SettingsServiceKillStore] get_overrides failed for %s",
                     exc,
+                    key,
                 )
         if self._fallback is not None:
             # The fallback store re-raises its own read errors (D2).

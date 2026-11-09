@@ -125,7 +125,10 @@ def test_the_manager_calls_the_factory() -> None:
     inline (e.g. ``DecisionOverlay(`` directly) would fail this pin.
     """
     source = (_repo_root() / "daemon" / "manager.py").read_text()
-    assert "build_decision_overlay(" in source
+    # B-2 — the manager calls the factory's DEFENSIVE entry (the decision
+    # config is OPTIONAL: an absent or invalid section leaves the module
+    # inert instead of raising out of the manager).
+    assert "build_decision_overlay_defensively(" in source
     # The manager must NOT construct the overlay or the client directly.
     assert "DecisionOverlay(" not in source
     assert "DecisionClient(" not in source

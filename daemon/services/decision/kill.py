@@ -79,6 +79,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from daemon.services.decision.logging_safe import log_exception
 from daemon.services.decision.types import DecisionStage
 
 logger = logging.getLogger(__name__)
@@ -524,11 +525,12 @@ class KillChannelResolver:
         try:
             stored = await self._store.get(key)
         except Exception as exc:  # noqa: BLE001 — read errors re-raise by design (D2)
-            logger.warning(
-                "decision switch store read failed for %s: %s: %s",
-                key,
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision switch store read failed for %s",
                 exc,
+                key,
             )
             # FAIL-CLOSED (L5): the state could not be resolved ⇒ the
             # switch is OFF and the state is UNREADABLE.
@@ -561,9 +563,10 @@ class KillChannelResolver:
             try:
                 rendered = renderer()
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "decision switch yaml tier failed (non-fatal): %s: %s",
-                    type(exc).__name__,
+                log_exception(
+                    logger,
+                    logging.WARNING,
+                    "decision switch yaml tier failed (non-fatal)",
                     exc,
                 )
                 return {}
@@ -577,9 +580,10 @@ class KillChannelResolver:
 
             rendered = seam_switch_tier(tier)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "decision switch yaml tier failed (non-fatal): %s: %s",
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision switch yaml tier failed (non-fatal)",
                 exc,
             )
             return {}
@@ -623,11 +627,12 @@ class KillChannelResolver:
             except Exception as exc:  # noqa: BLE001
                 # The write path swallows the store's raise; the seam
                 # resolves OFF (fail-closed).
-                logger.warning(
-                    "decision switch write failed for %s: %s: %s",
-                    key,
-                    type(exc).__name__,
+                log_exception(
+                    logger,
+                    logging.WARNING,
+                    "decision switch write failed for %s",
                     exc,
+                    key,
                 )
                 error = f"write failed: {type(exc).__name__}"
                 verified[key] = False
@@ -771,11 +776,12 @@ class KillChannelResolver:
         try:
             existing = await self._store.get(key)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "decision boot seed read failed for %s: %s: %s",
-                key,
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision boot seed read failed for %s",
                 exc,
+                key,
             )
             return SeedOutcome(key=key, seeded=False, reason="read failed")
         if existing is not None:
@@ -795,11 +801,12 @@ class KillChannelResolver:
         try:
             await self._write_value(key, value)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "decision boot seed write failed for %s: %s: %s",
-                key,
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision boot seed write failed for %s",
                 exc,
+                key,
             )
             return SeedOutcome(key=key, seeded=False, reason="write failed")
         self._drop_cache(None)
@@ -829,11 +836,12 @@ class KillChannelResolver:
             try:
                 raw = await self._store.get(key)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "decision switch re-verify read failed for %s: %s: %s",
-                    key,
-                    type(exc).__name__,
+                log_exception(
+                    logger,
+                    logging.WARNING,
+                    "decision switch re-verify read failed for %s",
                     exc,
+                    key,
                 )
                 outcomes.append(ReverifyOutcome(seam_id=seam_id, outcome="unreadable"))
                 continue

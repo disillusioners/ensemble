@@ -57,17 +57,35 @@ from daemon.services.decision import metrics as decision_metrics  # noqa: F401
 #: the P3 stage legitimately touched daemon/api.py.
 LANE_BASE = "644c2bfaaa48514ec7de79f7f4bcd078a700cdbe"
 
-#: The DECISION LANE's own daemon files (D4) — the set this pin must
-#: prove is FULLY covered by ``ALLOWED_DAEMON_DIFF``. A file in here
-#: that is NOT allowlisted is a LANE-CAUSED offender and REDS the pin.
+#: The DECISION LANE's own daemon files — BYTE-FROZEN, EXPLICIT.
+#:
+#: B-4 (council round 4) — this list and ``ALLOWED_DAEMON_DIFF`` are TWO
+#: INDEPENDENT literals. The previous shape DERIVED the allowlist from
+#: this list (``ALLOWED = (...) + tuple(sorted(LANE_OWNED))``), which
+#: made ``LANE_OWNED ⊆ ALLOWED`` true BY CONSTRUCTION: the pin's
+#: "no lane-caused offender" assertion could never fail, so it proved
+#: NOTHING. The conclusion ("no live escape among the lane's own
+#: files") was verified BY HAND by the tester; the PIN is what was
+#: tautological, and it is rewritten here so that it can fail.
+#:
+#: The pin now asserts the direction that CAN fail: every file in this
+#: list must be PRESENT in ``ALLOWED_DAEMON_DIFF`` (a lane file dropped
+#: from the allowlist REDs), and no changed daemon path may be neither
+#: allowlisted nor in the recorded pre-existing set (a NEW offender
+#: REDs). A file added to this list without an allowlist entry REDs —
+#: which is exactly the "future lane file that is not allowlisted"
+#: case the ruling names.
 LANE_OWNED_DAEMON = frozenset(
     {
+        "daemon/config.py",
+        "daemon/manager.py",
         "daemon/services/decision/__init__.py",
         "daemon/services/decision/client.py",
         "daemon/services/decision/config.py",
         "daemon/services/decision/cost_store.py",
         "daemon/services/decision/factory.py",
         "daemon/services/decision/kill.py",
+        "daemon/services/decision/logging_safe.py",
         "daemon/services/decision/metrics.py",
         "daemon/services/decision/overlay.py",
         "daemon/services/decision/port.py",
@@ -76,8 +94,6 @@ LANE_OWNED_DAEMON = frozenset(
         "daemon/services/decision/types.py",
         "daemon/services/settings_service.py",
         "daemon/services/snapshot_search_service.py",
-        "daemon/manager.py",
-        "daemon/config.py",
     }
 )
 
@@ -90,6 +106,10 @@ LANE_OWNED_DAEMON = frozenset(
 #: envelope, the constants) and the query router (the door) — and those
 #: are NOT producer modules: no producer may grow an observe/inc call,
 #: and every producer path stays outside this list.
+#:
+#: B4: the Decision Module P1 lane's OWN surfaces are listed HERE,
+#: EXPLICITLY and INDEPENDENTLY of ``LANE_OWNED_DAEMON`` — the two
+#: literals are compared by the pin, not merged by construction.
 ALLOWED_DAEMON_DIFF = (
     "daemon/persistence.py",
     "daemon/routers/metrics.py",
@@ -106,17 +126,152 @@ ALLOWED_DAEMON_DIFF = (
     "daemon/services/metrics_query/ring.py",
     "daemon/services/metrics_query/sampler.py",
     "daemon/services/metrics_query/selectors.py",
-    # The Decision Module P1 lane's OWN surfaces (2026-11-09) — the
-    # same shape as the query package's own surfaces above: a NEW
-    # lane's producers, not a change to somebody else's producer.
+    # ── The Decision Module P1 lane's OWN surfaces (2026-11-09) ──────
     # The lane registers its families through the WIRING registrar
     # (daemon/services/metrics_query/wiring/registry.py), so the AM-2
     # label-vocabulary enforcement and the pack's census apply to them
-    # exactly as they do to every other family.
-    #
-    # B20: these entries ARE ``LANE_OWNED_DAEMON`` — derived, so the
-    # two literals cannot drift (a new lane file joins both at once).
-) + tuple(sorted(LANE_OWNED_DAEMON))
+    # exactly as they do to every other family. Listed EXPLICITLY: this
+    # list is NOT derived from LANE_OWNED_DAEMON, so the pin can fail.
+    "daemon/config.py",
+    "daemon/manager.py",
+    "daemon/services/decision/__init__.py",
+    "daemon/services/decision/client.py",
+    "daemon/services/decision/config.py",
+    "daemon/services/decision/cost_store.py",
+    "daemon/services/decision/factory.py",
+    "daemon/services/decision/kill.py",
+    "daemon/services/decision/logging_safe.py",
+    "daemon/services/decision/metrics.py",
+    "daemon/services/decision/overlay.py",
+    "daemon/services/decision/port.py",
+    "daemon/services/decision/registry.py",
+    "daemon/services/decision/shadow.py",
+    "daemon/services/decision/types.py",
+    "daemon/services/settings_service.py",
+    "daemon/services/snapshot_search_service.py",
+)
+
+#: The daemon paths that were ALREADY offenders when this lane's base
+#: (``LANE_BASE``) was cut — other lanes' committed work, recorded
+#: EXPLICITLY so a NEW offender is distinguishable from the inherited
+#: set. The pin names the whole set in its failure message; it never
+#: silently absorbs an unknown path.
+PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
+    {
+        "daemon/__init__.py",
+        "daemon/_redact.py",
+        "daemon/auth/scopes.py",
+        "daemon/checkpoint_metrics.py",
+        "daemon/clients/plane_http_client.py",
+        "daemon/constants.py",
+        "daemon/loader.py",
+        "daemon/mcp/builtin_servers/base.py",
+        "daemon/mcp/builtin_servers/plane.py",
+        "daemon/migrations/versions/20261105_020500_create_anomaly_reports.sql",
+        "daemon/migrations/versions/20261105_020501_create_anomaly_clusters.sql",
+        "daemon/migrations/versions/20261105_102821_create_memoir_tables.sql",
+        "daemon/migrations/versions/20261107_110001_create_project_operating_knowledge.sql",
+        "daemon/migrations/versions/20261107_110002_create_project_operating_knowledge_embeddings.sql",
+        "daemon/migrations/versions/20261107_110003_add_pok_source_tier.sql",
+        "daemon/migrations/versions/20261107_122648_create_source_gc_archive_tables.sql",
+        "daemon/models/source.py",
+        "daemon/plane_workspace.py",
+        "daemon/registry.py",
+        "daemon/repositories/anomaly/__init__.py",
+        "daemon/repositories/anomaly/models.py",
+        "daemon/repositories/anomaly/repository.py",
+        "daemon/repositories/memoir/__init__.py",
+        "daemon/repositories/memoir/models.py",
+        "daemon/repositories/memoir/repository.py",
+        "daemon/repositories/memoir/seed.py",
+        "daemon/repositories/pok/__init__.py",
+        "daemon/repositories/pok/models.py",
+        "daemon/repositories/pok/repository.py",
+        "daemon/repositories/source/models.py",
+        "daemon/repositories/source/repository.py",
+        "daemon/routers/__init__.py",
+        "daemon/routers/live_views.py",
+        "daemon/routers/mcp_servers.py",
+        "daemon/routers/nest_reports.py",
+        "daemon/routers/schedules.py",
+        "daemon/routers/sources.py",
+        "daemon/services/anomaly_service.py",
+        "daemon/services/context_messages.py",
+        "daemon/services/instance_messaging.py",
+        "daemon/services/live_views.py",
+        "daemon/services/memoir_briefing.py",
+        "daemon/services/memoir_embedding_worker.py",
+        "daemon/services/memoir_retrieval.py",
+        "daemon/services/metrics_query/protocol.py",
+        "daemon/services/metrics_query/roster.py",
+        "daemon/services/plane_sync_service.py",
+        "daemon/services/pok_ari_seam.py",
+        "daemon/services/pok_injection.py",
+        "daemon/services/pok_service.py",
+        "daemon/services/project_skill_source/model.py",
+        "daemon/services/prompt_refresh.py",
+        "daemon/services/release_manifest.py",
+        "daemon/services/scheduling_service.py",
+        "daemon/services/skill_injection_service.py",
+        "daemon/services/skill_search_service.py",
+        "daemon/services/sources_gc_service.py",
+        "daemon/services/upgrade_journal_sweep.py",
+        "daemon/services/view_passcode_pages.py",
+        "daemon/sources/registry.py",
+        "daemon/tools/_tool_registry.py",
+        "daemon/tools/inner_soul.py",
+        "daemon/tools/instance.py",
+        "daemon/tools/job_queue.py",
+        "daemon/tools/mcp_tools.py",
+        "daemon/tools/memoir.py",
+        "daemon/tools/memoir_knob.py",
+        "daemon/tools/metrics_read.py",
+        "daemon/tools/nest_report.py",
+        "daemon/tools/nest_report_read.py",
+        "daemon/tools/plane_tools.py",
+        "daemon/tools/pok.py",
+        "daemon/tools/prompt_reload.py",
+        "daemon/tools/provenance.py",
+        "daemon/tools/scheduling.py",
+        "daemon/tools/skill_tools.py",
+        "daemon/tools/upgrade_journal.py",
+        "daemon/tools/upgrade_tools.py",
+    }
+)
+
+
+def _assert_lane_allowlist_complete(
+    owned: frozenset[str], allowlist: tuple[str, ...]
+) -> None:
+    """The B-4 assertion — every lane-owned file MUST be allowlisted.
+
+    This is the direction that CAN fail: the owned list and the
+    allowlist are independent literals, so dropping a lane file from the
+    allowlist (or adding one to the owned list) REDs here.
+    """
+    missing = sorted(path for path in owned if path not in allowlist)
+    assert missing == [], (
+        "LANE-CAUSED offenders — a decision-lane file missing from "
+        f"ALLOWED_DAEMON_DIFF: {missing}"
+    )
+
+
+def _assert_no_new_daemon_offenders(
+    daemon_changes: list[str],
+    allowlist: tuple[str, ...],
+    pre_existing: frozenset[str],
+) -> None:
+    """No changed daemon path may be neither allowlisted nor recorded."""
+    new_offenders = sorted(
+        path
+        for path in daemon_changes
+        if path not in allowlist and path not in pre_existing
+    )
+    assert new_offenders == [], (
+        f"{new_offenders} is a NEW offender: it is neither allowlisted nor in "
+        "the recorded pre-existing set."
+    )
+
 
 #: The wiring package's root (the new module).
 WIRING_ROOT = "daemon/services/metrics_query/wiring"
@@ -276,20 +431,45 @@ class TestNoProducerInstrumentation:
         daemon_changes = [
             path for path in changed if path.startswith("daemon/") and not path.startswith(WIRING_ROOT)
         ]
-        # D4 — FULL ENUMERATION (the original loop asserted the FIRST
-        # offender and stopped, so a lane-caused offender could hide
-        # behind a pre-existing one — the "0 offenders" misread).
-        offenders = [
-            path for path in daemon_changes if path not in ALLOWED_DAEMON_DIFF
-        ]
-        lane_offenders = [path for path in offenders if path in LANE_OWNED_DAEMON]
-        pre_existing = [path for path in offenders if path not in LANE_OWNED_DAEMON]
-        assert lane_offenders == [], (
-            "LANE-CAUSED offenders — a decision-lane file missing from "
-            f"ALLOWED_DAEMON_DIFF: {lane_offenders}\n"
-            f"(PRE-EXISTING offenders, other lanes, {len(pre_existing)}): "
-            f"{pre_existing}"
+        # B-4 — TWO INDEPENDENT ASSERTIONS, both able to fail:
+        #   (1) every lane-owned file is allowlisted (a lane file dropped
+        #       from the allowlist REDs);
+        #   (2) no changed daemon path is neither allowlisted nor in the
+        #       recorded pre-existing set (a NEW offender REDs).
+        _assert_lane_allowlist_complete(LANE_OWNED_DAEMON, ALLOWED_DAEMON_DIFF)
+        _assert_no_new_daemon_offenders(
+            daemon_changes, ALLOWED_DAEMON_DIFF, PRE_EXISTING_DAEMON_OFFENDERS
         )
+
+    def test_the_daemon_diff_pin_is_discriminating(self) -> None:
+        """B-4 — the rewritten pin CAN fail (in-memory proof).
+
+        The previous shape derived the allowlist from the owned list, so
+        its "no lane-caused offender" assertion was incapable of failing
+        — the conclusion it claimed was established by the tester's HAND
+        verification, not by the pin. This test proves the REWRITTEN pin
+        is discriminating: with one lane-owned file removed from the
+        allowlist (in memory — no git, no tree write), the assertion
+        RAISES. The same holds for a new, unrecorded offender.
+        """
+        import pytest as _pytest
+
+        doctored = tuple(
+            path
+            for path in ALLOWED_DAEMON_DIFF
+            if path != "daemon/services/decision/overlay.py"
+        )
+        with _pytest.raises(AssertionError) as excinfo:
+            _assert_lane_allowlist_complete(LANE_OWNED_DAEMON, doctored)
+        assert "daemon/services/decision/overlay.py" in str(excinfo.value)
+
+        with _pytest.raises(AssertionError) as excinfo:
+            _assert_no_new_daemon_offenders(
+                ["daemon/services/decision/brand_new_file.py"],
+                ALLOWED_DAEMON_DIFF,
+                PRE_EXISTING_DAEMON_OFFENDERS,
+            )
+        assert "brand_new_file.py" in str(excinfo.value)
 
     def test_the_wiring_package_never_touches_a_foreign_metric(self) -> None:
         """P4-M2 — an increment on somebody else's counter must go RED."""

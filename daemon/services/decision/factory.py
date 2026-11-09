@@ -32,7 +32,11 @@ from daemon.services.decision.overlay import DecisionOverlay
 from daemon.services.decision.registry import SeamRegistry
 from daemon.services.decision.shadow import ShadowWriter
 
-__all__ = ["DecisionOverlayParts", "build_decision_overlay"]
+__all__ = [
+    "DecisionOverlayParts",
+    "build_decision_overlay",
+    "build_decision_overlay_defensively",
+]
 
 
 def _raw_yaml_decision_block() -> Any:
@@ -144,3 +148,43 @@ def build_decision_overlay(
         accumulator=accumulator,
         overlay=overlay,
     )
+
+
+def build_decision_overlay_defensively(
+    *,
+    engine: Any,
+    config: Any,
+    settings_service_getter: Any = None,
+    board_service: Any = None,
+) -> DecisionOverlayParts | None:
+    """Build the overlay OR RETURN ``None`` — the module is OPTIONAL.
+
+    B-2 (council round 4). The decision configuration is an OPTIONAL
+    section of the house config: a config object that does not carry it
+    (a legacy config, a ``MagicMock(spec=Config)`` fixture — the
+    spec'd mock raises ``AttributeError`` on an unspecced attribute), a
+    section that cannot be read, or a section the factory cannot use,
+    must NOT raise out of the manager. The module is simply NOT
+    INSTALLED: the overlay is ``None``, the seam is OFF, the search
+    service gets no overlay — INERT. This is the doctrine (fail CLOSED
+    to inert, never fail the boot).
+
+    Returns:
+        The :class:`DecisionOverlayParts`, or ``None`` when the module
+        could not be installed.
+    """
+    try:
+        house = getattr(config, "decision", None)
+    except Exception:  # noqa: BLE001 — an unreadable section ⇒ inert
+        return None
+    if house is None:
+        return None
+    try:
+        return build_decision_overlay(
+            engine=engine,
+            house_decision_config=house,
+            settings_service_getter=settings_service_getter,
+            board_service=board_service,
+        )
+    except Exception:  # noqa: BLE001 — an invalid section ⇒ inert
+        return None

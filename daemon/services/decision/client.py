@@ -37,6 +37,7 @@ from typing import Any, Callable, Mapping
 
 import httpx
 
+from daemon.services.decision.logging_safe import log_exception
 from daemon.services.decision.config import DEFAULT_TIMEOUT_S, DecisionConfig
 from daemon.services.decision.types import (
     AnswerProbability,
@@ -190,9 +191,10 @@ class DecisionClient:
             if preflight is not None:
                 return preflight
         except Exception as exc:  # noqa: BLE001 — never raises
-            logger.debug(
-                "decision preflight fault (non-fatal): %s: %s",
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.DEBUG,
+                "decision preflight fault (non-fatal)",
                 exc,
             )
             return self._failure(
@@ -261,9 +263,10 @@ class DecisionClient:
                 reached_socket=True,
             )
         except Exception as exc:  # noqa: BLE001 — the client never raises
-            logger.debug(
-                "decision client internal fault (non-fatal): %s: %s",
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.DEBUG,
+                "decision client internal fault (non-fatal)",
                 exc,
             )
             return self._failure(

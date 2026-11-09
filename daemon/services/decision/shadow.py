@@ -36,6 +36,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from daemon.services.decision.logging_safe import log_exception
 from daemon.services.decision.types import (
     VERDICT_NO_OVERLAY,
 )
@@ -82,9 +83,18 @@ def sanitize_token(value: str) -> str:
     unchanged. Anything else (a title, a summary, a prompt fragment) is
     replaced by ``sha256:<16 hex>`` so the CONTENT never reaches the
     row.
+
+    An EMPTY value stays EMPTY (council round 4 — fold-now item 4):
+    hashing the empty string would mint the constant
+    ``sha256:e3b0c442...`` for "no value", which reads as a real token
+    in the row and hides the fact that the field was ABSENT. An empty
+    field is rendered as an empty field.
     """
     text = value.strip()
-    if text and len(text) <= 64 and not any(ch.isspace() for ch in text):
+    if not text:
+        # Absent stays absent — never the hash of the empty string.
+        return ""
+    if len(text) <= 64 and not any(ch.isspace() for ch in text):
         return text
     return "sha256:" + hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:16]
 
@@ -172,9 +182,10 @@ class ShadowWriter:
         except Exception as exc:  # noqa: BLE001 — the writer never fails a caller
             self._write_failures += 1
             self._count_write_failure()
-            logger.debug(
-                "decision shadow write failed (non-fatal): %s: %s",
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.DEBUG,
+                "decision shadow write failed (non-fatal)",
                 exc,
             )
             return False

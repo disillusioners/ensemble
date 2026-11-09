@@ -72,6 +72,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Deque, Mapping, Protocol, Sequence
 
+from daemon.services.decision.logging_safe import log_exception
 from daemon.services.decision import metrics
 from daemon.services.decision.config import (
     DEFAULT_COST_CEILING_USD,
@@ -499,11 +500,12 @@ class DecisionOverlay:
             try:
                 gate_ok = bool(record.gate_switch())
             except Exception as exc:  # noqa: BLE001 — an unreadable gate fails closed
-                logger.warning(
-                    "decision seam %s gate switch unreadable (fail-closed): %s: %s",
-                    seam_id,
-                    type(exc).__name__,
+                log_exception(
+                    logger,
+                    logging.WARNING,
+                    "decision seam %s gate switch unreadable (fail-closed)",
                     exc,
+                    seam_id,
                 )
                 return self._suppressed(
                     seam_id,
@@ -606,7 +608,10 @@ class DecisionOverlay:
         metrics.record_latency(seam_id, result.latency_s)
 
         # ── the cost accounting (L8) — BEFORE the outcome is applied ──
-        await self._account_cost(
+        # The returned value is the BILLED cost (the provider's reported
+        # cost, the operator-rate conversion, or the D3 floor) — the
+        # outward port reports THAT, not the reported cost alone.
+        billed_usd = await self._account_cost(
             seam_id,
             usd=result.cost_usd,
             tokens=result.total_tokens or 0,
@@ -655,7 +660,7 @@ class DecisionOverlay:
                 state=OverlayOutcome.FAILED.value,
                 failure_class=failure,
                 latency_s=result.latency_s,
-                cost_usd=result.cost_usd,
+                cost_usd=billed_usd,
             )
 
         # ── success ──────────────────────────────────────────────────
@@ -685,7 +690,7 @@ class DecisionOverlay:
                 state=OverlayOutcome.REFUSED.value,
                 verdict=result.verdict,
                 latency_s=result.latency_s,
-                cost_usd=result.cost_usd,
+                cost_usd=billed_usd,
             )
         if result.applied:
             return OverlayConsultResult(
@@ -694,14 +699,14 @@ class DecisionOverlay:
                 applied=True,
                 verdict=result.verdict,
                 latency_s=result.latency_s,
-                cost_usd=result.cost_usd,
+                cost_usd=billed_usd,
             )
         return OverlayConsultResult(
             outcome=heuristic_outcome,
             state=OverlayOutcome.LOGGED.value,
             verdict=result.verdict,
             latency_s=result.latency_s,
-            cost_usd=result.cost_usd,
+            cost_usd=billed_usd,
         )
 
     # ── the DETACHED entry ((c) — the shadow consult never blocks) ─────
@@ -799,9 +804,11 @@ class DecisionOverlay:
         except Exception as exc:  # noqa: BLE001 — point 7: contained
             # TYPE ONLY — never the message, never the payload, never
             # the context.
-            logger.warning(
-                "decision detached consult failed (contained): %s",
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision detached consult failed (contained)",
+                exc,
             )
         finally:
             # Point 2 — drop the strong reference when the task is
@@ -830,8 +837,17 @@ class DecisionOverlay:
         heuristic_outcome: Any,
         mode: str,
         state: Any,
-    ) -> None:
+    ) -> float:
         """Meter one attempt and evaluate the ceiling (L8 + D3).
+
+        Returns:
+            The BILLED cost of the attempt in USD — what the ledger was
+            actually charged (the provider's reported cost, the
+            operator-rate conversion, or the D3 floor). This is the
+            value the OUTWARD port reports as ``cost_usd``; the
+            provider-REPORTED cost alone would be a mismatch (a timeout
+            reports 0.0 upstream but bills the floor).
+        
 
         Four paths, in order:
 
@@ -872,12 +888,13 @@ class DecisionOverlay:
                 seam_id, usd=spend, tokens=int(tokens or 0)
             )
         except Exception as exc:  # noqa: BLE001 — never fail a caller
-            logger.warning(
-                "decision cost accounting failed (non-fatal): %s: %s",
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision cost accounting failed (non-fatal)",
                 exc,
             )
-            return
+            return 0.0
 
         if tokens > 0:
             # The token meter — always on, and the fail-safe when no USD
@@ -912,7 +929,7 @@ class DecisionOverlay:
                 month_to_date_usd=totals.month_to_date_usd,
                 ceiling_usd=ceiling_usd,
             )
-            return
+            return spend
 
         share = ceiling_usd * 0.5
         if totals.seam_month_to_date_usd >= share:
@@ -923,7 +940,7 @@ class DecisionOverlay:
                 month_to_date_usd=totals.seam_month_to_date_usd,
                 ceiling_usd=share,
             )
-            return
+            return spend
 
         token_ceiling = int(self._config.token_ceiling or DEFAULT_TOKEN_CEILING)
         if totals.month_to_date_tokens >= token_ceiling:
@@ -934,6 +951,10 @@ class DecisionOverlay:
                 month_to_date_usd=totals.month_to_date_usd,
                 ceiling_usd=ceiling_usd,
             )
+        # The BILLED cost of this attempt — what the outward port
+        # reports (the port's contract says "the billed cost", not the
+        # provider-reported cost).
+        return spend
 
     async def _trip(
         self,
@@ -977,9 +998,10 @@ class DecisionOverlay:
                 sink(payload)
                 notified = True
             except Exception as exc:  # noqa: BLE001 — a broken sink never fails a caller
-                logger.warning(
-                    "decision cost-trip notify sink failed (non-fatal): %s: %s",
-                    type(exc).__name__,
+                log_exception(
+                    logger,
+                    logging.WARNING,
+                    "decision cost-trip notify sink failed (non-fatal)",
                     exc,
                 )
         else:
@@ -1044,9 +1066,10 @@ class DecisionOverlay:
             )
             return True
         except Exception as exc:  # noqa: BLE001 — a broken board never fails a caller
-            logger.warning(
-                "decision cost-trip board item failed (non-fatal): %s: %s",
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision cost-trip board item failed (non-fatal)",
                 exc,
             )
             return False
@@ -1146,9 +1169,10 @@ class DecisionOverlay:
                 )
             )
         except Exception as exc:  # noqa: BLE001 — the writer never fails a caller
-            logger.debug(
-                "decision shadow row write failed (non-fatal): %s: %s",
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.DEBUG,
+                "decision shadow row write failed (non-fatal)",
                 exc,
             )
 

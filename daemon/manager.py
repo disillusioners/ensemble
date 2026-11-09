@@ -2873,16 +2873,44 @@ class InstanceManager:
         # D1: the PRODUCTION construction goes through the SINGLE named
         # factory, which stamps the configured predicate from the
         # EXPLICIT decision signal (resolve_values, not from_source).
-        from daemon.services.decision.factory import build_decision_overlay
+        #
+        # B-2 (council round 4) — the dependency is DEFENSIVE. The
+        # decision config is OPTIONAL: a config object without the
+        # section (a ``MagicMock(spec=Config)`` fixture, a legacy
+        # config, a partially-initialised config) must NOT raise out of
+        # the manager — the module is simply NOT INSTALLED (inert, seam
+        # OFF, no overlay in the search service). That is the doctrine:
+        # fail CLOSED to inert, never fail the boot.
+        self._decision_kill_resolver = None
+        self._decision_overlay = None
+        try:
+            from daemon.services.decision.factory import (
+                build_decision_overlay_defensively,
+            )
 
-        _dec = build_decision_overlay(
-            engine=self._engine,
-            house_decision_config=self.config.decision,
-            settings_service_getter=lambda: self._settings_service,
-            board_service=self._board_service,
-        )
-        self._decision_kill_resolver = _dec.kill_resolver
-        self._decision_overlay = _dec.overlay
+            _dec = build_decision_overlay_defensively(
+                engine=self._engine,
+                config=self.config,
+                settings_service_getter=lambda: self._settings_service,
+                board_service=self._board_service,
+            )
+            if _dec is not None:
+                self._decision_kill_resolver = _dec.kill_resolver
+                self._decision_overlay = _dec.overlay
+            else:
+                # B-2 — the decision config is absent or invalid: the
+                # module is NOT INSTALLED (inert, seam OFF). The
+                # manager does NOT raise.
+                logger.warning(
+                    "[DecisionModule] overlay NOT installed "
+                    "(no usable decision config — inert)"
+                )
+        except Exception as exc:  # noqa: BLE001 — the module is OPTIONAL
+            # TYPE only (B-1): the daemon log is agent-readable.
+            logger.warning(
+                "[DecisionModule] overlay NOT installed (non-fatal): %s",
+                type(exc).__name__,
+            )
         self._snapshot_search_service = SnapshotSearchService(
             snapshot_repo=self._snapshot_repo,
             embedding_service=self._snapshot_embedding_service,
@@ -4397,8 +4425,11 @@ class InstanceManager:
             try:
                 await self._decision_kill_resolver.reverify(["snapshot.l3.selection"])
             except Exception as exc:
+                # B-1 — the daemon log is AGENT-READABLE, so an
+                # interpolated exception is a content leak: TYPE only.
                 logger.warning(
-                    "[DecisionModule] boot reverify failed (non-fatal): %s", exc
+                    "[DecisionModule] boot reverify failed (non-fatal): %s",
+                    type(exc).__name__,
                 )
 
         # Eagerly warm tool metadata + tiktoken encoder in the background

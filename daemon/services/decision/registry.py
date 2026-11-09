@@ -37,6 +37,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from daemon.services.decision.logging_safe import log_exception
 from daemon.services.decision.client import ClientOutcome, DecisionClient
 from daemon.services.decision.config import DecisionConfig
 from daemon.services.decision.types import (
@@ -442,11 +443,12 @@ class SeamRegistry:
                 for value in question.option_values
             )
         except Exception as exc:  # noqa: BLE001 — the fence owns this
-            logger.warning(
-                "decision seam %s build_input failed (fail-open): %s: %s",
-                seam_id,
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision seam %s build_input failed (fail-open)",
                 exc,
+                seam_id,
             )
             return FencedResult(
                 outcome=heuristic_outcome,
@@ -461,11 +463,12 @@ class SeamRegistry:
                 timeout_s=record.timeout_s,
             )
         except Exception as exc:  # noqa: BLE001 — the client never raises
-            logger.warning(
-                "decision seam %s consult failed (fail-open): %s: %s",
-                seam_id,
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision seam %s consult failed (fail-open)",
                 exc,
+                seam_id,
             )
             return FencedResult(
                 outcome=heuristic_outcome,
@@ -530,11 +533,12 @@ class SeamRegistry:
         try:
             effective = record.apply(heuristic_outcome, answer)
         except Exception as exc:  # noqa: BLE001 — the fence owns this
-            logger.warning(
-                "decision seam %s apply failed (fail-open): %s: %s",
-                seam_id,
-                type(exc).__name__,
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision seam %s apply failed (fail-open)",
                 exc,
+                seam_id,
             )
             return FencedResult(
                 outcome=heuristic_outcome,
@@ -647,11 +651,12 @@ class SeamRegistry:
             try:
                 return VERDICT_AGREE if record.compare(heuristic_outcome, answer) else VERDICT_DISAGREE
             except Exception as exc:  # noqa: BLE001 — observability never breaks a caller
-                logger.debug(
-                    "decision seam %s comparator failed (non-fatal): %s: %s",
-                    record.seam_id,
-                    type(exc).__name__,
+                log_exception(
+                    logger,
+                    logging.DEBUG,
+                    "decision seam %s comparator failed (non-fatal)",
                     exc,
+                    record.seam_id,
                 )
                 return VERDICT_NO_OVERLAY
         heuristic_ids = _as_id_set(heuristic_outcome)

@@ -62,6 +62,7 @@ import logging
 from typing import Callable, Iterable, Mapping
 
 from daemon import checkpoint_metrics as cm
+from daemon.services.decision.logging_safe import log_exception
 from daemon.services.decision.types import FailureClass, SuppressionReason
 from daemon.services.metrics_query.wiring import registry as wiring_registry
 
@@ -460,11 +461,12 @@ def _safe(fn: Callable[[], None], *, what: str) -> None:
     try:
         fn()
     except Exception as exc:  # pragma: no cover — defensive
-        logger.debug(
-            "decision metric %s failed (non-fatal): %s: %s",
-            what,
-            type(exc).__name__,
+        log_exception(
+            logger,
+            logging.DEBUG,
+            "decision metric %s failed (non-fatal)",
             exc,
+            what,
         )
 
 
