@@ -951,8 +951,16 @@ def _www_equivalent(host: str) -> str:
     """Fold the ``www.`` apex equivalence: ``www.<domain>`` ≡ ``<domain>``.
 
     Comparison-side normalization only — never stored. A bare ``www``
-    (degenerate) stays ``www``.
+    (degenerate) stays ``www``. FIX-10: the trailing-dot/case
+    normalization (:func:`_views_host_key`) runs FIRST, so
+    ``www.example.com.`` folds exactly like ``www.example.com``.
     """
+    return _www_strip(_views_host_key(host))
+
+
+def _www_strip(host: str) -> str:
+    """Strip ONE leading ``www.`` label from an already-normalized
+    key."""
     if host.startswith("www.") and len(host) > len("www."):
         return host[len("www."):]
     return host
@@ -1010,6 +1018,24 @@ def _host_matches(
     return o_port == t_port
 
 
+def _views_host_key(host: str) -> str:
+    """The comparison KEY for a host name: lowercased + trailing-dot
+    stripped (the FQDN root-dot form ``example.com.`` ≡
+    ``example.com``).
+
+    FIX-10 (2026-11-09): applied on BOTH sides of every name
+    comparison — the operator-declared set, the forwarded-value
+    agreement check, and the Origin comparison — so a trailing dot
+    (or case) can neither bypass the agreement check nor split one
+    host into two spellings. Normalization only; never stored in
+    an anchor as-is.
+    """
+    key = (host or "").strip().lower()
+    if key.endswith(".") and len(key) > 1:
+        key = key[:-1]
+    return key
+
+
 def _views_exact_loopback_name(host_name: str) -> bool:
     """EXACT loopback names only — the C-2b mirror for the views carve.
 
@@ -1025,6 +1051,45 @@ def _views_exact_loopback_name(host_name: str) -> bool:
     if h.startswith("[") and h.endswith("]"):
         h = h[1:-1]
     return h in ("localhost", "127.0.0.1", "::1")
+
+
+def _views_forwarded_values(request: Request) -> list[tuple[str, str]]:
+    """The forwarded-derived client-facing host values carried by the
+    request — FIX-10 (2026-11-09).
+
+    Two sources, each with FIRST-value semantics:
+    ``("x-forwarded-host", <first comma-list value>)`` and
+    ``("forwarded", <first element's host= parameter>)``. Each entry
+    is ``(kind, raw_value)``; an absent header contributes NOTHING.
+    These values NEVER enter the anchor set (the FIX-10 deletion);
+    they are read only to CHECK AGREEMENT with the operator-declared
+    anchor set — a client value may veto its own request but may
+    never vouch for it.
+    """
+    values: list[tuple[str, str]] = []
+    headers = request.headers
+    xfh = headers.get("x-forwarded-host")
+    if xfh:
+        first_value = xfh.split(",")[0].strip()
+        if first_value:
+            values.append(("x-forwarded-host", first_value))
+    forwarded = headers.get("forwarded")
+    if forwarded:
+        first_element = forwarded.split(",")[0]
+        for piece in first_element.split(";"):
+            piece = piece.strip()
+            if piece.lower().startswith("host="):
+                raw_value = piece[len("host="):].strip()
+                if (
+                    len(raw_value) >= 2
+                    and raw_value.startswith('"')
+                    and raw_value.endswith('"')
+                ):
+                    raw_value = raw_value[1:-1]
+                if raw_value:
+                    values.append(("forwarded", raw_value))
+                break
+    return values
 
 
 def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
@@ -1095,6 +1160,51 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
     header, and the set must be self-sufficient where the audience
     leg is absent (auth-OFF has no auth config to absorb through).
 
+    FIX-10 (2026-11-09 — same-class bypass closure, anomaly 6c543ecc):
+    legs (b)/(c) are DELETED. The tester probe (cell-(ii) probe 5,
+    4/5 fail) showed that in a declared front, a forged
+    ``X-Forwarded-Host: evil.example`` + ``Origin:
+    https://evil.example`` self-matched and minted a full view
+    grant: leg (b) trusted the first forwarded value
+    UNCONSTRAINED — a client value became its own anchor.
+
+    REDUNDANCY PROBE (required analysis before the mechanism
+    choice): with the constraint applied, could a forwarded value
+    ever contribute an anchor legs (d)/(e) do not already carry?
+    The probe diffed the trust set with/without forwarded headers
+    across every declared fixture shape:
+    * auth-fallback declared — a NON-matching forwarded value
+      contributed a NEW name (``views.example.com``) ⇒ legs (b)/(c)
+      were NOT redundant in the vulnerable code (that IS the
+      exploit);
+    * service-declared / audience-only — already redundant;
+    * THE CORNER — a port-bearing declared base
+      (``https://views.example.com:8443``) plus a PORTLESS
+      forwarded value contributed ``('views.example.com', None)``,
+      which (d)/(e) do NOT carry ⇒ it widened acceptance to ANY
+      port for that name (an Origin on :9999 would pass where the
+      declared anchor alone rejects it). Admitting a matching
+      forwarded value by contributing the DECLARED anchor (never
+      the forwarded tuple) closes that corner; with that, legs
+      (b)/(c) are provable NO-OPS ⇒ they are DELETED.
+
+    THE CONSTRAINT THAT REMAINS (the veto, not the anchor): in a
+    DECLARED front, every forwarded-derived value present on the
+    request (first ``X-Forwarded-Host`` value; first RFC 7239
+    ``Forwarded`` element's ``host=``) MUST AGREE with the
+    operator-DECLARED anchor set (audience ∪ declared bases) under
+    the same match discipline (case-insensitive, trailing-dot
+    normalized both sides, ports via :func:`_host_matches` /
+    :func:`_authority_host_port`). A forwarded value that DISAGREES
+    ⇒ the request is NOT vouched by anything ⇒ the anchor set is
+    EMPTY ⇒ any real Origin rejects (403). The client value may VETO
+    its own request; it can never VOUCH for it. In an UNDECLARED
+    front the forwarded headers are ignored entirely (the FIX-1
+    inertness — unchanged).
+
+    LINEAGE: iteration-0 topology legs (b)/(c) → FIX-1 declaration
+    gating → FIX-10 constraint → provable redundancy → REMOVAL.
+
     DEGRADATION CONTRACT (G2.7/FIX-9): with NO vouching configured
     (no audience, no declared base) and a non-loopback peer, a
     same-origin POST carrying a REAL Origin now REJECTS — the
@@ -1163,13 +1273,19 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
 
     # G2.7/FIX-9 vouch names: the audience names ∪ the declared-base
     # hosts. Exact lowercased NAME membership only (auth-lane mirror).
-    vouched_names: set[str] = set(audience_hosts)
+    # FIX-10: the vouch universe is keyed by the NORMALIZED name
+    # (lowercase, trailing dot stripped) — the same key the
+    # forwarded-agreement check and the Origin comparison use, so a
+    # spelling variant can neither split the set nor slip past it.
+    vouched_names: set[str] = {
+        _views_host_key(audience_host) for audience_host in audience_hosts
+    }
     declared_anchors: list[tuple[str, int | None]] = []
     for declared_base_value in declared_bases:
         declared_anchor = _declared_base_anchor(declared_base_value)
         if declared_anchor is not None:
             declared_anchors.append(declared_anchor)
-            vouched_names.add(declared_anchor[0])
+            vouched_names.add(_views_host_key(declared_anchor[0]))
 
     # Loopback carve — peer-gated (sound by construction: a remote
     # rebinding victim never connects FROM loopback) + exact-name
@@ -1185,7 +1301,7 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
         parsed = _authority_host_port(host_header)
         if parsed is not None:
             host_name = parsed[0]
-            host_vouched = host_name in vouched_names or (
+            host_vouched = _views_host_key(host_name) in vouched_names or (
                 peer_loopback and _views_exact_loopback_name(host_name)
             )
             if host_vouched:
@@ -1200,42 +1316,44 @@ def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
         # has no auth config for ``parse_operator_audience`` to
         # absorb the base through). Each declared value parses via
         # :func:`_declared_base_anchor`; unparseable declarations
-        # contribute nothing (FIX-3 fail-closed discipline). This is
-        # an ADDITION to legs (a)/(d), never a replacement — legs
-        # (b)/(c) stay boolean-licensed by the declaration (the
-        # reviewed adjudication: the forwarded-original-host
-        # topology the R2 ruling asked to honor; C-2c house
-        # precedent shape).
+        # contribute nothing (FIX-3 fail-closed discipline).
         for declared_anchor in declared_anchors:
             trusted.append(declared_anchor)
-        xfh = headers.get("x-forwarded-host")
-        if xfh:
-            first_value = xfh.split(",")[0].strip()
-            if first_value:
-                parsed = _authority_host_port(first_value)
-                if parsed is not None:
-                    trusted.append(parsed)
 
-        forwarded = headers.get("forwarded")
-        if forwarded:
-            # RFC 7239 first element only (the element closest to the
-            # client-facing edge); ``host=`` is case-insensitive and its
-            # value may be quoted.
-            first_element = forwarded.split(",")[0]
-            for piece in first_element.split(";"):
-                piece = piece.strip()
-                if piece.lower().startswith("host="):
-                    raw_value = piece[len("host="):].strip()
-                    if (
-                        len(raw_value) >= 2
-                        and raw_value.startswith('"')
-                        and raw_value.endswith('"')
-                    ):
-                        raw_value = raw_value[1:-1]
-                    parsed = _authority_host_port(raw_value)
-                    if parsed is not None:
-                        trusted.append(parsed)
-                    break
+        # ── FIX-10: the forwarded-AGREEMENT constraint (the veto,
+        # not the anchor) ────────────────────────────────────────
+        # In a DECLARED front, every forwarded-derived value on the
+        # request MUST agree with the operator-declared anchor set
+        # (audience ∪ declared bases) under the same match discipline
+        # (case-insensitive, trailing-dot normalized both sides,
+        # ports via :func:`_host_matches`). A value that DISAGREES
+        # ⇒ the request is not vouched by anything ⇒ the anchor set
+        # is EMPTY ⇒ any real Origin rejects (403). The client
+        # value may VETO its own request; it can never VOUCH for it.
+        # (The vulnerable shape — the forwarded value ANCHORING —
+        # is DELETED: the probe proved legs (b)/(c) are no-ops once
+        # a matching forwarded value contributes the DECLARED anchor
+        # instead of its own tuple.)
+        declared_anchor_set = list(declared_anchors) + [
+            _authority_host_port(audience_host)
+            for audience_host in sorted(audience_hosts)
+        ]
+        declared_anchor_set = [
+            anchor for anchor in declared_anchor_set if anchor is not None
+        ]
+        for _kind, forwarded_value in _views_forwarded_values(request):
+            forwarded_parsed = _authority_host_port(forwarded_value)
+            if forwarded_parsed is None:
+                # Unparseable forwarded value in a declared front —
+                # it cannot be checked against the declared set, so
+                # it cannot agree with it ⇒ not vouched (fail
+                # closed, the FIX-3 discipline).
+                return []
+            if not any(
+                _host_matches(forwarded_parsed, declared_anchor)
+                for declared_anchor in declared_anchor_set
+            ):
+                return []
 
     # ── leg (d): the operator audience hosts (parse hoisted above —
     # G2.7/FIX-9 needs it for the Host-vouch check before this

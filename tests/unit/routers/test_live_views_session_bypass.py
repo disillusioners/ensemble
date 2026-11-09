@@ -478,6 +478,33 @@ def proxy_front_client(
     return TestClient(app, follow_redirects=False)
 
 @pytest.fixture
+def agreeing_front_client(
+    filesystem_root_dir: pathlib.Path,
+    passcode_service: ViewPasscodeService,
+    cipher: ViewPasscodeCipher,
+    limiter: VerifyRateLimiter,
+    auth_stub: _StubAuthService,
+) -> TestClient:
+    """FIX-10 declared front whose DECLARED host AGREES with the
+    forwarded client-facing host.
+
+    FIX-10 INVERTS the FIX-6 severance deliberately: the forwarded
+    value no longer ANCHORS (it is deleted), so there is no leg-(b)
+    contribution left to keep distinct from the audience leg — and
+    the operator's declared front must AGREE with the forwarded
+    client-facing host (a disagreement vetoes the request). Hence
+    the declared base here names the SAME host the topology
+    forwards."""
+    cfg = on_auth_config()
+    cfg.live_view_external_base_url_fallback = "https://views.example.com"
+    app = _build_app(
+        filesystem_root_dir, passcode_service, cipher, limiter,
+        auth_stub=auth_stub, auth_config=cfg,
+    )
+    return TestClient(app, follow_redirects=False)
+
+
+@pytest.fixture
 def mw_client(
     filesystem_root_dir: pathlib.Path,
     passcode_service: ViewPasscodeService,
@@ -950,15 +977,17 @@ class TestOriginGateNavigationCorrect:
         assert resp.json() == {"error": "forbidden"}
 
     def test_x_forwarded_host_first_value_trusted(
-        self, proxy_front_client: TestClient, in_memory_store, cipher
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
     ):
         """R2 leg (b) — behind a fronting proxy the browser-facing
         host rides XFH, not the internal Host. FIX-1: the leg is
-        active ONLY under a declared proxy front, so this runs on
-        the proxy_front_client (the undeclared state is pinned
-        negative by TestSelfAnchoringTrustGating)."""
+        active ONLY under a declared proxy front; FIX-10: the leg no
+        longer ANCHORS — the declared front must AGREE with the
+        forwarded value, and the GRANT comes from the DECLARED
+        anchor (the forwarded value contributes nothing)."""
         plaintext = _mint(in_memory_store, cipher)
-        resp = proxy_front_client.post(
+        resp = agreeing_front_client.post(
             _VIEW_PATH,
             data={"code": plaintext},
             headers={
@@ -972,12 +1001,14 @@ class TestOriginGateNavigationCorrect:
         assert resp.status_code == 303
 
     def test_rfc7239_forwarded_host_trusted(
-        self, proxy_front_client: TestClient, in_memory_store, cipher
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
     ):
         """R2 leg (c) — the standardized Forwarded spelling (FIX-1:
-        declared-proxy-front state)."""
+        declared-proxy-front state; FIX-10: agreement + declared
+        anchor)."""
         plaintext = _mint(in_memory_store, cipher)
-        resp = proxy_front_client.post(
+        resp = agreeing_front_client.post(
             _VIEW_PATH,
             data={"code": plaintext},
             headers={
@@ -1147,15 +1178,18 @@ class TestOriginGateUnit:
         assert _same_host_origin_check(request) is False
 
     def test_forwarded_host_first_element_only(self):
-        """Only the FIRST Forwarded element's host= is trusted — the
-        client-appendable later elements never join the anchor set.
+        """Only the FIRST Forwarded element's host= is considered —
+        the client-appendable later elements never join the anchor
+        set (FIX-10: the declared front must AGREE with the first
+        element; the later element is ignored, and no forwarded
+        value anchors anything).
         (FIX-1: the leg requires a declared proxy front, so this
         unit test constructs one via the lifespan-writer shape.)"""
         declared = on_auth_config()
-        # FIX-6: declared host ≠ the Forwarded host under test —
-        # ``edge.example.com`` must enter ONLY via the Forwarded leg.
+        # FIX-10 agreement: the declared front names the SAME host the
+        # Forwarded first element carries.
         declared.live_view_external_base_url_fallback = (
-            "https://elsewhere.example"
+            "https://edge.example.com"
         )
         request = _mock_request(
             {
@@ -1166,8 +1200,8 @@ class TestOriginGateUnit:
             auth_config=declared,
         )
         hosts = {h for h, _p in _views_trusted_hosts(request)}
-        assert "edge.example.com" in hosts
-        assert "evil.example.com" not in hosts
+        assert "edge.example.com" in hosts  # via the DECLARED anchor
+        assert "evil.example.com" not in hosts  # later element ignored
 
 class TestSecondDeclarationSource:
     """FIX-7 (NEW-ISSUE-1) — auth-OFF behind a Host-rewriting proxy
@@ -1535,13 +1569,15 @@ class TestSelfAnchoringTrustGating:
         assert row.failed_attempts == 0
 
     def test_xfh_honored_when_proxy_front_declared(
-        self, proxy_front_client: TestClient,
+        self, agreeing_front_client: TestClient,
         in_memory_store, cipher,
     ):
-        """SET-state: the operator's declared external base makes the
-        forwarded spellings authoritative — leg (b) works as before."""
+        """SET-state (FIX-10 re-home): the declared front AGREES with
+        the forwarded client-facing host; the GRANT comes from the
+        DECLARED anchor (the forwarded value contributes nothing —
+        legs (b)/(c) are deleted)."""
         plaintext = _mint(in_memory_store, cipher)
-        resp = proxy_front_client.post(
+        resp = agreeing_front_client.post(
             _VIEW_PATH,
             data={"code": plaintext},
             headers={
@@ -1555,12 +1591,13 @@ class TestSelfAnchoringTrustGating:
         assert resp.status_code == 303
 
     def test_forwarded_honored_when_proxy_front_declared(
-        self, proxy_front_client: TestClient,
+        self, agreeing_front_client: TestClient,
         in_memory_store, cipher,
     ):
-        """SET-state leg (c)."""
+        """SET-state leg (c) (FIX-10 re-home — agreement + declared
+        anchor)."""
         plaintext = _mint(in_memory_store, cipher)
-        resp = proxy_front_client.post(
+        resp = agreeing_front_client.post(
             _VIEW_PATH,
             data={"code": plaintext},
             headers={
@@ -1574,8 +1611,18 @@ class TestSelfAnchoringTrustGating:
         assert resp.status_code == 303
 
     def test_trusted_hosts_unit_unset_vs_set(self):
-        """Function-level pin: the forwarded anchors enter the trust
-        set ONLY under a declared proxy front."""
+        """Function-level pin of the FIX-10 contract:
+
+        * UNSET declaration ⇒ the forwarded headers are INERT (they
+          neither anchor nor veto — the FIX-1 undeclared posture);
+        * SET declaration + a forwarded value that DISAGREES with the
+          declared set ⇒ the anchor set is EMPTY (the veto — the
+          request is not vouched by anything);
+        * SET declaration + a forwarded value that AGREES ⇒ the
+          trust set is IDENTICAL to the same request WITHOUT the
+          forwarded headers — the provable no-op (legs (b)/(c) are
+          deleted; the forwarded value contributes nothing).
+        """
         common = {
             "Host": "internal-svc:8079",
             "X-Forwarded-Host": "views.example.com",
@@ -1597,18 +1644,38 @@ class TestSelfAnchoringTrustGating:
         assert "internal-svc" not in hosts_unset
         assert "testserver" in hosts_unset  # leg (d) audience intact
 
-        set_cfg = on_auth_config()
-        # FIX-6: declared host ≠ forwarded hosts under test — each
-        # forwarded anchor must enter ONLY via its own leg.
-        set_cfg.live_view_external_base_url_fallback = (
+        # SET state, CONTRADICTING forwarded value (the declared front
+        # is elsewhere.example; the request claims views.example.com /
+        # fwd.example.com) ⇒ the veto: nothing vouches ⇒ EMPTY set.
+        contradict_cfg = on_auth_config()
+        contradict_cfg.live_view_external_base_url_fallback = (
             "https://elsewhere.example"
         )
-        hosts_set = {
-            h for h, _p in _views_trusted_hosts(_mock_request(common, set_cfg))
+        hosts_contradict = _views_trusted_hosts(
+            _mock_request(common, contradict_cfg)
+        )
+        assert hosts_contradict == []
+
+        # SET state, AGREEING forwarded value ⇒ the declared anchor
+        # carries the trust; the forwarded headers change NOTHING.
+        agree_cfg = on_auth_config()
+        agree_cfg.live_view_external_base_url_fallback = (
+            "https://views.example.com"
+        )
+        agree_headers = {
+            "Host": "internal-svc:8079",
+            "X-Forwarded-Host": "views.example.com",
         }
-        assert "views.example.com" in hosts_set  # via leg (b) ONLY
-        assert "fwd.example.com" in hosts_set  # via leg (c) ONLY
-        assert "elsewhere.example" in hosts_set  # via leg (d)
+        with_forwarded = _views_trusted_hosts(
+            _mock_request(agree_headers, agree_cfg)
+        )
+        without_forwarded = _views_trusted_hosts(
+            _mock_request({"Host": "internal-svc:8079"}, agree_cfg)
+        )
+        assert with_forwarded == without_forwarded  # provable no-op
+        hosts_agree = {h for h, _p in with_forwarded}
+        assert "views.example.com" in hosts_agree  # via the DECLARED anchor
+        assert "fwd.example.com" not in hosts_agree
 
 class TestWwwPrefixAbuseMatrix:
     """T1 — the www-equivalence folds ONE ``www.`` label and is
@@ -2485,6 +2552,271 @@ class TestHostVouchingG27:
             data={"code": plaintext_null},
             headers={
                 "Origin": "null",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+
+# ─────────────────────────────────────────────────────────────────
+# FIX-10 — forwarded anchors constrained to the declared set
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestForwardedConstraintK10:
+    """FIX-10 (anomaly 6c543ecc) — the same-class bypass closure.
+
+    Tester cell-(ii) probe 5 (4/5 fail): in a DECLARED front, leg
+    (b) trusted the first ``X-Forwarded-Host`` value UNCONSTRAINED
+    ⇒ a direct-to-daemon forged ``XFH: evil.example`` + ``Origin:
+    https://evil.example`` self-matched and minted a full
+    view_grant. Leg (c) had the same hole by symmetry.
+
+    FIX-10: legs (b)/(c) are DELETED (provable no-ops once a
+    matching forwarded value contributes the DECLARED anchor). What
+    remains is the VETO: in a declared front, every forwarded-derived
+    value present on the request must AGREE with the declared anchor
+    set; a disagreement leaves the request unvouched (empty anchor
+    set ⇒ any real Origin rejects). The client value may veto its
+    own request; it can never vouch for it.
+    """
+
+    def test_k1_forged_xfh_rejected_zero_strikes(
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
+    ):
+        """K1 — THE tester probe shape: declared front + forged
+        ``XFH: evil.example`` + matching evil Origin ⇒ 403, ZERO
+        strikes consumed (the gate precedes the compare)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "evil.example",
+                "Origin": "https://evil.example",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+        row = in_memory_store.get_row("planning", _VIEW_REL)
+        assert row is not None and row.failed_attempts == 0
+
+    def test_k2_mismatched_forwarded_value_vetoes_declared_origin(
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
+    ):
+        """K2 — a mismatching forwarded value ALONE vetoes the
+        request: even the DECLARED-matching Origin is rejected (the
+        request contradicts the declared front ⇒ nothing vouches
+        for it)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "evil.example",
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+        row = in_memory_store.get_row("planning", _VIEW_REL)
+        assert row.failed_attempts == 0
+
+    def test_k3_matching_forwarded_value_grants_via_declared_anchor(
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
+    ):
+        """K3 — the legit forwarded topology still works: the
+        declared front AGREES with the forwarded client-facing host
+        ⇒ the DECLARED anchor grants (303)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "views.example.com, internal:8079",
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert f"{GRANT_COOKIE_NAME}=" in resp.headers.get("set-cookie", "")
+
+    def test_k4_multi_value_first_value_rules(
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
+    ):
+        """K4 — first-value semantics on a comma list:
+        ``evil.example, views.example.com`` ⇒ the FIRST value rules
+        ⇒ it contradicts the declared front ⇒ 403;
+        ``views.example.com, evil.example`` ⇒ the first agrees ⇒
+        the request proceeds, and the APPENDED value is ignored (it
+        never anchors ⇒ an evil Origin on the same request still
+        rejects)."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "evil.example, views.example.com",
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "views.example.com, evil.example",
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": "views.example.com, evil.example",
+                "Origin": "https://evil.example",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+    def test_k5_rfc7239_forwarded_equivalents(
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
+    ):
+        """K5 — the RFC 7239 equivalents of K1–K3."""
+        plaintext = _mint(in_memory_store, cipher)
+
+        # K1-equivalent: forged host= + evil Origin ⇒ 403.
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "Forwarded": 'for=10.0.0.9;host="evil.example"',
+                "Origin": "https://evil.example",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+        # K2-equivalent: mismatching host= vetoes the declared Origin.
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "Forwarded": 'for=10.0.0.9;host="evil.example"',
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+        # K3-equivalent: agreeing host= ⇒ grant via the declared anchor.
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "Forwarded": 'for=10.0.0.9;host="views.example.com";proto=https',
+                "Origin": "https://views.example.com",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    @pytest.mark.parametrize(
+        ("forwarded_value", "origin", "expected"),
+        [
+            # case-insensitive agreement ⇒ grant (declared anchor).
+            ("VIEWS.EXAMPLE.COM", "https://views.example.com", 303),
+            # trailing-dot (FQDN) form of the declared host ⇒ grant.
+            ("views.example.com.", "https://views.example.com.", 303),
+            # port-bearing agreement (port elides against the
+            # portless declared anchor) ⇒ grant.
+            ("views.example.com:8443", "https://views.example.com:8443", 303),
+            # NO ESCAPE: a trailing-dot lookalike of a NON-declared
+            # host still contradicts the declared front ⇒ 403.
+            ("evil.example.", "https://evil.example.", 403),
+            # a port-bearing non-declared host ⇒ 403.
+            ("evil.example:8443", "https://evil.example:8443", 403),
+        ],
+    )
+    def test_k6_normalization_equivalence_no_escape(
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
+        forwarded_value: str, origin: str, expected: int,
+    ):
+        """K6 — the agreement check normalizes case, the trailing
+        dot and ports on BOTH sides; a spelling variant can neither
+        split the declared set nor slip past the veto."""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "X-Forwarded-Host": forwarded_value,
+                "Origin": origin,
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == expected
+
+    def test_k7_referer_judged_against_anchor_set_only(
+        self, agreeing_front_client: TestClient,
+        in_memory_store, cipher,
+    ):
+        """K7 — the Referer fallback audit: with NO Origin and a
+        declared front, the Referer is judged against the ANCHOR SET
+        ONLY (no client-derived anchor) ⇒ an evil Referer rejects.
+        (The declared front's own Referer is accepted.)"""
+        plaintext = _mint(in_memory_store, cipher)
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "Referer": "https://evil.example/page",
+                "X-Forwarded-Proto": "https",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+        resp = agreeing_front_client.post(
+            _VIEW_PATH,
+            data={"code": plaintext},
+            headers={
+                "Host": "internal-svc:8079",
+                "Referer": "https://views.example.com/page",
                 "X-Forwarded-Proto": "https",
             },
             follow_redirects=False,
