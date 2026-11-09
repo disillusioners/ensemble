@@ -466,6 +466,41 @@ compared against live v0.29.7's same measurement, disclosed in **three** places 
 
 ---
 
+## DS-53 — I5: the REST PATCH must write BOTH columns (an implementation-found mirror desync; NOT a plan item)
+
+**Context.** The E1/D lane found, while implementing E4, that the REST PATCH handler
+(`daemon/routers/skills.py:931-933`) translated the public `is_active` flag by **popping** it and writing **only**
+`status` — `fields["status"] = "active" if fields.pop("is_active") else "inactive"`. The row's `is_active` COLUMN
+therefore never moved, so every `PUT /api/skills/{id}` carrying `is_active` MANUFACTURED `(is_active=True,
+status='inactive')` — the **mirror** of the production desync row `(is_active=False, status='ab_testing')` that E4
+reconciles. Fixing E4 alone would not have closed it: the desync was reachable through a second door.
+
+**Options.** (a) reuse `SkillRepository.deactivate_with_receipt` (the E4 dual-column writer, commit `5e7834dd4`) at
+the route. (b) inline the both-columns translation at the handler and keep the REST contract exactly as it is.
+(c) leave the route alone and reconcile downstream.
+
+**Ruling.** (b) — INLINE the translation (`fields["is_active"] = value` kept, `fields["status"]` derived), one
+`store.update_skill` call carrying both columns.
+
+**Why.** (a) is a SEMANTIC CHANGE dressed as a fix: the E4 writer REFUSES on an open A/B test, so wiring it into an
+existing public REST path would turn a today-200 into a refusal for every guarded skill — new refusals on a shipped
+surface, which the leader explicitly fenced. (c) leaves a live producer of the desync class, which is exactly the
+bug E4 exists to repair. (b) fixes the desync without touching what the endpoint accepts OR refuses: the same
+`is_active` field is accepted, `status` was never an accepted body field, and no new error path is introduced.
+
+**Pin.** `tests/unit/routers/test_skill_patch_dual_column.py` (9 nodes) asserts BOTH columns are forwarded in ONE
+call for the `false` and `true` directions, that a metadata-only PATCH touches neither, and that the REST contract is
+unchanged (a row guarded by an open A/B test is STILL updatable — the assertion that proves the E4 writer was not
+reused). The pre-existing pin `tests/unit/routers/test_skills.py::TestUpdateSkill::
+test_update_translates_is_active_to_BOTH_columns` used to assert `assert "is_active" not in kwargs` — it **pinned the
+defect** and was CORRECTED, not loosened. Mutation leg **M-I5-a** restores the pop-and-translate shape ⇒ 4 REST pins
+RED (the status-only translation still passes, so the pin catches the DESYNC rather than the translation).
+
+**What would reverse it.** A decision that the REST PATCH SHOULD refuse on an open A/B test (which would make (a)
+viable) — that is a product decision on a public endpoint, not an implementation choice.
+
+---
+
 ## DS-31 — Every new pin ships with a mutation leg **and** a registered-pack row
 
 **Context.** The house rule: *"a pinned condition whose pins live in no registered pack cannot be gate-verified, and a conditionally-default-ON feature must ship default-OFF if that is not met"* — plus the v0.28.6 lane's F-1 artifact-regeneration trap class (*"a pin that stays green with the guard removed is vacuous and worthless"*).
