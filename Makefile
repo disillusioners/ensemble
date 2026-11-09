@@ -7,7 +7,20 @@
 # config.yaml sed is gone (see install target). Operator-facing stop/start
 # echo+kill paths use PROD_PORT_FALLBACK (defined below, AFTER ENV_PROD_FILE
 # so the := shell expansion actually sees the file name), sourced from .env.prod.
-INSTALL_DIR ?= $(HOME)/agents-ensemble
+#
+# INSTALL_DIR — INERT BY DEFAULT (incident 2026-11-09). The old default
+# `?= $(HOME)/agents-ensemble` made the LIVE production install the target
+# of every bare make invocation (uninstall = ungated rm -rf of live;
+# install = kills the live daemon first). There is NO default anymore:
+# every mutating target runs scripts/install-dir-guard.sh as its first
+# recipe side effect and refuses with guidance when INSTALL_DIR is empty.
+# Explicit INSTALL_DIR resolving to a live dir ($HOME/agents-ensemble,
+# /opt/ensemble, plus ENSEMBLE_LIVE_INSTALL_DIRS entries) additionally
+# requires ENSEMBLE_INSTALL_LIVE=1; the demo dir ($HOME/agents-ensemble-
+# demo) requires ENSEMBLE_INSTALL_DEMO=1. See the guard script header for
+# the full contract (sudo form, sanctioned deploy/upgrade lanes).
+INSTALL_DIR ?=
+export INSTALL_DIR
 
 # Project structure
 BACKEND_DIRS = daemon agents data
@@ -15,6 +28,16 @@ CONFIG_FILE = config.yaml
 ENV_PROD_FILE = .env.prod
 FRONTEND_DIR = frontend
 FRONTEND_DIST = frontend/dist/frontend/browser
+
+# Live/demo confirm gate for ALL mutating targets — the single shared
+# mechanism (incident 2026-11-09). Reads INSTALL_DIR from the environment
+# (exported above, so env-set and command-line forms both arrive); exit 78
+# refuses BEFORE any side-effecting recipe line. One implementation, zero
+# per-target drift.
+GUARD_SCRIPT = scripts/install-dir-guard.sh
+.PHONY: install-dir-guard
+install-dir-guard:
+	@bash $(GUARD_SCRIPT) --target "$(ENS_GUARD_TARGET)"
 
 # Port actually in use by the installed prod daemon: read from .env.prod
 # (PORT=…) — the real port source per ADR-014. Defined AFTER ENV_PROD_FILE on
@@ -39,19 +62,20 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install watchdog-install deploy-demo deploy-live stage-demo upgrade-stage upgrade-promote upgrade-rollback upgrade-status
+.PHONY: build install install-deps clean uninstall help sync stop stop-by-port start dev pyinstaller pyinstaller-clean ensure-latest plist-install watchdog-install deploy-demo deploy-live stage-demo upgrade-stage upgrade-promote upgrade-rollback upgrade-status install-dir-guard
 
 help:
 	@echo "Available targets:"
 	@echo "  make build           - Build the frontend"
 	@echo "  make pyinstaller     - Build binary (dist/ensemble-prod, clears dist first)"
-	@echo "  make install         - Build and install to $(INSTALL_DIR) (backs up existing binary)"
+	@echo "  make install         - Build and install to INSTALL_DIR (REQUIRED; refuses without it)"
+	@echo "                         Live dirs need ENSEMBLE_INSTALL_LIVE=1, demo ENSEMBLE_INSTALL_DEMO=1"
 	@echo "  make plist-install   - Copy staged plist to ~/Library/LaunchAgents (prints launchctl hint)"
 	@echo "  make watchdog-install - Install the watchdog-watcher launchd agent (m3)"
-	@echo "  make install-deps    - Install Python dependencies in $(INSTALL_DIR)"
+	@echo "  make install-deps    - Install Python dependencies in INSTALL_DIR"
 	@echo "  make sync            - Install dependencies with uv sync"
 	@echo "  make start           - Start the daemon (dev flow: stop + start.sh)"
-	@echo "  make stop            - Stop ONLY processes owned by $(INSTALL_DIR) (ownership-scoped; never port-based)"
+	@echo "  make stop            - Stop ONLY processes owned by INSTALL_DIR (ownership-scoped; never port-based)"
 	@echo "  make stop-by-port    - OPT-IN legacy port kill (unsafe on coexistence hosts)"
 	@echo "  make deploy-demo     - Deploy to the DEMO env (~/agents-ensemble-demo, :7979, ensemble_demo)"
 	@echo "  make deploy-live     - Deploy to LIVE (~/agents-ensemble, :9797) — needs ENSEMBLE_DEPLOY_LIVE=1"
@@ -60,10 +84,14 @@ help:
 	@echo "  make dev             - stop + sync + start"
 	@echo "  make clean           - Remove build artifacts"
 	@echo "  make pyinstaller-clean - Remove PyInstaller build files"
-	@echo "  make uninstall       - Remove installed production version"
+	@echo "  make uninstall       - Remove the install at INSTALL_DIR (REQUIRED; refuses without it)"
 	@echo ""
 	@echo "Variables:"
-	@echo "  INSTALL_DIR=$(INSTALL_DIR)"
+	@echo "  INSTALL_DIR=$(INSTALL_DIR)  (REQUIRED for install/uninstall/install-deps/stop/plist-install/watchdog-install)"
+	@echo "  ENSEMBLE_INSTALL_LIVE=1   confirm actions on a live dir (\$HOME/agents-ensemble, /opt/ensemble,"
+	@echo "                            or ENSEMBLE_LIVE_INSTALL_DIRS entries)"
+	@echo "  ENSEMBLE_INSTALL_DEMO=1   confirm actions on \$HOME/agents-ensemble-demo"
+	@echo "  ENSEMBLE_LIVE_INSTALL_DIRS  extra live dirs (colon-separated) added to the protected set"
 	@echo "  PROD_PORT_FALLBACK=$(PROD_PORT_FALLBACK) (read from $(ENV_PROD_FILE); real port source is .env.prod per ADR-014)"
 
 # Sync dependencies with uv
@@ -91,10 +119,12 @@ sync:
 # crash and nothing bounces back up (review m5, ownership-redesigned).
 STOP_SCRIPT = scripts/stop-ensemble.sh
 stop:
+	@bash $(GUARD_SCRIPT) --target stop
 	@bash $(STOP_SCRIPT) $(INSTALL_DIR) $(PROD_PORT_FALLBACK)
 
 .PHONY: stop-by-port
 stop-by-port:
+	@bash $(GUARD_SCRIPT) --target stop-by-port
 	@echo "$(RED)STOP_BY_PORT: killing by port $(PROD_PORT_FALLBACK) can terminate UNRELATED listeners$(NC)"
 	@echo "$(RED)(dev+prod coexistence hosts share ports with clients — e.g. browsers). You opted in.$(NC)"
 	STOP_BY_PORT=1 bash $(STOP_SCRIPT) $(INSTALL_DIR) $(PROD_PORT_FALLBACK)
@@ -124,6 +154,7 @@ build: ensure-latest
 
 # Install Python dependencies in production directory
 install-deps:
+	@bash $(GUARD_SCRIPT) --target install-deps
 	@echo "$(GREEN)Installing Python dependencies in $(INSTALL_DIR)...$(NC)"
 	@if [ ! -d "$(INSTALL_DIR)" ]; then \
 		echo "$(RED)Error: $(INSTALL_DIR) does not exist. Run 'make install' first.$(NC)"; \
@@ -139,8 +170,18 @@ install-deps:
 	fi
 	@echo "$(GREEN)Dependencies installed!$(NC)"
 
-# Install production version
-install: pyinstaller
+# Install production version.
+# GUARD ORDERING (incident 2026-11-09): the confirm gate is BOTH the first
+# PREREQ (so a refusal fires before the pyinstaller → build → ensure-latest
+# chain — ensure-latest does `git checkout latest`, which must never run on
+# an unconfirmed invocation) AND the first recipe line (belt against `-j`
+# reordering; the recipe line precedes stop-ensemble.sh, the first
+# side-effecting line). Serial make builds prerequisites in listed order;
+# under `-j` the guard still runs first in practice (it completes in ~10ms
+# before pyinstaller's toolchain boots) — documented residual.
+install: ENS_GUARD_TARGET = install
+install: install-dir-guard pyinstaller
+	@bash $(GUARD_SCRIPT) --target install
 	@echo "$(GREEN)Installing to $(INSTALL_DIR)...$(NC)"
 	
 	# Stop only what THIS install owns — ownership-scoped, never port-based
@@ -291,6 +332,7 @@ install: pyinstaller
 # sed'd by `make install`) into ~/Library/LaunchAgents and print the
 # bootstrap hint. Convenience only — the operator runs launchctl by hand.
 plist-install:
+	@bash $(GUARD_SCRIPT) --target plist-install
 	@if [ ! -f "$(INSTALL_DIR)/data/ensemble-prod.plist" ]; then \
 		echo "$(RED)Error: $(INSTALL_DIR)/data/ensemble-prod.plist not found — run 'make install' first.$(NC)"; \
 		exit 1; \
@@ -315,6 +357,7 @@ plist-install:
 # com.ensemble.watchdog.demo + the demo INSTALL_DIR (see the template's
 # DEMO USAGE note) — same convention as ensemble-prod.plist.
 watchdog-install:
+	@bash $(GUARD_SCRIPT) --target watchdog-install
 	@if [ ! -f "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist" ]; then \
 		if [ -f "$(INSTALL_DIR)/scripts/watchdog-watcher.sh" ]; then \
 			INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' $(CURDIR)/scripts/ensemble-watchdog-watcher.plist > "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist"; \
@@ -400,8 +443,16 @@ pyinstaller: build
 	uv run python -m PyInstaller $(PYINSTALLER_SPEC)
 	@echo "$(GREEN)Binary built: dist/$(BINARY_NAME)$(NC)"
 
-# Uninstall production version
+# Uninstall production version.
+# GUARD FIRST (incident 2026-11-09): this recipe is a bare ungated
+# `rm -rf $(INSTALL_DIR)` — the guard line above it is what stands between
+# a stray make invocation and the live tree. With INSTALL_DIR unset the
+# guard refuses (inert default); with a live/demo dir it demands the
+# per-path confirm var. Stop-free recipe (echo/rm -rf/echo only — no
+# script calls), which is why uninstall is the make-level proceed-proof
+# target in tests.
 uninstall:
+	@bash $(GUARD_SCRIPT) --target uninstall
 	@echo "$(YELLOW)Removing $(INSTALL_DIR)...$(NC)"
 	rm -rf $(INSTALL_DIR)
 	@echo "$(GREEN)Uninstall complete!$(NC)"
