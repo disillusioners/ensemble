@@ -166,3 +166,30 @@ async def test_the_boot_reverify_is_the_public_entry_point() -> None:
         "verified_on"
     ]
     assert store.reads > reads, "the re-verify re-reads the store"
+
+
+async def test_the_store_keys_use_the_underscore_flattened_seam_id() -> None:
+    """L7 — the KEY carries the flattened seam id; the record keeps the dotted one.
+
+    The settings service's ``config_path`` walk DOT-SPLITS, so a dotted
+    seam id in a key would walk into a non-existent attribute — and the
+    crash is LATENT (it fires the first time an operator writes a DB
+    override).
+    """
+    from daemon.services.decision.kill import (
+        flatten_seam_id,
+        seam_enabled_key,
+        seam_env_name,
+        seam_stage_key,
+    )
+
+    assert flatten_seam_id("snapshot.l3.selection") == "snapshot_l3_selection"
+    assert (
+        seam_enabled_key("snapshot.l3.selection")
+        == "decision_seam_snapshot_l3_selection_enabled"
+    )
+    assert (
+        seam_stage_key("snapshot.l3.selection")
+        == "decision_seam_snapshot_l3_selection_stage"
+    )
+    assert seam_env_name("snapshot.l3.selection") == "DECISION_SEAM_SNAPSHOT_L3_SELECTION"

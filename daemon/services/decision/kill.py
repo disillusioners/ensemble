@@ -74,6 +74,7 @@ __all__ = [
     "SeedOutcome",
     "SwitchState",
     "WriteResult",
+    "flatten_seam_id",
     "seam_enabled_key",
     "seam_env_name",
     "seam_stage_key",
@@ -90,14 +91,28 @@ _TRUE_TOKENS = frozenset({"1", "true", "yes", "on", "enabled"})
 _FALSE_TOKENS = frozenset({"0", "false", "no", "off", "disabled"})
 
 
+def flatten_seam_id(seam_id: str) -> str:
+    """The UNDERSCORE-FLATTENED seam id used in the store keys.
+
+    L7: the KEY (and the managed key's ``config_path``) carries the
+    flattened form — ``snapshot.l3.selection`` → ``snapshot_l3_selection``
+    — because the settings service's ``config_path`` walk DOT-SPLITS
+    (a dotted seam id would walk into a non-existent attribute, and
+    the crash is LATENT: it fires the first time an operator writes a
+    DB override). The human-readable ``snapshot.l3.selection`` stays
+    the registry record's ``seam_id``.
+    """
+    return "".join(ch if ch.isalnum() else "_" for ch in seam_id).lower()
+
+
 def seam_enabled_key(seam_id: str) -> str:
-    """The per-seam enabled store key — ``decision_seam_<id>_enabled``."""
-    return f"decision_seam_{seam_id}_enabled"
+    """The per-seam enabled store key — ``decision_seam_<flat>_enabled``."""
+    return f"decision_seam_{flatten_seam_id(seam_id)}_enabled"
 
 
 def seam_stage_key(seam_id: str) -> str:
-    """The per-seam stage store key — ``decision_seam_<id>_stage``."""
-    return f"decision_seam_{seam_id}_stage"
+    """The per-seam stage store key — ``decision_seam_<flat>_stage``."""
+    return f"decision_seam_{flatten_seam_id(seam_id)}_stage"
 
 
 def seam_env_name(seam_id: str) -> str:
