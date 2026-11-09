@@ -174,7 +174,17 @@ def test_a_refused_approval_leaves_the_version_pending(repo):
 
 
 def test_submit_is_a_seam_without_a_v1_caller():
-    """The v1 persona is read-only — nothing outside the package calls it."""
+    """Phase 5 activates the dormant v1 persona authoring seam (V2-D 5.3).
+
+    THE PIN MOVES, AND THE MOVE IS THE PLAN: Phase 5 of the Memoir Store
+    v2 lane exists to ACTIVATE the dormant persona authoring seam
+    (create_draft and submit) from the service layer.
+
+    THE EXACT ALLOWED CALLERS:
+    - daemon/services/memoir_persona_gate.py (the JEV gate service)
+    - daemon/routers/memoir.py (the human approval REST surface)
+    - daemon/api.py (lifespan wiring and router mount)
+    """
     import subprocess
     import pathlib
 
@@ -187,12 +197,19 @@ def test_submit_is_a_seam_without_a_v1_caller():
         timeout=60,
     )
     hits = [line for line in result.stdout.splitlines() if line.strip()]
+    allowed = {
+        "daemon/repositories/memoir/repository.py",
+        "daemon/repositories/memoir/__init__.py",
+        "daemon/services/memoir_persona_gate.py",
+        "daemon/routers/memoir.py",
+        "daemon/api.py",
+    }
     outside = [
         hit
         for hit in hits
-        if not hit.startswith("daemon/repositories/memoir/")
+        if hit not in allowed
     ]
-    assert not outside, f"the persona repository has a caller: {outside}"
+    assert not outside, f"unexpected caller of MemoirPersonaRepository: {outside}"
 
 
 def test_get_current_is_none_without_a_persona(repo):

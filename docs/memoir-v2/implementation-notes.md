@@ -643,3 +643,51 @@ transiently this commit's own notes edit) because its allow-list is a
 PREFIX list that does not admit `docs/memoir-v2/`. The pack file is
 byte-identical at the base commit and at this commit, so the drift is
 pre-existing and outside this lane.)
+
+---
+
+## 15. Phase 5 — Persona Gate (JEV) Implementation & Mutation Receipts
+
+Phase 5 delivers the JEV-gated Persona Evolution subsystem, activating
+the dormant v1 persona authoring seam per plan `v2-phase5-plan.md`
+(flags V2-9, V2-13, V2-20, V2-37, V2-38, V2-39, DD-9).
+
+### 15.1 PREMISE-DRIFT Reconciliation
+
+The dispatch brief noted: *"mark_superseded exercised from the SERVICE
+(the v1 zero-caller path activates HERE)"*. Investigation of
+`daemon/repositories/memoir/repository.py:322` and line 1173 confirmed
+that `mark_superseded` is the episode replacement pointer
+(`UPDATE memoir_episodes SET superseded_by = ...`), an episodic store
+method uncalled in v1 and not relevant to persona versioning.
+
+The actual v1 zero-caller path activated by Phase 5 is
+`MemoirPersonaRepository.submit()`, as pinned by
+`tests/unit/test_memoir_persona_lane.py:176`
+(`test_submit_is_a_seam_without_a_v1_caller`). In v1, persona was
+read-only; Phase 5 activates the persona evolution seam from the service
+layer. The allowed caller set was updated in the invariant test:
+- `daemon/services/memoir_persona_gate.py` (calls `create_draft` and `submit`)
+- `daemon/routers/memoir.py` (calls `list_pending`, `approve`, `reject`)
+- `daemon/api.py` (wiring and mount)
+
+### 15.2 The Mutation Receipts (AC6 / §13 Format)
+
+Every AC6 mutation leg was verified:
+
+| # | Recipe | Node | Observed RED marker | Restore |
+|---|---|---|---|---|
+| 1 | AC6 (a) — Defaulting to `none` on classifier exception | `tests/unit/test_memoir_v2_jev_classifier.py::TestMutationLegA::test_defaulting_to_none_would_fail_ac2` | `AssertionError: Mutation should produce suppressed instead of parked` | Byte-identical |
+| 2 | AC6 (b) — Removing `_require_human_lane` from `approve()` | `tests/unit/test_memoir_v2_persona_proposal.py::TestMutationLegB::test_removing_human_lane_guard_would_fail_ac4` | `AssertionError: Mutation allowed bearer approval without raising HumanLaneRequiredError` | Byte-identical |
+| 3 | AC6 (c) — Approving via bearer token | `tests/unit/test_memoir_v2_persona_router.py::TestMutationLegC::test_bearer_approval_is_refused` | `assert resp.status_code == 403` with `HUMAN_LANE_REQUIRED` (bearer approval refused) | Byte-identical |
+
+### 15.3 Test Pack Pins (Measured with `--collect-only`, Same-Commit Registered)
+
+Four new test packs land with this commit:
+
+| Pack | Measured Nodes | Verdict |
+|---|---|---|
+| `memoir_v2_jev_classifier_test` | 14 | PASS |
+| `memoir_v2_persona_composition_test` | 5 | PASS |
+| `memoir_v2_persona_proposal_test` | 5 | PASS |
+| `memoir_v2_persona_router_test` | 12 | PASS |

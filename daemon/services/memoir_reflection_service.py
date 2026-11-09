@@ -337,6 +337,8 @@ class MemoirReflectionService:
         reflection_repository: Any,
         syntheses_repository: Any,
         constellation_repository: Any = None,
+        persona_repository: Any = None,
+        persona_gate: Any = None,
         settings: ReflectionSettings | None = None,
         config: Any = None,
         llm_config: dict[str, Any] | None = None,
@@ -347,6 +349,8 @@ class MemoirReflectionService:
         self._reflection = reflection_repository
         self._syntheses = syntheses_repository
         self._constellation = constellation_repository
+        self._persona_repo = persona_repository
+        self._persona_gate = persona_gate
         self._settings = settings or ReflectionSettings()
         #: The resolved daemon configuration (the config tier of the
         #: knobs — the worker re-resolves the settings per tick).
@@ -367,6 +371,24 @@ class MemoirReflectionService:
         self._debounce_anchor_ts: datetime | None = None
         #: When the trigger FIRST became ready — the force-fire anchor.
         self._trigger_anchor: datetime | None = None
+
+        if self._persona_gate is None and self._persona_repo is not None:
+            from daemon.services.memoir_persona_gate import MemoirPersonaGateService
+
+            engine = getattr(
+                self._persona_repo,
+                "engine",
+                getattr(self._reflection, "engine", None),
+            )
+            if engine is not None:
+                self._persona_gate = MemoirPersonaGateService(
+                    engine,
+                    persona_repository=self._persona_repo,
+                    llm_caller=self._llm_caller,
+                    llm_config=self._llm_config,
+                    clock=self._clock,
+                    agent_id=self._settings.agent_id,
+                )
 
     # ── the settings ────────────────────────────────────────────────────
 
@@ -625,6 +647,7 @@ class MemoirReflectionService:
         #: DRIFTED belief re-derives as a NEW row, not a duplicate).
         unmarked_episode_ids: set[str] = set()
         accepted = 0
+        accepted_synthesis_rows: list[Any] = []
         rejected = 0
         duplicates = 0
         llm_calls = 0
@@ -736,7 +759,9 @@ class MemoirReflectionService:
                         len(candidates),
                     )
                     break
-                verdict = self._write_synthesis(candidate)
+                verdict = self._write_synthesis(
+                    candidate, collector=accepted_synthesis_rows
+                )
                 if verdict == "accepted":
                     accepted += 1
                 elif verdict == "duplicate":
@@ -817,6 +842,25 @@ class MemoirReflectionService:
             except Exception:  # noqa: BLE001 — never fail the pass
                 logger.warning(
                     "[MemoirReflection] the Tier-2 summarization failed — "
+                    "the pass continues"
+                )
+
+        # ── THE PERSONA GATE (JEV) PHASE (V2-D 5.7 / Phase 5) ──────────
+        # Execution ordering: commit synthesis -> constellation -> JEV.
+        # JEV failure never rolls back or blocks the committed synthesis.
+        if self._persona_gate is not None:
+            try:
+                from daemon.services.memoir_persona_gate import (
+                    MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
+                )
+
+                self._persona_gate.process_pass(
+                    new_syntheses=accepted_synthesis_rows,
+                    max_composition_calls=MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
+                )
+            except Exception:  # noqa: BLE001 — never fail the pass
+                logger.warning(
+                    "[MemoirReflection] the Persona Gate (JEV) evaluation failed — "
                     "the pass continues"
                 )
 
@@ -1018,7 +1062,9 @@ class MemoirReflectionService:
 
     # ── the synthesis writer (the accept loop) ──────────────────────────
 
-    def _write_synthesis(self, candidate: dict) -> str:
+    def _write_synthesis(
+        self, candidate: dict, collector: list[Any] | None = None
+    ) -> str:
         """Validate and write ONE candidate synthesis.
 
         Returns:
@@ -1099,7 +1145,7 @@ class MemoirReflectionService:
 
         try:
             if supersedes:
-                self._syntheses.supersede_with(
+                row = self._syntheses.supersede_with(
                     self._settings.agent_id,
                     supersedes,
                     {
@@ -1110,13 +1156,15 @@ class MemoirReflectionService:
                     },
                 )
             else:
-                self._syntheses.create_synthesis(
+                row = self._syntheses.create_synthesis(
                     self._settings.agent_id,
                     claim,
                     source_ids,
                     verb,
                     confidence,
                 )
+            if collector is not None and row is not None:
+                collector.append(row)
         except ValueError as exc:
             # AN INVARIANT REJECTION RAISED BY THE STORE (the citations
             # are missing, the verb is outside the closed vocabulary):

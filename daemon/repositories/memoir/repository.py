@@ -158,6 +158,17 @@ class MemoirPersonaRepository:
                 )
             ).first()
 
+    def list_pending(self, agent_id: str | None = None) -> list[MemoirPersonaVersion]:
+        """Pending persona versions awaiting approval (status == 'pending_approval')."""
+        with Session(self.engine) as session:
+            stmt = select(MemoirPersonaVersion).where(
+                MemoirPersonaVersion.status == "pending_approval"
+            )
+            if agent_id:
+                stmt = stmt.where(MemoirPersonaVersion.agent_id == agent_id)
+            stmt = stmt.order_by(MemoirPersonaVersion.version.asc())
+            return list(session.exec(stmt).all())
+
     # ── writes ────────────────────────────────────────────────────────────
 
     def create_draft(

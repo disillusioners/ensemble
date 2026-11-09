@@ -127,6 +127,10 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # confirms each named scope is in SCOPE_TAXONOMY at the
     # dedicated validation leg below.
     "/api/prompts": "prompts:read|prompts:submit|prompts:approve|prompts:audit|prompts:write",
+    # Memoir Store v2 Phase 5 — persona gate HTTP surface (V2-37).
+    # Reuses prompts:* scopes (prompts:read for GET /pending;
+    # prompts:approve for POST /{id}/approve and POST /{id}/reject).
+    "/api/memoir": "prompts:read|prompts:approve",
     # Phase C / agent-prompt-immutability F1 (overnight, 2026-10-14):
     # custom-agents REST family (the 4 endpoints POST / GET / GET
     # / DELETE — same as the canonical R-A1/A2 lifecycle surface).
@@ -323,9 +327,9 @@ class TestSourceMatchTarget:
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 38, (
+        assert len(matches) == 39, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 38 = 35 unconditional + 2 auth-ON-gated + 1 "
+            "(pinned 39 = 36 unconditional + 2 auth-ON-gated + 1 "
             "gateway-flag-gated (WS)). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
@@ -430,8 +434,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 113, (
-            f"declared-route census drifted: {len(declared)} (pinned 113)"
+        assert len(declared) == 116, (
+            f"declared-route census drifted: {len(declared)} (pinned 116)"
         )
 
     def test_manifest_entries_valid(self):

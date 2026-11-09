@@ -116,6 +116,7 @@ from daemon.routers import (
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
+from daemon.routers.memoir import router as memoir_router  # /api/memoir/persona (Phase 5: JEV persona approval)
 # wedge-capture: ``wedge_capture_router`` is re-exported by
 # ``daemon.routers`` (see the import block above) — no second direct
 # import, so there is exactly ONE binding of the name.
@@ -3012,6 +3013,9 @@ async def lifespan(app: FastAPI):
     from daemon.repositories.memoir.syntheses_repository import (
         MemoirSynthesesRepository,
     )
+    from daemon.repositories.memoir.repository import (
+        MemoirPersonaRepository,
+    )
     from daemon.tools.memoir_knob import resolve_memoir_reflection_knob
 
     _reflection_boot_knob = resolve_memoir_reflection_knob(config)
@@ -3024,6 +3028,7 @@ async def lifespan(app: FastAPI):
                 constellation_repository=MemoirConstellationRepository(
                     _reflection_engine
                 ),
+                persona_repository=MemoirPersonaRepository(_reflection_engine),
                 config=config,
                 llm_config=_reflection_llm_config(config),
             )
@@ -5858,6 +5863,7 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # — BEFORE the SPA catch-all (api.py:3641) so Starlette
     # first-match-wins resolves /api/prompts/* to this router.
     api_router.include_router(prompts_router)         # /api/prompts (Phase B T5)
+    api_router.include_router(memoir_router)          # /api/memoir/persona (Phase 5: JEV persona approval)
 
     # OAuth2 Phase 3 (T3.12 / FR-41): the MCP-KB key-management CRUD —
     # the ONE new OAuth2-human-lane family (§5.6: 30 legacy + 1 new).
