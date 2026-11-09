@@ -12,6 +12,34 @@
 
 ---
 
+## ⚠️ CEREMONY PRECONDITION — declare the front ONLY after pinning its XFH
+
+**The live front is currently UNDECLARED, and Envoy's actual `X-Forwarded-Host`
+emission is UNPINNED** (§1.1 — the operator notes do not pin it; *verify, don't
+assume*).
+
+Declaring the front post-promote (an `auth.allowed_origins` entry,
+`auth.external_redirect_base`, or `live_views.external_base_url`) turns on the
+**forwarded-VETO** (§1.1): every forwarded client-facing host must AGREE with the
+declared anchor set. If the declaration does not match what Envoy actually emits,
+**the lane 403s WHOLESALE — every browser form POST** (the interstitial renders,
+but no customer can ever submit a passcode).
+
+**Ceremony order (do not reorder):**
+
+1. **Pin Envoy's ACTUAL `X-Forwarded-Host` output** on the `/views/public` rule —
+   exact spelling AND port form (§3.4 drill **H2**).
+2. **Declare the front** to match that output exactly (audience / external base /
+   `live_views.external_base_url`).
+3. **Re-run the ceremony probe** (§3.4 drill **H**) and archive the output.
+4. Only then treat the front as declared.
+
+**Leaving the front UNDECLARED is safe** and is today's live posture: with no
+declaration the forwarded headers are inert — they can neither anchor nor veto
+(§1.1).
+
+---
+
 ## 0. THE namespace line
 
 `PathPrefix /views/public` is the ONLY thing that must stay public across the
@@ -57,17 +85,42 @@ oauth2-proxy. Gateway API HTTPRoute rules are first-match-wins. House precedent:
 the per-path `/v1` bypass in `infranstructure/k8s/llmproxy/rancher-local-ensem-dev/llm.ensem.dev-httproute.yaml:20-36`
 (data-center-scripts repo).
 
-### 1.1 State A Host-preservation (REQUIRED PROPERTY — T3.1-HOST)
+### 1.1 The origin gate — veto model (REQUIRED PROPERTY — T3.1-HOST; rewritten 2026-11-09)
 
-The verify POST runs a same-host Origin/Referer check
-(`_same_host_origin_check`, `daemon/routers/live_views.py:721`): it compares the
-`Origin`/`Referer` **host** against the inbound **`Host` header**; a mismatch 403s
-(headers present only — absent headers are not a block, ADR D6:77).
+The verify POST runs the navigation-correct origin gate
+(`_same_host_origin_check`, `daemon/routers/live_views.py:1378`). It is **NOT** a
+raw `Host`-vs-`Origin` string inequality any more — that shape was the G2.7
+DNS-rebinding hole (an attacker who controls both the rebound `Host` and the page
+origin could self-match and mint a full view grant). The current model:
 
-**Consequence:** the Envoy Gateway **MUST preserve the client-visible host** as the
-`Host` header reaching the daemon (`www.ensem.dev`) — no internal-name rewrite
-(e.g. `ensemble-live.ensemble.svc.cluster.local:9797` or pod IP). A Host rewrite makes
-every legit verify POST cross-host → **every legit verify 403s**.
+- **Anchors come from operator configuration ONLY** —
+  - the **operator audience** (`auth.allowed_origins` + `auth.external_redirect_base`
+    + the one-shot `live_view_external_base_url_fallback` copy — parsed by
+    `parse_operator_audience`, `daemon/auth/cookie.py:332`);
+  - the **declared base hosts** (`live_views.external_base_url`, read through the
+    read-only `LiveViewsService.declared_external_base_url` seam);
+  - the **peer-gated exact-loopback carve** — the `Host` name must be an EXACT
+    loopback spelling (`localhost` / `127.0.0.1` / `::1` — lookalikes such as
+    `localhost.evil.example` do NOT qualify) **and** the TCP peer must be loopback
+    (a remote rebinding victim can never connect *from* loopback).
+- **The raw client `Host` header is NEVER an unconditional anchor.** It anchors
+  only when its name is operator-vouched (audience ∪ declared bases) or via the
+  loopback carve.
+- **Forwarded-derived values VETO, they never vouch.** The first
+  `X-Forwarded-Host` value and the first RFC 7239 `Forwarded` element's `host=`
+  **never enter the anchor set**. In a **declared** front they must **AGREE** with
+  the declared anchor set (case-insensitive, trailing-dot normalized on both sides,
+  ports by the `_host_matches` discipline). A disagreement leaves the request
+  **unvouched** ⇒ the anchor set is empty ⇒ any real `Origin` ⇒ **403**.
+- **`Origin` absent ⇒ allow. `Origin: null` ⇒ allow** — unless the browser attests
+  `Sec-Fetch-Site: cross-site` (browser-set, JS-unforgeable). Absent/`null` never
+  reaches the anchor comparison at all.
+
+**Host preservation is still REQUIRED** — not as a raw comparison any more, but as
+a precondition of the vouch: the `Host` the daemon receives must be the
+**client-visible** host (`www.ensem.dev`), because that is the name the audience /
+declared-base vouch is keyed on. A Host rewrite to an internal name makes the
+vouch fail → **every legit verify 403s**.
 
 > ⚠️ **This property is NOT stated by Envoy Gateway defaults in the operator notes**
 > (`state-a-proxy-apply.md` does not pin Envoy's Host behavior) — it is therefore a
@@ -75,10 +128,39 @@ every legit verify POST cross-host → **every legit verify 403s**.
 > step H), not an assumed silent default. Envoy Gateway's HTTPRoute handling
 > traditionally preserves the original Host, but **verify, don't assume**. If the
 > ceremony check fails, fix at the proxy (preserve Host on the `/views/public` rule)
-> — never by loosening the daemon-side check.
+> — never by loosening the daemon-side gate.
 
 The same requirement carries into State B (§2.2): the in-house auth module must
 equally preserve Host.
+
+#### 1.1.1 Operator contract — declared fronts (multi-vhost)
+
+- The declared base must **AGREE with the front's client-facing host / XFH,
+  including the PORT FORM**. The agreement check compares ports with the
+  `_host_matches` discipline: two explicit ports must be **equal**, a portless side
+  elides. Declare the base with the port the front actually serves.
+- An **undeclared extra vhost** ⇒ **403 with ZERO passcode strikes**. The veto
+  fires at the origin gate (gate #4), which **precedes** form parsing and the
+  constant-time compare ⇒ no strike is consumed. It **does burn one rate-limiter
+  slot** (the per-IP bucket is gate #1, ahead of the origin gate) ⇒ a vhost
+  mismatch can throttle that IP, but it can never lock a shared view.
+- **Remedy = DECLARATION** (audience / external base /
+  `live_views.external_base_url`) — **never a client-side workaround**.
+
+#### 1.1.2 Comparison primitives — accurate status of the loop-2 changes
+
+FIVE comparison primitives are **byte-identical** to the pre-lane implementation:
+`_same_host_origin_check` (`:1378`), `_host_matches` (`:998`),
+`_origin_url_host_port` (`:923`), `_views_exact_loopback_name` (`:1039`),
+`_authority_host_port` (`:884`).
+
+> **CORRECTION (2026-11-09).** An earlier lane report claimed *all* comparison
+> primitives were byte-identical — **that was wrong**. `_www_equivalent` (`:950`)
+> **DID change** in loop 2: it is now a benign **symmetric** fold applied to **both**
+> operands — it routes through the new `_views_host_key` (`:1021` — lowercase plus
+> trailing-dot strip) before the single `www.` strip. Symmetric ⇒ neither operand is
+> treated differently from the other; the only semantic effect is that the FQDN
+> trailing-dot form (`example.com.`) now folds like `example.com`.
 
 ### 1.2 The exact YAML diff (D16 — folded VERBATIM from the operator notes)
 
@@ -303,10 +385,13 @@ Executed drill + transcript: **§3.3 (State B dry-run) — DONE locally, evidenc
 
 ### 2.2 State B Host-preservation (REQUIRED PROPERTY — T3.1-HOST)
 
-The same-host Origin/Referer check (§1.1) applies unchanged in State B: the **in-house
+The origin gate (§1.1 — veto model) applies unchanged in State B: the **in-house
 auth module must preserve the `Host` header** (no internal-name rewrite) on requests
-it passes through, or every legit verify POST 403s. Whatever fronts the daemon in
-State B (in-house OIDC middleware, plain TLS terminator, direct bind), the property is:
+it passes through, or every legit verify POST 403s — the vouch that admits a
+same-origin request is keyed on the **client-visible** host name (operator audience ∪
+declared bases ∪ the peer-gated loopback carve), so a rewritten internal name is not
+vouched. Whatever fronts the daemon in State B (in-house OIDC middleware, plain TLS
+terminator, direct bind), the property is:
 
 > `Host` seen by the daemon == the host in the customer's browser URL bar.
 
@@ -356,13 +441,15 @@ verify → 303 + `view_grant` cookie → bytes through the gate; direct lane + `
 → 302 to `/api/auth/login`. **No daemon defect surfaced; zero daemon code changes in P3.**
 
 **Host-preservation assertion (local counterpart of §3 step H):** the verify POST is
-exercised with (a) a **same-host** `Origin` (`http://127.0.0.1:8079` == the inbound
-`Host`) → the request proceeds past the Origin check into the passcode comparison
-(deny/allow as coded), and (b) a **cross-host** `Origin` (`http://evil.example`) →
-**403** — proving the check fires on header presence and compares against the inbound
-`Host`. In State A/B production the equivalent assertion is: **the proxy must preserve
-Host so legit requests land in case (a), never case (b).**
-
+exercised with (a) a **vouched same-origin** `Origin` — the inbound `Host` and the
+`Origin` name the same host **and** that host is vouched (an audience entry, a
+declared base, or the loopback carve with a loopback peer) → the request proceeds
+past the origin gate into the passcode comparison (deny/allow as coded); and (b) an
+`Origin` naming a host that is **neither vouched nor declared**
+(`http://evil.example`) → **403** — proving the gate fires on a present `Origin` and
+that the raw inbound `Host` alone vouches for nothing (G2.7 hardening). In State A/B
+production the equivalent assertion is: **the proxy must preserve Host so legit
+requests land in case (a), never case (b).**
 ### 3.4 Drill step H — Host-preservation + XFF pin (CEREMONY-TIME, cluster-side)
 
 After the §1.3 apply, run BOTH pins once and archive the outputs with the ceremony
@@ -372,15 +459,40 @@ evidence:
 in the operator notes):
 
 ```bash
-# Same-host verify probe: Origin host == Host header the daemon should receive.
+# Vouched same-origin verify probe: Origin host == Host header the daemon
+# should receive, and that host must be vouched (audience / declared base /
+# loopback carve).
 # Mint a view first (view_link), then:
 curl -sS 'https://www.ensem.dev/views/public/<root>/<file>' \
   -X POST -d 'passcode=wrong-on-purpose' \
   -H 'Origin: https://www.ensem.dev' -D - -o /dev/null
 # EXPECT: NOT 403 — a 200 (interstitial/locked re-render) or the deny path
-# (strike/bucket). A 403 here = Host rewritten in flight → STOP and fix the
-# proxy (preserve Host); do NOT loosen the daemon check.
+# (strike/bucket). A 403 here = the vouch FAILED — the Host was rewritten in
+# flight (internal name), or the audience / declared base does not cover this
+# host → STOP and fix at the proxy (preserve Host) or declare the front
+# (§1.1.1); do NOT loosen the daemon gate.
 ```
+
+**H2 — `X-Forwarded-Host` emission pin (REQUIRED BEFORE DECLARING THE FRONT —
+§"CEREMONY PRECONDITION")**
+
+Envoy's `X-Forwarded-Host` output is **not** pinned by the operator notes, and it
+becomes load-bearing the moment the front is DECLARED (§1.1.1): a forwarded value
+that disagrees with the declared anchor set vetoes the request ⇒ 403 wholesale.
+Pin it BEFORE declaring:
+
+```bash
+# What does Envoy actually send as X-Forwarded-Host on the /views/public rule?
+# (read-only probe — the passcode gate is not the subject here)
+curl -sS 'https://www.ensem.dev/views/public/<root>/<file>' \
+  -H 'Origin: https://www.ensem.dev' -D - -o /dev/null | grep -i 'x-forwarded-host'
+# EXPECT: exactly ONE client-facing host, spelling AND port form matching the
+# declaration you are about to make. Absent header, an internal name, a
+# rewritten port, or a comma-list whose FIRST value is not the client-facing
+# host => DO NOT declare the front yet (fix the proxy rule first).
+```
+
+Declare the front to match that output **exactly** (§1.1.1), then re-run **H**.
 
 **X — XFF 3-outcome pin** (folded VERBATIM from `state-a-proxy-apply.md` §5;
 ADR V4 / D7 rightmost-XFF keying, `daemon/routers/live_views.py:690-711`):
@@ -492,7 +604,10 @@ never by assumption.**
   (`daemon/api.py:4205`, after `include_router` `:4180`); PUBLIC exact-tag loop
   (`daemon/api.py:3610-3648`); tagged resolution before session validation
   (`daemon/middleware/auth.py:328-335`); `anonymous_view_paths` default `()`
-  (`daemon/config.py:2997-2999`); same-host Origin/Referer check
-  (`daemon/routers/live_views.py:721`); rightmost-XFF keying
-  (`daemon/routers/live_views.py:690-711`); secure-context page
-  (`daemon/routers/live_views.py:671`).
+  (`daemon/config.py:2997-2999`); the origin gate / veto model
+  (`daemon/routers/live_views.py:1378`); the trusted-host builder
+  (`:1095`); the declared-base anchor seam (`:969`); the forwarded-value
+  extractor (`:1056`); the host-key normalization (`:1021`); the
+  peer-gated loopback carve (`:1039`); rightmost-XFF keying (`:852`);
+  secure-context page (`:834`); Accept-aware uniform 404 (`:567`) and the
+  origin-gate 403 responder (`:603`).

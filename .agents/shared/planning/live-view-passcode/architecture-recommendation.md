@@ -75,6 +75,23 @@ Open the public lane at **`/views/public/{root_name}/{rel_path}`** — a reserve
 - Claims JSON `{root_name, rel_path, generation, exp = now + 86400}` Fernet-encrypted; `Max-Age=86400` (matches `oauth2-proxy.yaml:29 --cookie-expire=24h` house precedent); `HttpOnly; Secure; SameSite=Lax`.
 - Validation chain: decrypt (`InvalidToken` → interstitial + cookie clear) → claims match THIS request's `(root, rel)` → `generation == row.generation` → `exp > now`; any failure → interstitial. Mermaid-wrapper `?raw=1` same-origin fetch is covered (cookie Path matching is query-insensitive).
 - Stateless over session-table: nothing to persist/purge/GC, restart-durable, revocation already exists (generation bump), per-view audience makes a table pure operational surface. CSRF: the grant changes only the requester's own browser; SameSite=Lax contains cross-site use; **adopt** the cheap same-host Origin/Referer check on the verify POST as defense-in-depth (no CSRF token).
+> **AMENDED 2026-11-09 (views-session-bypass lane; the gate code is
+> frozen, this is the mechanism description only).** The "same-host
+> check" of D6:77 was implemented as a raw `Host`-vs-`Origin` string
+> inequality and shipped that way; that shape was the G2.7 DNS-rebinding
+> hole (attacker-controlled `Host` + `Origin` self-match ⇒ a full view
+> grant). The gate now runs the **veto model**: anchors come from
+> OPERATOR CONFIG ONLY (operator audience ∪ declared bases ∪ the
+> peer-gated exact-loopback carve); the raw `Host` header is never an
+> unconditional anchor; forwarded-derived values (first
+> `X-Forwarded-Host` value / first RFC 7239 `Forwarded` `host=`) VETO but
+> never vouch (in a declared front they must agree with the declared
+> anchor set, else the request is unvouched ⇒ 403); `Origin` absent or
+> `null` is allowed unless the browser attests `Sec-Fetch-Site:
+> cross-site`. Operator contract + ceremony precondition:
+> `docs/runbooks/live-view-passcode-deployment.md` §"CEREMONY
+> PRECONDITION", §1.1, §1.1.1, §1.1.2. The CSRF-token decision (no
+> token) is UNCHANGED.
 - **POST shape: same-URL POST** (form action = the view URL) — view identity from the path, no reflected view parameter, shares uniform-404 naturally with GET. A central `/views/public/verify` endpoint is rejected (must carry a view identifier parameter). **This is the only POST route in the entire `/views` surface — pin it.**
 - Plain-HTTP edge: `Secure` blocks cookie storage on direct `http://LAN:9797` → render an explicit "secure context required" message, never a redirect loop.
 

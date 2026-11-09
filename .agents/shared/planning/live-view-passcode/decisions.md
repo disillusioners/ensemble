@@ -131,7 +131,7 @@ Provenance: enumerated from the ADR's council-merged material (risk register :16
 | S1 | Idempotent `view_link` does NOT clear an active lock (ADR D5:63) | pre-reflected (phase1 T1.3 refresh-only-unlock) — made explicit in this fold |
 | S2 | No remaining-attempt disclosure pre-lock — never aid multi-IP grinding (ADR D2:40) | pre-reflected (phase2 T2.4 strike-count-never-disclosed) |
 | S3 | Uniform-404 for unminted paths; no phantom rows; no interactive verify oracle on garbage (ADR D2:36-39) | pre-reflected (phase2 T2.3/AC12 row-gating) |
-| S4 | Same-host Origin/Referer check on verify POST; no CSRF token (ADR D6:77) | pre-reflected (phase2 D13/Q-2 lean — now ADR-decided) |
+| S4 | Same-host Origin/Referer check on verify POST; no CSRF token (ADR D6:77) | pre-reflected (phase2 D13/Q-2 lean — now ADR-decided) — **AMENDED 2026-11-09**: the mechanism is now the veto model (operator-config-only anchors; the raw Host is never an unconditional anchor; forwarded values veto, never vouch) — see the runbook §1.1/§1.1.1; the no-token decision is unchanged |
 | S5 | Valid grant cookies persist through lockout — lockout gates entry lane, not established grants (ADR D5:68) | FOLDED → phase2 D12/T2.5, phase4 T4 map |
 | S6 | Rightmost-XFF limiter keying, dominates every topology (ADR D7:83-86) | FOLDED → phase2 D14/T2.6, phase3 R3, overview R3 |
 | S7 | Keyed-HMAC domain-separated IP hashing (ADR D9:116) | FOLDED → M2/D-A2 |
@@ -147,7 +147,7 @@ Additional ADR items adopted in the same pass (not council sharpenings per se): 
 | ID | Question | Resolution (ADR ref) |
 |----|----------|----------------------|
 | Q-1 | Locked-page HTTP status | **CLOSED** — 200 with notice (ADR V3; sign-off D2/R11) |
-| Q-2 | CSRF posture on verify POST | **CLOSED** — same-host Origin/Referer check, no token (ADR D6:77) |
+| Q-2 | CSRF posture on verify POST | **CLOSED** — same-host Origin/Referer check, no token (ADR D6:77) — **AMENDED 2026-11-09**: implemented as the veto model (the raw-Host inequality was the G2.7 hole); see the runbook §1.1 |
 | Q-3 | XFF trust depth for the per-IP bucket | **CLOSED** — rightmost-XFF else socket peer (ADR D7) |
 | Q-4 | Audit IP hashing scheme | **CLOSED** — keyed-HMAC `ip_hmac`, 64-bit, domain-separated key (ADR D9) — supersedes the plan's unsalted-sha256 lean |
 | Q-5 | Final passcode alphabet | **CLOSED** — 31-symbol `23456789abcdefghjkmnpqrstuvwxyz`, 6 chars, CSPRNG (ADR D4; entropy bound stated under bounded-online-attack model) |
