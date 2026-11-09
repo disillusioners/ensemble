@@ -190,28 +190,37 @@ class TestKeeperReadScopeEnforcement:
         )
 
     def test_read_file_allows_a_relative_in_workdir_path(self, workdir):
-        """Relative in-workdir reads stay LEGAL (M-B3b's leg)."""
+        """Relative in-workdir reads stay LEGAL (M-B3b's leg).
+
+        The anchor is the daemon-resolved project workdir — a scoped
+        agent passes a RELATIVE path and the daemon resolves it.
+        """
         tools = _build_tools("skill-keeper", workdir)
-        result = tools["read_file"].invoke(
-            {"path": "inside.txt", "workdir": workdir}
-        )
+        result = tools["read_file"].invoke({"path": "inside.txt"})
         assert "inside-the-workdir" in result, (
             f"a relative in-workdir read must still work: {result!r}"
         )
 
-    def test_read_file_allows_an_absolute_in_workdir_path(self, workdir):
+    def test_read_file_refuses_an_absolute_in_workdir_path(self, workdir):
+        """D1 ruling 3 — an ABSOLUTE path is refused for a scoped agent.
+
+        The plan's acceptance list requires ``<repo>/.env`` to be
+        refused even though the repo IS the anchor, so the rule is
+        "RELATIVE reads only", not "inside the anchor".
+        """
         tools = _build_tools("skill-keeper", workdir)
         target = os.path.join(workdir, "inside.txt")
-        result = tools["read_file"].invoke({"path": target, "workdir": workdir})
-        assert "inside-the-workdir" in result, (
-            f"an absolute in-workdir read must still work: {result!r}"
+        result = tools["read_file"].invoke({"path": target})
+        assert result.startswith("ERROR:"), (
+            f"an absolute path must be refused for a scoped agent: {result!r}"
         )
+        assert "RELATIVE" in result
 
     def test_read_file_allows_the_keepers_own_meta_relative(self, workdir):
         """The acceptance example: the keeper reads its own meta.json."""
         tools = _build_tools("skill-keeper", workdir)
         result = tools["read_file"].invoke(
-            {"path": "agents/skill-keeper/meta.json", "workdir": workdir}
+            {"path": "agents/skill-keeper/meta.json"}
         )
         assert result.startswith("File:"), (
             f"the keeper must still read its own meta.json: {result!r}"
@@ -227,7 +236,7 @@ class TestKeeperReadScopeEnforcement:
     def test_list_directory_allows_a_relative_in_workdir_path(self, workdir):
         tools = _build_tools("skill-keeper", workdir)
         result = tools["list_directory"].invoke(
-            {"path": "agents/skill-keeper", "workdir": workdir}
+            {"path": "agents/skill-keeper"}
         )
         assert "meta.json" in result, (
             f"a relative in-workdir listing must still work: {result!r}"
@@ -243,10 +252,137 @@ class TestKeeperReadScopeEnforcement:
         )
         # And a forged argument does not widen the reach.
         result = tools["read_file"].invoke(
-            {"path": "/etc/passwd", "workdir": workdir, "read_scope": "none"}
+            {"path": "/etc/passwd", "read_scope": "none"}
         )
         assert result.startswith("ERROR:"), (
             f"a forged scope argument must not widen the reach: {result!r}"
+        )
+
+
+# =============================================================================
+# D1 — the ANCHOR is trusted, the ``workdir`` ARGUMENT is not
+# =============================================================================
+#
+# The reviewed bypass (Phase-1 fix round 1, D1): the scope's base was
+# ``Path(workdir).resolve()`` — and ``workdir`` is a FIRST-CLASS,
+# AGENT-SUPPLIED tool argument. The reviewer drove the production shape
+# and every probe returned the file:
+#
+#   [P1] workdir=<repo>      read_file(<repo>/.env)          -> RETURNED
+#   [P2] workdir="/"          read_file("/etc/passwd")       -> RETURNED
+#   [P3] workdir="/proc/self" read_file("/proc/self/environ")-> RETURNED
+#   [P4] list_directory(path="/", workdir="/")               -> RETURNED the FS root
+#
+# The ruling: the base MUST be the daemon-resolved trusted workdir, the
+# agent-supplied ``workdir`` MUST NOT move it, and an ABSOLUTE path
+# argument MUST be refused for a scoped agent.
+
+
+class TestTrustedAnchor:
+    def test_read_file_refuses_an_agent_supplied_root_workdir(self, workdir):
+        """[P2] — the D1 bypass, closed."""
+        tools = _build_tools("skill-keeper", workdir)
+        result = tools["read_file"].invoke(
+            {"path": "/etc/passwd", "workdir": "/"}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not move its read anchor: {result!r}"
+        )
+        assert "workdir" in result
+
+    def test_read_file_refuses_an_agent_supplied_repo_workdir(self, workdir):
+        """[P1] — the D1 bypass, closed (the repo-``.env`` shape)."""
+        tools = _build_tools("skill-keeper", workdir)
+        result = tools["read_file"].invoke(
+            {"path": str(REPO_ROOT / ".env"), "workdir": str(REPO_ROOT)}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not move its read anchor: {result!r}"
+        )
+
+    def test_read_file_refuses_an_agent_supplied_proc_workdir(self, workdir):
+        """[P3] — the D1 bypass, closed."""
+        tools = _build_tools("skill-keeper", workdir)
+        result = tools["read_file"].invoke(
+            {"path": "/proc/self/environ", "workdir": "/proc/self"}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not move its read anchor: {result!r}"
+        )
+
+    def test_list_directory_refuses_an_agent_supplied_root_workdir(self, workdir):
+        """[P4] — the D1 bypass, closed."""
+        tools = _build_tools("skill-keeper", workdir)
+        result = tools["list_directory"].invoke({"path": "/", "workdir": "/"})
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not list the filesystem root: {result!r}"
+        )
+
+    def test_the_read_anchor_is_the_daemon_resolved_project_workdir(self, workdir):
+        """The anchor is the DAEMON's workdir — the manager's project dir."""
+        tools = _build_tools("skill-keeper", workdir)
+        result = tools["read_file"].invoke({"path": "inside.txt"})
+        assert "inside-the-workdir" in result, (
+            f"the relative read must resolve at the trusted anchor: {result!r}"
+        )
+
+    def test_a_relative_read_resolves_at_the_anchor_not_at_the_argument(
+        self, workdir, tmp_path
+    ):
+        """The argument cannot become the base — even for a relative path.
+
+        The trusted anchor holds ``inside.txt``; a DIFFERENT directory
+        (the argument) also holds a file with the same name. The
+        agent-supplied ``workdir`` is refused outright, so the read can
+        only resolve at the anchor.
+        """
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        (other / "inside.txt").write_text("the-other-file\n", encoding="utf-8")
+
+        tools = _build_tools("skill-keeper", workdir)
+        result = tools["read_file"].invoke(
+            {"path": "inside.txt", "workdir": str(other)}
+        )
+        assert result.startswith("ERROR:"), (
+            f"an agent-supplied workdir must be refused outright: {result!r}"
+        )
+
+    def test_the_trusted_anchor_never_comes_from_the_tool_arguments(self):
+        """Static pin — the resolver must not read the ``workdir`` argument.
+
+        The base is the CONTEXTVAR the factory binds. A resolver that
+        took the base from the tool-call's ``workdir`` would be the D1
+        defect itself. The check is AST-level: the scoped resolver must
+        not even NAME a ``workdir`` variable (the word may appear in a
+        message, never as a binding).
+        """
+        import ast
+        import inspect
+
+        from daemon.tools import filesystem
+
+        sig = inspect.signature(filesystem._resolve_within_scope)
+        assert "workdir" not in sig.parameters, (
+            "the scoped resolver must not take the tool-call's workdir "
+            f"argument: {sorted(sig.parameters)}"
+        )
+
+        tree = ast.parse(inspect.getsource(filesystem._resolve_within_scope))
+        names = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+        }
+        assert "workdir" not in names, (
+            "the scoped resolver must not read a workdir binding: "
+            f"{sorted(names)}"
+        )
+
+        anchor_source = inspect.getsource(filesystem._trusted_scope_anchor)
+        assert "current_trusted_workdir()" in anchor_source, (
+            "the scoped resolver's base must come from the trusted-workdir "
+            "binding the factory sets"
         )
 
 

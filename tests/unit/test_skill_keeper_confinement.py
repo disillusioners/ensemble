@@ -15,6 +15,24 @@ Two legs:
   PRODUCTION registry. The assertion is by CAPABILITY — derived from
   each tool's IMPLEMENTATION and the registry's own category metadata —
   never by tool NAME, so a future rename cannot slip through.
+
+  THE HONEST PROPERTY (Phase-1 fix round 1, D2). The plan's literal
+  sentence *"no tool in the resolved set can write a file"* is FALSE of
+  the shipped surface, and the pin now states what is actually true:
+
+  * **no tool on the keeper's bound surface writes the PROJECT
+    surface**, and
+  * the TEMP-dir writers (the house's shared-context save — ``explore``
+    and ``experience``) are **ENUMERATED AND PINNED BY NAME**.
+
+  The classifier that backs those pins is REACHABILITY-based: it
+  follows the helpers a tool reaches (including the
+  ``asyncio.to_thread`` ARGUMENT edge the old name-only walk missed),
+  recognises the real write primitives (``open(mode='w')``,
+  ``Path.write_text``/``write_bytes``, ``Path.open('w')``,
+  ``print(file=...)``, ``shutil.copy*``, destructive ``os.remove`` /
+  ``rename``), and decides temp-vs-project from the WRITE TARGET's
+  derivation chain — never from "the body mentions gettempdir".
 * **B1b — the invocation leg.** The ``b7da3ed0`` sequence is actually
   ATTEMPTED through the production dispatch mechanism (LangGraph's
   ``ToolNode``, which is what ``daemon/graph.py`` binds). Every attempt
@@ -89,7 +107,6 @@ _CMD_DOTTED = frozenset(
 _CMD_SUBSTRINGS = ("subprocess", "create_subprocess")
 _SERVICE_TOKENS = ("service_manager", "start_service", "_service_tool_manager")
 _MEMORY_TOKENS = ("memories",)
-_TEMP_DIR_TOKENS = ("gettempdir",)
 
 
 # =============================================================================
@@ -180,20 +197,288 @@ def _calls(node: Any) -> tuple[set[str], set[str], bool]:
     return attrs, dotted, shell
 
 
-def _write_ish(names) -> bool:
-    """True when a called name reads like a write.
+# ---------------------------------------------------------------------------
+# D2 — the WRITE analysis: REACHABILITY + write-TARGET derivation
+# ---------------------------------------------------------------------------
+#
+# The old classifier decided "does this tool write?" from the NAME of a
+# called function and decided "is the write temp-confined?" from
+# "does the body MENTION ``gettempdir()``". Both halves were blind:
+#
+#   * a helper passed to ``asyncio.to_thread`` was never REACHED, so
+#     ``experience``'s write (the real one at
+#     ``daemon/tools/knowledge_tools.py``) was invisible — and
+#   * a body that merely MENTIONED ``gettempdir()`` was DOWNGRADED to
+#     the temp class even when it wrote a project path.
+#
+# The classifier below is REACHABILITY-based (it follows the helper
+# edges, including the thread-offload ARGUMENT edge) and decides
+# temp-vs-project from the WRITE TARGET's derivation chain — "where
+# does this written path COME FROM" — never from the body's prose.
 
-    ``read``-bearing names are excluded (``read_text`` is a READ), and
-    the check is on the NAME OF THE CALL, never on the tool's name — a
-    renamed write tool is still caught.
+#: A write mode MUTATES the target. ``open(path)`` with no mode is a
+#: READ; ``open(path, "rb")`` is a READ.
+_WRITE_MODE_CHARS = ("w", "a", "x", "+")
+
+#: Markers that prove a write TARGET derives from the system temp dir.
+#: They are matched against the TARGET's derivation chain ONLY — never
+#: against the function body (that "body mentions gettempdir" downgrade
+#: was the blind spot this replaces).
+_TEMP_TARGET_MARKERS = (
+    "gettempdir",
+    "gettempprefix",
+    "TemporaryDirectory",
+    "TemporaryFile",
+    "NamedTemporaryFile",
+    "mkdtemp",
+    "mkstemp",
+    "tempfile.",
+)
+
+#: The thread-offload calls whose ARGUMENT may be a helper the tool
+#: reaches indirectly. This is the edge the old name-only walk missed.
+_THREAD_OFFLOAD_NAMES = frozenset({"to_thread", "run_in_executor"})
+
+#: The write PRIMITIVES. Each maps a called ATTRIBUTE to the way its
+#: WRITE TARGET is recovered.
+_WRITE_TARGET_ATTRS = frozenset(
+    {"write_text", "write_bytes", "writelines", "touch", "write"}
+)
+
+
+def _receiver_name(node: Any) -> str:
+    """Return the dotted source of an attribute receiver (``shutil``, ...)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _receiver_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def _kwarg(call: ast.Call, name: str):
+    """Return the value of a keyword argument, or ``None``."""
+    for kw in call.keywords:
+        if kw.arg == name:
+            return kw.value
+    return None
+
+
+def _mode_is_write(mode_node) -> bool:
+    """True when an ``open`` MODE argument mutates the target.
+
+    An unknown (computed) mode is treated as a WRITE — fail-closed: a
+    write we cannot rule out is a write.
     """
-    for name in names:
-        low = name.lower()
-        if "read" in low:
+    if mode_node is None:
+        return False
+    if isinstance(mode_node, ast.Constant) and isinstance(mode_node.value, str):
+        return any(ch in mode_node.value for ch in _WRITE_MODE_CHARS)
+    return True
+
+
+def _referenced_helper_names(fnode: Any) -> set[str]:
+    """The module-level names a function can REACH.
+
+    Two edges (D2):
+
+    * a helper CALLED DIRECTLY by name, and
+    * a helper PASSED AS AN ARGUMENT to a thread-offload call
+      (``asyncio.to_thread`` / ``to_thread`` / ``run_in_executor`` /
+      ``loop.run_in_executor``) — the edge that hid
+      ``_save_experience_result`` and with it ``experience``'s write.
+    """
+    names: set[str] = set()
+    for sub in ast.walk(fnode):
+        if not isinstance(sub, ast.Call):
             continue
-        if "write" in low:
-            return True
-    return False
+        fn = sub.func
+        if isinstance(fn, ast.Name):
+            names.add(fn.id)
+        elif isinstance(fn, ast.Attribute):
+            names.add(fn.attr)
+            base = _receiver_name(fn.value)
+            if base:
+                names.add(base)
+            if fn.attr in _THREAD_OFFLOAD_NAMES:
+                for arg in list(sub.args) + [kw.value for kw in sub.keywords]:
+                    if isinstance(arg, ast.Name):
+                        names.add(arg.id)
+    return names
+
+
+def _reachable_module_helpers(
+    tree: Any,
+    index: dict[str, Any],
+    exclude: set[str],
+) -> list[ast.AST]:
+    """The module-level helpers the tool can REACH (bounded depth)."""
+    reachable: list[ast.AST] = []
+    seen: set[str] = set()
+    frontier = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    depth = 0
+    while frontier and depth < 5:
+        depth += 1
+        nxt: list[ast.AST] = []
+        for fnode in frontier:
+            for name in _referenced_helper_names(fnode):
+                if name in seen or name in exclude:
+                    continue
+                seen.add(name)
+                target = index.get(name)
+                if target is None:
+                    continue
+                reachable.append(target)
+                nxt.append(target)
+        frontier = nxt
+    return reachable
+
+
+def _write_calls(node: Any) -> list[tuple[Any, ast.Call]]:
+    """``(write-target-or-None, the Call node)`` for every write signal.
+
+    The recognised signals (D2):
+
+    * ``open(path, mode)`` with a mutating mode,
+    * ``Path.write_text`` / ``write_bytes`` / ``writelines`` / ``touch``,
+    * ``Path.open(mode)`` with a mutating mode,
+    * ``print(..., file=fh)``,
+    * ``file_handle.write(...)``,
+    * ``shutil.copy*`` (the DESTINATION),
+    * destructive ``os.remove`` / ``os.unlink`` / ``os.rename`` /
+      ``os.replace`` and the ``Path`` equivalents.
+
+    A ``None`` target means "a write we cannot attribute to a path" →
+    treated as a PROJECT write (fail-closed).
+    """
+    out: list[tuple[Any, ast.Call]] = []
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        fn = sub.func
+        if isinstance(fn, ast.Attribute):
+            attr = fn.attr
+            recv = fn.value
+            recv_name = _receiver_name(recv)
+            if attr in _WRITE_TARGET_ATTRS:
+                out.append((recv, sub))
+            elif attr == "open":
+                if _mode_is_write(_kwarg(sub, "mode")):
+                    if isinstance(recv, ast.Call) and _receiver_name(recv.func) == "Path":
+                        out.append((recv.args[0] if recv.args else recv, sub))
+                    else:
+                        out.append((recv, sub))
+            elif recv_name == "shutil" and attr.startswith("copy"):
+                dst = _kwarg(sub, "dst")
+                if dst is None and len(sub.args) > 1:
+                    dst = sub.args[1]
+                out.append((dst, sub))
+            elif recv_name == "os" and attr in (
+                "remove",
+                "unlink",
+                "rename",
+                "replace",
+                "rmdir",
+                "removedirs",
+            ):
+                out.append((sub.args[0] if sub.args else None, sub))
+            elif attr in ("unlink", "rmdir"):
+                out.append((recv, sub))
+        elif isinstance(fn, ast.Name):
+            if fn.id == "open":
+                mode = sub.args[1] if len(sub.args) > 1 else _kwarg(sub, "mode")
+                if _mode_is_write(mode):
+                    out.append((sub.args[0] if sub.args else None, sub))
+            elif fn.id == "print":
+                handle = _kwarg(sub, "file")
+                if handle is not None:
+                    out.append((handle, sub))
+    return out
+
+
+def _target_derivations(
+    node: Any,
+    scope_nodes: list[Any],
+    seen: set[int] | None = None,
+) -> set[str]:
+    """The source texts a write TARGET derives from.
+
+    The chain is followed through assignments (a name bound to a
+    ``Path(tempfile.gettempdir()) / ...`` expression), binary
+    concatenation, attribute access, subscripting and call arguments —
+    i.e. "where does this written path COME FROM", which is the
+    question that decides temp-vs-project confinement.
+    """
+    if node is None:
+        return set()
+    marker = id(node)
+    if seen is None:
+        seen = set()
+    if marker in seen:
+        return set()
+    seen.add(marker)
+    out: set[str] = set()
+    try:
+        out.add(ast.unparse(node))
+    except Exception:  # pragma: no cover — unparse is total for our nodes
+        out.add("")
+    if isinstance(node, ast.Name):
+        for fnode in scope_nodes:
+            for sub in ast.walk(fnode):
+                if isinstance(sub, ast.Assign):
+                    for tgt in sub.targets:
+                        if isinstance(tgt, ast.Name) and tgt.id == node.id:
+                            out |= _target_derivations(sub.value, scope_nodes, seen)
+                elif isinstance(sub, ast.AnnAssign):
+                    if (
+                        isinstance(sub.target, ast.Name)
+                        and sub.target.id == node.id
+                        and sub.value is not None
+                    ):
+                        out |= _target_derivations(sub.value, scope_nodes, seen)
+    elif isinstance(node, ast.BinOp):
+        out |= _target_derivations(node.left, scope_nodes, seen)
+    elif isinstance(node, ast.Call):
+        for arg in node.args:
+            out |= _target_derivations(arg, scope_nodes, seen)
+        for kw in node.keywords:
+            out |= _target_derivations(kw.value, scope_nodes, seen)
+    elif isinstance(node, ast.Attribute):
+        out |= _target_derivations(node.value, scope_nodes, seen)
+    elif isinstance(node, ast.Subscript):
+        out |= _target_derivations(node.value, scope_nodes, seen)
+    return out
+
+
+def _write_profile(scope_nodes: list[Any]) -> tuple[bool, bool]:
+    """``(writes the PROJECT surface, writes the TEMP surface)``.
+
+    Every write signal in the REACHABLE set is attributed to a TARGET
+    expression; the target's derivation chain decides whether the
+    written path comes from the system temp dir. A write with no
+    attributable target counts as a PROJECT write (fail-closed).
+    """
+    project = False
+    temp = False
+    for fnode in scope_nodes:
+        for target, _call in _write_calls(fnode):
+            if target is None:
+                project = True
+                continue
+            derivations = _target_derivations(target, scope_nodes)
+            if any(
+                marker in text
+                for text in derivations
+                for marker in _TEMP_TARGET_MARKERS
+            ):
+                temp = True
+            else:
+                project = True
+    return project, temp
 
 
 def tool_capabilities(tool: Any) -> set[str]:
@@ -204,12 +489,13 @@ def tool_capabilities(tool: Any) -> set[str]:
 
     Derivation (name-independent):
     * the tool's IMPLEMENTATION (its own body plus the same-module
-      helpers it reaches) is scanned for write / process primitives;
+      helpers it REACHES — including the helpers passed to a
+      thread-offload call) is scanned for write / process primitives;
     * the tool's defining MODULE's imports supply the process signal
       (``import subprocess``);
     * the registry's own CATEGORY metadata supplies the service signal.
 
-    A write whose target is confined to the system temp directory is
+    A write whose TARGET derives from the system temp directory is
     reported as :data:`TEMP_FILE_CAPABILITY` instead of
     ``writes_file`` — the house's shared-context save is not a
     project-surface mutation, and the distinction stays VISIBLE.
@@ -226,38 +512,9 @@ def tool_capabilities(tool: Any) -> set[str]:
     index, module_text = _module_index(module_path)
 
     # --- reachable same-module helpers (bounded depth) --------------------
-    reachable: list[Any] = []
-    seen: set[str] = set()
-    frontier = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
-    depth = 0
-    while frontier and depth < 5:
-        depth += 1
-        nxt: list[Any] = []
-        for fnode in frontier:
-            _, called, _ = _calls(fnode)
-            for name in called:
-                if name in seen:
-                    continue
-                seen.add(name)
-                target = index.get(name)
-                if target is None:
-                    continue
-                reachable.append(target)
-                nxt.append(target)
-        frontier = nxt
-
-    attrs: set[str] = set()
-    dotted: set[str] = set()
-    shell = False
-    for fnode in [tree] + reachable:
-        a, d, s = _calls(fnode)
-        attrs |= a
-        dotted |= d
-        shell = shell or s
+    impl_name = getattr(impl, "__name__", "")
+    reachable = _reachable_module_helpers(tree, index, {impl_name})
+    scope_nodes = [tree] + reachable
 
     union_src = src
     for target in reachable:
@@ -267,6 +524,15 @@ def tool_capabilities(tool: Any) -> set[str]:
             segment = None
         if segment:
             union_src += "\n" + textwrap.dedent(segment)
+
+    attrs: set[str] = set()
+    dotted: set[str] = set()
+    shell = False
+    for fnode in scope_nodes:
+        a, d, s = _calls(fnode)
+        attrs |= a
+        dotted |= d
+        shell = shell or s
 
     imported: set[str] = set()
     module_writes = False
@@ -284,16 +550,18 @@ def tool_capabilities(tool: Any) -> set[str]:
                     if node.module:
                         imported.add(node.module.split(".")[0])
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    a, d, _ = _calls(node)
-                    if (a & _WRITE_ATTRS) or (d & _DESTRUCTIVE_DOTTED):
+                    if _write_calls(node):
                         module_writes = True
 
     caps: set[str] = set()
-    writes = bool((attrs & _WRITE_ATTRS) or (dotted & _DESTRUCTIVE_DOTTED)
-                  or _write_ish(dotted))
-    if writes:
-        temp_confined = any(tok in union_src for tok in _TEMP_DIR_TOKENS)
-        caps.add(TEMP_FILE_CAPABILITY if temp_confined else "writes_file")
+    # D2: the write decision is REACHABILITY-based (the reachable set
+    # above) and the temp-vs-project decision comes from the write
+    # TARGET's derivation chain — not from the body's prose.
+    project_writes, temp_writes = _write_profile(scope_nodes)
+    if project_writes:
+        caps.add("writes_file")
+    elif temp_writes:
+        caps.add(TEMP_FILE_CAPABILITY)
     if (
         (dotted & _CMD_DOTTED)
         or any(any(sub in d.lower() for sub in _CMD_SUBSTRINGS) for d in dotted)
@@ -400,19 +668,55 @@ class TestResolverLeg:
             f"command / process / service / agent-memory capability: {offenders}"
         )
 
-    def test_the_only_write_capable_tool_is_the_temp_confined_context_save(
-        self, tmp_path
-    ):
-        """DISCLOSURE pin.
+    def test_the_bound_set_holds_no_project_surface_writer(self, tmp_path):
+        """THE confinement property (D2, re-stated).
 
-        The plan's literal assertion ("no tool can write a file") is NOT
-        true of the shipped surface: the ``knowledge`` category's
-        ``explore`` tool auto-saves its result into the SYSTEM TEMP
-        directory (``<tempdir>/ensemble/context/<ctx>/<slug>_<ts>.md``).
-        That is the house's shared-context feature, not a project-surface
-        mutation — but it IS a write, so it is pinned HERE rather than
-        folded away. If a future change makes ``explore`` write outside
-        the temp dir, this pin goes RED.
+        The plan's literal B1a sentence — *"no tool in the resolved set
+        can write a file"* — is FALSE of the shipped surface, and the
+        honest property is:
+
+            **no tool on the keeper's bound surface writes the PROJECT
+            surface.**
+
+        The temp-dir writers are a separate, ENUMERATED class (the
+        house's shared-context save) — they are pinned by name in
+        :meth:`test_the_temp_confined_writers_are_enumerated`, not
+        folded away. A tool that starts writing a PROJECT path turns
+        THIS pin RED.
+        """
+        tools = _build_keeper_tools(str(tmp_path))
+        project_writers = {
+            tool.name: sorted(tool_capabilities(tool))
+            for tool in tools
+            if "writes_file" in tool_capabilities(tool)
+        }
+        assert project_writers == {}, (
+            "no tool on the keeper's bound surface may write the PROJECT "
+            f"surface: {project_writers}"
+        )
+
+    def test_the_temp_confined_writers_are_enumerated(self, tmp_path):
+        """DISCLOSURE pin — the temp writers are ENUMERATED by name.
+
+        The house's shared-context feature writes TWO files into the
+        SYSTEM TEMP directory (``<tempdir>/ensemble/context/...``):
+
+        * ``explore`` — the explorer-result auto-save
+          (``_save_explorer_result``), and
+        * ``experience`` — the experience auto-save
+          (``_save_experience_result``).
+
+        The OLD pin asserted ``explore`` alone. That was FALSE, and
+        false in the dangerous direction: the classifier could not SEE
+        ``experience``'s write (the helper is passed to
+        ``asyncio.to_thread`` — an ARGUMENT edge, not a call edge), so
+        the pin held for the wrong reason and would not have reddened
+        when a second writer appeared. The TRUE set is asserted here.
+
+        The classifier is REACHABILITY-based, so ``experience`` is now
+        reached through the thread-offload argument edge and its write
+        is attributed to a TEMP target — the distinction between
+        "temp-confined" and "project-surface" stays VISIBLE.
         """
         tools = _build_keeper_tools(str(tmp_path))
         writers = {
@@ -420,10 +724,103 @@ class TestResolverLeg:
             for tool in tools
             if tool_capabilities(tool) & {"writes_file", TEMP_FILE_CAPABILITY}
         }
-        assert writers == {"explore": [TEMP_FILE_CAPABILITY]}, (
-            "the only write-capable tool on the keeper's surface is the "
-            "temp-confined shared-context save: "
-            f"{writers}"
+        assert writers == {
+            "explore": [TEMP_FILE_CAPABILITY],
+            "experience": [TEMP_FILE_CAPABILITY],
+        }, (
+            "the temp-confined shared-context writers on the keeper's "
+            f"surface are exactly explore + experience: {writers}"
+        )
+
+    def test_a_project_write_is_not_downgraded_by_a_gettempdir_mention(self):
+        """D2 blind spot #2 — the temp decision follows the WRITE TARGET.
+
+        The OLD classifier downgraded a write to the temp class when
+        the function body merely MENTIONED ``gettempdir()``. A tool
+        that derives a scratch path from the temp dir and then writes a
+        PROJECT path was therefore classified as temp-confined. The
+        temp-vs-project decision now follows the WRITE TARGET's
+        derivation chain, so the mention is irrelevant.
+        """
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def zzz_temp_mention_probe(path: str, content: str) -> str:
+            """Mentions gettempdir, writes a PROJECT path."""
+            import tempfile
+            from pathlib import Path
+
+            scratch = tempfile.gettempdir()
+            Path(path).write_text(content, encoding="utf-8")
+            return scratch
+
+        caps = tool_capabilities(zzz_temp_mention_probe)
+        assert "writes_file" in caps, (
+            "a PROJECT-surface write must not be downgraded to the temp "
+            f"class because the body mentions gettempdir: {sorted(caps)}"
+        )
+
+    def test_the_classifier_follows_a_helper_passed_to_to_thread(self):
+        """D2 blind spot #1 — the thread-offload ARGUMENT edge.
+
+        A helper handed to ``asyncio.to_thread`` is REACHED by the
+        tool even though it is never CALLED by name. The real case is
+        ``experience`` → ``asyncio.to_thread(_save_experience_result,
+        ...)`` in ``daemon/tools/knowledge_tools.py``.
+        """
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def zzz_thread_helper_probe(path: str, content: str) -> str:
+            """Reaches its write only through asyncio.to_thread."""
+            import asyncio
+
+            from pathlib import Path
+
+            def _hidden_writer(target: str, body: str) -> None:
+                Path(target).write_text(body, encoding="utf-8")
+
+            asyncio.to_thread(_hidden_writer, path, content)
+            return "scheduled"
+
+        caps = tool_capabilities(zzz_thread_helper_probe)
+        assert "writes_file" in caps, (
+            "a helper passed to asyncio.to_thread must be REACHED by the "
+            f"classifier: {sorted(caps)}"
+        )
+
+    def test_the_classifier_catches_an_open_and_print_write(self):
+        """D2 blind spot #1 — the ``open``/``print(file=)`` shape."""
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def zzz_open_print_probe(path: str, content: str) -> str:
+            """Writes through an explicit file handle."""
+            with open(path, "w", encoding="utf-8") as handle:
+                print(content, file=handle)
+            return "written"
+
+        caps = tool_capabilities(zzz_open_print_probe)
+        assert "writes_file" in caps, (
+            f"an open(mode='w') + print(file=) write must be caught: {sorted(caps)}"
+        )
+
+    def test_the_classifier_catches_a_path_open_write(self):
+        """D2 blind spot #1 — the ``Path(...).open('w')`` shape."""
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def zzz_path_open_probe(path: str, content: str) -> str:
+            """Writes through Path.open."""
+            from pathlib import Path
+
+            with Path(path).open("w", encoding="utf-8") as handle:
+                handle.write(content)
+            return "written"
+
+        caps = tool_capabilities(zzz_path_open_probe)
+        assert "writes_file" in caps, (
+            f"a Path.open('w') write must be caught: {sorted(caps)}"
         )
 
     def test_the_classifier_catches_a_renamed_write_tool(self):
@@ -742,7 +1139,11 @@ class TestInvocationLeg:
                 f"starve its legitimate surface: {sorted(tools)}"
             )
 
-        result = tools["read_file"].invoke({"path": "audit.md", "workdir": str(root)})
+        # B3 fix round 1 (D1): a scoped agent passes a RELATIVE path —
+        # the read anchor is the daemon-resolved workdir, and the
+        # tool-call's ``workdir`` argument is refused for a scoped
+        # agent (it could otherwise move the boundary).
+        result = tools["read_file"].invoke({"path": "audit.md"})
         assert "# audit" in result, (
             f"the keeper must still read in its project: {result!r}"
         )

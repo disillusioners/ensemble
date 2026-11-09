@@ -1624,10 +1624,13 @@ class TestInlineEvolveLaneGate:
         return service
 
     @staticmethod
-    async def _call_evolve(tools: dict[str, Any]) -> str:
+    async def _call_evolve(
+        tools: dict[str, Any],
+        skill_id: str = "skill-under-test",
+    ) -> str:
         return await tools["skill_evolve"].ainvoke(
             {
-                "skill_id": "skill-under-test",
+                "skill_id": skill_id,
                 "evolution_type": "FIX",
                 "direction": "tighten error handling",
             }
@@ -1661,6 +1664,15 @@ class TestInlineEvolveLaneGate:
         criterion in the plan's own words ("no skill row is created or
         modified"), checked at the DB, not at a mock.
 
+        D5 — THE SEEDED-ROW HALF. The "table is empty" assertion alone
+        is NON-DISCRIMINATING: an UNGATED ``evolve_skill`` aimed at a
+        MISSING skill also writes 0 rows, so the old pin could not tell
+        "refused" from "reached the service and found nothing". The
+        row is therefore SEEDED with a known body, the refused call
+        targets that EXISTING row, and the pin asserts its CONTENT and
+        lifecycle flags are UNCHANGED — an ungated evolve would have
+        mutated or cloned it.
+
         Non-vacuity: the ON leg (``test_lane_on_proceeds_to_the_service``)
         proves the same call site DOES reach the service when the lane is
         open — the gate is the only thing standing between the call and
@@ -1672,6 +1684,7 @@ class TestInlineEvolveLaneGate:
 
         import daemon.repositories.skill.models  # noqa: F401 — table registration
         from daemon.config import SkillEvolutionConfig
+        from daemon.repositories.skill.models import Skill
         from daemon.repositories.skill.repository import SkillRepository
         from daemon.services.skill_evolution_service import SkillEvolutionService
 
@@ -1681,6 +1694,19 @@ class TestInlineEvolveLaneGate:
             poolclass=StaticPool,
         )
         SQLModel.metadata.create_all(engine)
+
+        # --- D5: seed a REAL existing skill row with a known body ---------
+        with Session(engine) as session:
+            seeded = Skill(
+                name="seeded-skill",
+                content="ORIGINAL CONTENT — MUST NOT CHANGE",
+                description="seeded by the lane-gate pin",
+                is_active=True,
+                status="active",
+            )
+            session.add(seeded)
+            session.commit()
+            seeded_id = seeded.id
 
         service = SkillEvolutionService(
             skill_repo=SkillRepository(engine),
@@ -1695,16 +1721,24 @@ class TestInlineEvolveLaneGate:
         manager = self._manager(False)
         manager._skill_evolution_service = service
 
-        result = await self._call_evolve(self._tools(manager))
+        result = await self._call_evolve(self._tools(manager), skill_id=seeded_id)
 
         assert "NO skill-keeper job was created" in result
-        from daemon.repositories.skill.models import Skill
         from sqlmodel import select
 
         with Session(engine) as session:
-            assert len(session.exec(select(Skill)).all()) == 0, (
-                "the refused inline evolve must not create a skill row"
+            rows = session.exec(select(Skill)).all()
+            assert len(rows) == 1, (
+                "the refused inline evolve must not create a skill row: "
+                f"{len(rows)} rows"
             )
+            assert rows[0].content == "ORIGINAL CONTENT — MUST NOT CHANGE", (
+                "the refused inline evolve must not modify the seeded skill's "
+                f"content: {rows[0].content!r}"
+            )
+            assert rows[0].is_active is True
+            assert rows[0].status == "active"
+            assert rows[0].generation == 0
 
     @pytest.mark.asyncio
     async def test_refusal_envelope_never_claims_success(self):
@@ -1835,3 +1869,183 @@ class TestInlineEvolveLaneGate:
 
         service.analyze_skill.assert_awaited_once()
         assert "NO skill-keeper job was created" not in result
+
+
+# =============================================================================
+# D3 — the SECOND inline mutation path (``skill_resolve_ab``)
+# =============================================================================
+
+
+class TestInlineResolveAbLaneGate:
+    """D3 — ``skill_resolve_ab`` is a SECOND inline mutation path.
+
+    The plan's §6 B2 premise — *"the ONE reachable mutation path"* — was
+    FALSE. ``skill_resolve_ab`` calls
+    ``SkillEvolutionService.check_ab_test_resolution`` INLINE with NO
+    lane check, and the reviewer drove it with the lane OFF: it
+    DEACTIVATED a live skill arm (``{"resolved": true,
+    "reason": "threshold_met"}`` → ``_skill_repo.deactivate('a')``).
+
+    The gate is the SAME one ``skill_evolve`` carries: the same
+    resolution point (``manager.is_skill_evolution_lane_enabled()``),
+    the same fail-closed posture, the same truthful refusal envelope.
+
+    LANE SIMULATION: the lane state is simulated by INJECTING the
+    manager accessor (``MagicMock(return_value=...)``). The
+    ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` environment variable is NEVER
+    set, unset or exported by these pins.
+    """
+
+    @staticmethod
+    def _tools(manager: Any) -> dict[str, Any]:
+        from daemon.tools.skill_evolution_tools import create_skill_evolution_tools
+
+        return {
+            getattr(t, "name", None): t
+            for t in create_skill_evolution_tools(manager, "inst-d3")
+        }
+
+    @staticmethod
+    def _manager(lane_enabled: bool | None) -> Any:
+        manager = MagicMock()
+        if lane_enabled is None:
+            del manager.is_skill_evolution_lane_enabled
+        else:
+            manager.is_skill_evolution_lane_enabled = MagicMock(
+                return_value=lane_enabled
+            )
+        return manager
+
+    @staticmethod
+    def _service() -> Any:
+        service = MagicMock()
+        service.check_ab_test_resolution = AsyncMock(
+            return_value={
+                "resolved": True,
+                "reason": "threshold_met",
+                "winner_id": "a",
+                "loser_id": "b",
+            }
+        )
+        return service
+
+    @staticmethod
+    async def _call_resolve(tools: dict[str, Any]) -> str:
+        return await tools["skill_resolve_ab"].ainvoke(
+            {"ab_test_group": "prompt-style-2026-07"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_lane_off_refuses_the_ab_resolution(self):
+        """Lane OFF ⇒ the tool refuses and the service is NEVER reached."""
+        manager = self._manager(False)
+        service = self._service()
+        manager._skill_evolution_service = service
+
+        result = await self._call_resolve(self._tools(manager))
+
+        assert "NO skill-keeper job was created" in result, (
+            f"the refusal must state that no job was created: {result!r}"
+        )
+        service.check_ab_test_resolution.assert_not_awaited()
+        service.check_ab_test_resolution.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_ab_refusal_never_claims_success(self):
+        """The SAME truthful envelope as ``skill_evolve`` (M-B2d shape)."""
+        manager = self._manager(False)
+        manager._skill_evolution_service = self._service()
+
+        result = await self._call_resolve(self._tools(manager))
+
+        assert "NOT executed" in result
+        for forbidden in (
+            "✅",
+            "Dispatched:",
+            "was admitted",
+            "Evolution complete",
+            "successfully",
+            "has been evolved",
+            '"resolved": true',
+        ):
+            assert forbidden not in result, (
+                f"the refusal envelope must not claim success: {forbidden!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_lane_on_proceeds_to_the_ab_resolution(self):
+        """Lane ON ⇒ the inline path behaves EXACTLY as before the gate."""
+        manager = self._manager(True)
+        service = self._service()
+        manager._skill_evolution_service = service
+
+        result = await self._call_resolve(self._tools(manager))
+
+        service.check_ab_test_resolution.assert_awaited_once_with(
+            "prompt-style-2026-07"
+        )
+        assert "NO skill-keeper job was created" not in result
+        assert "threshold_met" in result
+
+    @pytest.mark.asyncio
+    async def test_the_ab_gate_uses_the_same_resolution_point(self):
+        """Single-resolution-point pin for the SECOND path (M-B2c shape)."""
+        manager = self._manager(True)
+        manager._skill_evolution_service = self._service()
+
+        await self._call_resolve(self._tools(manager))
+
+        manager.is_skill_evolution_lane_enabled.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_the_ab_gate_fails_closed_without_an_accessor(self):
+        """An ABSENT accessor refuses — never admits."""
+        manager = self._manager(None)
+        service = self._service()
+        manager._skill_evolution_service = service
+
+        result = await self._call_resolve(self._tools(manager))
+
+        assert "NO skill-keeper job was created" in result
+        assert "fail-closed" in result
+        service.check_ab_test_resolution.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_ab_gate_fails_closed_on_a_raising_accessor(self):
+        """A RAISING probe refuses — never admits."""
+        manager = self._manager(False)
+        manager.is_skill_evolution_lane_enabled = MagicMock(
+            side_effect=RuntimeError("probe exploded")
+        )
+        service = self._service()
+        manager._skill_evolution_service = service
+
+        result = await self._call_resolve(self._tools(manager))
+
+        assert "NO skill-keeper job was created" in result
+        assert "fail-closed" in result
+        service.check_ab_test_resolution.assert_not_awaited()
+
+    def test_both_inline_mutation_paths_carry_the_gate(self):
+        """Static pin — BOTH inline mutation paths are gated.
+
+        The exit criterion the reviewer could not confirm: every
+        INLINE call into the evolution service must sit behind the
+        lane gate. A NEW inline mutation path added without a gate
+        turns this pin RED.
+        """
+        from daemon.tools import skill_evolution_tools as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        # The two Tier-3 mutation service methods reachable inline.
+        for method in ("evolve_skill", "check_ab_test_resolution"):
+            assert f'"{method}"' in source, (
+                f"the tool module must still call {method} inline"
+            )
+        # The gate must appear once per inline mutation path.
+        gate_calls = source.count("lane_reason = _evolution_lane_refusal_reason(manager)")
+        assert gate_calls == 2, (
+            "both inline mutation paths (skill_evolve + skill_resolve_ab) "
+            "must consult the lane gate — the count is "
+            f"{gate_calls}"
+        )

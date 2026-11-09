@@ -216,6 +216,23 @@ _CURRENT_CALLER_AGENT_ID: contextvars.ContextVar[str | None] = (
     contextvars.ContextVar("ensemble_caller_agent_id", default=None)
 )
 
+#: The TRUSTED, daemon-resolved workdir for the CURRENT tool call.
+#:
+#: WHY a SEPARATE binding (Phase-1 fix round 1, D1): the scope's base
+#: must NOT come from the tool-call ARGUMENTS. ``workdir`` is a
+#: FIRST-CLASS agent-supplied argument (``read_file``'s schema carries
+#: it), so anchoring the refusal to it let the agent move its own
+#: boundary — the reviewed bypass drove
+#: ``read_file("/etc/passwd", workdir="/")`` and GOT the file back.
+#:
+#: The anchor is bound by the tool FACTORY (``daemon/tools/instance.py``)
+#: from the instance's project ``main_directory`` — the SAME directory
+#: the read tool would default to. It travels beside the caller
+#: identity, and both are set/reset around EVERY tool call.
+_CURRENT_TRUSTED_WORKDIR: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("ensemble_trusted_workdir", default=None)
+)
+
 #: The only scope value Phase 1 defines. A DECLARED scope (any value)
 #: means "bounded" — the declaration is the opt-in, the value names the
 #: boundary in the refusal message.
@@ -243,6 +260,28 @@ def reset_caller_agent_id(token) -> None:
 def current_caller_agent_id() -> str | None:
     """Return the calling agent's identity for the current tool call."""
     return _CURRENT_CALLER_AGENT_ID.get()
+
+
+def set_trusted_workdir(workdir: str | None):
+    """Bind the TRUSTED, daemon-resolved workdir for the current tool call.
+
+    Returns a token to hand back to :func:`reset_trusted_workdir`.
+    """
+    return _CURRENT_TRUSTED_WORKDIR.set(workdir or None)
+
+
+def reset_trusted_workdir(token) -> None:
+    """Restore the previous trusted-workdir binding."""
+    _CURRENT_TRUSTED_WORKDIR.reset(token)
+
+
+def current_trusted_workdir() -> str | None:
+    """Return the TRUSTED, daemon-resolved workdir for the current tool call.
+
+    ``None`` means the daemon could not resolve an anchor — a scoped
+    agent then has NO legal read base and every read is refused.
+    """
+    return _CURRENT_TRUSTED_WORKDIR.get()
 
 
 def declared_read_scope(agent_id: str | None) -> str | None:
@@ -286,38 +325,69 @@ def _load_declared_read_scope(agent_id: str) -> str | None:
     return None
 
 
-def _read_scope_refusal(
-    target: Path,
-    workdir: str | None,
-    scope: str,
-) -> str | None:
-    """Return an error string when the absolute target escapes the scope.
+def _trusted_scope_anchor() -> Path | None:
+    """Return the TRUSTED read anchor for a scoped agent, or ``None``.
 
-    A DECLARED scope means the agent may only read INSIDE its project
-    workdir. An absolute path outside that boundary is refused — this
-    is the credential-hazard class (the repo ``.env``, ``~/.ssh/*``,
-    ``/proc/self/environ``, another agent's directory) the keeper's
-    residual read reach exposed.
+    The anchor is the daemon-resolved project workdir, bound by the
+    tool FACTORY. It is NEVER derived from the tool-call's ``workdir``
+    ARGUMENT — that argument is agent-supplied and would let the agent
+    choose its own boundary (the reviewed D1 bypass: ``workdir="/"``
+    turned ``read_file("/etc/passwd")`` into a success).
     """
-    if not workdir or not workdir.strip():
-        return (
-            f"ERROR: read scope {scope!r} forbids reading absolute paths "
-            "outside the project workdir, and no workdir was declared."
+    trusted = current_trusted_workdir()
+    if not trusted or not str(trusted).strip():
+        return None
+    try:
+        return Path(trusted).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _resolve_within_scope(
+    path: str,
+    scope: str,
+) -> tuple[Path | None, str | None]:
+    """Resolve a read path for an agent that DECLARES a read scope.
+
+    The rules (Phase-1 fix round 1 — D1):
+
+    * **ABSOLUTE path argument ⇒ REFUSED**, unconditionally. The
+      acceptance list requires ``<repo>/.env`` to be refused even
+      though the repo IS the anchor, so "inside the anchor" is not the
+      rule — "relative only" is.
+    * **RELATIVE path ⇒ resolved against the TRUSTED anchor** (the
+      daemon-resolved project workdir), NEVER against the tool-call's
+      ``workdir`` argument. A relative path that escapes the anchor is
+      refused.
+    * **No anchor ⇒ every read is refused** (fail-closed).
+
+    A DECLARED scope therefore means *relative-only reads, anchored at
+    the daemon's own workdir* — the credential-hazard class (the repo
+    ``.env``, ``~/.ssh/*``, ``/proc/self/environ``, another agent's
+    directory) the keeper's residual read reach exposed.
+    """
+    anchor = _trusted_scope_anchor()
+    if anchor is None:
+        return None, (
+            f"ERROR: read scope {scope!r} has no trusted workdir anchor — the "
+            "daemon could not resolve this instance's project directory. "
+            "Reads are refused (the scope permits relative reads anchored "
+            "at the trusted workdir only)."
+        )
+    if _is_absolute_path(path):
+        return None, (
+            f"ERROR: read scope {scope!r} permits RELATIVE reads only, "
+            f"anchored at {anchor}. The absolute path {path!r} is refused — "
+            "read it as a relative path from the anchor."
         )
     try:
-        base = Path(workdir).expanduser().resolve()
-    except (OSError, RuntimeError) as exc:
-        return f"ERROR: invalid workdir for read scope: {exc}"
-    try:
-        resolved = target.resolve()
-    except (OSError, RuntimeError) as exc:
-        return f"ERROR: Invalid absolute path: {exc}"
-    if WorkspaceGuard._normed_contains(base, resolved):
-        return None
-    return (
-        f"ERROR: read scope {scope!r} forbids reading outside the project "
-        f"workdir ({base}); {resolved} is outside it."
-    )
+        guard = WorkspaceGuard(str(anchor))
+    except ValueError:
+        return None, (
+            f"ERROR: trusted workdir does not exist: {anchor} — the daemon "
+            "could not resolve this instance's project directory."
+        )
+    return guard.resolve(path)
 
 
 def _resolve_within_workdir(
@@ -330,27 +400,29 @@ def _resolve_within_workdir(
     Combines ``_resolve_target_path`` with the boundary check, so callers get
     a single (target, err) tuple and can't forget to apply the boundary check.
 
-    ``scope_agent_id`` is the OPT-IN read-scope hook (B3). When it is
-    ``None`` — the write/edit call paths and every agent that declares
-    no scope — the behavior is byte-identical to the pre-scope resolver.
-    Only the READ call sites pass it.
+    ``scope_agent_id`` is the OPT-IN read-scope hook (B3). When the agent
+    declares NO scope — the write/edit call paths and every agent that
+    declares none — the behavior is byte-identical to the pre-scope
+    resolver. Only the READ call sites pass it.
 
     Returns:
         (target_path, error). On error, target_path is None. For absolute
         paths the boundary check is intentionally skipped UNLESS the
         caller opted into a declared read scope.
     """
+    scope = declared_read_scope(scope_agent_id)
+    if scope:
+        # A SCOPED agent reads RELATIVE paths against the TRUSTED
+        # daemon-resolved anchor only. The `workdir` ARGUMENT is never
+        # consulted here — it is agent-supplied and must not be able to
+        # move the boundary (D1).
+        return _resolve_within_scope(path, scope)
+
     if _is_absolute_path(path):
         try:
-            resolved = Path(path).expanduser()
+            return Path(path).expanduser(), None
         except (OSError, RuntimeError) as e:
             return None, f"ERROR: Invalid absolute path: {e}"
-        scope = declared_read_scope(scope_agent_id)
-        if scope:
-            scope_err = _read_scope_refusal(resolved, workdir, scope)
-            if scope_err:
-                return None, scope_err
-        return resolved, None
 
     if not workdir or not workdir.strip():
         return (

@@ -362,6 +362,18 @@ proposed diff.
         stats and decides whether to resolve, extend, or wait for more
         data.
         """
+        # B2 fix round 1 (D3): this path is a SECOND inline mutation
+        # path and it was UNGATED. The reviewer drove it with the lane
+        # OFF and it DEACTIVATED a live skill arm
+        # (``{"resolved": true, "reason": "threshold_met"}`` →
+        # ``_skill_repo.deactivate('a')``) — so the plan's §6 B2 premise
+        # ("the ONE reachable mutation path") was FALSE. It now carries
+        # the SAME gate, the SAME resolution point and the SAME truthful
+        # refusal envelope as ``skill_evolve``.
+        lane_reason = _evolution_lane_refusal_reason(manager)
+        if lane_reason is not None:
+            return _lane_refusal(lane_reason)
+
         return await _invoke_service(
             manager,
             "_skill_evolution_service",
