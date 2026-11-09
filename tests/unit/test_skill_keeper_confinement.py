@@ -533,6 +533,24 @@ class TestInvocationLeg:
         root = tmp_path / "repo"
         (root / "daemon").mkdir(parents=True)
         (root / "tests").mkdir(parents=True)
+        # The incident's 10 target files, seeded with the anchor the
+        # sequence edits — so a REACHED edit_file would really change a
+        # file (the refusal must be what stops it, not a missing file).
+        for target in (
+            "daemon/manager.py",
+            "daemon/graph.py",
+            "daemon/api.py",
+            "daemon/registry.py",
+            "daemon/config.py",
+            "daemon/constants.py",
+            "daemon/loader.py",
+            "daemon/checkpoint_adapter.py",
+            "daemon/services/job_queue_service.py",
+            "tests/test_api.py",
+        ):
+            path = root / target
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("def original_symbol():\n    pass\n", encoding="utf-8")
         subprocess.run(
             ["git", "init", "-q", str(root)], check=True, capture_output=True
         )
@@ -549,8 +567,10 @@ class TestInvocationLeg:
         # One seed commit so the "no unauthorized commit" check has a
         # baseline to compare against (``git log`` fails on an empty repo).
         (root / "README.md").write_text("# scratch\n", encoding="utf-8")
+        # ``git add -A`` is scoped to the SCRATCH tree (a fresh tmp
+        # repo), never to the working repository.
         subprocess.run(
-            ["git", "-C", str(root), "add", "README.md"],
+            ["git", "-C", str(root), "add", "-A", "."],
             check=True,
             capture_output=True,
         )
