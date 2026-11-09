@@ -137,6 +137,60 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _record_capture_lane_off_refusal(
+    *,
+    agent_id: Any = None,
+    task_message: Any = None,
+    prompt_source: str = "skill_metrics_service",
+) -> None:
+    """Count AND record one capture-lane-OFF admission refusal (C2 seam).
+
+    THE GAP THIS CLOSES.  Gate 0 of ``_check_capture_eligibility`` returns
+    ``None`` when ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` is off — BEFORE the
+    dispatcher's own gate is ever reached. The dispatcher counts its
+    refusals, so the ``capture_lane_off`` ADMISSION counter was
+    **PARTIAL**: it moved for the tools-lane seam only, never for the
+    production metrics-lane path. This helper is the metrics-lane's half.
+
+    DEFENSIVE BY CONSTRUCTION (the observability module belongs to another
+    lane): the import and the call are both inside one guard, so a missing
+    symbol — or a raising sink — degrades to the PREVIOUS behaviour
+    (uncounted) instead of breaking the capture path. The helper itself
+    never raises.
+
+    Args:
+        agent_id: The originating agent id, when known.
+        task_message: The raw prompt text. Used ONLY to derive the prompt
+            SHAPE downstream (length bucket + sha256 prefix) — the raw
+            text is never copied into the record.
+        prompt_source: Which producer minted the attempt.
+    """
+    try:
+        from daemon.services import skill_capture_observability as observability
+
+        record = getattr(
+            observability, "record_capture_lane_disabled_refusal", None
+        )
+        if record is None:  # pragma: no cover — another lane owns the symbol
+            logger.debug(
+                "SkillMetricsService: capture-lane-off refusal recorder is "
+                "absent — the refusal is uncounted (previous behaviour)"
+            )
+            return
+        record(
+            agent_id=agent_id,
+            task_message=task_message,
+            prompt_source=prompt_source,
+        )
+    except Exception as exc:  # noqa: BLE001 — observability NEVER breaks the lane
+        logger.warning(
+            "SkillMetricsService: capture-lane-off refusal record failed "
+            "(%s: %s) — the capture gate is unaffected",
+            type(exc).__name__,
+            exc,
+        )
+
+
 # ============================================================
 # SkillMetricsService
 # ============================================================
@@ -603,6 +657,17 @@ class SkillMetricsService:
         # over propagation here so the job-queue completion hook
         # (which calls this method) never blocks on metrics.
         if not _resolve_capture_enabled():
+            # C2 — the METRICS-LANE refusal seam. Gate 0 returns BEFORE the
+            # dispatcher's own gate is reached, so without this call the
+            # ``capture_lane_off`` ADMISSION counter is PARTIAL (it moved
+            # only for the tools lane). Count AND record, then refuse.
+            # The recorder is defensive: a missing symbol or a raising sink
+            # degrades to the previous behaviour and never breaks the gate.
+            _record_capture_lane_off_refusal(
+                agent_id=agent_id,
+                task_message=task_message,
+                prompt_source="skill_metrics_service",
+            )
             return None
 
         # Gate 1: evolution service must be wired. This is the
