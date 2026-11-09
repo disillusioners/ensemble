@@ -23,7 +23,13 @@
 #   2. tests/tools/test_skill_tools_pf_surface.py — the sibling corpus
 #      (the folded W4 pin: the ``— source: db`` suffix additivity and
 #      the knob-OFF byte-shape).
-#   3. The MUTATION MATRIX (M1-M6 + M2b + M7-M9) — pack-level plants:
+#   2b. tests/unit/test_skill_evolution_lane_gate.py — the Phase-1
+#      workstream-B2 pins (the inline `skill_evolve` lane gate). The
+#      plan body claimed this pack already ran this file; it did NOT
+#      (the claim was STALE — the approver flagged it). The pack now
+#      runs it, and the M-B2a..d mutation legs live inside it.
+#   3. The MUTATION MATRIX (M1-M6 + M2b + M7-M9 + M-B2a..d) — pack-level
+#      plants:
 #      plant the defect → the discriminating leg must go RED → restore
 #      → the same leg must go GREEN. RESTORE SEMANTICS (gate F1 fix):
 #      every mutable file's PRISTINE content+sha256 is captured BEFORE
@@ -47,7 +53,7 @@
 #   - INTERNAL TIMER (gate F2 fix): the pack asserts its own wall-clock
 #     budget after every phase and every mutation leg; overrun prints
 #     RESULT: TIMEOUT and exits 124. Budget via
-#     SKILL_ID_VERBATIM_BUDGET_S (default 300 = the house cap; the
+#     SKILL_ID_VERBATIM_BUDGET_S (default 420 = the house cap; the
 #     registered PACKS.md invocation also wraps ``timeout 300``).
 #   - CONCURRENCY FENCE (gate F1 fix): flock keyed on the checkout's
 #     realpath — a second concurrent run against the SAME checkout
@@ -74,7 +80,7 @@
 #   bash test/packs/skill_id_verbatim_contract_unit_test.sh
 #   SKILL_ID_VERBATIM_MUTATIONS=0 bash test/packs/skill_id_verbatim_contract_unit_test.sh
 #     — skip the mutation matrix (the pin only).
-#   SKILL_ID_VERBATIM_BUDGET_S=300 bash test/packs/skill_id_verbatim_contract_unit_test.sh
+#   SKILL_ID_VERBATIM_BUDGET_S=420 bash test/packs/skill_id_verbatim_contract_unit_test.sh
 #     — override the internal wall-clock budget (seconds).
 #
 # Pack exit: 0 PASS / 1 FAIL / 124 TIMEOUT. The RESULT label always
@@ -93,7 +99,7 @@ echo "=== Test Pack: skill_id_verbatim_contract_unit_test ==="
 # The pack measures its own elapsed wall time from PACK_START and
 # asserts it against BUDGET_S after every phase and every mutation leg.
 PACK_START="$(date +%s)"
-BUDGET_S="${SKILL_ID_VERBATIM_BUDGET_S:-300}"
+BUDGET_S="${SKILL_ID_VERBATIM_BUDGET_S:-420}"
 elapsed_s() { echo $(( $(date +%s) - PACK_START )); }
 check_budget() {
   local elapsed label="${1:-}"
