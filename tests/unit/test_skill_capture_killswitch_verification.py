@@ -318,7 +318,7 @@ class TestDefaultOffSeamInertness:
         ab_test_repo = SkillABTestRepository(verif_engine)
         # Replace the real repo methods with Mocks at the boundary so we
         # can spy on them — same pattern as the dev's ks_* fixtures.
-        usage_repo.has_applied_for_instance = MagicMock(return_value=False)
+        usage_repo.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         # ALL external collaborators mocked — these are the boundaries
         # whose non-invocation we use to prove the gate fires.
@@ -386,7 +386,7 @@ class TestDefaultOffSeamInertness:
         # NO agent-metadata lookup.
         verif_metrics_service._verif_agent_id_resolver.assert_not_called()
         # NO usage-record DB read.
-        verif_metrics_service._verif_usage_repo.has_applied_for_instance \
+        verif_metrics_service._verif_usage_repo.has_genuinely_evolved_for_instance \
             .assert_not_called()
         # NO instance metadata touch.
         verif_metrics_service._verif_instance_repo.get.assert_not_called()

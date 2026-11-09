@@ -473,7 +473,7 @@ class TestSkillMetricsRecording:
 
         _set_injected_metrics(metrics_service, "inst-1", [skill_id])
         # Without a skill applied → gate fires, but we already have a record.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         inserted = await metrics_service.record_task_completion(
             instance_id="inst-1",
@@ -522,7 +522,7 @@ class TestSkillMetricsRecording:
         # counters on the skill row are bumped. The metrics endpoint
         # reads the counters off the row (not off usage records).
         _set_injected_metrics(metrics_service, "inst-m1", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         await metrics_service.record_task_completion(
             instance_id="inst-m1",

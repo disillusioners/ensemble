@@ -244,7 +244,7 @@ class TestSkillCapture:
         _set_injected(instance_repo, "inst-cx-1", [skill_id])
 
         # ``has_applied_for_instance`` must return False — no skill applied.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-1",
@@ -282,7 +282,7 @@ class TestSkillCapture:
         """Trivial success (low iterations AND short duration) skips capture."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-2", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-2",
@@ -344,7 +344,7 @@ class TestSkillCapture:
         """Failed tasks are never eligible for capture, even when complex."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-4", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-4",
@@ -375,7 +375,7 @@ class TestSkillCapture:
 
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-5", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-5",
@@ -425,7 +425,7 @@ class TestSkillCapture:
         """Capture gating is downstream of metrics — both fire on success."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-7", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         # Read the skill row before so we can compare counters after.
         before = repos.skill.get(skill_id)
@@ -460,7 +460,7 @@ class TestSkillCapture:
         """Failed task → consecutive_failures +1, no capture."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-8", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         await metrics_service.record_task_completion(
             instance_id="inst-cx-8",
@@ -493,7 +493,7 @@ class TestCaptureServiceLevel:
         self, evolution_service, repos,
     ):
         # No usage records for this instance → has_applied returns False.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         details = await evolution_service.check_and_capture(
             instance_id="inst-1",

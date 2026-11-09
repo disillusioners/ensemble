@@ -24,6 +24,7 @@
 #   tests/tools/test_skill_evolution_tools.py               (ON-pin: module-level autouse)
 #   tests/unit/test_skill_capture_attribution_seam.py       (A3 seam — Phase 1)
 #   tests/unit/test_skill_gate4_attribution_consumer.py     (A3 GATE-4 CONSUMER — Phase 1)
+#   tests/unit/test_skill_capture_gate_twin_parity.py       (A3 TWIN PARITY — M-A3d, Phase 1)
 #
 # NOTE on addopts: repo default addopts = `-m 'not integration and not postgres'`
 # would silently deselect the two integration-marked ON-pin files. This pack
@@ -54,7 +55,7 @@
 #           BLOCKED — both call sites live in files outside this lane's
 #           edit fence (reported, not pinned).
 #
-# Expected test count: 144 (49 + 12 + 12 + 22 + 23 + 18 + 8)
+# Expected test count: 157 (49 + 12 + 12 + 22 + 23 + 18 + 8 + 13)
 # Timeout: internal 240s per pytest leg; caller applies outer `timeout 900`.
 set -uo pipefail
 
@@ -87,10 +88,12 @@ FILES=(
   tests/tools/test_skill_evolution_tools.py
   tests/unit/test_skill_capture_attribution_seam.py
   tests/unit/test_skill_gate4_attribution_consumer.py
+  tests/unit/test_skill_capture_gate_twin_parity.py
 )
 
 SEAM="tests/unit/test_skill_capture_attribution_seam.py"
 CONSUMER="tests/unit/test_skill_gate4_attribution_consumer.py"
+PARITY="tests/unit/test_skill_capture_gate_twin_parity.py"
 REPO_PY="daemon/repositories/skill/repository.py"
 LOG_DIR="${SKILL_CAPTURE_KILLSWITCH_LOG_DIR:-/tmp/skill-capture-killswitch-gate}"
 mkdir -p "$LOG_DIR"
@@ -313,6 +316,17 @@ consumer_leg "M-A3d-consumer" "$SVC_PY" \
   '                self.usage_repo.has_applied_for_instance,' \
   "$CONSUMER"
 
+# ── M-A3d-parity — the TWIN-PARITY leg ────────────────────────────────────
+# Plant the defect on OUR OWN seam only: repointing `skill_metrics_service.py`
+# back to the feedback-only predicate must red the parity pin. The plant is
+# deliberately NOT placed in `skill_evolution_service.py` — a transient plant
+# in a file another lane may commit into can revert their commit on restore
+# (the house CONCURRENT-COMMIT hazard).
+consumer_leg "M-A3d-parity" "$SVC_PY" \
+  '                self.usage_repo.has_genuinely_evolved_for_instance,' \
+  '                self.usage_repo.has_applied_for_instance,' \
+  "$PARITY"
+
 for meta in "$PRISTINE"/*.meta; do
   [ -e "$meta" ] || continue
   path="$(cat "$meta")"
@@ -330,5 +344,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (4 A3 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (5 A3 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0

@@ -338,7 +338,7 @@ class TestStep1TaskCompletionOpensCaptureGate:
         skill_id = _seed_skill(repos, "complex-target").id
         _set_injected(instance_repo, "inst-flow-c-1", [skill_id])
         # No skill was actually applied on this instance.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-flow-c-1",
@@ -367,7 +367,7 @@ class TestStep1TaskCompletionOpensCaptureGate:
         """
         skill_id = _seed_skill(repos, "trivial-target").id
         _set_injected(instance_repo, "inst-flow-c-triv", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-flow-c-triv",
@@ -393,7 +393,7 @@ class TestStep1TaskCompletionOpensCaptureGate:
         """Failed task → gate2 refuses; no capture enqueued."""
         skill_id = _seed_skill(repos, "failed-target").id
         _set_injected(instance_repo, "inst-flow-c-fail", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-flow-c-fail",
@@ -468,7 +468,7 @@ class TestStep2CaptureJobRoutedToParallelQueue:
         """The capture job's ``queue_id`` resolves to the parallel queue."""
         skill_id = _seed_skill(repos, "routing-target").id
         _set_injected(instance_repo, "inst-flow-c-rt", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         await metrics_service.record_task_completion(
             instance_id="inst-flow-c-rt",
@@ -514,7 +514,7 @@ class TestStep2CaptureJobRoutedToParallelQueue:
         """``queue_repo.get_by_name`` was queried with ``system_parallel_queue``."""
         skill_id = _seed_skill(repos, "queue-name-target").id
         _set_injected(instance_repo, "inst-flow-c-qn", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         await metrics_service.record_task_completion(
             instance_id="inst-flow-c-qn",
@@ -745,7 +745,7 @@ class TestStep4MetricsAndCaptureAgree:
         existing_skill_id = _seed_skill(repos, "pre-existing").id
         _set_injected(instance_repo, "inst-flow-c-e2e", [existing_skill_id])
         # No skill was actually applied on this instance.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         # ── Phase 4: Task completion triggers the capture gate ────
         result = await metrics_service.record_task_completion(
