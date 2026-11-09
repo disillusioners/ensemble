@@ -104,6 +104,10 @@ from daemon.services.project_skill_source.model import (
 from daemon.services.project_skill_source.service import (
     ProjectSkillBodyUnavailable,
 )
+from daemon.services.skill_deactivation import is_open_ab_shadowed
+from daemon.services.skill_deactivation_manifest import (
+    is_excluded_from_injection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -433,6 +437,14 @@ class SkillInjectionService:
         injected = list(results.get("injected") or [])
         low_match = list(results.get("low_match") or [])
 
+        # Stage 1.5 — E4.3 (the injection-side defence / "the belt").
+        # The stale/shadow rows are excluded HERE, so nothing stale can be
+        # injected even when the boot-time reconciliation (E4.1) has not run
+        # yet. See :meth:`_filter_stale_candidates` for the exact predicate.
+        injected, low_match = await self._filter_stale_candidates(
+            injected, low_match, project_id
+        )
+
         # Empty result → nothing to inject. Caller treats this
         # as "skip the skill message entirely".
         if not injected and not low_match:
@@ -493,6 +505,132 @@ class SkillInjectionService:
         ]
 
         return (injection_text, skill_ids)
+
+    # --------------------------------------------------------
+    # E4.3 — the injection-side defence (the BELT)
+    # --------------------------------------------------------
+
+    async def _filter_stale_candidates(
+        self,
+        injected: list[dict[str, Any]],
+        low_match: list[dict[str, Any]],
+        project_id: str | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Drop every stale/shadow candidate before it can be served.
+
+        E4.3 (skill-system-revival Phase 1, plan §9): the search/injection
+        path excludes the stale/shadow rows so **nothing stale can be
+        injected even if the boot-time reconciliation (E4.1) has not run
+        yet**. The safety property is therefore independent of the boot
+        timing (DS-24).
+
+        The predicate, per candidate row:
+
+        1. **Declared disposition** — a row carrying a declared
+           disposition (the plan-verifier tooling artifact) is never
+           served. Enforced in CODE, not merely documented.
+        2. **Inactive row** — a row whose ``is_active`` is false is never
+           served. This also covers the census' desync proof
+           (``is_active=False`` + ``status='ab_testing'``): the A/B variant
+           filter used to consult ``status`` ONLY, so that half-dead row
+           was selectable.
+        3. **R1-shaped row** — a row that shadows an active same-name
+           sibling inside an UNRESOLVED A/B group is never served (the
+           group is unresolved ⇒ any selection would silently pick a
+           winner).
+
+        Failure posture: predicates 1 and 2 are pure attribute reads and
+        are always enforced. Predicate 3 needs the database; a transient
+        DB error degrades to KEEPING the candidate (fail-open) with a
+        warning — a database outage is not a stale-row scenario, and
+        suppressing every injection on a hiccup would be a far larger
+        behaviour change than the hazard this belt closes.
+
+        Args:
+            injected: The search's ``injected`` entries.
+            low_match: The search's ``low_match`` entries (name-only).
+            project_id: The active project scope.
+
+        Returns:
+            The filtered ``(injected, low_match)`` pair.
+        """
+        if not injected and not low_match:
+            return (injected, low_match)
+
+        kept_injected: list[dict[str, Any]] = []
+        for item in injected:
+            skill = item.get("skill") if isinstance(item, dict) else None
+            if skill is None:
+                continue
+            if not await self._is_servable_skill(skill):
+                continue
+            kept_injected.append(item)
+
+        kept_low: list[dict[str, Any]] = []
+        for item in low_match:
+            name = str((item or {}).get("name") or "")
+            if name and await self._is_servable_name(name, project_id):
+                kept_low.append(item)
+            elif not name:
+                kept_low.append(item)
+
+        return (kept_injected, kept_low)
+
+    async def _is_servable_skill(self, skill: Any) -> bool:
+        """True iff *skill* may be served (see :meth:`_filter_stale_candidates`)."""
+        # 1 — declared disposition (a tooling artifact is not a skill).
+        if is_excluded_from_injection(skill):
+            logger.info(
+                "[SkillInjection] E4.3 — skipping a declared-disposition row: "
+                "id=%s name=%s",
+                getattr(skill, "id", None),
+                getattr(skill, "name", None),
+            )
+            return False
+        # 2 — an inactive row is never served (covers the desync proof).
+        if not bool(getattr(skill, "is_active", False)):
+            return False
+        # 3 — R1-shaped row (same-name active shadowing, unresolved A/B).
+        try:
+            shadowed, blocking_test_id = await asyncio.to_thread(
+                is_open_ab_shadowed, skill, self._skill_repo, self._ab_test_repo
+            )
+        except Exception as e:  # noqa: BLE001 — never break the user message
+            logger.warning(
+                "[SkillInjection] E4.3 — R1 check failed for skill "
+                "id=%s (%s). Keeping the candidate.",
+                getattr(skill, "id", None),
+                e,
+            )
+            return True
+        if shadowed:
+            logger.info(
+                "[SkillInjection] E4.3 — skipping an R1-shaped row: id=%s "
+                "name=%s blocking_test=%s",
+                getattr(skill, "id", None),
+                getattr(skill, "name", None),
+                blocking_test_id,
+            )
+            return False
+        return True
+
+    async def _is_servable_name(self, name: str, project_id: str | None) -> bool:
+        """True iff a NAME (a ``low_match`` entry) may be advertised."""
+        try:
+            variant = await asyncio.to_thread(
+                self._skill_repo.get_active_variant, project_id, name
+            )
+        except Exception as e:  # noqa: BLE001 — never break the user message
+            logger.warning(
+                "[SkillInjection] E4.3 — low-match lookup failed for name=%s "
+                "(%s). Keeping the entry.",
+                name,
+                e,
+            )
+            return True
+        if variant is None:
+            return True
+        return await self._is_servable_skill(variant)
 
     async def inject_explicit_skill(
         self,
@@ -928,11 +1066,19 @@ class SkillInjectionService:
         # the hash-based selection stable across retries — even
         # if the DB returns variants in a different order, the
         # same modulo picks the same skill.
+        #
+        # E4.3 (2026-11-09): the filter consults ``is_active`` as
+        # well as ``status``. It used to consult ``status`` ONLY —
+        # so a DESYNCED row (``is_active=False`` + ``status='ab_testing'``,
+        # the census' desync proof) was selectable and an INACTIVE
+        # skill could be served. The two columns are the lever; both
+        # are consulted here.
         active_variants = sorted(
             [
                 v
                 for v in (all_variants or [])
                 if getattr(v, "status", "") in _ACTIVE_AB_STATUSES
+                and bool(getattr(v, "is_active", False))
             ],
             key=lambda v: str(getattr(v, "id", "")),
         )

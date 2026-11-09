@@ -2759,6 +2759,31 @@ class InstanceManager:
                 # when ANY lookup is missing (test fixtures,
                 # pre-Phase-3 deployments).
                 self._wire_skill_injection_capability_gate()
+                # E4.1 (skill-system-revival Phase 1, plan §9 E4 / open item
+                # E-7): the SHIPPED, idempotent boot-time reconciliation of
+                # the stale/shadow skill rows.
+                #
+                # WHY HERE (the ordering proof):
+                #   * it is the LAST call of the skill-services init block,
+                #     under the SAME "skill repos present" guard as the
+                #     injection wiring above;
+                #   * the block runs strictly AFTER ``run_pending_migrations()``
+                #     (manager.py:1019) and AFTER ``self._ensure_postgres_columns()``
+                #     (manager.py:1036) — so this call is NEVER inside the
+                #     one-transaction ensure list (critical note 48a7f77f:
+                #     any entry's failure there aborts the boot);
+                #   * it completes BEFORE the first injection can occur (the
+                #     service is only reachable after this block returns).
+                #     The guarantee is NOT timing-dependent anyway: E4.3's
+                #     injection-side filter excludes the stale rows even when
+                #     this reconciliation has not run yet (DS-24).
+                #
+                # It is idempotent by construction (a RULE, not a list), it
+                # never hard-deletes, never re-activates, and it REFUSES any
+                # row whose A/B test is unresolved (no winner is ever
+                # declared). Failures are contained: the reconciliation is a
+                # SEPARATE boot step, so a fault here logs and continues.
+                self._run_skill_stale_deactivation_reconciliation()
         else:
             self._skill_usage_repo = None
             self._skill_trigger_repo = None
@@ -5675,6 +5700,58 @@ class InstanceManager:
         )
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # E4.1 — the boot-time stale/shadow skill reconciliation
+    # ------------------------------------------------------------------
+    # Skill-system-revival Phase 1, plan §9 E4 (open item E-7). The call
+    # site is the LAST call of the skill-services init block (adjacent to
+    # ``_wire_skill_injection_capability_gate()``), under the same "skill
+    # repos present" guard — strictly AFTER ``run_pending_migrations()``
+    # and ``_ensure_postgres_columns()``, and therefore NEVER inside the
+    # one-transaction ensure list.
+
+    def _run_skill_stale_deactivation_reconciliation(self) -> None:
+        """Run E4.1's idempotent boot reconciliation (fail-soft).
+
+        The reconciliation applies the R1/R2/R3/R5 rules, refuses every row
+        whose A/B test is unresolved (no winner is ever declared), never
+        hard-deletes and never re-activates. Its receipt lives in the data
+        dir and doubles as the file-backed suppression store, so an
+        operator's reversal is not undone by the next boot.
+
+        Failure posture: this is a SEPARATE boot step (not inside the
+        ensure list), so a fault here is contained — it logs and the boot
+        continues. The safety property does not depend on this call: E4.3's
+        injection-side filter excludes the stale rows independently.
+        """
+        skill_repo = getattr(self, "_skill_repo", None)
+        ab_test_repo = getattr(self, "_skill_ab_test_repo", None)
+        if skill_repo is None or ab_test_repo is None:
+            return
+        try:
+            from daemon.services.skill_deactivation import (
+                SkillStaleDeactivator,
+            )
+
+            report = SkillStaleDeactivator(
+                skill_repo=skill_repo,
+                ab_test_repo=ab_test_repo,
+            ).reconcile(dry_run=False)
+        except Exception as e:  # noqa: BLE001 — a boot step must not abort boot
+            logger.warning(
+                f"[E4.1] skill stale-deactivation reconciliation failed "
+                f"({type(e).__name__}: {e}) — boot continues; the E4.3 "
+                f"injection-side filter still holds the safety property"
+            )
+            return
+        if report.touched_count or report.refused_count:
+            logger.info(
+                f"[E4.1] skill stale-deactivation reconciliation: "
+                f"touched={report.touched_count} "
+                f"refused={report.refused_count} "
+                f"receipt={report.receipt_path}"
+            )
+
     # Question pause-requested flag (Phase 1 / question tool)
     # ------------------------------------------------------------------
     # The ``question`` tool sets this flag before returning. The
