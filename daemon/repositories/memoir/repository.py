@@ -653,6 +653,72 @@ def memoir_row_is_terminal(row: Any, attempt_cap: int = MEMOIR_EMBEDDING_ATTEMPT
     return error.startswith(MEMOIR_EMBEDDING_TERMINAL_MARKER)
 
 
+# ── THE POIGNANCY SCORING SURFACE (phase 4, T4.2 / V2-D 4.1) ──────────────
+#
+# THE IMPORTANCE RULING (V2-10 / §3-A2): ``importance`` is WRITE-FROZEN.
+# The LLM score lands in the SEPARATE ``poignancy`` column and the
+# ``poignancy_status`` marker carries the state. NOTHING in this section
+# writes a record column — the ``RECORD_COLUMNS`` purity pin
+# (``tests/unit/test_memoir_write_purity_unit.py``) is the standing proof
+# and it stays GREEN and UNTOUCHED.
+#
+# The terminal marker is the SAME vocabulary as the embedding lane's
+# (``terminal:<reason>``) — single-sourced HERE so the worker's marker
+# and the scan window's predicate cannot drift.
+
+#: The status marker that makes a scoring row terminal on the next scan
+#: (the worker's own vocabulary — an operator requeue clears the status
+#: and the attempt counter).
+MEMOIR_POIGNANCY_TERMINAL_MARKER = "terminal:"
+
+#: The per-row scoring attempt budget (AC3 — attempts at/over the cap are
+#: terminal). Single-sourced here; the worker re-exports it.
+MEMOIR_POIGNANCY_ATTEMPT_CAP = 5
+
+#: The default batch cap per tick (V2-D 4.2 / §3.1).
+MEMOIR_POIGNANCY_BATCH_CAP = 10
+
+#: The scoring write-back — ONE atomic column-targeted UPDATE. It writes
+#: ``poignancy`` and ``poignancy_status`` TOGETHER (a partial write would
+#: leave the row re-scored forever) and NEVER touches ``importance``.
+_MEMOIR_RECORD_POIGNANCY_SQL = (
+    "UPDATE memoir_episodes "
+    "SET poignancy = :poignancy, poignancy_status = :status "
+    "WHERE id = :id"
+)
+_MEMOIR_RECORD_POIGNANCY_STATEMENT = text(_MEMOIR_RECORD_POIGNANCY_SQL).bindparams(
+    bindparam("poignancy", type_=Integer()),
+    bindparam("status", type_=Text()),
+    bindparam("id", type_=Text()),
+)
+
+#: The failed-attempt recorder — ONE statement that counts the attempt
+#: AND terminalizes the row in the same write.
+#:
+#: The terminal condition is ``:immediate`` (the classification said this
+#: failure can never succeed) OR the NEW attempt count reaching the cap
+#: (AC3: the fifth failure flips the row to ``terminal:<reason>``). The
+#: ELSE branch KEEPS the existing status — a fresh row stays NULL (so the
+#: unscored scan still finds it) and a legacy row stays ``'legacy'`` (so
+#: the backfill scan still finds it) until the cap is reached.
+_MEMOIR_RECORD_POIGNANCY_ATTEMPT_SQL = (
+    "UPDATE memoir_episodes "
+    "SET poignancy_attempts = poignancy_attempts + 1, "
+    "poignancy_status = CASE "
+    "WHEN :immediate OR (poignancy_attempts + 1) >= :cap THEN :status "
+    "ELSE poignancy_status END "
+    "WHERE id = :id"
+)
+_MEMOIR_RECORD_POIGNANCY_ATTEMPT_STATEMENT = text(
+    _MEMOIR_RECORD_POIGNANCY_ATTEMPT_SQL
+).bindparams(
+    bindparam("immediate", type_=Boolean()),
+    bindparam("cap", type_=Integer()),
+    bindparam("status", type_=Text()),
+    bindparam("id", type_=Text()),
+)
+
+
 class MemoirRepository:
     """The episode surface — the CLOSED public surface (D2.1).
 
@@ -901,6 +967,140 @@ class MemoirRepository:
             if episode is None:
                 return 0
             return int(episode.embedding_attempts or 0)
+
+    # ── the POIGNANCY scoring surface (phase 4, T4.2) ─────────────────────
+
+    def get_pending_poignancy_episodes(
+        self,
+        limit: int = MEMOIR_POIGNANCY_BATCH_CAP,
+        *,
+        backfill_max: int = 0,
+    ) -> list[MemoirEpisode]:
+        """The scoring queue — the UNSCORED rows, oldest first.
+
+        TWO disjoint sets, and the second one is OPT-IN:
+
+        * the NEW rows (``poignancy_status IS NULL``) — the queue IS the
+          column's emptiness, so an episode written while the worker was
+          down is picked up on the next tick (restart-durable by
+          construction);
+        * the LEGACY rows (``poignancy_status = 'legacy'``) — the
+          pre-cutover corpus, scored ONLY when the operator raises
+          ``ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX`` (V2-14 / §3-A3).
+          The constitutional default 0 means the legacy corpus is NEVER
+          scored.
+
+        BOTH sets exclude the rows at/over the attempt cap, so the window
+        ADVANCES past the terminal rows instead of stalling on them.
+        """
+        rows: list[MemoirEpisode] = []
+        with Session(self.engine) as session:
+            stmt = (
+                select(MemoirEpisode)
+                .where(MemoirEpisode.poignancy_status.is_(None))
+                .where(
+                    MemoirEpisode.poignancy_attempts < MEMOIR_POIGNANCY_ATTEMPT_CAP
+                )
+                .order_by(MemoirEpisode.created_at.asc(), MemoirEpisode.id.asc())
+            )
+            if limit is not None:
+                stmt = stmt.limit(int(limit))
+            rows.extend(list(session.exec(stmt).all()))
+        backfill = int(backfill_max or 0)
+        if backfill <= 0:
+            return rows
+        with Session(self.engine) as session:
+            legacy_stmt = (
+                select(MemoirEpisode)
+                .where(MemoirEpisode.poignancy_status == "legacy")
+                .where(
+                    MemoirEpisode.poignancy_attempts < MEMOIR_POIGNANCY_ATTEMPT_CAP
+                )
+                .order_by(MemoirEpisode.created_at.asc(), MemoirEpisode.id.asc())
+                .limit(backfill)
+            )
+            rows.extend(list(session.exec(legacy_stmt).all()))
+        return rows
+
+    def record_poignancy_score(self, episode_id: str, score: int) -> bool:
+        """Write the LLM's score — ``poignancy`` + ``poignancy_status``.
+
+        THE IMPORTANCE RULING (V2-10 / §3-A2): this statement writes the
+        SEPARATE ``poignancy`` column and the status marker. It NEVER
+        writes ``importance`` — the authored record is WRITE-FROZEN, and
+        the ``RECORD_COLUMNS`` purity pin is the standing proof (AC6's
+        mutation leg: pointing this statement at ``importance`` flips
+        that pin RED).
+
+        The score is clamped to ``1..10`` HERE as well as in the scorer:
+        the column's CHECK constraint is the last line of defence, and a
+        caller that bypasses the scorer must not be able to store a 0 or
+        an 11.
+        """
+        bounded = max(1, min(10, int(score)))
+        with Session(self.engine) as session:
+            result = session.execute(
+                _MEMOIR_RECORD_POIGNANCY_STATEMENT,
+                {
+                    "poignancy": bounded,
+                    "status": "scored",
+                    "id": episode_id,
+                },
+            )
+            session.commit()
+            return bool(result.rowcount)
+
+    def record_poignancy_attempt(
+        self,
+        episode_id: str,
+        reason: str,
+        *,
+        immediate_terminal: bool = False,
+    ) -> tuple[int, str | None]:
+        """Count ONE failed scoring attempt and terminalize when due.
+
+        The write is ONE statement (see
+        ``_MEMOIR_RECORD_POIGNANCY_ATTEMPT_SQL``): the attempt counter
+        moves and the status flips together, so a crash can never leave a
+        row counted-but-not-terminal (or terminal-but-not-counted).
+
+        The row goes terminal when EITHER the classification says the
+        failure can never succeed (``immediate_terminal`` — e.g. a 401/403
+        dead credential) OR the attempt count reaches the cap (AC3: the
+        fifth failure flips the row to ``terminal:<reason>``). Until then
+        the status is LEFT ALONE: a fresh row stays NULL (the unscored
+        scan still finds it) and a legacy row stays ``'legacy'`` (the
+        backfill scan still finds it).
+
+        Returns:
+            ``(attempts, terminal_status)`` — the attempt count AFTER
+            the increment and the terminal status when the row went
+            terminal (else ``None``).
+        """
+        status = f"{MEMOIR_POIGNANCY_TERMINAL_MARKER}{reason}"
+        with Session(self.engine) as session:
+            session.execute(
+                _MEMOIR_RECORD_POIGNANCY_ATTEMPT_STATEMENT,
+                {
+                    "immediate": bool(immediate_terminal),
+                    "cap": MEMOIR_POIGNANCY_ATTEMPT_CAP,
+                    "status": status,
+                    "id": episode_id,
+                },
+            )
+            session.commit()
+            episode = session.exec(
+                select(MemoirEpisode).where(MemoirEpisode.id == episode_id)
+            ).first()
+            if episode is None:
+                return 0, None
+            attempts = int(episode.poignancy_attempts or 0)
+            terminal = (
+                f"{MEMOIR_POIGNANCY_TERMINAL_MARKER}{reason}"
+                if episode.poignancy_status == status
+                else None
+            )
+            return attempts, terminal
 
     def mark_superseded(self, episode_id: str, superseded_by: str) -> bool:
         """Point an episode at its replacement (DD-8).

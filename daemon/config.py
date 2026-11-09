@@ -4033,6 +4033,214 @@ class MemoirReflectionConfig(BaseSettings):
         return self
 
 
+# ── the POIGNANCY lane's knobs (phase 4, T4.4 / V2-D 4.7) ───────────────
+#
+# The env-var name of the poignancy kill-switch (§3-A4 Enabled-flags).
+MEMOIR_POIGNANCY_ENABLED_ENV_VAR = "ENSEMBLE_MEMOIR_POIGNANCY_ENABLED"
+
+#: The budget-bound knobs — the field → env-var map used by the AGGREGATE
+#: unset warning and by the budget-bound before-validator.
+#:
+#: ``backfill_max`` is the ONLY budget-bound knob in this family, and its
+#: constitutional default is ZERO — zero means "the backfill is DISABLED",
+#: which is a MEANINGFUL state, not a masquerading kill-switch. The
+#: shared classifier's "never zero" rule (a budget cap masquerading as a
+#: kill-switch) does NOT apply here: the floor is 0, so a garbage value
+#: resolves to 0 (the backfill stays OFF — the fail-SAFE side) and a
+#: negative value clamps to 0.
+_MEMOIR_POIGNANCY_BUDGET_ENV_VARS: dict[str, str] = {
+    "backfill_max": "ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX",
+}
+
+#: The cadence-tunable knobs — the field → env-var map. These are SILENT
+#: when unset (tuning, not governance).
+_MEMOIR_POIGNANCY_CADENCE_ENV_VARS: dict[str, str] = {
+    "tick_s": "ENSEMBLE_MEMOIR_POIGNANCY_TICK_S",
+    "batch_cap": "ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP",
+}
+
+#: THE per-knob numeric SPEC — ``field → (env name, numeric class, floor)``.
+#:
+#: ONE source, consumed by BOTH tiers: the model's own ``mode="before"``
+#: validators (the BOOT tier) and the worker's per-tick reader (the LIVE
+#: tier). Two hand-written copies of the class/floor assignment would be
+#: exactly the drift class §3-A4 exists to prevent — the boot tier and
+#: the worker tier must never disagree about what a value MEANS.
+_MEMOIR_POIGNANCY_NUMERIC_SPEC: dict[str, tuple[str, str, float]] = {
+    "backfill_max": (
+        "ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX",
+        NUMERIC_CLASS_BUDGET,
+        0,
+    ),
+    "tick_s": ("ENSEMBLE_MEMOIR_POIGNANCY_TICK_S", NUMERIC_CLASS_CADENCE, 1),
+    "batch_cap": (
+        "ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP",
+        NUMERIC_CLASS_CADENCE,
+        1,
+    ),
+}
+
+
+class MemoirPoignancyConfig(BaseSettings):
+    """The Memoir Store v2 POIGNANCY lane knobs (phase 4, T4.4).
+
+    An ISOLATED section — the plan's N1 / V2-D 4.9 precedent: the
+    poignancy knobs live in their own model with their own env prefix
+    and are NOT folded into the v1 ``MemoirConfig`` section, and the
+    worker NEVER calls the global knob resolver (``resolve_memoir_knob``)
+    — the CLASSIFIER is shared, the RESOLVER is per-lane.
+
+    The env prefix is ``ENSEMBLE_MEMOIR_POIGNANCY_``:
+
+    * ``ENSEMBLE_MEMOIR_POIGNANCY_ENABLED`` — the kill-switch
+      (Enabled-flags class: unset ON + WARNING, garbage OFF + WARNING,
+      never a ``ValidationError``);
+    * ``ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX`` — the opt-in legacy
+      backfill budget (Budget-bounds class, default 0 = disabled);
+    * ``ENSEMBLE_MEMOIR_POIGNANCY_TICK_S`` — the worker tick interval
+      (Cadence class);
+    * ``ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP`` — the episodes scored per
+      tick (Cadence class).
+
+    EVERY numeric goes through the shared ``_classify_numeric`` helper
+    through a ``mode="before"`` validator, so a garbage value clamps to
+    the constitutional default and NEVER aborts the boot (§3-A4 /
+    Register #12 / V2-16). NO bare ``Field(gt=...)`` on a v2 numeric.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_MEMOIR_POIGNANCY_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the poignancy scoring lane "
+                    "(Enabled-flags class). Unset resolves ON with a loud "
+                    "WARNING; a garbage value fails CLOSED (OFF) with a "
+                    "WARNING; neither raises. "
+                    "Env: ENSEMBLE_MEMOIR_POIGNANCY_ENABLED.",
+    )
+    backfill_max: int = Field(
+        default=0,
+        description="The opt-in legacy backfill budget: how many "
+                    "'legacy' (pre-cutover) episodes are scored per pass. "
+                    "0 (the default) means NO legacy episode is ever "
+                    "scored (V2-14 / §3-A3). "
+                    "Env: ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX.",
+    )
+    tick_s: int = Field(
+        default=20,
+        description="The worker tick interval in seconds (V2-D 4.2 / "
+                    "§3.1). Env: ENSEMBLE_MEMOIR_POIGNANCY_TICK_S.",
+    )
+    batch_cap: int = Field(
+        default=10,
+        description="The maximum episodes scored per tick (V2-D 4.2 / "
+                    "§3.1). Env: ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP.",
+    )
+
+    #: WHICH budget knobs are unset (recorded by the after-validator; the
+    #: knob module turns this into the AGGREGATE warning). Private: never
+    #: env-bound, never serialized.
+    _unset_budget_knobs: tuple[str, ...] = PrivateAttr(default=())
+
+    # ── the three-class before-validators (§3-A4 / Register #12) ──────────
+
+    @model_validator(mode="before")
+    @classmethod
+    def _env_tier_wins(cls, data: Any) -> Any:
+        """The ENV tier wins over the init/yaml tier — and the UNSET case
+        is LOUD.
+
+        The same shape as the reflection section: a present env value
+        overrides an init/yaml value, and an ABSENT env value injects
+        ``None`` for ``enabled`` so the field validator runs and the
+        "unset ⇒ ON" case is never silent.
+        """
+        if not isinstance(data, dict):
+            return data
+        merged = dict(data)
+        raw = os.environ.get(MEMOIR_POIGNANCY_ENABLED_ENV_VAR)
+        if raw is not None and raw.strip():
+            merged["enabled"] = raw
+        elif "enabled" not in merged:
+            merged["enabled"] = None
+        return merged
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _classify_enabled_flag(cls, value: Any) -> Any:
+        """The Enabled-flags class — unset ON, garbage fail-CLOSED OFF."""
+        return _classify_enabled_flag(
+            value, name=MEMOIR_POIGNANCY_ENABLED_ENV_VAR, default=True
+        )
+
+    @field_validator("backfill_max", mode="before")
+    @classmethod
+    def _classify_budget_bound(cls, value: Any, info: Any) -> Any:
+        """The Budget-bounds class — clamp to the default, floor ZERO.
+
+        The floor is 0 (not 1) BECAUSE 0 is this knob's constitutional
+        default and its meaningful "disabled" state: a garbage value
+        resolves to 0 (the backfill stays off — the fail-safe side) and
+        a negative value clamps to 0. The class and the floor come from
+        the shared SPEC, so this validator and the worker's per-tick
+        reader cannot drift.
+        """
+        name, numeric_class, floor = _MEMOIR_POIGNANCY_NUMERIC_SPEC.get(
+            info.field_name,
+            (info.field_name, NUMERIC_CLASS_BUDGET, 0),
+        )
+        default = cls.model_fields[info.field_name].default
+        return _classify_numeric(
+            value,
+            default=default,
+            numeric_class=numeric_class,
+            name=name,
+            minimum=floor,
+        )
+
+    @field_validator(
+        "tick_s",
+        "batch_cap",
+        mode="before",
+    )
+    @classmethod
+    def _classify_cadence_count(cls, value: Any, info: Any) -> Any:
+        """The Cadence-tunables class for the INTEGER knobs.
+
+        An integer knob resolves to an integer — a fractional value is
+        GARBAGE (the constitutional default), never a ``ValidationError``.
+        The class and the floor come from the shared SPEC.
+        """
+        name, numeric_class, floor = _MEMOIR_POIGNANCY_NUMERIC_SPEC.get(
+            info.field_name,
+            (info.field_name, NUMERIC_CLASS_CADENCE, 1),
+        )
+        default = cls.model_fields[info.field_name].default
+        return _classify_numeric(
+            value,
+            default=default,
+            numeric_class=numeric_class,
+            name=name,
+            minimum=floor,
+        )
+
+    @model_validator(mode="after")
+    def _record_budget_knob_state(self) -> "MemoirPoignancyConfig":
+        """Record WHICH budget knobs are unset — the knob module warns.
+
+        The AGGREGATE warning itself lives in
+        :mod:`daemon.tools.memoir_knob` (the house precedent: the knob
+        module owns the operator-facing log lines, and the model is the
+        CLASSIFIER). This validator only RECORDS the fact.
+        """
+        self._unset_budget_knobs = tuple(
+            env_name
+            for env_name in _MEMOIR_POIGNANCY_BUDGET_ENV_VARS.values()
+            if os.environ.get(env_name, "").strip() == ""
+        )
+        return self
+
+
 class MemoirConfig(BaseSettings):
     """Configuration for the Memoir Store surface (phase 0, D0.4).
 
@@ -6235,6 +6443,20 @@ class Config(BaseSettings):
     # env knob — the defect §3-A4 names.)
     memoir_reflection: MemoirReflectionConfig = Field(
         default_factory=MemoirReflectionConfig
+    )
+    # Memoir Store v2 (phase 4, T4.4): the POIGNANCY lane's isolated
+    # knob section (class MemoirPoignancyConfig, env prefix
+    # ENSEMBLE_MEMOIR_POIGNANCY_). ISOLATED by design (N1 / V2-D 4.9):
+    # the poignancy knobs are NOT folded into the v1 ``memoir:`` section
+    # and the worker NEVER calls the global knob resolver — the
+    # CLASSIFIER is shared (``_classify_numeric`` /
+    # ``_classify_enabled_flag``), the RESOLVER is per-lane.
+    # ENV-ONLY (the ``memoir_reflection`` precedent): this section has NO
+    # ``config.yaml`` block and ``load_config`` has NO pass-through for
+    # it, so a hand-added yaml block is silently ignored and the ENV tier
+    # is always the live one.
+    memoir_poignancy: MemoirPoignancyConfig = Field(
+        default_factory=MemoirPoignancyConfig
     )
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)

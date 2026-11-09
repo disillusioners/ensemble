@@ -36,12 +36,17 @@ THE ARITHMETIC (adjudicated — decisions.md §4 row 15):
   deterministic, and NO rounding (rounding manufactures ties and breaks
   monotonicity);
 * the final comparator is TOTAL: ``(-prior_multiplied_score DESC,
-  importance DESC, event_at DESC, id ASC)``. The prior MULTIPLIES the
-  fused score for non-keepsakes (a keepsake's multiplier is 1.0 — never
-  decayed), so it MAY reorder rows that importance had separated, and
-  importance is RE-APPLIED after the multiplication. The idle basis is
-  ``now − coalesce(last_accessed_at, created_at)`` (the design's
-  ``idle = now − last_accessed_at`` is NULL-unsafe);
+  effective_importance DESC, event_at DESC, id ASC)``. The prior
+  MULTIPLIES the fused score for non-keepsakes (a keepsake's multiplier
+  is 1.0 — never decayed), so it MAY reorder rows that importance had
+  separated, and importance is RE-APPLIED after the multiplication. The
+  idle basis is ``now − coalesce(last_accessed_at, created_at)`` (the
+  design's ``idle = now − last_accessed_at`` is NULL-unsafe). Memoir
+  Store v2 (V2-D 4.8 / V2-41) changed ONE term of that comparator: the
+  importance term is now the EFFECTIVE importance
+  ``COALESCE(poignancy, importance)`` — ORDERING ONLY, while the
+  projection and the rendering keep displaying the AUTHORED importance
+  (the display-freeze, B6);
 * the access stats are updated ONLY on an explicit recall, and they mark
   EXACTLY the ids in the SHIPPED projection — post-clamp and
   post-ranked-drop. The marked-id list and the rendered-id list are
@@ -257,6 +262,25 @@ def recency_multiplier(
     if is_keepsake:
         return 1.0
     return math.exp(-max(0.0, float(idle_days)) / MEMOIR_PRIOR_TAU_DAYS)
+
+
+def effective_importance(row: Any) -> int:
+    """The EFFECTIVE importance of one episode — the COALESCE consumer.
+
+    Memoir Store v2 (V2-D 4.8 / V2-41 / §A2): the LLM's narrative-weight
+    score lands in the SEPARATE ``poignancy`` column and every CONSUMER
+    reads ``COALESCE(poignancy, importance)`` — here the score wins when
+    it exists, and the AUTHORED importance stands until it does.
+
+    FOR ORDERING ONLY. The projection (``_project``) and the rendering
+    (``render_episode`` / ``_render_episode_block``) keep displaying the
+    AUTHORED ``importance``, so the shipped recall text stays
+    byte-identical across every lane (the display-freeze, B6).
+    """
+    poignancy = getattr(row, "poignancy", None)
+    if poignancy is not None:
+        return int(poignancy)
+    return int(getattr(row, "importance", None) or 0)
 
 
 # ── the projection + the rendering ────────────────────────────────────────
@@ -940,7 +964,14 @@ class MemoirRetrievalService:
             scored.append(
                 (
                     -float(fused_score * multiplier),
-                    -int(row.importance or 0),
+                    # THE EFFECTIVE IMPORTANCE — the tie-break comparator.
+                    # Memoir Store v2 (V2-D 4.8 / V2-41): the LLM's
+                    # narrative-weight score wins when it exists, and the
+                    # AUTHORED importance stands until then. ORDERING
+                    # ONLY — the projection keeps displaying the authored
+                    # ``importance`` (the display-freeze, B6), so the
+                    # rendered recall text stays byte-identical.
+                    -effective_importance(row),
                     -event_at.timestamp(),
                     row_id,
                     row,

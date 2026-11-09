@@ -39,6 +39,27 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 REPOSITORY_PY = REPO_ROOT / "daemon" / "repositories" / "memoir" / "repository.py"
 
 #: The D2.1 closed surface — verbatim from the plan.
+#:
+#: Memoir Store v2 (phase 4, T4.2) DELIBERATELY AMENDS this set with the
+#: three POIGNANCY methods: ``get_pending_poignancy_episodes``,
+#: ``record_poignancy_score`` and ``record_poignancy_attempt``. The
+#: amendment IS the evidence trail (V2-42's discipline: the pin stays
+#: byte-exact, and the reason for the change is recorded).
+#:
+#: WHY the surface grows: the phase-4 worker needs a queue read and two
+#: column-targeted writes, and the D2.1 hazard the plan names is a
+#: GENERAL-PURPOSE update (``update`` / ``patch`` / …) — a method that
+#: could rewrite any column. The three new methods are exactly as
+#: narrow as the embedding lane's (``get_pending_embeddings`` /
+#: ``store_embedding`` / ``record_embedding_attempt``): one named queue
+#: read and two named, column-targeted writes.
+#:
+#: WHAT the amendment does NOT do: ``RECORD_COLUMNS`` (the write-once
+#: record family) stays GREEN and UNTOUCHED. The scoring writes touch
+#: ``poignancy`` / ``poignancy_status`` / ``poignancy_attempts`` only —
+#: ``importance`` is WRITE-FROZEN (V2-10 / §3-A2), and AC6's mutation
+#: leg (pointing ``record_poignancy_score`` at ``importance``) is what
+#: keeps that true.
 D2_1_SURFACE = {
     "insert_episode",
     "mark_recalled",
@@ -46,6 +67,9 @@ D2_1_SURFACE = {
     "clear_pin",
     "store_embedding",
     "record_embedding_attempt",
+    "get_pending_poignancy_episodes",
+    "record_poignancy_score",
+    "record_poignancy_attempt",
     "mark_superseded",
     "get_pending_embeddings",
     "fetch_keepsakes",
@@ -122,7 +146,13 @@ def _set_columns(sql: str) -> set[str]:
 
 
 def test_the_public_surface_is_exactly_the_closed_d2_1_set():
-    """AC1: the exact method set — and NO general-purpose update."""
+    """AC1: the exact method set — and NO general-purpose update.
+
+    Memoir Store v2 (phase 4, T4.2): the set carries the three
+    POIGNANCY methods (the queue read and the two column-targeted
+    writes). The general-purpose-update hazard is UNCHANGED — the
+    amendment adds named, narrow methods, never a generic mutator.
+    """
     public = {
         name
         for name, value in vars(MemoirRepository).items()

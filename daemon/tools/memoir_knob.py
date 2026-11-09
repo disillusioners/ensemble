@@ -652,14 +652,166 @@ def memoir_reflection_enabled(config: "Config | None" = None) -> bool:
     return resolve_memoir_reflection_knob(config).enabled
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Memoir Store v2 — the POIGNANCY lane's boot-state surface (phase 4, T4.4)
+#
+# THE TOUCHPOINT IS NARROW ON PURPOSE: this module carries the
+# POIGNANCY knob's OPERATOR-FACING SURFACE (the boot-state line and the
+# status inspection) — it is NOT where the worker resolves its knob. The
+# worker's resolution belongs to the LANE'S OWN module
+# (``daemon/services/memoir_poignancy_service.resolve_poignancy_settings``),
+# which reads the ISOLATED ``memoir_poignancy`` section and never calls
+# the global knob resolver (N1 / V2-D 4.9).
+#
+# The truth table is NOT copied here either: the resolved value comes
+# from the lane's own resolver, and that resolver classifies the raw
+# string with the SHARED helper (``daemon.config._classify_enabled_flag``).
+# So this surface and the worker can never disagree about what a value
+# MEANS.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MemoirPoignancyKnobState:
+    """The resolved POIGNANCY-lane state plus its provenance.
+
+    The shape mirrors :class:`MemoirReflectionKnobState` so a health
+    surface can render both with one code path.
+    """
+
+    enabled: bool
+    resolution: str
+    source: str
+    rejected_value: str | None
+    message: str
+    log_level: str
+
+
+def resolve_memoir_poignancy_knob(
+    config: "Config | None" = None,
+) -> MemoirPoignancyKnobState:
+    """Resolve the POIGNANCY-lane kill-switch NOW (call-time read).
+
+    The classification is the lane's (the shared classifier, applied by
+    the lane's own resolver); this function reports the PROVENANCE and
+    owns the operator-facing log line. It NEVER raises: an unresolvable
+    lane resolves to DISABLED (fail closed).
+
+    Args:
+        config: The resolved daemon configuration, when the caller has
+            one. Its ``memoir_poignancy`` section is the config tier;
+            ``None`` means the section is built from the environment
+            alone.
+
+    Returns:
+        The resolved :class:`MemoirPoignancyKnobState`.
+    """
+    from daemon.services.memoir_poignancy_service import (
+        resolve_poignancy_settings,
+    )
+
+    try:
+        settings = resolve_poignancy_settings(config)
+    except Exception as exc:  # noqa: BLE001 — a knob never raises
+        message = (
+            f"[MemoirPoignancy] the lane settings could not be resolved "
+            f"({exc}) — the poignancy lane is DISABLED (fail closed)"
+        )
+        state = MemoirPoignancyKnobState(
+            enabled=False,
+            resolution=MEMOIR_RESOLUTION_ERROR,
+            source="none",
+            rejected_value=None,
+            message=message,
+            log_level="ERROR",
+        )
+        _emit_poignancy_once(state)
+        return state
+
+    resolution = settings.resolution
+    if resolution == MEMOIR_RESOLUTION_EXPLICIT_OFF:
+        message = (
+            "[MemoirPoignancy] ENSEMBLE_MEMOIR_POIGNANCY_ENABLED=false — "
+            "the scoring lane is DISABLED (the worker parks; the episodes "
+            "are untouched)"
+        )
+        log_level = "INFO"
+    elif resolution == MEMOIR_RESOLUTION_EXPLICIT_ON:
+        message = (
+            "[MemoirPoignancy] ENSEMBLE_MEMOIR_POIGNANCY_ENABLED=true — "
+            "the scoring lane is ENABLED"
+        )
+        log_level = "INFO"
+    elif resolution == MEMOIR_RESOLUTION_INDETERMINATE:
+        message = (
+            f"[MemoirPoignancy] ENSEMBLE_MEMOIR_POIGNANCY_ENABLED="
+            f"{settings.rejected_value!r} is not a recognised boolean — the "
+            f"scoring lane is DISABLED (fail closed); accepted spellings "
+            f"are true/false, 1/0, yes/no, on/off, t/f, y/n"
+        )
+        log_level = "WARNING"
+    elif settings.enabled:
+        message = (
+            "[MemoirPoignancy] ENSEMBLE_MEMOIR_POIGNANCY_ENABLED is unset — "
+            "the scoring lane is ENABLED by default; set "
+            "`ENSEMBLE_MEMOIR_POIGNANCY_ENABLED=false` to disable it"
+        )
+        log_level = "WARNING"
+    else:
+        message = (
+            "[MemoirPoignancy] ENSEMBLE_MEMOIR_POIGNANCY_ENABLED is unset "
+            "and the configuration disables the scoring lane "
+            "(memoir_poignancy.enabled=false) — the scoring lane is "
+            "DISABLED"
+        )
+        log_level = "INFO"
+
+    state = MemoirPoignancyKnobState(
+        enabled=settings.enabled,
+        resolution=resolution,
+        source=settings.source,
+        rejected_value=settings.rejected_value,
+        message=message,
+        log_level=log_level,
+    )
+    _emit_poignancy_once(state)
+    return state
+
+
+def _emit_poignancy_once(state: MemoirPoignancyKnobState) -> None:
+    """Emit the poignancy-lane line ONCE per boot (the log guard).
+
+    Keyed by the message, so a repeated resolution stays quiet while a
+    CHANGED value re-warns. The resolved VALUE is never memoized here.
+    """
+    if state.message in _EMITTED:
+        return
+    _EMITTED.add(state.message)
+    logger.log(
+        logging.ERROR
+        if state.log_level == "ERROR"
+        else (logging.WARNING if state.log_level == "WARNING" else logging.INFO),
+        state.message,
+    )
+
+
+def memoir_poignancy_enabled(config: "Config | None" = None) -> bool:
+    """``True`` when the POIGNANCY lane is live. Read at CALL TIME."""
+    return resolve_memoir_poignancy_knob(config).enabled
+
+
 __all__ = [
     "MemoirKnobState",
+    "MemoirPoignancyKnobState",
     "MemoirReflectionKnobState",
     "emit_boot_state",
     "memoir_enabled",
     "memoir_knob_state",
+    "memoir_poignancy_enabled",
     "memoir_reflection_enabled",
     "memoir_tool_help",
     "reset_boot_log_state",
     "resolve_memoir_knob",
+    "resolve_memoir_poignancy_knob",
+    "resolve_memoir_reflection_knob",
 ]
