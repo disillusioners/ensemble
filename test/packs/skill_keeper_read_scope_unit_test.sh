@@ -543,6 +543,21 @@ PYEOF
 ' \
 "$PIN_FILE::TestCredentialBasenameRule::test_read_file_refuses_the_repo_dotenv_relative"
 
+  # M-B3h (final pass — D-N7) — the `list_directory` NAME-enumeration
+  # filter is removed. The read surface denied `.env` but the LISTING
+  # surface still printed the name (`show_hidden=True`) — names only,
+  # never content, but the name is itself the hazard: it tells the agent
+  # the credential file exists and where. The enumeration pin MUST go RED.
+  leg "M-B3h" "daemon/tools/filesystem.py" \
+'            # D-N7: a SCOPED agent never sees a denied basename — not
+            # even as a NAME (and regardless of ``show_hidden``).
+            if list_scope and _is_scope_denied_basename(entry.name):
+                continue
+
+' \
+'' \
+"$PIN_FILE::TestListDirectoryDoesNotEnumerateDeniedBasenames::test_a_scoped_agent_does_not_see_dotenv_names_with_show_hidden"
+
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
   echo "mutation failures: $MUTATION_FAILURES"
