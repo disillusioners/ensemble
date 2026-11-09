@@ -5,7 +5,8 @@
 # Legs:
 #   1. the pre-existing unit suites (unchanged);
 #   2. the G flakiness pins (M-G1..M-G5);
-#   3. the G ACCEPTANCE — >= 3 consecutive FULL-FILE-SET green runs of
+#   3. the E1 re-fix burst-guard pins (M-E1a..M-E1f);
+#   4. the G ACCEPTANCE — >= 3 consecutive FULL-FILE-SET green runs of
 #      the A/B-resolution file, classified with the pinned classifier
 #      (`grep '^FAILED'` only) and asserted through
 #      `assert_full_file_set_acceptance` (phase1-plan §11, DS-37: an
@@ -44,7 +45,14 @@ if [ "$EXIT_CODE" -eq 0 ]; then
     --tb=short -q 2>&1 || EXIT_CODE=$?
 fi
 
-# ── Leg 3 — the G acceptance (>= 3 consecutive FULL-FILE-SET greens) ──
+# ── Leg 3 — the E1 re-fix burst-guard pins (M-E1a..M-E1f) ─────────────
+if [ "$EXIT_CODE" -eq 0 ]; then
+  timeout 120s .venv/bin/pytest \
+    tests/unit/test_skill_fix_burst_guard.py \
+    --tb=short -q 2>&1 || EXIT_CODE=$?
+fi
+
+# ── Leg 4 — the G acceptance (>= 3 consecutive FULL-FILE-SET greens) ──
 if [ "$EXIT_CODE" -eq 0 ]; then
   G_RUNS=3
   G_TMP="$(mktemp -d)"

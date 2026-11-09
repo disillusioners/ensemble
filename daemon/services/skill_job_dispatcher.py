@@ -47,9 +47,11 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.services import skill_capture_observability as observability
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +290,26 @@ SOURCE_TAG = "skill_evolution"
 # without serializing behind a single worker.
 PARALLEL_QUEUE_NAME = "system_parallel_queue"
 
+# ── Durable re-fix burst cap (2026-11-09 — phase1-plan §9 E1) ───────
+# Defaults mirror ``SkillEvolutionConfig.fix_burst_cap`` /
+# ``fix_burst_window_seconds`` (3 FIX admissions per skill per 24h).
+DEFAULT_FIX_BURST_CAP = 3
+DEFAULT_FIX_BURST_WINDOW_SECONDS = 86400
+
+
+class SkillFixBurstCapRefused(RuntimeError):
+    """Raised when the durable re-fix burst cap refuses a FIX admission.
+
+    The refusal MUST NOT be silent and MUST NOT masquerade as the
+    generic "lane disabled" refusal: the evolution lane is ON — the
+    CAP refused. The ``skill_fix`` tool renders the exception message in
+    its envelope, so the message starts with ``refused: burst cap``.
+
+    Callers that must not raise (e.g. the trigger engine's per-item
+    scan) catch it and continue — the refusal is logged, counted and
+    announced as an anomaly row before it is raised.
+    """
+
 
 class SkillJobDispatcher:
     """Dispatches skill-related jobs via the job queue.
@@ -325,6 +347,9 @@ class SkillJobDispatcher:
         queue_repo: Any,
         evolution_lane_enabled: bool = False,
         fix_cooldown_seconds: int = 1800,
+        fix_burst_cap: int = DEFAULT_FIX_BURST_CAP,
+        fix_burst_window_seconds: int = DEFAULT_FIX_BURST_WINDOW_SECONDS,
+        anomaly_reporter: Any = None,
     ) -> None:
         """Store the job service and queue repository.
 
@@ -347,11 +372,27 @@ class SkillJobDispatcher:
                 DB half is the ``idempotency_key`` non-terminal
                 dedup). Default 1800 (30 min; the 2026-10-21 burst
                 re-FIXed the same skill 3× in 38 min).
+            fix_burst_cap: Max ``FIX`` admissions for the SAME skill
+                inside ``fix_burst_window_seconds``. The next one is
+                refused with :class:`SkillFixBurstCapRefused` ("refused:
+                burst cap") + an anomaly row. 0 disables the cap.
+                Default 3 per 24h.
+            fix_burst_window_seconds: The durable cap's window.
+                Default 86400 (24h).
+            anomaly_reporter: Optional daemon-side anomaly reporter
+                (the ``AnomalyService.accept_report`` shape). When
+                omitted, the reporter is resolved late-bound from the
+                job service — the cap still announces itself.
         """
         self._job_service = job_service
         self._queue_repo = queue_repo
         self._evolution_lane_enabled = bool(evolution_lane_enabled)
         self._fix_cooldown_seconds = max(0, int(fix_cooldown_seconds))
+        # Durable burst cap (E1) — the RAM cooldown above is the FAST
+        # path; this is the backstop that survives a restart.
+        self._fix_burst_cap = max(0, int(fix_burst_cap))
+        self._fix_burst_window_seconds = max(0, int(fix_burst_window_seconds))
+        self._anomaly_reporter = anomaly_reporter
         # (normalized_project_id, skill_id) -> monotonic timestamp of
         # the last ACCEPTED FIX admission. RAM-only by design: it is
         # a rate limiter, not durable state; a daemon restart resets
@@ -511,6 +552,146 @@ class SkillJobDispatcher:
 
     # ── Public API: Tier 2 analysis ─────────────────────────────────
 
+    def _fix_admission_ledger(self) -> Any | None:
+        """Return the repository that holds the durable FIX-admission ledger.
+
+        The ledger lives on the JOB repository (``JobRepository`` in
+        ``daemon/repositories/job_queue/repository.py`` — the file the
+        plan anchors ``count_fix_admissions_since`` on). The dispatcher
+        reaches it through the job service's PUBLIC ``repository``
+        property; the queue repository is accepted as a fallback for
+        doubles that implement the count themselves.
+
+        Returns:
+            The repository, or ``None`` when no ledger is reachable (the
+            durable cap is then DEGRADED to the RAM cooldown — logged
+            at WARNING by the caller).
+        """
+        candidates = (
+            getattr(self._job_service, "repository", None),
+            self._queue_repo,
+        )
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            if callable(getattr(candidate, "count_fix_admissions_since", None)):
+                return candidate
+        return None
+
+    async def _check_fix_burst_cap(
+        self,
+        skill_id: str,
+    ) -> SkillFixBurstCapRefused | None:
+        """Check the DURABLE FIX burst cap for one skill.
+
+        Counts COMMITTED ``skill_evolution`` FIX admission rows for the
+        same skill inside the window and refuses the admission when the
+        count has reached the cap (default 3 per 24h — the 2026-10-21
+        burst re-FIXed one skill 3× in 37 minutes).
+
+        The refusal is HUMAN-VISIBLE, not a silent drop: a WARNING log
+        line, an admission-refusal counter, a sink record, and an
+        anomaly row through the daemon-side ``accept_report`` path
+        (the same mechanism workstream D uses — "one mechanism, two
+        callers").
+
+        FAIL-OPEN on an infrastructure error (the count query raised or
+        the repository does not implement it): a rate limiter must not
+        block the lane on a DB hiccup, and the RAM cooldown + the
+        ``idempotency_key`` dedup remain the always-on fast path. The
+        degraded state is logged at WARNING and written to the sink.
+
+        Args:
+            skill_id: The skill identity.
+
+        Returns:
+            The refusal exception to raise, or ``None`` when the
+            admission may proceed.
+        """
+        since = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=self._fix_burst_window_seconds)
+        ).isoformat()
+        ledger = self._fix_admission_ledger()
+        if ledger is None:
+            logger.warning(
+                "SkillJobDispatcher: no FIX-admission ledger is available "
+                "(the job service does not expose a repository with "
+                "count_fix_admissions_since) — the durable FIX burst cap "
+                "is DEGRADED (RAM cooldown only) for skill %s",
+                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+            )
+            return None
+        counter = getattr(ledger, "count_fix_admissions_since", None)
+        if not callable(counter):
+            logger.warning(
+                "SkillJobDispatcher: the job repository does not implement "
+                "count_fix_admissions_since — the durable FIX burst cap is "
+                "DEGRADED (RAM cooldown only) for skill %s",
+                skill_id[:8] if isinstance(skill_id, str) else skill_id,
+            )
+            return None
+        try:
+            recent = int(await asyncio.to_thread(counter, skill_id, since))
+        except Exception as count_err:  # noqa: BLE001 — fail-open
+            logger.warning(
+                "SkillJobDispatcher: durable FIX burst-cap count failed "
+                "(%s: %s) — FAIL-OPEN (the admission proceeds; the RAM "
+                "cooldown still applies)",
+                type(count_err).__name__, count_err,
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    outcome="cap_check_error",
+                    extra={
+                        "skill_id": skill_id,
+                        "error": f"{type(count_err).__name__}: {count_err}",
+                    },
+                )
+            )
+            return None
+
+        if recent < self._fix_burst_cap:
+            return None
+
+        short_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
+        message = (
+            f"refused: burst cap — {recent} FIX admissions for skill "
+            f"{short_id} within {self._fix_burst_window_seconds}s "
+            f"(cap {self._fix_burst_cap}). NO skill-keeper job was "
+            f"created."
+        )
+        logger.warning(
+            "SkillJobDispatcher.enqueue_evolution: %s", message,
+        )
+        observability.record_admission_refusal("fix_burst_cap")
+        observability.append_run_record(
+            observability.build_run_record(
+                stage="admission",
+                outcome="refused",
+                refusal_reason="fix_burst_cap",
+                extra={
+                    "skill_id": skill_id,
+                    "fix_admissions_in_window": recent,
+                    "cap": self._fix_burst_cap,
+                    "window_seconds": self._fix_burst_window_seconds,
+                },
+            )
+        )
+        await observability.emit_lane_anomaly(
+            category=observability.CATEGORY_BURST_CAP,
+            description=message,
+            severity="major",
+            suspected_cause=(
+                "re-fix burst: the same skill was re-FIXed "
+                f"{recent} times within {self._fix_burst_window_seconds}s"
+            ),
+            job_service=self._job_service,
+            reporter=self._anomaly_reporter,
+        )
+        return SkillFixBurstCapRefused(message)
+
     async def enqueue_analysis(
         self,
         project_id: str | None,
@@ -589,6 +770,15 @@ class SkillJobDispatcher:
            ``idempotency_key="skill_fix:<project>:<skill_id>"`` so a
            non-terminal duplicate collapses onto the live job at the
            DB layer.
+        4. **Durable FIX burst cap** (2026-11-09, phase1-plan §9 E1) —
+           the RAM cooldown above DRAINS ON RESTART and a sliding
+           window still permits a slow trickle, so a durable backstop
+           counts COMMITTED FIX admissions for the SAME skill inside
+           ``fix_burst_window_seconds`` (default 24h) and refuses the
+           next one once the cap (default 3) is reached. The refusal
+           RAISES :class:`SkillFixBurstCapRefused` ("refused: burst
+           cap") and is announced as an anomaly row — it is never a
+           silent drop.
 
         Called either directly by the trigger engine (action =
         ``evolve_fix`` skips Tier 2) or by the skill-keeper after
@@ -611,6 +801,12 @@ class SkillJobDispatcher:
             the kill-switch is OFF or the FIX cooldown refuses the
             admission. ``None`` is the no-op contract — callers
             must treat it as "not admitted", not as success.
+
+        Raises:
+            SkillFixBurstCapRefused: the DURABLE burst cap refused
+                this FIX admission (the message starts with "refused:
+                burst cap"). The refusal is counted, logged and
+                announced as an anomaly row before it is raised.
         """
         # ── 1. Kill-switch gate ──────────────────────────────────
         # Belt-and-braces single chokepoint: env wins, config default
@@ -655,6 +851,27 @@ class SkillJobDispatcher:
                         self._fix_cooldown_seconds,
                     )
                     return None
+
+        # ── 2b. Durable FIX burst cap (E1 — phase1-plan §9) ─────────
+        # The RAM cooldown above is the FAST path; this is the DURABLE
+        # backstop: it counts COMMITTED ``skill_evolution`` FIX
+        # admissions for the SAME SKILL inside the window and refuses
+        # the next one ("refused: burst cap" + an anomaly row).
+        #
+        # The count is keyed on the SKILL IDENTITY in the job metadata
+        # — NOT on the ``idempotency_key``: a re-admission is suffixed
+        # with ``#<uuid8>`` (``job_queue_service.py:1596-1608``), so a
+        # job-keyed count matches at most ONE row and the cap could
+        # never trip (council finding F-9).
+        #
+        # The refusal RAISES (it does not return ``None``): the
+        # generic ``None`` path renders as "the lane is disabled" in
+        # the ``skill_fix`` envelope, which would be a lie — the lane
+        # is ON, the CAP refused.
+        if is_fix and self._fix_burst_cap > 0:
+            refusal = await self._check_fix_burst_cap(skill_id)
+            if refusal is not None:
+                raise refusal
 
         message = f"Evolve skill {skill_id}. Type: {evolution_type}. Direction: {direction}"
         job_id = await self._enqueue_skill_keeper_job(
@@ -811,6 +1028,13 @@ class SkillJobDispatcher:
             ``job_id`` of the dispatched evolution JobItem, or
             ``None`` when the evolution-lane gate is OFF or the FIX
             cooldown refuses the repeat admission.
+
+        Raises:
+            SkillFixBurstCapRefused: the durable burst cap refused the
+                admission. The exception message is what the
+                ``skill_fix`` tool renders in its envelope — it starts
+                with "refused: burst cap", so the agent is told WHY
+                no job exists instead of the generic lane-off text.
         """
         del current_instance_id  # Reserved for Phase 5 audit hooks.
         direction = issue_description

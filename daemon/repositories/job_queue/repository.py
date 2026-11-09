@@ -20,6 +20,17 @@ from ._idle_predicate_sql import background_busy_binds, background_busy_statemen
 logger = logging.getLogger(__name__)
 
 
+# ── Re-fix burst ledger literals (E1) ────────────────────────────────────
+# The job type / evolution type the durable burst-cap count filters on.
+# Mirrors ``daemon/services/skill_job_dispatcher.py``
+# (``JOB_TYPE_EVOLUTION`` / ``EVOLUTION_TYPE_FIX``) — kept as literals
+# here because a REPOSITORY must not import a SERVICE module (layering
+# inversion); the drift between the two copies is pinned by
+# ``tests/unit/test_skill_fix_burst_guard.py``.
+_JOB_TYPE_EVOLUTION = "skill_evolution"
+_EVOLUTION_TYPE_FIX = "FIX"
+
+
 # ── Legacy status → AdmissionState read-path translation ───────────────────
 # Phase 7b: the ``JobStatus`` enum was removed. This map translates
 # legacy status filter values (still accepted by ``list()`` /
@@ -583,6 +594,80 @@ class JobRepository:
                 )
 
             return job, inserted
+
+    # --------------------------------------------------------
+    # RE-FIX BURST LEDGER (E1 — durable windowed FIX cap)
+    # --------------------------------------------------------
+
+    def count_fix_admissions_since(
+        self,
+        skill_id: str,
+        since_iso: str,
+    ) -> int:
+        """Count committed ``skill_evolution`` FIX admissions for ONE skill.
+
+        The durable half of the re-fix burst guard (phase1-plan §9 E1;
+        decisions.md DS-20). The RAM cooldown in
+        ``SkillJobDispatcher`` drains on restart and a sliding window
+        still permits a slow trickle; this count is read from COMMITTED
+        job rows, so it survives a restart.
+
+        ⚠ THE COUNT IS **NOT** KEYED ON ``idempotency_key`` — that shape
+        is DEAD BY CONSTRUCTION: ``JobQueueService.enqueue`` gives a
+        re-admission a unique synthetic key
+        (``f"{idempotency_key}#{uuid.uuid4().hex[:8]}"``,
+        ``daemon/services/job_queue_service.py:1596-1608``) under a
+        partial UNIQUE index (``idx_job_idempotency``,
+        ``daemon/repositories/job_queue/models.py:300-306``), so a
+        job-keyed count matches AT MOST ONE row ever and the cap could
+        NEVER trip (council finding F-9). The count is keyed on the
+        SKILL IDENTITY read from the job metadata
+        (``metadata->>'skill_id'``) — the census confirmed every
+        evolution row carries ``skill_id``.
+
+        Dialect split: ``metadata`` is ``JSONBType`` — ``JSONB`` on
+        PostgreSQL (the ``->>`` operator exists) and ``JSON``/TEXT on
+        SQLite (where ``->>`` does NOT exist — ``json_extract`` is the
+        SQLite spelling).
+
+        ⚠ The filter is UNINDEXED: there is no ``created_at`` index on
+        ``job_queue_items`` and the JSON path has no index either. The
+        scan is bounded by the window + ``job_type`` at the
+        FIX-admission volume (116 lifetime evolution rows) and is
+        pinned as such.
+
+        Args:
+            skill_id: The skill identity (the metadata ``skill_id``).
+            since_iso: Inclusive lower bound on ``created_at`` (ISO-8601
+                string — the column is a text ISO timestamp).
+
+        Returns:
+            The number of matching committed rows (``0`` when none).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            is_postgres = db_session.bind.dialect.name == "postgresql"
+            if is_postgres:
+                skill_expr = JobItem.job_metadata["skill_id"].as_string()
+                evolution_expr = (
+                    JobItem.job_metadata["evolution_type"].as_string()
+                )
+            else:
+                skill_expr = func.json_extract(
+                    JobItem.job_metadata, "$.skill_id"
+                )
+                evolution_expr = func.json_extract(
+                    JobItem.job_metadata, "$.evolution_type"
+                )
+            stmt = (
+                select(func.count())
+                .select_from(JobItem)
+                .where(JobItem.job_type == _JOB_TYPE_EVOLUTION)
+                .where(skill_expr == skill_id)
+                .where(evolution_expr == _EVOLUTION_TYPE_FIX)
+                .where(JobItem.created_at >= since_iso)
+                .where(JobItem.deleted_at.is_(None))
+            )
+            return int(db_session.exec(stmt).one())
 
     # --------------------------------------------------------
     # READ
