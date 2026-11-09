@@ -715,3 +715,169 @@ async def test_resolver_timeout_is_never_quarantine_eligible():
         "the resolver timeout must NOT count towards the init-failure "
         "threshold"
     )
+
+
+# ── R3 (launcher-journal-sweep-fix): bound the mcp_server_state history ──
+# The cap lives in the MCP writer layer (init_guard) and applies PURE ENTRY
+# REMOVAL: keep the last N entries per server; every non-MCP entry and every
+# top-level field passes through verbatim (old-launcher-validatable JSON).
+def _seed_history(install_dir: Path, entries: list[dict]) -> Path:
+    """Seed a scratch ``releases/state.json`` with the given history."""
+    releases = install_dir / "releases"
+    releases.mkdir(parents=True, exist_ok=True)
+    state = {
+        "current": "v0.0.0",
+        "previous": "v0.0.1",
+        "in_flight": None,
+        "history": entries,
+        "quarantined": [],
+        "cooldown_until": None,
+        "rollback_window_count": {"24h": 3, "window_start": "2026-10-26T00:00:00Z"},
+    }
+    path = releases / "state.json"
+    path.write_text(json.dumps(state), encoding="utf-8")
+    return path
+
+
+def test_cap_keeps_last_n_per_server_and_all_non_mcp_entries(scratch_install):
+    """Keep last 20 per server; preserve non-MCP entries + their order."""
+    seeded = []
+    for i in range(25):
+        seeded.append(
+            {
+                "ts": "2026-11-01T00:%02d:00Z" % i,
+                "event": "mcp_server_state",
+                "detail": "server=alpha state=ok run %d" % i,
+            }
+        )
+    for i in range(5):
+        seeded.append(
+            {
+                "ts": "2026-11-01T01:%02d:00Z" % i,
+                "event": "mcp_server_state",
+                "detail": "server=beta state=ok run %d" % i,
+            }
+        )
+    # Interleaved, non-MCP entries (upgrade events the launcher/daemon
+    # read for rollback_requested / intent_flip / sweep_deferred).
+    non_mcp = [
+        {"ts": "2026-11-01T02:00:00Z", "event": "intent_flip", "detail": "target v0.29.9"},
+        {"ts": "2026-11-01T02:01:00Z", "event": "rollback_requested", "detail": "target v0.29.9"},
+        {"ts": "2026-11-01T02:02:00Z", "event": "sweep_deferred", "detail": "target=v0.29.9,"},
+    ]
+    seeded = seeded[:10] + non_mcp[0:1] + seeded[10:] + non_mcp[1:]
+    seeded.append(non_mcp[2])
+    _seed_history(scratch_install, seeded)
+
+    before = json.loads((scratch_install / "releases" / "state.json").read_text())
+    before_non_mcp = [e for e in before["history"] if e["event"] != "mcp_server_state"]
+
+    init_guard._write_journal("alpha", "ok", "init ok")
+
+    after = json.loads((scratch_install / "releases" / "state.json").read_text())
+    alpha = [e for e in after["history"] if e["detail"].startswith("server=alpha")]
+    beta = [e for e in after["history"] if e["detail"].startswith("server=beta")]
+    after_non_mcp = [e for e in after["history"] if e["event"] != "mcp_server_state"]
+
+    assert len(alpha) == init_guard.JOURNAL_HISTORY_MAX_PER_SERVER, (
+        "alpha must be capped at N=%d after the append+trim (got %d)"
+        % (init_guard.JOURNAL_HISTORY_MAX_PER_SERVER, len(alpha))
+    )
+    assert len(beta) == 5, "beta (under cap) must be untouched (got %d)" % len(beta)
+    # The new entry is the newest alpha row.
+    assert alpha[-1]["detail"] == "server=alpha state=ok init ok"
+    # Non-MCP entries preserved in order, byte-identical.
+    assert after_non_mcp == before_non_mcp, (
+        "non-MCP entries must pass through verbatim (incl. order)"
+    )
+    # Pure-entry removal: survivors are a subsequence of the seeded+appended
+    # sequence (order preserved).
+    seeded_plus = seeded + [
+        {"ts": "ignored", "event": "mcp_server_state", "detail": "server=alpha state=ok init ok"}
+    ]
+    # Build the expected surviving sequence from the seeded+appended list
+    # using the same keep-last-N-per-server rule.
+    seen: dict[str, int] = {}
+    keep_flags = [True] * len(seeded_plus)
+    for idx in range(len(seeded_plus) - 1, -1, -1):
+        e = seeded_plus[idx]
+        if not isinstance(e, dict) or e.get("event") != "mcp_server_state":
+            continue
+        detail = e.get("detail", "")
+        server = detail[len("server="):].split(" state=", 1)[0] if detail.startswith("server=") else "\x00unshaped"
+        if seen.get(server, 0) >= init_guard.JOURNAL_HISTORY_MAX_PER_SERVER:
+            keep_flags[idx] = False
+        else:
+            seen[server] = seen.get(server, 0) + 1
+    expected_survivors = [e for i, e in enumerate(seeded_plus) if keep_flags[i]]
+    # Compare by (event, detail) since timestamps are preserved too.
+    assert [(e["event"], e["detail"]) for e in after["history"]] == [
+        (e["event"], e["detail"]) for e in expected_survivors
+    ], "trim must be pure entry removal (subsequence, order preserved)"
+
+
+def test_cap_preserves_top_level_fields_and_valid_json(scratch_install):
+    """All top-level fields + valid JSON survive the trim."""
+    import json as _j
+
+    seeded = [
+        {
+            "ts": "2026-11-01T00:00:00Z",
+            "event": "mcp_server_state",
+            "detail": "server=srv state=ok run %d" % i,
+        }
+        for i in range(30)
+    ]
+    path = _seed_history(scratch_install, seeded)
+    before = _j.loads(path.read_text())
+    init_guard._write_journal("srv", "ok", "init ok")
+    after = _j.loads(path.read_text())  # raises if invalid JSON
+
+    for key in ("current", "previous", "in_flight", "quarantined", "cooldown_until", "rollback_window_count"):
+        assert after[key] == before[key], "top-level field %r must be carried through verbatim" % key
+    assert isinstance(after["history"], list)
+    srv = [e for e in after["history"] if e["detail"].startswith("server=srv")]
+    assert len(srv) == init_guard.JOURNAL_HISTORY_MAX_PER_SERVER
+
+
+def test_cap_groups_unshaped_rows_into_one_bucket(scratch_install):
+    """Rows whose detail lacks the ``server=... state=`` shape still get bounded."""
+    seeded = [
+        {"ts": "2026-11-01T00:00:00Z", "event": "mcp_server_state", "detail": "garbage-%d" % i}
+        for i in range(25)
+    ]
+    _seed_history(scratch_install, seeded)
+    init_guard._write_journal("alpha", "ok", "init ok")
+    after = json.loads((scratch_install / "releases" / "state.json").read_text())
+    unshaped = [e for e in after["history"] if e["detail"].startswith("garbage-")]
+    # 25 seeded + 0 from the new write (the new write is shaped) → capped at N.
+    assert len(unshaped) == init_guard.JOURNAL_HISTORY_MAX_PER_SERVER, (
+        "unshaped rows must be bounded too (got %d)" % len(unshaped)
+    )
+
+
+def test_trim_never_raises_on_torn_journal(tmp_path):
+    """The cap is hygiene: a torn/absent journal never raises."""
+    # No releases/state.json at all → journal_read raises → trim returns False.
+    install = tmp_path / "nojournal"
+    install.mkdir()
+    from daemon.tools import upgrade_journal as _uj
+
+    assert init_guard._trim_mcp_journal_history(_uj, install) is False
+    # A torn journal (unparseable) → same: no raise, no write.
+    (install / "releases").mkdir()
+    (install / "releases" / "state.json").write_text("{not json")
+    assert init_guard._trim_mcp_journal_history(_uj, install) is False
+
+
+def test_cap_does_not_touch_other_event_classes(scratch_install):
+    """Only mcp_server_state rows are eligible for trimming."""
+    seeded = [
+        {"ts": "2026-11-01T00:%02d:00Z" % i, "event": "intent_flip", "detail": "target v0.29.9"}
+        for i in range(40)
+    ]
+    _seed_history(scratch_install, seeded)
+    init_guard._write_journal("alpha", "ok", "init ok")
+    after = json.loads((scratch_install / "releases" / "state.json").read_text())
+    intent = [e for e in after["history"] if e["event"] == "intent_flip"]
+    assert len(intent) == 40, "non-MCP event classes must never be trimmed (got %d)" % len(intent)

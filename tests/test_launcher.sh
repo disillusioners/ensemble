@@ -1169,10 +1169,124 @@ else
         "load_env_file=${loadenv_line:-absent} export=${export_line:-absent}"
 fi
 
+# ─── 13. _js_journal_read / _js_json_sub O(n) rewrite (launcher-journal-sweep-fix) ──
+# The per-character bash loops were O(n²) (25.2 s @ 37 KB measured; ~31 min
+# extrapolated @ 215 KB) and ran on EVERY boot via _journal_sweep. The
+# replacements are vectorized POSIX awk passes. The pins below freeze the
+# CONTRACT (not the implementation): byte-exact outputs, accept/reject
+# verdicts including the escape parity rule, the deliberate string-blind
+# depth walk of _js_json_sub, locale invariance, and a wall-clock perf gate.
+section "js journal read: O(n) validator semantics"
+JSF_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf.XXXXXX")"
+
+_jsf_read() {  # <file> — read + validate, print stdout + rc marker
+    ( . "$LAUNCHER"; _js_journal_read "$1"; echo "rc=$?" )
+}
+
+# 13a. brackets INSIDE string values + escaped quotes (\") and escaped
+# backslashes (\\) — all validated correctly (R6a).
+printf '%s' '{"current":"v1","history":[{"detail":"has } and { inside \"quoted \\\" and \\\\ backslash\" brackets [yes]"}],"quarantined":[]}' \
+    > "$JSF_TEST_DIR/escapes.json"
+_jsf_out="$(_jsf_read "$JSF_TEST_DIR/escapes.json")"
+assert_contains "13a escape-heavy journal validates" "rc=0" "$_jsf_out"
+assert_contains "13a output byte-exact (bracket-in-string intact)" \
+    '"detail":"has } and { inside \"quoted \\\" and \\\\ backslash\" brackets [yes]"' \
+    "$_jsf_out"
+
+# 13b. the escape PARITY cases: a string closed after an escaped
+# backslash run, and a quote escaped by a backslash (must NOT close).
+printf '%s' '{"a":"ends with escaped backslash \\\\ and closes"}' > "$JSF_TEST_DIR/parity_ok.json"
+assert_contains "13b even-backslash-run then quote closes (valid)" "rc=0" "$(_jsf_read "$JSF_TEST_DIR/parity_ok.json")"
+printf '%s' '{"a":"escaped \" quote never closes' > "$JSF_TEST_DIR/parity_torn.json"
+assert_contains "13b escaped quote does NOT close (unterminated → reject)" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/parity_torn.json")"
+
+# 13c. truncated/torn rejection (R6b) — torn tail → nonzero.
+printf '%s' '{"a":{"b":[1,2' > "$JSF_TEST_DIR/torn_bracket.json"
+assert_contains "13c torn bracket tail rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/torn_bracket.json")"
+printf '%s' '{"a":"unterminated' > "$JSF_TEST_DIR/torn_string.json"
+assert_contains "13c unterminated string rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/torn_string.json")"
+printf '%s' '{"a":{"b":1}}}' > "$JSF_TEST_DIR/extra_close.json"
+assert_contains "13c extra close rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/extra_close.json")"
+printf '%s' '{"a":1}{"b":2}' > "$JSF_TEST_DIR/two_docs.json"
+# Balance-count contract (NOT a parser — pre-existing semantics): equal
+# open/close counts with no unterminated string is ACCEPTED, exactly as
+# the replaced loop accepted it. The pin freezes that contract.
+assert_contains "13c balance-only contract preserved (two docs accepted)" "rc=0" "$(_jsf_read "$JSF_TEST_DIR/two_docs.json")"
+: > "$JSF_TEST_DIR/empty.json"
+assert_contains "13c empty journal rejected (pre-existing contract)" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/empty.json")"
+
+# 13d. locale invariance (R1): identical verdicts under default locale AND
+# LC_ALL=C AND a UTF-8 locale (the awk pass pins LC_ALL=C internally, so
+# this holds by construction — the pin keeps it true).
+_jsf_val="$( ( . "$LAUNCHER"; _js_journal_read "$JSF_TEST_DIR/escapes.json" >/dev/null; echo $? ) )"
+_jsf_c="$(LC_ALL=C bash -c '. "$1"; _js_journal_read "$2" >/dev/null; echo $?' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json")"
+_jsf_utf8="$(LC_ALL=en_US.UTF-8 bash -c '. "$1"; _js_journal_read "$2" >/dev/null; echo $?' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json" 2>/dev/null)"
+assert_eq "13d default locale verdict" "0" "$_jsf_val"
+assert_eq "13d LC_ALL=C verdict identical" "0" "$_jsf_c"
+assert_eq "13d UTF-8 locale verdict identical" "0" "${_jsf_utf8:-$_jsf_c}"
+_jsf_torn_c="$(LC_ALL=C bash -c '. "$1"; _js_journal_read "$2" >/dev/null; echo $?' _ "$LAUNCHER" "$JSF_TEST_DIR/torn_bracket.json")"
+assert_eq "13d LC_ALL=C torn verdict identical" "1" "$_jsf_torn_c"
+
+# ─── 13e. _js_json_sub: O(n) extractor semantics (R6d) ─────────────────────
+section "js json sub: O(n) extractor semantics"
+_jsf_sub() {  # <json> <key>
+    ( . "$LAUNCHER"; _js_json_sub "$1" "$2"; echo "rc=$?" )
+}
+_jsf_sub_out="$(_jsf_sub '{"history":[{"detail":"esc \" and \\\\ inside"}],"quarantined":["v1"]}' history)"
+assert_contains "13e escaped-quote value extracted byte-exact" \
+    '[{"detail":"esc \" and \\\\ inside"}]' "$_jsf_sub_out"
+assert_contains "13e history extraction rc=0" "rc=0" "$_jsf_sub_out"
+assert_contains "13e quarantined extracted" '["v1"]rc=0' "$(_jsf_sub '{"quarantined":["v1"]}' quarantined | tr -d '\n')"
+assert_contains "13e missing key → rc=1" "rc=1" "$(_jsf_sub '{"a":{}}' nope)"
+assert_contains "13e scalar value → rc=1" "rc=1" "$(_jsf_sub '{"a":1}' a)"
+assert_contains "13e null value → rc=1" "rc=1" "$(_jsf_sub '{"a":null}' a)"
+assert_contains "13e spaced form tolerated" '[1,2]rc=0' "$(_jsf_sub '{"history" :  [1,2]}' history | tr -d '\n')"
+# The string-blind depth walk is PRESERVED DELIBERATELY (the replaced loop
+# never tracked string context either): a brace inside the TARGET's string
+# still terminates the extraction. Pin it — changing it would change
+# verdicts on existing journals.
+assert_eq "13e quirk preserved: brace-in-string terminates walk" \
+    '{"x":"y}rc=0' "$(_jsf_sub '{"a":{"x":"y}z"},"b":1}' a | tr -d '\n')"
+
+# ─── 13f. perf gate: ~250 KB journal validates well inside 2 s (R6c) ───────
+section "js journal read: 250KB perf gate"
+JSF_PERF_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf-perf.XXXXXX")"
+PERF_JOURNAL="$JSF_PERF_DIR/state.json"
+# Dependency-light generation (awk is already a launcher runtime dep).
+awk 'BEGIN {
+    printf "%s", "{\"current\":\"v1\",\"previous\":null,\"in_flight\":null,\"quarantined\":[],\"history\":["
+    for (i = 0; i < 1900; i++) {
+        printf "%s{\"ts\":\"2026-10-27T%02d:%02d:%02dZ\",\"event\":\"mcp_server_state\",\"detail\":\"server=context7 state=degraded resolver_timeout ENOTFOUND (attempt %d padding-padding-padding)\"}", (i > 0 ? "," : ""), (i/60)%24, i%60, (i*7)%60, i
+    }
+    printf "%s", "]}"
+}' > "$PERF_JOURNAL"
+_perf_bytes=$(wc -c < "$PERF_JOURNAL" | tr -d ' ')
+if [ "$_perf_bytes" -ge 240000 ]; then
+    _pass  # fixture really is ~250 KB class
+else
+    _fail "13f perf fixture is ~250 KB" ">= 240000 bytes" "$_perf_bytes"
+fi
+# Watchdog form: _js_run_bounded 2 kills the read at 2 s. The O(n²) loop
+# this replaces needed ~31 min at 215 KB — it CANNOT pass this gate; the
+# awk pass finishes in ~50 ms.
+_perf_rc="$( ( . "$LAUNCHER"; _js_run_bounded 2 -- bash -c '. "$1"; _js_journal_read "$2" > /dev/null' _ "$LAUNCHER" "$PERF_JOURNAL" >/dev/null 2>&1; echo $? ) )"
+assert_eq "13f 250KB journal read completes inside the 2s watchdog" "0" "$_perf_rc"
+_perf_s0=$(date +%s)
+( . "$LAUNCHER"; _js_journal_read "$PERF_JOURNAL" > "$JSF_PERF_DIR/read.out" 2>/dev/null )
+_perf_rc2=$?
+_perf_s1=$(date +%s)
+assert_eq "13f unbounded read rc=0" "0" "$_perf_rc2"
+if [ $(( _perf_s1 - _perf_s0 )) -le 2 ]; then _pass; else _fail "13f read elapsed ≤ 2s" "<= 2" "$(( _perf_s1 - _perf_s0 ))"; fi
+if cmp -s "$PERF_JOURNAL" "$JSF_PERF_DIR/read.out"; then
+    _pass  # byte-exact roundtrip at scale
+else
+    _fail "13f 250KB read output byte-exact" "identical" "differs"
+fi
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
-       "$RB_TEST_DIR5" 2>/dev/null
+       "$RB_TEST_DIR5" "$JSF_TEST_DIR" "$JSF_PERF_DIR" 2>/dev/null
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'

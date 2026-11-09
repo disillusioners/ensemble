@@ -336,35 +336,80 @@ _js_json_field() {
 # _js_json_sub <json> <key> — extract a nested object/array value by
 # bracket counting from `"key":`. Prints the raw {…} / […] text.
 _js_json_sub() {
-    local json="$1" key="$2" rest char depth out=""
-    rest="${json#*\"$key\"}"
-    [ "$rest" = "$json" ] && return 1
-    rest="${rest#*:}"
-    rest="${rest#"${rest%%[![:space:]]*}"}"
-    case "$rest" in
-        '{'*|'['*) ;;
-        *) return 1 ;;
-    esac
-    depth=0
-    while [ -n "$rest" ]; do
-        char="${rest:0:1}"
-        case "$char" in
-            '{'|'[') depth=$((depth + 1)) ;;
-            '}'|']')
-                depth=$((depth - 1))
-                out="$out$char"
-                if [ "$depth" -eq 0 ]; then
-                    printf '%s' "$out"
-                    return 0
-                fi
-                rest="${rest:1}"
-                continue
-                ;;
-        esac
-        out="$out$char"
-        rest="${rest:1}"
-    done
-    return 1
+    local json="$1" key="$2"
+    [ -n "$json" ] || return 1
+    # O(n) extraction (launcher-journal-sweep-fix, R2): the replaced loop
+    # built the value with `out="$out$char"` AND stripped the consumed
+    # prefix per character (`rest="${rest:1}"`) — both O(n) per step,
+    # O(n²) overall, on every sweep read. ONE POSIX awk pass owns the
+    # scan now (vectorized: the post-value tail is split into
+    # per-bracket segments once, C-speed; the depth walk then visits
+    # brackets only, by computed position — ~tens of ms @ 455 KB). The
+    # contract is preserved BYTE-FOR-BYTE:
+    #   - the FIRST `"key"` occurrence anchors (≡ bash shortest-`#` strip);
+    #   - skip to the first `:` after it (index(), C-speed), trim
+    #     leading [[:space:]];
+    #   - the value must START with { or [ (else return 1);
+    #   - bracket depth counts EVERY { } [ ] — string context is NOT
+    #     tracked, exactly like the replaced loop (a brace inside a
+    #     string value still terminates the extraction — quirk preserved
+    #     deliberately, pinned by the tests; changing it would CHANGE
+    #     verdicts on existing journals);
+    #   - EOF before depth closes → return 1.
+    # LC_ALL=C pins byte-oriented processing; the key travels via the
+    # environment (not awk -v) so no escape sequences can be mangled.
+    # The json itself rides stdin (printf builtin — one O(n) pipe write).
+    printf '%s' "$json" | JS_JSON_SUB_KEY="$key" LC_ALL=C awk '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            n = length(buf)
+            kq = "\"" ENVIRON["JS_JSON_SUB_KEY"] "\""
+            p = index(buf, kq)
+            if (p == 0) exit 1
+            i = p + length(kq)
+            # skip to the first ":" after the key (≡ bash ${rest#*:})
+            t = substr(buf, i)
+            r = index(t, ":")
+            if (r == 0) exit 1
+            i = i + r
+            # trim leading whitespace (≡ bash [![:space:]] trim)
+            n = length(buf)
+            while (i <= n) {
+                c = substr(buf, i, 1)
+                if (c == " " || c == "\t" || c == "\n" || c == "\r" \
+                    || c == "\f" || c == "\v") { i++; continue }
+                break
+            }
+            if (i > n) exit 1
+            c = substr(buf, i, 1)
+            if (c != "{" && c != "[") exit 1
+            # vectorized depth walk: seg[j] is the text between bracket
+            # j-1 and bracket j, so bracket j sits at tail position
+            # pos_(j-1) + 1 + length(seg[j])
+            tail = substr(buf, i)
+            tn = split(tail, seg, "[]{}[]")
+            pos = length(seg[1])
+            depth = 0
+            for (j = 1; j <= tn; j++) {
+                pos++
+                c = substr(tail, pos, 1)
+                if (c == "{" || c == "[") depth++
+                else {
+                    depth--
+                    if (depth == 0) {
+                        printf "%s", substr(buf, i, pos)
+                        exit 0
+                    }
+                }
+                pos += length(seg[j + 1])
+            }
+            exit 1
+        }
+    '
 }
 
 # _js_journal_read <path> — print journal JSON; nonzero on absent/unreadable/
@@ -378,27 +423,62 @@ _js_journal_read() {
     [ -f "$jp" ] || return 1
     json="$(_js_run_bounded 3 -- cat "$jp")" || return 1
     [ -z "$json" ] && return 1
-    local ob=0 cb=0 os=0 cs=0 i c in_str=0 esc=0
-    for ((i = 0; i < ${#json}; i++)); do
-        c="${json:i:1}"
-        if [ "$esc" = "1" ]; then esc=0; continue; fi
-        if [ "$c" = "\\" ]; then
-            if [ "$in_str" = "1" ]; then esc=1; fi
-            continue
-        fi
-        if [ "$c" = "\"" ]; then
-            in_str=$((1 - in_str))
-            continue
-        fi
-        [ "$in_str" = "1" ] && continue
-        case "$c" in
-            '{') ob=$((ob + 1)) ;;
-            '}') cb=$((cb + 1)) ;;
-            '[') os=$((os + 1)) ;;
-            ']') cs=$((cs + 1)) ;;
-        esac
-    done
-    if [ "$ob" != "$cb" ] || [ "$os" != "$cs" ] || [ "$in_str" = "1" ]; then
+    # O(n) balance validation (launcher-journal-sweep-fix, R1): the old
+    # per-character bash loop (`${json:i:1}` indexing) was O(n²) — 25.2 s
+    # measured @ 37 KB, ~31 min extrapolated @ 215 KB — and ran on EVERY
+    # boot via _journal_sweep. ONE POSIX awk pass owns the scan now
+    # (vectorized: split each line on quotes, count brackets per
+    # outside-string segment with gsub — all C-speed; ~tens of ms @
+    # 455 KB). LC_ALL=C pins byte-oriented processing, so the verdict is
+    # locale-invariant BY CONSTRUCTION (multibyte UTF-8 bytes can never
+    # collide with the ASCII structural characters).
+    # Semantics are UNCHANGED (D4 discipline — callers and pins stay put):
+    #   - { } [ ] counted ONLY outside strings;
+    #   - strings are escape-aware (an escaped quote toggles nothing, an
+    #     escaped backslash consumes the next char, so \\\" can never
+    #     close the string) — the vectorized form decides each boundary
+    #     quote by the PARITY of the backslash run immediately before it
+    #     (odd = escaped), which is provably the same state machine;
+    #   - reject on ob≠cb ∨ os≠cs ∨ unterminated string at EOF;
+    #   - NOT a full JSON parser — the same balance-count contract the
+    #     replaced loop implemented (torn/truncated tail → nonzero →
+    #     _journal_sweep skips safely; e.g. a stray "}{ is still
+    #     "balanced" exactly as before).
+    if ! printf '%s' "$json" | LC_ALL=C awk '
+        BEGIN { ob = 0; cb = 0; os = 0; cs = 0; in_str = 0 }
+        {
+            n = split($0, parts, "\"")
+            cur = in_str
+            for (p = 1; p <= n; p++) {
+                if (cur == 0) {
+                    t = parts[p]
+                    ob += gsub(/\{/, "", t)
+                    cb += gsub(/\}/, "", t)
+                    os += gsub(/\[/, "", t)
+                    cs += gsub(/\]/, "", t)
+                }
+                if (p < n) {
+                    if (cur == 1) {
+                        # boundary quote while inside a string: escaped
+                        # iff the backslash run before it has odd length
+                        t = parts[p]
+                        if (match(t, /\\+$/) > 0 && RLENGTH % 2 == 1) {
+                            ;  # escaped quote — the string continues
+                        } else {
+                            cur = 0
+                        }
+                    } else {
+                        cur = 1
+                    }
+                }
+            }
+            in_str = cur
+        }
+        END {
+            if (ob != cb || os != cs || in_str == 1) exit 1
+            exit 0
+        }
+    '; then
         return 1
     fi
     printf '%s' "$json"
