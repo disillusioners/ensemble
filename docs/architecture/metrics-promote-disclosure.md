@@ -68,34 +68,44 @@
 >
 > **The six dark families — each with a NAMED cause, none of them the C-1 locator** (measured at
 > the fenced-dev observation): **F1** and **F3** — `capture_off`, because the provider's
-> `capture_active` is never wired (`daemon/api.py:2528-2533` constructs the provider without it);
+> `capture_active` was never wired (`daemon/api.py:2528-2533` constructed the provider without
+> it — **FIXED**, the live construction site is `daemon/api.py:2571-2586`);
 > **F6** — `census_gated`, and that reason is **INVERTED** (the census published 15 live series
-> while the door reported dark); **F7** — `series_absent`, because the non-internal histogram
-> never publishes (`daemon/checkpoint_metrics.py:830-874`); **F18** — `series_absent`, the
-> MCPS-gateway store is empty in dev; **F21** — `series_absent`, the journal family needs an
-> install dir and **dev has none by design**. The seven families whose adapters read `sources.dsn` —
-> **F0.3, F3, F8, F10, F11, F13, F18** — were the ones the C-1 locator left dark (**F4/F5** carry
-> **no** dsn gate — they were handle-dark; **F6 was never dsn-dark**). **Five of them are live now**
-> (F0.3, F8, F10, F11, F13); **F3 and F18 are still dark**, for their own non-C-1 reasons
-> (`capture_off`, `series_absent`).
+> while the door reported dark — **FIXED**, see R-ii below); **F7** — `series_absent`, because
+> the non-internal histogram never publishes (`daemon/checkpoint_metrics.py:830-874`); **F18** —
+> `series_absent`, the MCPS-gateway store is empty in dev; **F21** — `series_absent`, the journal
+> family needs an install dir and **dev has none by design**. The seven families whose adapters
+> read `sources.dsn` — **F0.3, F3, F8, F10, F11, F13, F18** — were the ones the C-1 locator left
+> dark (**F4/F5** carry **no** dsn gate — they were handle-dark; **F6 was never dsn-dark**).
+> **Five of them are live now** (F0.3, F8, F10, F11, F13); **F3 and F18 are still dark**, for
+> their own non-C-1 reasons (`capture_off`, `series_absent`).
 >
-> **THREE OF THE SIXTEEN FAMILIES REPORT `dark` WHILE PUBLISHING LIVE SERIES — AND THAT IS A
-> PRODUCTION DEFECT, NOT A DEV ARTEFACT.** **F1** (9 live series in the dev observation) and
-> **F3** (its `capture_off` twin — the wedge capture publishes in production even though the
-> door calls the family dark) and **F6** (15 live series) all report `dark` while their series
-> are LIVE. The causes are the two out-of-lane defects routed as R-i/R-ii: the provider's
-> `capture_active` is **never wired** (`daemon/api.py:2528-2533`), so the `capture_off` reason is
-> unconditional; and the census's public `gated` property is **INVERTED**
-> (`daemon/services/metrics_census.py:323-335` returns "enabled", the door reads it as "gated
-> off"), so the `census_gated` reason fires exactly when the census is running and publishing.
-> **The door's availability verdict is WRONG for these three wherever the capture and the census
-> run** — the same defect is visible in dev only because dev has no live capture and no wired
-> `capture_active`. **The code fix is correctly routed OUT of this lane** (R-i: wire
-> `capture_active` at the `daemon/api.py` construction site — a Tier-2 mechanical file; R-ii: the
-> census's `gated` polarity — the metrics-collection lane's surface). **Nothing in this lane's
-> code changes for them**, and the disclosure states the defect plainly rather than smoothing it
-> away: a reader of the `/families` body must know that `dark` + live series is possible, and
-> for these three it is the NORM.
+> **THREE OF THE SIXTEEN FAMILIES REPORTED `dark` WHILE PUBLISHING LIVE SERIES — A PRODUCTION
+> DEFECT (HISTORICAL; BOTH CAUSES ARE NOW FIXED).** **F1** (9 live series in the dev observation)
+> and **F3** (its `capture_off` twin — the wedge capture publishes in production even though the
+> door calls the family dark) and **F6** (15 live series) all reported `dark` while their series
+> were LIVE. The causes were the two defects tracked as R-i/R-ii: the provider's
+> `capture_active` was **never wired** (`daemon/api.py:2528-2533`, a stale anchor — the live
+> construction site is `daemon/api.py:2571-2586`), so the `capture_off` reason was
+> unconditional; and the census's public `gated` property was **INVERTED**
+> (`daemon/services/metrics_census.py:323-335` returned "enabled", the door reads it as "gated
+> off"), so the `census_gated` reason fired exactly when the census was running and publishing.
+> **The door's availability verdict was WRONG for these three wherever the capture and the census
+> ran.** **BOTH ARE FIXED** (skill-system-revival Phase 1, workstream A): **R-i (`capture_active`) —
+> FIXED** at `daemon/api.py:2571-2586` (a late-binding `capture_active` resolver reading the
+> wedge-capture PROCESS FACT, `app.state.wedge_capture_watchdog is not None`, resolved per read —
+> the watchdog is created AFTER the provider is constructed); **R-ii (the census `gated`
+> polarity) — FIXED** at `daemon/services/metrics_census.py:343` (the `gated` property now
+> returns `not self._gate()`, so it carries the gated-OFF sense its own docstring declares).
+> After the fix,
+> **F1/F3 report `live` whenever the wedge-capture watchdog is live** (and `dark` with
+> `capture_off` when it is not), and **F6 reports `live` whenever the census is enabled AND
+> running AND publishing** (and `dark` with `census_gated` / `census_not_running` /
+> `series_absent` otherwise). Public metrics query routes: `activation.census_enabled` flips
+> from inverted to correct. The `census inverted` polarity correction is therefore a completed
+> fix, not a routed-out residual — and the disclosure still states the historical defect plainly
+> rather than smoothing it away: a reader of the `/families` body must know that `dark` + live
+> series was POSSIBLE, and for these three it was the NORM.
 >
 > **The `stale_pause` sweep lane is DOCUMENTED-DARK for TWO independent reasons.** (i) The
 > service exposes **no `counters()` reader**, so it would render no series even if it were
