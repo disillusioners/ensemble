@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import log
 from typing import Any, Optional
@@ -64,6 +65,64 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# E4 — the dual-column deactivation contract
+# ============================================================
+
+
+@dataclass
+class DeactivationResult:
+    """The outcome of ONE receipted deactivation.
+
+    Carries the PRIOR ``(is_active, status)`` pair so the caller's receipt
+    can record it and restore it EXACTLY (the E4 reversal contract), plus
+    the updated row.
+
+    Attributes:
+        skill_id: The row that was deactivated.
+        row: The updated :class:`Skill` row (after the write).
+        prior_is_active: The row's ``is_active`` BEFORE the write.
+        prior_status: The row's ``status`` BEFORE the write.
+    """
+
+    skill_id: str
+    row: Any
+    prior_is_active: bool
+    prior_status: str
+
+    def prior_pair(self) -> dict[str, Any]:
+        """The prior pair in the JSON-safe shape a receipt stores."""
+        return {"is_active": self.prior_is_active, "status": self.prior_status}
+
+
+class SkillDeactivationRefused(Exception):
+    """A deactivation was REFUSED because an A/B test is still open.
+
+    The guard is the repository's own (self-contained): the caller passes a
+    skill id and nothing else, and a guarded row produces this typed
+    refusal. It carries the blocking test's ``ab_test_group`` (or an empty
+    string when the test row itself carried none) so a receipt can record
+    the reason.
+
+    Attributes:
+        skill_id: The row that was NOT deactivated.
+        ab_test_group: The group of the open ``skill_ab_tests`` row that
+            guards it.
+        reason: The stable refusal token (``"open_ab_test"``).
+    """
+
+    #: The stable token a receipt / a caller matches on.
+    reason = "open_ab_test"
+
+    def __init__(self, *, skill_id: str, ab_test_group: str) -> None:
+        self.skill_id = skill_id
+        self.ab_test_group = ab_test_group
+        super().__init__(
+            f"refused: skill {skill_id!r} is guarded by an OPEN A/B test "
+            f"(group={ab_test_group!r}, resolved_at IS NULL)"
+        )
 
 
 # Module-level ISO-timestamp helper, mirrors infra's
@@ -394,6 +453,118 @@ class SkillRepository:
             no row with that ID exists.
         """
         return self.update(skill_id, is_active=False, status="inactive")
+
+    def deactivate_with_receipt(
+        self,
+        skill_id: str,
+    ) -> "DeactivationResult | None":
+        """Deactivate ONE skill and surface the PRIOR column pair.
+
+        THE E4 REPOSITORY-SIDE WRITER (DS-39 / R3.2).  ``skills.is_active``
+        and ``skills.status`` are TWO DESYNCABLE COLUMNS — a real
+        ``(is_active=False, status='ab_testing')`` row exists in
+        production, which is the proof that a single-column write leaves a
+        half-dead row.  This writer therefore sets BOTH in ONE repository
+        call, and it surfaces the PRIOR ``(is_active, status)`` pair so the
+        caller's receipt can record and restore it EXACTLY (the E4
+        reversal contract).
+
+        REFUSAL — the guard is SELF-CONTAINED.  A skill that belongs to an
+        **OPEN** A/B test (``skill_ab_tests.resolved_at IS NULL``) must not
+        be deactivated: the winner decision belongs to the pair-resolver,
+        and deactivating a variant mid-test strands the comparison.  The
+        repository RESOLVES that state itself (it owns both tables), so an
+        external caller needs no extra argument and still gets a clean,
+        typed refusal.  TWO conditions raise:
+
+          * the row's own ``ab_test_group`` has an unresolved
+            ``skill_ab_tests`` row → refused;
+          * NO row-level group, but the skill IS one of the two variants
+            of an unresolved test (``skill_id_old`` / ``skill_id_new``) →
+            refused (the same test, discovered from the test side).
+
+        Args:
+            skill_id: The row to deactivate.
+
+        Returns:
+            A :class:`DeactivationResult` carrying the updated row and the
+            PRIOR pair, or ``None`` when no row with that ID exists.
+
+        Raises:
+            SkillDeactivationRefused: the skill is guarded by an open A/B
+                test. The exception carries the blocking test's group so a
+                receipt can record WHY it was refused.
+        """
+        with Session(self.engine) as session:
+            skill = session.get(Skill, skill_id)
+            if skill is None:
+                logger.warning(
+                    f"Skill not found for deactivate_with_receipt: "
+                    f"id={skill_id}"
+                )
+                return None
+
+            prior = DeactivationResult(
+                skill_id=skill_id,
+                row=skill,
+                prior_is_active=bool(skill.is_active),
+                prior_status=str(skill.status or ""),
+            )
+
+            blocking = self._open_ab_test_blocking(session, skill)
+            if blocking is not None:
+                raise SkillDeactivationRefused(
+                    skill_id=skill_id,
+                    ab_test_group=blocking,
+                )
+
+            # BOTH columns in ONE assignment — never two ad-hoc statements.
+            skill.is_active = False
+            skill.status = "inactive"
+            skill.updated_at = _now_iso()
+            session.commit()
+            session.refresh(skill)
+            prior.row = skill
+            logger.info(
+                f"Deactivated skill (dual-column, receipted): id={skill_id}, "
+                f"prior=({prior.prior_is_active}, {prior.prior_status!r})"
+            )
+            return prior
+
+    @staticmethod
+    def _open_ab_test_blocking(session: Session, skill: Skill) -> str | None:
+        """The OPEN A/B test's group guarding this row, or ``None``.
+
+        Dialect-safe ORM only (PostgreSQL primary, SQLite supported): the
+        query is ``resolved_at IS NULL`` — a NULL check, not a sentinel
+        comparison, so it behaves identically on both engines.
+        """
+        group = getattr(skill, "ab_test_group", None)
+        if group:
+            stmt = (
+                select(SkillABTest)
+                .where(SkillABTest.ab_test_group == str(group))
+                .where(SkillABTest.resolved_at.is_(None))
+                .limit(1)
+            )
+            row = session.exec(stmt).first()
+            if row is not None:
+                return str(group)
+        # The test may be discoverable only from the TEST side (a variant
+        # row can carry no ``ab_test_group`` of its own).
+        stmt = (
+            select(SkillABTest)
+            .where(SkillABTest.resolved_at.is_(None))
+            .where(
+                (SkillABTest.skill_id_old == skill.id)
+                | (SkillABTest.skill_id_new == skill.id)
+            )
+            .limit(1)
+        )
+        row = session.exec(stmt).first()
+        if row is not None:
+            return str(row.ab_test_group)
+        return None
 
     # --------------------------------------------------------
     # COUNTERS (atomic)
