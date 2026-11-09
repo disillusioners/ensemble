@@ -39,6 +39,7 @@ from daemon.repositories.skill.repository import (
     SkillABTestRepository,
     SkillRepository,
 )
+from daemon.manager import InstanceManager
 from daemon.services import skill_deactivation as e4
 from daemon.services.skill_deactivation import (
     CANONICAL_INACTIVE,
@@ -49,10 +50,12 @@ from daemon.services.skill_deactivation import (
     RULE_R2,
     RULE_R3,
     RULE_R5,
+    SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV,
     PairResolutionRefused,
     SkillStaleDeactivator,
     deactivate_skill,
     is_open_ab_shadowed,
+    is_stale_deactivation_enabled,
     load_receipt,
     resolve_receipt_path,
     write_skill_pair,
@@ -1189,3 +1192,206 @@ class TestTheOperatorScript:
         assert payload["entries"][0]["skill_id"] == row.id
         after = skill_repo.get(row.id)
         assert (after.is_active, after.status) == CANONICAL_INACTIVE
+
+
+# ============================================================
+# The stale-deactivation brake (Task 1 / DS-54)
+# ============================================================
+
+
+class TestTheBrake:
+    """The ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED brake (default 0 / off)."""
+
+    def test_brake_resolution_order_and_tokens(self, monkeypatch):
+        """Resolver checks env, defaults to False, recognizes on/off tokens, raises on invalid."""
+        monkeypatch.delenv(
+            SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, raising=False
+        )
+        assert is_stale_deactivation_enabled() is False
+
+        for empty in ("", "   ", "\t"):
+            monkeypatch.setenv(SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, empty)
+            assert is_stale_deactivation_enabled() is False
+
+        for off_token in ("0", "false", "no", "off", "FALSE", "Off"):
+            monkeypatch.setenv(
+                SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, off_token
+            )
+            assert is_stale_deactivation_enabled() is False
+
+        for on_token in ("1", "true", "yes", "on", "TRUE", "Yes", "On"):
+            monkeypatch.setenv(
+                SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, on_token
+            )
+            assert is_stale_deactivation_enabled() is True
+
+        for bad in ("2", "disabled", "enabled", "maybe"):
+            monkeypatch.setenv(SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, bad)
+            with pytest.raises(ValueError, match="Invalid value for"):
+                is_stale_deactivation_enabled()
+
+    def test_brake_absent_and_off_tokens_render_boot_pass_inert(
+        self, file_db, data_dir, monkeypatch
+    ):
+        """When the brake is absent or OFF, the boot pass is FULLY INERT:
+
+        - no receipt file created;
+        - no row touched;
+        - SkillStaleDeactivator is NOT constructed.
+
+        This pin is also the target of mutation M-E4k (default flipped to ON -> RED).
+        """
+        skill_repo = SkillRepository(file_db)
+        ab_test_repo = SkillABTestRepository(file_db)
+
+        # Create a candidate row that R5 would touch if the pass ran
+        row = _make_skill(
+            skill_repo,
+            name="inert-boot-candidate",
+            is_active=False,
+            status="ab_testing",
+        )
+
+        class DummyManager:
+            _run_skill_stale_deactivation_reconciliation = (
+                InstanceManager._run_skill_stale_deactivation_reconciliation
+            )
+
+            def __init__(self, s_repo, a_repo):
+                self._skill_repo = s_repo
+                self._skill_ab_test_repo = a_repo
+
+        mgr = DummyManager(skill_repo, ab_test_repo)
+        monkeypatch.setenv("ENSEMBLE_DATA_DIR", str(data_dir))
+
+        # Spy on SkillStaleDeactivator constructor to verify it is NEVER called
+        constructed = []
+        orig_init = SkillStaleDeactivator.__init__
+
+        def spy_init(self_deactivator, *args, **kwargs):
+            constructed.append(True)
+            orig_init(self_deactivator, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "daemon.services.skill_deactivation.SkillStaleDeactivator.__init__",
+            spy_init,
+        )
+
+        receipt = data_dir / "skill_stale_deactivation_receipt.json"
+
+        for off_val in (None, "0", "false", "off", "no"):
+            if off_val is None:
+                monkeypatch.delenv(
+                    SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, raising=False
+                )
+            else:
+                monkeypatch.setenv(
+                    SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, off_val
+                )
+
+            mgr._run_skill_stale_deactivation_reconciliation()
+
+            # The pass must be fully inert
+            assert len(constructed) == 0, (
+                f"SkillStaleDeactivator was constructed with brake={off_val!r}"
+            )
+            assert not receipt.exists(), (
+                f"Receipt was written with brake={off_val!r}"
+            )
+            after = skill_repo.get(row.id)
+            assert after.status == "ab_testing", (
+                f"Row was modified with brake={off_val!r}"
+            )
+            assert after.is_active is False
+
+    def test_brake_on_runs_boot_pass_and_writes_receipt(
+        self, file_db, data_dir, monkeypatch
+    ):
+        """When the brake is ON, the pass runs as designed (receipt written, row normalized)."""
+        skill_repo = SkillRepository(file_db)
+        ab_test_repo = SkillABTestRepository(file_db)
+
+        row = _make_skill(
+            skill_repo,
+            name="on-boot-candidate",
+            is_active=False,
+            status="ab_testing",
+        )
+
+        class DummyManager:
+            _run_skill_stale_deactivation_reconciliation = (
+                InstanceManager._run_skill_stale_deactivation_reconciliation
+            )
+
+            def __init__(self, s_repo, a_repo):
+                self._skill_repo = s_repo
+                self._skill_ab_test_repo = a_repo
+
+        mgr = DummyManager(skill_repo, ab_test_repo)
+        monkeypatch.setenv("ENSEMBLE_DATA_DIR", str(data_dir))
+        monkeypatch.setenv(SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, "1")
+
+        receipt = data_dir / "skill_stale_deactivation_receipt.json"
+        assert not receipt.exists()
+
+        mgr._run_skill_stale_deactivation_reconciliation()
+
+        assert receipt.exists()
+        after = skill_repo.get(row.id)
+        assert after.status == "inactive"
+        assert after.is_active is False
+
+    def test_brake_invalid_value_renders_pass_inert_and_boot_continues(
+        self, file_db, data_dir, monkeypatch
+    ):
+        """An invalid env value raises ValueError inside resolver, which is caught fail-soft:
+
+        boot continues, no exception escapes, and the pass remains inert.
+        """
+        skill_repo = SkillRepository(file_db)
+        ab_test_repo = SkillABTestRepository(file_db)
+
+        row = _make_skill(
+            skill_repo,
+            name="invalid-brake-candidate",
+            is_active=False,
+            status="ab_testing",
+        )
+
+        class DummyManager:
+            _run_skill_stale_deactivation_reconciliation = (
+                InstanceManager._run_skill_stale_deactivation_reconciliation
+            )
+
+            def __init__(self, s_repo, a_repo):
+                self._skill_repo = s_repo
+                self._skill_ab_test_repo = a_repo
+
+        mgr = DummyManager(skill_repo, ab_test_repo)
+        monkeypatch.setenv("ENSEMBLE_DATA_DIR", str(data_dir))
+        monkeypatch.setenv(
+            SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, "invalid_typo_val"
+        )
+
+        constructed = []
+        orig_init = SkillStaleDeactivator.__init__
+
+        def spy_init(self_deactivator, *args, **kwargs):
+            constructed.append(True)
+            orig_init(self_deactivator, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "daemon.services.skill_deactivation.SkillStaleDeactivator.__init__",
+            spy_init,
+        )
+
+        receipt = data_dir / "skill_stale_deactivation_receipt.json"
+
+        # Must not raise: fail-soft catch renders it inert
+        mgr._run_skill_stale_deactivation_reconciliation()
+
+        assert len(constructed) == 0
+        assert not receipt.exists()
+        after = skill_repo.get(row.id)
+        assert after.status == "ab_testing"
+        assert after.is_active is False

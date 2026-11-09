@@ -5731,7 +5731,15 @@ class InstanceManager:
         try:
             from daemon.services.skill_deactivation import (
                 SkillStaleDeactivator,
+                is_stale_deactivation_enabled,
             )
+
+            if not is_stale_deactivation_enabled():
+                logger.debug(
+                    "[E4.1] skill stale-deactivation reconciliation skipped: "
+                    "brake ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED is OFF (default)"
+                )
+                return
 
             report = SkillStaleDeactivator(
                 skill_repo=skill_repo,

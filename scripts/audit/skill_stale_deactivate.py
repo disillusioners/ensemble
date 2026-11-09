@@ -15,6 +15,14 @@ the pre-flight verification tool AND the reversal path. The shipped
 boot-time reconciliation (E4.1) is the self-healing half; the injection-side
 filter (E4.3) is the belt that holds even when this script has never run.
 
+BRAKE / ENABLEMENT SPLIT
+The environment variable ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED governs
+the BOOT path (daemon startup reconciliation in daemon/manager.py, default OFF).
+This operator script is an EXPLICIT operator action (dry-run by default;
+--apply required to execute) and does NOT require the boot brake to be set.
+The two enablements are separate by design: the brake protects the automatic
+production boot path, while this script is for explicit operator intervention.
+
 HOUSE PRECEDENT
 
 ``scripts/audit/skill_counter_reconcile.py`` — dry-run by default,
@@ -92,7 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "E4 stale/shadow skill deactivation — dry-run by default; "
-            "--apply writes; --reactivate reverses from a receipt."
+            "--apply writes; --reactivate reverses from a receipt. "
+            "Note: ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED governs the "
+            "daemon boot path; this operator script is an explicit manual tool."
         ),
     )
     parser.add_argument(

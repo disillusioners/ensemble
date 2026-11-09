@@ -40,6 +40,8 @@
 #           (the receipt grows without bound across boots).
 #   M-E4h — make the writer write ONLY `is_active` ⇒ the single-column pin
 #           REDs (the dual-column contract is broken).
+#   M-E4k — flip the resolver's default to ON ⇒ the "inert by default"
+#           pin REDs (the deactivator is constructed and the receipt is written).
 #
 # FENCES: per-variable env scrub, worktree-local interpreter, dual-layer
 # timeout, sha-verified PRISTINE restore, VACUOUS-GREEN guard, no PG, no
@@ -289,6 +291,11 @@ leg "M-E4h" "$E4_PY" \
         is_active=bool(is_active),
     )  # MUTATION: a single-column write'
 
+# M-E4k — flip the resolver's default to ON ⇒ the "inert by default" pin REDs.
+leg "M-E4k" "$E4_PY" \
+  '    return _resolve_switch(SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, False)' \
+  '    return _resolve_switch(SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, True)  # MUTATION: default ON'
+
 # Final manifest check.
 for f in "${MUTABLE_FILES[@]}"; do
   key="$(printf '%s' "$f" | sha256sum | cut -d' ' -f1 | cut -c1-16)"
@@ -305,5 +312,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (10 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (11 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0

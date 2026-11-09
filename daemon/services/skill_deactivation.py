@@ -97,6 +97,11 @@ from daemon.services.skill_deactivation_manifest import (
     RULE_DECLARED,
     match_declared_disposition,
 )
+from daemon.services.skill_job_dispatcher import (
+    _SWITCH_OFF_TOKENS,
+    _SWITCH_ON_TOKENS,
+    _resolve_switch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +121,31 @@ RULE_R5 = "R5_DESYNCED_INACTIVE_PAIR"
 
 #: Every rule this module can apply, in evaluation order.
 ALL_RULES: tuple[str, ...] = (RULE_R1, RULE_R2, RULE_R3, RULE_R5)
+
+#: The kill-switch env var for E4 stale skill deactivation (default OFF).
+SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV = (
+    "ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED"
+)
+
+
+def is_stale_deactivation_enabled() -> bool:
+    """Resolve the stale-deactivation kill-switch env var (default OFF; flag-ON enables).
+
+    Resolution order (mirroring the house pattern in
+    ``daemon/services/skill_job_dispatcher.py``):
+
+    1. ``ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED`` env var.
+    2. Unset / empty string -> default OFF (stale-deactivation disabled).
+    3. Recognized OFF tokens: ``0``, ``false``, ``no``, ``off`` -> ``False``.
+    4. Recognized ON tokens: ``1``, ``true``, ``yes``, ``on`` -> ``True``.
+    5. Anything else -> raises ``ValueError`` (fail-closed on misconfiguration).
+
+    When OFF (the default), the boot pass is FULLY INERT: no receipt write,
+    no row change, no refusal enumeration, and ``SkillStaleDeactivator`` is
+    not constructed.
+    """
+    return _resolve_switch(SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, False)
+
 
 #: The refusal reason recorded for an A/B-guarded row (R3.6).
 REFUSAL_OPEN_AB_TEST = "skipped_open_ab_test"
