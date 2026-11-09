@@ -40,6 +40,8 @@
 | M-C1 | break ONE link of the production holder chain (the anomaly service stops resolving) | `test_c1_pin_anomaly_service_resolves_through_the_production_chain` |
 | M-m1 | restore the stale fixture artefacts (the `NullPool` import, the "the pool is ``NullPool``" comment, the dead 30 s connect timeout) | `test_g_pin_services_fixture_ships_the_documented_shape` |
 | M-m5 | revert the fixture to the pre-G shared-connection shape (`StaticPool` + `:memory:`) — the two arms of the decisive experiment no longer agree | `test_g_pin_experiment_equivalence_normal_vs_inline` |
+| M-1b | restore the module-level metrics-wiring-vocabulary import (the import-time family registration returns — the exposition artifact diverges: registry 18 → 70) | `test_m1b_pin_importing_the_observability_module_registers_no_families` |
+| M-1b-b | drift the frozen fallback vocabulary away from the canonical one (`daemon/services/metrics_query/wiring/vocab.py`) | `test_m1b_pin_the_fallback_vocabulary_matches_the_canonical_one` |
 
 **Red-set accounting (the §13.2 protocol — `grep '^FAILED'` only, ≥ 3 runs, diffed as SETS):** the 12-file skill blast radius = **3 failed / 456 passed × 3 consecutive runs**, red set == the 3 base reds (`tests/manager/test_skill_service_init.py` ×3 — the pre-existing SQLite `20260714_000001` defect). **NET-NEW REDS = 0.** The wider `tests/services/` sweep carries 12 reds that are BYTE-IDENTICAL to the pre-G base set (measured on the same command with the base fixture restored) — also net-new 0.
 

@@ -421,7 +421,14 @@ class TestStep1TaskCompletionOpensCaptureGate:
         """
         skill_id = _seed_skill(repos, "applied-target").id
         _set_injected(instance_repo, "inst-flow-c-app", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=True)
+        # A3: the capture gate asks the OUTCOME-FIELDS predicate
+        # (selected AND task_succeeded AND feedback_applied IS NOT
+        # NULL) — the feedback-only ``has_applied_for_instance`` is not
+        # a capture-gate predicate (its ``applied`` column is written by
+        # nobody).
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(
+            return_value=True
+        )
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-flow-c-app",

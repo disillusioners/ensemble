@@ -310,8 +310,14 @@ class TestSkillCapture:
         """When a usage record has feedback_applied=True, capture is suppressed."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-3", [skill_id])
-        # Skill was applied — success is attributed to it.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=True)
+        # Skill was genuinely evolved — success is attributed to it.
+        # A3: the capture gate asks the OUTCOME-FIELDS predicate
+        # (selected AND task_succeeded AND feedback_applied IS NOT
+        # NULL), not the feedback-only ``has_applied_for_instance``
+        # (whose ``applied`` column is written by nobody).
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(
+            return_value=True
+        )
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-3",
@@ -538,7 +544,10 @@ class TestCaptureServiceLevel:
     async def test_check_and_capture_returns_none_when_skill_already_applied(
         self, evolution_service, repos,
     ):
-        repos.usage.has_applied_for_instance = MagicMock(return_value=True)
+        # A3: the capture gate asks the OUTCOME-FIELDS predicate.
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(
+            return_value=True
+        )
         details = await evolution_service.check_and_capture(
             instance_id="inst-1",
             agent_id="developer",
