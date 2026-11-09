@@ -1183,8 +1183,8 @@ _jsf_read() {  # <file> — read + validate, print stdout + rc marker
     ( . "$LAUNCHER"; _js_journal_read "$1"; echo "rc=$?" )
 }
 
-# 13a. brackets INSIDE string values + escaped quotes (\") and escaped
-# backslashes (\\) — all validated correctly (R6a).
+# ─── 13a. brackets inside string values + escaped quotes/backslashes (R6a) ─
+section "js journal read: brackets inside strings"
 printf '%s' '{"current":"v1","history":[{"detail":"has } and { inside \"quoted \\\" and \\\\ backslash\" brackets [yes]"}],"quarantined":[]}' \
     > "$JSF_TEST_DIR/escapes.json"
 _jsf_out="$(_jsf_read "$JSF_TEST_DIR/escapes.json")"
@@ -1193,14 +1193,17 @@ assert_contains "13a output byte-exact (bracket-in-string intact)" \
     '"detail":"has } and { inside \"quoted \\\" and \\\\ backslash\" brackets [yes]"' \
     "$_jsf_out"
 
-# 13b. the escape PARITY cases: a string closed after an escaped
-# backslash run, and a quote escaped by a backslash (must NOT close).
+# ─── 13b. escape parity: a string closed after an escaped backslash run ──
+section "js journal read: escape parity"
+# The escape PARITY cases: a string closed after an escaped backslash run,
+# and a quote escaped by a backslash (must NOT close).
 printf '%s' '{"a":"ends with escaped backslash \\\\ and closes"}' > "$JSF_TEST_DIR/parity_ok.json"
 assert_contains "13b even-backslash-run then quote closes (valid)" "rc=0" "$(_jsf_read "$JSF_TEST_DIR/parity_ok.json")"
 printf '%s' '{"a":"escaped \" quote never closes' > "$JSF_TEST_DIR/parity_torn.json"
 assert_contains "13b escaped quote does NOT close (unterminated → reject)" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/parity_torn.json")"
 
-# 13c. truncated/torn rejection (R6b) — torn tail → nonzero.
+# ─── 13c. truncated/torn rejection (R6b) — torn tail → nonzero ───────────
+section "js journal read: torn tail rejection"
 printf '%s' '{"a":{"b":[1,2' > "$JSF_TEST_DIR/torn_bracket.json"
 assert_contains "13c torn bracket tail rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/torn_bracket.json")"
 printf '%s' '{"a":"unterminated' > "$JSF_TEST_DIR/torn_string.json"
@@ -1215,9 +1218,11 @@ assert_contains "13c balance-only contract preserved (two docs accepted)" "rc=0"
 : > "$JSF_TEST_DIR/empty.json"
 assert_contains "13c empty journal rejected (pre-existing contract)" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/empty.json")"
 
-# 13d. locale invariance (R1): identical verdicts under default locale AND
-# LC_ALL=C AND a UTF-8 locale (the awk pass pins LC_ALL=C internally, so
-# this holds by construction — the pin keeps it true).
+# ─── 13d. locale invariance (R1) — default, LC_ALL=C and UTF-8 agree ───
+section "js journal read: locale invariance"
+# identical verdicts under default locale AND LC_ALL=C AND a UTF-8 locale
+# (the awk pass pins LC_ALL=C internally, so this holds by construction —
+# the pin keeps it true).
 _jsf_val="$( ( . "$LAUNCHER"; _js_journal_read "$JSF_TEST_DIR/escapes.json" >/dev/null; echo $? ) )"
 _jsf_c="$(LC_ALL=C bash -c '. "$1"; _js_journal_read "$2" >/dev/null; echo $?' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json")"
 _jsf_utf8="$(LC_ALL=en_US.UTF-8 bash -c '. "$1"; _js_journal_read "$2" >/dev/null; echo $?' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json" 2>/dev/null)"
@@ -1251,7 +1256,7 @@ assert_eq "13e quirk preserved: brace-in-string terminates walk" \
 # ─── 13f. perf gate: ~250 KB journal validates well inside 2 s (R6c) ───────
 section "js journal read: 250KB perf gate"
 JSF_PERF_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf-perf.XXXXXX")"
-PERF_JOURNAL="$JSF_PERF_DIR/state.json"
+JSF_PERF_JOURNAL="$JSF_PERF_DIR/state.json"
 # Dependency-light generation (awk is already a launcher runtime dep).
 awk 'BEGIN {
     printf "%s", "{\"current\":\"v1\",\"previous\":null,\"in_flight\":null,\"quarantined\":[],\"history\":["
@@ -1259,25 +1264,25 @@ awk 'BEGIN {
         printf "%s{\"ts\":\"2026-10-27T%02d:%02d:%02dZ\",\"event\":\"mcp_server_state\",\"detail\":\"server=context7 state=degraded resolver_timeout ENOTFOUND (attempt %d padding-padding-padding)\"}", (i > 0 ? "," : ""), (i/60)%24, i%60, (i*7)%60, i
     }
     printf "%s", "]}"
-}' > "$PERF_JOURNAL"
-_perf_bytes=$(wc -c < "$PERF_JOURNAL" | tr -d ' ')
-if [ "$_perf_bytes" -ge 240000 ]; then
+}' > "$JSF_PERF_JOURNAL"
+_jsf_perf_bytes=$(wc -c < "$JSF_PERF_JOURNAL" | tr -d ' ')
+if [ "$_jsf_perf_bytes" -ge 240000 ]; then
     _pass  # fixture really is ~250 KB class
 else
-    _fail "13f perf fixture is ~250 KB" ">= 240000 bytes" "$_perf_bytes"
+    _fail "13f perf fixture is ~250 KB" ">= 240000 bytes" "$_jsf_perf_bytes"
 fi
 # Watchdog form: _js_run_bounded 2 kills the read at 2 s. The O(n²) loop
 # this replaces needed ~31 min at 215 KB — it CANNOT pass this gate; the
 # awk pass finishes in ~50 ms.
-_perf_rc="$( ( . "$LAUNCHER"; _js_run_bounded 2 -- bash -c '. "$1"; _js_journal_read "$2" > /dev/null' _ "$LAUNCHER" "$PERF_JOURNAL" >/dev/null 2>&1; echo $? ) )"
-assert_eq "13f 250KB journal read completes inside the 2s watchdog" "0" "$_perf_rc"
-_perf_s0=$(date +%s)
-( . "$LAUNCHER"; _js_journal_read "$PERF_JOURNAL" > "$JSF_PERF_DIR/read.out" 2>/dev/null )
-_perf_rc2=$?
-_perf_s1=$(date +%s)
-assert_eq "13f unbounded read rc=0" "0" "$_perf_rc2"
-if [ $(( _perf_s1 - _perf_s0 )) -le 2 ]; then _pass; else _fail "13f read elapsed ≤ 2s" "<= 2" "$(( _perf_s1 - _perf_s0 ))"; fi
-if cmp -s "$PERF_JOURNAL" "$JSF_PERF_DIR/read.out"; then
+_jsf_perf_rc="$( ( . "$LAUNCHER"; _js_run_bounded 2 -- bash -c '. "$1"; _js_journal_read "$2" > /dev/null' _ "$LAUNCHER" "$JSF_PERF_JOURNAL" >/dev/null 2>&1; echo $? ) )"
+assert_eq "13f 250KB journal read completes inside the 2s watchdog" "0" "$_jsf_perf_rc"
+_jsf_perf_s0=$(date +%s)
+( . "$LAUNCHER"; _js_journal_read "$JSF_PERF_JOURNAL" > "$JSF_PERF_DIR/read.out" 2>/dev/null )
+_jsf_perf_rc2=$?
+_jsf_perf_s1=$(date +%s)
+assert_eq "13f unbounded read rc=0" "0" "$_jsf_perf_rc2"
+if [ $(( _jsf_perf_s1 - _jsf_perf_s0 )) -le 2 ]; then _pass; else _fail "13f read elapsed ≤ 2s" "<= 2" "$(( _jsf_perf_s1 - _jsf_perf_s0 ))"; fi
+if cmp -s "$JSF_PERF_JOURNAL" "$JSF_PERF_DIR/read.out"; then
     _pass  # byte-exact roundtrip at scale
 else
     _fail "13f 250KB read output byte-exact" "identical" "differs"
@@ -1344,10 +1349,111 @@ assert_contains "13i odd-backslash run escapes the quote (rc=0)" "rc=0" "$_jsf_w
 assert_contains "13i output byte-exact (odd run intact)" \
     '{"a":"x\\\"","b":2}' "$_jsf_w2b_out"
 
+# ─── 13j. rc vocabulary: UNAVAILABLE (2) is distinct from NOT-TRUSTED (1) ─
+# The launcher distinguishes THREE outcomes for its JSON passes:
+#   0 — the pass ran and the content is trustworthy;
+#   1 — the pass ran and the content is NOT trustworthy (bracket-unbalanced,
+#       unterminated string, key absent) — a CONTENT verdict;
+#   2 — the pass could not RUN (awk missing / broken / wedged past the
+#       bound) — the verdict is UNKNOWN.
+# Collapsing 2 into 1 is a silent-corruption class: an empty extraction is
+# indistinguishable from "the field is gone", and the writers that splice
+# an empty value back into the journal would overwrite real history (or
+# reset the 24h rollback counter). These pins freeze the distinction.
+section "js journal rc vocabulary: unavailable vs not-trustworthy"
+
+_JSF_BASH="$(command -v bash)"
+
+# (a) a PATH with NO awk — the interpreter is gone.
+JSF_NOAWK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf-noawk.XXXXXX")"
+for _jsf_bin in cat date sleep uname grep sed tr wc mkdir rm mv sh; do
+    _jsf_real="$(command -v "$_jsf_bin" 2>/dev/null)" || continue
+    ln -sf "$_jsf_real" "$JSF_NOAWK_DIR/$_jsf_bin" 2>/dev/null
+done
+
+# (b) a fake awk whose FIRST call (the balance validator) succeeds and
+#     every LATER call (the extractor) exits 127 — the "not found" status
+#     the wrapper maps into the rc-2 class.
+JSF_FAKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf-fake.XXXXXX")"
+JSF_FAKE_COUNTER="$JSF_TEST_DIR/fake_awk_calls"
+cat > "$JSF_FAKE_DIR/awk" <<'JSF_FAKE_AWK'
+#!/bin/sh
+_n=$(cat "$JSF_FAKE_COUNTER" 2>/dev/null || echo 0)
+_n=$((_n + 1))
+echo "$_n" > "$JSF_FAKE_COUNTER" 2>/dev/null || true
+if [ "$_n" -le 1 ]; then exit 0; fi
+exit 127
+JSF_FAKE_AWK
+chmod +x "$JSF_FAKE_DIR/awk"
+
+# (c) a wedged awk — a single blocking process (the watchdog's SIGKILL
+#     must land on awk ITSELF, or the bound would not hold).
+JSF_WEDGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf-wedge.XXXXXX")"
+printf '#!/bin/sh\nexec sleep 300\n' > "$JSF_WEDGE_DIR/awk"
+chmod +x "$JSF_WEDGE_DIR/awk"
+
+# 13j.1 — no awk at all: the READ and the EXTRACTOR report rc=2 (the raw
+#        awk status 127 must NOT leak, and must NOT read as "unbalanced").
+_jsf_noawk_read="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_journal_read "$2" >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json" 2>/dev/null)"
+_jsf_noawk_sub="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_json_sub "{\"a\":{\"b\":1}}" a >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" 2>/dev/null)"
+assert_contains "13j journal read without awk → rc=2 (unavailable, not 1)" "rc=2" "$_jsf_noawk_read"
+assert_contains "13j json sub without awk → rc=2 (unavailable, not 1)" "rc=2" "$_jsf_noawk_sub"
+
+# 13j.2 — a wedged awk under the bound → rc=2 as well (a TIMEOUT is
+#        UNAVAILABLE, never "unbalanced"/1). The bound is shortened to 2 s
+#        for the test (the shipped value is 60 s — see _JS_AWK_TIMEOUT_S).
+_jsf_wedge_rc="$(PATH="$JSF_WEDGE_DIR:$PATH" "$_JSF_BASH" -c '. "$1"; _JS_AWK_TIMEOUT_S=2; _js_json_sub "{\"a\":{\"b\":1}}" a >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" 2>/dev/null)"
+assert_contains "13j wedged awk under the bound → rc=2 (not 1)" "rc=2" "$_jsf_wedge_rc"
+
+# 13j.3 — the writers REFUSE on an unavailable extractor, and the journal
+#        is left byte-identical. The read succeeds (the validator ran) and
+#        the extraction fails (the interpreter vanished in between) — the
+#        exact shape that used to REPLACE the history array with one row
+#        and RESTART the 24h rollback counter from zero.
+printf '%s' '{"current":"v1","history":[{"ts":"t","event":"sweep","detail":"d"}],"quarantined":["v0.0.1"],"rollback_window_count":{"24h":2,"window_start":"2026-01-01T00:00:00Z"},"cooldown_until":null}' \
+    > "$JSF_TEST_DIR/rc_journal.json"
+cp "$JSF_TEST_DIR/rc_journal.json" "$JSF_TEST_DIR/rc_journal.before"
+_jsf_hist_rc="$(JSF_FAKE_COUNTER="$JSF_FAKE_COUNTER" PATH="$JSF_FAKE_DIR:$PATH" "$_JSF_BASH" -c '. "$1"; _js_history_append "$2" "evt" "det" 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_journal.json" 2>/dev/null)"
+assert_contains "13j history append refused when the extractor is unavailable" "rc=1" "$_jsf_hist_rc"
+assert_contains "13j the refusal says UNAVAILABLE (visible to the operator)" "UNAVAILABLE" "$_jsf_hist_rc"
+if cmp -s "$JSF_TEST_DIR/rc_journal.before" "$JSF_TEST_DIR/rc_journal.json"; then
+    _pass
+else
+    _fail "13j history array untouched when the extractor is unavailable" "identical" "differs"
+fi
+_jsf_cnt_rc="$(JSF_FAKE_COUNTER="$JSF_FAKE_COUNTER" PATH="$JSF_FAKE_DIR:$PATH" "$_JSF_BASH" -c '. "$1"; _js_count_rollback "$2" 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_journal.json" 2>/dev/null)"
+assert_contains "13j rollback counter refused when the extractor is unavailable" "rc=1" "$_jsf_cnt_rc"
+if cmp -s "$JSF_TEST_DIR/rc_journal.before" "$JSF_TEST_DIR/rc_journal.json"; then
+    _pass
+else
+    _fail "13j 24h counter NOT reset when the extractor is unavailable" "identical" "differs"
+fi
+_jsf_quar_rc="$(JSF_FAKE_COUNTER="$JSF_FAKE_COUNTER" PATH="$JSF_FAKE_DIR:$PATH" "$_JSF_BASH" -c '. "$1"; _js_quarantine "$2" "v9.9.9" 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_journal.json" 2>/dev/null)"
+assert_contains "13j quarantine append refused when the extractor is unavailable" "rc=1" "$_jsf_quar_rc"
+if cmp -s "$JSF_TEST_DIR/rc_journal.before" "$JSF_TEST_DIR/rc_journal.json"; then
+    _pass
+else
+    _fail "13j quarantined[] untouched when the extractor is unavailable" "identical" "differs"
+fi
+
+# 13j.4 — the sweep WARN names the check that actually ran (the launcher
+#        runs a BRACKET BALANCE CHECK, not a JSON parse) and distinguishes
+#        "the validator is unavailable" from "the content is not trusted".
+_jsf_warn_dir="$JSF_TEST_DIR/warn"
+mkdir -p "$_jsf_warn_dir/releases"
+printf '%s' '{"current":"v1","in_flight":{' > "$_jsf_warn_dir/releases/state.json"
+_jsf_warn_out="$( ( . "$LAUNCHER"; INSTALL_DIR="$_jsf_warn_dir" _journal_sweep ) 2>&1 >/dev/null )"
+assert_contains "13j the refusal WARN names the check it ran (balance-check only)" \
+    "balance-check only — not a JSON parse" "$_jsf_warn_out"
+_jsf_warn2_out="$( ( PATH="$JSF_NOAWK_DIR"; . "$LAUNCHER"; INSTALL_DIR="$_jsf_warn_dir" _journal_sweep ) 2>&1 >/dev/null )"
+assert_contains "13j the unavailable WARN does NOT claim 'unbalanced'" \
+    "validator is UNAVAILABLE" "$_jsf_warn2_out"
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
-       "$RB_TEST_DIR5" "$JSF_TEST_DIR" "$JSF_PERF_DIR" 2>/dev/null
+       "$RB_TEST_DIR5" "$JSF_TEST_DIR" "$JSF_PERF_DIR" \
+       "$JSF_NOAWK_DIR" "$JSF_FAKE_DIR" "$JSF_WEDGE_DIR" 2>/dev/null
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'
