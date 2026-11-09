@@ -162,6 +162,10 @@ class ManagedKeySpec:
     # bound" and preserves every pre-existing key's behavior
     # byte-for-byte.
     gt: float | None = None
+    # ``allowed_values`` is OPTIONAL and additive (decision-module P1):
+    # for string-valued keys with a closed vocabulary (e.g. stage: shadow|deciding).
+    # ``None`` (the default) means "any valid value_type value".
+    allowed_values: tuple[Any, ...] | set[Any] | None = None
     requires_restart: bool = True
     sensitive: bool = False
     description: str = ""
@@ -172,6 +176,9 @@ class ManagedKeySpec:
         ``failed validation (ge=5,le=20)`` — multi-part when several
         bounds apply)."""
         parts: list[str] = []
+        if self.allowed_values is not None:
+            vals = sorted(self.allowed_values) if isinstance(self.allowed_values, (set, frozenset, list, tuple)) else self.allowed_values
+            parts.append(f"allowed_values={vals}")
         if self.gt is not None:
             parts.append(f"gt={self.gt}")
         if self.ge is not None:
@@ -600,6 +607,57 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "default."
         ),
     ),
+    # ── Decision Module (P1, shadow-only) ─────────────────────────────
+    "decision_global_enabled": ManagedKeySpec(
+        key="decision_global_enabled",
+        config_path="decision.global_enabled",
+        env_var="DECISION_ENABLED",
+        value_type="int",
+        default=0,
+        ge=0,
+        le=1,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Decision Module global master switch (P1). 0=disabled, 1=enabled. "
+            "Takes effect on the next consult without restart. Effective precedence: "
+            "DB override > env DECISION_ENABLED > config.yaml decision.global_enabled > 0."
+        ),
+    ),
+    "decision_seam_snapshot_l3_selection_enabled": ManagedKeySpec(
+        key="decision_seam_snapshot_l3_selection_enabled",
+        config_path="decision.seams.snapshot_l3_selection_enabled",
+        env_var="DECISION_SEAM_SNAPSHOT_L3_SELECTION",
+        value_type="int",
+        default=0,
+        ge=0,
+        le=1,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Decision Module per-seam switch for snapshot L3 candidate selection (S1). "
+            "0=disabled, 1=enabled. Takes effect on the next consult without restart. "
+            "Effective precedence: DB override > env DECISION_SEAM_SNAPSHOT_L3_SELECTION > "
+            "config.yaml decision.seams.snapshot_l3_selection_enabled > 0."
+        ),
+    ),
+    "decision_seam_snapshot_l3_selection_stage": ManagedKeySpec(
+        key="decision_seam_snapshot_l3_selection_stage",
+        config_path="decision.seams.snapshot_l3_selection_stage",
+        env_var="DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE",
+        value_type="str",
+        default="shadow",
+        allowed_values={"shadow", "deciding"},
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Decision Module per-seam stage for snapshot L3 selection (S1). "
+            "Allowed values: shadow, deciding. P1 is shadow-only. Takes effect "
+            "on the next consult without restart. Effective precedence: "
+            "DB override > env DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE > "
+            "config.yaml decision.seams.snapshot_l3_selection_stage > shadow."
+        ),
+    ),
 }
 
 
@@ -673,6 +731,13 @@ def parse_and_validate(spec: ManagedKeySpec, raw: Any) -> tuple[bool, Any, str |
         value = _coerce_value(spec.value_type, raw)
     except (ValueError, TypeError) as exc:
         return False, None, "parse", str(exc)
+    if spec.allowed_values is not None and value not in spec.allowed_values:
+        return (
+            False,
+            value,
+            "validation",
+            f"value {value!r} fails constraint {spec.constraint_desc()}",
+        )
     if spec.gt is not None and value <= spec.gt:
         return (
             False,
@@ -995,6 +1060,26 @@ class SettingsService:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+        self._override_changed_callbacks: list[Callable[[str], None]] = []
+
+    def register_override_changed_callback(self, callback: Callable[[str], None]) -> None:
+        """Register a callback invoked when an override is set or cleared.
+
+        Callback signature: ``callback(key: str) -> None``.
+        Invoked synchronously after DB commit.
+        """
+        self._override_changed_callbacks.append(callback)
+
+    def _notify_override_changed(self, key: str) -> None:
+        for cb in self._override_changed_callbacks:
+            try:
+                cb(key)
+            except Exception as exc:
+                logger.warning(
+                    "[Settings] override changed callback failed for %s: %s",
+                    key,
+                    exc,
+                )
 
     def get_overrides(self) -> dict[str, Any]:
         """Return ``{key: decoded value}`` for every VALID registered
@@ -1032,6 +1117,7 @@ class SettingsService:
         with Session(self._engine) as session:
             session.merge(row)
             session.commit()
+        self._notify_override_changed(spec.key)
 
     def clear_override(self, key: str) -> bool:
         """Delete the override row for a registered key (idempotent —
@@ -1046,7 +1132,8 @@ class SettingsService:
                 return False
             session.delete(row)
             session.commit()
-            return True
+        self._notify_override_changed(spec.key)
+        return True
 
 
 # =============================================================================
@@ -1088,9 +1175,17 @@ def _raw_yaml_leaf(raw_yaml_limits: Any, spec: ManagedKeySpec) -> Any:
     deriving from it would mis-attribute ``source="yaml"`` on a
     default-only install and fail the default-tier test).
     """
-    if not isinstance(raw_yaml_limits, dict):
+    section = spec.config_path.split(".")[0]
+    if section == "decision":
+        try:
+            from daemon.config import raw_yaml_decision
+            node: Any = raw_yaml_decision()
+        except ImportError:
+            node = None
+    else:
+        node = raw_yaml_limits
+    if not isinstance(node, dict):
         return None
-    node: Any = raw_yaml_limits
     for part in spec.config_path.split(".")[1:]:
         if not isinstance(node, dict) or part not in node:
             return None

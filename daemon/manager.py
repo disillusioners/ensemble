@@ -2869,11 +2869,58 @@ class InstanceManager:
             self._snapshot_repo,
             snapshot_embedding_service=self._snapshot_embedding_service,
         )
+        # Decision Module (P1, shadow-only) — overlay wiring
+        from daemon.services.decision.client import DecisionClient
+        from daemon.services.decision.config import DecisionConfig as CoreDecisionConfig
+        from daemon.services.decision.cost_store import (
+            AppSettingCostAccumulator,
+            SettingsServiceKillStore,
+            build_s1_seam_record,
+        )
+        from daemon.services.decision.kill import AppSettingKillStore, KillChannelResolver
+        from daemon.services.decision.overlay import DecisionOverlay
+        from daemon.services.decision.registry import SeamRegistry
+        from daemon.services.decision.shadow import ShadowWriter
+
+        core_dec_cfg = CoreDecisionConfig.from_source(self.config.decision)
+        self._decision_cost_accumulator = AppSettingCostAccumulator(self._engine)
+        self._decision_client = DecisionClient(core_dec_cfg)
+        self._decision_registry = SeamRegistry(
+            client=self._decision_client, config=core_dec_cfg
+        )
+        self._decision_registry.register(build_s1_seam_record())
+
+        self._decision_fallback_kill_store = AppSettingKillStore(self._engine)
+        self._decision_kill_store = SettingsServiceKillStore(
+            lambda: self._settings_service,
+            fallback_store=self._decision_fallback_kill_store,
+        )
+
+        def _decision_override_writer(k: str, v: Any, u: str | None = None) -> Any:
+            if self._settings_service is not None:
+                return self._settings_service.set_override(k, v, u)
+            return self._decision_fallback_kill_store._write_sync(k, str(v))
+
+        self._decision_kill_resolver = KillChannelResolver(
+            self._decision_kill_store,
+            yaml_snapshot=core_dec_cfg,
+            override_writer=_decision_override_writer,
+        )
+        self._decision_shadow_writer = ShadowWriter()
+        self._decision_overlay = DecisionOverlay(
+            registry=self._decision_registry,
+            kill=self._decision_kill_resolver,
+            shadow_writer=self._decision_shadow_writer,
+            config=core_dec_cfg,
+            accumulator=self._decision_cost_accumulator,
+            board_service=self._board_service,
+        )
         self._snapshot_search_service = SnapshotSearchService(
             snapshot_repo=self._snapshot_repo,
             embedding_service=self._snapshot_embedding_service,
             llm_config=snapshot_llm_config,
             staleness_fn=compute_staleness_report,
+            decision_overlay=self._decision_overlay,
         )
         # R16 — monitoring counters (Wave 3). Always wired (the
         # service holds no expensive state and the row count is the
@@ -4376,6 +4423,15 @@ class InstanceManager:
         if self.config.mcp_pool.enabled and self._warmup_task is None:
             self._warmup_task = asyncio.create_task(self._warmup_and_report())
             logger.debug("MCP warmup task started from initialize()")
+
+        # Re-verify Decision Module kill switches at boot (records verify counters and drops stale cache)
+        if hasattr(self, "_decision_kill_resolver") and self._decision_kill_resolver is not None:
+            try:
+                await self._decision_kill_resolver.reverify(["snapshot.l3.selection"])
+            except Exception as exc:
+                logger.warning(
+                    "[DecisionModule] boot reverify failed (non-fatal): %s", exc
+                )
 
         # Eagerly warm tool metadata + tiktoken encoder in the background
         # so the first ``spawn_instance`` after startup doesn't pay the
@@ -6134,6 +6190,11 @@ class InstanceManager:
         attribute (``manager._settings_service``) — degrade-to-empty on
         unwired seams."""
         self._settings_service = service
+        if hasattr(self, "_decision_kill_resolver") and self._decision_kill_resolver is not None:
+            if hasattr(service, "register_override_changed_callback"):
+                service.register_override_changed_callback(
+                    lambda key: self._decision_kill_resolver.invalidate(None)
+                )
 
     def set_pending_system_execution(self, instance_id: str, spec: dict) -> None:
         """Arm the post-turn executor trigger marker (D-FA1.4). Called by the

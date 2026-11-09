@@ -681,3 +681,22 @@ vscode:
   # =0 on the env var.
   webview_csp_fix: null
 
+# Decision Module Configuration (P1, shadow-only)
+# Field names mirror daemon/config.py:DecisionConfig exactly.
+# Serves both the config_path attribute chain (decision.global_enabled,
+# decision.seams.snapshot_l3_selection_enabled, decision.seams.snapshot_l3_selection_stage)
+# and the store-key mapped yaml_switch_tier().
+decision:
+  base_url: ""                 # Empty string falls back to OPENAI_BASE_URL (reuse, never mint)
+  api_key: ""                  # Empty string falls back to OPENAI_API_KEY (reuse, never mint)
+  model: ""                    # Empty string resolves to 'decision' (never OPENAI_MODEL)
+  timeout_s: 5.0
+  cost_ceiling_usd: 50.0       # Ratified global ceiling (USD 50/month)
+  token_ceiling: 10000000      # Global token ceiling fail-safe
+  pricing_usd_per_million_tokens: ""   # JSON rate table, e.g. '{"decision": 1.20}'
+  global_enabled: false        # Global master switch (default OFF)
+  seams:
+    snapshot_l3_selection_enabled: false       # S1 snapshot L3 selection switch (default OFF)
+    snapshot_l3_selection_stage: "shadow"      # S1 stage: shadow | deciding (P1 shadow-only)
+
+
