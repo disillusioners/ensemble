@@ -23,8 +23,6 @@ from daemon.services.decision.registry import (
     StageTransitionRefused,
 )
 from daemon.services.decision.types import (
-    DecisionChoice,
-    DecisionQuestion,
     DecisionRequest,
     DecisionStage,
     FailureClass,

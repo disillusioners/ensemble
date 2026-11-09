@@ -12,10 +12,10 @@ so a violation breaks a unit test rather than merely a convention. The
 overlay's counters must therefore NOT be registered from inside the
 ranking module.
 
-This module upholds that constraint structurally: it imports ONLY
-``daemon.services.decision.types`` — never ``metrics``, never
-``overlay``, never ``registry``. A ranking module may import
-``daemon.services.decision.port`` and stay clean of the metrics
+This module upholds that constraint structurally: it imports NOTHING
+from the decision package — never ``metrics``, never ``overlay``, never
+``registry``; every type it needs is stdlib. A ranking module may
+import ``daemon.services.decision.port`` and stay clean of the metrics
 registry; the overlay (which DOES register the families) is injected
 into it by the wiring round.
 

@@ -34,8 +34,7 @@ superset-only rule would break S1 — the only P1 seam.
 from __future__ import annotations
 
 import logging
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from daemon.services.decision.client import ClientOutcome, DecisionClient

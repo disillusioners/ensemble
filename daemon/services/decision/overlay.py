@@ -51,6 +51,15 @@ WARNING row and a dedicated counter. When no board service is
 reachable the notify degrades to counter + WARNING + the trip status
 surfaced on the daemon-settings detail read — and that downgrade is
 DISCLOSED. A chat/push channel remains a NAMED FUTURE.
+
+**Why this file is large (~1,070 lines).** The 1,000–3,000-line band
+requires a why-large note: the orchestrator deliberately keeps the
+admission ladder, the shadow/apply split, the cost metering + trip,
+the throttle breakers and the operator notify in ONE module because
+they share one consult-time state machine — every gate reads
+cumulative state the others write, and splitting them would put the
+ordering contract across a module boundary where the compiler cannot
+hold it.
 """
 
 from __future__ import annotations
@@ -58,7 +67,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Deque, Mapping, Protocol, Sequence
 
@@ -70,7 +79,7 @@ from daemon.services.decision.config import (
 )
 from daemon.services.decision.kill import KillChannelResolver
 from daemon.services.decision.port import OverlayConsultResult
-from daemon.services.decision.registry import FencedResult, SeamRegistry
+from daemon.services.decision.registry import SeamRegistry
 from daemon.services.decision.shadow import ShadowRow, ShadowWriter
 from daemon.services.decision.types import (
     VERDICT_NO_OVERLAY,
@@ -107,9 +116,6 @@ GLOBAL_COST_CEILING_USD = DEFAULT_COST_CEILING_USD
 #: The per-seam share of the global ceiling — half of it, so one seam
 #: can never eat the whole budget (``controls-and-phasing.md`` §5).
 PER_SEAM_COST_SHARE_USD = GLOBAL_COST_CEILING_USD * 0.5
-
-#: The fallback token ceiling (L8) — used when the config carries none.
-DEFAULT_TOKEN_CEILING_USD = DEFAULT_TOKEN_CEILING
 
 #: The board item's author stamp — the daemon itself, never an agent.
 BOARD_AUTHOR = "ensemble-daemon"
@@ -763,7 +769,7 @@ class DecisionOverlay:
             )
             return
 
-        token_ceiling = int(self._config.token_ceiling or DEFAULT_TOKEN_CEILING_USD)
+        token_ceiling = int(self._config.token_ceiling or DEFAULT_TOKEN_CEILING)
         if totals.month_to_date_tokens >= token_ceiling:
             await self._trip(
                 reason="global_ceiling",

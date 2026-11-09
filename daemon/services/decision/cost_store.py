@@ -12,13 +12,13 @@ import json
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping
 
 from daemon.models.app_settings import AppSetting
 from daemon.services.db_offload import offload
-from daemon.services.decision.kill import AppSettingKillStore, KillStore
+from daemon.services.decision.kill import KillStore
 from daemon.services.decision.overlay import CostAccumulator, CostTotals
-from daemon.services.decision.port import extract_snapshot_ids, intersect_selection
+from daemon.services.decision.port import extract_snapshot_ids
 from daemon.services.decision.registry import SeamRecord
 from daemon.services.decision.types import (
     DecisionChoice,
@@ -101,8 +101,6 @@ class AppSettingCostAccumulator(CostAccumulator):
         LOST — the month-to-date spend undercounts, and the ceiling
         binds on that undercounted quantity.
         """
-        from sqlmodel import Session, select
-
         key = f"decision_cost_ledger_{period}"
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -283,6 +281,7 @@ def build_s1_seam_record(
         query = str(context.get("query", ""))
         candidates_raw = context.get("candidate_ids", ())
         if not isinstance(candidates_raw, (list, tuple)):
+            # duck-typed: a snapshot-row stand-in, not a Sequence[Any]
             candidates_raw = extract_snapshot_ids(candidates_raw)  # type: ignore[arg-type]
         choices = tuple(
             DecisionChoice(value=cid)

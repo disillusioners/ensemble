@@ -20,7 +20,6 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 import httpx
-import pytest
 
 from daemon.services.decision.kill import (
     GLOBAL_ENABLED_KEY,

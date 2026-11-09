@@ -5,17 +5,13 @@ Each pin is DISCRIMINATING: it must go RED if the safety defect returns.
 
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
-from daemon.services.decision import metrics
 from daemon.services.decision.client import DecisionClient
-from daemon.services.decision.config import DecisionConfig
 from daemon.services.decision.kill import (
     GLOBAL_ENABLED_KEY,
     AppSettingKillStore,
@@ -24,22 +20,6 @@ from daemon.services.decision.kill import (
     seam_stage_key,
 )
 from tests.unit.decision.helpers import choice_answer_payload, json_response, smart_handler
-
-
-@pytest.fixture(autouse=True)
-async def _setup_db_offload_loop():
-    """Bind the db_offload seam to the CURRENT test loop.
-
-    ``db_offload`` caches its loop; a test session that runs several
-    event loops (one per test) needs the seam re-bound, or a worker
-    future lands on a stale loop.
-    """
-    import asyncio
-
-    from daemon.services import db_offload
-
-    db_offload.configure(loop=asyncio.get_running_loop(), max_workers=4)
-    yield
 
 
 def _repo_root() -> Path:
@@ -86,7 +66,9 @@ class _HouseDecisionConfig:
             setattr(self, key, value)
 
 
-async def test_the_production_factory_stamps_the_configured_predicate_with_decision_signal() -> None:
+async def test_the_production_factory_stamps_the_configured_predicate_with_decision_signal(
+    monkeypatch,
+) -> None:
     """D1 PIN — the MANAGER-CONSTRUCTION PATH proves CONFIGURED.
 
     Calls the SAME factory the manager calls. NO ``configured=``
@@ -99,31 +81,23 @@ async def test_the_production_factory_stamps_the_configured_predicate_with_decis
     """
     from daemon.services.decision.factory import build_decision_overlay
 
-    saved = {k: os.environ.get(k) for k in ("DECISION_API_KEY", "DECISION_BASE_URL")}
-    os.environ["DECISION_API_KEY"] = "sk-production-signal"
-    os.environ["OPENAI_BASE_URL"] = "https://proxy.test/v1"
-    os.environ["OPENAI_API_KEY"] = "sk-inherited"
-    os.environ.pop("DECISION_BASE_URL", None)
-    try:
-        parts = build_decision_overlay(
-            engine=_sqlite_engine(),
-            house_decision_config=_HouseDecisionConfig(),
-        )
-        assert parts.config.is_configured() is True
-        assert parts.overlay._is_configured() is True
-        assert parts.config.api_key == "sk-production-signal"
-        assert parts.config.base_url == "https://proxy.test/v1"  # value fallback
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        os.environ.pop("OPENAI_BASE_URL", None)
-        os.environ.pop("OPENAI_API_KEY", None)
+    monkeypatch.setenv("DECISION_API_KEY", "sk-production-signal")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.test/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-inherited")
+    monkeypatch.delenv("DECISION_BASE_URL", raising=False)
+    parts = build_decision_overlay(
+        engine=_sqlite_engine(),
+        house_decision_config=_HouseDecisionConfig(),
+    )
+    assert parts.config.is_configured() is True
+    assert parts.overlay._is_configured() is True
+    assert parts.config.api_key == "sk-production-signal"
+    assert parts.config.base_url == "https://proxy.test/v1"  # value fallback
 
 
-async def test_the_production_factory_with_only_openai_inherited_is_not_configured() -> None:
+async def test_the_production_factory_with_only_openai_inherited_is_not_configured(
+    monkeypatch,
+) -> None:
     """D1 PIN — the same factory, only ``OPENAI_*`` inherited ⇒ suppressed.
 
     Discriminating: a factory that ignored the signal would report
@@ -131,30 +105,17 @@ async def test_the_production_factory_with_only_openai_inherited_is_not_configur
     """
     from daemon.services.decision.factory import build_decision_overlay
 
-    saved = {
-        k: os.environ.get(k)
-        for k in ("DECISION_API_KEY", "DECISION_BASE_URL")
-    }
-    os.environ.pop("DECISION_API_KEY", None)
-    os.environ.pop("DECISION_BASE_URL", None)
-    os.environ["OPENAI_BASE_URL"] = "https://proxy.test/v1"
-    os.environ["OPENAI_API_KEY"] = "sk-inherited"
-    try:
-        parts = build_decision_overlay(
-            engine=_sqlite_engine(),
-            house_decision_config=_HouseDecisionConfig(),
-            )
-        assert parts.config.is_configured() is False
-        assert parts.config.base_url == "https://proxy.test/v1"  # value fallback still works
-        assert parts.config.api_key == "sk-inherited"
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        os.environ.pop("OPENAI_BASE_URL", None)
-        os.environ.pop("OPENAI_API_KEY", None)
+    monkeypatch.delenv("DECISION_API_KEY", raising=False)
+    monkeypatch.delenv("DECISION_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.test/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-inherited")
+    parts = build_decision_overlay(
+        engine=_sqlite_engine(),
+        house_decision_config=_HouseDecisionConfig(),
+    )
+    assert parts.config.is_configured() is False
+    assert parts.config.base_url == "https://proxy.test/v1"  # value fallback still works
+    assert parts.config.api_key == "sk-inherited"
 
 
 def test_the_manager_calls_the_factory() -> None:
@@ -357,7 +318,6 @@ async def test_d3_a_timeout_consult_bills_a_positive_floor() -> None:
     fail-safe. This pin goes RED if the floor is reverted.
     """
     import asyncio
-    from typing import Mapping
 
     from daemon.services.decision.overlay import (
         CostTotals,

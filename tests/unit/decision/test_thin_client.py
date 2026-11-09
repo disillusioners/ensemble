@@ -24,7 +24,6 @@ from daemon.services.decision.client import (
     _carries_misroute_code,
     _carries_proxy_error_envelope,
 )
-from daemon.services.decision.config import DecisionConfig
 from daemon.services.decision.types import (
     FailureClass,
     QuestionKind,

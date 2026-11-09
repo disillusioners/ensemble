@@ -8,7 +8,6 @@ and T-4/T-6/T-8.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping
 
 import httpx
@@ -25,8 +24,6 @@ from daemon.services.decision.kill import (
     seam_stage_key,
 )
 from daemon.services.decision.overlay import (
-    GLOBAL_COST_CEILING_USD,
-    PER_SEAM_COST_SHARE_USD,
     CostTotals,
     DecisionOverlay,
     InMemoryCostAccumulator,
@@ -36,15 +33,12 @@ from daemon.services.decision.shadow import ShadowWriter
 from daemon.services.decision.types import (
     DecisionStage,
     FailureClass,
-    Monotonicity,
     OverlayOutcome,
-    QuestionKind,
     SuppressionReason,
 )
 from tests.unit.decision.helpers import (
     RowCapture,
     choice_answer_payload,
-    choice_question,
     json_response,
     make_config,
     seam_record,
@@ -646,7 +640,9 @@ async def test_the_floor_rejection_is_a_subset_view_not_an_additive_term() -> No
 # ── Q2 end-to-end pins ───────────────────────────────────────────────────
 
 
-async def test_with_only_openai_inherited_and_no_decision_signal_a_seam_enabled_makes_no_call_and_suppresses_not_configured() -> None:
+async def test_with_only_openai_inherited_and_no_decision_signal_a_seam_enabled_makes_no_call_and_suppresses_not_configured(
+    monkeypatch,
+) -> None:
     """Q2 pin (negative): the reconciliation's second belt.
 
     The seam key is ON, the environment carries ONLY ``OPENAI_BASE_URL`` /
@@ -657,52 +653,36 @@ async def test_with_only_openai_inherited_and_no_decision_signal_a_seam_enabled_
     module configured, because the ``decision`` row routes to a PAID
     upstream.)
     """
-    import os
-
-    saved = {k: os.environ.get(k) for k in ("DECISION_BASE_URL", "DECISION_API_KEY")}
-    for k in saved:
-        os.environ.pop(k, None)
-    os.environ["OPENAI_BASE_URL"] = "https://proxy.test/v1"
-    os.environ["OPENAI_API_KEY"] = "sk-inherited"
-    try:
-        overlay, _registry, _kill, _store, capture, calls = _build_overlay(
-            store_values=_on_seam(),
-            config=make_config(explicitly_configured=False),
-        )
-        result = await overlay.consult(
-            "snapshot.l3.selection",
-            heuristic_outcome=["id-a"],
-            context={"input": "x"},
-        )
-        assert calls == [], "a not-configured module must never call out"
-        assert result.suppression == "not_configured"
-        assert "reason=not_configured" in capture.last
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        os.environ.pop("OPENAI_BASE_URL", None)
-        os.environ.pop("OPENAI_API_KEY", None)
+    monkeypatch.delenv("DECISION_BASE_URL", raising=False)
+    monkeypatch.delenv("DECISION_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.test/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-inherited")
+    overlay, _registry, _kill, _store, capture, calls = _build_overlay(
+        store_values=_on_seam(),
+        config=make_config(explicitly_configured=False),
+    )
+    result = await overlay.consult(
+        "snapshot.l3.selection",
+        heuristic_outcome=["id-a"],
+        context={"input": "x"},
+    )
+    assert calls == [], "a not-configured module must never call out"
+    assert result.suppression == "not_configured"
+    assert "reason=not_configured" in capture.last
 
 
-async def test_with_an_explicit_decision_signal_a_seam_enabled_does_call() -> None:
+async def test_with_an_explicit_decision_signal_a_seam_enabled_does_call(
+    monkeypatch,
+) -> None:
     """Q2 pin (positive): an explicit signal makes the seam call out."""
-    import os
-
-    os.environ["DECISION_API_KEY"] = "sk-explicit"
-    os.environ["OPENAI_API_KEY"] = "sk-inherited"
-    try:
-        overlay, _registry, _kill, _store, _capture, calls = _build_overlay(
-            store_values=_on_seam()
-        )
-        await overlay.consult(
-            "snapshot.l3.selection",
-            heuristic_outcome=["id-a"],
-            context={"input": "x"},
-        )
-        assert len(calls) == 1, "an explicit signal makes the seam call out"
-    finally:
-        os.environ.pop("DECISION_API_KEY", None)
-        os.environ.pop("OPENAI_API_KEY", None)
+    monkeypatch.setenv("DECISION_API_KEY", "sk-explicit")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-inherited")
+    overlay, _registry, _kill, _store, _capture, calls = _build_overlay(
+        store_values=_on_seam()
+    )
+    await overlay.consult(
+        "snapshot.l3.selection",
+        heuristic_outcome=["id-a"],
+        context={"input": "x"},
+    )
+    assert len(calls) == 1, "an explicit signal makes the seam call out"

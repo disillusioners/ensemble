@@ -107,7 +107,7 @@ from .skill_search_service import (  # DRIFT-PIN: direct import — sibling-drif
     _tokenize,
 )
 from .snapshot_embedding_service import SnapshotEmbeddingService
-from daemon.services.decision.port import extract_snapshot_ids, intersect_selection
+from .decision.port import DecisionOverlayPort, extract_snapshot_ids
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +261,7 @@ class SnapshotSearchService:
         embedding_service: SnapshotEmbeddingService,
         llm_config: dict[str, Any],
         staleness_fn: Any,
-        decision_overlay: Any = None,
+        decision_overlay: DecisionOverlayPort | None = None,
     ) -> None:
         """Store dependencies for the three pipeline stages.
 

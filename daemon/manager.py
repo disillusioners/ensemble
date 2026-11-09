@@ -2874,7 +2874,6 @@ class InstanceManager:
         # factory, which stamps the configured predicate from the
         # EXPLICIT decision signal (resolve_values, not from_source).
         from daemon.services.decision.factory import build_decision_overlay
-        from daemon.services.decision.kill import AppSettingKillStore
 
         _dec = build_decision_overlay(
             engine=self._engine,
@@ -2882,14 +2881,7 @@ class InstanceManager:
             settings_service_getter=lambda: self._settings_service,
             board_service=self._board_service,
         )
-        self._decision_config = _dec.config
-        self._decision_cost_accumulator = _dec.accumulator
-        self._decision_client = _dec.client
-        self._decision_registry = _dec.registry
-        self._decision_fallback_kill_store = AppSettingKillStore(self._engine)
-        self._decision_kill_store = _dec.kill_store
         self._decision_kill_resolver = _dec.kill_resolver
-        self._decision_shadow_writer = _dec.shadow_writer
         self._decision_overlay = _dec.overlay
         self._snapshot_search_service = SnapshotSearchService(
             snapshot_repo=self._snapshot_repo,
@@ -6168,8 +6160,23 @@ class InstanceManager:
         self._settings_service = service
         if hasattr(self, "_decision_kill_resolver") and self._decision_kill_resolver is not None:
             if hasattr(service, "register_override_changed_callback"):
+                # A1: narrow the D2 poison-clear to the DECISION namespace.
+                # The settings service keys live in ``MANAGED_KEYS``
+                # (daemon/services/settings_service.py); every decision key
+                # is ``decision_``-prefixed — ``GLOBAL_ENABLED_KEY`` =
+                # ``"decision_global_enabled"`` (daemon/services/decision/
+                # config.py:125, kill.py:105) and the per-seam keys built by
+                # ``seam_enabled_key`` / ``seam_stage_key`` =
+                # ``decision_seam_<flat>_{enabled,stage}``. A non-decision
+                # settings write must NOT clear the write-failure poison
+                # (fail-closed is preserved: the resolver still reports OFF
+                # while the poison stands).
                 service.register_override_changed_callback(
-                    lambda key: self._decision_kill_resolver.invalidate(None)
+                    lambda key: (
+                        self._decision_kill_resolver.invalidate(None)
+                        if isinstance(key, str) and key.startswith("decision_")
+                        else None
+                    )
                 )
 
     def set_pending_system_execution(self, instance_id: str, spec: dict) -> None:

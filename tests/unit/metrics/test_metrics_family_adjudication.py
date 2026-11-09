@@ -57,6 +57,30 @@ from daemon.services.decision import metrics as decision_metrics  # noqa: F401
 #: the P3 stage legitimately touched daemon/api.py.
 LANE_BASE = "644c2bfaaa48514ec7de79f7f4bcd078a700cdbe"
 
+#: The DECISION LANE's own daemon files (D4) — the set this pin must
+#: prove is FULLY covered by ``ALLOWED_DAEMON_DIFF``. A file in here
+#: that is NOT allowlisted is a LANE-CAUSED offender and REDS the pin.
+LANE_OWNED_DAEMON = frozenset(
+    {
+        "daemon/services/decision/__init__.py",
+        "daemon/services/decision/client.py",
+        "daemon/services/decision/config.py",
+        "daemon/services/decision/cost_store.py",
+        "daemon/services/decision/factory.py",
+        "daemon/services/decision/kill.py",
+        "daemon/services/decision/metrics.py",
+        "daemon/services/decision/overlay.py",
+        "daemon/services/decision/port.py",
+        "daemon/services/decision/registry.py",
+        "daemon/services/decision/shadow.py",
+        "daemon/services/decision/types.py",
+        "daemon/services/settings_service.py",
+        "daemon/services/snapshot_search_service.py",
+        "daemon/manager.py",
+        "daemon/config.py",
+    }
+)
+
 #: The daemon-side files the lane MAY touch.
 #:
 #: THE PIN PROTECTS THE PRODUCERS, NOT THE LANE'S OWN SURFACES.  The
@@ -89,51 +113,10 @@ ALLOWED_DAEMON_DIFF = (
     # (daemon/services/metrics_query/wiring/registry.py), so the AM-2
     # label-vocabulary enforcement and the pack's census apply to them
     # exactly as they do to every other family.
-    "daemon/services/decision/__init__.py",
-    "daemon/services/decision/client.py",
-    "daemon/services/decision/config.py",
-    "daemon/services/decision/cost_store.py",
-    "daemon/services/decision/factory.py",
-    "daemon/services/decision/kill.py",
-    "daemon/services/decision/metrics.py",
-    "daemon/services/decision/overlay.py",
-    "daemon/services/decision/port.py",
-    "daemon/services/decision/registry.py",
-    "daemon/services/decision/shadow.py",
-    "daemon/services/decision/types.py",
-    # The decision lane's OTHER daemon surfaces (D4): the wiring round's
-    # two call-site edits and the two files the lane's production wiring
-    # lives in. These are NOT producer modules for the metrics census —
-    # they are the decision lane's own integration points.
-    "daemon/services/settings_service.py",
-    "daemon/services/snapshot_search_service.py",
-    "daemon/manager.py",
-    "daemon/config.py",
-)
-
-#: The DECISION LANE's own daemon files (D4) — the set this pin must
-#: prove is FULLY covered by ``ALLOWED_DAEMON_DIFF``. A file in here
-#: that is NOT allowlisted is a LANE-CAUSED offender and REDS the pin.
-LANE_OWNED_DAEMON = frozenset(
-    {
-        "daemon/services/decision/__init__.py",
-        "daemon/services/decision/client.py",
-        "daemon/services/decision/config.py",
-        "daemon/services/decision/cost_store.py",
-        "daemon/services/decision/factory.py",
-        "daemon/services/decision/kill.py",
-        "daemon/services/decision/metrics.py",
-        "daemon/services/decision/overlay.py",
-        "daemon/services/decision/port.py",
-        "daemon/services/decision/registry.py",
-        "daemon/services/decision/shadow.py",
-        "daemon/services/decision/types.py",
-        "daemon/services/settings_service.py",
-        "daemon/services/snapshot_search_service.py",
-        "daemon/manager.py",
-        "daemon/config.py",
-    }
-)
+    #
+    # B20: these entries ARE ``LANE_OWNED_DAEMON`` — derived, so the
+    # two literals cannot drift (a new lane file joins both at once).
+) + tuple(sorted(LANE_OWNED_DAEMON))
 
 #: The wiring package's root (the new module).
 WIRING_ROOT = "daemon/services/metrics_query/wiring"

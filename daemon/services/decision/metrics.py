@@ -59,8 +59,9 @@ the caller (the seam path must not depend on observability).
 from __future__ import annotations
 
 import logging
-from typing import Callable, Mapping
+from typing import Callable, Iterable, Mapping
 
+from daemon import checkpoint_metrics as cm
 from daemon.services.decision.types import FailureClass, SuppressionReason
 from daemon.services.metrics_query.wiring import registry as wiring_registry
 
@@ -179,17 +180,6 @@ REVERIFY_OUTCOMES: tuple[str, ...] = ("verified_off", "verified_on", "unreadable
 #: The auto-trip reasons (FLAG3/FLAG2).
 COST_TRIP_REASONS: tuple[str, ...] = ("global_ceiling", "per_seam_share")
 
-#: The bounded label vocabularies, keyed by label key.
-LABEL_VALUES: Mapping[str, tuple[str, ...]] = {
-    "seam_id": KNOWN_SEAM_IDS,
-    "mode": MODES,
-    "failure_class": FAILURE_CLASSES,
-    "reason": SUPPRESSION_REASONS,
-    "verdict": VERDICTS,
-    "outcome": REVERIFY_OUTCOMES,
-    "state": PROVISIONING_STATES,
-}
-
 
 # ── registration ─────────────────────────────────────────────────────────
 
@@ -218,7 +208,13 @@ def ensure_metrics_registered() -> None:
     seam = ("seam_id",)
     seam_values = {"seam_id": KNOWN_SEAM_IDS}
 
-    def _counter(name, label_keys, allowed_values, help_text, weight):
+    def _counter(
+        name: str,
+        label_keys: Iterable[str],
+        allowed_values: Mapping[str, Iterable[str]],
+        help_text: str,
+        weight: int,
+    ) -> cm.Metric:
         return wiring_registry.register_family_metric(
             family=FAMILY_ID,
             cluster=CLUSTER,
@@ -234,7 +230,13 @@ def ensure_metrics_registered() -> None:
             cardinality_weight=weight,
         )
 
-    def _gauge(name, label_keys, allowed_values, help_text, weight):
+    def _gauge(
+        name: str,
+        label_keys: Iterable[str],
+        allowed_values: Mapping[str, Iterable[str]],
+        help_text: str,
+        weight: int,
+    ) -> cm.Metric:
         return wiring_registry.register_family_metric(
             family=FAMILY_ID,
             cluster=CLUSTER,
@@ -250,7 +252,13 @@ def ensure_metrics_registered() -> None:
             cardinality_weight=weight,
         )
 
-    def _histogram(name, label_keys, allowed_values, help_text, weight):
+    def _histogram(
+        name: str,
+        label_keys: Iterable[str],
+        allowed_values: Mapping[str, Iterable[str]],
+        help_text: str,
+        weight: int,
+    ) -> cm.Metric:
         return wiring_registry.register_family_metric(
             family=FAMILY_ID,
             cluster=CLUSTER,

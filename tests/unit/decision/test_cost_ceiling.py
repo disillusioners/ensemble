@@ -34,7 +34,6 @@ from tests.unit.decision.helpers import (
     choice_answer_payload,
     json_response,
     make_config,
-    smart_handler,
 )
 from tests.unit.decision.test_overlay import _build_overlay, _on_seam
 

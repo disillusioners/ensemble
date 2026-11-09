@@ -10,7 +10,7 @@ yaml_block=raw_yaml_decision())``, which stamps
 ``explicitly_configured`` from the EXPLICIT decision signal
 (``DECISION_BASE_URL`` / ``DECISION_API_KEY`` in the environment, or a
 ``decision:`` block in config.yaml). Without this stamp the predicate
-is永远 False and every consult is suppressed ``not_configured`` —
+is always False and every consult is suppressed ``not_configured`` —
 fail-shut, but P1's only capability never fires.
 
 The factory accepts NO ``configured=`` override: the production path

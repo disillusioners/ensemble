@@ -76,7 +76,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -513,7 +512,7 @@ class KillChannelResolver:
         """
         try:
             stored = await self._store.get(key)
-        except Exception as exc:  # noqa: BLE001 — the store never raises
+        except Exception as exc:  # noqa: BLE001 — read errors re-raise by design (D2)
             logger.warning(
                 "decision switch store read failed for %s: %s: %s",
                 key,
@@ -610,7 +609,9 @@ class KillChannelResolver:
         for key, value in pending:
             try:
                 await self._write_value(key, value)
-            except Exception as exc:  # noqa: BLE001 — the store never raises
+            except Exception as exc:  # noqa: BLE001
+                # The write path swallows the store's raise; the seam
+                # resolves OFF (fail-closed).
                 logger.warning(
                     "decision switch write failed for %s: %s: %s",
                     key,
@@ -749,7 +750,7 @@ class KillChannelResolver:
             "[Settings] db override set key=%s value=%r subject=%s",
             key,
             typed,
-            "auth-off",
+            None,
         )
 
     async def _seed_one(

@@ -30,9 +30,9 @@ narrow outward port in ``port.py`` may import it freely).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 __all__ = [
     "AnswerProbability",

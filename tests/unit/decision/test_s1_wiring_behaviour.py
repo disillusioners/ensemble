@@ -13,20 +13,17 @@ MANAGED_KEYS registration + allowed_values validation, durable cost store).
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
 
-from daemon.config import Config, DecisionConfig, DecisionSeamsConfig, load_config
+from daemon.config import DecisionConfig, DecisionSeamsConfig, load_config
 from daemon.models.app_settings import AppSetting
-from daemon.services import db_offload
 from daemon.services.decision.client import DecisionClient
 from daemon.services.decision.config import (
     GLOBAL_ENABLED_KEY,
@@ -45,7 +42,6 @@ from daemon.services.decision.kill import (
     seam_stage_key,
 )
 from daemon.services.decision.overlay import DecisionOverlay
-from daemon.services.decision.port import extract_snapshot_ids, intersect_selection
 from daemon.services.decision.registry import SeamRegistry
 from daemon.services.decision.shadow import ShadowWriter
 from daemon.services.settings_service import (
@@ -60,13 +56,6 @@ from tests.unit.decision.helpers import (
     choice_answer_payload,
     json_response,
 )
-
-
-@pytest.fixture(autouse=True)
-async def _setup_db_offload_loop():
-    """Ensure db_offload binds the current running test loop."""
-    db_offload.configure(loop=asyncio.get_running_loop(), max_workers=4)
-    yield
 
 
 def _make_test_engine():

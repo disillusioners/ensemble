@@ -3605,7 +3605,10 @@ class DecisionConfig(BaseSettings):
     """Configuration for Decision Module (P1, shadow-only).
 
     Namespace for the typed overlay client, kill channels, and seams.
-    Base URL and API key reuse OPENAI_* values by default (never mint new key material).
+    Base URL and API key reuse OPENAI_* values by default (never mint
+    new key material); the reuse itself is resolved in
+    ``daemon/services/decision/config.py`` ``resolve_values`` (the
+    OPENAI fallback lives there, not as a property on this class).
     Model defaults to 'decision' (purpose-id literal, already in _ALLOWED_MODELS_DEFAULT).
     """
 
@@ -3638,6 +3641,16 @@ class DecisionConfig(BaseSettings):
         gt=0,
         description="Global monthly token ceiling fail-safe. Env: DECISION_TOKEN_CEILING.",
     )
+    cost_floor_per_attempt_usd: float = Field(
+        default=0.0005,
+        ge=0,
+        description=(
+            "D3 per-attempt conservative cost floor in USD, applied to any "
+            "socket-reaching attempt that carries no usage. Env: "
+            "DECISION_COST_FLOOR_PER_ATTEMPT_USD. Lives beside the per-model "
+            "rate table. 0.0 disables the floor."
+        ),
+    )
     pricing_usd_per_million_tokens: str = Field(
         default="",
         description="JSON object mapping model to USD rate per million tokens. Env: DECISION_PRICING_USD_PER_MILLION_TOKENS.",
@@ -3652,14 +3665,6 @@ class DecisionConfig(BaseSettings):
         description="Global master kill switch for Decision Module. Default False. Env: DECISION_ENABLED.",
     )
     seams: DecisionSeamsConfig = Field(default_factory=DecisionSeamsConfig)
-
-    @property
-    def OPENAI_BASE_URL(self) -> str:
-        return os.environ.get("OPENAI_BASE_URL", "")
-
-    @property
-    def OPENAI_API_KEY(self) -> str:
-        return os.environ.get("OPENAI_API_KEY", "")
 
 
 class MemoirConfig(BaseSettings):

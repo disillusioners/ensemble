@@ -10,11 +10,9 @@ prompt carries (snapshot titles, tags, summaries) must never reach it.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping
 
 import httpx
-import pytest
 
 from daemon.services.decision import metrics
 from daemon.services.decision.client import DecisionClient
@@ -36,7 +34,6 @@ from daemon.services.decision.types import (
 )
 from tests.unit.decision.helpers import (
     RowCapture,
-    json_response,
     make_config,
     smart_handler,
 )

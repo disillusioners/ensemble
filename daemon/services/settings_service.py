@@ -81,8 +81,11 @@ v1.3 (2026-10-29, metrics-collection P0): adds the SEVEN metrics
 knobs (``limits.metrics_enabled`` / ``limits.metrics_listener_port`` /
 ``limits.metrics_scrape_interval_hint_s`` /
 ``limits.metrics_census_interval_s`` / ``limits.metrics_sampler_interval_s``
-/ ``limits.metrics_textfile_dir`` / ``limits.metrics_cardinality_cap``)
-— the registry now carries SIXTEEN entries. ``len(MANAGED_KEYS)`` is
+/ ``limits.metrics_textfile_dir`` / ``limits.metrics_cardinality_cap``);
+v1.4 (2026-11-09, decision-module P1) adds the THREE decision switches
+(``decision_global_enabled`` / ``decision_seam_snapshot_l3_selection_enabled``
+/ ``decision_seam_snapshot_l3_selection_stage``) — the registry now
+carries NINETEEN entries. ``len(MANAGED_KEYS)`` is
 the authoritative census; this prose is history, not truth.
 """
 
@@ -165,7 +168,9 @@ class ManagedKeySpec:
     # ``allowed_values`` is OPTIONAL and additive (decision-module P1):
     # for string-valued keys with a closed vocabulary (e.g. stage: shadow|deciding).
     # ``None`` (the default) means "any valid value_type value".
-    allowed_values: tuple[Any, ...] | set[Any] | None = None
+    allowed_values: (
+        tuple[Any, ...] | list[Any] | set[Any] | frozenset[Any] | None
+    ) = None
     requires_restart: bool = True
     sensitive: bool = False
     description: str = ""
@@ -177,7 +182,10 @@ class ManagedKeySpec:
         bounds apply)."""
         parts: list[str] = []
         if self.allowed_values is not None:
-            vals = sorted(self.allowed_values) if isinstance(self.allowed_values, (set, frozenset, list, tuple)) else self.allowed_values
+            if isinstance(self.allowed_values, (set, frozenset, list, tuple)):
+                vals: Any = sorted(self.allowed_values)
+            else:
+                vals = self.allowed_values
             parts.append(f"allowed_values={vals}")
         if self.gt is not None:
             parts.append(f"gt={self.gt}")
@@ -195,12 +203,13 @@ class ManagedKeySpec:
 #: O3, 2026-10-18) plus ``limits.chart_render_concurrency`` (resource-
 #: cost-control O2, 2026-10-18). Landed since, without a prose census
 #: bump: the checkpoint A4 pair (soak-gate-mcp-warmup),
-#: ``limits.manager_pool_size`` (devops incident fix item #7) and the
-#: SEVEN metrics-collection knobs (metrics-collection P0, 2026-10-29) —
-#: the registry now carries SIXTEEN entries. Adding keys later is a
-#: registry entry + nothing else (the ladder, CRUD, API and FE render
-#: generically off the registry); ``len(MANAGED_KEYS)`` is the
-#: authoritative census.
+#: ``limits.manager_pool_size`` (devops incident fix item #7), the
+#: SEVEN metrics-collection knobs (metrics-collection P0, 2026-10-29)
+#: and the THREE decision-module switches (decision-module P1,
+#: 2026-11-09) — the registry now carries NINETEEN entries. Adding keys
+#: later is a registry entry + nothing else (the ladder, CRUD, API and
+#: FE render generically off the registry); ``len(MANAGED_KEYS)`` is
+#: the authoritative census.
 #: The registry default MUST mirror the backing pydantic Field default —
 #: chain: ``daemon.constants`` → ``LimitsConfig`` Field → this registry
 #: default (ONE truth).
@@ -1168,12 +1177,20 @@ def _raw_yaml_leaf(raw_yaml_limits: Any, spec: ManagedKeySpec) -> Any:
 
     ``raw_yaml_limits`` is the SECTION dict captured by the
     ``daemon/config.py`` accessor (the section named by the FIRST
-    component of ``config_path`` — ``limits`` today); the remaining
-    components walk to the leaf. ABSENT means "not literally present
-    in config.yaml" — the pydantic-merged field is NEVER consulted
-    (it cannot distinguish a yaml literal from the field default;
-    deriving from it would mis-attribute ``source="yaml"`` on a
-    default-only install and fail the default-tier test).
+    component of ``config_path`` — ``limits`` for the limits keys);
+    the remaining components walk to the leaf. ABSENT means "not
+    literally present in config.yaml" — the pydantic-merged field is
+    NEVER consulted (it cannot distinguish a yaml literal from the
+    field default; deriving from it would mis-attribute
+    ``source="yaml"`` on a default-only install and fail the
+    default-tier test).
+
+    DECISION SPECIAL-CASE. The decision-module switches live in a
+    DIFFERENT yaml section (``decision:``), which the limits accessor
+    never captured. For those the first component is ``decision``, and
+    the section is read through ``daemon.config.raw_yaml_decision()``
+    instead of the passed-in limits dict; the remaining components
+    walk exactly as for every other key.
     """
     section = spec.config_path.split(".")[0]
     if section == "decision":

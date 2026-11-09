@@ -5,12 +5,14 @@ The registrar's canonical name rule is ``^ensemble_[a-z0-9_]+$``
 violation — so every series is ``ensemble_decision_overlay_*`` and the
 family id is the single string ``decision_overlay``.
 
-Because the decision lane takes the L3 FALLBACK (the raw
-``cm.register_*`` path — the wiring registrar would require an
-adjudication-pack census amendment that the pack's own test pins by
-EXACT set equality over the 27 ``F*`` families, and that test file is
-not the decision lane's), the AM-2 discipline is enforced HERE instead:
-every label key carries an explicit ``allowed_values`` set.
+The lane registers through the WIRING registrar
+(``daemon/services/decision/metrics.py:209-267`` →
+``wiring_registry.register_family_metric``), which is the PRIMARY path
+and is where AM-2's label-vocabulary enforcement and AM-3's mandatory
+metadata genuinely live. This local test is an ADDITIONAL assertion on
+top of that path — not a substitute for it: every label key still
+carries an explicit ``allowed_values`` set, and the pin re-proves the
+invariants independently of the registrar's own checks.
 """
 
 from __future__ import annotations
@@ -110,7 +112,11 @@ def test_the_family_is_registered_through_the_wiring_registrar() -> None:
         if m.family == metrics.FAMILY_ID
     }
     mine = {m.name for m in metrics.decision_metric_handles().values()}
-    assert registered == mine, "the census must hold exactly this lane's families"
+    assert registered == mine, (
+        "the census must hold exactly this lane's families — "
+        f"registered-only (missing from the lane): {sorted(registered - mine)}; "
+        f"lane-only (missing from the census): {sorted(mine - registered)}"
+    )
 
 
 def test_the_family_is_in_the_adjudication_census() -> None:

@@ -33,14 +33,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from daemon.services.decision.types import (
-    VERDICT_AGREE,
-    VERDICT_DISAGREE,
     VERDICT_NO_OVERLAY,
-    outcome_summary,
 )
 
 logger = logging.getLogger(__name__)
