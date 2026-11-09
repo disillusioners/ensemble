@@ -1846,6 +1846,78 @@ class TestEvolveSkillDispatch:
 # =============================================================================
 
 
+# ── G acceptance helper (phase1-plan §11; decisions.md DS-37) ──────────────
+# The AB-resolution flake fires at 15% ISOLATED and 38% in the
+# FULL-FILE-SET context, so the acceptance context is the full file
+# set: an isolated green would pass at 15% BY LUCK. This helper is the
+# machine-checkable form of that rule — the registered pack feeds it
+# the per-run red lists and it REFUSES anything that is not >= 3
+# consecutive green full-file-set runs.
+G_ACCEPTANCE_MIN_GREEN_RUNS = 3
+G_ACCEPTANCE_CONTEXT = "full-file-set"
+
+
+class GAcceptanceRun:
+    """One full-file-set run: its context tag + the nodes that failed."""
+
+    __slots__ = ("context", "failed_nodes")
+
+    def __init__(self, context: str, failed_nodes: tuple[str, ...] = ()) -> None:
+        self.context = context
+        self.failed_nodes = tuple(failed_nodes)
+
+    def __repr__(self) -> str:  # pragma: no cover — debug aid
+        return (
+            f"GAcceptanceRun(context={self.context!r}, "
+            f"failed_nodes={self.failed_nodes!r})"
+        )
+
+
+def assert_full_file_set_acceptance(runs: Any) -> None:
+    """Assert G's acceptance: >= 3 consecutive FULL-FILE-SET green runs.
+
+    Args:
+        runs: An iterable of :class:`GAcceptanceRun` (or of
+            ``(context, failed_nodes)`` pairs).
+
+    Raises:
+        AssertionError — when fewer than
+        :data:`G_ACCEPTANCE_MIN_GREEN_RUNS` runs are supplied, when any
+        run is not tagged :data:`G_ACCEPTANCE_CONTEXT` (an isolated run
+        can NEVER satisfy this acceptance — DS-37), or when any run has
+        a failed node.
+    """
+    normalized: list[GAcceptanceRun] = []
+    for run in runs or ():
+        if isinstance(run, GAcceptanceRun):
+            normalized.append(run)
+        else:
+            context, failed_nodes = run
+            normalized.append(GAcceptanceRun(context, tuple(failed_nodes)))
+
+    if len(normalized) < G_ACCEPTANCE_MIN_GREEN_RUNS:
+        raise AssertionError(
+            f"G acceptance needs >= {G_ACCEPTANCE_MIN_GREEN_RUNS} "
+            f"{G_ACCEPTANCE_CONTEXT} runs, got {len(normalized)} — an "
+            f"isolated (or too-short) run can never satisfy the "
+            f"acceptance (DS-37: the flake fires at 38% in the "
+            f"full-file-set context)."
+        )
+
+    for index, run in enumerate(normalized, start=1):
+        if run.context != G_ACCEPTANCE_CONTEXT:
+            raise AssertionError(
+                f"G acceptance run {index} has context "
+                f"{run.context!r}, expected {G_ACCEPTANCE_CONTEXT!r} — "
+                f"an isolated run is not an acceptable proof."
+            )
+        if run.failed_nodes:
+            raise AssertionError(
+                f"G acceptance run {index} is not green: "
+                f"{list(run.failed_nodes)}"
+            )
+
+
 class TestCheckABTestResolution:
     """Tests for ``SkillEvolutionService.check_ab_test_resolution``."""
 
