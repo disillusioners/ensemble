@@ -1,6 +1,6 @@
 # Seam Registry — Typed Overlay Seams Over `POST /v1/decisions`
 
-> **Status:** **DESIGN — awaiting Emperor ratification.** Docs-only commission; every statement is design-for-a-future-commission.
+> **Status:** **RATIFIED P1 SHADOW-ONLY — Emperor ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
 > **Scope items:** 2 (registry) + 3 (catalog, incl. the re-validation table). **Normative source:** `scope-and-doctrine.md` — cited by §id, never re-quoted.
 > **Base:** `docs/decision-module` @ `5da1021f2`
 
@@ -48,7 +48,7 @@ Three rules, all enforceable in the type signature:
 
 1. **The heuristic outcome is always an argument.** There is no `apply(overlay)` overload, so an overlay answer can never *replace* the heuristic answer — it can only be combined with it. This is D1 made structural.
 2. **The overlay outcome is optional (`None` ⇒ use the heuristic unchanged).** Every failure path in `thin-client.md` §6 produces `None`, and `None` must yield the heuristic result. This is D2 made structural.
-3. **`apply` may not widen the outcome space.** It may not introduce a value that neither input contained. For S1 that means: **it may never introduce an id outside the candidate set, and it may never empty the result** (see §5.1).
+3. **`apply` may not widen the outcome space.** It may not introduce a value that neither input contained. For S1 that means: **it may never introduce an id outside the candidate set, and it may never empty the result** (see §5.1). **Per-direction, not global.** The superset-only constraint (result ⊇ heuristic outcome) applies **only to `TOWARD_COMPLETION` seams** (S4) — see §2.2 and `thin-client.md` §8.4. A `WITHIN_SET` seam (S1) may **replace or reorder** the heuristic's selection within the candidate set; it is bound by the universal no-widening rule (no value outside the inputs) and by "never empty the result", never by superset-of-picks. A **global** superset-only rule would break S1, the only P1 seam, which legitimately replaces the heuristic's selection.
 
 ### §2.2 The monotonicity contract — D4 translated
 
@@ -61,6 +61,15 @@ D4's rule is stated for the attestation lane; the registry generalises it so tha
 | `WITHIN_SET` | The overlay may select/reorder **within** an existing candidate set; it may not extend or empty it. | S1 |
 | `ADVISORY_ONLY` | The overlay may only annotate; the heuristic decision stands regardless. | S2 |
 | `NONE` | The seam is excluded from overlay consultation (EX-1…EX-5). | excluded seams |
+
+**Per-direction monotonicity — enforced at registration AND at apply time (FLAG5).** The universal rule above (no seam may loosen a gate) is the *floor*; the monotonicity contract is *per-direction*:
+
+- **`TOWARD_COMPLETION` (S4): MUST return a superset.** A **subset is refused at registration time** (the `monotonicity` field is validated) **and at apply time** (the registry checks the returned set is a superset of the candidate completions it was given). The contract carries no denial value, so the overlay cannot propose one.
+- **`WITHIN_SET` (S1): must stay within the candidate set and never empty it.** It may **replace or reorder** the heuristic's selection — a `WITHIN_SET` seam is **not** bound by superset-of-picks. Only the universal no-widening rule (no id outside the candidate set) and "never empty the result" bind it. A global superset-only constraint would break S1, the only P1 seam.
+- **`TOWARD_TIGHTENING` (S3): may only add a positive signal;** never remove one, never loosen the gate.
+- **`ADVISORY_ONLY` (S2): annotates only;** the heuristic decision stands regardless.
+
+The registry stores the declared direction and refuses a registration whose `apply` cannot be shown to honour it.
 
 **Generalisation.** Every direction above is a *monotone* restriction on the overlay's power, and **no seam may declare a direction that would let the overlay loosen a gate** — that is the general form of the source doctrine's "monotonically tighter-or-equal, never looser" (`scope-and-doctrine.md` §D4). A registration that omits a direction is refused.
 

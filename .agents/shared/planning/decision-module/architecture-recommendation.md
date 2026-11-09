@@ -1,6 +1,6 @@
 # Architecture Recommendation — Ensemble Decision Module (Thin Client + Seam Registry)
 
-> **Status:** **DESIGN — awaiting Emperor ratification.** Docs-only commission. Nothing here authorises implementation: **Emperor ratification gates any implementation commission.**
+> **Status:** **RATIFIED P1 SHADOW-ONLY — Emperor ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
 > **Scope item:** 7 of 7 (the umbrella). **Normative source:** `scope-and-doctrine.md` — cited by §id, never re-quoted.
 > **Base:** `docs/decision-module` @ `5da1021f2` · **Set:** `scope-and-doctrine.md`, `thin-client.md`, `seam-registry.md`, `controls-and-phasing.md`, this file.
 
@@ -80,28 +80,17 @@ The diagram's two load-bearing edges are styled apart from the rest: the **red d
 
 ---
 
-## §5 Open questions (2)
+## §5 Open questions — SETTLED (both ratified 2026-11-09)
 
-**Q1 — Cost-ceiling policy.** How is the overlay's spend bounded?
+**Q1 — Cost-ceiling policy — SETTLED.** The Emperor ratified option (a): a **global cost ceiling of USD 50 per month (owner: the Emperor)** with an **automatic trip** that switches the overlay off when it is reached, plus a **per-seam share** so one seam cannot consume the whole budget. The binding ceiling, auto-trip mechanism, and operator notification are specified in `controls-and-phasing.md` §5 and §3.4 (T5). Options (b) (per-seam ceilings only) and (c) (operator-set, no auto-trip) are **rejected** by the ratification.
 
-- **(a) Global ceiling + auto-trip [DEFAULT]** — one ceiling across all seams, with an automatic trip that switches the overlay off when it is reached, plus a per-seam share so one seam cannot consume the whole budget.
-- (b) Per-seam ceilings only — finer-grained, but N thresholds to set and to watch.
-- (c) Operator-set ceiling, no auto-trip — the most control, the least protection; a runaway seam bills until a human notices.
-
-*Default assumed by this design:* **(a)**. Under (b) the per-seam budget in `controls-and-phasing.md` §5 would replace the global ceiling and the T5 trip would become per-seam. Under (c) the trip condition T5 would remain manual, and the operator procedure would gain a mandatory cost-check step.
-
-**Q2 — Shadow-log content stance.** How much may the shadow log contain?
-
-- **(a) Content-free [DEFAULT]** — ids, hashes, scores, probabilities, counts, latencies, enum labels only. Never credentials, never user text, never request/response payloads.
-- (b) Content-bearing with redaction — richer for debugging (e.g. the snapshot titles the S1 prompt saw), at the cost of a second redaction surface and a materially larger retention risk.
-
-*Default assumed by this design:* **(a)**. Under (b) the content policy in `controls-and-phasing.md` §2.6 would gain a redaction specification and a stricter access rule, and the retention bound would need to be tightened — the S1 prompt carries snapshot titles, tags and summaries, which are user content.
+**Q2 — Shadow-log content stance — SETTLED.** The Emperor ratified option (a): **content-free** — ids, hashes, scores, probabilities, counts, latencies, enum labels only; never credentials, never user text, never request/response payloads. The Q2(b) redaction branch is **foreclosed**: v1 is content-free by the WRITE-TIME content policy (`controls-and-phasing.md` §2.6); a non-agent-readable sink stays a **named future (v2 build requirement)**. The audit-trail posture follows in `controls-and-phasing.md` §2.8. Options (b) (content-bearing with redaction) is **rejected** by the ratification.
 
 ---
 
 ## §6 Status
 
-**DESIGN — awaiting Emperor ratification.** No implementation is authorised by this document set. The ratification gate that matters first is **P3** (`controls-and-phasing.md` §4): no seam may enter `deciding` before the Emperor ratifies it, and the pilot's own transition from `shadow` to `deciding` is the first such decision.
+**RATIFIED P1 SHADOW-ONLY (Emperor, 2026-11-09: "yeah, look good, go ahead, shadow only for now").** P1 implementation is authorised by this document set: client + registry + shadow instrumentation, seams 2/3/4 unregistered, S4 shadow-only. The ratification gate that matters next is **P3** (`controls-and-phasing.md` §4): no seam may enter `deciding` before the Emperor ratifies it, and the pilot's own transition from `shadow` to `deciding` is the first such decision.
 
 ---
 

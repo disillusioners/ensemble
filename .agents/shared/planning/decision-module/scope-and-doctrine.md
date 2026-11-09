@@ -1,6 +1,6 @@
 # Scope & Doctrine — Ensemble Decision Module (Thin Client + Seam Registry)
 
-> **Status:** **DESIGN — awaiting Emperor ratification.** Docs-only commission. No daemon code, no staging, no promote, no git commits (the leader's giter commits at finalize).
+> **Status:** **RATIFIED P1 SHADOW-ONLY — Emperor ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
 > **Base:** branch `docs/decision-module` @ `5da1021f2` · Worktree `/home/nea/ensemble-src-wt-decision-module-design`
 > **Role in this set:** **NORMATIVE ANCHOR.** This file is the single source of the doctrine, the exclusion list, the census, the proxy surface digest, and the infra precedents. Every other document in this set cites **this file by §id** and never re-quotes it.
 
@@ -22,7 +22,7 @@ Scope items covered by this set:
 | 6 | Phasing | `controls-and-phasing.md` |
 | 7 | Rejected alternatives | `architecture-recommendation.md` |
 
-Everything below is **design-for-a-future-commission**. No statement here authorises implementation. Emperor ratification gates any implementation commission.
+Everything below is the **design of record, ratified P1 SHADOW-ONLY**. The doctrine, exclusion list, census, proxy surface digest, and infra precedents stand as ratified; P1 implementation (client + registry + shadow instrumentation) is authorised. Emperor ratification of any further transition (shadow → deciding) gates later phases.
 
 ### §0.1 Citation map (how the set cites this file)
 
