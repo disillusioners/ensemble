@@ -1124,8 +1124,13 @@ class SkillStaleDeactivator:
             touched.append(entry)
 
         receipt.entries.extend(touched)
-        receipt.refusals.extend(refusals)
-        receipt.observations.extend(observations)
+        # The refusal / observation lists describe the CURRENT run — they are
+        # REPLACED, not appended, so the receipt cannot grow without bound
+        # across boots (the every-boot sweep re-reports the same refusals).
+        # The ``entries`` list is the accumulating audit trail AND the
+        # suppression store (a row is touched at most once per rule).
+        receipt.refusals = list(refusals)
+        receipt.observations = list(observations)
         receipt.run_id = run_id
         receipt.updated_at_iso = now
         save_receipt(self._receipt_path, receipt)

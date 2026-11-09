@@ -36,6 +36,8 @@
 #           idempotence pin REDs.
 #   M-E4i — drop the suppression alone ⇒ the "apply → reactivate → the next
 #           boot does NOT re-deactivate" pin REDs (the reversal is undone).
+#   M-E4j — make the refusal list APPEND again ⇒ the receipt-hygiene pin REDs
+#           (the receipt grows without bound across boots).
 #   M-E4h — make the writer write ONLY `is_active` ⇒ the single-column pin
 #           REDs (the dual-column contract is broken).
 #
@@ -269,6 +271,12 @@ leg "M-E4i" "$E4_PY" \
   '            if (skill_id, RULE_R3) in suppression:' \
   '            if False:  # MUTATION: the suppression is dropped'
 
+# M-E4j — the refusal list is APPENDED again ⇒ the receipt grows without
+# bound across boots ⇒ the receipt-hygiene pin REDs.
+leg "M-E4j" "$E4_PY" \
+  '        receipt.refusals = list(refusals)' \
+  '        receipt.refusals.extend(refusals)  # MUTATION: the receipt grows'
+
 # M-E4h — the writer writes ONLY `is_active` (the dual-column contract breaks).
 leg "M-E4h" "$E4_PY" \
   '    updated = skill_repo.update(
@@ -297,5 +305,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (9 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (10 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0

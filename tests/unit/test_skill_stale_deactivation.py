@@ -677,6 +677,20 @@ class TestTheReceipt:
         assert first.touched_count == 1
         assert second.touched_count == 0
 
+    def test_the_refusal_list_is_replaced_not_appended_across_boots(
+        self, repos, data_dir
+    ):
+        """The every-boot sweep must not grow the receipt without bound."""
+        skill_repo, ab_test_repo = repos
+        _seed_r1_pair(skill_repo, ab_test_repo)
+
+        deactivator = _deactivator(repos, data_dir)
+        deactivator.reconcile(dry_run=False)
+        deactivator.reconcile(dry_run=False)
+
+        receipt = load_receipt(deactivator.receipt_path)
+        assert len(receipt.refusals) == 2
+
     def test_the_receipt_entry_carries_the_prior_pair(self, repos, data_dir):
         skill_repo, ab_test_repo = repos
         row = _make_skill(
@@ -1084,6 +1098,57 @@ class TestTheOperatorScript:
         after = skill_repo.get(row.id)
         assert after.status == "ab_testing"
         assert after.is_active is False
+
+    def test_the_script_reactivate_restores_the_prior_pair(
+        self, file_db, data_dir
+    ):
+        """The operator reversal path: apply → --reactivate → the pair is back."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "skill_stale_deactivate_script_reactivate", OPERATOR_SCRIPT
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        skill_repo = SkillRepository(file_db)
+        row = _make_skill(
+            skill_repo,
+            name="desynced-script-reactivate",
+            is_active=False,
+            status="ab_testing",
+        )
+        db_url = skill_repo.engine.url.render_as_string(
+            hide_password=False
+        )
+
+        assert (
+            module.main(
+                ["--db-url", db_url, "--data-dir", str(data_dir), "--apply"]
+            )
+            == 0
+        )
+        assert skill_repo.get(row.id).status == "inactive"
+
+        receipt = data_dir / "skill_stale_deactivation_receipt.json"
+        assert (
+            module.main(
+                [
+                    "--db-url",
+                    db_url,
+                    "--data-dir",
+                    str(data_dir),
+                    "--apply",
+                    "--reactivate",
+                    str(receipt),
+                ]
+            )
+            == 0
+        )
+        restored = skill_repo.get(row.id)
+        assert restored.is_active is False
+        assert restored.status == "ab_testing"
 
     def test_the_script_apply_writes_the_receipt_and_the_row(
         self, file_db, data_dir
