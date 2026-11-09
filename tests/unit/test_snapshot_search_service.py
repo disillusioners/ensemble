@@ -44,6 +44,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
@@ -816,9 +818,10 @@ class TestCosineBlendIntoStage3:
         emb_service = FakeEmbeddingService(query_vec=[1.0, 0.0, 0.0])
 
         # Fake LLM stage: record the candidate list it is shown
-        # (the stage-3 top-20 input) and select nothing (empty
-        # selection → pipeline falls back to rerank order for the
-        # final result, which we also assert).
+        # (the stage-3 top-20 input) and select nothing (a VALID
+        # empty selection — the LLM declined — which leaves the
+        # result set empty; it does NOT fall back to the rerank
+        # order). The decline case is asserted explicitly below.
         captured_prompts: list[str] = []
 
         class RecordingChatCompletions:
@@ -848,6 +851,13 @@ class TestCosineBlendIntoStage3:
             )
         )
         assert result["error"] is None
+        # The DECLINE case is pinned by a real assertion: a valid
+        # ``{"selected": []}`` means the LLM declined to pick — the
+        # result set stays EMPTY (it does NOT fall back to the
+        # rerank order).
+        assert result["results"] == [], (
+            "a declined selection must leave the result set empty"
+        )
         # The cosine-only candidate reached the LLM-selection stage
         # (the top-20 input) AND leads it.
         assert captured_prompts, "LLM stage was never invoked"
@@ -1250,3 +1260,359 @@ class TestListActiveByProjectCompatWrapper:
         # Explicit limit honored (the contract carries it through).
         rows_capped = repo.list_active_by_project("p1", limit=1)
         assert len(rows_capped) == 1
+
+
+# ============================================================================
+# Stage-3 fail-open contract — malformed response vs. declined selection
+# ============================================================================
+#
+# Two contract points are pinned here:
+#
+# * A MALFORMED stage-3 response (no JSON object located) must fall
+#   back to the FUSED stage-2 order through the ``search`` fail-open
+#   branch — the module-docstring promise ("Stage 3 failure (LLM down
+#   or malformed JSON) -> fall back to the top ``limit`` from stage 2
+#   as the result").  A well-formed but EMPTY selection
+#   (``{"selected": []}``) means the LLM declined to pick and must
+#   stay empty — it must NOT take the fallback.
+# * The fused stage-2 composite score must REACH the selector prompt
+#   (stage 2 computes it; the prompt builder used to drop it).
+
+
+def _fused_stage2_scenario() -> tuple[
+    list[FakeSnapshot], dict[str, list[Any]], list[float]
+]:
+    """Three BM25-tied candidates whose COSINE reorders them.
+
+    Repo order is ``[s_low, s_mid, s_high]``; the fused stage-2 order
+    (``bm25 + cosine``) is ``[s_high, s_mid, s_low]``.  A result set in
+    repo order would prove the stage-2 reorder never happened; an
+    EMPTY result set would prove the fallback never happened.
+    """
+    snaps = [
+        FakeSnapshot(
+            snapshot_id="s_low",
+            task_summary="upgrade pipeline",
+            domain_tags=[],
+        ),
+        FakeSnapshot(
+            snapshot_id="s_mid",
+            task_summary="upgrade pipeline",
+            domain_tags=[],
+        ),
+        FakeSnapshot(
+            snapshot_id="s_high",
+            task_summary="upgrade pipeline",
+            domain_tags=[],
+        ),
+    ]
+    emb_rows = {
+        # Unit vectors against the query vector [1, 0, 0] → cosine
+        # 0.0 / ~0.707 / 1.0.  The BM25 term is identical for all
+        # three (identical corpus text), so the cosine alone decides
+        # the fused order.
+        "s_low": [MagicMock(embedding=[0.0, 1.0, 0.0])],
+        "s_mid": [MagicMock(embedding=[0.5**0.5, 0.5**0.5, 0.0])],
+        "s_high": [MagicMock(embedding=[1.0, 0.0, 0.0])],
+    }
+    return snaps, emb_rows, [1.0, 0.0, 0.0]
+
+
+def _stage3_service(
+    snaps: list[FakeSnapshot],
+    emb_rows: dict[str, list[Any]],
+    query_vec: list[float],
+    response_text: str,
+    *,
+    raise_in_chat: bool = False,
+) -> tuple[SnapshotSearchService, Any, list[str]]:
+    """Build a service whose chat seam returns ``response_text``.
+
+    Returns ``(service, chat_client, captured_prompts)`` — the third
+    element collects the USER prompt handed to the chat client.
+    """
+    captured_prompts: list[str] = []
+
+    class ScriptedChatCompletions:
+        def create(self, model, messages, temperature):
+            captured_prompts.append(messages[-1]["content"])
+            if raise_in_chat:
+                raise RuntimeError("simulated LLM outage")
+            m = MagicMock()
+            m.choices = [
+                MagicMock(message=MagicMock(content=response_text))
+            ]
+            return m
+
+    client = MagicMock()
+    client.chat.completions = ScriptedChatCompletions()
+    service = SnapshotSearchService(
+        snapshot_repo=FakeSnapshotRepo(active=snaps, embeddings=emb_rows),
+        embedding_service=FakeEmbeddingService(query_vec=query_vec),  # type: ignore[arg-type]
+        llm_config={"model": "test"},
+        staleness_fn=_staleness_stub,
+    )
+    return service, client, captured_prompts
+
+
+class TestStage3FailOpenContract:
+    """Stage-3 degradation: malformed → rerank order, declined → empty."""
+
+    def test_malformed_response_degrades_to_fused_stage2_order(self, caplog):
+        """LEG A — a malformed stage-3 response degrades to the FUSED
+        stage-2 order.
+
+        The module docstring promises: "Stage 3 failure (LLM down or
+        malformed JSON) -> fall back to the top ``limit`` from stage 2
+        as the result".  Before the fix the malformed response
+        produced an EMPTY selection (the parser's ``None`` was
+        collapsed into ``[]``), so the pipeline failed closed to zero
+        candidates.
+
+        The fallback happens INSIDE ``_llm_select`` (the parser
+        returns ``None``, it does not raise), so the exception branch
+        in ``search`` is NOT the path taken here — the malformed site
+        logs its OWN warning.
+        """
+        snaps, emb_rows, query_vec = _fused_stage2_scenario()
+        service, client, _ = _stage3_service(
+            snaps,
+            emb_rows,
+            query_vec,
+            "not json at all",
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.snapshot_search_service"
+        ):
+            result = asyncio.run(
+                service.search(
+                    "upgrade pipeline",
+                    project_id="p1",
+                    limit=3,
+                    llm_client=client,
+                )
+            )
+
+        # Fail-soft: the pipeline never raises to its caller.
+        assert result["error"] is None
+        # The DOCUMENTED fallback: the FUSED stage-2 order — cosine
+        # reordered, NOT the repo order and NOT empty.
+        ids = [r["snapshot_id"] for r in result["results"]]
+        assert ids == ["s_high", "s_mid", "s_low"], (
+            f"expected the fused stage-2 order, got {ids}"
+        )
+        # The malformed SITE ran (it logs its own warning) — and the
+        # exception branch in ``search`` did NOT (a malformed response
+        # never reaches it: the parser returns None, it does not
+        # raise).
+        malformed = [
+            r
+            for r in caplog.records
+            if "malformed" in r.getMessage().lower()
+        ]
+        assert malformed, (
+            "the malformed-response site did not log — the malformed "
+            "case was not handled where it belongs"
+        )
+        assert not [
+            r for r in caplog.records if "LLM select failed" in r.getMessage()
+        ], (
+            "the malformed case must be handled inside _llm_select — "
+            "it must not route through the exception branch"
+        )
+
+    def test_wellformed_empty_selection_stays_empty(self, caplog):
+        """A well-formed ``{"selected": []}`` means the LLM DECLINED —
+        the result stays empty and the fallback is NOT taken."""
+        snaps, emb_rows, query_vec = _fused_stage2_scenario()
+        service, client, _ = _stage3_service(
+            snaps, emb_rows, query_vec, '{"selected": []}'
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.snapshot_search_service"
+        ):
+            result = asyncio.run(
+                service.search(
+                    "upgrade pipeline",
+                    project_id="p1",
+                    limit=3,
+                    llm_client=client,
+                )
+            )
+        assert result["error"] is None
+        assert result["results"] == [], (
+            "a declined selection must stay empty — it must not be "
+            "turned into a fallback result set"
+        )
+        assert not [
+            r for r in caplog.records if "LLM select failed" in r.getMessage()
+        ], "the declined-selection path must NOT take the fallback"
+
+    def test_wellformed_selection_output_follows_the_llm_pick(self, caplog):
+        """The selection OUTPUT for a well-formed response is the
+        LLM's pick, in the LLM's order — unchanged by the prompt-side
+        score addition."""
+        snaps, emb_rows, query_vec = _fused_stage2_scenario()
+        service, client, _ = _stage3_service(
+            snaps, emb_rows, query_vec, '{"selected": ["s_mid", "s_high"]}'
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.snapshot_search_service"
+        ):
+            result = asyncio.run(
+                service.search(
+                    "upgrade pipeline",
+                    project_id="p1",
+                    limit=3,
+                    llm_client=client,
+                )
+            )
+        assert result["error"] is None
+        assert [r["snapshot_id"] for r in result["results"]] == [
+            "s_mid",
+            "s_high",
+        ]
+        assert not [
+            r for r in caplog.records if "LLM select failed" in r.getMessage()
+        ], "the well-formed path must not take the fallback"
+
+    def test_llm_exception_path_still_degrades_to_fused_stage2_order(self, caplog):
+        """The pre-existing exception path is the REGRESSION BASELINE —
+        a chat-call exception still degrades to the fused stage-2
+        order and never raises."""
+        snaps, emb_rows, query_vec = _fused_stage2_scenario()
+        service, client, _ = _stage3_service(
+            snaps,
+            emb_rows,
+            query_vec,
+            '{"selected": []}',
+            raise_in_chat=True,
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.snapshot_search_service"
+        ):
+            result = asyncio.run(
+                service.search(
+                    "upgrade pipeline",
+                    project_id="p1",
+                    limit=3,
+                    llm_client=client,
+                )
+            )
+        assert result["error"] is None
+        assert [r["snapshot_id"] for r in result["results"]] == [
+            "s_high",
+            "s_mid",
+            "s_low",
+        ]
+        fallback = [
+            r for r in caplog.records if "LLM select failed" in r.getMessage()
+        ]
+        assert fallback, "the exception path did not log its degradation"
+
+
+class TestSelectorPromptCarriesTheFusedScore:
+    """LEG B — the fused stage-2 composite score must reach the selector."""
+
+    def test_fused_composite_score_reaches_the_selector_prompt(self):
+        """The score stage 2 computes must appear in the prompt handed
+        to the selector — the value the model is asked to reason over.
+
+        The expected composite is re-derived here from stage 1's BM25
+        output plus the REAL cosine helper (the documented composite
+        formula ``bm25 + cosine``) — the stage-2 method under test is
+        NOT used to compute the expectation.
+        """
+        snaps, emb_rows, query_vec = _fused_stage2_scenario()
+        service, client, captured = _stage3_service(
+            snaps, emb_rows, query_vec, '{"selected": []}'
+        )
+        result = asyncio.run(
+            service.search(
+                "upgrade pipeline",
+                project_id="p1",
+                limit=3,
+                llm_client=client,
+            )
+        )
+        assert result["error"] is None
+        assert captured, "the LLM stage was never invoked"
+        prompt = captured[0]
+
+        bm25_pairs = asyncio.run(
+            service._bm25_prefilter(
+                "upgrade pipeline", snaps, [], top_k=_LLM_SELECT_TOP_N
+            )
+        )
+        expected: dict[str, float] = {}
+        for snap, bm25 in bm25_pairs:
+            best_cos = max(
+                SnapshotEmbeddingService.cosine_similarity(
+                    query_vec, list(getattr(e, "embedding", []) or [])
+                )
+                for e in emb_rows[snap.id]
+            )
+            expected[snap.id] = bm25 + best_cos
+
+        pairs = re.findall(
+            r"id=(\S+)[^\n]*?stage2_score=([-+0-9.eE]+)", prompt
+        )
+        found = dict(pairs)
+        assert found, (
+            "the selector prompt carries NO score field — the fused "
+            "stage-2 composite is computed and then dropped"
+        )
+        assert set(found) == set(expected), (
+            f"prompt scored ids {sorted(found)} != candidates "
+            f"{sorted(expected)}"
+        )
+        for sid, raw in found.items():
+            assert float(raw) == pytest.approx(expected[sid], abs=1e-6), (
+                f"prompt score for {sid} ({raw}) != fused composite "
+                f"({expected[sid]})"
+            )
+        # The prompt order follows the fused order (descending score).
+        scores = [float(raw) for _, raw in pairs]
+        assert scores == sorted(scores, reverse=True), (
+            f"prompt scores are not in descending fused order: {scores}"
+        )
+
+    def test_prompt_keeps_candidate_window_and_json_contract(self):
+        """The candidate window (``_LLM_SELECT_TOP_N``) and the
+        ``{"selected": [ids]}`` response contract are unchanged."""
+        candidates = _many_candidates(40)
+        emb_rows = {
+            s.id: [MagicMock(embedding=[1.0, 0.0, 0.0])] for s in candidates
+        }
+        repo = FakeSnapshotRepo(active=candidates, embeddings=emb_rows)
+        emb_service = FakeEmbeddingService(query_vec=[1.0, 0.0, 0.0])
+        captured: list[str] = []
+
+        class RecordingChatCompletions:
+            def create(self, model, messages, temperature):
+                captured.append(messages[-1]["content"])
+                m = MagicMock()
+                m.choices = [
+                    MagicMock(
+                        message=MagicMock(content='{"selected": ["s000"]}')
+                    )
+                ]
+                return m
+
+        client = MagicMock()
+        client.chat.completions = RecordingChatCompletions()
+        service = SnapshotSearchService(
+            snapshot_repo=repo,
+            embedding_service=emb_service,  # type: ignore[arg-type]
+            llm_config={"model": "test"},
+            staleness_fn=_staleness_stub,
+        )
+        result = asyncio.run(
+            service.search(
+                "upgrade", project_id="p1", limit=5, llm_client=client
+            )
+        )
+        assert [r["snapshot_id"] for r in result["results"]] == ["s000"]
+        prompt = captured[0]
+        assert prompt.count("- id=") == _LLM_SELECT_TOP_N
+        assert '{"selected": [<id>, <id>, ...]}' in prompt

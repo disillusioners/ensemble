@@ -592,10 +592,11 @@ class SnapshotSearchService:
         BM25+cosine+tag-overlap order.
 
         The chat-completion prompt lists each candidate's
-        ``title`` + ``task_summary`` + ``tags`` (NOT the full
-        digest — too verbose for a short context window). The
-        model returns JSON ``{"selected": [<id>, ...]}``;
-        unmapped ids are dropped with a warning.
+        ``title`` + ``task_summary`` + ``tags`` + its
+        ``stage2_score`` (NOT the full digest — too verbose for a
+        short context window). The model returns JSON
+        ``{"selected": [<id>, ...]}``; unmapped ids are dropped
+        with a warning.
 
         Args:
             query: User search text (echoed back to the LLM so
@@ -613,9 +614,11 @@ class SnapshotSearchService:
 
         Raises:
             Exception: Propagates any exception from the LLM
-                call or the JSON parser. The public ``search``
-                method catches and falls back to the rerank
-                order.
+                call. The public ``search`` method catches it and
+                falls back to the rerank order. A MALFORMED
+                response is NOT an exception here: the JSON parser
+                returns ``None`` and this method falls back to the
+                stage-2 order locally.
         """
         if not reranked:
             return []
@@ -625,8 +628,18 @@ class SnapshotSearchService:
         candidates = reranked[:_LLM_SELECT_TOP_N]
 
         # Build the prompt — minimal per-candidate surface.
+        #
+        # SCALE NOTE (``stage2_score``): the value below is the
+        # stage-2 score of the candidate.  On the happy path that is
+        # the composite ``bm25 + cosine`` (unbounded); on the
+        # stage-2 embedding-FAILURE path the WHOLE list is replaced
+        # with tag-overlap-scale values (bounded) — see the opacity
+        # note in ``search``.  The two scales are NOT comparable and
+        # are NOT normalized here.  Within ONE prompt every value
+        # comes from ONE branch (the fallback replaces the list
+        # wholesale), so intra-prompt comparison stays consistent.
         lines: list[str] = []
-        for snap, _score in candidates:
+        for snap, score in candidates:
             sid = getattr(snap, "id", "?")
             title = getattr(snap, "title", "") or ""
             task_summary = getattr(snap, "task_summary", "") or ""
@@ -639,7 +652,7 @@ class SnapshotSearchService:
             summary = task_summary or preview or "(no summary)"
             lines.append(
                 f"- id={sid} title={title!r} tags=[{tag_line}] "
-                f"summary={summary[:300]!r}"
+                f"summary={summary[:300]!r} stage2_score={score:.6f}"
             )
         candidates_block = "\n".join(lines)
 
@@ -665,6 +678,20 @@ class SnapshotSearchService:
         )
 
         parsed = self._parse_selection(response_text, limit=limit)
+        if parsed is None:
+            # Malformed response — the parser could not locate a
+            # selection object. Fall back HERE, locally, to the
+            # stage-2 order: the SAME ``reranked[:limit]`` slice the
+            # exception path in ``search`` uses. (The parser returns
+            # ``None`` rather than raising, so the public ``search``
+            # method never sees this case.)  A WELL-FORMED but empty
+            # selection (``{"selected": []}``) means the LLM declined
+            # to pick — that must stay empty.
+            logger.warning(
+                "[SnapshotSearch] LLM selection response was malformed "
+                "(no JSON object located) - using the stage-2 order"
+            )
+            return [snap for snap, _ in reranked[:limit]]
         if not parsed:
             return []
 
@@ -788,8 +815,8 @@ class SnapshotSearchService:
         Tolerant of markdown code fences (re-uses the skill-side
         :func:`_extract_json_object`) and minor JSON-shape variants.
         Returns ``None`` when no JSON object can be located — the
-        public ``search`` method catches and falls back to the
-        rerank order.
+        caller (:meth:`_llm_select`) handles that case locally and
+        falls back to the stage-2 rerank order.
         """
         json_text = _extract_json_object(raw_text or "")
         if not json_text:
