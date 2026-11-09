@@ -1645,9 +1645,13 @@ class SkillEvolutionService:
         * Either ``iterations > capture_min_iterations`` OR
           ``duration_seconds > capture_min_duration_seconds`` —
           we don't want to capture trivial / instant successes.
-        * ``has_applied_for_instance(instance_id)`` must be false —
-          if a skill was already applied to this instance the
-          success is attributed to that skill, not a new pattern.
+        * ``has_genuinely_evolved_for_instance(instance_id)`` must be
+          false — if a skill was genuinely evolved on this instance
+          (selected AND task_succeeded AND feedback_applied IS NOT
+          NULL) the success is attributed to that skill, not a new
+          pattern. (A3: the predicate used to be the feedback-only
+          ``has_applied_for_instance``, whose ``applied`` column is
+          written by NOBODY — the gate never fired.)
 
         The returned dict is the *input* to
         :meth:`capture_skill` — the caller (typically
@@ -1697,11 +1701,20 @@ class SkillEvolutionService:
         if iterations <= min_iter and duration_seconds <= min_dur:
             return None
 
-        applied = await asyncio.to_thread(
-            self._usage_repo.has_applied_for_instance, instance_id
+        # A3 (LEADER RULING Q1 — the OUTCOME-FIELDS form): the capture
+        # gate asks whether a skill was GENUINELY EVOLVED on this
+        # instance (selected AND task_succeeded AND feedback_applied IS
+        # NOT NULL) — NOT the feedback-only ``has_applied_for_instance``
+        # (whose ``applied`` column is a projection that
+        # ``update_completion`` never writes, so it gated on nothing).
+        # This is the service-seam twin of the metrics-service gate
+        # (``daemon/services/skill_metrics_service.py`` — the same
+        # predicate).
+        evolved = await asyncio.to_thread(
+            self._usage_repo.has_genuinely_evolved_for_instance, instance_id
         )
-        if applied:
-            # A skill was already applied — the success is
+        if evolved:
+            # A skill was already genuinely evolved — the success is
             # already attributed. Don't create a sibling.
             return None
 
