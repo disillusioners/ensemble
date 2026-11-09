@@ -1504,6 +1504,96 @@ _jsf_qurem_read2="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_quarantin
 assert_contains "13j quarantine removal WARNs when the journal READ is unavailable (raw rc quoted)" \
     "awk rc=127" "$_jsf_qurem_read2"
 
+# ─── 13k. PHANTOM-BRACKET truncation regression (the `j < tn` bound) ─────────
+# THE REGRESSION. The replaced bash loop counted brackets one character at a
+# time and returned 1 at EOF with the depth still open — a value missing its
+# final closing bracket was NEVER extracted. The O(n) awk rewrite replaced
+# that walk with a split()-based vectorized scan; its first cut visited the
+# trailing field AFTER the last bracket and counted it as a closing bracket
+# — the phantom bracket. A torn value then reached depth 0 and was emitted
+# TRUNCATED with rc 0 (the whole `history` array came back as a bare `[`).
+# The bound that kills it is `j < tn`: the loop visits EXACTLY the tn-1 real
+# brackets, so a value missing its final closing bracket falls through to
+# `exit 1` with NO output.
+#
+# THE CONTRACT PINNED HERE (it must never regress):
+#   a value missing its final closing bracket  =>  rc=1 AND EMPTY stdout.
+# The EMPTY-stdout half is the load-bearing one: a truncated value returned
+# with rc 0 would be spliced straight back into the journal by the writers
+# (history append / quarantine append), and the readers would treat the bare
+# `[` as a real (empty) history array.
+section "js json sub: phantom-bracket truncation regression (j < tn bound)"
+
+# _jsf_sub_probe <json> <key> <outfile> — echo the rc; the extractor's stdout
+# bytes land in <outfile> so "EMPTY stdout" is asserted on the BYTES, not on
+# a marker string appended to them.
+_jsf_sub_probe() {
+    ( . "$LAUNCHER"; _js_json_sub "$1" "$2" > "$3" 2>/dev/null )
+    echo $?
+}
+
+# ── (a) four shapes of "the target value is missing its FINAL closing
+#        bracket": a flat object value, a flat array value, a nested-object
+#        value, and an array value. Each must be refused with NO output.
+JSF_TORN_DIR="$JSF_TEST_DIR/torn"
+mkdir -p "$JSF_TORN_DIR"
+
+printf '%s' '{"a":{"x":1'      > "$JSF_TORN_DIR/flat_value_torn.json"
+printf '%s' '{"a":[1,2'       > "$JSF_TORN_DIR/flat_array_torn.json"
+printf '%s' '{"a":{"b":{"x":1}' > "$JSF_TORN_DIR/nested_object_torn.json"
+printf '%s' '{"a":[{"x":1}'   > "$JSF_TORN_DIR/array_torn.json"
+
+for _jsf_shape in flat_value_torn flat_array_torn nested_object_torn array_torn; do
+    _jsf_torn_json="$(cat "$JSF_TORN_DIR/$_jsf_shape.json")"
+    _jsf_torn_rc="$(_jsf_sub_probe "$_jsf_torn_json" a "$JSF_TORN_DIR/$_jsf_shape.out")"
+    assert_eq "13k $_jsf_shape: value missing its final closing bracket => rc=1" \
+        "1" "$_jsf_torn_rc"
+    assert_eq "13k $_jsf_shape: EMPTY stdout (no truncated emission)" \
+        "0" "$(wc -c < "$JSF_TORN_DIR/$_jsf_shape.out" | tr -d ' ')"
+done
+
+# ── (b) The three NAMED differential cases from the launcher's own byte
+#        parity corpus, embedded VERBATIM. The pin is SELF-CONTAINED: it
+#        must not reference /tmp (or any corpus path) at test runtime.
+#
+#        case_0124_trunc_torn_flat_077 (77 bytes)  — history array torn
+#        case_0154_trunc_torn_hist_027  (27 bytes)  — history array torn
+#        case_0230_trunc_torn_hist_103  (103 bytes) — history array torn
+#
+#        Acceptance notation: SUB_history|1|  (rc=1, zero stdout bytes).
+JSF_CASE_DIR="$JSF_TEST_DIR/cases"
+mkdir -p "$JSF_CASE_DIR"
+
+printf '%s' '{"current":"v1","previous":null,"in_flight":null,"quarantined":[],"history":[' \
+    > "$JSF_CASE_DIR/case_0124_trunc_torn_flat_077"
+printf '%s' '{"current":"v1","history":[' \
+    > "$JSF_CASE_DIR/case_0154_trunc_torn_hist_027"
+printf '%s' '{"current":"v1","history":[{"ts":"2026-01-01T00:00:00Z","event":"sweep","detail":"target v1 run_id r1"}' \
+    > "$JSF_CASE_DIR/case_0230_trunc_torn_hist_103"
+
+# The byte-count assertion is the in-test guard against a shell-mangled
+# literal (the §13g/h/i discipline): the embedded bytes must be EXACTLY the
+# named file's bytes. The one-off pre-commit `cmp` against the corpus files
+# is the second, external half of that proof.
+assert_eq "13k named case case_0124_trunc_torn_flat_077 is byte-exact (77 bytes)" \
+    "77" "$(wc -c < "$JSF_CASE_DIR/case_0124_trunc_torn_flat_077" | tr -d ' ')"
+assert_eq "13k named case case_0154_trunc_torn_hist_027 is byte-exact (27 bytes)" \
+    "27" "$(wc -c < "$JSF_CASE_DIR/case_0154_trunc_torn_hist_027" | tr -d ' ')"
+assert_eq "13k named case case_0230_trunc_torn_hist_103 is byte-exact (103 bytes)" \
+    "103" "$(wc -c < "$JSF_CASE_DIR/case_0230_trunc_torn_hist_103" | tr -d ' ')"
+
+for _jsf_case in case_0124_trunc_torn_flat_077 case_0154_trunc_torn_hist_027 case_0230_trunc_torn_hist_103; do
+    _jsf_case_json="$(cat "$JSF_CASE_DIR/$_jsf_case")"
+    _jsf_case_rc="$(_jsf_sub_probe "$_jsf_case_json" history "$JSF_CASE_DIR/$_jsf_case.out")"
+    assert_eq "13k $_jsf_case: SUB_history|1| (rc=1)" "1" "$_jsf_case_rc"
+    assert_eq "13k $_jsf_case: SUB_history|1| (empty stdout, no truncated emission)" \
+        "0" "$(wc -c < "$JSF_CASE_DIR/$_jsf_case.out" | tr -d ' ')"
+    # The READ side refuses the same torn document (the journal is not
+    # trustworthy) — a writer must never see it.
+    assert_contains "13k $_jsf_case: torn journal read refused (rc=1)" \
+        "rc=1" "$(_jsf_read "$JSF_CASE_DIR/$_jsf_case")"
+done
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
