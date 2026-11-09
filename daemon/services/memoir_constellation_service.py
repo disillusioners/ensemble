@@ -513,7 +513,9 @@ class MemoirConstellationService:
                 "bypasses the V2-31 cost control)"
             )
         moment = now or self._clock()
-        # Collect candidate stars from the chunk's lines.
+        # Collect candidate stars from the AGENT's lines (the scan is
+        # agent-wide: every distinct star_id of this agent, not the
+        # chunk's).
         try:
             with Session(self._repo.engine) as session:
                 star_ids = session.exec(

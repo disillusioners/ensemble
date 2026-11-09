@@ -414,13 +414,24 @@ council's own probe:
 3. **The comments now state the true invariant** — the cap is "at most
    ONE extraction call and at most ONE Tier-2 summarization per PASS",
    and the ordering guarantee is written down at both call sites.
+4. **THE SCAN SHAPE changed with it (declared; CARRIED TO THE
+   TIDIER):** the Tier-2 phase collects its candidate stars with an
+   AGENT-WIDE query
+   (`select(MemoirLine.star_id).where(MemoirLine.agent_id == agent)`)
+   and the phase now runs ONCE per PASS. The banked tidier item
+   "per-chunk Tier-2 scan O(stars)x3" is therefore **de facto ONE
+   agent-wide scan per PASS** — the per-chunk x3 shape is GONE. The
+   per-pass O(stars) scan REMAINS (the phase still walks the agent's
+   distinct star ids), and it still runs inside the 60 s tick budget.
+   This is a DECLARATION, not a fix: no scan shape changed behaviour
+   here beyond what F-2 already shipped.
 
 ### The receipts (the legs are not vacuous)
 
 | Recipe | Mutation | Red node |
 |---|---|---|
-| M1c | the per-purpose cap removed | `TestThePerPurposeBudget::test_a_second_extraction_in_the_same_pass_is_refused` (`assert 2 == 1`) |
-| M1b | the pre-fix shape (no per-purpose cap + the per-chunk Tier-2) | `TestThePerPurposeBudget::test_the_extraction_is_taken_before_the_tier2` (`assert 0 == 1` — the council's probe reproduced verbatim) and `test_a_second_tier2_in_the_same_pass_is_refused` (`assert 2 == 1`) |
+| M1c | the per-purpose cap removed | `TestThePerPurposeBudget::test_a_second_extraction_in_the_same_pass_is_refused` (`assert 2 == 1`) + `TestThePerPassCallBudget::test_a_multi_chunk_pass_spends_at_most_two_constellation_llm_calls` (`assert 2 == 1`) |
+| M1b | the pre-fix shape (no per-purpose cap + the per-chunk Tier-2) | `TestThePerPurposeBudget::test_the_extraction_is_taken_before_the_tier2` (`assert 0 == 1` — the council's probe reproduced verbatim) + `TestThePerPurposeBudget::test_a_second_extraction_in_the_same_pass_is_refused` (`assert 2 == 1`) + `TestThePerPurposeBudget::test_a_second_tier2_in_the_same_pass_is_refused` (`assert 2 == 1`) |
 
 **THE FINDING (disclosed):** with the per-purpose cap in place, the
 per-chunk Tier-2 is **not observable on its own** — the cap alone
@@ -467,11 +478,30 @@ construction and is NOT claimed.
    production pass loop — and is threaded into EVERY chunk.
    **No new column, no migration:** the identity is DERIVED, not
    persisted.
-   *THE TRADE-OFF (disclosed):* two passes that consider the same anchor
-   episode share the identity, so the second one does not inflate the
-   mention counts. That is the conservative direction (the guard
-   under-counts, it never over-counts) and it is the price of a durable
-   identity without a schema change.
+   *THE TRADE-OFF (disclosed, CORRECTED 2026-11-10):* two passes that
+   consider the same anchor episode share the identity, so the second
+   one does not inflate the mention counts. In the COMMON case the
+   guard UNDER-counts — but it CAN over-count, by exactly ONE, at an
+   ANCHOR TRANSITION. **THE OLD SENTENCE ("the guard under-counts, it
+   never over-counts") WAS MEASURABLY FALSE and is withdrawn here.**
+   *THE OVER-COUNT (measured, reproducible):* when the pass ANCHOR
+   MOVES between passes — a chunk left UNMARKED (an R2 synthesis-parse
+   failure, a write failure, or a cap-deferral) while an older chunk
+   was marked — the next pass mints a DIFFERENT id, the guard sees a
+   DISTINCT pass, and the same `(star, episode)` pair is counted TWICE.
+   *THE PROBE (the shape, so the claim is reproducible):* P1 anchor =
+   E-old → P2 anchor = E-new → the pair is counted TWICE (count = 2)
+   → P3 over the new anchor is STABLE (no further inflation). The
+   over-count is therefore BOUNDED to +1 per anchor transition.
+   *THE BLAST RADIUS:* `mention_count` is READ in exactly ONE place —
+   the star-card "lines" payload
+   (`daemon/repositories/memoir/constellation_repository.py:464`) — so
+   it is DISPLAY ONLY and never a trigger: the tier-2 trigger is
+   `COUNT(*)` over the `memoir_line` rows, NEVER `SUM(mention_count)`
+   (V2-22).
+   *NO REDESIGN HERE:* the identity derivation is NOT changed by this
+   note — a redesign of the identity is a NEW leader decision, not a
+   documentation fix.
 2. **The atomic pass unit** — `MemoirReflectionRepository.unit_of_work()`
    opens ONE transaction; the constellation edges
    (`record_line(..., session=…)`) and the per-episode watermark
@@ -532,9 +562,9 @@ recipes existed only in the reviewer's report.
 
 | Recipe | Mutation | Red node |
 |---|---|---|
-| M1b | the pre-fix shape (no per-purpose cap + the per-chunk Tier-2) | `test_the_extraction_is_taken_before_the_tier2` (`assert 0 == 1`) + `test_a_second_tier2_in_the_same_pass_is_refused` (`assert 2 == 1`) |
-| M1c | the per-purpose cap removed | `test_a_second_extraction_in_the_same_pass_is_refused` (`assert 2 == 1`) |
-| R1 | the LLM paths take an unbudgeted call again | `TestTheBudgetRefusal::test_the_llm_extraction_is_refused_without_a_budget` + `test_the_tier2_summarization_is_refused_without_a_budget` |
+| M1b | the pre-fix shape (no per-purpose cap + the per-chunk Tier-2) | `TestThePerPurposeBudget::test_the_extraction_is_taken_before_the_tier2` (`assert 0 == 1` — the extraction was STARVED: 0 calls) + `TestThePerPurposeBudget::test_a_second_extraction_in_the_same_pass_is_refused` (`assert 2 == 1` — two extractions) + `TestThePerPurposeBudget::test_a_second_tier2_in_the_same_pass_is_refused` (`assert 2 == 1` — two Tier-2 calls) |
+| M1c | the per-purpose cap removed | `TestThePerPurposeBudget::test_a_second_extraction_in_the_same_pass_is_refused` (`assert 2 == 1` — two extractions) + `TestThePerPassCallBudget::test_a_multi_chunk_pass_spends_at_most_two_constellation_llm_calls` (`assert 2 == 1` — two extractions) |
+| R1 | the LLM paths take an unbudgeted call again | `TestTheBudgetRefusal::test_the_llm_extraction_is_refused_without_a_budget` (`DID NOT RAISE <class 'Exception'>`) + `TestTheBudgetRefusal::test_the_tier2_summarization_is_refused_without_a_budget` (`DID NOT RAISE <class 'Exception'>`) |
 | R2 | the synthesis parse failure skips the constellation extraction again | `TestTheSeedSurvivesAParseFailure::test_a_failed_synthesis_batch_still_seeds_the_constellation` (`assert None is not None` — the star was never written) |
 | R3 | a DELETED episode still counts as a hit | `TestTheHeatHonesty::test_a_deleted_episode_does_not_accrue_heat` (`assert 1.0 == 0.0`) |
 | F-3a | the per-chunk random mint | `test_the_retry_of_the_same_pass_reuses_the_identity` (the retry minted a NEW stamp) |
@@ -543,6 +573,12 @@ recipes existed only in the reviewer's report.
 Every receipt restores the mutated file **byte-identically** (the
 sha256 is captured before the mutation and re-checked after the
 restore) and re-runs the pack to GREEN.
+
+**THE RED SETS (re-measured 2026-11-10):** the M1b, M1c and R1 rows
+above were re-measured with the mutation applied, the pack's selector
+run, and the mutated file restored byte-identically (sha256 before ==
+sha256 after). Each row now carries **EVERY** red node of its
+mutation — M1b reddens THREE, M1c TWO, R1 TWO — not a subset.
 
 ---
 
@@ -566,8 +602,44 @@ The node-count pins that moved with this close-out (measured with
 | `memoir_v2_constellation_service_test` | 6 | 17 |
 | `memoir_v2_about_tool_test` | 27 | 29 |
 
-The two close-out classes (`TestThePerPurposeBudget`,
+The four close-out classes (`TestThePerPurposeBudget`,
 `TestTheDurablePassIdentity`, `TestTheBudgetRefusal`,
 `TestTheSeedSurvivesAParseFailure`) are named in the constellation
 pack's selector as well — a leg that no pack selects is a leg the gate
 cannot see.
+
+### THE PACK STATUS — a FIFTH memoir pack is RED (pre-existing)
+
+The close-out commit body claims "the four packs PASS (17 / 4 / 29 /
+26)". Those four PASS (re-measured 2026-11-10 at this commit):
+
+| Pack | Nodes | Verdict |
+|---|---|---|
+| `memoir_v2_constellation_service_test` | 17 | PASS |
+| `memoir_v2_star_description_test` | 4 | PASS |
+| `memoir_v2_about_tool_test` | 29 | PASS |
+| `memoir_v2_tool_registration_test` | 26 | PASS |
+
+**A FIFTH memoir pack is RED — and it is PRE-EXISTING, not this
+lane's:** `memoir_v2_reflection_service_test` reports
+`passed=43 != EXPECTED_PASSED_N=32`. The pack file
+(`test/packs/memoir_v2_reflection_service_test.sh`, pin 32) and its
+test module (`tests/unit/test_memoir_v2_reflection_service.py`, 43
+nodes) are **byte-identical at the base commit `e76fef843` and at this
+commit** (same blob `ef5ab884…`), so the drift cannot have been caused
+by this lane's close-out. It is already tracked in the shared KV
+(`memoir-v2.phase4-residuals`, item 2 — pre-existing pack-pin drift).
+
+**WHY IT IS NAMED HERE ANYWAY:** this lane DID modify
+`daemon/services/memoir_reflection_service.py` (F-3's durable pass
+identity and the atomic pass unit), so the RED reflection pack sits
+next to code this lane touched — a reader of the commit body would
+otherwise have no way to tell the two apart. The RED is a stale
+node-count PIN, not a failing assertion: the pack's 43 nodes all
+PASS. (`memoir_inner_soul_redirect_test` is likewise RED in this
+WORKTREE — but its RED is that pack's own TREE-FENCE, which flags the
+worktree's UNCOMMITTED files (the foreign `.agents/approver/` WIP, and
+transiently this commit's own notes edit) because its allow-list is a
+PREFIX list that does not admit `docs/memoir-v2/`. The pack file is
+byte-identical at the base commit and at this commit, so the drift is
+pre-existing and outside this lane.)
