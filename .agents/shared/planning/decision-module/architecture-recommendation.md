@@ -19,7 +19,7 @@ Adopt a **thin, single-attempt, fail-open typed client** to the proxy's `POST /v
 ```mermaid
 flowchart TD
     Caller["Seam call site (snapshot_search_service / graph.py / attestation)"]
-    Registry["Seam Registry (admission, exclusion check, stage gate, switch)"]
+    Registry["Seam Registry (admission, exclusion check, apply-stage gate, switch)"]
     Config["Config (DECISION_BASE_URL / API_KEY / MODEL, reuse OPENAI_*)"]
     Client["Thin Client (single attempt, no retry, 5-10s budget)"]
     Proxy["Proxy POST /v1/decisions (predicate | choice | score)"]
