@@ -1,13 +1,15 @@
 # Approver Active State
 
-Plan: canary-injection-defense (prompt-injection defense lane: injection-screen skill + fencing doctrine edits to 5 personas + canary red-team agent + house ceremonies; plan set at .agents/shared/planning/canary-injection-defense/, worktree feature/canary-injection-defense)
-Slug: canary-injection-defense
-Status: APPROVED
-Iteration: 003 FINAL (cap 3) — 001 REJECTED (7 blocking @ 4fe4d995a-era); 002 REJECTED (15 aggregated @ e559548bf); 003 APPROVED @ 24ba60462.
-All 15 iteration-002 blockers verified CLOSED on disk (B1 four-constant ledger + FAMILY_ROSTER 22 legs + the :564 split into DOCTRINE_ONLY / MANIFEST_BEARING legs; arch §5.2 split + per-leg table; T31–T38 / M1–M8 inventory; AM-3 propagated to all six sites; deny_spawn pinned-as-ruled; AM-4 data file + body ≤8,000 HARD; $HOME scratch root; scratch_root_removed_at + every-exit teardown; 9+3+1=13 ⇒ 379; DOC-07/CER-06/X-10/§11-r2 retractions; P6 merge-before-regenerate; G0.5/P6 STOP generalized).
-Load-bearing premises re-measured this pass and all TRUE: skill_view truncation at 8,000 (skill_tools.py:428-432, :1001-1004) with NO 20,000-char cap; $DATA_DIR defaults to ./data inside the repo (api.py:516-519); agents/ = 366 files; baseline = 177 rows; sweeper has no skill-set.yaml; aegis team_members = 4; 25 `parametrize("agent", CHILDREN)` sites.
-Residual notes (non-blocking): phase4 :102 historical note says "12 files" vs the authoritative 13; arch §5.2 T21 row / §11 item 6 "installer children no-manifest" prose vs sweeper's positive-manifest (phase4 (a2) tuples govern); decisions :765 AM-2 row lacks a superseded marker; decisions §C.5 keeps `LEAVES` as a disclosed alias for FAMILY_ROSTER; G4.4 does not name T27.
-Method disclosure: iteration-003 closure pass adjudicated on disk evidence (no fresh worker dispatch — cap reached; input = 6 prior cold workers + the council pass at this SHA).
-Started: 2026-11-05T20:30Z
-Last Verdict: APPROVED (iteration 003 FINAL, 2026-11-05 @ 24ba60462) — APPROVED-WITH-NOTES form
-Tracking: .agents/approver/canary-injection-defense-tracking.md
+Plan: decision-module — the ensemble-side DECISION MODULE (thin client + seam registry over the proxy's POST /v1/decisions); plan set at /home/nea/ensemble-src-wt-decision-module-design/.agents/shared/planning/decision-module/ (5 docs, 1223 lines: scope-and-doctrine.md, thin-client.md, seam-registry.md, controls-and-phasing.md, architecture-recommendation.md; branch docs/decision-module @ 5da1021f2, set UNCOMMITTED)
+Slug: decision-module
+Mode: Plan Approval (large design set — 3 workers partitioned by verification axis, fan-in via todo_graph)
+Status: ESCALATED
+Iteration: 003 (FINAL — max iterations reached)
+Started: 2026-11-09T06:35Z
+Last Verdict: REJECTED (iteration 003 FINAL, 2026-11-09 — 4 blocking, ESCALATED to the Emperor). K1 (enforce-mode shadow) CLOSED; design content anchor-verified by two independent workers. Remaining: B1 one live sentence in thin-client.md §6 row 17 still asserts the deleted client boot-probe; B2-B4 the anchor-audit.md evidence artefact's ledger is unreliable (6 mis-cited rows, §10-vs-§5 tally contradiction, one false verification output). Tracking: .agents/approver/decision-module-tracking.md)
+Note: superseded-from-active: source-gc APPROVED 001 FINAL 2026-11-07 (12 commission constraints code-verified at 6b571771d) — see .agents/approver/source-gc-tracking.md (historical record, preserved, do not delete).
+Note: superseded-from-active: project-operating-knowledge ESCALATED 003 FINAL 2026-11-06 (8 aggregated blockers; full history preserved) — see .agents/approver/project-operating-knowledge-tracking.md.
+Note: superseded-from-active: skill-list-full-uuid APPROVED 001 FINAL 2026-11-03 — see .agents/approver/skill-list-full-uuid-tracking.md (historical record, preserved, do not delete).
+Note: superseded-from-active: plane-pm-issue-tools ESCALATED 003 FINAL 2026-11-02 — see .agents/approver/plane-pm-issue-tools-tracking.md.
+Note: superseded-from-active: central-metrics-v1 ESCALATED 003 FINAL 2026-11-02 — see .agents/approver/central-metrics-v1-tracking.md.
+Note: superseded-from-active: project-skill-loader ESCALATED 003 FINAL 2026-10-31 — see .agents/approver/skill-loader-plan-tracking.md.
