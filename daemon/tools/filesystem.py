@@ -917,7 +917,7 @@ def list_directory(
     # ambient caller identity is bound by the scope-aware wrapper in
     # ``daemon/tools/instance.py``). Undeclared ⇒ no scope ⇒ unchanged.
     # D-N7: the enumerating twin of the read surface. The listing must
-    # not leak credential-hazard NAMES either — `_scope_filter_entries`
+    # not leak credential-hazard NAMES either — the in-loop `_is_scope_denied_basename` check
     # drops them for a SCOPED agent only (names, never content, but the
     # name is itself the hazard: it tells the agent the file exists and
     # where). Undeclared agents get the untouched entry list.
