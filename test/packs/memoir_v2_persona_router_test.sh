@@ -46,12 +46,28 @@ if [ ! -f "$TARGET" ]; then
   exit 1
 fi
 
-EXPECTED_PASSED_N=12
+EXPECTED_PASSED_N=15
+
+# The MEASURED node count at the pin (2026-11-10, this worktree):
+# TestMemoirPersonaRouter (11) + TestProductionRepositoryResolution (3)
+# + TestMutationLegC (1).
+#
+# THE DELTA'S OWN LEGS ARE SELECTOR-REGISTERED (the pack-orphan class):
+# the selector below names EVERY class in the module EXPLICITLY and the
+# node-count pin moves IN THE SAME COMMIT as the legs.
+#
+# THE FIX-ROUND LEG (2026-11-10): TestProductionRepositoryResolution
+# covers the PRODUCTION branch — the manager exposes the ENGINE only and
+# the router resolves the repository through the ENGINE FALLBACK.  The
+# fixture's former MagicMock manager auto-created
+# ``manager._memoir_persona_repo`` (an attribute NO production code
+# sets), so the production branch was untested.
 
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-280}"
 LOG="${TMPDIR:-/tmp}/${PACK_NAME}.log"
 
 timeout "${TIMEOUT_S}" "${PY}" -m pytest "${TARGET}" \
+  -k "TestMemoirPersonaRouter or TestProductionRepositoryResolution or TestMutationLegC" \
   -q --tb=short -p no:randomly --override-ini="addopts=" 2>&1 | tee "${LOG}"
 EXIT_CODE=${PIPESTATUS[0]}
 if [ "$EXIT_CODE" -eq 124 ]; then

@@ -46,12 +46,29 @@ if [ ! -f "$TARGET" ]; then
   exit 1
 fi
 
-EXPECTED_PASSED_N=5
+EXPECTED_PASSED_N=7
+
+# The MEASURED node count at the pin (2026-11-10, this worktree):
+# TestPersonaComposition (1) + TestUnbuildableDiffParking (3)
+# + TestCompositionBudgetPerPass (3).
+#
+# THE DELTA'S OWN LEGS ARE SELECTOR-REGISTERED (the pack-orphan class):
+# the selector below names EVERY class in the module EXPLICITLY and the
+# node-count pin moves IN THE SAME COMMIT as the legs.
+#
+# THE FIX-ROUND LEG (2026-11-10): TestCompositionBudgetPerPass now holds
+# the PRODUCTION-SHAPED budget leg — one pass with two gated candidates
+# parks the second as 'pending' (deferred:composition_budget) and the NEXT
+# pass (with NO new syntheses) picks it up FROM THE LEDGER.  The leg it
+# replaced re-passed the candidate explicitly, a shape production never
+# produces, and asserted the candidate was NEVER TOUCHED — which is the
+# data loss itself.
 
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-280}"
 LOG="${TMPDIR:-/tmp}/${PACK_NAME}.log"
 
 timeout "${TIMEOUT_S}" "${PY}" -m pytest "${TARGET}" \
+  -k "TestPersonaComposition or TestUnbuildableDiffParking or TestCompositionBudgetPerPass" \
   -q --tb=short -p no:randomly --override-ini="addopts=" 2>&1 | tee "${LOG}"
 EXIT_CODE=${PIPESTATUS[0]}
 if [ "$EXIT_CODE" -eq 124 ]; then

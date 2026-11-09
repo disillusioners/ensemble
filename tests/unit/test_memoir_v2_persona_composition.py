@@ -16,7 +16,9 @@ Coverage:
   - NEVER silently dropped to 'none'
 * Composition budget ceiling per pass:
   - MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS = 1
-  - Multi-candidate passes spend at most 1 composition call per pass; remainder deferred.
+  - Multi-candidate passes spend at most 1 composition call per pass; the
+    remainder is PARKED as 'pending' (deferred:composition_budget) and is
+    picked up FROM THE LEDGER by the next pass — no candidate is lost.
 """
 
 from __future__ import annotations
@@ -192,9 +194,18 @@ class TestUnbuildableDiffParking:
 
 
 class TestCompositionBudgetPerPass:
-    """MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS = 1 per reflection pass."""
+    """MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS = 1 per reflection pass.
 
-    def test_pass_spends_at_most_one_composition_call(self, engine, persona_repo):
+    THE PRODUCTION SHAPE (C1): the reflection service passes ONLY this
+    pass's accepted syntheses, and the ONLY re-selection source is the
+    ledger (``get_pending_candidates()``).  A candidate the per-pass
+    budget never reached MUST therefore be PARKED as 'pending' — with no
+    ledger row it would be lost from the JEV lane forever (V2-38).
+    """
+
+    def test_a_budget_deferred_candidate_is_parked_and_picked_up_next_pass(
+        self, engine, persona_repo
+    ):
         comp_calls = 0
 
         def counting_llm(prompt):
@@ -211,26 +222,127 @@ class TestCompositionBudgetPerPass:
         syn1 = _make_synthesis(engine, claim="Rule 1 to integrate")
         syn2 = _make_synthesis(engine, claim="Rule 2 to integrate")
 
+        # PASS 1 — two gated candidates, a budget of ONE composition call.
         outcomes = svc.process_pass(
             new_syntheses=[syn1, syn2],
             max_composition_calls=MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
         )
 
-        assert len(outcomes) == 1  # 1 composed; second deferred
+        assert len(outcomes) == 1  # 1 composed; the second is DEFERRED
         assert comp_calls == 1
         assert outcomes[0].status == "drafted"
+        assert outcomes[0].synthesis_id == syn1.id
 
-        # syn1 is drafted, syn2 was not processed in this pass (still un-evaluated)
         entry1 = svc.get_ledger_entry(syn1.id)
+        assert entry1 is not None
         assert entry1.status == "drafted"
-        entry2 = svc.get_ledger_entry(syn2.id)
-        assert entry2 is None  # Never touched in this pass
 
-        # Next pass processes syn2
+        # THE PARK: the deferred candidate is NOT lost — it is parked as
+        # 'pending' with the deferral marker, so the ledger can
+        # re-select it.
+        entry2 = svc.get_ledger_entry(syn2.id)
+        assert entry2 is not None
+        assert entry2.status == "pending"
+        assert entry2.last_error == "deferred:composition_budget"
+
+        # PASS 2 — the reflection service passes NO new syntheses; the
+        # candidate comes back FROM THE LEDGER and is drafted.
         outcomes2 = svc.process_pass(
-            new_syntheses=[syn2],
+            new_syntheses=[],
             max_composition_calls=MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
         )
         assert len(outcomes2) == 1
         assert outcomes2[0].status == "drafted"
+        assert outcomes2[0].synthesis_id == syn2.id
         assert comp_calls == 2
+
+        entry2_after = svc.get_ledger_entry(syn2.id)
+        assert entry2_after.status == "drafted"
+        assert entry2_after.last_error is None
+
+    def test_a_deferred_candidate_with_a_known_classification_is_not_reclassified(
+        self, engine, persona_repo
+    ):
+        """A candidate whose classification is ALREADY KNOWN keeps it — the
+        retry must NOT re-pay the classifier."""
+        classify_calls: list[str] = []
+        comp_calls: list[str] = []
+
+        def failing_composition(prompt):
+            if "Taxonomy:" in prompt:
+                classify_calls.append(prompt)
+                return json.dumps({
+                    "classification": "new_rule",
+                    "reasoning": "Valid new rule.",
+                })
+            raise RuntimeError("composition exploded")
+
+        svc_fail = MemoirPersonaGateService(
+            engine, persona_repository=persona_repo, llm_caller=failing_composition
+        )
+        syn = _make_synthesis(engine, claim="Rule to integrate")
+
+        # The candidate is classified, then its composition FAILS -> parked
+        # as 'pending' WITH the classification stored.
+        outcome = svc_fail.process_candidate(syn)
+        assert outcome.status == "pending"
+        assert outcome.classification == "new_rule"
+        assert len(classify_calls) == 1
+
+        def working(prompt):
+            if "Taxonomy:" in prompt:
+                classify_calls.append(prompt)
+                return json.dumps({
+                    "classification": "new_rule",
+                    "reasoning": "Valid new rule.",
+                })
+            comp_calls.append(prompt)
+            return "# Ari Persona\n\nUpdated with rule."
+
+        svc = MemoirPersonaGateService(engine, persona_repository=persona_repo, llm_caller=working)
+        retry = svc.process_candidate(syn)
+        assert retry.status == "drafted"
+        assert retry.classification == "new_rule"
+        # NO second classifier call — the STORED classification was used.
+        assert len(classify_calls) == 1
+        assert len(comp_calls) == 1
+
+    def test_a_candidate_that_raises_is_parked_not_lost(self, engine, persona_repo):
+        """THE PARK IS UNCONDITIONAL: a candidate that RAISES is parked too.
+
+        The gate's `process_candidate` can raise (a store failure).  If
+        the park only ran on the normal exit, the raising candidate AND
+        every candidate after it would be dropped from the JEV lane.
+        """
+        class _ExplodingRepo(MemoirPersonaRepository):
+            def create_draft(self, agent_id, body, source="ari"):
+                raise RuntimeError("the proposal store exploded")
+
+        def fake_llm(prompt):
+            if "Taxonomy:" in prompt:
+                return json.dumps({
+                    "classification": "new_rule",
+                    "reasoning": "Valid new rule.",
+                })
+            return "# Ari Persona\n\nUpdated with rule."
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=_ExplodingRepo(engine),
+            llm_caller=fake_llm,
+        )
+        syn1 = _make_synthesis(engine, claim="Rule 1 to integrate")
+        syn2 = _make_synthesis(engine, claim="Rule 2 to integrate")
+
+        with pytest.raises(RuntimeError):
+            svc.process_pass(
+                new_syntheses=[syn1, syn2],
+                max_composition_calls=MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
+            )
+
+        # BOTH candidates are parked — the one that raised and the one
+        # after it.  Neither is lost.
+        for syn in (syn1, syn2):
+            entry = svc.get_ledger_entry(syn.id)
+            assert entry is not None
+            assert entry.status == "pending"

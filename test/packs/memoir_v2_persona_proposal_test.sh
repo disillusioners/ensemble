@@ -52,10 +52,24 @@ fi
 
 EXPECTED_PASSED_N=5
 
+# The MEASURED node count at the pin (2026-11-10, this worktree):
+# TestProposalCreationAndIsolation (1) + TestHumanLaneEnforcement (3)
+# + TestMutationLegB (1).
+#
+# THE DELTA'S OWN LEGS ARE SELECTOR-REGISTERED (the pack-orphan class):
+# the selector below names EVERY class in the module EXPLICITLY and the
+# node-count pin moves IN THE SAME COMMIT as the legs.
+#
+# THE FIX-ROUND LEG (2026-11-10): TestMutationLegB is now a PRODUCTION
+# REVERT recipe — it calls the PRODUCTION approve() with a non-session
+# actor and asserts HumanLaneRequiredError.  The self-mutating subclass
+# it replaced could not be reddened by ANY production revert.
+
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-280}"
 LOG="${TMPDIR:-/tmp}/${PACK_NAME}.log"
 
 timeout "${TIMEOUT_S}" "${PY}" -m pytest "${TARGET}" \
+  -k "TestProposalCreationAndIsolation or TestHumanLaneEnforcement or TestMutationLegB" \
   -q --tb=short -p no:randomly --override-ini="addopts=" 2>&1 | tee "${LOG}"
 EXIT_CODE=${PIPESTATUS[0]}
 if [ "$EXIT_CODE" -eq 124 ]; then

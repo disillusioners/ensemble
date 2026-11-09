@@ -652,6 +652,44 @@ Phase 5 delivers the JEV-gated Persona Evolution subsystem, activating
 the dormant v1 persona authoring seam per plan `v2-phase5-plan.md`
 (flags V2-9, V2-13, V2-20, V2-37, V2-38, V2-39, DD-9).
 
+**THE FIX ROUND (2026-11-10) — what this commit changes.** The
+independent mutation-grade review found 2 CRITICALs, 3 unpinned
+properties and 3 advisories against the phase-5 implementation; this
+commit is the fix round for all of them except the carried F4 (§15.5).
+
+* **C1 — the silent production loss.** The per-pass composition budget
+  ended the candidate loop with a bare `break`, so a candidate the
+  budget never reached was **dropped with NO ledger row**. The ONLY
+  re-selection source is `get_pending_candidates()` (the ledger) and the
+  sole production caller passes ONLY this pass's accepted syntheses —
+  so such a candidate was **PERMANENTLY LOST** from the JEV lane, the
+  exact data loss V2-38 exists to forbid. It fires on the DEFAULT
+  configuration whenever a pass yields ≥ 2 gated candidates (the
+  synthesis cap is 4). **THE MECHANISM:** `process_pass` now records
+  the ids it processed and, after the loop, parks EVERY candidate it did
+  NOT process (`_park_unprocessed_candidates`) as a `pending` ledger row
+  with `last_error='deferred:composition_budget'`. A candidate whose
+  classification is ALREADY KNOWN keeps it (the retry must not re-pay
+  the classifier); a candidate that was never classified is stored with
+  `classification=NULL` and is classified on the next pass (it was never
+  classified — there is nothing to store). A candidate that ALREADY has
+  a row is left alone, so a diagnostic `last_error` is never clobbered.
+* **C2 — the gate integrity.** The two AC6 legs were SELF-MUTATING
+  (they asserted a property of a subclass the test itself defined) and
+  were therefore UNFALSIFIABLE. They are now production-revert recipes
+  (§15.2 rows 1-2), and the receipts that claimed otherwise are
+  CORRECTED.
+* **C3 — the two unpinned properties.** The suppression rule
+  (V2-D 5.2 / AC1) and the heuristic ORDERING (V2-D 5.1) now have
+  legs that a production revert reddens (§15.2 rows 5-6).
+* **F1 / F2 — the doubly-broken local fallback lane** is FIXED and
+  exercised (§15.2 rows 7-9); the production-wiring verdict is in §15.5.
+* **F3 — the router's production branch** (the engine fallback) is now
+  the PRIMARY case in the router tests (§15.2 row 3 + the new
+  `TestProductionRepositoryResolution` class).
+* **The precedence** — the plan's comparator — is implemented and the
+  ambiguity is recorded for the caller's ruling (§15.4).
+
 ### 15.1 PREMISE-DRIFT Reconciliation
 
 The dispatch brief noted: *"mark_superseded exercised from the SERVICE
@@ -671,23 +709,133 @@ layer. The allowed caller set was updated in the invariant test:
 - `daemon/routers/memoir.py` (calls `list_pending`, `approve`, `reject`)
 - `daemon/api.py` (wiring and mount)
 
-### 15.2 The Mutation Receipts (AC6 / §13 Format)
+### 15.2 The Mutation Receipts (AC6 / §13 Format) — CORRECTED
 
-Every AC6 mutation leg was verified:
+**THE CORRECTION OF ROWS 1-2 (the independent mutation-grade review's
+finding).** The rows this section carried before were **receipts of
+NOTHING**: each leg defined a `MutatedService` / `MutatedRepo` subclass
+INSIDE the test and asserted that the mutant it had just built
+misbehaved. **No production revert could redden them** — they asserted
+a property of the test's own subclass, not of the production code. The
+"Byte-identical" column attested to a restore of a mutation that never
+touched production. Both legs are now **PRODUCTION REVERT recipes**: the
+leg asserts PRODUCTION behavior, and the mutation is applied to the
+production file, run, observed RED, and restored byte-identically.
 
-| # | Recipe | Node | Observed RED marker | Restore |
-|---|---|---|---|---|
-| 1 | AC6 (a) — Defaulting to `none` on classifier exception | `tests/unit/test_memoir_v2_jev_classifier.py::TestMutationLegA::test_defaulting_to_none_would_fail_ac2` | `AssertionError: Mutation should produce suppressed instead of parked` | Byte-identical |
-| 2 | AC6 (b) — Removing `_require_human_lane` from `approve()` | `tests/unit/test_memoir_v2_persona_proposal.py::TestMutationLegB::test_removing_human_lane_guard_would_fail_ac4` | `AssertionError: Mutation allowed bearer approval without raising HumanLaneRequiredError` | Byte-identical |
-| 3 | AC6 (c) — Approving via bearer token | `tests/unit/test_memoir_v2_persona_router.py::TestMutationLegC::test_bearer_approval_is_refused` | `assert resp.status_code == 403` with `HUMAN_LANE_REQUIRED` (bearer approval refused) | Byte-identical |
+Every recipe below was run in this worktree on 2026-11-10 against the
+production files, with the ambient `POSTGRES_*` variables scrubbed
+per-variable (never the `env -u POSTGRES_*` no-op glob). Every mutated
+file was restored **byte-identically** (sha256 before == sha256 after),
+and the packs were re-run GREEN after the restore.
+
+| # | Recipe (the PRODUCTION revert) | Node(s) | Observed RED marker | What it ACTUALLY proves | Restore |
+|---|---|---|---|---|---|
+| 1 | **AC6 (a)** — the classifier exception DEFAULTS to `none` (the production revert of the park) | `tests/unit/test_memoir_v2_jev_classifier.py::TestCandidateParkingInJevLedger::test_classifier_failure_parks_candidate_with_classification_null` | `AssertionError: assert 'suppressed' == 'pending'` (:241) | the production classifier-failure path PARKS (never defaults to `none`) | sha256-identical (`fbf22ad83d53`) |
+| | | `…::TestCandidateParkingInJevLedger::test_classifier_failure_retries_and_terminalizes_at_max_attempts` | `AssertionError: assert 'suppressed' == 'pending'` (:264) | the retry ladder counts attempts and reaches `terminal:gate_unavailable` at 5 | sha256-identical |
+| | | `…::TestMutationLegA::test_a_failing_classifier_parks_the_candidate_and_writes_no_version` | `AssertionError: assert 'suppressed' == 'pending'` (:339) | the park is durable AND no persona version is drafted for a failed classification | sha256-identical |
+| 2 | **AC6 (b)** — `_require_human_lane` removed from the production `approve()` | `tests/unit/test_memoir_v2_persona_proposal.py::TestMutationLegB::test_the_production_approve_refuses_a_non_session_actor` | `Failed: DID NOT RAISE <class 'daemon.services.prompt_version_service.HumanLaneRequiredError'>` (:177) | the PRODUCTION `approve()` refuses a non-session actor (no subclass, no mutant) | sha256-identical (`b3b7abe8ff85`) |
+| | | `…::TestHumanLaneEnforcement::test_approve_with_bearer_lane_raises_human_lane_required_error` | `Failed: DID NOT RAISE <class '…HumanLaneRequiredError'>` (:142) | the refusal is fail-closed — the version stays `pending_approval` | sha256-identical |
+| 3 | **AC6 (c)** — the route stops mapping `HumanLaneRequiredError` to 403 | `tests/unit/test_memoir_v2_persona_router.py::TestMutationLegC::test_bearer_approval_is_refused` | `assert 500 == 403` (:391) | the HTTP surface maps the refusal to 403 `HUMAN_LANE_REQUIRED` | sha256-identical (`b4943fe42e67`) |
+| 4 | **C1** — the bare composition-budget break (no ledger row — the pre-fix shape) | `tests/unit/test_memoir_v2_persona_composition.py::TestCompositionBudgetPerPass::test_a_budget_deferred_candidate_is_parked_and_picked_up_next_pass` | `assert None is not None` (:244) | a candidate the budget never reached is PARKED — without the row it is LOST from the JEV lane forever | sha256-identical (`fbf22ad83d53`) |
+| 4b | **C1(b)** — the park is skipped when NO candidate was processed (the failure path) | `tests/unit/test_memoir_v2_persona_composition.py::TestCompositionBudgetPerPass::test_a_candidate_that_raises_is_parked_not_lost` | `assert None is not None` | the park is UNCONDITIONAL — a candidate that RAISES is parked too, and so is every candidate after it | sha256-identical (`fbf22ad83d53`) |
+| 5 | **C3(a)** — the SUPPRESSED classes draft + submit (the suppression rule removed) | `tests/unit/test_memoir_v2_jev_classifier.py::TestSuppressionRule::test_a_reinforcement_candidate_never_creates_or_submits_a_version` | `AssertionError: assert 'drafted' == 'suppressed'` (:382) | `reinforcement` NEVER creates or submits a version (V2-D 5.2) | sha256-identical |
+| | | `…::TestSuppressionRule::test_a_trivial_candidate_never_creates_or_submits_a_version` | `AssertionError: assert 'pending' == 'suppressed'` (:407) | the same for the heuristic `none` path | sha256-identical |
+| 6 | **C3(b)** — the heuristic result is IGNORED (the LLM is called for every candidate) | `tests/unit/test_memoir_v2_jev_classifier.py::TestHeuristicOrdering::test_a_trivial_candidate_makes_zero_llm_calls` | `assert ['You are the…r backticks.'] == []` (:440) | the rule filter runs FIRST — a trivial candidate makes ZERO LLM calls (V2-D 5.1) | sha256-identical |
+| | | `…::TestHeuristicOrdering::test_a_verbatim_candidate_makes_zero_llm_calls` | `assert ['You are the…r backticks.'] == []` (:460) | the same for the verbatim-overlap path | sha256-identical |
+| 7 | **F1** — the failover arguments REVERSED (the pre-fix shape) | `tests/unit/test_memoir_v2_jev_classifier.py::TestLocalFallbackLane::test_the_local_fallback_lane_calls_the_provider` | `AttributeError: 'function' object has no attribute 'get'` | the gate's OWN failover lane is wired with the right argument order | sha256-identical |
+| 8 | **F2(a)** — `httpx_timeout` called with the keyword it does not accept | (the same node) | `TypeError: httpx_timeout() got an unexpected keyword argument 'connect'` | the local lane calls the house timeout helper correctly | sha256-identical |
+| 9 | **F2(b)** — the per-call timeout is HARD-CODED (it stops riding the knob) | (the same node) | `assert 45.0 == 12.5` (:619) | the local lane's timeout RIDES `call_timeout_s` (no second copy of the truth) | sha256-identical |
+| 10 | **PREC** — the precedence resolution removed (a multi-label response is refused) | `tests/unit/test_memoir_v2_jev_classifier.py::TestPrecedenceResolution::test_a_multi_label_response_resolves_by_precedence` | `JevClassificationError: Classification "['new_rule', 'conflict']" not in ('conflict', 'boundary_change', 'new_rule', 'reinforcement', 'none')` | a multi-label response resolves by the documented precedence | sha256-identical |
+| | | `…::TestPrecedenceResolution::test_a_compound_string_response_resolves_by_precedence` | `JevClassificationError: Classification 'boundary_change, new_rule' not in (…)` | the same for a compound string | sha256-identical |
+
+**NO RECEIPT CLAIMS A PROPERTY IT DOES NOT EXERCISE.** Rows 1-3 are
+now production reverts (they were receipts of nothing before). The
+"what it actually proves" column is the receipt's own claim, and every
+row's RED marker was observed in THIS worktree on 2026-11-10.
 
 ### 15.3 Test Pack Pins (Measured with `--collect-only`, Same-Commit Registered)
 
-Four new test packs land with this commit:
+The four phase-5 packs, re-measured in this fix round (2026-11-10).
+Every class in every module is now named EXPLICITLY in the pack's `-k`
+selector, and the node-count pins move in the SAME commit as the legs
+(the LANE RULE of §14):
 
-| Pack | Measured Nodes | Verdict |
-|---|---|---|
-| `memoir_v2_jev_classifier_test` | 14 | PASS |
-| `memoir_v2_persona_composition_test` | 5 | PASS |
-| `memoir_v2_persona_proposal_test` | 5 | PASS |
-| `memoir_v2_persona_router_test` | 12 | PASS |
+| Pack | Before (phase 5) | After (this fix round) | Verdict |
+|---|---|---|---|
+| `memoir_v2_jev_classifier_test` | 14 | **26** | PASS |
+| `memoir_v2_persona_composition_test` | 5 | **7** | PASS |
+| `memoir_v2_persona_proposal_test` | 5 | **5** | PASS |
+| `memoir_v2_persona_router_test` | 12 | **15** | PASS |
+
+The class census (measured with `--collect-only -q`):
+
+| Module | Classes (node counts) |
+|---|---|
+| `test_memoir_v2_jev_classifier.py` | `TestJevHeuristicFilter` (6) · `TestJevLlmClassifier` (4) · `TestCandidateParkingInJevLedger` (3) · `TestHeuristicOrdering` (2) · `TestLocalFallbackLane` (2) · `TestPrecedenceResolution` (5) · `TestSuppressionRule` (2) · `TestMutationLegA` (1) · `TestProductionWiring` (1) |
+| `test_memoir_v2_persona_composition.py` | `TestPersonaComposition` (1) · `TestUnbuildableDiffParking` (3) · `TestCompositionBudgetPerPass` (3) |
+| `test_memoir_v2_persona_proposal.py` | `TestProposalCreationAndIsolation` (1) · `TestHumanLaneEnforcement` (3) · `TestMutationLegB` (1) |
+| `test_memoir_v2_persona_router.py` | `TestMemoirPersonaRouter` (11) · `TestProductionRepositoryResolution` (3) · `TestMutationLegC` (1) |
+
+### 15.4 The PRECEDENCE AMBIGUITY — the plan's comparator, and the caller's ruling
+
+**THE AMBIGUITY (recorded for the ruling).** The plan writes the gated
+classes as `conflict > boundary_change > new_rule`
+(`v2-phase5-plan.md` §1.2, §3.1). That reads as a taxonomy PRIORITY,
+but the plan never defines a COMPARATOR: nothing said what an
+ambiguous or multi-label classifier response RESOLVES to. Before this
+fix round the production parser accepted ONE label and raised
+`JevClassificationError` for anything else — so a model answering
+`["conflict", "new_rule"]` was PARKED (a candidate the gate could not
+adjudicate), and the plan's `>` was never exercised by ANY code path.
+
+**THE INTERPRETATION IMPLEMENTED.** A documented precedence
+RESOLUTION now applies to the classifier output:
+
+* the comparator is the taxonomy order —
+  `conflict > boundary_change > new_rule > reinforcement > none`
+  (`JEV_CLASSIFICATION_PRECEDENCE`);
+* a response carrying MORE THAN ONE known label resolves to the FIRST
+  match in that order;
+* a response carrying exactly ONE known label is unchanged;
+* a response carrying NO known label is still a FAILURE
+  (`JevClassificationError`) — the candidate is PARKED, never defaulted.
+
+**WHY THE GATED CLASSES OUTRANK THE SUPPRESSED ONES.** The plan's
+`>` only orders the three gated classes; it says nothing about a
+gated class versus a suppressed one. This implementation resolves a
+gated class ABOVE a suppressed one, and the reason is V2-38: the
+lane's constitution forbids a SILENT loss of a candidate. A model that
+says "this contradicts an existing rule" and also mentions "none" has
+reported a conflict; downgrading that to a suppressed class would drop
+a real identity change without a trace — exactly the failure mode the
+ledger was built to prevent. The direction chosen therefore favours
+VISIBILITY over persona-churn restraint. The alternative reading (a
+suppressed class masks a gated one) is defensible on churn grounds and
+is the caller's to overrule.
+
+**THE CALLER'S RULING IS REQUESTED ON:** (a) the gated-over-suppressed
+direction, and (b) whether the resolution should stay INSIDE the
+classifier parser (as implemented) or move to the taxonomy itself.
+
+### 15.5 The CARRY — F4 (house-inherited, fail-closed, NOT changed here)
+
+**F4: `auth_method='internal'` approve returns 500.** The actor's
+anti-forgery `ValueError` escapes outside the router's `try` block
+(`daemon/routers/memoir.py:158-165`). This shape is **HOUSE-INHERITED**
+— `daemon/routers/prompts.py:635` has the identical shape — and it is
+**fail-closed**: the version stays `pending_approval` and the persona
+pointer does not move. Changing shared router behavior is out of this
+lane's scope, so the defect is CARRIED and DISCLOSED here, not fixed.
+
+**THE PRODUCTION WIRING VERDICT (F1 / F2 / F3).** The gate DOES
+classify in production today: the reflection service constructs
+`MemoirPersonaGateService` and injects **its own** caller
+(`daemon/services/memoir_reflection_service.py:384-393`), so the gate
+never uses its own fallback lane in production — which is why the
+doubly-broken local lane was dormant. The local lane is now FIXED and
+exercised by `TestLocalFallbackLane`, and the wiring itself is pinned
+by `TestProductionWiring` (the gate's `_llm_caller` IS the reflection
+service's caller object, and the gate rides the reflection service's
+`call_timeout_s` knob).
+
+

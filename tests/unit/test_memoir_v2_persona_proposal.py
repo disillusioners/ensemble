@@ -17,8 +17,8 @@ Coverage:
   - approve() with actor.auth_method == "internal" or None raises HumanLaneRequiredError
 * Write purity (Write Purity Pin §2-Q4):
   - create_draft / submit exercised strictly from service layer, not daemon/tools/memoir.py
-* AC6 Mutation leg (b):
-  - Removing _require_human_lane from approve() flips AC4 RED.
+* AC6 Mutation leg (b) — a PRODUCTION REVERT recipe:
+  - removing _require_human_lane from the production approve() flips AC4 RED.
 """
 
 from __future__ import annotations
@@ -159,25 +159,29 @@ class TestHumanLaneEnforcement:
 
 
 class TestMutationLegB:
-    """AC6 (b): Removing _require_human_lane from approve() flips AC4 RED."""
+    """AC6 (b): the PRODUCTION approve() refuses a non-session actor.
 
-    def test_removing_human_lane_guard_would_fail_ac4(self, persona_repo):
-        """Simulate mutation: approve without calling _require_human_lane."""
-        class MutatedRepo(MemoirPersonaRepository):
-            def approve(self, version_id, actor):
-                # MUTATION: bypass _require_human_lane
-                return self._transition(version_id, "approved", actor=actor)
+    THE RECIPE IS A PRODUCTION REVERT (implementation notes §15.2):
+    removing ``_require_human_lane`` from the production ``approve()``
+    reddens THIS node (together with
+    ``test_approve_with_bearer_lane_raises_human_lane_required_error``).
+    Nothing here mutates anything: a self-mutating leg cannot be
+    reddened by any production revert, so it proves nothing.
+    """
 
-        mutated = MutatedRepo(persona_repo.engine)
-        draft = mutated.create_draft("ari", "# Mutated", source="ari")
-        pending = mutated.submit(draft.id)
+    def test_the_production_approve_refuses_a_non_session_actor(self, persona_repo):
+        draft = persona_repo.create_draft("ari", "# Ari Persona v2", source="ari")
+        pending = persona_repo.submit(draft.id)
 
-        # Under valid AC4 behavior, approving with bearer MUST raise HumanLaneRequiredError
-        raised = False
-        try:
-            mutated.approve(pending.id, _Actor("bearer"))
-        except HumanLaneRequiredError:
-            raised = True
+        # THE PRODUCTION CALL — no subclass, no mutated repository.
+        with pytest.raises(HumanLaneRequiredError):
+            persona_repo.approve(pending.id, _Actor("bearer"))
 
-        # Assert that the mutation fails the AC4 requirement
-        assert not raised, "Mutation allowed bearer approval without raising HumanLaneRequiredError"
+        # FAIL-CLOSED: the version stays pending_approval.
+        ver = persona_repo.get_version(pending.id)
+        assert ver is not None
+        assert ver.status == "pending_approval"
+        # The pointer did not move.
+        current = persona_repo.get_current("ari")
+        assert current is not None
+        assert current.version == 1

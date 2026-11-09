@@ -22,6 +22,8 @@ Coverage:
   - 503 AUTH_NOT_CONFIGURED when auth is off
 * Hermetic auth environment:
   - Ambient ENSEMBLE_AUTH_* scrubbed via autouse fixture per project POK
+* The PRODUCTION repository-resolution branch (F3):
+  - the manager exposes the ENGINE only -> the engine fallback is used
 * AC6 Mutation leg (c):
   - Approving via bearer token flips AC5 RED.
 """
@@ -29,9 +31,10 @@ Coverage:
 from __future__ import annotations
 
 import os
+import types
 from unittest.mock import MagicMock
 import pytest
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine, select
@@ -112,6 +115,30 @@ def db_engine():
     engine.dispose()
 
 
+class _ProductionManager:
+    """THE PRODUCTION MANAGER SHAPE — it exposes the ENGINE only.
+
+    NO production code ever sets ``manager._memoir_persona_repo``: the
+    production branch of ``_get_persona_repo`` is the ENGINE FALLBACK
+    (``daemon/routers/memoir.py:91-94``).  A ``MagicMock`` manager would
+    answer ``hasattr(manager, "_memoir_persona_repo")`` with True (the
+    mock auto-creates attributes) and would therefore exercise a branch
+    production never takes.
+    """
+
+    def __init__(self, engine):
+        self.engine = engine
+
+
+class _StubRequest:
+    """A minimal request stub for the repository-resolution seam."""
+
+    def __init__(self, manager):
+        self.app = types.SimpleNamespace(
+            state=types.SimpleNamespace(manager=manager)
+        )
+
+
 @pytest.fixture
 def repo(db_engine):
     r = MemoirPersonaRepository(db_engine)
@@ -132,10 +159,8 @@ def app(db_engine, repo):
     application.include_router(api)
 
     application.state.auth_config = on_auth_config()
-    manager = MagicMock()
-    manager.engine = db_engine
-    manager._memoir_persona_repo = repo
-    application.state.manager = manager
+    # THE PRODUCTION SHAPE — the engine fallback branch.
+    application.state.manager = _ProductionManager(db_engine)
 
     application.add_middleware(_AuthInjectionMiddleware, role="session")
     return application
@@ -280,10 +305,8 @@ class TestMemoirPersonaRouter:
 
         # auth_config is None (auth OFF)
         application.state.auth_config = None
-        manager = MagicMock()
-        manager.engine = db_engine
-        manager._memoir_persona_repo = repo
-        application.state.manager = manager
+        # THE PRODUCTION SHAPE — the engine fallback branch.
+        application.state.manager = _ProductionManager(db_engine)
 
         c = TestClient(application, raise_server_exceptions=False)
         resp = c.get("/api/memoir/persona/pending")
@@ -306,6 +329,51 @@ class TestMemoirPersonaRouter:
             ("/api/memoir/persona/{version_id}/approve", ("POST",)),
             ("/api/memoir/persona/{version_id}/reject", ("POST",)),
         }
+
+
+class TestProductionRepositoryResolution:
+    """F3: the PRODUCTION branch — the ENGINE FALLBACK.
+
+    ``daemon/routers/memoir.py:89-94`` prefers a
+    ``manager._memoir_persona_repo`` attribute that NO production code
+    ever sets; production resolves the repository from the manager's
+    ENGINE.  These legs cover that branch directly.
+    """
+
+    def test_the_production_manager_resolves_the_repo_through_the_engine_fallback(
+        self, db_engine
+    ):
+        from daemon.routers.memoir import _get_persona_repo
+
+        manager = _ProductionManager(db_engine)
+        # NO production code sets this attribute.
+        assert not hasattr(manager, "_memoir_persona_repo")
+
+        request = _StubRequest(manager)
+        resolved = _get_persona_repo(request)
+        assert isinstance(resolved, MemoirPersonaRepository)
+        assert resolved.engine is db_engine
+
+    def test_an_explicit_repo_attribute_is_still_honored(self, db_engine, repo):
+        """The fake-attribute branch — an EXTRA case, never the only one."""
+        from daemon.routers.memoir import _get_persona_repo
+
+        manager = _ProductionManager(db_engine)
+        manager._memoir_persona_repo = repo
+
+        request = _StubRequest(manager)
+        resolved = _get_persona_repo(request)
+        assert resolved is repo
+
+    def test_a_manager_without_an_engine_is_refused(self):
+        from daemon.routers.memoir import _get_persona_repo
+
+        manager = _ProductionManager(None)
+        request = _StubRequest(manager)
+        with pytest.raises(HTTPException) as excinfo:
+            _get_persona_repo(request)
+        assert excinfo.value.status_code == 503
+        assert excinfo.value.detail["error"] == "MEMOIR_UNAVAILABLE"
 
 
 class TestMutationLegC:

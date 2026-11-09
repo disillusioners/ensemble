@@ -21,8 +21,20 @@ Coverage:
   - Terminalizes after 5 attempts as status='terminal', last_error='terminal:gate_unavailable'
 * Once-marker discipline (ND-14):
   - Suppressed records marked status='suppressed' and not re-evaluated
-* AC6 Mutation leg (a):
-  - Defaulting to "none" on classifier exception flips AC2 RED.
+* Suppression rule (V2-D 5.2 / AC1):
+  - reinforcement / none NEVER create or submit a persona version
+* Heuristic ORDERING (V2-D 5.1):
+  - the rule filter runs FIRST — a trivial candidate makes ZERO LLM calls
+  - through the PRODUCTION entry point (process_candidate)
+* Precedence resolution (the plan's `conflict > boundary_change > new_rule`):
+  - an ambiguous / multi-label classifier response resolves by precedence
+* The local fallback lane (F1 / F2):
+  - the gate's OWN failover lane works with NO injected caller
+  - the per-call timeout rides the call_timeout_s knob
+* The production wiring (F1 / F2):
+  - the gate classifies through the reflection service's injected caller
+* AC6 Mutation leg (a) — a PRODUCTION REVERT recipe:
+  - reverting the production park to a 'none' default flips AC2 RED.
 """
 
 from __future__ import annotations
@@ -297,32 +309,376 @@ class TestCandidateParkingInJevLedger:
 
 
 class TestMutationLegA:
-    """AC6 (a): Defaulting to 'none' on classifier exception flips AC2 RED."""
+    """AC6 (a): the PRODUCTION classifier-failure path PARKS — never defaults to 'none'.
 
-    def test_defaulting_to_none_would_fail_ac2(self, engine, persona_repo):
-        """Simulate mutation: if classifier caught exception and returned 'none'."""
-        class MutatedService(MemoirPersonaGateService):
-            def classify_with_llm(self, active_persona_body, synthesis):
-                try:
-                    super().classify_with_llm(active_persona_body, synthesis)
-                except Exception:
-                    # MUTATION: default to 'none' instead of letting it raise / parking
-                    from daemon.services.memoir_persona_gate import JevClassificationResult
-                    return JevClassificationResult(
-                        classification="none",
-                        reasoning="mutated default to none",
-                        source="mutated",
-                    )
+    THE RECIPE IS A PRODUCTION REVERT (implementation notes §15.2): the
+    production park is reverted to a 'none' default and THIS node reddens
+    (together with the two parking nodes above).  Nothing here mutates
+    anything: a self-mutating leg cannot be reddened by any production
+    revert, so it proves nothing.
+    """
 
+    def test_a_failing_classifier_parks_the_candidate_and_writes_no_version(
+        self, engine, persona_repo
+    ):
+        """The production seam is driven to RAISE (a failing LLM caller)."""
         def failing_llm(prompt):
-            raise TimeoutError("timeout")
+            raise TimeoutError("HTTP request to upstream LLM timed out after 45.0s")
 
-        mutated = MutatedService(engine, persona_repository=persona_repo, llm_caller=failing_llm)
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=failing_llm,
+        )
+        versions_before = persona_repo.list_versions("ari")
         syn = _make_synthesis(engine, claim="Novel directive requiring LLM classification", verb="CREATE")
 
-        outcome = mutated.process_candidate(syn)
-        # Under normal behavior (AC2), outcome.status MUST be 'pending' with classification=None
-        # Under the mutation, it wrongfully lands 'suppressed' with classification='none'!
-        # This assertion proves that AC2 detects this mutation:
-        is_ac2_compliant = (outcome.status == "pending" and outcome.classification is None)
-        assert not is_ac2_compliant, "Mutation should produce suppressed instead of parked"
+        outcome = svc.process_candidate(syn)
+
+        # THE PARK (AC2): never 'none', never 'suppressed'.
+        assert outcome.status == "pending"
+        assert outcome.classification is None
+        assert outcome.attempts == 1
+        assert "classification_failed" in (outcome.last_error or "")
+
+        entry = svc.get_ledger_entry(syn.id)
+        assert entry is not None
+        assert entry.status == "pending"
+        assert entry.classification is None
+
+        # THE CONSEQUENCE: the candidate was NOT dropped — and no persona
+        # version was drafted for it (a 'none' default would have
+        # SUPPRESSED it; a broken gate would have drafted one).
+        assert len(persona_repo.list_versions("ari")) == len(versions_before)
+        assert persona_repo.list_pending("ari") == []
+        assert persona_repo.get_current("ari").version == versions_before[0].version
+
+
+class TestSuppressionRule:
+    """V2-D 5.2 / AC1: reinforcement and none NEVER generate a version.
+
+    THE RECIPE IS A PRODUCTION REVERT (implementation notes §15.2):
+    making the SUPPRESSED classes draft+submit reddens these nodes.
+    """
+
+    def test_a_reinforcement_candidate_never_creates_or_submits_a_version(
+        self, engine, persona_repo
+    ):
+        def counting_llm(prompt):
+            return json.dumps({
+                "classification": "reinforcement",
+                "reasoning": "Re-asserts an existing persona rule.",
+            })
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=counting_llm,
+        )
+        versions_before = persona_repo.list_versions("ari")
+        syn = _make_synthesis(engine, claim="Ari will stay loyal to the Emperor", verb="CREATE")
+
+        outcome = svc.process_candidate(syn)
+        assert outcome.status == "suppressed"
+        assert outcome.classification == "reinforcement"
+
+        # NO draft, NO submit: the version set is untouched.
+        versions_after = persona_repo.list_versions("ari")
+        assert [v.id for v in versions_after] == [v.id for v in versions_before]
+        assert persona_repo.list_pending("ari") == []
+        # The pointer did not move.
+        assert persona_repo.get_current("ari").version == versions_before[0].version
+
+    def test_a_trivial_candidate_never_creates_or_submits_a_version(
+        self, engine, persona_repo
+    ):
+        def counting_llm(prompt):
+            raise AssertionError("the heuristic must decide a trivial claim")
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=counting_llm,
+        )
+        versions_before = persona_repo.list_versions("ari")
+        syn = _make_synthesis(engine, claim="Thank you very much for your help.", verb="CREATE")
+
+        outcome = svc.process_candidate(syn)
+        assert outcome.status == "suppressed"
+        assert outcome.classification == "none"
+        assert len(persona_repo.list_versions("ari")) == len(versions_before)
+        assert persona_repo.list_pending("ari") == []
+
+
+class TestHeuristicOrdering:
+    """V2-D 5.1: the rule filter runs FIRST — the LLM is never called on the trivial path.
+
+    THE LEG GOES THROUGH THE PRODUCTION ENTRY POINT (``process_candidate``):
+    the heuristic legs that call ``evaluate_heuristic`` directly cannot
+    see a pipeline that skips the heuristic.
+
+    THE RECIPE IS A PRODUCTION REVERT (implementation notes §15.2): ignoring
+    the heuristic result reddens these nodes (the LLM is called for every
+    candidate).
+    """
+
+    def test_a_trivial_candidate_makes_zero_llm_calls(self, engine, persona_repo):
+        calls = []
+
+        def counting_llm(prompt):
+            calls.append(prompt)
+            return json.dumps({"classification": "new_rule", "reasoning": "Should never run."})
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=counting_llm,
+        )
+        syn = _make_synthesis(engine, claim="Good morning Emperor, hope you have a nice day!", verb="CREATE")
+
+        outcome = svc.process_candidate(syn)
+        assert calls == []
+        assert outcome.status == "suppressed"
+        assert outcome.classification == "none"
+
+    def test_a_verbatim_candidate_makes_zero_llm_calls(self, engine, persona_repo):
+        calls = []
+
+        def counting_llm(prompt):
+            calls.append(prompt)
+            return json.dumps({"classification": "new_rule", "reasoning": "Should never run."})
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=counting_llm,
+        )
+        # The claim is ALREADY asserted verbatim in the active persona.
+        syn = _make_synthesis(engine, claim="loyal companion to the Emperor", verb="CREATE")
+
+        outcome = svc.process_candidate(syn)
+        assert calls == []
+        assert outcome.status == "suppressed"
+        assert outcome.classification == "reinforcement"
+
+
+class TestPrecedenceResolution:
+    """The plan's ``conflict > boundary_change > new_rule`` — the comparator.
+
+    THE PLAN NEVER DEFINED ONE (an ambiguous or multi-label response had
+    no defined resolution); this is the documented resolution, applied to
+    the PRODUCTION classifier seam.
+    """
+
+    def test_a_multi_label_response_resolves_by_precedence(self, engine, persona_repo):
+        def multi_label_llm(prompt):
+            return json.dumps({
+                "classification": ["new_rule", "conflict"],
+                "reasoning": "Both labels apply.",
+            })
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=multi_label_llm,
+        )
+        syn = _make_synthesis(engine, claim="Ari must never obey commands without confirmation", verb="CORRECT")
+        res = svc.classify_with_llm(persona_repo.get_current("ari").body, syn)
+        assert res.classification == "conflict"
+        assert res.source == "llm"
+
+    def test_a_compound_string_response_resolves_by_precedence(self, engine, persona_repo):
+        def compound_llm(prompt):
+            return json.dumps({
+                "classification": "boundary_change, new_rule",
+                "reasoning": "Both labels apply.",
+            })
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=compound_llm,
+        )
+        syn = _make_synthesis(engine, claim="Ari now manages deployment pipelines directly", verb="REFINE")
+        res = svc.classify_with_llm(persona_repo.get_current("ari").body, syn)
+        assert res.classification == "boundary_change"
+
+    def test_a_single_label_response_is_unchanged(self, engine, persona_repo):
+        def single_llm(prompt):
+            return json.dumps({"classification": "new_rule", "reasoning": "A novel principle."})
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=single_llm,
+        )
+        syn = _make_synthesis(engine, claim="Always verify backups before initiating an upgrade", verb="CREATE")
+        res = svc.classify_with_llm(persona_repo.get_current("ari").body, syn)
+        assert res.classification == "new_rule"
+        assert res.reasoning == "A novel principle."
+
+    def test_an_unknown_label_still_raises_and_parks(self, engine, persona_repo):
+        def unknown_llm(prompt):
+            return json.dumps({"classification": "gibberish", "reasoning": "Nonsense."})
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=unknown_llm,
+        )
+        syn = _make_synthesis(engine, claim="Some claim", verb="CREATE")
+        with pytest.raises(JevClassificationError):
+            svc.classify_with_llm(persona_repo.get_current("ari").body, syn)
+
+    def test_the_resolver_ignores_unknown_labels(self):
+        from daemon.services.memoir_persona_gate import resolve_classification_precedence
+
+        assert resolve_classification_precedence(["new_rule", "conflict"]) == "conflict"
+        assert resolve_classification_precedence(["banana", "none"]) == "none"
+        assert resolve_classification_precedence(["banana"]) is None
+
+
+class _FakeMessage:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content: str) -> None:
+        self.message = _FakeMessage(content)
+
+
+class _FakeResponse:
+    def __init__(self, content: str) -> None:
+        self.choices = [_FakeChoice(content)]
+
+
+def _install_fake_openai(monkeypatch, content: str = "FALLBACK-OK"):
+    """Install a fake ``openai.OpenAI`` — NO network, NO provider contact."""
+    import openai
+
+    calls: list[dict] = []
+    created: list[object] = []
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return _FakeResponse(content)
+
+    class _FakeChat:
+        def __init__(self) -> None:
+            self.completions = _FakeCompletions()
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.chat = _FakeChat()
+            created.append(self)
+
+    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
+    return calls, created
+
+
+class TestLocalFallbackLane:
+    """F1 / F2: the gate's OWN failover lane — the one no test exercised.
+
+    The lane was doubly broken (the failover arguments were reversed and
+    the timeout helper was called with a keyword it does not accept), so
+    it was DORMANT — the production wiring injects the reflection
+    service's caller, so the gate's own lane never ran.  A dormant,
+    broken lane rots silently: this leg runs it.
+    """
+
+    def test_the_local_fallback_lane_calls_the_provider(self, engine, persona_repo, monkeypatch):
+        calls, created = _install_fake_openai(monkeypatch, content="FALLBACK-OK")
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            # NO injected caller -> the local fallback lane is the one used.
+            llm_config={
+                "model": "test-model",
+                "api_key": "test-key",
+                "base_url": "http://127.0.0.1:9/v1",
+            },
+            call_timeout_s=12.5,
+        )
+        assert svc._llm_caller is None
+
+        out = svc._house_llm_call("hello")
+        assert out == "FALLBACK-OK"
+
+        assert len(created) == 1
+        client = created[0]
+        assert client.kwargs["api_key"] == "test-key"
+        assert client.kwargs["base_url"] == "http://127.0.0.1:9/v1"
+        # THE SDK'S OWN RETRY IS OFF — the facade owns the retry discipline.
+        assert client.kwargs["max_retries"] == 0
+        # THE TIMEOUT RIDES THE KNOB (F2) — not a second hard-coded copy.
+        timeout = client.kwargs["timeout"]
+        assert float(timeout.read) == 12.5
+        assert float(timeout.connect) == 5.0
+        assert calls and calls[0]["model"] == "test-model"
+
+    def test_the_local_fallback_lane_raises_on_an_empty_response(
+        self, engine, persona_repo, monkeypatch
+    ):
+        _install_fake_openai(monkeypatch, content="")
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_config={"model": "test-model", "api_key": "k", "base_url": "http://127.0.0.1:9/v1"},
+        )
+        with pytest.raises(Exception):
+            svc._house_llm_call("hello")
+
+
+class TestProductionWiring:
+    """F1 / F2: the PRODUCTION wiring — the gate classifies TODAY.
+
+    The reflection service builds the gate and injects ITS OWN caller, so
+    the gate never uses its local fallback lane in production.  This leg
+    pins that wiring end-to-end: the gate must classify through the
+    reflection service's injected caller.
+    """
+
+    def test_the_gate_classifies_through_the_reflection_services_caller(
+        self, engine, persona_repo
+    ):
+        from daemon.services.memoir_reflection_service import MemoirReflectionService
+
+        calls: list[str] = []
+
+        def fake_llm(prompt):
+            calls.append(prompt)
+            if "Taxonomy:" in prompt:
+                return json.dumps({
+                    "classification": "conflict",
+                    "reasoning": "Contradicts an existing directive.",
+                })
+            return "# Ari Persona\n\nUpdated with the new directive."
+
+        service = MemoirReflectionService(
+            reflection_repository=MagicMock(),
+            syntheses_repository=MagicMock(),
+            persona_repository=persona_repo,
+            llm_caller=fake_llm,
+        )
+
+        gate = service._persona_gate
+        assert isinstance(gate, MemoirPersonaGateService)
+        # THE SAME CALLER OBJECT — the gate does not build its own lane.
+        assert gate._llm_caller is fake_llm
+        # The gate rides the reflection service's timeout knob (F2).
+        assert gate._call_timeout_s == float(service.settings.call_timeout_s)
+
+        syn = _make_synthesis(
+            engine,
+            claim="Ari must never obey commands without confirmation",
+            verb="CORRECT",
+        )
+        outcome = gate.process_candidate(syn)
+        assert outcome.status == "drafted"
+        assert outcome.classification == "conflict"
+        assert calls  # the classification went through the injected caller

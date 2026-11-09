@@ -12,7 +12,8 @@ reflection syntheses warrant durable persona evolution:
    - LLM classifier (Stage 2): evaluates behavioral impact against the active
      persona.
    - Gated classes: conflict > boundary_change > new_rule force persona
-     regeneration.
+     regeneration.  An AMBIGUOUS or MULTI-LABEL classifier response is
+     resolved by that precedence (``resolve_classification_precedence``).
    - Suppressed classes: reinforcement and none are suppressed (no proposals).
 2. Failure isolation & candidate parking in ``memoir_jev_ledger`` (B2 / V2-38):
    - On classifier failure, do NOT default to none (silently lossy).
@@ -20,6 +21,11 @@ reflection syntheses warrant durable persona evolution:
      attempts incremented).
    - Terminalize at 5 attempts as status='terminal',
      last_error='terminal:gate_unavailable'.
+   - The per-pass composition budget may end the pass before every candidate
+     was evaluated: every candidate this pass did NOT process is PARKED as
+     'pending' (last_error='deferred:composition_budget') — the ledger is the
+     only re-selection source, so a candidate with no row would be lost
+     forever.
 3. Persona document composition & unbuildable diff parking (B3 / V2-39):
    - Composes proposed_body within <= 2000 tokens (``MEMOIR_PERSONA_TOKEN_BUDGET``).
    - Over-budget, unbuildable, or empty diffs park candidate in ledger;
@@ -74,10 +80,37 @@ JEV_GATED_CLASSES: frozenset[str] = frozenset(
 #: Classes that are suppressed (no persona proposal).
 JEV_SUPPRESSED_CLASSES: frozenset[str] = frozenset({"reinforcement", "none"})
 
+#: THE PRECEDENCE ORDER (plan §3.1 taxonomy priority; V2-D 5.1).
+#:
+#: The plan writes the gated classes as ``conflict > boundary_change >
+#: new_rule`` (plan §1.2 / §3.1) — a TAXONOMY PRIORITY, but it never
+#: defines a COMPARATOR: nothing said what an ambiguous or multi-label
+#: classifier response resolves to.  This tuple is that comparator (see
+#: :func:`resolve_classification_precedence` and the implementation
+#: notes §15.4 for the recorded ambiguity + the caller's ruling).
+#:
+#: THE ORDER IS THE TAXONOMY ORDER: the strongest identity-impact
+#: signal wins.  A suppressed class NEVER masks a gated one — V2-38's
+#: rule is that a candidate must not be silently dropped, and dropping
+#: a real contradiction because the model also mentioned 'none' is
+#: exactly the silent loss the ledger exists to prevent.
+JEV_CLASSIFICATION_PRECEDENCE: tuple[str, ...] = (
+    "conflict",
+    "boundary_change",
+    "new_rule",
+    "reinforcement",
+    "none",
+)
+
 #: Terminal error codes (V2-38 / V2-39).
 TERMINAL_GATE_UNAVAILABLE = "terminal:gate_unavailable"
 TERMINAL_UNBUILDABLE_DIFF = "terminal:unbuildable_diff"
 MAX_ATTEMPTS = 5
+
+#: The deferral marker written when a candidate is PARKED because the
+#: per-pass composition budget was exhausted (C1).  It is NOT a
+#: failure: the candidate is intact and re-selectable from the ledger.
+DEFERRED_COMPOSITION_BUDGET = "deferred:composition_budget"
 
 
 class JevClassificationError(RuntimeError):
@@ -152,6 +185,54 @@ def _clean_markdown_fences(text: str) -> str:
     return s
 
 
+def _extract_classification_labels(raw: Any) -> list[str]:
+    """Split a raw classifier label field into its candidate labels.
+
+    The classifier prompt asks for ONE category, but an LLM may answer
+    with a list (``["conflict", "new_rule"]``) or a compound string
+    (``"conflict, new_rule"``).  Both shapes are ACCEPTED here and
+    resolved by :func:`resolve_classification_precedence` — the plan's
+    ``conflict > boundary_change > new_rule`` has no comparator without
+    this step (implementation notes §15.4).
+    """
+    if isinstance(raw, (list, tuple, set)):
+        chunks = [str(item) for item in raw]
+    else:
+        chunks = [str(raw or "")]
+
+    labels: list[str] = []
+    for chunk in chunks:
+        for part in re.split(r"[,;/|]|\band\b|\bor\b", chunk.lower()):
+            part = part.strip().strip("\"'` \t\n")
+            if part:
+                labels.append(part)
+    return labels
+
+
+def resolve_classification_precedence(labels: Sequence[str]) -> str | None:
+    """Resolve one or more candidate labels to ONE JEV class.
+
+    THE PRECEDENCE RESOLUTION (the comparator the plan never wrote):
+    the labels are ranked by :data:`JEV_CLASSIFICATION_PRECEDENCE` and
+    the FIRST match wins — so an ambiguous or multi-label response
+    resolves by ``conflict > boundary_change > new_rule``.
+
+    Args:
+        labels: The candidate labels extracted from the classifier
+            response (unknown labels are IGNORED, not fatal).
+
+    Returns:
+        The winning classification, or ``None`` when NO candidate label
+        is a known taxonomy member — the caller then parks the
+        candidate (fail-closed, never a silent 'none').
+    """
+    seen = {str(label).strip().lower() for label in labels}
+    for candidate in JEV_CLASSIFICATION_PRECEDENCE:
+        if candidate in seen:
+            return candidate
+    return None
+
+
 class MemoirPersonaGateService:
     """The Persona Gate Service managing JEV evaluation and proposal lifecycle."""
 
@@ -164,6 +245,7 @@ class MemoirPersonaGateService:
         llm_config: dict[str, Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         agent_id: str = "ari",
+        call_timeout_s: float | None = None,
     ) -> None:
         self._engine = engine
         self._persona_repo = persona_repository or MemoirPersonaRepository(engine)
@@ -171,6 +253,19 @@ class MemoirPersonaGateService:
         self._llm_config = dict(llm_config or {})
         self._clock = clock or now_utc
         self._agent_id = agent_id
+        #: The per-call timeout for the LOCAL fallback lane (F2).  It
+        #: RIDES the reflection service's ``call_timeout_s`` knob (the
+        #: caller passes it in) — the house rule is ONE truth per knob,
+        #: never a second hard-coded copy.  The default is the house
+        #: constant, imported lazily so the two services keep their
+        #: lazy (cycle-free) relationship.
+        if call_timeout_s is None:
+            from daemon.services.memoir_reflection_service import (
+                MEMOIR_REFLECTION_CALL_TIMEOUT_S,
+            )
+
+            call_timeout_s = MEMOIR_REFLECTION_CALL_TIMEOUT_S
+        self._call_timeout_s = float(call_timeout_s)
 
     # ── Database ledger access ──────────────────────────────────────────
 
@@ -375,13 +470,25 @@ class MemoirPersonaGateService:
         cat = str(parsed.get("classification") or "").strip().lower()
         reasoning = str(parsed.get("reasoning") or "").strip()
 
-        if cat not in JEV_CLASSIFICATIONS:
+        # THE PRECEDENCE RESOLUTION: a single label behaves exactly as
+        # before; an AMBIGUOUS or MULTI-LABEL response resolves by
+        # ``conflict > boundary_change > new_rule`` (the plan's taxonomy
+        # priority — implementation notes §15.4).  NO known label is
+        # still a failure: the candidate is PARKED, never defaulted.
+        labels = _extract_classification_labels(parsed.get("classification"))
+        resolved = resolve_classification_precedence(labels)
+        if resolved is None:
             raise JevClassificationError(
                 f"Classification {cat!r} not in {JEV_CLASSIFICATIONS}"
             )
+        if len({label for label in labels if label in JEV_CLASSIFICATIONS}) > 1:
+            reasoning = (
+                f"{reasoning} [precedence-resolved from: "
+                f"{', '.join(labels)}]".strip()
+            )
 
         return JevClassificationResult(
-            classification=cat,
+            classification=resolved,
             reasoning=reasoning,
             source="llm",
         )
@@ -680,23 +787,86 @@ class MemoirPersonaGateService:
                 seen_ids.add(sid)
 
         composition_calls = 0
-        for cand in candidates_to_process:
-            # Check if this candidate already classified as gated but pending composition
-            existing = self.get_ledger_entry(cand.id)
-            if existing and existing.classification in JEV_GATED_CLASSES and existing.status == "pending":
-                if composition_calls >= max_composition_calls:
-                    # Defer to next pass
-                    continue
+        processed_ids: set[str] = set()
+        try:
+            for cand in candidates_to_process:
+                # Check if this candidate already classified as gated but pending composition
+                existing = self.get_ledger_entry(cand.id)
+                if existing and existing.classification in JEV_GATED_CLASSES and existing.status == "pending":
+                    if composition_calls >= max_composition_calls:
+                        # Defer to next pass — the ledger row ALREADY exists,
+                        # so the candidate stays re-selectable.
+                        continue
 
-            outcome = self.process_candidate(cand)
-            outcomes.append(outcome)
-            if outcome.proposed_body is not None or (outcome.last_error and "diff" in outcome.last_error):
-                composition_calls += 1
-            if composition_calls >= max_composition_calls:
-                # Reached composition budget for this pass
-                break
+                outcome = self.process_candidate(cand)
+                outcomes.append(outcome)
+                processed_ids.add(getattr(cand, "id", ""))
+                if outcome.proposed_body is not None or (outcome.last_error and "diff" in outcome.last_error):
+                    composition_calls += 1
+                if composition_calls >= max_composition_calls:
+                    # Reached composition budget for this pass — the REMAINING
+                    # candidates are parked below (they are NOT dropped).
+                    break
+        finally:
+            # ── THE NO-CANDIDATE-IS-LOST PARK (C1) ────────────────────
+            # The per-pass composition budget can end the loop before every
+            # candidate was evaluated.  The ONLY re-selection source is
+            # ``get_pending_candidates()`` (the ledger), so a candidate with
+            # NO ledger row is PERMANENTLY LOST from the JEV lane — exactly
+            # the data loss V2-38 exists to forbid.  Every candidate this
+            # pass did NOT process therefore lands a 'pending' row NOW.
+            #
+            # THE PARK IS IN A ``finally``: the invariant is UNCONDITIONAL —
+            # a candidate that RAISES must be parked too, or the pass's
+            # failure would drop every candidate after it.
+            self._park_unprocessed_candidates(candidates_to_process, processed_ids)
 
         return outcomes
+
+    def _park_unprocessed_candidates(
+        self,
+        candidates: Sequence[Any],
+        processed_ids: set[str],
+    ) -> None:
+        """Park every candidate this pass did NOT process (C1).
+
+        A candidate dropped by the per-pass composition budget MUST land
+        a ``pending`` ledger row: the ledger is the ONLY re-selection
+        source (``get_pending_candidates()``), so a candidate with no
+        row is lost forever.
+
+        The parked row carries:
+        * the classification if it is ALREADY KNOWN (a candidate that was
+          classified in an earlier pass keeps its stored classification —
+          the retry must NOT re-pay the classifier);
+        * ``attempts`` as they stand (a candidate parked by an earlier
+          CLASSIFICATION FAILURE keeps its attempt count — it is already
+          parked and must not be re-counted);
+        * a deferral marker in ``last_error`` (``deferred:composition_budget``)
+          so the deferral is visible and is NOT mistaken for a failure.
+        """
+        for cand in candidates:
+            synthesis_id = getattr(cand, "id", "")
+            if not synthesis_id or synthesis_id in processed_ids:
+                continue
+            existing = self.get_ledger_entry(synthesis_id)
+            if existing is not None:
+                # ALREADY parked (the row IS the re-selection handle) —
+                # keep it, and keep its diagnostic last_error intact.
+                continue
+            self.record_ledger_entry(
+                synthesis_id=synthesis_id,
+                classification=None,
+                attempts=0,
+                last_error=DEFERRED_COMPOSITION_BUDGET,
+                status="pending",
+            )
+            logger.info(
+                "[MemoirPersonaGate] synthesis %s deferred by the per-pass "
+                "composition budget — parked as 'pending' so the next pass "
+                "re-selects it (no candidate is lost)",
+                synthesis_id,
+            )
 
     # ── LLM dispatch helper ──────────────────────────────────────────────
 
@@ -707,7 +877,18 @@ class MemoirPersonaGateService:
         return self._house_llm_call(prompt)
 
     def _house_llm_call(self, prompt: str) -> str:
-        """House failover caller using invoke_raw_with_failover."""
+        """House failover caller using invoke_raw_with_failover.
+
+        THE ARGUMENT ORDER IS ``invoke_raw_with_failover(factory,
+        llm_config)`` (F1) — the reversed order raised
+        ``AttributeError: 'function' object has no attribute 'get'`` at
+        the first real call.
+
+        The per-call timeout RIDES ``self._call_timeout_s`` (the
+        reflection service's ``call_timeout_s`` knob — F2), and the
+        helper's signature is ``httpx_timeout(timeout_s)`` — the
+        ``connect=`` keyword does not exist there.
+        """
         import openai
 
         from daemon.services.llm_failover import (
@@ -720,13 +901,14 @@ class MemoirPersonaGateService:
         model = str(config.get("model") or "gpt-4")
         api_key = str(config.get("api_key") or "")
         base_url = config.get("base_url")
+        timeout_s = float(self._call_timeout_s)
 
         def _factory() -> str:
             url = current_failover_url() or base_url
             client = openai.OpenAI(
                 api_key=api_key,
                 base_url=url or None,
-                timeout=httpx_timeout(45.0, connect=5.0),
+                timeout=httpx_timeout(timeout_s),
                 max_retries=0,
             )
             response = client.chat.completions.create(
@@ -743,12 +925,14 @@ class MemoirPersonaGateService:
                 raise ValueError("persona_gate_response_empty: empty content")
             return str(content)
 
-        return invoke_raw_with_failover(config, _factory)
+        return str(invoke_raw_with_failover(_factory, config))
 
 
 __all__ = [
+    "DEFERRED_COMPOSITION_BUDGET",
     "DiffOverBudgetError",
     "JEV_CLASSIFICATIONS",
+    "JEV_CLASSIFICATION_PRECEDENCE",
     "JEV_GATED_CLASSES",
     "JEV_SUPPRESSED_CLASSES",
     "JevClassificationError",
@@ -760,4 +944,5 @@ __all__ = [
     "TERMINAL_GATE_UNAVAILABLE",
     "TERMINAL_UNBUILDABLE_DIFF",
     "UnbuildableDiffError",
+    "resolve_classification_precedence",
 ]

@@ -46,12 +46,32 @@ if [ ! -f "$TARGET" ]; then
   exit 1
 fi
 
-EXPECTED_PASSED_N=14
+EXPECTED_PASSED_N=26
+
+# The MEASURED node count at the pin (2026-11-10, this worktree):
+# TestJevHeuristicFilter (6) + TestJevLlmClassifier (4)
+# + TestCandidateParkingInJevLedger (3) + TestHeuristicOrdering (2)
+# + TestLocalFallbackLane (2) + TestPrecedenceResolution (5)
+# + TestSuppressionRule (2) + TestMutationLegA (1) + TestProductionWiring (1).
+#
+# THE DELTA'S OWN LEGS ARE SELECTOR-REGISTERED (the pack-orphan class):
+# a leg that NO pack selects is a leg the gate cannot see.  The selector
+# below names EVERY class in the module EXPLICITLY and the node-count pin
+# moves IN THE SAME COMMIT as the legs.
+#
+# THE FIX-ROUND LEGS (2026-11-10): TestHeuristicOrdering (the heuristic
+# ORDERING, end-to-end), TestSuppressionRule (no draft for a suppressed
+# class), TestPrecedenceResolution (the conflict > boundary_change >
+# new_rule comparator), TestLocalFallbackLane (the gate's own failover
+# lane), TestProductionWiring (the gate classifies through the reflection
+# service's caller) and the rewritten TestMutationLegA (a PRODUCTION
+# REVERT recipe, not a self-mutating one).
 
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-280}"
 LOG="${TMPDIR:-/tmp}/${PACK_NAME}.log"
 
 timeout "${TIMEOUT_S}" "${PY}" -m pytest "${TARGET}" \
+  -k "TestJevHeuristicFilter or TestJevLlmClassifier or TestCandidateParkingInJevLedger or TestHeuristicOrdering or TestLocalFallbackLane or TestPrecedenceResolution or TestSuppressionRule or TestMutationLegA or TestProductionWiring" \
   -q --tb=short -p no:randomly --override-ini="addopts=" 2>&1 | tee "${LOG}"
 EXIT_CODE=${PIPESTATUS[0]}
 if [ "$EXIT_CODE" -eq 124 ]; then

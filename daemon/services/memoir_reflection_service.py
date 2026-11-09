@@ -388,6 +388,10 @@ class MemoirReflectionService:
                     llm_config=self._llm_config,
                     clock=self._clock,
                     agent_id=self._settings.agent_id,
+                    # THE GATE RIDES THE SAME TIMEOUT KNOB (F2) — the
+                    # gate's local fallback lane must not carry a
+                    # second, hard-coded copy of the call timeout.
+                    call_timeout_s=float(self._settings.call_timeout_s),
                 )
 
     # ── the settings ────────────────────────────────────────────────────
