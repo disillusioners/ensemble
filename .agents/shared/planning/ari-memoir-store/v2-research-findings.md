@@ -85,7 +85,7 @@ All memoir tools enforce a strict two-layer security gate (`_gate` in `daemon/to
 - **Seam anchor:** `daemon/services/context_messages.py` (`_assemble_memoir_briefing` line 432, `_maybe_memoir_briefing_message` line 483).
 
 ### 3.1 Budget Model (DR-1 / AM-38)
-- Persona budget: ~2,000 chars nominal.
+- Persona budget: ~2,000 tokens nominal (authority `memoir_briefing.py:127-135`).
 - Keepsake zone: ~4,000 tokens rendered FULL, never truncated.
 - Dynamic zone: ~3,000 tokens over latest 5 episodes.
 - Hard briefing ceiling: **24,000 characters** (DR-1).

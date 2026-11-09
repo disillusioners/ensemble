@@ -70,11 +70,12 @@ The mutation driver (`test/packs/memoir_mutation_matrix_test.py` + `mutation-mat
 4. **Notification / proposal-ledger once-everness dedup (W2 / Suggestion #9):** Removing the date comparison in notification ledger emits 2 notifications -> RED. Removing the proposal-ledger once-ever-per-episode UNIQUE constraint (`uq_memoir_proposal_agent_episode`) allows re-proposing an episode -> RED. Removing refresh's independence from `memoir_briefing_injected` -> RED.
 5. **Append-only / supersede chains:** Emitting `REFINE` without `supersedes` back-pointer -> RED; emitting synthesis with empty `source_episode_ids` -> RED.
 6. **Backfill seed cutover & 'T'-literal mutation leg (SF11 / Suggestion #9):** Widening legacy seed predicate to bare-NULL marks post-cutover rows legacy -> RED. Swapping the space-separated cutover literal `'2026-11-09 00:00:00'` to the ISO-8601 `'T'` literal `'2026-11-09T00:00:00Z'` in SQLite seed causes the cutover fixture row to be incorrectly marked legacy (the space < T lexicographic trap) -> RED.
-7. **Record-column purity vs poignancy:** Making `record_poignancy_score` write to `importance` trips `RECORD_COLUMNS` purity pin -> RED.
+7. **Record-column purity vs poignancy:** Making `record_poignancy_score` write to `importance` trips `RECORD_COLUMNS` purity pin -> RED (`RECORD_COLUMNS` remains write-frozen); `MEMOIR_INSERT_COLUMNS` pin asserts the updated byte-exact insert list -> amending statement to match passes GREEN.
 
 ### 3.4 3-Worker Boot Census & Interpreter Isolation (SF8 / Suggestion #7)
 Boot smoke starts the daemon under `ENSEMBLE_SELF_ENV=sandbox` using `/home/nea/ensemble-src-wt-memoir-v2/.venv/bin/python -m daemon`:
 - **Bootstrap Step (Suggestion #7):** Execute `uv sync` in `/home/nea/ensemble-src-wt-memoir-v2` prior to boot smoke to ensure worktree venv dependencies are fully materialized.
+- **POK Auth Scrub (ND-11):** Boot smoke environment explicitly scrubs `ENSEMBLE_AUTH_ISSUER`, `ENSEMBLE_AUTH_DISCOVERY_URL`, and `ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE` per project POK (`auth-lane-scrub-ensemble-auth-env`).
 - **Isolation Pin:** Invocation uses worktree venv python directly. NEVER invoke frozen binary from `releases/`.
 - **Ceremony-coordination caveat:** Live promote ceremonies running concurrently are protected from nonce eviction by bypassing frozen binary path resolution.
 - Worker 1: `MemoirEmbeddingWorker` running on `app.state.memoir_embedding_worker_task`, thread prefix `memoir-embed`.
