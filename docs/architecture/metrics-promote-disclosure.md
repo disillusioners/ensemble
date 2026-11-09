@@ -69,7 +69,7 @@
 > **The six dark families — each with a NAMED cause, none of them the C-1 locator** (measured at
 > the fenced-dev observation): **F1** and **F3** — `capture_off`, because the provider's
 > `capture_active` was never wired (`daemon/api.py:2528-2533` constructed the provider without
-> it — **FIXED**, the live construction site is `daemon/api.py:2571-2586`);
+> it — **FIXED**, the live construction site is `daemon/api.py:2571-2586` (the plan-time anchor `daemon/api.py:2571-2576`));
 > **F6** — `census_gated`, and that reason is **INVERTED** (the census published 15 live series
 > while the door reported dark — **FIXED**, see R-ii below); **F7** — `series_absent`, because
 > the non-internal histogram never publishes (`daemon/checkpoint_metrics.py:830-874`); **F18** —
@@ -86,7 +86,7 @@
 > door calls the family dark) and **F6** (15 live series) all reported `dark` while their series
 > were LIVE. The causes were the two defects tracked as R-i/R-ii: the provider's
 > `capture_active` was **never wired** (`daemon/api.py:2528-2533`, a stale anchor — the live
-> construction site is `daemon/api.py:2571-2586`), so the `capture_off` reason was
+> construction site is `daemon/api.py:2571-2586`, plan-time anchor `daemon/api.py:2571-2576`), so the `capture_off` reason was
 > unconditional; and the census's public `gated` property was **INVERTED**
 > (`daemon/services/metrics_census.py:323-335` returned "enabled", the door reads it as "gated
 > off"), so the `census_gated` reason fired exactly when the census was running and publishing.
