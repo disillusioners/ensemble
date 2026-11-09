@@ -83,6 +83,20 @@
 #
 #   bash scripts/install-dir-guard.sh --target install
 #
+# --require-live (OPT-IN mode, additive; incident 2026-11-09 analysis):
+#   bash scripts/install-dir-guard.sh --target plist-install --require-live
+#   Some targets write HOST state that the INSTALL_DIR axis cannot express:
+#   plist-install / watchdog-install copy the staged plist into
+#   $HOME/Library/LaunchAgents/ REGARDLESS of INSTALL_DIR — a sandbox (or
+#   demo) INSTALL_DIR would silently overwrite the running prod launchd unit
+#   with one pointing at the sandbox. The flag adds ONE extra rule for those
+#   targets: the requested dir must classify as LIVE, and (as always) a live
+#   dir additionally needs ENSEMBLE_INSTALL_LIVE=1. It is evaluated AFTER the
+#   per-path gate, so the canonical live refusal still fires first for an
+#   unconfirmed live dir, and ENSEMBLE_INSTALL_DEMO never opens a demo dir
+#   under this mode. WITHOUT the flag the guard is byte-for-byte unchanged
+#   for every existing consumer.
+#
 # INSTALL_DIR is read from the environment (the Makefile exports it, so
 # env-set and command-line `make install INSTALL_DIR=…` both arrive — and
 # the path never crosses a shell-quoting boundary at the call site).
@@ -110,15 +124,18 @@
 set -u
 
 usage() {
-    echo "usage: install-dir-guard.sh --target <make-target>  (INSTALL_DIR via env)" >&2
+    echo "usage: install-dir-guard.sh --target <make-target> [--require-live]  (INSTALL_DIR via env)" >&2
 }
 
 TARGET=""
+REQUIRE_LIVE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --target)
             [ $# -ge 2 ] || { usage; exit 78; }
             TARGET="$2"; shift 2 ;;
+        --require-live)
+            REQUIRE_LIVE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "install-dir-guard: unknown arg '$1'" >&2; usage; exit 78 ;;
     esac
@@ -323,5 +340,34 @@ EOF
         # prints its banners.
         ;;
 esac
+
+# ── 6. --require-live mode (opt-in; additive) ───────────────────────────────
+# The plist-install / watchdog-install targets write HOST launchd state
+# (${HOME}/Library/LaunchAgents/ensemble-prod.plist): the prod-named unit must
+# point at the LIVE install, never at a sandbox or demo tree — a sandbox
+# INSTALL_DIR would silently overwrite the running prod unit with one that
+# points at the sandbox (the dir axis alone cannot express that: the host
+# write happens regardless of INSTALL_DIR).
+#
+# Evaluated AFTER the per-path gate above, so the canonical live refusal
+# (ENSEMBLE_INSTALL_LIVE) still fires FIRST for an unconfirmed live dir, and
+# ENSEMBLE_INSTALL_DEMO never opens a demo dir under this mode. Without the
+# flag the guard behaves exactly as before (REQUIRE_LIVE=0 → no effect).
+if [ "$REQUIRE_LIVE" = "1" ] && [ "$CLASS" != "live" ]; then
+    cat >&2 <<EOF
+make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR does not resolve to a LIVE install dir (${DIR_CANON}).
+  This target writes the HOST launchd unit
+  (${HOME}/Library/LaunchAgents/ensemble-prod.plist) — the prod unit must point
+  at the live install, never at a sandbox or demo tree (a sandbox INSTALL_DIR
+  would silently overwrite the running prod unit).
+  To install the prod launchd unit:
+    ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR='${INSTALL_DIR_ENV}'
+  Under sudo (env vars do not survive plain sudo), the sudo-correct form:
+    sudo env ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR='${INSTALL_DIR_ENV}'
+  The demo launchd agent is a hand-duplicate with its own Label
+  (com.ensemble.watchdog.demo) — see the Makefile's demo-usage note.
+EOF
+    exit 78
+fi
 
 exit 0

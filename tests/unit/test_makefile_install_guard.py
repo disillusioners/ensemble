@@ -727,3 +727,325 @@ class TestMakefileWiring:
         the only make-level proceed target is the stop-free uninstall."""
         text = STOP_SCRIPT.read_text()  # read-only reference
         assert text.startswith("#!/bin/bash")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ADDED 2026-11-09 (phase 2 of the live-install-guard mission) — APPEND-ONLY
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Two gaps closed on top of the 51-test matrix above (which is UNCHANGED —
+# every pre-existing test body, name and order is byte-identical):
+#
+#   P1-core — stop-by-port: the legacy port kill took its port from the
+#     REPO's .env.prod (the live prod port 9797) while the guard gates the
+#     DIR axis → a sandbox INSTALL_DIR passed the guard and the kill still
+#     landed on the live daemon (inverted protection: the correct live
+#     spelling is refused, the sandbox spelling reaches live). The kill port
+#     is now read from the TARGET install dir's own staged PORT
+#     ($(INSTALL_DIR)/.env) and the target fails closed when that dir has
+#     no staged PORT.
+#
+#   P2 — plist-install / watchdog-install write HOST launchd state
+#     ($HOME/Library/LaunchAgents/…) REGARDLESS of INSTALL_DIR: a sandbox
+#     dir passed the INSTALL_DIR gate and silently overwrote the running
+#     prod unit with one pointing at the sandbox. The guard's new opt-in
+#     --require-live mode closes that (the dir must BE the live install; a
+#     live dir still needs ENSEMBLE_INSTALL_LIVE=1).
+#
+# CARVE-OUT (same rules as the file header, honored here verbatim):
+#   * every real make invocation runs with HOME = a fresh tmp fake home;
+#     every path any recipe can touch lives under tmp.
+#   * scripts/stop-ensemble.sh is NEVER executed — the stop-by-port
+#     proceed-arm is proven at guard level and via `make -n` (dry run);
+#     the make-level refusal arm dies BEFORE the stop script line, and the
+#     suite asserts the script's banner never printed.
+#   * the make-level plist/watchdog proceed arms write into the FAKE home's
+#     Library/LaunchAgents (tmp) — never on the real host; neither recipe
+#     invokes launchctl (it only prints the bootstrap hint).
+#   * the sudo arm stays behind `sudo -n` (not needed here — no new sudo
+#     arm is added; the sudo-correct FORM is asserted in the refusal text).
+
+
+def run_guard_require_live(
+    target: str,
+    home: Path,
+    install_dir: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess:
+    """Guard-level probe WITH the opt-in --require-live mode (P2).
+
+    A sibling of run_guard (which is left byte-identical): the host launchd
+    gate is a MODE of the same script, so the probe adds the flag instead of
+    changing the shared helper. The guard never writes.
+    """
+    env = _base_env(home, extra_env)
+    if install_dir is not None:
+        env["INSTALL_DIR"] = install_dir
+    return subprocess.run(
+        ["bash", str(GUARD), "--target", target, "--require-live"],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+class TestStopByPortPortScoping:
+    """P1-core: the legacy port kill must be bound to the GATED dir.
+
+    Before: `make stop-by-port INSTALL_DIR=<sandbox>` expanded to
+    `STOP_BY_PORT=1 bash scripts/stop-ensemble.sh <sandbox> 9797` — the
+    repo's prod port, i.e. the LIVE daemon's port, regardless of the dir
+    the guard had just approved. After: the port comes from
+    $(INSTALL_DIR)/.env and the target refuses when that dir stages none.
+    """
+
+    def test_inert_refusal(self, fake_home):
+        """Bare `make stop-by-port` → the guard's inert refusal fires first
+        (INSTALL_DIR unset → no dir to scope the kill to)."""
+        r = run_make(["stop-by-port"], fake_home)
+        assert r.returncode != 0
+        assert "INSTALL_DIR is not set" in r.stderr
+
+    def test_missing_staged_port_refuses_and_names_ownership_stop(
+        self, fake_home, tmp_path
+    ):
+        """A dir with NO staged PORT → refuse with exit 78 BEFORE the stop
+        script runs, and name the exact ownership-scoped command.
+
+        Non-vacuity: the stop script's ownership banner never printed AND
+        the STOP_BY_PORT kill line was never reached (make prints recipe
+        lines as it executes them, so its absence proves the refusal came
+        first).
+        """
+        sbx = tmp_path / "sbx-no-env"
+        sbx.mkdir()
+        r = run_make(["stop-by-port", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert f"make stop INSTALL_DIR='{sbx}'" in r.stdout
+        assert sbx.exists()
+        assert "Stopping processes owned by" not in r.stdout
+        assert "STOP_BY_PORT=1" not in r.stdout
+
+    def test_confirmed_live_dir_without_staged_port_still_refuses(self, fake_home):
+        """Fail-closed even for a CONFIRMED live dir: without a staged PORT
+        the kill cannot be scoped to the dir, so it is refused rather than
+        falling back to an unscoped port."""
+        live = make_live_shaped(fake_home)
+        r = run_make(
+            ["stop-by-port", f"INSTALL_DIR={live}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert f"make stop INSTALL_DIR='{live}'" in r.stdout
+        assert sentinel_of(live).exists()
+
+    def test_kill_port_is_read_from_the_target_dir_not_the_repo(
+        self, fake_home, tmp_path
+    ):
+        """`make -n stop-by-port` with a dir whose OWN .env stages
+        PORT=12345 → the kill targets 12345, never the repo's prod port."""
+        sbx = tmp_path / "sbx-with-port"
+        sbx.mkdir()
+        (sbx / ".env").write_text("PORT=12345\n")
+        r = run_make(["-n", "stop-by-port", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode == 0, r.stderr
+        assert "12345" in r.stdout
+        assert "9797" not in r.stdout
+        assert f"scripts/stop-ensemble.sh {sbx} 12345" in r.stdout
+
+    def test_no_repo_prod_port_leaks_into_the_kill(self, fake_home, tmp_path):
+        """A dir with no staged PORT → the expanded kill line carries NO
+        port at all (empty), never the repo's prod port (the old wiring
+        took it from .env.prod)."""
+        sbx = tmp_path / "sbx-no-env"
+        sbx.mkdir()
+        r = run_make(["-n", "stop-by-port", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode == 0, r.stderr
+        kill_lines = [ln for ln in r.stdout.splitlines() if "stop-ensemble.sh" in ln]
+        assert kill_lines, r.stdout
+        assert kill_lines[0].rstrip().endswith(str(sbx)), kill_lines
+
+    def test_recipe_no_longer_reads_the_repo_prod_port(self):
+        """Static wiring pin: the stop-by-port recipe is bound to
+        $(STOP_PORT) (the target dir's own staged port), not to
+        $(PROD_PORT_FALLBACK) (the repo's .env.prod)."""
+        text = MAKEFILE.read_text()
+        block = text.split("\nstop-by-port:\n", 1)[1]
+        recipe = block.split("\n\n", 1)[0]
+        assert "PROD_PORT_FALLBACK" not in recipe, recipe
+        assert "STOP_PORT" in recipe, recipe
+
+    def test_guard_level_pass_for_unclassified_dir(self, fake_home, tmp_path):
+        """Guard-level proceed arm for the DIR axis (the guard never
+        writes; the stop script is never executed by this suite)."""
+        sbx = tmp_path / "sbx"
+        sbx.mkdir()
+        r = run_guard("stop-by-port", fake_home, install_dir=str(sbx))
+        assert r.returncode == 0, r.stderr
+
+
+class TestHostLaunchdInstallRequiresLive:
+    """P2: the host launchd write must only ever come from the LIVE install.
+
+    plist-install / watchdog-install copy the staged plist into
+    $HOME/Library/LaunchAgents/ REGARDLESS of INSTALL_DIR, so a sandbox dir
+    (which the INSTALL_DIR gate happily opens) used to overwrite the running
+    prod unit with one pointing at the sandbox. The guard's opt-in
+    --require-live mode closes that hole; the canonical live refusal still
+    fires FIRST for an unconfirmed live dir.
+    """
+
+    @staticmethod
+    def _launch_agents(home: Path) -> Path:
+        return home / "Library" / "LaunchAgents"
+
+    def test_plist_install_refuses_sandbox_and_writes_no_launchd_unit(
+        self, fake_home, tmp_path
+    ):
+        """REFUSAL arm (sandbox dir): the refusal names the exact confirm
+        var and the sudo-correct form, and NO host launchd unit was
+        written (HOME is the tmp fake home → the mkdir + cp never ran)."""
+        sbx = tmp_path / "sbx"
+        sbx.mkdir()
+        r = run_make(["plist-install", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert "REFUSING" in r.stderr
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+        assert (
+            f"sudo env ENSEMBLE_INSTALL_LIVE=1 make plist-install INSTALL_DIR='{sbx}'"
+            in r.stderr
+        )
+        assert not self._launch_agents(fake_home).exists()
+        assert not (
+            self._launch_agents(fake_home) / "ensemble-prod.plist"
+        ).exists()
+
+    def test_watchdog_install_refuses_sandbox_and_writes_no_launchd_unit(
+        self, fake_home, tmp_path
+    ):
+        """REFUSAL arm (sandbox dir) for the watchdog agent — same
+        non-vacuity proof: no LaunchAgents dir, no unit file."""
+        sbx = tmp_path / "sbx"
+        sbx.mkdir()
+        r = run_make(["watchdog-install", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+        assert (
+            f"sudo env ENSEMBLE_INSTALL_LIVE=1 make watchdog-install INSTALL_DIR='{sbx}'"
+            in r.stderr
+        )
+        assert not self._launch_agents(fake_home).exists()
+        assert not (
+            self._launch_agents(fake_home) / "ensemble-watchdog-watcher.plist"
+        ).exists()
+
+    def test_demo_dir_is_not_opened_by_the_demo_confirm(self, fake_home):
+        """ENSEMBLE_INSTALL_DEMO=1 must NOT open a demo dir under
+        --require-live: the prod-named launchd unit must point at live."""
+        demo = fake_home / "agents-ensemble-demo"
+        demo.mkdir()
+        r = run_make(
+            ["plist-install", f"INSTALL_DIR={demo}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
+        )
+        assert r.returncode != 0
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+        assert not self._launch_agents(fake_home).exists()
+
+    @pytest.mark.parametrize("target", ["plist-install", "watchdog-install"])
+    def test_live_dir_without_confirm_gets_the_canonical_live_refusal(
+        self, fake_home, target
+    ):
+        """ORDERING: for a live dir WITHOUT the confirm var the EXISTING
+        per-path live refusal fires first (its message shape is unchanged);
+        the --require-live refusal must not shadow or pre-empt it."""
+        live = make_live_shaped(fake_home)
+        r = run_make([target, f"INSTALL_DIR={live}"], fake_home)
+        assert r.returncode != 0
+        assert "resolves to a LIVE install dir" in r.stderr
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+        assert not self._launch_agents(fake_home).exists()
+
+    def test_guard_require_live_refuses_unclassified_dir(self, fake_home, tmp_path):
+        """Guard level: --require-live refuses a sandbox dir (exit 78)."""
+        sbx = tmp_path / "sbx"
+        sbx.mkdir()
+        r = run_guard_require_live("plist-install", fake_home, install_dir=str(sbx))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+
+    def test_guard_require_live_refuses_demo_even_with_demo_confirm(self, fake_home):
+        """Guard level: a demo dir stays refused under --require-live even
+        with ENSEMBLE_INSTALL_DEMO=1."""
+        demo = fake_home / "agents-ensemble-demo"
+        demo.mkdir()
+        r = run_guard_require_live(
+            "watchdog-install",
+            fake_home,
+            install_dir=str(demo),
+            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
+        )
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+
+    def test_guard_require_live_passes_for_confirmed_live_dir(self, fake_home):
+        """Guard level: a confirmed live dir passes (the mode adds the live
+        requirement, it does not replace the confirm var)."""
+        live = make_live_shaped(fake_home)
+        r = run_guard_require_live(
+            "plist-install",
+            fake_home,
+            install_dir=str(live),
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode == 0, r.stderr
+
+    def test_plist_install_proceeds_for_confirmed_live_dir(self, fake_home):
+        """SUCCESS arm: a confirmed live dir installs the staged plist into
+        the FAKE home's LaunchAgents (tmp — never the real host)."""
+        live = make_live_shaped(fake_home)
+        (live / "data").mkdir()
+        (live / "data" / "ensemble-prod.plist").write_text("<plist/>\n")
+        r = run_make(
+            ["plist-install", f"INSTALL_DIR={live}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode == 0, r.stderr
+        installed = self._launch_agents(fake_home) / "ensemble-prod.plist"
+        assert installed.exists()
+        assert installed.read_text() == "<plist/>\n"
+
+    def test_watchdog_install_proceeds_for_confirmed_live_dir(self, fake_home):
+        """SUCCESS arm for the watchdog agent (fake home only)."""
+        live = make_live_shaped(fake_home)
+        (live / "data").mkdir()
+        (live / "data" / "ensemble-watchdog-watcher.plist").write_text("<plist/>\n")
+        r = run_make(
+            ["watchdog-install", f"INSTALL_DIR={live}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode == 0, r.stderr
+        installed = self._launch_agents(fake_home) / "ensemble-watchdog-watcher.plist"
+        assert installed.exists()
+        assert installed.read_text() == "<plist/>\n"
+
+    @pytest.mark.parametrize("target", ["plist-install", "watchdog-install"])
+    def test_recipes_pass_the_require_live_flag(self, target):
+        """Static wiring pin: both host-launchd targets front the guard
+        with --require-live."""
+        text = MAKEFILE.read_text()
+        block = text.split(f"\n{target}:\n", 1)[1]
+        first_line = block.split("\n", 1)[0]
+        assert "$(GUARD_SCRIPT) --target" in first_line, target
+        assert "--require-live" in first_line, target
