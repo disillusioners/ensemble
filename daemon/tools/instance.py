@@ -6506,6 +6506,10 @@ Returns:
     # B3: the two READ call sites carry the scope-aware binding (the
     # write/edit call sites deliberately do NOT — write-path scope is
     # explicitly out of scope per the plan §6 B3).
+    # D-N1 (iteration 2): the two WALK tools carry the SAME binding. They
+    # were the second surface with the same anchor bug — bounded against
+    # the AGENT-SUPPLIED `workdir`, so `grep_files(path=<out-of-anchor>,
+    # workdir="/")` returned live CONTENT to the keeper.
     list_directory_aware = _make_read_scope_aware(
         _make_workdir_aware(list_directory, get_current_workdir),
         get_current_caller_agent_id,
@@ -6517,8 +6521,16 @@ Returns:
         get_trusted_workdir,
     )
     write_file_aware = _make_workdir_aware(write_file, get_current_workdir)
-    glob_files_aware = _make_workdir_aware(glob_files, get_current_workdir)
-    grep_files_aware = _make_workdir_aware(grep_files, get_current_workdir)
+    glob_files_aware = _make_read_scope_aware(
+        _make_workdir_aware(glob_files, get_current_workdir),
+        get_current_caller_agent_id,
+        get_trusted_workdir,
+    )
+    grep_files_aware = _make_read_scope_aware(
+        _make_workdir_aware(grep_files, get_current_workdir),
+        get_current_caller_agent_id,
+        get_trusted_workdir,
+    )
     edit_file_aware = _make_workdir_aware(edit_file, get_current_workdir)
     
     # Base tools (available in all instances) - with auto workdir support

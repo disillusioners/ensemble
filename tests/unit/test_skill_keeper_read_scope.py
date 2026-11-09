@@ -465,3 +465,317 @@ class TestOtherAgentsAreUnchanged:
 
         target, err = _resolve_within_workdir("/etc/hostname", workdir)
         assert err is None and target is not None
+
+
+# =============================================================================
+# D-N1 — the WALK tools (glob_files / grep_files) carry the SAME scope
+# =============================================================================
+#
+# The re-adjudication PROVED content exfiltration on the keeper's own bound
+# surface: `grep_files(pattern=<canary>, path=<out-of-anchor>, workdir="/")`
+# returned the canary, and `glob_files(..., path=<foreign tree>, workdir="/")`
+# listed files — while `read_file` / `list_directory` on the same paths were
+# correctly REFUSED. The plan's premise ("glob/grep already fenced") was FALSE
+# for a scoped agent: `_resolve_search_root` bounded the walk against the
+# AGENT-SUPPLIED `workdir` — the same anchor bug D1 had.
+#
+# The ruling: the SAME `_make_read_scope_aware` binding and the SAME
+# scoped-agent policy as the file tools — (1) a supplied `workdir` is
+# REFUSED, (2) an ABSOLUTE `path` is REFUSED, (3) a relative `path` resolves
+# against the trusted anchor and cannot escape it, (4) undeclared agents are
+# byte-identical to base.
+#
+# The canary fixture keeps CONTENT out of every assertion: the pins assert
+# only on STATUS (refused / no-match / found), never on file bytes.
+
+CANARY_TOKEN = "CANARY_TOKEN_DN1_9f3a"
+
+
+@pytest.fixture
+def canary_tree(tmp_path: Path) -> dict[str, str]:
+    """An anchor with an ordinary file, plus a canary tree OUTSIDE it."""
+    anchor = tmp_path / "project"
+    anchor.mkdir()
+    (anchor / "inside.txt").write_text("inside-the-anchor\n", encoding="utf-8")
+    (anchor / "agents" / "skill-keeper").mkdir(parents=True)
+    (anchor / "agents" / "skill-keeper" / "meta.json").write_text(
+        json.dumps({"id": "skill-keeper"}), encoding="utf-8"
+    )
+    outside = tmp_path / "outside"
+    (outside / "deep").mkdir(parents=True)
+    (outside / "canary.txt").write_text(
+        f"canary line {CANARY_TOKEN}\n", encoding="utf-8"
+    )
+    (outside / "deep" / "nested.txt").write_text(
+        f"nested line {CANARY_TOKEN}\n", encoding="utf-8"
+    )
+    return {"anchor": str(anchor), "outside": str(outside)}
+
+
+def _leaks(result: str) -> bool:
+    """True when a result carries the canary token (i.e. exfiltration)."""
+    return CANARY_TOKEN in result
+
+
+class TestWalkToolsAreScoped:
+    """glob_files / grep_files obey the scoped-agent policy."""
+
+    # -- (2) an ABSOLUTE path argument is REFUSED --------------------------
+
+    def test_grep_refuses_an_absolute_path_outside_the_anchor(self, canary_tree):
+        """The reviewer's exfiltration probe — closed."""
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        result = tools["grep_files"].invoke(
+            {"pattern": CANARY_TOKEN, "path": canary_tree["outside"]}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not grep an absolute out-of-anchor path: {result!r}"
+        )
+        assert not _leaks(result), "the canary token must NEVER be returned"
+
+    def test_glob_refuses_an_absolute_path_outside_the_anchor(self, canary_tree):
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        result = tools["glob_files"].invoke(
+            {"pattern": "*.txt", "path": canary_tree["outside"]}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not glob an absolute out-of-anchor path: {result!r}"
+        )
+
+    def test_grep_refuses_an_absolute_path_inside_the_anchor(self, canary_tree):
+        """Ruling property (2) is unconditional: absolute ⇒ refused."""
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        result = tools["grep_files"].invoke(
+            {"pattern": "inside-the-anchor", "path": canary_tree["anchor"]}
+        )
+        assert result.startswith("ERROR:"), (
+            f"an absolute walk root must be refused for a scoped agent: {result!r}"
+        )
+
+    # -- (1) a supplied workdir is REFUSED --------------------------------
+
+    def test_grep_refuses_an_agent_supplied_workdir(self, canary_tree):
+        """The D-N1 anchor bug: `workdir="/"` must not widen the walk."""
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        result = tools["grep_files"].invoke(
+            {"pattern": CANARY_TOKEN, "path": canary_tree["outside"], "workdir": "/"}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not move its walk anchor: {result!r}"
+        )
+        assert not _leaks(result)
+
+    def test_glob_refuses_an_agent_supplied_workdir(self, canary_tree):
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        result = tools["glob_files"].invoke(
+            {"pattern": "*.txt", "path": canary_tree["outside"], "workdir": "/"}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not move its walk anchor: {result!r}"
+        )
+
+    # -- (3) relative paths resolve at the anchor and cannot escape -------
+
+    def test_grep_allows_a_relative_in_anchor_path(self, canary_tree):
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        result = tools["grep_files"].invoke(
+            {"pattern": "inside-the-anchor", "path": "."}
+        )
+        assert not result.startswith("ERROR:"), (
+            f"a relative in-anchor grep must still work: {result!r}"
+        )
+        assert "inside.txt" in result
+
+    def test_glob_allows_a_relative_in_anchor_path(self, canary_tree):
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        result = tools["glob_files"].invoke({"pattern": "*.txt", "path": "."})
+        assert "inside.txt" in result, (
+            f"a relative in-anchor glob must still work: {result!r}"
+        )
+        assert "canary.txt" not in result
+
+    def test_grep_refuses_a_relative_escape(self, canary_tree):
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        result = tools["grep_files"].invoke(
+            {"pattern": CANARY_TOKEN, "path": "../outside"}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a relative walk root must not escape the anchor: {result!r}"
+        )
+        assert not _leaks(result)
+
+    def test_glob_refuses_a_relative_escape(self, canary_tree):
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        result = tools["glob_files"].invoke(
+            {"pattern": "*.txt", "path": "../outside"}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a relative walk root must not escape the anchor: {result!r}"
+        )
+
+    # -- the CONTENT probe ------------------------------------------------
+
+    def test_no_content_exfiltration_via_any_walk_vector(self, canary_tree):
+        """CONTENT probe: no walk vector returns the canary token.
+
+        Every out-of-anchor shape the reviewer drove is attempted. The
+        assertion is on CONTENT, not on the refusal text: EVEN IF a future
+        refactor lets a call through, the canary must not come back.
+        """
+        tools = _build_tools("skill-keeper", canary_tree["anchor"])
+        outside = canary_tree["outside"]
+        anchor = canary_tree["anchor"]
+        vectors = [
+            ("grep_files", {"pattern": CANARY_TOKEN, "path": outside}),
+            ("grep_files", {"pattern": CANARY_TOKEN, "path": outside, "workdir": "/"}),
+            ("grep_files", {"pattern": CANARY_TOKEN, "path": outside, "workdir": outside}),
+            ("grep_files", {"pattern": CANARY_TOKEN, "path": "../outside"}),
+            ("grep_files", {"pattern": CANARY_TOKEN, "path": ".", "workdir": outside}),
+            ("glob_files", {"pattern": "*.txt", "path": outside}),
+            ("glob_files", {"pattern": "*.txt", "path": outside, "workdir": "/"}),
+            ("glob_files", {"pattern": "**/*", "path": anchor, "workdir": outside}),
+            ("glob_files", {"pattern": "*.txt", "path": "../outside"}),
+        ]
+        for tool_name, args in vectors:
+            result = tools[tool_name].invoke(args)
+            assert not _leaks(result), (
+                f"{tool_name} LEAKED the canary for {args!r}: {result!r}"
+            )
+
+    # -- (4) undeclared agents are byte-identical to base ------------------
+
+    def test_another_agent_still_walks_outside_the_workdir(self, canary_tree):
+        """The no-fleet-change pin: `coder` keeps base walk behavior."""
+        tools = _build_tools("coder", canary_tree["anchor"])
+        result = tools["grep_files"].invoke(
+            {"pattern": CANARY_TOKEN, "path": canary_tree["outside"]}
+        )
+        assert not result.startswith("ERROR:"), (
+            f"a non-declaring agent's walk must be unchanged: {result!r}"
+        )
+        assert _leaks(result), (
+            "the base behavior for an undeclared agent is to return the match"
+        )
+
+    def test_another_agent_still_globs_outside_the_workdir(self, canary_tree):
+        tools = _build_tools("coder", canary_tree["anchor"])
+        result = tools["glob_files"].invoke(
+            {"pattern": "*.txt", "path": canary_tree["outside"]}
+        )
+        assert "canary.txt" in result, (
+            f"a non-declaring agent's glob must be unchanged: {result!r}"
+        )
+
+
+# =============================================================================
+# D-N2 — the credential-hazard basename rule (`.env` family)
+# =============================================================================
+#
+# The anchor IS the project repo, so "relative-only" alone permits exactly
+# the file the scope exists to deny: `read_file(".env")` RETURNED the live
+# credential block (619 chars) in the re-adjudication. DS-15 names this
+# class explicitly. This is the NAMED EXCEPTION for that exact hazard —
+# not a broad denylist; the primary fence remains relative-only + the
+# trusted anchor.
+
+
+class TestCredentialBasenameRule:
+    def test_the_denied_basename_constant_exists(self):
+        from daemon.tools import filesystem
+
+        assert ".env" in filesystem._SCOPE_DENIED_BASENAMES
+
+    def test_read_file_refuses_the_repo_dotenv_relative(self, dotenv_tree):
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["read_file"].invoke({"path": ".env"})
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not read the repo .env: {result!r}"
+        )
+        assert not _leaks(result)
+
+    def test_read_file_refuses_a_nested_dotenv(self, dotenv_tree):
+        """The rule is by BASENAME, at ANY depth under the anchor."""
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["read_file"].invoke({"path": "frontend/.env"})
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not read a nested .env: {result!r}"
+        )
+        assert not _leaks(result)
+
+    def test_read_file_refuses_a_dotenv_family_member(self, dotenv_tree):
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["read_file"].invoke({"path": ".env.local"})
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not read .env.local: {result!r}"
+        )
+        assert not _leaks(result)
+
+    def test_read_file_still_allows_an_ordinary_relative_file(self, dotenv_tree):
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["read_file"].invoke({"path": "pyproject.toml"})
+        assert result.startswith("File:"), (
+            f"an ordinary relative read must stay legal: {result!r}"
+        )
+
+    def test_glob_yields_nothing_for_dotenv_under_scope(self, dotenv_tree):
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["glob_files"].invoke({"pattern": "**/.env*", "path": "."})
+        # The PATTERN is echoed in the no-match notice, so assert on the
+        # RESULT ROWS (line-equal), never on a substring of the whole text.
+        rows = {line.strip() for line in result.splitlines()}
+        assert not any(row == ".env" or row.startswith(".env.") or
+                       row.endswith("/.env") for row in rows), (
+            f"a scoped glob must not enumerate .env names: {result!r}"
+        )
+        assert result.startswith("No files matching"), (
+            f"a scoped glob for the .env family must find NOTHING: {result!r}"
+        )
+
+    def test_grep_yields_no_content_for_dotenv_under_scope(self, dotenv_tree):
+        tools = _build_tools("skill-keeper", dotenv_tree)
+        result = tools["grep_files"].invoke(
+            {"pattern": "sk-dotenv-secret-marker", "path": "."}
+        )
+        # The PATTERN is echoed in the no-match notice — assert on the
+        # match SHAPE (a `path:line: content` row), never on a substring.
+        assert result.startswith("No matches"), (
+            f"a scoped grep must not return .env content: {result!r}"
+        )
+        assert ":1:" not in result, (
+            f"a scoped grep returned a match ROW: {result!r}"
+        )
+
+    def test_another_agent_reads_the_dotenv_unchanged(self, dotenv_tree):
+        """Base behavior for an undeclared agent is UNCHANGED."""
+        tools = _build_tools("coder", dotenv_tree)
+        result = tools["read_file"].invoke(
+            {"path": ".env", "workdir": dotenv_tree}
+        )
+        assert result.startswith("File:"), (
+            f"a non-declaring agent's .env read must be unchanged: {result!r}"
+        )
+
+
+@pytest.fixture
+def dotenv_tree(tmp_path: Path) -> str:
+    """An anchor holding the `.env` family plus one ordinary file."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "agents" / "skill-keeper").mkdir(parents=True)
+    (root / "agents" / "skill-keeper" / "meta.json").write_text(
+        json.dumps({"id": "skill-keeper"}), encoding="utf-8"
+    )
+    (root / ".env").write_text(
+        "OPENAI_API_KEY=sk-dotenv-secret-marker\n", encoding="utf-8"
+    )
+    (root / "frontend").mkdir()
+    (root / "frontend" / ".env").write_text(
+        "VITE_TOKEN=sk-dotenv-secret-marker\n", encoding="utf-8"
+    )
+    (root / ".env.local").write_text(
+        "LOCAL=sk-dotenv-secret-marker\n", encoding="utf-8"
+    )
+    (root / "pyproject.toml").write_text(
+        "[project]\nname='fixture'\n", encoding="utf-8"
+    )
+    return str(root)

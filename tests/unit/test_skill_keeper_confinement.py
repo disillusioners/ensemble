@@ -82,22 +82,6 @@ FORBIDDEN_CAPABILITIES = frozenset(
 #: being silently folded into "no write capability at all".
 TEMP_FILE_CAPABILITY = "writes_temp_file"
 
-_WRITE_ATTRS = frozenset(
-    {
-        "write", "write_text", "write_bytes", "writelines", "unlink",
-        "rmtree", "mkdir", "makedirs", "symlink_to", "hardlink_to",
-        "mkstemp", "rmdir", "truncate", "touch", "copyfile", "copytree",
-        "removedirs",
-    }
-)
-_DESTRUCTIVE_DOTTED = frozenset(
-    {
-        "os.remove", "os.rename", "os.replace", "os.rmdir", "os.makedirs",
-        "os.mkdir", "os.truncate", "os.chmod", "os.symlink", "os.link",
-        "shutil.rmtree", "shutil.move", "shutil.copy", "shutil.copy2",
-        "shutil.copyfile", "shutil.copymode", "shutil.copytree",
-    }
-)
 _CMD_DOTTED = frozenset(
     {
         "os.system", "os.popen", "os.spawnv", "os.spawnl", "os.execv",
@@ -230,34 +214,65 @@ def _calls(node: Any) -> tuple[set[str], set[str], bool]:
 # temp-vs-project from the WRITE TARGET's derivation chain — "where
 # does this written path COME FROM" — never from the body's prose.
 
+#: Path / file-handle methods that MUTATE — the write TARGET is the
+#: RECEIVER (``p.write_text(...)``, ``p.unlink()``, ``p.mkdir()``, …).
+#: Restored in iteration 2 (D-N3): the reachability rewrite had narrowed
+#: this to the pure-write methods and silently LOST the destructive /
+#: directory-creation coverage the pre-rewrite classifier had.
+_WRITE_TARGET_ATTRS = frozenset(
+    {
+        "write", "write_text", "write_bytes", "writelines",
+        "touch", "unlink", "rmdir", "mkdir", "makedirs", "removedirs",
+        "symlink_to", "hardlink_to", "truncate",
+    }
+)
+
+#: ``shutil.<attr>(src, dst)`` — the mutating target is the DESTINATION.
+_SHUTIL_DST_SECOND = frozenset(
+    {"copy", "copy2", "copyfile", "copytree", "copymode"}
+)
+
+#: ``shutil.<attr>(target, ...)`` — the mutating target is the FIRST arg.
+_SHUTIL_TARGET_FIRST = frozenset({"rmtree", "move"})
+
+#: ``os.<attr>(target, ...)`` — the mutating target is the FIRST arg.
+_OS_TARGET_FIRST = frozenset(
+    {
+        "remove", "unlink", "rename", "replace", "rmdir", "removedirs",
+        "makedirs", "mkdir", "chmod", "truncate",
+    }
+)
+
+#: ``os.<attr>(src, dst)`` — the mutating target is the SECOND arg.
+_OS_TARGET_SECOND = frozenset({"symlink", "link"})
+
 #: A write mode MUTATES the target. ``open(path)`` with no mode is a
 #: READ; ``open(path, "rb")`` is a READ.
 _WRITE_MODE_CHARS = ("w", "a", "x", "+")
 
-#: Markers that prove a write TARGET derives from the system temp dir.
-#: They are matched against the TARGET's derivation chain ONLY — never
-#: against the function body (that "body mentions gettempdir" downgrade
-#: was the blind spot this replaces).
-_TEMP_TARGET_MARKERS = (
-    "gettempdir",
-    "gettempprefix",
-    "TemporaryDirectory",
-    "TemporaryFile",
-    "NamedTemporaryFile",
-    "mkdtemp",
-    "mkstemp",
-    "tempfile.",
+#: The tempfile APIs whose presence IN THE DERIVATION CHAIN (as a CALL)
+#: proves the written path is temp-confined.
+#:
+#: D-N4: the decision is made on the CALL NODE, never on a substring of
+#: the path. The old substring rule downgraded a PROJECT write whose path
+#: LITERAL happened to contain a marker — ``Path("/repo/logs/tempfile.notes")
+#: .write_text(...)`` classified as ``writes_temp_file``.
+_TEMP_API_NAMES = frozenset(
+    {
+        "gettempdir",
+        "gettempprefix",
+        "TemporaryDirectory",
+        "TemporaryFile",
+        "NamedTemporaryFile",
+        "SpooledTemporaryFile",
+        "mkdtemp",
+        "mkstemp",
+    }
 )
 
 #: The thread-offload calls whose ARGUMENT may be a helper the tool
 #: reaches indirectly. This is the edge the old name-only walk missed.
 _THREAD_OFFLOAD_NAMES = frozenset({"to_thread", "run_in_executor"})
-
-#: The write PRIMITIVES. Each maps a called ATTRIBUTE to the way its
-#: WRITE TARGET is recovered.
-_WRITE_TARGET_ATTRS = frozenset(
-    {"write_text", "write_bytes", "writelines", "touch", "write"}
-)
 
 
 def _receiver_name(node: Any) -> str:
@@ -355,16 +370,22 @@ def _reachable_module_helpers(
 def _write_calls(node: Any) -> list[tuple[Any, ast.Call]]:
     """``(write-target-or-None, the Call node)`` for every write signal.
 
-    The recognised signals (D2):
+    The recognised signals (D2 + iteration 2 / D-N3 restoration):
 
     * ``open(path, mode)`` with a mutating mode,
-    * ``Path.write_text`` / ``write_bytes`` / ``writelines`` / ``touch``,
+    * Path / handle methods whose RECEIVER is the target —
+      ``write`` / ``write_text`` / ``write_bytes`` / ``writelines`` /
+      ``touch`` and the destructives ``unlink`` / ``rmdir`` / ``mkdir`` /
+      ``makedirs`` / ``removedirs`` / ``truncate`` / ``symlink_to`` /
+      ``hardlink_to``,
     * ``Path.open(mode)`` with a mutating mode,
     * ``print(..., file=fh)``,
-    * ``file_handle.write(...)``,
-    * ``shutil.copy*`` (the DESTINATION),
-    * destructive ``os.remove`` / ``os.unlink`` / ``os.rename`` /
-      ``os.replace`` and the ``Path`` equivalents.
+    * ``shutil.copy*`` / ``copyfile`` / ``copytree`` / ``copymode`` — the
+      DESTINATION; ``shutil.rmtree`` / ``shutil.move`` — the FIRST arg,
+    * ``os.remove`` / ``unlink`` / ``rename`` / ``replace`` / ``rmdir`` /
+      ``removedirs`` / ``makedirs`` / ``mkdir`` / ``chmod`` / ``truncate``
+      — the FIRST arg; ``os.symlink`` / ``os.link`` — the SECOND,
+    * the ``Path``-receiver equivalents (``p.unlink()``, ``p.rmdir()``).
 
     A ``None`` target means "a write we cannot attribute to a path" →
     treated as a PROJECT write (fail-closed).
@@ -386,22 +407,18 @@ def _write_calls(node: Any) -> list[tuple[Any, ast.Call]]:
                         out.append((recv.args[0] if recv.args else recv, sub))
                     else:
                         out.append((recv, sub))
-            elif recv_name == "shutil" and attr.startswith("copy"):
+            elif recv_name == "shutil" and attr in _SHUTIL_DST_SECOND:
                 dst = _kwarg(sub, "dst")
                 if dst is None and len(sub.args) > 1:
                     dst = sub.args[1]
                 out.append((dst, sub))
-            elif recv_name == "os" and attr in (
-                "remove",
-                "unlink",
-                "rename",
-                "replace",
-                "rmdir",
-                "removedirs",
-            ):
+            elif recv_name == "shutil" and attr in _SHUTIL_TARGET_FIRST:
+                target = sub.args[0] if sub.args else _kwarg(sub, "path")
+                out.append((target, sub))
+            elif recv_name == "os" and attr in _OS_TARGET_FIRST:
                 out.append((sub.args[0] if sub.args else None, sub))
-            elif attr in ("unlink", "rmdir"):
-                out.append((recv, sub))
+            elif recv_name == "os" and attr in _OS_TARGET_SECOND:
+                out.append((sub.args[1] if len(sub.args) > 1 else None, sub))
         elif isinstance(fn, ast.Name):
             if fn.id == "open":
                 mode = sub.args[1] if len(sub.args) > 1 else _kwarg(sub, "mode")
@@ -418,54 +435,76 @@ def _target_derivations(
     node: Any,
     scope_nodes: list[Any],
     seen: set[int] | None = None,
-) -> set[str]:
-    """The source texts a write TARGET derives from.
+) -> list[Any]:
+    """The AST nodes a write TARGET derives from.
 
     The chain is followed through assignments (a name bound to a
     ``Path(tempfile.gettempdir()) / ...`` expression), binary
     concatenation, attribute access, subscripting and call arguments —
     i.e. "where does this written path COME FROM", which is the
     question that decides temp-vs-project confinement.
+
+    Returning NODES (not source strings) is what makes iteration 2 /
+    D-N4 possible: the temp decision inspects the derivation chain for a
+    ``tempfile`` API **CALL**, so a path LITERAL that merely contains a
+    marker substring can no longer downgrade a project write.
     """
     if node is None:
-        return set()
+        return []
     marker = id(node)
     if seen is None:
         seen = set()
     if marker in seen:
-        return set()
+        return []
     seen.add(marker)
-    out: set[str] = set()
-    try:
-        out.add(ast.unparse(node))
-    except Exception:  # pragma: no cover — unparse is total for our nodes
-        out.add("")
+    out: list[Any] = [node]
     if isinstance(node, ast.Name):
         for fnode in scope_nodes:
             for sub in ast.walk(fnode):
                 if isinstance(sub, ast.Assign):
                     for tgt in sub.targets:
                         if isinstance(tgt, ast.Name) and tgt.id == node.id:
-                            out |= _target_derivations(sub.value, scope_nodes, seen)
+                            out.extend(
+                                _target_derivations(sub.value, scope_nodes, seen)
+                            )
                 elif isinstance(sub, ast.AnnAssign):
                     if (
                         isinstance(sub.target, ast.Name)
                         and sub.target.id == node.id
                         and sub.value is not None
                     ):
-                        out |= _target_derivations(sub.value, scope_nodes, seen)
+                        out.extend(
+                            _target_derivations(sub.value, scope_nodes, seen)
+                        )
     elif isinstance(node, ast.BinOp):
-        out |= _target_derivations(node.left, scope_nodes, seen)
+        out.extend(_target_derivations(node.left, scope_nodes, seen))
     elif isinstance(node, ast.Call):
         for arg in node.args:
-            out |= _target_derivations(arg, scope_nodes, seen)
+            out.extend(_target_derivations(arg, scope_nodes, seen))
         for kw in node.keywords:
-            out |= _target_derivations(kw.value, scope_nodes, seen)
+            out.extend(_target_derivations(kw.value, scope_nodes, seen))
     elif isinstance(node, ast.Attribute):
-        out |= _target_derivations(node.value, scope_nodes, seen)
+        out.extend(_target_derivations(node.value, scope_nodes, seen))
     elif isinstance(node, ast.Subscript):
-        out |= _target_derivations(node.value, scope_nodes, seen)
+        out.extend(_target_derivations(node.value, scope_nodes, seen))
     return out
+
+
+def _is_temp_derivation(nodes: list[Any]) -> bool:
+    """True when the derivation chain actually CALLS a tempfile API.
+
+    D-N4: the decision is made on the CALL NODE's name — never on a
+    substring of the unparsed path. ``Path("/repo/logs/tempfile.notes")``
+    is a plain project path even though its LITERAL contains
+    ``tempfile.``; ``Path(tempfile.gettempdir()) / "x"`` is temp.
+    """
+    for node in nodes:
+        if not isinstance(node, ast.Call):
+            continue
+        name = _receiver_name(node.func).split(".")[-1]
+        if name in _TEMP_API_NAMES:
+            return True
+    return False
 
 
 def _write_profile(scope_nodes: list[Any]) -> tuple[bool, bool]:
@@ -484,11 +523,7 @@ def _write_profile(scope_nodes: list[Any]) -> tuple[bool, bool]:
                 project = True
                 continue
             derivations = _target_derivations(target, scope_nodes)
-            if any(
-                marker in text
-                for text in derivations
-                for marker in _TEMP_TARGET_MARKERS
-            ):
+            if _is_temp_derivation(derivations):
                 temp = True
             else:
                 project = True
@@ -835,6 +870,127 @@ class TestResolverLeg:
         caps = tool_capabilities(zzz_path_open_probe)
         assert "writes_file" in caps, (
             f"a Path.open('w') write must be caught: {sorted(caps)}"
+        )
+
+    def test_the_classifier_catches_the_restored_destructive_primitives(self):
+        """D-N3 — the destructive / directory-creation coverage is RESTORED.
+
+        The D2 reachability rewrite narrowed the primitive list and
+        silently LOST the destructive coverage the pre-rewrite classifier
+        had (``shutil.move`` / ``shutil.rmtree`` / ``os.makedirs`` all
+        reported ``[]``). Each shape is probed here; a regression to the
+        narrowed list turns this pin RED.
+        """
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def zzz_shutil_move_probe(src: str, dst: str) -> str:
+            """shutil.move(src, dst) — the FIRST arg is destroyed."""
+            import shutil
+
+            shutil.move(src, dst)
+            return "moved"
+
+        @lc_tool
+        def zzz_shutil_rmtree_probe(path: str) -> str:
+            """shutil.rmtree(path)."""
+            import shutil
+
+            shutil.rmtree(path)
+            return "removed"
+
+        @lc_tool
+        def zzz_os_makedirs_probe(path: str) -> str:
+            """os.makedirs(path)."""
+            import os
+
+            os.makedirs(path, exist_ok=True)
+            return "made"
+
+        @lc_tool
+        def zzz_os_symlink_probe(src: str, dst: str) -> str:
+            """os.symlink(src, dst) — the SECOND arg is created."""
+            import os
+
+            os.symlink(src, dst)
+            return "linked"
+
+        @lc_tool
+        def zzz_path_mkdir_probe(path: str) -> str:
+            """Path(path).mkdir()."""
+            from pathlib import Path
+
+            Path(path).mkdir(parents=True, exist_ok=True)
+            return "made"
+
+        for probe in (
+            zzz_shutil_move_probe,
+            zzz_shutil_rmtree_probe,
+            zzz_os_makedirs_probe,
+            zzz_os_symlink_probe,
+            zzz_path_mkdir_probe,
+        ):
+            caps = tool_capabilities(probe)
+            assert "writes_file" in caps, (
+                f"{probe.name} must classify as write-capable (D-N3 "
+                f"restoration): {sorted(caps)}"
+            )
+
+    def test_a_project_write_with_a_marker_literal_is_project(self):
+        """D-N4 — the temp decision follows API CALLS, never literals.
+
+        ``Path("/repo/logs/tempfile.notes").write_text(...)`` is a plain
+        PROJECT write. The old substring rule downgraded it to
+        ``writes_temp_file`` because the path LITERAL contains
+        ``tempfile.``.
+        """
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def zzz_marker_literal_probe(content: str) -> str:
+            """A PROJECT write whose path literal contains a marker."""
+            from pathlib import Path
+
+            Path("/repo/logs/tempfile.notes").write_text(
+                content, encoding="utf-8"
+            )
+            return "written"
+
+        caps = tool_capabilities(zzz_marker_literal_probe)
+        assert "writes_file" in caps, (
+            "a project write must not be downgraded because its path "
+            f"LITERAL contains a tempfile marker: {sorted(caps)}"
+        )
+        assert TEMP_FILE_CAPABILITY not in caps, (
+            f"the write is PROJECT-surface, not temp: {sorted(caps)}"
+        )
+
+    def test_a_genuine_temp_write_stays_temp(self):
+        """D-N4 — the true temp case still classifies as temp.
+
+        Non-vacuity for the pin above: the tempfile-API CALL edge must
+        still be recognised (this is the shape ``explore`` and
+        ``experience`` use).
+        """
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def zzz_real_temp_probe(content: str) -> str:
+            """A genuinely temp-confined write."""
+            import tempfile
+            from pathlib import Path
+
+            (Path(tempfile.gettempdir()) / "x.txt").write_text(
+                content, encoding="utf-8"
+            )
+            return "written"
+
+        caps = tool_capabilities(zzz_real_temp_probe)
+        assert TEMP_FILE_CAPABILITY in caps, (
+            f"a tempfile-API-derived write must classify as temp: {sorted(caps)}"
+        )
+        assert "writes_file" not in caps, (
+            f"a temp-confined write is not a project write: {sorted(caps)}"
         )
 
     def test_the_classifier_catches_a_renamed_write_tool(self):

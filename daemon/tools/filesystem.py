@@ -325,6 +325,37 @@ def _load_declared_read_scope(agent_id: str) -> str | None:
     return None
 
 
+#: Basenames a SCOPED agent may NEVER read, at ANY depth under the anchor
+#: (iteration 2 — D-N2). The `.env` FAMILY is matched as a prefix
+#: (``.env``, ``.env.local``, ``.env.production``, …).
+#:
+#: WHY this exists even though the primary fence is relative-only + the
+#: trusted anchor: the anchor IS the project repo, so "relative only"
+#: permits exactly the file the scope exists to deny — ``read_file(".env")``
+#: RETURNED the live credential block (619 chars) in the re-adjudication.
+#: DS-15 names this class explicitly ("the repo ``.env``, ``~/.ssh/*``,
+#: ``/proc/self/environ``"); the latter two are outside the anchor and were
+#: already refused, ``.env`` was not. This is the NAMED EXCEPTION for the
+#: exact hazard class the commission enumerates — NOT a broad denylist.
+_SCOPE_DENIED_BASENAMES: frozenset[str] = frozenset({".env"})
+
+
+def _is_scope_denied_basename(name: str | None) -> bool:
+    """True when *name* is a credential-hazard basename (see the constant).
+
+    ``.env`` and the whole ``.env.*`` family are denied. The match is on
+    the BASENAME only, so the rule applies at ANY depth under the anchor
+    (``.env``, ``frontend/.env``, ``deploy/.env.production``).
+    """
+    if not name:
+        return False
+    lowered = str(name).strip().lower()
+    for denied in _SCOPE_DENIED_BASENAMES:
+        if lowered == denied or lowered.startswith(f"{denied}."):
+            return True
+    return False
+
+
 def _trusted_scope_anchor() -> Path | None:
     """Return the TRUSTED read anchor for a scoped agent, or ``None``.
 
@@ -349,7 +380,7 @@ def _resolve_within_scope(
 ) -> tuple[Path | None, str | None]:
     """Resolve a read path for an agent that DECLARES a read scope.
 
-    The rules (Phase-1 fix round 1 — D1):
+    The rules (iteration 2 — D1 / D-N1 / D-N2):
 
     * **ABSOLUTE path argument ⇒ REFUSED**, unconditionally. The
       acceptance list requires ``<repo>/.env`` to be refused even
@@ -359,12 +390,21 @@ def _resolve_within_scope(
       daemon-resolved project workdir), NEVER against the tool-call's
       ``workdir`` argument. A relative path that escapes the anchor is
       refused.
+    * **A CREDENTIAL-HAZARD BASENAME ⇒ REFUSED at any depth under the
+      anchor** (``.env`` / ``.env.*`` — see
+      :data:`_SCOPE_DENIED_BASENAMES`). The anchor IS the project repo,
+      so "relative-only" alone permits exactly the file the scope
+      exists to deny.
     * **No anchor ⇒ every read is refused** (fail-closed).
 
     A DECLARED scope therefore means *relative-only reads, anchored at
-    the daemon's own workdir* — the credential-hazard class (the repo
-    ``.env``, ``~/.ssh/*``, ``/proc/self/environ``, another agent's
-    directory) the keeper's residual read reach exposed.
+    the daemon's own workdir, minus the named credential-hazard
+    basenames* — the class DS-15 enumerates (the repo ``.env``,
+    ``~/.ssh/*``, ``/proc/self/environ``, another agent's directory).
+
+    Shared by the file tools AND the walk tools (``glob_files`` /
+    ``grep_files``) so there is exactly ONE definition of what a scope
+    permits.
     """
     anchor = _trusted_scope_anchor()
     if anchor is None:
@@ -387,7 +427,47 @@ def _resolve_within_scope(
             f"ERROR: trusted workdir does not exist: {anchor} — the daemon "
             "could not resolve this instance's project directory."
         )
-    return guard.resolve(path)
+    target, err = guard.resolve(path)
+    if err:
+        return None, err
+    # STRICT containment — ``WorkspaceGuard.resolve`` ALSO allows any target
+    # inside an allowed TEMP dir (the house's "trusted by design" allowance).
+    # For a SCOPED agent that allowance is a hole: an anchor that itself
+    # lives under a temp dir (a sandbox / test deploy) would let `../x`
+    # climb out and land back inside temp and be accepted. A scope means the
+    # anchor and nothing else.
+    if target is not None and not WorkspaceGuard._normed_contains(anchor, target):
+        return None, (
+            f"ERROR: read scope {scope!r} forbids reading outside the trusted "
+            f"workdir ({anchor}); {target} is outside it."
+        )
+    if target is not None and _is_scope_denied_basename(target.name):
+        return None, (
+            f"ERROR: read scope {scope!r} denies the credential-hazard "
+            f"basename {target.name!r} — the `.env` family is refused at ANY "
+            f"depth under the trusted workdir ({anchor})."
+        )
+    return target, None
+
+
+def _scope_filter_candidates(
+    files: list[Path],
+    scope: str | None,
+) -> list[Path]:
+    """Drop credential-hazard basenames from a SCOPED agent's walk results.
+
+    The walk tools (``glob_files`` / ``grep_files``) enumerate files rather
+    than resolving ONE target, so :func:`_resolve_within_scope`'s basename
+    rule cannot reach them. Without this filter a scoped agent could still
+    ``glob`` the ``.env`` file's NAME or ``grep`` its CONTENT from inside
+    its own anchor — the exact hazard the rule exists to deny.
+
+    Undeclared agents (``scope is None``) get the list UNCHANGED — base
+    behaviour, byte-identical.
+    """
+    if not scope:
+        return files
+    return [f for f in files if not _is_scope_denied_basename(f.name)]
 
 
 def _resolve_within_workdir(
@@ -463,6 +543,7 @@ def _is_within_workdir(workdir: Path, target: Path) -> bool:
 def _resolve_search_root(
     path: str,
     workdir: str | None,
+    scope_agent_id: str | None = None,
 ) -> tuple[Path | None, str | None]:
     """Resolve a search root for WALK tools (glob_files, grep_files) ONLY.
 
@@ -471,7 +552,17 @@ def _resolve_search_root(
     absolute path (e.g. ``/Users/...``) makes the walk unbounded — the
     2026-09-23 incident root cause (16 GB RAM walk → SIGKILL).
 
-    Semantics:
+    ``scope_agent_id`` is the OPT-IN read-scope hook (iteration 2 — D-N1).
+    The walk tools were the SECOND surface with the SAME anchor bug the file
+    tools had: the walk root was bounded against the AGENT-SUPPLIED
+    ``workdir``, so ``grep_files(path=<out-of-anchor>, workdir="/")`` returned
+    LIVE CONTENT to the keeper. When the agent DECLARES a scope the whole
+    resolution is delegated to :func:`_resolve_within_scope` — relative-only,
+    anchored at the daemon-resolved trusted workdir, credential-hazard
+    basenames denied. Undeclared agents fall through to the base rules below,
+    byte-identically.
+
+    Semantics (undeclared agents — unchanged):
       - Relative path: delegates to ``_resolve_within_workdir`` (same workdir
         requirement and behavior as the file tools — relative path stays
         inside the workdir or temp dir).
@@ -489,6 +580,12 @@ def _resolve_search_root(
     Returns:
         (target_path, error). On error, target_path is None.
     """
+    scope = declared_read_scope(scope_agent_id)
+    if scope:
+        # A SCOPED agent's walk root obeys the SAME rules as its file
+        # reads: relative-only, trusted anchor, no credential basenames.
+        return _resolve_within_scope(path, scope)
+
     if not _is_absolute_path(path):
         # Relative paths keep the existing _resolve_within_workdir semantics.
         return _resolve_within_workdir(path, workdir)
@@ -978,7 +1075,12 @@ def glob_files(
     """Find files matching a glob pattern. Use tool_help("glob_files") for details."""
     # Walk-tool absolute-path guard (2026-09-23 incident fix). Bare absolute
     # roots outside the workdir are REFUSED — see _resolve_search_root.
-    search_path, err = _resolve_search_root(path, workdir)
+    # D-N1: a SCOPED agent resolves its walk root through the SAME
+    # relative-only / trusted-anchor rules as its file reads.
+    glob_scope = declared_read_scope(current_caller_agent_id())
+    search_path, err = _resolve_search_root(
+        path, workdir, current_caller_agent_id()
+    )
     if err:
         return err
 
@@ -988,7 +1090,10 @@ def glob_files(
 
         # Bounded walk — applies exclusions / depth / count / timeout caps.
         walk = _bounded_walk(search_path)
-        candidate_files = walk.files
+        # D-N1: a scoped agent's walk never enumerates credential-hazard
+        # basenames — otherwise `glob '**/.env*'` would hand it the file
+        # NAME the read scope denies.
+        candidate_files = _scope_filter_candidates(walk.files, glob_scope)
 
         # Filter candidates by the user's pattern (uses _file_matches_pattern
         # internally; preserves Path.glob semantics including `**`).
@@ -1536,7 +1641,12 @@ def grep_files(
     """Search file contents using regex patterns. Use tool_help("grep_files") for details."""
     # Walk-tool absolute-path guard (2026-09-23 incident fix). Bare absolute
     # roots outside the workdir are REFUSED — see _resolve_search_root.
-    search_path, err = _resolve_search_root(path, workdir)
+    # D-N1: a SCOPED agent resolves its walk root through the SAME
+    # relative-only / trusted-anchor rules as its file reads.
+    grep_scope = declared_read_scope(current_caller_agent_id())
+    search_path, err = _resolve_search_root(
+        path, workdir, current_caller_agent_id()
+    )
     if err:
         return err
 
@@ -1559,7 +1669,13 @@ def grep_files(
 
         # Resolve include filter on top of the bounded walk's output
         # (recursive + single-level brace expansion).
-        candidate_files = _filter_candidates_by_include(search_path, include, walk.files)
+        # D-N1: a scoped agent's grep never READS credential-hazard
+        # basenames — otherwise `grep '<secret>'` inside its own anchor
+        # would return the `.env` CONTENT the read scope denies.
+        candidate_files = _scope_filter_candidates(
+            _filter_candidates_by_include(search_path, include, walk.files),
+            grep_scope,
+        )
 
         # Stamp ONE phase deadline (shared by stat + read phases below).
         # Reuses the walker's stamped deadline so a slow walk + slow post-walk
