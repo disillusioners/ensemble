@@ -2243,12 +2243,19 @@ class TestCheckAndCapture:
     ):
         """A skill was already applied → no capture (success is attributed)."""
         skill = _make_skill(skill_repo, project_id, "applied-skill")
-        # Insert a usage record for instance 'inst-3' and stamp it as applied.
+        # Insert a usage record for instance 'inst-3' and stamp it as
+        # applied. A3: the capture gate asks the OUTCOME-FIELDS
+        # predicate (selected AND task_succeeded AND feedback_applied IS
+        # NOT NULL), so the row must carry ALL THREE conjuncts — the
+        # old gate asked the feedback-only ``has_applied_for_instance``,
+        # whose ``applied`` column is written by nobody.
         rec = usage_repo.create(
             skill_id=skill.id,
             project_id=project_id,
             instance_id="inst-3",
             agent_id="agent-x",
+            selected=True,
+            task_succeeded=True,
         )
         usage_repo.update_feedback(rec.id, applied=True, note="applied")
 
@@ -2267,7 +2274,8 @@ class TestCheckAndCapture:
         self, evolution_service, usage_repo, project_id,
     ):
         """iterations > min OR duration > min, no skill applied → returns details."""
-        # No usage record for this instance → has_applied_for_instance → False.
+        # No usage record for this instance → the A3 capture-gate
+        # predicate (has_genuinely_evolved_for_instance) → False.
         result = await evolution_service.check_and_capture(
             instance_id="inst-4",
             agent_id="agent-x",
