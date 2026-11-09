@@ -1,0 +1,109 @@
+# GROUP E — Origin-parser leniency edges — 2026-11-09T03:16:53Z
+
+#### E1 Origin '//op.example' (scheme-less) ⇒ RECORD (the parser's hostname wins ⇒ expect 303)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Origin: //op.example --data code=dummy-not-used
+-- status: 200   (expect RECORD)  => RECORD
+-- content-type: text/html;   set-cookie headers: 0
+   HTTP/1.1 200 OK
+   date: Mon, 09 Nov 2026 03:16:52 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-0be510579cd5b1b22cea8e1e4898bd81'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1820
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="0be510579cd5b1b22cea8e1e4898bd81">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### E2 Origin 'https://evil.example@op.example' (userinfo) ⇒ RECORD (hostname wins ⇒ expect 303)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Origin: https://evil.example@op.example --data code=dummy-not-used
+-- status: 200   (expect RECORD)  => RECORD
+-- content-type: text/html;   set-cookie headers: 0
+   HTTP/1.1 200 OK
+   date: Mon, 09 Nov 2026 03:17:06 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-4d1d1c644feb360b7cee00bc81d65003'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1820
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="4d1d1c644feb360b7cee00bc81d65003">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### E3 Origin 'https://op.example/some/path' (path on an Origin) ⇒ RECORD (expect 303)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Origin: https://op.example/some/path --data code=dummy-not-used
+-- status: 200   (expect RECORD)  => RECORD
+-- content-type: text/html;   set-cookie headers: 0
+   HTTP/1.1 200 OK
+   date: Mon, 09 Nov 2026 03:17:19 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-601d1b18827440559a2960782e5f4da1'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1820
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="601d1b18827440559a2960782e5f4da1">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### E4 Origin 'https://evil.example@op.example' with a forged XFH evil ⇒ RECORD (expect 303 — audience anchor, no declared front ⇒ no veto)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H X-Forwarded-Host: evil.example -H Origin: https://evil.example@op.example --data code=dummy-not-used
+-- status: 200   (expect RECORD)  => RECORD
+-- content-type: text/html;   set-cookie headers: 0
+   HTTP/1.1 200 OK
+   date: Mon, 09 Nov 2026 03:17:33 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-baf357ffda54a3c80f8a3fe2f92883e6'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1820
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="baf357ffda54a3c80f8a3fe2f92883e6">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
