@@ -47,6 +47,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -295,6 +296,21 @@ PARALLEL_QUEUE_NAME = "system_parallel_queue"
 # ``fix_burst_window_seconds`` (3 FIX admissions per skill per 24h).
 DEFAULT_FIX_BURST_CAP = 3
 DEFAULT_FIX_BURST_WINDOW_SECONDS = 86400
+
+
+# The prompt SOURCE of a capture run — which producer minted it.
+# ``completion_hook`` is the live producer today (the task-completion
+# hook in ``SkillMetricsService.check_and_capture``); a tool-driven
+# producer passes its own token so the two are distinguishable in the
+# sink after the fact.
+PROMPT_SOURCE_COMPLETION_HOOK = "completion_hook"
+
+
+def _task_detail(task_details: Any, key: str) -> Any:
+    """Read one key out of the capture ``task_details`` (defensively)."""
+    if isinstance(task_details, dict):
+        return task_details.get(key)
+    return None
 
 
 class SkillFixBurstCapRefused(RuntimeError):
@@ -828,6 +844,20 @@ class SkillJobDispatcher:
                 self._evolution_lane_enabled,
                 skill_id,
             )
+            # D: a refused ADMISSION mints NO row — it needs a COUNTER
+            # (the execution-refusal counter is a DIFFERENT signal and
+            # must never be merged with this one).
+            observability.record_admission_refusal("evolution_lane_off")
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    agent_id=None,
+                    prompt_source="evolution",
+                    outcome="refused",
+                    refusal_reason="evolution_lane_off",
+                    extra={"skill_id": skill_id},
+                )
+            )
             return None
 
         normalized_project_id = normalize_project_id(project_id)
@@ -849,6 +879,21 @@ class SkillJobDispatcher:
                         skill_id[:8] if isinstance(skill_id, str) else skill_id,
                         elapsed,
                         self._fix_cooldown_seconds,
+                    )
+                    observability.record_admission_refusal("fix_cooldown")
+                    observability.append_run_record(
+                        observability.build_run_record(
+                            stage="admission",
+                            agent_id=None,
+                            prompt_source="evolution",
+                            outcome="refused",
+                            refusal_reason="fix_cooldown",
+                            extra={
+                                "skill_id": skill_id,
+                                "elapsed_seconds": elapsed,
+                                "cooldown_seconds": self._fix_cooldown_seconds,
+                            },
+                        )
                     )
                     return None
 
@@ -893,6 +938,10 @@ class SkillJobDispatcher:
             # for this key already exists, which is exactly the
             # state the cooldown should keep protecting.
             self._fix_admission_cooldown[cooldown_key] = time.monotonic()
+        if job_id:
+            # D: the admitted-run counter + the re-fix-rate gauge (the
+            # number of FIX admissions per skill per window).
+            observability.record_admission(is_fix=is_fix)
         return job_id
 
     # ── Public API: CAPTURED flow ───────────────────────────────────
@@ -901,6 +950,7 @@ class SkillJobDispatcher:
         self,
         project_id: str | None,
         task_details: dict[str, Any],
+        prompt_source: str = PROMPT_SOURCE_COMPLETION_HOOK,
     ) -> str | None:
         """Enqueue a ``skill_capture`` job (CAPTURED flow).
 
@@ -941,15 +991,55 @@ class SkillJobDispatcher:
                 "will be enqueued.",
                 SKILL_CAPTURE_KILL_SWITCH_ENV,
             )
+            # D: a refused ADMISSION mints NO row — the counter + the
+            # sink record are the only residue it leaves (and they are
+            # a DIFFERENT signal from the execution-refusal counter).
+            observability.record_admission_refusal("capture_lane_off")
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    agent_id=_task_detail(task_details, "agent_id"),
+                    prompt_source=prompt_source,
+                    task_message=_task_detail(task_details, "task_message"),
+                    outcome="refused",
+                    refusal_reason="capture_lane_off",
+                )
+            )
             return None
 
         message = f"Capture skill from task. Details: {task_details}"
-        return await self._enqueue_skill_keeper_job(
+        # D: the per-run observability stamps — a stable run id, the
+        # prompt SOURCE (which producer minted the run) and the prompt
+        # SHAPE (never the prompt text itself — DS-18).
+        run_id = uuid.uuid4().hex
+        agent_id = _task_detail(task_details, "agent_id")
+        shape = observability.prompt_shape(
+            _task_detail(task_details, "task_message"), agent_id
+        )
+        job_id = await self._enqueue_skill_keeper_job(
             project_id,
             JOB_TYPE_CAPTURE,
             message,
-            metadata={"task_details": task_details},
+            metadata={
+                "task_details": task_details,
+                "capture_run_id": run_id,
+                "prompt_source": prompt_source,
+                "prompt_shape": shape,
+            },
         )
+        observability.record_admission()
+        observability.append_run_record(
+            observability.build_run_record(
+                stage="admission",
+                run_id=run_id,
+                agent_id=agent_id,
+                prompt_source=prompt_source,
+                task_message=_task_detail(task_details, "task_message"),
+                outcome="admitted",
+                extra={"job_id": job_id},
+            )
+        )
+        return job_id
 
     # ── Public API: metric scan ─────────────────────────────────────
 

@@ -49,6 +49,7 @@ from typing import Any, Optional
 import openai
 
 from .skill_job_dispatcher import EVOLUTION_TYPE_FIX
+from . import skill_capture_observability as observability
 from .llm_failover import current_failover_url, invoke_raw_with_failover
 
 logger = logging.getLogger(__name__)
@@ -1379,6 +1380,37 @@ class SkillEvolutionService:
             # the out-of-extensions case). Raising ValueError maps
             # to HTTP 400 at the router.
             if comparisons < sample_size:
+                # ── D3: the DAEMON-SIDE DEVIATION TRIGGER ───────────
+                # A forced resolve below the sample size is an action
+                # OUTSIDE the keeper's sanctioned surface. The guard
+                # refuses it (this ValueError maps to HTTP 400) — but
+                # on 2026-10-22 the refusal left NO residue: the
+                # keeper force-resolved a LIVE experiment at
+                # comparisons=2/10 and the incident only became
+                # visible through a forensic reconstruction.
+                #
+                # The DAEMON announces the deviation now (an anomaly
+                # row through the same accept path the agent-side
+                # ``nest-report`` tool uses) — the agent is NOT
+                # trusted to report itself. The raw prompt is never
+                # included; only ids and counts.
+                observability.record_deviation()
+                await observability.emit_lane_anomaly(
+                    category=observability.CATEGORY_LANE_DEVIATION,
+                    description=(
+                        "Keeper deviation: forced A/B resolve refused "
+                        f"for ab_test_group={ab_test_group!r} "
+                        f"(comparisons={comparisons} < "
+                        f"ab_sample_size={sample_size}); no verdict was "
+                        "forced and no mutation was performed."
+                    ),
+                    severity="major",
+                    suspected_cause=(
+                        "forced A/B resolve attempted below the sample "
+                        "size (2026-10-21 incident shape)"
+                    ),
+                    holder=self._metrics_service,
+                )
                 raise ValueError(
                     f"Forced A/B resolve refused for "
                     f"ab_test_group={ab_test_group!r}: comparisons="

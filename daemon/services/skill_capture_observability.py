@@ -251,8 +251,26 @@ def resolve_data_dir(data_dir: str | Path | None = None) -> Path:
     )
 
 
+#: Explicit sink location override (tests / wiring). ``None`` → the
+#: resolved data dir (``ENSEMBLE_DATA_DIR`` > ``DATA_DIR`` > ``./data``).
+_SINK_DIR_OVERRIDE: str | Path | None = None
+
+
+def configure_sink(data_dir: str | Path | None = None) -> None:
+    """Point the sink at an explicit data dir (or reset it to the default).
+
+    The daemon resolves the data dir from the environment; TESTS point
+    the sink at a scratch dir so a test run never writes into the
+    checkout's ``data/`` tree.
+    """
+    global _SINK_DIR_OVERRIDE
+    _SINK_DIR_OVERRIDE = data_dir
+
+
 def resolve_sink_dir(data_dir: str | Path | None = None) -> Path:
     """Resolve the sink directory (under the daemon data dir)."""
+    if data_dir is None and _SINK_DIR_OVERRIDE is not None:
+        data_dir = _SINK_DIR_OVERRIDE
     return resolve_data_dir(data_dir) / SINK_DIR_NAME
 
 
@@ -341,36 +359,61 @@ def get_anomaly_reporter() -> AnomalyReporter | None:
     return _ANOMALY_REPORTER
 
 
-def resolve_anomaly_service(job_service: Any = None) -> Any | None:
+#: The holder paths that lead to the daemon's ``AnomalyService``.
+#: The anomaly service is mounted on the instance manager
+#: (``manager.anomaly_service`` — the public alias of
+#: ``manager._anomaly_service``); the job queue service holds the
+#: instance manager; the skill-metrics service holds the job
+#: dispatcher, which holds the job service. Walking those paths keeps
+#: the wiring inside this module — NO manager-side change is required
+#: for the daemon to announce a deviation.
+_ANOMALY_SEARCH_PATHS: tuple[tuple[str, ...], ...] = (
+    ("anomaly_service",),
+    ("_anomaly_service",),
+    ("_instance_manager", "anomaly_service"),
+    ("_instance_manager", "_anomaly_service"),
+    ("_job_service", "_instance_manager", "anomaly_service"),
+    ("_job_service", "_instance_manager", "_anomaly_service"),
+    (
+        "_skill_job_dispatcher",
+        "_job_service",
+        "_instance_manager",
+        "anomaly_service",
+    ),
+    (
+        "_skill_job_dispatcher",
+        "_job_service",
+        "_instance_manager",
+        "_anomaly_service",
+    ),
+)
+
+
+def resolve_anomaly_service(*holders: Any) -> Any | None:
     """Late-bound resolution of the daemon's ``AnomalyService``.
 
-    The anomaly service is mounted on the instance manager
-    (``manager._anomaly_service`` with the public alias
-    ``manager.anomaly_service``), and the job queue service holds the
-    instance manager. Resolving it through the job service keeps the
-    wiring inside this module (no manager-side change is required for
-    the daemon to announce a deviation).
-
     Args:
-        job_service: The ``JobQueueService`` (or anything exposing
-            ``_instance_manager``).
+        *holders: Any service objects that (transitively) expose the
+            anomaly service — e.g. the job queue service or the skill
+            metrics service.
 
     Returns:
         The anomaly service (anything with an ``accept_report``
         coroutine), or ``None`` when it cannot be resolved.
     """
-    candidates: list[Any] = []
-    if job_service is not None:
-        manager = getattr(job_service, "_instance_manager", None)
-        if manager is not None:
-            candidates.append(manager)
-    for holder in candidates:
-        for attr in ("anomaly_service", "_anomaly_service"):
-            service = getattr(holder, attr, None)
-            if service is not None and callable(
-                getattr(service, "accept_report", None)
+    for holder in holders:
+        if holder is None:
+            continue
+        for path in _ANOMALY_SEARCH_PATHS:
+            current: Any = holder
+            for attr in path:
+                current = getattr(current, attr, None)
+                if current is None:
+                    break
+            if current is not None and callable(
+                getattr(current, "accept_report", None)
             ):
-                return service
+                return current
     return None
 
 
@@ -416,6 +459,7 @@ async def emit_lane_anomaly(
     agent_id: str = SKILL_KEEPER_AGENT_ID,
     instance_id: str = DAEMON_REPORTER_INSTANCE_ID,
     job_service: Any = None,
+    holder: Any = None,
     reporter: AnomalyReporter | None = None,
 ) -> bool:
     """Write ONE anomaly row through the daemon-side accept path.
@@ -433,6 +477,9 @@ async def emit_lane_anomaly(
         agent_id: The reporting agent TYPE id.
         instance_id: The reporting instance id (synthetic for daemon rows).
         job_service: Used for the late-bound anomaly-service resolution.
+        holder: An additional holder for the same resolution (e.g. the
+            metrics service, which reaches the anomaly service through
+            the job dispatcher).
         reporter: Explicit reporter (overrides the registered one).
 
     Returns:
@@ -442,7 +489,7 @@ async def emit_lane_anomaly(
     canonical = _canonical_category(category)
     target = reporter or get_anomaly_reporter()
     if target is None:
-        service = resolve_anomaly_service(job_service)
+        service = resolve_anomaly_service(job_service, holder)
         if service is not None:
             target = getattr(service, "accept_report", None)
     if target is None:

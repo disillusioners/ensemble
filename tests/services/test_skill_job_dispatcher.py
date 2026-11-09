@@ -22,6 +22,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import json
+
 import pytest
 
 
@@ -347,9 +349,20 @@ class TestEnqueueCapture:
         assert kwargs["queue_id"] == "q-parallel-1"
         assert kwargs["agent_id"] == "skill-keeper"
         # task_details lives verbatim in metadata.
-        assert kwargs["metadata"] == {"task_details": task_details}
+        assert kwargs["metadata"]["task_details"] == task_details
         assert kwargs["metadata"]["task_details"]["iterations"] == 8
         assert kwargs["metadata"]["task_details"]["duration_seconds"] == 90
+        # D (2026-11-09 — phase1-plan §8 row 29): the metadata ALSO
+        # carries the per-run observability stamps — a stable run id,
+        # the prompt SOURCE and the prompt SHAPE. The shape never
+        # carries the raw prompt (credential hygiene, DS-18).
+        assert kwargs["metadata"]["capture_run_id"]
+        assert kwargs["metadata"]["prompt_source"] == "completion_hook"
+        shape = kwargs["metadata"]["prompt_shape"]
+        assert shape["length_bucket"] in ("short", "medium", "long")
+        assert shape["has_agent_id"] is True
+        assert shape["sha256_16"]
+        assert task_details["task_message"] not in json.dumps(shape)
 
 
 # =============================================================================
