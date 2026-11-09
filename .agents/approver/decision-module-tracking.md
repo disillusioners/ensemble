@@ -122,3 +122,20 @@ POSITIVE: K1 closed. The design content is substantively sound and anchor-verifi
 STATUS: **ESCALATED** — max iterations reached (3). Escalated to the Emperor via the Leader.
 
 ---
+---
+## POST-ESCALATION REPAIR — leader disposition (2026-11-09)
+
+The iteration-003 verdict above is preserved verbatim as the record of what the approver found at that point. After the escalation, the leader directed one repair pass on exactly the four blocking items and ran three independent verification rounds (a read-only checker separate from the architect who made the edits).
+
+- B1 — the surviving boot-probe sentence in `thin-client.md` §6 row 17 was deleted; it now reads: "The no-adapter case is resolved at provisioning time by the operator (§7); the client never probes and no boot-time verification occurs." §7 already stated the operator-precondition rule; the contradiction is gone.
+- B2 — all 48 register rows were re-derived at claim level with the construct at the cited line pasted. The six named misalignments were corrected; a class scan across all 48 rows found two further comment-line anchors (rows 19, 45), now fixed to real constructs; five remaining comment anchors are justified in-row (module docstring / documented invariant / block header / documentation-by-comment / the comment is the finding). Operative tally: 48 VERIFIED / 0 UNVERIFIED / 0 CONTRADICTED.
+- B3 — `anchor-audit.md` §5 is the operative tally; §10's "21 UNVERIFIED" statement is retained but explicitly marked historical in place.
+- B4 — the non-reproducing verification output was replaced with a command that reproduces; the underlying fix (catch-all = §6 row 19) was already correct.
+- CONFIRM (§8.4) — the deny-ownership paragraph no longer asserts subset/superset or substitution: overlay answers are ADDED to the judge's verdict, never substituted; DENY is minted at two sites both inside `decide()` (:1024 main path, :950 error variant).
+
+Verification evidence: the independent checker returned READY on 2026-11-09 10:16Z — the six prior defects confirmed landed with their exact corrections; `:6186` fully re-pointed to `:6187` (`:6186` confirmed a blank line by direct read); ledger rows 19 and 45 claim-aligned against source; the five justified comment anchors spot-checked honest; regression surface unchanged — no claim TEXT was altered, only anchors moved.
+
+Correction to the header above: the committed set is 6 documents / 1,606 lines (the "5 docs, 1223 lines" note predates the addition of `anchor-audit.md`).
+
+Disposition: the approver certified the DESIGN CONTENT sound at iteration 003; the items it blocked on were one sentence and three evidence-instrument defects, all now repaired and independently verified. The set lands as the design of record pending Emperor ratification. Implementation remains gated on that ratification.
+---
