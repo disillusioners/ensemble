@@ -11,7 +11,8 @@
 # skill id.
 #
 # FILE SET
-#   tests/unit/test_skill_dual_column_deactivation.py   (the pin)
+#   tests/unit/test_skill_dual_column_deactivation.py   (the repository-side pin)
+#   tests/unit/routers/test_skill_patch_dual_column.py   (I5 — the REST PATCH arm)
 #
 # MUTATION MATRIX (phase 2), planted on daemon/repositories/skill/repository.py
 # (the A3 gate region is NOT touched by any leg — the two regions stay separate):
@@ -19,6 +20,10 @@
 #   M-E4w-b — drop the A/B guard ⇒ the refusal pins RED
 #   M-E4w-c — stop surfacing the PRIOR pair (return the post-write pair) ⇒ the
 #             reversibility pins RED
+#   M-I5-a  — restore the REST handler's pop-and-translate shape (drop the
+#             `is_active` write at `daemon/routers/skills.py`) ⇒ the REST
+#             both-columns pins RED (the status-only translation still passes,
+#             so the pin catches the DESYNC, not the translation)
 #
 # FENCES: per-variable env scrub, worktree-local interpreter, dual-layer
 # timeout, sha-verified PRISTINE restore, VACUOUS-GREEN guard.
@@ -41,13 +46,15 @@ SCRUB=(env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT
        -u ENSEMBLE_SELF_ENV -u ENSEMBLE_CONFIG -u ENSEMBLE_DATA_DIR)
 
 PIN="tests/unit/test_skill_dual_column_deactivation.py"
+REST_PIN="tests/unit/routers/test_skill_patch_dual_column.py"
+ROUTER_PY="daemon/routers/skills.py"
 REPO_PY="daemon/repositories/skill/repository.py"
 
 echo "=== Test Pack: skill_dual_column_deactivation_unit_test ==="
 echo "REPO_ROOT=$REPO_ROOT"
 
 [ -x "$PY" ] || { echo "RESULT: FAIL (MISSING-INTERPRETER)"; exit 1; }
-for f in "$PIN" "$REPO_PY"; do
+for f in "$PIN" "$REST_PIN" "$REPO_PY" "$ROUTER_PY"; do
   [ -f "$f" ] || { echo "RESULT: FAIL (MISSING-ARTIFACT — $f)"; exit 1; }
 done
 
@@ -61,8 +68,13 @@ check_budget() {
 }
 
 run_pin() {
-  timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$PIN" -q --tb=line -p no:randomly \
-    --override-ini="addopts=" > "$1" 2>&1
+  timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$PIN" "$REST_PIN" -q --tb=line \
+    -p no:randomly --override-ini="addopts=" > "$1" 2>&1
+}
+
+run_rest_pin() {
+  timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$REST_PIN" -q --tb=line \
+    -p no:randomly --override-ini="addopts=" > "$1" 2>&1
 }
 
 echo "--- phase 1: the pin ---"
@@ -89,6 +101,7 @@ restore_all() {
   [ "$CLEANED" = 1 ] && return 0
   CLEANED=1
   [ -f "$PRISTINE/content" ] && cp "$PRISTINE/content" "$REPO_PY"
+  [ -f "$PRISTINE/router-content" ] && cp "$PRISTINE/router-content" "$ROUTER_PY"
   rm -rf "$PRISTINE"
 }
 trap restore_all EXIT
@@ -97,7 +110,10 @@ trap 'restore_all; exit 130' INT
 
 cp "$REPO_PY" "$PRISTINE/content"
 WANT="$(sha256sum "$REPO_PY" | cut -d' ' -f1)"
+cp "$ROUTER_PY" "$PRISTINE/router-content"
+ROUTER_WANT="$(sha256sum "$ROUTER_PY" | cut -d' ' -f1)"
 echo "[pack] pristine: $REPO_PY sha=$WANT"
+echo "[pack] pristine: $ROUTER_PY sha=$ROUTER_WANT"
 
 plant() {
   "$PY" - "$1" "$2" "$3" <<'PYEOF'
@@ -183,9 +199,60 @@ leg "M-E4w-c" \
                 prior_status="inactive",
             )'
 
+# ── M-I5-a — the REST PATCH desync leg ────────────────────────────────────
+# Restore the handler's ORIGINAL pop-and-translate shape: it writes only
+# `status`, so the row's `is_active` column never moves and the PATCH
+# manufactures the MIRROR desync (True, 'inactive'). The status-only
+# assertion still passes — the pin catches the DESYNC, not the translation.
+rest_leg() {
+  local id="$1" old="$2" new="$3" log rc sha_before sha_after
+  sha_before="$(sha256sum "$ROUTER_PY" | cut -d' ' -f1)"
+  if [ "$sha_before" != "$ROUTER_WANT" ]; then
+    echo "  ${id}: FAIL (leg did not start pristine)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1)); return
+  fi
+  if ! plant "$ROUTER_PY" "$old" "$new"; then
+    echo "  ${id}: FAIL (plant error)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+    cp "$PRISTINE/router-content" "$ROUTER_PY"; return
+  fi
+  log="$LOG_DIR/${id}-red.log"
+  run_rest_pin "$log"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "  ${id}: FAIL (NON-DISCRIMINATING — the REST pin stayed GREEN with the desync restored)"
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+  else
+    echo "  ${id}: RED as intended (rc=${rc})"
+    grep -E "^FAILED " "$log" | head -3 | sed 's/^/    /' || true
+  fi
+  cp "$PRISTINE/router-content" "$ROUTER_PY"
+  sha_after="$(sha256sum "$ROUTER_PY" | cut -d' ' -f1)"
+  if [ "$sha_after" != "$ROUTER_WANT" ]; then
+    echo "  ${id}: FAIL (restore NOT sha-identical)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1)); return
+  fi
+  log="$LOG_DIR/${id}-green.log"
+  run_rest_pin "$log"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "  ${id}: FAIL (post-restore leg not GREEN, rc=${rc})"
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+  else
+    echo "  ${id}: GREEN after sha-verified restore"
+  fi
+  check_budget "after ${id}"
+}
+
+rest_leg "M-I5-a" \
+  '        fields["is_active"] = is_active_value
+        fields["status"] = "active" if is_active_value else "inactive"' \
+  '        fields.pop("is_active", None)
+        fields["status"] = "active" if is_active_value else "inactive"'
+
 sha="$(sha256sum "$REPO_PY" | cut -d' ' -f1)"
 if [ "$sha" != "$WANT" ]; then
   echo "RESULT: FAIL (post-run manifest: $REPO_PY is NOT byte-identical)"
+  exit 1
+fi
+sha="$(sha256sum "$ROUTER_PY" | cut -d' ' -f1)"
+if [ "$sha" != "$ROUTER_WANT" ]; then
+  echo "RESULT: FAIL (post-run manifest: $ROUTER_PY is NOT byte-identical)"
   exit 1
 fi
 echo "[pack] post-run manifest: every touched file is byte-identical"
@@ -194,5 +261,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (3 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (4 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0

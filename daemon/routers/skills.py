@@ -927,11 +927,37 @@ async def update_skill(
             ``ValueError``; 500 on unexpected failure.
     """
     fields = body.model_dump(exclude_none=True)
-    # Translate the public ``is_active`` flag to the SQLModel's
-    # ``status`` column. Keeping them aligned keeps the API
-    # intuitive without changing the on-disk layout.
+    # ── I5: write BOTH columns, never one without the other ───────────────
+    #
+    # ``skills.is_active`` and ``skills.status`` are TWO DESYNCABLE COLUMNS
+    # (a real production row carries ``(False, 'ab_testing')``).  This site
+    # used to POP ``is_active`` and write ONLY ``status`` — which never moved
+    # the row's ``is_active`` column and therefore MANUFACTURED the mirror
+    # desync ``(True, 'inactive')`` on every PATCH that set ``is_active``.
+    #
+    # The fix keeps the public ``is_active`` flag AND derives ``status`` from
+    # it, so ``store.update_skill`` persists BOTH in ONE repository call
+    # (``SkillRepository.update`` writes every field it is given in a single
+    # transaction).  The REST ACCEPTANCE SEMANTICS ARE UNCHANGED: the same
+    # ``is_active`` field is accepted, no new refusal can fire, and a caller
+    # that does not send ``is_active`` is untouched.
+    #
+    # Deliberately NOT reusing ``SkillRepository.deactivate_with_receipt``
+    # (the E4 dual-column writer, commit 5e7834dd4): that writer REFUSES on
+    # an OPEN A/B test, so wiring it here would introduce NEW refusals to an
+    # existing public REST path — a semantic change, not a desync fix.  The
+    # inlined both-columns translation fixes the desync without altering what
+    # the endpoint accepts OR refuses.
     if "is_active" in fields:
-        fields["status"] = "active" if fields.pop("is_active") else "inactive"
+        is_active_value = bool(fields["is_active"])
+        # Keep the flag (the repository persists it) and derive the paired
+        # status.  ``fields["is_active"]`` is NOT popped any more.
+        fields["is_active"] = is_active_value
+        fields["status"] = "active" if is_active_value else "inactive"
+    # NOTE (the mirror guard): ``status`` is NOT an accepted field on this
+    # route (``SkillUpdateRequest`` declares description / content / category
+    # / is_active only), so the pair can only ever arrive through
+    # ``is_active`` — a caller cannot move ``status`` alone at this site.
     try:
         skill = await store.update_skill(skill_id, **fields)
         if skill is None:

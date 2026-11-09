@@ -423,7 +423,19 @@ class TestGetSkill:
 
 
 class TestUpdateSkill:
-    def test_update_translates_is_active_to_status(self, skill_app_with_mock_services):
+    def test_update_translates_is_active_to_BOTH_columns(
+        self, skill_app_with_mock_services
+    ):
+        """I5 — the PATCH must move BOTH columns, never one alone.
+
+        THIS PIN WAS CORRECTED, NOT LOOSENED.  It used to assert
+        ``assert "is_active" not in kwargs`` — i.e. it pinned the DEFECT:
+        the handler popped the public flag and wrote ONLY ``status``, so the
+        row's ``is_active`` column never moved and every
+        ``PATCH {"is_active": false}`` manufactured the mirror desync
+        ``(is_active=True, status='inactive')``.  The corrected contract is
+        that one call carries BOTH columns.
+        """
         client = skill_app_with_mock_services["client"]
         store = skill_app_with_mock_services["store"]
         response = client.put(
@@ -432,10 +444,34 @@ class TestUpdateSkill:
         )
         assert response.status_code == 200
         kwargs = store.update_skill.await_args.kwargs
-        # Public API uses is_active; service layer uses status.
-        assert "is_active" not in kwargs
+        # BOTH columns in ONE forwarded call — the desync guard.
+        assert kwargs["is_active"] is False
         assert kwargs["status"] == "inactive"
         assert kwargs["description"] == "new"
+
+    def test_update_true_direction_also_moves_both_columns(
+        self, skill_app_with_mock_services
+    ):
+        """The ``is_active=True`` direction is the mirror of the same defect."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        response = client.put("/api/skills/skill-abc", json={"is_active": True})
+        assert response.status_code == 200
+        kwargs = store.update_skill.await_args.kwargs
+        assert kwargs["is_active"] is True
+        assert kwargs["status"] == "active"
+
+    def test_update_without_is_active_sends_neither_column(
+        self, skill_app_with_mock_services
+    ):
+        """A metadata-only PATCH must never touch the pair at all."""
+        client = skill_app_with_mock_services["client"]
+        store = skill_app_with_mock_services["store"]
+        response = client.put("/api/skills/skill-abc", json={"description": "x"})
+        assert response.status_code == 200
+        kwargs = store.update_skill.await_args.kwargs
+        assert "is_active" not in kwargs
+        assert "status" not in kwargs
 
     def test_update_404_when_missing(self, skill_app_with_mock_services):
         client = skill_app_with_mock_services["client"]
