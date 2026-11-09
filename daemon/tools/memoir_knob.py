@@ -419,7 +419,8 @@ def memoir_tool_help(config: "Config | None" = None) -> str:
 #
 # | `ENSEMBLE_MEMOIR_REFLECTION_ENABLED` | Resolved | Lane | Log |
 # |---|---|---|---|
-# | absent | ON (the constitutional default) | ENABLED | WARNING — "unset — the reflection lane is ENABLED by default" |
+# | absent | the CONFIG tier decides: ON (the constitutional default) | ENABLED | WARNING — "unset — the reflection lane is ENABLED by default" |
+# | absent + `memoir_reflection.enabled: false` | OFF (the config tier) | DISABLED | INFO — "unset and the configuration disables the reflection lane" (resolution `config`) |
 # | empty string | = absent | ENABLED | as above |
 # | `true`/`1`/`yes`/`on`/`t`/`y` | true | ENABLED | INFO |
 # | `false`/`0`/`no`/`off`/`f`/`n` | false | DISABLED | INFO |
@@ -484,8 +485,10 @@ def resolve_memoir_reflection_knob(
         # The value comes from the SHARED classifier (mechanism N-2 — the
         # same reader the model's own field validator uses), so the live
         # env tier and the boot-frozen section can never disagree about
-        # what a value MEANS. The truth table is unchanged: unset ⇒ ON
-        # (+ the loud WARNING), garbage ⇒ OFF (fail closed), explicit
+        # what a value MEANS. The truth table is: unset ⇒ ON ONLY when
+        # the config tier ALSO says ON (+ the loud WARNING); unset ⇒ OFF
+        # when the config tier disables the lane (an explicit CONFIG
+        # decision — INFO); garbage ⇒ OFF (fail closed); explicit
         # true/false ⇒ honoured.
         env_enabled: bool | None = None
         if env_present:
@@ -550,21 +553,41 @@ def resolve_memoir_reflection_knob(
         _warn_unset_budget_knobs(section)
         return state
 
-    # The env tier is ABSENT: the model's constitutional default decides
-    # (ON), and the unset case is LOUD — "unset ⇒ ON" is admissible only
-    # because it is never silent.
-    message = (
-        f"[MemoirReflect] {MEMOIR_REFLECTION_ENABLED_ENV_VAR} is unset — the "
-        f"reflection lane is ENABLED by default; set "
-        f"`{MEMOIR_REFLECTION_ENABLED_ENV_VAR}=false` to disable it"
-    )
+    # The env tier is ABSENT: the CONFIG tier decides — and the line
+    # states the RESOLVED value, never a value the resolver did not
+    # reach (D0.7: the resolved state is retrievable WITHOUT reading
+    # logs — ``memoir_knob_state`` is the accessor).
+    #
+    # The model's own truth table is the authority here (the same split
+    # ``MemoirConfig._record_resolution`` records for the v1 surface):
+    # an ABSENT env with the section ENABLED is the constitutional
+    # DEFAULT (the unset case is LOUD — a WARNING); an ABSENT env with
+    # the section DISABLED is an explicit CONFIG decision (INFO, and the
+    # resolution code names the tier that decided).
+    if enabled:
+        message = (
+            f"[MemoirReflect] {MEMOIR_REFLECTION_ENABLED_ENV_VAR} is unset — the "
+            f"reflection lane is ENABLED by default; set "
+            f"`{MEMOIR_REFLECTION_ENABLED_ENV_VAR}=false` to disable it"
+        )
+        resolution = MEMOIR_RESOLUTION_DEFAULT
+        log_level = "WARNING"
+    else:
+        message = (
+            f"[MemoirReflect] {MEMOIR_REFLECTION_ENABLED_ENV_VAR} is unset and "
+            f"the configuration disables the reflection lane "
+            f"(memoir_reflection.enabled=false) — the reflection lane is "
+            f"DISABLED"
+        )
+        resolution = MEMOIR_RESOLUTION_CONFIG
+        log_level = "INFO"
     state = MemoirReflectionKnobState(
         enabled=enabled,
-        resolution=MEMOIR_RESOLUTION_DEFAULT,
+        resolution=resolution,
         source="config",
         rejected_value=None,
         message=message,
-        log_level="WARNING",
+        log_level=log_level,
     )
     _emit_reflection_once(state)
     _warn_unset_budget_knobs(section)

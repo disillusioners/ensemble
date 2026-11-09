@@ -797,12 +797,42 @@ def test_a_null_pass_id_never_increments_the_mention_count(
 # built UNCONFIGURED: every attempt uses the primary and NO swap can
 # ever occur (see ``daemon/services/llm_failover.py``).
 #
-# The lifespan builds that dict INLINE (there is no importable
-# helper), so the wiring pin reads the source — the house AST pin.
+# THE SEAM IS IMPORTABLE. The lifespan builds that dict through
+# ``daemon.api._reflection_llm_config`` — a MODULE-LEVEL helper — so
+# every pin below drives the REAL dict instead of a hand-built
+# look-alike.
+#
+# WHY THE SEAM MATTERS (the MUT-5 lesson): the FIRST version of this
+# pin was AST-only and read the dict's KEY NAMES. A typo'd ATTRIBUTE
+# (``base_url_backu``) left the VALUE permanently ``None`` — the key
+# SPELLING was still right, so every leg stayed GREEN while the
+# failover path could never swap. A key-spelling pin cannot see a dead
+# value. The behavioural legs below read the VALUE, and the facade's
+# own ``is_configured`` gate is asserted against the real dict.
+
+_LIFESPAN_PRIMARY_URL = "https://primary.test/v1"
+_LIFESPAN_BACKUP_URL = "https://backup.test/v1"
 
 
-def _lifespan_reflection_llm_config_keys() -> set[str]:
-    """The KEYS of the lifespan-built reflection ``llm_config`` dict."""
+def _real_reflection_llm_config() -> dict:
+    """The REAL dict the lifespan hands the reflection service."""
+    from types import SimpleNamespace
+
+    from daemon.api import _reflection_llm_config
+
+    config = SimpleNamespace(
+        llm=SimpleNamespace(
+            base_url=_LIFESPAN_PRIMARY_URL,
+            base_url_backup=_LIFESPAN_BACKUP_URL,
+            api_key="test-key",
+            model="gpt-test",
+        )
+    )
+    return _reflection_llm_config(config)
+
+
+def _lifespan_llm_config_keyword_node():
+    """The AST node of the lifespan's ``llm_config`` keyword value."""
     import ast
     import pathlib
 
@@ -816,42 +846,84 @@ def _lifespan_reflection_llm_config_keys() -> set[str]:
         if name != "MemoirReflectionService":
             continue
         for keyword in node.keywords:
-            if keyword.arg != "llm_config":
-                continue
-            if not isinstance(keyword.value, ast.Dict):
-                continue
-            return {
-                key.value
-                for key in keyword.value.keys
-                if isinstance(key, ast.Constant) and isinstance(key.value, str)
-            }
+            if keyword.arg == "llm_config":
+                return keyword.value
     raise AssertionError(
-        "the lifespan builds no llm_config dict for the reflection service"
+        "the lifespan builds no llm_config for the reflection service"
     )
 
 
-def test_the_lifespan_llm_config_carries_the_failover_backup():
-    """F2: the lifespan-built dict carries ``base_url_backup``.
+def test_the_reflection_llm_config_helper_is_module_level_and_importable():
+    """The helper is MODULE-LEVEL in ``daemon.api`` — and importable."""
+    import ast
+    import pathlib
 
-    The blueprint clause is absolute — ``base_url_backup`` is NEVER
-    stripped. Without it the failover path can NEVER swap.
-    """
-    keys = _lifespan_reflection_llm_config_keys()
-    assert "base_url" in keys
-    assert "api_key" in keys
-    assert "model" in keys
-    assert "base_url_backup" in keys, (
-        "the lifespan's llm_config MUST carry base_url_backup — without it "
-        "the failover path can never swap (daemon/services/llm_failover.py)"
+    api_path = pathlib.Path(__file__).resolve().parents[2] / "daemon" / "api.py"
+    tree = ast.parse(api_path.read_text())
+    top_level = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_reflection_llm_config"
+    ]
+    assert top_level, (
+        "_reflection_llm_config must be a MODULE-LEVEL function in "
+        "daemon/api.py — a closure inside lifespan() is not importable "
+        "and cannot be pinned behaviourally"
+    )
+    from daemon.api import _reflection_llm_config
+
+    assert callable(_reflection_llm_config)
+
+
+def test_the_lifespan_uses_the_importable_reflection_llm_config_helper():
+    """The lifespan call site USES the helper — no second hand-built dict."""
+    import ast
+
+    node = _lifespan_llm_config_keyword_node()
+    assert isinstance(node, ast.Call), (
+        "the lifespan's llm_config MUST come from "
+        "_reflection_llm_config(config) — a second hand-built dict is a "
+        "second place to drop base_url_backup"
+    )
+    func = node.func
+    name = getattr(func, "id", None) or getattr(func, "attr", None)
+    assert name == "_reflection_llm_config"
+
+
+def test_the_real_reflection_llm_config_carries_the_failover_backup():
+    """F2: the REAL dict carries the backup VALUE (not just the key)."""
+    llm_config = _real_reflection_llm_config()
+    assert llm_config["base_url"] == _LIFESPAN_PRIMARY_URL
+    assert llm_config["base_url_backup"] == _LIFESPAN_BACKUP_URL, (
+        "the reflection llm_config MUST carry the backup VALUE — a "
+        "typo'd attribute leaves it None and the failover path can never "
+        "swap (daemon/services/llm_failover.py)"
+    )
+    assert llm_config["api_key"] == "test-key"
+    assert llm_config["model"] == "gpt-test"
+
+
+def test_the_real_reflection_llm_config_configures_the_failover_shim():
+    """The REAL dict actually CONFIGURES the failover swap path."""
+    from daemon.services.llm_failover import _RawFailoverShim
+
+    llm_config = _real_reflection_llm_config()
+    shim = _RawFailoverShim(
+        llm_config.get("base_url"), llm_config.get("base_url_backup")
+    )
+    assert shim.is_configured is True, (
+        "the facade's own gate must be OPEN for the real dict — "
+        "is_configured is False when the backup value never arrived"
     )
 
 
-def test_the_failover_path_can_swap_on_the_lifespan_backup():
-    """F2: a dict shaped like the lifespan's lets the facade SWAP.
+def test_the_failover_path_can_swap_on_the_real_lifespan_dict():
+    """F2: the REAL dict lets the facade SWAP.
 
     The primary answers 500 (a retryable status); the facade exhausts
     the primary slice, swaps to the backup and the call succeeds there.
-    The backup is reached ONLY because the dict carries the key.
+    The backup is reached ONLY because the REAL dict carries the value.
     """
     import httpx
     import openai
@@ -861,8 +933,8 @@ def test_the_failover_path_can_swap_on_the_lifespan_backup():
         invoke_raw_with_failover,
     )
 
-    primary = "https://primary.test/v1"
-    backup = "https://backup.test/v1"
+    primary = _LIFESPAN_PRIMARY_URL
+    backup = _LIFESPAN_BACKUP_URL
     captured: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -889,30 +961,244 @@ def test_the_failover_path_can_swap_on_the_lifespan_backup():
         )
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    # the dict shape the lifespan builds — the backup key included.
-    llm_config = {
-        "base_url": primary,
-        "base_url_backup": backup,
-        "api_key": "test",
-        "model": "gpt-test",
-    }
+    # THE REAL dict — not a hand-built look-alike.
+    llm_config = _real_reflection_llm_config()
 
     def _call():
         url = current_failover_url() or primary
         client = openai.OpenAI(
-            api_key="test",
+            api_key=llm_config["api_key"],
             base_url=url or None,
             http_client=http_client,
             max_retries=0,
         )
         return client.chat.completions.create(
-            model="gpt-test", messages=[{"role": "user", "content": "hi"}]
+            model=llm_config["model"],
+            messages=[{"role": "user", "content": "hi"}],
         )
 
     result = invoke_raw_with_failover(_call, llm_config)
     assert result.choices[0].message.content == "ok-backup"
     assert "primary.test" in captured, "the primary must be tried first"
     assert "backup.test" in captured, (
-        "the failover path must be able to SWAP to the backup — the dict "
-        "carries base_url_backup"
+        "the failover path must be able to SWAP to the backup — the REAL "
+        "dict carries base_url_backup"
     )
+
+
+def test_the_service_preserves_the_backup_value_to_the_failover_facade(
+    monkeypatch,
+):
+    """THE SERVICE→FACADE HOP: the value survives the service seam.
+
+    The helper hands the service a dict; the service stores it and
+    hands it to ``invoke_raw_with_failover``. A strip introduced at
+    EITHER seam (the service's ``__init__`` or ``_house_llm_call``)
+    must turn this RED — the value is dropped between the helper and
+    the facade.
+    """
+    from daemon.services import llm_failover as failover_module
+    from daemon.services.memoir_reflection_service import (
+        MemoirReflectionService,
+    )
+
+    captured: dict = {}
+
+    def _capture(factory, llm_config, **kwargs):
+        captured["llm_config"] = llm_config
+        return "ok"
+
+    monkeypatch.setattr(failover_module, "invoke_raw_with_failover", _capture)
+
+    service = MemoirReflectionService(
+        reflection_repository=object(),
+        syntheses_repository=object(),
+        llm_config=_real_reflection_llm_config(),
+    )
+    service._house_llm_call("a prompt")
+
+    assert "llm_config" in captured, (
+        "the house lane MUST route through the failover facade"
+    )
+    assert captured["llm_config"].get("base_url_backup") == _LIFESPAN_BACKUP_URL, (
+        "the backup VALUE must survive the SERVICE→FACADE hop — a strip "
+        "at the service seam silently disables the failover swap"
+    )
+
+
+def test_the_house_llm_client_disables_the_sdk_retry(monkeypatch):
+    """F: the SDK's OWN retry is OFF — the facade owns the discipline.
+
+    The openai SDK's default ``max_retries=2`` issues up to THREE HTTP
+    requests per facade attempt. The facade's attempt ladder is 6 (with
+    a configured backup), so the SDK's ladder would silently turn one
+    LLM call into up to 18 HTTP requests. The house lane sets 0 (see
+    ``daemon/plugin_subsystem/opendesign/generate.py``).
+    """
+    import openai
+
+    from daemon.services.memoir_reflection_service import (
+        MemoirReflectionService,
+    )
+
+    captured: dict = {}
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            message = type("Message", (), {"content": "ok"})()
+            choice = type("Choice", (), {"message": message})()
+            return type("Response", (), {"choices": [choice]})()
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.chat = type("Chat", (), {"completions": _FakeCompletions()})()
+
+    monkeypatch.setattr(openai, "OpenAI", _FakeClient)
+
+    service = MemoirReflectionService(
+        reflection_repository=object(),
+        syntheses_repository=object(),
+        llm_config={
+            "base_url": "https://primary.test/v1",
+            "base_url_backup": "https://backup.test/v1",
+            "api_key": "test-key",
+            "model": "gpt-test",
+        },
+    )
+    service._house_llm_call("a prompt")
+
+    assert captured.get("max_retries") == 0, (
+        "the SDK's own retry MUST be OFF (max_retries=0) — the default 2 "
+        "turns the facade's 6-attempt ladder into up to 18 HTTP requests "
+        "per LLM call"
+    )
+
+
+# ── G: the mark / unmark distinction ────────────────────────────────────
+#
+# A marked episode is never re-considered (``reflected_at`` is the
+# watermark). So marking an episode whose belief never landed LOSES the
+# belief forever. The distinction:
+#
+# * INVARIANT REJECTION (too long, uncited, an unknown episode, a verb
+#   outside the vocabulary) ⇒ the candidate is PERMANENTLY invalid ⇒
+#   MARK (it will never become valid);
+# * WRITE FAILURE / CAP-DEFERAL ⇒ the belief is missing but VALID ⇒
+#   UNMARK (the next pass retries it). THE DEDUP KEY (V2-17) is what
+#   makes that retry idempotent: the beliefs that DID land come back as
+#   "duplicate" and are skipped.
+
+
+def test_a_write_failure_leaves_the_episode_unmarked_for_the_next_pass(
+    repo, reflection_repo, syntheses_repo, monkeypatch
+):
+    """G: a WRITE FAILURE must not mark the episode — the belief is lost
+    forever if the episode is marked."""
+    episode_id = repo.insert_episode(agent_id=AGENT, body="one", importance=9)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("the store is unavailable")
+
+    monkeypatch.setattr(syntheses_repo, "create_synthesis", _boom)
+
+    def fake_llm(prompt):
+        return _envelope(
+            [
+                {
+                    "claim": "the Emperor prefers the zebra",
+                    "source_episode_ids": [episode_id],
+                    "verb": "CREATE",
+                    "confidence": 0.8,
+                }
+            ],
+            [episode_id],
+        )
+
+    service = _service(reflection_repo, syntheses_repo, llm_caller=fake_llm)
+    outcome = service.run_in_day_pass()
+
+    assert outcome.syntheses_rejected == 1
+    assert outcome.marked == 0, (
+        "a failed write MUST NOT mark the episode — the belief is lost "
+        "forever if the episode is marked"
+    )
+    assert service.derive_trigger()[0] == 9, (
+        "the episode must stay UNREFLECTED so the next pass retries it"
+    )
+
+
+def test_an_invariant_rejection_still_marks_the_episode(
+    repo, reflection_repo, syntheses_repo
+):
+    """G: an INVARIANT rejection still MARKS — it is permanent.
+
+    A claim over the character bound will NEVER become valid: the
+    episode was considered and stays marked. An unmarked episode would
+    re-derive the same invalid belief forever.
+    """
+    episode_id = repo.insert_episode(agent_id=AGENT, body="one", importance=9)
+
+    def fake_llm(prompt):
+        return _envelope(
+            [
+                {
+                    "claim": "x" * 1001,
+                    "source_episode_ids": [episode_id],
+                    "verb": "CREATE",
+                    "confidence": 0.8,
+                }
+            ],
+            [episode_id],
+        )
+
+    service = _service(reflection_repo, syntheses_repo, llm_caller=fake_llm)
+    outcome = service.run_in_day_pass()
+
+    assert outcome.syntheses_rejected == 1
+    assert outcome.marked == 1, (
+        "an invariant rejection is PERMANENT — the episode stays marked"
+    )
+
+
+def test_the_cap_deferral_leaves_the_dropped_belief_unmarked(
+    repo, reflection_repo, syntheses_repo
+):
+    """G: a CAP-DEFERAL must not mark the dropped candidate's episode.
+
+    The belief did not land (the synthesis cap was spent) — the episode
+    stays UNREFLECTED so the next pass re-derives it.
+    """
+    episode_ids = [
+        repo.insert_episode(agent_id=AGENT, body=f"memory {index}", importance=9)
+        for index in range(6)
+    ]
+
+    def fake_llm(prompt):
+        return _envelope(
+            [
+                {
+                    "claim": f"belief number {index}",
+                    "source_episode_ids": [episode_ids[index]],
+                    "verb": "CREATE",
+                    "confidence": 0.8,
+                }
+                for index in range(6)
+            ],
+            episode_ids,
+        )
+
+    service = _service(reflection_repo, syntheses_repo, llm_caller=fake_llm)
+    outcome = service.run_in_day_pass()
+
+    assert outcome.syntheses_accepted == 5
+    assert len(outcome.considered_ids) == 5, (
+        "only the five beliefs that LANDED may be marked — the dropped "
+        "candidate's episode must stay unreflected so the next pass "
+        "re-derives it"
+    )
+    assert episode_ids[5] not in outcome.considered_ids, (
+        "the DROPPED candidate's episode must NOT be marked"
+    )
+    assert set(outcome.considered_ids) == set(episode_ids[:5])
+    assert outcome.marked == 5

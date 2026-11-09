@@ -398,6 +398,41 @@ def test_an_unset_kill_switch_still_follows_the_config_tier():
     assert state.source == "config"
 
 
+def test_the_unset_kill_switch_message_states_the_resolved_value(caplog):
+    """E: the unset line states the RESOLVED value, never another one.
+
+    The config tier DISABLED the lane and the env is ABSENT: the old
+    line said "the reflection lane is ENABLED by default" while the
+    lane was OFF. The line must say DISABLED, and the resolution must
+    name the tier that decided (``config``) — D0.7: the resolved state
+    is retrievable WITHOUT reading logs.
+    """
+    from types import SimpleNamespace
+
+    from daemon.config import MemoirReflectionConfig
+    from daemon.tools.memoir_knob import (
+        reset_boot_log_state,
+        resolve_memoir_reflection_knob,
+    )
+
+    config = SimpleNamespace(
+        memoir_reflection=MemoirReflectionConfig(enabled=False)
+    )
+    reset_boot_log_state()
+    with caplog.at_level(logging.INFO, logger=KNOB_LOGGER):
+        state = resolve_memoir_reflection_knob(config)
+
+    assert state.enabled is False
+    assert state.resolution == "config", (
+        "the config tier decided — the resolution must NAME that tier"
+    )
+    assert "ENABLED by default" not in state.message, (
+        "the line must never claim a value the resolver did not reach"
+    )
+    assert "DISABLED" in state.message
+    assert state.source == "config"
+
+
 @pytest.mark.asyncio
 async def test_the_worker_parks_within_one_tick_after_a_post_boot_flip(
     tmp_path, monkeypatch

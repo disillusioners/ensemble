@@ -478,6 +478,42 @@ def inject_reports_live_view_root(config, data_dir) -> bool:
     return True
 
 
+def _reflection_llm_config(config: Any) -> dict[str, Any]:
+    """The reflection lane's LLM config dict — the IMPORTABLE seam.
+
+    The Memoir Store v2 reflection engine calls the LLM through the
+    house HA facade (``daemon.services.llm_failover``), which reads the
+    backup URL from the RAW dict. Without ``base_url_backup`` in that
+    dict the facade is built UNCONFIGURED: every attempt uses the
+    primary and NO swap can ever occur.
+
+    This helper is the ONE place the dict is built. It is module-level
+    (not a closure inside ``lifespan``) so the wiring can be pinned by
+    a test that drives the REAL dict — an AST-only pin that read the
+    dict's KEY NAMES could not see a typo'd ATTRIBUTE, which leaves the
+    value permanently ``None`` while every key-spelling pin stays
+    GREEN.
+
+    Args:
+        config: The loaded daemon config (its ``llm`` section supplies
+            the base URLs, the API key and the model).
+
+    Returns:
+        The raw ``llm_config`` dict for
+        :class:`~daemon.services.memoir_reflection_service.MemoirReflectionService`.
+    """
+    llm = getattr(config, "llm", None)
+    return {
+        "base_url": getattr(llm, "base_url", None),
+        # ``base_url_backup`` reaches the HA facade through the RAW dict
+        # (never stripped). Without it the failover path can NEVER swap
+        # (see ``daemon/services/llm_failover.py``).
+        "base_url_backup": getattr(llm, "base_url_backup", None),
+        "api_key": getattr(llm, "api_key", None),
+        "model": getattr(llm, "model", None),
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context manager.
@@ -2945,18 +2981,7 @@ async def lifespan(app: FastAPI):
                     _reflection_engine
                 ),
                 config=config,
-                llm_config={
-                    "base_url": getattr(config.llm, "base_url", None),
-                    # ``base_url_backup`` reaches the HA facade through
-                    # the raw dict (never stripped). Without it the
-                    # failover path can NEVER swap (see
-                    # ``daemon/services/llm_failover.py``).
-                    "base_url_backup": getattr(
-                        config.llm, "base_url_backup", None
-                    ),
-                    "api_key": getattr(config.llm, "api_key", None),
-                    "model": getattr(config.llm, "model", None),
-                },
+                llm_config=_reflection_llm_config(config),
             )
             memoir_reflection_worker = MemoirReflectionWorker(
                 _reflection_service,

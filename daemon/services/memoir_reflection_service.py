@@ -530,6 +530,13 @@ class MemoirReflectionService:
         settings = self._settings
         considered = 0
         marked_episode_ids: list[str] = []
+        #: The episodes the pass CONSIDERED but must NOT mark: a WRITE
+        #: FAILURE or a CAP-DEFERAL leaves the belief un-written, so the
+        #: episode stays unreflected and the NEXT pass retries it. The
+        #: dedup key (V2-17) makes that retry idempotent — the beliefs
+        #: that DID land come back as "duplicate" and are skipped, so
+        #: only the missing belief is re-derived.
+        unmarked_episode_ids: set[str] = set()
         accepted = 0
         rejected = 0
         duplicates = 0
@@ -585,10 +592,20 @@ class MemoirReflectionService:
                 notes.append("batch_parse_failed")
                 continue
             marked_episode_ids.extend(episode.id for episode in chunk)
+            chunk_ids = {episode.id for episode in chunk}
 
-            for candidate in candidates:
+            for candidate_index, candidate in enumerate(candidates):
                 if accepted >= int(settings.max_syntheses_per_pass):
                     stop_reason = "synthesis_cap_hit"
+                    # THE CAP-DEFERAL: the dropped candidates are NOT
+                    # lost — their source episodes are UNMARKED so the
+                    # next pass re-derives them. THE DEDUP KEY (V2-17) is
+                    # what makes the retry idempotent (the beliefs that
+                    # DID land come back as "duplicate").
+                    for dropped in candidates[candidate_index:]:
+                        unmarked_episode_ids.update(
+                            _candidate_source_ids(dropped, chunk_ids)
+                        )
                     notes.append(
                         f"synthesis_cap_hit kept={accepted} dropped={len(candidates)}"
                     )
@@ -604,7 +621,22 @@ class MemoirReflectionService:
                     accepted += 1
                 elif verdict == "duplicate":
                     duplicates += 1
+                elif verdict == "write_failed":
+                    # THE WRITE FAILURE: the row did NOT land, so the
+                    # source episode is UNMARKED and the next pass
+                    # retries it (the dedup key, V2-17, makes the retry
+                    # idempotent).
+                    unmarked_episode_ids.update(
+                        _candidate_source_ids(candidate, chunk_ids)
+                    )
+                    rejected += 1
                 else:
+                    # THE INVARIANT REJECTION: the candidate is
+                    # PERMANENTLY invalid (too long, uncited, an unknown
+                    # episode, a verb outside the vocabulary). It will
+                    # NEVER become valid, so the episode STAYS MARKED — a
+                    # retry would re-derive the same invalid belief
+                    # forever.
                     rejected += 1
 
             # ── the constellation extraction — its OWN budget (V2-31) ──
@@ -629,7 +661,11 @@ class MemoirReflectionService:
             deferred=deferred,
             duration_s=duration,
             notes=tuple(notes),
-            considered_ids=tuple(marked_episode_ids),
+            considered_ids=tuple(
+                episode_id
+                for episode_id in marked_episode_ids
+                if episode_id not in unmarked_episode_ids
+            ),
         )
         return outcome
 
@@ -907,13 +943,33 @@ class MemoirReflectionService:
                     verb,
                     confidence,
                 )
-        except (ValueError, KeyError, RuntimeError) as exc:
+        except ValueError as exc:
+            # AN INVARIANT REJECTION RAISED BY THE STORE (the citations
+            # are missing, the verb is outside the closed vocabulary):
+            # the candidate is PERMANENTLY invalid — it will NEVER become
+            # valid, so the episode STAYS MARKED (a retry would re-derive
+            # the same invalid belief forever).
             logger.warning(
-                "[MemoirReflection] claim_write_failed (%s) — the belief is "
-                "skipped, the pass continues",
+                "[MemoirReflection] claim_rejected_by_store (%s) — the belief "
+                "is skipped, the pass continues",
                 type(exc).__name__,
             )
             return "rejected"
+        except (KeyError, RuntimeError) as exc:
+            # A WRITE FAILURE: the row did NOT land (the superseded
+            # synthesis is gone, or another writer holds the claim). The
+            # source episode is UNMARKED so the NEXT pass retries it —
+            # THE DEDUP KEY (V2-17) is what makes that retry idempotent:
+            # the beliefs that DID land come back as "duplicate" and are
+            # skipped, so only the missing belief is re-derived.
+            logger.warning(
+                "[MemoirReflection] claim_write_failed (%s) — the belief is "
+                "skipped and the source episode is UNMARKED (the next pass "
+                "retries it; the dedup key, V2-17, makes the retry "
+                "idempotent)",
+                type(exc).__name__,
+            )
+            return "write_failed"
         return "accepted"
 
     # ── the constellation extraction (V2-31, the decoupled budget) ─────
@@ -1013,6 +1069,15 @@ class MemoirReflectionService:
                 api_key=api_key,
                 base_url=url or None,
                 timeout=httpx_timeout(timeout_s),
+                # THE SDK'S OWN RETRY IS OFF — the house lane (see
+                # ``daemon/plugin_subsystem/opendesign/generate.py``):
+                # the SDK's default ``max_retries=2`` issues up to THREE
+                # HTTP requests per facade attempt, so the facade's
+                # 6-attempt ladder would silently become up to 18 HTTP
+                # requests per LLM call and inflate the failure window.
+                # THE FACADE OWNS THE RETRY DISCIPLINE; the SDK must not
+                # add a second, invisible ladder on top of it.
+                max_retries=0,
             )
             response = client.chat.completions.create(
                 model=model,
@@ -1234,6 +1299,23 @@ def _clamp_prompt(prompt: str, max_tokens: int) -> str:
         kept.append(line)
         total += tokens
     return "\n".join(kept)
+
+
+def _candidate_source_ids(candidate: Any, allowed_ids: set[str]) -> set[str]:
+    """The chunk episode ids a candidate's belief is derived FROM.
+
+    Only ids in ``allowed_ids`` (the CURRENT chunk's episodes) can be
+    unmarked — the watermark only ever moves for the episodes the pass
+    actually consumed. A candidate may cite episodes from an EARLIER
+    chunk (already marked, already reflected on); those are never
+    un-marked by a later chunk's failure.
+    """
+    sources = candidate.get("source_episode_ids")
+    if not isinstance(sources, list):
+        return set()
+    return {
+        str(item) for item in sources if item and str(item) in allowed_ids
+    }
 
 
 def _clamp_confidence(value: Any) -> float:

@@ -50,6 +50,44 @@ pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 AGENT = "ari"
 
 
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    """HERMETICITY (MUT-7): the AMBIENT knob must never leak into a test.
+
+    ``Config()`` reads the env tier at CONSTRUCTION. Under an ambient
+    ``ENSEMBLE_MEMOIR_REFLECTION_ENABLED=false`` the post-boot-flip leg
+    false-REDed: its premise ("the BOOT tier says the lane is ON")
+    never held, because the ambient environment had already turned the
+    lane OFF before the test built its boot config.
+
+    THE FIX: scrub EVERY reflection knob before the test body runs, and
+    reset the knob module's one-shot boot-log state — the numeric-knob
+    file's pattern (``tests/unit/test_memoir_v2_numeric_knob.py``).
+    The knob NAMES come from ``daemon.config`` (the canonical map), so
+    a knob added upstream is scrubbed here without a second edit.
+    """
+    from daemon.config import (
+        MEMOIR_REFLECTION_ENABLED_ENV_VAR,
+        _MEMOIR_REFLECTION_BUDGET_ENV_VARS,
+        _MEMOIR_REFLECTION_CADENCE_ENV_VARS,
+        _reset_v2_knob_warnings,
+    )
+    from daemon.tools.memoir_knob import reset_boot_log_state
+
+    knobs = (
+        MEMOIR_REFLECTION_ENABLED_ENV_VAR,
+        *_MEMOIR_REFLECTION_BUDGET_ENV_VARS.values(),
+        *_MEMOIR_REFLECTION_CADENCE_ENV_VARS.values(),
+    )
+    for name in knobs:
+        monkeypatch.delenv(name, raising=False)
+    _reset_v2_knob_warnings()
+    reset_boot_log_state()
+    yield
+    _reset_v2_knob_warnings()
+    reset_boot_log_state()
+
+
 @pytest.fixture()
 def engine(tmp_path):
     # A FILE-backed SQLite database: the tool layer runs the recall on
