@@ -515,12 +515,19 @@ class SkillMetricsService:
         """Run the CAPTURED-flow eligibility gate after metrics recording.
 
         The CAPTURED flow auto-extracts a reusable skill from a
-        successful task that did NOT use any existing skill.
-        "Did not use" means no usage record for this instance
-        has ``feedback_applied=True`` — checking injection
-        records alone is not enough, because a skill may have
-        been *injected* into the prompt but the agent decided
-        not to apply it.
+        successful task that did NOT genuinely evolve any existing
+        skill. "Genuinely evolved" is the **three-conjunct
+        OUTCOME-FIELDS predicate** (LEADER RULING Q1 —
+        ``has_genuinely_evolved_for_instance``)::
+
+            selected = TRUE AND task_succeeded = TRUE
+            AND feedback_applied IS NOT NULL
+
+        Checking injection records alone is not enough (a skill may
+        have been *injected* into the prompt and never used), and
+        checking ``feedback_applied`` alone is not enough either
+        (feedback may exist without the skill having been selected or
+        without the task having succeeded).
 
         The check is gated on:
 
@@ -539,10 +546,13 @@ class SkillMetricsService:
            ``agent_id_resolver``) — capture is a feature of the
            injection subsystem; non-injection agents shouldn't
            spawn captures.
-        4. No skill was *applied* on this instance —
-           ``SkillUsageRepository.has_applied_for_instance``
-           returns False. This is the expensive part; it's
-           gated behind steps 1-3 so we don't hit the DB when
+        4. No skill GENUINELY EVOLVED on this instance —
+           ``SkillUsageRepository.has_genuinely_evolved_for_instance``
+           returns False. The three-conjunct OUTCOME-FIELDS predicate
+           (``selected = TRUE AND task_succeeded = TRUE AND
+           feedback_applied IS NOT NULL``), NOT the feedback-only
+           ``has_applied_for_instance``. This is the expensive part;
+           it's gated behind steps 1-3 so we don't hit the DB when
            the answer is already "no".
         5. Complexity threshold — at least one of
            ``iterations > capture_min_iterations`` or
@@ -550,10 +560,10 @@ class SkillMetricsService:
            must hold. Trivial / instant successes are ignored.
 
         The :meth:`SkillEvolutionService.check_and_capture`
-        method does the final gatekeeping (re-checks
-        ``has_applied_for_instance`` to close the race window
-        between this read and the LLM call) and enqueues a
-        ``skill_capture`` job via the dispatcher.
+        method does the final gatekeeping (its own service-seam twin of
+        the same predicate, to close the race window between this read
+        and the LLM call) and enqueues a ``skill_capture`` job via the
+        dispatcher.
 
         Args:
             instance_id: The instance that just completed.
@@ -639,26 +649,42 @@ class SkillMetricsService:
         if not skill_injection_enabled:
             return None
 
-        # Gate 4: no skill must have been applied to this
-        # instance. Using ``feedback_applied`` (not injection
-        # records) is the spec — a skill may have been offered
-        # to the agent without being consumed.
+        # Gate 4: no skill must have GENUINELY EVOLVED on this
+        # instance. The predicate is the three-conjunct OUTCOME-FIELDS
+        # form (LEADER RULING Q1 — ``selected = TRUE AND
+        # task_succeeded = TRUE AND feedback_applied IS NOT NULL``),
+        # NOT the feedback-only ``has_applied_for_instance``: a
+        # feedback-only signal counts a skill as evolved on the
+        # strength of feedback alone, which is exactly the 3,457-row
+        # false-eligible census window (``selected AND task_succeeded
+        # AND feedback_applied IS NULL``). ``applied`` is deliberately
+        # not a conjunct — ``update_completion`` never sets it.
+        #
+        # POPULATION CAVEAT (unchanged by the repoint, and load-bearing
+        # for any count derived from this gate): ``record_task_completion``
+        # early-returns at the ``if not injected_ids: return 0`` guard
+        # ABOVE this method's caller, so instances that injected no
+        # skill at all never reach Gate 4. The population this gate can
+        # ever refuse is therefore "succeeded instances with at least
+        # one selected/injected usage row AND zero feedback evidence" —
+        # an UPPER BOUND on capture candidates, never a capture
+        # forecast.
         try:
-            applied = await asyncio.to_thread(
-                self.usage_repo.has_applied_for_instance,
+            genuinely_evolved = await asyncio.to_thread(
+                self.usage_repo.has_genuinely_evolved_for_instance,
                 instance_id,
             )
         except Exception as exc:
             logger.warning(
-                f"SkillMetricsService: has_applied_for_instance "
+                f"SkillMetricsService: has_genuinely_evolved_for_instance "
                 f"failed for instance {instance_id}: {exc}"
             )
             # Fail closed: if we can't tell, don't capture.
             return None
-        if applied:
-            # A skill was already applied — the success is
-            # already attributed to that skill. Don't spawn
-            # a sibling capture.
+        if genuinely_evolved:
+            # A skill genuinely evolved on this instance — the success
+            # is already attributed to that skill. Don't spawn a
+            # sibling capture.
             return None
 
         # Gate 5: complexity threshold. The evolution service
@@ -1023,7 +1049,17 @@ class SkillMetricsService:
             bool(applied) if applied is not None else None
         )
 
-        def _do_feedback() -> Optional[str]:
+        def _do_feedback() -> Optional[tuple[str, bool]]:
+            """Stamp feedback; return ``(record_id, prev_applied)``.
+
+            ``prev_applied`` is the row's ``applied`` value **before** this
+            call's update — the transition discriminator for the
+            ``total_applied`` bump (A4, plan §5). It is read from the SAME
+            single row fetch the method already performs (no second
+            query): the on-miss insert path has no prior row, so
+            ``prev_applied`` is ``False`` there (the FIRST legitimate bump
+            must still happen — council F-4's trap).
+            """
             record = self.usage_repo.get_latest_for_skill_instance(
                 skill_id=skill_id, instance_id=instance_id
             )
@@ -1108,12 +1144,21 @@ class SkillMetricsService:
                         skill_id, "total_fallbacks", amount=1
                     )
                 self.skill_repo.touch_last_used(skill_id)
-                return inserted.id
+                # On-miss: there was no prior row, so ``prev_applied`` is
+                # False by construction — the insert above writes
+                # ``applied`` from ``applied_bool``, but the BUMP rule is
+                # about the row's prior state, not the just-written value.
+                # Reading the row back would return True and suppress the
+                # first legitimate bump (council F-4's trap).
+                return inserted.id, False
 
             # Found an existing record → standard update path.
             # Option C (D20): Fallback is driven by worker's applied judgment.
             # Capture previous fallback state to detect state transitions.
             _prev_fallback = bool(getattr(record, "fallback", False))
+            # A4: the same pre-update read gives the ``total_applied``
+            # transition discriminator — no second query.
+            _prev_applied = bool(getattr(record, "applied", False))
 
             if applied_bool is False:
                 # Worker explicitly said skill was NOT applied/helpful -> real fallback signal
@@ -1152,10 +1197,10 @@ class SkillMetricsService:
                     improvement_note=improvement_note or None,
                 )
 
-            return record.id
+            return record.id, _prev_applied
 
         try:
-            record_id = await asyncio.to_thread(_do_feedback)
+            feedback_result = await asyncio.to_thread(_do_feedback)
         except Exception as exc:
             logger.warning(
                 f"SkillMetricsService.record_feedback: failed "
@@ -1164,14 +1209,25 @@ class SkillMetricsService:
             )
             return False
 
-        if record_id is None:
+        if feedback_result is None:
             return False
+        record_id, prev_applied = feedback_result
 
-        # Counter bump only on positive feedback. None and False
-        # are both excluded — False is a negative signal the
-        # trigger engine consumes separately, not a counter
-        # bump.
-        if applied_bool is True:
+        # Counter bump ONLY on the False→True TRANSITION of the row's
+        # ``applied`` flag (A4, plan §5 — the leak fix). The ledger counts
+        # ROWS; a call-counting counter drifts monotonically away from it:
+        # every repeat filing of the same feedback added +1 to the counter
+        # and +0 to the ledger, which is exactly the observed +480.
+        #
+        #   * on-miss insert  → ``prev_applied`` is False by construction
+        #                       ⇒ the FIRST legitimate bump DOES happen;
+        #   * existing row    → bump only when the row was not already
+        #                       ``applied`` ⇒ a repeat filing bumps +0.
+        #
+        # ``applied_bool is None`` (no worker judgment) never bumps and
+        # does not move the stored flag, so it can neither create nor
+        # suppress a transition.
+        if applied_bool is True and not prev_applied:
             try:
                 await asyncio.to_thread(
                     self.skill_repo.increment_counter,
