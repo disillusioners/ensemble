@@ -1283,6 +1283,67 @@ else
     _fail "13f 250KB read output byte-exact" "identical" "differs"
 fi
 
+# ─── 13g. string-context discrimination (W1) ───────────────────────────────
+# COUNCIL FINDING W1. Every in-string bracket in §13a is BALANCED ({…},
+# […] inside the value), and every rejection in 13b/13c is caught by an
+# IMBALANCE — so a validator that ignores string context entirely
+# produces the SAME totals and the SAME verdict on the whole existing
+# suite. This fixture carries an UNBALANCED in-string brace run: three
+# `{` inside the value plus the ONE `}` that closes the document. A
+# string-blind counter reads ob=4 / cb=1 ⇒ rc=1; the shipped validator
+# reads rc=0. Kills the M1 (string-blind) mutant.
+section "js journal read: string-context (W1)"
+# Byte discipline: ONE single-quoted printf arg, then ASSERT the bytes
+# actually written (a shell-mangled fixture would be a false green).
+#   11 bytes, 4 × '{', 1 × '}', 0 × '\'   (i.e. genuinely unbalanced)
+printf '%s' '{"a":"{{{"}' > "$JSF_TEST_DIR/string_context.json"
+assert_eq "13g fixture bytes are exactly 11 (single-quoted literal)" \
+    "11" "$(wc -c < "$JSF_TEST_DIR/string_context.json" | tr -d ' ')"
+assert_eq "13g fixture carries UNBALANCED in-string braces (4 open / 1 close)" \
+    "4/1/0" "$(tr -cd '{' < "$JSF_TEST_DIR/string_context.json" | wc -c | tr -d ' ')/$(tr -cd '}' < "$JSF_TEST_DIR/string_context.json" | wc -c | tr -d ' ')/$(tr -cd '\\' < "$JSF_TEST_DIR/string_context.json" | wc -c | tr -d ' ')"
+_jsf_w1_out="$(_jsf_read "$JSF_TEST_DIR/string_context.json")"
+assert_contains "13g unbalanced in-string braces validate (rc=0)" "rc=0" "$_jsf_w1_out"
+assert_contains "13g output byte-exact (in-string braces intact)" \
+    '{"a":"{{{"}' "$_jsf_w1_out"
+
+# ─── 13h. escape parity: EVEN run adjacent to a quote CLOSES it (W2a) ──────
+# COUNCIL FINDING W2. Every backslash run adjacent to a quote elsewhere in
+# this section is ODD, and the even runs in 13a are followed by a SPACE,
+# never a quote — so relaxing the parity test `RLENGTH % 2 == 1` to a
+# presence-only `RLENGTH > 0` passes the ENTIRE pre-existing suite. Here a
+# 2-backslash run sits immediately before the closing quote: the quote
+# CLOSES the string (valid JSON, §13's contract ⇒ rc=0). Presence-only
+# keeps the string open ⇒ unbalanced ⇒ rc=1. Kills the M2 mutant.
+section "js journal read: escape parity — even run (W2a)"
+#   17 bytes, 2 × '\' (even run) immediately before the closing quote.
+printf '%s' '{"a":"x\\","b":2}' > "$JSF_TEST_DIR/parity_even_run.json"
+assert_eq "13h fixture bytes are exactly 17 (single-quoted literal)" \
+    "17" "$(wc -c < "$JSF_TEST_DIR/parity_even_run.json" | tr -d ' ')"
+assert_eq "13h fixture carries an EVEN 2-backslash run" \
+    "2" "$(tr -cd '\\' < "$JSF_TEST_DIR/parity_even_run.json" | wc -c | tr -d ' ')"
+_jsf_w2a_out="$(_jsf_read "$JSF_TEST_DIR/parity_even_run.json")"
+assert_contains "13h even-backslash run before the quote validates (rc=0)" "rc=0" "$_jsf_w2a_out"
+assert_contains "13h output byte-exact (even run intact)" \
+    '{"a":"x\\","b":2}' "$_jsf_w2a_out"
+
+# ─── 13i. escape parity: ODD (3-backslash) run adjacent to a quote (W2b) ───
+# The 3-run ⇒ the following quote is ESCAPED ⇒ the string stays OPEN and
+# the NEXT quote closes it (valid JSON ⇒ rc=0). Parity inverted
+# (`RLENGTH % 2 == 0`) treats the 3-run as non-escaping ⇒ the first quote
+# closes ⇒ the second quote opens a string that never terminates ⇒ rc=1.
+# Kills the M3 mutant.
+section "js journal read: escape parity — odd run (W2b)"
+#   19 bytes, 3 × '\' (odd run) immediately before an escaped quote.
+printf '%s' '{"a":"x\\\"","b":2}' > "$JSF_TEST_DIR/parity_odd_run.json"
+assert_eq "13i fixture bytes are exactly 19 (single-quoted literal)" \
+    "19" "$(wc -c < "$JSF_TEST_DIR/parity_odd_run.json" | tr -d ' ')"
+assert_eq "13i fixture carries an ODD 3-backslash run" \
+    "3" "$(tr -cd '\\' < "$JSF_TEST_DIR/parity_odd_run.json" | wc -c | tr -d ' ')"
+_jsf_w2b_out="$(_jsf_read "$JSF_TEST_DIR/parity_odd_run.json")"
+assert_contains "13i odd-backslash run escapes the quote (rc=0)" "rc=0" "$_jsf_w2b_out"
+assert_contains "13i output byte-exact (odd run intact)" \
+    '{"a":"x\\\"","b":2}' "$_jsf_w2b_out"
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
