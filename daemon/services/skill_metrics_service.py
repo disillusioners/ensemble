@@ -703,9 +703,9 @@ class SkillMetricsService:
             return None
 
         # All gates passed — delegate to the evolution service.
-        # ``check_and_capture`` re-checks ``has_applied_for_instance``
-        # to close the TOCTOU window between our read and the
-        # eventual LLM call.
+        # ``check_and_capture`` runs its OWN service-seam twin of the
+        # same genuinely-evolved predicate, to close the TOCTOU window
+        # between our read and the eventual LLM call.
         try:
             task_details = await self.evolution_service.check_and_capture(
                 instance_id=instance_id,
