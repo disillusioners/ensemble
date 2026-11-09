@@ -43,6 +43,11 @@ def make_config(**overrides: Any) -> DecisionConfig:
         "cost_ceiling_usd": 50.0,
         "token_ceiling": 10_000_000,
         "pricing_usd_per_million_tokens": {},
+        # The tests' EXPLICIT decision signal (Q2): a config built here
+        # stands for a module the operator opted into. The Q2 pins
+        # build theirs through ``resolve_values(env=...)`` instead, so
+        # the reconciliation is exercised end-to-end.
+        "explicitly_configured": True,
     }
     base.update(overrides)
     return DecisionConfig(**base)
