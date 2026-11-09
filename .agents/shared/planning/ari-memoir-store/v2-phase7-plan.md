@@ -51,6 +51,7 @@ Deliver end-to-end integration verification, safety gate enforcement, documentat
   - Verifies ensure census pins: `test_memoir_retrieval_pg.py` == 2, `test_memoir_pg_corpus.py` == 4.
   - Verifies GIN and B-Tree index utilization with `EXPLAIN`.
   - Verifies CHECK constraints reject out-of-bounds `star_type` and negative `heat`.
+  - **Verifies the `memoir_proposal_ledger.notification_status` CHECK enforces the EXACT closed 4-token vocabulary `('pending', 'enqueued', 'sent', 'failed')`** (B1' / V2-28): each of the 4 blessed tokens is ACCEPTED; a 5th token (e.g. `'notified'`) is REJECTED; dropping any one of the 4 is REJECTED. The vocabulary is TEST-ENFORCED, not merely greppable.
 
 ### 3.2 Inductive Ensure Blast Radius Proof (W8 Pattern)
 1. Launch scratch PG instance.
@@ -74,7 +75,7 @@ The mutation driver (`test/packs/memoir_mutation_matrix_test.py` + `mutation-mat
 
 ### 3.4 3-Worker Boot Census & Interpreter Isolation (SF8 / Suggestion #7)
 Boot smoke starts the daemon under `ENSEMBLE_SELF_ENV=sandbox` using `/home/nea/ensemble-src-wt-memoir-v2/.venv/bin/python -m daemon`:
-- **Bootstrap Step (Suggestion #7):** Execute `uv sync` in `/home/nea/ensemble-src-wt-memoir-v2` prior to boot smoke to ensure worktree venv dependencies are fully materialized.
+- **Bootstrap Step (Suggestion #7) — MUST COMPLETE BEFORE THE BOOT SMOKE:** Execute `uv sync` in `/home/nea/ensemble-src-wt-memoir-v2` as a hard prerequisite of the smoke. ORDERING IS NORMATIVE, NOT INCIDENTAL: the daemon is NOT started until `uv sync` has exited 0 and the worktree venv dependencies are fully materialized. A boot smoke attempted before (or without) a successful `uv sync` is INVALID — it may run against a stale or partial venv and produce a false-green census.
 - **POK Auth Scrub (ND-11):** Boot smoke environment explicitly scrubs `ENSEMBLE_AUTH_ISSUER`, `ENSEMBLE_AUTH_DISCOVERY_URL`, and `ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE` per project POK (`auth-lane-scrub-ensemble-auth-env`).
 - **Isolation Pin:** Invocation uses worktree venv python directly. NEVER invoke frozen binary from `releases/`.
 - **Ceremony-coordination caveat:** Live promote ceremonies running concurrently are protected from nonce eviction by bypassing frozen binary path resolution.

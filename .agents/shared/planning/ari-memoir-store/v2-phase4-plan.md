@@ -12,7 +12,7 @@ Deliver the Asynchronous Poignancy Scorer for episodic memory:
 1. Implement `MemoirPoignancyWorker` cloning the architectural pattern of `MemoirEmbeddingWorker` (lifespan task on `app.state`, dedicated executor `memoir-poignancy`, tick budget 20s, per-tick exception catching, call-time knob re-reading).
 2. Implement `MemoirPoignancyService` to evaluate narrative importance (1–10) using the house LLM failover lane (`invoke_raw_with_failover`).
 3. **The Importance Ruling (§3-A2 / Register #3):** `importance` remains **WRITE-FROZEN** (the authored, bounded 1–10 record at INSERT); the LLM score lands in the NEW `poignancy INTEGER NULL` column; all consumers read effective importance = `COALESCE(poignancy, importance)`. `RECORD_COLUMNS` pin stays green and untouched by construction; `MEMOIR_INSERT_COLUMNS` pin is deliberately amended to the new insert list as an evidence trail.
-4. **The Backfill Ruling (§3-A3 / Register #5):** Pre-existing history is seeded as `poignancy_status = 'legacy'` at cutover using storage literal `'2026-11-09 00:00:00'` (SF11 / V2-33); automatic backfill of pre-cutover history is REJECTED; opt-in backfill is provided via `MEMOIR_POIGNANCY_BACKFILL_MAX = 0` (default disabled). Only new post-cutover episodes are automatically scored.
+4. **The Backfill Ruling (§3-A3 / Register #5):** Pre-existing history is seeded as `poignancy_status = 'legacy'` at cutover using storage literal `'2026-11-09 00:00:00'` (SF11 / V2-33); automatic backfill of pre-cutover history is REJECTED; opt-in backfill is provided via `ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX = 0` (default disabled). Only new post-cutover episodes are automatically scored.
 5. Scan for unscored episodes (`poignancy_status IS NULL AND poignancy_attempts < 5`), score them asynchronously, and atomically update `poignancy = score, poignancy_status = 'scored'`.
 6. Classify failover errors cloning `classify_embed_failure` (401/403 -> immediate terminal + latch; non-transient -> terminal; transient -> attempt++).
 7. Update `daemon/services/memoir_retrieval.py` (:39-42, :849, :953) to switch the recall ranker tie-break in `_rank` (:827) to effective importance `(row.poignancy if getattr(row, "poignancy", None) is not None else (row.importance or 0))` for ORDERING ONLY, with display-freeze preserving raw authored `importance` in projection and rendering (B6 / V2-41).
@@ -28,11 +28,11 @@ Deliver the Asynchronous Poignancy Scorer for episodic memory:
 |----|----------|------------------------------|-----------------------|
 | **V2-D 4.1** | The Importance Ruling (§3-A2 / Register #3): `importance` is **write-frozen** (preserving the authored record); LLM score lands in `poignancy INTEGER NULL`; all v2 consumers read `COALESCE(poignancy, importance)`. `RECORD_COLUMNS` pin stays green; `D2_1_SURFACE` pin amended deliberately with recorded rationale. | Overwriting `importance` in place REDs the frozen `RECORD_COLUMNS` purity pin and corrupts authored historical judgment. COALESCE preserves the blessed capability semantically without mutating historical records. | Overwriting `importance` in place. |
 | **V2-D 4.2** | Clones `MemoirEmbeddingWorker` architecture: lifespan task on `app.state`, dedicated `ThreadPoolExecutor(max_workers=1, thread_name_prefix="memoir-poignancy")`, 30s timeout, attempt cap of 5, terminal markers (`terminal:<reason>`), structured pinnable tick lines. | Module docstring of `memoir_embedding_worker.py:1-78` represents the battle-tested house worker pattern. Dedicated thread pool avoids event-loop starvation. | Using `asyncio.to_thread` (forbidden in workers); OR unmanaged polling loops. |
-| **V2-D 4.3** | Cutover-bounded legacy seed & opt-in backfill knob (§3-A3 / Register #5 / SF11): Pre-cutover episodes seeded `poignancy_status='legacy'` using `'2026-11-09 00:00:00'`. Full-corpus backfill rejected; opt-in backfill governed by `MEMOIR_POIGNANCY_BACKFILL_MAX=0` (default disabled). | Full-history backfill would drain ~43k episodes/day on large hosts, replace authored history with model guesses, and flood the reflection trigger sum with stale events. | Full-history automatic backfill on startup. |
+| **V2-D 4.3** | Cutover-bounded legacy seed & opt-in backfill knob (§3-A3 / Register #5 / SF11): Pre-cutover episodes seeded `poignancy_status='legacy'` using `'2026-11-09 00:00:00'`. Full-corpus backfill rejected; opt-in backfill governed by `ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX=0` (default disabled). | Full-history backfill would drain ~43k episodes/day on large hosts, replace authored history with model guesses, and flood the reflection trigger sum with stale events. | Full-history automatic backfill on startup. |
 | **V2-D 4.4** | Poignancy scoring prompt with integer scale 1–10: 1 = trivial pleasantry; 5 = standard operational; 8–9 = significant milestone; 10 = constitutional decree. Clamped strictly `1..10`. | Aligns with existing CHECK constraint `ck_memoir_episodes_importance`. | Floating-point score (violates integer schema contract). |
 | **V2-D 4.5** | Delete delta-notify coupling (§3-A1 / Register #4): Poignancy worker does NOT push delta updates to reflection service. Reflection derives its trigger sum directly from SQL each tick: `SELECT COALESCE(SUM(COALESCE(poignancy, importance)), 0) ...`. | Delta-notifies double-count on re-scores, die on restart, and tightly couple service lifecycles. Derived sum is restart-durable and decoupled. | In-memory rolling counters; delta-notify pub/sub. |
 | **V2-D 4.6** | Failover error classification (§3-A3): Clone `classify_embed_failure` (`memoir_embedding_worker.py:300-328`): 401/403 auth errors trigger immediate terminal status + latch; other non-transient errors terminalize; connection/timeout errors increment `poignancy_attempts`. | Blind retries on auth failure; OR swallowing all exceptions. |
-| **V2-D 4.7** | Three-class numeric knob governance (§3-A4 / Register #12): `MEMOIR_POIGNANCY_TICK_S`, `MEMOIR_POIGNANCY_BATCH_CAP`, `MEMOIR_POIGNANCY_BACKFILL_MAX` validated via `_classify_numeric` before-validator. Never aborts boot. | Bare `Field(gt=...)` on numerics (pre-existing boot-abort defect, anomaly `33028b27`). | Bare `Field` validator killing daemon boot on unparseable numeric env vars. |
+| **V2-D 4.7** | Three-class numeric knob governance (§3-A4 / Register #12): `ENSEMBLE_MEMOIR_POIGNANCY_TICK_S`, `ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP`, `ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX` validated via `_classify_numeric` before-validator. Never aborts boot. | Bare `Field(gt=...)` on numerics (pre-existing boot-abort defect, anomaly `33028b27`). | Bare `Field` validator killing daemon boot on unparseable numeric env vars. |
 | **V2-D 4.8** | Recall tie-break consumer tasking & display-freeze (SF1 / B6 / V2-41): Switch ranker `_rank` (:827, not `_sort_and_rank`) tie-break comparator (:849) in `daemon/services/memoir_retrieval.py` to effective importance `(row.poignancy if getattr(row, "poignancy", None) is not None else (row.importance or 0))` for ORDERING ONLY. Projection in `_project` (:938) and rendering in `_render_episode_block` (`tools/memoir.py:495-508`) keep displaying authored `row.importance` unchanged, preserving byte-identical recall envelope text across all lanes. | Modifying projected `importance` to poignancy score (alters rendered recall text, breaking frozen v1 surfaces); sorting on raw importance alone. | Preserves frozen v1 recall text output byte-identical across all lanes while honoring the importance ruling for retrieval ordering. |
 | **V2-D 4.9** | Dedicated worker config isolation (N1): `MemoirPoignancyWorker` reads its own isolated configuration section (`MemoirConfig.poignancy_enabled`), never cloning or calling the shared global knob resolver. | Calling shared global knob resolver. | Preserves architectural boundary: poignancy worker is governed by its own discrete flag, preventing cross-subsystem interference. |
 
@@ -41,15 +41,15 @@ Deliver the Asynchronous Poignancy Scorer for episodic memory:
 ## 3. Domain Detail & Worker Architecture
 
 ### 3.1 Worker Lifecycle & Tick Loop
-- **Tick Interval:** Every 20 seconds (`MEMOIR_POIGNANCY_TICK_S = 20.0`).
-- **Batch Cap:** Maximum 10 episodes per tick (`MEMOIR_POIGNANCY_BATCH_CAP = 10`).
+- **Tick Interval:** Every 20 seconds (`ENSEMBLE_MEMOIR_POIGNANCY_TICK_S = 20.0`).
+- **Batch Cap:** Maximum 10 episodes per tick (`ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP = 10`).
 - **Knob Re-read (N1):** Every tick re-reads `ENSEMBLE_MEMOIR_POIGNANCY_ENABLED` directly from `MemoirConfig.poignancy_enabled` (isolated config section), NEVER cloning or calling the shared global knob resolver. If OFF, logs one park message and sleeps; resumes execution when turned ON.
 - **Structured Log Line:** `[MemoirPoignancy] pending=N scored=K failed=F terminal=T duration=X.Xs`.
 
 ### 3.2 Scoring Pipeline & Queue Scanning
 1. Worker queries repository for batch:
    `SELECT * FROM memoir_episodes WHERE poignancy_status IS NULL AND poignancy_attempts < 5 ORDER BY created_at ASC LIMIT 10`.
-   *(If `MEMOIR_POIGNANCY_BACKFILL_MAX > 0`, it additionally scans up to that limit from the `poignancy_status = 'legacy'` set).*
+   *(If `ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX > 0`, it additionally scans up to that limit from the `poignancy_status = 'legacy'` set).*
 2. For each episode:
    - Formulates scoring prompt containing title, event time, body, and star tags.
    - Invokes LLM via `invoke_raw_with_failover`.
@@ -100,7 +100,7 @@ Deliver the Asynchronous Poignancy Scorer for episodic memory:
 ## 7. Flag Consumption
 
 - `ENSEMBLE_MEMOIR_POIGNANCY_ENABLED`: Discrete kill-switch for poignancy scoring.
-- `MEMOIR_POIGNANCY_BACKFILL_MAX`: Opt-in backfill budget knob (default 0).
+- `ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX`: Opt-in backfill budget knob (default 0).
 - **DD-5:** Asynchronous LLM importance scoring replacing v1 static default.
 - **DD-20:** Hot append purity preserved.
 - **V2-10 / §3-A2:** The Importance Ruling (write-frozen `importance`, new `poignancy` column, COALESCE consumers).

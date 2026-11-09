@@ -166,7 +166,7 @@ Mechanics: (1) **legacy seed** — `UPDATE memoir_episodes SET poignancy_status=
 - **Model refusal** ("I cannot…") ⇒ treat as valid-empty (zero syntheses), mark the batch considered — never a retry loop (a refusal is deterministic).
 - **Confidence missing/out-of-range** ⇒ clamp to `[0.1, 1.0]` and log; do not reject the synthesis (clamping a scalar is not truncating a claim; AC2 already specifies clamping).
 
-**JEV + keepsake isolation:** ordering per §2-Q4; `notify_user` refusal is DATA, never an exception (the tool never raises; catch-all converts to `notify_internal_error`, `notify_user.py:519-533`; `notify_no_bound_chat_source` is structurally normal for a background session — log once per day, escalate to briefing only). **Ledger discipline:** the date-keyed 1/day notification ledger is consumed ONLY on an accepted send (mirror the N3 "only accepted rows consume budget" rule) — a refusal that burns the day's slot starves a legitimately-bound day; an unbound session would refuse every day forever.
+**JEV + keepsake isolation:** ordering per §2-Q4; `notify_user` refusal is DATA, never an exception (the tool never raises; catch-all converts to `notify_internal_error`, `notify_user.py:519-533`; `notify_no_bound_chat_source` is structurally normal for a background session — log once per day, escalate to briefing only). **Ledger discipline:** the date-keyed 1/day notification ledger is consumed ONLY on an accepted enqueue (mirror the N3 "only accepted rows consume budget" rule) — a refusal that burns the day's slot starves a legitimately-bound day; an unbound session would refuse every day forever.
 
 **Kill-switch truth tables (binding — three knob classes, one classifier each, model layer NEVER raises, boot NEVER aborts):**
 
@@ -221,7 +221,7 @@ Implementation: ONE shared `_classify_numeric` helper in `daemon/config.py` cons
 | 2 | 🔴 | `poignancy_attempts INTEGER NOT NULL DEFAULT 0` column missing from phase-1 (phase-4 query + AC3 depend on it) | phase-1 DDL/ensure/model |
 | 3 | 🔴 | Poignancy writes `poignancy` (new col), NEVER `importance`; consumers `COALESCE(poignancy, importance)`; `RECORD_COLUMNS` pin stays green; `D2_1_SURFACE` pin amended deliberately with rationale | phase-4 V2-D 4.1/4.4, T4.1–T4.3 |
 | 4 | 🔴 | DELETE V2-D 4.5 delta-notify + phase-2 T2.1 in-memory rolling counter → derived SUM per §3-A1 | phase-4 V2-D 4.5; phase-2 T2.1 |
-| 5 | 🔴 | Legacy seed (cutover-bounded) + `MEMOIR_POIGNANCY_BACKFILL_MAX=0` opt-in; full-history scoring rejected | phase-1 + phase-4 |
+| 5 | 🔴 | Legacy seed (cutover-bounded) + `ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX=0` opt-in; full-history scoring rejected | phase-1 + phase-4 |
 | 6 | 🟡 | `supersede_with(old_id, new_row)` single-transaction writer replaces the two-call create+mark shape | phase-1 repo tasks |
 | 7 | 🟡 | Phase-2 §3.2 recall envelope sketch does not match the real envelope — implement §3-A6's shape instead | phase-2 §3.2 |
 | 8 | 🟡 | Census correction: corpus pin 2→4; retrieval_pg stays 2 (asymmetric filters) | phase-1 AC3, phase-7 |
@@ -233,7 +233,7 @@ Implementation: ONE shared `_classify_numeric` helper in `daemon/config.py` cons
 | 14 | 🟡 | Briefing proposals: own measured section ≤1000 chars + rung order fit-dynamic→trim-dynamic→trim-proposals→withhold | phase-6 V2-D 6.5 |
 | 15 | 🟡 | `reflected_at` claim column + `memoir_reflection_state` row (watermark mechanism; derived-sum trigger population) | phase-1 + phase-2 |
 | 16 | 🟢 | JEV candidate parking (retry next pass, `terminal:gate_unavailable`) replaces silent default-to-`none` drop | phase-5 T5.2 |
-| 17 | 🟢 | Keepsake notification ledger consumed only on accepted send | phase-6 §3.1 |
+| 17 | 🟢 | Keepsake notification ledger consumed only on accepted enqueue | phase-6 §3.1 |
 | 18 | 🟢 | Fragments = `COUNT(*)` lines, never `SUM(mention_count)` | phase-3 V2-D 3.2 |
 | 19 | 🟢 | Nightly-before-in-day ordering inside the tick documented as load-bearing | phase-2 §3.1 |
 
