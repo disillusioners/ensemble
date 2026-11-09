@@ -109,7 +109,15 @@ Published from the implementation reports (core implementation lane + wiring rou
 
 **OPEN QUESTION (explicitly labelled, distinct from the settled Q1/Q2):** `DECISION_MODEL` unset vs explicitly empty (item 5 above). The difference is unobservable in P1. Awaiting ratification.
 
-**STILL OPEN — wiring round not yet reported:** the settings-key table's ACTUAL registered state, the wiring round's own deviations, and the last updates to §5. What is written here is the CONTRACT, not a claim that the code has landed.
+**WIRING STATE (published as ACTUAL, not contract):** the settings-key table (§12) now records the real registered specs (value_type, bounds, allowed_values, requires_restart, sensitive, env_var, config_path) as registered; the S1 wiring facts (§13) and the implementation base state (§15) are published as measured facts (commit `c0801c9cf`). The wiring round reported ZERO deviations and stayed within its assigned files. The wiring state is no longer pending.
+
+---
+
+## §6 Notes
+
+- House-consistent front-matter: normative source is `scope-and-doctrine.md` (cited by §id, never re-quoted); this file is the decisions record, not doctrine.
+- The design set now carries **zero** open questions (Q1 and Q2 settled 2026-11-09). Any future question must be raised as a new ruling, not re-opened here.
+- Corrections to proxy anchors are **published here**, never silently patched into the design docs' anchor tables (house convention).
 
 ---
 
@@ -177,6 +185,8 @@ S2/S3/S4 per-seam keys register ONLY when those seams register (P4 lane); in P1 
 
 **Content-free hazard — the row must be assembled BY HAND.** At the hook point 17 names are live and 15 carry user content or model text. `Snapshot.to_dict()` (`daemon/repositories/snapshot/models.py:231-252`) returns EVERY field (title/task_summary/domain_tags/full digest) — `model_dump()`/`vars()`/a generic dump helper all LEAK. The service is DUCK-TYPED (`getattr(snap, "id", "?")` `:630`; test doubles are `FakeSnapshot` with only `.id`, `tests/unit/test_snapshot_search_service.py:83-101`) ⇒ an id extractor must tolerate arbitrary stand-ins. NO content hash exists: the only sha256 is the capture idempotency key (`daemon/services/snapshot_executor.py:587-592`, derived from the transcript, not persisted on the row); `git_sha` (`:214-216`) is a nullable repo anchor, NOT a content hash ⇒ compute your own hash (consistent with `controls-and-phasing.md` §2.6). `_parse_selection` accepts ANY non-empty string (`:806-809`) and unknown ids are logged VERBATIM into the agent-readable daemon log (`:679-682`) ⇒ `parsed` is NOT a set of candidate ids ⇒ INTERSECT AGAINST `candidates` BEFORE WRITING ANY ROW, write VALIDATED ids only. The pre-existing malformed-JSON→empty path (`:667-669` returns `[]` — NOT an exception, so `search()`'s `:410-415` fallback is NOT reached ⇒ `{"results": [], "error": None}`) contradicts the module docstring `:27-28` and is UNPINNED (the only fallback test, `tests/unit/test_snapshot_search_service.py:691-720`, uses a RAISED RuntimeError). ⇒ ADD to `controls-and-phasing.md` §2.6: the shadow row is assembled BY HAND, ids are validated against the candidate set BEFORE any row is written, and the overlay's "no answer" surfaces as a FAILURE, never an empty selection.
 
+**S1 wiring facts (implementation, landed).** The hook lives at `daemon/services/snapshot_search_service.py:689-718` — the last point where `picked` is final and the prompt/evidence is still live. It calls **OUTWARD** and the shipped `picked` is returned **completely unaltered**; the consult is wrapped so a raise is non-fatal (logged, never propagated). It passes: the validated candidate ids, the heuristic's picked ids, the query, the candidates block, the system prompt, the user prompt and the limit — and it uses the core's `extract_snapshot_ids` (id-only, duck-tolerant). The file imports ONLY from `daemon.services.decision.port` — **no observer module, and no lowercase `metrics` token** (the whole-file substring ban at `tests/unit/tools/test_snapshot_v3.py:1645` is respected); the house import-graph pin passes 57. The coverage note is at `:401-405`: the `:399-400` "no chat model configured" path bypasses `_llm_select` entirely ⇒ no overlay consult on that path. **The manager wiring:** `daemon/manager.py` constructs `AppSettingCostAccumulator(engine)`, `DecisionClient`, `SeamRegistry` (with S1 registered via `build_s1_seam_record()`), `AppSettingKillStore` + `SettingsServiceKillStore`, `KillChannelResolver` (with `override_writer` → `SettingsService.set_override`, dispatched off-loop through `db_offload`), and `DecisionOverlay(registry, kill, shadow_writer, config, accumulator, board_service=self._board_service)`; injects `decision_overlay=` into `SnapshotSearchService`; registers the settings invalidation callback in `set_settings_service`; and calls `await self._decision_kill_resolver.reverify(["snapshot.l3.selection"])` in `initialize()` — the **boot re-verification** that makes a kill survive a restart. **The durable cost ledger** (`daemon/services/decision/cost_store.py`): `app_settings` rows via the `AppSetting` model, deliberately **NOT** in `MANAGED_KEYS` so the settings router 404s them — operator-invisible and un-editable (the operator must not be able to edit the meter). Period-keyed `decision_cost_ledger_{YYYY-MM}` so a new calendar month starts at zero with **no reset job**. Every consult updates the row, so a daemon restart reads the month back — **a restart cannot reset month-to-date spend and defeat the global ceiling**. All DB access through `daemon.services.db_offload.offload` — no sync DB on the event loop.
+
 ---
 
 ## §14 Final metric-family roster (19 names + family id + bounded label sets)
@@ -211,16 +221,10 @@ Published as the measured registered state. The family id is **`decision_overlay
 
 ## §15 Implementation base state (factual record, not a claim of success)
 
-- `tests/unit/decision/` — **167 passed, 0 failed** (10 files).
+- `tests/unit/decision/` — **173 passed** (167 + the 6 new wiring/behaviour tests), 0 failed.
 - `tests/unit/metrics/` — **531 passed, 6 failed, 1 error** — **byte-identical to its base state** (the same node names before and after the change). All six failures plus the error are **PRE-EXISTING**: the `test_the_daemon_diff_is_confined_to_the_allowed_files` pin is **RED AT BASE** on `daemon/__init__.py` (a committed change from another lane since the pin's `LANE_BASE` `644c2bfaaa48514ec7de79f7f4bcd078a700cdbe`; `PACKS.md:216-219` records it as a known-stale pin), the F21-journal plan assertion, 3× `AuthConfig` discovery/issuer errors, and the metrics scope-cage route census. After the change the pin's verdict is UNCHANGED and the 10 new files are **0 offenders** (measured: 101 `daemon/` changes vs `LANE_BASE`, 80 pre-existing offenders). The global series cap needed **no** change: `BASELINE_SERIES (89) + measured 817 = 906 ≤ 2000`.
-- The house import-graph pin `tests/unit/tools/test_snapshot_v3.py` — **57 passed**.
+- The house import-graph pin `tests/unit/tools/test_snapshot_v3.py` — **57 passed** · `tests/unit/test_snapshot_search_service.py` — **42 passed** · `tests/test_settings_resolution.py` — **36 passed**.
+- **The developer's own independent verification on the settled tree** (commit `c0801c9cf`): the lane's change set is **38 files, +10,795/-98**; `git status` clean; `uv run pytest tests/unit/decision/ -q` ⇒ **173 passed, 0 failed in 5.97s**, matching the lane's own report exactly. Publish this as the independent-verification record.
+- The 3 behavioural obligations and their test node ids (publish verbatim): `tests/unit/decision/test_s1_wiring_behaviour.py::test_s1_overlay_active_produces_identical_selection_and_writes_shadow_row` (overlay ACTIVE ⇒ selection IDENTICAL to heuristic-only `['snap-1','snap-3']`, exactly 1 proxy call, exactly 1 shadow row with `seam_id="snapshot.l3.selection"`, `mode="shadow"`) · `::test_s1_overlay_inactive_produces_byte_identical_results_and_no_call_made` (switch OFF/unconfigured ⇒ byte-identical `['snap-1']` and **0** socket calls) · `::test_kill_switch_flip_takes_effect_without_restart_and_survives_restart` (an operator override to 0 suppresses the **next** consult with **no restart** and freezes proxy calls at 1; a simulated reboot (cache dropped, resolver re-initialised over the DB) yields `reverify` outcome `verified_off` and still 0 new calls).
 
 Publish these as the measured base state for the lane, with the pre-existing-red provenance quoted.
-
----
-
-## §6 Notes
-
-- House-consistent front-matter: normative source is `scope-and-doctrine.md` (cited by §id, never re-quoted); this file is the decisions record, not doctrine.
-- The design set now carries **zero** open questions (Q1 and Q2 settled 2026-11-09). Any future question must be raised as a new ruling, not re-opened here.
-- Corrections to proxy anchors are **published here**, never silently patched into the design docs' anchor tables (house convention).
