@@ -985,7 +985,10 @@ class MemoirReflectionService:
                 "[MemoirReflection] claim_write_failed (%s) — the belief is "
                 "skipped and the source episode is UNMARKED (the next pass "
                 "retries it; the dedup key, V2-17, makes the retry "
-                "idempotent)",
+                "idempotent ONLY when the re-derivation yields the same "
+                "claim over the same source ids and the landed row is "
+                "still active in the 2-day dedup window; a drifted "
+                "re-derivation lands as a NEW row)",
                 type(exc).__name__,
             )
             return "write_failed"

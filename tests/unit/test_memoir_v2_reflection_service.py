@@ -1128,6 +1128,70 @@ def test_a_write_failure_leaves_the_episode_unmarked_for_the_next_pass(
     )
 
 
+def test_the_write_failure_log_states_the_qualified_idempotence(
+    repo, reflection_repo, syntheses_repo, monkeypatch, caplog
+):
+    """G: the operator-facing WRITE-FAILURE log must state the RESOLVED
+    truth about the retry, not a stronger claim than the truth.
+
+    The retry is idempotent ONLY when the re-derivation yields the SAME
+    claim over the SAME source ids AND the landed row is still ACTIVE
+    inside the 2-day dedup window — the LLM re-derivation is NOT
+    deterministic, so a DRIFTED belief re-derives as a NEW row, not a
+    duplicate. The unconditional phrasing told an operator something
+    STRONGER than the truth (the same honesty standard as the knob
+    message, D0.7).
+    """
+    episode_id = repo.insert_episode(agent_id=AGENT, body="one", importance=9)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("the store is unavailable")
+
+    monkeypatch.setattr(syntheses_repo, "create_synthesis", _boom)
+
+    def fake_llm(prompt):
+        return _envelope(
+            [
+                {
+                    "claim": "the Emperor prefers the zebra",
+                    "source_episode_ids": [episode_id],
+                    "verb": "CREATE",
+                    "confidence": 0.8,
+                }
+            ],
+            [episode_id],
+        )
+
+    service = _service(reflection_repo, syntheses_repo, llm_caller=fake_llm)
+    with caplog.at_level(
+        logging.WARNING, logger="daemon.services.memoir_reflection_service"
+    ):
+        service.run_in_day_pass()
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "claim_write_failed" in text, (
+        "the WRITE-FAILURE warning MUST be emitted — the assertion is "
+        "about the message it carries"
+    )
+    assert "idempotent ONLY" in text, (
+        "the operator-facing log MUST carry the QUALIFIER — the retry is "
+        "idempotent only when the re-derivation matches and the landed "
+        "row is still active in the 2-day dedup window"
+    )
+    assert "2-day dedup window" in text, (
+        "the operator-facing log MUST name the 2-day dedup window — it "
+        "is the second half of the qualifier"
+    )
+    assert "NEW row" in text, (
+        "the operator-facing log MUST say that a DRIFTED re-derivation "
+        "lands as a NEW row (not a duplicate)"
+    )
+    assert "makes the retry idempotent)" not in text, (
+        "the UNCONDITIONAL over-claim MUST be gone — an operator must "
+        "never be told the retry is idempotent without its conditions"
+    )
+
+
 def test_an_invariant_rejection_still_marks_the_episode(
     repo, reflection_repo, syntheses_repo
 ):
