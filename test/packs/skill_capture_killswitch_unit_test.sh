@@ -23,6 +23,7 @@
 #   tests/services/test_skill_job_dispatcher.py             (ON-pin: class-scoped autouse ×2)
 #   tests/tools/test_skill_evolution_tools.py               (ON-pin: module-level autouse)
 #   tests/unit/test_skill_capture_attribution_seam.py       (A3 seam — Phase 1)
+#   tests/unit/test_skill_gate4_attribution_consumer.py     (A3 GATE-4 CONSUMER — Phase 1)
 #
 # NOTE on addopts: repo default addopts = `-m 'not integration and not postgres'`
 # would silently deselect the two integration-marked ON-pin files. This pack
@@ -53,7 +54,7 @@
 #           BLOCKED — both call sites live in files outside this lane's
 #           edit fence (reported, not pinned).
 #
-# Expected test count: 136 (49 + 12 + 12 + 22 + 23 + 18)
+# Expected test count: 144 (49 + 12 + 12 + 22 + 23 + 18 + 8)
 # Timeout: internal 240s per pytest leg; caller applies outer `timeout 900`.
 set -uo pipefail
 
@@ -85,9 +86,11 @@ FILES=(
   tests/services/test_skill_job_dispatcher.py
   tests/tools/test_skill_evolution_tools.py
   tests/unit/test_skill_capture_attribution_seam.py
+  tests/unit/test_skill_gate4_attribution_consumer.py
 )
 
 SEAM="tests/unit/test_skill_capture_attribution_seam.py"
+CONSUMER="tests/unit/test_skill_gate4_attribution_consumer.py"
 REPO_PY="daemon/repositories/skill/repository.py"
 LOG_DIR="${SKILL_CAPTURE_KILLSWITCH_LOG_DIR:-/tmp/skill-capture-killswitch-gate}"
 mkdir -p "$LOG_DIR"
@@ -244,10 +247,79 @@ leg "M-A3c" \
 ' \
   ''
 
+# ── M-A3d-consumer — the GATE-4 CONSUMPTION leg ───────────────────────────
+# The three legs above plant defects in the PREDICATE. This leg plants the
+# defect the leader's extended fence exists for: Gate 4 falls back to the
+# FEEDBACK-ONLY predicate (a repoint that was never wired, or a revert). The
+# predicate pins stay green under it — only the CONSUMER pins see it, which is
+# exactly why the consumer pin has to exist separately.
+SVC_PY="daemon/services/skill_metrics_service.py"
+consumer_leg() {
+  local id="$1" path="$2" old="$3" new="$4" pinfile="$5"
+  local key want sha_before sha_after log rc
+  key="$(key_of "$path")"
+  if [ ! -f "$PRISTINE/$key.content" ]; then
+    cp "$path" "$PRISTINE/$key.content"
+    printf '%s' "$path" > "$PRISTINE/$key.meta"
+    sha256sum "$path" | cut -d' ' -f1 > "$PRISTINE/$key.sha"
+    echo "[pack] pristine: $path sha=$(cat "$PRISTINE/$key.sha")"
+  fi
+  want="$(cat "$PRISTINE/$key.sha")"
+  sha_before="$(sha256sum "$path" | cut -d' ' -f1)"
+  if [ "$sha_before" != "$want" ]; then
+    echo "  ${id}: FAIL (leg did not start pristine)"
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+    return
+  fi
+  if ! plant "$path" "$old" "$new"; then
+    echo "  ${id}: FAIL (plant error)"
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+    cp "$PRISTINE/$key.content" "$path"
+    return
+  fi
+  log="$LOG_DIR/${id}-red.log"
+  timeout 240 "${PYTEST[@]}" "$pinfile" -q --tb=line -p no:randomly \
+    --override-ini="addopts=" > "$log" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "  ${id}: FAIL (NON-DISCRIMINATING — the consumer pin stayed GREEN with the repoint planted)"
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+  else
+    echo "  ${id}: RED as intended (rc=${rc})"
+    grep -E "^FAILED " "$log" | head -3 | sed 's/^/    /' || true
+  fi
+  cp "$PRISTINE/$key.content" "$path"
+  sha_after="$(sha256sum "$path" | cut -d' ' -f1)"
+  if [ "$sha_after" != "$want" ]; then
+    echo "  ${id}: FAIL (restore NOT sha-identical: ${sha_after} != ${want})"
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+    return
+  fi
+  log="$LOG_DIR/${id}-green.log"
+  timeout 240 "${PYTEST[@]}" "$pinfile" -q --tb=line -p no:randomly \
+    --override-ini="addopts=" > "$log" 2>&1
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "  ${id}: FAIL (post-restore leg did not return to GREEN, rc=${rc})"
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+  else
+    echo "  ${id}: GREEN after sha-verified restore"
+  fi
+  check_budget "after ${id}"
+}
+
+consumer_leg "M-A3d-consumer" "$SVC_PY" \
+  '                self.usage_repo.has_genuinely_evolved_for_instance,' \
+  '                self.usage_repo.has_applied_for_instance,' \
+  "$CONSUMER"
+
 for meta in "$PRISTINE"/*.meta; do
+  [ -e "$meta" ] || continue
   path="$(cat "$meta")"
+  key="$(basename "$meta" .meta)"
+  want="$(cat "$PRISTINE/$key.sha")"
   got="$(sha256sum "$path" | cut -d' ' -f1)"
-  if [ "$got" != "$WANT" ]; then
+  if [ "$got" != "$want" ]; then
     echo "RESULT: FAIL (post-run manifest: $path is NOT byte-identical)"
     exit 1
   fi
@@ -258,5 +330,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (3 A3 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (4 A3 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0
