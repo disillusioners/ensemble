@@ -535,7 +535,11 @@ class MemoirReflectionService:
         #: episode stays unreflected and the NEXT pass retries it. The
         #: dedup key (V2-17) makes that retry idempotent — the beliefs
         #: that DID land come back as "duplicate" and are skipped, so
-        #: only the missing belief is re-derived.
+        #: only the missing belief is re-derived — but ONLY while the
+        #: re-derivation yields the SAME claim over the SAME source ids
+        #: AND the landed row is still ACTIVE inside the 2-day dedup
+        #: window (the LLM re-derivation is NOT deterministic, so a
+        #: DRIFTED belief re-derives as a NEW row, not a duplicate).
         unmarked_episode_ids: set[str] = set()
         accepted = 0
         rejected = 0
@@ -601,7 +605,12 @@ class MemoirReflectionService:
                     # lost — their source episodes are UNMARKED so the
                     # next pass re-derives them. THE DEDUP KEY (V2-17) is
                     # what makes the retry idempotent (the beliefs that
-                    # DID land come back as "duplicate").
+                    # DID land come back as "duplicate") — but ONLY while
+                    # the re-derivation yields the SAME claim over the
+                    # SAME source ids AND the landed row is still ACTIVE
+                    # inside the 2-day dedup window (the LLM
+                    # re-derivation is NOT deterministic, so a DRIFTED
+                    # belief re-derives as a NEW row, not a duplicate).
                     for dropped in candidates[candidate_index:]:
                         unmarked_episode_ids.update(
                             _candidate_source_ids(dropped, chunk_ids)
@@ -625,7 +634,12 @@ class MemoirReflectionService:
                     # THE WRITE FAILURE: the row did NOT land, so the
                     # source episode is UNMARKED and the next pass
                     # retries it (the dedup key, V2-17, makes the retry
-                    # idempotent).
+                    # idempotent) — but ONLY while the re-derivation
+                    # yields the SAME claim over the SAME source ids AND
+                    # the landed row is still ACTIVE inside the 2-day
+                    # dedup window (the LLM re-derivation is NOT
+                    # deterministic, so a DRIFTED belief re-derives as a
+                    # NEW row, not a duplicate).
                     unmarked_episode_ids.update(
                         _candidate_source_ids(candidate, chunk_ids)
                     )
@@ -961,7 +975,12 @@ class MemoirReflectionService:
             # source episode is UNMARKED so the NEXT pass retries it —
             # THE DEDUP KEY (V2-17) is what makes that retry idempotent:
             # the beliefs that DID land come back as "duplicate" and are
-            # skipped, so only the missing belief is re-derived.
+            # skipped, so only the missing belief is re-derived — but ONLY
+            # while the re-derivation yields the SAME claim over the SAME
+            # source ids AND the landed row is still ACTIVE inside the
+            # 2-day dedup window (the LLM re-derivation is NOT
+            # deterministic, so a DRIFTED belief re-derives as a NEW row,
+            # not a duplicate).
             logger.warning(
                 "[MemoirReflection] claim_write_failed (%s) — the belief is "
                 "skipped and the source episode is UNMARKED (the next pass "

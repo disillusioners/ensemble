@@ -433,6 +433,43 @@ def test_the_unset_kill_switch_message_states_the_resolved_value(caplog):
     assert state.source == "config"
 
 
+def test_the_unset_kill_switch_message_states_enabled_on_the_config_tier():
+    """A1: the ENABLED half of the D0.7 honesty fix is PINNED.
+
+    The DISABLED branch is pinned — the line must never claim "ENABLED
+    by default" while the lane is OFF — but the ON branch had NO pin:
+    mutating the ON-branch message text produced ZERO red across the
+    memoir test files, so the ENABLED wording could drift silently.
+
+    With the env tier ABSENT and the config tier ON, the line must
+    state the RESOLVED value ("ENABLED by default"), the resolution
+    must be ``default`` (the constitutional default — NOT ``config``,
+    which is the DISABLED branch's label), and the line is a WARNING.
+    """
+    from daemon.tools.memoir_knob import (
+        reset_boot_log_state,
+        resolve_memoir_reflection_knob,
+    )
+
+    config = _boot_config()
+    assert config.memoir_reflection.enabled is True
+
+    reset_boot_log_state()
+    state = resolve_memoir_reflection_knob(config)
+
+    assert state.enabled is True
+    assert state.resolution == "default", (
+        "the constitutional default decided — NOT the config branch's label"
+    )
+    assert state.source == "config"
+    assert state.log_level == "WARNING", (
+        "the unset case is LOUD — the ON branch is a WARNING, not INFO"
+    )
+    assert "ENABLED by default" in state.message, (
+        "the line must state the RESOLVED value (the lane IS on)"
+    )
+
+
 @pytest.mark.asyncio
 async def test_the_worker_parks_within_one_tick_after_a_post_boot_flip(
     tmp_path, monkeypatch
