@@ -588,7 +588,11 @@ class SkillInjectionService:
             )
             return False
         # 2 — an inactive row is never served (covers the desync proof).
-        if not bool(getattr(skill, "is_active", False)):
+        #    Only an EXPLICIT ``is_active=False`` drops the candidate: a
+        #    duck-typed candidate that simply does not carry the attribute
+        #    (a file-backed project skill, a test fixture) is NOT treated as
+        #    inactive — the check must never silence a corpus it cannot see.
+        if getattr(skill, "is_active", None) is False:
             return False
         # 3 — R1-shaped row (same-name active shadowing, unresolved A/B).
         try:
