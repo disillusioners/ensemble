@@ -224,7 +224,14 @@ Three documents disagreed about the tick's time budget:
 3. **An abandoned call and the NEXT tick's call can overlap.** In the
    pathological hang case the lane may have two scoring calls in flight
    (one abandoned, one from the next tick). The normal path is
-   strictly sequential.
+   strictly sequential. Two concrete effects of that overlap: an
+   abandoned call that later SUCCEEDS still calls
+   `record_poignancy_score` (the row's status moves to `scored` and the
+   score is written) after the tick already recorded the
+   `poignancy_call_timeout` attempt; an abandoned call that later FAILS
+   takes the failure-record path AGAIN — a SECOND attempt increment on
+   top of the timeout's — accelerating the row's terminalization. Both
+   effects are reachable in the pathological-hang case only.
 
 ---
 
@@ -266,6 +273,16 @@ permanently.
   success,
 * the tick **stops at the first credential rejection** — the remaining
   rows are DEFERRED, so a dead credential costs ONE request per tick.
+
+**Scope of these protections in the MIXED-tick case.** "Stops at the
+first credential rejection" is exact only for an ALL-FAIL tick. A MIXED
+tick — one that scores at least one row and THEN hits a 401/403 — also
+breaks out of the scoring loop, so the DEFERRAL protection holds in
+both cases: one request per tick, and the remaining rows are deferred.
+What does NOT hold in the mixed-tick case is the latch: the tick lands
+in its scored-at-least-one branch, which RELEASES the latch and resets
+the credential-rejected streak, so after a mixed tick the lane retries
+at the NORMAL tick interval, not the latched 300 s.
 
 ### The one deliberate deviation from the embedding lane
 
