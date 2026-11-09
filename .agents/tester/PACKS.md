@@ -1,3 +1,37 @@
+<!-- skill-system-revival-phase1-gates-20261109-begin -->
+## SKILL-SYSTEM-REVIVAL Phase 1 — functional gates G + E1 + D (2026-11-09; worktree `/home/nea/ensemble-src-wt-skill-revival-phase1`, branch `feature/skill-system-revival-phase1`, venv CPython 3.14.7)
+
+> **Outcome: PASS.** **G** (flakiness stabilization) — the A/B-resolution flake's mechanism is PROVEN (base-evidence pack `.agents/tester/RESULTS/2026-11-09-skill-revival-base-evidence/`: `StaticPool`'s single shared DBAPI connection + the concurrent `asyncio.gather(asyncio.to_thread(...))` resolve fan-out → `session.get(Skill, id)` → `None` → `repository.py:333` "Skill not found for update" → the loser was never deactivated). The FIX is **fixture-level** (DS-29): `tests/services/conftest.py` now uses a FILE-BACKED DB (`tmp_path`) with a NON-SHARED pool (`QueuePool`, one connection per session) + `journal_mode=WAL` + `busy_timeout=5000` + `synchronous=NORMAL`; the production fan-out is UNCHANGED and UNSERIALIZED (no lock). **ACCEPTANCE: 3 consecutive FULL-FILE-SET runs (the 12-file skill blast radius) = 3 failed / 456 passed each, red set == the 3 base reds (SQLite `20260714_000001` family), AB node + sibling GREEN in all 3** (base leg: 4F in 2 of 3 runs); decisive A/B re-run — normal `asyncio.to_thread` 84P/0F ≡ inline monkey-patch 84P/0F; **QUARANTINE.md rows 45 (item 2 re-scoped), 56 and 90 REMOVED** into the Resolved table. **E1** (durable re-fix burst cap) — the count is keyed on the **SKILL IDENTITY** (`metadata->>'skill_id'`, PG/SQLite dialect split), NOT on the job key (which is `#<uuid8>`-suffixed per re-admission and could never trip — council F-9); cap = 3 FIX admissions per skill per 24h; the refusal RAISES `SkillFixBurstCapRefused` ("refused: burst cap") + an anomaly row + a counter. **D** (capture-lane observability) — per-run run id + prompt source + prompt SHAPE (never the raw prompt — DS-18/F7) stamped into the capture job metadata; ADMISSION-refusal and EXECUTION-refusal counters kept DISTINCT (DS-19); the daemon-side DEVIATION TRIGGER (D3) fires at the forced-resolve guard — the keeper is not trusted to report itself.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `skill_evolution_unit_test` (EXTENDED 2026-11-09) | `bash test/packs/skill_evolution_unit_test.sh` | leg 1: seed + clone units (47) · leg 2: **G** flakiness pins M-G1..M-G5 (4) · leg 3: **E1** burst-guard pins M-E1a..M-E1f (9) · leg 4: the **G ACCEPTANCE** — ≥ 3 consecutive FULL-FILE-SET green runs of `tests/services/test_skill_evolution_service.py`, classified with the pinned classifier (`grep '^FAILED'` only) and asserted through `assert_full_file_set_acceptance` | 2026-11-09 @ `2350ecb03` | **PASS** — 47 + 4 + 9 green; acceptance leg 3/3 runs 0 reds |
+| `skill_capture_observability_unit_test` (NEW 2026-11-09) | `bash test/packs/skill_capture_observability_unit_test.sh` | **D** pins M-D1..M-D4 (4): every refusal site increments ITS counter · the daemon announces a keeper deviation · the new fields carry a SHAPE, never the raw prompt · the admission/execution refusal signals are never merged | 2026-11-09 | **PASS 4/4** |
+| `skill_services_gzip_regression_unit_test` (the row-90 node's pack — re-adjudicated) | `bash test/packs/skill_services_gzip_regression_unit_test.sh` | the row-90 node (`TestCheckABTestResolution::test_ab_resolution_threshold_met`) under the merge-gate file set (search + embedding + evolution services + the manager init wiring) | 2026-11-09 | **PASS** — the AB node is GREEN (the row's reds are the 3 base `20260714_000001` reds only) |
+
+**Mutation matrix (every leg proven RED→GREEN with a sha256-verified restore):**
+
+| Leg | Mutation | Pin that turns RED |
+|---|---|---|
+| M-G1 | revert the fixture to `StaticPool` + `:memory:` | `test_g_pin_concurrent_sessions_do_not_share_one_connection` |
+| M-G2 | revert to a shared `:memory:` with `NullPool` | `test_g_pin_database_is_shared_across_connections` |
+| M-G3 | serialize the production fan-out with a lock (the masking anti-pattern) | `test_g_pin_production_fanout_is_not_serialized` |
+| M-G4 | delete the "≥ 3 consecutive FULL-FILE-SET greens" acceptance helper | `test_g_pin_acceptance_helper_requires_three_full_file_set_greens` |
+| M-G5 | narrow the acceptance helper to a single isolated run | `test_g_pin_acceptance_helper_requires_three_full_file_set_greens` |
+| M-E1a | key the count on `idempotency_key` (the dead guard) | `test_e1_cap_trips_on_the_fourth_fix_admission` (+3) |
+| M-E1b | remove the `metadata->>'skill_id'` filter | `test_e1_count_only_matches_the_requested_skill` (+2) |
+| M-E1c | drop the window filter (`created_at >= since`) | `test_e1_old_admissions_outside_the_window_are_not_counted` |
+| M-E1d | refuse the WRONG skill | `test_e1_different_skills_are_independent` (+4) |
+| M-E1e | remove the anomaly write on a cap refusal | `test_e1_cap_refusal_writes_an_anomaly_row` (+1) |
+| M-E1f | make the refusal envelope claim success | `test_e1_refusal_never_claims_a_job_was_admitted` (+1) |
+| M-D1 | remove the refusal counter increment at one site | `test_d_pin_every_refusal_site_increments_its_counter` (+1) |
+| M-D2 | make the auto-anomaly trigger a no-op | `test_d_pin_deviation_is_announced_by_the_daemon` |
+| M-D3 | store the raw `task_message` in the new `prompt_shape` field | `test_d_pin_prompt_shape_never_carries_the_raw_prompt` |
+| M-D4 | merge the admission-refusal and execution-refusal signals | `test_d_pin_admission_and_execution_refusals_are_never_merged` (+1) |
+
+**Red-set accounting (the §13.2 protocol — `grep '^FAILED'` only, ≥ 3 runs, diffed as SETS):** the 12-file skill blast radius = **3 failed / 456 passed × 3 consecutive runs**, red set == the 3 base reds (`tests/manager/test_skill_service_init.py` ×3 — the pre-existing SQLite `20260714_000001` defect). **NET-NEW REDS = 0.** The wider `tests/services/` sweep carries 12 reds that are BYTE-IDENTICAL to the pre-G base set (measured on the same command with the base fixture restored) — also net-new 0.
+
+<!-- skill-system-revival-phase1-gates-20261109-end -->
 <!-- v0297-staged-verification-begin -->
 ## v0.29.7 STAGED VERIFICATION registration (2026-11-09; staged tree `55512d21eeef6e0a1af5ab318ab581725f4a6631`; binary `69fccb24af9f40068a5e892b1348cfa1d73230ef3cd1443b053c938bce71d7e6` 4-way independently recomputed; tag `v0.29.7` = annotated `4c3e8b149978df1cea27e8c93709c1c1cd1bd668` → `55512d21e` PUSHED (peels local+origin); BRANCH NOT PUSHED; origin/latest unmoved at `f49006b92`; release dir `/home/nea/agents-ensemble/releases/v0.29.7`; stage worktree `/home/nea/ensemble-src-wt-stage-v0297` detached @ `55512d21e`; RESULTS: 2026-11-09-v0297-staging.md)
 
