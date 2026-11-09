@@ -89,6 +89,9 @@ __all__ = [
     "MEMOIR_POIGNANCY_MIN",
     "MEMOIR_POIGNANCY_TICK_S",
     "MemoirPoignancyService",
+    "POIGNANCY_AUTH_REJECTED_REASON",
+    "POIGNANCY_CALL_TIMEOUT_REASON",
+    "POIGNANCY_EXCEPTION_REASON",
     "PoignancyOutcome",
     "PoignancySettings",
     "build_poignancy_prompt",
@@ -134,8 +137,24 @@ MEMOIR_POIGNANCY_BODY_CHARS = 2000
 MEMOIR_POIGNANCY_RETRYABLE_STATUS_CODES = frozenset(RETRYABLE_STATUS_CODES) | {408}
 
 #: Dead-credential statuses: the row goes terminal AT ONCE and the tick
-#: counts as an all-fail tick (the lane-down latch).
+#: counts as an all-fail tick — the WORKER's lane-down latch engages on
+#: the FIRST occurrence (``daemon.services.memoir_poignancy_worker``).
 PERMANENT_CREDENTIAL_STATUS_CODES = frozenset({401, 403})
+
+# ── the reason tokens the WORKER matches on (the lane's vocabulary) ─────
+#: The reason token of a DEAD CREDENTIAL (V2-D 4.6). The worker matches
+#: on it to arm the lane-down latch (the embedding lane's D3.9 shape).
+POIGNANCY_AUTH_REJECTED_REASON = "poignancy_auth_rejected"
+
+#: The reason token of a RAISING EPISODE (the worker's per-episode
+#: isolation): the attempt is counted and the row terminalizes at the
+#: cap like any other failure — the queue ADVANCES past it.
+POIGNANCY_EXCEPTION_REASON = "poignancy_exception"
+
+#: The reason token of a scoring call that exceeded the tick's remaining
+#: budget (the per-episode wall-clock bound): a TRANSIENT failure — the
+#: attempt is counted, the row stays in the queue.
+POIGNANCY_CALL_TIMEOUT_REASON = "poignancy_call_timeout"
 
 
 def _status_code(exc: BaseException) -> int | None:
@@ -176,7 +195,7 @@ def classify_poignancy_failure(exc: BaseException) -> tuple[str, bool]:
     status = _status_code(exc)
     if status is not None:
         if status in PERMANENT_CREDENTIAL_STATUS_CODES:
-            return ("poignancy_auth_rejected", True)
+            return (POIGNANCY_AUTH_REJECTED_REASON, True)
         if status in MEMOIR_POIGNANCY_RETRYABLE_STATUS_CODES:
             return ("poignancy_status_transient", False)
         return ("poignancy_status_permanent", True)
@@ -593,6 +612,37 @@ class MemoirPoignancyService:
             episode_id,
             reason,
             immediate_terminal=bool(outcome.immediate_terminal),
+        )
+
+    # ── the operator recovery path (W6) ─────────────────────────────────
+
+    def requeue_episode(
+        self, episode_id: str, *, restore_legacy: bool = False
+    ) -> bool:
+        """Requeue ONE scoring row — THE operator recovery path.
+
+        The lane CREATES terminal states (a dead credential, a permanent
+        status, the attempt cap), so a transient outage excludes rows
+        PERMANENTLY unless something puts them back. This is that
+        something: it clears the terminal marker, resets the attempt
+        counter and drops the stale score, so the row re-enters the
+        scoring queue on the next tick.
+
+        Args:
+            episode_id: The episode to requeue.
+            restore_legacy: Restore the LEGACY status (``'legacy'``)
+                instead of the unscored NULL. A legacy row MUST keep the
+                legacy marker — restoring NULL would put it in the
+                ALWAYS-scored set and BYPASS the backfill fence
+                (V2-14 / §3-A3), which is the constitutional default the
+                operator raised deliberately.
+
+        Returns:
+            ``True`` when a row was requeued, ``False`` when the id
+            matched no row.
+        """
+        return self._repository.requeue_poignancy_episode(
+            episode_id, restore_legacy=restore_legacy
         )
 
     # ── the house LLM lane ───────────────────────────────────────────────

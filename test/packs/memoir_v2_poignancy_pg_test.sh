@@ -120,7 +120,11 @@ echo "current_database(): ${CURRENT_DB}"
 #: `-lt 1` let a silently-shortened selection pass; an exact count
 #: turns "a test disappeared" into a RED instead of a quieter green
 #: (tidier M12). Re-measure and move this constant deliberately.
-EXPECTED_PASSED_N=13
+#:
+#: RE-MEASURED (2026-11-09, the phase-4 fix round): +2 legs for W6 —
+#: the operator REQUEUE on PostgreSQL (the typed-NULL status bind and
+#: the legacy-marker restore). The measured value is 15.
+EXPECTED_PASSED_N=15
 
 LOG="$(mktemp -t memoir_v2_poignancy_pg.XXXXXX)"
 

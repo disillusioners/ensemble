@@ -60,6 +60,16 @@ REPOSITORY_PY = REPO_ROOT / "daemon" / "repositories" / "memoir" / "repository.p
 #: ``importance`` is WRITE-FROZEN (V2-10 / §3-A2), and AC6's mutation
 #: leg (pointing ``record_poignancy_score`` at ``importance``) is what
 #: keeps that true.
+#:
+#: THE PHASE-4 FIX ROUND AMENDED THIS SET ONCE (deliberately, with a
+#: rationale — the plan's own instruction for the phase-4 extension):
+#: ``requeue_poignancy_episode`` joined the set. It is the OPERATOR
+#: RECOVERY PATH (W6): the lane CREATES terminal states, so without it a
+#: transient outage excluded rows permanently and the only recovery was
+#: manual SQL. It is a NAMED, NARROW method — it moves the scoring
+#: columns of ONE row and nothing else — so the general-purpose-update
+#: hazard this census exists to prevent is UNCHANGED (the forbidden set
+#: below still holds, and the method touches no record column).
 D2_1_SURFACE = {
     "insert_episode",
     "mark_recalled",
@@ -70,6 +80,7 @@ D2_1_SURFACE = {
     "get_pending_poignancy_episodes",
     "record_poignancy_score",
     "record_poignancy_attempt",
+    "requeue_poignancy_episode",
     "mark_superseded",
     "get_pending_embeddings",
     "fetch_keepsakes",
@@ -150,8 +161,10 @@ def test_the_public_surface_is_exactly_the_closed_d2_1_set():
 
     Memoir Store v2 (phase 4, T4.2): the set carries the three
     POIGNANCY methods (the queue read and the two column-targeted
-    writes). The general-purpose-update hazard is UNCHANGED — the
-    amendment adds named, narrow methods, never a generic mutator.
+    writes) and, from the phase-4 FIX ROUND, the requeue (the operator
+    recovery path — a named, narrow method beside them). The
+    general-purpose-update hazard is UNCHANGED — the amendment adds
+    named, narrow methods, never a generic mutator.
     """
     public = {
         name

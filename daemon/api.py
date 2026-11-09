@@ -3065,9 +3065,11 @@ async def lifespan(app: FastAPI):
     # Memoir Store v2 — the POIGNANCY worker (phase 4, T4.3/T4.5).
     #
     # The SAME shape as the embedding worker and the reflection worker
-    # above: a lifespan task on ``app.state``, a DEDICATED single-thread
-    # executor (``memoir-poignancy``), a per-tick knob re-read with
-    # park/resume, and a cancel+await in the shutdown sequence below.
+    # above: a lifespan task on ``app.state``, a DEDICATED executor
+    # (``memoir-poignancy`` — two threads, SEQUENTIAL scoring; see
+    # ``daemon/services/memoir_poignancy_worker.py``), a per-tick knob
+    # re-read with park/resume, and a cancel+await in the shutdown
+    # sequence below.
     #
     # THE TASK IS CREATED UNCONDITIONALLY (the lane's OFF state is a
     # PER-TICK PARK, not a boot gate): AC4 requires that flipping

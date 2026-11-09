@@ -251,3 +251,40 @@ def test_the_poignancy_columns_exist_on_postgres(repo):
         "poignancy_attempts",
         "reflected_at",
     } <= columns
+
+
+def test_the_requeue_puts_a_terminal_row_back_into_the_queue(repo):
+    """W6 on PostgreSQL: the operator recovery path.
+
+    The requeue clears the terminal marker, resets the attempt counter
+    and drops the stale score in ONE statement. The status is bound as a
+    TYPED NULL (the statement binds ``:status`` with an explicit Text
+    type) — the dialect-portable form, the same shape as the attempt
+    recorder's boolean-bound CASE WHEN.
+    """
+    episode_id = _seed(repo)[0]
+    repo.record_poignancy_attempt(
+        episode_id, "poignancy_auth_rejected", immediate_terminal=True
+    )
+    assert repo.get_pending_poignancy_episodes() == []
+
+    assert repo.requeue_poignancy_episode(episode_id) is True
+
+    row = _row(repo, episode_id)
+    assert row.poignancy_status is None
+    assert row.poignancy_attempts == 0
+    assert row.poignancy is None
+    assert [r.id for r in repo.get_pending_poignancy_episodes()] == [episode_id]
+
+
+def test_the_requeue_keeps_the_legacy_marker_on_postgres(repo):
+    """W6 on PostgreSQL: the legacy marker survives the requeue (the
+    backfill fence is NOT bypassed)."""
+    episode_id = _seed(repo, count=1, status="legacy")[0]
+
+    assert repo.requeue_poignancy_episode(episode_id, restore_legacy=True) is True
+
+    assert _row(repo, episode_id).poignancy_status == "legacy"
+    # the legacy corpus is still behind the backfill fence (default 0)
+    assert repo.get_pending_poignancy_episodes() == []
+    assert repo.get_pending_poignancy_episodes(10, backfill_max=10) != []

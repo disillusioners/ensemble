@@ -39,7 +39,7 @@ if [ ! -f "$TARGET" ]; then
 fi
 
 # The MEASURED node count at the pin (2026-11-09, this worktree).
-EXPECTED_PASSED_N=7
+EXPECTED_PASSED_N=10
 
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-300}"
 LOG="${TMPDIR:-/tmp}/memoir_v2_poignancy_lifecycle_test.log"

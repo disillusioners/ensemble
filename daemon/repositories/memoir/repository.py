@@ -667,8 +667,11 @@ def memoir_row_is_terminal(row: Any, attempt_cap: int = MEMOIR_EMBEDDING_ATTEMPT
 # and the scan window's predicate cannot drift.
 
 #: The status marker that makes a scoring row terminal on the next scan
-#: (the worker's own vocabulary — an operator requeue clears the status
-#: and the attempt counter).
+#: (the worker's own vocabulary). THE OPERATOR REQUEUE is
+#: :meth:`MemoirRepository.requeue_poignancy_episode` — it clears this
+#: marker, resets the attempt counter and drops the stale score, so the
+#: row re-enters the scoring queue (the service surface is
+#: :meth:`daemon.services.memoir_poignancy_service.MemoirPoignancyService.requeue_episode`).
 MEMOIR_POIGNANCY_TERMINAL_MARKER = "terminal:"
 
 #: The per-row scoring attempt budget (AC3 — attempts at/over the cap are
@@ -714,6 +717,25 @@ _MEMOIR_RECORD_POIGNANCY_ATTEMPT_STATEMENT = text(
 ).bindparams(
     bindparam("immediate", type_=Boolean()),
     bindparam("cap", type_=Integer()),
+    bindparam("status", type_=Text()),
+    bindparam("id", type_=Text()),
+)
+
+#: The OPERATOR REQUEUE (W6) — ONE statement that puts a terminal row
+#: back into the scoring queue: the status marker is cleared (or
+#: restored to ``legacy``), the attempt counter is reset and the stale
+#: score is dropped. It NEVER touches ``importance`` (the authored
+#: record is WRITE-FROZEN — V2-10 / §3-A2).
+_MEMOIR_REQUEUE_POIGNANCY_SQL = (
+    "UPDATE memoir_episodes "
+    "SET poignancy_status = :status, "
+    "poignancy_attempts = 0, "
+    "poignancy = NULL "
+    "WHERE id = :id"
+)
+_MEMOIR_REQUEUE_POIGNANCY_STATEMENT = text(
+    _MEMOIR_REQUEUE_POIGNANCY_SQL
+).bindparams(
     bindparam("status", type_=Text()),
     bindparam("id", type_=Text()),
 )
@@ -1101,6 +1123,52 @@ class MemoirRepository:
                 else None
             )
             return attempts, terminal
+
+    def requeue_poignancy_episode(
+        self, episode_id: str, *, restore_legacy: bool = False
+    ) -> bool:
+        """Requeue ONE scoring row — THE operator recovery path (W6).
+
+        THE LANE CREATES TERMINAL STATES: a dead credential (401/403), a
+        permanent status and the attempt cap all flip a row's status to
+        ``terminal:<reason>``, and the unscored scan EXCLUDES the
+        terminal rows. A transient outage therefore excludes rows
+        PERMANENTLY unless something puts them back — and without this
+        method the only recovery was manual SQL.
+
+        THE WRITE IS ONE statement (the counter, the marker and the
+        stale score move together — a crash can never leave a row
+        counted-but-not-requeued):
+
+        * ``poignancy_status`` → ``NULL`` (unscored — the row re-enters
+          the queue) or ``'legacy'`` when ``restore_legacy`` is true;
+        * ``poignancy_attempts`` → ``0`` (the attempt budget is whole
+          again);
+        * ``poignancy`` → ``NULL`` (the stale score is dropped — the row
+          is re-scored from scratch, and the authored ``importance``
+          stands until the new score lands).
+
+        THE LEGACY MARKER MATTERS: a legacy row MUST keep the ``legacy``
+        status. Restoring ``NULL`` would move it into the ALWAYS-scored
+        set and BYPASS the backfill fence (V2-14 / §3-A3) — the
+        constitutional default the operator raised deliberately.
+
+        Args:
+            episode_id: The episode to requeue.
+            restore_legacy: Restore the LEGACY status instead of NULL.
+
+        Returns:
+            ``True`` when a row was requeued, ``False`` when the id
+            matched no row.
+        """
+        status = "legacy" if restore_legacy else None
+        with Session(self.engine) as session:
+            result = session.execute(
+                _MEMOIR_REQUEUE_POIGNANCY_STATEMENT,
+                {"status": status, "id": episode_id},
+            )
+            session.commit()
+            return bool(result.rowcount)
 
     def mark_superseded(self, episode_id: str, superseded_by: str) -> bool:
         """Point an episode at its replacement (DD-8).

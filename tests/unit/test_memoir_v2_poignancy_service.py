@@ -593,3 +593,237 @@ def test_the_lane_never_calls_the_global_knob_resolver():
         "the poignancy lane references the global knob resolver at lines "
         f"{references} — it must read its own isolated section"
     )
+
+
+# ── the LLM-config seam (the W3 class — the THIRD occurrence) ─────────────
+#
+# WHY THE SEAM MATTERS (the MUT-5 lesson, the C2 class): a pin that
+# reads a dict's KEY NAMES cannot see a DEAD VALUE. A typo'd ATTRIBUTE
+# (``base_url_backu``) leaves the VALUE permanently ``None`` — the key
+# SPELLING stays right, so every key-spelling pin stays GREEN while the
+# failover path can NEVER swap. The legs below drive the REAL dict
+# (``daemon.api._poignancy_llm_config``), assert the lifespan's call
+# site IS that helper, and assert the facade's own ``is_configured``
+# gate is OPEN for the real value.
+#
+# This is the THIRD occurrence of the class in this lane (the reflection
+# lane paid for it first; the poignancy lane shipped WITHOUT the seam
+# pin — every poignancy test built its OWN dict, so the real builder
+# was structurally blind).
+
+_LIFESPAN_PRIMARY_URL = "https://primary.test/v1"
+_LIFESPAN_BACKUP_URL = "https://backup.test/v1"
+
+
+def _real_poignancy_llm_config() -> dict:
+    """The REAL dict the lifespan hands the poignancy service."""
+    from types import SimpleNamespace
+
+    from daemon.api import _poignancy_llm_config
+
+    config = SimpleNamespace(
+        llm=SimpleNamespace(
+            base_url=_LIFESPAN_PRIMARY_URL,
+            base_url_backup=_LIFESPAN_BACKUP_URL,
+            api_key="test-key",
+            model="gpt-test",
+        )
+    )
+    return _poignancy_llm_config(config)
+
+
+def _lifespan_poignancy_llm_config_keyword_node():
+    """The AST node of the lifespan's ``llm_config`` keyword value."""
+    import ast
+    import pathlib
+
+    api_path = pathlib.Path(__file__).resolve().parents[2] / "daemon" / "api.py"
+    tree = ast.parse(api_path.read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name != "MemoirPoignancyService":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "llm_config":
+                return keyword.value
+    raise AssertionError(
+        "the lifespan builds no llm_config for the poignancy service"
+    )
+
+
+def test_the_poignancy_llm_config_helper_is_module_level_and_importable():
+    """The helper is MODULE-LEVEL in ``daemon.api`` — and importable."""
+    import ast
+    import pathlib
+
+    api_path = pathlib.Path(__file__).resolve().parents[2] / "daemon" / "api.py"
+    tree = ast.parse(api_path.read_text())
+    top_level = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_poignancy_llm_config"
+    ]
+    assert top_level, (
+        "_poignancy_llm_config must be a MODULE-LEVEL function in "
+        "daemon/api.py — a closure inside lifespan() is not importable "
+        "and cannot be pinned behaviourally"
+    )
+    from daemon.api import _poignancy_llm_config
+
+    assert callable(_poignancy_llm_config)
+
+
+def test_the_lifespan_uses_the_importable_poignancy_llm_config_helper():
+    """The lifespan call site USES the helper — no second hand-built dict."""
+    import ast
+
+    node = _lifespan_poignancy_llm_config_keyword_node()
+    assert isinstance(node, ast.Call), (
+        "the lifespan's llm_config MUST come from "
+        "_poignancy_llm_config(config) — a second hand-built dict is a "
+        "second place to drop base_url_backup"
+    )
+    func = node.func
+    name = getattr(func, "id", None) or getattr(func, "attr", None)
+    assert name == "_poignancy_llm_config"
+
+
+def test_the_real_poignancy_llm_config_carries_the_failover_backup():
+    """The REAL dict carries the backup VALUE (not just the key)."""
+    llm_config = _real_poignancy_llm_config()
+    assert llm_config["base_url"] == _LIFESPAN_PRIMARY_URL
+    assert llm_config["base_url_backup"] == _LIFESPAN_BACKUP_URL, (
+        "the poignancy llm_config MUST carry the backup VALUE — a "
+        "typo'd attribute leaves it None and the failover path can never "
+        "swap (daemon/services/llm_failover.py)"
+    )
+    assert llm_config["api_key"] == "test-key"
+    assert llm_config["model"] == "gpt-test"
+
+
+def test_the_real_poignancy_llm_config_configures_the_failover_shim():
+    """The REAL dict actually CONFIGURES the failover swap path."""
+    from daemon.services.llm_failover import _RawFailoverShim
+
+    llm_config = _real_poignancy_llm_config()
+    shim = _RawFailoverShim(
+        llm_config.get("base_url"), llm_config.get("base_url_backup")
+    )
+    assert shim.is_configured is True, (
+        "the facade's own gate must be OPEN for the real dict — "
+        "is_configured is False when the backup value never arrived"
+    )
+
+
+def test_the_poignancy_service_hands_the_real_dict_to_the_failover_facade():
+    """THE SERVICE→FACADE HOP: the dict the SERVICE holds is the one the
+    facade sees — a strip between the builder and the service is caught."""
+    from daemon.services.llm_failover import _RawFailoverShim
+
+    llm_config = _real_poignancy_llm_config()
+    service = MemoirPoignancyService(
+        repository=None,
+        config=None,
+        llm_config=llm_config,
+        llm_caller=lambda prompt: "7",
+    )
+    handed = service._llm_config
+    assert handed.get("base_url_backup") == _LIFESPAN_BACKUP_URL
+    shim = _RawFailoverShim(
+        handed.get("base_url"), handed.get("base_url_backup")
+    )
+    assert shim.is_configured is True
+
+
+# ── the operator requeue (W6 — THE recovery path) ───────────────────────
+
+
+def test_the_requeue_puts_a_terminal_row_back_into_the_queue(repo):
+    """W6: the terminal row re-enters the scoring queue.
+
+    The lane CREATES terminal states, so a transient outage excluded the
+    row permanently and the only recovery was manual SQL. The requeue IS
+    that recovery path.
+    """
+    from sqlmodel import Session, select
+
+    from daemon.repositories.memoir.models import MemoirEpisode
+
+    episode_id = repo.insert_episode(agent_id=AGENT, body="a moment")
+    # the row goes terminal (a dead credential — an IMMEDIATE terminal)
+    attempts, status = repo.record_poignancy_attempt(
+        episode_id, "poignancy_auth_rejected", immediate_terminal=True
+    )
+    assert status == "terminal:poignancy_auth_rejected"
+    assert repo.get_pending_poignancy_episodes() == []
+
+    service = MemoirPoignancyService(
+        repository=repo,
+        config=None,
+        llm_config={"base_url": "http://example.invalid/v1", "model": "m"},
+        llm_caller=lambda prompt: "7",
+    )
+    assert service.requeue_episode(episode_id) is True
+
+    with Session(repo.engine) as session:
+        row = session.exec(
+            select(MemoirEpisode).where(MemoirEpisode.id == episode_id)
+        ).first()
+    assert row.poignancy_status is None
+    assert row.poignancy_attempts == 0
+    assert row.poignancy is None
+    # the row is back in the queue
+    assert [r.id for r in repo.get_pending_poignancy_episodes()] == [episode_id]
+
+
+def test_the_requeue_keeps_the_legacy_marker(repo):
+    """W6: a LEGACY row keeps the legacy marker.
+
+    Restoring NULL would move the row into the ALWAYS-scored set and
+    BYPASS the backfill fence (V2-14 / §3-A3) — the constitutional
+    default the operator raised deliberately.
+    """
+    from sqlmodel import Session, select
+
+    from daemon.repositories.memoir.models import MemoirEpisode
+
+    episode_id = repo.insert_episode(agent_id=AGENT, body="a legacy moment")
+    with Session(repo.engine) as session:
+        row = session.exec(
+            select(MemoirEpisode).where(MemoirEpisode.id == episode_id)
+        ).first()
+        row.poignancy_status = "legacy"
+        session.add(row)
+        session.commit()
+
+    service = MemoirPoignancyService(
+        repository=repo,
+        config=None,
+        llm_config={"base_url": "http://example.invalid/v1", "model": "m"},
+        llm_caller=lambda prompt: "7",
+    )
+    assert service.requeue_episode(episode_id, restore_legacy=True) is True
+
+    with Session(repo.engine) as session:
+        row = session.exec(
+            select(MemoirEpisode).where(MemoirEpisode.id == episode_id)
+        ).first()
+    assert row.poignancy_status == "legacy"
+    # the legacy corpus is STILL behind the backfill fence (default 0)
+    assert repo.get_pending_poignancy_episodes() == []
+    assert repo.get_pending_poignancy_episodes(10, backfill_max=10) != []
+
+
+def test_the_requeue_reports_an_unknown_id(repo):
+    """W6: an unknown id is reported, never silently ignored."""
+    service = MemoirPoignancyService(
+        repository=repo,
+        config=None,
+        llm_config={"base_url": "http://example.invalid/v1", "model": "m"},
+        llm_caller=lambda prompt: "7",
+    )
+    assert service.requeue_episode("no-such-episode") is False

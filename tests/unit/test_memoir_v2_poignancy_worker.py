@@ -31,8 +31,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import logging
 import pathlib
 import threading
+import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -47,6 +50,9 @@ from daemon.services.memoir_poignancy_service import (
     PoignancySettings,
 )
 from daemon.services.memoir_poignancy_worker import (
+    LATCH_THRESHOLD_TICKS,
+    LATCH_TICK_INTERVAL_S,
+    TICK_SCORE_BUDGET_S,
     MemoirPoignancyWorker,
     current_executor_thread_name,
     executor_thread_prefix,
@@ -396,8 +402,17 @@ def test_asyncio_to_thread_is_forbidden_in_the_worker_module():
 
 
 @pytest.mark.asyncio
-async def test_one_failed_tick_does_not_kill_the_loop(repo, monkeypatch):
-    """A failed tick is logged and the NEXT tick still runs."""
+async def test_the_tick_level_guard_still_catches_a_broken_queue_read(repo, monkeypatch):
+    """A failed TICK is logged and the NEXT tick still runs.
+
+    THE SCOPE IS THE TICK, not the episode: this leg injects the failure
+    at the QUEUE READ (the census), which is the tick-level guard's own
+    job. The PER-EPISODE failure (a raising scoring call) is a
+    different property and has its own leg below — the earlier version of
+    this test was the only failure injection in the suite, and it left
+    the per-episode path unpinned (the false confidence the review
+    named).
+    """
     monkeypatch.setenv("ENSEMBLE_MEMOIR_POIGNANCY_TICK_S", "1")
     worker = _worker(repo, answer="7")
 
@@ -419,6 +434,258 @@ async def test_one_failed_tick_does_not_kill_the_loop(repo, monkeypatch):
         await task
 
     assert calls["n"] >= 2  # the loop survived the first failure
+
+
+@pytest.mark.asyncio
+async def test_a_raising_scoring_call_does_not_kill_the_loop(repo, monkeypatch):
+    """THE PER-EPISODE FAILURE (W1) — injected at the SCORING CALL.
+
+    The failure is injected where it really happens (the per-episode
+    scoring call), NOT at the queue read: the tick must SURVIVE it, and
+    the failure must be RECORDED as an attempt on that episode.
+    """
+    monkeypatch.setenv("ENSEMBLE_MEMOIR_POIGNANCY_TICK_S", "1")
+    episode_id = _seed(repo)[0]
+    worker = _worker(repo, answer="7")
+
+    calls = {"n": 0}
+    original = worker._service.score_episode
+
+    def _boom(episode):
+        calls["n"] += 1
+        raise RuntimeError("the scorer exploded")
+
+    worker._service.score_episode = _boom
+
+    task = asyncio.create_task(worker.run(), name="memoir-poignancy-worker")
+    await asyncio.sleep(1.4)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert calls["n"] >= 2, "the loop died on the first raising episode"
+    row = _row(repo, episode_id)
+    assert row.poignancy_attempts >= 1, (
+        "the raising episode was not RECORDED — the attempt counter must "
+        "advance (or the row can never terminalize)"
+    )
+
+
+# ── the per-episode isolation (W1 — the four-part proof) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_raising_episode_is_isolated_recorded_and_the_queue_advances(repo):
+    """W1 — THE FOUR-PART PROOF.
+
+    A scorer that RAISES on episode 1 must not abort the tick:
+
+    (a) the tick CONTINUES to episode 2;
+    (b) the failure is RECORDED;
+    (c) ``poignancy_attempts`` ADVANCES toward the cap;
+    (d) the poison row TERMINALIZES at the cap and the queue ADVANCES
+        PAST it.
+
+    BEFORE the fix the raise propagated out of the tick: the queue is
+    ``created_at ASC``, so the poison row sat at the head forever, the
+    rows behind it were NEVER reached, the attempt counter never
+    advanced and the cap never fired — a silent, permanent starvation.
+    """
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    poison_id = repo.insert_episode(
+        agent_id=AGENT, body="the poison row", created_at=base
+    )
+    healthy_id = repo.insert_episode(
+        agent_id=AGENT, body="the healthy row", created_at=base + timedelta(seconds=1)
+    )
+
+    worker = _worker(repo, answer="7")
+    service = worker._service
+    raised = {"n": 0}
+    original = service.score_episode
+
+    def _boom(episode):
+        raised["n"] += 1
+        if getattr(episode, "id", "") == poison_id:
+            raise RuntimeError("the scorer exploded")
+        return original(episode)
+
+    service.score_episode = _boom
+
+    await worker._tick()
+
+    # (a) THE TICK CONTINUED to the second episode
+    assert raised["n"] == 2, "the tick aborted on the raising episode"
+    assert _row(repo, healthy_id).poignancy == 7
+
+    # (b) + (c) THE FAILURE WAS RECORDED and the counter ADVANCED
+    poison = _row(repo, poison_id)
+    assert poison.poignancy_attempts == 1
+    assert poison.poignancy_status is None  # not terminal yet
+    assert poison.poignancy is None
+
+    # (d) THE COUNTER ADVANCES TO THE CAP and the row TERMINALIZES
+    for attempt in range(2, MEMOIR_POIGNANCY_ATTEMPT_CAP + 1):
+        await worker._tick()
+        poison = _row(repo, poison_id)
+        assert poison.poignancy_attempts == attempt
+    assert poison.poignancy_status == "terminal:poignancy_exception"
+
+    # ... AND THE QUEUE ADVANCES PAST the poison row
+    assert poison_id not in [
+        row.id for row in repo.get_pending_poignancy_episodes()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_queue_warns_loudly(repo, caplog):
+    """W1: a queue that does not advance must be VISIBLE.
+
+    The stall warning names the stalled episode — silent starvation is
+    the harm the per-episode isolation exists to prevent, and the
+    warning is the second line of defence.
+    """
+    episode_id = _seed(repo)[0]
+    worker = _worker(repo, answer="7")
+
+    def _boom(episode):
+        raise RuntimeError("the scorer exploded")
+
+    worker._service.score_episode = _boom
+
+    with caplog.at_level(
+        logging.WARNING, logger="daemon.services.memoir_poignancy_worker"
+    ):
+        for _ in range(3):
+            await worker._tick()
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "STALL" in text, f"the stalled queue was not named: {text}"
+    assert episode_id in text, f"the stalled episode was not named: {text}"
+
+
+# ── the lane-down latch (W2 — V2-D 4.6 / D3.9-D3.10) ─────────────────────
+
+
+def _credential_service(repo):
+    """A service whose caller ALWAYS rejects the credential (401)."""
+    calls = {"n": 0}
+
+    def _caller(prompt: str) -> str:
+        calls["n"] += 1
+        raise _FakeStatusError(401)
+
+    service = MemoirPoignancyService(
+        repository=repo,
+        config=None,
+        llm_config={"base_url": "http://example.invalid/v1", "model": "m"},
+        llm_caller=_caller,
+    )
+    return service, calls
+
+
+@pytest.mark.asyncio
+async def test_a_dead_credential_arms_the_latch_and_stops_the_tick(repo):
+    """W2: the lane-down latch — the credential half.
+
+    A dead credential must NOT burn one request per pending row per
+    tick, and the latch state must be OBSERVABLE on the snapshot.
+    """
+    _seed(repo, count=3)
+    service, calls = _credential_service(repo)
+    worker = MemoirPoignancyWorker(service, config=None)
+
+    interval = await worker._tick()
+
+    # ONE request — not one per pending row
+    assert calls["n"] == 1, (
+        f"the dead credential burned {calls['n']} requests — the tick "
+        "must stop at the first rejection"
+    )
+    # the latch is engaged and observable
+    snapshot = worker.snapshot()
+    assert snapshot["latched"] is True
+    assert snapshot["credential_rejected_streak"] == 1
+    assert snapshot["consecutive_all_fail_ticks"] == LATCH_THRESHOLD_TICKS
+    assert snapshot["latch_tick_interval_s"] == LATCH_TICK_INTERVAL_S
+    # the tick SLOWS DOWN
+    assert interval == LATCH_TICK_INTERVAL_S
+    # the untouched rows wait for a working credential
+    assert len(repo.get_pending_poignancy_episodes()) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_latch_releases_on_the_first_success(repo):
+    """W2: the latch releases on the first success (D3.10)."""
+    _seed(repo, count=2)
+    service, _calls = _credential_service(repo)
+    worker = MemoirPoignancyWorker(service, config=None)
+
+    await worker._tick()
+    assert worker.snapshot()["latched"] is True
+
+    # the credential recovers
+    service._llm_caller = lambda prompt: "6"
+    interval = await worker._tick()
+
+    snapshot = worker.snapshot()
+    assert snapshot["latched"] is False
+    assert snapshot["credential_rejected_streak"] == 0
+    assert interval != LATCH_TICK_INTERVAL_S
+
+
+# ── the tick bound (V2-44) ────────────────────────────────────────────────
+
+
+def test_the_tick_budget_is_the_plans_twenty_seconds():
+    """V2-44: the tick's TOTAL scoring budget is the PLAN's 20 s.
+
+    The code shipped 60 s (the plan says 20 s); V2-D 4.2's "30 s" is
+    the PER-CALL timeout, a different knob. The reconciliation is
+    recorded in ``docs/memoir-v2/implementation-notes.md``.
+    """
+    assert TICK_SCORE_BUDGET_S == 20.0
+
+
+@pytest.mark.asyncio
+async def test_the_tick_budget_is_a_real_wall_clock_bound(repo):
+    """V2-44: the budget BOUNDS THE TICK even when an episode hangs.
+
+    The OLD shape checked the budget only BETWEEN episodes: one episode
+    could run to the per-call timeout (30 s) and the tick reached ~1.5x
+    its budget. The bound is now REAL — the per-episode wait is sized
+    to the REMAINING budget.
+    """
+    _seed(repo, count=3)
+    worker = _worker(repo, answer="7")
+    worker._tick_score_budget_s = 0.25
+
+    hang_s = 1.5
+    finished = threading.Event()
+
+    def _hang(prompt: str) -> str:
+        time.sleep(hang_s)
+        finished.set()
+        return "7"
+
+    worker._service._llm_caller = _hang
+
+    started = time.monotonic()
+    await worker._tick()
+    elapsed = time.monotonic() - started
+
+    assert not finished.is_set(), (
+        "the tick waited for the hung scoring call — the budget must "
+        "bound the tick (the wait is checked only BETWEEN episodes)"
+    )
+    assert elapsed < hang_s, (
+        f"the tick took {elapsed:.2f}s against a {hang_s}s hang — the "
+        "budget did not bound the tick"
+    )
+    # the timed-out episode counts an attempt (the timeout is RECORDED)
+    row = _row(repo, repo.get_pending_poignancy_episodes()[0].id)
+    assert row.poignancy_attempts == 1
+
 
 
 # ── no delta-notify coupling (V2-D 4.5) ──────────────────────────────────

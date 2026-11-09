@@ -169,3 +169,190 @@ The wall-clock bounds are separate and stay as designed: a 45 s
 per-request timeout (`MEMOIR_REFLECTION_CALL_TIMEOUT_S`) and the
 facade's 45 s wall-clock cap (which fires BETWEEN attempts), inside a
 60 s per-pass tick budget (`MEMOIR_REFLECTION_TICK_BUDGET_S`).
+
+---
+
+## 5. V2-44 — the tick budget reconciliation (the phase-4 fix round)
+
+**Status:** NEW decision. Recorded here (the lane's own notes file). The
+planning ledger (`.agents/shared/planning/ari-memoir-store/v2-decisions.md`)
+is READ-ONLY for the implementation lanes — the caller folds this text in.
+
+### The contradiction
+
+Three documents disagreed about the tick's time budget:
+
+| Source | Number | What it actually bounds |
+|---|---|---|
+| `v2-phase4-plan.md` objective 1 | **20 s** | "tick budget 20s" |
+| V2-D 4.2 | 30 s | the **PER-CALL timeout** (`MEMOIR_POIGNANCY_CALL_TIMEOUT_S`) — NOT a tick budget |
+| the shipped code (`TICK_SCORE_BUDGET_S`) | 60 s | the tick's TOTAL scoring budget |
+
+### The decision — V2-44 (verbatim)
+
+> **The tick's TOTAL scoring budget is 20 seconds — the PLAN's number.**
+> The code's 60 s is retired. V2-D 4.2's "30 s" is not a tick budget:
+> it is the PER-CALL timeout (`MEMOIR_POIGNANCY_CALL_TIMEOUT_S`), a
+> different knob, and it stays 30 s.
+>
+> **The budget is now a REAL wall-clock bound.** The old shape checked
+> the budget only BETWEEN episodes: one episode could run to the
+> per-call timeout (30 s) and the tick could reach ~1.5x its budget.
+> Each episode's wait is now sized to the tick's REMAINING budget
+> (`asyncio.wait_for` — the embedding lane's AM-28 shape), so the tick's
+> scoring work can never exceed the budget.
+
+### The consequences that MUST be disclosed
+
+1. **The per-call timeout (30 s) is no longer reachable inside a tick.**
+   The tick budget (20 s) binds first: a scoring call that needs more
+   than the tick's remaining budget is abandoned at the budget, the
+   episode counts a `poignancy_call_timeout` attempt, and the abandoned
+   call keeps running in the executor until its own timeout fires. A
+   model that consistently needs more than 20 s per call therefore
+   loses its rows to the attempt cap instead of being scored — the
+   operator's lever is `ENSEMBLE_MEMOIR_POIGNANCY_TICK_S` (the tick
+   interval) and the backfill/knob family, not a per-call knob.
+2. **The lane's executor has TWO threads** (the embedding lane's AM-29
+   shape). V2-D 4.2's parenthetical said `max_workers=1`; that is the
+   ONE deviation this round makes to the decision text, and it is
+   forced: the scoring calls stay SEQUENTIAL, and the second thread
+   exists so the tick's own accounting write (the failed attempt of an
+   abandoned call) does not queue behind the abandoned call. With one
+   thread the tick's wall-clock bound would be broken by the length of
+   the hung call — the bound V2-44 exists to create.
+3. **An abandoned call and the NEXT tick's call can overlap.** In the
+   pathological hang case the lane may have two scoring calls in flight
+   (one abandoned, one from the next tick). The normal path is
+   strictly sequential.
+
+---
+
+## 6. The worst-case ceiling of a poignancy tick (staged release notes)
+
+| Component | Bound | Source |
+|---|---|---|
+| the tick's TOTAL scoring work | **20 s** | `TICK_SCORE_BUDGET_S` (V2-44) |
+| one scoring call | min(30 s, the tick's remaining budget) — the budget binds first | `MEMOIR_POIGNANCY_CALL_TIMEOUT_S` |
+| one episode's wait | the tick's remaining budget (≥ 0.05 s) | `_process_episode` |
+| the scoring calls per tick | ≤ 10 (the batch cap) | `MEMOIR_POIGNANCY_BATCH_CAP` |
+| the HTTP requests per scoring call | 6 with a configured backup / 3 without one | the HA facade (`llm_failover`) |
+| the HTTP requests per tick | ≤ 60 (10 calls × 6) | derived |
+| the dead-credential path | **1 request per tick** — the tick stops at the first rejection | the latch (below) |
+| the tick's wall clock | 20 s of scoring + the census + the failure records (short DB round trips, NOT counted in the 20 s) | derived |
+| the latched tick interval | 300 s (until the first success) | `LATCH_TICK_INTERVAL_S` |
+| the row's terminal path | 5 attempts (one per tick) → `terminal:<reason>` | `MEMOIR_POIGNANCY_ATTEMPT_CAP` |
+
+---
+
+## 7. The lane-down latch (V2-D 4.6 / D3.9-D3.10) — what was missing and what shipped
+
+### What was missing
+
+The service's own comment claimed the lane-down latch existed
+("a 401/403 is an IMMEDIATE terminal … the tick counts as an all-fail
+tick (the lane-down latch)") — only the ROW half was implemented. A
+dead credential burned one request per pending row per tick and
+terminalized the whole unscored backlog, because the lane CREATES
+terminal states: every row the dead credential touched was excluded
+permanently.
+
+### What shipped
+
+* a **credential-rejected streak** (`snapshot()["credential_rejected_streak"]`),
+* an **all-fail streak** (`snapshot()["consecutive_all_fail_ticks"]`),
+* the **latch** (`snapshot()["latched"]`) and the **slowed tick**
+  (300 s, `snapshot()["latch_tick_interval_s"]`), released by the first
+  success,
+* the tick **stops at the first credential rejection** — the remaining
+  rows are DEFERRED, so a dead credential costs ONE request per tick.
+
+### The one deliberate deviation from the embedding lane
+
+The embedding lane CONTINUES with the remaining candidates after a
+credential rejection (its rows are embeddings: idempotent, and the
+failure is retried). This lane CREATES terminal states, so continuing
+would permanently exclude the rest of the backlog against a wall. The
+deviation is recorded here (V2-D 4.6's intent — "a dead credential
+must not burn a row's attempt budget against a wall" — is served by
+stopping, not by continuing) and in the code at the deviation site.
+
+---
+
+## 8. The operator recovery path (W6) — the requeue
+
+The lane creates terminal states, so a transient outage used to exclude
+rows PERMANENTLY and the only recovery was manual SQL.
+
+**THE RECOVERY PATH (both surfaces):**
+
+* repository: `MemoirRepository.requeue_poignancy_episode(episode_id, *, restore_legacy=False)`
+* service: `MemoirPoignancyService.requeue_episode(episode_id, *, restore_legacy=False)`
+
+The write is ONE statement: the terminal marker is cleared (or restored
+to `'legacy'`), the attempt counter is reset to 0, and the stale score
+is dropped, so the row re-enters the scoring queue on the next tick.
+The authored `importance` is NEVER touched (V2-10 / §3-A2).
+
+**`restore_legacy=True` MATTERS.** A legacy row MUST keep the `'legacy'`
+marker: restoring `NULL` would move it into the ALWAYS-scored set and
+BYPASS the backfill fence (V2-14 / §3-A3).
+
+**WHY THERE IS NO OPERATOR TOOL.** The plan's phase-4 tool surface is
+the knob family and the status inspection; a requeue tool would add a
+new tool to the closed tool surface (and move the tool-vocabulary
+census). The method + this note ARE the recovery path; a tool is a
+follow-up, not a silent gap.
+
+---
+
+## 9. The transitive provider edge (W7) — a phase-1/2 BACKLOG NOTE
+
+**NO production change.** The write path's provider-freedom pin is now
+a TRANSITIVE AST walk scoped to the `insert_episode` closure (the
+callable reachability set) instead of a direct-import name check on the
+one module that owns the INSERT.
+
+**THE KNOWN EDGE (pre-existing, phase 1/2, READ-PATH):**
+`daemon/repositories/memoir/repository.py` imports
+`daemon.services.skill_search_service` (which imports `openai` at the
+module level) inside `_lexical_rank_sqlite` — the LEXICAL RANKER, a
+read path. It is UNREACHABLE from the append closure (the walk proves
+it: the module never enters the reachable set), and phase 4 added ZERO
+import edges.
+
+**THE BACKLOG ITEM (phase 1/2, NOT this lane):** the lexical ranker
+reaches a module that imports an LLM provider. It is a READ path and
+the write path is provably unaffected, so it is recorded here rather
+than fixed. If a future lane moves the ranker or the repository's
+import graph, the transitive pin will catch a change to that edge.
+
+**THE PIN'S SCOPE (disclosed):** the walk follows CALLS through the
+project's own modules (`daemon/…`); a third-party module is out of
+scope (a dependency's own imports are not the write path's
+responsibility), and a RELATIVE import (`from .x import y`) inside a
+reachable module is not resolved to its file (the module-level import
+name is still checked).
+
+---
+
+## 10. The LLM-config seam (W3) — the THIRD occurrence of the class
+
+The poignancy lane shipped WITHOUT the importable-seam pin that the
+reflection lane earned the hard way: every poignancy test built its OWN
+`llm_config` dict, so a typo'd attribute in the REAL builder
+(`daemon/api.py::_poignancy_llm_config`) was structurally invisible.
+
+The seam is now pinned end-to-end: the helper is module-level and
+importable, the lifespan's call site IS that helper (an AST assertion),
+the REAL dict carries the backup VALUE, and the facade's own
+`is_configured` gate is asserted OPEN against the real dict (a dead
+value turns the pin RED — proven by the mutation: a typo'd
+`base_url_backup` attribute leaves the value `None` while every
+key-spelling leg stays GREEN).
+
+The same class appeared three times in this lane: the reflection
+lane's `llm_config`, the FAILOVER CLIENT's `max_retries=0` (a
+carry-in), and now the poignancy builder. The house rule that follows:
+**a pin that reads a value must be pinned at the value's CONSUMER, and
+the consumer's own gate (`is_configured`) is the assertion.**
