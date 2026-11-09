@@ -815,4 +815,78 @@ async def get_metrics_series(request: Request) -> dict[str, Any]:
         raise _err(400, _ERR_INVALID_LABEL_FILTER, str(exc)) from exc
 
 
+# ── the capture-lane counters (m4 read site — EXPOSITION-NEUTRAL) ─────────
+#
+# WHY THIS IS A JSON ROUTE AND NOT A REGISTRY FAMILY.  The capture-lane
+# counters are a process fact owned by
+# ``daemon/services/skill_capture_observability.py`` (another lane's file —
+# this route only READS its public accessor).  Publishing them as a new
+# metric family would add series to the Prometheus exposition body, and the
+# COMMITTED baseline artifact
+# (``tests/unit/metrics/baselines/metrics_exposition_baseline.txt``) is the
+# structural-identity gate's reference: a new family forces a re-baseline of
+# a committed artifact, which widens the gate's blast radius for no
+# observability gain.  The route therefore serves the SAME snapshot as JSON
+# and touches NO registry state — the exposition body stays byte-identical.
+#
+# It carries the same any-of scope set as the query door and the same
+# fail-closed auth-OFF refusal as the exposition route.
+
+
+@router.get(
+    "/capture-lane",
+    dependencies=[scope_required(_SCOPE_READ, _SCOPE_READ_METRICS)],
+    responses={
+        200: {
+            "description": (
+                "The capture-lane counters (admissions, admission refusals "
+                "by reason, execution refusals by reason, deviations, "
+                "fix admissions) as a JSON snapshot."
+            )
+        },
+        401: {"description": "Auth is ON and the caller is unauthenticated."},
+        403: {
+            "description": (
+                "The caller lacks the required scope (``maintenance:read`` "
+                "OR ``metrics:read``)."
+            )
+        },
+        503: {"description": "Auth is OFF — the route refuses (fail-closed)."},
+    },
+)
+async def get_capture_lane_counters(request: Request) -> dict[str, Any]:
+    """``GET /api/metrics/capture-lane`` — the capture-lane counter snapshot.
+
+    Serves :func:`daemon.services.skill_capture_observability.counters_snapshot`
+    verbatim::
+
+        {
+          "counters": {
+            "admission_refusals": {"capture_lane_off": N, ...},
+            "execution_refusals": {"lane_disabled": M, ...},
+            "admissions": A,
+            "deviations": D,
+            "fix_admissions": F
+          },
+          "source": "daemon.services.skill_capture_observability",
+          "exposition_neutral": True
+        }
+
+    The snapshot is a COPY (the accessor never returns the live counter
+    object), so a caller cannot mutate the daemon's counters.
+
+    Raises:
+        HTTPException: ``503 AUTH_NOT_CONFIGURED`` when auth is OFF (the
+            fail-closed gate fires BEFORE the counters are read).
+    """
+    _require_auth_on(request)
+    from daemon.services import skill_capture_observability as observability
+
+    return {
+        "counters": observability.counters_snapshot(),
+        "source": "daemon.services.skill_capture_observability",
+        "exposition_neutral": True,
+    }
+
+
 __all__ = ["METRICS_MEDIA_TYPE", "router"]
