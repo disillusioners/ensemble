@@ -284,12 +284,22 @@ class DecisionQuestion:
 
         This is the shape the proxy's request validators accept
         (``pkg/decision/validators.go``: a choice question needs ≥2
-        ``choices`` and a score question needs 2–10 ``levels``) — the
-        client-facing contract is byte-identical across the proxy's
-        v185 and v187 builds. The canonical R3/R4 ``criteria`` shape is
-        the SYSTEM ONE UPSTREAM's shape (the proxy's own translation
-        target), not the client's; :meth:`to_canonical_payload` renders
-        it for the wiring round that may need it.
+        ``choices`` and a score question needs 2–10 ``levels``).
+
+        **THE CLIENT NEVER EMITS A ``criteria`` KEY.** The proxy has two
+        adapters: the OPENAI adapter is a BYTE-FAITHFUL PASS-THROUGH
+        (only the literal ``model`` token is rewritten), so on the path
+        P1 uses the request body IS the upstream body; the SYSTEM ONE
+        adapter is the TRANSLATING one and it BUILDS the canonical
+        R3/R4 ``criteria`` from these very ``choices[]``/``levels[]``
+        entries (choice → a label→description map, score → an ordered
+        label list). The canonicalization is the PROXY's business —
+        supplying labels and descriptions in the OpenAI-decisions shape
+        is the client's whole job.
+
+        Proof the client contract did not move: ``pkg/decision/types.go``
+        is ABSENT from the proxy's v185→v187 diff (10 files, +792/-118)
+        — only the upstream wire did.
         """
         payload: dict[str, Any] = {"type": self.kind.value, "name": self.name}
         if self.instructions is not None:
@@ -298,28 +308,6 @@ class DecisionQuestion:
             payload["choices"] = [c.to_payload() for c in self.choices]
         if self.levels:
             payload["levels"] = [level.to_payload() for level in self.levels]
-        return payload
-
-    def to_canonical_payload(self) -> dict[str, Any]:
-        """The CANONICAL R3/R4 rendering — ``criteria``.
-
-        * choice → ``{"criteria": {label: description}}``
-        * score  → ``{"criteria": ["label", ...]}``
-
-        This is the System One upstream's own shape (the proxy's
-        translation target). It is rendered here — and tested — so a
-        future proxy build that demands the canonical client shape can
-        be adopted by flipping one flag, without a redesign.
-        """
-        payload: dict[str, Any] = {"type": self.kind.value, "name": self.name}
-        if self.instructions is not None:
-            payload["instructions"] = self.instructions
-        if self.kind is QuestionKind.CHOICE:
-            payload["criteria"] = {
-                choice.value: (choice.description or "") for choice in self.choices
-            }
-        elif self.kind is QuestionKind.SCORE:
-            payload["criteria"] = [level.label for level in self.levels]
         return payload
 
     @property
@@ -392,29 +380,23 @@ class DecisionRequest:
                     "instructions (omitting them 502s upstream)"
                 )
 
-    def build_payload(self, *, canonical: bool = False) -> dict[str, Any]:
-        """Validate, then render the wire payload.
+    def build_payload(self) -> dict[str, Any]:
+        """Validate, then render the wire payload (the client shape).
 
-        Args:
-            canonical: Render the canonical R3/R4 ``criteria`` shape
-                instead of the client-facing ``choices[]``/``levels[]``
-                shape.
+        The payload is ALWAYS the OpenAI-decisions shape — there is no
+        ``criteria`` key anywhere in the client request path (the
+        proxy derives the canonical R3/R4 criteria itself).
 
         Raises:
             ValueError: when :meth:`validate` fails.
         """
         self.validate()
-        renderer = (
-            DecisionQuestion.to_canonical_payload
-            if canonical
-            else DecisionQuestion.to_payload
-        )
         payload: dict[str, Any] = {
             "model": self.model,
             "input": self.input
             if isinstance(self.input, str)
             else [m.to_payload() for m in self.input],
-            "questions": [renderer(q) for q in self.questions],
+            "questions": [q.to_payload() for q in self.questions],
         }
         if self.safety_identifier is not None:
             payload["safety_identifier"] = self.safety_identifier

@@ -475,6 +475,75 @@ async def test_the_built_request_always_carries_instructions_for_predicate_and_s
     assert payload["questions"][0]["instructions"] == "Rate the work"
 
 
+# ── the wire shape — the client NEVER emits ``criteria`` ───────────────
+
+
+async def test_the_built_request_contains_no_criteria_key() -> None:
+    """The regression pin for the client shape.
+
+    The proxy's OPENAI adapter is a BYTE-FAITHFUL PASS-THROUGH, so on
+    the path P1 uses the request body IS the upstream body: a wrong
+    shape surfaces as a 502 relayed from the upstream — and since a 502
+    never parks a seam, as a SILENTLY DEAD overlay that fails open
+    forever.
+
+    The canonical R3/R4 ``criteria`` shape is the System One UPSTREAM's
+    shape; the proxy DERIVES it from ``choices[]``/``levels[]``. The
+    client must therefore never construct a ``criteria`` key.
+    """
+    from daemon.services.decision.types import DecisionLevel
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content.decode("utf-8")))
+        return json_response(choice_answer_payload())
+
+    client = make_client(handler)
+    await client.consult(choice_request())
+    body = bodies[0]
+    assert "criteria" not in body
+    for question in body["questions"]:
+        assert "criteria" not in question
+        assert "choices" in question
+        for option in question["choices"]:
+            assert set(option) <= {"value", "description"}
+            assert "value" in option
+
+
+async def test_the_score_payload_uses_the_openai_decisions_shape() -> None:
+    """A score question carries ``levels[]`` — never ``criteria``."""
+    from daemon.services.decision.types import DecisionLevel, DecisionQuestion
+
+    question = DecisionQuestion(
+        kind=QuestionKind.SCORE,
+        name="q_score",
+        instructions="Rate the work",
+        levels=(
+            DecisionLevel(label="low", description="weak"),
+            DecisionLevel(label="high", description="strong"),
+        ),
+    )
+    payload = question.to_payload()
+    assert "criteria" not in payload
+    assert payload["levels"] == [
+        {"label": "low", "description": "weak"},
+        {"label": "high", "description": "strong"},
+    ]
+
+
+async def test_the_request_module_emits_no_criteria_anywhere() -> None:
+    """No request-building path in the package emits ``criteria``."""
+    from daemon.services.decision.types import DecisionQuestion, DecisionRequest
+
+    request = DecisionRequest(
+        input="x",
+        questions=(choice_question(),),
+    )
+    payload = request.build_payload()
+    assert "criteria" not in json.dumps(payload)
+
+
 # ── TRAP 2 — the mapper degrades, it never raises ───────────────────────
 
 
