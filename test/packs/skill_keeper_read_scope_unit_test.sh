@@ -93,6 +93,7 @@ mkdir -p "$PRISTINE_DIR"
 # The COMPLETE plant surface of the mutation matrix.
 MUTABLE_FILES=(
   "daemon/tools/filesystem.py"
+  "daemon/tools/instance.py"
 )
 
 _pristine_key() { printf '%s' "$1" | sha256sum | cut -d' ' -f1 | cut -c1-16; }
@@ -307,43 +308,107 @@ PYEOF
     check_budget "after leg $id"
   }
 
-  # M-B3a — the scope check removed from the resolver. The keeper's
-  # absolute read outside the workdir is allowed again → RED.
+  # A MULTI-PLANT leg. Some defects are COMPOSITE — they need SEVERAL
+  # edits across SEVERAL files to reproduce faithfully. The leg plants
+  # every spec, runs the probe (the probe MUST go RED), then restores
+  # EVERY touched file to PRISTINE and re-runs it (the probe MUST go
+  # GREEN again). A leg that starts from a contaminated file, a plant
+  # that does not apply, or a restore that does not land is a LOUD
+  # failure — never a silent pass.
+  leg_multi() {
+    local id="$1" node="$2"; shift 2
+    local -a specs=("$@")
+    local n=${#specs[@]} i path old new
+    local key want sha_before sha_after red green
+
+    # 1. every touched file must be PRISTINE at leg start
+    for ((i=0; i<n; i+=3)); do
+      path="${specs[$i]}"
+      key="$(_pristine_key "$path")"
+      want="$(cat "$PRISTINE_DIR/$key.sha")"
+      sha_before="$(sha256sum "$path" | cut -d' ' -f1)"
+      if [ "$sha_before" != "$want" ]; then
+        printf '%s\tLEG-START-CONTAMINATED\t-\t%s\n' "$id" "$sha_before" >>"$TSV"
+        MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+        restore_pristine
+        return
+      fi
+    done
+
+    # 2. plant every spec
+    for ((i=0; i<n; i+=3)); do
+      path="${specs[$i]}"
+      old="${specs[$((i+1))]}"
+      new="${specs[$((i+2))]}"
+      if ! plant "$path" "$old" "$new"; then
+        printf '%s\tPLANT-FAILED\t-\t%s\n' "$id" "$path" >>"$TSV"
+        MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+        restore_pristine
+        return
+      fi
+    done
+
+    # 3. the probe must go RED
+    if run_pytest "$node" >"$FAKE_HOME/$id.red.log" 2>&1; then
+      red="NO"
+    else
+      red="YES"
+    fi
+
+    # 4. restore to PRISTINE (every touched file)
+    restore_pristine
+    for ((i=0; i<n; i+=3)); do
+      path="${specs[$i]}"
+      key="$(_pristine_key "$path")"
+      want="$(cat "$PRISTINE_DIR/$key.sha")"
+      sha_after="$(sha256sum "$path" | cut -d' ' -f1)"
+      if [ "$sha_after" != "$want" ]; then
+        printf '%s\tRESTORE-MISMATCH\t-\t%s\n' "$id" "$want" >>"$TSV"
+        MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+        restore_pristine
+        return
+      fi
+    done
+
+    # 5. the same probe must go GREEN again
+    if run_pytest "$node" >"$FAKE_HOME/$id.green.log" 2>&1; then
+      green="YES"
+    else
+      green="NO"
+    fi
+
+    printf '%s\t%s\t%s\t%s\n' "$id" "$red" "$green" "$want" >>"$TSV"
+    if [ "$red" != "YES" ] || [ "$green" != "YES" ]; then
+      MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+    fi
+    check_budget "after leg $id"
+  }
+
+  # M-B3a — the scope branch is REMOVED from the resolver. The keeper's
+  # absolute read is allowed again → RED.
   leg "M-B3a" "daemon/tools/filesystem.py" \
-'        scope = declared_read_scope(scope_agent_id)
-        if scope:
-            scope_err = _read_scope_refusal(resolved, workdir, scope)
-            if scope_err:
-                return None, scope_err
+'    scope = declared_read_scope(scope_agent_id)
+    if scope:
+        # A SCOPED agent reads RELATIVE paths against the TRUSTED
+        # daemon-resolved anchor only. The `workdir` ARGUMENT is never
+        # consulted here — it is agent-supplied and must not be able to
+        # move the boundary (D1).
+        return _resolve_within_scope(path, scope)
+
 ' \
 '' \
-"$PIN_FILE::TestKeeperReadScopeEnforcement::test_read_file_refuses_an_absolute_path_outside_the_workdir"
+"$PIN_FILE::TestKeeperReadScopeEnforcement::test_read_file_refuses_an_absolute_path_outside_the_workdir_without_a_workdir_argument"
 
   # M-B3b — the scope check applied to RELATIVE paths too. A relative
   # in-workdir read must stay LEGAL → RED.
   leg "M-B3b" "daemon/tools/filesystem.py" \
 '    if _is_absolute_path(path):
-        try:
-            resolved = Path(path).expanduser()
-        except (OSError, RuntimeError) as e:
-            return None, f"ERROR: Invalid absolute path: {e}"
-        scope = declared_read_scope(scope_agent_id)
-        if scope:
-            scope_err = _read_scope_refusal(resolved, workdir, scope)
-            if scope_err:
-                return None, scope_err
-        return resolved, None
+        return None, (
+            f"ERROR: read scope {scope!r} permits RELATIVE reads only, "
 ' \
-'    scope = declared_read_scope(scope_agent_id)
-    if scope:
-        scope_err = _read_scope_refusal(Path(path).expanduser(), workdir, scope)
-        if scope_err:
-            return None, scope_err
-    if _is_absolute_path(path):
-        try:
-            return Path(path).expanduser(), None
-        except (OSError, RuntimeError) as e:
-            return None, f"ERROR: Invalid absolute path: {e}"
+'    if True:
+        return None, (
+            f"ERROR: read scope {scope!r} permits RELATIVE reads only, "
 ' \
 "$PIN_FILE::TestKeeperReadScopeEnforcement::test_read_file_allows_a_relative_in_workdir_path"
 
@@ -371,7 +436,72 @@ PYEOF
         return None
     cached = _READ_SCOPE_CACHE.get(agent_id, ...)
 ' \
-"$PIN_FILE::TestKeeperReadScopeEnforcement::test_read_file_refuses_proc_self_environ"
+"$PIN_FILE::TestKeeperReadScopeEnforcement::test_read_file_refuses_an_absolute_in_workdir_path"
+
+  # M-B3e (B3 fix round 1 — D4) — THE D1 ANCHOR DEFECT.
+  #
+  # The defect is COMPOSITE: the scope's base must never come from the
+  # agent-supplied ``workdir`` ARGUMENT. The fix has TWO independent
+  # enforcement points, so the faithful defect plant removes BOTH:
+  #
+  #   (1) the tool FACTORY stops rejecting an agent-supplied workdir
+  #       for a scoped agent (``daemon/tools/instance.py``), and
+  #   (2) the resolver takes its base from that argument and allows an
+  #       absolute path inside it (``daemon/tools/filesystem.py``) —
+  #       i.e. the PRE-FIX semantics.
+  #
+  # With the defect planted, a scoped agent that passes
+  # ``workdir="/"`` resolves ``../../etc/passwd`` against "/" and is
+  # HANDED /etc/passwd — the reviewed bypass, live. The bypass probe
+  # MUST go RED.
+  leg_multi "M-B3e" \
+"$PIN_FILE::TestTrustedAnchor::test_a_relative_escape_cannot_leave_the_anchor" \
+"daemon/tools/instance.py" \
+'        if supplied_workdir is None or not str(supplied_workdir).strip():
+            return None
+' \
+'        if True:  # M-B3e PLANT: the agent-supplied workdir is accepted
+            return None
+' \
+"daemon/tools/filesystem.py" \
+'def _resolve_within_scope(
+    path: str,
+    scope: str,
+) -> tuple[Path | None, str | None]:
+' \
+'def _resolve_within_scope(
+    path: str,
+    scope: str,
+    workdir: str | None = None,
+) -> tuple[Path | None, str | None]:
+' \
+"daemon/tools/filesystem.py" \
+'        return _resolve_within_scope(path, scope)
+' \
+'        return _resolve_within_scope(path, scope, workdir)
+' \
+"daemon/tools/filesystem.py" \
+'    anchor = _trusted_scope_anchor()
+' \
+'    anchor = (
+        Path(workdir).expanduser().resolve()
+        if workdir
+        else _trusted_scope_anchor()
+    )
+' \
+"daemon/tools/filesystem.py" \
+'    if _is_absolute_path(path):
+        return None, (
+            f"ERROR: read scope {scope!r} permits RELATIVE reads only, "
+' \
+'    if _is_absolute_path(path):
+        if WorkspaceGuard._normed_contains(
+            anchor, Path(path).expanduser().resolve()
+        ):
+            return Path(path).expanduser(), None
+        return None, (
+            f"ERROR: read scope {scope!r} permits RELATIVE reads only, "
+'
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"

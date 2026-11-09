@@ -478,13 +478,25 @@ PYEOF
 
   # M-B2a — the lane check is DELETED. With the lane OFF the tool must
   # refuse; without the check it reaches the service → RED.
+  #
+  # The plant text carries the FOLLOWING call so it stays UNIQUE: the
+  # B2 fix round 1 (D3) added a SECOND gated path (``skill_resolve_ab``)
+  # and the bare gate block now occurs twice in the module.
   leg "M-B2a" "daemon/tools/skill_evolution_tools.py" \
 '        lane_reason = _evolution_lane_refusal_reason(manager)
         if lane_reason is not None:
             return _lane_refusal(lane_reason)
 
+        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "evolve_skill",
 ' \
-'' \
+'        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "evolve_skill",
+' \
 "$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_lane_off_returns_the_honest_refusal_envelope"
 
   # M-B2b — the check is INVERTED (`if lane_enabled: refuse`). With the
@@ -492,9 +504,19 @@ PYEOF
   leg "M-B2b" "daemon/tools/skill_evolution_tools.py" \
 '        if lane_reason is not None:
             return _lane_refusal(lane_reason)
+
+        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "evolve_skill",
 ' \
 '        if lane_reason is None:
             return _lane_refusal(lane_reason)
+
+        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "evolve_skill",
 ' \
 "$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_lane_off_returns_the_honest_refusal_envelope"
 
@@ -535,6 +557,30 @@ PYEOF
 '    "Evolution complete: the skill was evolved successfully."
 ' \
 "$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_refusal_envelope_never_claims_success"
+
+  # M-B2e (B2 fix round 1 — D3) — the SECOND inline mutation path
+  # (``skill_resolve_ab``) loses its gate. The reviewer drove the
+  # ungated path with the lane OFF and it DEACTIVATED a live skill arm
+  # (``{"resolved": true, "reason": "threshold_met"}`` →
+  # ``_skill_repo.deactivate('a')``), so the plan's §6 B2 premise
+  # ("the ONE reachable mutation path") was FALSE. With the gate
+  # deleted the tool reaches the service again → RED.
+  leg "M-B2e" "daemon/tools/skill_evolution_tools.py" \
+'        lane_reason = _evolution_lane_refusal_reason(manager)
+        if lane_reason is not None:
+            return _lane_refusal(lane_reason)
+
+        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "check_ab_test_resolution",
+' \
+'        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "check_ab_test_resolution",
+' \
+"$LANE_GATE_FILE::TestInlineResolveAbLaneGate::test_lane_off_refuses_the_ab_resolution"
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"

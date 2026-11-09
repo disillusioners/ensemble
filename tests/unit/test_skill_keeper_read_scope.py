@@ -189,6 +189,23 @@ class TestKeeperReadScopeEnforcement:
             f"the keeper must not read /proc/self/environ: {result!r}"
         )
 
+    def test_read_file_refuses_an_absolute_path_outside_the_workdir_without_a_workdir_argument(
+        self, workdir
+    ):
+        """The plan's acceptance list, in PRODUCTION shape.
+
+        The plan requires ``read_file("/etc/passwd")`` to be REFUSED.
+        This leg passes NO ``workdir`` argument at all — the daemon
+        resolves the anchor itself — so the refusal can only come from
+        the SCOPE, not from the argument handling.
+        """
+        tools = _build_tools("skill-keeper", workdir)
+        result = tools["read_file"].invoke({"path": "/etc/passwd"})
+        assert result.startswith("ERROR:"), (
+            f"the keeper must not read /etc/passwd: {result!r}"
+        )
+        assert "read scope" in result
+
     def test_read_file_allows_a_relative_in_workdir_path(self, workdir):
         """Relative in-workdir reads stay LEGAL (M-B3b's leg).
 
@@ -316,6 +333,23 @@ class TestTrustedAnchor:
         result = tools["list_directory"].invoke({"path": "/", "workdir": "/"})
         assert result.startswith("ERROR:"), (
             f"a scoped agent must not list the filesystem root: {result!r}"
+        )
+
+    def test_a_relative_escape_cannot_leave_the_anchor(self, workdir):
+        """The relative form of the D1 bypass — the anchor is not movable.
+
+        A relative path that climbs out of the anchor must be refused.
+        The agent-supplied ``workdir="/"`` must not become the base: if
+        it did, ``../../etc/passwd`` would resolve to ``/etc/passwd``
+        and be handed to the agent. This is the probe the M-B3e leg
+        (the D1 anchor defect) must redden.
+        """
+        tools = _build_tools("skill-keeper", workdir)
+        result = tools["read_file"].invoke(
+            {"path": "../../etc/passwd", "workdir": "/"}
+        )
+        assert result.startswith("ERROR:"), (
+            f"a scoped agent must not climb out of the trusted anchor: {result!r}"
         )
 
     def test_the_read_anchor_is_the_daemon_resolved_project_workdir(self, workdir):

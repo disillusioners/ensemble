@@ -136,9 +136,19 @@ def _implementation_function(tool: Any):
     The runtime wraps the filesystem tools in ``_make_workdir_aware`` /
     ``_make_read_scope_aware``; the StructuredTool's ``func`` is then the
     wrapper closure, not the implementation. Analyzing the wrapper would
-    be VACUOUS — it would never see a write. The wrapper keeps the
-    wrapped callable in a free variable named ``original_func``, so the
-    chain is walkable.
+    be VACUOUS — it would never see a write.
+
+    Two unwrapping steps, both needed:
+
+    * ``functools.wraps`` records the real implementation in
+      ``__wrapped__`` — ``inspect.unwrap`` reaches it. Without this the
+      classifier would read the WRAPPER's module
+      (``daemon/tools/instance.py``) and every helper the
+      implementation calls (``_atomic_write_text`` and friends) would be
+      UNREACHABLE — a write hidden one call away.
+    * the wrapper keeps the wrapped callable in a free variable named
+      ``original_func``, so the chain is walkable even when
+      ``__wrapped__`` is absent.
     """
     func = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
     if func is None:
@@ -148,6 +158,10 @@ def _implementation_function(tool: Any):
     for _ in range(8):
         if current is None:
             return None
+        unwrapped = inspect.unwrap(current)
+        if unwrapped is not current:
+            current = unwrapped
+            continue
         if getattr(current, "__name__", None) == tool_name:
             return current
         code = getattr(current, "__code__", None)

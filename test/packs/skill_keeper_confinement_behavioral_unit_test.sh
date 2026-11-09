@@ -421,12 +421,58 @@ PYEOF
   # write-shaped body) must still classify it as write-capable → the
   # name-based classifier REDs it.
   leg "M-B1e" "tests/unit/test_skill_keeper_confinement.py" \
-'    writes = bool((attrs & _WRITE_ATTRS) or (dotted & _DESTRUCTIVE_DOTTED)
-                  or _write_ish(dotted))
+'    project_writes, temp_writes = _write_profile(scope_nodes)
 ' \
-'    writes = getattr(tool, "name", "") in {"write_file", "edit_file"}
+'    project_writes = getattr(tool, "name", "") in {"write_file", "edit_file"}
+    temp_writes = False
 ' \
 "$PIN_FILE::TestResolverLeg::test_the_classifier_catches_a_renamed_write_tool"
+
+  # M-B1f (B1 fix round 1 — D2) — the REACHABILITY edge that hides a
+  # write: a helper PASSED AS AN ARGUMENT to a thread-offload call
+  # (``asyncio.to_thread``). The edge is removed → ``experience``'s
+  # write becomes invisible → the ENUMERATED writer set loses a member
+  # → RED. (The old classifier reached only DIRECTLY CALLED helpers,
+  # which is why the pin asserted a convenient subset — ``explore``
+  # alone — instead of the truth.)
+  leg "M-B1f" "tests/unit/test_skill_keeper_confinement.py" \
+'            if fn.attr in _THREAD_OFFLOAD_NAMES:
+' \
+'            if False and fn.attr in _THREAD_OFFLOAD_NAMES:
+' \
+"$PIN_FILE::TestResolverLeg::test_the_temp_confined_writers_are_enumerated"
+
+  # M-B1g (B1 fix round 1 — D2) — the temp-vs-project decision
+  # degrades to "the body mentions gettempdir" (the OLD behaviour). A
+  # tool that derives a scratch path from the temp dir and then writes
+  # a PROJECT path is DOWNGRADED to the temp class → the pin's
+  # self-test REDs it.
+  leg "M-B1g" "tests/unit/test_skill_keeper_confinement.py" \
+'            derivations = _target_derivations(target, scope_nodes)
+            if any(
+                marker in text
+                for text in derivations
+                for marker in _TEMP_TARGET_MARKERS
+            ):
+                temp = True
+' \
+'            derivations = _target_derivations(target, scope_nodes)
+            body = ast.unparse(fnode)
+            if any(marker in body for marker in _TEMP_TARGET_MARKERS):
+                temp = True
+' \
+"$PIN_FILE::TestResolverLeg::test_a_project_write_is_not_downgraded_by_a_gettempdir_mention"
+
+  # M-B1h (B1 fix round 1 — D2) — the write PRIMITIVES stop being
+  # recognised at all → the classifier cannot see a write → the
+  # ``open``/``print(file=)`` self-test REDs it.
+  leg "M-B1h" "tests/unit/test_skill_keeper_confinement.py" \
+'    out: list[tuple[Any, ast.Call]] = []
+' \
+'    out: list[tuple[Any, ast.Call]] = []
+    return out  # M-B1h PLANT: the write primitives are not recognised
+' \
+"$PIN_FILE::TestResolverLeg::test_the_classifier_catches_an_open_and_print_write"
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
