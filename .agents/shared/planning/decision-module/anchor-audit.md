@@ -239,15 +239,15 @@ These strings were **removed from the design prose** and live **only in this art
 
 **Budget rule: DESIGN documents ≤ 300 lines each; this audit artefact is exempt** (it is evidence, not design).
 
-**Convention: LOGICAL lines** (`split('\n')`). Two files — `controls-and-phasing.md` and `thin-client.md` — lack a trailing newline, so `wc -l` reports exactly one **less** for each (299 and 245 respectively). Under the logical convention **`controls-and-phasing.md` is exactly 300**, which is **within** budget, not over.
+**Convention: LOGICAL lines** (`split('\n')`, counted with `grep -c ""`). Three files — `controls-and-phasing.md`, `thin-client.md` and `decisions.md` — lack a trailing newline, so `wc -l` reports exactly one **less** for each. The counts below are RE-TAKEN at the current tree; `controls-and-phasing.md` and `seam-registry.md` are over the ≤300 rule by an ADJUDICATED EXCEPTION (see `decisions.md` §6 Notes).
 
 | Document | Lines |
 |---|---|
 | `architecture-recommendation.md` | 99 |
-| `controls-and-phasing.md` | 306 |
+| `controls-and-phasing.md` | 325 |
 | `scope-and-doctrine.md` | 283 |
-| `seam-registry.md` | 308 |
-| `thin-client.md` | 247 |
+| `seam-registry.md` | 312 |
+| `thin-client.md` | 250 |
 | `anchor-audit.md` (this artefact) | exempt — evidence, not design |
 | `decisions.md` (this artefact) | exempt — decisions record, not design |
 
