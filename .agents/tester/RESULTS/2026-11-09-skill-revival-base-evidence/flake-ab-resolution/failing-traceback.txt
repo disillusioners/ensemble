@@ -1,0 +1,1190 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________ TestCheckABTestResolution.test_ab_resolution_threshold_met __________
+
+self = <tests.services.test_skill_evolution_service.TestCheckABTestResolution object at 0x77d1b50aefd0>
+evolution_service = <daemon.services.skill_evolution_service.SkillEvolutionService object at 0x77d1b3b50ad0>
+skill_repo = <daemon.repositories.skill.repository.SkillRepository object at 0x77d1b50afb10>
+ab_test_repo = <daemon.repositories.skill.repository.SkillABTestRepository object at 0x77d1b50afc50>
+fake_metrics_service = <MagicMock id='131742560172224'>
+project_id = 'test-project'
+
+    async def test_ab_resolution_threshold_met(
+        self, evolution_service, skill_repo, ab_test_repo,
+        fake_metrics_service, project_id,
+    ):
+        """Comparisons >= sample AND diff >= min → resolve by raw rate."""
+        old = _make_skill(skill_repo, project_id, "old")
+        new = _make_skill(skill_repo, project_id, "new")
+        group = "g-threshold"
+        ab_test_repo.create_ab_test(group, old.id, new.id)
+        for _ in range(10):
+            ab_test_repo.increment_comparison(group)
+    
+        fake_metrics_service.get_ab_comparison_stats.return_value = {
+            "skill_id_a": old.id,
+            "skill_id_b": new.id,
+            "completion_rate_a": 0.5,
+            "completion_rate_b": 0.9,
+            "difference": 0.4,  # >= 0.15
+            "comparisons": 10,
+            "extension_count": 0,
+            "ready_to_resolve": True,
+            "needs_more_data": False,
+        }
+    
+>       result = await evolution_service.check_ab_test_resolution(group)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/services/test_skill_evolution_service.py:1906: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <daemon.services.skill_evolution_service.SkillEvolutionService object at 0x77d1b3b50ad0>
+ab_test_group = 'g-threshold'
+winner_id = '65a071fa-d5a0-455b-abd8-80cf446d9266'
+
+    async def check_ab_test_resolution(
+        self,
+        ab_test_group: str,
+        winner_id: Optional[str] = None,
+    ) -> dict:
+        """Decide whether an A/B test should resolve, extend, or wait.
+    
+        Decision tree:
+    
+        0. **Forced winner** (``winner_id`` argument is set) →
+           validate the ID against the two persisted variants,
+           then run the same side effects as Path 2 / Path 3
+           (deactivate loser / resolve ab_test / promote winner).
+           ``reason='forced_winner'``. Skips the threshold /
+           extension evaluation — the caller has explicit
+           authority to pick — but NOT the sample-size floor:
+           a forced winner while ``comparisons < ab_sample_size``
+           raises ``ValueError`` (incident 2026-10-21 — an agent
+           force-resolved a live experiment at 2/10 comparisons
+           and killed the incumbent arm).
+        1. **Not enough data** (``comparisons < ab_sample_size``) →
+           keep collecting. ``reason='needs_more_data'``.
+        2. **Threshold met** (``difference >= ab_min_difference``) →
+           resolve by raw completion rate. ``reason='threshold_met'``.
+        3. **Threshold missed + ``extension_count >= max_extensions``** →
+           force-resolve by raw completion rate.
+           ``reason='force_resolved_max_extensions'``.
+        4. **Threshold missed + extensions remaining** → bump
+           ``extension_count`` via the repo. ``reason='extended'``.
+    
+        The persisted ``SkillABTest`` row is the source of truth
+        for ``comparisons`` / ``extension_count`` — the metrics
+        service mirrors them into its returned dict but we trust
+        the row to avoid drift under concurrent feedback
+        ingestion.
+    
+        Args:
+            ab_test_group: The shared UUID grouping old + new
+                variants.
+            winner_id: Optional forced-winner skill ID. When set,
+                the test is force-resolved by selecting this
+                variant as the winner (the other variant is
+                deactivated). Must match one of the test's two
+                variant IDs — anything else raises
+                ``ValueError``. ``None`` (default) runs the
+                normal completion-rate-driven decision tree.
+    
+        Returns:
+            Dict with ``resolved`` (bool), ``winner_id`` / ``loser_id``
+            (str | None), ``reason`` (str), ``extension_count`` (int).
+            When ``winner_id`` is provided, ``reason`` is
+            ``"forced_winner"``.
+    
+        Raises:
+            ValueError: When ``winner_id`` is provided but does
+                not match either variant of the test group, OR when a
+                forced winner is requested while
+                ``comparisons < ab_sample_size`` (below-sample-size
+                forced resolve is refused — 2026-10-22 confinement
+                fix).
+        """
+        sample_size = getattr(self._config, "ab_sample_size", 10) or 10
+        min_diff = getattr(self._config, "ab_min_difference", 0.15) or 0.15
+        max_ext = getattr(self._config, "max_extensions", 3) or 3
+    
+        # Fetch the test row + per-variant stats in parallel.
+        ab_test, stats = await asyncio.gather(
+            asyncio.to_thread(self._ab_test_repo.get_by_group, ab_test_group),
+            self._metrics_service.get_ab_comparison_stats(ab_test_group),
+        )
+    
+        if ab_test is None:
+            return {
+                "resolved": False,
+                "winner_id": None,
+                "loser_id": None,
+                "reason": "ab_test_group not found",
+                "extension_count": 0,
+            }
+    
+        # Trust the persisted row over the stats dict for
+        # counters — single source of truth.
+        extension_count = int(getattr(ab_test, "extension_count", 0) or 0)
+        comparisons = int(getattr(ab_test, "comparisons", 0) or 0)
+        difference = float(stats.get("difference", 0.0) or 0.0)
+    
+        # Path 0: forced-winner override. Validates the supplied
+        # ID against the persisted variant pair and short-circuits
+        # the sample-size / threshold / extension gates. The
+        # caller (e.g. an admin UI) has explicit authority to
+        # pick a winner; we still run the same three concurrent
+        # side effects as Paths 2 / 3 so the persisted state
+        # matches the auto-resolution outcome.
+        if winner_id is not None:
+            skill_id_a = stats.get("skill_id_a")
+            skill_id_b = stats.get("skill_id_b")
+            if winner_id not in (skill_id_a, skill_id_b):
+                raise ValueError(
+                    f"winner_id={winner_id!r} is not a variant of "
+                    f"ab_test_group={ab_test_group!r} "
+                    f"(variants: {skill_id_a!r}, {skill_id_b!r})"
+                )
+            # Forced-resolve below-threshold guard (2026-10-22
+            # confinement fix, incident 2026-10-21): a forced winner
+            # at comparisons < ab_sample_size is REFUSED. During the
+            # incident a skill-keeper run force-resolved a LIVE
+            # experiment at comparisons=2/10 via the admin endpoint
+            # (POST /api/skills/{id}/ab-test/resolve?winner_id=...),
+            # killing the incumbent arm with no data. The
+            # "explicit authority" contract stays intact for
+            # at/above-sample-size resolves; below it, the caller
+            # must let the test reach sample size or exhaust
+            # max_extensions (Path 3 force-resolve still exists for
+            # the out-of-extensions case). Raising ValueError maps
+            # to HTTP 400 at the router.
+            if comparisons < sample_size:
+                raise ValueError(
+                    f"Forced A/B resolve refused for "
+                    f"ab_test_group={ab_test_group!r}: comparisons="
+                    f"{comparisons} < ab_sample_size={sample_size}. "
+                    f"Let the test reach sample size (or exhaust "
+                    f"max_extensions) before forcing a verdict."
+                )
+            loser_id = (
+                skill_id_b if winner_id == skill_id_a else skill_id_a
+            )
+            logger.info(
+                f"[SkillEvolution] A/B test {ab_test_group}: forced "
+                f"winner={winner_id} (loser={loser_id})"
+            )
+            await asyncio.gather(
+                asyncio.to_thread(
+                    self._skill_repo.deactivate, loser_id,
+                ),
+                asyncio.to_thread(
+                    self._ab_test_repo.resolve,
+                    ab_test_group, winner_id,
+                ),
+                asyncio.to_thread(
+                    self._skill_repo.update,
+                    winner_id,
+                    ab_test_group=None,
+                    status="active",
+                ),
+            )
+            return {
+                "resolved": True,
+                "winner_id": winner_id,
+                "loser_id": loser_id,
+                "reason": "forced_winner",
+                "extension_count": extension_count,
+            }
+    
+        if comparisons < sample_size:
+            return {
+                "resolved": False,
+                "winner_id": None,
+                "loser_id": None,
+                "reason": "needs_more_data",
+                "extension_count": extension_count,
+            }
+    
+        # Helper: pick the winner by composite score.
+        # Tie-breaking favors the challenger (B/new) so the new variant
+        # wins ties — inverted from the old incumbent-wins-ties rule.
+        def _pick_winner() -> tuple[Optional[str], Optional[str]]:
+            score_a = float(stats.get("composite_score_a", 0.0) or 0.0)
+            score_b = float(stats.get("composite_score_b", 0.0) or 0.0)
+            # Tie-breaking: challenger (B/new) wins ties — changed from incumbent-wins-ties
+            if score_b >= score_a:
+                return (
+                    stats.get("skill_id_b"),  # winner = new variant
+                    stats.get("skill_id_a"),  # loser = old variant
+                )
+            return (
+                stats.get("skill_id_a"),  # winner = old variant
+                stats.get("skill_id_b"),  # loser = new variant
+            )
+    
+        # Path 2: threshold met.
+        if difference >= min_diff:
+            winner_id, loser_id = _pick_winner()
+>           await asyncio.gather(
+                asyncio.to_thread(self._skill_repo.deactivate, loser_id),
+                asyncio.to_thread(self._ab_test_repo.resolve, ab_test_group, winner_id),
+                asyncio.to_thread(
+                    self._skill_repo.update,
+                    winner_id,
+                    ab_test_group=None,
+                    status="active",
+                ),
+            )
+
+daemon/services/skill_evolution_service.py:1448: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+func = <bound method SkillRepository.deactivate of <daemon.repositories.skill.repository.SkillRepository object at 0x77d1b3b50440>>
+args = ('41fb4337-96fb-4c50-9c48-c91d555d1e48',), kwargs = {}
+loop = <_UnixSelectorEventLoop running=False closed=False debug=False>
+ctx = <_contextvars.Context object at 0x77d1b3110180>
+func_call = functools.partial(<built-in method run of _contextvars.Context object at 0x77d1b3110180>, <bound method SkillRepositor...aemon.repositories.skill.repository.SkillRepository object at 0x77d1b3b50440>>, '41fb4337-96fb-4c50-9c48-c91d555d1e48')
+
+    async def to_thread(func, /, *args, **kwargs):
+        """Asynchronously run function *func* in a separate thread.
+    
+        Any *args and **kwargs supplied for this function are directly passed
+        to *func*. Also, the current :class:`contextvars.Context` is propagated,
+        allowing context variables from the main thread to be accessed in the
+        separate thread.
+    
+        Return a coroutine that can be awaited to get the eventual result of
+        *func*.
+        """
+        loop = events.get_running_loop()
+        ctx = contextvars.copy_context()
+        func_call = functools.partial(ctx.run, func, *args, **kwargs)
+>       return await loop.run_in_executor(None, func_call)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py:26: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = None
+ctx = <concurrent.futures.thread.WorkerContext object at 0x77d1b3b51be0>
+
+    def run(self, ctx):
+        if not self.future.set_running_or_notify_cancel():
+            return
+    
+        try:
+>           result = ctx.run(self.task)
+                     ^^^^^^^^^^^^^^^^^^
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:86: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <concurrent.futures.thread.WorkerContext object at 0x77d1b3b51be0>
+task = (functools.partial(<built-in method run of _contextvars.Context object at 0x77d1b3110180>, <bound method SkillReposito...ositories.skill.repository.SkillRepository object at 0x77d1b3b50440>>, '41fb4337-96fb-4c50-9c48-c91d555d1e48'), (), {})
+
+    def run(self, task):
+        fn, args, kwargs = task
+>       return fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:73: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <daemon.repositories.skill.repository.SkillRepository object at 0x77d1b3b50440>
+skill_id = '41fb4337-96fb-4c50-9c48-c91d555d1e48'
+
+    def deactivate(self, skill_id: str) -> Skill | None:
+        """Soft-deactivate a skill.
+    
+        Sets ``is_active=False`` and ``status='inactive'``. The
+        row is preserved so usage history remains queryable.
+    
+        Args:
+            skill_id: The skill to deactivate.
+    
+        Returns:
+            The updated :class:`Skill` instance, or ``None`` if
+            no row with that ID exists.
+        """
+>       return self.update(skill_id, is_active=False, status="inactive")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+daemon/repositories/skill/repository.py:396: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <daemon.repositories.skill.repository.SkillRepository object at 0x77d1b3b50440>
+skill_id = '41fb4337-96fb-4c50-9c48-c91d555d1e48'
+fields = {'is_active': False, 'status': 'inactive'}
+protected = {'created_at', 'id'}
+session = <sqlmodel.orm.session.Session object at 0x77d1b31249b0>
+skill = Skill(), key = 'status', value = 'inactive'
+
+    def update(self, skill_id: str, **fields: Any) -> Skill | None:
+        """Update fields on an existing skill.
+    
+        Protected keys (``id``, ``created_at``) are silently
+        dropped. ``updated_at`` is owned by the repository and
+        bumped to the current time before commit.
+    
+        Args:
+            skill_id: The skill to update.
+            **fields: Column values to overwrite. Any unknown
+                key that isn't a column on :class:`Skill`
+                raises ``AttributeError``.
+    
+        Returns:
+            The updated :class:`Skill` instance, or ``None`` if
+            no row with that ID exists.
+        """
+        protected = {"id", "created_at"}
+        with Session(self.engine) as session:
+            skill = session.get(Skill, skill_id)
+            if skill is None:
+                logger.warning(
+                    f"Skill not found for update: id={skill_id}"
+                )
+                return None
+            for key, value in fields.items():
+                if key in protected:
+                    logger.warning(
+                        f"Ignoring protected field in skill update: "
+                        f"id={skill_id}, field={key}"
+                    )
+                    continue
+                if not hasattr(skill, key):
+                    raise AttributeError(
+                        f"Skill has no field {key!r}"
+                    )
+                setattr(skill, key, value)
+            skill.updated_at = _now_iso()
+>           session.commit()
+
+daemon/repositories/skill/repository.py:350: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlmodel.orm.session.Session object at 0x77d1b31249b0>
+
+    def commit(self) -> None:
+        """Flush pending changes and commit the current transaction.
+    
+        When the COMMIT operation is complete, all objects are fully
+        :term:`expired`, erasing their internal contents, which will be
+        automatically re-loaded when the objects are next accessed. In the
+        interim, these objects are in an expired state and will not function if
+        they are :term:`detached` from the :class:`.Session`. Additionally,
+        this re-load operation is not supported when using asyncio-oriented
+        APIs. The :paramref:`.Session.expire_on_commit` parameter may be used
+        to disable this behavior.
+    
+        When there is no transaction in place for the :class:`.Session`,
+        indicating that no operations were invoked on this :class:`.Session`
+        since the previous call to :meth:`.Session.commit`, the method will
+        begin and commit an internal-only "logical" transaction, that does not
+        normally affect the database unless pending flush changes were
+        detected, but will still invoke event handlers and object expiration
+        rules.
+    
+        The outermost database transaction is committed unconditionally,
+        automatically releasing any SAVEPOINTs in effect.
+    
+        .. seealso::
+    
+            :ref:`session_committing`
+    
+            :ref:`unitofwork_transaction`
+    
+            :ref:`asyncio_orm_avoid_lazyloads`
+    
+        """
+        trans = self._transaction
+        if trans is None:
+            trans = self._autobegin_t()
+    
+>       trans.commit(_to_root=True)
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py:2030: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlalchemy.orm.session.SessionTransaction object at 0x77d1b3109710>
+_to_root = True
+
+>   ???
+
+<string>:2: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fn = <function SessionTransaction.commit at 0x77d1b7e7acf0>
+self = <sqlalchemy.orm.session.SessionTransaction object at 0x77d1b3109710>
+arg = (), kw = {'_to_root': True}
+current_state = <SessionTransactionState.ACTIVE: 1>
+next_state = <_StateChangeStates.ANY: 1>, existing_fn = None
+expect_state = <SessionTransactionState.CLOSED: 5>
+
+    @util.decorator
+    def _go(fn: _F, self: Any, *arg: Any, **kw: Any) -> Any:
+        current_state = self._state
+    
+        if (
+            has_prerequisite_states
+            and current_state not in prerequisite_state_collection
+        ):
+            self._raise_for_prerequisite_state(fn.__name__, current_state)
+    
+        next_state = self._next_state
+        existing_fn = self._current_fn
+        expect_state = moves_to if expect_state_change else current_state
+    
+        if (
+            # destination states are restricted
+            next_state is not _StateChangeStates.ANY
+            # method seeks to change state
+            and expect_state_change
+            # destination state incorrect
+            and next_state is not expect_state
+        ):
+            if existing_fn and next_state in (
+                _StateChangeStates.NO_CHANGE,
+                _StateChangeStates.CHANGE_IN_PROGRESS,
+            ):
+                raise sa_exc.IllegalStateChangeError(
+                    f"Method '{fn.__name__}()' can't be called here; "
+                    f"method '{existing_fn.__name__}()' is already "
+                    f"in progress and this would cause an unexpected "
+                    f"state change to {moves_to!r}",
+                    code="isce",
+                )
+            else:
+                raise sa_exc.IllegalStateChangeError(
+                    f"Can't run operation '{fn.__name__}()' here; "
+                    f"will move to state {moves_to!r} where we are "
+                    f"expecting {next_state!r}",
+                    code="isce",
+                )
+    
+        self._current_fn = fn
+        self._next_state = _StateChangeStates.CHANGE_IN_PROGRESS
+        try:
+>           ret_value = fn(self, *arg, **kw)
+                        ^^^^^^^^^^^^^^^^^^^^
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/state_changes.py:137: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlalchemy.orm.session.SessionTransaction object at 0x77d1b3109710>
+_to_root = True
+
+    @_StateChange.declare_states(
+        (SessionTransactionState.ACTIVE, SessionTransactionState.PREPARED),
+        SessionTransactionState.CLOSED,
+    )
+    def commit(self, _to_root: bool = False) -> None:
+        if self._state is not SessionTransactionState.PREPARED:
+            with self._expect_state(SessionTransactionState.PREPARED):
+>               self._prepare_impl()
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py:1311: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlalchemy.orm.session.SessionTransaction object at 0x77d1b3109710>
+
+>   ???
+
+<string>:2: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fn = <function SessionTransaction._prepare_impl at 0x77d1b7e7a980>
+self = <sqlalchemy.orm.session.SessionTransaction object at 0x77d1b3109710>
+arg = (), kw = {}, current_state = <SessionTransactionState.ACTIVE: 1>
+next_state = <SessionTransactionState.PREPARED: 2>
+existing_fn = <function SessionTransaction.commit at 0x77d1b7e7acf0>
+expect_state = <SessionTransactionState.PREPARED: 2>
+
+    @util.decorator
+    def _go(fn: _F, self: Any, *arg: Any, **kw: Any) -> Any:
+        current_state = self._state
+    
+        if (
+            has_prerequisite_states
+            and current_state not in prerequisite_state_collection
+        ):
+            self._raise_for_prerequisite_state(fn.__name__, current_state)
+    
+        next_state = self._next_state
+        existing_fn = self._current_fn
+        expect_state = moves_to if expect_state_change else current_state
+    
+        if (
+            # destination states are restricted
+            next_state is not _StateChangeStates.ANY
+            # method seeks to change state
+            and expect_state_change
+            # destination state incorrect
+            and next_state is not expect_state
+        ):
+            if existing_fn and next_state in (
+                _StateChangeStates.NO_CHANGE,
+                _StateChangeStates.CHANGE_IN_PROGRESS,
+            ):
+                raise sa_exc.IllegalStateChangeError(
+                    f"Method '{fn.__name__}()' can't be called here; "
+                    f"method '{existing_fn.__name__}()' is already "
+                    f"in progress and this would cause an unexpected "
+                    f"state change to {moves_to!r}",
+                    code="isce",
+                )
+            else:
+                raise sa_exc.IllegalStateChangeError(
+                    f"Can't run operation '{fn.__name__}()' here; "
+                    f"will move to state {moves_to!r} where we are "
+                    f"expecting {next_state!r}",
+                    code="isce",
+                )
+    
+        self._current_fn = fn
+        self._next_state = _StateChangeStates.CHANGE_IN_PROGRESS
+        try:
+>           ret_value = fn(self, *arg, **kw)
+                        ^^^^^^^^^^^^^^^^^^^^
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/state_changes.py:137: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlalchemy.orm.session.SessionTransaction object at 0x77d1b3109710>
+
+    @_StateChange.declare_states(
+        (SessionTransactionState.ACTIVE,), SessionTransactionState.PREPARED
+    )
+    def _prepare_impl(self) -> None:
+        if self._parent is None or self.nested:
+            self.session.dispatch.before_commit(self.session)
+    
+        stx = self.session._transaction
+        assert stx is not None
+        if stx is not self:
+            for subtransaction in stx._iterate_self_and_parents(upto=self):
+                subtransaction.commit()
+    
+        if not self.session._flushing:
+            for _flush_guard in range(100):
+                if self.session._is_clean():
+                    break
+>               self.session.flush()
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py:1286: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlmodel.orm.session.Session object at 0x77d1b31249b0>, objects = None
+
+    def flush(self, objects: Optional[Sequence[Any]] = None) -> None:
+        """Flush all the object changes to the database.
+    
+        Writes out all pending object creations, deletions and modifications
+        to the database as INSERTs, DELETEs, UPDATEs, etc.  Operations are
+        automatically ordered by the Session's unit of work dependency
+        solver.
+    
+        Database operations will be issued in the current transactional
+        context and do not affect the state of the transaction, unless an
+        error occurs, in which case the entire transaction is rolled back.
+        You may flush() as often as you like within a transaction to move
+        changes from Python to the database's transaction buffer.
+    
+        :param objects: Optional; restricts the flush operation to operate
+          only on elements that are in the given collection.
+    
+          This feature is for an extremely narrow set of use cases where
+          particular objects may need to be operated upon before the
+          full flush() occurs.  It is not intended for general use.
+    
+        """
+    
+        if self._flushing:
+            raise sa_exc.InvalidRequestError("Session is already flushing")
+    
+        if self._is_clean():
+            return
+        try:
+            self._flushing = True
+>           self._flush(objects)
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py:4331: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlmodel.orm.session.Session object at 0x77d1b31249b0>, objects = None
+
+    def _flush(self, objects: Optional[Sequence[object]] = None) -> None:
+        dirty = self._dirty_states
+        if not dirty and not self._deleted and not self._new:
+            self.identity_map._modified.clear()
+            return
+    
+        flush_context = UOWTransaction(self)
+    
+        if self.dispatch.before_flush:
+            self.dispatch.before_flush(self, flush_context, objects)
+            # re-establish "dirty states" in case the listeners
+            # added
+            dirty = self._dirty_states
+    
+        deleted = set(self._deleted)
+        new = set(self._new)
+    
+        dirty = set(dirty).difference(deleted)
+    
+        # create the set of all objects we want to operate upon
+        if objects:
+            # specific list passed in
+            objset = set()
+            for o in objects:
+                try:
+                    state = attributes.instance_state(o)
+    
+                except exc.NO_STATE as err:
+                    raise exc.UnmappedInstanceError(o) from err
+                objset.add(state)
+        else:
+            objset = None
+    
+        # store objects whose fate has been decided
+        processed = set()
+    
+        # put all saves/updates into the flush context.  detect top-level
+        # orphans and throw them into deleted.
+        if objset:
+            proc = new.union(dirty).intersection(objset).difference(deleted)
+        else:
+            proc = new.union(dirty).difference(deleted)
+    
+        for state in proc:
+            is_orphan = _state_mapper(state)._is_orphan(state)
+    
+            is_persistent_orphan = is_orphan and state.has_identity
+    
+            if (
+                is_orphan
+                and not is_persistent_orphan
+                and state._orphaned_outside_of_session
+            ):
+                self._expunge_states([state])
+            else:
+                _reg = flush_context.register_object(
+                    state, isdelete=is_persistent_orphan
+                )
+                assert _reg, "Failed to add object to the flush context!"
+                processed.add(state)
+    
+        # put all remaining deletes into the flush context.
+        if objset:
+            proc = deleted.intersection(objset).difference(processed)
+        else:
+            proc = deleted.difference(processed)
+        for state in proc:
+            _reg = flush_context.register_object(state, isdelete=True)
+            assert _reg, "Failed to add object to the flush context!"
+    
+        if not flush_context.has_work:
+            return
+    
+        flush_context.transaction = transaction = self._autobegin_t()._begin()
+        try:
+            self._warn_on_events = True
+            try:
+                flush_context.execute()
+            finally:
+                self._warn_on_events = False
+    
+            self.dispatch.after_flush(self, flush_context)
+    
+            flush_context.finalize_flush_changes()
+    
+            if not objects and self.identity_map._modified:
+                len_ = len(self.identity_map._modified)
+    
+                statelib.InstanceState._commit_all_states(
+                    [
+                        (state, state.dict)
+                        for state in self.identity_map._modified
+                    ],
+                    instance_dict=self.identity_map,
+                )
+                util.warn(
+                    "Attribute history events accumulated on %d "
+                    "previously clean instances "
+                    "within inner-flush event handlers have been "
+                    "reset, and will not result in database updates. "
+                    "Consider using set_committed_value() within "
+                    "inner-flush event handlers to avoid this warning." % len_
+                )
+    
+            # useful assertions:
+            # if not objects:
+            #    assert not self.identity_map._modified
+            # else:
+            #    assert self.identity_map._modified == \
+            #            self.identity_map._modified.difference(objects)
+    
+            self.dispatch.after_flush_postexec(self, flush_context)
+    
+            transaction.commit()
+    
+        except:
+>           with util.safe_reraise():
+                 ^^^^^^^^^^^^^^^^^^^
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py:4466: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlalchemy.util.langhelpers.safe_reraise object at 0x77d1b3063490>
+type_ = None, value = None, traceback = None
+
+    def __exit__(
+        self,
+        type_: Optional[Type[BaseException]],
+        value: Optional[BaseException],
+        traceback: Optional[types.TracebackType],
+    ) -> NoReturn:
+        assert self._exc_info is not None
+        # see #2703 for notes
+        if type_ is None:
+            exc_type, exc_value, exc_tb = self._exc_info
+            assert exc_value is not None
+            self._exc_info = None  # remove potential circular references
+>           raise exc_value.with_traceback(exc_tb)
+
+.venv/lib/python3.14/site-packages/sqlalchemy/util/langhelpers.py:121: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlmodel.orm.session.Session object at 0x77d1b31249b0>, objects = None
+
+    def _flush(self, objects: Optional[Sequence[object]] = None) -> None:
+        dirty = self._dirty_states
+        if not dirty and not self._deleted and not self._new:
+            self.identity_map._modified.clear()
+            return
+    
+        flush_context = UOWTransaction(self)
+    
+        if self.dispatch.before_flush:
+            self.dispatch.before_flush(self, flush_context, objects)
+            # re-establish "dirty states" in case the listeners
+            # added
+            dirty = self._dirty_states
+    
+        deleted = set(self._deleted)
+        new = set(self._new)
+    
+        dirty = set(dirty).difference(deleted)
+    
+        # create the set of all objects we want to operate upon
+        if objects:
+            # specific list passed in
+            objset = set()
+            for o in objects:
+                try:
+                    state = attributes.instance_state(o)
+    
+                except exc.NO_STATE as err:
+                    raise exc.UnmappedInstanceError(o) from err
+                objset.add(state)
+        else:
+            objset = None
+    
+        # store objects whose fate has been decided
+        processed = set()
+    
+        # put all saves/updates into the flush context.  detect top-level
+        # orphans and throw them into deleted.
+        if objset:
+            proc = new.union(dirty).intersection(objset).difference(deleted)
+        else:
+            proc = new.union(dirty).difference(deleted)
+    
+        for state in proc:
+            is_orphan = _state_mapper(state)._is_orphan(state)
+    
+            is_persistent_orphan = is_orphan and state.has_identity
+    
+            if (
+                is_orphan
+                and not is_persistent_orphan
+                and state._orphaned_outside_of_session
+            ):
+                self._expunge_states([state])
+            else:
+                _reg = flush_context.register_object(
+                    state, isdelete=is_persistent_orphan
+                )
+                assert _reg, "Failed to add object to the flush context!"
+                processed.add(state)
+    
+        # put all remaining deletes into the flush context.
+        if objset:
+            proc = deleted.intersection(objset).difference(processed)
+        else:
+            proc = deleted.difference(processed)
+        for state in proc:
+            _reg = flush_context.register_object(state, isdelete=True)
+            assert _reg, "Failed to add object to the flush context!"
+    
+        if not flush_context.has_work:
+            return
+    
+        flush_context.transaction = transaction = self._autobegin_t()._begin()
+        try:
+            self._warn_on_events = True
+            try:
+>               flush_context.execute()
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py:4427: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <sqlalchemy.orm.unitofwork.UOWTransaction object at 0x77d1b3158770>
+
+    def execute(self) -> None:
+        postsort_actions = self._generate_actions()
+    
+        postsort_actions = sorted(
+            postsort_actions,
+            key=lambda item: item.sort_key,
+        )
+        # sort = topological.sort(self.dependencies, postsort_actions)
+        # print "--------------"
+        # print "\ndependencies:", self.dependencies
+        # print "\ncycles:", self.cycles
+        # print "\nsort:", list(sort)
+        # print "\nCOUNT OF POSTSORT ACTIONS", len(postsort_actions)
+    
+        # execute
+        if self.cycles:
+            for subset in topological.sort_as_subsets(
+                self.dependencies, postsort_actions
+            ):
+                set_ = set(subset)
+                while set_:
+                    n = set_.pop()
+                    n.execute_aggregate(self, set_)
+        else:
+            for rec in topological.sort(self.dependencies, postsort_actions):
+>               rec.execute(self)
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/unitofwork.py:466: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = SaveUpdateAll(Mapper[Skill(skills)])
+uow = <sqlalchemy.orm.unitofwork.UOWTransaction object at 0x77d1b3158770>
+
+    @util.preload_module("sqlalchemy.orm.persistence")
+    def execute(self, uow):
+>       util.preloaded.orm_persistence.save_obj(
+            self.mapper,
+            uow.states_for_mapper_hierarchy(self.mapper, False, False),
+            uow,
+        )
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/unitofwork.py:642: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+base_mapper = <Mapper at 0x77d1b53e7b60; Skill>
+states = <generator object UOWTransaction.states_for_mapper_hierarchy at 0x77d1b3148f40>
+uowtransaction = <sqlalchemy.orm.unitofwork.UOWTransaction object at 0x77d1b3158770>
+single = False
+
+    def save_obj(base_mapper, states, uowtransaction, single=False):
+        """Issue ``INSERT`` and/or ``UPDATE`` statements for a list
+        of objects.
+    
+        This is called within the context of a UOWTransaction during a
+        flush operation, given a list of states to be flushed.  The
+        base mapper in an inheritance hierarchy handles the inserts/
+        updates for all descendant mappers.
+    
+        """
+    
+        # if batch=false, call _save_obj separately for each object
+        if not single and not base_mapper.batch:
+            for state in _sort_states(base_mapper, states):
+                save_obj(base_mapper, [state], uowtransaction, single=True)
+            return
+    
+        states_to_update = []
+        states_to_insert = []
+    
+        for (
+            state,
+            dict_,
+            mapper,
+            connection,
+            has_identity,
+            row_switch,
+            update_version_id,
+        ) in _organize_states_for_save(base_mapper, states, uowtransaction):
+            if has_identity or row_switch:
+                states_to_update.append(
+                    (state, dict_, mapper, connection, update_version_id)
+                )
+            else:
+                states_to_insert.append((state, dict_, mapper, connection))
+    
+        for table, mapper in base_mapper._sorted_tables.items():
+            if table not in mapper._pks_by_table:
+                continue
+            insert = _collect_insert_commands(table, states_to_insert)
+    
+            update = _collect_update_commands(
+                uowtransaction, table, states_to_update
+            )
+    
+>           _emit_update_statements(
+                base_mapper,
+                uowtransaction,
+                mapper,
+                table,
+                update,
+            )
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/persistence.py:85: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+base_mapper = <Mapper at 0x77d1b53e7b60; Skill>
+uowtransaction = <sqlalchemy.orm.unitofwork.UOWTransaction object at 0x77d1b3158770>
+mapper = <Mapper at 0x77d1b53e7b60; Skill>
+table = Table('skills', MetaData(), Column('id', AutoString(length=64), table=<skills>, primary_key=True, nullable=False, defa...lumnDefault(<function _now_iso at 0x77d1b5244b40>)), Column('last_used_at', AutoString(), table=<skills>), schema=None)
+update = <generator object _collect_update_commands at 0x77d1b3b34220>
+
+    def _emit_update_statements(
+        base_mapper,
+        uowtransaction,
+        mapper,
+        table,
+        update,
+        *,
+        bookkeeping=True,
+        use_orm_update_stmt=None,
+        enable_check_rowcount=True,
+    ):
+        """Emit UPDATE statements corresponding to value lists collected
+        by _collect_update_commands()."""
+    
+        needs_version_id = (
+            mapper.version_id_col is not None
+            and mapper.version_id_col in mapper._cols_by_table[table]
+        )
+    
+        execution_options = {"compiled_cache": base_mapper._compiled_cache}
+    
+        def update_stmt(existing_stmt=None):
+            clauses = BooleanClauseList._construct_raw(operators.and_)
+    
+            for col in mapper._pks_by_table[table]:
+                clauses._append_inplace(
+                    col == sql.bindparam(col._label, type_=col.type)
+                )
+    
+            if needs_version_id:
+                clauses._append_inplace(
+                    mapper.version_id_col
+                    == sql.bindparam(
+                        mapper.version_id_col._label,
+                        type_=mapper.version_id_col.type,
+                    )
+                )
+    
+            if existing_stmt is not None:
+                stmt = existing_stmt.where(clauses)
+            else:
+                stmt = table.update().where(clauses)
+            return stmt
+    
+        if use_orm_update_stmt is not None:
+            cached_stmt = update_stmt(use_orm_update_stmt)
+    
+        else:
+            cached_stmt = base_mapper._memo(("update", table), update_stmt)
+    
+        for (
+            (connection, paramkeys, hasvalue, has_all_defaults, has_all_pks),
+            records,
+        ) in groupby(
+            update,
+            lambda rec: (
+                rec[4],  # connection
+                set(rec[2]),  # set of parameter keys
+                bool(rec[5]),  # whether or not we have "value" parameters
+                rec[6],  # has_all_defaults
+                rec[7],  # has all pks
+            ),
+        ):
+            rows = 0
+            records = list(records)
+    
+            statement = cached_stmt
+    
+            if use_orm_update_stmt is not None:
+                statement = statement._annotate(
+                    {
+                        "_emit_update_table": table,
+                        "_emit_update_mapper": mapper,
+                    }
+                )
+    
+            return_defaults = False
+    
+            if not has_all_pks:
+                statement = statement.return_defaults(*mapper._pks_by_table[table])
+                return_defaults = True
+    
+            if (
+                bookkeeping
+                and not has_all_defaults
+                and mapper.base_mapper.eager_defaults is True
+                # change as of #8889 - if RETURNING is not going to be used anyway,
+                # (applies to MySQL, MariaDB which lack UPDATE RETURNING) ensure
+                # we can do an executemany UPDATE which is more efficient
+                and table.implicit_returning
+                and connection.dialect.update_returning
+            ):
+                statement = statement.return_defaults(
+                    *mapper._server_onupdate_default_cols[table]
+                )
+                return_defaults = True
+    
+            if mapper._version_id_has_server_side_value:
+                statement = statement.return_defaults(mapper.version_id_col)
+                return_defaults = True
+    
+            assert_singlerow = connection.dialect.supports_sane_rowcount
+    
+            assert_multirow = (
+                assert_singlerow
+                and connection.dialect.supports_sane_multi_rowcount
+            )
+    
+            # change as of #8889 - if RETURNING is not going to be used anyway,
+            # (applies to MySQL, MariaDB which lack UPDATE RETURNING) ensure
+            # we can do an executemany UPDATE which is more efficient
+            allow_executemany = not return_defaults and not needs_version_id
+    
+            if hasvalue:
+                for (
+                    state,
+                    state_dict,
+                    params,
+                    mapper,
+                    connection,
+                    value_params,
+                    has_all_defaults,
+                    has_all_pks,
+                ) in records:
+                    c = connection.execute(
+                        statement.values(value_params),
+                        params,
+                        execution_options=execution_options,
+                    )
+                    if bookkeeping:
+                        _postfetch(
+                            mapper,
+                            uowtransaction,
+                            table,
+                            state,
+                            state_dict,
+                            c,
+                            c.context.compiled_parameters[0],
+                            value_params,
+                            True,
+                            c.returned_defaults,
+                        )
+                    rows += c.rowcount
+                    check_rowcount = enable_check_rowcount and assert_singlerow
+            else:
+                if not allow_executemany:
+                    check_rowcount = enable_check_rowcount and assert_singlerow
+                    for (
+                        state,
+                        state_dict,
+                        params,
+                        mapper,
+                        connection,
+                        value_params,
+                        has_all_defaults,
+                        has_all_pks,
+                    ) in records:
+                        c = connection.execute(
+                            statement, params, execution_options=execution_options
+                        )
+    
+                        # TODO: why with bookkeeping=False?
+                        if bookkeeping:
+                            _postfetch(
+                                mapper,
+                                uowtransaction,
+                                table,
+                                state,
+                                state_dict,
+                                c,
+                                c.context.compiled_parameters[0],
+                                value_params,
+                                True,
+                                c.returned_defaults,
+                            )
+                        rows += c.rowcount
+                else:
+                    multiparams = [rec[2] for rec in records]
+    
+                    check_rowcount = enable_check_rowcount and (
+                        assert_multirow
+                        or (assert_singlerow and len(multiparams) == 1)
+                    )
+    
+                    c = connection.execute(
+                        statement, multiparams, execution_options=execution_options
+                    )
+    
+                    rows += c.rowcount
+    
+                    for (
+                        state,
+                        state_dict,
+                        params,
+                        mapper,
+                        connection,
+                        value_params,
+                        has_all_defaults,
+                        has_all_pks,
+                    ) in records:
+                        if bookkeeping:
+                            _postfetch(
+                                mapper,
+                                uowtransaction,
+                                table,
+                                state,
+                                state_dict,
+                                c,
+                                c.context.compiled_parameters[0],
+                                value_params,
+                                True,
+                                (
+                                    c.returned_defaults
+                                    if not c.context.executemany
+                                    else None
+                                ),
+                            )
+    
+            if check_rowcount:
+                if rows != len(records):
+>                   raise orm_exc.StaleDataError(
+                        "UPDATE statement on table '%s' expected to "
+                        "update %d row(s); %d were matched."
+                        % (table.description, len(records), rows)
+                    )
+E                   sqlalchemy.orm.exc.StaleDataError: UPDATE statement on table 'skills' expected to update 1 row(s); 0 were matched.
+
+.venv/lib/python3.14/site-packages/sqlalchemy/orm/persistence.py:948: StaleDataError
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-skill-revival-base1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/services/test_skill_evolution_service.py::TestCheckABTestResolution::test_ab_resolution_threshold_met
+1 failed, 1 warning in 0.85s

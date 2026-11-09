@@ -1,0 +1,35 @@
+# Decisive experiment — SAME tree (ae5bbafed), SAME interpreter (3.14.7), SAME command.
+# Only the thread hop differs: normal asyncio.to_thread vs inline.
+
+## LEG A — normal (asyncio.to_thread -> thread pool)
+  run1: pass  (1 passed, 1 warning in 0.43s)
+  run2: pass  (1 passed, 1 warning in 0.65s)
+  run3: FAIL  (1 failed, 1 warning in 0.54s)
+  run4: pass  (1 passed, 1 warning in 0.40s)
+  run5: pass  (1 passed, 1 warning in 0.40s)
+  run6: pass  (1 passed, 1 warning in 0.43s)
+  run7: pass  (1 passed, 1 warning in 0.44s)
+  run8: pass  (1 passed, 1 warning in 0.42s)
+  run9: pass  (1 passed, 1 warning in 0.42s)
+  run10: pass  (1 passed, 1 warning in 0.40s)
+  run11: pass  (1 passed, 1 warning in 0.40s)
+  run12: pass  (1 passed, 1 warning in 0.41s)
+  --> NORMAL: 11 passed / 1 failed
+
+## LEG B — asyncio.to_thread monkey-patched to call inline (no thread hop)
+  run1: pass  (1 passed, 1 warning in 0.47s)
+  run2: pass  (1 passed, 1 warning in 0.45s)
+  run3: pass  (1 passed, 1 warning in 0.38s)
+  run4: pass  (1 passed, 1 warning in 0.38s)
+  run5: pass  (1 passed, 1 warning in 0.40s)
+  run6: pass  (1 passed, 1 warning in 0.38s)
+  run7: pass  (1 passed, 1 warning in 0.39s)
+  run8: pass  (1 passed, 1 warning in 0.38s)
+  run9: pass  (1 passed, 1 warning in 0.38s)
+  run10: pass  (1 passed, 1 warning in 0.38s)
+  run11: pass  (1 passed, 1 warning in 0.38s)
+  run12: pass  (1 passed, 1 warning in 0.59s)
+  --> INLINED: 12 passed / 0 failed
+
+VERDICT: identical tree/interpreter/command; only the thread hop differs.
+         Causality, not correlation.
