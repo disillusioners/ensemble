@@ -144,25 +144,27 @@ def _assert_envelope(result: str, label: str, code: str) -> None:
 
 
 class TestTheSurface:
-    def test_the_factory_builds_exactly_the_five_blessed_tools(self, tools):
+    def test_the_factory_builds_exactly_the_six_blessed_tools(self, tools):
         assert set(tools) == set(MEMOIR_TOOL_NAMES) == {
             "memoir_write",
             "memoir_pin",
             "memoir_unpin",
             "memoir_recall",
             "memoir_timeline",
+            "memoir_about",
         }
 
     def test_the_decorator_order_is_load_bearing(self):
         """``@register_tool_category`` sits ABOVE ``@tool`` on every tool."""
         source = MODULE_PATH.read_text(encoding="utf-8")
-        assert source.count("@register_tool_category(MEMOIR_CATEGORY_KEY)") == 5
+        assert source.count("@register_tool_category(MEMOIR_CATEGORY_KEY)") == 6
         for schema in (
             "MemoirWriteInput",
             "MemoirPinInput",
             "MemoirUnpinInput",
             "MemoirRecallInput",
             "MemoirTimelineInput",
+            "MemoirAboutInput",
         ):
             dec_idx = source.index("@register_tool_category(MEMOIR_CATEGORY_KEY)")
             tool_idx = source.index(f"@tool(args_schema={schema})")
@@ -241,6 +243,8 @@ class TestTheGateOrder:
             return {"id": "x"}
         if name == "memoir_recall":
             return {"query": "q"}
+        if name == "memoir_about":
+            return {"star": "x"}
         return {}
 
 
@@ -253,7 +257,7 @@ class TestTheKnobGate:
         mgr.knob_reads = 0
         mgr.engine_touches = 0
         for name in ("memoir_write", "memoir_pin", "memoir_unpin",
-                     "memoir_recall", "memoir_timeline"):
+                     "memoir_recall", "memoir_timeline", "memoir_about"):
             result = await tools[name].ainvoke(
                 TestTheGateOrder._args_for(name)
             )
@@ -791,7 +795,7 @@ class TestTheDegradedBoot:
         tools = create_memoir_tools(
             mgr, current_instance_id="inst-9", agent_id=MEMOIR_AUTHORIZED_AGENT
         )
-        assert len(tools) == 5
+        assert len(tools) == 6
 
 
 # ── Tidier M16 (C1): POST-COMMIT honesty ────────────────────────────────

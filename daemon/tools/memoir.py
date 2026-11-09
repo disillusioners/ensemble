@@ -170,6 +170,7 @@ MEMOIR_TOOL_NAMES: frozenset[str] = frozenset(
         "memoir_unpin",
         "memoir_recall",
         "memoir_timeline",
+        "memoir_about",
     }
 )
 
@@ -432,6 +433,26 @@ def _memoir_service_for(manager: Any) -> MemoirRetrievalService | None:
         reflection_enabled=lambda: memoir_reflection_enabled(config),
         constellation_repository=constellation_repository,
     )
+
+
+def _memoir_constellation_repository_for(manager: Any) -> Any:
+    """Build the constellation repository over the caller's engine."""
+    engine = getattr(manager, "_engine", None)
+    if engine is None:
+        return None
+    try:
+        from ..repositories.memoir.constellation_repository import (
+            MemoirConstellationRepository,
+        )
+
+        return MemoirConstellationRepository(engine)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[Memoir] the constellation repository could not be built "
+            "(%s)",
+            type(exc).__name__,
+        )
+        return None
 
 
 def _map_write_error(exc: MemoirWriteError, label: str) -> str:
@@ -770,6 +791,19 @@ def create_memoir_tools(
                 default=None,
                 description=(
                     "Optional lexical narrowing term inside the window."
+                ),
+            ),
+        ]
+
+    class MemoirAboutInput(BaseModel):
+        """Input schema for memoir_about."""
+
+        star: Annotated[
+            str,
+            Field(
+                description=(
+                    "The star (entity) name to retrieve a dossier for "
+                    "(<=100 chars)."
                 ),
             ),
         ]
@@ -1200,6 +1234,171 @@ def create_memoir_tools(
                 "an unexpected error occurred (logged server-side)",
             )
 
+    @register_tool_category(MEMOIR_CATEGORY_KEY)
+    @tool(args_schema=MemoirAboutInput)
+    async def memoir_about(star: str) -> str:
+        """Retrieve an entity dossier from the Constellation graph. Use tool_help("memoir_about") for details."""
+        label = "memoir_about"
+        try:
+            refusal = _gate(label, "read", caller_agent_id, manager)
+            if refusal is not None:
+                return refusal
+            if not isinstance(star, str) or not star.strip():
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_QUERY_REQUIRED,
+                    "star is required (non-empty)",
+                )
+            star_name = star.strip()
+            if len(star_name) > 100:
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_STARS_OUT_OF_BOUNDS,
+                    f"star name too long: {len(star_name)} > 100",
+                )
+
+            def _sync() -> str:
+                repo = _memoir_constellation_repository_for(manager)
+                if repo is None:
+                    return _refuse(
+                        label,
+                        MEMOIR_CODE_INTERNAL_ERROR,
+                        "the constellation store is not available on this manager "
+                        "(no engine)",
+                    )
+                star_row = repo.resolve_star(caller_agent_id, star_name)
+                if star_row is None:
+                    try:
+                        from sqlmodel import Session, select
+                        from daemon.repositories.memoir.models import MemoirStar
+
+                        with Session(repo.engine) as session:
+                            rows = session.exec(
+                                select(MemoirStar).where(
+                                    MemoirStar.agent_id == caller_agent_id
+                                )
+                            ).all()
+                            for row in rows:
+                                if str(row.name).strip().casefold() == star_name.casefold():
+                                    star_row = row
+                                    break
+                    except Exception:  # noqa: BLE001
+                        star_row = None
+                if star_row is None:
+                    return _refuse(
+                        label,
+                        MEMOIR_CODE_NOT_FOUND,
+                        f"star not found: {star_name}",
+                    )
+                card = repo.get_star_card(caller_agent_id, star_row.id)
+                lines = card.get("lines") or []
+                has_episodes = len(lines) > 0
+                from daemon.services.memoir_constellation_service import (
+                    MemoirConstellationService,
+                )
+
+                effective = MemoirConstellationService.effective_heat(
+                    getattr(star_row, "heat", 0.0),
+                    getattr(star_row, "last_touched_at", None),
+                )
+                aliases = [
+                    a.get("alias")
+                    for a in (card.get("aliases") or [])
+                    if a.get("alias")
+                ]
+                episode_lines: list[str] = []
+                if has_episodes:
+                    try:
+                        from sqlmodel import Session as _S
+                        from daemon.repositories.memoir.models import MemoirEpisode
+
+                        with _S(repo.engine) as session:
+                            for line in lines[:10]:
+                                eid = line.get("episode_id")
+                                ep = session.get(MemoirEpisode, eid)
+                                title = "(untitled)"
+                                when = line.get("last_mentioned_at") or line.get(
+                                    "first_mentioned_at"
+                                )
+                                if ep is not None:
+                                    title = getattr(ep, "title", None) or "(untitled)"
+                                    if getattr(ep, "event_at", None) is not None:
+                                        when = ep.event_at
+                                date_str = ""
+                                if when is not None:
+                                    try:
+                                        from daemon.services.timestamps import (
+                                            coerce_to_aware_utc,
+                                        )
+
+                                        date_str = coerce_to_aware_utc(when).date().isoformat()
+                                    except Exception:  # noqa: BLE001
+                                        date_str = str(when)
+                                episode_lines.append(f"- [{date_str}] {title}")
+                    except Exception:  # noqa: BLE001
+                        pass
+                if not episode_lines:
+                    episode_lines = ["- (none)"]
+                neighbor_lines: list[str] = []
+                for n in (card.get("neighbors") or [])[:10]:
+                    neighbor_lines.append(
+                        f"- {n.get('name')} ({n.get('star_type', 'concept')})"
+                    )
+                if not neighbor_lines:
+                    neighbor_lines = ["- (none)"]
+                aliases_text = ", ".join(aliases) if aliases else "(none)"
+                description = getattr(star_row, "description", "") or "(none)"
+                first_seen = getattr(star_row, "first_seen_at", None)
+                last_touched = getattr(star_row, "last_touched_at", None)
+                summary_as_of = getattr(star_row, "description_as_of", None)
+                first_str = (
+                    first_seen.date().isoformat()
+                    if hasattr(first_seen, "date")
+                    else str(first_seen)
+                )
+                last_str = (
+                    last_touched.date().isoformat()
+                    if hasattr(last_touched, "date")
+                    else str(last_touched)
+                )
+                summary_str = (
+                    summary_as_of.isoformat()
+                    if hasattr(summary_as_of, "isoformat")
+                    else (str(summary_as_of) if summary_as_of else "(none)")
+                )
+                name = getattr(star_row, "name", star_name)
+                stype = getattr(star_row, "star_type", "concept")
+                dossier = (
+                    f"=== STAR: {name} (type: {stype}, heat: {effective}) ===\n"
+                    f"Aliases: {aliases_text}\n"
+                    f"First Seen: {first_str} | Last Touched: {last_str} | "
+                    f"Summary As Of: {summary_str}\n"
+                    f"\n"
+                    f"Description:\n{description}\n"
+                    f"\n"
+                    f"Connected Episodes (recent):\n"
+                    + "\n".join(episode_lines)
+                    + "\n"
+                    f"\n"
+                    f"Neighbor Stars (1-hop):\n"
+                    + "\n".join(neighbor_lines)
+                )
+                if has_episodes:
+                    try:
+                        repo.increment_heat(caller_agent_id, star_row.id, 1.0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                return dossier
+
+            return await asyncio.to_thread(_sync)
+        except Exception:  # noqa: BLE001
+            logger.exception("memoir_about failed")
+            return _refuse(
+                label,
+                MEMOIR_CODE_INTERNAL_ERROR,
+                "an unexpected error occurred (logged server-side)",
+            )
+
     # ── the tool_help surface (the ``_full_doc_`` contract) ─────────────
     # D0.7: the resolved knob state is embedded from the knob module's
     # own text — the wording has exactly one home.
@@ -1260,6 +1459,13 @@ def create_memoir_tools(
         "an act of attention and never reorders future recalls. An "
         "inverted window (since after until) is refused." + shared_tail
     )
+    memoir_about._full_doc_ = (
+        "Retrieve an entity dossier from the Constellation graph: canonical "
+        "identity, type, consolidated description, effective heat, recent "
+        "connected episodes, and 1-hop neighbor stars. A star with zero "
+        "linked episodes returns an empty-dossier SUCCESS. Unauthorized "
+        "callers and a disabled surface are refused." + shared_tail
+    )
 
     return [
         memoir_write,
@@ -1267,6 +1473,7 @@ def create_memoir_tools(
         memoir_unpin,
         memoir_recall,
         memoir_timeline,
+        memoir_about,
     ]
 
 

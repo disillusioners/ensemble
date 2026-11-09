@@ -997,70 +997,41 @@ class MemoirReflectionService:
     # ── the constellation extraction (V2-31, the decoupled budget) ─────
 
     def _extract_constellation(self, chunk: Sequence[Any], *, now: datetime) -> int:
-        """Extract the star mentions and write the constellation LINES.
+        """Extract star mentions and write constellation LINES.
 
-        THE PASS ID IS ALWAYS EXPLICIT (the phase-1 CRASH-RECOVERY
-        GUARD): ``record_line`` increments ``mention_count`` only when
-        the incoming ``pass_id`` differs from the stored one, and the
-        comparison is ``IS DISTINCT FROM`` — so a ``None`` pass id would
-        NEVER increment (a NULL is not distinct from a NULL). A pass
-        that always passes an explicit id therefore counts its mentions
-        exactly once, and a RE-RUN of the same pass is a no-op.
-
-        Returns:
-            The number of lines written.
+        Delegates to :class:`MemoirConstellationService` so the heuristic
+        ``stars[]`` seed is the PRIMARY mechanism and the LLM extraction
+        is the FALLBACK (V2-D 3.1 / 3.9).  The pass id is always explicit
+        (the phase-1 crash-recovery guard).
         """
         if self._constellation is None:
             return 0
-        prompt = self._extraction_prompt(chunk)
         try:
-            raw = self._llm_caller(prompt)
+            from daemon.services.memoir_constellation_service import (
+                MemoirConstellationService,
+            )
+
+            svc = MemoirConstellationService(
+                self._constellation,
+                llm_caller=self._llm_caller,
+                clock=lambda: now,
+                agent_id=self._settings.agent_id,
+            )
+            return int(
+                svc.extract(
+                    chunk,
+                    pass_id=f"reflect-{uuid.uuid4().hex[:12]}",
+                    agent_id=self._settings.agent_id,
+                    now=now,
+                )
+            )
         except Exception as exc:  # noqa: BLE001 — never fail the pass
             logger.warning(
-                "[MemoirReflection] the constellation extraction call failed "
+                "[MemoirReflection] the constellation extraction failed "
                 "(%s) — the pass continues",
                 type(exc).__name__,
             )
             return 0
-        mentions = self._parse_envelope(raw, kind="mentions")
-        if mentions is None:
-            return 0
-        pass_id = f"reflect-{uuid.uuid4().hex[:12]}"
-        written = 0
-        chunk_ids = {episode.id for episode in chunk}
-        for mention in mentions:
-            episode_id = str(mention.get("episode_id") or "")
-            name = str(mention.get("name") or "").strip()
-            if not episode_id or not name:
-                continue
-            if episode_id not in chunk_ids:
-                continue
-            star_type = str(mention.get("star_type") or "concept").strip().lower()
-            if star_type not in MEMOIR_STAR_TYPES:
-                star_type = "concept"
-            try:
-                star = self._constellation.upsert_star(
-                    self._settings.agent_id,
-                    name,
-                    star_type,
-                    event_at=getattr(chunk[0], "event_at", None) if chunk else None,
-                )
-                self._constellation.record_line(
-                    self._settings.agent_id,
-                    star.id,
-                    episode_id,
-                    event_at=getattr(chunk[0], "event_at", None) if chunk else None,
-                    # THE EXPLICIT PASS ID — never None.
-                    pass_id=pass_id,
-                )
-                written += 1
-            except Exception as exc:  # noqa: BLE001 — one bad mention is not a failed pass
-                logger.warning(
-                    "[MemoirReflection] a constellation mention was refused "
-                    "(%s) — the pass continues",
-                    type(exc).__name__,
-                )
-        return written
 
     # ── the house LLM lane ──────────────────────────────────────────────
 

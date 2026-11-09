@@ -64,6 +64,7 @@ TOOL_NAMES: frozenset[str] = frozenset(
         "memoir_unpin",
         "memoir_recall",
         "memoir_timeline",
+        "memoir_about",
     }
 )
 
@@ -225,13 +226,14 @@ class TestTheRegistrationWiring:
         source = (REPO_ROOT / "daemon" / "tools" / "memoir.py").read_text(
             encoding="utf-8"
         )
-        assert source.count("@register_tool_category(MEMOIR_CATEGORY_KEY)") == 5
+        assert source.count("@register_tool_category(MEMOIR_CATEGORY_KEY)") == 6
         for schema in (
             "MemoirWriteInput",
             "MemoirPinInput",
             "MemoirUnpinInput",
             "MemoirRecallInput",
             "MemoirTimelineInput",
+            "MemoirAboutInput",
         ):
             dec_idx = source.index("@register_tool_category(MEMOIR_CATEGORY_KEY)")
             tool_idx = source.index(f"@tool(args_schema={schema})")
@@ -248,7 +250,7 @@ class TestTheRegistrationWiring:
             encoding="utf-8"
         )
         assert (
-            source.count("refusal = _gate(label,") == 5
+            source.count("refusal = _gate(label,") == 6
         ), "every one of the five bodies must gate on the captured id"
         assert source.count("def _gate(label: str, action: str, agent_id: str, manager: Any) -> str | None:") == 1, (
             "the shared gate helper must exist exactly once"
@@ -281,7 +283,7 @@ class TestTheRegistrationWiring:
             match.start()
             for match in re.finditer(r"refusal = _gate\(label,", source)
         ]
-        assert len(call_starts) == 5, "five bodies must delegate to _gate"
+        assert len(call_starts) == 6, "six bodies must delegate to _gate"
         for start in call_starts:
             first_db_idx = source.find("asyncio.to_thread(", start)
             assert first_db_idx != -1, (
