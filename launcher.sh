@@ -366,7 +366,15 @@ _js_json_field() {
 # _JS_LAST_AWK_RC — the RAW exit status of the last awk pass (0/1/127/2/124).
 # Read it in the message that names the failure class, so the operator sees
 # WHICH failure it was ("awk rc=127" = the interpreter is gone).
+# VISIBILITY ACROSS THE $(...) BOUNDARY: `_js_journal_read`/`_js_json_sub`
+# are invoked via command substitution (itself a subshell), so even with
+# the here-string delivery the in-frame assignment would die with that
+# subshell. When a caller holds FD 9 OPEN FOR WRITING around the producer
+# call (`_js_awk_rc_begin` / `_js_awk_rc_end`), `_js_awk_bounded` writes
+# the raw status through it and `_js_awk_rc_end` folds it back into the
+# caller's frame. FD 9 — NOT 3 (`_js_awk_pass` runs awk on fd 3).
 _JS_LAST_AWK_RC=0
+_JS_AWK_RC_TMP=""
 
 # _js_awk_pass <program> [key] — run ONE awk pass over the caller's input.
 #
@@ -404,7 +412,12 @@ _js_awk_pass() {
 #              maps the SIGKILL to the conventional `timeout` code 124)
 #   any other raw status → 2 (an unknown failure is NOT a content verdict)
 #
-# The input arrives on the caller's stdin; the awk program is unchanged.
+# The input arrives on the caller's stdin (delivered by a here-string at
+# the call sites); the awk program is unchanged. Callers invoke this
+# wrapper DIRECTLY — never as a pipeline segment: a pipeline's last
+# segment runs in a SUBSHELL, so the `_JS_LAST_AWK_RC` assignment below
+# would never reach the caller's frame and every unavailable-WARN would
+# quote a stale `awk rc=0` (D1, probe-proven; fixed round 3).
 _js_awk_bounded() {
     local prog="$1" key="${2-}" rc=0
     if _js_run_bounded "$_JS_AWK_TIMEOUT_S" -- _js_awk_pass "$prog" "$key" 3<&0; then
@@ -413,10 +426,46 @@ _js_awk_bounded() {
         rc=$?
     fi
     _JS_LAST_AWK_RC="$rc"
+    # raw-rc side-channel (see the rc-vocabulary block above): when the
+    # caller holds FD 9 open for writing around the producer call, the
+    # raw status crosses the $(...) command-substitution boundary with
+    # it. Closed FD 9 → the write fails harmlessly and the value simply
+    # stays frame-local. NB: the silencing MUST be scoped to the group —
+    # redirection-setup errors fire BEFORE a command-scoped 2>/dev/null
+    # is applied, so `printf ... >&9 2>/dev/null` still leaks
+    # "9: Bad file descriptor" to stderr on every unbracketed pass.
+    { printf '%s' "$rc" >&9; } 2>/dev/null || true
     case "$rc" in
         0|1) return "$rc" ;;
         *)   return 2 ;;
     esac
+}
+
+# _js_awk_rc_begin / _js_awk_rc_end — bracket ONE producer call
+# (`_js_journal_read` / `_js_json_sub`) so its RAW awk status reaches the
+# CALLER's frame. `$(...)` is itself a subshell: the in-frame assignment
+# inside the producer would be discarded with it. begin opens FD 9 to a
+# per-process temp file (inherited by the cmdsub subshell); the wrapper
+# writes the raw status through it; end folds it back into
+# `_JS_LAST_AWK_RC` and removes the file. Every WARN that quotes
+# `awk rc=$_JS_LAST_AWK_RC` sits behind a bracketed producer call —
+# brackets only ever span ONE producer call, so "the last pass" and
+# "the pass that failed" are the same pass.
+_js_awk_rc_begin() {
+    _JS_AWK_RC_TMP="${TMPDIR:-/tmp}/launcher-awkrc.$$"
+    # NB: the silencing MUST be scoped to the group — a bare
+    # `exec 9>f 2>/dev/null` persists BOTH redirections and would send
+    # every later WARN to /dev/null (probe-caught in round 3).
+    { exec 9>"$_JS_AWK_RC_TMP"; } 2>/dev/null || true
+}
+_js_awk_rc_end() {
+    { exec 9<&-; } 2>/dev/null || true
+    if [ -n "$_JS_AWK_RC_TMP" ] && [ -f "$_JS_AWK_RC_TMP" ]; then
+        _JS_LAST_AWK_RC="$(cat "$_JS_AWK_RC_TMP" 2>/dev/null)"
+        [ -n "$_JS_LAST_AWK_RC" ] || _JS_LAST_AWK_RC=0
+        rm -f "$_JS_AWK_RC_TMP" 2>/dev/null || true
+    fi
+    _JS_AWK_RC_TMP=""
 }
 
 # _js_json_sub <json> <key> — extract a nested object/array value by
@@ -457,16 +506,28 @@ _js_json_sub() {
     # ENVIRON, split() with a regex separator, substr/index/length).
     # LC_ALL=C pins byte-oriented processing; the key travels via the
     # environment (not awk -v) so no escape sequences can be mangled.
-    # The json itself rides stdin (printf builtin — one O(n) pipe write).
+    # DELIVERY (round-3 rc-visibility fix): the json rides stdin via a
+    # bash here-string and the wrapper is invoked DIRECTLY — no longer as
+    # a pipeline segment. A pipeline's last segment runs in a SUBSHELL,
+    # so `_JS_LAST_AWK_RC` (set inside `_js_awk_bounded`) never reached
+    # this frame and every unavailable-WARN printed a stale `awk rc=0`
+    # even after a raw 127 (D1, probe-proven). The RAW RC CROSSES THE
+    # OUTER $(...) LAYER TOO via the FD 9 side-channel: callers that
+    # quote the raw status bracket the producer call with
+    # `_js_awk_rc_begin` / `_js_awk_rc_end` (see the rc-vocabulary
+    # block). The here-string delivers the SAME bytes as the old printf
+    # (one O(n) write) plus ONE trailing newline; awk drops a final
+    # record separator, so buf is byte-exact unchanged (§13g/h/i pins
+    # hold).
     # The awk program re-assembles stdin VERBATIM: RS="\n" consumes the
     # record separator and the join puts it back, so buf is the input
     # bytes MINUS a trailing newline (awk's record split drops the final
-    # separator; printf emits none). The callers never supply a trailing
-    # newline — `_js_journal_read` prints with printf '%s' and every
-    # `$(...)` capture strips trailing newlines — so buf == the input
-    # bytes in practice. The §13g/h/i fixtures pin a byte-exact round-trip,
+    # separator — the here-string's newline IS that final separator; the
+    # callers' json is itself newline-free: `_js_journal_read` prints
+    # with printf '%s' and every `$(...)` capture strips trailing
+    # newlines). The §13g/h/i fixtures pin a byte-exact round-trip,
     # so this detail is load-bearing.
-    printf '%s' "$json" | _js_awk_bounded '
+    _js_awk_bounded '
         BEGIN { buf = ""; first = 1 }
         {
             if (first == 1) { buf = $0; first = 0 }
@@ -537,7 +598,7 @@ _js_json_sub() {
             }
             exit 1
         }
-    ' "$key" || rc=$?
+    ' "$key" <<<"$json" || rc=$?
     return "$rc"
 }
 
@@ -597,7 +658,16 @@ _js_journal_read() {
     # The pass is BOUNDED (60 s — see _JS_AWK_TIMEOUT_S) and its exit
     # status is MAPPED by _js_awk_bounded: 1 = a content verdict (not
     # trustworthy), 2 = the validator was unavailable (verdict UNKNOWN).
-    printf '%s' "$json" | _js_awk_bounded '
+    # DELIVERY (round-3 rc-visibility fix): the wrapper is invoked via a
+    # here-string in THIS shell — a pipeline segment would run it in a
+    # subshell and `_JS_LAST_AWK_RC` (the raw awk status the WARN sites
+    # quote) would never land in this frame. The raw status ALSO crosses
+    # this function's own `$(...)` capture at the callers via the FD 9
+    # side-channel (`_js_awk_rc_begin`/`_js_awk_rc_end` brackets — see
+    # the rc-vocabulary block). The here-string adds ONE trailing
+    # newline, which awk drops as the final record separator — the pass
+    # sees the same bytes (see _js_json_sub's delivery note).
+    _js_awk_bounded '
         BEGIN { ob = 0; cb = 0; os = 0; cs = 0; in_str = 0 }
         {
             n = split($0, parts, "\"")
@@ -631,7 +701,7 @@ _js_journal_read() {
             if (ob != cb || os != cs || in_str == 1) exit 1
             exit 0
         }
-    ' || rc=$?
+    ' <<<"$json" || rc=$?
     if [ "$rc" -ne 0 ]; then
         return "$rc"
     fi
@@ -659,7 +729,9 @@ _js_journal_write() {
 # pre-quoted, objects/numbers/bools/null raw).
 _js_journal_update() {
     local jp="$1" field="$2" raw="$3" json rest head out="" c depth rc=0
+    _js_awk_rc_begin
     json="$(_js_journal_read "$jp")" || rc=$?
+    _js_awk_rc_end
     if [ "$rc" -eq 2 ]; then
         # The validator was UNAVAILABLE — the journal's trustworthiness is
         # UNKNOWN, so the write is REFUSED (an empty read would splice a
@@ -723,8 +795,22 @@ _js_journal_update() {
 # history (newest last, D4).
 _js_history_append() {
     local jp="$1" event="$2" detail="$3" json hist new rc=0
-    json="$(_js_journal_read "$jp")" || return 1
+    _js_awk_rc_begin
+    json="$(_js_journal_read "$jp")" || rc=$?
+    _js_awk_rc_end
+    if [ "$rc" -eq 2 ]; then
+        # The journal READ was UNAVAILABLE (the balance validator never
+        # ran) — the verdict is UNKNOWN, so the append is REFUSED. Same
+        # safe outcome as the extractor refusal below, but LOUD: this arm
+        # used to fall into `|| return 1` with NO WARN (silent-refuse
+        # class — D2, round-3 sweep).
+        _log "WARN: journal history append REFUSED — $jp: the journal validator is UNAVAILABLE (awk rc=$_JS_LAST_AWK_RC); the history array is left untouched"
+        return 1
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    _js_awk_rc_begin
     hist="$(_js_json_sub "$json" "history")" || rc=$?
+    _js_awk_rc_end
     if [ "$rc" -eq 2 ]; then
         # The EXTRACTOR was UNAVAILABLE — the history array could not be
         # read. An empty extraction is indistinguishable from "the history
@@ -770,8 +856,22 @@ _js_history_append() {
 # loudness the ruling asks for.)
 _js_count_rollback() {
     local jp="$1" json counts cnt wstart wstart_epoch new_cnt until until_epoch rc=0
-    json="$(_js_journal_read "$jp")" || return 1
+    _js_awk_rc_begin
+    json="$(_js_journal_read "$jp")" || rc=$?
+    _js_awk_rc_end
+    if [ "$rc" -eq 2 ]; then
+        # The journal READ was UNAVAILABLE — the verdict is UNKNOWN; the
+        # counter is NOT reset and NO cooldown is armed. Same safe outcome
+        # as the extractor refusal below, but LOUD: this arm used to fall
+        # into `|| return 1` with NO WARN (silent-refuse class — D2,
+        # round-3 sweep).
+        _log "WARN: journal rollback counter NOT advanced — $jp: the journal validator is UNAVAILABLE (awk rc=$_JS_LAST_AWK_RC); the 24h counter is left untouched"
+        return 1
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    _js_awk_rc_begin
     counts="$(_js_json_sub "$json" "rollback_window_count")" || rc=$?
+    _js_awk_rc_end
     if [ "$rc" -eq 2 ]; then
         # The EXTRACTOR was UNAVAILABLE — the 24h counter could not be read.
         # An empty extraction is indistinguishable from "the counter is
@@ -819,8 +919,21 @@ _js_count_rollback() {
 # _js_quarantine <path> <ver> — append to quarantined[] (idempotent).
 _js_quarantine() {
     local jp="$1" ver="$2" json q new rc=0
-    json="$(_js_journal_read "$jp")" || return 1
+    _js_awk_rc_begin
+    json="$(_js_journal_read "$jp")" || rc=$?
+    _js_awk_rc_end
+    if [ "$rc" -eq 2 ]; then
+        # The journal READ was UNAVAILABLE — the verdict is UNKNOWN, so
+        # the append is REFUSED. Same safe outcome as the extractor
+        # refusal below, but LOUD (silent-refuse class — D2, round-3
+        # sweep found this arm alongside the two the verifier probed).
+        _log "WARN: journal quarantine append REFUSED — $jp: the journal validator is UNAVAILABLE (awk rc=$_JS_LAST_AWK_RC); the quarantined[] array is left untouched"
+        return 1
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    _js_awk_rc_begin
     q="$(_js_json_sub "$json" "quarantined")" || rc=$?
+    _js_awk_rc_end
     if [ "$rc" -eq 2 ]; then
         # The EXTRACTOR was UNAVAILABLE — the quarantine array could not be
         # read. An empty extraction is indistinguishable from "the array is
@@ -1499,9 +1612,21 @@ _js_serving_probe() {
 # missing field is a no-op, not an error.
 _js_quarantine_remove() {
     local jp="$1" ver="$2" json q inner item out="" first=1 rc=0
+    _js_awk_rc_begin
     json="$(_js_journal_read "$jp")" || rc=$?
+    _js_awk_rc_end
+    if [ "$rc" -eq 2 ]; then
+        # The journal READ was UNAVAILABLE — the verdict is UNKNOWN, so
+        # the removal is REFUSED loudly (this arm used to fall into
+        # `[ "$rc" -eq 0 ] || return 1` with NO WARN — silent-refuse
+        # class, round-3 sweep).
+        _log "WARN: journal quarantine removal REFUSED — $jp: the journal validator is UNAVAILABLE (awk rc=$_JS_LAST_AWK_RC); the quarantined[] array is left untouched"
+        return 1
+    fi
     [ "$rc" -eq 0 ] || return 1
+    _js_awk_rc_begin
     q="$(_js_json_sub "$json" "quarantined")" || rc=$?
+    _js_awk_rc_end
     if [ "$rc" -eq 2 ]; then
         # The extractor was UNAVAILABLE — the array could not be read, so
         # the removal is REFUSED (an empty read would rewrite the array).
@@ -1979,7 +2104,9 @@ _js_serving_commit_close() {
     # `_js_journal_update`'s OWN existence gate (the same substring
     # test), so it can only refuse what the writer itself would refuse.
     local pre_json pre_missing="" mfield prc=0
+    _js_awk_rc_begin
     pre_json="$(_js_journal_read "$journal")" || prc=$?
+    _js_awk_rc_end
     if [ "$prc" -eq 2 ]; then
         # The validator was UNAVAILABLE — the journal's trustworthiness is
         # UNKNOWN, so the whole commit is refused (ZERO writes, the txn
@@ -2222,7 +2349,9 @@ _js_sweep_flipped_disposition() {
     local jsize
     [ -f "$journal" ] || return 0
     local frc=0
+    _js_awk_rc_begin
     json="$(_js_journal_read "$journal")" || frc=$?
+    _js_awk_rc_end
     if [ "$frc" -eq 2 ]; then
         _log "WARN: journal sweep: the journal validator is UNAVAILABLE (awk rc=$_JS_LAST_AWK_RC) — the balance check did NOT run, so the txn state is UNKNOWN; the txn is left OPEN, boot proceeds"
         return 0
@@ -2280,7 +2409,9 @@ _js_sweep_flipped_disposition() {
     # re-read + revalidate UNDER the lock (the launcher's discipline — the
     # txn OBJECT is the identity: any change ⇒ the owner acted ⇒ no-op)
     local json2 inf2 j2rc=0
+    _js_awk_rc_begin
     json2="$(_js_journal_read "$journal")" || j2rc=$?
+    _js_awk_rc_end
     if [ "$j2rc" -ne 0 ]; then
         if [ "$j2rc" -eq 2 ]; then
             _log "WARN: journal sweep: the journal validator is UNAVAILABLE under the lock (awk rc=$_JS_LAST_AWK_RC) — the re-read could not be validated; refusing to act on the stale snapshot, boot proceeds"
@@ -2587,7 +2718,9 @@ _journal_sweep() {
     [ -f "$journal" ] || return 0
 
     local json jrc=0
+    _js_awk_rc_begin
     json="$(_js_journal_read "$journal")" || jrc=$?
+    _js_awk_rc_end
     if [ "$jrc" -eq 2 ]; then
         # The VALIDATOR was UNAVAILABLE — the balance check NEVER RAN, so
         # the journal's trustworthiness is UNKNOWN. NEVER report this as
@@ -2696,7 +2829,9 @@ _journal_sweep() {
     # (kind/target/started_at/flipped/owner_pid) or disappearance → the
     # owner is alive and acting — do nothing, release, boot proceeds.
     local json2 inf2 j2rc=0
+    _js_awk_rc_begin
     json2="$(_js_journal_read "$journal")" || j2rc=$?
+    _js_awk_rc_end
     if [ "$j2rc" -ne 0 ]; then
         if [ "$j2rc" -eq 2 ]; then
             _log "WARN: journal sweep: the journal validator is UNAVAILABLE under the lock (awk rc=$_JS_LAST_AWK_RC) — the re-read could not be validated; refusing to act on the stale snapshot, boot proceeds"

@@ -1449,6 +1449,61 @@ _jsf_warn2_out="$( ( PATH="$JSF_NOAWK_DIR"; . "$LAUNCHER"; INSTALL_DIR="$_jsf_wa
 assert_contains "13j the unavailable WARN does NOT claim 'unbalanced'" \
     "validator is UNAVAILABLE" "$_jsf_warn2_out"
 
+# 13j.5 — the unavailable WARN quotes the REAL RAW awk status. Before the
+#         round-3 fix the WARN read a stale `_JS_LAST_AWK_RC=0` at every
+#         site: the raw rc was set inside `_js_awk_bounded`, which ran as
+#         a pipeline segment (a subshell) AND behind the callers' `$(...)`
+#         command substitution (a second subshell). The wrapper is now
+#         invoked via a here-string AND writes the raw status through an
+#         FD 9 side-channel that `_js_awk_rc_begin`/`_js_awk_rc_end`
+#         brackets carry across the cmdsub boundary. Pin: under a
+#         missing-awk PATH the raw status is 127 — a NON-ZERO, NON-0
+#         literal in the WARN text.
+_jsf_noawk_update="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_journal_update "$2" current v2 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json" 2>/dev/null)"
+assert_contains "13j update-refusal WARN quotes the RAW awk status (awk rc=127, not a stale 0)" \
+    "awk rc=127" "$_jsf_noawk_update"
+_jsf_noawk_sweep="$( ( PATH="$JSF_NOAWK_DIR"; . "$LAUNCHER"; INSTALL_DIR="$_jsf_warn_dir" _journal_sweep ) 2>&1 >/dev/null )"
+assert_contains "13j sweep unavailable WARN quotes the RAW awk status (awk rc=127)" \
+    "awk rc=127" "$_jsf_noawk_sweep"
+
+# 13j.6 — the read-unavailable refuse arms are LOUD (round-3 D2): when
+#         `_js_journal_read` ITSELF reports rc=2, the writers used to
+#         fall into `|| return 1` with NO WARN — the journal stayed
+#         untouched (safe) but the operator got zero signal. Each arm now
+#         emits the sibling-style UNAVAILABLE WARN (with the raw rc)
+#         before returning 1.
+printf '%s' '{"current":"v1","history":[{"ts":"t","event":"sweep","detail":"d"}],"quarantined":["v0.0.1"],"rollback_window_count":{"24h":2,"window_start":"2026-01-01T00:00:00Z"},"cooldown_until":null}' \
+    > "$JSF_TEST_DIR/rc_read2.json"
+cp "$JSF_TEST_DIR/rc_read2.json" "$JSF_TEST_DIR/rc_read2.before"
+_jsf_hist_read2="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_history_append "$2" evt det 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
+assert_contains "13j history append WARNs when the journal READ is unavailable (raw rc quoted)" \
+    "awk rc=127" "$_jsf_hist_read2"
+_jsf_hist_read2_rc="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_history_append "$2" evt det >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
+assert_eq "13j read-unavailable history-append refusal still returns rc=1" \
+    "rc=1" "$_jsf_hist_read2_rc"
+if cmp -s "$JSF_TEST_DIR/rc_read2.before" "$JSF_TEST_DIR/rc_read2.json"; then
+    _pass
+else
+    _fail "13j history array untouched when the journal READ is unavailable" "identical" "differs"
+fi
+_jsf_cnt_read2="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_count_rollback "$2" 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
+assert_contains "13j rollback counter WARNs when the journal READ is unavailable (raw rc quoted)" \
+    "awk rc=127" "$_jsf_cnt_read2"
+_jsf_cnt_read2_rc="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_count_rollback "$2" >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
+assert_eq "13j read-unavailable rollback refusal still returns rc=1" \
+    "rc=1" "$_jsf_cnt_read2_rc"
+if cmp -s "$JSF_TEST_DIR/rc_read2.before" "$JSF_TEST_DIR/rc_read2.json"; then
+    _pass
+else
+    _fail "13j 24h counter untouched when the journal READ is unavailable" "identical" "differs"
+fi
+_jsf_quar_read2="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_quarantine "$2" v9.9.9 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
+assert_contains "13j quarantine append WARNs when the journal READ is unavailable (raw rc quoted)" \
+    "awk rc=127" "$_jsf_quar_read2"
+_jsf_qurem_read2="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_quarantine_remove "$2" v9.9.9 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
+assert_contains "13j quarantine removal WARNs when the journal READ is unavailable (raw rc quoted)" \
+    "awk rc=127" "$_jsf_qurem_read2"
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
