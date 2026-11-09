@@ -107,6 +107,10 @@ Published from the implementation reports (core implementation lane + wiring rou
 6. **Unverifiable in P1, by design** — the live proxy's behaviour against a real decision model row (nothing was contacted; no credential, no proxy-store write); `AppSettingKillStore` / `SettingsService.set_override` against a live PostgreSQL (the tests use the in-memory store); the durable month-to-date `CostAccumulator` (that is the wiring round's file); and the real board transaction (the test uses a fake `BoardService` — the `db_offload` thread path is exercised, the live transaction is not).
 7. **`AppSettingKillStore` is retained as the pre-wiring fallback** (it is the resolver's DB tier when no reader is injected); the wiring round binds the settings-service reader + writer so the production path resolves in one place. Record it as a deliberate retention, not an omission.
 
+8. **No new metric label values and no new seam id:** the wiring used only `snapshot.l3.selection` (already inside the bounded known-seam set), so `FAMILY_SERIES_BANDS["decision_overlay"]` stays at **411** and the zero-headroom band rule was **not** triggered.
+9. **The wiring round reported ZERO deviations** and stayed strictly within its assigned files.
+10. **A developer-verification finding:** `daemon/services/decision/config.py:331` accessed `model_fields` **on an instance**, raising `PydanticDeprecatedSince211` — **removal in Pydantic v3**, so config resolution would break on the next major with no test failing today. Found by independent verification on the settled tree (commit `c0801c9cf`), not reported by either implementation lane; a behaviour-preserving fix plus a regression pin is in flight in the same branch. Status at the time of this pass: **fix in flight** (if it has landed when you commit, say **fixed (commit `<sha>`)**; if not, say **fix in flight** — either is honest, do not guess). Cross-reference the `AliasChoices`/`validation_alias` mechanism: the alias choices published in §12b ARE the env-name contract and are implemented via Pydantic's `validation_alias` (`AliasChoices`), so the `model_fields` access at `:331` is the one Pydantic-API call that must be corrected before the next major.
+
 **OPEN QUESTION (explicitly labelled, distinct from the settled Q1/Q2):** `DECISION_MODEL` unset vs explicitly empty (item 5 above). The difference is unobservable in P1. Awaiting ratification.
 
 **WIRING STATE (published as ACTUAL, not contract):** the settings-key table (§12) now records the real registered specs (value_type, bounds, allowed_values, requires_restart, sensitive, env_var, config_path) as registered; the S1 wiring facts (§13) and the implementation base state (§15) are published as measured facts (commit `c0801c9cf`). The wiring round reported ZERO deviations and stayed within its assigned files. The wiring state is no longer pending.
@@ -163,19 +167,47 @@ P1 needs **NO new credential and NO proxy-store write**: the proxy store already
 
 ---
 
-## §12 Settings-key registration table (L7)
+## §12 Settings-key registration table (L7) — ACTUAL REGISTERED STATE (wiring round landed)
 
 P1 registers these keys in `MANAGED_KEYS` (no new table, no migration; the generic `AppSetting` row model suffices):
 
-| Key | Type | Default | Boot seed | config_path (underscore-flattened) |
-|---|---|---|---|---|
-| `decision_global_enabled` | int (0/1) | 0 (OFF) | `DECISION_ENABLED` (unset ⇒ OFF) | `decision.global_enabled` |
-| `decision_seam_snapshot_l3_selection_enabled` | int (0/1) | 0 (OFF) | `DECISION_SEAM_SNAPSHOT_L3_SELECTION` (unset ⇒ OFF) | `decision.seams.snapshot_l3_selection_enabled` |
-| `decision_seam_snapshot_l3_selection_stage` | str (`shadow`/`deciding`) | `shadow` | `DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE` (unset ⇒ `shadow`) | `decision.seams.snapshot_l3_selection_stage` |
+| Key | value_type | default | bounds | allowed_values | requires_restart | sensitive | env_var | config_path |
+|---|---|---|---|---|---|---|---|---|
+| `decision_global_enabled` | int | 0 | ge=0 le=1 | — | False | False | `DECISION_ENABLED` | `decision.global_enabled` |
+| `decision_seam_snapshot_l3_selection_enabled` | int | 0 | ge=0 le=1 | — | False | False | `DECISION_SEAM_SNAPSHOT_L3_SELECTION` | `decision.seams.snapshot_l3_selection_enabled` |
+| `decision_seam_snapshot_l3_selection_stage` | str | `shadow` | — | `{shadow, deciding}` | False | False | `DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE` | `decision.seams.snapshot_l3_selection_stage` |
 
-**Rationale (canonical chains).** The `config_path` walk dot-splits, so a dotted seam id would walk into a non-existent attribute (B-4 — `_get_config_value` uses bare `getattr` at `settings_service.py:1101-1105` ⇒ AttributeError, LATENT at registration and firing the first time an operator writes a DB override). The NESTED `seams.` form lets the S2/S3/S4 per-seam keys be added in the P4 lane **without changing the shape** — they are flat today ONLY because the table lists the one P1 seam. Keep the underscore-flattened seam id in the KEY (`decision_seam_snapshot_l3_selection_enabled`) and keep the human-readable `snapshot.l3.selection` as the registry record's `seam_id` — only the `config_path` chains change. These chains MUST resolve to REAL attributes on a real `Config.decision` object, and the yaml tier is `decision:` in `config.yaml` with an explicit `config_dict["decision"] = …` pass-through in `load_config` (a yaml block WITHOUT the pass-through is SILENTLY IGNORED — stated in-repo for nest_report at `daemon/config.py:5753-5755`).
+- **The additive change is IN:** `ManagedKeySpec` gained an OPTIONAL `allowed_values` (`None` ⇒ today's behaviour, fully backward-compatible), surfaced in `constraint_desc()` as `allowed_values=['deciding', 'shadow']`, and membership is enforced in `parse_and_validate` — a stage typo is **422 at write time**. This is what makes the ratified kill semantics' stage key self-validating.
+- **The invalidation hook is IN:** `SettingsService` gained `register_override_changed_callback(callback)`; **both** `set_override` and `clear_override` notify the registered callbacks **after** `session.commit()`. `settings_service.py` has **ZERO** imports from `daemon.services.decision` — no circular import; the callback is registered dynamically in `daemon/manager.py`.
+- **The YAML tier is IN:** `daemon/config.py` gained `_RAW_YAML_DECISION` / `raw_yaml_decision()`, and the settings resolver's `_raw_yaml_leaf` reads it, so the settings service's yaml tier and the `Config.decision` object serve the SAME nested structure. The two keying schemes agree: the `config_path` walk (`config.decision.global_enabled`, `config.decision.seams.snapshot_l3_selection_{enabled,stage}`) and the store-key mapping rendered by `yaml_switch_tier()` / `seam_switch_tier()` (`decision_global_enabled`, `decision_seam_snapshot_l3_selection_{enabled,stage}`).
 
-S2/S3/S4 per-seam keys register ONLY when those seams register (P4 lane); in P1 they stay UNREGISTERED. `_enabled` → `value_type="int", ge=0, le=1`; `_stage` → `value_type="str"`. The `allowed_values` on the stage key is an OPTIONAL additive change to `ManagedKeySpec` (None = today's behaviour, fully backward-compatible). Use the underscore-flattened seam id in the KEY and in `config_path`; keep the human-readable `snapshot.l3.selection` as the registry record's `seam_id`.
+All three keys have `requires_restart=False` (live, no restart needed for a flip).
+
+---
+
+## §12b `Config.decision` shape (implementation fact)
+
+`Config.decision` = `DecisionConfig(BaseSettings)` with `env_prefix="DECISION_"`, bound on `Config` as `decision: DecisionConfig = Field(default_factory=DecisionConfig)`.
+
+| Field | Type / default | Env |
+|---|---|---|
+| `base_url` | `str = ""` ⇒ falls back to `OPENAI_BASE_URL` (reuse, never mint) | `DECISION_BASE_URL` |
+| `api_key` | `str = ""` ⇒ `OPENAI_API_KEY` | `DECISION_API_KEY` |
+| `model` | `str = ""` ⇒ resolves to the purpose-id `decision`; **never** `OPENAI_MODEL` | `DECISION_MODEL` |
+| `timeout_s` | `float = 5.0` (gt 0) | `DECISION_TIMEOUT_S` |
+| `cost_ceiling_usd` | `float = 50.0` (gt 0 — the ratified global ceiling) | `DECISION_COST_CEILING_USD` |
+| `token_ceiling` | `int = 10_000_000` (gt 0 — the L8 fail-safe) | `DECISION_TOKEN_CEILING` |
+| `pricing_usd_per_million_tokens` | `str = ""` (JSON object string — the operator-configured rate table) | `DECISION_PRICING_USD_PER_MILLION_TOKENS` |
+| `global_enabled` | `bool = False` | `DECISION_ENABLED` **or** `DECISION_GLOBAL_ENABLED` |
+| `seams` | `DecisionSeamsConfig` | — |
+
+`DecisionSeamsConfig` (`env_prefix="DECISION_SEAM_"`): `snapshot_l3_selection_enabled: bool = False` (aliases `DECISION_SEAM_SNAPSHOT_L3_SELECTION` / `DECISION_SEAM_SNAPSHOT_L3_SELECTION_ENABLED`), `snapshot_l3_selection_stage: str = "shadow"` (alias `DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE`).
+
+The MANAGED-KEY `env_var` tier (`DECISION_ENABLED`, `DECISION_SEAM_SNAPSHOT_L3_SELECTION`) is deliberately **distinct** from the config namespace's env prefix — two surfaces, ONE ladder. Base/key **reuse** the `OPENAI_*` values; `"decision"` is **already** in `_ALLOWED_MODELS_DEFAULT` (not re-added).
+
+The `config.yaml` `decision:` block (ratified defaults): `base_url: ""`, `api_key: ""`, `model: ""`, `timeout_s: 5.0`, `cost_ceiling_usd: 50.0`, `token_ceiling: 10000000`, `pricing_usd_per_million_tokens: ""`, `global_enabled: false`, `seams: {snapshot_l3_selection_enabled: false, snapshot_l3_selection_stage: "shadow"}`.
+
+The `.env.example` additions: `DECISION_BASE_URL`, `DECISION_API_KEY`, `DECISION_MODEL`, `DECISION_TIMEOUT_S`, `DECISION_COST_CEILING_USD`, `DECISION_TOKEN_CEILING`, `DECISION_PRICING_USD_PER_MILLION_TOKENS`, `DECISION_ENABLED`, `DECISION_SEAM_SNAPSHOT_L3_SELECTION`, `DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE`.
 
 ---
 
