@@ -432,6 +432,8 @@ class SeamRegistry:
             )
 
         # ── stage 1: build the question ────────────────────────────────
+        import sys as _dbg
+        print("REG stage1 build_input", file=_dbg.stderr, flush=True)
         try:
             request = record.build_input(context)
             if not isinstance(request, DecisionRequest):
@@ -456,6 +458,8 @@ class SeamRegistry:
 
         # ── stage 2: the call (single attempt, never raises) ──────────
         try:
+            import sys as _dbg
+            print("REG stage2 consult", file=_dbg.stderr, flush=True)
             client_outcome: ClientOutcome = await self._client.consult(
                 request,
                 floor=floor,

@@ -230,7 +230,9 @@ async def test_s1_overlay_active_produces_identical_selection_and_writes_shadow_
         global_enabled=True,
     )
 
-    client = DecisionClient(core_cfg, transport_factory=lambda: transport)
+    client = DecisionClient(
+        core_cfg, transport_factory=lambda: transport, configured=True
+    )
     registry = SeamRegistry(client=client, config=core_cfg)
     registry.register(build_s1_seam_record())
 
@@ -251,6 +253,7 @@ async def test_s1_overlay_active_produces_identical_selection_and_writes_shadow_
         shadow_writer=shadow_writer,
         config=core_cfg,
         accumulator=accumulator,
+        configured=True,
     )
 
     # Candidates: snap-1, snap-2, snap-3
@@ -342,7 +345,9 @@ async def test_s1_overlay_inactive_produces_byte_identical_results_and_no_call_m
         model="decision",
         global_enabled=False,
     )
-    client = DecisionClient(core_cfg, transport_factory=lambda: transport)
+    client = DecisionClient(
+        core_cfg, transport_factory=lambda: transport, configured=True
+    )
     registry = SeamRegistry(client=client, config=core_cfg)
     registry.register(build_s1_seam_record())
 
@@ -357,6 +362,7 @@ async def test_s1_overlay_inactive_produces_byte_identical_results_and_no_call_m
         shadow_writer=shadow_writer,
         config=core_cfg,
         accumulator=accumulator,
+        configured=True,
     )
 
     candidates = [
@@ -445,7 +451,9 @@ async def test_kill_switch_flip_takes_effect_without_restart_and_survives_restar
         model="decision",
         global_enabled=True,
     )
-    client = DecisionClient(core_cfg, transport_factory=lambda: transport)
+    client = DecisionClient(
+        core_cfg, transport_factory=lambda: transport, configured=True
+    )
     registry = SeamRegistry(client=client, config=core_cfg)
     registry.register(build_s1_seam_record())
 
@@ -471,6 +479,7 @@ async def test_kill_switch_flip_takes_effect_without_restart_and_survives_restar
         shadow_writer=ShadowWriter(sink=lambda r: None),
         config=core_cfg,
         accumulator=AppSettingCostAccumulator(engine),
+        configured=True,
     )
 
     # Turn 1: Overlay is ON, consult succeeds and calls proxy

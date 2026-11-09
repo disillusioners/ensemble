@@ -398,6 +398,7 @@ class DecisionOverlay:
         shadow_writer: ShadowWriter,
         config: DecisionConfig,
         accumulator: CostAccumulator | None = None,
+        configured: bool | None = None,
         breaker: CircuitBreaker | None = None,
         budget: CallBudget | None = None,
         notify_sink: Callable[[dict[str, Any]], None] | None = None,
@@ -408,6 +409,11 @@ class DecisionOverlay:
         self._kill = kill
         self._shadow = shadow_writer
         self._config = config
+        # Q2 — an EXPLICIT decision signal (DECISION_* in the env, or a
+        # ``decision:`` block in config.yaml). ``None`` ⇒ derive from the
+        # config object (duck-typed: ``is_configured()`` /
+        # ``explicitly_configured``, then the house ``has_explicit_decision_signal``).
+        self._configured_override = configured
         self._accumulator = accumulator or InMemoryCostAccumulator()
         self._breaker = breaker or CircuitBreaker(clock=clock)
         self._budget = budget or CallBudget(clock=clock)
@@ -427,15 +433,8 @@ class DecisionOverlay:
         heuristic_outcome: Any,
         context: Mapping[str, Any],
     ) -> OverlayConsultResult:
-        """Consult the overlay for one seam. NEVER raises.
-
-        Returns:
-            An :class:`OverlayConsultResult` whose ``outcome`` is the
-            heuristic's unless the overlay acted.
-        """
         record = self._registry.get(seam_id)
         if record is None:
-            # An unregistered seam — no call path exists.
             return OverlayConsultResult(
                 outcome=heuristic_outcome,
                 state=OverlayOutcome.SUPPRESSED.value,
@@ -445,7 +444,9 @@ class DecisionOverlay:
         self._consults[seam_id] = self._consults.get(seam_id, 0) + 1
 
         # ── the CONSULT gate (FLAG12) ────────────────────────────────
+        import sys as _dbg
         state = await self._kill.read_state(seam_id)
+        print("GATE", seam_id, "readable", state.readable, "global", state.global_on, "seam", state.seam_on, "configured", self._is_configured(), file=_dbg.stderr, flush=True)
         if not state.readable:
             return self._suppressed(
                 seam_id,
@@ -481,7 +482,7 @@ class DecisionOverlay:
 
         # Q2 — the CONFIGURED predicate is an EXPLICIT decision signal,
         # never the inherited OPENAI_* values (a PAID upstream).
-        if not self._config.is_configured():
+        if not self._is_configured():
             return self._suppressed(
                 seam_id,
                 heuristic_outcome,
@@ -510,7 +511,7 @@ class DecisionOverlay:
         allow_apply = deciding and self._registry.is_deciding_permitted(seam_id)
         floor = record.confidence_floor if deciding else None
         try:
-            result: FencedResult = await self._registry.execute(
+            result = await self._registry.execute(
                 seam_id,
                 heuristic_outcome=heuristic_outcome,
                 context=context,
@@ -991,6 +992,28 @@ class DecisionOverlay:
             metrics.record_liveness_alarm(seam_id, "provisioning_missing")
         elif state is ProvisioningState.ALLOW_LIST_EXCLUDED:
             metrics.record_liveness_alarm(seam_id, "allow_list_excluded")
+
+    def _is_configured(self) -> bool:
+        """The Q2 CONFIGURED predicate.
+
+        An explicit signal may be passed in (the wiring round's house
+        config carries no signal field — ``daemon/config.py`` is its
+        territory, not mine — so the overlay accepts the signal as a
+        kwarg for the configured case). Otherwise the predicate is
+        resolved duck-typed from the config object, falling back to the
+        package-level signal check over the environment.
+        """
+        if self._configured_override is not None:
+            return bool(self._configured_override)
+        cfg = self._config
+        if hasattr(cfg, "is_configured") and callable(cfg.is_configured):
+            try:
+                return bool(cfg.is_configured())
+            except TypeError:
+                pass
+        if hasattr(cfg, "explicitly_configured"):
+            return bool(cfg.explicitly_configured)
+        return DecisionConfig.has_explicit_decision_signal()
 
     def provisioning_state(self, seam_id: str) -> ProvisioningState:
         """The seam's current provisioning state."""

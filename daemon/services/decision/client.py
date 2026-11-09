@@ -135,6 +135,7 @@ class DecisionClient:
         *,
         transport_factory: Callable[[], Any] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        configured: bool | None = None,
     ) -> None:
         """Build the client.
 
@@ -143,10 +144,15 @@ class DecisionClient:
             transport_factory: Test seam — returns the httpx transport
                 injected into every client this instance builds.
             clock: Monotonic clock seam (latency measurement).
+            configured: An EXPLICIT decision signal (Q2). ``None`` ⇒
+                resolved duck-typed from ``config`` (``is_configured()`` /
+                ``explicitly_configured``, then the package-level signal
+                check over the environment).
         """
         self._config = config
         self._transport_factory = transport_factory or _TRANSPORT_FACTORY
         self._clock = clock
+        self._configured_override = configured
 
     # ── public surface ──────────────────────────────────────────────────
 
@@ -257,7 +263,7 @@ class DecisionClient:
         # values is not enough: the decision row routes to a PAID
         # upstream, so an operator who never opted in must never be
         # consulted — and never billed.
-        if not self._config.is_configured():
+        if not self._is_configured():
             return self._suppressed(SuppressionReason.NOT_CONFIGURED)
         # Rows 1-3 of §6 — the emptiness checks are SEPARATE from the
         # configured predicate: a configured module with a missing base
@@ -297,6 +303,28 @@ class DecisionClient:
                 if len(question.levels) > MAX_LEVELS:
                     return self._suppressed(SuppressionReason.INVALID_REQUEST)
         return None
+
+    def _is_configured(self) -> bool:
+        """The Q2 CONFIGURED predicate (duck-typed for the house config).
+
+        The house ``DecisionConfig`` (``daemon/config.py``) carries no
+        signal field — it is the wiring round's territory, not mine —
+        so the predicate is resolved duck-typed: an explicit override
+        (the wiring test's hermetic signal), then ``is_configured()`` /
+        ``explicitly_configured`` if the config carries them, then the
+        package-level signal check over the environment.
+        """
+        if self._configured_override is not None:
+            return bool(self._configured_override)
+        cfg = self._config
+        if hasattr(cfg, "is_configured") and callable(cfg.is_configured):
+            try:
+                return bool(cfg.is_configured())
+            except TypeError:
+                pass
+        if hasattr(cfg, "explicitly_configured"):
+            return bool(cfg.explicitly_configured)
+        return DecisionConfig.has_explicit_decision_signal()
 
     # ── transport ───────────────────────────────────────────────────────
 

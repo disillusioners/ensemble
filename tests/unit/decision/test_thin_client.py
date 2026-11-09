@@ -544,6 +544,49 @@ async def test_the_request_module_emits_no_criteria_anywhere() -> None:
     assert "criteria" not in json.dumps(payload)
 
 
+# ── FIX A — join by name, never by index; UNANSWERED is explicit ──────
+
+
+async def test_the_unanswered_question_is_recorded_not_substituted() -> None:
+    """FIX A — ask 2, answer 1: no mis-join, no silent drop.
+
+    A provider that answers only a strict subset of the questions must
+    NOT be mis-joined (question 2's answer is not attached to question
+    1's name) and the unanswered question is RECORDED as an explicit
+    ``unanswered`` outcome — never dropped and never substituted.
+    """
+    from daemon.services.decision.types import DecisionRequest
+
+    client = make_client(
+        lambda request: json_response(
+            {
+                "model": "decision",
+                "answers": [
+                    {"type": "choice", "name": "q1", "choice": "id-a",
+                     "probabilities": [{"value": "id-a", "probability": 0.9}],
+                     "confidence": 0.9},
+                ],
+            }
+        )
+    )
+    request = DecisionRequest(
+        input="x",
+        questions=(
+            choice_question(name="q1"),
+            choice_question(name="q2"),
+        ),
+    )
+    outcome = await client.consult(request)
+    assert outcome.answer is None, "an unanswered question fails open"
+    assert outcome.failure_class is not None
+    assert outcome.failure_class.value == "unmatched_answer"
+    assert outcome.unanswered_questions == ("q2",), (
+        "the unanswered question must be recorded, never dropped"
+    )
+    # The shadow row's verdict is 'unanswered' (carried by the overlay);
+    # the metric verdict label keeps its three values (no new label).
+
+
 # ── TRAP 2 — the mapper degrades, it never raises ───────────────────────
 
 
@@ -736,6 +779,8 @@ async def test_a_choice_answer_carries_the_full_distribution() -> None:
 
 async def test_a_predicate_answer_reads_its_probability() -> None:
     """AC-4 — a predicate answer carries ``probability``."""
+    from daemon.services.decision.types import DecisionRequest
+
     client = make_client(
         lambda request: json_response(
             {
