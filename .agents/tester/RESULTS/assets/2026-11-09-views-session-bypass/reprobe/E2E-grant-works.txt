@@ -1,0 +1,41 @@
+
+#### E2E-1 mint grant (Origin null): → EXPECT 303 + grant
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Origin: null --data code=m2enz6 -c /tmp/tmp.wwDRDvsGkl
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:18:33 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8RFaOER77MGCUAbdbXBNTHeFMa6JGmTZqxD_bSAve21ygOakvK-AD6Pkh7MW2E9rHOY3ro-B5RIYqkR3-gu5wraks4Tc3kFdCElMkwiZVK60xhJzHH-XerumKM1citq8QZjeBYx351DiNcxKsuOnhKIB45bF7N1XmG8tjysQVM_CQngWkbUx9B-mqnIKSTEQrfPE; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### E2E-2 GET with grant cookie: → EXPECT 200 + SECRET-CONTENT-REPROBE-marker
+$ curl http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -b /tmp/tmp.wwDRDvsGkl
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Mon, 09 Nov 2026 00:18:47 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   content-security-policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'nonce-UPNmX6aFXdlWOxmY7tFieA'; style-src 'self' 'nonce-UPNmX6aFXdlWOxmY7tFieA' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+   referrer-policy: no-referrer
+   content-length: 3368
+   content-type: text/html; charset=utf-8
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+   <meta charset="utf-8">
+   <title>reprobe.md - live view</title>
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <style nonce="UPNmX6aFXdlWOxmY7tFieA">
+     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; }

@@ -1,0 +1,7 @@
+== mint view_link('cellroot', 'matrix-a.md')
+Public URL: /views/public/cellroot/matrix-a.md
+Passcode: bqe8hq
+Authenticated URL: /views/cellroot/matrix-a.md
+Generation: 1
+Locked: no
+  shape OK (in-process tool path, dev DB, drill fence key)

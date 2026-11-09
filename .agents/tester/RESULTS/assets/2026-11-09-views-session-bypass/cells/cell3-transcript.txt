@@ -1,0 +1,138 @@
+
+#### cell3-p1 EXPECT-303+grant [carve: peer loopback + exact 127.0.0.1] Host: 127.0.0.1:8083 + Origin: https://127.0.0.1:8083
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: 127.0.0.1:8083 -H Origin: https://127.0.0.1:8083 http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:13:07 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/cellroot/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8RATNKVW62ocF7ff0zKkhTcoOGl76zjX6Mq4P5VmAe6HA2gtFHEAJe4Z5fjhzF7-fO-V31bQoWEwl8JB1urzNws7sZNRQYleVhvkoOR85cmzSh3Wq4ffGbaq2NiXcEf5xX5lmKWdbj5bi5JTdk3Omk9T9ttXfG7_iICDv2pIcmKCyPaASCieLChZYB2w9Q_8DA9K; Path=/views/public/cellroot/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### cell3-p2 EXPECT-303+grant [carve: exact name localhost] Host: localhost:8083 + Origin: https://localhost:8083
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: localhost:8083 -H Origin: https://localhost:8083 http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:13:21 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/cellroot/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8RAh68MZXjisek966pip4pb-a5YdQR3ID2UvfIOA_dSnM6PGleSRXTY7oogJSf-OV8Iwi498_r0oEIjF-tpFK3Z8RPAtIyVwRQy72R5cUbMupIKnJKVrVwpQCxP1rvZFarLPqy3PtF9EWat16vzbsN_SeZpf1sCtVYkb-fKv4xhow_SZpthrABBYCJcxpBU-c-7E; Path=/views/public/cellroot/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### cell3-p3 EXPECT-403+zero-strikes [lookalike self-match] Host: 127.0.0.1.evil.example + Origin: https://127.0.0.1.evil.example
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: 127.0.0.1.evil.example -H Origin: https://127.0.0.1.evil.example http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:13:35 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-f9f634fb19214a6d1af195f1ea9a04f9'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="f9f634fb19214a6d1af195f1ea9a04f9">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### cell3-p4 EXPECT-403+zero-strikes [lookalike] Host: localhost.evil.example + Origin: https://localhost.evil.example
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: localhost.evil.example -H Origin: https://localhost.evil.example http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:13:49 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-5d60a43ab4b86f0bb8fda91fc7e8c5c2'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="5d60a43ab4b86f0bb8fda91fc7e8c5c2">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### cell3-p5 EXPECT-403+zero-strikes [127.x range != canonical name; record actual] Host: 127.0.0.2:8083 + Origin: https://127.0.0.2:8083
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: 127.0.0.2:8083 -H Origin: https://127.0.0.2:8083 http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:14:03 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-797d1cdf6fc6235829fb4131681c792e'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="797d1cdf6fc6235829fb4131681c792e">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### cell3-p6 EXPECT-403+zero-strikes [cross-name: vouched Host localhost vs Origin 127.0.0.1] Host: localhost:8083 + Origin: https://127.0.0.1:8083
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: localhost:8083 -H Origin: https://127.0.0.1:8083 http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:14:17 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-55de979820ea6e059dae8e50501dc9a2'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="55de979820ea6e059dae8e50501dc9a2">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt

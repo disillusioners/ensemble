@@ -1,0 +1,317 @@
+# GROUP C7-CX — GENERALIZATION HUNT part 2 — 2026-11-09T00:13:25Z — view=/views/public/g27fix/reprobe.md (correct code, XFP https, browser Accept)
+
+#### C7a loopback cross-name: Host: localhost + Origin: https://127.0.0.1 → EXPECT 403 (names differ; carve is exact-name)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: localhost -H Origin: https://127.0.0.1 --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:13:25 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-638e36d5269c1b6159093a41617a5e27'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="638e36d5269c1b6159093a41617a5e27">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C7b loopback EXACT self-match: Host: 127.0.0.1 + Origin: https://127.0.0.1 → GRANT-EXPECTED via carve (peer loopback + exact name). Attributed to carve, not capture, by C7c/C7d/C6 negatives
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: 127.0.0.1 -H Origin: https://127.0.0.1 --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:13:39 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8RAzQgzCRLs1UABkaCkcxFyYYuf8eqh-doqWRtP6RB-2kA_r5eWF4PdBefS0OCvBiJ1d4d_dxt9HMSFHWKi6ocPB-1wV3zgSlHww-lVeZj82FHUZcZVE9nu-hxFH_xW0iaV4QxfcmGjGol1pwy8yOWJwKP-VA9Js6CZTlJNvSkxttZU3sZNKIpZxfQnfeY9uK7To; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### C7c loopback RANGE non-canonical: Host: 127.0.0.2 + Origin: https://127.0.0.2 → EXPECT 403 (127.0.0.0/8 blanket must NOT anchor)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: 127.0.0.2 -H Origin: https://127.0.0.2 --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:13:56 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-bfe9b9e055530dd507ad4314b4ee0c87'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="bfe9b9e055530dd507ad4314b4ee0c87">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C7d IPv6 loopback self-match: Host: [::1] + Origin: https://[::1] → RECORD (expect GRANT via carve: ::1 exact)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: [::1] -H Origin: https://[::1] --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:14:10 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8RBT3IhY7ExumWJjVlwiHvhrtnYM60LeTykRQaw6ukA82zv9necOEEiPrOE51IPRT4voJtSuKNq-YOWewsZ9MXSjx9JFbTJ_kMxO3cmzdd6GXBBySMgHGNAAPYf64PLqTW2LOvHQycC21kSlzBp-4v2EHGBjhoC-XMVN1yra1QTQ4P1misfo1NV4u3Ph3iY3bzZc; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### C8a XFH revival (NO declared front): Host: evil.example + X-Forwarded-Host: evil.example + Origin: https://evil.example → EXPECT 403 (leg b INERT undeclared)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example -H X-Forwarded-Host: evil.example -H Origin: https://evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:14:28 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-d5e298393ec9b072eb1eb58a1ae68439'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="d5e298393ec9b072eb1eb58a1ae68439">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C8b Forwarded revival (NO declared front): Host: evil.example + Forwarded: host=evil.example + Origin: https://evil.example → EXPECT 403 (leg c INERT undeclared)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example -H Forwarded: host=evil.example -H Origin: https://evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:14:42 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-e25faeead9d7fc4e85a144f7935ddffc'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="e25faeead9d7fc4e85a144f7935ddffc">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C9a ABSENT-Origin with foreign Host: Host: evil.example, NO Origin/Referer → GRANT-EXPECTED (by design: absent Origin allows BEFORE anchors; FLAG if regressed)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:15:00 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8RCELIsCmWn7zwZyC2R1vsZi9Cc83MR5DvJoK9TJj9pd6kgDGlmecKz_81nv2ATjoz-ImIfTuNJ1Z0_AAZ8d8yP3nk_OME6RXcEXezGbrl0SbajRD178Cq_0tJ1DOYIFSZ0d9OEKz3JyNZ3Z1b29R6hg4hoY1Vdn4vwSWr_BCvUB-L_Rztrq58BoQ-t6CUgEEnRj; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### C9b EMPTY-Origin header (treated absent): Host: evil.example + empty Origin → RECORD (expect 303 same as absent)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example -H Origin; --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:15:18 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8RCXYOmI_exM3mLObDkHCiyhZQjBbd1BT6owECh4xKDpP1AWVroYlGGNTaS_Y9l0bxiZZfrMD3M9Y4aMehR_gvT8yc6ctn_LY6QicXKscypkYvGsAIhhKHsZvjdgCYyfSQxyGVMwlkS-_Nmp7fw4nlSHBsCUzSFkoAEgLt9PUnN_U4uiaFxewQHYi-_dJRE43ahu; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### C10a IPv6 bracket+port: Host: [::1]:8082 + Origin: https://[::1]:8082 → RECORD (expect GRANT via carve: ::1 exact + ports equal)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: [::1]:8082 -H Origin: https://[::1]:8082 --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:15:32 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8RClKPZJFeIOK4EN7yX7zRusPnrK3UN2UOyUUPzHLcp_Mmd7urTTglcvXLPN36u8WZHaEc3XJk26iW5MZBqjLDe12AIsytrRzWhNpnW0ujY_qPZPiqzh0lgZhaP3jaVAiUcIlgRjCDIhOgiNuBkKz6p01Jw280TW0KqH8r_QlEXfkiBlymeZcg5qCZxZmqfZJ_0I; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### C10b IPv6 port-elision: Host: [::1]:8082 + Origin: https://[::1] → RECORD (expect GRANT: portless origin vs ported anchor is port-compatible by FIX-3)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: [::1]:8082 -H Origin: https://[::1] --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:15:50 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8RC2_wYUTfeIMpNcA7gaHlenTA3DKF_dJiXxSyEeYK88ok7QJjQyDi2heknDvcapT2cGn7wp3Wbz8qfqdXiPpWPdixOxVbQXTmXaXo3Az7vLHMVjpDWxLsazgUpflXMYqZ2X0sHKfcmKdcHi2kUHUYG64mE3ZEwHndgZuPVu7iOlUqJJQq8NfEuNU5xHCBORumfD; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### CX1 carve case-insensitivity: Host: LOCALHOST + Origin: https://localhost → RECORD (expect GRANT via carve: vouch check lowercases; consistent with C4a host-case posture)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: LOCALHOST -H Origin: https://localhost --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:16:04 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8RDEehHdbqhzINppjcVZLxL7JJog3YDKgt7XYIF1y4QuTO9Plj3l0LzYjKBUH4lNrYmHU-cvxuz-_sI1rJgZu4Nxch62Ubknx_Zk5wct4Z6tLIWd7JB4CNu0AgjdqaTNpFtvg6ivvNEln1ZnNRBvcAopqk2-OOKNnztEKdpo9Q-G8vgZWm0dIOx_dyeh-_-MJD1H; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### CX2 mapped-v4 spelling: Host: ::ffff:127.0.0.1 + Origin: https://::ffff:127.0.0.1 → EXPECT 403 (peer-side normalization must NOT leak into the NAME compare)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: ::ffff:127.0.0.1 -H Origin: https://::ffff:127.0.0.1 --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:16:22 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-36da426d903bb223c0b76e91c487c0bb'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="36da426d903bb223c0b76e91c487c0bb">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### CX3 carve asymmetry (Host carved, origin foreign): Host: 127.0.0.1 + Origin: https://evil.example → EXPECT 403 (carve vouches the HOST name only; attacker origin must still match it)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: 127.0.0.1 -H Origin: https://evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:16:36 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-1c6a8fa2616af022dee958b7a000a7fc'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="1c6a8fa2616af022dee958b7a000a7fc">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### CX4 Referer-fallback self-match: Host: evil.example + Referer: https://evil.example/x (NO Origin) → EXPECT 403 (Referer judged by the same vouched anchors)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example -H Referer: https://evil.example/whatever --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:16:54 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-39f332b6d5e456829fafa2259920084e'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="39f332b6d5e456829fafa2259920084e">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### CX5 carve port participation: Host: 127.0.0.1:8443 + Origin: https://127.0.0.1:8443 → RECORD (expect GRANT via carve: exact name; ports equal — loopback dev on any port is carve by-design)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: 127.0.0.1:8443 -H Origin: https://127.0.0.1:8443 --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:17:08 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8REE1O35fhOAO7SRWGMCQktT2XFPl93hbA5P7Nw_T8I95Y6464T_6h6HPGJ7odOIbpum6k-_KMLcDqHLmJ3dFBwgr4Tu_svBn44RxP4zHR-1R_41-xkRDEVAtSNSsrFnzVun5lQHjLLicpIo59s6K9oq8QJNnxVXRZjgqstvWWlfCzOarvAwqVhuEB6wWrheeS4h; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+

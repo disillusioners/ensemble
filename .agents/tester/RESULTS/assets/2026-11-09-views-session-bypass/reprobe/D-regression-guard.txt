@@ -1,0 +1,53 @@
+# GROUP D — REGRESSION GUARD — 2026-11-09T00:17:26Z — view=/views/public/g27fix/reprobe.md (correct code, XFP https, browser Accept)
+
+#### D1 audience leg: Origin: https://operator.example (Host default 127.0.0.1:8082) → EXPECT 303 + grant
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Origin: https://operator.example --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:17:25 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8REWfj6VApNI8vjVNvIHlMD_avawt202eTQ2vj39pglA2QTFOHg0tJRW9GOmZ-wNNtpH8pFEyGEQsR_JA0LdM8wMvLBaF_3vCl3FO13ySKoUMIJKsOkyEmjNGHWXVhbFMG916cEso21Epl1ztt1-B310BHGwPGYAHKqcqow8Npmy_1-qjQwb9cyy5Jjeswq8VLXG; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   access-control-allow-origin: https://operator.example
+   vary: Origin
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### D2 plain flow: NO Origin, NO Sec-Fetch-Site, correct code → EXPECT 303 + grant
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:17:43 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8REnuM6nfLDlRuDmx8FBxqVwaMtlPkrCanmc8jHVypiFHwP5leL2J6YLGKMN7RErg1gIOjnnOoHxp-YX4rXqQyx50fAdfm_N9vyz5uJE3X0RdMZJSDtSgDYbmsIMiJ_Y3rd8nvGZ0YlUvsohYyxPXvUdX_Gt_Y2vvDxVTCD5DvhU4NpwSyegPO9pIQR074aXbVLJ; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### D3 audience leg port-elision: Origin: https://operator.example:443 → EXPECT 303 + grant (scheme-default explicit port vs portless anchor)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Origin: https://operator.example:443 --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:17:57 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8RE1S2EWyxY644v_WhYaWMXgCftoUwonkjC0EF8AljJ2FJFucr212JIB_zrAo9iW1j8L0jJjOPllUCLc_HWUL7e9dQwOCV1dmMd-2PdL-Jkj4iRGIo-kZuf5kBiw-QTNwuBaZkEHxQjxTxCLWp3etnx2mibxrNQRykmjkPYW21RGZTRLfspVvsV0Wotf8-bRadoV; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+

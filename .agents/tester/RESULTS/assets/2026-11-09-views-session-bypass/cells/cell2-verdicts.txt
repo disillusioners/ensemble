@@ -1,0 +1,5 @@
+[cell2-p1 EXPECT-303+grant [declared-base vouch] Host: views.example + Origin: https://views.example] status=303 grant=YES loc=/views/public/cellroot/matrix-a.md
+[cell2-p2 EXPECT-303+grant [www=apex on vouched anchor] Host: views.example + Origin: https://www.views.example] status=303 grant=YES loc=/views/public/cellroot/matrix-a.md
+[cell2-p3 EXPECT-403+zero-strikes [evil origin, no vouch] Host: views.example + Origin: https://evil.example] status=403 grant=no loc=
+[cell2-p4 EXPECT-303+grant [declared front -> XFH leg active, XFH == declared] Host: internal-svc:8079 + XFH: views.example + Origin: https://views.example] status=303 grant=YES loc=/views/public/cellroot/matrix-a.md
+[cell2-p5 EXPECT-403 per commission [XFH != declared creates no vouch] Host: internal-svc:8079 + XFH: evil.example + Origin: https://evil.example] status=303 grant=YES loc=/views/public/cellroot/matrix-a.md

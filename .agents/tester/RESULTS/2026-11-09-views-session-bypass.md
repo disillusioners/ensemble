@@ -71,3 +71,22 @@ The branch moved past the commissioned SHA mid-lane (giter polish, all disclosed
 - Surface files **zero-diff at tip** → the 196/196 remains a byte-faithful measurement of the shipping tree.
 - **Test-suite posture at tip:** no test anywhere asserts rejection of a matching non-testserver Host/Origin pair; the two permissive pins survive (`test_portless_host_vs_explicit_origin_port_elides` :1647, `test_explicit_vs_explicit_match_grants` :1730) — the G2.7 fix must flip/update pins alongside the gate, and the review council's "stated threat model" should be re-scoped to explicitly include or exclude host-capture.
 - 26 evidence files (`assets/…/g1/logs/` 25 + `g2g8/boot.log`) are gitignore-excluded (`logs/`, `*.log`) — disk-resident at the stable worktree path, NOT force-added (gitignore policy call left to the leader); fail-closed secret scans ran clean over staged AND excluded evidence.
+
+## Addendum #2 (2026-11-09 ~00:20Z): FIX-9 re-verification @ `6398a29a3` — G2.7 DEAD; NEW same-class finding in cell (ii); Phase 2 HELD
+
+Fix delta verified (intel2): exactly ONE commit (`6398a29a3`, giter, +669/−101, 2 files: `daemon/routers/live_views.py` + lane test file); protected-set zero-diff vs base re-verified; fix confined to the origin-gate region (`_same_host_origin_check` hunk docstring-only); vouch expression confirmed (`peer_is_loopback` via cookie.py public seam; audience ∪ declared-base; malformed audience inert); in-code loopback disclosure at `:1066-1075` matches promote-notes residual 1 verbatim; both permissive pins flipped `FLIPPED (G2.7/FIX-9)` → 403.
+
+| Leg | Verdict | Evidence |
+|---|---|---|
+| T1a exploit re-probe | ✅ DEAD | `Host:evil.example`+`Origin:https://evil.example` ⇒ **403 HTML, no Set-Cookie, ×3 repeat-stable**; 22/22 class variants reject (port-consistent self-match, www-elision ⊥ captured host both directions, subdomains, case, trailing dot, loopback lookalikes incl. octal `0177.0.0.1` + `::ffff:127.0.0.1` mapped-v4 + cross-name, XFH/Forwarded revival undeclared, Referer-fallback); every grant attributed to carve/absent-null/audience — zero non-vouched grants; 22 rowpeek checkpoints `failed_attempts=0` throughout. `reprobe/VERDICT-SUMMARY.md` + 39 transcripts |
+| T1b cell (i) auth-ON | ✅ | null absent-SFS ⇒ 303+grant; null + SFS cross-site ⇒ 403 HTML |
+| **T1b cell (ii) declared base** | ❌ **4/5** | base/www≡apex/declared-XFH grants ✅, evil-Origin 403 ✅ — **probe 5 BYPASS: `XFH: evil.example` + `Origin: https://evil.example` ⇒ 303 + full view_grant`** (same-boot control: evil Origin WITHOUT XFH ⇒ 403 → clean attribution). Leg (b) trusts the first XFH value UNCONSTRAINED once a front is declared; declared-state mismatched-XFH is unpinned by tests. **Anomaly `6c543ecc`**; suggested fix: forwarded-leg anchors must `_host_matches` the DECLARED anchor + pin. `cells/cell2-transcript.txt` |
+| T1b cell (iii) loopback carve | ✅ 6/6 | `127.0.0.1`/`localhost`/`[::1]` exact ⇒ grant; lookalikes + `127.0.0.2` (/8 NOT honored — exact canonical names only) + cross-name ⇒ 403×0 |
+| T1b cell (iv) non-loopback peer | ✅ 3/3 | bind `192.168.1.151:8083` interface-only; real-Origin ⇒ **403 AND `failed_attempts==0`** (gate precedes compare — the cell's equality proven); absent/null-Origin ⇒ grants |
+| T1c lane pack | ✅ | **86/86** @ tip (collect 86 exact = 74+12 pins; both flipped pins pass) — 10.7s |
+| T1c surface pack | ✅ | **196/196 hermetic** @ tip — zero regressions into the unmodified surface |
+| T1c G1-shape structural | ✅ | B3: `Origin: null` with UNVOUCHED `Host: evil.example` ⇒ 303+grant — null/absent branches provably run BEFORE the anchor universe |
+
+**Task-1 verdict: NOT fully green (cell ii p5) → Phase 2 staging HELD.** The new finding is the same anchor-poisoning class the leader just paid a fix cycle to close, present in the front-declaring deployment shape (State A/B), one-line-class fix + one pin; council #2's 17 generalizations did not cover declared-state mismatched-XFH (unpinned). Recorded residual (by-design, not a defect): absent-Origin + attacker-controlled Host still grants (R2 absent ⇒ allow; backstops = per-IP bucket + strike lock) — widest remaining surface in this class, flag for promote-notes.
+
+Worker instances: intel2 `f35ece6f`, reprobe `6e145235`, cells `4eaa8ea7`, lane86 `1c52218a`, surface196 `3563f91e`. Safety envelope held on every boot (per-variable scrubs incl. live `ENSEMBLE_AUTH_*`, SWEEP=0 pinned, FAKE_HOME fences, dev-DB asserts, port-verify-before-kill, 8082/8083 freed, 8088 untouched, zero prod contact).
