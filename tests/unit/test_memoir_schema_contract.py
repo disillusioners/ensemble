@@ -69,12 +69,34 @@ def sqlite_engine():
 # ── the model registry census ─────────────────────────────────────────────
 
 
-def test_the_four_memoir_tables_are_registered():
-    """Exactly the four memoir tables are in the SQLModel metadata."""
+#: The v2 (Memoir Store v2 Phase 1) tables — registered by the same
+#: late-import block. See
+#: ``.agents/shared/planning/ari-memoir-store/v2-phase1-plan.md``.
+MEMOIR_V2_TABLE_NAMES = {
+    "memoir_star",
+    "memoir_star_alias",
+    "memoir_line",
+    "memoir_reflection_state",
+    "memoir_proposal_ledger",
+    "memoir_jev_ledger",
+}
+
+
+def test_the_memoir_tables_are_registered():
+    """The memoir model registry carries the v1 FOUR plus the v2 SIX.
+
+    Memoir Store v2 (Phase 1) DELIBERATELY amends this census: the
+    v2 lane registers SIX new tables (``memoir_star`` /
+    ``memoir_star_alias`` / ``memoir_line`` /
+    ``memoir_reflection_state`` / ``memoir_proposal_ledger`` /
+    ``memoir_jev_ledger``) into the SAME metadata. The census stays
+    EXACT — it is not loosened to a subset — it simply names the ten
+    tables that now exist.
+    """
     registered = {
         name for name in SQLModel.metadata.tables if name.startswith("memoir_")
     }
-    assert registered == MEMOIR_TABLE_NAMES
+    assert registered == MEMOIR_TABLE_NAMES | MEMOIR_V2_TABLE_NAMES
 
 
 def test_the_model_table_names_match_the_table_names():
@@ -245,10 +267,20 @@ def test_the_down_section_drops_every_memoir_table():
 
 
 def test_the_lane_adds_exactly_one_migration_file():
-    """The census DELTA is +1 — asserted as a DELTA, not as an absolute."""
+    """The census DELTA is +1 — asserted as a DELTA, not as an absolute.
+
+    Memoir Store v2 (Phase 1) DELIBERATELY amends this leg: the
+    memoir migration FILES are now TWO — the v1 substrate
+    (``20261105_102821_create_memoir_tables.sql``) and the v2 substrate
+    (``20261109_021154_create_memoir_v2_tables.sql``). The v1 lane's own
+    DELTA is still measured EXACTLY, by the git-derived leg below
+    (over the v1 lane's OWN branch range, which this lane does not
+    touch).
+    """
     memoir_files = sorted(p.name for p in MIGRATIONS_DIR.glob("*memoir*.sql"))
-    assert len(memoir_files) == 1, memoir_files
-    assert memoir_files[0] == MEMOIR_MIGRATION.name
+    assert len(memoir_files) == 2, memoir_files
+    assert MEMOIR_MIGRATION.name in memoir_files
+    assert "20261109_021154_create_memoir_v2_tables.sql" in memoir_files
 
 
 def test_every_migration_prefix_is_unique_and_distinct_count_matches():

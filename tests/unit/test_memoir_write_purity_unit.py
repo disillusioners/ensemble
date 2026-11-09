@@ -159,7 +159,17 @@ def test_the_persona_lane_is_still_present_and_untouched():
 
 
 def test_the_insert_column_list_is_the_d2_15_set():
-    """D2.15 / AM-13 — the EXACT column set, in the adjudicated order."""
+    """D2.15 / AM-13 — the EXACT column set, in the adjudicated order.
+
+    Memoir Store v2 (V2-D 1.14 / B7 / V2-42) DELIBERATELY amends this
+    pin: ``poignancy_status`` joins the column list because the shipped
+    ``MEMOIR_INSERT_SQL`` now writes it EXPLICITLY with a literal NULL
+    in the VALUES clause (no reliance on a column-default accident).
+    The amendment IS the evidence trail — the pin stays byte-exact, and
+    ``RECORD_COLUMNS`` (the write-once record family) stays GREEN and
+    untouched: ``poignancy_status`` is an operational column, not a
+    record column.
+    """
     assert MEMOIR_INSERT_COLUMNS == (
         "id",
         "agent_id",
@@ -182,6 +192,7 @@ def test_the_insert_column_list_is_the_d2_15_set():
         "last_accessed_at",
         "access_count",
         "superseded_by",
+        "poignancy_status",
     )
 
 
@@ -208,11 +219,15 @@ def test_the_insert_does_not_mention_tsv():
 
 
 def test_the_insert_starts_the_semantic_half_empty():
-    """D2.15: the semantic columns start NULL / 0 — the worker fills them."""
+    """D2.15: the semantic columns start NULL / 0 — the worker fills them.
+
+    Memoir Store v2 (V2-D 1.14): the count is EIGHT, not seven — the
+    eighth NULL is the explicit ``poignancy_status`` literal.
+    """
     values = MEMOIR_INSERT_SQL[
         MEMOIR_INSERT_SQL.index("VALUES") : MEMOIR_INSERT_SQL.rindex(")")
     ]
-    assert values.count("NULL") == 7  # the four embedding + error + stats + pointer
+    assert values.count("NULL") == 8  # the four embedding + error + stats + pointer + poignancy_status
     assert ":embedding" not in values
     assert ":embedding_model" not in values
     assert ":embedding_dims" not in values
@@ -221,6 +236,26 @@ def test_the_insert_starts_the_semantic_half_empty():
     assert ":last_accessed_at" not in values
     assert ":access_count" not in values
     assert ":superseded_by" not in values
+    assert ":poignancy_status" not in values
+
+
+def test_the_insert_names_poignancy_status_explicitly():
+    """V2-D 1.14 — the column is NAMED in the INSERT, with a literal NULL.
+
+    The mutation leg: dropping ``poignancy_status`` from the column
+    list (relying on the column default instead) flips THIS pin RED.
+    """
+    assert "poignancy_status" in MEMOIR_INSERT_SQL
+    start = MEMOIR_INSERT_SQL.index("(")
+    end = MEMOIR_INSERT_SQL.index(")", start)
+    columns = tuple(
+        part.strip() for part in MEMOIR_INSERT_SQL[start + 1 : end].split(",")
+    )
+    assert columns[-1] == "poignancy_status"
+    values = MEMOIR_INSERT_SQL[
+        MEMOIR_INSERT_SQL.index("VALUES") : MEMOIR_INSERT_SQL.rindex(")")
+    ]
+    assert values.rstrip().endswith("NULL")
 
 
 def test_the_insert_writes_the_record_columns_exactly_once(repo):

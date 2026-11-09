@@ -378,6 +378,13 @@ MEMOIR_INSERT_COLUMNS: tuple[str, ...] = (
     "last_accessed_at",
     "access_count",
     "superseded_by",
+    # Memoir Store v2 (V2-D 1.14 / B7 / V2-42): ``poignancy_status`` is
+    # written EXPLICITLY with a literal NULL in the VALUES clause, so
+    # the statement never relies on a column-default accident. The
+    # purity pin below is DELIBERATELY amended to this new byte-exact
+    # column list as the evidence trail; ``RECORD_COLUMNS`` stays green
+    # and untouched.
+    "poignancy_status",
 )
 
 #: The ONE INSERT (D2.15). The DEFAULTS are literal in the VALUES clause so
@@ -389,14 +396,16 @@ MEMOIR_INSERT_SQL = (
     "    is_keepsake, pinned_by, pinned_reason, pinned_at,\n"
     "    embedding, embedding_model, embedding_dims, embedded_at,\n"
     "    embedding_attempts, embedding_error,\n"
-    "    last_accessed_at, access_count, superseded_by\n"
+    "    last_accessed_at, access_count, superseded_by,\n"
+    "    poignancy_status\n"
     ") VALUES (\n"
     "    :id, :agent_id, :title, :body, :created_at, :event_at, :importance,"
     " :stars,\n"
     "    :is_keepsake, :pinned_by, :pinned_reason, :pinned_at,\n"
     "    NULL, NULL, NULL, NULL,\n"
     "    0, NULL,\n"
-    "    NULL, 0, NULL\n"
+    "    NULL, 0, NULL,\n"
+    "    NULL\n"
     ")"
 )
 
