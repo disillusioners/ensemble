@@ -86,6 +86,7 @@ LANE_OWNED_DAEMON = frozenset(
         "daemon/services/decision/factory.py",
         "daemon/services/decision/kill.py",
         "daemon/services/decision/logging_safe.py",
+        "daemon/services/decision/MUTATION_MATRIX.md",
         "daemon/services/decision/metrics.py",
         "daemon/services/decision/overlay.py",
         "daemon/services/decision/port.py",
@@ -141,6 +142,7 @@ ALLOWED_DAEMON_DIFF = (
     "daemon/services/decision/factory.py",
     "daemon/services/decision/kill.py",
     "daemon/services/decision/logging_safe.py",
+    "daemon/services/decision/MUTATION_MATRIX.md",
     "daemon/services/decision/metrics.py",
     "daemon/services/decision/overlay.py",
     "daemon/services/decision/port.py",
@@ -150,6 +152,27 @@ ALLOWED_DAEMON_DIFF = (
     "daemon/services/settings_service.py",
     "daemon/services/snapshot_search_service.py",
 )
+
+#: The allowlist entries that predate THIS lane — the metrics-query
+#: lane's own surfaces (the P4 stage's list). They are FROZEN here so
+#: the both-directions consistency pin can tell "the allowlist holds a
+#: known prior entry" from "the allowlist silently WIDENED".
+PRIOR_ALLOWLIST_ENTRIES = frozenset(
+    {
+        "daemon/api.py",
+        "daemon/persistence.py",
+        "daemon/routers/metrics.py",
+        "daemon/services/metrics_query/__init__.py",
+        "daemon/services/metrics_query/availability.py",
+        "daemon/services/metrics_query/constants.py",
+        "daemon/services/metrics_query/envelope.py",
+        "daemon/services/metrics_query/provider.py",
+        "daemon/services/metrics_query/ring.py",
+        "daemon/services/metrics_query/sampler.py",
+        "daemon/services/metrics_query/selectors.py",
+    }
+)
+
 
 #: The daemon paths that were ALREADY offenders when this lane's base
 #: (``LANE_BASE``) was cut — other lanes' committed work, recorded
@@ -253,6 +276,47 @@ def _assert_lane_allowlist_complete(
     assert missing == [], (
         "LANE-CAUSED offenders — a decision-lane file missing from "
         f"ALLOWED_DAEMON_DIFF: {missing}"
+    )
+
+
+def _assert_allowlist_did_not_widen(
+    allowlist: tuple[str, ...],
+    owned: frozenset[str],
+    prior: frozenset[str],
+) -> None:
+    """Direction 2 — the allowlist may not silently widen."""
+    widened = sorted(
+        path
+        for path in allowlist
+        if path not in owned and path not in prior
+    )
+    assert widened == [], (
+        "the allowlist SILENTLY WIDENED — an entry that is neither "
+        f"lane-owned nor a frozen prior entry: {widened}"
+    )
+
+
+def _assert_lane_package_files_recorded(
+    package_dir: Path, owned: frozenset[str]
+) -> None:
+    """Direction 3 — every file ON DISK in the lane's daemon package is
+    lane-owned.
+
+    The census diff (``git diff --name-only LANE_BASE``) cannot see an
+    UNCOMMITTED (untracked) file, and the registered pack's scope is
+    ``tests/unit/decision/`` only — so a new artefact under ``daemon/``
+    is invisible to both. This sweep closes that gap: it reads the
+    directory, not the diff.
+    """
+    on_disk = {
+        str(path.relative_to(package_dir.parents[2]))
+        for path in package_dir.iterdir()
+        if path.is_file() and not path.name.endswith(".pyc")
+    }
+    unrecorded = sorted(path for path in on_disk if path not in owned)
+    assert unrecorded == [], (
+        "a file in the lane's daemon package is not recorded in "
+        f"LANE_OWNED_DAEMON — record it (or remove it): {unrecorded}"
     )
 
 
@@ -441,6 +505,38 @@ class TestNoProducerInstrumentation:
             daemon_changes, ALLOWED_DAEMON_DIFF, PRE_EXISTING_DAEMON_OFFENDERS
         )
 
+    def test_the_lane_census_is_consistent_in_both_directions(self) -> None:
+        """B-4+ — the BOTH-DIRECTIONS consistency pin.
+
+        Direction 1 — every lane-owned path is allowlisted (a lane file
+        dropped from the allowlist REDs).
+
+        Direction 2 — the allowlist never SILENTLY WIDENS: every entry
+        is either lane-owned or one of the FROZEN prior entries (the
+        metrics-query lane's own surfaces). An allowlist entry that is
+        neither REDs.
+
+        Direction 3 — THE ARTEFACT CLASS: every file ON DISK in the
+        lane's own daemon package is lane-owned. This is the leg that
+        catches a new lane artefact — INCLUDING AN UNTRACKED ONE (the
+        census diff cannot see an uncommitted file, and the registered
+        pack's scope is ``tests/unit/decision/`` only, so a new file
+        under ``daemon/`` is invisible to both). The artefact that
+        caused the measured red — ``MUTATION_MATRIX.md`` — is exactly
+        this class.
+        """
+        # Direction 1
+        _assert_lane_allowlist_complete(LANE_OWNED_DAEMON, ALLOWED_DAEMON_DIFF)
+        # Direction 2
+        _assert_allowlist_did_not_widen(
+            ALLOWED_DAEMON_DIFF, LANE_OWNED_DAEMON, PRIOR_ALLOWLIST_ENTRIES
+        )
+        # Direction 3 — the on-disk sweep (catches an untracked artefact)
+        _assert_lane_package_files_recorded(
+            Path(__file__).resolve().parents[3] / "daemon" / "services" / "decision",
+            LANE_OWNED_DAEMON,
+        )
+
     def test_the_daemon_diff_pin_is_discriminating(self) -> None:
         """B-4 — the rewritten pin CAN fail (in-memory proof).
 
@@ -470,6 +566,35 @@ class TestNoProducerInstrumentation:
                 PRE_EXISTING_DAEMON_OFFENDERS,
             )
         assert "brand_new_file.py" in str(excinfo.value)
+
+        # Direction 2 — a SILENTLY WIDENED allowlist REDs (an entry that
+        # is neither lane-owned nor a frozen prior entry).
+        with _pytest.raises(AssertionError) as excinfo:
+            _assert_allowlist_did_not_widen(
+                ALLOWED_DAEMON_DIFF + ("daemon/services/decision/sneaky.py",),
+                LANE_OWNED_DAEMON,
+                PRIOR_ALLOWLIST_ENTRIES,
+            )
+        assert "sneaky.py" in str(excinfo.value)
+
+        # Direction 3 — the ON-DISK sweep: a file that exists in the
+        # lane's package but is NOT recorded REDs (the measured class:
+        # ``MUTATION_MATRIX.md`` was invisible to the diff-based census
+        # until it was recorded). Proven IN MEMORY — the owned set is
+        # doctored, no file is created and no tree is written.
+        package_dir = (
+            Path(__file__).resolve().parents[3] / "daemon" / "services" / "decision"
+        )
+        with _pytest.raises(AssertionError) as excinfo:
+            _assert_lane_package_files_recorded(
+                package_dir,
+                frozenset(
+                    path
+                    for path in LANE_OWNED_DAEMON
+                    if path != "daemon/services/decision/MUTATION_MATRIX.md"
+                ),
+            )
+        assert "MUTATION_MATRIX.md" in str(excinfo.value)
 
     def test_the_wiring_package_never_touches_a_foreign_metric(self) -> None:
         """P4-M2 — an increment on somebody else's counter must go RED."""
