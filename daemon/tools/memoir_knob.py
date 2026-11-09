@@ -87,6 +87,7 @@ from daemon.config import (
     MEMOIR_TRUTHY_VALUES,
     MemoirConfig,
     MemoirReflectionConfig,
+    _classify_enabled_flag,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -474,7 +475,26 @@ def resolve_memoir_reflection_knob(
             section = None
         if section is None:
             section = MemoirReflectionConfig()
-        enabled = bool(section.enabled)
+        # The ENV tier is read LIVE (call time) and WINS over the
+        # BOOT-FROZEN config section: a mid-run flip of the kill-switch
+        # must take effect WITHOUT a restart. The config section decides
+        # ONLY when the env tier is ABSENT — the v1 knob's shape (the
+        # classifier is shared, the RESOLVER is per-lane, N1).
+        #
+        # The value comes from the SHARED classifier (mechanism N-2 — the
+        # same reader the model's own field validator uses), so the live
+        # env tier and the boot-frozen section can never disagree about
+        # what a value MEANS. The truth table is unchanged: unset ⇒ ON
+        # (+ the loud WARNING), garbage ⇒ OFF (fail closed), explicit
+        # true/false ⇒ honoured.
+        env_enabled: bool | None = None
+        if env_present:
+            env_enabled = _classify_enabled_flag(
+                raw,
+                name=MEMOIR_REFLECTION_ENABLED_ENV_VAR,
+                default=True,
+            )
+        enabled = env_enabled if env_enabled is not None else bool(section.enabled)
     except Exception as exc:  # noqa: BLE001 — a knob never raises
         message = (
             f"[MemoirReflect] {MEMOIR_REFLECTION_ENABLED_ENV_VAR} could not "

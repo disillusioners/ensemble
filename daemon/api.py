@@ -2947,6 +2947,13 @@ async def lifespan(app: FastAPI):
                 config=config,
                 llm_config={
                     "base_url": getattr(config.llm, "base_url", None),
+                    # ``base_url_backup`` reaches the HA facade through
+                    # the raw dict (never stripped). Without it the
+                    # failover path can NEVER swap (see
+                    # ``daemon/services/llm_failover.py``).
+                    "base_url_backup": getattr(
+                        config.llm, "base_url_backup", None
+                    ),
                     "api_key": getattr(config.llm, "api_key", None),
                     "model": getattr(config.llm, "model", None),
                 },

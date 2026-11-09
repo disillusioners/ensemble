@@ -787,3 +787,132 @@ def test_a_null_pass_id_never_increments_the_mention_count(
     assert fourth.mention_count == 2, (
         "the SAME pass id must not increment the count either"
     )
+
+
+# ── the lifespan llm_config carries the failover backup ──────────────────
+#
+# The reflection lane's LLM calls go through the HA facade
+# (``invoke_raw_with_failover``), which reads the backup URL from the
+# RAW dict. Without ``base_url_backup`` in that dict the facade is
+# built UNCONFIGURED: every attempt uses the primary and NO swap can
+# ever occur (see ``daemon/services/llm_failover.py``).
+#
+# The lifespan builds that dict INLINE (there is no importable
+# helper), so the wiring pin reads the source — the house AST pin.
+
+
+def _lifespan_reflection_llm_config_keys() -> set[str]:
+    """The KEYS of the lifespan-built reflection ``llm_config`` dict."""
+    import ast
+    import pathlib
+
+    api_path = pathlib.Path(__file__).resolve().parents[2] / "daemon" / "api.py"
+    tree = ast.parse(api_path.read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name != "MemoirReflectionService":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "llm_config":
+                continue
+            if not isinstance(keyword.value, ast.Dict):
+                continue
+            return {
+                key.value
+                for key in keyword.value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+    raise AssertionError(
+        "the lifespan builds no llm_config dict for the reflection service"
+    )
+
+
+def test_the_lifespan_llm_config_carries_the_failover_backup():
+    """F2: the lifespan-built dict carries ``base_url_backup``.
+
+    The blueprint clause is absolute — ``base_url_backup`` is NEVER
+    stripped. Without it the failover path can NEVER swap.
+    """
+    keys = _lifespan_reflection_llm_config_keys()
+    assert "base_url" in keys
+    assert "api_key" in keys
+    assert "model" in keys
+    assert "base_url_backup" in keys, (
+        "the lifespan's llm_config MUST carry base_url_backup — without it "
+        "the failover path can never swap (daemon/services/llm_failover.py)"
+    )
+
+
+def test_the_failover_path_can_swap_on_the_lifespan_backup():
+    """F2: a dict shaped like the lifespan's lets the facade SWAP.
+
+    The primary answers 500 (a retryable status); the facade exhausts
+    the primary slice, swaps to the backup and the call succeeds there.
+    The backup is reached ONLY because the dict carries the key.
+    """
+    import httpx
+    import openai
+
+    from daemon.services.llm_failover import (
+        current_failover_url,
+        invoke_raw_with_failover,
+    )
+
+    primary = "https://primary.test/v1"
+    backup = "https://backup.test/v1"
+    captured: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.url.host)
+        if request.url.host == "backup.test":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "created": 1700000000,
+                    "model": "gpt-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok-backup"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            500, json={"error": {"message": "down", "type": "server_error"}}
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    # the dict shape the lifespan builds — the backup key included.
+    llm_config = {
+        "base_url": primary,
+        "base_url_backup": backup,
+        "api_key": "test",
+        "model": "gpt-test",
+    }
+
+    def _call():
+        url = current_failover_url() or primary
+        client = openai.OpenAI(
+            api_key="test",
+            base_url=url or None,
+            http_client=http_client,
+            max_retries=0,
+        )
+        return client.chat.completions.create(
+            model="gpt-test", messages=[{"role": "user", "content": "hi"}]
+        )
+
+    result = invoke_raw_with_failover(_call, llm_config)
+    assert result.choices[0].message.content == "ok-backup"
+    assert "primary.test" in captured, "the primary must be tried first"
+    assert "backup.test" in captured, (
+        "the failover path must be able to SWAP to the backup — the dict "
+        "carries base_url_backup"
+    )

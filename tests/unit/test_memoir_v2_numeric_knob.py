@@ -322,3 +322,129 @@ def test_the_full_config_builds_with_every_knob_garbage(monkeypatch):
     assert config.memoir_reflection.enabled is False
     assert config.memoir_reflection.max_syntheses_per_pass == 5
     assert config.memoir_reflection.tick_interval_s == 30
+
+
+# ── the kill-switch is LIVE, not boot-frozen ─────────────────────────────
+#
+# The defect these legs pin: the resolver used to take ``enabled`` from
+# the BOOT-FROZEN ``config.memoir_reflection`` section, so a mid-run
+# flip of ``ENSEMBLE_MEMOIR_REFLECTION_ENABLED`` was ignored until the
+# next restart. The env tier is read LIVE (call time) and WINS over the
+# frozen section; the section decides only when the env tier is ABSENT.
+#
+# EVERY leg below uses a REAL boot-constructed ``Config``: the
+# ``config=None`` fixtures elsewhere in this file CANNOT see the defect
+# (a freshly built model re-reads the env on every construction), so
+# they must not be the guard against a regression here.
+
+
+def _boot_config():
+    """A REAL boot-constructed ``Config`` (the env tier is unset here)."""
+    from daemon.config import Config
+
+    return Config()
+
+
+def test_the_kill_switch_is_read_live_not_from_the_boot_frozen_section(
+    monkeypatch,
+):
+    """The env flip is honoured at CALL TIME (no restart, no re-boot).
+
+    Before the fix the resolver answered the boot-frozen section value,
+    so the flip was ignored until the daemon restarted.
+    """
+    from daemon.tools.memoir_knob import resolve_memoir_reflection_knob
+
+    config = _boot_config()
+    assert config.memoir_reflection.enabled is True  # the boot tier
+
+    monkeypatch.setenv(MEMOIR_REFLECTION_ENABLED_ENV_VAR, "false")
+    state = resolve_memoir_reflection_knob(config)
+    assert state.enabled is False
+    assert state.resolution == "explicit_off"
+    assert state.source == "env"
+
+    monkeypatch.setenv(MEMOIR_REFLECTION_ENABLED_ENV_VAR, "true")
+    state = resolve_memoir_reflection_knob(config)
+    assert state.enabled is True
+    assert state.resolution == "explicit_on"
+
+
+def test_a_garbage_kill_switch_fails_closed_against_a_real_config(monkeypatch):
+    """The truth table survives the live read: garbage ⇒ OFF (fail closed).
+
+    The boot-frozen section says ON; the live env tier says garbage.
+    The truth table wins — the lane is DISABLED, never a ValidationError.
+    """
+    from daemon.tools.memoir_knob import resolve_memoir_reflection_knob
+
+    config = _boot_config()
+    assert config.memoir_reflection.enabled is True
+
+    monkeypatch.setenv(MEMOIR_REFLECTION_ENABLED_ENV_VAR, "maybe")
+    state = resolve_memoir_reflection_knob(config)
+    assert state.enabled is False
+    assert state.resolution == "indeterminate"
+
+
+def test_an_unset_kill_switch_still_follows_the_config_tier():
+    """The env tier is ABSENT ⇒ the config section decides (unchanged)."""
+    from daemon.tools.memoir_knob import resolve_memoir_reflection_knob
+
+    config = _boot_config()
+    state = resolve_memoir_reflection_knob(config)
+    assert state.enabled is True
+    assert state.resolution == "default"
+    assert state.source == "config"
+
+
+@pytest.mark.asyncio
+async def test_the_worker_parks_within_one_tick_after_a_post_boot_flip(
+    tmp_path, monkeypatch
+):
+    """F1 leg (a): the worker parks within ONE tick of the flip.
+
+    The worker re-reads the knob EVERY tick (D3.12). With the live env
+    read, a post-boot flip parks the lane on the very next tick — the
+    worker stays ALIVE and resumes when the knob returns.
+    """
+    from daemon.config import Config
+    from daemon.repositories.memoir.constellation_repository import (
+        MemoirConstellationRepository,
+    )
+    from daemon.repositories.memoir.reflection_repository import (
+        MemoirReflectionRepository,
+    )
+    from daemon.repositories.memoir.syntheses_repository import (
+        MemoirSynthesesRepository,
+    )
+    from daemon.services.memoir_reflection_service import (
+        MemoirReflectionService,
+    )
+    from daemon.services.memoir_reflection_worker import (
+        MemoirReflectionWorker,
+    )
+    from sqlmodel import SQLModel, create_engine
+
+    config = Config()  # the BOOT tier: the lane is ON
+    assert config.memoir_reflection.enabled is True
+
+    engine = create_engine(f"sqlite:///{tmp_path}/memoir-knob-flip.db")
+    SQLModel.metadata.create_all(engine)
+    try:
+        service = MemoirReflectionService(
+            reflection_repository=MemoirReflectionRepository(engine),
+            syntheses_repository=MemoirSynthesesRepository(engine),
+            constellation_repository=MemoirConstellationRepository(engine),
+            config=config,
+        )
+        worker = MemoirReflectionWorker(service, config=config)
+
+        # the flip happens AFTER the boot — no restart, no re-boot
+        monkeypatch.setenv(MEMOIR_REFLECTION_ENABLED_ENV_VAR, "false")
+        await worker._tick()
+        assert worker.snapshot()["parked"] is True
+        assert worker.snapshot()["phase"] == "parked"
+        assert worker.pass_order == []
+    finally:
+        engine.dispose()

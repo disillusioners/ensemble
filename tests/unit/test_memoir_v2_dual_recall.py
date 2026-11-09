@@ -87,6 +87,22 @@ def _service(repo, syntheses_repo=None, constellation_repo=None, lane=True):
     )
 
 
+def _lane_off_service(repo, syntheses_repo=None, constellation_repo=None, config=None):
+    """The lane-OFF service built through the REAL knob path.
+
+    NO injected callable: the service's own call-time read of
+    ``ENSEMBLE_MEMOIR_REFLECTION_ENABLED`` decides the lane. An injected
+    lambda would prove that the INJECTION works, not that the KNOB
+    works — and the knob is what the operator flips.
+    """
+    return MemoirRetrievalService(
+        repo,
+        config=config,
+        syntheses_repository=syntheses_repo,
+        constellation_repository=constellation_repo,
+    )
+
+
 def _seed(repo, body="the zebra choice", importance=5, stars=None):
     return repo.insert_episode(
         agent_id=AGENT, body=body, importance=importance, stars=stars
@@ -108,7 +124,7 @@ def test_the_lane_off_envelope_is_byte_identical_to_v1(
     monkeypatch.setenv("ENSEMBLE_MEMOIR_REFLECTION_ENABLED", "false")
     _seed(repo)
     v1_service = MemoirRetrievalService(repo, config=None)
-    lane_service = _service(repo, syntheses_repo, lane=False)
+    lane_service = _lane_off_service(repo, syntheses_repo)
     v1_result = v1_service.recall(AGENT, "zebra", 5)
     lane_result = lane_service.recall(AGENT, "zebra", 5)
     assert lane_result.footer == v1_result.footer
@@ -131,7 +147,32 @@ def test_the_lane_off_footer_carries_no_syntheses_token(
 ):
     monkeypatch.setenv("ENSEMBLE_MEMOIR_REFLECTION_ENABLED", "false")
     _seed(repo)
-    result = _service(repo, syntheses_repo, lane=False).recall(AGENT, "zebra", 5)
+    result = _lane_off_service(repo, syntheses_repo).recall(AGENT, "zebra", 5)
+    assert "syntheses=" not in result.footer
+    assert result.syntheses == []
+
+
+def test_the_lane_off_is_honoured_at_call_time_after_a_post_boot_flip(
+    repo, syntheses_repo, monkeypatch
+):
+    """F1 leg (b): the footer loses the token on a POST-BOOT flip.
+
+    The service carries a REAL boot-constructed ``Config`` (the boot tier
+    says the lane is ON) and the environment is flipped to ``false``
+    AFTER the boot. The lane-off must be honoured at CALL TIME — the
+    footer loses its ``syntheses=`` token without a restart.
+    """
+    from daemon.config import Config
+
+    boot_config = Config()
+    assert boot_config.memoir_reflection.enabled is True  # the boot tier
+
+    _seed(repo)
+    # the flip happens AFTER the boot — no restart, no re-boot
+    monkeypatch.setenv("ENSEMBLE_MEMOIR_REFLECTION_ENABLED", "false")
+    result = _lane_off_service(repo, syntheses_repo, config=boot_config).recall(
+        AGENT, "zebra", 5
+    )
     assert "syntheses=" not in result.footer
     assert result.syntheses == []
 
