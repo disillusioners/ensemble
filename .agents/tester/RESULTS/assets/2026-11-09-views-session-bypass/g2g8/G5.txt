@@ -1,0 +1,87 @@
+# G5 ANONYMOUS FLOW — 2026-11-08T22:36:31Z
+
+#### G5a anonymous correct code + XFP https → expect 303 + Set-Cookie view_grant (capture raw attrs)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=feqdgj
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Sun, 08 Nov 2026 22:36:45 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g2g8matrix/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8Pl-kDFijc_9A3IyIIz-LYcrm9z3Zlu7QDV7spBfmq-L-PslXes2CupgyP_1jxpuFgW0SP13L1IZcJ3gkQKeMQ0rL-e_NlXONztSbrsfm4CJOY7iMt1eHo3X_nTpwSfjzNso3VeCCIZCOkR-q0j9Crp6D0vDvaMDIG0J-naeaOe2WK8fQ9vQjF41TuLJyeOBySlW; Path=/views/public/g2g8matrix/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   
+-- body (first 400B):
+
+
+#### G5b GET with the fresh grant cookie → expect 200 view HTML
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H Cookie: view_grant=gAAAAABq8Pl-kDFijc_9A3IyIIz-LYcrm9z3Zlu7QDV7spBfmq-L-PslXes2CupgyP_1jxpuFgW0SP13L1IZcJ3gkQKeMQ0rL-e_NlXONztSbrsfm4CJOY7iMt1eHo3X_nTpwSfjzNso3VeCCIZCOkR-q0j9Crp6D0vDvaMDIG0J-naeaOe2WK8fQ9vQjF41TuLJyeOBySlW; Path=/views/public/g2g8matrix/matrix-a.md; HttpOnly; Secure; SameSite=Lax http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:36:45 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   content-security-policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'nonce-mhWfdsqhBYfemHQo0SMaew'; style-src 'self' 'nonce-mhWfdsqhBYfemHQo0SMaew' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+   referrer-policy: no-referrer
+   content-length: 3373
+   content-type: text/html; charset=utf-8
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+   <meta charset="utf-8">
+   <title>matrix-a.md - live view</title>
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <style nonce="mhWfdsqhBYfemHQo0SMaew">
+     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; 
+
+#### G5c WRONG code (one strike) → expect HTML form re-render, 200 text/html, never JSON
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONG1
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:36:45 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-db348c9534015647e301a422930147cd'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="db348c9534015647e301a422930147cd">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G5d plain-HTTP leg (NO X-Forwarded-Proto) correct code → expect secure-context page ~200 HTML, NO grant
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 --data code=feqdgj
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:36:59 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-01ea0bb2add75cca1593276618c467bd'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1398
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Secure connection required</title>
+     <style nonce="01ea0bb2add75cca1593276618c467bd">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap

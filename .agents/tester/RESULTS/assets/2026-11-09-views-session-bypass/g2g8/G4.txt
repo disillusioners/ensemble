@@ -1,0 +1,64 @@
+# G4 STALE/INVALID SESSION — 2026-11-08T22:36:31Z — expired sid minted with expires_at=now-1h
+
+#### G4a GET public viewA with EXPIRED ensemble_sid → expect 200 interstitial HTML (anonymous), never 403/JSON
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H Cookie: ensemble_sid=h21xHqzcT5GQIu5qQixU1XAxwuw8izkSXe7WIYXCXjQ http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:36:31 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-b452b3e67c3a1f5f7dc8c2b422dc87c9'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1779
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="b452b3e67c3a1f5f7dc8c2b422dc87c9">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G4b GET public viewA with GARBAGE ensemble_sid → expect 200 interstitial HTML (anonymous)
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H Cookie: ensemble_sid=garbage-nonsense-value-12345 http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:36:31 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-e1fdbed2ec4dbf98306644558d77c12a'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1779
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="e1fdbed2ec4dbf98306644558d77c12a">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G4c POST verify with EXPIRED sid + correct code → expect anonymous chain (303+grant; sid contributes nothing)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Cookie: ensemble_sid=h21xHqzcT5GQIu5qQixU1XAxwuw8izkSXe7WIYXCXjQ --data code=feqdgj
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Sun, 08 Nov 2026 22:36:31 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g2g8matrix/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8PlwThGFp59mBYTvXGUDDlPXcf1U0VEuVCLPBIxORHaC5PjJ_JRBC2WRLX5Z8wbBtYEmzZCjxV9HtXG8MlM_T8SDoA9dhJ1amYVTV6A35DS6vTOgsPwCfzj42LHv3RWtGJzVp2YyUndlAieuVzp_o8A7k_mBka65HqKBFDbCSTty6tXud99UjXS6lxGqoeY7WuYL; Path=/views/public/g2g8matrix/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   
+-- body (first 400B):
+

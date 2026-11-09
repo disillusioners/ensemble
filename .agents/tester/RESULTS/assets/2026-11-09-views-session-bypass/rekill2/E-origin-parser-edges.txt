@@ -1,0 +1,73 @@
+# GROUP E — Origin-parser leniency edges — 2026-11-09T03:18:47Z
+
+#### E1 Origin '//op.example' (scheme-less) ⇒ RECORD (the parser's hostname wins ⇒ expect 303)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Origin: //op.example --data code=uhftde
+-- status: 303   (expect RECORD)  => RECORD
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:18:46 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8TuXQCxdFX_ZbnmImTaRj_YhAMcAqZvM_gLQJ-kMMODEVXUWjc8BgnfDPWJqCVisRzD75Nd-OIXP89j3E64X15XZAZn1yqijsZLj6G0vYr_NF6zgG3_bcXL2WzzvsEwdfhzsiEI9nC2HtarNeR4TQQzr9td1LhmJm5yinZWfiyYfRR9VvavXb_HYd74omQg1P1sz; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### E2 Origin 'https://evil.example@op.example' (userinfo) ⇒ RECORD (hostname wins ⇒ expect 303)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Origin: https://evil.example@op.example --data code=uhftde
+-- status: 303   (expect RECORD)  => RECORD
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:18:59 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8TukTEu3TBbxzcpyFVdtix0Uy7qvlE9SV0i0ekDn8mAaVL7KaBXvkVTO-ZW2nDLx8u_gDxHSpJgs64G1poHZwdNu28fuPoV4XRAdGw8DTKAs001CW3pHkqJdzE1P6UQ9ypmt2H3cUrFeXj8abZe2l7QxEzx1VOq5MCKY1HFBzfUA8eX7KcW7ZkSmPGndE5hLdPrO; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### E3 Origin 'https://op.example/some/path' (path on an Origin) ⇒ RECORD (expect 303)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Origin: https://op.example/some/path --data code=uhftde
+-- status: 303   (expect RECORD)  => RECORD
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:19:12 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8TuxjPrLWE_LPLhZGiv0rEMebifh0jzjfNqUllRxV71dovmlsQ595WV_I7AHk7XJxMjVMP6MRTPTO1b7kXaQjwVcQkWd3m0pEXqZt7Kmi9T5KRvJCRWmGPRE1_UwOEouSz_8PORqNvwxPOEx9c8ha8dAtnzBQ5w_N62iPGJZQY5NwOR4dbUz-xn5MHz_5vZ-YHNA; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### E4 Origin 'https://evil.example@op.example' with a forged XFH evil ⇒ RECORD (expect 303 — audience anchor, no declared front ⇒ no veto)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H X-Forwarded-Host: evil.example -H Origin: https://evil.example@op.example --data code=uhftde
+-- status: 303   (expect RECORD)  => RECORD
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:19:25 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8Tu-W8n-zzptKUnlheryEgK9sQM_Z2nGaqtYBb8xTuKJd6eaHaZHyqd9YkUvENlHTNVz7X-5nZDXDZMepfxAqi13zLaH5NRA6gvtftXmKapa5gzJBxYkf8tLAa31opHHf5LTI12hzLdmNkvicqA0i-2He3ab6HE5W7aZjjVOBciUiRku6GhZNYJZ3eJCHHDzR3Fm; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+

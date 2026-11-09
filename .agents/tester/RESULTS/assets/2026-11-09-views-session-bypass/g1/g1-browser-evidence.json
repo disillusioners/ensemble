@@ -1,0 +1,173 @@
+{
+  "meta": {
+    "base": "https://127.0.0.1:8443",
+    "view_path": "/views/public/g1root2/gate.md",
+    "browser": "playwright-python 1.64.1 + Chromium 148 (chromium-1223 bundle), headless",
+    "header_injection": "NONE \u2014 no setExtraHTTPHeaders, no route interception, no CDP header overrides",
+    "tls": "self-signed edge cert; ignore_https_errors=True (untrusted TLS => natural Origin: null)",
+    "passcode": "correct code, single submission"
+  },
+  "interstitial": {
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "title": "Enter passcode",
+    "h1": "Enter passcode",
+    "form_action": "/views/public/g1root2/gate.md",
+    "form_method": "post",
+    "input_selector_hit": true,
+    "script_count": 0,
+    "body_is_json": false,
+    "cookies": []
+  },
+  "after_submit": {
+    "final_url": "https://127.0.0.1:8443/views/public/g1root2/gate.md",
+    "final_status": 200,
+    "final_content_type": "text/html; charset=utf-8",
+    "title": "gate.md - live view",
+    "h1": "G1 Gate View",
+    "body_text_head": "G1 Gate View\n\nG1-CONTENT-MARKER \u2014 this markdown body proves the passcode gate opened.\n\nnavigation reached the view\nno JSON error page was rendered",
+    "still_interstitial": false,
+    "body_is_json": false,
+    "body_is_exact_forbidden_json": false,
+    "content_marker_present": true,
+    "cookies": [
+      "view_grant"
+    ]
+  },
+  "cookies_after": [
+    {
+      "name": "view_grant",
+      "domain": "127.0.0.1",
+      "path": "/views/public/g1root2/gate.md",
+      "expires": 1794263920.278803,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax",
+      "value_prefix": "gAAAAABq8Pnw"
+    }
+  ],
+  "wire_chain": [
+    {
+      "hop": 0,
+      "method": "GET",
+      "url": "https://127.0.0.1:8443/views/public/g1root2/gate.md",
+      "status": 200,
+      "redirect_hop": false,
+      "request_headers": {
+        "origin": "<absent>",
+        "referer": "<absent>",
+        "sec-fetch-site": "none",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        "sec-fetch-user": "?1",
+        "content-type": "<absent>",
+        "cookie": "<absent>"
+      },
+      "post_data": null,
+      "response_headers": {
+        "content-type": "text/html; charset=utf-8",
+        "location": "<absent>",
+        "set-cookie": "<absent>",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "content-security-policy": "default-src 'none'; script-src 'none'; style-src 'nonce-66a0ab878c14519e8b167ed03a504583'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+      }
+    },
+    {
+      "hop": 0,
+      "method": "POST",
+      "url": "https://127.0.0.1:8443/views/public/g1root2/gate.md",
+      "status": 303,
+      "redirect_hop": false,
+      "request_headers": {
+        "origin": "null",
+        "referer": "<absent>",
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        "sec-fetch-user": "?1",
+        "content-type": "application/x-www-form-urlencoded",
+        "cookie": "<absent>"
+      },
+      "post_data": "code=rfxs26",
+      "response_headers": {
+        "content-type": "<absent>",
+        "location": "/views/public/g1root2/gate.md",
+        "set-cookie": "view_grant=gAAAAABq8PnwxbKe7I0Y7wJ8FG7yO9pbSM4-X-ddE5I5lbWVP8kDihk_7FXf2Fns5kAkgrr0pDouhKUFAN0tP3UDc2WM6QwMGBE5hpME1bK5Q9uEvxI0HHAQ3WoVn00CzfwUUJVOThQxMdMAQlFRR9CdHc_OEvDEHltL2GdqO3pXwDaSmaD4tRzTzlDhVbM_SacUR60vC-IT; Path=/views/public/g1root2/gate.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400",
+        "cache-control": "private, max-age=60",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "<absent>",
+        "content-security-policy": "<absent>"
+      }
+    },
+    {
+      "hop": 1,
+      "method": "GET",
+      "url": "https://127.0.0.1:8443/views/public/g1root2/gate.md",
+      "status": 200,
+      "redirect_hop": true,
+      "request_headers": {
+        "origin": "<absent>",
+        "referer": "<absent>",
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        "sec-fetch-user": "?1",
+        "content-type": "<absent>",
+        "cookie": "<present>"
+      },
+      "post_data": null,
+      "response_headers": {
+        "content-type": "text/html; charset=utf-8",
+        "location": "<absent>",
+        "set-cookie": "<absent>",
+        "cache-control": "private, max-age=60",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "content-security-policy": "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'nonce-WhH4gIO5dwZzhB95Ewy26A'; style-src 'self' 'nonce-WhH4gIO5dwZzhB95Ewy26A' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+      }
+    }
+  ],
+  "all_raw_response_header_events": [
+    {
+      "rid": "F57A9A451F953A510E29B406E6D85223",
+      "status": 200,
+      "location": "<absent>",
+      "set_cookie": "<absent>"
+    },
+    {
+      "rid": "124DD5046CD15DCD3D2A382CE15816E9",
+      "status": 303,
+      "location": "/views/public/g1root2/gate.md",
+      "set_cookie": "view_grant=gAAAAABq8PnwxbKe7I0Y7wJ8FG7yO9pbSM4-X-ddE5I5lbWVP8kDihk_7FXf2Fns5kAkgrr0pDouhKUFAN0tP3UDc2WM6QwMGBE5hpME1bK5Q9uEvxI0HHAQ3WoVn00CzfwUUJVOThQxMdMAQlFRR9CdHc_OEvDEHltL2GdqO3pXwDaSmaD4tRzTzlDhVbM_SacUR60vC-IT; Path=/views/public/g1root2/gate.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400"
+    },
+    {
+      "rid": "124DD5046CD15DCD3D2A382CE15816E9",
+      "status": 200,
+      "location": "<absent>",
+      "set_cookie": "<absent>"
+    },
+    {
+      "rid": "392207.4",
+      "status": 200,
+      "location": "<absent>",
+      "set_cookie": "<absent>"
+    },
+    {
+      "rid": "392207.3",
+      "status": 200,
+      "location": "<absent>",
+      "set_cookie": "<absent>"
+    },
+    {
+      "rid": "392207.7",
+      "status": 404,
+      "location": "<absent>",
+      "set_cookie": "<absent>"
+    }
+  ],
+  "console": [
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ]
+}

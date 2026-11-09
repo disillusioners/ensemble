@@ -1,0 +1,339 @@
+# GROUP C1-C6 — GENERALIZATION HUNT — 2026-11-09T00:10:05Z — view=/views/public/g27fix/reprobe.md (correct code, XFP https, browser Accept)
+
+#### C1 old-pin-shape on foreign host: Host: evil.example:8443 + Origin: https://evil.example:8443 → EXPECT 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example:8443 -H Origin: https://evil.example:8443 --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:10:05 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-3b0c89dd7f11b451193aa0a9473c1add'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="3b0c89dd7f11b451193aa0a9473c1add">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C2a www-elision (origin www vs apex host): Host: evil.example + Origin: https://www.evil.example → EXPECT 403 (www≡apex only under VOUCHED anchors)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example -H Origin: https://www.evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:10:19 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-bc785029580d3c08552f11b4499de0ec'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="bc785029580d3c08552f11b4499de0ec">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C2b www-elision (apex origin vs www host): Host: www.evil.example + Origin: https://evil.example → EXPECT 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: www.evil.example -H Origin: https://evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:10:33 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-890d3b13cf3d06bea58b6e1cbea33c68'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="890d3b13cf3d06bea58b6e1cbea33c68">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C3a subdomain self-match: Host: sub.evil.example + Origin: https://sub.evil.example → EXPECT 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: sub.evil.example -H Origin: https://sub.evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:10:50 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-013a322c72b54d7f8b0a672b6179deca'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="013a322c72b54d7f8b0a672b6179deca">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C3b sibling self-match: Host: sub.evil.example + Origin: https://other.evil.example → EXPECT 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: sub.evil.example -H Origin: https://other.evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:11:04 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-1176f16790b47c168dca808cec899121'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="1176f16790b47c168dca808cec899121">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C4a host-case game (semantically fine, still unvouched): Host: EVIL.EXAMPLE + Origin: https://evil.example → EXPECT 403 (vouch check lowercases; name not vouched)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: EVIL.EXAMPLE -H Origin: https://evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:11:18 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-382159d8f98337830fb26570755df596'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="382159d8f98337830fb26570755df596">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C4b crafted origin-case: Host: evil.example + Origin: https://EVIL.EXAMPLE → EXPECT 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example -H Origin: https://EVIL.EXAMPLE --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:11:36 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-e2fafb60bfe728921c9dffeb0ad68279'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="e2fafb60bfe728921c9dffeb0ad68279">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C5a trailing dot both sides: Host: evil.example. + Origin: https://evil.example. → EXPECT 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example. -H Origin: https://evil.example. --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:11:50 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-1b35df972d6e332891a7116ba0fd2253'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="1b35df972d6e332891a7116ba0fd2253">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C5b trailing dot cross-form: Host: evil.example + Origin: https://evil.example. → EXPECT 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example -H Origin: https://evil.example. --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:12:09 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-5f0382440e52ee481b89e6f4f9818ea6'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="5f0382440e52ee481b89e6f4f9818ea6">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C6a loopback lookalike (pinned): Host: 127.0.0.1.evil.example + Origin: https://127.0.0.1.evil.example → EXPECT 403 (peer IS loopback; exact-name gate must still reject)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: 127.0.0.1.evil.example -H Origin: https://127.0.0.1.evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:12:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-d1b2c14fc2f5e2ea0a0c4a882bcd079d'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="d1b2c14fc2f5e2ea0a0c4a882bcd079d">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C6b loopback lookalike: Host: localhost.evil.example + Origin: https://localhost.evil.example → EXPECT 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: localhost.evil.example -H Origin: https://localhost.evil.example --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:12:41 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-295e7304d071d45f23ac153e5cdc3e16'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="295e7304d071d45f23ac153e5cdc3e16">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C6c octal loopback: Host: 0177.0.0.1 + Origin: https://0177.0.0.1 → EXPECT 403 (not an exact loopback SPELLING)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: 0177.0.0.1 -H Origin: https://0177.0.0.1 --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:12:55 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-f5934454bbf962e0742c16a7850465af'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="f5934454bbf962e0742c16a7850465af">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### C6d octal cross-form: Host: 0177.0.0.1 + Origin: https://127.0.0.1 → EXPECT 403 (no 0177 anchor; 127.0.0.1 origin matches nothing)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: 0177.0.0.1 -H Origin: https://127.0.0.1 --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:13:13 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-7e28bb019c2110b6020d640a0ecd6b70'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="7e28bb019c2110b6020d640a0ecd6b70">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt

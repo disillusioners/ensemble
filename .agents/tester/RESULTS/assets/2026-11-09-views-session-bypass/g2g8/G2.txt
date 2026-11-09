@@ -1,0 +1,180 @@
+# G2 ORIGIN MATRIX — 2026-11-08T22:33:16Z — viewA=/views/public/g2g8matrix/matrix-a.md (correct code, XFP https, browser Accept)
+
+#### G2.1 Origin: null (no Sec-Fetch-Site) → expect 303+grant
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Origin: null --data code=feqdgj
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Sun, 08 Nov 2026 22:33:15 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g2g8matrix/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8Pis1D3krxB5VudS69Ppl6HB0jRncJbF-_jqns1vlxdWBgYrZPgfUr96E1IwueaI4C6upsq-pTBKXx_mfWv7KtralK8zAGCtfA7QbS3InJ5ikCfj3G9c16HVP-c3ZgzBWWCFg1k3d3j_PsVoWCY-PSuFozhyw1m8kYLFW6MmONdek0D_CGgV0dxCjyRY3gYba2XL; Path=/views/public/g2g8matrix/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### G2.2 Host: matrix.example + Origin: https://www.matrix.example (www origin vs apex host) → expect 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: matrix.example -H Origin: https://www.matrix.example --data code=feqdgj
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Sun, 08 Nov 2026 22:33:29 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g2g8matrix/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8Pi6r2m2BggCHQHq5-jRrfVXGPY4J1KEBj0w3vtrvftILecEJu2Ugrn6yexEt1MbisqdjsXqOMX6nuipiw-Evniz5LxoQGLX4rxnWUs8DOLhRxMypFVlI2W45-itTbQkvwgwU_1Lcd3wYbYN8I1IgHzf8_jzMQ6q1GwTFVd6zru2w1-oHtAnp_iCIbYcXKazskw0; Path=/views/public/g2g8matrix/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### G2.3 Host: www.matrix.example + Origin: https://matrix.example (apex origin vs www host) → expect 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: www.matrix.example -H Origin: https://matrix.example --data code=feqdgj
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Sun, 08 Nov 2026 22:33:43 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g2g8matrix/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8PjIkNZ-zjpZaMipnpk-0Pa6v3wAp__vbQIh5bKz1RI8W4rRyYpnFQtUDol6n6NtNrFdhnpJgJXy3fIjPwS5LCK0SaSFYd8-rF38PbmRd25ckFyeMxeQq6oKltGlvZcLQHEJPiZomq4OFFC7d9kTtXB0RSrQWxp_xfeFO9P_nEesi7k98UrNwo31y_X_JssiuooO; Path=/views/public/g2g8matrix/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### G2.4 Origin: null + Sec-Fetch-Site: cross-site → expect graceful REJECT (HTML; report status)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Origin: null -H Sec-Fetch-Site: cross-site --data code=feqdgj
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Sun, 08 Nov 2026 22:33:58 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-d784c34a702812c7aac30b67a4d3cf33'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="d784c34a702812c7aac30b67a4d3cf33">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### G2.5 No Origin header at all → expect 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=feqdgj
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Sun, 08 Nov 2026 22:34:12 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g2g8matrix/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8PjlnNJWRL8yzji-UetHbj4f4VSZA37nRuiPFxyaSIyIYiPXs8rwuzIYNEShzgOk5V46yvb6SJPOsL7gXDBCLLQBt3XowzOM0w3136V8pBtYfpkIwDiilOxKPrzUnb3ERsC8hbxfksLL91bT_uYhBjkDagvIzsty_PyDkhbOSDONLbNzAKNBaK0kEVkbXOQeiA4U; Path=/views/public/g2g8matrix/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   
+-- body (first 400B):
+
+
+#### G2.6 Origin: https://evil.example (Host default 127.0.0.1) → expect REJECT (HTML)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Origin: https://evil.example --data code=feqdgj
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Sun, 08 Nov 2026 22:34:26 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-bb88c41d58720d9de17225ed3135601c'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="bb88c41d58720d9de17225ed3135601c">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### G2.7 TAUTOLOGY: Host: evil.example + Origin: https://evil.example (attacker self-match) — task expects FAIL-CLOSED
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example -H Origin: https://evil.example --data code=feqdgj
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Sun, 08 Nov 2026 22:34:40 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g2g8matrix/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8PkB2bqVzRMUPXoLNC3mTsmilKypk6jwdzA-Di2lQb87xFapPsTp3A4yuOBjQ6ouVjbYJi5DqnZ27cqKX7TJVkY1Z7p3et1I_7jHdL1CpQbjYUUZn6irz0C1vfyTSJqWo1qCwe_TUDjECpjcr2czH-JxXc60b9a7IlM36qzzCyPH2M767a9K1wk1W4eCvsoY1nFD; Path=/views/public/g2g8matrix/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### G2.8a XFH negative (NO declared proxy front): X-Forwarded-Host: evil.example + Origin: https://evil.example → expect REJECT
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H X-Forwarded-Host: evil.example -H Origin: https://evil.example --data code=feqdgj
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Sun, 08 Nov 2026 22:34:54 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-f11c0cefafc1db717305435e8c961718'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="f11c0cefafc1db717305435e8c961718">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### G2.8b Forwarded negative (NO declared proxy front): Forwarded: host=evil.example + Origin: https://evil.example → expect REJECT
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Forwarded: host=evil.example -H Origin: https://evil.example --data code=feqdgj
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Sun, 08 Nov 2026 22:35:08 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-5df946d0917f537f6106e645701991ca'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="5df946d0917f537f6106e645701991ca">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt

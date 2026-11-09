@@ -1,0 +1,290 @@
+# G3 SESSION BYPASS — 2026-11-08T22:35:46Z — sid minted via AuthSessionRepository.insert_session (issue_session field-mirror)
+
+#### G3a public GET /views/public/<viewA> with valid ensemble_sid → expect 200 view HTML, NO interstitial
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H Cookie: ensemble_sid=hmtKePcP4xltbmhyggYq60U6wtGhfjk5bSwgdr_rtms http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:35:45 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   content-security-policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'nonce-xkq2BmLT5IRJT3XMSnRskA'; style-src 'self' 'nonce-xkq2BmLT5IRJT3XMSnRskA' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+   referrer-policy: no-referrer
+   content-length: 3373
+   content-type: text/html; charset=utf-8
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+   <meta charset="utf-8">
+   <title>matrix-a.md - live view</title>
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <style nonce="xkq2BmLT5IRJT3XMSnRskA">
+     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; 
+
+#### G3a-control public GET with NO session → expect 200 interstitial (passcode form)
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:35:45 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-6d476baf6dbfe10d511bfb6eb1860978'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1779
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="6d476baf6dbfe10d511bfb6eb1860978">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G3b direct (non-public) lane GET with valid session → observe
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H Cookie: ensemble_sid=hmtKePcP4xltbmhyggYq60U6wtGhfjk5bSwgdr_rtms http://127.0.0.1:8082/views/g2g8matrix/matrix-a.md
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:35:45 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   content-security-policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'nonce-Cl1O2kbXL5SqGxfR2V2FZQ'; style-src 'self' 'nonce-Cl1O2kbXL5SqGxfR2V2FZQ' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+   referrer-policy: no-referrer
+   content-length: 3373
+   content-type: text/html; charset=utf-8
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+   <meta charset="utf-8">
+   <title>matrix-a.md - live view</title>
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <style nonce="Cl1O2kbXL5SqGxfR2V2FZQ">
+     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; 
+
+#### G3b-control direct lane GET with NO session → observe (middleware lane)
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 http://127.0.0.1:8082/views/g2g8matrix/matrix-a.md
+-- status: 302
+   HTTP/1.1 302 Found
+   date: Sun, 08 Nov 2026 22:35:45 GMT
+   server: uvicorn
+   content-type: text/plain; charset=utf-8
+   location: /api/auth/login?return_to=/views/g2g8matrix/matrix-a.md
+   content-length: 0
+   
+-- body (first 400B):
+
+
+#### G3c-prep POST unminted #1 (burn token; expect 404)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=feqdgj
+-- status: 404
+   HTTP/1.1 404 Not Found
+   date: Sun, 08 Nov 2026 22:35:45 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-1d01d8ec4c65c3b01ee57e8b2782a8f4'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1408
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View not found</title>
+     <style nonce="1d01d8ec4c65c3b01ee57e8b2782a8f4">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G3c-prep POST unminted #2
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=feqdgj
+-- status: 404
+   HTTP/1.1 404 Not Found
+   date: Sun, 08 Nov 2026 22:35:46 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-ba01c272fe7c2e5bdd0e44180cf6bdf4'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1408
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View not found</title>
+     <style nonce="ba01c272fe7c2e5bdd0e44180cf6bdf4">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G3c-prep POST unminted #3
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=feqdgj
+-- status: 404
+   HTTP/1.1 404 Not Found
+   date: Sun, 08 Nov 2026 22:35:46 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-cb3d8355bc6ae993bab74e9b89c5aed2'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1408
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View not found</title>
+     <style nonce="cb3d8355bc6ae993bab74e9b89c5aed2">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G3c-prep POST unminted #4
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=feqdgj
+-- status: 404
+   HTTP/1.1 404 Not Found
+   date: Sun, 08 Nov 2026 22:35:46 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-0f4a014b9a05659c1c28d78b53985152'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1408
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View not found</title>
+     <style nonce="0f4a014b9a05659c1c28d78b53985152">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G3c-prep POST unminted #5
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=feqdgj
+-- status: 404
+   HTTP/1.1 404 Not Found
+   date: Sun, 08 Nov 2026 22:35:46 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-82dcd960eb7738af338cb8038a1d5d57'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1408
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View not found</title>
+     <style nonce="82dcd960eb7738af338cb8038a1d5d57">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G3c-prep POST unminted #6 (bucket now empty → expect 429)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=feqdgj
+-- status: 429
+   HTTP/1.1 429 Too Many Requests
+   date: Sun, 08 Nov 2026 22:35:46 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-76c89b0fe9d3de7c1aad11ceda91600a'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1351
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Too many attempts</title>
+     <style nonce="76c89b0fe9d3de7c1aad11ceda91600a">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-wi
+
+#### G3c-1 POST viewA WITH session, bucket EXHAUSTED → 303 here proves session bypass precedes rate limiter
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Cookie: ensemble_sid=hmtKePcP4xltbmhyggYq60U6wtGhfjk5bSwgdr_rtms --data code=feqdgj
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Sun, 08 Nov 2026 22:35:46 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g2g8matrix/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8PlCZfdsu4k2IW6U-5YB482RkFO73RP42Pgy8cGde3VBbnPLb3nJ4bqFTnvIQmwwSJij7SLr22EuElk-wFSrOKnM-xTV6RjPn5KwvJ2qO2T542raLAcFmVNNPm9SxFUmcW31RVcK_6-_NzY0SSbMIpX2aaeBUrN3UjxkVjRxTHZ2E8tdYjok7MUEtr3wolW07hJ9; Path=/views/public/g2g8matrix/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   
+-- body (first 400B):
+
+
+#### G3c-2 POST viewA NO session, correct code, bucket STILL exhausted → expect 429 (proves G3c-1 was bypass)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=feqdgj
+-- status: 429
+   HTTP/1.1 429 Too Many Requests
+   date: Sun, 08 Nov 2026 22:35:46 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-eb84bc9028ef034af17f264438bc3f02'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1351
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Too many attempts</title>
+     <style nonce="eb84bc9028ef034af17f264438bc3f02">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-wi
+
+#### G3d plain GET with session — Set-Cookie audit (expect NO set-cookie: GET mints nothing)
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H Cookie: ensemble_sid=hmtKePcP4xltbmhyggYq60U6wtGhfjk5bSwgdr_rtms http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md?probe=g3d-nocookie
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:35:46 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   content-security-policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'nonce-cQfS3kEu9pLsQkbLyDN1xw'; style-src 'self' 'nonce-cQfS3kEu9pLsQkbLyDN1xw' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+   referrer-policy: no-referrer
+   content-length: 3373
+   content-type: text/html; charset=utf-8
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+   <meta charset="utf-8">
+   <title>matrix-a.md - live view</title>
+   <meta name="viewport" content="width=device-width, initial-scale=1">
+   <style nonce="cQfS3kEu9pLsQkbLyDN1xw">
+     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; 

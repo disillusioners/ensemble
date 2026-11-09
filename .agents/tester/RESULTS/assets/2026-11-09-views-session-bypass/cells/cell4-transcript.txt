@@ -1,0 +1,58 @@
+
+#### cell4-p1 EXPECT-403+zero-strikes [non-loopback peer, no vouch universe: real Origin rejected] Host: 192.168.1.151:8083 + Origin: https://192.168.1.151:8083
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: 192.168.1.151:8083 -H Origin: https://192.168.1.151:8083 http://192.168.1.151:8083/views/public/cellroot/matrix-a.md
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:16:33 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-8ad2203639bdb2a34387257bef01025f'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="8ad2203639bdb2a34387257bef01025f">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### cell4-p2 EXPECT-303+grant [DEGRADATION ALLOWANCE: absent Origin => fail-open R2] Host: 192.168.1.151:8083, no Origin
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: 192.168.1.151:8083 http://192.168.1.151:8083/views/public/cellroot/matrix-a.md
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:16:47 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/cellroot/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8RDvnIVK6Yc79ZPldD7XOifGnjaQvX31Hq25rSYusT3Rrfjeb3PhmDvi_KzArOwohZu5v4DKI3q7Hndry-01cJTCa5tEeOmoBTs9Q01Upkmd6NyuKBBVU4R7otXaRYAxsvNiX2gwj9dkxIo0BkJrbEiybAYskxSKfpfjwcmaTC5ZRzRBdHpK3-sVewidsf4fWgE_; Path=/views/public/cellroot/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   
+-- body (first 400B):
+
+
+#### cell4-p3 EXPECT-303+grant [DEGRADATION ALLOWANCE: Origin: null (no Sec-Fetch-Site) => fail-open R2] Host: 192.168.1.151:8083 + Origin: null
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: 192.168.1.151:8083 -H Origin: null http://192.168.1.151:8083/views/public/cellroot/matrix-a.md
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:17:01 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/cellroot/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8RD-EoFyXU2Iq7-g8Wx49ILcF00fDfqLykgxRpPRd6xuGwvVGWiERawt3Bry414pFl8bFo-IV2SPSA8TiMBZi2PruSwZ87tDo51ZP8D6ZG2OOqh6-EULTlVbfYnwjnx_L6RfwkrKfQWXGP1ztUgw7kJq56Hg-8mFHW2Ft91VNb-bAgqhxKY07SuH0DBsrBgAANWu; Path=/views/public/cellroot/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+

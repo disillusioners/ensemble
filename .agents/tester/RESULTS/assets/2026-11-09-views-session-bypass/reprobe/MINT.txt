@@ -1,0 +1,4 @@
+# MINT — g27fix/reprobe.md — 2026-11-09T00:08:17Z
+Public URL: /views/public/g27fix/reprobe.md
+Passcode: m2enz6 (drill only — dev DB row, generation 1)
+Generation: 1  Locked: no

@@ -1,0 +1,5 @@
+/home/nea/ensemble-src-wt-views-session-bypass/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+sid-valid=hmtKePcP4xltbmhyggYq60U6wtGhfjk5bSwgdr_rtms  expires_at=2026-11-09T22:32:30.828252+00:00
+sid-expired=h21xHqzcT5GQIu5qQixU1XAxwuw8izkSXe7WIYXCXjQ  expires_at=2026-11-08T21:32:30.828252+00:00
+scopes=auth:admin instances:read instances:write jobs:read jobs:write maintenance:read ...

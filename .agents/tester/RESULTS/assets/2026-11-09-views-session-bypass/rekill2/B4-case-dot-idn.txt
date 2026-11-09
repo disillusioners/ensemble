@@ -1,0 +1,180 @@
+# GROUP 6+7 — case / trailing-dot / IPv6 / IDN lookalikes — 2026-11-09T03:06:21Z — view=/views/public/g27fix/rekill2.md
+
+#### B6.1 Host VIEWS.EXAMPLE + Origin https://views.example ⇒ EXPECT 303 (case-normalized)
+EXPECT: 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: VIEWS.EXAMPLE -H Origin: https://views.example --data code=uhftde
+-- status: 303   (expect 303)  => MATCH
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:06:24 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8TiwuOTrZod11LYmNaZylq9L0j-J4XLAk0dQLocyTsSYvplzcbAgx-397elreEhtChDceFztYonv07dNfen3TLR_mc6bt90a2bleCniEJ6UwPDEe8MAAqasedg4mXtgwnuVGWMHyvCBJsuljn5BaxVK3Y6kHx9ta28truel_PDcLwfNk-lXsVo0wqgwMRBluSzlo; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### B6.2 Host views.example. + Origin https://views.example. ⇒ EXPECT 303 (pinned FQDN root-dot equivalence; brief predicted 403)
+EXPECT: 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: views.example. -H Origin: https://views.example. --data code=uhftde
+-- status: 303   (expect 303)  => MATCH
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:06:37 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8Ti9rX69YFuJIYIybqxD66q__z_KX2v0PEvy9OjIH-uO8o8l3VyrZOnVr2mYM975kDo7o_kTUkue-bpC351i1q5peCbEkcWiQs2V-tPe960hxVbuP9x7phRkQ_MD4zZ_jbGkw6ICd9v4PC2vit2895cJB-z2vL2VD-XIJl5kFG1EwndVOVzeN0K6A-AegZnvnWHm; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### B6.3 cross-form: Host views.example. + Origin https://views.example ⇒ EXPECT 303
+EXPECT: 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: views.example. -H Origin: https://views.example --data code=uhftde
+-- status: 303   (expect 303)  => MATCH
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:06:50 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8TjKugi4H6k37n2g7BfSJhwZByauvf4OPLaOdaXCygK-uBAj5eEqbV33XhOBjmUg2JGT00u0nQObzil2jjsAQ19nOloqz0LL1KhyMhNPmvVAT5I0uFczpmBz4GFCZRpmq-XLI-eZzKh51xQI1BEcmo0DJv1ylHdsdKChBYFLA521bSEsUfvJUnJnigGvmDI2ZylC; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### B6.4 cross-form: Host views.example + Origin https://views.example. ⇒ EXPECT 303
+EXPECT: 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: views.example -H Origin: https://views.example. --data code=uhftde
+-- status: 303   (expect 303)  => MATCH
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:07:03 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8TjX2YZFzDX9ok7DY8gQ5gOl_OVNnr164jsi7IUtoXo6AAY39Jt4peZGn69hvZY9Sgu7ZjVfOtltpEc2g-MzFHQYOV2clMqk-KkxsuMJpCB1f5v-bKbzgKqYRcB1fJ1BVRynC6QS1lZFtJMCd8R1W0CxUb_tIeWrC66Xw5FEa2xzBGFPhf07RImr18cIRvgLYZxK; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### B7.1 Host [::1]:8082 + Origin https://[::1] ⇒ EXPECT 303 (exact-loopback carve — allowed source)
+EXPECT: 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: [::1]:8082 -H Origin: https://[::1] --data code=uhftde
+-- status: 303   (expect 303)  => MATCH
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:07:16 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8TjlUy_VRa9orFYJgO8G5Z93X6lR6VLIljT4r3ivkJUuLEvjFtXEDoD9Ien-0Qrf_vYYL9NPZ_U7hcW2lrLv0goQ2nGqICfi-pGM47FLp6Wxht2zwsKDH8VdHGAzMtXN2ODuHwb-Bf40ZhqT3ECmoZsSlpWbBFfV07p__zbnjklp0jGDJMZf19mEu-3tEcAfCBK2; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### B7.2 Host xn--views-4ua.example + Origin https://xn--views-4ua.example ⇒ EXPECT 403 (punycode lookalike)
+EXPECT: 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: xn--views-4ua.example -H Origin: https://xn--views-4ua.example --data code=uhftde
+-- status: 403   (expect 403)  => MATCH
+-- content-type: text/html;   set-cookie headers: 0
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 03:07:29 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-ec5b4e42edbdb667364092708145c1f8'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="ec5b4e42edbdb667364092708145c1f8">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### B7.3 Host 'vıews.example' (raw UTF-8 confusable) + Origin https://vıews.example ⇒ RECORD (expect 403; a 400 means the HTTP layer rejected the header)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: vıews.example -H Origin: https://vıews.example --data code=uhftde
+-- status: 403   (expect RECORD)  => RECORD
+-- content-type: text/html;   set-cookie headers: 0
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 03:07:42 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-89c7105b1533e8da1f3759348a53d25d'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="89c7105b1533e8da1f3759348a53d25d">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### B7.4 Host views.example.evil.com + Origin https://views.example.evil.com ⇒ EXPECT 403 (suffix lookalike)
+EXPECT: 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: views.example.evil.com -H Origin: https://views.example.evil.com --data code=uhftde
+-- status: 403   (expect 403)  => MATCH
+-- content-type: text/html;   set-cookie headers: 0
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 03:07:55 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-e8da88496f4a3b7700209cd8eba749c6'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="e8da88496f4a3b7700209cd8eba749c6">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt

@@ -1,0 +1,6 @@
+[cell3-p1 EXPECT-303+grant [carve: peer loopback + exact 127.0.0.1] Host: 127.0.0.1:8083 + Origin: https://127.0.0.1:8083] status=303 grant=YES loc=/views/public/cellroot/matrix-a.md
+[cell3-p2 EXPECT-303+grant [carve: exact name localhost] Host: localhost:8083 + Origin: https://localhost:8083] status=303 grant=YES loc=/views/public/cellroot/matrix-a.md
+[cell3-p3 EXPECT-403+zero-strikes [lookalike self-match] Host: 127.0.0.1.evil.example + Origin: https://127.0.0.1.evil.example] status=403 grant=no loc=
+[cell3-p4 EXPECT-403+zero-strikes [lookalike] Host: localhost.evil.example + Origin: https://localhost.evil.example] status=403 grant=no loc=
+[cell3-p5 EXPECT-403+zero-strikes [127.x range != canonical name; record actual] Host: 127.0.0.2:8083 + Origin: https://127.0.0.2:8083] status=403 grant=no loc=
+[cell3-p6 EXPECT-403+zero-strikes [cross-name: vouched Host localhost vs Origin 127.0.0.1] Host: localhost:8083 + Origin: https://127.0.0.1:8083] status=403 grant=no loc=

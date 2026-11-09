@@ -1,0 +1,16 @@
+# RE-KILL 2 BOOT CONFIG — boot1 — 2026-11-09T02:54:46Z
+tip=4be947eeebcc1faf7e81c3c83fd25430c454398f
+shape=declared
+PORT=8082 (owned exclusively by this lane; 8088 NEVER)
+FAKE_HOME=/tmp/lvrekill2.WkbRCf/home
+ENSEMBLE_DATA_DIR=/tmp/lvrekill2.WkbRCf/data
+ENSEMBLE_AUTH_ENABLED=false
+ENSEMBLE_AUTH_ALLOWED_ORIGINS=<unset>
+ENSEMBLE_AUTH_ISSUER=<unset> (drill-fake; live issuer scrubbed)
+ENSEMBLE_AUTH_DISCOVERY_URL=<unset>
+ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE=<unset>
+ENSEMBLE_LIVE_VIEWS_EXTERNAL_BASE_URL=https://views.example
+ENSEMBLE_LIVE_VIEWS_ROOTS={"g27fix": {"type": "filesystem", "path": "/tmp/lvrekill2.WkbRCf/roots/g27fix"}, "tmp-images": {"type": "tmp_images"}}
+ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0
+POSTGRES_DB=ensemble_dev (dev assert passed)
+SYSTEM_ENCRYPTION_KEY=<drill-key sha256:cb8cc7bf7996...>

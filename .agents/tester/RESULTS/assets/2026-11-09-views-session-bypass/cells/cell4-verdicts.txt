@@ -1,0 +1,3 @@
+[cell4-p1 EXPECT-403+zero-strikes [non-loopback peer, no vouch universe: real Origin rejected] Host: 192.168.1.151:8083 + Origin: https://192.168.1.151:8083] status=403 grant=no loc=
+[cell4-p2 EXPECT-303+grant [DEGRADATION ALLOWANCE: absent Origin => fail-open R2] Host: 192.168.1.151:8083, no Origin] status=303 grant=YES loc=/views/public/cellroot/matrix-a.md
+[cell4-p3 EXPECT-303+grant [DEGRADATION ALLOWANCE: Origin: null (no Sec-Fetch-Site) => fail-open R2] Host: 192.168.1.151:8083 + Origin: null] status=303 grant=YES loc=/views/public/cellroot/matrix-a.md

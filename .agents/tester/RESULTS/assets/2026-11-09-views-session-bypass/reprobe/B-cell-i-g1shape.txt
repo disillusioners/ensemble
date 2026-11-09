@@ -1,0 +1,61 @@
+# GROUP B — CELL (i) + G1 SHAPE — 2026-11-09T00:09:23Z — view=/views/public/g27fix/reprobe.md (correct code, XFP https, browser Accept)
+
+#### B1 CELL(i): Origin: null, NO Sec-Fetch-Site → EXPECT 303 + grant
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Origin: null --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:09:23 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8Q8z2XsbXlhNqGt_KzyOPZ2FmO9bkEpfSz59_9P6Rl1UOQg9bwcBgCRZqC4LOp9kxOR43KF3xeAHu1V6dxF29dNBbjrl1vE5omPObUcpVf9X6dCmmGysZV93-g8kG7QR5Jn2-d5brQSiWec5edLN9G6FvfE9VSXee5cqRArcLH2YDNBnSoailwYXi0I_DZrpkV2v; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+
+
+#### B2 CELL(i) discriminator: Origin: null + Sec-Fetch-Site: cross-site → EXPECT 403 HTML, no cookie
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Origin: null -H Sec-Fetch-Site: cross-site --data code=m2enz6
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:09:37 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-9ca96dfa9e526221e1b2381fb6978be2'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 0
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="9ca96dfa9e526221e1b2381fb6978be2">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### B3 G1-SHAPE (null branch BEFORE anchors): Host: evil.example + Origin: null, no SFS → EXPECT 303 + grant (grant with NO evil anchor proves null-allow precedes anchor consult)
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/reprobe.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: evil.example -H Origin: null --data code=m2enz6
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:09:55 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/reprobe.md
+   set-cookie: view_grant=gAAAAABq8Q9TZ4WEeLjOpIV8EJcd6avwoiYNo3q6YPVX5QCNc-AYCBWT5rpBHAgQUtsAIH629MJ3n_gbwFsk4KwWFNvFc3y69g97cJRO_ma2p7EaILOQfNeHhIGPbT4ZxT3sjwsEt-yXf_JQbI5sBFSr3IhkRR9uLXgO7kZG9l9urGAsWhtMFzF5UddoeLpTP2Y9bJUa7An7; Path=/views/public/g27fix/reprobe.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- set-cookie present: 1
+-- body (first 400B):
+

@@ -1,0 +1,62 @@
+# R5 SANITY — 2026-11-08T22:43:03Z
+== grep 1: resolve_views_session callsites (the R1 seam) ==
+2087:        if await resolve_views_session(request) is not None:
+2364:        session_ctx = await resolve_views_session(request)
+2623:        if await resolve_views_session(request) is not None:
+== grep 2: view_write surface — HTTP handlers with write verbs on /views? ==
+2692:    @router.post("/public/{root_name}/{rel_path:path}")
+== grep 3: view_write TOOL authz seam (agent tool, NOT HTTP) ==
+91:def create_live_view_tools(manager: "InstanceManager", current_instance_id: str) -> list:
+101:        current_instance_id: The current instance ID. Accepted
+326:        # privileged mint actor. ``current_instance_id`` is
+331:            current_instance_id
+332:            if isinstance(current_instance_id, str)
+333:            and current_instance_id
+
+#### R5-board GET board WITHOUT session (anonymous posture; observe)
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 http://127.0.0.1:8082/views/public/board/index.html
+-- status: 404
+   HTTP/1.1 404 Not Found
+   date: Sun, 08 Nov 2026 22:43:02 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-e5dbcef86372458620038816d01babe8'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1408
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View not found</title>
+     <style nonce="e5dbcef86372458620038816d01babe8">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### R5-board GET board WITH valid ensemble_sid (session bypass on board lane; observe)
+$ curl -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H Cookie: ensemble_sid=hmtKePcP4xltbmhyggYq60U6wtGhfjk5bSwgdr_rtms http://127.0.0.1:8082/views/public/board/index.html
+-- status: 404
+   HTTP/1.1 404 Not Found
+   date: Sun, 08 Nov 2026 22:43:02 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-8d6439e5ad750773621ec50c3b0e262f'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1408
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View not found</title>
+     <style nonce="8d6439e5ad750773621ec50c3b0e262f">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width

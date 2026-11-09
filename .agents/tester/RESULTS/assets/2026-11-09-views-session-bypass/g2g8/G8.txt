@@ -1,0 +1,409 @@
+# G8 LOCKOUT SAFETY — 2026-11-08T22:37:35Z — viewB=/views/public/g2g8matrix/matrix-b.md (gen=1)
+
+#### G8 strike 1/10 (wrong code) → expect failure re-render 200 HTML
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:37:35 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-d1d96fe922acbbfa09bc690c0307958c'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="d1d96fe922acbbfa09bc690c0307958c">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G8 strike 2/10 (wrong code) → expect failure re-render 200 HTML
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:37:49 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-7b8779016254dbdb49e1f6cdb9bbd390'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="7b8779016254dbdb49e1f6cdb9bbd390">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G8 strike 3/10 (wrong code) → expect failure re-render 200 HTML
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:38:03 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-a41a8e41f45716e472a850ae048b8b7e'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="a41a8e41f45716e472a850ae048b8b7e">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G8 strike 4/10 (wrong code) → expect failure re-render 200 HTML
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:38:17 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-87b7a215dab2046a5b4d7fec65e4dd50'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="87b7a215dab2046a5b4d7fec65e4dd50">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G8 strike 5/10 (wrong code) → expect failure re-render 200 HTML
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:38:31 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-6fe17979c3b1667fdf0d4ca938f87c01'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="6fe17979c3b1667fdf0d4ca938f87c01">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G8 strike 6/10 (wrong code) → expect failure re-render 200 HTML
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:38:45 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-61413238e3047b3b4f0a501bf00e5af6'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="61413238e3047b3b4f0a501bf00e5af6">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G8 strike 7/10 (wrong code) → expect failure re-render 200 HTML
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:38:59 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-963e6fa6f948e797187f520de8e2a986'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="963e6fa6f948e797187f520de8e2a986">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G8 strike 8/10 (wrong code) → expect failure re-render 200 HTML
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:39:14 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-87eb489cfc2429535c457cf365bf7b63'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="87eb489cfc2429535c457cf365bf7b63">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G8 strike 9/10 (wrong code) → expect failure re-render 200 HTML
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:39:28 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-c19b4a7e140325afa2ba8abcf629844a'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1830
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Enter passcode</title>
+     <style nonce="c19b4a7e140325afa2ba8abcf629844a">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### G8 strike 10/10 (wrong code) → expect LOCKED page 200 HTML (lock flips this strike)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:39:42 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-8be3224f84664c10297da93ccbb73676'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="8be3224f84664c10297da93ccbb73676">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### G8 post-lock attempt 11 → expect locked short-circuit 200 HTML (no compare, no increment)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=k3wdzv
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:39:56 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-8f53302f63df9f8954b765450d66fd65'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="8f53302f63df9f8954b765450d66fd65">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### G8 hammer 1 → expect locked page 200 (tokens remain)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:39:56 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-ac6bf603c61465a95750e07166062045'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="ac6bf603c61465a95750e07166062045">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### G8 hammer 2
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:39:56 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-046e2ef985505af8e57a0333c3418c28'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="046e2ef985505af8e57a0333c3418c28">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### G8 hammer 3
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:39:56 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-3846195709e99c96105384e06a577bcd'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="3846195709e99c96105384e06a577bcd">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### G8 hammer 4 → expect 429 (bucket exhausted)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:39:56 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-cc4124faad20519587f7c5555e162f84'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="cc4124faad20519587f7c5555e162f84">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### G8 hammer 5 → expect 429
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 429
+   HTTP/1.1 429 Too Many Requests
+   date: Sun, 08 Nov 2026 22:39:56 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-d5dde28206915f2a7d18f55f8cea192e'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1351
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Too many attempts</title>
+     <style nonce="d5dde28206915f2a7d18f55f8cea192e">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-wi
+
+#### G8 recovery after ≈13s refill → expect locked page 200 (NOT 429; one token returned)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data code=WRONGG8
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:40:09 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-975c71cd6d97b953b737816ba0a4d56e'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="975c71cd6d97b953b737816ba0a4d56e">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4

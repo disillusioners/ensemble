@@ -1,0 +1,22 @@
+2026-11-09T00:08:14Z [BASELINE attempt-1 (pre-warning-fix)] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:08:35Z [BASELINE (post-mint, pre-probe)] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:08:59Z [after-A1] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:09:17Z [after-A3] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:09:55Z [after-B1/B2] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:09:58Z [after-B3] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:10:51Z [after-C2] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:11:37Z [after-C4a] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:12:09Z [after-C5] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:12:41Z [after-C6a] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:13:13Z [after-C6c] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:13:17Z [after-C6d] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:13:57Z [after-C7b] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:14:29Z [after-C7d] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:15:00Z [after-C8] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:15:19Z [after-C9a] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:15:50Z [after-C10a] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:16:22Z [after-CX1] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:16:54Z [after-CX3] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:17:12Z [after-CX5] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:17:43Z [after-D1] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1
+2026-11-09T00:18:01Z [after-D3] rowpeek g27fix/reprobe.md: failed_attempts=0 locked=False generation=1

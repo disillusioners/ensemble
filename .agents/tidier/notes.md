@@ -1,5 +1,13 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-11-09 — views-session-bypass tidier pass (worktree feature/views-session-bypass, range f49006b92..HEAD, 4 files +2991/−163), Iteration 001
+- Commission: quality-only pass post council APPROVE, behavior frozen, mechanical folds authorized.
+- Dispatch: 2 parallel read-only workers readable+hygiene, then 1 fix worker.
+- Verdict counts post-dedup: 2 High / 10 Medium / 8 Low; 13 folded, 5 report-only, plus deferred-to-Reviewer notes.
+- Folds applied: (1) `style(views)` 91d1617e2 — P1 size rationale added to live_views.py module docstring (1000–3000 band obligation); P2 view_passcode_pages.py docstring updated from five to seven pages with accurate enumeration; P3 resolve_views_session return annotation -> "AuthContext | None" + TYPE_CHECKING import; P4 corrected outranks-lockout comments at ~:2069 and ~:2605; P5 view_passcode_pages.py EOF trailing newline; P6 _grant_success_response typed with forward-ref annotations and unquoted actor. (2) `test(views)` 9bb0651dd — T1 reorganized into contiguous thematic sections with hoisted fixture preamble; T2 consolidated mock Starlette Request builder into _mock_request helper; T3 removed dead _post helper; T4 removed _same_origin_helper indirection; T5 parametrized Sec-Fetch-Site trio and malformed/out-of-range port pair; T6 grouped models import into daemon.* block; T7 appended file-size rationale to test docstring; T8 annotated _build_app auth_config param.
+- Deliberately left: M7 adjacent duplicated 12-line resolve block in _public_resolve — extraction restructures control flow, report-only; M9/M10 trusted-host parsing/anchor-dedup — behavior-bearing; L6/L7 test churn vs value.
+- Green evidence: baseline 74 passed @ 4.08s == post-fold 74 passed @ 5.10s, collect 74/74. Zero skips; all authorized folds applied.
+
 ## 2026-11-07 — wi-b97ec302 sources-regression tidier pass (worktree fix/wi-b97ec302-sources-regression, range 6b571771d..8623641f2 + 3 fold commits), Iteration 001
 - Commission: quality/convention sweep post reviewer-council APPROVE (0 critical); W1/W2/W3 (unbounded schedules loops, DESC truncation @100k, quiet self-silencing) ROUTED — fenced out of worker prompts, not re-litigated. Zero-behavior folds authorized incl. wrapper exit-flow cosmetics + repository.py double blank.
 - Dispatch: 2 parallel workers (readable-code + static-hygiene) — 9 findings deduped to 8 fixed / 4 deliberately left.

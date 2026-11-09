@@ -1,0 +1,372 @@
+# G6 NEVER-JSON-ON-HUMAN-PAGES + R3 byte-identity — 2026-11-08T22:41:22Z
+
+#### S1-unminted Accept:text/html → MUST be HTML 404
+$ curl -H Accept: text/html http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md
+-- status: 404
+   HTTP/1.1 404 Not Found
+   date: Sun, 08 Nov 2026 22:41:22 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-a861f80c3c9ef1bf0973a5160a63f639'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1408
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View not found</title>
+     <style nonce="a861f80c3c9ef1bf0973a5160a63f639">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width
+
+#### S1-unminted Accept:application/json → JSON envelope 404
+$ curl -H Accept: application/json http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md
+-- status: 404
+   HTTP/1.1 404 Not Found
+   date: Sun, 08 Nov 2026 22:41:22 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   content-length: 26
+   content-type: application/json
+   
+-- body (first 400B):
+   {"error":"view not found"}
+
+#### S1-unminted Accept:application/json (sha)
+$ curl -H Accept: application/json http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md
+-- status: 404   body-sha256: 958f0b8807e7e7474e65aac315cd47de0d7a9b788179b0ab8c7f26bf8d42b09d
+   content-type: application/json
+
+#### S1-unminted Accept:text/plain (sha; expect same JSON bytes as application/json)
+$ curl -H Accept: text/plain http://127.0.0.1:8082/views/public/g2g8matrix/never-minted.md
+-- status: 404   body-sha256: 958f0b8807e7e7474e65aac315cd47de0d7a9b788179b0ab8c7f26bf8d42b09d
+   content-type: application/json
+
+#### S2-locked GET viewB Accept:text/html → locked HTML 200
+$ curl -H Accept: text/html http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-d0b981b995aa54be40cd88a6c5d7aa70'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="d0b981b995aa54be40cd88a6c5d7aa70">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### S2-locked GET viewB Accept:application/json → JSON envelope 200
+$ curl -H Accept: application/json http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   content-length: 23
+   content-type: application/json
+   
+-- body (first 400B):
+   {"error":"view locked"}
+
+#### S2-locked GET viewB Accept:text/plain → observe (explicit-json-only flip per R4)
+$ curl -H Accept: text/plain http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-8206ccf9863f6ee2bfa64e99ae8b2793'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="8206ccf9863f6ee2bfa64e99ae8b2793">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### S3-burn 1 (default */* accept; consume/observe)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-987bad6482a9c2cb2ac7d48be4bd4496'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="987bad6482a9c2cb2ac7d48be4bd4496">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### S3-burn 2 (default */* accept; consume/observe)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-538b83617fc84e29f3d161a5d5204a70'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="538b83617fc84e29f3d161a5d5204a70">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### S3-burn 3 (default */* accept; consume/observe)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-3343399b8778dab012671a5e39758210'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="3343399b8778dab012671a5e39758210">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### S3-burn 4 (default */* accept; consume/observe)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-6d937d6c7800b163f1295411c4afb3db'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="6d937d6c7800b163f1295411c4afb3db">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### S3-burn 5 (default */* accept; consume/observe)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 200
+   HTTP/1.1 200 OK
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-249f15a101460fe03cbf595481c2b1d2'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1403
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>View locked</title>
+     <style nonce="249f15a101460fe03cbf595481c2b1d2">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-width: 4
+
+#### S3-burn 6 (default */* accept; consume/observe)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 429
+   HTTP/1.1 429 Too Many Requests
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-0af95cb378214f7b5610f852abbaf6c3'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1351
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Too many attempts</title>
+     <style nonce="0af95cb378214f7b5610f852abbaf6c3">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-wi
+
+#### S3-burn 7 (default */* accept; consume/observe)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 429
+   HTTP/1.1 429 Too Many Requests
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-7f4fb9e97556e29575d53cc044b06c3f'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1351
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Too many attempts</title>
+     <style nonce="7f4fb9e97556e29575d53cc044b06c3f">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-wi
+
+#### S3-ratelimited POST viewB Accept:text/html → MUST be HTML 429
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/html -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 429
+   HTTP/1.1 429 Too Many Requests
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-ec5004e98854726dcf58f2b60f1c3605'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1351
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Too many attempts</title>
+     <style nonce="ec5004e98854726dcf58f2b60f1c3605">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-wi
+
+#### S3-ratelimited POST viewB Accept:application/json → JSON 429
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: application/json -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 429
+   HTTP/1.1 429 Too Many Requests
+   date: Sun, 08 Nov 2026 22:41:23 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   content-length: 24
+   content-type: application/json
+   
+-- body (first 400B):
+   {"error":"rate limited"}
+
+#### S3-ratelimited POST viewB Accept:text/plain (sha; observe shape)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-b.md -H Accept: text/plain -H X-Forwarded-Proto: https --data code=WRONGG6
+-- status: 429   body-sha256: 49a97ac0af91e492ef6965583e0be93d088fc9e5f36db89b74cdd107b4546536
+   content-type: text/html; charset=utf-8
+
+#### S4-origin POST viewA evil origin Accept:text/html → MUST be HTML 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/html -H X-Forwarded-Proto: https -H Origin: https://evil.example --data code=x
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Sun, 08 Nov 2026 22:41:49 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-a748f68f8e106544e8c185d2a44668e0'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="a748f68f8e106544e8c185d2a44668e0">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### S4-origin POST viewA evil origin Accept:application/json → JSON 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: application/json -H X-Forwarded-Proto: https -H Origin: https://evil.example --data code=x
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Sun, 08 Nov 2026 22:42:03 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   content-length: 21
+   content-type: application/json
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   {"error":"forbidden"}
+
+#### S4-origin POST viewA evil origin Accept:application/json (sha)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: application/json -H X-Forwarded-Proto: https -H Origin: https://evil.example --data code=x
+-- status: 403   body-sha256: 2815fee6edc3716bd6c85027399f06e03168706e7fcac786ecf0c66e6190843f
+   content-type: application/json
+
+#### S4-origin POST viewA evil origin Accept:text/plain (sha; expect same JSON bytes)
+$ curl -X POST http://127.0.0.1:8082/views/public/g2g8matrix/matrix-a.md -H Accept: text/plain -H X-Forwarded-Proto: https -H Origin: https://evil.example --data code=x
+-- status: 403   body-sha256: 2815fee6edc3716bd6c85027399f06e03168706e7fcac786ecf0c66e6190843f
+   content-type: application/json

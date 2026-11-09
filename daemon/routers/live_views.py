@@ -98,6 +98,14 @@ cap is re-checked against the fstat, not the prior stat) →
 intervening growth). The same shape is used in
 ``daemon/routers/tmp_images.py`` for the sidecar-MIME
 substrate.
+
+Size rationale (~2914 lines, refreshed 2026-11-08): this router is
+the sole HTTP surface of the live-views subsystem; route-registration
+order is load-bearing (mounted directly on ``app`` before the SPA
+catch-all); gate, pages, and origin logic live beside the route family
+to keep the security boundary cohesive. The file sits in the 1000–3000
+band (the band obligation applies) and any future extraction would
+preserve the unified registration order.
 """
 
 from __future__ import annotations
@@ -106,12 +114,16 @@ import asyncio
 import logging
 import os
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 if TYPE_CHECKING:
+    from daemon.auth.context import AuthContext
+    from daemon.repositories.view_passcodes.models import LiveViewPasscode
     from daemon.services.live_views import LiveViewsService, ResolvedTarget
+    from daemon.services.view_passcode_service import ViewPasscodeService
 
 logger = logging.getLogger(__name__)
 
@@ -517,7 +529,42 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
             pass
 
 
-def _uniform_404() -> Response:
+def _accept_wants_html(request: Request | None) -> bool:
+    """True when this request explicitly accepts ``text/html``.
+
+    The R3 discriminator for the JSON-native envelopes (uniform 404,
+    origin-gate 403): an explicit ``text/html`` accept names a browser
+    navigation, which gets the HTML page; every other accept —
+    ``*/*``, ``application/json``, no header at all — keeps the JSON
+    envelope byte-for-byte (programmatic consumers, including the
+    mermaid wrapper's ``?raw=1`` fetch, are unchanged). ``request=None``
+    (the historical no-argument shape used by non-navigation callers
+    such as the ``/views/livez`` probe) is JSON.
+    """
+    from daemon.services.view_passcode_pages import wants_html
+
+    if request is None:
+        return False
+    return wants_html(request.headers.get("accept"))
+
+
+def _accept_wants_json_page(request: Request | None) -> bool:
+    """True when an EXPLICIT ``application/json`` accept (and no html).
+
+    The R3 discriminator for the HTML-native pages (429 rate-limit,
+    locked notice): those stay HTML for browsers AND for the
+    ``*/*`` shape every historical client sent — only an explicit
+    API-client accept flips them to JSON (R4: anonymous-visible
+    surface unchanged for the shapes the wild already exercises).
+    """
+    from daemon.services.view_passcode_pages import wants_json_page
+
+    if request is None:
+        return False
+    return wants_json_page(request.headers.get("accept"))
+
+
+def _uniform_404(request: Request | None = None) -> Response:
     """Return a uniform 404 — same body, same code, no path disclosure.
 
     Used for every miss (unknown root, traversal, not-found,
@@ -525,10 +572,57 @@ def _uniform_404() -> Response:
     body intentionally echoes nothing about which case fired;
     a probing client cannot distinguish "root exists but path
     missing" from "root disabled" from "traversal rejected".
+
+    R3 (views-session-bypass 2026-11-08): Accept-aware. A request
+    whose Accept explicitly includes ``text/html`` (a browser
+    navigation to a stale / wrong / disabled link) gets the HTML
+    404 page (:func:`render_not_found`) with the page-header set;
+    EVERY other accept keeps the JSON envelope byte-for-byte —
+    same status, same body, same ``_HARDENING_HEADERS``. No path
+    disclosure in either shape.
     """
+    if _accept_wants_html(request):
+        from daemon.services.view_passcode_pages import (
+            page_headers,
+            render_not_found,
+        )
+
+        nonce = _public_csp_nonce()
+        return Response(
+            content=render_not_found(csp_nonce=nonce),
+            status_code=404,
+            headers=page_headers(csp_nonce=nonce),
+        )
     return JSONResponse(
         status_code=404,
         content={"error": "view not found"},
+        headers=_HARDENING_HEADERS,
+    )
+
+
+def _forbidden_response(request: Request) -> Response:
+    """The origin-gate 403 — Accept-aware (R3, 2026-11-08).
+
+    Browser navigations (Accept: text/html) get the HTML 403 page;
+    programmatic consumers keep the historical JSON envelope
+    byte-for-byte. Neither shape discloses the path, the Origin
+    value, or which trust leg rejected.
+    """
+    if _accept_wants_html(request):
+        from daemon.services.view_passcode_pages import (
+            page_headers,
+            render_forbidden,
+        )
+
+        nonce = _public_csp_nonce()
+        return Response(
+            content=render_forbidden(csp_nonce=nonce),
+            status_code=403,
+            headers=page_headers(csp_nonce=nonce),
+        )
+    return JSONResponse(
+        status_code=403,
+        content={"error": "forbidden"},
         headers=_HARDENING_HEADERS,
     )
 
@@ -681,7 +775,19 @@ def _render_failure_page(
 
 
 def _render_locked_page(request: Request) -> Response:
-    """Render the locked-notice page (HTTP 200, no content / no form)."""
+    """Render the locked-notice page — Accept-aware (R3, 2026-11-08).
+
+    HTTP 200, no content / no form. An EXPLICIT ``application/json``
+    accept (an API client probing the lane) gets the JSON envelope
+    instead; every browser / ``*/*`` shape keeps the historical HTML
+    page byte-for-byte.
+    """
+    if _accept_wants_json_page(request):
+        return JSONResponse(
+            status_code=200,
+            content={"error": "view locked"},
+            headers=_HARDENING_HEADERS,
+        )
     from daemon.services.view_passcode_pages import (
         page_headers,
         render_locked,
@@ -698,7 +804,18 @@ def _render_locked_page(request: Request) -> Response:
 
 
 def _render_rate_limited_page(request: Request) -> Response:
-    """Render the 429 page (per-IP bucket exceeded)."""
+    """Render the 429 page — Accept-aware (R3, 2026-11-08).
+
+    Per-IP bucket exceeded. An EXPLICIT ``application/json`` accept
+    gets the JSON envelope (no strike-count disclosure in either
+    shape); browsers and ``*/*`` keep the historical HTML notice.
+    """
+    if _accept_wants_json_page(request):
+        return JSONResponse(
+            status_code=429,
+            content={"error": "rate limited"},
+            headers=_HARDENING_HEADERS,
+        )
     from daemon.services.view_passcode_pages import (
         page_headers,
         render_rate_limited,
@@ -764,51 +881,591 @@ def _client_ip_for_bucket(request: Request) -> str:
     return "unknown"
 
 
+def _authority_host_port(value: str) -> tuple[str, int | None] | None:
+    """Parse a bare authority (``host`` / ``host:port``) into ``(host, port)``.
+
+    Used for the Host header, the first ``X-Forwarded-Host`` value, and
+    the RFC 7239 ``Forwarded`` ``host=`` parameter — none of which carry
+    a scheme. Lowercased host; explicit port or ``None``. IPv6 literals
+    arrive bracketed (``urlsplit`` handles the brackets). Unparseable /
+    hostless input returns ``None`` (fail closed at the caller).
+
+    FIX-3 (fix-iteration 1, 2026-11-08 — MINOR-3): a MALFORMED port
+    (unparseable / out-of-range ⇒ ``urlsplit`` raises ``ValueError``)
+    fails closed FOR THE ANCHOR — ``None`` for the whole value, never
+    a portless host that would ride the portless↔explicit
+    compatibility in :func:`_host_matches`. The honest portless
+    spellings (bare ``host``, scheme-default browser origins) keep
+    their elision; explicit-vs-explicit stays strict.
+    """
+    value = (value or "").strip()
+    if not value:
+        return None
+    if "://" not in value:
+        value = f"//{value}"
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if not host:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        # Malformed / out-of-range port — the anchor cannot be
+        # interpreted, so it vouches for NOTHING (FIX-3 fail
+        # closed; the old mapping to portless opened the gate).
+        return None
+    return host, port
+
+
+def _origin_url_host_port(value: str) -> tuple[str, int | None] | None:
+    """Parse an ``Origin`` / ``Referer`` URL into ``(host, port)``.
+
+    ``urlsplit`` handles the scheme, the authority, and anything after
+    the authority (path/query are irrelevant here). Lowercased host;
+    explicit port or ``None``. Hostless values return ``None``.
+
+    FIX-3 symmetry (fix-iteration 1, 2026-11-08): a malformed /
+    out-of-range port fails closed for the whole value — an origin
+    whose port cannot be interpreted is unparseable, and the old
+    portless mapping would have ridden the portless↔explicit
+    compatibility the other way.
+    """
+    try:
+        parts = urlsplit((value or "").strip())
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if not host:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    return host, port
+
+
+def _www_equivalent(host: str) -> str:
+    """Fold the ``www.`` apex equivalence: ``www.<domain>`` ≡ ``<domain>``.
+
+    Comparison-side normalization only — never stored. A bare ``www``
+    (degenerate) stays ``www``. FIX-10: the trailing-dot/case
+    normalization (:func:`_views_host_key`) runs FIRST, so
+    ``www.example.com.`` folds exactly like ``www.example.com``.
+    """
+    return _www_strip(_views_host_key(host))
+
+
+def _www_strip(host: str) -> str:
+    """Strip ONE leading ``www.`` label from an already-normalized
+    key."""
+    if host.startswith("www.") and len(host) > len("www."):
+        return host[len("www."):]
+    return host
+
+
+def _declared_base_anchor(
+    declared_base: str,
+) -> tuple[str, int | None] | None:
+    """The declared external base's OWN host as a trust anchor (FIX-8).
+
+    fix-iteration 3 (2026-11-08): when a proxy front is DECLARED
+    (auth ``live_view_external_base_url_fallback`` OR
+    ``live_views.external_base_url`` via
+    ``LiveViewsService.declared_external_base_url``), the declared
+    base's host joins the trust anchor set next to legs (a)/(d) —
+    the operator's own declared origin must be accepted WITHOUT a
+    forwarded header, and the anchor set must be self-sufficient
+    where the audience leg is absent (auth-OFF:
+    ``parse_operator_audience`` needs an auth config and has no
+    auth-fallback to absorb). Parses ``urlsplit(value).netloc``
+    through :func:`_authority_host_port` — malformed / hostless /
+    bad-port values contribute NOTHING (the FIX-3 fail-closed
+    discipline; a declaration that cannot be parsed never becomes
+    an anchor). OPERATOR CONFIG ONLY by construction — the value
+    comes from the declaration sources, never from a request
+    header.
+    """
+    try:
+        netloc = urlsplit((declared_base or "").strip()).netloc
+    except ValueError:
+        return None
+    return _authority_host_port(netloc)
+
+
+def _host_matches(
+    origin: tuple[str, int | None],
+    trusted: tuple[str, int | None],
+) -> bool:
+    """One origin-vs-trusted comparison: case-insensitive, port-normalized,
+    ``www.``-equivalent, scheme-insensitive.
+
+    Port normalization: when BOTH sides carry an explicit port they must
+    be equal; a portless side (the common Host-header / operator-audience
+    shape, or a scheme-default browser Origin) is port-compatible. The
+    scheme never participates (``https`` and ``http`` spellings of the
+    same host are the same trust anchor here — the gate judges HOST, and
+    the TLS posture is the proxy's, not the form's).
+    """
+    o_host, o_port = origin
+    t_host, t_port = trusted
+    if _www_equivalent(o_host) != _www_equivalent(t_host):
+        return False
+    if o_port is None or t_port is None:
+        return True
+    return o_port == t_port
+
+
+def _views_host_key(host: str) -> str:
+    """The comparison KEY for a host name: lowercased + trailing-dot
+    stripped (the FQDN root-dot form ``example.com.`` ≡
+    ``example.com``).
+
+    FIX-10 (2026-11-09): applied on BOTH sides of every name
+    comparison — the operator-declared set, the forwarded-value
+    agreement check, and the Origin comparison — so a trailing dot
+    (or case) can neither bypass the agreement check nor split one
+    host into two spellings. Normalization only; never stored in
+    an anchor as-is.
+    """
+    key = (host or "").strip().lower()
+    if key.endswith(".") and len(key) > 1:
+        key = key[:-1]
+    return key
+
+
+def _views_exact_loopback_name(host_name: str) -> bool:
+    """EXACT loopback names only — the C-2b mirror for the views carve.
+
+    ``localhost``, ``127.0.0.1``, ``::1`` — IPv6 arrives bracketed
+    (strip before compare). The 127.0.0.0/8 blanket and every
+    lookalike (``localhost.evil.example``, ``127.0.0.1.evil.example``,
+    other 127.x spellings) FAIL here — same exactness discipline as
+    :func:`daemon.auth.cookie._host_is_localhost` (private there;
+    mirrored here so the views lane keeps its one-file dependency
+    surface on cookie.py's PUBLIC seam, :func:`peer_is_loopback`).
+    """
+    h = (host_name or "").strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    return h in ("localhost", "127.0.0.1", "::1")
+
+
+def _views_forwarded_values(request: Request) -> list[tuple[str, str]]:
+    """The forwarded-derived client-facing host values carried by the
+    request — FIX-10 (2026-11-09).
+
+    Two sources, each with FIRST-value semantics:
+    ``("x-forwarded-host", <first comma-list value>)`` and
+    ``("forwarded", <first element's host= parameter>)``. Each entry
+    is ``(kind, raw_value)``; an absent header contributes NOTHING.
+    These values NEVER enter the anchor set (the FIX-10 deletion);
+    they are read only to CHECK AGREEMENT with the operator-declared
+    anchor set — a client value may veto its own request but may
+    never vouch for it.
+    """
+    values: list[tuple[str, str]] = []
+    headers = request.headers
+    xfh = headers.get("x-forwarded-host")
+    if xfh:
+        first_value = xfh.split(",")[0].strip()
+        if first_value:
+            values.append(("x-forwarded-host", first_value))
+    forwarded = headers.get("forwarded")
+    if forwarded:
+        first_element = forwarded.split(",")[0]
+        for piece in first_element.split(";"):
+            piece = piece.strip()
+            if piece.lower().startswith("host="):
+                raw_value = piece[len("host="):].strip()
+                if (
+                    len(raw_value) >= 2
+                    and raw_value.startswith('"')
+                    and raw_value.endswith('"')
+                ):
+                    raw_value = raw_value[1:-1]
+                if raw_value:
+                    values.append(("forwarded", raw_value))
+                break
+    return values
+
+
+def _views_trusted_hosts(request: Request) -> list[tuple[str, int | None]]:
+    """Derive the SERVER-SIDE trusted-host universe for the views gate.
+
+    Legs (R2, views-session-bypass 2026-11-08; FIX-1/FIX-7/FIX-8
+    hardening; G2.7/FIX-9 host-vouching — every entry is a
+    server-derivable host, never a client-invented allowlist entry):
+
+    (a) the request ``Host`` header — CONDITIONAL since G2.7 (FIX-9,
+        2026-11-09): an anchor ONLY when the HOST NAME is
+        operator-vouched — audience membership, a declared-base
+        host, or the loopback carve. The raw Host header is
+        attacker-controlled on a DNS-rebinding victim: without this
+        gate, ``Host: evil.example`` + ``Origin:
+        https://evil.example`` self-matched and minted a FULL view
+        grant. This mirrors the auth lane's ``host_is_trusted``
+        hardening (``daemon/auth/cookie.py:249`` comparator
+        ``:232-329``, derived at
+        ``daemon/middleware/auth.py:535-537``) that the views gate
+        never carried over. Vouch check = exact lowercased name
+        membership (mirrors the auth lane; the ORIGIN comparison
+        keeps the www/port folding — a vouched-name anchor
+        participates in the same comparisons as every other
+        anchor);
+    (b) the FIRST ``X-Forwarded-Host`` value — the fronting-proxy
+        anchor — ONLY when the operator declared a proxy front;
+    (c) the RFC 7239 ``Forwarded`` ``host=`` parameter (first element)
+        — the standardized spelling of (b) — under the SAME
+        operator-declared-proxy-front gate;
+    (d) the operator-audience trusted-host set —
+        :func:`daemon.auth.cookie.parse_operator_audience` over
+        ``auth.allowed_origins`` + ``auth.external_redirect_base`` +
+        the one-shot ``live_view_external_base_url_fallback`` copy.
+        Portless by construction (bare hosts) — port-compatible with
+        any origin port for the same host spelling;
+    (e) the DECLARED base's own host (FIX-8) — the auth-fallback
+        and/or ``live_views.external_base_url`` hosts;
+    (f) the loopback carve (G2.7/FIX-9) — the SOUND-BY-CONSTRUCTION
+        fallback the commission prescribed: the Host name is an
+        EXACT loopback spelling AND the TCP peer is loopback (a
+        remote rebinding victim can never connect FROM loopback).
+        The auth lane's carve additionally requires the dev gate
+        (``allow_insecure_cookie``); that gate does NOT port to the
+        views lane — the lane must serve unconfigured dev access
+        with auth OFF (no AuthConfig to read the knob from) — so
+        the peer gate carries the soundness alone, exactly as the
+        commission's fallback specifies.
+
+    FIX-1: legs (b)/(c) are CLIENT headers gated on the operator
+    having DECLARED a proxy front (``auth.live_view_external_base_url_fallback``
+    set — the lifespan one-shot copy of ``live_views.external_base_url``,
+    env ``ENSEMBLE_LIVE_VIEWS_EXTERNAL_BASE_URL`` — the SAME accessor
+    :func:`parse_operator_audience` uses). This is the C-2c condition
+    the auth lane applies to ``X-Forwarded-Proto`` trust.
+
+    FIX-7: the second declaration source — ``live_views.external_base_url``
+    set (read through
+    :attr:`LiveViewsService.declared_external_base_url`, the raw
+    tier-1 override; the resolved chain is request-derived and never
+    counts). The auth fallback's sole writer sits inside
+    ``if config.auth.enabled`` (daemon/api.py:2937); without this
+    source an auth-OFF deployment behind a Host-rewriting proxy
+    could never declare a front.
+
+    FIX-8: the declared base's own host joins the anchor set — the
+    operator's declared origin must be accepted without a forwarded
+    header, and the set must be self-sufficient where the audience
+    leg is absent (auth-OFF has no auth config to absorb through).
+
+    FIX-10 (2026-11-09 — same-class bypass closure, anomaly 6c543ecc):
+    legs (b)/(c) are DELETED. The tester probe (cell-(ii) probe 5,
+    4/5 fail) showed that in a declared front, a forged
+    ``X-Forwarded-Host: evil.example`` + ``Origin:
+    https://evil.example`` self-matched and minted a full view
+    grant: leg (b) trusted the first forwarded value
+    UNCONSTRAINED — a client value became its own anchor.
+
+    REDUNDANCY PROBE (required analysis before the mechanism
+    choice): with the constraint applied, could a forwarded value
+    ever contribute an anchor legs (d)/(e) do not already carry?
+    The probe diffed the trust set with/without forwarded headers
+    across every declared fixture shape:
+    * auth-fallback declared — a NON-matching forwarded value
+      contributed a NEW name (``views.example.com``) ⇒ legs (b)/(c)
+      were NOT redundant in the vulnerable code (that IS the
+      exploit);
+    * service-declared / audience-only — already redundant;
+    * THE CORNER — a port-bearing declared base
+      (``https://views.example.com:8443``) plus a PORTLESS
+      forwarded value contributed ``('views.example.com', None)``,
+      which (d)/(e) do NOT carry ⇒ it widened acceptance to ANY
+      port for that name (an Origin on :9999 would pass where the
+      declared anchor alone rejects it). Admitting a matching
+      forwarded value by contributing the DECLARED anchor (never
+      the forwarded tuple) closes that corner; with that, legs
+      (b)/(c) are provable NO-OPS ⇒ they are DELETED.
+
+    THE CONSTRAINT THAT REMAINS (the veto, not the anchor): in a
+    DECLARED front, every forwarded-derived value present on the
+    request (first ``X-Forwarded-Host`` value; first RFC 7239
+    ``Forwarded`` element's ``host=``) MUST AGREE with the
+    operator-DECLARED anchor set (audience ∪ declared bases) under
+    the same match discipline (case-insensitive, trailing-dot
+    normalized both sides, ports via :func:`_host_matches` /
+    :func:`_authority_host_port`). A forwarded value that DISAGREES
+    ⇒ the request is NOT vouched by anything ⇒ the anchor set is
+    EMPTY ⇒ any real Origin rejects (403). The client value may VETO
+    its own request; it can never VOUCH for it. In an UNDECLARED
+    front the forwarded headers are ignored entirely (the FIX-1
+    inertness — unchanged).
+
+    OPERATOR CONTRACT — MULTI-VHOST (disclosed, loop-2 cleanup
+    2026-11-09): a declared front requires EVERY forwarded
+    client-facing host to be DECLARED. A front that serves more than
+    one vhost rejects the undeclared ones (403 — the undeclared
+    vhost is neither vouched nor anchored) until the operator
+    declares each of them (``auth.allowed_origins`` /
+    ``auth.external_redirect_base`` / ``live_views.external_base_url``).
+    The remedy is a declaration, never a client-side workaround.
+
+    LINEAGE: iteration-0 topology legs (b)/(c) → FIX-1 declaration
+    gating → FIX-10 constraint → provable redundancy → REMOVAL.
+
+    DEGRADATION CONTRACT (G2.7/FIX-9): with NO vouching configured
+    (no audience, no declared base) and a non-loopback peer, a
+    same-origin POST carrying a REAL Origin now REJECTS — the
+    intended strict-contract degradation (cure: the operator
+    declares a base or audience). Absent-Origin and null-Origin
+    flows are UNCHANGED (both allow before the anchor set is
+    consulted), and loopback peers keep working via the carve.
+
+    A request may carry several of these at once (proxy chains); the
+    gate accepts if the Origin host matches ANY of them.
+    """
+    trusted: list[tuple[str, int | None]] = []
+    headers = request.headers
+    auth_config = getattr(request.app.state, "auth_config", None)
+
+    # ── the operator-vouch universe (computed FIRST — the Host
+    # anchor's vouch check needs it; G2.7/FIX-9) ──────────────────
+    declared_bases: list[str] = []
+    if auth_config is not None:
+        external_base = getattr(
+            auth_config,
+            "live_view_external_base_url_fallback",
+            None,
+        )
+        if external_base:
+            declared_bases.append(external_base)
+    # FIX-7 (fix-iteration 2, 2026-11-08): SECOND operator-
+    # declaration source — ``live_views.external_base_url`` set.
+    # The auth fallback above has exactly ONE writer
+    # (daemon/api.py:2937) inside ``if config.auth.enabled:``, so
+    # an auth-OFF deployment behind a Host-rewriting proxy could
+    # never declare a front and the forwarded legs were dead
+    # code in that posture (legit forwarded POSTs 403'd). This
+    # source is OPERATOR CONFIG ONLY — read through the service's
+    # DECLARATION accessor (``declared_external_base_url``: the
+    # raw tier-1 override). The resolved chain
+    # (``public_base()``: host-capture / bind tiers) is
+    # request-derived and is deliberately NOT consulted — using
+    # it would let client-shaped evidence declare a front and
+    # re-open the self-anchoring class FIX-1 closed. Service
+    # unwired / property absent / value unset ⇒ STILL
+    # undeclared.
+    live_views_service = getattr(
+        request.app.state, "live_views_service", None
+    )
+    if live_views_service is not None:
+        declared_base = getattr(
+            live_views_service,
+            "declared_external_base_url",
+            None,
+        )
+        if declared_base:
+            declared_bases.append(declared_base)
+    proxy_front_declared = bool(declared_bases)
+
+    audience_hosts: frozenset[str] = frozenset()
+    if auth_config is not None:
+        from daemon.auth.cookie import parse_operator_audience
+
+        try:
+            audience_hosts, _audience_origins = parse_operator_audience(
+                auth_config
+            )
+        except Exception:  # noqa: BLE001 — a malformed audience is inert
+            audience_hosts = frozenset()
+
+    # G2.7/FIX-9 vouch names: the audience names ∪ the declared-base
+    # hosts. Exact lowercased NAME membership only (auth-lane mirror).
+    # FIX-10: the vouch universe is keyed by the NORMALIZED name
+    # (lowercase, trailing dot stripped) — the same key the
+    # forwarded-agreement check and the Origin comparison use, so a
+    # spelling variant can neither split the set nor slip past it.
+    vouched_names: set[str] = {
+        _views_host_key(audience_host) for audience_host in audience_hosts
+    }
+    declared_anchors: list[tuple[str, int | None]] = []
+    for declared_base_value in declared_bases:
+        declared_anchor = _declared_base_anchor(declared_base_value)
+        if declared_anchor is not None:
+            declared_anchors.append(declared_anchor)
+            vouched_names.add(_views_host_key(declared_anchor[0]))
+
+    # Loopback carve — peer-gated (sound by construction: a remote
+    # rebinding victim never connects FROM loopback) + exact-name
+    # gated on the HOST side below.
+    from daemon.auth.cookie import peer_is_loopback
+
+    peer_loopback = peer_is_loopback(request.scope.get("client"))
+
+    # ── leg (a): the Host header — CONDITIONALLY anchored
+    # (G2.7/FIX-9). A vouched name only. ──────────────────────────
+    host_header = headers.get("host")
+    if host_header:
+        parsed = _authority_host_port(host_header)
+        if parsed is not None:
+            host_name = parsed[0]
+            host_vouched = _views_host_key(host_name) in vouched_names or (
+                peer_loopback and _views_exact_loopback_name(host_name)
+            )
+            if host_vouched:
+                trusted.append(parsed)
+
+    if proxy_front_declared:
+        # FIX-8 (fix-iteration 3, 2026-11-08): the DECLARED base's
+        # own host joins the anchor set — the operator's declared
+        # origin (``Origin: https://<declared-host>``, no forwarded
+        # header) must be accepted, and the anchor set must be
+        # self-sufficient where the audience leg is absent (auth-OFF
+        # has no auth config for ``parse_operator_audience`` to
+        # absorb the base through). Each declared value parses via
+        # :func:`_declared_base_anchor`; unparseable declarations
+        # contribute nothing (FIX-3 fail-closed discipline).
+        for declared_anchor in declared_anchors:
+            trusted.append(declared_anchor)
+
+        # ── FIX-10: the forwarded-AGREEMENT constraint (the veto,
+        # not the anchor) ────────────────────────────────────────
+        # In a DECLARED front, every forwarded-derived value on the
+        # request MUST agree with the operator-declared anchor set
+        # (audience ∪ declared bases) under the same match discipline
+        # (case-insensitive, trailing-dot normalized both sides,
+        # ports via :func:`_host_matches`). A value that DISAGREES
+        # ⇒ the request is not vouched by anything ⇒ the anchor set
+        # is EMPTY ⇒ any real Origin rejects (403). The client
+        # value may VETO its own request; it can never VOUCH for it.
+        # (The vulnerable shape — the forwarded value ANCHORING —
+        # is DELETED: the probe proved legs (b)/(c) are no-ops once
+        # a matching forwarded value contributes the DECLARED anchor
+        # instead of its own tuple.)
+        declared_anchor_set = list(declared_anchors) + [
+            _authority_host_port(audience_host)
+            for audience_host in sorted(audience_hosts)
+        ]
+        declared_anchor_set = [
+            anchor for anchor in declared_anchor_set if anchor is not None
+        ]
+        for _kind, forwarded_value in _views_forwarded_values(request):
+            forwarded_parsed = _authority_host_port(forwarded_value)
+            if forwarded_parsed is None:
+                # Unparseable forwarded value in a declared front —
+                # it cannot be checked against the declared set, so
+                # it cannot agree with it ⇒ not vouched (fail
+                # closed, the FIX-3 discipline).
+                return []
+            if not any(
+                _host_matches(forwarded_parsed, declared_anchor)
+                for declared_anchor in declared_anchor_set
+            ):
+                return []
+
+    # ── leg (d): the operator audience hosts (parse hoisted above —
+    # G2.7/FIX-9 needs it for the Host-vouch check before this
+    # point; the append behavior is unchanged). ────────────────────
+    for audience_host in sorted(audience_hosts):
+        normalized = _authority_host_port(audience_host)
+        if normalized is not None:
+            trusted.append(normalized)
+
+    return trusted
+
+
 def _same_host_origin_check(request: Request) -> bool:
-    """Cheap CSRF check — same-host Origin / Referer when present.
+    """Navigation-correct Origin/Referer gate — views lane ONLY (R2).
 
-    Architecture-recommendation.md D6:77 (CSRF defense-in-depth).
-    The check ONLY fires when the header is present (some
-    clients omit it; a missing header is not a CSRF block).
-    The check is a string ``startswith`` against the request
-    host — same-host requests always pass; cross-host
-    requests fail with a 403 generic envelope.
+    REWRITE (views-session-bypass 2026-11-08). The previous check was a
+    plain string inequality between the Origin host and the RAW client
+    ``Host`` header (design lineage: ADR D6:77, pre-C-2). Behind any
+    real fronting (www-vs-apex fronting, an external base, a proxy
+    chain) the two spellings diverge and every legit form POST failed
+    with a JSON 403 — the live defect. This rewrite closes the
+    asymmetry with the auth lane's hardened comparator
+    (:func:`daemon.auth.cookie.validate_browser_lane_origin`) while
+    staying scoped to the views surface.
 
-    Returns ``True`` when the header is absent (the binding
-    posture: same-host check when header present).
-    Returns ``False`` only on a confirmed cross-host hit.
+    Decision table (in order):
+
+    * BOTH ``Origin`` and ``Referer`` absent ⇒ ALLOW (unchanged
+      binding posture — headerless clients are not a CSRF signal).
+    * ``Origin`` present (even empty-string ⇒ treat as absent):
+      judge the ORIGIN; ``Referer`` is not consulted (C-2 precedence:
+      Origin first, Referer only when Origin absent).
+    * Literal ``"null"`` (case-insensitive) ⇒ ALLOW — UNLESS the
+      browser attests ``Sec-Fetch-Site: cross-site`` (FIX-2: the
+      null-allow is the live defect fix for top-level navigation,
+      but ``null`` is also what a cross-site sandboxed-iframe form
+      POST sends; ``Sec-Fetch-Site`` is browser-set and
+      JS-unforgeable — absent header (older browsers) keeps the
+      live fix).
+    * Present, non-null, parseable ⇒ ALLOW iff the origin's host
+      matches ANY server-derivable trusted host (:func:`_views_trusted_hosts`)
+      under :func:`_host_matches` semantics. FIX-1: the forwarded
+      anchors (b)/(c) participate ONLY when the operator declared a
+      proxy front (``live_view_external_base_url_fallback`` set).
+    * Present, non-null, UNPARSEABLE ⇒ REJECT (the old strip-parse
+      also failed these as ordinary inequalities).
+    * Present, non-null, NO trusted host derivable at all (no
+      VOUCHED Host anchor — G2.7/FIX-9: the raw Host is an anchor
+      only under operator vouching — no gated-forward anchors,
+      empty operator audience, no declared base, no loopback
+      carve) ⇒ REJECT — fail closed; the tautology guard. A gate
+      with no server-side anchor cannot vouch for anything.
+
+    Sole callsite: the ``_public_post`` gate #4. The auth lane
+    (``daemon/middleware/auth.py`` → ``daemon/auth/cookie.py``) is
+    structurally separate and is NOT touched by this rewrite.
     """
     headers = request.headers
-    host = headers.get("host")
-    if not host:
-        # The Host header is mandatory on HTTP/1.1; absent
-        # only on degenerate traffic. Skip the check rather
-        # than 403 — the binding posture is permissive on
-        # missing headers (ADR D6:77 — applies when present).
+    origin_raw = headers.get("origin")
+    referer_raw = headers.get("referer")
+
+    # C-2 precedence: Origin judges when present; Referer is the
+    # fallback for the legacy clients that omit Origin. A
+    # present-but-EMPTY header is treated as absent (the historical
+    # binding posture — degenerate traffic, not a CSRF signal).
+    judged = origin_raw if origin_raw else referer_raw
+    if judged is None:
         return True
-    expected = host.strip().lower()
-    for header_name in ("origin", "referer"):
-        raw = headers.get(header_name)
-        if not raw:
-            continue
-        # Strip the scheme + authority and compare the
-        # remaining host against the request Host.
-        value = raw.strip().lower()
-        # Origin / Referer can be ``https://host:port/path``;
-        # we only care about the host segment.
-        if value.startswith("https://"):
-            value = value[len("https://"):]
-        elif value.startswith("http://"):
-            value = value[len("http://"):]
-        # Take the first path segment end or query start or
-        # end-of-string.
-        for terminator in ("/", "?", "#"):
-            if terminator in value:
-                value = value.split(terminator, 1)[0]
-                break
-        if value and value != expected:
+    value = judged.strip()
+    if not value:
+        return True
+    if value.lower() == "null":
+        # Top-level navigation / sandboxed-frame serialization —
+        # the browser cannot name the opener's origin. Allowing
+        # this is the LIVE DEFECT fix (logged-in users got a JSON
+        # 403 on every same-tab form POST from a sandboxed or
+        # data-URL context; anonymous users got it from
+        # top-level navigations that serialize to ``null``).
+        #
+        # FIX-2 (fix-iteration 1, 2026-11-08 — MAJOR-2): ``null`` is
+        # ALSO what a CROSS-SITE sandboxed-iframe form POST sends —
+        # the bare null-allow re-opened that CSRF class (a 10-strike
+        # grind durably locks a shared view; no preflight needed).
+        # Discriminator: the browser-set ``Sec-Fetch-Site`` header
+        # (JS-unforgeable). REJECT iff it attests ``cross-site``;
+        # allow when the header is ABSENT (older browsers — this is
+        # what preserves the live fix) or attests same-origin /
+        # same-site / none (top-level navigation).
+        sec_fetch_site = (headers.get("sec-fetch-site") or "").strip().lower()
+        if sec_fetch_site == "cross-site":
             return False
-    return True
+        return True
+    origin_parsed = _origin_url_host_port(value)
+    if origin_parsed is None:
+        return False
+    trusted_hosts = _views_trusted_hosts(request)
+    if not trusted_hosts:
+        # Tautology guard: with NO server-derivable anchor the
+        # gate cannot distinguish same-origin from cross-origin —
+        # reject (fail closed). Absent/null origins never reach
+        # this branch (both allow above).
+        return False
+    return any(_host_matches(origin_parsed, t) for t in trusted_hosts)
 
 
 def _is_https_request(request: Request) -> bool:
@@ -999,6 +1656,63 @@ def _resolve_verify_rate_limiter(request: Request):
     return limiter
 
 
+async def resolve_views_session(request: Request) -> "AuthContext | None":
+    """Resolve the operator session behind a /views request — R1 seam.
+
+    Views-session-bypass (2026-11-08). Returns the
+    :class:`daemon.auth.context.AuthContext` when the request carries a
+    VALID ``ensemble_sid`` session cookie, else ``None``. This helper IS
+    the future-scope seam: a later views-scope/role mapping lands HERE
+    (scope gates, per-view ACLs) — the bypass logic below never grows
+    its own identity checks.
+
+    The DIRECT-call pattern (mirrors ``GET /api/auth/me``,
+    ``daemon/routers/auth.py``): the ``/views`` surface is
+    middleware-EXEMPT on the public prefix, so
+    ``request.state.auth_context`` is NOT populated there — the cookie
+    is probed directly against the session store
+    (``AuthService.validate_session``: absent / expired / replayed /
+    IP-subnet-mismatch ⇒ ``None``). ``auth_service`` unwired (auth
+    OFF, lifespan early traffic) ⇒ ``None``.
+
+    Fail-toward-anonymous is the binding contract: ANY failure on this
+    path — missing service, missing cookie, expired session, an
+    exception from the store — yields ``None`` and the request proceeds
+    EXACTLY as anonymous. A session problem NEVER produces a forbidden,
+    a 401, or an error page on the views surface.
+
+    Store-write cost / session-lifetime coupling (FIX-5 note,
+    fix-iteration 1): ``validate_session`` defaults to ``touch=True``,
+    and the touch is minute-batched in the repository
+    (``TOUCH_MIN_INTERVAL_SECONDS = 60``, auth_session/repository.py:68)
+    ⇒ at most ONE session-store write per minute per session — a
+    passcode-view GET with a session costs ≤1 write/min, not one per
+    request. Under auth ``sliding_renewal=true`` that same touch also
+    EXTENDS the login expiry (sliding sessions): operator view-browsing
+    deliberately keeps the login alive. Both couplings are intentional.
+    """
+    from daemon.auth.cookie import SESSION_COOKIE_NAME
+
+    service = getattr(request.app.state, "auth_service", None)
+    if service is None:
+        return None
+    session_id = request.cookies.get(SESSION_COOKIE_NAME, "")
+    if not session_id:
+        return None
+    client = request.scope.get("client")
+    client_ip = client[0] if isinstance(client, tuple) and client else None
+    try:
+        return await service.validate_session(
+            session_id, client_ip=client_ip
+        )
+    except Exception:  # noqa: BLE001 — the anonymous fallback IS the contract
+        logger.debug(
+            "[LiveViews] session probe failed; proceeding anonymous",
+            exc_info=True,
+        )
+        return None
+
+
 def _serve_resolved_target(
     request: Request,
     resolved: "ResolvedTarget",
@@ -1043,7 +1757,7 @@ def _serve_resolved_target(
             else None
         )
         if open_result is None:
-            return _uniform_404()
+            return _uniform_404(request)
         data, content_type, _sha = open_result
         return Response(
             content=data,
@@ -1072,7 +1786,7 @@ def _serve_resolved_target(
     # containment — see module docstring).
     file_bytes = _fd_read(resolved.on_disk_path, MAX_SERVED_BYTES)
     if file_bytes is None:
-        return _uniform_404()
+        return _uniform_404(request)
 
     if is_markdown_content_type(resolved.content_type):
         return _render_markdown_response(
@@ -1324,7 +2038,7 @@ def build_router() -> APIRouter:
     ) -> Response:
         service = _resolve_service(request)
         if service is None or not service.enabled():
-            return _uniform_404()
+            return _uniform_404(request)
         # Defensive layer 3 (architecture-recommendation.md
         # D1:29): the generic (non-public) handler additionally
         # 404s ``root_name == "public"`` even if a future drift
@@ -1333,7 +2047,7 @@ def build_router() -> APIRouter:
         from daemon.services.live_views import is_reserved_root_name
 
         if is_reserved_root_name(root_name):
-            return _uniform_404()
+            return _uniform_404(request)
         try:
             # REWORK 2026-10-07 (M2): every registered root is
             # now anonymous-resolvable (designer-artifact moved
@@ -1354,7 +2068,7 @@ def build_router() -> APIRouter:
                 calling_instance_id=None,
             )
         except (RootNotFoundError, TraversalError, PathNotFoundError):
-            return _uniform_404()
+            return _uniform_404(request)
         return resolved
 
     # ─────────────────────────────────────────────────────────
@@ -1479,29 +2193,29 @@ def build_router() -> APIRouter:
         )
 
         if not is_well_formed_root_name(root_name):
-            return _uniform_404()
+            return _uniform_404(request)
         # Reserved-name mirror (architecture-recommendation.md
         # D1:27 — three-layer guard; the route-side mirror
         # collapses reserved-name misses to uniform 404 even
         # if a future config drift let one slip past the
         # registry validator).
         if is_reserved_root_name(root_name):
-            return _uniform_404()
+            return _uniform_404(request)
         if not is_well_formed_rel_path(rel_path):
-            return _uniform_404()
+            return _uniform_404(request)
         service = _resolve_service(request)
         if service is None or not service.enabled():
-            return _uniform_404()
+            return _uniform_404(request)
         # Passcode row existence check — gate #3. ANY miss
         # here is uniform 404 (the row existence is NEVER
         # disclosed to the client; no leaked signal even to a
         # holder of the URL).
         passcode_service = _resolve_passcode_service(request)
         if passcode_service is None:
-            return _uniform_404()
+            return _uniform_404(request)
         row = passcode_service.get_row(root_name, rel_path)
         if row is None:
-            return _uniform_404()
+            return _uniform_404(request)
         # Grant cookie check — gate #4 — runs BEFORE the
         # locked check (architecture-recommendation.md
         # D5:68: "Valid grant cookies persist through
@@ -1540,7 +2254,7 @@ def build_router() -> APIRouter:
                         TraversalError,
                         PathNotFoundError,
                     ):
-                        return _uniform_404()
+                        return _uniform_404(request)
                 except Exception:
                     # Cookie failure (decrypt / claims /
                     # exp / generation mismatch) — fall
@@ -1550,6 +2264,30 @@ def build_router() -> APIRouter:
                     # row, write-amplification pin;
                     # architecture-recommendation.md D9:115).
                     pass
+        # R1 SESSION BYPASS (GET lane) — views-session-bypass
+        # 2026-11-08. A valid operator session serves the view
+        # DIRECTLY — the same resolution envelope the granted-cookie
+        # path above returns, entered BEFORE the locked check (a
+        # valid session, like an established grant cookie, outranks
+        # lockout: "lockout gates the entry lane, not established
+        # grants", ADR D5:68 — and the bypass mints NOTHING: no
+        # grant cookie is written on GET, the write-amplification
+        # pin stands). Absent / stale / garbage sessions resolve to
+        # None ⇒ EXACTLY the anonymous flow below (locked page /
+        # interstitial), unchanged.
+        if await resolve_views_session(request) is not None:
+            try:
+                return service.resolve_for_instance(
+                    root_name,
+                    rel_path,
+                    calling_instance_id=None,
+                )
+            except (
+                RootNotFoundError,
+                TraversalError,
+                PathNotFoundError,
+            ):
+                return _uniform_404(request)
         # Locked short-circuit — gate #5. A valid grant
         # would have served above; with no valid grant,
         # the locked view renders the dedicated
@@ -1631,6 +2369,142 @@ def build_router() -> APIRouter:
             },
         )
 
+    async def _grant_success_response(
+        request: Request,
+        passcode_service: "ViewPasscodeService",
+        row: "LiveViewPasscode",
+        *,
+        root_name: str,
+        rel_path: str,
+        ip: str,
+        actor: str | None,
+    ) -> Response:
+        """Mint the grant cookie + 303 — the SINGLE success block.
+
+        Extracted VERBATIM from the verify handler's OK branch
+        (views-session-bypass R1, 2026-11-08) so BOTH entry lanes —
+        the passcode compare (actor=None) and the R1 session bypass
+        (actor=the session subject) — mint byte-identical grants:
+
+        * ``issue_grant_cookie`` with the row's generation and the
+          configured TTL (identical attributes: Path-scoped to the
+          exact queryless view URL, ``HttpOnly; Secure;
+          SameSite=Lax``, 24h default);
+        * the ``grant`` audit row (D9:115 closed action set; the
+          session lane records the operator subject as the actor —
+          log-only on audit failure);
+        * the cipher-missing fail-closed uniform 404;
+        * the plain-HTTP secure-context page (a ``Secure`` cookie
+          cannot be stored on plain HTTP — D6:79, never a redirect
+          loop);
+        * the 303 See Other (PRG) back to the full view URL.
+
+        NO compare, NO strike, NO limiter touch happens here — the
+        caller decides authority (passcode OK / valid session) and
+        this block only mints.
+        """
+        from daemon.services.view_passcode_service import (
+            issue_grant_cookie,
+        )
+
+        cipher = getattr(
+            request.app.state, "view_passcode_cipher", None
+        )
+        ttl_seconds = getattr(
+            request.app.state,
+            "view_passcode_grant_ttl_seconds",
+            86400,
+        )
+        if cipher is None:
+            # Cipher missing → fail-closed. The cookie
+            # cannot be issued safely; collapse to
+            # uniform 404.
+            return _uniform_404(request)
+        token = issue_grant_cookie(
+            cipher=cipher,
+            root_name=root_name,
+            rel_path=rel_path,
+            generation=_row_generation(row),
+            ttl_seconds=int(ttl_seconds),
+        )
+        # Audit row — successful verify emits ``grant``
+        # (architecture-recommendation.md D9:115 —
+        # the closed action set). The session lane passes
+        # the operator subject as ``actor``; the passcode
+        # lane passes None (the customer is anonymous).
+        try:
+            passcode_service.append_audit(
+                root_name,
+                rel_path,
+                _row_generation(row),
+                action="grant",
+                actor=actor,
+                ip=ip,
+            )
+        except Exception:
+            # Audit write failure is LOG-ONLY; never
+            # break the customer flow on an audit
+            # hiccup.
+            logger.warning(
+                "[LiveViews] grant audit append failed "
+                "for root=%s rel=%s",
+                root_name,
+                rel_path,
+            )
+        # Cookie Path = the EXACT queryless public view
+        # path (tightest scope; architecture-
+        # recommendation.md D6:73 — NOT the
+        # ``/views/public`` prefix). RFC 6265 §5.1.4
+        # path-matching compares the Path attribute
+        # against the request PATH only — the query is
+        # never part of the match (ADR D6:76 "cookie
+        # Path matching is query-insensitive"). A query-
+        # bearing Path attribute would match NO request:
+        # correct passcode → 303 → cookie never sent →
+        # infinite interstitial loop for query-bearing
+        # entry URLs (?raw=1, utm). The query lives ONLY
+        # in the 303 ``Location`` below and the form
+        # action.
+        cookie_path = _grant_cookie_path(root_name, rel_path)
+        # On plain HTTP the ``Secure`` flag blocks
+        # cookie storage on the browser
+        # (architecture-recommendation.md D6:79).
+        # Detect and render the explicit
+        # secure-context message — never a redirect
+        # loop.
+        if not _is_https_request(request):
+            return _render_secure_context_page(
+                request, csp_nonce=_public_csp_nonce()
+            )
+        response = Response(
+            status_code=303,
+            headers={
+                **_HARDENING_HEADERS,
+                # Location = the FULL view URL the
+                # customer just POSTed from — query
+                # included verbatim (same-URL POST →
+                # PRG; D6:78). NOT the cookie path.
+                "Location": _request_public_url_path(
+                    request, root_name, rel_path
+                ),
+                "Set-Cookie": _build_grant_cookie_value(
+                    token=token,
+                    path=cookie_path,
+                    ttl_seconds=int(ttl_seconds),
+                ),
+            },
+        )
+        # Belt-and-suspenders: the cookie WAS set with
+        # ``Secure`` (see ``_build_grant_cookie_value``)
+        # so a plain-HTTP request never reaches the
+        # success branch — the explicit
+        # secure-context page above is the only
+        # plain-HTTP outcome. If a test ever injects
+        # a non-secure request through the success
+        # path, the ``Secure`` flag still denies the
+        # cookie storage on the browser.
+        return response
+
     async def _public_post(
         request: Request, root_name: str, rel_path: str
     ) -> Response:
@@ -1658,15 +2532,40 @@ def build_router() -> APIRouter:
         """
         from daemon.services.view_passcode_service import (
             VerifyOutcome,
-            issue_grant_cookie,
-            parse_grant_cookie,
         )
 
         # Service presence — fail-closed (uniform 404) on
         # misconfigured lifespan / disabled subsystem.
         passcode_service = _resolve_passcode_service(request)
         if passcode_service is None:
-            return _uniform_404()
+            return _uniform_404(request)
+
+        # R1 SESSION BYPASS (POST lane) — views-session-bypass
+        # 2026-11-08. A valid operator session + a minted row ⇒
+        # grant + 303 identical to a successful passcode POST, with
+        # NO passcode submitted and NO run through gates #1/#3/#4/#5
+        # (never rate-limited, never locked-out, never origin-checked,
+        # never a compare). Placement is BEFORE the rate limiter so a
+        # valid session is never throttled; an UNMINTED / unknown path
+        # yields the SAME uniform 404 a sessionless prober gets (the
+        # information-leak posture is unchanged for session holders).
+        # Anything that fails session resolution (absent / stale /
+        # garbage cookie) lands in ``None`` and falls through to the
+        # EXACT anonymous chain below — byte-identical semantics.
+        session_ctx = await resolve_views_session(request)
+        if session_ctx is not None:
+            session_row = passcode_service.get_row(root_name, rel_path)
+            if session_row is None:
+                return _uniform_404(request)
+            return await _grant_success_response(
+                request,
+                passcode_service,
+                session_row,
+                root_name=root_name,
+                rel_path=rel_path,
+                ip=_client_ip_for_bucket(request),
+                actor=session_ctx.subject,
+            )
 
         # Per-IP bucket — gate #1 (ADR §Attack surface :186).
         # The bucket throttles the lane BEFORE any row lookup
@@ -1682,7 +2581,7 @@ def build_router() -> APIRouter:
         # row created; architecture-recommendation.md D2:36).
         row = passcode_service.get_row(root_name, rel_path)
         if row is None:
-            return _uniform_404()
+            return _uniform_404(request)
 
         # Locked short-circuit — gate #3. No compare, no
         # increment (architecture-recommendation.md D5:65).
@@ -1693,13 +2592,14 @@ def build_router() -> APIRouter:
         # D6:77). Only applied when the header is present
         # (a missing Origin / Referer is NOT a CSRF block —
         # some clients omit them; the binding posture is
-        # "same-host check when header present").
+        # "same-host check when header present"). R2
+        # (views-session-bypass 2026-11-08): the check is
+        # navigation-correct now (null Origin, forwarded
+        # hosts, www/apex, operator audience); R3: browsers
+        # get the HTML 403, programmatic consumers keep the
+        # JSON envelope byte-for-byte.
         if not _same_host_origin_check(request):
-            return JSONResponse(
-                status_code=403,
-                content={"error": "forbidden"},
-                headers=_HARDENING_HEADERS,
-            )
+            return _forbidden_response(request)
 
         # Read the customer-entered passcode from the form
         # body. The form action = same URL (architecture-
@@ -1760,101 +2660,20 @@ def build_router() -> APIRouter:
             # Other (PRG; the customer is sent back to the
             # same URL via GET, which then short-circuits
             # through the cookie gate to the served view).
-            cipher = getattr(
-                request.app.state, "view_passcode_cipher", None
-            )
-            ttl_seconds = getattr(
-                request.app.state,
-                "view_passcode_grant_ttl_seconds",
-                86400,
-            )
-            if cipher is None:
-                # Cipher missing → fail-closed. The cookie
-                # cannot be issued safely; collapse to
-                # uniform 404.
-                return _uniform_404()
-            token = issue_grant_cookie(
-                cipher=cipher,
+            # The mint block is SINGLE-HOMED in
+            # :func:`_grant_success_response` — the R1
+            # session bypass (above) enters the SAME block
+            # so both entry lanes mint byte-identical
+            # grants.
+            return await _grant_success_response(
+                request,
+                passcode_service,
+                row,
                 root_name=root_name,
                 rel_path=rel_path,
-                generation=_row_generation(row),
-                ttl_seconds=int(ttl_seconds),
+                ip=ip,
+                actor=None,
             )
-            # Audit row — successful verify emits ``grant``
-            # (architecture-recommendation.md D9:115 —
-            # the closed action set).
-            try:
-                passcode_service.append_audit(
-                    root_name,
-                    rel_path,
-                    _row_generation(row),
-                    action="grant",
-                    actor=None,
-                    ip=ip,
-                )
-            except Exception:
-                # Audit write failure is LOG-ONLY; never
-                # break the customer flow on an audit
-                # hiccup.
-                logger.warning(
-                    "[LiveViews] grant audit append failed "
-                    "for root=%s rel=%s",
-                    root_name,
-                    rel_path,
-                )
-            # Cookie Path = the EXACT queryless public view
-            # path (tightest scope; architecture-
-            # recommendation.md D6:73 — NOT the
-            # ``/views/public`` prefix). RFC 6265 §5.1.4
-            # path-matching compares the Path attribute
-            # against the request PATH only — the query is
-            # never part of the match (ADR D6:76 "cookie
-            # Path matching is query-insensitive"). A query-
-            # bearing Path attribute would match NO request:
-            # correct passcode → 303 → cookie never sent →
-            # infinite interstitial loop for query-bearing
-            # entry URLs (?raw=1, utm). The query lives ONLY
-            # in the 303 ``Location`` below and the form
-            # action.
-            cookie_path = _grant_cookie_path(root_name, rel_path)
-            # On plain HTTP the ``Secure`` flag blocks
-            # cookie storage on the browser
-            # (architecture-recommendation.md D6:79).
-            # Detect and render the explicit
-            # secure-context message — never a redirect
-            # loop.
-            if not _is_https_request(request):
-                return _render_secure_context_page(
-                    request, csp_nonce=_public_csp_nonce()
-                )
-            response = Response(
-                status_code=303,
-                headers={
-                    **_HARDENING_HEADERS,
-                    # Location = the FULL view URL the
-                    # customer just POSTed from — query
-                    # included verbatim (same-URL POST →
-                    # PRG; D6:78). NOT the cookie path.
-                    "Location": _request_public_url_path(
-                        request, root_name, rel_path
-                    ),
-                    "Set-Cookie": _build_grant_cookie_value(
-                        token=token,
-                        path=cookie_path,
-                        ttl_seconds=int(ttl_seconds),
-                    ),
-                },
-            )
-            # Belt-and-suspenders: the cookie WAS set with
-            # ``Secure`` (see ``_build_grant_cookie_value``)
-            # so a plain-HTTP request never reaches the
-            # success branch — the explicit
-            # secure-context page above is the only
-            # plain-HTTP outcome. If a test ever injects
-            # a non-secure request through the success
-            # path, the ``Secure`` flag still denies the
-            # cookie storage on the browser.
-            return response
 
         # Wrong code — gate #6. Increment the strike
         # counter (atomic in the service; the lockout
@@ -1943,16 +2762,16 @@ def build_router() -> APIRouter:
         """
         service = _resolve_service(request)
         if service is None or not service.enabled():
-            return _uniform_404()
+            return _uniform_404(request)
         passcode_service = _resolve_passcode_service(request)
         if passcode_service is None:
-            return _uniform_404()
+            return _uniform_404(request)
         row = passcode_service.get_row("board", "index.html")
         if row is None:
             # GET NEVER mints (the write-amplification pin) — an
             # unminted board is indistinguishable from any other
             # miss: the uniform 404, byte-identical.
-            return _uniform_404()
+            return _uniform_404(request)
         # Grant cookie — a valid grant short-circuits to the render;
         # an absent / invalid / stale-generation cookie falls through
         # to the locked / interstitial branch (log-only, no audit row).
@@ -1980,6 +2799,20 @@ def build_router() -> APIRouter:
                     # audit row) — the same posture as
                     # ``_public_resolve``.
                     pass
+        # R1 SESSION BYPASS (board lane) — views-session-bypass
+        # 2026-11-08. A valid operator session renders the board
+        # directly (``None`` = granted) — the same render the
+        # granted-cookie path gets: 200, ``page_headers`` (no-store
+        # + nonce CSP). Entered BEFORE the locked check (a valid
+        # session, like an established grant cookie, outranks lockout:
+        # "lockout gates the entry lane, not established grants",
+        # ADR D5:68 posture). NO grant is minted on GET — the
+        # write-amplification pin stands; the board keeps gating
+        # future anonymous sessions by passcode. A stale / garbage
+        # session resolves to ``None`` ⇒ the anonymous flow below,
+        # byte-identical.
+        if await resolve_views_session(request) is not None:
+            return None
         if _row_locked(row):
             return _render_locked_page(request)
         return _render_interstitial_page(request, "board", "index.html")
@@ -2128,7 +2961,7 @@ def build_router() -> APIRouter:
             try:
                 file_bytes = _fd_read(resolved.on_disk_path, MAX_SERVED_BYTES)
                 if file_bytes is None:
-                    return _uniform_404()
+                    return _uniform_404(request)
                 markdown_text = file_bytes.decode(
                     "utf-8", errors="replace"
                 )
@@ -2199,7 +3032,7 @@ def build_router() -> APIRouter:
                 else None
             )
             if open_result is None:
-                return _uniform_404()
+                return _uniform_404(request)
             data, content_type, _sha = open_result
             return Response(
                 content=data,
@@ -2253,7 +3086,7 @@ def build_router() -> APIRouter:
             # unlink, race that the kernel rejected at
             # ``O_NOFOLLOW`` open time, etc.) — uniform 404, no
             # stack trace leak.
-            return _uniform_404()
+            return _uniform_404(request)
 
         # Phase 2: content-aware rendering. ``.md`` files get
         # the HTML wrapper (renderer + sanitizer via pinned CDN,

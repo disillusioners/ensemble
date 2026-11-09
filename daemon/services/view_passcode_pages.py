@@ -1,8 +1,9 @@
 """Public-lane page templates (P2 of live-view-passcode).
 
-The five pages the public-lane router serves — interstitial,
-failure, locked, 429 rate-limit, and the explicit
-"secure-context required" notice — share the same shell:
+The seven pages the public-lane router serves — interstitial,
+failure, locked, 429 rate-limit, explicit "secure-context
+required" notice, uniform-404 not-found, and origin-gate-403
+forbidden — share the same shell:
 
 * zero JavaScript (architecture-recommendation.md D11:129,
   phase2-plan.md D9 / T2.7)
@@ -293,12 +294,88 @@ def render_secure_context_required(*, csp_nonce: str) -> str:
     )
 
 
+# ── Accept-discrimination (views-session-bypass R3, 2026-11-08) ────
+#
+# NEVER-JSON-ON-HUMAN-PAGES: every views-surface miss / rejection
+# picks its body shape from the request ``Accept`` header. Two
+# predicates, because the surface has TWO native shapes:
+#
+# * :func:`wants_html` — an explicit ``text/html`` accept names a
+#   browser navigation. JSON-native envelopes (the uniform 404, the
+#   403 origin rejection) flip to their HTML page for these
+#   requests; the JSON envelope stays byte-for-byte for everyone
+#   else (programmatic consumers, the mermaid wrapper's ``?raw=1``
+#   fetch, which sends ``*/*``).
+# * :func:`wants_json_page` — an explicit ``application/json``
+#   accept WITHOUT ``text/html`` names a programmatic consumer on a
+#   page that is HTML-native today (429 rate-limit, locked notice).
+#   Those flip to a JSON envelope for API clients; every other
+#   accept — including ``*/*`` — keeps the historical HTML page, so
+#   the anonymous-visible surface is unchanged (R4).
+
+def wants_html(accept_header: str | None) -> bool:
+    """True when Accept explicitly includes ``text/html``."""
+    return "text/html" in (accept_header or "").lower()
+
+
+def wants_json_page(accept_header: str | None) -> bool:
+    """True when Accept is explicitly ``application/json`` (and not html)."""
+    lowered = (accept_header or "").lower()
+    return "application/json" in lowered and "text/html" not in lowered
+
+
+def render_not_found(*, csp_nonce: str) -> str:
+    """The HTML shape of the uniform 404 (R3, 2026-11-08).
+
+    The SAME no-information contract as the JSON envelope: no root
+    name, no rel path, no which-miss-case-fired. A human holding a
+    stale or wrong link gets a renderable page; a probing client
+    learns nothing from this shape that the JSON envelope would not
+    have disclosed.
+    """
+    body = (
+        "<h1>View not found</h1>\n"
+        "<p>This link does not point to an available document. "
+        "Please ask the person who shared it for a fresh link.</p>\n"
+    )
+    return _shell(
+        title="View not found",
+        body_inner=body,
+        csp_nonce=csp_nonce,
+    )
+
+
+def render_forbidden(*, csp_nonce: str) -> str:
+    """The HTML shape of the origin-gate 403 (R3, 2026-11-08).
+
+    Cross-origin form submission rejected. NO path disclosure, no
+    Origin echo, no which-trust-leg-fired — the same generic
+    envelope discipline as the JSON ``{"error": "forbidden"}`` body
+    this page mirrors.
+    """
+    body = (
+        "<h1>Request blocked</h1>\n"
+        "<p>This form can only be submitted from the page that "
+        "shared it. Please re-open the original link and try "
+        "again.</p>\n"
+    )
+    return _shell(
+        title="Request blocked",
+        body_inner=body,
+        csp_nonce=csp_nonce,
+    )
+
+
 __all__ = [
     "new_csp_nonce",
     "page_headers",
     "render_failure",
+    "render_forbidden",
     "render_interstitial",
     "render_locked",
+    "render_not_found",
     "render_rate_limited",
     "render_secure_context_required",
+    "wants_html",
+    "wants_json_page",
 ]

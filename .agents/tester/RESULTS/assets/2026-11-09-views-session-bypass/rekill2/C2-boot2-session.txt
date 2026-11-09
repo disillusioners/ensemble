@@ -1,0 +1,101 @@
+# GROUP C2 — BOOT 2 session path (auth ON ⇒ R1 session bypass live) — 2026-11-09T03:15:54Z
+
+#### C17 VALID SESSION + forged XFH evil + Origin evil ⇒ EXPECT 303 (BY-DESIGN R1 session bypass — the session precedes the origin gate)
+EXPECT: 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Cookie: ensemble_sid=y8TwLEoipi5L50JSUx8pfe2R4jTMRlua4Np7ql_yiMA -H X-Forwarded-Host: evil.example -H Origin: https://evil.example --data code=dummy-not-used
+-- status: 303   (expect 303)  => MATCH
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:15:57 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8TruZYAx_0cN0g8FsvXOS1cElU1agrpOUw2nRCDZ2hQzEuQotz93cyM_KMz_hD-kCGX4dqQKZbWTzWAGrV-_WhKPCfcW_0p-YLhFoSa0GwHil0qRonbWvH4LoBrOsHzhOhiF7I9A8C9Pi1_u8TBVj8nk3w6M00XWf68OLzrTt_skVtVTfdFG8xrzvl-IxNWOXhZ1; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### C18 VALID SESSION + vouched shape (XFH op.example + Origin op.example) ⇒ EXPECT 303 (regression guard: the legit proxied shape must grant)
+EXPECT: 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Cookie: ensemble_sid=y8TwLEoipi5L50JSUx8pfe2R4jTMRlua4Np7ql_yiMA -H X-Forwarded-Host: op.example -H Origin: https://op.example --data code=dummy-not-used
+-- status: 303   (expect 303)  => MATCH
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:15:59 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8TrwTyIt8wZVGbPF-2Hxttw6jKDyHNJvHjp1LSl8UdDUBogCf6OiGR4RyOEajdegnTqaMuo1qsbSgAAHW1_kaVmA-mbLuHSU7zGRqD98Eh6ByYRiF2kNLxigqg5caatEE-G6xf4HobLQ5SL69U0_FtCMgCJyvRUcA6zOslwKkYx5ZVlIZC_ibFn9BybCS3MGiuxe; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   access-control-allow-origin: https://op.example
+   vary: Origin
+   
+-- body (first 400B):
+
+
+#### C19 VALID SESSION + NO Origin ⇒ EXPECT 303
+EXPECT: 303
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Cookie: ensemble_sid=y8TwLEoipi5L50JSUx8pfe2R4jTMRlua4Np7ql_yiMA --data code=dummy-not-used
+-- status: 303   (expect 303)  => MATCH
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:16:01 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8Try5tvYxdhjsi28U-RkLVTE_eFrJ6bQC-2Ea8RVRPMv4rrAnPj63bQGUw1G4hOuTD0hFQMaiMzkk-TFgsBLPOlkO52xg6A9Zlf6-OIVrIxgDGLhCYSkp403CMsmK70FDf6Y0oHiNPRnHpod73HwRaH9R8-JLVQZwKUnHJKC6hLW8MO2n_BkI9z5CNAw5cZRPu0B; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   
+-- body (first 400B):
+
+
+#### C20 VALID SESSION + Origin null + Sec-Fetch-Site: cross-site ⇒ EXPECT 303 (RECORD — the session bypass is total: never origin-checked)
+EXPECT: RECORD
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Cookie: ensemble_sid=y8TwLEoipi5L50JSUx8pfe2R4jTMRlua4Np7ql_yiMA -H Origin: null -H Sec-Fetch-Site: cross-site --data code=dummy-not-used
+-- status: 303   (expect RECORD)  => RECORD
+-- content-type: <none>   set-cookie headers: 1
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 03:16:03 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/g27fix/rekill2.md
+   set-cookie: view_grant=gAAAAABq8Tr0y8KAYDsFZgCVjcfa0woXOYI_SvN6QoyyR7pk_Uei3VR2z_X28JsOHrkfOTAaU3eVABGN1qiO775QKpZwrnh0PN3SU_RuJv3Epv-zHiGENx1e66gngoIMIR4pTdMJvM_q-J0hxehPgKAlyWvpC0zmkJRL17dMhSdyTqYiE1KXkFRXSU19dMVNQpPOFANcRuVn; Path=/views/public/g27fix/rekill2.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### C21 GARBAGE session cookie + forged XFH evil + Origin evil ⇒ EXPECT 403 (a stale/garbage session falls through to the anonymous chain)
+EXPECT: 403
+$ curl -X POST http://127.0.0.1:8082/views/public/g27fix/rekill2.md -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https -H Host: op.example -H Cookie: ensemble_sid=not-a-real-session-id -H X-Forwarded-Host: evil.example -H Origin: https://evil.example --data code=dummy-not-used
+-- status: 403   (expect 403)  => MATCH
+-- content-type: text/html;   set-cookie headers: 0
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 03:16:06 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-815a0e5e8cce211cff8812fb33b60d04'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="815a0e5e8cce211cff8812fb33b60d04">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt

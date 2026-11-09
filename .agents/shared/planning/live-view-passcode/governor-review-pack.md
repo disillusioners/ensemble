@@ -161,6 +161,15 @@ Path (T2.5 pin — `tests/unit/routers/test_live_views_public_lane.py
 - **Controls:**
   - **`SameSite=Lax`** — the cookie is NOT sent on cross-site POSTs.
   - **Same-host Origin / Referer check** (ADR D6:77 + S4 fold-in + `tests/unit/routers/test_live_views_public_lane.py::TestVerifyHandler::test_wrong_code_failure_page_no_strike_disclosure` and the cross-host 403 probe in P3 drill `evidence/state-b-dry-run-transcript.md` probe (g)) — applied WHEN the header is present (a missing Origin/Referer is NOT a CSRF block — some clients omit them; the binding posture is "same-host check when header present"). Mismatch → 403 generic.
+  - **AMENDED 2026-11-09 (views-session-bypass lane):** the mechanism behind
+    this bullet is now the **veto model** — anchors are operator-config-only
+    (audience ∪ declared bases ∪ peer-gated exact-loopback carve); the raw
+    `Host` header is never an unconditional anchor (G2.7 rebinding hole,
+    closed); forwarded-derived values veto but never vouch. The residual
+    bullet below stands (an XSS on a vouched host is still a same-origin
+    request — bounded by the D11 posture), and the no-CSRF-token decision is
+    unchanged. See the runbook §1.1/§1.1.1 and the evidence README at
+    `.agents/shared/planning/live-view-passcode/evidence/views-session-bypass/`.
   - **No CSRF token** (ADR D6:77 — the cheap posture; the cookie's SameSite=Lax + same-host origin check is defense-in-depth).
 - **Residual:** an attacker who controls a same-host origin (XSS on `*.ensem.dev`) could still craft a CSRF — but the same-host origin check is the per-host seam, and the broader XSS posture (D11) bounds the surface.
 - **Test pins:** ADR D6:77 + S4 fold; the cross-host 403 probe in the P3 drill (probe g in the transcript).

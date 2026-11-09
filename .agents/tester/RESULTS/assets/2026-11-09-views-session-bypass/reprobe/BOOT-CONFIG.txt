@@ -1,0 +1,15 @@
+# REPROBE BOOT CONFIG — 2026-11-09T00:07:44Z
+tip=6398a29a3e4de43074c14935d25d08dc4396aa5b
+PORT=8082 (owned exclusively by this lane)
+FAKE_HOME=/tmp/lvreprobe.e8kiS2/home
+ENSEMBLE_DATA_DIR=/tmp/lvreprobe.e8kiS2/data
+ENSEMBLE_AUTH_ENABLED=true
+ENSEMBLE_AUTH_ALLOWED_ORIGINS=https://operator.example
+ENSEMBLE_AUTH_ISSUER=https://drill.invalid (drill-fake; live issuer scrubbed)
+ENSEMBLE_AUTH_DISCOVERY_URL=<unset>
+ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE=<unset>
+ENSEMBLE_LIVE_VIEWS_EXTERNAL_BASE_URL=<unset>
+ENSEMBLE_LIVE_VIEWS_ROOTS={"g27fix": {"type": "filesystem", "path": "/tmp/lvreprobe.e8kiS2/roots/g27fix"}, "tmp-images": {"type": "tmp_images"}}
+ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0
+POSTGRES_DB=ensemble_dev (dev assert passed)
+SYSTEM_ENCRYPTION_KEY=<drill-key sha256:60dc658c1a58...>

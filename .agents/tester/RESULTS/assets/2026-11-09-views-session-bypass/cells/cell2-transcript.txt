@@ -1,0 +1,94 @@
+
+#### cell2-p1 EXPECT-303+grant [declared-base vouch] Host: views.example + Origin: https://views.example
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: views.example -H Origin: https://views.example http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:10:55 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/cellroot/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8Q-PKA9shMvT2Bvs4_X2TTvGL0u3OGzEVbM3T6fxTlFLQ2TRXLTfuSTnAUVQr7KIdPM2-PF25ifJpHVbhn0VRErt1cGRJzFHZvr11_30HB4CPLI7W6PR7qmuNF7pLJRxyf0VswE03ulxf2xVqYo4TBnu-XJU63dd9riEZptDZJb6w188bhx7cLYvNVB3GaEn6VXE; Path=/views/public/cellroot/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### cell2-p2 EXPECT-303+grant [www=apex on vouched anchor] Host: views.example + Origin: https://www.views.example
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: views.example -H Origin: https://www.views.example http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:11:09 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/cellroot/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8Q-e8MkNHTiHmjay0Ua4iFYsdS-n9YRzZDgRQ2pVyWoMG9qB2ZN4wttbxbEtRNP7wNn3YQ7VohQYxOO0xOP0B-PB_Xnbu5BucN1nz34F_2xB3KsmOvcIwn-v5ksUp5oyW1Jk-iJSzgDwE0FdNLo3OHctt6BOJi66_c3Nqm6DAv8gJ4VMq8J93dEYrQtAltMpya5M; Path=/views/public/cellroot/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### cell2-p3 EXPECT-403+zero-strikes [evil origin, no vouch] Host: views.example + Origin: https://evil.example
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: views.example -H Origin: https://evil.example http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 403
+   HTTP/1.1 403 Forbidden
+   date: Mon, 09 Nov 2026 00:11:23 GMT
+   server: uvicorn
+   content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-ce17c4d9c90bae2464abe7d991fa12bf'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+   x-content-type-options: nosniff
+   cache-control: no-store
+   referrer-policy: no-referrer
+   content-type: text/html; charset=utf-8
+   content-length: 1415
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+   <!DOCTYPE html>
+   <html lang="en">
+   <head>
+     <meta charset="utf-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1">
+     <title>Request blocked</title>
+     <style nonce="ce17c4d9c90bae2464abe7d991fa12bf">* { box-sizing: border-box; }
+   html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+   .wrap { max-widt
+
+#### cell2-p4 EXPECT-303+grant [declared front -> XFH leg active, XFH == declared] Host: internal-svc:8079 + XFH: views.example + Origin: https://views.example
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: internal-svc:8079 -H X-Forwarded-Host: views.example -H Origin: https://views.example http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:11:37 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/cellroot/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8Q-6sECF-GmC4R73IjzjuSRHcwdaKA-Cc4vFcKBxliS3I3f2EC3aVcqTKsymA3_2bECbDWlvPwfV4AslmbtTninQOUeDTcHpkD8VMHh44bV2ytVkUaa5MNQEzQTh99Il3ZYr2q421LA8ikCV_8E87wzNoDmbU8eFPZMdgMIBu15_LjhY9YUDjUyyVGrR1JOmOZLv; Path=/views/public/cellroot/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
+
+#### cell2-p5 EXPECT-403 per commission [XFH != declared creates no vouch] Host: internal-svc:8079 + XFH: evil.example + Origin: https://evil.example
+$ curl -X POST -H Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8 -H X-Forwarded-Proto: https --data-urlencode code=bqe8hq -H Host: internal-svc:8079 -H X-Forwarded-Host: evil.example -H Origin: https://evil.example http://127.0.0.1:8083/views/public/cellroot/matrix-a.md
+-- status: 303
+   HTTP/1.1 303 See Other
+   date: Mon, 09 Nov 2026 00:11:51 GMT
+   server: uvicorn
+   x-content-type-options: nosniff
+   cache-control: private, max-age=60
+   location: /views/public/cellroot/matrix-a.md
+   set-cookie: view_grant=gAAAAABq8Q_IaDtWM3nZHisQKD33G8g_N2l3zNt654kAiUCp-RTOT6CJ2G4862qge0SUteRCx0ySY79_mjFIc6s5j_8P3pdeiFldIYM0mkqDukxwEEJQVdbp_rLKPQTcqWstUTnt8cT8c_lAFtYvabT27SdrlzdAggfCUHo-YTcQe4MuLwlM3gNgcCLtyrXbheHCxD9Tv-Gd; Path=/views/public/cellroot/matrix-a.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+   content-length: 0
+   access-control-allow-origin: *
+   access-control-allow-credentials: true
+   
+-- body (first 400B):
+
