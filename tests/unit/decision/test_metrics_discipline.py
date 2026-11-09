@@ -98,3 +98,50 @@ def test_the_families_are_registered_in_the_canonical_registry() -> None:
     names = {m.name for m in cm.registered_metrics()}
     for handle in metrics.decision_metric_handles().values():
         assert handle.name in names
+
+
+def test_the_family_is_registered_through_the_wiring_registrar() -> None:
+    """L3 — the PRIMARY path: the families live in the WIRING registry."""
+    from daemon.services.metrics_query.wiring import registry as wiring_registry
+
+    assert metrics.FAMILY_ID in wiring_registry.registered_families()
+    registered = {
+        m.name for m in wiring_registry.registered_family_metrics()
+        if m.family == metrics.FAMILY_ID
+    }
+    mine = {m.name for m in metrics.decision_metric_handles().values()}
+    assert registered == mine, "the census must hold exactly this lane's families"
+
+
+def test_the_family_is_in_the_adjudication_census() -> None:
+    """L3 — the pack's census admits the family (verdict + band)."""
+    from daemon.services.metrics_query.wiring import adjudication
+
+    assert metrics.FAMILY_ID in adjudication.CATALOG_FAMILY_VERDICTS
+    assert metrics.FAMILY_ID in adjudication.REGISTERED_FAMILIES
+    assert metrics.FAMILY_ID in adjudication.FAMILY_SERIES_BANDS
+    verdict, seam = adjudication.CATALOG_FAMILY_VERDICTS[metrics.FAMILY_ID]
+    assert verdict in adjudication.VALID_VERDICTS
+    assert seam and seam.strip()
+
+
+def test_the_closed_label_space_stays_inside_the_declared_band() -> None:
+    """The band is a CEILING — the measured space never exceeds it."""
+    from daemon.services.metrics_query.wiring import adjudication
+    from daemon.services.metrics_query.wiring import registry as wiring_registry
+
+    family_metrics = [
+        m
+        for m in wiring_registry.registered_family_metrics()
+        if m.family == metrics.FAMILY_ID
+    ]
+    measured = 0
+    for metric in family_metrics:
+        combinations = 1
+        for key in metric.label_keys:
+            allowed = metric.allowed_values.get(key)
+            combinations *= len(allowed) if allowed is not None else 1
+        if metric.kind == "histogram":
+            combinations *= len(metric.buckets or ()) + 2
+        measured += combinations
+    assert measured <= adjudication.FAMILY_SERIES_BANDS[metrics.FAMILY_ID]

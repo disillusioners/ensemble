@@ -8,24 +8,19 @@ family" here is a **module counter / structured log row / sink seam**
 registration-time metadata — ``family`` / ``source_idiom`` /
 ``durability`` / ``cardinality_weight`` / ``chart_role``.
 
-**REGISTRAR PATH (L3).** The WIRING registrar
-(``daemon/services/metrics_query/wiring/registry.py::register_family_metric``)
-is the preferred path, but it requires the family to be part of the
-adjudication pack's census — and the pack's own test pins that census
-by EXACT set equality over the 27 ``F*`` families
-(``tests/unit/metrics/test_metrics_family_adjudication.py``:
-``test_every_catalog_family_carries_exactly_one_verdict`` asserts
-``len(verdicts) == 27`` and an exact expected set). Adding a
-non-``F`` family therefore requires amending that TEST file, which the
-decision lane does not own. **The fallback is taken: the raw
-``cm.register_*`` path, with an explicit ``allowed_values`` set for
-EVERY label key** — the AM-2 enforcement the wiring registrar would
-have provided. The consequence is DISCLOSED: **these families escape
-the adjudication pack's census discipline** (they are not in
-``REGISTERED_FAMILIES``, carry no band entry, and are not counted by
-the pack's global series cap). The package's own test
-(``tests/unit/decision/test_metrics_discipline.py``) enforces the
-discipline locally instead.
+**REGISTRAR PATH (L3).** The families are registered through the
+**WIRING registrar**
+(``daemon/services/metrics_query/wiring/registry.py::register_family_metric``),
+so AM-2's enforcement is structural — a declared label key without an
+``allowed_values`` set REFUSES the registration — and AM-3's
+``source_idiom`` / ``durability`` / ``cardinality_weight`` kwargs are
+REQUIRED (no defaults). The family is IN the adjudication pack's
+census: ``decision_overlay`` carries a verdict in
+``CATALOG_FAMILY_VERDICTS``, an entry in ``REGISTERED_FAMILIES`` and a
+``FAMILY_SERIES_BANDS`` ceiling.
+
+The package's own test (``tests/unit/decision/test_metrics_discipline.py``)
+remains as a belt-and-braces pin on top of the pack's census.
 
 **Naming (L1).** The registrar's canonical name rule is
 ``^ensemble_[a-z0-9_]+$`` (``daemon/checkpoint_metrics.py:110``), and
@@ -66,12 +61,8 @@ from __future__ import annotations
 import logging
 from typing import Callable, Mapping
 
-from daemon.checkpoint_metrics import (
-    register_counter,
-    register_gauge,
-    register_histogram,
-)
 from daemon.services.decision.types import FailureClass, SuppressionReason
+from daemon.services.metrics_query.wiring import registry as wiring_registry
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +119,21 @@ __all__ = [
 ]
 
 
-#: The ONE family id every decision family carries (L1).
+#: The ONE family id every decision family carries (L1) — and the id
+#: the adjudication pack's census carries for it.
 FAMILY_ID = "decision_overlay"
+
+#: The wiring cluster this lane's families belong to (the census's
+#: cluster convention — W1..W4 are the census lanes; W5 is the
+#: decision module's own).
+CLUSTER = "W5"
+
+#: The pack verdict for this family — ``IN`` (registered, observable,
+#: no OUT half).
+VERDICT = "IN"
+
+#: The seam anchor the pack's verdict row cites.
+SEAM_ANCHOR = "daemon/services/decision/metrics.py (the P1 decision overlay)"
 
 #: The bounded ``seam_id`` vocabulary — the design's four catalog seams
 #: (``seam-registry.md`` §5). A seam outside this set folds to the
@@ -201,6 +205,10 @@ def ensure_metrics_registered() -> None:
     families live BEFORE the first overlay call (the P1 exit criteria
     — "the global and shadow families must be live and populated
     before the first overlay call").
+
+    Every registration goes through the WIRING registrar (L3), so the
+    label vocabularies are enforced (AM-2) and the family metadata is
+    mandatory (AM-3).
     """
     global _registered
     if _registered:
@@ -208,18 +216,65 @@ def ensure_metrics_registered() -> None:
     _registered = True
 
     seam = ("seam_id",)
+    seam_values = {"seam_id": KNOWN_SEAM_IDS}
+
+    def _counter(name, label_keys, allowed_values, help_text, weight):
+        return wiring_registry.register_family_metric(
+            family=FAMILY_ID,
+            cluster=CLUSTER,
+            name=name,
+            kind="counter",
+            verdict=VERDICT,
+            seam=SEAM_ANCHOR,
+            label_keys=label_keys,
+            allowed_values=allowed_values,
+            help=help_text,
+            source_idiom="registry",
+            durability="process",
+            cardinality_weight=weight,
+        )
+
+    def _gauge(name, label_keys, allowed_values, help_text, weight):
+        return wiring_registry.register_family_metric(
+            family=FAMILY_ID,
+            cluster=CLUSTER,
+            name=name,
+            kind="gauge",
+            verdict=VERDICT,
+            seam=SEAM_ANCHOR,
+            label_keys=label_keys,
+            allowed_values=allowed_values,
+            help=help_text,
+            source_idiom="registry",
+            durability="process",
+            cardinality_weight=weight,
+        )
+
+    def _histogram(name, label_keys, allowed_values, help_text, weight):
+        return wiring_registry.register_family_metric(
+            family=FAMILY_ID,
+            cluster=CLUSTER,
+            name=name,
+            kind="histogram",
+            verdict=VERDICT,
+            seam=SEAM_ANCHOR,
+            label_keys=label_keys,
+            allowed_values=allowed_values,
+            help=help_text,
+            source_idiom="registry",
+            durability="process",
+            cardinality_weight=weight,
+        )
+
     handles = {
-        "attempts_total": register_counter(
+        "attempts_total": _counter(
             "ensemble_decision_overlay_attempts_total",
             ("seam_id", "mode"),
             {"seam_id": KNOWN_SEAM_IDS, "mode": MODES},
-            help="Overlay calls that reached the socket (one per attempt).",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            "Overlay calls that reached the socket (one per attempt).",
+            2,
         ),
-        "failures_total": register_counter(
+        "failures_total": _counter(
             "ensemble_decision_overlay_failures_total",
             ("seam_id", "failure_class", "mode"),
             {
@@ -227,185 +282,131 @@ def ensure_metrics_registered() -> None:
                 "failure_class": FAILURE_CLASSES,
                 "mode": MODES,
             },
-            help="Overlay failures by class and mode (19 distinct classes).",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=5,
+            "Overlay failures by class and mode (19 distinct classes).",
+            5,
         ),
-        "fallbacks_total": register_counter(
+        "fallbacks_total": _counter(
             "ensemble_decision_overlay_fallbacks_total",
             ("seam_id", "mode"),
             {"seam_id": KNOWN_SEAM_IDS, "mode": MODES},
-            help="Times the heuristic absorbed a failure (== failures, mode=deciding).",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            "Times the heuristic absorbed a failure (== failures, mode=deciding).",
+            2,
         ),
-        "latency_seconds": register_histogram(
+        "latency_seconds": _histogram(
             "ensemble_decision_overlay_latency_seconds",
             seam,
-            allowed_values={"seam_id": KNOWN_SEAM_IDS},
-            help="Overlay call latency in seconds.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            seam_values,
+            "Overlay call latency in seconds.",
+            2,
         ),
-        "cost_total": register_counter(
+        "cost_total": _counter(
             "ensemble_decision_overlay_cost_total",
             seam,
-            {"seam_id": KNOWN_SEAM_IDS},
-            help="Billed overlay cost in USD — only attempts that reached the socket.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            seam_values,
+            "Billed overlay cost in USD — only attempts that reached the socket.",
+            2,
         ),
-        "cost_tokens_total": register_counter(
+        "cost_tokens_total": _counter(
             "ensemble_decision_overlay_cost_tokens_total",
             seam,
-            {"seam_id": KNOWN_SEAM_IDS},
-            help="Metered overlay tokens — the fail-safe meter when no USD rate exists.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            seam_values,
+            "Metered overlay tokens — the fail-safe meter when no USD rate exists.",
+            2,
         ),
-        "floor_rejections_total": register_counter(
+        "floor_rejections_total": _counter(
             "ensemble_decision_overlay_floor_rejections_total",
             ("seam_id", "mode"),
             {"seam_id": KNOWN_SEAM_IDS, "mode": MODES},
-            help="Subset view of failures{failure_class=below_floor} — never additive.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            "Subset view of failures{failure_class=below_floor} — never additive.",
+            2,
         ),
-        "suppressed_total": register_counter(
+        "suppressed_total": _counter(
             "ensemble_decision_overlay_suppressed_total",
             ("seam_id", "reason"),
             {"seam_id": KNOWN_SEAM_IDS, "reason": SUPPRESSION_REASONS},
-            help="Consults that made NO call (closed 10-value reason vocabulary).",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=4,
+            "Consults that made NO call (closed 10-value reason vocabulary).",
+            4,
         ),
         # L2 — NO question_id label: the per-question A/B signal lives in
         # the SHADOW LOG (the §2.6 substrate), which already carries it.
-        "shadow_agreement_total": register_counter(
+        "shadow_agreement_total": _counter(
             "ensemble_decision_overlay_shadow_agreement_total",
             ("seam_id", "verdict"),
             {"seam_id": KNOWN_SEAM_IDS, "verdict": VERDICTS},
-            help="Shadow A/B verdicts (aggregated per seam).",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=3,
+            "Shadow A/B verdicts (aggregated per seam).",
+            3,
         ),
-        "shadow_disagreement_total": register_counter(
+        "shadow_disagreement_total": _counter(
             "ensemble_decision_overlay_shadow_disagreement_total",
             seam,
-            {"seam_id": KNOWN_SEAM_IDS},
-            help="Where the overlay disagreed with the heuristic (aggregated per seam).",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            seam_values,
+            "Where the overlay disagreed with the heuristic (aggregated per seam).",
+            2,
         ),
-        "shadow_latency_seconds": register_histogram(
+        "shadow_latency_seconds": _histogram(
             "ensemble_decision_overlay_shadow_latency_seconds",
             seam,
-            allowed_values={"seam_id": KNOWN_SEAM_IDS},
-            help="Overlay-only latency, distinct from the end-to-end latency.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            seam_values,
+            "Overlay-only latency, distinct from the end-to-end latency.",
+            2,
         ),
-        "liveness_alarm_total": register_counter(
+        "liveness_alarm_total": _counter(
             "ensemble_decision_overlay_liveness_alarm_total",
             ("seam_id", "reason"),
             {"seam_id": KNOWN_SEAM_IDS, "reason": LIVENESS_REASONS},
-            help="'Enabled but never consults' liveness alarms.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=4,
+            "'Enabled but never consults' liveness alarms.",
+            4,
         ),
-        "provisioning_state": register_gauge(
+        "provisioning_state": _gauge(
             "ensemble_decision_overlay_provisioning_state",
             ("seam_id", "state"),
             {"seam_id": KNOWN_SEAM_IDS, "state": PROVISIONING_STATES},
-            help="Per-seam provisioning state (ok | provisioning_missing | allow_list_excluded).",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=3,
+            "Per-seam provisioning state (ok | provisioning_missing | allow_list_excluded).",
+            3,
         ),
-        "shadow_write_failures_total": register_counter(
+        "shadow_write_failures_total": _counter(
             "ensemble_decision_overlay_shadow_write_failures_total",
             (),
             None,
-            help="Shadow-writer failures (counted, swallowed — the writer never fails a caller).",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=1,
+            "Shadow-writer failures (counted, swallowed — the writer never fails a caller).",
+            1,
         ),
-        "shadow_rows_dropped_total": register_counter(
+        "shadow_rows_dropped_total": _counter(
             "ensemble_decision_overlay_shadow_rows_dropped_total",
             seam,
-            {"seam_id": KNOWN_SEAM_IDS},
-            help="Shadow rows dropped by the per-seam row-count cap.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            seam_values,
+            "Shadow rows dropped by the per-seam row-count cap.",
+            2,
         ),
-        "switch_reverify_total": register_counter(
+        "switch_reverify_total": _counter(
             "ensemble_decision_overlay_switch_reverify_total",
             ("seam_id", "outcome"),
             {"seam_id": KNOWN_SEAM_IDS, "outcome": REVERIFY_OUTCOMES},
-            help="Boot re-verification of every kill (a kill is never undone by a restart).",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=4,
+            "Boot re-verification of every kill (a kill is never undone by a restart).",
+            4,
         ),
-        "cost_trip_total": register_counter(
+        "cost_trip_total": _counter(
             "ensemble_decision_overlay_cost_trip_total",
             ("reason",),
             {"reason": COST_TRIP_REASONS},
-            help="Auto-trips fired by the cost ceiling (global) or the per-seam share guard.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=1,
+            "Auto-trips fired by the cost ceiling (global) or the per-seam share guard.",
+            1,
         ),
         # The S1 pair (§2.4) — set-level comparison of the overlay's
         # ranked selection against the heuristic's.
-        "shadow_selection_agreement_total": register_counter(
+        "shadow_selection_agreement_total": _counter(
             "ensemble_decision_overlay_shadow_selection_agreement_total",
             seam,
-            {"seam_id": KNOWN_SEAM_IDS},
-            help="S1: shadow selections compared set-wise against the heuristic's.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            seam_values,
+            "S1: shadow selections compared set-wise against the heuristic's.",
+            2,
         ),
-        "shadow_selection_overlap_ratio": register_gauge(
+        "shadow_selection_overlap_ratio": _gauge(
             "ensemble_decision_overlay_shadow_selection_overlap_ratio",
             seam,
-            {"seam_id": KNOWN_SEAM_IDS},
-            help="S1: Jaccard overlap of the overlay's selection and the heuristic's.",
-            family=FAMILY_ID,
-            source_idiom="registry",
-            durability="process",
-            cardinality_weight=2,
+            seam_values,
+            "S1: Jaccard overlap of the overlay's selection and the heuristic's.",
+            2,
         ),
     }
     _handles.update(handles)

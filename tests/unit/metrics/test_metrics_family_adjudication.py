@@ -43,6 +43,14 @@ from daemon.services.metrics_query.wiring import sources as wiring_sources
 from daemon.services.metrics_query.wiring import vocab
 from daemon.services.metrics_query.wiring import ws_a
 
+# The Decision Module P1 lane's family (``decision_overlay``) is
+# registered by ITS OWN module — the census's other families live
+# inside the wiring package, this one does not — so the pack loads it
+# here, exactly as it loads ``ws_a``/``vocab``/``sources``.  Without
+# this import the family would be absent from the registry and the
+# census would (correctly) report a mismatch.
+from daemon.services.decision import metrics as decision_metrics  # noqa: F401
+
 #: The P4 STAGE's base commit — the diff-review pin's anchor.  It is
 #: the tree the P4 stage started from (the P3 stage's tip: the query
 #: door + the lifespan wiring).  The pin is about THIS stage's diff —
@@ -74,6 +82,23 @@ ALLOWED_DAEMON_DIFF = (
     "daemon/services/metrics_query/ring.py",
     "daemon/services/metrics_query/sampler.py",
     "daemon/services/metrics_query/selectors.py",
+    # The Decision Module P1 lane's OWN surfaces (2026-11-09) — the
+    # same shape as the query package's own surfaces above: a NEW
+    # lane's producers, not a change to somebody else's producer.
+    # The lane registers its families through the WIRING registrar
+    # (daemon/services/metrics_query/wiring/registry.py), so the AM-2
+    # label-vocabulary enforcement and the pack's census apply to them
+    # exactly as they do to every other family.
+    "daemon/services/decision/__init__.py",
+    "daemon/services/decision/client.py",
+    "daemon/services/decision/config.py",
+    "daemon/services/decision/kill.py",
+    "daemon/services/decision/metrics.py",
+    "daemon/services/decision/overlay.py",
+    "daemon/services/decision/port.py",
+    "daemon/services/decision/registry.py",
+    "daemon/services/decision/shadow.py",
+    "daemon/services/decision/types.py",
 )
 
 #: The wiring package's root (the new module).
@@ -103,18 +128,22 @@ def _closed_label_space(metrics: list[cm.Metric]) -> int:
 class TestTheAdjudicationTable:
     def test_every_catalog_family_carries_exactly_one_verdict(self) -> None:
         verdicts = adjudication.CATALOG_FAMILY_VERDICTS
-        assert len(verdicts) == 27
-        expected = {"F0.1", "F0.2", "F0.3", "F0.4"} | {f"F{n}" for n in range(1, 24)}
+        assert len(verdicts) == 28
+        expected = (
+            {"F0.1", "F0.2", "F0.3", "F0.4"}
+            | {f"F{n}" for n in range(1, 24)}
+            | {"decision_overlay"}
+        )
         assert set(verdicts) == expected
         for family, (verdict, seam) in verdicts.items():
             assert verdict in adjudication.VALID_VERDICTS, family
             assert seam and seam.strip(), family
 
-    def test_the_binding_subset_is_seventeen_of_twenty_seven(self) -> None:
+    def test_the_binding_subset_is_eighteen_of_twenty_eight(self) -> None:
         verdicts = adjudication.CATALOG_FAMILY_VERDICTS
         full = [f for f, (v, _s) in verdicts.items() if v == "IN"]
         partial = [f for f, (v, _s) in verdicts.items() if v == "PARTIAL"]
-        assert len(full) == 11
+        assert len(full) == 12
         assert len(partial) == 6
         assert tuple(sorted(full + partial)) == tuple(sorted(adjudication.REGISTERED_FAMILIES))
 
