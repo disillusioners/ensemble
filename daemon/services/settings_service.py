@@ -97,7 +97,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import Engine
 from sqlmodel import Session, select
@@ -174,6 +174,17 @@ class ManagedKeySpec:
     requires_restart: bool = True
     sensitive: bool = False
     description: str = ""
+    # (f) council round 3 — the PER-KEY raw-leaf accessor. When set,
+    # the key's RAW yaml SECTION is read THROUGH this zero-arg callable
+    # instead of the boot-time limits dict: the decision keys live in
+    # the ``decision:`` section, which the limits accessor never
+    # captured. ``None`` (the default) means "use the passed-in limits
+    # dict" — every pre-existing key behaves byte-for-byte as before.
+    # The accessor may RAISE; :func:`_raw_yaml_leaf` fails soft (an
+    # unreadable section means the yaml tier is ABSENT for that key,
+    # never a boot/wire failure — the settings service must never break
+    # because the decision module changed).
+    raw_yaml_section: Callable[[], Any] | None = None
 
     def constraint_desc(self) -> str:
         """Human-readable constraint for log lines / 422 details
@@ -213,6 +224,20 @@ class ManagedKeySpec:
 #: The registry default MUST mirror the backing pydantic Field default —
 #: chain: ``daemon.constants`` → ``LimitsConfig`` Field → this registry
 #: default (ONE truth).
+def _raw_decision_section() -> Any:
+    """The DECISION yaml section accessor — the per-key hook (f).
+
+    Returns whatever ``daemon.config.raw_yaml_decision()`` captured for
+    the ``decision:`` section (or ``None`` when nothing was captured).
+    The import is lazy (``daemon.config`` imports this module's
+    siblings late in boot) and MAY raise — :func:`_raw_yaml_leaf`
+    fails soft around it.
+    """
+    from daemon.config import raw_yaml_decision
+
+    return raw_yaml_decision()
+
+
 MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     # ── v1 (db-backed-settings, 2026-10-15) — the original semaphore knob ──
     "limits.llm_concurrency": ManagedKeySpec(
@@ -620,6 +645,7 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     "decision_global_enabled": ManagedKeySpec(
         key="decision_global_enabled",
         config_path="decision.global_enabled",
+        raw_yaml_section=_raw_decision_section,
         env_var="DECISION_ENABLED",
         value_type="int",
         default=0,
@@ -636,6 +662,7 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     "decision_seam_snapshot_l3_selection_enabled": ManagedKeySpec(
         key="decision_seam_snapshot_l3_selection_enabled",
         config_path="decision.seams.snapshot_l3_selection_enabled",
+        raw_yaml_section=_raw_decision_section,
         env_var="DECISION_SEAM_SNAPSHOT_L3_SELECTION",
         value_type="int",
         default=0,
@@ -653,6 +680,7 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     "decision_seam_snapshot_l3_selection_stage": ManagedKeySpec(
         key="decision_seam_snapshot_l3_selection_stage",
         config_path="decision.seams.snapshot_l3_selection_stage",
+        raw_yaml_section=_raw_decision_section,
         env_var="DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE",
         value_type="str",
         default="shadow",
@@ -1185,29 +1213,41 @@ def _raw_yaml_leaf(raw_yaml_limits: Any, spec: ManagedKeySpec) -> Any:
     ``source="yaml"`` on a default-only install and fail the
     default-tier test).
 
-    DECISION SPECIAL-CASE. The decision-module switches live in a
-    DIFFERENT yaml section (``decision:``), which the limits accessor
-    never captured. For those the first component is ``decision``, and
-    the section is read through ``daemon.config.raw_yaml_decision()``
-    instead of the passed-in limits dict; the remaining components
-    walk exactly as for every other key.
+    THE PER-KEY SECTION ACCESSOR (f, council round 3). A key whose
+    spec carries ``raw_yaml_section`` reads its section THROUGH that
+    accessor (the decision keys' ``decision:`` section is captured by
+    ``daemon.config.raw_yaml_decision``, not by the limits accessor);
+    the remaining components walk exactly as for every other key.
+    There is NO name-based special-case: the spec declares its own
+    section source.
+
+    FAIL-SOFT (f). The WHOLE body is guarded: an accessor that raises
+    (a broken decision config path, an import failure) or a walk that
+    faults means the yaml tier is ABSENT for that key — the lower
+    tiers stay active and the caller resolves on them. The settings
+    service must never break because the decision module changed; the
+    log carries the failure CLASS only.
     """
-    section = spec.config_path.split(".")[0]
-    if section == "decision":
-        try:
-            from daemon.config import raw_yaml_decision
-            node: Any = raw_yaml_decision()
-        except ImportError:
-            node = None
-    else:
-        node = raw_yaml_limits
-    if not isinstance(node, dict):
-        return None
-    for part in spec.config_path.split(".")[1:]:
-        if not isinstance(node, dict) or part not in node:
+    try:
+        if spec.raw_yaml_section is not None:
+            node: Any = spec.raw_yaml_section()
+        else:
+            node = raw_yaml_limits
+        if not isinstance(node, dict):
             return None
-        node = node[part]
-    return node
+        for part in spec.config_path.split(".")[1:]:
+            if not isinstance(node, dict) or part not in node:
+                return None
+            node = node[part]
+        return node
+    except Exception as exc:  # noqa: BLE001 — fail-soft: ABSENT, never a raise
+        logger.warning(
+            "[Settings] raw yaml leaf read failed for %s (%s) — treating "
+            "the yaml tier as ABSENT for this key",
+            spec.key,
+            type(exc).__name__,
+        )
+        return None
 
 
 def _get_config_value(config: Any, config_path: str) -> Any:

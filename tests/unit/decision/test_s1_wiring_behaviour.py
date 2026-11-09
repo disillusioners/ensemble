@@ -298,6 +298,10 @@ async def test_s1_overlay_active_produces_identical_selection_and_writes_shadow_
         r["snapshot_id"] for r in baseline_result["results"]
     ] == ["snap-1", "snap-3"]
 
+    # (c) — the consult is DETACHED now: drain the in-flight task
+    # before asserting on its effects.
+    await overlay.wait_for_detached()
+
     # ASSERTION 2: Proxy was called (active consult)
     assert len(calls) == 1
 
@@ -384,6 +388,11 @@ async def test_s1_overlay_inactive_produces_byte_identical_results_and_no_call_m
         query="find task", project_id="p1", llm_client=fake_llm_client
     )
 
+    # (c) — the dispatch itself happens even for an INACTIVE overlay
+    # (the gate read inside the task suppresses it): drain before
+    # asserting nothing was called.
+    await overlay.wait_for_detached()
+
     # ASSERTION 1: Decision is byte-identical
     assert [r["snapshot_id"] for r in res["results"]] == ["snap-1"]
 
@@ -411,6 +420,7 @@ async def test_s1_overlay_inactive_produces_byte_identical_results_and_no_call_m
     )
     assert [r["snapshot_id"] for r in res2["results"]] == ["snap-1"]
     assert len(calls) == 0
+    await overlay_unconfigured.wait_for_detached()
 
 
 # =============================================================================

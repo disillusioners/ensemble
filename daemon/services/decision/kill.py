@@ -386,6 +386,17 @@ class KillChannelResolver:
             # D2 — a failed write left this seam's store value
             # untrustworthy: resolve UNREADABLE ⇒ OFF (never the stale ON).
             return SwitchState(readable=False)
+        if GLOBAL_ENABLED_KEY in self._poisoned:
+            # (a) council round 3 — the GLOBAL-MASTER poison must NOT be
+            # inert: the trip's global write is recorded under
+            # ``GLOBAL_ENABLED_KEY`` in this set, and a failed
+            # global-master write means the stored GLOBAL value cannot
+            # be trusted either. Resolve UNREADABLE ⇒ global OFF (the
+            # consult is suppressed ``switch_unreadable`` and NO call is
+            # made) until an operator retries via ``invalidate(None)``
+            # (or ``invalidate(GLOBAL_ENABLED_KEY)``). Bounded: this
+            # gates consults, and the trip also wrote the per-seam keys.
+            return SwitchState(readable=False)
         cached = self._cached(seam_id)
         if cached is not None:
             return cached

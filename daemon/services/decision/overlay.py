@@ -64,6 +64,7 @@ hold it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import deque
@@ -429,6 +430,14 @@ class DecisionOverlay:
         self._trips: list[TripRecord] = []
         self._provisioning: dict[str, ProvisioningState] = {}
         self._consults: dict[str, int] = {}
+        # (c) — the STRONG-REFERENCE set for detached consults. A bare
+        # ``asyncio.create_task`` result is GC-eligible MID-FLIGHT: the
+        # event loop holds only a weak reference, so an unreferenced
+        # task can be silently garbage-collected before it runs or
+        # completes — no error, no row. Every detached task is added
+        # HERE on dispatch and discarded in the payload's ``finally``
+        # (the loop keeps the set alive for the overlay's lifetime).
+        self._detached_tasks: set[asyncio.Task[None]] = set()
 
     # ── the consult ─────────────────────────────────────────────────────
 
@@ -438,7 +447,33 @@ class DecisionOverlay:
         *,
         heuristic_outcome: Any,
         context: Mapping[str, Any],
+        force_shadow: bool = False,
     ) -> OverlayConsultResult:
+        """Consult the overlay for one seam — the INLINE entry.
+
+        This is the path a DECIDING consult uses (an applied answer is
+        needed synchronously by definition). The SHADOW path uses
+        :meth:`consult_detached`, which runs this same consult inside a
+        bounded background task and returns immediately.
+
+        Args:
+            seam_id: The seam to consult.
+            heuristic_outcome: The caller's own answer — the permanent
+                default and the fallback (D2).
+            context: The seam's context (the seam's ``build_input``
+                reads it).
+            force_shadow: The STRUCTURAL shadow/deciding split (council
+                round 3, shape point 8). ``True`` — the detached path —
+                FORBIDS apply regardless of the resolved stage: an
+                applied answer is never detached, so a detached consult
+                can never move the caller's outcome even if a P4 seam
+                were dispatched through this path. ``False`` (the
+                inline default) keeps the stage-driven apply gate for
+                deciding seams.
+
+        Returns:
+            The consult's terminal state. Never raises.
+        """
         record = self._registry.get(seam_id)
         if record is None:
             return OverlayConsultResult(
@@ -512,7 +547,14 @@ class DecisionOverlay:
 
         # ── the fenced consult ───────────────────────────────────────
         deciding = state.stage is DecisionStage.DECIDING
-        allow_apply = deciding and self._registry.is_deciding_permitted(seam_id)
+        # The APPLY gate — force_shadow (the detached path) never
+        # applies, structurally (shape point 8: "apply is never
+        # detached").
+        allow_apply = (
+            deciding
+            and self._registry.is_deciding_permitted(seam_id)
+            and not force_shadow
+        )
         floor = record.confidence_floor if deciding else None
         try:
             result = await self._registry.execute(
@@ -661,6 +703,120 @@ class DecisionOverlay:
             latency_s=result.latency_s,
             cost_usd=result.cost_usd,
         )
+
+    # ── the DETACHED entry ((c) — the shadow consult never blocks) ─────
+
+    def consult_detached(
+        self,
+        seam_id: str,
+        *,
+        heuristic_outcome: Any,
+        context: Mapping[str, Any],
+    ) -> None:
+        """Dispatch the consult as a BOUNDED BACKGROUND task — the (c)
+        entry. Returns IMMEDIATELY; the caller's path is untouched.
+
+        Council round 3 shape, point by point:
+
+        1. **Capture at the hook** — the caller captures
+           ``heuristic_ids`` / ``candidate_ids`` / ``query`` and hands
+           them here; this method dispatches and returns. The caller's
+           ``search()`` is byte-identical whether the overlay is armed
+           or not.
+        2. **Strong reference** — the task is added to
+           :attr:`_detached_tasks` on dispatch and discarded in the
+           payload's ``finally`` (a bare ``create_task`` result is
+           GC-eligible mid-flight).
+        3. **Per-task budget = the configured timeout** — the socket
+           phase inside the task is bounded by
+           ``DecisionConfig.timeout_s`` (the client's own
+           ``wait_for``); concurrency is throttled by the EXISTING
+           breaker / CallBudget, which run inside the task pre-socket.
+        4. **The A/B row lands INCLUDING timeout rows** — the whole
+           consult lifecycle runs inside the task, so a client timeout
+           still writes its shadow row before the task exits.
+        5. **Kill read, cost accounting and auto-trip stay INSIDE the
+           task** — spend accrues on consults, not dispatches; the D3
+           floor exists for the reached-socket-no-usage case, which is
+           only knowable inside the task.
+        6. **Detachment semantic (disclosed):** the kill gate is read
+           INSIDE the task, so a kill written BETWEEN dispatch and
+           execution may not be honoured for that one in-flight
+           consult. Bounded: one consult.
+        7. **Exceptions contained, TYPE ONLY** — the payload never
+           propagates; the log carries ``type(exc).__name__`` and
+           nothing else (no message, no payload, no context).
+        8. **Shadow ⇒ detached; deciding ⇒ inline** — the payload runs
+           the consult with ``force_shadow=True``, so a detached
+           consult can NEVER apply (an applied answer is needed
+           synchronously by definition). Deciding call sites keep the
+           inline :meth:`consult`.
+
+        Never raises: even the dispatch itself is guarded (a caller
+        without a running loop logs and returns).
+        """
+        try:
+            task = asyncio.create_task(
+                self._detached_payload(
+                    seam_id,
+                    heuristic_outcome=heuristic_outcome,
+                    context=context,
+                ),
+                name=f"decision-overlay:consult:{seam_id}",
+            )
+        except RuntimeError:
+            # No running loop in this thread — the consult cannot be
+            # scheduled. Never raise into the caller (the hook is
+            # non-fatal by contract); the consult is simply not made,
+            # and the heuristic outcome stands.
+            logger.warning(
+                "decision detached consult not dispatched for %s "
+                "(no running event loop)",
+                seam_id,
+            )
+            return
+        # Point 2 — the strong reference, BEFORE any await can run.
+        self._detached_tasks.add(task)
+        # Point 2 — discarded in the payload's ``finally``.
+
+    async def _detached_payload(
+        self,
+        seam_id: str,
+        *,
+        heuristic_outcome: Any,
+        context: Mapping[str, Any],
+    ) -> None:
+        """The detached task's body: the WHOLE consult lifecycle,
+        contained (shape points 4–7)."""
+        task = asyncio.current_task()
+        try:
+            await self.consult(
+                seam_id,
+                heuristic_outcome=heuristic_outcome,
+                context=context,
+                force_shadow=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — point 7: contained
+            # TYPE ONLY — never the message, never the payload, never
+            # the context.
+            logger.warning(
+                "decision detached consult failed (contained): %s",
+                type(exc).__name__,
+            )
+        finally:
+            # Point 2 — drop the strong reference when the task is
+            # finished (done OR failed).
+            if task is not None:
+                self._detached_tasks.discard(task)
+
+    async def wait_for_detached(self, timeout_s: float = 10.0) -> int:
+        """Await every in-flight detached consult — the test + shutdown
+        drain. Returns how many tasks completed within the budget."""
+        tasks = [t for t in self._detached_tasks if not t.done()]
+        if not tasks:
+            return 0
+        done, _pending = await asyncio.wait(tasks, timeout=timeout_s)
+        return len(done)
 
     # ── cost + the auto-trip ───────────────────────────────────────────
 

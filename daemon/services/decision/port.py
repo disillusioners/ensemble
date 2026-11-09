@@ -111,6 +111,28 @@ class DecisionOverlayPort(Protocol):
         """
         ...
 
+    def consult_detached(
+        self,
+        seam_id: str,
+        *,
+        heuristic_outcome: Any,
+        context: Mapping[str, Any],
+    ) -> None:
+        """Dispatch the consult as a bounded BACKGROUND task — the (c)
+        shadow entry. Returns immediately; the caller's path is
+        untouched.
+
+        The implementation owns the strong-reference set (a bare
+        ``create_task`` is GC-eligible mid-flight), the per-task budget
+        (the configured timeout), the containment (exceptions logged
+        TYPE-ONLY) and the structural never-apply guarantee (shadow ⇒
+        detached; deciding ⇒ the awaited :meth:`consult`). The caller
+        owns the capture (ids + query) and nothing else.
+
+        Never raises.
+        """
+        ...
+
 
 # ── the S1 id helpers (duck-typed, never a generic dump) ────────────────
 

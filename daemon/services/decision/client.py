@@ -37,7 +37,7 @@ from typing import Any, Callable, Mapping
 
 import httpx
 
-from daemon.services.decision.config import DecisionConfig
+from daemon.services.decision.config import DEFAULT_TIMEOUT_S, DecisionConfig
 from daemon.services.decision.types import (
     AnswerProbability,
     DecisionAnswer,
@@ -178,15 +178,39 @@ class DecisionClient:
             A :class:`ClientOutcome` — success, a failure label, or a
             suppression reason. Never raises.
         """
-        preflight = self._preflight(request)
-        if preflight is not None:
-            return preflight
+        started = self._clock()
+
+        # (g1) — the pre-flight sits INSIDE a never-raises guard: the
+        # thin client must NEVER raise into the caller, and a malformed
+        # request shape must yield the failure outcome (the caller's
+        # heuristic stands), not an exception. A pre-flight fault NEVER
+        # opened a socket, so it is not D3-floor-eligible.
+        try:
+            preflight = self._preflight(request)
+            if preflight is not None:
+                return preflight
+        except Exception as exc:  # noqa: BLE001 — never raises
+            logger.debug(
+                "decision preflight fault (non-fatal): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return self._failure(
+                FailureClass.SEAM_FAULT,
+                latency_s=self._clock() - started,
+                reached_socket=False,
+            )
 
         budget = float(timeout_s if timeout_s is not None else self._config.timeout_s)
-        if budget <= 0:
+        # (g2) — the budget is CLAMPED, twice: ``not (b > 0)`` also
+        # rejects NaN (every comparison with NaN is False), and the
+        # config tier falls back to the §4.2 default S1 budget so a
+        # garbage config can never produce an unbounded/NaN wait_for.
+        if not (budget > 0):
             budget = float(self._config.timeout_s)
+        if not (budget > 0):
+            budget = DEFAULT_TIMEOUT_S
 
-        started = self._clock()
         try:
             status, raw_body, oversize, sse = await asyncio.wait_for(
                 self._post(request, budget), timeout=budget
@@ -197,15 +221,40 @@ class DecisionClient:
                 latency_s=self._clock() - started,
                 reached_socket=True,
             )
+        except httpx.ConnectTimeout:
+            # (e) — the CONNECT phase timed out: the TCP connection was
+            # never established, so no socket was opened and the attempt
+            # is NOT D3-floor-eligible (no server-side spend can have
+            # accrued). Listed BEFORE the broad TimeoutException.
+            return self._failure(
+                FailureClass.TIMEOUT,
+                latency_s=self._clock() - started,
+                reached_socket=False,
+            )
         except httpx.TimeoutException:
+            # A mid-flight timeout (read/write/pool): the socket WAS
+            # open — the attempt bills (§3.5.3 + the D3 floor).
             return self._failure(
                 FailureClass.TIMEOUT,
                 latency_s=self._clock() - started,
                 reached_socket=True,
             )
+        except httpx.ConnectError:
+            # (e) — connection refused / DNS failure / unreachable host:
+            # the connection was never established, so no socket was
+            # opened and the attempt is NOT D3-floor-eligible. Listed
+            # BEFORE the broad HTTPError.
+            return self._failure(
+                FailureClass.CONNECT_ERROR,
+                latency_s=self._clock() - started,
+                reached_socket=False,
+            )
         except httpx.HTTPError:
             # DNS failure, connection refused, TLS failure — one label
-            # for every transport fault (§6 rows 6–8).
+            # for every transport fault (§6 rows 6–8). Anything reaching
+            # THIS handler (not ConnectError above) faulted MID-FLIGHT —
+            # the socket was open — so the conservative
+            # ``reached_socket=True`` stands.
             return self._failure(
                 FailureClass.CONNECT_ERROR,
                 latency_s=self._clock() - started,

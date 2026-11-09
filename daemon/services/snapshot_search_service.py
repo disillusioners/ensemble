@@ -692,7 +692,15 @@ class SnapshotSearchService:
 
         # S1 Decision Overlay hook — call OUTWARD at the last point where
         # picked is final and prompt/evidence is still live.
-        # The shipped selection MUST NOT change: this is the C1 shadow call.
+        # The shipped selection MUST NOT change: this is the C1 shadow
+        # call, DETACHED (council round 3): the consult runs as a
+        # bounded background task inside the overlay (strong-referenced,
+        # never-apply, contained TYPE-ONLY) and this method returns
+        # `picked` immediately — search() is byte-identical whether the
+        # overlay is armed or not. The DETACHMENT SEMANTIC (disclosed):
+        # the kill gate is read INSIDE the task, so a kill written
+        # between dispatch and execution may not be honoured for that
+        # one in-flight consult — bounded at one consult.
         if self._decision_overlay is not None:
             candidate_ids = extract_snapshot_ids([s for s, _ in candidates])
             heuristic_ids = extract_snapshot_ids(picked)
@@ -705,16 +713,12 @@ class SnapshotSearchService:
                 "user_prompt": user_prompt,
                 "limit": limit,
             }
-            try:
-                await self._decision_overlay.consult(
-                    "snapshot.l3.selection",
-                    heuristic_outcome=heuristic_ids,
-                    context=context,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[SnapshotSearch] decision overlay consult failed (non-fatal): {e}"
-                )
+            # Never raises (containment lives inside the overlay).
+            self._decision_overlay.consult_detached(
+                "snapshot.l3.selection",
+                heuristic_outcome=heuristic_ids,
+                context=context,
+            )
 
         return picked
 
