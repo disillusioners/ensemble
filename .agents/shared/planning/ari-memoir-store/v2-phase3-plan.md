@@ -151,3 +151,18 @@ Neighbor Stars (1-hop):
 - **V2-27 / C2:** Bounded one-time seed pass from v1 corpus.
 - **V2-31 / SF7:** Constellation 2-call LLM budget cap.
 - **V2-34 / SF3 / Suggestion #11:** Two-part heat model (stored accumulator + render-time decay with `MEMOIR_HEAT_DECAY_LAMBDA = 0.005`).
+
+---
+
+## 8. Phase-3 Unlanded Items (F-5 / T7.6 handoff — single home)
+
+**Owner:** this section is the ONE home for the `agents/ari/tools_note.md` re-stamp handoff (rule recorded: ONE home, no duplicate copy; T7.6 in `v2-phase7-plan.md` POINTS here rather than re-stating the text).
+
+**Status of the handoff (as of the build-phase close-out):**
+
+1. `agents/ari/tools_note.md` is a **VERSIONED_PROMPT_ARTIFACT** (`daemon/tools/prompt_artifacts.py:123` — agent writes REFUSED; the prompt-versioning DB lane is HUMAN-SESSION-ONLY). The re-stamp therefore CANNOT land from an agent-lane commit; it is outstanding human-lane work.
+2. The metrics half is **DONE**: `.agents/shared/metrics/tool-categories.json` was regenerated, the category count is **unchanged at 62**, and the memoir tool count moved **5 → 6** (`memoir_about` added).
+3. The PROPOSED re-stamp text is parked in the KB entry `plan-defect-memoir-v2-phase-3-t3-5-agents-ari-tools-note-md-_20261109_134632_experience.md` (verbatim quoted block, marked `human-lane-to-apply`).
+4. The sha of `tools_note.md` is **unchanged across base / 664ae3d14 / f15a0bb7b** — the re-stamp was never applied; outstanding human-lane work remains.
+
+**No duplicate copy:** T7.6 (`v2-phase7-plan.md`) references this section rather than re-stating the handoff text.
