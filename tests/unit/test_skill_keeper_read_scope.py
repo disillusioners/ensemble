@@ -911,24 +911,29 @@ class TestCategoryDocStatesTheRealContract:
 # row / a listed name), never on the secret's bytes.
 
 
-class TestSymlinkExfiltrationIsClosed:
-    @pytest.fixture
-    def symlink_tree(self, tmp_path: Path) -> dict[str, str]:
-        """An anchor holding an ordinary file, a planted symlink and a secret."""
-        anchor = tmp_path / "anchor"
-        anchor.mkdir()
-        (anchor / "agents" / "skill-keeper").mkdir(parents=True)
-        (anchor / "agents" / "skill-keeper" / "meta.json").write_text(
-            json.dumps({"id": "skill-keeper"}), encoding="utf-8"
-        )
-        (anchor / "plain.txt").write_text("ordinary in-anchor line\n", encoding="utf-8")
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        secret = outside / "secret.txt"
-        secret.write_text(f"SENSITIVE_TOKEN {CANARY_TOKEN}\n", encoding="utf-8")
-        os.symlink(secret, anchor / "le.txt")
-        return {"anchor": str(anchor), "outside": str(outside)}
+@pytest.fixture
+def symlink_tree(tmp_path: Path) -> dict[str, str]:
+    """An anchor holding an ordinary file, a planted symlink and a secret.
 
+    MODULE-scoped (not class-scoped) so the F-1 walk-tool pins and the
+    D-N14 listing pins share one fixture.
+    """
+    anchor = tmp_path / "anchor"
+    anchor.mkdir()
+    (anchor / "agents" / "skill-keeper").mkdir(parents=True)
+    (anchor / "agents" / "skill-keeper" / "meta.json").write_text(
+        json.dumps({"id": "skill-keeper"}), encoding="utf-8"
+    )
+    (anchor / "plain.txt").write_text("ordinary in-anchor line\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text(f"SENSITIVE_TOKEN {CANARY_TOKEN}\n", encoding="utf-8")
+    os.symlink(secret, anchor / "le.txt")
+    return {"anchor": str(anchor), "outside": str(outside)}
+
+
+class TestSymlinkExfiltrationIsClosed:
     def test_grep_returns_nothing_from_an_outward_symlink(self, symlink_tree):
         """(a) the content must NOT come back."""
         tools = _build_tools("skill-keeper", symlink_tree["anchor"])
@@ -1083,10 +1088,140 @@ class TestScopeCacheInvalidatesOnEdit:
         scope = filesystem.declared_read_scope("skill-keeper")
         entry = filesystem._READ_SCOPE_CACHE.get("skill-keeper")
         assert entry is not None, "the declaration must be cached"
-        assert isinstance(entry, tuple) and len(entry) == 4, (
-            f"the cache entry must carry (scope, path, mtime_ns, size): {entry!r}"
+        assert isinstance(entry, tuple) and len(entry) == 5, (
+            "the cache entry must carry (scope, path, mtime_ns, size, "
+            f"ctime_ns): {entry!r}"
         )
         assert entry[0] == scope
         assert entry[1].endswith("meta.json"), (
             f"the cache entry must name the meta.json it read: {entry!r}"
+        )
+
+
+# =============================================================================
+# D-N14 — `list_directory` must not enumerate SYMLINK names either
+# =============================================================================
+#
+# The F-1 fix dropped symlinks from the WALK tools' candidate filter, but
+# the LISTING surface was left asymmetric: a scoped agent's
+# `list_directory(show_hidden=True)` still printed `link.txt@`. Name-only
+# (the ``@`` is the tool's own marker, no target path is disclosed, and
+# `read_file` on the link is still refused) — but the F-1 docstring states
+# the principle "a scoped agent never sees a symlink candidate — neither
+# its content nor its name", and the sibling surface violated it.
+
+
+class TestListDirectoryDoesNotEnumerateSymlinks:
+    def test_a_scoped_agent_does_not_see_the_symlink_name(self, symlink_tree):
+        tools = _build_tools("skill-keeper", symlink_tree["anchor"])
+        result = tools["list_directory"].invoke(
+            {"path": ".", "show_hidden": True}
+        )
+        listed = {ln.strip() for ln in result.splitlines() if ln.strip()}
+        assert "le.txt" not in listed and "le.txt@" not in listed, (
+            f"a scoped listing must not enumerate a symlink: {result!r}"
+        )
+
+    def test_an_ordinary_entry_is_still_listed(self, symlink_tree):
+        """Non-vacuity — the listing is not emptied."""
+        tools = _build_tools("skill-keeper", symlink_tree["anchor"])
+        result = tools["list_directory"].invoke(
+            {"path": ".", "show_hidden": True}
+        )
+        assert "plain.txt" in result, (
+            f"ordinary entries must still be listed: {result!r}"
+        )
+
+    def test_an_undeclared_agent_still_lists_the_symlink(self, symlink_tree):
+        """The undeclared twin — base behaviour is UNCHANGED."""
+        tools = _build_tools("coder", symlink_tree["anchor"])
+        result = tools["list_directory"].invoke(
+            {"path": ".", "workdir": symlink_tree["anchor"], "show_hidden": True}
+        )
+        listed = {ln.strip() for ln in result.splitlines() if ln.strip()}
+        assert "le.txt@" in listed, (
+            "a non-declaring agent's listing must still show the symlink "
+            f"with the '@' marker: {result!r}"
+        )
+
+
+# =============================================================================
+# D-N15 — the cache identity carries ctime (the MECHANISM, deterministically)
+# =============================================================================
+#
+# The residual fail-open window: an edit that preserves the byte length
+# AND lands inside the filesystem's timestamp tick can still be served
+# stale. ``st_ctime_ns`` closes the ``utime``-restore case (a restored
+# mtime cannot restore ctime) and tightens the same-tick window, but it
+# does NOT eliminate it — every REAL scope declaration/removal changes
+# the length, so the practical fail-open direction is closed.
+#
+# The pins below are DETERMINISTIC (no clock racing, no tick assumptions):
+# they pin the MECHANISM — the key carries ctime, and an identity
+# mismatch on ctime ALONE forces a re-read. A tick-dependent pin would be
+# host-dependent flake; it is deliberately NOT written.
+
+
+class TestScopeCacheCarriesCtime:
+    def test_the_cache_entry_carries_the_ctime_field(self):
+        """The key structure includes the ctime (5 identity fields)."""
+        from daemon.tools import filesystem
+
+        filesystem._READ_SCOPE_CACHE.clear()
+        filesystem.declared_read_scope("skill-keeper")
+        entry = filesystem._READ_SCOPE_CACHE.get("skill-keeper")
+        assert entry is not None, "the declaration must be cached"
+        assert isinstance(entry, tuple) and len(entry) == 5, (
+            "the cache entry must carry (scope, path, mtime_ns, size, "
+            f"ctime_ns): {entry!r}"
+        )
+        scope, path, mtime_ns, size, ctime_ns = entry
+        assert scope == "project"
+        assert path.endswith("meta.json")
+        assert isinstance(ctime_ns, int) and ctime_ns > 0, (
+            f"the ctime field must be a real stat value: {entry!r}"
+        )
+
+    def test_a_ctime_only_mismatch_forces_a_re_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A perturbed ctime alone invalidates the entry.
+
+        The crafted entry keeps the REAL path/mtime/size and perturbs ONLY
+        the ctime — so the re-read can only be explained by the ctime
+        comparison. The re-read is observed through the CACHE (the
+        corrected entry replaces the crafted one).
+        """
+        from daemon.tools import filesystem
+        from daemon.tools import prompt_artifacts
+
+        agent_dir = tmp_path / "agents" / "fixture-agent"
+        agent_dir.mkdir(parents=True)
+        meta = agent_dir / "meta.json"
+        meta.write_text(
+            json.dumps({"id": "fixture-agent", "read_scope": "project"}),
+            encoding="utf-8",
+        )
+        st = meta.stat()
+        monkeypatch.setattr(
+            prompt_artifacts,
+            "get_agents_roots",
+            lambda: [tmp_path / "agents"],
+        )
+
+        filesystem._READ_SCOPE_CACHE.clear()
+        # Craft an entry whose ctime is deliberately wrong.
+        filesystem._READ_SCOPE_CACHE["fixture-agent"] = (
+            "project",
+            str(meta),
+            st.st_mtime_ns,
+            st.st_size,
+            st.st_ctime_ns + 1,
+        )
+        scope = filesystem.declared_read_scope("fixture-agent")
+        assert scope == "project", "the re-read must still find the scope"
+        entry = filesystem._READ_SCOPE_CACHE["fixture-agent"]
+        assert entry[4] == st.st_ctime_ns, (
+            "the ctime mismatch must have forced a re-read and a cache "
+            f"refresh: {entry!r}"
         )
