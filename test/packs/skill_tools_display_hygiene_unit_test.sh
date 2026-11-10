@@ -339,6 +339,39 @@ PYEOF
 "        lines.append(f\"- id: {getattr(file_skill, 'id', '')}\")" \
 "$PIN_FILE::TestE33PfViewEchoesTheAddress::test_the_id_line_carries_the_address"
 
+  # M-E3d (tidier H2) — the structural ``except SkillFixBurstCapRefused``
+  # is removed, so the blanket catch swallows the DESIGNED refusal again
+  # and renders the generic note — including the UNTRUE "request is still
+  # recorded above for the next skill-keeper run". The false-durability
+  # pin MUST go RED.
+  #
+  # CODE-ONLY plant text (no apostrophes — the round-5 lesson).
+  leg "M-E3d" "daemon/tools/skill_tools.py" \
+'                except SkillFixBurstCapRefused as e:
+                    # H2 (tidier) — the DESIGNED refusal, caught BEFORE
+                    # the blanket catch. The blanket catch swallowed it
+                    # and rendered the generic note, including the
+                    # UNTRUE "request is still recorded above for the next
+                    # skill-keeper run": the cap REFUSED the dispatch, so
+                    # NO job exists and NOTHING will pick it up. An
+                    # agent told "your request is recorded" believes a
+                    # fix is pending when nothing was recorded.
+                    #
+                    # The REST route already handles this exception
+                    # structurally (HTTP 429, M2-pinned) and reads the
+                    # stable token off the refusal class (``e.reason``)
+                    # rather than hard-coding a literal — the agent-facing
+                    # envelope mirrors that vocabulary, so the two can
+                    # never drift (M11: one token per concept).
+                    logger.warning(
+                        "skill_fix burst cap refused for skill %s: %s",
+                        skill_id,
+                        e,
+                    )
+                    burst_cap_refusal = e
+' \
+'' \
+"$PIN_FILE::TestH2BurstCapRefusalIsTruthful::test_the_false_durability_sentence_is_absent"
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
   echo "mutation failures: $MUTATION_FAILURES"
