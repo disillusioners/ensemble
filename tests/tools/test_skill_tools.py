@@ -254,9 +254,11 @@ class TestServicesMissing:
     ``manager._skill_store_service``, ``manager._skill_job_dispatcher``,
     and ``manager._skill_metrics_service`` are all ``None``, every tool
     returns the appropriate soft-fail string. The 4 read/write tools
-    return a "service not yet available" message; ``skill_fix`` always
-    records the request but adds a "dispatcher not yet available"
-    note; ``skill_feedback`` returns the "metrics service not yet
+    return a "service not yet available" message; ``skill_fix``
+    answers with its durability-neutral header and adds a "dispatcher
+    not yet available" note (nothing is recorded anywhere — the
+    response is the only record); ``skill_feedback`` returns the
+    "metrics service not yet
     available" message.
     """
 
@@ -311,10 +313,18 @@ class TestServicesMissing:
     async def test_skill_fix_returns_user_facing_message_when_dispatcher_missing(
         self, skill_tools
     ):
-        """``skill_fix`` always answers with a durability-neutral
-        header (D-G1: no durability claim lives in the header). When
-        the dispatcher is missing, the response also says that NOTHING
-        was dispatched and no skill-keeper job was created.
+        """``skill_fix`` answers with a durability-neutral header
+        (D-G1: no durability claim lives in the header) and, when the
+        dispatcher is missing, adds the "dispatcher not yet available"
+        note.
+
+        SCOPE (D-G5): this pin asserts the HEADER SHAPE and the
+        dispatcher's absence note ONLY — it does NOT assert the
+        durability body ("NOTHING was dispatched … no skill-keeper job
+        was created"). That durability coverage lives in the
+        strengthened lane-gate pin
+        (``tests/unit/test_skill_evolution_lane_gate.py``) and in the
+        D-G1 coherence pins.
         """
         tool = skill_tools["skill_fix"]
         result = await tool.ainvoke({
@@ -323,8 +333,10 @@ class TestServicesMissing:
         })
         assert FIX_HEADER_NEEDLE in result
         assert DISPATCHER_MISSING_NEEDLE in result
-        # Issue description is echoed into the Summary line so the
-        # skill-keeper agent has full context for the next pass.
+        # The issue description is echoed into the response so the
+        # skill-keeper agent has full context for the next pass. (The
+        # pin asserts its PRESENCE in the response — not any specific
+        # line: the tool has no "Summary" line.)
         assert "Outdated regex" in result
 
     @pytest.mark.asyncio
@@ -517,7 +529,9 @@ class TestServicesAvailable:
         result = await tools["skill_list"].ainvoke({})
 
         assert service.list_skills.await_count == 1
-        # The bullet line carries the skill name, category, and status.
+        # The response carries the skill name, the category and the
+        # status. (The pin asserts their PRESENCE — not their position
+        # on one bullet line.)
         assert "Demo" in result
         assert "workflow" in result
         assert "active" in result
@@ -585,8 +599,10 @@ class TestServicesAvailable:
 
         result = await tools["skill_list"].ainvoke({})
 
-        # The header line "Skills (0 of 0 total):" appears regardless
-        # of whether the underlying service returned any rows.
+        # A "Skills" header and a zero count appear regardless of
+        # whether the underlying service returned any rows. (The pin
+        # asserts the "Skills" marker and the "0" — not the exact
+        # header line.)
         assert "Skills" in result
         assert "0" in result
 
@@ -775,8 +791,7 @@ class TestEdgeCases:
     ):
         """When ``_skill_job_dispatcher`` is ``None``, ``skill_fix``
         does NOT attempt any service dispatch \u2014 it just emits the
-        user-facing "recorded" message with the dispatcher-missing
-        note.
+        user-facing header with the dispatcher-missing note.
 
         To verify that no service slots were touched, rebuild the
         tools with a fresh manager where the read/write services are
@@ -827,8 +842,12 @@ class TestEdgeCases:
     async def test_skill_fix_uses_dispatcher_when_available(self):
         """When ``_skill_job_dispatcher.dispatch_fix`` is wired up,
         ``skill_fix`` calls it (with a sync OR async dispatch_fix).
-        The agent-facing header stays durability-neutral (D-G1) and
-        the admission verdict lives in the body line.
+        The agent-facing header stays durability-neutral (D-G1).
+
+        SCOPE (D-G5): the admission VERDICT is NOT asserted here — this
+        pin checks that the dispatcher was invoked with the expected
+        kwargs, that the header is the neutral one, and that the
+        dispatcher-missing note is ABSENT.
         """
         from daemon.tools.skill_tools import create_skill_tools
 
@@ -852,7 +871,9 @@ class TestEdgeCases:
         call = dispatcher.dispatch_fix.await_args
         assert call.kwargs.get("skill_id") == "sk-x"
         assert call.kwargs.get("issue_description") == "broken"
-        # The neutral header + the admission verdict are preserved.
+        # The neutral header is present. (D-G5: the admission VERDICT
+        # is NOT asserted here — this pin checks the header shape and
+        # the dispatcher's invocation only.)
         assert FIX_HEADER_NEEDLE in result
         # Dispatcher-missing note is NOT present when the dispatcher
         # ran (the ``dispatcher is None or dispatch_method is None``
