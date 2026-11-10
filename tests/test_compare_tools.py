@@ -1728,6 +1728,78 @@ class TestInputResolutionWorkdirReasons:
         mock_invoke.assert_not_awaited()
 
 
+# ── D1 parity — related_directories are part of the facade's scope ──────────
+
+
+class TestWorkdirScopeIncludesRelatedDirectories:
+    """``compare_images`` confines a local path to main ∪ related dirs.
+
+    Parity with ``explain_image``: the project declaration, not just its
+    main directory, defines the allowed local scope. A video/review asset
+    living in a declared related directory must resolve.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_module_state(self):
+        compare_tools_module._inflight_reuse.clear()
+        yield
+        compare_tools_module._inflight_reuse.clear()
+
+    def test_related_directory_path_resolves(self, tmp_path):
+        """A file inside a declared related directory produces a data URI."""
+        from daemon.tools.compare_tools import _resolve_workdir_input
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        video = tmp_path / "video-lab"
+        (video / "prod-v2").mkdir(parents=True)
+        image = video / "prod-v2" / "contact-sheet.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
+        manager = _make_manager()
+        manager._project_repository = MagicMock()
+        manager._project_repository.get = MagicMock(
+            return_value=SimpleNamespace(
+                main_directory=str(main),
+                related_directories=[str(video)],
+            )
+        )
+
+        row = _resolve_workdir_input(
+            str(image), manager=manager, project_id="pid"
+        )
+
+        assert "data_uri" in row, row
+        assert row["data_uri"].startswith("data:image/png;base64,")
+
+    def test_path_outside_main_and_related_is_rejected(self, tmp_path):
+        """A path outside both roots stays ``workdir_invalid``."""
+        from daemon.tools.compare_tools import _resolve_workdir_input
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        video = tmp_path / "video-lab"
+        video.mkdir()
+        outside = tmp_path / "elsewhere.png"
+        outside.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
+        manager = _make_manager()
+        manager._project_repository = MagicMock()
+        manager._project_repository.get = MagicMock(
+            return_value=SimpleNamespace(
+                main_directory=str(main),
+                related_directories=[str(video)],
+            )
+        )
+
+        row = _resolve_workdir_input(
+            str(outside), manager=manager, project_id="pid"
+        )
+
+        assert row["reason"] == "workdir_invalid"
+        assert str(main) in row["message"]
+
+
 # ── P2-WP3 — Single-call shape ──────────────────────────────────────────────
 
 

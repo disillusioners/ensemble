@@ -795,6 +795,276 @@ class TestInvokeAgentAndWaitBackwardCompat:
 
 
 # ---------------------------------------------------------------------------
+# Section 6b — local-path scope: main_directory ∪ related_directories (D1)
+# ---------------------------------------------------------------------------
+
+
+def _png_bytes() -> bytes:
+    """A minimal valid PNG payload (signature + filler)."""
+    return b"\x89PNG\r\n\x1a\n" + b"x" * 32
+
+
+def _scope_manager(main_directory, related_directories):
+    """Build a manager whose instance resolves to a project with a scope.
+
+    ``explain_image`` auto-injects the project from the calling instance,
+    then reads ``main_directory`` + ``related_directories`` off it. The
+    mock mirrors that two-hop lookup exactly.
+    """
+    manager = MagicMock()
+    manager._instance_repository = MagicMock()
+    manager._instance_repository.get = MagicMock(
+        return_value=MagicMock(project_id="pid"),
+    )
+    manager._project_repository = MagicMock()
+    manager._project_repository.get = MagicMock(
+        return_value=MagicMock(
+            main_directory=main_directory,
+            related_directories=list(related_directories),
+        ),
+    )
+    return manager
+
+
+class TestExplainImagePathScope:
+    """A local path is allowed inside the project's WHOLE declared scope.
+
+    The scope is ``main_directory`` PLUS every ``related_directories``
+    entry. Regression pin for the D1 defect: a video/review asset living
+    in a declared related directory was refused as "outside the project
+    workdir boundary" because only ``main_directory`` was consulted.
+    """
+
+    def test_path_under_main_directory_is_accepted(self, tmp_path):
+        """(a) A file under ``main_directory`` is accepted (existing behavior)."""
+        from daemon.tools.image_tools import _validate_local_path
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        image = main / "shot.png"
+        image.write_bytes(_png_bytes())
+
+        resolved, err = _validate_local_path(str(image), [str(main)])
+
+        assert err is None, err
+        assert resolved is not None
+        assert resolved == image.resolve()
+
+    def test_path_under_each_related_directory_is_accepted(self, tmp_path):
+        """(b) A file under ANY declared related directory is accepted."""
+        from daemon.tools.image_tools import _validate_local_path
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        video = tmp_path / "video-lab"
+        assets = tmp_path / "design-assets"
+        (video / "prod-v2" / "review").mkdir(parents=True)
+        assets.mkdir()
+
+        in_video = video / "prod-v2" / "review" / "contact-sheet.png"
+        in_video.write_bytes(_png_bytes())
+        in_assets = assets / "logo.png"
+        in_assets.write_bytes(_png_bytes())
+
+        roots = [str(main), str(video), str(assets)]
+
+        for image in (in_video, in_assets):
+            resolved, err = _validate_local_path(str(image), roots)
+            assert err is None, err
+            assert resolved is not None
+
+    def test_relative_path_resolves_against_the_primary_root(self, tmp_path):
+        """Relative paths anchor at the first root (main_directory)."""
+        from daemon.tools.image_tools import _validate_local_path
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        video = tmp_path / "video-lab"
+        video.mkdir()
+        image = main / "shot.png"
+        image.write_bytes(_png_bytes())
+
+        resolved, err = _validate_local_path("shot.png", [str(main), str(video)])
+
+        assert err is None, err
+        assert resolved == image.resolve()
+
+    def test_path_outside_every_scope_is_refused_naming_roots_and_remedy(self, tmp_path):
+        """(c) An outside path is REFUSED; the message names roots + remedy."""
+        from daemon.tools.image_tools import _validate_local_path
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        video = tmp_path / "video-lab"
+        video.mkdir()
+        outside = tmp_path / "elsewhere" / "secret.png"
+        outside.parent.mkdir()
+        outside.write_bytes(_png_bytes())
+
+        resolved, err = _validate_local_path(str(outside), [str(main), str(video)])
+
+        assert resolved is None
+        assert err is not None
+        # Names both allowed roots (the caller's own project paths).
+        assert str(main) in err
+        assert str(video) in err
+        # Names the remedy.
+        assert "remedy" in err.lower()
+        assert "related directories" in err.lower()
+
+    def test_no_project_scope_fails_closed(self, tmp_path):
+        """(d) No resolvable scope → refuse, even for an existing file."""
+        from daemon.tools.image_tools import _validate_local_path
+
+        image = tmp_path / "shot.png"
+        image.write_bytes(_png_bytes())
+
+        for empty_scope in (None, [], (), ""):
+            resolved, err = _validate_local_path(str(image), empty_scope)
+            assert resolved is None, empty_scope
+            assert err is not None
+            assert "fail-closed" in err.lower() or "no project" in err.lower()
+
+    def test_unresolvable_scope_roots_fail_closed(self, tmp_path):
+        """(d) Declared roots that do not exist cannot authorize a read."""
+        from daemon.tools.image_tools import _validate_local_path
+
+        image = tmp_path / "shot.png"
+        image.write_bytes(_png_bytes())
+        ghost_main = tmp_path / "gone-main"
+        ghost_related = tmp_path / "gone-related"
+
+        resolved, err = _validate_local_path(
+            str(image), [str(ghost_main), str(ghost_related)]
+        )
+
+        assert resolved is None
+        assert err is not None
+
+    def test_traversal_escape_from_inside_a_scope_is_refused(self, tmp_path):
+        """(e) ``..`` traversal out of a root is refused after resolution."""
+        from daemon.tools.image_tools import _validate_local_path
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        outside = tmp_path / "secret.png"
+        outside.write_bytes(_png_bytes())
+
+        resolved, err = _validate_local_path("../secret.png", [str(main)])
+
+        assert resolved is None
+        assert err is not None
+        assert "outside" in err.lower()
+
+    def test_symlink_escape_from_inside_a_scope_is_refused(self, tmp_path):
+        """(e) A symlink inside a root pointing outside it is refused.
+
+        The candidate is resolved (strict) BEFORE containment, so the
+        link's lexical location inside the root cannot launder the read.
+        """
+        from daemon.tools.image_tools import _validate_local_path
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        video = tmp_path / "video-lab"
+        video.mkdir()
+        outside = tmp_path / "secret.png"
+        outside.write_bytes(_png_bytes())
+        sneaky = video / "sneaky.png"
+        sneaky.symlink_to(outside)
+
+        resolved, err = _validate_local_path(str(sneaky), [str(main), str(video)])
+
+        assert resolved is None
+        assert err is not None
+        assert "outside" in err.lower()
+
+    def test_symlink_inside_a_related_directory_is_accepted(self, tmp_path):
+        """Negative control: a symlink resolving INSIDE scope is allowed."""
+        from daemon.tools.image_tools import _validate_local_path
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        video = tmp_path / "video-lab"
+        video.mkdir()
+        real = video / "real.png"
+        real.write_bytes(_png_bytes())
+        link = video / "alias.png"
+        link.symlink_to(real)
+
+        resolved, err = _validate_local_path(str(link), [str(main), str(video)])
+
+        assert err is None, err
+        assert resolved == real.resolve()
+
+    def test_single_string_root_still_accepted(self, tmp_path):
+        """Back-compat: a bare string root behaves like a one-root scope."""
+        from daemon.tools.image_tools import _validate_local_path
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        image = main / "shot.png"
+        image.write_bytes(_png_bytes())
+
+        resolved, err = _validate_local_path(str(image), str(main))
+
+        assert err is None, err
+
+    async def test_explain_image_reads_from_a_related_directory(self, tmp_path):
+        """D1 END-TO-END: ``explain_image`` accepts a related-dir path.
+
+        Before the fix the tool refused this path as "outside the project
+        workdir boundary" and never spawned the image-reader — the trap
+        that cost the caller a wasted turn.
+        """
+        from daemon.tools.image_tools import create_image_tools
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        video = tmp_path / "video-lab"
+        (video / "prod-v2" / "review").mkdir(parents=True)
+        image = video / "prod-v2" / "review" / "contact-sheet.png"
+        image.write_bytes(_png_bytes())
+
+        manager = _scope_manager(str(main), [str(video)])
+        mock_invoke = AsyncMock(return_value=("sheet analysis", "child-id"))
+
+        with patch("daemon.tools.image_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_image_tools(manager, "parent-instance-id")
+            result = await tools[0].coroutine(
+                image=str(image), question="What is shown?"
+            )
+
+        assert result == "sheet analysis"
+        mock_invoke.assert_awaited_once()
+        assert mock_invoke.call_args.kwargs["images"][0].startswith(
+            "data:image/png;base64,"
+        )
+
+    async def test_explain_image_refuses_outside_path_without_spawning(self, tmp_path):
+        """A path outside every declared root → Error string, no dispatch."""
+        from daemon.tools.image_tools import create_image_tools
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        video = tmp_path / "video-lab"
+        video.mkdir()
+        outside = tmp_path / "elsewhere.png"
+        outside.write_bytes(_png_bytes())
+
+        manager = _scope_manager(str(main), [str(video)])
+        mock_invoke = AsyncMock()
+
+        with patch("daemon.tools.image_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_image_tools(manager, "parent-instance-id")
+            result = await tools[0].coroutine(image=str(outside), question="?")
+
+        assert result.startswith("Error:")
+        assert str(main) in result
+        mock_invoke.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Section 6 — explain_image delegation (factory + ``invoke_agent_and_wait``)
 # ---------------------------------------------------------------------------
 
