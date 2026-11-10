@@ -749,7 +749,35 @@ class DecisionClient:
                         break
             raw_tokens = usage.get("total_tokens")
             if isinstance(raw_tokens, (int, float)) and not isinstance(raw_tokens, bool):
-                tokens = int(raw_tokens)
+                tokens = max(0, int(raw_tokens))
+            else:
+                # D-9 — a payload that carries usage tokens but NO price
+                # must still ACCRUE to the token meter. ``total_tokens``
+                # alone was the only shape read, so the standard
+                # ``prompt_tokens``/``completion_tokens`` (and the
+                # Responses-API ``input_tokens``/``output_tokens``)
+                # shapes metered ZERO — the token ceiling could never
+                # bind, and the USD ceiling was bypassable by a
+                # no-price payload (L8: the token meter is the
+                # fail-safe). Summing the two halves is NOT inventing a
+                # cost: it is the same token count the provider reports
+                # as ``total_tokens`` when it reports one.
+                for left, right in (
+                    ("prompt_tokens", "completion_tokens"),
+                    ("input_tokens", "output_tokens"),
+                ):
+                    raw_left = usage.get(left)
+                    raw_right = usage.get(right)
+                    if not isinstance(raw_left, (int, float)) or isinstance(
+                        raw_left, bool
+                    ):
+                        continue
+                    if not isinstance(raw_right, (int, float)) or isinstance(
+                        raw_right, bool
+                    ):
+                        continue
+                    tokens = max(0, int(raw_left) + int(raw_right))
+                    break
         return usd, tokens
 
     def _failure(

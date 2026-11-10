@@ -8,7 +8,11 @@ rendered rows.
 
 from __future__ import annotations
 
+import ast
 import json
+import sys
+import types
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import httpx
@@ -293,3 +297,282 @@ def answer_for_request(request: httpx.Request) -> dict[str, Any]:
 def smart_handler(request: httpx.Request) -> httpx.Response:
     """A handler that answers whatever was asked."""
     return json_response(answer_for_request(request))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# the in-memory mutant loader (the counter-mutation workhorse)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+#: The repo root — the mutant loader resolves module paths against it.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def load_mutant_module(
+    rel_path: str,
+    mutations: list[tuple[str, str]],
+    module_name: str,
+) -> types.ModuleType:
+    """Compile a DOCTORED copy of a module IN MEMORY.
+
+    The mutant is the SHIPPED source with the named replacements applied
+    — the real defect, not a re-implementation. Nothing is written to
+    the tree; the module's absolute imports still resolve to the real
+    package, so the mutant exercises the real collaborators.
+
+    Args:
+        rel_path: the module's path, relative to the repo root.
+        mutations: ``(old, new)`` pairs; each ``old`` must occur
+            EXACTLY once (a moved anchor is a loud failure, not a
+            silent no-op).
+        module_name: the module object's ``__name__``.
+
+    Returns:
+        The mutant module object.
+    """
+    path = _REPO_ROOT / rel_path
+    source = path.read_text()
+    for old, new in mutations:
+        count = source.count(old)
+        assert count == 1, (
+            f"the mutation anchor must occur EXACTLY once in {rel_path} "
+            f"(found {count}): {old[:70]!r}"
+        )
+        source = source.replace(old, new)
+    module = types.ModuleType(module_name)
+    module.__file__ = str(path)
+    sys.modules[module_name] = module
+    exec(compile(source, str(path), "exec"), module.__dict__)  # noqa: S102
+    return module
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# D-2 — the PURE exception-leak walker
+# ═══════════════════════════════════════════════════════════════════════
+
+
+#: The calls that may receive an exception object: the shared
+#: TYPE-only helper, and ``type()`` (the sanctioned type extraction).
+SANCTIONED_CALLS = frozenset({"log_exception", "type"})
+
+
+def _call_name(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _is_sanctioned(node: ast.Call) -> bool:
+    return _call_name(node) in SANCTIONED_CALLS
+
+
+def _contains_unsafe(node: ast.AST, tainted: set[str]) -> bool:
+    """True when the expression can carry an exception's MESSAGE.
+
+    The exception OBJECT is unsafe: it renders as its message. The
+    TYPE extraction (``type(exc).__name__``) is safe — that is the
+    sanctioned form, and the walker must not flag it.
+    """
+    if isinstance(node, ast.Call):
+        name = _call_name(node)
+        if name == "type":
+            # type(exc).__name__ — the sanctioned extraction.
+            return False
+    if isinstance(node, ast.Name):
+        return node.id in tainted
+    if isinstance(node, ast.Attribute):
+        return _contains_unsafe(node.value, tainted)
+    for child in ast.iter_child_nodes(node):
+        if _contains_unsafe(child, tainted):
+            return True
+    return False
+
+
+def _tainted_names(tree: ast.AST) -> set[str]:
+    """The exception names + every name that DERIVES from one.
+
+    Foreign except-names are included (``except X as e`` binds ``e``),
+    and the derivation is transitive: ``error = f"{exc}"`` taints
+    ``error``; ``payload = {"error": error}`` taints ``payload``;
+    ``sink(payload)`` then leaks.
+    """
+    tainted = {
+        handler.name
+        for handler in ast.walk(tree)
+        if isinstance(handler, ast.ExceptHandler) and handler.name
+    }
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            value = None
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                value = node.value
+                targets = list(node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                value = node.value
+                targets = [node.target]
+            if value is None or not isinstance(value, ast.expr):
+                continue
+            if not _contains_unsafe(value, tainted):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in tainted:
+                    tainted.add(target.id)
+                    changed = True
+    return tainted
+
+
+def exception_leak_offenders(source: str) -> list[str]:
+    """Every place in ``source`` where an exception's MESSAGE could go.
+
+    A PURE function over source text — the pin feeds it the SHIPPED
+    module sources AND the doctored :981 shape, so the walker's teeth
+    are proven against the real defect.
+
+    The classes it covers (the round-4 blind spots):
+
+    1. ``str(exc)`` / ``repr(exc)`` — the message in text form;
+    2. a FOREIGN except-name (``except X as e``) — not just exc/err/e;
+    3. an INTERMEDIATE variable — a name assigned from an exception and
+       then interpolated, passed to a sink, or placed in a payload;
+    4. a BoolOp flow — ``error or "-"`` carries the tainted value into
+       a logger call just as an f-string would;
+    5. a payload/dict value — the notify-payload shape.
+    """
+    tree = ast.parse(source)
+    exception_names = {
+        handler.name
+        for handler in ast.walk(tree)
+        if isinstance(handler, ast.ExceptHandler) and handler.name
+    }
+    tainted = _tainted_names(tree)
+    # A name that is only RE-RAISED never renders the message.
+    raised = {
+        node.exc.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Name)
+    }
+    tainted -= raised
+
+    offenders: list[str] = []
+
+    def _flag(node: ast.AST, text: str) -> None:
+        offenders.append(f"line {getattr(node, 'lineno', '?')}: {text}")
+
+    for node in ast.walk(tree):
+        # 1. an assignment that CAPTURES the exception content
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(
+            node.value, ast.expr
+        ):
+            targets = (
+                list(node.targets)
+                if isinstance(node, ast.Assign)
+                else [node.target]
+            )
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            if names and not any(n in raised for n in names):
+                if _contains_unsafe(node.value, exception_names):
+                    _flag(node, "an assignment captures the exception content")
+
+        # 2. str()/repr() of an exception
+        if isinstance(node, ast.Call) and _call_name(node) in {"str", "repr"}:
+            if _contains_unsafe(node, exception_names):
+                _flag(node, f"{_call_name(node)}() of an exception")
+
+        # 3. a CALL (a sink: logger, notify sink, record) receiving tainted content
+        if isinstance(node, ast.Call) and not _is_sanctioned(node):
+            for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                if _contains_unsafe(arg, tainted):
+                    _flag(node, "a call receives the exception content")
+                    break
+
+        # 4. a payload/dict value carrying tainted content
+        if isinstance(node, ast.Dict):
+            for value in node.values:
+                if value is not None and _contains_unsafe(value, tainted):
+                    _flag(node, "a payload/dict value carries the exception content")
+                    break
+
+        # 5. an f-string interpolating tainted content
+        if isinstance(node, ast.JoinedStr):
+            for part in node.values:
+                if isinstance(part, ast.FormattedValue) and _contains_unsafe(
+                    part.value, tainted
+                ):
+                    _flag(node, "an f-string interpolates the exception content")
+                    break
+
+    return offenders
+
+
+def test_the_exception_leak_walker_finds_nothing_in_the_shipped_package() -> None:
+    """D-2 — the widened walker over the SHIPPED package: no offender.
+
+    The walker covers the classes the round-4 pin missed: ``str(exc)``,
+    a foreign except-name, an intermediate variable, a BoolOp flow and
+    a payload value.
+    """
+    package_dir = _REPO_ROOT / "daemon" / "services" / "decision"
+    offenders: list[str] = []
+    for path in sorted(package_dir.glob("*.py")):
+        for offender in exception_leak_offenders(path.read_text()):
+            offenders.append(f"{path.name}: {offender}")
+    assert offenders == [], (
+        "the daemon log and the board body are agent-readable — no "
+        f"exception MESSAGE may reach them. Offenders: {offenders}"
+    )
+
+
+def test_the_exception_leak_walker_flags_the_real_cost_trip_shape() -> None:
+    """D-2 — the walker's TEETH, proven on the REAL :981 shape.
+
+    The doctored source is the SHIPPED overlay with the D-1 fix reverted
+    (the exact pre-round-5 text) — fed to the walker IN MEMORY. The
+    walker MUST flag it; if it does not, the pin is green on the defect
+    it exists to catch (the round-4 pattern).
+    """
+    source = (_REPO_ROOT / "daemon/services/decision/overlay.py").read_text()
+    doctored = source.replace(
+        '            error = type(exc).__name__\n',
+        '            error = f"{type(exc).__name__}: {exc}"\n',
+        1,
+    )
+    assert doctored != source, "the anchor moved — the pin must be updated"
+    offenders = exception_leak_offenders(doctored)
+    assert offenders, (
+        "the walker MUST flag the real :981 shape (an assignment that "
+        "captures the exception content)"
+    )
+
+
+def test_the_exception_leak_walker_flags_the_blind_spot_classes() -> None:
+    """D-2 — each class the round-4 pin missed, proven individually."""
+    cases = {
+        "str(exc)": "try:\n    pass\nexcept Exception as exc:\n    logger.warning('%s', str(exc))\n",
+        "repr(exc)": "try:\n    pass\nexcept Exception as exc:\n    logger.warning('%s', repr(exc))\n",
+        "foreign except-name": "try:\n    pass\nexcept Exception as boom:\n    logger.warning('%s', boom)\n",
+        "intermediate variable": (
+            "try:\n    pass\nexcept Exception as exc:\n"
+            "    detail = f'boom {exc}'\n"
+            "    logger.warning('%s', detail)\n"
+        ),
+        "BoolOp flow": (
+            "try:\n    pass\nexcept Exception as exc:\n"
+            "    detail = f'boom {exc}'\n"
+            "    logger.warning('%s', detail or '-')\n"
+        ),
+        "payload value": (
+            "try:\n    pass\nexcept Exception as exc:\n"
+            "    detail = f'boom {exc}'\n"
+            "    payload = {'error': detail}\n"
+            "    sink(payload)\n"
+        ),
+    }
+    for label, source in cases.items():
+        offenders = exception_leak_offenders(source)
+        assert offenders, f"the walker missed the class: {label}"

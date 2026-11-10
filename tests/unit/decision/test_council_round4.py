@@ -18,7 +18,6 @@ but the source under test, and never reverts with git.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import logging
 import threading
@@ -90,58 +89,32 @@ def test_the_shared_helper_never_logs_the_exception_message(
 
 
 def test_no_decision_log_site_can_receive_an_exception_object() -> None:
-    """B-1 — the STATIC half: no ``logger.*`` call in the package may
-    receive an exception object (a bare name, an f-string interpolation,
-    or ``str(exc)``).
+    """B-1 — the STATIC half: no decision-package site may render an
+    exception's MESSAGE.
 
-    This is what keeps the helper SINGLE-surface: a future site that
-    bypasses :func:`log_exception` REDs here, before it can leak.
+    D-2 (council round 5): the round-4 version of this pin was BLIND —
+    it only inspected ``logger.*`` call arguments for a bare name or an
+    f-string, so it never saw the real ``:981`` shape (an assignment
+    that captured the message, a payload that carried it, a BoolOp that
+    flowed it into a logger call). The walker now lives in the shared
+    helpers (``exception_leak_offenders``) and covers the classes the
+    old pin missed: ``str(exc)``/``repr(exc)``, a FOREIGN except-name,
+    an INTERMEDIATE variable, a BoolOp flow and a payload/dict value.
+
+    The walker's TEETH are proven in ``test_council_round5.py`` — the
+    doctored :981 shape (fed IN MEMORY) MUST be flagged, and the blind
+    -spot classes are proven one by one.
     """
+    from tests.unit.decision.helpers import exception_leak_offenders
+
+    package_dir = Path(__file__).resolve().parents[3] / "daemon" / "services" / "decision"
     offenders: list[str] = []
-    for path in sorted(_package_dir().glob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not (
-                isinstance(func, ast.Attribute)
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "logger"
-            ):
-                continue
-            for arg in list(node.args) + [kw.value for kw in node.keywords]:
-                if isinstance(arg, ast.Name) and arg.id in {
-                    "exc",
-                    "err",
-                    "error",
-                    "e",
-                    "exception",
-                }:
-                    offenders.append(f"{path.name}:{arg.lineno} — bare {arg.id}")
-                if isinstance(arg, ast.JoinedStr):
-                    for part in arg.values:
-                        if isinstance(part, ast.FormattedValue) and isinstance(
-                            part.value, ast.Name
-                        ) and part.value.id in {
-                            "exc",
-                            "err",
-                            "error",
-                            "e",
-                            "exception",
-                        }:
-                            offenders.append(
-                                f"{path.name}:{part.lineno} — f-string {{{part.value.id}}}"
-                            )
-                if (
-                    isinstance(arg, ast.Call)
-                    and isinstance(arg.func, ast.Attribute)
-                    and arg.func.attr in {"format", "join"}
-                ):
-                    offenders.append(f"{path.name}:{arg.lineno} — exception formatting")
+    for path in sorted(package_dir.glob("*.py")):
+        for offender in exception_leak_offenders(path.read_text()):
+            offenders.append(f"{path.name}: {offender}")
     assert offenders == [], (
-        "a decision log site may not receive an exception object — the "
-        f"daemon log is agent-readable. Offenders: {offenders}"
+        "the daemon log and the board body are agent-readable — no "
+        f"exception MESSAGE may reach them. Offenders: {offenders}"
     )
 
 

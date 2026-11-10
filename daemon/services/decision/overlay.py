@@ -978,8 +978,24 @@ class DecisionOverlay:
             if not write.ok:
                 error = write.error or "read-back mismatch"
         except Exception as exc:  # noqa: BLE001
-            error = f"{type(exc).__name__}: {exc}"
+            # D-1 — the exception TYPE only, NEVER the message. The old
+            # shape (``f"{type(exc).__name__}: {exc}"``) put the MESSAGE
+            # into ``error``, and ``error`` flowed into BOTH the log
+            # line AND the notify payload — the board body is an
+            # agent-readable surface. The message is gone: the TYPE is
+            # the whole report, and it goes to the log through the
+            # shared helper.
+            error = type(exc).__name__
+            log_exception(
+                logger,
+                logging.WARNING,
+                "decision cost-trip shadow-off write failed",
+                exc,
+            )
 
+        # The notify payload carries NO exception text at all (the board
+        # body is agent-readable): the operator gets the reason, the
+        # seams and the numbers; the failure TYPE is in the log.
         payload = {
             "event": "decision_overlay_cost_trip",
             "reason": reason,
@@ -987,7 +1003,6 @@ class DecisionOverlay:
             "global_off": global_off,
             "month_to_date_usd": month_to_date_usd,
             "ceiling_usd": ceiling_usd,
-            "error": error,
         }
 
         notified = False
