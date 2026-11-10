@@ -1,7 +1,18 @@
-"""The four Memoir Store tables — layer 1 (episodes), 3 (persona), 4 (syntheses).
+"""The Memoir Store tables — TEN of them: the v1 four (episodes, persona,
+persona versions, syntheses) plus the six v2 Constellation/Gate tables
+(``memoir_star``, ``memoir_star_alias``, ``memoir_line``,
+``memoir_reflection_state``, ``memoir_proposal_ledger``,
+``memoir_jev_ledger``).
+
+The "four" in this module's original docstring was TRUE for v1 and FALSE
+from phase 1 of the v2 lane onward; the census pin
+(``tests/unit/test_memoir_schema_contract.py``) has named the v2 six
+since they landed.
 
 Phase 1 of the Memoir Store v1 lane (plan:
-``.agents/shared/planning/ari-memoir-store/phase1-plan.md``).
+``.agents/shared/planning/ari-memoir-store/phase1-plan.md``); the v2 six
+are registered in v2 phase 1
+(``v2-phase1-plan.md``).
 
 Design contract refs: ``design.md`` §3 (the three storage kinds — the
 relational table is the TRUTH, the ``tsv`` column is the LEXICAL half,

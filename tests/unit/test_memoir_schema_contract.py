@@ -457,6 +457,13 @@ def test_the_syntheses_table_has_no_writer_in_the_tree():
         text=True,
         timeout=60,
     )
+    # FAIL-CLOSED: rc == 0 means `git grep` ran and produced matches; a
+    # broken object store / non-git tree returns >1 and would otherwise
+    # yield an empty hit list that trivially satisfies the allow-list.
+    assert result.returncode == 0, (
+        f"writer-census pin is vacuous: `git grep` rc={result.returncode} "
+        f"(stderr={result.stderr.strip()!r})"
+    )
     hits = [line for line in result.stdout.splitlines() if line.strip()]
     # The model, the package export, the manager's registration, the ONE
     # named writer (the syntheses repository), the reflection service
@@ -491,5 +498,11 @@ def test_the_syntheses_table_has_no_writer_in_the_tree():
             capture_output=True,
             text=True,
             timeout=60,
+        )
+        # rc 1 = "no matches" (the expected answer); rc > 1 = git error, which
+        # must FAIL rather than masquerade as "no writer exists".
+        assert writer.returncode in (0, 1), (
+            f"raw-SQL writer scan is vacuous for {needle!r}: `git grep` "
+            f"rc={writer.returncode} (stderr={writer.stderr.strip()!r})"
         )
         assert not writer.stdout.strip(), f"a writer exists for {needle}"

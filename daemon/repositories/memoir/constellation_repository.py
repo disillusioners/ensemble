@@ -19,6 +19,9 @@ surface:
   decides whether the alias belongs to another star or is a mistake).
 * :meth:`MemoirConstellationRepository.resolve_star` — canonical name
   OR alias → the one canonical star.
+* :meth:`MemoirConstellationRepository.resolve_star_casefold` — the
+  forgiving (case-insensitive) form of the same resolution, ALSO
+  alias-aware.
 * :meth:`MemoirConstellationRepository.record_line` — the episodic
   co-occurrence edge, with the ``last_pass_id`` CRASH-RECOVERY GUARD
   (SF2 / V2-29): a re-run of the SAME extraction pass must not
@@ -58,7 +61,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import case, update
+from sqlalchemy import case, func, update
 from sqlmodel import Session, select
 
 from daemon.repositories.memoir.models import (
@@ -234,6 +237,43 @@ class MemoirConstellationRepository:
                 return None
             return session.get(MemoirStar, alias_row.star_id)
 
+    def resolve_star_casefold(
+        self, agent_id: str, query_name: str
+    ) -> MemoirStar | None:
+        """Case-insensitive resolution — canonical name FIRST, then alias.
+
+        This is the ONE home for forgiving resolution (the ``memoir.star``
+        tool's suffix match).  It is ALIAS-AWARE: the tool previously fell
+        back to a Python scan over ``MemoirStar`` rows that ignored the
+        alias table, so an alias differing only in case resolved to nothing
+        while a canonical name did.  SQL ``lower()`` is deliberately used
+        for the comparison (ASCII-folding) — star names are machine
+        identifiers, not prose.
+        """
+        if not agent_id or not query_name:
+            return None
+        target = str(query_name).strip().lower()
+        if not target:
+            return None
+        with Session(self.engine) as session:
+            star = session.exec(
+                select(MemoirStar).where(
+                    MemoirStar.agent_id == agent_id,
+                    func.lower(MemoirStar.name) == target,
+                )
+            ).first()
+            if star is not None:
+                return star
+            alias_row = session.exec(
+                select(MemoirStarAlias).where(
+                    MemoirStarAlias.agent_id == agent_id,
+                    func.lower(MemoirStarAlias.alias) == target,
+                )
+            ).first()
+            if alias_row is None:
+                return None
+            return session.get(MemoirStar, alias_row.star_id)
+
     # ── the edge ─────────────────────────────────────────────────────────
 
     def record_line(
@@ -312,6 +352,19 @@ class MemoirConstellationRepository:
                 MemoirLine.episode_id == episode_id,
             )
         ).first()
+        # KNOWN, DEFERRED (tidier pass 2026-11-10): this read-then-insert is
+        # not atomic.  A concurrent extraction can insert the same
+        # ``(star_id, episode_id)`` pair in the gap, and the unique
+        # constraint then raises IntegrityError to THIS caller.  The
+        # savepoint-based cure was MEASURED to break the pass unit on
+        # SQLite (pysqlite's SAVEPOINT/RELEASE quirk commits the outer
+        # work — ``TestTheDurablePassIdentity::test_the_edges_roll_back_with
+        # _the_marks`` went RED and the edge PERSISTED through the injected
+        # watermark fault).  The race is narrow (one reflection worker per
+        # agent; the worker is single-threaded) and the constraint still
+        # prevents a duplicate row.  A dialect-safe ``INSERT ... ON CONFLICT
+        # DO NOTHING`` upsert is the proper cure — tracked in
+        # ``docs/memoir-v2/implementation-notes.md`` §17.
         if line is None:
             line = MemoirLine(
                 id=uuid.uuid4().hex,
@@ -383,14 +436,18 @@ class MemoirConstellationRepository:
             if star is None:
                 return {"star": None, "aliases": [], "lines": [], "neighbors": []}
 
-            aliases = session.exec(
+            # THE ALIAS FILTER IS SQL (phase-1 should-fix): the earlier
+            # shape fetched EVERY alias for the agent and filtered in
+            # Python, so a star card cost O(all aliases) rows on a growing
+            # store for no reason.
+            alias_rows = session.exec(
                 select(MemoirStarAlias)
-                .where(MemoirStarAlias.agent_id == agent_id)
+                .where(
+                    MemoirStarAlias.agent_id == agent_id,
+                    MemoirStarAlias.star_id == star_id,
+                )
                 .order_by(MemoirStarAlias.alias)
             ).all()
-            alias_rows = [
-                alias for alias in aliases if alias.star_id == star_id
-            ]
 
             lines = session.exec(
                 select(MemoirLine)
@@ -498,17 +555,22 @@ class MemoirConstellationRepository:
                         else_=MemoirStar.heat + amount,
                     )
                 )
+                # RETURNING ADOPTED (phase-1 should-fix): the pre-fix shape
+                # committed, expired the identity map and issued a SECOND
+                # SELECT to read back the value — two statements where one
+                # suffices, and a read that can race another writer.  An
+                # UPDATE ... RETURNING that yields no row means the star did
+                # not exist, which is exactly the KeyError contract below.
+                .returning(MemoirStar.heat)
             )
-            if result.rowcount == 0:
+            row = result.first()
+            if row is None:
                 session.rollback()
                 raise KeyError(
                     f"memoir star {star_id!r} not found for agent {agent_id!r}"
                 )
             session.commit()
-            session.expire_all()
-            heat = session.execute(
-                select(MemoirStar.heat).where(MemoirStar.id == star_id)
-            ).scalar()
+            heat = row[0]
             return float(heat) if heat is not None else 0.0
 
     # ── the description writer ───────────────────────────────────────────

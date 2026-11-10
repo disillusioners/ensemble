@@ -9768,11 +9768,15 @@ class InstanceManager:
             #     V2-33): rows written BEFORE the cutover are stamped
             #     ``poignancy_status='legacy'`` so the v2 scoring worker
             #     can tell "never scored" (NULL) from "predates the
-            #     cutover" ('legacy'). The literal is SPACE-SEPARATED
-            #     (``'2026-11-09 00:00:00'``), never the ISO-8601 'T'
-            #     form: SQLite compares datetimes LEXICOGRAPHICALLY and
-            #     the 'T' separator would misclassify the whole day
-            #     (``'T'`` = 0x54 > ``' '`` = 0x20).
+            #     cutover" ('legacy'). The literal is SPACE-SEPARATED and
+            #     carries an EXPLICIT UTC OFFSET (``'2026-11-09 00:00:00+00'``):
+            #     this method is POSTGRES-ONLY (the SQLite counterpart is a
+            #     migration) and ``created_at`` is ``timestamptz``, so a bare
+            #     timestamp literal would be read in the SESSION TimeZone and
+            #     the cutover would silently move with the connection zone.
+            #     The 'T' separator is also avoided: the companion SQLite
+            #     migration compares LEXICOGRAPHICALLY and 'T' (0x54) > ' '
+            #     (0x20) would misclassify the day.
             #
             # PLACEMENT IS AN AUDITABILITY / OWNERSHIP CHOICE ONLY —
             # ORDER IS NOT A CONTAINMENT MEASURE (D1.5 / AM-9): the
@@ -9792,7 +9796,7 @@ class InstanceManager:
             (
                 "UPDATE memoir_episodes SET poignancy_status = 'legacy' "
                 "WHERE poignancy_status IS NULL "
-                "AND created_at < '2026-11-09 00:00:00'"
+                "AND created_at < '2026-11-09 00:00:00+00'"
             ),
             # ── POK Phase 2 — trust tier (addendum T-1, 2026-11-07) ──
             # ``project_operating_knowledge.source_tier`` — the
