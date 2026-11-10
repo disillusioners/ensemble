@@ -114,7 +114,11 @@
 #                 unchanged and the HOME candidates cannot be dropped by a
 #                 bad override. Extension entries are exact paths (no ~ or
 #                 Layer-1 expansion); each is confirmed by the same
-#                 ENSEMBLE_INSTALL_LIVE=1 var. Entries are split on ':',
+#                 ENSEMBLE_INSTALL_LIVE=1 var.
+#   * Layer-1 SIBLING (cross-env, lib.sh:898-899): when HOME ends with
+#                 EITHER install name, the sibling dir (dirname(HOME)/<name>)
+#                 is a candidate too — HOME=…/agents-ensemble-demo makes
+#                 …/agents-ensemble a LIVE candidate, and vice versa. Entries are split on ':',
 #                 trimmed of surrounding whitespace, empty entries skipped,
 #                 globbing disabled (an entry containing '*' cannot expand).
 #   The demo dir stays HOME-derived only ($HOME/agents-ensemble-demo, both
@@ -154,6 +158,17 @@
 #   consumers.
 #
 #   bash scripts/install-dir-guard.sh --target install
+#
+# --require-live (OPT-IN mode, additive): some targets write HOST state that
+#   the INSTALL_DIR axis cannot express (plist-install / watchdog-install
+#   copy the staged plist into $HOME/Library/LaunchAgents REGARDLESS of
+#   INSTALL_DIR). The flag adds ONE extra rule: the requested dir must
+#   classify as LIVE (and a live dir still needs ENSEMBLE_INSTALL_LIVE=1).
+#   It is evaluated AFTER the per-path gate and the containment arm, so the
+#   canonical live refusal and the structural containment refusal still fire
+#   first; ENSEMBLE_INSTALL_DEMO never opens a demo dir under this mode.
+#   Without the flag the guard is byte-for-byte unchanged for every existing
+#   consumer.
 #
 # INSTALL_DIR is read from the environment (the Makefile exports it, so
 # env-set and command-line `make install INSTALL_DIR=…` both arrive — and
@@ -200,15 +215,18 @@ ENSEMBLE_INSTALL_LIVE="${ENSEMBLE_INSTALL_LIVE:-0}"
 ENSEMBLE_INSTALL_DEMO="${ENSEMBLE_INSTALL_DEMO:-0}"
 
 usage() {
-    echo "usage: install-dir-guard.sh --target <make-target>  (INSTALL_DIR via env)" >&2
+    echo "usage: install-dir-guard.sh --target <make-target> [--require-live]  (INSTALL_DIR via env)" >&2
 }
 
 TARGET=""
+REQUIRE_LIVE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --target)
             [ $# -ge 2 ] || { usage; exit 78; }
             TARGET="$2"; shift 2 ;;
+        --require-live)
+            REQUIRE_LIVE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "install-dir-guard: unknown arg '$1'" >&2; usage; exit 78 ;;
     esac
@@ -599,6 +617,26 @@ _cand_class() {
                     fi
                     ;;
             esac
+            # Layer-1 SIBLING shape (lib.sh:898-899, :907-914): when <home>
+            # ends with EITHER install name, the cross-env sibling is a
+            # candidate too (HOME=…/agents-ensemble-demo ⇒ …/agents-ensemble
+            # is a LIVE candidate, and vice versa).
+            case "$base" in
+                agents-ensemble|agents-ensemble-demo)
+                    if [ "$base" != "$name" ]; then
+                        cand="$(dirname "$h")/$name"
+                        cand_n="$(_norm "$cand")"
+                        cand_c="$(_canon_dir "$cand_n")"
+                        if _eq "$want" "$cand_n" || _eq "$want" "$cand_c"; then
+                            case "$name" in
+                                agents-ensemble)      printf 'live\n' ;;
+                                agents-ensemble-demo) printf 'demo\n' ;;
+                            esac
+                            return 0
+                        fi
+                    fi
+                    ;;
+            esac
         done
     done
     # Built-in non-HOME live dirs + the extensible set (colon-separated,
@@ -727,6 +765,12 @@ _protected_install_paths() {
         case "$base" in
             agents-ensemble|agents-ensemble-demo)
                 printf '%s\n' "$(_norm "$h")"
+                # Layer-1 SIBLING (lib.sh:898-899): cross-env candidate —
+                # dirname(<home>)/<name> for the OTHER install name.
+                for name in agents-ensemble agents-ensemble-demo; do
+                    [ "$(basename "$h")" != "$name" ] || continue
+                    printf '%s\n' "$(_norm "$(dirname "$h")/$name")"
+                done
                 ;;
         esac
     done
@@ -783,5 +827,33 @@ EOF
 $(_protected_home_paths)
 EOF
 done
+
+# ── --require-live mode (opt-in; additive) ──────────────────────────────────
+# The plist-install / watchdog-install targets write HOST launchd state
+# ($HOME/Library/LaunchAgents/ensemble-prod.plist) REGARDLESS of INSTALL_DIR
+# — a sandbox or demo INSTALL_DIR would silently overwrite the running prod
+# unit with one pointing at that tree. The flag adds ONE extra rule for
+# those targets: the requested dir must classify as LIVE (and a live dir
+# still needs ENSEMBLE_INSTALL_LIVE=1, via the per-path gate above).
+# Evaluated AFTER the per-path gate and the containment arm, so the canonical
+# live refusal and the structural containment refusal still fire first, and
+# ENSEMBLE_INSTALL_DEMO never opens a demo dir under this mode. Without the
+# flag the guard is byte-for-byte unchanged for every existing consumer.
+if [ "$REQUIRE_LIVE" = "1" ] && [ "$CLASS" != "live" ]; then
+    cat >&2 <<EOF
+make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR does not resolve to a LIVE install dir ($DIR_CANON).
+  This target writes the HOST launchd unit
+  ($HOME/Library/LaunchAgents/ensemble-prod.plist) — the prod unit must point
+  at the live install, never at a sandbox or demo tree (a sandbox INSTALL_DIR
+  would silently overwrite the running prod unit).
+  To install the prod launchd unit:
+    ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR='$INSTALL_DIR_ENV'
+  Under sudo (env vars do not survive plain sudo), the sudo-correct form:
+    sudo env ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR='$INSTALL_DIR_ENV'
+  The demo launchd agent is a hand-duplicate with its own Label
+  (com.ensemble.watchdog.demo) — see the Makefile's demo-usage note.
+EOF
+    exit 78
+fi
 
 exit 0

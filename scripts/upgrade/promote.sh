@@ -127,6 +127,7 @@ done
 
 resolve_env "${TARGET_ARG:-${TARGET:-demo}}"
 require_live_guard "$UP_TARGET"
+require_demo_guard "$UP_TARGET" upgrade-promote
 
 # MINOR-4b (P2.3 review cycle 1): live-target F2 gate. promote.sh live is
 # a DEAD PATH until F2 (the unauthenticated loopback API user-origin forge

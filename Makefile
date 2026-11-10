@@ -121,10 +121,10 @@ help:
 	@echo "                lands - it touches only this repo, never an install dir."
 	@echo ""
 	@echo "Variables:"
-	@echo "  INSTALL_DIR=$(INSTALL_DIR)  (REQUIRED for install/uninstall/install-deps/stop/plist-install/watchdog-install)"
+	@echo "  INSTALL_DIR=$(INSTALL_DIR)  (REQUIRED for install/uninstall/install-deps/stop/stop-by-port/plist-install/watchdog-install)"
 	@echo '  ENSEMBLE_INSTALL_LIVE=1   confirm actions on a live dir ($$HOME/agents-ensemble, /opt/ensemble,'
 	@echo "                            or ENSEMBLE_LIVE_INSTALL_DIRS entries)"
-	@echo '  ENSEMBLE_INSTALL_DEMO=1   confirm actions on $$HOME/agents-ensemble-demo'
+	@echo '  ENSEMBLE_INSTALL_DEMO=1   confirm actions on $$HOME/agents-ensemble-demo (incl. the deploy/upgrade demo lanes)'
 	@echo "  ENSEMBLE_LIVE_INSTALL_DIRS  extra live dirs (colon-separated) added to the protected set"
 	@echo "  PROD_PORT_FALLBACK=$(PROD_PORT_FALLBACK) (read from $(ENV_PROD_FILE); real port source is .env.prod per ADR-014)"
 
@@ -157,11 +157,28 @@ stop:
 	@bash $(STOP_SCRIPT) "$(INSTALL_DIR)" "$(PROD_PORT_FALLBACK)"
 
 .PHONY: stop-by-port
+# STOP-BY-PORT port source: the TARGET install dir's own staged PORT
+# ($(INSTALL_DIR)/.env) — NOT the repo's .env.prod. The legacy port kill is
+# gated on the INSTALL_DIR axis (the guard line below), so taking the port
+# from an unrelated file DECOUPLED the kill from the gated dir: a sandbox
+# INSTALL_DIR passed the guard while the kill still landed on the live prod
+# port 9797 (incident 2026-11-09 analysis — the correct live spelling is
+# refused, the sandbox spelling reaches the live daemon).
+# Fail-closed when the dir has no staged PORT — an unscoped port kill is
+# exactly the hazard this gate closes. Silent when INSTALL_DIR is unset or
+# empty (2>/dev/null: a stray sed error must never print on unrelated make
+# invocations).
+STOP_PORT := $(shell sed -n 's/^PORT=//p' "$(INSTALL_DIR)/.env" 2>/dev/null | tr -d '\r' | head -1)
 stop-by-port:
 	@bash $(GUARD_SCRIPT) --target stop-by-port
-	@echo "$(RED)STOP_BY_PORT: killing by port $(PROD_PORT_FALLBACK) can terminate UNRELATED listeners$(NC)"
+	@if [ -z "$(STOP_PORT)" ]; then \
+		echo "$(RED)REFUSING — no resolvable PORT in $(INSTALL_DIR)/.env — the legacy port kill cannot be scoped to this install dir.$(NC)"; \
+		echo "  Use the ownership-scoped stop instead:  make stop INSTALL_DIR='$(INSTALL_DIR)'"; \
+		exit 78; \
+	fi
+	@echo "$(RED)STOP_BY_PORT: killing by port $(STOP_PORT) can terminate UNRELATED listeners$(NC)"
 	@echo "$(RED)(dev+prod coexistence hosts share ports with clients — e.g. browsers). You opted in.$(NC)"
-	STOP_BY_PORT=1 bash $(STOP_SCRIPT) "$(INSTALL_DIR)" "$(PROD_PORT_FALLBACK)"
+	STOP_BY_PORT=1 bash $(STOP_SCRIPT) "$(INSTALL_DIR)" "$(STOP_PORT)"
 
 # Start the daemon
 start: stop
@@ -390,7 +407,7 @@ install: install-dir-guard pyinstaller
 # sed'd by `make install`) into ~/Library/LaunchAgents and print the
 # bootstrap hint. Convenience only — the operator runs launchctl by hand.
 plist-install:
-	@bash $(GUARD_SCRIPT) --target plist-install
+	@bash $(GUARD_SCRIPT) --target plist-install --require-live
 	@if [ ! -f "$(INSTALL_DIR)/data/ensemble-prod.plist" ]; then \
 		echo "$(RED)Error: $(INSTALL_DIR)/data/ensemble-prod.plist not found — run 'make install' first.$(NC)"; \
 		exit 1; \
@@ -415,7 +432,7 @@ plist-install:
 # com.ensemble.watchdog.demo + the demo INSTALL_DIR (see the template's
 # DEMO USAGE note) — same convention as ensemble-prod.plist.
 watchdog-install:
-	@bash $(GUARD_SCRIPT) --target watchdog-install
+	@bash $(GUARD_SCRIPT) --target watchdog-install --require-live
 	@if [ ! -f "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist" ]; then \
 		if [ -f "$(INSTALL_DIR)/scripts/watchdog-watcher.sh" ]; then \
 			INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' $(CURDIR)/scripts/ensemble-watchdog-watcher.plist > "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist"; \

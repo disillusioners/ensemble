@@ -114,7 +114,7 @@ assert_contains "--help mentions ENSEMBLE_DEPLOY_LIVE" "ENSEMBLE_DEPLOY_LIVE" "$
 
 # ─── 2. dry-run on demo: plan lines, no side effects ────────────────────────
 section "dry-run demo"
-DRY_DEMO="$(HOME="$FAKE_HOME" bash "$FAKE_REPO/scripts/deploy.sh" demo --dry-run 2>&1)"
+DRY_DEMO="$(HOME="$FAKE_HOME" ENSEMBLE_INSTALL_DEMO=1 bash "$FAKE_REPO/scripts/deploy.sh" demo --dry-run 2>&1)"
 DRY_DEMO_RC=$?
 assert_eq "demo dry-run rc" "0" "$DRY_DEMO_RC"
 assert_contains "demo dry-run: install dir" "$FAKE_HOME/agents-ensemble-demo" "$DRY_DEMO"
@@ -167,7 +167,7 @@ assert_eq "live, no .env.prod: exit 78" "78" "$NOENV_RC"
 assert_contains "live, no .env.prod: refusal says refusing" "refusing" "$NOENV_OUT"
 assert_contains "live, no .env.prod: names the missing file" "$NOENV_REPO/.env.prod" "$NOENV_OUT"
 # demo with no .env.prod AND no .env.prod.demo → generator cannot run → 78
-NOENV_DEMO_OUT="$(HOME="$FAKE_HOME" bash "$NOENV_REPO/scripts/deploy.sh" demo --dry-run 2>&1)"
+NOENV_DEMO_OUT="$(HOME="$FAKE_HOME" ENSEMBLE_INSTALL_DEMO=1 bash "$NOENV_REPO/scripts/deploy.sh" demo --dry-run 2>&1)"
 NOENV_DEMO_RC=$?
 assert_eq "demo, no sources at all: exit 78" "$NOENV_DEMO_RC" "78"
 
@@ -181,7 +181,7 @@ assert_contains "TARGET=live override port" "port=9797" "$ENV_TGT_OUT"
 
 # ─── 6. .env.prod.demo generator: run for real against the fixture ──────────
 section ".env.prod.demo generator (real run, --no-start)"
-GEN_OUT="$(HOME="$FAKE_HOME" bash "$FAKE_REPO/scripts/deploy.sh" demo --no-start --skip-build 2>&1)"
+GEN_OUT="$(HOME="$FAKE_HOME" ENSEMBLE_INSTALL_DEMO=1 bash "$FAKE_REPO/scripts/deploy.sh" demo --no-start --skip-build 2>&1)"
 GEN_RC=$?
 assert_eq "demo real stage (no-start) rc" "0" "$GEN_RC"
 
@@ -214,7 +214,7 @@ assert_eq "staged .env has demo PORT" "7979" "$STAGED_PORT"
     || _fail "frontend staged"
 
 # 6e. idempotency: re-run stages cleanly, does not duplicate or drift
-GEN_OUT2="$(HOME="$FAKE_HOME" bash "$FAKE_REPO/scripts/deploy.sh" demo --no-start --skip-build 2>&1)"
+GEN_OUT2="$(HOME="$FAKE_HOME" ENSEMBLE_INSTALL_DEMO=1 bash "$FAKE_REPO/scripts/deploy.sh" demo --no-start --skip-build 2>&1)"
 GEN_RC2=$?
 assert_eq "second deploy run rc" "0" "$GEN_RC2"
 assert_not_contains "second run: no regeneration (file exists)" "generating" "$GEN_OUT2"
@@ -225,7 +225,7 @@ assert_eq "second run: agents not duplicated" "1" "$AGENTS_COUNT"
 
 # 6f. a PRE-EXISTING .env.prod.demo is never overwritten by the generator
 printf 'PORT=1234\nPOSTGRES_DB=custom\nMARKER=preserved\n' > "$FAKE_REPO/.env.prod.demo"
-GEN_OUT3="$(HOME="$FAKE_HOME" bash "$FAKE_REPO/scripts/deploy.sh" demo --no-start --skip-build 2>&1)"
+GEN_OUT3="$(HOME="$FAKE_HOME" ENSEMBLE_INSTALL_DEMO=1 bash "$FAKE_REPO/scripts/deploy.sh" demo --no-start --skip-build 2>&1)"
 assert_not_contains "pre-existing env not regenerated" "generating" "$GEN_OUT3"
 CUSTOM_PORT="$(sed -n 's/^PORT=//p' "$FAKE_HOME/agents-ensemble-demo/.env" | head -1)"
 assert_eq "custom pre-existing env is staged verbatim" "1234" "$CUSTOM_PORT"
