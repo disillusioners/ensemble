@@ -59,6 +59,7 @@ done
 
 resolve_env "${TARGET_ARG:-${TARGET:-demo}}"
 require_live_guard "$UP_TARGET"
+require_demo_guard "$UP_TARGET" upgrade-rollback
 echo_env_triple
 
 # 0a-pre. python3 ≥ 3.7 floor probe (P2 / C-7 — mirrors promote.sh's

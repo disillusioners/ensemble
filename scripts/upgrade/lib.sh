@@ -1375,6 +1375,29 @@ EOF
     fi
 }
 
+# require_demo_guard <target> [make-target] — the DEMO lane needs the same
+# explicit operator ack as the LIVE lane (2026-11-09: the demo install IS a
+# running demo orchestrator — a stray `make upgrade-stage` rewrites the whole
+# demo install and restarts its daemon; the DEFAULT target of every mutating
+# upgrade wrapper is demo). The confirm var is the Makefile guard's per-path
+# DEMO var (ENSEMBLE_INSTALL_DEMO) — one var per PATH, not one per lane, so
+# the demo confirm means the same thing in every lane. The SANDBOX lane is
+# EXEMPT (a throwaway tree, never a running install). Mirrors
+# require_live_guard's shape and exit code (78).
+require_demo_guard() {
+    if [ "$1" = "demo" ] && [ "${ENSEMBLE_INSTALL_DEMO:-0}" != "1" ]; then
+        cat >&2 <<EOF
+${LOG_TAG}: REFUSING to operate on demo.
+  The upgrade pipeline's DEFAULT target is demo (\$HOME/agents-ensemble-demo,
+  :7979, ensemble_demo) — a stray invocation rewrites the whole demo install
+  and restarts the demo daemon, the same incident class the live guard
+  exists for (2026-11-09).
+  To operate on demo anyway:   ENSEMBLE_INSTALL_DEMO=1 make ${2:-upgrade-stage}
+EOF
+        exit 78
+    fi
+}
+
 # require_live_guard_restart <target> — agent-restart (§3.4 C-1/F-3/F-4):
 # the RESTART lane's sibling live guard. Accepts ONLY
 # ENSEMBLE_RESTART_LIVE=1 — minted exclusively by the post-turn drain

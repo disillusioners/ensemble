@@ -90,7 +90,7 @@ help:
 	@echo "  INSTALL_DIR=$(INSTALL_DIR)  (REQUIRED for install/uninstall/install-deps/stop/stop-by-port/start/dev/plist-install/watchdog-install)"
 	@echo "  ENSEMBLE_INSTALL_LIVE=1   confirm actions on a live dir (\$HOME/agents-ensemble, /opt/ensemble,"
 	@echo "                            or ENSEMBLE_LIVE_INSTALL_DIRS entries)"
-	@echo "  ENSEMBLE_INSTALL_DEMO=1   confirm actions on \$HOME/agents-ensemble-demo"
+	@echo "  ENSEMBLE_INSTALL_DEMO=1   confirm actions on \$HOME/agents-ensemble-demo (incl. the deploy/upgrade demo lanes)"
 	@echo "  ENSEMBLE_LIVE_INSTALL_DIRS  extra live dirs (colon-separated) added to the protected set"
 	@echo "  PROD_PORT_FALLBACK=$(PROD_PORT_FALLBACK) (read from $(ENV_PROD_FILE); real port source is .env.prod per ADR-014)"
 

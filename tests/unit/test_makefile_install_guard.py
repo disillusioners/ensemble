@@ -1049,3 +1049,318 @@ class TestHostLaunchdInstallRequiresLive:
         first_line = block.split("\n", 1)[0]
         assert "$(GUARD_SCRIPT) --target" in first_line, target
         assert "--require-live" in first_line, target
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ADDED 2026-11-09 (phase 3 of the live-install-guard mission) — APPEND-ONLY
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Continues the phase-2 block above (same ADDED banner style; the phase-2
+# banner text itself is NOT rewritten, and the first 1051 lines of this file
+# stay byte-identical).
+#
+#   E1 — live-install SUBPATH classification (both parts):
+#     (1) a protected root AND every path INSIDE it (any depth) share its
+#         class — `~/agents-ensemble/data` is LIVE and refuses exactly like
+#         the root does (`rm -rf $HOME/agents-ensemble/data` destroys the
+#         live install's data). The match is PATH-COMPONENT aware: a
+#         NAME-PREFIX SIBLING ("…/agents-ensemble-backup") is a separate
+#         tree and stays allowed BY DESIGN.
+#     (2) the candidate set now mirrors lib.sh:902-917
+#         (_install_dir_candidates): under a Layer-1 HOME the cross-env
+#         SIBLING is a candidate too (HOME=…/agents-ensemble-demo ⇒
+#         …/agents-ensemble is a LIVE candidate).
+#
+#   P3a — deploy lane demo confirm: `scripts/deploy.sh demo` now needs
+#     ENSEMBLE_INSTALL_DEMO=1 (same incident class as its live gate).
+#   P3b — upgrade lane demo confirm: the MUTATING upgrade wrappers
+#     (stage/promote/rollback) now need ENSEMBLE_INSTALL_DEMO=1 for the
+#     demo target (the default target of all three). status.sh stays
+#     ungated (read-only); the sandbox lane is exempt.
+#
+# CARVE-OUT (same rules as the file header, honored here verbatim):
+#   * every real invocation runs with HOME = a fresh tmp fake home; every
+#     path any recipe can touch lives under tmp.
+#   * the deploy/upgrade scripts are invoked ONLY in their refusal arms
+#     (no confirm var → the gate fires before any mutation) or in a
+#     dry-run / pre-mutation-gate arm (--dry-run for deploy; the VERSION
+#     gate for the upgrade scripts) — never in a mutating lane.
+#   * scripts/stop-ensemble.sh is NEVER executed.
+
+
+def run_script(
+    script: str,
+    args: list[str],
+    home: Path,
+    extra_env: dict[str, str] | None = None,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess:
+    """Run a repo script (deploy/upgrade lane) with a fake HOME.
+
+    The scripts resolve their own REPO_ROOT from BASH_SOURCE, so cwd is the
+    repo root. The SCRUBBED_VARS scrub applies (ENSEMBLE_INSTALL_DEMO among
+    them) — an ambient export can never silently open the gate under test.
+    """
+    env = _base_env(home, extra_env)
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / script), *args],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+class TestLiveSubpathContainment:
+    """E1 part 1: root-or-inside containment (path-component aware)."""
+
+    def test_live_subpath_depth1_refused_without_confirm(self, fake_home):
+        """`$HOME/agents-ensemble/data` is LIVE → refused with the canonical
+        live refusal. Non-vacuity: the sentinel inside the subdir survives
+        (the unguarded rm -rf did NOT run)."""
+        live = make_live_shaped(fake_home)
+        sub = live / "data"
+        sub.mkdir()
+        (sub / "SENTINEL").write_text("keep")
+        r = run_make(["uninstall", f"INSTALL_DIR={sub}"], fake_home)
+        assert r.returncode != 0
+        assert "resolves to a LIVE install dir" in r.stderr
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+        assert (sub / "SENTINEL").exists(), "ungated rm -rf ran on a live SUBPATH"
+
+    def test_live_subpath_deep_refused_without_confirm(self, fake_home):
+        """Depth is irrelevant: …/agents-ensemble/data/deep/x is LIVE too."""
+        live = make_live_shaped(fake_home)
+        deep = live / "data" / "deep" / "x"
+        deep.mkdir(parents=True)
+        (deep / "SENTINEL").write_text("keep")
+        r = run_make(["uninstall", f"INSTALL_DIR={deep}"], fake_home)
+        assert r.returncode != 0
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+        assert (deep / "SENTINEL").exists(), "ungated rm -rf ran on a live SUBPATH"
+
+    def test_live_subpath_proceeds_with_confirm(self, fake_home):
+        """SUCCESS arm (make-level, stop-free uninstall recipe, fake home):
+        with the confirm var the subpath IS removable — and ONLY the
+        subpath: the root and its sentinel survive. That is the blast
+        radius the refusal was standing in front of."""
+        live = make_live_shaped(fake_home)
+        sub = live / "data"
+        sub.mkdir()
+        (sub / "SENTINEL").write_text("ok-to-delete")
+        r = run_make(
+            ["uninstall", f"INSTALL_DIR={sub}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode == 0, r.stderr
+        assert not sub.exists()
+        assert live.exists(), "the ROOT must survive a subpath-scoped uninstall"
+        assert sentinel_of(live).exists()
+
+    def test_name_prefix_siblings_are_not_live(self, fake_home):
+        """DOCUMENTED DECISION (guard header): a NAME-PREFIX SIBLING is a
+        separate tree and stays ALLOWED — only the tree inside the
+        protected root is gated. Both spellings are pinned."""
+        make_live_shaped(fake_home)
+        for name in ("agents-ensemble-backup", "agents-ensembleX"):
+            sib = fake_home / name
+            sib.mkdir()
+            r = run_guard("uninstall", fake_home, install_dir=str(sib))
+            assert r.returncode == 0, (name, r.stderr)
+            assert "LIVE install dir" not in r.stderr, name
+
+    def test_symlink_into_live_root_refused(self, fake_home, tmp_path):
+        """A symlink alias pointing AT the live root resolves physically
+        (cd + pwd -P) and is caught."""
+        live = make_live_shaped(fake_home)
+        alias = tmp_path / "alias-to-live-root"
+        alias.symlink_to(live)
+        r = run_guard("uninstall", fake_home, install_dir=str(alias))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+    def test_symlink_into_live_subdir_refused(self, fake_home, tmp_path):
+        """A symlink alias pointing INTO the live root (a subdir) is LIVE
+        too — physical resolution happens BEFORE classification."""
+        live = make_live_shaped(fake_home)
+        sub = live / "data"
+        sub.mkdir()
+        alias = tmp_path / "alias-to-live-data"
+        alias.symlink_to(sub)
+        r = run_guard("uninstall", fake_home, install_dir=str(alias))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+    def test_not_yet_existing_subpath_refused_textually(self, fake_home):
+        """A spelling that does not exist yet is still caught TEXTUALLY
+        (the root exists, the leaf does not)."""
+        make_live_shaped(fake_home)
+        r = run_guard(
+            "uninstall", fake_home,
+            install_dir=f"{fake_home}/agents-ensemble/newdir",
+        )
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+    def test_demo_subpath_is_demo_class(self, fake_home):
+        """A subpath of the demo root is DEMO (not live): it needs the DEMO
+        confirm var, and the live var must not open it."""
+        demo = fake_home / "agents-ensemble-demo"
+        sub = demo / "data"
+        sub.mkdir(parents=True)
+        refused = run_guard("uninstall", fake_home, install_dir=str(sub))
+        assert refused.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_DEMO" in refused.stderr
+        assert "ENSEMBLE_INSTALL_LIVE" not in refused.stderr
+        opened = run_guard(
+            "uninstall", fake_home, install_dir=str(sub),
+            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
+        )
+        assert opened.returncode == 0, opened.stderr
+
+    def test_opt_ensemble_subpath_refused(self, fake_home):
+        """The built-in /opt/ensemble live dir extends to its subpaths."""
+        r = run_guard("uninstall", fake_home, install_dir="/opt/ensemble/sub")
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+    def test_extension_entry_subpath_refused(self, fake_home, tmp_path):
+        """An ENSEMBLE_LIVE_INSTALL_DIRS entry extends to its subpaths."""
+        ext = tmp_path / "ext-entry"
+        sub = ext / "sub"
+        sub.mkdir(parents=True)
+        r = run_guard(
+            "uninstall", fake_home, install_dir=str(sub),
+            extra_env={"ENSEMBLE_LIVE_INSTALL_DIRS": str(ext)},
+        )
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+
+class TestLayer1SiblingCandidate:
+    """E1 part 2: the candidate set mirrors lib.sh:902-917.
+
+    Under a Layer-1 HOME (HOME ends with an install name) the cross-env
+    SIBLING is a candidate too — lib.sh:898-899 documents it ("plus the
+    sibling <name> next to it (cross-env resolution, e.g. the flipped live
+    daemon resolving the demo install)").
+    """
+
+    def test_live_sibling_under_demo_home_is_live(self, tmp_path):
+        """HOME=…/agents-ensemble-demo ⇒ the sibling …/agents-ensemble is a
+        LIVE candidate (phase-1 probe: this was rc=0, i.e. ungated)."""
+        home = tmp_path / "layer1" / "agents-ensemble-demo"
+        home.mkdir(parents=True)
+        sibling = tmp_path / "layer1" / "agents-ensemble"
+        sibling.mkdir()
+        r = run_guard("uninstall", home, install_dir=str(sibling))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+        assert "resolves to a LIVE install dir" in r.stderr
+
+    def test_demo_sibling_under_live_home_is_demo(self, tmp_path):
+        """HOME=…/agents-ensemble ⇒ the sibling …/agents-ensemble-demo is a
+        DEMO candidate (phase-1 probe: this was rc=0, i.e. ungated)."""
+        home = tmp_path / "layer1" / "agents-ensemble"
+        home.mkdir(parents=True)
+        sibling = tmp_path / "layer1" / "agents-ensemble-demo"
+        sibling.mkdir()
+        r = run_guard("uninstall", home, install_dir=str(sibling))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_DEMO" in r.stderr
+        assert "ENSEMBLE_INSTALL_LIVE" not in r.stderr
+
+
+class TestDemoLaneConfirmGates:
+    """P3a (deploy lane) + P3b (upgrade lane): the demo lane now demands
+    ENSEMBLE_INSTALL_DEMO=1 — one var per PATH, not one per lane."""
+
+    def test_deploy_demo_refuses_without_confirm(self, fake_home):
+        """REFUSAL arm (deploy.sh demo, no var): exit 78, and the refusal
+        names BOTH exact commands."""
+        r = run_script("scripts/deploy.sh", ["demo"], fake_home)
+        assert r.returncode == 78
+        assert "REFUSING to deploy to demo" in r.stderr
+        assert "ENSEMBLE_INSTALL_DEMO=1 make deploy-demo" in r.stderr
+        assert "ENSEMBLE_INSTALL_DEMO=1 make stage-demo" in r.stderr
+
+    def test_deploy_demo_refusal_precedes_any_mutation(self, fake_home):
+        """Non-vacuity: the refusal fires in phase 0 — no demo env source
+        was generated in the repo and the demo install dir was not created."""
+        demo_env = REPO_ROOT / ".env.prod.demo"
+        existed_before = demo_env.exists()
+        mtime_before = demo_env.stat().st_mtime if existed_before else None
+        r = run_script("scripts/deploy.sh", ["demo"], fake_home)
+        assert r.returncode == 78
+        assert demo_env.exists() == existed_before, "the demo env source was generated"
+        if existed_before:
+            assert demo_env.stat().st_mtime == mtime_before, "the demo env source was rewritten"
+        assert not (fake_home / "agents-ensemble-demo").exists()
+
+    def test_deploy_demo_passes_the_gate_with_confirm(self, fake_home):
+        """SUCCESS arm: with the confirm var the demo gate opens and the
+        run reaches the staging phase. --dry-run keeps it side-effect free
+        (deploy.sh's run() prints instead of executing)."""
+        r = run_script(
+            "scripts/deploy.sh", ["demo", "--dry-run", "--skip-build"], fake_home,
+            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
+        )
+        assert "REFUSING to deploy to demo" not in r.stderr, r.stderr
+        assert "phase 1/5 build" in r.stdout
+        assert "phase 2/5 stage" in r.stdout
+        assert not (fake_home / "agents-ensemble-demo").exists()
+
+    def test_deploy_demo_gate_is_static_before_the_first_mutating_phase(self):
+        """Static placement pin: the demo arm sits in phase 0, before the
+        build (:219-226), the staging block (:325-338) and the ownership-
+        scoped stop (:347)."""
+        text = (REPO_ROOT / "scripts" / "deploy.sh").read_text()
+        gate = text.index("REFUSING to deploy to demo")
+        assert gate < text.index('run "PyInstaller build (bare, branch-safe)"')
+        assert gate < text.index('run "stage binary"')
+        assert gate < text.index('run "stop owned processes"')
+
+    @pytest.mark.parametrize(
+        "script,make_target",
+        [
+            ("scripts/upgrade/stage.sh", "upgrade-stage"),
+            ("scripts/upgrade/promote.sh", "upgrade-promote"),
+            ("scripts/upgrade/rollback.sh", "upgrade-rollback"),
+        ],
+    )
+    def test_upgrade_demo_refuses_without_confirm(self, fake_home, script, make_target):
+        """REFUSAL arm (upgrade lane, demo target, no var): exit 78 naming
+        the exact make command for that wrapper. Non-vacuity: the demo
+        install dir was not created."""
+        r = run_script(script, ["demo"], fake_home)
+        assert r.returncode == 78, r.stderr
+        assert "REFUSING to operate on demo" in r.stderr
+        assert f"ENSEMBLE_INSTALL_DEMO=1 make {make_target}" in r.stderr
+        assert not (fake_home / "agents-ensemble-demo").exists()
+
+    def test_upgrade_stage_demo_passes_the_gate_with_confirm(self, fake_home):
+        """SUCCESS arm: with the confirm var the demo gate opens and the
+        NEXT gate (the explicit-VERSION rule) fires instead — still before
+        any mutation (stage.sh's VERSION check precedes the staging)."""
+        r = run_script(
+            "scripts/upgrade/stage.sh", ["demo"], fake_home,
+            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
+        )
+        assert "REFUSING to operate on demo" not in r.stderr, r.stderr
+        assert "explicit VERSION required" in r.stderr
+        assert not (fake_home / "agents-ensemble-demo").exists()
+
+    def test_upgrade_sandbox_lane_is_exempt(self, fake_home):
+        """The SANDBOX lane must NOT hit the demo gate — it reaches its own
+        resolution refusal (a sandbox needs an explicit dir + port)."""
+        r = run_script("scripts/upgrade/stage.sh", ["sandbox"], fake_home)
+        assert "REFUSING to operate on demo" not in r.stderr, r.stderr
+        assert "sandbox target requires" in r.stderr
+
+    def test_upgrade_status_stays_ungated(self, fake_home):
+        """status.sh is READ-ONLY (status.sh:18-20) → it keeps NO demo
+        gate: it observes, it does not mutate."""
+        r = run_script("scripts/upgrade/status.sh", ["demo"], fake_home)
+        assert "REFUSING to operate on demo" not in r.stderr, r.stderr

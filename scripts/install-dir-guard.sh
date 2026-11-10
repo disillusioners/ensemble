@@ -30,6 +30,10 @@
 #      — each family owns its own, kept disjoint by design; no collision
 #      with the launcher leg's ENSEMBLE_LAUNCHER_PATH / ENSEMBLE_LAUNCHER_
 #      STATE_FILE).
+#      (2026-11-09: the DEPLOY and UPGRADE lanes additionally honor
+#      ENSEMBLE_INSTALL_DEMO for their DEMO target — one var per PATH
+#      (live/demo), not one per lane, so the demo confirm means the same
+#      thing in every lane; their LIVE vars stay lane-owned.)
 #
 # PROTECTED LIVE SET (extensible, operator directive #2.2):
 #   * built-ins:  $HOME/agents-ensemble  (both Layer-1 HOME shapes — below)
@@ -112,6 +116,22 @@
 #   * compared in BOTH directions (requested dir textual + physical vs
 #     candidate textual + physical) so symlink aliases are caught whether
 #     the alias is the requested path or the protected tree itself.
+#   * the candidate set mirrors lib.sh's _install_dir_candidates: the legacy
+#     shape <home>/<name>, the Layer-1 shape (HOME itself IS the install
+#     when it ends with the name) and the Layer-1 SIBLING
+#     (dirname(<home>)/<name> when <home> ends with EITHER install name —
+#     cross-env resolution, lib.sh:898-899).
+#
+# ROOT-OR-INSIDE MATCHING (E1, 2026-11-09): a protected root AND every path
+# INSIDE it (any depth) share its class — `~/agents-ensemble/data` and
+# `~/agents-ensemble/data/deep/x` are LIVE and refuse exactly like the root
+# does (`rm -rf $HOME/agents-ensemble/data` destroys the live install's
+# data). The match is PATH-COMPONENT aware: a NAME-PREFIX SIBLING
+# (`~/agents-ensemble-backup`, `~/agents-ensembleX`) is a SEPARATE tree and
+# stays allowed BY DESIGN — only the tree INSIDE a protected root is gated,
+# never a neighbour whose name merely starts with the same prefix.
+# This only ever ADDS refusals: a path allowed before stays allowed unless
+# it is inside a protected root or a Layer-1 sibling.
 #
 # CONTRACT: exit 78 (the repo's config-refuse code — same as deploy.sh's
 # unconfirmed-live refusal) BEFORE any side effect, with the target name,
@@ -244,19 +264,43 @@ _sudo_user_home() {
 HOME_ALT="$(_sudo_user_home)"
 
 # ── 4. classify the requested dir against the protected set ──────────────────
+# _cand_hit <want> <cand> — true when want IS cand or lies INSIDE it.
+# Both spellings are compared (normalized + physical): the physical form
+# catches a SYMLINK ALIAS pointing INTO the protected tree, the textual form
+# catches a not-yet-created spelling. The containment test is PATH-COMPONENT
+# aware ("cand" + "/"): a name-prefix sibling ("…/agents-ensemble-backup")
+# is NOT inside the protected root.
+_cand_hit() {
+    local want="$1" cand="$2" cn cc
+    [ -n "$cand" ] || return 1
+    cn="$(_norm "$cand")"
+    cc="$(_canon_dir "$cn")"
+    [ "$want" = "$cn" ] && return 0
+    [ "$want" = "$cc" ] && return 0
+    case "$want" in
+        "$cn"/*) return 0 ;;
+        "$cc"/*) return 0 ;;
+    esac
+    return 1
+}
+
 # _cand_class <normalized-or-physical-path> — echoes live|demo when the path
-# matches a protected install candidate for ANY protected home (textually or
-# physically); empty output otherwise.
+# IS a protected install candidate for ANY protected home (textually or
+# physically) OR lies INSIDE one (any depth); empty output otherwise.
+# The candidate set mirrors scripts/upgrade/lib.sh:902-917
+# (_install_dir_candidates): the legacy shape <home>/<name>, the Layer-1
+# shape (HOME itself IS the install when it ends with the name) and the
+# Layer-1 SIBLING (dirname(<home>)/<name> when <home> ends with EITHER
+# install name — cross-env resolution, lib.sh:898-899).
 _cand_class() {
-    local want="$1" h base cand cand_n cand_c name cls ext
+    local want="$1" h base name cand sib
     for h in "$HOME" "$HOME_ALT"; do
         [ -n "$h" ] || continue
+        base="$(basename "$h")"
         for name in agents-ensemble agents-ensemble-demo; do
             # legacy shape: <home>/<name>
             cand="$h/$name"
-            cand_n="$(_norm "$cand")"
-            cand_c="$(_canon_dir "$cand_n")"
-            if [ "$want" = "$cand_n" ] || [ "$want" = "$cand_c" ]; then
+            if _cand_hit "$want" "$cand"; then
                 case "$name" in
                     agents-ensemble)      printf 'live\n' ;;
                     agents-ensemble-demo) printf 'demo\n' ;;
@@ -264,15 +308,30 @@ _cand_class() {
                 return 0
             fi
             # Layer-1 shape: home ends with the name → home itself IS it
-            base="$(basename "$h")"
+            if [ "$base" = "$name" ]; then
+                if _cand_hit "$want" "$h"; then
+                    case "$name" in
+                        agents-ensemble)      printf 'live\n' ;;
+                        agents-ensemble-demo) printf 'demo\n' ;;
+                    esac
+                    return 0
+                fi
+            fi
+            # Layer-1 SIBLING shape (lib.sh:898-899, :907-914): when <home>
+            # ends with EITHER install name, the cross-env sibling is a
+            # candidate too — HOME=…/agents-ensemble-demo ⇒ …/agents-ensemble
+            # is a LIVE candidate, and vice versa.
             case "$base" in
-                "$name")
-                    if [ "$want" = "$(_norm "$h")" ] || [ "$want" = "$(_canon_dir "$h")" ]; then
-                        case "$name" in
-                            agents-ensemble)      printf 'live\n' ;;
-                            agents-ensemble-demo) printf 'demo\n' ;;
-                        esac
-                        return 0
+                agents-ensemble|agents-ensemble-demo)
+                    if [ "$base" != "$name" ]; then
+                        sib="$(dirname "$h")/$name"
+                        if _cand_hit "$want" "$sib"; then
+                            case "$name" in
+                                agents-ensemble)      printf 'live\n' ;;
+                                agents-ensemble-demo) printf 'demo\n' ;;
+                            esac
+                            return 0
+                        fi
                     fi
                     ;;
             esac
@@ -282,9 +341,7 @@ _cand_class() {
     # exact paths, live class only).
     for ext in /opt/ensemble "$(printf '%s' "${ENSEMBLE_LIVE_INSTALL_DIRS:-}" | tr ':' '\n')"; do
         [ -n "$ext" ] || continue
-        ext_n="$(_norm "$ext")"
-        ext_c="$(_canon_dir "$ext_n")"
-        if [ "$want" = "$ext_n" ] || [ "$want" = "$ext_c" ]; then
+        if _cand_hit "$want" "$ext"; then
             printf 'live\n'
             return 0
         fi
