@@ -383,11 +383,11 @@ class TestH2BurstCapRefusalIsTruthful:
         """Pin 1 — the UNTRUE sentence must never reach the agent.
 
         F-G2 removed that sentence from the GENERIC branch as well (the
-        generic branch now renders a DERIVED outcome). So the
-        "sentence absent" assertion alone can NO LONGER discriminate the
-        H2 plant — the pin must also assert that the DESIGNED refusal
-        still renders its OWN first-class shape and is NOT degraded into
-        the generic fault note.
+        generic branch now renders a DERIVED outcome), so the "sentence
+        absent" assertion alone can no longer discriminate the H2 plant
+        — this pin therefore asserts the OUTCOME property (the agent is
+        TOLD that no job exists and nothing will be picked up), which
+        holds on EVERY branch, designed refusal or not.
         """
         from daemon.services.skill_job_dispatcher import (
             SkillFixBurstCapRefused,
@@ -401,13 +401,75 @@ class TestH2BurstCapRefusalIsTruthful:
             "the burst-cap refusal must not claim the request is still "
             f"recorded for a later run: {result!r}"
         )
-        assert "burst cap" in result, (
-            "the designed refusal must keep its own shape — the cap "
-            f"refusal must NOT be degraded into the generic fault note: {result!r}"
+        assert "NOTHING will be picked up" in result, (
+            "the agent must be told that nothing will pick the request up: "
+            f"{result!r}"
         )
-        assert "dispatcher raised during dispatch" not in result, (
-            "the designed refusal must NOT be rendered as a generic "
-            f"dispatcher fault: {result!r}"
+        assert "NO skill-keeper job" in result, (
+            "the agent must be told that no job exists: " f"{result!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_designed_refusal_is_truthful_and_is_not_a_dropped_request(self):
+        """Pin 2 — the OUTCOME-level discriminator for the M-E3d plant.
+
+        A DESIGNED refusal (the durable re-fix burst cap) must not be
+        signalled as a DROPPED-REQUEST FAULT:
+
+        (a) the agent is TOLD the request was not recorded — no job
+            created, nothing will be picked up, not claimed as recorded;
+        (b) NO dropped-request signal fires for it: no
+            ``fix_dispatch_fault`` admission-refusal counter and no
+            drop-anomaly row (the cap has its OWN token; DS-19 keeps the
+            refusal signals separate).
+
+        **WHICH ASSERTION DISCRIMINATES (measured, not assumed):** after
+        F-G2 the generic-fault branch ALSO says "NOT recorded … NOTHING
+        will be picked up", so (a) SURVIVES the M-E3d plant (the
+        structural ``except SkillFixBurstCapRefused`` removed) — (b) is
+        the DISCRIMINATOR: without the structural catch the designed
+        refusal falls into the generic fault path, which emits the
+        dropped-request signal (``fix_dispatch_fault`` + the drop
+        anomaly). (a) is kept here anyway: the pin is self-contained,
+        and (a) is the property the leg protects.
+        """
+        from daemon.services.skill_job_dispatcher import (
+            SkillFixBurstCapRefused,
+        )
+
+        reporter = _RecordingReporter()
+        observability.set_anomaly_reporter(reporter)
+
+        result = await _drive_skill_fix(
+            SkillFixBurstCapRefused("refused: burst cap — 3 FIX admissions")
+        )
+
+        # (a) the truthful negative — the agent is told.
+        assert "NOTHING will be picked up" in result, (
+            f"the designed refusal must tell the agent nothing will pick "
+            f"it up: {result!r}"
+        )
+        assert "NO skill-keeper job" in result, (
+            f"the designed refusal must tell the agent no job exists: {result!r}"
+        )
+        assert FALSE_DURABILITY_SENTENCE not in result, (
+            f"the designed refusal must not claim the request is recorded: {result!r}"
+        )
+
+        # (b) NO dropped-request signal for a DESIGNED refusal.
+        refusals = observability.counters_snapshot()["admission_refusals"]
+        assert "fix_dispatch_fault" not in refusals, (
+            "a designed refusal must never be counted as a dropped "
+            f"request: {refusals!r}"
+        )
+        drop_anomalies = [
+            call
+            for call in reporter.calls
+            if "fix_dispatch_fault" in str(call.get("description", ""))
+        ]
+        assert not drop_anomalies, (
+            "a designed refusal must never raise a dropped-request "
+            f"anomaly: {drop_anomalies!r}"
         )
 
     @pytest.mark.asyncio

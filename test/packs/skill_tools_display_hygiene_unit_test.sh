@@ -375,7 +375,7 @@ PYEOF
                     burst_cap_refusal = e
 ' \
 '' \
-"$PIN_FILE::TestH2BurstCapRefusalIsTruthful::test_the_false_durability_sentence_is_absent"
+"$PIN_FILE::TestH2BurstCapRefusalIsTruthful::test_the_designed_refusal_is_truthful_and_is_not_a_dropped_request"
 
   # M-E3e (F-G2) — the generic-fault envelope regresses to the CONSTANT
   # "still recorded" wording (the empirically FALSE sentence the tester
