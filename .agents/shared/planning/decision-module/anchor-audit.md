@@ -248,7 +248,7 @@ These strings were **removed from the design prose** and live **only in this art
 | `scope-and-doctrine.md` | 283 |
 | `seam-registry.md` | 312 |
 | `thin-client.md` | 250 |
-| `decisions.md` | 379 (decisions record — over the rule, adjudicated; see `decisions.md` §6 Notes) |
+| `decisions.md` | 389 (decisions record — over the rule, adjudicated; see `decisions.md` §6 Notes) |
 | `anchor-audit.md` (this artefact) | exempt — evidence, not design |
 | `decisions.md` (this artefact) | exempt — decisions record, not design |
 
