@@ -32,4 +32,4 @@ On failure the tool returns a short `Error: ...` string; I relay it as-is and ne
 
 ## Image Reading — `explain_image`
 
-`explain_image` is the only route that gets image pixels read — it fetches the local file or URL and attaches the bytes to the vision model; a local path must resolve inside my project's main directory or one of its related directories. If it refuses a path, copy the file under one of the allowed directories it names (or have its directory added to the project as a related directory). Never spawn `image-reader` with a bare path in prose: that agent has no filesystem access, so a path is only text to it and the turn is wasted.
+`explain_image` is the only route that gets image pixels read — it fetches the local file or URL and attaches the bytes to the vision model. A local path may be ANY readable path on the daemon host (absolute, or relative to my project's main directory), capped at 10 MB and validated as a real PNG/JPEG/GIF/WebP; a nonexistent or unreadable path comes back as an honest load error. Never spawn `image-reader` with a bare path in prose: that agent has no filesystem access, so a path is only text to it and the turn is wasted.

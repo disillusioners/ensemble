@@ -15,12 +15,10 @@ import base64
 import binascii
 import ipaddress
 import logging
-import os
 import re
 import socket
 import stat
 import uuid
-from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -165,8 +163,7 @@ async def _load_image_as_data_uri(image: str) -> str:
         ValueError: If the source string is empty, the format is unsupported,
             the URL cannot be reached, the URL resolves to a private/reserved
             IP, the image exceeds ``_MAX_IMAGE_BYTES``, or a local file is
-            missing / outside the project's allowed directories / not a
-            regular file.
+            missing / not readable / not a regular file.
         httpx.HTTPError: If an HTTP fetch fails (timeout, connection error,
             non-2xx status). The caller catches and returns a tool error.
         OSError: If a local read fails (permissions, I/O). Caught by caller.
@@ -274,131 +271,51 @@ async def _load_image_from_url(url: str) -> str:
     return f"data:image/{fmt};base64,{b64}"
 
 
-def _resolve_scope_roots(allowed_roots: "str | Iterable[str] | None") -> list[Path]:
-    """Resolve declared local-path scope roots to existing real directories.
-
-    The image tool confines local reads to the calling project's declared
-    directories: the project ``main_directory`` PLUS every
-    ``related_directories`` entry. A caller may also pass a single root
-    (the ``compare_images`` facade and older call sites do), so both a
-    bare string and an iterable are accepted.
-
-    Roots are ``resolve()``-d up front (real path, symlinks followed) and
-    de-duplicated. Entries that are empty, non-string, unresolvable, or
-    not a directory are dropped — an unusable root can never widen or
-    silently weaken the scope, and an empty result makes the validator
-    fail closed.
-
-    Args:
-        allowed_roots: A single root path, or an iterable of root paths
-            (typically ``[main_directory, *related_directories]``).
-
-    Returns:
-        The list of resolved, existing directories, order-preserving.
-    """
-    if allowed_roots is None:
-        candidates: list[object] = []
-    elif isinstance(allowed_roots, str):
-        candidates = [allowed_roots]
-    else:
-        try:
-            candidates = list(allowed_roots)
-        except TypeError:
-            candidates = []
-
-    roots: list[Path] = []
-    for candidate in candidates:
-        if not isinstance(candidate, str) or not candidate.strip():
-            continue
-        try:
-            resolved_root = Path(candidate).expanduser().resolve()
-        except (OSError, RuntimeError, ValueError):
-            continue
-        # ``os.path.isdir`` (not ``Path.is_dir``) on purpose: the real
-        # directory check must consult the filesystem, never an
-        # instance-level ``Path.stat`` override.
-        if not os.path.isdir(str(resolved_root)):
-            continue
-        if resolved_root not in roots:
-            roots.append(resolved_root)
-    return roots
-
-
-def _is_within_scope(resolved: Path, roots: list[Path]) -> bool:
-    """Return True when ``resolved`` sits inside one of ``roots``.
-
-    Both sides are already real paths (``resolve()`` ran before this
-    check), so ``..`` traversal and symlink escapes are settled: a link
-    that points outside every root resolves to a target the containment
-    test rejects. Containment uses ``Path.relative_to`` on the resolved
-    paths.
-    """
-    for root in roots:
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            continue
-        return True
-    return False
-
-
 def _validate_local_path(
     path_str: str,
-    workdir: "str | Iterable[str] | None",
+    base_dir: "str | None" = None,
 ) -> tuple[Path | None, str | None]:
-    """Validate that ``path_str`` resolves to a regular file inside scope.
+    """Resolve ``path_str`` to an existing regular file (no confinement).
 
-    The allowed scope is the calling project's declared directories —
-    its ``main_directory`` plus every ``related_directories`` entry —
-    which callers pass either as one root string or as the full list.
-    Relative paths resolve against the first (primary) root. The boundary
-    applies to BOTH relative and absolute paths, and the tool fails
-    closed (rejects the path) when no scope root resolves.
+    The image tool reads ANY local path the daemon host can read — there is
+    deliberately no directory confinement. This helper only settles the
+    path itself:
 
-    Escape resistance: the candidate is ``resolve``-d with
-    ``strict=True`` (``..`` collapsed, symlinks followed) and the
-    REAL path is then containment-checked against the REAL roots, so a
-    symlink or traversal that lands outside every declared directory is
-    rejected rather than accepted by its lexical form.
+    * a RELATIVE path is anchored at ``base_dir`` (a convenience anchor —
+      normally the calling project's main directory); when ``base_dir`` is
+      ``None`` or unusable the process working directory anchors it. The
+      anchor is NOT a boundary: an absolute path, or a resolved target that
+      lands outside the anchor, is read just as happily;
+    * ``..`` is collapsed and symlinks are FOLLOWED by ``resolve(strict=True)``,
+      so a link to a readable file is accepted exactly like the file itself;
+    * the target must exist and be a regular file.
 
     Args:
         path_str: Path provided by the caller (relative or absolute).
-        workdir: The allowed scope — a single root path, or an iterable
-            of roots (project main_directory + related_directories). If
-            ``None`` or empty, every path is rejected — there is no safe
-            fallback for the image tool.
+        base_dir: Optional anchor used ONLY for relative paths (typically the
+            calling project's ``main_directory``). Never a boundary.
 
     Returns:
-        ``(resolved_path, None)`` on success, or ``(None, error_msg)`` if
-        the path escapes the allowed scope, does not exist, cannot be
-        resolved, or is not a regular file.
+        ``(resolved_path, None)`` on success, or ``(None, error_msg)`` if the
+        path does not exist, cannot be resolved, or is not a regular file.
     """
-    roots = _resolve_scope_roots(workdir)
-    if not roots:
-        return None, (
-            "No project workdir or related directories are available — "
-            "cannot validate local file path for security (fail-closed)."
-        )
-
-    raw = Path(path_str)
-    if not raw.is_absolute():
-        raw = roots[0] / raw
+    raw = Path(path_str).expanduser()
+    if not raw.is_absolute() and isinstance(base_dir, str) and base_dir.strip():
+        try:
+            anchor = Path(base_dir).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            anchor = None
+        if anchor is not None:
+            raw = anchor / raw
 
     try:
         resolved = raw.resolve(strict=True)
     except FileNotFoundError:
         return None, f"Image file does not exist: {path_str}"
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
+        # ``RuntimeError`` covers a symlink loop; ``OSError`` covers the rest
+        # (permission on a parent directory, I/O errors, path too long).
         return None, f"Cannot resolve path {path_str!r}: {exc}"
-
-    if not _is_within_scope(resolved, roots):
-        allowed = ", ".join(str(root) for root in roots)
-        return None, (
-            f"Path {path_str!r} is outside the project's allowed directories; "
-            f"it must resolve inside one of [{allowed}]. Remedy: copy the "
-            "image under one of those directories, or add its directory to "
-            "the project's related directories."
-        )
 
     file_stat = resolved.stat()
     if not stat.S_ISREG(file_stat.st_mode):
@@ -408,36 +325,33 @@ def _validate_local_path(
 
 def _load_image_from_path(
     path: str,
-    workdir: "str | Iterable[str] | None" = None,
+    base_dir: "str | None" = None,
 ) -> str:
     """Read a local image file and return a base64 data URI.
 
-    Uses ``_validate_local_path`` to enforce the project's allowed local
-    scope for BOTH relative and absolute paths — absolute paths are not
-    a bypass. Fails closed (rejects the path) when no scope root
-    resolves, so the tool cannot read arbitrary files outside the
-    project.
+    Reads ANY local path the daemon host can read — there is no directory
+    confinement. ``_validate_local_path`` settles existence, symlink
+    resolution and regular-file shape; this function then applies the size
+    cap and the magic-byte / extension MIME validation.
 
     Args:
-        path: Filesystem path to the image (absolute or relative to the
-            primary scope root).
-        workdir: The allowed scope — a single root, or the project's
-            ``[main_directory, *related_directories]`` list. When
-            ``None``/empty the path is rejected — see
-            ``_validate_local_path``.
+        path: Filesystem path to the image (absolute, or relative to
+            ``base_dir``).
+        base_dir: Optional anchor for RELATIVE paths only (normally the
+            calling project's main directory). Never a boundary — absolute
+            paths and resolved targets outside the anchor are read normally.
 
     Returns:
         A ``data:image/{format};base64,{base64_data}`` string ready to pass
         to ``invoke_agent_and_wait`` via its ``images`` parameter.
 
     Raises:
-        ValueError: If the path escapes the project's allowed scope, the
-            file does not exist, is not a regular file, exceeds
-            ``_MAX_IMAGE_BYTES``, or the magic-byte / extension check
-            fails.
+        ValueError: If the file does not exist, is not a regular file,
+            exceeds ``_MAX_IMAGE_BYTES``, or the magic-byte / extension
+            check fails.
         OSError: If the read fails (permissions, I/O). Caught by caller.
     """
-    resolved, err = _validate_local_path(path, workdir)
+    resolved, err = _validate_local_path(path, base_dir)
     if err:
         raise ValueError(err)
     assert resolved is not None  # for type-checkers
@@ -561,39 +475,28 @@ def create_image_tools(manager: "InstanceManager", current_instance_id: str) -> 
         except Exception:
             return None
 
-    def _get_project_scope_roots() -> list[str]:
-        """Auto-inject the project's allowed local-path roots.
+    def _get_project_base_dir() -> str | None:
+        """Auto-inject the project's main directory as a relative-path anchor.
 
-        The allowed scope for a local image path is the calling
-        instance's project declaration: ``main_directory`` PLUS every
-        entry in ``related_directories`` (the project owner already
-        declared those directories as part of this project). Returns an
-        empty list when no project / no declared directory resolves, so
-        ``_load_image_from_path`` fails closed.
-
-        Used by ``_load_image_from_path`` so the image tool cannot read
-        files outside the project's declared scope via symlinks,
-        traversal, or absolute paths.
+        ``explain_image`` reads ANY local path; this anchor exists ONLY so a
+        caller's relative path (``shot.png``) still resolves somewhere
+        predictable — the calling project's ``main_directory``. It is NOT a
+        boundary: absolute paths and resolved targets outside it are read
+        normally. Returns ``None`` when no project / no main directory
+        resolves, and relative paths then anchor at the process cwd.
         """
         try:
             instance_meta = manager._instance_repository.get(current_instance_id)
             if instance_meta and instance_meta.project_id:
                 project = manager._project_repository.get(instance_meta.project_id)
                 if project is None:
-                    return []
-                roots: list[str] = []
+                    return None
                 main_directory = getattr(project, "main_directory", None)
                 if isinstance(main_directory, str) and main_directory.strip():
-                    roots.append(main_directory)
-                related = getattr(project, "related_directories", None)
-                if isinstance(related, (list, tuple, set, frozenset)):
-                    for entry in related:
-                        if isinstance(entry, str) and entry.strip():
-                            roots.append(entry)
-                return roots
+                    return main_directory
         except Exception:
             pass
-        return []
+        return None
 
     @register_tool_category("image")
     @tool
@@ -611,18 +514,17 @@ def create_image_tools(manager: "InstanceManager", current_instance_id: str) -> 
 
         URLs are validated against an SSRF guard (private/loopback IPs
         rejected, redirects walked manually up to ``_MAX_REDIRECT_HOPS``
-        hops with each hop re-validated) and capped at 10 MB. Local paths
-        must resolve inside the project's allowed directories — its main
-        directory plus every related directory — for both relative and
-        absolute paths. The tool fails closed (rejects the path) when no
-        allowed directory resolves.
+        hops with each hop re-validated) and capped at 10 MB. A local path
+        may be ANY readable path on the daemon host — absolute or relative
+        (a relative path anchors at the calling project's main directory).
+        Local files are capped at 10 MB and must be a valid PNG/JPEG/GIF/
+        WebP. A nonexistent or unreadable path returns an honest load error,
+        not a scope refusal.
 
         This tool is the ONLY route that gets image pixels read: it
         fetches the bytes and attaches them to the vision model. Never
         hand a bare path to the image-reader agent — it has no filesystem
-        access and cannot open one. If a path is refused, copy the file
-        under one of the allowed directories or add its directory to the
-        project's related directories.
+        access and cannot open one.
 
         Args:
             image: URL (``http://`` / ``https://``) or local file path to an
@@ -639,7 +541,7 @@ def create_image_tools(manager: "InstanceManager", current_instance_id: str) -> 
             short ``"Error: ..."`` string — it never raises.
         """
         pid = _get_project_id()
-        scope_roots = _get_project_scope_roots()
+        base_dir = _get_project_base_dir()
 
         # Load + base64-encode the image so the vision model actually sees
         # the bytes (URLs alone never reach the multimodal pipeline). All
@@ -650,7 +552,7 @@ def create_image_tools(manager: "InstanceManager", current_instance_id: str) -> 
             if lowered.startswith("http://") or lowered.startswith("https://"):
                 image_data_uri = await _load_image_from_url(image)
             else:
-                image_data_uri = _load_image_from_path(image, workdir=scope_roots)
+                image_data_uri = _load_image_from_path(image, base_dir=base_dir)
         except Exception as exc:
             logger.warning("Failed to load image for explain_image: %s", exc)
             return f"Error: Failed to load image {image!r}: {exc}"
@@ -707,20 +609,18 @@ answer, or analysis — directly to the caller.
 URLs are validated against an SSRF guard (private/loopback IPs are
 rejected and redirects are walked manually up to ``_MAX_REDIRECT_HOPS``
 hops with each hop re-validated). Both URLs and local paths are
-capped at ``_MAX_IMAGE_BYTES`` (10 MB). Local paths must resolve
-inside the project's allowed directories — its main directory plus
-every related directory — for both relative and absolute paths. The
-tool fails closed (rejects the path) when no allowed directory
-resolves. Format is detected from magic bytes
+capped at ``_MAX_IMAGE_BYTES`` (10 MB). A local path may be ANY
+readable path on the daemon host — absolute, or relative (a relative
+path anchors at the calling project's main directory). A nonexistent
+or unreadable path returns an honest ``file not found`` / ``unreadable``
+error, never a scope refusal. Format is detected from magic bytes
 first, then verified against the Content-Type header / URL extension
 / file extension hint.
 
 This tool is the ONLY route that gets image pixels read: it fetches
 the bytes and attaches them to the vision model. Never hand a bare
 path to the image-reader agent — it has no filesystem access and
-cannot open one. If a path is refused, copy the file under one of the
-allowed directories or add its directory to the project's related
-directories (the refusal names the allowed roots).
+cannot open one.
 
 Args:
     image: URL (``http://`` / ``https://``) or local file path to an
@@ -751,17 +651,16 @@ Example:
     # image_list / image_get — agent-facing surface over the
     # daemon-side tmp_images store.
     #
-    # Unlike ``explain_image`` (which the agent-instruction must keep
-    # workdir-confined), these tools run DAEMON-SIDE with full
-    # ``data_dir`` access via ``manager.tmp_image_store``. The
-    # distinction is deliberate — see
-    # ``agents/designer/tools_note.md`` (WP4): ``explain_image`` reads
-    # bytes the agent already has a reference to; ``image_*`` writes
-    # to + reads from the canonical image substrate that ships with
-    # the daemon (the same store the HTTP router uses). Confining
-    # ``image_save`` to the project workdir would mean the wire-up
-    # for path→data-URI pixels-at-dispatch had to be re-invented
-    # inside the agent, defeating the WP10 bridge.
+    # Unlike ``explain_image`` (which reads a caller-named path through
+    # the tool), these tools run DAEMON-SIDE with full ``data_dir``
+    # access via ``manager.tmp_image_store``. The distinction is
+    # deliberate — see ``agents/designer/tools_note.md`` (WP4):
+    # ``explain_image`` reads bytes the agent already has a reference
+    # to; ``image_*`` writes to + reads from the canonical image
+    # substrate that ships with the daemon (the same store the HTTP
+    # router uses). Routing ``image_save`` through the project workdir
+    # would mean the wire-up for path→data-URI pixels-at-dispatch had
+    # to be re-invented inside the agent, defeating the WP10 bridge.
     #
     # All three tools fail closed: a missing / unavailable store
     # surfaces a short ``"Error: ..."`` string so the agent can

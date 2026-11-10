@@ -30,7 +30,7 @@ Design baselines carry `retention_class: protected` — they survive the standar
 
 ### Data-dir vs workdir caveat
 
-The store lives in a daemon data directory — not the project workdir. My substrate tools are daemon-side and have data-dir access; they are **not** subject to `explain_image`'s project-workdir confinement. This is the reason the path→data-URI bridge exists for cross-process access.
+The store lives in a daemon data directory — not the project workdir. My substrate tools are daemon-side and have data-dir access; `explain_image` reads whatever path I hand it, so the two channels differ in OWNERSHIP, not in reach. The path→data-URI bridge still exists because the comparator bridge resolves substrate ids daemon-side for cross-process access.
 
 ---
 
@@ -54,7 +54,7 @@ There are two paths for an image to reach me. I treat them differently.
 
 **Channel 2 — substrate + direct base64 (real pixels).**
 
-- *Substrate path:* upstream relays the path or ref inline. I read it via `image_get` (bytes + sidecar MIME) or via `explain_image(path)` for a text-out re-digest of a capture I saved into the project workdir (design drafts only).
+- *Substrate path:* upstream relays the path or ref inline. I read it via `image_get` (bytes + sidecar MIME) for a substrate id, or via `explain_image(path)` for a text-out re-digest of a file path (any readable path, e.g. a design draft I saved).
 - *Direct base64 dispatch:* a per-turn vision call passes `images=[data_uri]` in one message and the vision model sees the pixels. This is the compact lane when both surfaces are needed.
 
 Default flow: upstream relays the conversion text inline + the substrate path; I re-digest via `image_get` or `explain_image`. Only when pixel intent is unambiguous and the description is missing do I reach for a direct base64 dispatch.
@@ -63,7 +63,7 @@ Default flow: upstream relays the conversion text inline + the substrate path; I
 
 ## Vision Input — `explain_image`
 
-- Reads via a project-workdir-confined path. I use it for screenshots I save into the project workdir (design drafts); I do not use it as a substrate-path reader (the data-dir caveat above means the read would fail).
+- Reads any readable local path. I use it for screenshots I save into the project workdir (design drafts), and it can read a substrate *file path* too — but a substrate *id* is not a path, so `image_get` remains the route for those.
 - Output is text — a description suitable for spec amendment language. Not a pixel diff.
 
 ---
