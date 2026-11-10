@@ -3571,6 +3571,102 @@ def classify_memoir_enabled(raw: str) -> tuple[bool, str, str | None]:
     return False, MEMOIR_RESOLUTION_INDETERMINATE, raw
 
 
+class DecisionSeamsConfig(BaseSettings):
+    """Configuration for Decision Module per-seam switches (P1, shadow-only)."""
+
+    model_config = SettingsConfigDict(env_prefix="DECISION_SEAM_")
+
+    snapshot_l3_selection_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "snapshot_l3_selection_enabled",
+            "DECISION_SEAM_SNAPSHOT_L3_SELECTION",
+            "DECISION_SEAM_SNAPSHOT_L3_SELECTION_ENABLED",
+        ),
+        description=(
+            "Whether S1 (snapshot L3 selection) overlay consult is enabled. "
+            "Default False. Env: DECISION_SEAM_SNAPSHOT_L3_SELECTION."
+        ),
+    )
+    snapshot_l3_selection_stage: str = Field(
+        default="shadow",
+        validation_alias=AliasChoices(
+            "snapshot_l3_selection_stage",
+            "DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE",
+        ),
+        description=(
+            "Stage for S1 (snapshot L3 selection) overlay. "
+            "Default 'shadow'. Env: DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE."
+        ),
+    )
+
+
+class DecisionConfig(BaseSettings):
+    """Configuration for Decision Module (P1, shadow-only).
+
+    Namespace for the typed overlay client, kill channels, and seams.
+    Base URL and API key reuse OPENAI_* values by default (never mint
+    new key material); the reuse itself is resolved in
+    ``daemon/services/decision/config.py`` ``resolve_values`` (the
+    OPENAI fallback lives there, not as a property on this class).
+    Model defaults to 'decision' (purpose-id literal, already in _ALLOWED_MODELS_DEFAULT).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="DECISION_")
+
+    base_url: str = Field(
+        default="",
+        description="Decision proxy base URL (defaults to OPENAI_BASE_URL if empty). Env: DECISION_BASE_URL.",
+    )
+    api_key: str = Field(
+        default="",
+        description="Decision proxy API key (defaults to OPENAI_API_KEY if empty). Env: DECISION_API_KEY.",
+    )
+    model: str = Field(
+        default="",
+        description="Decision purpose-id model (resolves to 'decision' if empty). Env: DECISION_MODEL.",
+    )
+    timeout_s: float = Field(
+        default=5.0,
+        gt=0,
+        description="Per-lane call timeout in seconds. Env: DECISION_TIMEOUT_S.",
+    )
+    cost_ceiling_usd: float = Field(
+        default=50.0,
+        gt=0,
+        description="Ratified global monthly cost ceiling in USD. Env: DECISION_COST_CEILING_USD.",
+    )
+    token_ceiling: int = Field(
+        default=10_000_000,
+        gt=0,
+        description="Global monthly token ceiling fail-safe. Env: DECISION_TOKEN_CEILING.",
+    )
+    cost_floor_per_attempt_usd: float = Field(
+        default=0.0005,
+        ge=0,
+        description=(
+            "D3 per-attempt conservative cost floor in USD, applied to any "
+            "socket-reaching attempt that carries no usage. Env: "
+            "DECISION_COST_FLOOR_PER_ATTEMPT_USD. Lives beside the per-model "
+            "rate table. 0.0 disables the floor."
+        ),
+    )
+    pricing_usd_per_million_tokens: str = Field(
+        default="",
+        description="JSON object mapping model to USD rate per million tokens. Env: DECISION_PRICING_USD_PER_MILLION_TOKENS.",
+    )
+    global_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "global_enabled",
+            "DECISION_ENABLED",
+            "DECISION_GLOBAL_ENABLED",
+        ),
+        description="Global master kill switch for Decision Module. Default False. Env: DECISION_ENABLED.",
+    )
+    seams: DecisionSeamsConfig = Field(default_factory=DecisionSeamsConfig)
+
+
 class MemoirConfig(BaseSettings):
     """Configuration for the Memoir Store surface (phase 0, D0.4).
 
@@ -5791,6 +5887,8 @@ class Config(BaseSettings):
     # same default_factory pattern as every sibling section. Default OFF —
     # an auth-less yaml/env boots byte-equivalent to the pre-feature state.
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    # Decision Module (P1, shadow-only): typed overlay client and kill channels.
+    decision: DecisionConfig = Field(default_factory=DecisionConfig)
 
 
 # Warn-only deprecation guard for the removed reasoning-echo allowlist env
@@ -7100,6 +7198,7 @@ _spawn_intelligence_tier_boot_warned = False
 # cache + getter idiom. This accessor is the ONLY config.py change
 # the db-backed-settings commission carries.
 _RAW_YAML_LIMITS: Dict[str, Any] | None = None
+_RAW_YAML_DECISION: Dict[str, Any] | None = None
 
 
 def raw_yaml_limits() -> Dict[str, Any] | None:
@@ -7111,6 +7210,14 @@ def raw_yaml_limits() -> Dict[str, Any] | None:
     evidence accessor: nobody mutates the returned dict on the
     module's behalf (the copy is taken at capture time)."""
     return _RAW_YAML_LIMITS
+
+
+def raw_yaml_decision() -> Dict[str, Any] | None:
+    """Return the RAW processed ``decision`` section dict from the most
+    recent :func:`load_config` call in this process, or ``None`` when
+    the loaded file had no ``decision`` section (or ``load_config`` has
+    not run)."""
+    return _RAW_YAML_DECISION
 
 
 def load_config(config_path: str | None = None) -> Config:
@@ -7277,9 +7384,14 @@ def load_config(config_path: str | None = None) -> Config:
     # yaml tier. Copy taken so later mutation of processed_config
     # cannot rewrite history.
     global _RAW_YAML_LIMITS
+    global _RAW_YAML_DECISION
     raw_limits_section = processed_config.get("limits")
     _RAW_YAML_LIMITS = (
         dict(raw_limits_section) if isinstance(raw_limits_section, dict) else None
+    )
+    raw_decision_section = processed_config.get("decision")
+    _RAW_YAML_DECISION = (
+        dict(raw_decision_section) if isinstance(raw_decision_section, dict) else None
     )
     if "limits" in processed_config:
         config_dict["limits"] = processed_config["limits"]
@@ -7634,6 +7746,21 @@ def load_config(config_path: str | None = None) -> Config:
                 ens_value=_resolved_vscode_webview_csp_fix_env_value,
             ),
         }
+
+    if "decision" in processed_config:
+        dec_raw = processed_config["decision"]
+        if isinstance(dec_raw, dict):
+            clean_dec: dict[str, Any] = {}
+            for k, v in dec_raw.items():
+                if v is None:
+                    continue
+                if k == "seams" and isinstance(v, dict):
+                    clean_dec[k] = {sk: sv for sk, sv in v.items() if sv is not None}
+                else:
+                    clean_dec[k] = v
+            config_dict["decision"] = clean_dec
+        else:
+            config_dict["decision"] = dec_raw
 
     # Create and validate config
     config = Config(**config_dict)

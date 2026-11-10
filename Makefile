@@ -20,7 +20,33 @@
 # demo) requires ENSEMBLE_INSTALL_DEMO=1. See the guard script header for
 # the full contract (sudo form, sanctioned deploy/upgrade lanes).
 INSTALL_DIR ?=
+# TILDE NORMALIZATION (cross-lane fix 2026-11-09; D3 2026-11-10). The recipes
+# now QUOTE $(INSTALL_DIR), so the shell no longer expands a leading `~` —
+# the recipe would consume the literal `~/x` while the guard verifies
+# `$HOME/x`, a guard/recipe divergence (the F-01 class). Expand the tilde
+# ONCE, here, so both sides see the same string. `override` is REQUIRED: a
+# command-line `INSTALL_DIR=~/x` beats a makefile assignment (command-line
+# variables win), so without `override` the most common spelling would stay
+# unexpanded.
+# FORM (D3): the naive `patsubst ~/%,$(HOME)/%,$(INSTALL_DIR)` is WRONG —
+# `%` in a patsubst REPLACEMENT is the stem specifier, so a literal `%`
+# inside $HOME is consumed (HOME=/x%y + '~/z' expands to /xzy/z). This form
+# keeps $(HOME) OUT of any replacement: `filter` detects the `~/` prefix,
+# `patsubst` strips ONLY that prefix, and $(HOME) is concatenated outside —
+# a `%` in HOME is literal. Only `~/` is rewritten; `~user/x` and a bare `~`
+# pass through untouched (the guard's unverifiable-spelling refusal keeps
+# working), and the empty inert default stays empty.
+override INSTALL_DIR := $(if $(filter ~/%,$(INSTALL_DIR)),$(HOME)/$(patsubst ~/%,%,$(INSTALL_DIR)),$(INSTALL_DIR))
 export INSTALL_DIR
+
+# DEFAULT GOAL = help (contract g, P0 hotfix 2026-11-09).
+# Before this, the FIRST target defined in the file was `install-dir-guard`,
+# so a bare `make` ran the guard with an EMPTY target name and died with
+# "make <unknown>: REFUSING" (exit 2). The default goal must be a DISPLAY
+# target: `help` prints and mutates nothing. `.DEFAULT_GOAL := help` moves NO
+# target and adds NO rule, so the structural pins (guard-as-first-prereq,
+# guard-as-first-recipe-line, target headers at column 0) are untouched.
+.DEFAULT_GOAL := help
 
 # Project structure
 BACKEND_DIRS = daemon agents data
@@ -86,6 +112,14 @@ help:
 	@echo "  make pyinstaller-clean - Remove PyInstaller build files"
 	@echo "  make uninstall       - Remove the install at INSTALL_DIR (REQUIRED; refuses without it)"
 	@echo ""
+	@echo "REFUSAL NOTE:"
+	@echo "  make start  - REFUSES: it inherits the 'stop' prerequisite's guard line,"
+	@echo "                which requires INSTALL_DIR (plus the matching confirm var for a"
+	@echo "                live/demo dir). It never reaches start.sh until that guard opens."
+	@echo "  make dev    - REFUSES the same way via its 'stop' prerequisite; under -j (make >= 3.82)"
+	@echo "                the 'sync' step (uv sync in THIS repo) may still run before the refusal"
+	@echo "                lands - it touches only this repo, never an install dir."
+	@echo ""
 	@echo "Variables:"
 	@echo "  INSTALL_DIR=$(INSTALL_DIR)  (REQUIRED for install/uninstall/install-deps/stop/stop-by-port/start/dev/plist-install/watchdog-install)"
 	@echo "  ENSEMBLE_INSTALL_LIVE=1   confirm actions on a live dir (\$HOME/agents-ensemble, /opt/ensemble,"
@@ -120,7 +154,7 @@ sync:
 STOP_SCRIPT = scripts/stop-ensemble.sh
 stop:
 	@bash $(GUARD_SCRIPT) --target stop
-	@bash $(STOP_SCRIPT) $(INSTALL_DIR) $(PROD_PORT_FALLBACK)
+	@bash $(STOP_SCRIPT) "$(INSTALL_DIR)" $(PROD_PORT_FALLBACK)
 
 .PHONY: stop-by-port
 # STOP-BY-PORT port source: the TARGET install dir's own staged PORT
@@ -144,7 +178,7 @@ stop-by-port:
 	fi
 	@echo "$(RED)STOP_BY_PORT: killing by port $(STOP_PORT) can terminate UNRELATED listeners$(NC)"
 	@echo "$(RED)(dev+prod coexistence hosts share ports with clients — e.g. browsers). You opted in.$(NC)"
-	STOP_BY_PORT=1 bash $(STOP_SCRIPT) $(INSTALL_DIR) $(STOP_PORT)
+	STOP_BY_PORT=1 bash $(STOP_SCRIPT) "$(INSTALL_DIR)" $(STOP_PORT)
 
 # Start the daemon
 start: stop
@@ -177,7 +211,7 @@ install-deps:
 		echo "$(RED)Error: $(INSTALL_DIR) does not exist. Run 'make install' first.$(NC)"; \
 		exit 1; \
 	fi
-	cd $(INSTALL_DIR) && \
+	cd "$(INSTALL_DIR)" && \
 	if command -v uv >/dev/null 2>&1; then \
 		echo "$(GREEN)Using uv to sync dependencies...$(NC)"; \
 		uv sync; \
@@ -193,9 +227,24 @@ install-deps:
 # chain — ensure-latest does `git checkout latest`, which must never run on
 # an unconfirmed invocation) AND the first recipe line (belt against `-j`
 # reordering; the recipe line precedes stop-ensemble.sh, the first
-# side-effecting line). Serial make builds prerequisites in listed order;
-# under `-j` the guard still runs first in practice (it completes in ~10ms
-# before pyinstaller's toolchain boots) — documented residual.
+# side-effecting line).
+# `-j` BOUND (contract i): the guard is a PREREQ and the install RECIPE's
+# first line, and every `$(INSTALL_DIR)` mutation lives in that recipe —
+# which never runs after a failed prereq — so under `-j` the destructive
+# exposure is BOUNDED. The guard prereq PRECEDES the whole pyinstaller →
+# build → ensure-latest chain (ensure-latest is transitive, not a sibling),
+# so a refusal aborts BEFORE the toolchain chain and `git checkout latest`
+# never runs (verified end-to-end with a live-shaped target). On this host
+# (make 3.81) the invocation is fully serial anyway (see the .NOTPARALLEL
+# note below). (The old "~10ms" figure was a scheduling argument, not a
+# measurement — measured guard cost is 20-40 ms; it bounds nothing, the
+# prereq/recipe ordering above does.)
+# `.NOTPARALLEL: install` (below) also serialises the prerequisite chain.
+# NOTE: on GNU Make 3.81 the target-scoped form is NOT inert — the legacy
+# 3.81 semantics serialise the WHOLE invocation (a superset of the intended
+# effect, so the bound still holds, at the cost of parallelism); it becomes
+# target-scoped on GNU Make >= 3.82.
+.NOTPARALLEL: install
 install: ENS_GUARD_TARGET = install
 install: install-dir-guard pyinstaller
 	@bash $(GUARD_SCRIPT) --target install
@@ -205,11 +254,11 @@ install: install-dir-guard pyinstaller
 	# (incident fix 2026-08-16; see scripts/stop-ensemble.sh). A foreign
 	# daemon on the same port (dev+prod coexistence) is reported, not killed.
 	@echo "$(YELLOW)Stopping processes owned by $(INSTALL_DIR) (ownership-scoped)...$(NC)"
-	@bash $(STOP_SCRIPT) $(INSTALL_DIR) $(PROD_PORT_FALLBACK) || true
+	@bash $(STOP_SCRIPT) "$(INSTALL_DIR)" $(PROD_PORT_FALLBACK) || true
 	
 	# Clean up old backups (keep only 2 most recent)
 	@echo "$(YELLOW)Cleaning up old backups...$(NC)"; \
-	cd $(INSTALL_DIR) && { \
+	cd "$(INSTALL_DIR)" && { \
 		ls -dt backup-$(BINARY_NAME)-*.bak 2>/dev/null | tail -n +3 | xargs rm -f 2>/dev/null || true; \
 		ls -dt data-backup/data-* 2>/dev/null | tail -n +3 | xargs rm -rf 2>/dev/null || true; \
 	}; \
@@ -218,7 +267,7 @@ install: install-dir-guard pyinstaller
 	# Backup existing binary if present
 	@if [ -f "$(INSTALL_DIR)/$(BINARY_NAME)" ]; then \
 		echo "$(YELLOW)Backing up existing $(BINARY_NAME)...$(NC)"; \
-		mv $(INSTALL_DIR)/$(BINARY_NAME) $(INSTALL_DIR)/$(BACKUP_NAME); \
+		mv "$(INSTALL_DIR)/$(BINARY_NAME)" "$(INSTALL_DIR)/$(BACKUP_NAME)"; \
 		echo "$(GREEN)Backed up to $(BACKUP_NAME)$(NC)"; \
 	else \
 		echo "$(GREEN)No existing binary to backup.$(NC)"; \
@@ -231,9 +280,9 @@ install: install-dir-guard pyinstaller
 	# is wasteful. We always back up ensemble.json (backend selector +
 	# runtime config). In sqlite mode we additionally back up
 	# instances.db and checkpoints.db with their WAL/SHM sidecars.
-	@if [ -d "$(INSTALL_DIR)/data" ] && [ "$$(ls -A $(INSTALL_DIR)/data 2>/dev/null)" ]; then \
+	@if [ -d "$(INSTALL_DIR)/data" ] && [ "$$(ls -A "$(INSTALL_DIR)/data" 2>/dev/null)" ]; then \
 		echo "$(YELLOW)Backing up existing data directory (selective)...$(NC)"; \
-		mkdir -p $(INSTALL_DIR)/$(DATA_BACKUP_DIR); \
+		mkdir -p "$(INSTALL_DIR)/$(DATA_BACKUP_DIR)"; \
 		if command -v python3 >/dev/null 2>&1 && [ -f "$(INSTALL_DIR)/data/ensemble.json" ]; then \
 			BACKEND=$$(python3 -c "import json,sys; print(json.load(open('$(INSTALL_DIR)/data/ensemble.json')).get('database','sqlite'))" 2>/dev/null || echo sqlite); \
 		else \
@@ -246,7 +295,7 @@ install: install-dir-guard pyinstaller
 		fi; \
 		for f in $$FILES; do \
 			if [ -f "$(INSTALL_DIR)/data/$$f" ]; then \
-				cp -p $(INSTALL_DIR)/data/$$f $(INSTALL_DIR)/$(DATA_BACKUP_DIR)/; \
+				cp -p "$(INSTALL_DIR)/data/$$f" "$(INSTALL_DIR)/$(DATA_BACKUP_DIR)/"; \
 				echo "  backed up $$f"; \
 			fi; \
 		done; \
@@ -256,13 +305,13 @@ install: install-dir-guard pyinstaller
 	fi
 	
 	# Create installation directory
-	mkdir -p $(INSTALL_DIR)
-	mkdir -p $(INSTALL_DIR)/data
+	mkdir -p "$(INSTALL_DIR)"
+	mkdir -p "$(INSTALL_DIR)/data"
 	
 	# Copy binary
 	@echo "$(YELLOW)Installing $(BINARY_NAME)...$(NC)"
-	cp dist/$(BINARY_NAME) $(INSTALL_DIR)/$(BINARY_NAME)
-	chmod +x $(INSTALL_DIR)/$(BINARY_NAME)
+	cp dist/$(BINARY_NAME) "$(INSTALL_DIR)/$(BINARY_NAME)"
+	chmod +x "$(INSTALL_DIR)/$(BINARY_NAME)"
 	
 	# Remove daemon folder if exists (binary is self-contained, local daemon would shadow bundled code)
 	@if [ -d "$(INSTALL_DIR)/daemon" ]; then \
@@ -272,8 +321,8 @@ install: install-dir-guard pyinstaller
 	
 	# Copy agents directory (clean copy)
 	@echo "$(YELLOW)Copying agents...$(NC)"
-	rm -rf $(INSTALL_DIR)/agents
-	cp -r $(CURDIR)/agents $(INSTALL_DIR)/agents
+	rm -rf "$(INSTALL_DIR)/agents"
+	cp -r $(CURDIR)/agents "$(INSTALL_DIR)/agents"
 	
 	# Copy config.yaml AS-IS (no port munging — the old sed targeting
 	# 'port: ${PORT:-8079}' never matched the actual 'port: ${PORT:-8088}'
@@ -281,7 +330,7 @@ install: install-dir-guard pyinstaller
 	# staged to INSTALL_DIR/.env, which config.yaml's ${PORT:-…} interpolation
 	# resolves from the exported environment)
 	@echo "$(YELLOW)Copying config.yaml (unmodified)...$(NC)"
-	cp $(CONFIG_FILE) $(INSTALL_DIR)/$(CONFIG_FILE)
+	cp $(CONFIG_FILE) "$(INSTALL_DIR)/$(CONFIG_FILE)"
 	
 	# Stage env: repo .env.prod → INSTALL_DIR/.env — the single canonical
 	# prod env source (ADR-014). No .env / .env.example fallback anymore:
@@ -295,7 +344,7 @@ install: install-dir-guard pyinstaller
 		echo "$(RED)then set PORT=9797 (canonical prod port) and your prod values.$(NC)"; \
 		exit 1; \
 	fi
-	cp $(ENV_PROD_FILE) $(INSTALL_DIR)/.env
+	cp $(ENV_PROD_FILE) "$(INSTALL_DIR)/.env"
 	
 	# Stage the launchd plist with the real install path substituted
 	# (template lives in scripts/ensemble-prod.plist with placeholders).
@@ -307,24 +356,24 @@ install: install-dir-guard pyinstaller
 	# → placeholder replaced by exactly that string. The redirect is quoted
 	# for the same reason (shell split/glob safety).
 	@echo "$(YELLOW)Staging launcher + plist...$(NC)"
-	cp $(CURDIR)/launcher.sh $(INSTALL_DIR)/launcher.sh
-	chmod +x $(INSTALL_DIR)/launcher.sh
-	mkdir -p $(INSTALL_DIR)/data
+	cp $(CURDIR)/launcher.sh "$(INSTALL_DIR)/launcher.sh"
+	chmod +x "$(INSTALL_DIR)/launcher.sh"
+	mkdir -p "$(INSTALL_DIR)/data"
 	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/ensemble-prod.plist \
 		> "$(INSTALL_DIR)/data/ensemble-prod.plist"
 	# Watchdog-watcher (m3): stage the script + its launchd-agent plist
 	# (same literal-substitution awk as above — no sed `&` hazards).
-	mkdir -p $(INSTALL_DIR)/scripts
-	cp $(CURDIR)/scripts/watchdog-watcher.sh $(INSTALL_DIR)/scripts/watchdog-watcher.sh
-	chmod +x $(INSTALL_DIR)/scripts/watchdog-watcher.sh
+	mkdir -p "$(INSTALL_DIR)/scripts"
+	cp $(CURDIR)/scripts/watchdog-watcher.sh "$(INSTALL_DIR)/scripts/watchdog-watcher.sh"
+	chmod +x "$(INSTALL_DIR)/scripts/watchdog-watcher.sh"
 	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/ensemble-watchdog-watcher.plist \
 		> "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist"
 	
 	# Copy frontend build (preserve frontend/dist/frontend/browser structure)
 	@echo "$(YELLOW)Copying frontend...$(NC)"
-	rm -rf $(INSTALL_DIR)/frontend/dist
-	mkdir -p $(INSTALL_DIR)/frontend/dist/frontend/browser
-	cp -r $(FRONTEND_DIST)/* $(INSTALL_DIR)/frontend/dist/frontend/browser/ || echo "$(YELLOW)Warning: Frontend not built. Run 'make build' first.$(NC)"
+	rm -rf "$(INSTALL_DIR)/frontend/dist"
+	mkdir -p "$(INSTALL_DIR)/frontend/dist/frontend/browser"
+	cp -r $(FRONTEND_DIST)/* "$(INSTALL_DIR)/frontend/dist/frontend/browser/" || echo "$(YELLOW)Warning: Frontend not built. Run 'make build' first.$(NC)"
 	
 	@echo "$(GREEN)Installation complete!$(NC)"
 	@echo ""
@@ -354,8 +403,8 @@ plist-install:
 		echo "$(RED)Error: $(INSTALL_DIR)/data/ensemble-prod.plist not found — run 'make install' first.$(NC)"; \
 		exit 1; \
 	fi
-	mkdir -p $(HOME)/Library/LaunchAgents
-	cp $(INSTALL_DIR)/data/ensemble-prod.plist $(HOME)/Library/LaunchAgents/ensemble-prod.plist
+	mkdir -p "$(HOME)/Library/LaunchAgents"
+	cp "$(INSTALL_DIR)/data/ensemble-prod.plist" "$(HOME)/Library/LaunchAgents/ensemble-prod.plist"
 	@echo "$(GREEN)Plist installed: $(HOME)/Library/LaunchAgents/ensemble-prod.plist$(NC)"
 	@echo ""
 	@echo "To load it (macOS launchd):"
@@ -383,8 +432,8 @@ watchdog-install:
 			exit 1; \
 		fi; \
 	fi
-	mkdir -p $(HOME)/Library/LaunchAgents
-	cp $(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist $(HOME)/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+	mkdir -p "$(HOME)/Library/LaunchAgents"
+	cp "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist" "$(HOME)/Library/LaunchAgents/ensemble-watchdog-watcher.plist"
 	@echo "$(GREEN)Watchdog-watcher agent installed: $(HOME)/Library/LaunchAgents/ensemble-watchdog-watcher.plist$(NC)"
 	@echo ""
 	@echo "To load it (macOS launchd):"
@@ -471,5 +520,5 @@ pyinstaller: build
 uninstall:
 	@bash $(GUARD_SCRIPT) --target uninstall
 	@echo "$(YELLOW)Removing $(INSTALL_DIR)...$(NC)"
-	rm -rf $(INSTALL_DIR)
+	rm -rf "$(INSTALL_DIR)"
 	@echo "$(GREEN)Uninstall complete!$(NC)"

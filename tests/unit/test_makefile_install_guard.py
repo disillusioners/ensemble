@@ -49,6 +49,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -78,9 +79,18 @@ MAKE_REFUSED_RC = 2
 GUARD_REFUSE_RC = 78
 
 
-def _base_env(home: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
+def _base_env(
+    home: Path,
+    extra: dict[str, str] | None = None,
+    drop_home: bool = False,
+) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in SCRUBBED_VARS}
     env["HOME"] = str(home)
+    if drop_home:
+        # F-02 arm probe: HOME must be genuinely ABSENT from the child env —
+        # popping it is the only honest way to test the "unset" spelling
+        # (os.environ always carries the operator's real HOME).
+        env.pop("HOME", None)
     env.update(extra or {})
     return env
 
@@ -90,12 +100,20 @@ def run_make(
     home: Path,
     extra_env: dict[str, str] | None = None,
     timeout: int = 60,
+    cwd: Path | None = None,
+    drop_home: bool = False,
 ) -> subprocess.CompletedProcess:
-    """Run make from the repo root with a fake HOME (carve-out rule)."""
+    """Run make from the repo root with a fake HOME (carve-out rule).
+
+    ``cwd`` overrides the working directory for the relative-spelling rows
+    (the guard resolves a relative INSTALL_DIR against ITS OWN cwd); the
+    default stays the repo root so every existing call is unchanged.
+    ``drop_home`` removes HOME from the child env entirely (F-02).
+    """
     return subprocess.run(
         ["make", *args],
-        cwd=str(REPO_ROOT),
-        env=_base_env(home, extra_env),
+        cwd=str(cwd or REPO_ROOT),
+        env=_base_env(home, extra_env, drop_home=drop_home),
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -108,14 +126,24 @@ def run_guard(
     install_dir: str | None = None,
     extra_env: dict[str, str] | None = None,
     timeout: int = 30,
+    drop_home: bool = False,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess:
-    """Invoke the guard script directly (guard-level proof; never writes)."""
-    env = _base_env(home, extra_env)
+    """Invoke the guard script directly (guard-level proof; never writes).
+
+    ``install_dir`` reaches the guard VERBATIM through the environment — make
+    never touches this spelling, so the raw-value arm sees exactly the bytes
+    the operator typed (that is why the metacharacter rows are guard-level).
+    ``drop_home`` removes HOME from the child env entirely (F-02). ``cwd``
+    moves the guard's working directory (the relative-spelling row resolves
+    a relative INSTALL_DIR against it).
+    """
+    env = _base_env(home, extra_env, drop_home=drop_home)
     if install_dir is not None:
         env["INSTALL_DIR"] = install_dir
     return subprocess.run(
         ["bash", str(GUARD), "--target", target],
-        cwd=str(REPO_ROOT),
+        cwd=str(cwd or REPO_ROOT),
         env=env,
         capture_output=True,
         text=True,
@@ -729,6 +757,592 @@ class TestMakefileWiring:
         assert text.startswith("#!/bin/bash")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# P0 SECURITY HOTFIX MATRIX — F-01 … F-05 refusal rows
+#
+# The guard script (scripts/install-dir-guard.sh) grew from 327 to 719 lines
+# of refusal arms. Every row below is a case the ARM must refuse BEFORE any
+# side effect. The five findings pinned here:
+#
+#   F-01  RAW-VALUE / UNVERIFIABLE-SPELLING ARM — `make` substitutes
+#         $(INSTALL_DIR) TEXTUALLY into the recipe and the shell re-parses it,
+#         so a spelling the guard cannot verify (whitespace, quotes, shell
+#         metacharacters, glob characters, or a non-normalized path) must
+#         never reach the recipe. STRUCTURAL: no confirm var opens it.
+#   F-02  HOME ARM — the protected set is HOME-derived; an unset/empty HOME
+#         SILENTLY SHRINKS it (the live dir stops being classified and the
+#         guard would exit 0). Fail CLOSED instead.
+#   F-03  MULTI-ENTRY LIVE SET — ENSEMBLE_LIVE_INSTALL_DIRS is PATH-syntax
+#         (colon-separated); the old quoted command substitution collapsed
+#         the whole list into ONE word, so no extension entry ever matched.
+#   F-04  CONTAINMENT ARM — `rm -rf` of an ANCESTOR of a protected install dir
+#         destroys the protected tree; `rm -rf` of a DESCENDANT is the same
+#         incident one level down. STRUCTURAL: no confirm var opens it.
+#   F-05  CASE / PATH RESOLUTION — case-folded comparison on Darwin and
+#         longest-existing-prefix PHYSICAL resolution, so an uppercase
+#         spelling, a non-existent intermediate, or a relative spelling of a
+#         live dir still classifies as live.
+#
+# REGRESSION NAMES pinned by this section: TestTildeSpellingGate (the
+# unverifiable-spelling first-line shape is SHARED with the tilde arm — both
+# keep the same wording), TestInertDefault / TestLiveGate / TestDemoGate
+# (the LIVE / DEMO / inert-default refusals are UNCHANGED and keep passing),
+# TestExtensibleLiveSet (single-entry behavior preserved), and
+# TestGuardCanonicalization (the symlink alias is still refused).
+#
+# SAFETY (mission rules, honored here verbatim): every path here lives under
+# the pytest tmp sandbox (the fake HOME is <tmp>/home); the LIVE install, the
+# demo install and /opt/ensemble are NEVER written; scripts/stop-ensemble.sh
+# is NEVER executed — the only make-level target used is the stop-free
+# `uninstall` recipe (echo / rm -rf / echo).
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: First-line anchor of the unverifiable-spelling refusal (F-01). The tilde
+#: arm (TestTildeSpellingGate) shares this exact shape.
+RAW_VALUE_FIRST_LINE = "REFUSING — INSTALL_DIR spelling"
+RAW_VALUE_TAIL = "cannot be verified safely."
+
+#: The two detail-line anchors of the F-01 arm — WHICH reason fired.
+DETAIL_METACHAR = "The path contains whitespace, quotes, shell metacharacters"
+DETAIL_NOT_NORMALIZED = "The path is not in normalized form"
+
+#: HOME arm (F-02) first line — fail CLOSED, never a silent shrink.
+HOME_ARM_FIRST_LINE = (
+    "REFUSING — HOME is unset or empty, so the protected install set "
+    "cannot be determined."
+)
+
+#: Containment arm (F-04) — the relation word and the STRUCTURAL marker.
+CONTAINS_ARM = "which CONTAINS the protected install dir"
+INSIDE_ARM = "which is INSIDE the protected install dir"
+STRUCTURAL_LINE = "This refusal is STRUCTURAL: no confirm var opens it"
+
+#: Live / demo classification wording (UNCHANGED by this hotfix).
+LIVE_ARM = "REFUSING — INSTALL_DIR resolves to a LIVE install dir"
+DEMO_ARM = "REFUSING — INSTALL_DIR resolves to the DEMO install"
+
+#: F-01 case table: (case-id, value template, detail anchor, make template).
+#:
+#: The value templates are formatted with `sbx` (the SAFE sandbox dir inside
+#: the fake home) and `home` (the fake home itself). Every value points at a
+#: SAFE dir — never at a protected one — so the ONLY reason for a refusal is
+#: the raw-value arm itself.
+#:
+#: The make template is None when MAKE rewrites the value before the guard
+#: ever sees it (make's `override INSTALL_DIR := $(patsubst …)` collapses
+#: whitespace, and `$(INSTALL_DIR)` expands `$H` in a `$HOME` spelling), so
+#: those spellings are asserted at GUARD level only. The `$` case reaches
+#: make verbatim as `$$` (make's escape for a literal `$`) and IS asserted at
+#: make level.
+RAW_VALUE_CASES = (
+    ("trailing-space", "{sbx} ", DETAIL_METACHAR, None),
+    ("leading-space", " {sbx}", DETAIL_METACHAR, None),
+    ("double-quote", '{sbx}"q', DETAIL_METACHAR, '{sbx}"q'),
+    ("single-quote", "{sbx}'q", DETAIL_METACHAR, "{sbx}'q"),
+    ("semicolon", "{sbx};x", DETAIL_METACHAR, "{sbx};x"),
+    ("pipe", "{sbx}|x", DETAIL_METACHAR, "{sbx}|x"),
+    ("ampersand", "{sbx}&x", DETAIL_METACHAR, "{sbx}&x"),
+    ("dollar", "{sbx}$HOME", DETAIL_METACHAR, "{sbx}$$HOME"),
+    ("backtick", "{sbx}`x`", DETAIL_METACHAR, "{sbx}`x`"),
+    ("less-than", "{sbx}<x", DETAIL_METACHAR, "{sbx}<x"),
+    ("greater-than", "{sbx}>x", DETAIL_METACHAR, "{sbx}>x"),
+    ("open-paren", "{sbx}(x", DETAIL_METACHAR, "{sbx}(x"),
+    ("close-paren", "{sbx})x", DETAIL_METACHAR, "{sbx})x"),
+    ("newline", "{sbx}\nx", DETAIL_METACHAR, "{sbx}\nx"),
+    ("tab", "{sbx}\tx", DETAIL_METACHAR, "{sbx}\tx"),
+    ("glob-star", "{sbx}*", DETAIL_METACHAR, "{sbx}*"),
+    ("double-slash", "{home}//sandbox", DETAIL_NOT_NORMALIZED, "{home}//sandbox"),
+    ("dot-slash-segment", "{home}/./sandbox", DETAIL_NOT_NORMALIZED, "{home}/./sandbox"),
+    ("trailing-slash", "{sbx}/", DETAIL_NOT_NORMALIZED, "{sbx}/"),
+)
+
+#: The subset make passes through VERBATIM (asserted at make level too).
+MAKE_VERBATIM_RAW_CASES = tuple(c for c in RAW_VALUE_CASES if c[3] is not None)
+
+RAW_VALUE_IDS = [c[0] for c in RAW_VALUE_CASES]
+MAKE_VERBATIM_RAW_IDS = [c[0] for c in MAKE_VERBATIM_RAW_CASES]
+
+
+def _safe_sandbox(home: Path, name: str = "sandbox") -> Path:
+    """A SAFE (never protected) dir inside the fake home, with a sentinel."""
+    sbx = home / name
+    sbx.mkdir(parents=True, exist_ok=True)
+    (sbx / "SENTINEL").write_text("do-not-delete")
+    return sbx
+
+
+def _ext_live_dir(root: Path, name: str) -> Path:
+    """A fake EXTENSION live dir (a sibling of the fake home) with a sentinel."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SENTINEL").write_text("do-not-delete")
+    return d
+
+
+def _assert_make_refused(result: subprocess.CompletedProcess, context: str) -> None:
+    """The make-level refusal shape: non-zero rc and the guard's code 78."""
+    assert result.returncode != 0, context
+    assert result.returncode == MAKE_REFUSED_RC, (context, result.returncode)
+    assert "Error 78" in result.stderr, (context, result.stderr)
+
+
+class TestRawValueArm:
+    """F-01 — UNVERIFIABLE SPELLING (the raw-value arm).
+
+    `make` substitutes $(INSTALL_DIR) TEXTUALLY into the recipe and the shell
+    then RE-PARSES it: a trailing space is stripped by word splitting (the
+    recipe then deletes the tree the guard verified as a different path) and
+    ';' / '|' are true command separators (arbitrary commands run inside a
+    make recipe). The guard compares the NORMALIZED path while the recipe
+    consumes the RAW one — so a spelling that differs from its normalized
+    form, or that carries characters a shell would re-parse, is REFUSED
+    STRUCTURALLY (no confirm var opens it).
+
+    The arm is one shared refusal (`_refuse_unverifiable`) with the tilde
+    arm, so the first-line shape asserted here is the SAME one
+    TestTildeSpellingGate pins — the two must not drift apart.
+    """
+
+    @pytest.mark.parametrize("case", RAW_VALUE_CASES, ids=RAW_VALUE_IDS)
+    def test_raw_value_spelling_refused_at_guard_level(self, fake_home, case):
+        """Every unverifyable spelling refuses at rc 78 with the shared
+        wording — and stays refused WITH the confirm var set (structural)."""
+        case_id, template, detail, _make_template = case
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+        value = template.format(sbx=str(sbx), home=str(fake_home))
+
+        r = run_guard("uninstall", fake_home, install_dir=value)
+        assert r.returncode == GUARD_REFUSE_RC, (case_id, r.stderr)
+        assert RAW_VALUE_FIRST_LINE in r.stderr, (case_id, r.stderr)
+        assert RAW_VALUE_TAIL in r.stderr, (case_id, r.stderr)
+        assert detail in r.stderr, (case_id, r.stderr)
+        # the guard never writes — but the SENTINELS prove nothing ran
+        assert sentinel_of(live).exists(), case_id
+        assert sentinel_of(sbx).exists(), case_id
+
+        # STRUCTURAL: ENSEMBLE_INSTALL_LIVE=1 does NOT open the raw-value arm
+        r_conf = run_guard(
+            "uninstall", fake_home, install_dir=value,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r_conf.returncode == GUARD_REFUSE_RC, (case_id, r_conf.stderr)
+        assert RAW_VALUE_TAIL in r_conf.stderr, (case_id, r_conf.stderr)
+        assert sentinel_of(live).exists(), case_id
+        assert sentinel_of(sbx).exists(), case_id
+
+    @pytest.mark.parametrize("case", MAKE_VERBATIM_RAW_CASES, ids=MAKE_VERBATIM_RAW_IDS)
+    def test_raw_value_spelling_refused_at_make_level(self, fake_home, case):
+        """The make-level refusal for every spelling make passes through
+        VERBATIM: non-zero rc, the guard's "Error 78", and the sandbox
+        sentinel still there (the rm -rf recipe never ran)."""
+        case_id, _template, detail, make_template = case
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+        value = make_template.format(sbx=str(sbx), home=str(fake_home))
+
+        r = run_make(["uninstall", f"INSTALL_DIR={value}"], fake_home)
+        _assert_make_refused(r, case_id)
+        assert RAW_VALUE_FIRST_LINE in r.stderr, (case_id, r.stderr)
+        assert RAW_VALUE_TAIL in r.stderr, (case_id, r.stderr)
+        assert detail in r.stderr, (case_id, r.stderr)
+        assert sentinel_of(live).exists(), case_id
+        assert sentinel_of(sbx).exists(), case_id
+
+    def test_make_level_metachar_payload_never_executes(self, fake_home):
+        """The command-injection shape: a `;`-separated payload in
+        INSTALL_DIR must not run. The guard refuses BEFORE the recipe, so the
+        injected command never executes and the sentinel survives."""
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+        marker = fake_home / "INJECTED"
+        payload = f"{sbx}; echo INJECTED > {marker}"
+
+        r = run_make(["uninstall", f"INSTALL_DIR={payload}"], fake_home)
+        _assert_make_refused(r, "semicolon-payload")
+        assert RAW_VALUE_TAIL in r.stderr, r.stderr
+        assert not marker.exists(), "the injected command RAN — guard ordering broken"
+        assert sentinel_of(live).exists()
+        assert sentinel_of(sbx).exists()
+
+
+class TestHomeArm:
+    """F-02 — HOME unset or empty must fail CLOSED.
+
+    The protected live/demo set is derived from $HOME (and SUDO_USER's home).
+    With HOME unset the $HOME candidates would be SILENTLY DROPPED, the
+    protected set would shrink, the live install would stop being recognised
+    — and the guard would exit 0 and let the recipe run. The arm refuses
+    instead, with no unbound-variable crash (the script captures every env
+    value up front with ${var:-}).
+    """
+
+    def test_home_empty_refused_at_guard_level(self, fake_home):
+        """HOME="" → the protected set cannot be determined → refuse (78)."""
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+        r = run_guard(
+            "uninstall", fake_home, install_dir=str(sbx), extra_env={"HOME": ""},
+        )
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert HOME_ARM_FIRST_LINE in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+        assert sentinel_of(sbx).exists()
+
+    def test_home_unset_refused_at_guard_level(self, fake_home):
+        """HOME absent from the child env → refuse (78), NOT 0 — and with no
+        unbound-variable crash (set -u safety)."""
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+        r = run_guard(
+            "uninstall", fake_home, install_dir=str(sbx), drop_home=True,
+        )
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert HOME_ARM_FIRST_LINE in r.stderr, r.stderr
+        assert "unbound variable" not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+        assert sentinel_of(sbx).exists()
+
+    def test_home_empty_refused_at_make_level(self, fake_home):
+        """make-level: HOME="" → the guard refuses before the recipe."""
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+        r = run_make(
+            ["uninstall", f"INSTALL_DIR={sbx}"], fake_home, extra_env={"HOME": ""},
+        )
+        _assert_make_refused(r, "home-empty")
+        assert HOME_ARM_FIRST_LINE in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+        assert sentinel_of(sbx).exists()
+
+    def test_home_unset_refused_at_make_level(self, fake_home):
+        """make-level: HOME absent → the guard refuses before the recipe."""
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+        r = run_make(
+            ["uninstall", f"INSTALL_DIR={sbx}"], fake_home, drop_home=True,
+        )
+        _assert_make_refused(r, "home-unset")
+        assert HOME_ARM_FIRST_LINE in r.stderr, r.stderr
+        assert "unbound variable" not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+        assert sentinel_of(sbx).exists()
+
+
+class TestMultiEntryLiveSet:
+    """F-03 — ENSEMBLE_LIVE_INSTALL_DIRS is PATH-syntax (colon-separated).
+
+    The old implementation used a QUOTED command substitution
+    (`for ext in /opt/ensemble "$(printf '%s' "$VAR" | tr ':' '\n')"`), which
+    collapsed the whole list into ONE word — so no extension entry ever
+    matched and the documented knob protected NOTHING. The list is now split
+    per entry, trimmed of surrounding whitespace, empty entries skipped and
+    globbing disabled. Regression guard: a SINGLE entry behaves exactly as
+    before (TestExtensibleLiveSet).
+    """
+
+    @pytest.mark.parametrize("entry", ["extA", "extB"])
+    def test_two_entry_live_set_protects_both(self, fake_home, tmp_path, entry):
+        """Two colon-separated entries → BOTH are protected (rc 78)."""
+        ext_a = _ext_live_dir(tmp_path, "extA")
+        ext_b = _ext_live_dir(tmp_path, "extB")
+        target = {"extA": ext_a, "extB": ext_b}[entry]
+        env = {"ENSEMBLE_LIVE_INSTALL_DIRS": f"{ext_a}:{ext_b}"}
+
+        r = run_guard("uninstall", fake_home, install_dir=str(target), extra_env=env)
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert sentinel_of(target).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={target}"], fake_home, extra_env=env)
+        _assert_make_refused(m, entry)
+        assert LIVE_ARM in m.stderr, m.stderr
+        assert sentinel_of(target).exists()
+
+    @pytest.mark.parametrize("entry", ["extA", "extB", "extC"])
+    def test_three_entry_live_set_protects_all(self, fake_home, tmp_path, entry):
+        """Three colon-separated entries → all three are protected (rc 78)."""
+        dirs = {n: _ext_live_dir(tmp_path, n) for n in ("extA", "extB", "extC")}
+        env = {"ENSEMBLE_LIVE_INSTALL_DIRS": ":".join(str(dirs[n]) for n in ("extA", "extB", "extC"))}
+        target = dirs[entry]
+
+        r = run_guard("uninstall", fake_home, install_dir=str(target), extra_env=env)
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert sentinel_of(target).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={target}"], fake_home, extra_env=env)
+        _assert_make_refused(m, entry)
+        assert LIVE_ARM in m.stderr, m.stderr
+        assert sentinel_of(target).exists()
+
+    @pytest.mark.parametrize("entry", ["extA", "extB"])
+    def test_whitespace_padded_entries_behave_identically(self, fake_home, tmp_path, entry):
+        """Whitespace-padded entries (" A : B ") are TRIMMED → identical to
+        the unpadded spelling (both entries stay protected)."""
+        ext_a = _ext_live_dir(tmp_path, "extA")
+        ext_b = _ext_live_dir(tmp_path, "extB")
+        env = {"ENSEMBLE_LIVE_INSTALL_DIRS": f" {ext_a} : {ext_b} "}
+        target = {"extA": ext_a, "extB": ext_b}[entry]
+
+        r = run_guard("uninstall", fake_home, install_dir=str(target), extra_env=env)
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert sentinel_of(target).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={target}"], fake_home, extra_env=env)
+        _assert_make_refused(m, entry)
+        assert LIVE_ARM in m.stderr, m.stderr
+        assert sentinel_of(target).exists()
+
+    def test_single_entry_behavior_unchanged(self, fake_home, tmp_path):
+        """REGRESSION: a single entry behaves exactly as before — refused
+        without the confirm var, opened with it."""
+        ext = _ext_live_dir(tmp_path, "extA")
+        env = {"ENSEMBLE_LIVE_INSTALL_DIRS": str(ext)}
+
+        r = run_guard("uninstall", fake_home, install_dir=str(ext), extra_env=env)
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert sentinel_of(ext).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={ext}"], fake_home, extra_env=env)
+        _assert_make_refused(m, "single-entry")
+        assert LIVE_ARM in m.stderr, m.stderr
+        assert sentinel_of(ext).exists()
+
+        r_conf = run_guard(
+            "uninstall", fake_home, install_dir=str(ext),
+            extra_env={**env, "ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r_conf.returncode == 0, r_conf.stderr
+        assert sentinel_of(ext).exists()  # the guard never writes
+
+    def test_glob_entry_matched_literally_never_expanded(self, fake_home, tmp_path):
+        """REGRESSION: an entry containing '*' is matched LITERALLY — the
+        guard must never glob-expand it, so a decoy path that the glob would
+        have matched is NOT refused."""
+        ext_a = _ext_live_dir(tmp_path, "extA")
+        decoy = _ext_live_dir(tmp_path, "extB")  # would match the glob "ext*"
+        env = {"ENSEMBLE_LIVE_INSTALL_DIRS": f"{tmp_path}/ext*"}
+
+        r = run_guard("uninstall", fake_home, install_dir=str(decoy), extra_env=env)
+        assert r.returncode == 0, r.stderr
+        assert "REFUSING" not in r.stderr, r.stderr
+        assert sentinel_of(decoy).exists()
+
+        # the LITERAL entry spelling is itself unverifyable (it carries a glob
+        # character) — it is refused as a spelling, never as a live dir
+        r_literal = run_guard(
+            "uninstall", fake_home, install_dir=f"{tmp_path}/ext*", extra_env=env,
+        )
+        assert r_literal.returncode == GUARD_REFUSE_RC, r_literal.stderr
+        assert RAW_VALUE_TAIL in r_literal.stderr, r_literal.stderr
+        assert sentinel_of(ext_a).exists()
+        assert sentinel_of(decoy).exists()
+
+        # make level: the decoy is NOT refused either — the recipe runs and
+        # removes it (proof the path was genuinely ALLOWED, not refused)
+        m = run_make(["uninstall", f"INSTALL_DIR={decoy}"], fake_home, extra_env=env)
+        assert m.returncode == 0, m.stderr
+        assert "REFUSING" not in m.stderr, m.stderr
+        assert not decoy.exists()
+        assert sentinel_of(ext_a).exists()
+
+
+class TestContainmentArm:
+    """F-04 — ANCESTOR / DESCENDANT containment (STRUCTURAL).
+
+    A recursive delete of an ANCESTOR of a protected install dir destroys the
+    protected tree ($HOME itself, /opt, …); a recursive delete of a
+    DESCENDANT is the same incident one level down (<live>/data). Both are
+    refused regardless of any confirm var — the confirm vars open a path that
+    IS the protected install dir, not one that swallows it. The false-positive
+    guard matters just as much: a plain subdir of $HOME is a NORMAL install
+    location and must stay allowed.
+    """
+
+    def test_home_itself_refused(self, fake_home):
+        """INSTALL_DIR=$HOME → CONTAINS the protected live dir."""
+        live = make_live_shaped(fake_home)
+        r = run_guard("uninstall", fake_home, install_dir=str(fake_home))
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert CONTAINS_ARM in r.stderr, r.stderr
+        assert STRUCTURAL_LINE in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+        # STRUCTURAL: the confirm var does not open it
+        r_conf = run_guard(
+            "uninstall", fake_home, install_dir=str(fake_home),
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r_conf.returncode == GUARD_REFUSE_RC, r_conf.stderr
+        assert CONTAINS_ARM in r_conf.stderr, r_conf.stderr
+        assert sentinel_of(live).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={fake_home}"], fake_home)
+        _assert_make_refused(m, "home-itself")
+        assert CONTAINS_ARM in m.stderr, m.stderr
+        assert sentinel_of(live).exists()
+
+    def test_ancestor_of_home_refused(self, fake_home, tmp_path):
+        """An ancestor of $HOME/agents-ensemble (here: the tmp root that
+        holds the fake home) → CONTAINS the protected live dir."""
+        live = make_live_shaped(fake_home)
+        r = run_guard("uninstall", fake_home, install_dir=str(tmp_path))
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert CONTAINS_ARM in r.stderr, r.stderr
+        assert STRUCTURAL_LINE in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={tmp_path}"], fake_home)
+        _assert_make_refused(m, "ancestor-of-home")
+        assert CONTAINS_ARM in m.stderr, m.stderr
+        assert sentinel_of(live).exists()
+
+    def test_descendant_of_live_refused(self, fake_home):
+        """A STRICT descendant of the live dir (<live>/data) → INSIDE."""
+        live = make_live_shaped(fake_home)
+        data = live / "data"
+        data.mkdir()
+        (data / "SENTINEL").write_text("do-not-delete")
+        r = run_guard("uninstall", fake_home, install_dir=str(data))
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert INSIDE_ARM in r.stderr, r.stderr
+        assert STRUCTURAL_LINE in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+        assert (data / "SENTINEL").exists()
+
+        r_conf = run_guard(
+            "uninstall", fake_home, install_dir=str(data),
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r_conf.returncode == GUARD_REFUSE_RC, r_conf.stderr
+        assert INSIDE_ARM in r_conf.stderr, r_conf.stderr
+
+        m = run_make(["uninstall", f"INSTALL_DIR={data}"], fake_home)
+        _assert_make_refused(m, "descendant-of-live")
+        assert INSIDE_ARM in m.stderr, m.stderr
+        assert sentinel_of(live).exists()
+
+    def test_descendant_of_demo_refused(self, fake_home):
+        """A STRICT descendant of the DEMO dir → INSIDE (demo is protected
+        too — confirming live must not open a demo descendant)."""
+        demo = fake_home / "agents-ensemble-demo"
+        demo.mkdir()
+        (demo / "SENTINEL").write_text("do-not-delete")
+        data = demo / "data"
+        data.mkdir()
+        r = run_guard("uninstall", fake_home, install_dir=str(data))
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert INSIDE_ARM in r.stderr, r.stderr
+        assert STRUCTURAL_LINE in r.stderr, r.stderr
+        assert sentinel_of(demo).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={data}"], fake_home)
+        _assert_make_refused(m, "descendant-of-demo")
+        assert INSIDE_ARM in m.stderr, m.stderr
+        assert sentinel_of(demo).exists()
+
+    def test_plain_subdir_of_home_still_allowed(self, fake_home):
+        """FALSE-POSITIVE GUARD: a plain subdir of $HOME that is NOT a
+        protected dir ($HOME/sandbox) is a NORMAL install location and must
+        stay ALLOWED (rc 0) — the containment arm must not swallow it."""
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+
+        r = run_guard("uninstall", fake_home, install_dir=str(sbx))
+        assert r.returncode == 0, r.stderr
+        assert "REFUSING" not in r.stderr, r.stderr
+        assert sentinel_of(sbx).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={sbx}"], fake_home)
+        assert m.returncode == 0, m.stderr
+        assert "REFUSING" not in m.stderr, m.stderr
+        assert "Uninstall complete" in m.stdout
+        assert not sbx.exists()  # the recipe really ran on the sandbox
+        assert sentinel_of(live).exists()
+
+
+class TestCaseAndPathResolutionArm:
+    """F-05 — case-folded comparison + longest-existing-prefix PHYSICAL
+    resolution.
+
+    An uppercase spelling of a live dir (Darwin/APFS is case-insensitive), a
+    spelling whose INTERMEDIATE does not exist (<home>/ghost/../live), a
+    RELATIVE spelling resolved against the cwd, and a symlink alias must all
+    still classify as live. The physical resolution uses /bin/pwd -P (BSD) —
+    bash's builtin `pwd -P` echoes the TYPED casing, which compares unequal
+    to the real tree.
+    """
+
+    @pytest.mark.skipif(
+        sys.platform != "darwin",
+        reason="case-folded comparison is Darwin-only (APFS/HFS+ are "
+        "case-insensitive by default); on a case-sensitive filesystem the "
+        "uppercase spelling is a DIFFERENT path and must not be refused",
+    )
+    def test_darwin_case_variant_of_live_refused(self, fake_home):
+        """The UPPERCASE spelling of the live dir still classifies as live."""
+        live = make_live_shaped(fake_home)
+        upper = str(live).upper()
+        assert upper != str(live)
+
+        r = run_guard("uninstall", fake_home, install_dir=upper)
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={upper}"], fake_home)
+        _assert_make_refused(m, "case-variant")
+        assert LIVE_ARM in m.stderr, m.stderr
+        assert sentinel_of(live).exists()
+
+    def test_nonexistent_intermediate_spelling_refused(self, fake_home):
+        """<home>/ghost/../agents-ensemble — the intermediate does not exist,
+        so the guard resolves through the deepest EXISTING ancestor and
+        compares the PHYSICAL path: still live."""
+        live = make_live_shaped(fake_home)
+        assert not (fake_home / "ghost").exists()
+        spelling = f"{fake_home}/ghost/../agents-ensemble"
+
+        r = run_guard("uninstall", fake_home, install_dir=spelling)
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={spelling}"], fake_home)
+        _assert_make_refused(m, "ghost-intermediate")
+        assert LIVE_ARM in m.stderr, m.stderr
+        assert sentinel_of(live).exists()
+
+    def test_relative_live_spelling_refused(self, fake_home):
+        """A RELATIVE live spelling ("agents-ensemble") is resolved against
+        the CWD: with cwd=$HOME it is the live dir and must be refused.
+
+        Guard-level: the guard resolves a relative INSTALL_DIR against its
+        own cwd, so the probe runs with cwd=$HOME. Make-level: make resolves
+        the recipe's rm -rf against ITS cwd, so the probe runs with
+        cwd=$HOME too — and GUARD_SCRIPT is overridden with an absolute path
+        because the Makefile spells it relative to the repo root.
+        """
+        live = make_live_shaped(fake_home)
+        r = run_guard(
+            "uninstall", fake_home, install_dir="agents-ensemble", cwd=fake_home,
+        )
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+        m = run_make(
+            ["-f", str(MAKEFILE), f"GUARD_SCRIPT={GUARD}",
+             "uninstall", "INSTALL_DIR=agents-ensemble"],
+            fake_home, cwd=fake_home,
+        )
+        _assert_make_refused(m, "relative-live")
+        assert LIVE_ARM in m.stderr, m.stderr
+        assert sentinel_of(live).exists()
+
 # ══════════════════════════════════════════════════════════════════════════
 # ADDED 2026-11-09 (phase 2 of the live-install-guard mission) — APPEND-ONLY
 # ══════════════════════════════════════════════════════════════════════════
@@ -857,7 +1471,7 @@ class TestStopByPortPortScoping:
         assert r.returncode == 0, r.stderr
         assert "12345" in r.stdout
         assert "9797" not in r.stdout
-        assert f"scripts/stop-ensemble.sh {sbx} 12345" in r.stdout
+        assert f'scripts/stop-ensemble.sh "{sbx}" 12345' in r.stdout
 
     def test_no_repo_prod_port_leaks_into_the_kill(self, fake_home, tmp_path):
         """A dir with no staged PORT → the expanded kill line carries NO
@@ -869,7 +1483,8 @@ class TestStopByPortPortScoping:
         assert r.returncode == 0, r.stderr
         kill_lines = [ln for ln in r.stdout.splitlines() if "stop-ensemble.sh" in ln]
         assert kill_lines, r.stdout
-        assert kill_lines[0].rstrip().endswith(str(sbx)), kill_lines
+        assert "9797" not in r.stdout
+        assert str(sbx) in kill_lines[0]
 
     def test_recipe_no_longer_reads_the_repo_prod_port(self):
         """Static wiring pin: the stop-by-port recipe is bound to
@@ -1125,8 +1740,9 @@ class TestLiveSubpathContainment:
         (sub / "SENTINEL").write_text("keep")
         r = run_make(["uninstall", f"INSTALL_DIR={sub}"], fake_home)
         assert r.returncode != 0
-        assert "resolves to a LIVE install dir" in r.stderr
-        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+        assert "Error 78" in r.stderr
+        assert "INSIDE the protected install dir" in r.stderr
+        assert "STRUCTURAL: no confirm var opens it" in r.stderr
         assert (sub / "SENTINEL").exists(), "ungated rm -rf ran on a live SUBPATH"
 
     def test_live_subpath_deep_refused_without_confirm(self, fake_home):
@@ -1140,11 +1756,13 @@ class TestLiveSubpathContainment:
         assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
         assert (deep / "SENTINEL").exists(), "ungated rm -rf ran on a live SUBPATH"
 
-    def test_live_subpath_proceeds_with_confirm(self, fake_home):
-        """SUCCESS arm (make-level, stop-free uninstall recipe, fake home):
-        with the confirm var the subpath IS removable — and ONLY the
-        subpath: the root and its sentinel survive. That is the blast
-        radius the refusal was standing in front of."""
+    def test_live_subpath_refused_even_with_confirm(self, fake_home):
+        """STRENGTHENED by the union (upstream 0f60f1ab9): containment is
+        now STRUCTURAL -- no confirm var opens a path inside the protected
+        root, so the subpath is refused EVEN WITH ENSEMBLE_INSTALL_LIVE=1.
+        (Adapted from the branch's old
+        `test_live_subpath_proceeds_with_confirm`, which asserted the
+        opposite under the branch's weaker containment-as-classification.)"""
         live = make_live_shaped(fake_home)
         sub = live / "data"
         sub.mkdir()
@@ -1154,11 +1772,10 @@ class TestLiveSubpathContainment:
             fake_home,
             extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
         )
-        assert r.returncode == 0, r.stderr
-        assert not sub.exists()
-        assert live.exists(), "the ROOT must survive a subpath-scoped uninstall"
-        assert sentinel_of(live).exists()
-
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert "STRUCTURAL: no confirm var opens it" in r.stderr
+        assert (sub / "SENTINEL").exists(), "the structural refusal must not run rm -rf"
     def test_name_prefix_siblings_are_not_live(self, fake_home):
         """DOCUMENTED DECISION (guard header): a NAME-PREFIX SIBLING is a
         separate tree and stays ALLOWED — only the tree inside the
@@ -1204,22 +1821,22 @@ class TestLiveSubpathContainment:
         assert r.returncode == GUARD_REFUSE_RC
         assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
 
-    def test_demo_subpath_is_demo_class(self, fake_home):
-        """A subpath of the demo root is DEMO (not live): it needs the DEMO
-        confirm var, and the live var must not open it."""
+    def test_demo_subpath_refused_even_with_confirm(self, fake_home):
+        """STRENGTHENED by the union (upstream 0f60f1ab9): containment is
+        now STRUCTURAL for the demo root too -- no confirm var opens a path
+        inside it, so the subpath is refused EVEN WITH ENSEMBLE_INSTALL_DEMO=1."""
         demo = fake_home / "agents-ensemble-demo"
         sub = demo / "data"
         sub.mkdir(parents=True)
+        (sub / "SENTINEL").write_text("keep")
         refused = run_guard("uninstall", fake_home, install_dir=str(sub))
         assert refused.returncode == GUARD_REFUSE_RC
-        assert "ENSEMBLE_INSTALL_DEMO" in refused.stderr
-        assert "ENSEMBLE_INSTALL_LIVE" not in refused.stderr
-        opened = run_guard(
-            "uninstall", fake_home, install_dir=str(sub),
-            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
-        )
-        assert opened.returncode == 0, opened.stderr
-
+        assert "STRUCTURAL: no confirm var opens it" in refused.stderr
+        opened = run_guard("uninstall", fake_home, install_dir=str(sub),
+                           extra_env={"ENSEMBLE_INSTALL_DEMO": "1"})
+        assert opened.returncode == GUARD_REFUSE_RC, "structural refusal must not open"
+        assert "STRUCTURAL: no confirm var opens it" in opened.stderr
+        assert (sub / "SENTINEL").exists()
     def test_opt_ensemble_subpath_refused(self, fake_home):
         """The built-in /opt/ensemble live dir extends to its subpaths."""
         r = run_guard("uninstall", fake_home, install_dir="/opt/ensemble/sub")
