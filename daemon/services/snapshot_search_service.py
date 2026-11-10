@@ -107,6 +107,7 @@ from .skill_search_service import (  # DRIFT-PIN: direct import — sibling-drif
     _tokenize,
 )
 from .snapshot_embedding_service import SnapshotEmbeddingService
+from .decision.port import DecisionOverlayPort, extract_snapshot_ids
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,7 @@ class SnapshotSearchService:
         embedding_service: SnapshotEmbeddingService,
         llm_config: dict[str, Any],
         staleness_fn: Any,
+        decision_overlay: DecisionOverlayPort | None = None,
     ) -> None:
         """Store dependencies for the three pipeline stages.
 
@@ -274,11 +276,14 @@ class SnapshotSearchService:
                 service uses the ``freshness`` + ``snapshot_age_days``
                 keys for the result envelope and ignores the rest
                 (Wave 2b's tool wrapper adds the rest).
+            decision_overlay: Optional DecisionOverlayPort instance
+                for S1 overlay consults.
         """
         self._repo = snapshot_repo
         self._embedding_service = embedding_service
         self._llm_config = dict(llm_config) if llm_config else {}
         self._staleness_fn = staleness_fn
+        self._decision_overlay = decision_overlay
 
     # --------------------------------------------------------
     # Public API
@@ -397,6 +402,8 @@ class SnapshotSearchService:
             # configured — graceful-degrade path: the search lands
             # with BM25+cosine+tag-overlap order rather than
             # spending wall-clock on a guaranteed-outbound call.
+            # Coverage note: the path below bypasses _llm_select entirely
+            # so no overlay consult occurs on that path.
             if not self._llm_config.get("model"):
                 final_snapshots = [s for s, _ in reranked[:limit]]
             else:
@@ -714,6 +721,37 @@ class SnapshotSearchService:
                 )
             if len(picked) >= limit:
                 break
+
+        # S1 Decision Overlay hook — call OUTWARD at the last point where
+        # picked is final and prompt/evidence is still live.
+        # The shipped selection MUST NOT change: this is the C1 shadow
+        # call, DETACHED (council round 3): the consult runs as a
+        # bounded background task inside the overlay (strong-referenced,
+        # never-apply, contained TYPE-ONLY) and this method returns
+        # `picked` immediately — search() is byte-identical whether the
+        # overlay is armed or not. The DETACHMENT SEMANTIC (disclosed):
+        # the kill gate is read INSIDE the task, so a kill written
+        # between dispatch and execution may not be honoured for that
+        # one in-flight consult — bounded at one consult.
+        if self._decision_overlay is not None:
+            candidate_ids = extract_snapshot_ids([s for s, _ in candidates])
+            heuristic_ids = extract_snapshot_ids(picked)
+            context = {
+                "query": query,
+                "candidate_ids": candidate_ids,
+                "heuristic_ids": heuristic_ids,
+                "candidates_block": candidates_block,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "limit": limit,
+            }
+            # Never raises (containment lives inside the overlay).
+            self._decision_overlay.consult_detached(
+                "snapshot.l3.selection",
+                heuristic_outcome=heuristic_ids,
+                context=context,
+            )
+
         return picked
 
     # --------------------------------------------------------
