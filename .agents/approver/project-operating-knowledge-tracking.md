@@ -97,3 +97,14 @@ Positive record: receipt integrity remains exceptional across all rounds (~45 + 
 Unverified/inherited: live 69-keys/279,810B vs 82%/408,809B mutually inconsistent (279,810/408,809 = 68.4%); AC12 gates it. Retrieval quality unassessable (no implementation; stated weights match no code). Compaction interaction "code shape, not measured". Post-D7 multi-model corroboration blocked => whole set at MEDIUM, single-source confidence.
 
 Note for Leader on escalation: 7 of 8 blockers are narrow mechanical fixes (B1 one line + propagation; B3 one paragraph; B4 one paragraph; B5 one sentence; B6 one paragraph + AC leg; B8 one sentence; B2 a step + an AC). Only B5/B6 (metadata semantic deletion; PG table materialisation) require a decision or an inventory rather than an edit. The core design — DB-canon, the injected block, the derivation, the family mechanism, code-site placement — survived independent verification intact.
+
+---
+
+## Forward pointer — 2026-11-10 (cap raise; NOT a new approver iteration)
+
+**Scope note:** this section is a DATED FORWARD POINTER added by the fix-pass coder lane. It does **not** revise, reopen, or re-score iterations 001–003 above — that historical framing is deliberately left untouched (iteration 001 opened 2026-11-06; all three iterations and the escalation stand as recorded).
+
+- **Event:** the Emperor directed a raise of the POK active-entry admission cap **64 → 256** `[active cap 256 — Emperor directive 2026-11-10]` (2026-11-10, source: Discord). Ruling of record: `decisions.md` **ER-2**; amended constants: **A-6** / **A-13**.
+- **Superseded invariant:** iteration 001's check "`…/64/…` identical across all **4** files" (`:44`) is **SUPERSEDED**. Numeric identity across four duplicating files was the fragile construct — an approver invariant that a single-value change breaks in four places. Do **not** re-assert 4-way numeric duplication in any future approval of this artifact set.
+- **Single source of truth NOW:** `.agents/shared/planning/project-operating-knowledge/decisions.md` **A-13** is the ONE authoritative statement of the live sizing constant set. Other sites must REFERENCE A-13, or (where a file genuinely must carry the value) use the house marker form `[active cap 256 — Emperor directive 2026-11-10]`. No bare, unmarked `256` outside A-13.
+- **Unchanged by the raise:** refuse-never-evict semantics, the archive cure, the family-max/pin-cap intersection (`PIN_CAP × FAMILY_MAX ≤ BLOCK_MAX_ENTRIES`), all per-view bounds, and every AC other than the cap-dependent leg of AC19.

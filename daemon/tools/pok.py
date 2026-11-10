@@ -12,7 +12,7 @@ IN-BODY role gates from the FACTORY-CAPTURED ``agent_id``
   trust tier (Phase 2, addendum T-1: ``source_tier`` default
   ``agent``; ``curated`` is leader/PM-only). Write-time fence +
   escape-aware budget + exact-dup echo + dispute-laundering guard +
-  supersede transaction + admission caps (64-active
+  supersede transaction + admission caps (active-entry
   refuse-never-evict; family >3). Supersede-of-PINNED or
   -of-CURATED is leader/PM-only (the guard predicate widened in
   Phase 2, addendum T-3; an omitted tier on supersede INHERITS the
@@ -55,6 +55,7 @@ from langchain_core.tools import tool
 
 from ..services.pok_service import (
     POKError,
+    POK_ACTIVE_CAP_PER_PROJECT,
     POKService,
     is_default_project,
     is_curator,
@@ -169,8 +170,32 @@ def create_pok_tools(
             )
         return project_id, name, None
 
+    def _substitute_active_cap(fn: Any) -> Any:
+        """Substitute the LIVE admission cap into the docstring BEFORE
+        ``@tool`` bakes it into the tool description (and any
+        ``args_schema`` doc).
+
+        This runs on the PLAIN function object — a pure string op on
+        our own ``__doc__``, never a post-construction attribute write
+        on the tool object (an upstream ``frozen=True`` on ``BaseTool``
+        would otherwise break every instance spawn, since
+        ``create_pok_tools`` runs bare in the spawn path).
+
+        Load-bearing: the constant is read from the MODULE GLOBAL
+        inside the body. It must NOT be captured as a default argument
+        — a default binds at ``def`` time and would freeze the value,
+        defeating the discriminating test that patches
+        ``daemon.tools.pok.POK_ACTIVE_CAP_PER_PROJECT``.
+        """
+        if fn.__doc__:
+            fn.__doc__ = fn.__doc__.replace(
+                "<active_cap>", str(POK_ACTIVE_CAP_PER_PROJECT)
+            )
+        return fn
+
     @register_tool_category(CATEGORY_NAME)
     @tool
+    @_substitute_active_cap
     def pok_upsert(
         slug: str,
         body: str,
@@ -206,9 +231,9 @@ def create_pok_tools(
           its lineage wire; the successor starts unpinned).
           Superseding a PINNED or CURATED entry requires leader /
           project-manager.
-        - Admission is refuse-never-evict: at 64 active entries the
-          call refuses naming the archive cure; a family's 4th
-          active member refuses (pok_family_full).
+        - Admission is refuse-never-evict: at <active_cap> active
+          entries the call refuses naming the archive cure; a family's
+          4th active member refuses (pok_family_full).
         """
         svc = _service()
         if svc is None:

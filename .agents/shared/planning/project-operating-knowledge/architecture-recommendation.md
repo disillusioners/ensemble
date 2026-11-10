@@ -90,7 +90,7 @@ Two additive `.sql` files (house rule), CHECK-closed vocabularies (incl. the new
 - **Writers:** all agents on a non-default project. Attribution = factory-captured `agent_id`; **attribution ≠ authorization**.
 - **Slug bound:** `[a-z0-9-]` ≤44 (`pok_slug_oversize`). **Write-time fence:** `pok_body_structural_token` (newline / leading `#` at body start / `[SYSTEM CONTEXT:` / ```). **Escape-aware budget:** `len(escape_for_context_block(body)) ≤ 240` (`pok_body_oversize`).
 - Transaction: exact-dup no-op echo; normalized-hash dispute-laundering guard; supersede txn; disputed flip; **archived flip (forward-only)**.
-- Admission: 64 refuse-never-evict (refusal names oldest-least-verified + archive cure); family admission >3 active → `pok_family_full`.
+- Admission: refuse-never-evict at `POK_ACTIVE_CAP_PER_PROJECT` active entries (refusal names oldest-least-verified + archive cure; the live value is single-sourced in `decisions.md` **A-13** — `[active cap 256 — Emperor directive 2026-11-10]`); family admission >3 active → `pok_family_full`.
 - **Grant model:** `pok` NOT privileged; 40-agent sweep per §7 (B4 rules — watcher excluded, `nest-report` LAST).
 
 ### 4.3 Update / supersede / curate / archive — authorization model
@@ -129,14 +129,16 @@ declared/observed inline; `[DISPUTED]`; ranking = decay × observed × access; s
 
 - **UNIVERSAL-READ INVARIANT (Emperor ruling, 2026-11-07, source: Discord):** `pok_query` returns **ALL entries of the project to ANY agent on it, regardless of audience tags** — *injection is curated; reading is free.* The audience field affects ACTIVE injection ONLY; it never filters retrieval. ("It's for active injection — if agent want read them they can read any.")
 
-### 4.7 Sizing constants (unchanged by the ruling — per-view)
+### 4.7 Sizing constants (unchanged by the ER-1 audience ruling; active cap raised to 256 per PROJECT by Emperor directive 2026-11-10 — the per-view constants below are unchanged) [active cap 256 — Emperor directive 2026-11-10]
+
+> **Single source of truth: `decisions.md` A-13.** The table below MIRRORS A-13 for reading convenience; if the two ever disagree, A-13 wins. Do not introduce a bare, unmarked numeric restatement of any value from this table elsewhere in the artifact set — reference A-13 instead.
 
 | Constant | Value | Role |
 |---|---|---|
 | `POK_BODY_MAX_CHARS` | 240 | escaped body (`pok_body_oversize`) |
 | `POK_SLUG_MAX_CHARS` | 44 | slug bound |
 | `POK_ENTRY_RENDER_MAX_CHARS` | 332 | derived entry ceiling |
-| `POK_ACTIVE_CAP_PER_PROJECT` | 64 | refuse-never-evict (curable) — **per PROJECT (not per audience)** |
+| `POK_ACTIVE_CAP_PER_PROJECT` | 256 | refuse-never-evict (curable) — **per PROJECT (not per audience)**; `[active cap 256 — Emperor directive 2026-11-10]` — mirrors A-13 |
 | `POK_PIN_CAP_PER_PROJECT` | 2 | **pin admission per PROJECT — pins render in every audience view that can see the entry** |
 | `POK_FAMILY_MAX` | 3 | family admission bound |
 | `POK_BLOCK_MAX_CHARS` | 2,900 | FULL rendered block incl. wrapper — **PER-VIEW** (audience filter precedes admission) |

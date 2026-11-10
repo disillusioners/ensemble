@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-10-24
 
+- POK active-entry admission cap 64 → 256 (Emperor directive 2026-11-10)
+
 ## [0.29.10] — 2026-11-10
 
 ### Added — macOS deployment topology: canonical deployment guide + launcher supervisor-env PATH/STATE_FILE leg + Makefile live-install guard (`feature/macos-deployment-topology`; design `.agents/shared/planning/macos-deployment-topology/`)
