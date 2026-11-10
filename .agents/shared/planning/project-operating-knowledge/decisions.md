@@ -25,7 +25,7 @@
 
 **A-5 — Writers, scope predicate, attribution.** Non-default project only (`project_id != SYSTEM_DEFAULT_PROJECT_ID`; `project_normalizer.py:6-45`; `instance_lifecycle.py:1895`; `constants.py:596-597`; `api.py:2656`; mirrors `context_messages.py:2248/:2272`). Default → block suppressed; typed refusals. Attribution = factory-captured `agent_id` — **attribution ≠ authorization**; **audience mapping ALSO by factory-captured `agent_id` (ER-1 — the proven in-body pattern).**
 
-**A-6 — Admission + sizing.** Active cap 64 refuse-never-evict (curable via archive; **per PROJECT, not per audience**); family admission >3 → `pok_family_full`. Body 240 **escaped**; slug ≤44; pin 2; family-max 3 (2×3 = 6 ≤ 8). **Block budget 8/2,900 is PER-VIEW (ER-1).**
+**A-6 — Admission + sizing.** Active cap = `POK_ACTIVE_CAP_PER_PROJECT` (its live value is single-sourced in **A-13** below — do not restate it here) refuse-never-evict (curable via archive; **per PROJECT, not per audience**); family admission >3 → `pok_family_full`. Body 240 **escaped**; slug ≤44; pin 2; family-max 3 (2×3 = 6 ≤ 8). **Block budget 8/2,900 is PER-VIEW (ER-1).**
 
 ### Update / curate / currency
 
@@ -57,7 +57,7 @@
 
 ### Sizing constants
 
-**A-13 —** body 240 (escaped) · slug ≤44 · entry ≤332 · active 64 (per project) · pin 2 (per project) · family-max 3 · **block 2,900 full-render PER-VIEW** / 8 · threshold = selector-configured, non-pinned only · window 30d.
+**A-13 — SINGLE SOURCE OF TRUTH for the live sizing constant set.** body 240 (escaped) · slug ≤44 · entry ≤332 · active 256 (POK_ACTIVE_CAP_PER_PROJECT, per project) · pin 2 (per project) · family-max 3 · **block 2,900 full-render PER-VIEW** / 8 · threshold = selector-configured, non-pinned only · window 30d. **This row is the ONE authoritative restatement of the set** — every other site in the artifact set MUST reference A-13 instead of re-typing the ACTIVE-CAP value (`256`), or (where a file genuinely must carry that value) use the house marker form `[active cap 256 — Emperor directive 2026-11-10]`. No bare, unmarked `256` outside this row; the per-view block/entry budget constants are derived closed-form values restated in place and are NOT single-sourced. The prior "identical across all 4 files" duplication invariant is RETIRED (it re-armed a four-site numeric fragility that ER-2 broke).
 
 ### REQUIRED same-lane companion
 
@@ -117,6 +117,8 @@
 3. **Ari delivery seam** — Ari holds the OPERATION slice at dispatch time (today Ari receives no project injection); the seam sits where Ari's dispatch/work context is assembled for a target project; gates: non-default project, operation audience, same budget/fence/family semantics; per-dispatch fresh read.
 4. **Universal read (invariant)** — `pok_query` returns ALL entries to ANY agent on the project, regardless of audience tags. Injection is curated; reading is free.
 Landed: arch §4.1/§4.2/§4.3/§4.5/§4.5.1/§4.6/§11/§13/§14; decisions A-2/A-4/A-5/A-6/A-9/A-11/A-12/A-19 + this row; plan §2/§4.1/§4.5/AC22–AC24/§9; Appendix D.
+
+**ER-2 — Active-entry cap 64 → 256.** `[active cap 256 — Emperor directive 2026-11-10]` *(Emperor directive, 2026-11-10, source: Discord.)* Amends A-6/A-13: `POK_ACTIVE_CAP_PER_PROJECT` raised 64 → 256 (per PROJECT, not per audience); refuse-never-evict now fires at the raised cap `[active cap 256 — Emperor directive 2026-11-10]` active entries. ER-1 audience/per-view bounds unaffected. *(Numbers live in A-13 — this row records the ruling, not a second restatement of the constant set.)*
 
 ---
 

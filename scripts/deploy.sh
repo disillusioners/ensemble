@@ -172,6 +172,26 @@ EOF
     exit 78
 fi
 
+# 0a-bis. demo-guard: deploying to DEMO requires an explicit operator ack
+# too (2026-11-09 — same incident class as the live gate: a demo deploy
+# rewrites the WHOLE demo install and bounces the demo daemon, so an
+# accidental one is not a harmless rehearsal). It reuses the Makefile
+# guard's per-path DEMO var (ENSEMBLE_INSTALL_DEMO) — one var per PATH,
+# not one per lane — and fires HERE, in phase 0, before every mutating
+# phase (build :219-226, staging :325-338, stop :347, start :361).
+if [ "$TARGET" = "demo" ] && [ "${ENSEMBLE_INSTALL_DEMO:-0}" != "1" ]; then
+    cat >&2 <<EOF
+deploy: REFUSING to deploy to demo without an explicit confirm.
+  A demo deploy rewrites the whole demo install (\$HOME/agents-ensemble-demo,
+  :7979, ensemble_demo) and restarts the demo daemon — an accidental one is
+  the same incident class the live gate above exists for (2026-11-09).
+  To deploy demo deliberately:
+    ENSEMBLE_INSTALL_DEMO=1 make deploy-demo
+    ENSEMBLE_INSTALL_DEMO=1 make stage-demo
+EOF
+    exit 78
+fi
+
 # 0b. target dir: demo is created on demand; live must already exist (we
 # never bootstrap the live install from a deploy).
 if [ ! -d "$INSTALL_DIR" ]; then

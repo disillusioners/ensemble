@@ -18,7 +18,9 @@
   background) · `docs/incidents/2026-09-29-promote-halt-forced-rollback.md`
   (the r-20260929-170301 incident; the motivating case for the 3-layer
   protocol below) · the A1 declared×verified outcome map (in-repo: the
-  twins' section comments).
+  twins' section comments) · `docs/deployment.md` (the canonical deployment
+  guide — the macOS launchd counterpart of this supervision model and the
+  2026-11 cutover live there).
 
 **Adoption is OPT-IN, EXPLICIT OPERATOR ACTION ONLY.** Nothing in the
 pipeline ever adopts a host automatically; script mode remains a first-class,
@@ -190,10 +192,10 @@ highest wins:
    static MALLOC_ARENA_MAX directive)
 3. `systemctl set-environment` (inherited) — vacuous in-repo (zero
    producers/consumers)
-4. code defaults — launcher `: "${MALLOC_ARENA_MAX:=2}"` (`launcher.sh:1658-1659`);
+4. code defaults — launcher `: "${MALLOC_ARENA_MAX:=2}"` (`launcher.sh:3695-3696`);
    `config.yaml` defaults
 
-`load_env_file` is called **ONCE per launcher process** (`launcher.sh:1649`,
+`load_env_file` is called **ONCE per launcher process** (`launcher.sh:3662`,
 env-first in `main()`, OUTSIDE `run_loop`): child restarts inside the loop
 re-inherit the exports without re-reading `.env`. (Precision: `run_app.py`'s
 only-unset `.env` load is **frozen-binary-only** (`sys.frozen` gate) and
@@ -216,7 +218,7 @@ auto-derives + persists a SQLITE config — on a fresh-dir or corrupt-config
 install a missing `.env` yields a silent SQLITE boot on an empty DB (known
 residual; candidate for a future refusal-hardening commission).
 Restart-storm: NON-ISSUE — tempfail backoff 5s start ×2, cap 60s
-(`launcher.sh:55-56`, ladder `:1349-1370`, arm `:1569-1585`), so a 75-loop
+(`launcher.sh:56`, ladder `:3345`, arm `:3588-3597`), so a 75-loop
 costs ≈2 journal lines per ≤60s steady state.
 
 **Unit naming rule** (the polkit pattern `^ensemble-[0-9A-Za-z@._-]+\.service$`):
@@ -609,7 +611,7 @@ Required notes:
    clear.
 2. **The reset also clears `MALLOC_ARENA_MAX`** — harmless: the launcher
    re-establishes it default-only (`: "${MALLOC_ARENA_MAX:=2}"` + export,
-   `launcher.sh:1658-1659`) at every start.
+   `launcher.sh:3695-3696`) at every start.
 3. **Order-sensitivity:** drop-ins sort AFTER the main unit. A FUTURE
    drop-in that re-adds `Environment=` values RE-CREATES the exposure —
    the lone-reset drop-in must stay the LAST-sorting env-bearing drop-in

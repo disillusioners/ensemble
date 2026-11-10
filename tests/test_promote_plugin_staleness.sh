@@ -503,7 +503,7 @@ _run_promote() {  # <repo_root> [extra flags...] — HOME fixed to the first e2e
         export PORT="4999"
         export PLUGIN_STALENESS_PYTHON="$PRED_PY"
         mkdir -p "$HOME"
-        VERSION="v9.9.9" bash scripts/upgrade/promote.sh demo "$@" 2>&1
+        VERSION="v9.9.9" ENSEMBLE_INSTALL_DEMO=1 bash scripts/upgrade/promote.sh demo "$@" 2>&1
     )
 }
 
@@ -516,7 +516,7 @@ _run_promote_home() {  # <repo_root> <home> [extra flags...]
         export PORT="4999"
         export PLUGIN_STALENESS_PYTHON="$PRED_PY"
         mkdir -p "$HOME"
-        VERSION="v9.9.9" bash scripts/upgrade/promote.sh demo "$@" 2>&1
+        VERSION="v9.9.9" ENSEMBLE_INSTALL_DEMO=1 bash scripts/upgrade/promote.sh demo "$@" 2>&1
     )
 }
 

@@ -188,9 +188,16 @@ resolve_install_dir() {
 #   KEY="quoted value"        (matching surrounding quotes are stripped)
 #   KEY='single quoted'
 #   # comment / blank lines   (skipped)
+#   KEY=value   # trailing comment   (the comment suffix is stripped — F-06)
 # Malformed lines (no '=', invalid key charset) are logged and skipped.
 # A missing file is NOT fatal: log loudly and continue with the inherited
 # environment (prod may rely on plist-passed env).
+#
+# F-06: the VALUE-RESOLUTION RULE lives in _env_strip_value below and is
+# duplicated BY DESIGN (byte-identical semantics) in
+# scripts/watchdog-watcher.sh — the watchdog is a standalone script and must
+# not depend on launcher.sh. The parity rows in
+# tests/test_watchdog_watcher.sh pin the two implementations together.
 load_env_file() {
     local env_file="$1" line key value
     if [ ! -f "$env_file" ]; then
@@ -224,15 +231,306 @@ load_env_file() {
             _log "WARN: env file line with invalid key skipped: $line"
             continue
         fi
-        # strip one layer of matching surrounding quotes
-        if [ "${#value}" -ge 2 ]; then
-            case "$value" in
-                \"*\") value="${value#\"}"; value="${value%\"}" ;;
-                \'*\') value="${value#\'}"; value="${value%\'}" ;;
-            esac
+        # PATH is SUPERVISOR-OWNED (design §iv Layer 1 + Layer 2): the
+        # launchd anchor and the _path_ensure synthesis decide the PATH.
+        # A PATH= line in .env would silently override BOTH — the rule used
+        # to be comment-only; now it is ENFORCED (loud WARN + the key is
+        # NOT exported).
+        if [ "$key" = "PATH" ]; then
+            _log "WARNING: PATH key in env file IGNORED ($env_file) — PATH is supervisor-owned (launchd anchor / _path_ensure synthesis); a PATH= line in .env would silently override it"
+            continue
         fi
+        # one layer of matching surrounding quotes + the unquoted inline
+        # comment suffix (F-06) — ONE rule, shared with the watchdog.
+        value="$(_env_strip_value "$value")"
         export "$key=$value"
     done < "$env_file"
+    return 0
+}
+
+# _env_strip_value <value> — the ONE .env value-resolution rule (F-06).
+# The value is expected to be TRIMMED already (both callers trim first).
+#   1. a value WRAPPED IN MATCHING QUOTES is quoted → any '#' inside it is
+#      part of the value ("a # b" survives) and ONE quote layer is stripped;
+#   2. an UNQUOTED value loses everything from the first '#' THAT IS
+#      PRECEDED BY WHITESPACE ("/p # c" → "/p"); a '#' NOT preceded by
+#      whitespace ("pa#ss") is part of the value;
+#   3. one layer of matching surrounding quotes is stripped afterwards
+#      (e.g. the '"a"' left by cutting a trailing comment).
+# Prints the resolved value. Pure — no side effects, no eval.
+_env_strip_value() {
+    local v="$1" i c prev=""
+    if [ "${#v}" -ge 2 ]; then
+        case "$v" in
+            \"*\") printf '%s' "${v:1:${#v}-2}"; return 0 ;;
+            \'*\') printf '%s' "${v:1:${#v}-2}"; return 0 ;;
+        esac
+    fi
+    i=0
+    while [ "$i" -lt "${#v}" ]; do
+        c="${v:$i:1}"
+        if [ "$c" = "#" ]; then
+            case "$prev" in
+                [[:space:]])
+                    v="${v:0:$i}"
+                    v="${v%"${v##*[![:space:]]}"}"
+                    break
+                    ;;
+            esac
+        fi
+        prev="$c"
+        i=$((i + 1))
+    done
+    if [ "${#v}" -ge 2 ]; then
+        case "$v" in
+            \"*\") v="${v:1:${#v}-2}" ;;
+            \'*\') v="${v:1:${#v}-2}" ;;
+        esac
+    fi
+    printf '%s' "$v"
+}
+
+# ── Supervisor-env PATH strategy (design §iv, Layer 2 — launcher surface) ──
+# Two complementary layers, both required (architecture-recommendation.md §iv;
+# rehearsal-a A/B proof: minimal launchd PATH ⇒ context7 stdio MCP
+# FileNotFoundError, healthy:False; anchored PATH ⇒ healthy:True):
+#   Layer 1 (macOS supervisor-env): scripts/ensemble-prod.plist carries a
+#           STABLE-ANCHOR EnvironmentVariables.PATH (no user dirs, no nvm
+#           version dirs — version dirs rot when nvm updates).
+#   Layer 2 (THIS block, cross-platform shared launcher): probe the
+#           inherited PATH; no-op when the needed tool class already
+#           resolves; otherwise synthesize from stable anchors + the DYNAMIC
+#           nvm default ($HOME/.nvm/alias/default read at boot — NEVER a
+#           baked version dir). Required-tools provenance: npx
+#           (context7.py:56), uvx (webfetch.py:36), node (npx runtime); the
+#           daemon's spawn seams pass commands verbatim PATH-resolved, so
+#           the fix is supervisor/PATH-layer ONLY — no daemon code changes.
+# VM no-op contract: under systemd's default PATH npx/uvx/node already
+# resolve ⇒ the probe logs one line and changes NOTHING (burst budget,
+# env loading, every other behavior byte-identical).
+#
+# Pure functions (unit-tested by tests/test_launcher.sh §13 — source guard:
+# sourcing must not run anything; _path_ensure is called from main() only).
+
+# _path_has <dir> — exact colon-component membership test against the
+# CURRENT PATH. No word-splitting games, no external tools.
+_path_has() {
+    case ":${PATH:-}:" in
+        *":$1:"*) return 0 ;;
+    esac
+    return 1
+}
+
+# _path_ver_str_gt <verA> <verB> — numeric dot-component compare of two
+# VERSION strings ("22.21.1" vs "22.9.1"; a leading "v" is tolerated).
+# Missing components read as 0; any non-numeric component ⇒ not-greater
+# (stable fallback). Pure bash — `sort -V` is GNU-only and this must run on
+# the macOS/BSD supervisor too.
+_path_ver_str_gt() {
+    local a="${1#v}" b="${2#v}"
+    local -a A B
+    local IFS=. i ai bi
+    read -ra A <<< "$a" || return 1
+    read -ra B <<< "$b" || return 1
+    for i in 0 1 2 3; do
+        ai="${A[i]:-}"; bi="${B[i]:-}"
+        [ -n "$ai" ] || ai=0
+        [ -n "$bi" ] || bi=0
+        case "${ai}${bi}" in *[!0-9]*) return 1 ;; esac
+        if [ "$ai" -gt "$bi" ]; then return 0; fi
+        if [ "$ai" -lt "$bi" ]; then return 1; fi
+    done
+    return 1
+}
+
+# _path_version_gt <dirA> <dirB> — numeric dot-component compare of the
+# version SUFFIX of two nvm version dirs (…/node/vX.Y.Z). Delegates to the
+# string comparator above (same semantics — shared with the alias resolver,
+# which compares bare version strings).
+_path_version_gt() {
+    _path_ver_str_gt "${1##*/v}" "${2##*/v}"
+}
+
+# _nvm_alias_version <token> <depth> — resolve an nvm ALIAS token to a
+# CONCRETE version string (F-10). nvm's alias/default may hold a CODENAME
+# ("lts/*", "lts/krypton") rather than a version — the old one-hop glob
+# ("…/node/v<token>*") is dead for those, so on macOS (the only source of
+# npx) the synthesis yielded NOTHING and npx stayed unresolved — exactly
+# the rehearsal-a failure mode this block exists to prevent.
+# Resolution (BOUNDED to 3 hops so a self-referential alias cannot loop):
+#   token without "/"        → already version-ish ("22", "22.21.1") → as-is;
+#   alias/<token> is a FILE  → its content is the next token (recurse);
+#   alias/<token> is a DIR   → every entry file's content is a version →
+#                              the HIGHEST version wins;
+#   token contains a glob    → expand alias/<token>, HIGHEST version wins.
+# Prints the version string (leading "v" stripped); prints NOTHING when the
+# token is unresolvable (the caller then warns — boot is never wedged).
+_nvm_alias_version() {
+    local token="$1" depth="$2" f content best="" v alias_dir=""
+    local max_hops=3
+    [ -n "$token" ] || return 0
+    [ "$depth" -lt "$max_hops" ] || return 0
+    case "$token" in
+        */*) ;;
+        *) printf '%s' "${token#v}"; return 0 ;;
+    esac
+    f="${HOME:-}/.nvm/alias/$token"
+    if [ -f "$f" ]; then
+        content="$(head -n 1 "$f" 2>/dev/null)"
+        content="${content%%$'\r'}"
+        content="${content#"${content%%[![:space:]]*}"}"
+        content="${content%"${content##*[![:space:]]}"}"
+        content="${content%%[[:space:]]*}"
+        _nvm_alias_version "$content" "$((depth + 1))"
+        return 0
+    fi
+    if [ -d "$f" ]; then
+        for v in "$f"*; do
+            [ -f "$v" ] || continue
+            content="$(head -n 1 "$v" 2>/dev/null)"
+            content="${content%%$'\r'}"
+            content="${content#"${content%%[![:space:]]*}"}"
+            content="${content%"${content##*[![:space:]]}"}"
+            content="${content%%[[:space:]]*}"
+            [ -n "$content" ] || continue
+            if [ -z "$best" ] || _path_ver_str_gt "$content" "$best"; then
+                best="$content"
+            fi
+        done
+        [ -n "$best" ] && printf '%s' "${best#v}"
+        return 0
+    fi
+    case "$token" in
+        *'*'*|*'?'*)
+            # the token may CARRY a glob ("lts/*") → expand it. The alias
+            # dir stays quoted; the token is unquoted so the shell performs
+            # the pathname expansion (it is the first whitespace-delimited
+            # word of the alias file, so it carries no spaces).
+            alias_dir="${HOME:-}/.nvm/alias"
+            for v in "$alias_dir"/$token; do
+                [ -f "$v" ] || continue
+                content="$(head -n 1 "$v" 2>/dev/null)"
+                content="${content%%$'\r'}"
+                content="${content#"${content%%[![:space:]]*}"}"
+                content="${content%"${content##*[![:space:]]}"}"
+                content="${content%%[[:space:]]*}"
+                [ -n "$content" ] || continue
+                if [ -z "$best" ] || _path_ver_str_gt "$content" "$best"; then
+                    best="$content"
+                fi
+            done
+            [ -n "$best" ] && printf '%s' "${best#v}"
+            ;;
+    esac
+    return 0
+}
+
+# _path_nvm_bin — the nvm DEFAULT version's bin dir, resolved DYNAMICALLY
+# (design §iv: "read $HOME/.nvm/alias/default, glob $HOME/.nvm/versions/
+# node/v<alias>*, take latest, verify bin/node executable — NEVER hardcode
+# a version dir"). The alias token is first RESOLVED to a concrete version
+# (F-10: "lts/*" / "lts/krypton" are codenames, not versions). Highest
+# VERSION wins (numeric compare — lexicographic glob order would pick
+# v22.9.3 over v22.21.1). Prints the bin dir, or nothing when nvm is
+# absent/unresolvable.
+_path_nvm_bin() {
+    local alias_file="${HOME:-}/.nvm/alias/default" alias="" d best="" ver=""
+    [ -n "${HOME:-}" ] || return 0
+    [ -f "$alias_file" ] || return 0
+    alias="$(head -n 1 "$alias_file" 2>/dev/null)"
+    alias="${alias%%$'\r'}"
+    alias="${alias%%[[:space:]]*}"   # first token ("22" / "22.21.1" / "lts/*")
+    [ -n "$alias" ] || return 0
+    ver="$(_nvm_alias_version "$alias" 0)"
+    [ -n "$ver" ] || return 0
+    for d in "$HOME/.nvm/versions/node/v$ver"*; do
+        [ -d "$d" ] || continue
+        [ -x "$d/bin/node" ] || continue
+        if [ -z "$best" ] || _path_version_gt "$d" "$best"; then
+            best="$d"
+        fi
+    done
+    [ -n "$best" ] && printf '%s\n' "$best/bin"
+    return 0
+}
+
+# _path_synth_dirs — the §iv candidate set in order: stable anchors, then
+# the dynamic nvm default. Prints EXISTING dirs only (newline-separated);
+# the caller filters dirs already present in the CURRENT PATH.
+_path_synth_dirs() {
+    local d
+    for d in /opt/homebrew/bin /usr/local/bin "${HOME:-}/.local/bin"; do
+        [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"
+    done
+    _path_nvm_bin
+    return 0
+}
+
+# _path_ensure — the Layer-2 entry point (called from main, AFTER
+# load_env_file so an .env-staged ENSEMBLE_LAUNCHER_PATH participates in
+# the same precedence, and BEFORE _journal_sweep/binary resolve so every
+# launcher child and the daemon inherit the resolved PATH):
+#   1. ENSEMBLE_LAUNCHER_PATH set → export VERBATIM (top precedence —
+#      full replacement, not a prepend; design §iv step 1).
+#   2. Probe: npx/uvx/node ALL resolve → one log line, change NOTHING
+#      (the VM no-op case).
+#   3. Synthesize (any missing): prepend existing anchor/nvm dirs not
+#      already in PATH; inherited PATH retained as suffix. Nothing
+#      addable → loud WARNING, proceed — optional MCP tooling must never
+#      wedge daemon boot (behavior degrades to the pre-block status quo).
+#
+# F-11 (observability only — WHEN synthesis fires and WHAT it prepends are
+# UNCHANGED): EVERY branch now logs the three facts a VM drill can assert:
+#   source=      which branch produced the final PATH
+#                (ensemble_launcher_path_override | probe-satisfied |
+#                 synthesized | none-addable);
+#   delta=       exactly what was prepended (and whether the inherited PATH
+#                was retained as the suffix — the override branch is a FULL
+#                replacement);
+#   resolved_path=the final PATH value (a PATH is not a secret; the drill
+#                needs the real value to assert the delta).
+# The "VM no-op / changes NOTHING" claim is therefore CHECKABLE from the
+# log: source=probe-satisfied + delta=none ⇒ the PATH was not touched.
+_path_ensure() {
+    local t missing="" synth="" added="" d still=""
+    if [ -n "${ENSEMBLE_LAUNCHER_PATH:-}" ]; then
+        export PATH="$ENSEMBLE_LAUNCHER_PATH"
+        _log "PATH: ENSEMBLE_LAUNCHER_PATH override exported verbatim (§iv Layer 2, top precedence)"
+        _log "PATH: source=ensemble_launcher_path_override delta=full-replacement (the inherited PATH is NOT retained — the override replaces it) resolved_path=$PATH"
+        return 0
+    fi
+    for t in npx uvx node; do
+        command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+    done
+    if [ -z "$missing" ]; then
+        _log "PATH: npx/uvx/node all resolve on the inherited PATH — probe no-op, PATH unchanged"
+        _log "PATH: source=probe-satisfied delta=none (the inherited PATH is retained verbatim) resolved_path=${PATH:-}"
+        return 0
+    fi
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        _path_has "$d" && continue
+        synth="${synth:+$synth:}$d"
+        added="$added $d"
+    done < <(_path_synth_dirs)
+    if [ -z "$synth" ]; then
+        _log "WARNING: PATH probe missing:${missing} — no existing stable anchors and nvm default unresolvable; proceeding on the inherited PATH (optional MCP tooling may be unavailable)"
+        _log "PATH: source=none-addable delta=none (the inherited PATH is retained verbatim) resolved_path=${PATH:-}"
+        return 0
+    fi
+    # "${PATH:+:$PATH}" — set -u safe (an UNSET PATH must not abort the
+    # launcher) and EMPTY-PATH safe (a trailing ":" is an empty PATH
+    # component, which POSIX resolves as the CWD on the command search
+    # path). Inert on any host with a non-empty PATH.
+    export PATH="$synth${PATH:+:$PATH}"
+    _log "PATH: probe missing:${missing} — synthesized PATH extended with:${added} (stable anchors + dynamic nvm default; inherited PATH retained as suffix)"
+    _log "PATH: source=synthesized delta=prepended:${synth} (the inherited PATH is retained as the suffix) resolved_path=$PATH"
+    for t in npx uvx node; do
+        command -v "$t" >/dev/null 2>&1 || still="$still $t"
+    done
+    if [ -n "$still" ]; then
+        _log "WARNING: PATH synthesis complete but still unresolved:${still} — proceeding (optional MCP tooling degraded, never blocking boot)"
+    fi
     return 0
 }
 
@@ -727,8 +1025,38 @@ _js_journal_write() {
 # _js_journal_update <path> <field> <raw-json-or-scalar> — read-modify-write
 # ONE top-level field atomically; <raw> spliced verbatim (strings arrive
 # pre-quoted, objects/numbers/bools/null raw).
+#
+# O(n) (launcher-journal-sweep-fix, R3): the replaced implementation
+# consumed the OLD VALUE ONE CHARACTER AT A TIME (`rest="${rest:1}"` in the
+# two value-scan loops) — O(n) per step under LC_ALL=C and O(n) per
+# CHARACTER under a UTF-8 locale ⇒ O(n²) overall. That scan was 100% of
+# `_js_history_append`'s cost (the append re-writes the WHOLE history
+# array): measured 16.9 s @ 32 KB and 106.2 s @ 32 KB under the daemon's
+# UTF-8 env (6.3×/locale), >300 s @ 220 KB — the boot wedge this lane
+# exists to close. ONE POSIX awk pass owns the scan now.
+#
+# BYTE-EQUIVALENCE (the contract this rewrite MUST hold — the output is
+# byte-identical to the replaced implementation for the same input):
+#   - the ANCHOR is unchanged: the FIRST occurrence of the field token
+#     wins (`head`/`rest` still use the same `"$field"` globs, and the
+#     quoted-token presence gate is still checked BEFORE the splice — a
+#     bare field NAME that never appears as `"field"` still refuses);
+#   - the WHITESPACE TRIM is still BASH's own `[![:space:]]` trim — it is
+#     ASCII-only in EVERY locale (probed on macOS: a U+00A0 is NOT
+#     stripped under either en_US.UTF-8 or C), so the trim is
+#     locale-invariant and stays in bash;
+#   - the VALUE SCAN is byte-equivalent to the replaced character loop:
+#     the same structural characters (`{ } [ ] ,`) are compared and the
+#     same escape-aware quote rule applies, and only ASCII characters are
+#     ever compared — a multibyte UTF-8 byte can never be mistaken for a
+#     structural one, so a character-wise scan and a byte-wise scan stop
+#     at the SAME place and yield the SAME tail;
+#   - the SPLICE is unchanged: `head + ": " + raw + tail`.
+# The awk pass runs under the launcher's single awk seam, which pins
+# LC_ALL=C (see `_js_awk_pass`) — byte-oriented, so the scan is
+# locale-invariant BY CONSTRUCTION.
 _js_journal_update() {
-    local jp="$1" field="$2" raw="$3" json rest head out="" c depth rc=0
+    local jp="$1" field="$2" raw="$3" json rest head out="" tail rc=0 arc=0
     _js_awk_rc_begin
     json="$(_js_journal_read "$jp")" || rc=$?
     _js_awk_rc_end
@@ -741,52 +1069,94 @@ _js_journal_update() {
     fi
     [ "$rc" -eq 0 ] || return 1
     case "$json" in
-        *"\"$field\""*) ;;
+        *"$field"*) ;;
         *) return 1 ;;
     esac
-    # Walk the object; replace the value that follows "field":.
+    # Walk the object; replace the value that follows "field".
     rest="$json"
-    while [ -n "$rest" ]; do
-        case "$rest" in
-            *"\"$field\""*)
-                head="${rest%%\"$field\"*}\"$field\""
-                rest="${rest#*\"$field\"}"
-                rest="${rest#*:}"
-                # drop leading whitespace of the old value
-                rest="${rest#"${rest%%[![:space:]]*}"}"
-                # consume the old value by bracket/quote scanning
-                depth=0
-                if [ "${rest:0:1}" = "\"" ]; then
-                    # string value: skip to closing quote (escape-aware)
-                    rest="${rest:1}"
-                    while [ -n "$rest" ]; do
-                        c="${rest:0:1}"
-                        if [ "$c" = "\\" ]; then rest="${rest:2}"; continue; fi
-                        [ "$c" = "\"" ] && { rest="${rest:1}"; break; }
-                        rest="${rest:1}"
-                    done
-                else
-                    while [ -n "$rest" ]; do
-                        c="${rest:0:1}"
-                        case "$c" in
-                            '{'|'[') depth=$((depth + 1)) ;;
-                            '}'|']')
-                                if [ "$depth" -eq 0 ]; then break; fi
-                                depth=$((depth - 1)) ;;
-                            ',')
-                                [ "$depth" -eq 0 ] && break ;;
-                        esac
-                        rest="${rest:1}"
-                    done
-                fi
-                out="$head: $raw$rest"
-                break
-                ;;
-            *)
-                break
-                ;;
-        esac
-    done
+    case "$rest" in
+        *"\"$field\""*) ;;
+        # The field NAME occurs in the document but never as a quoted
+        # token (field=history against {"xhistory":…}) — the replaced
+        # loop matched nothing and left `out` empty ⇒ refuse (the same
+        # verdict, decided before the splice instead of after it).
+        *) return 1 ;;
+    esac
+    head="${rest%%\"$field\"*}\"$field\""
+    rest="${rest#*\"$field\"}"
+    rest="${rest#*:}"
+    # drop leading whitespace of the old value
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    # ONE awk pass returns the tail that follows the old value: the
+    # string case (a leading quote) skips to the escape-aware closing
+    # quote; the composite case walks the bracket depth to the first
+    # top-level `,` / `}` / `]`. Both are the replaced loops' rules,
+    # byte-for-byte.
+    _js_awk_rc_begin
+    tail="$(_js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            n = length(buf)
+            if (n >= 1 && substr(buf, 1, 1) == "\"") {
+                # STRING VALUE — VECTORIZED (the validator parity idiom,
+                # proven in the balance validator):: split ONCE on the quote boundaries and
+                # visit only the SEGMENTS; each boundary quote is escaped
+                # iff the backslash run before it has odd length, so the
+                # first unescaped quote closes the string. Only ASCII
+                # structural characters are compared — byte-equivalent to
+                # the replaced per-character loop.
+                s = substr(buf, 2)
+                m = split(s, q, "\"")
+                pos = 0
+                found = 0
+                for (j = 1; j < m; j++) {
+                    pos += length(q[j]) + 1   # the segment bytes + the quote byte
+                    t = q[j]
+                    if (match(t, /\\+$/) > 0 && RLENGTH % 2 == 1) continue
+                    found = 1
+                    break
+                }
+                if (found) start = pos + 2    # the closing quote is consumed
+                else start = n + 1            # unterminated: everything consumed
+            } else {
+                # COMPOSITE VALUE — VECTORIZED (the _js_json_sub idiom):
+                # split the value ONCE on the structural characters and
+                # visit only those (~3 per history entry, never a
+                # per-byte walk). The terminator is NOT consumed (the
+                # replaced loop broke on it); EOF ⇒ the tail is empty.
+                tn = split(buf, seg, "[],{}[]")
+                pos = length(seg[1])
+                depth = 0
+                start = n + 1
+                for (j = 1; j < tn; j++) {
+                    pos++
+                    c = substr(buf, pos, 1)
+                    if (c == "{" || c == "[") depth++
+                    else if (c == "}" || c == "]") {
+                        if (depth == 0) { start = pos; break }
+                        depth--
+                    } else if (c == ",") {
+                        if (depth == 0) { start = pos; break }
+                    }
+                    pos += length(seg[j + 1])
+                }
+            }
+            printf "%s", substr(buf, start)
+        }
+    ' <<<"$rest")" || arc=$?
+    _js_awk_rc_end
+    if [ "$arc" -ne 0 ]; then
+        # The SCANNER was UNAVAILABLE (awk missing / wedged): the extent
+        # of the old value is UNKNOWN, so the splice is REFUSED — a wrong
+        # extent would truncate or corrupt the journal.
+        _log "WARN: journal update refused — $jp: the value scanner is UNAVAILABLE (awk rc=$_JS_LAST_AWK_RC); the journal is left untouched"
+        return 1
+    fi
+    out="$head: $raw$tail"
     [ -n "$out" ] || return 1
     _js_journal_write "$jp" "$out"
 }
@@ -1159,42 +1529,62 @@ _js_history_has_event_for_target() {
     case "$hist" in
         ''|null|\[\]) return 1 ;;
     esac
-    t_space="target $target "
-    t_end="target $target\""
-    r_space="run_id $run_id "
-    r_end="run_id $run_id\""
-    rest="$hist"
-    while :; do
-        case "$rest" in
-            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
-            *) break ;;
-        esac
-        case "$rest" in
-            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
-            *) entry="$rest" ;;
-        esac
-        # the EVENT KIND must be in THIS entry
-        # the event-kind literal — the house writers emit the COMPACT form
-        # ("event":"x"); the spaced form ("event": "x") is tolerated too
-        # (a hand-edited journal must not silently change a verdict).
-        case "$entry" in
-            *"\"event\":\"$event\""*|*"\"event\": \"$event\""*) ;;
-            *) continue ;;
-        esac
-        # the TARGET must be in THIS entry, delimiter-anchored
-        case "$entry" in
-            *"$t_space"*|*"$t_end"*) ;;
-            *) continue ;;
-        esac
-        if [ -n "$run_id" ]; then
-            case "$entry" in
-                *"$r_space"*|*"$r_end"*) ;;
-                *) continue ;;
-            esac
-        fi
-        return 0
-    done
-    return 1
+    # O(n) SCAN (launcher-journal-sweep-fix, R4): the replaced loop walked
+    # the history ONE ENTRY AT A TIME and each step re-sliced the WHOLE
+    # remainder (`rest="${rest#*'{"ts":'}"` + `entry="${rest%%'{"ts":'*}"`)
+    # — O(n) per ENTRY ⇒ O(n·entries) = quadratic in BYTES (measured
+    # ×3.8–4.1 per doubling; 125 s @ 220 KB under the daemon's UTF-8 env).
+    # ONE POSIX awk pass answers the question for ALL entries: the document
+    # is split ONCE on the entry marker and each entry is matched with
+    # LITERAL substring searches (index()).
+    #
+    # SEMANTICS UNCHANGED (every quirk preserved):
+    #   - the entry boundary is still the LITERAL `{"ts":` marker matched
+    #     ANYWHERE (even inside a string value — a detail carrying that
+    #     byte sequence still splits an entry, exactly as before);
+    #   - the text BEFORE the first marker is still discarded (no marker
+    #     at all ⇒ no entries ⇒ "not found", rc 1);
+    #   - the event-kind literals keep BOTH forms (compact + spaced);
+    #   - the target/run_id checks keep BOTH delimiter anchors (the
+    #     space form and the closing-quote form);
+    #   - run_id is still skipped when empty;
+    #   - "first entry that matches all conjuncts wins" — same order.
+    # The literal index() searches are byte-exact equivalents of the
+    # replaced `case` globs: every needle in those globs was a quoted
+    # expansion (literal already — no glob metacharacters were active).
+    # The parameters travel via the ENVIRONMENT (never `awk -v` — no
+    # escape sequence can be mangled), under the launcher's single awk
+    # seam, which pins LC_ALL=C (see `_js_awk_pass`).
+    local _JS_HIST_EVENT="$event" _JS_HIST_TARGET="$target" _JS_HIST_RUN_ID="$run_id"
+    export _JS_HIST_EVENT _JS_HIST_TARGET _JS_HIST_RUN_ID
+    rc=0
+    _js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            ev = ENVIRON["_JS_HIST_EVENT"]
+            tg = ENVIRON["_JS_HIST_TARGET"]
+            rid = ENVIRON["_JS_HIST_RUN_ID"]
+            n = split(buf, seg, /\{"ts":/)
+            for (i = 2; i <= n; i++) {
+                e = seg[i]
+                if (index(e, "\"event\":\"" ev "\"") == 0 && \
+                    index(e, "\"event\": \"" ev "\"") == 0) continue
+                if (index(e, "target " tg " ") == 0 && \
+                    index(e, "target " tg "\"") == 0) continue
+                if (rid != "") {
+                    if (index(e, "run_id " rid " ") == 0 && \
+                        index(e, "run_id " rid "\"") == 0) continue
+                }
+                exit 0
+            }
+            exit 1
+        }
+    ' <<<"$hist" || rc=$?
+    return "$rc"
 }
 
 # _js_history_has_defer_reason <journal> <target> <run_id> <reason>
@@ -1219,7 +1609,17 @@ _js_history_has_defer_reason() {
     [ -n "$target" ] || return 1
     [ -n "$reason" ] || return 1
     json="$(_js_journal_read "$jp")" || rc=$?
-    [ "$rc" -eq 0 ] || return "$rc"
+    if [ "$rc" -ne 0 ]; then
+        # The journal could not be READ at all (rc 1 = the balance check
+        # says the document is NOT TRUSTWORTHY; rc 2 = the validator was
+        # UNAVAILABLE). That is NOT "no defer row": the write-once check
+        # is UNKNOWN. The rc contract above says the caller MUST NOT read
+        # rc 2 as "none" — so a READ failure is reported as rc 2 too (the
+        # conservative class), never as the rc-1 content verdict. Before
+        # this, a torn journal answered "no defer row yet" and the caller
+        # read that as a licence to write (Q1=C).
+        return 2
+    fi
     hist="$(_js_json_sub "$json" "history")" || rc=$?
     if [ "$rc" -eq 2 ]; then
         # The EXTRACTOR was UNAVAILABLE — the history could not be read, so
@@ -1230,43 +1630,46 @@ _js_history_has_defer_reason() {
     case "$hist" in
         ''|null|'[]') return 1 ;;
     esac
-    marker="DEFERRED ($reason)"
-    t_eq="target=$target,"
-    r_eq="run_id=$run_id,"
-    rest="$hist"
-    while :; do
-        case "$rest" in
-            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
-            *) break ;;
-        esac
-        case "$rest" in
-            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
-            *) entry="$rest" ;;
-        esac
-        # the EVENT KIND must be in THIS entry (compact or spaced form)
-        case "$entry" in
-            *"\"event\":\"sweep_deferred\""*|*"\"event\": \"sweep_deferred\""*) ;;
-            *) continue ;;
-        esac
-        # the REASON marker must be in THIS entry
-        case "$entry" in
-            *"$marker"*) ;;
-            *) continue ;;
-        esac
-        # the TXN identity must be in THIS entry, delimiter-anchored
-        if [ -n "$run_id" ]; then
-            case "$entry" in
-                *"$r_eq"*) ;;
-                *) continue ;;
-            esac
-        fi
-        case "$entry" in
-            *"$t_eq"*) ;;
-            *) continue ;;
-        esac
-        return 0
-    done
-    return 1
+    # O(n) SCAN (launcher-journal-sweep-fix, R4): the same single-pass
+    # mechanism as `_js_history_has_event_for_target` (see its block
+    # comment) — split ONCE on the `{"ts":` marker, match each entry with
+    # literal index() searches. SEMANTICS UNCHANGED: the entry boundary,
+    # the discarded pre-first-marker text, the compact+spaced event
+    # forms, the `,`-anchored `target=<ver>,` / `run_id=<id>,` txn
+    # anchors, the `DEFERRED (<reason>)` marker (stable across ticks) and
+    # the run_id-skipped-when-empty rule are all the replaced loop's.
+    # LC_ALL=C is pinned at the `_js_awk_pass` seam; the parameters travel
+    # via the ENVIRONMENT (never `awk -v`).
+    local _JS_HIST_REASON="$reason" _JS_HIST_TARGET="$target" _JS_HIST_RUN_ID="$run_id"
+    export _JS_HIST_REASON _JS_HIST_TARGET _JS_HIST_RUN_ID
+    rc=0
+    _js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            rs = ENVIRON["_JS_HIST_REASON"]
+            tg = ENVIRON["_JS_HIST_TARGET"]
+            rid = ENVIRON["_JS_HIST_RUN_ID"]
+            marker = "DEFERRED (" rs ")"
+            t_eq = "target=" tg ","
+            r_eq = "run_id=" rid ","
+            n = split(buf, seg, /\{"ts":/)
+            for (i = 2; i <= n; i++) {
+                e = seg[i]
+                if (index(e, "\"event\":\"sweep_deferred\"") == 0 && \
+                    index(e, "\"event\": \"sweep_deferred\"") == 0) continue
+                if (index(e, marker) == 0) continue
+                if (rid != "" && index(e, r_eq) == 0) continue
+                if (index(e, t_eq) == 0) continue
+                exit 0
+            }
+            exit 1
+        }
+    ' <<<"$hist" || rc=$?
+    return "$rc"
 }
 
 # _js_sanitise_run_id <run_id> — filename-safe form (AM-P2-20). The
@@ -1295,9 +1698,21 @@ _js_sanitise_run_id() {
 # 27KB ⇒ ≈285× at the incident size) with NO launcher-side size guard,
 # and an INVERTED over-count doctrine (this counter gates the ROLLBACK
 # itself ⇒ over-count = a wrongful rollback; the live count was 2/3).
+#
+# Design §v relocation: the counter relocates WITH the state file — its
+# directory is dirname($STATE_FILE) whenever STATE_FILE is set (runtime
+# always sets it, classic or overridden), else the classic $install_dir
+# (the sourced/unit-test shape and the byte-identical pre-relocation
+# behavior when the override is unset). Callers keep passing install_dir —
+# the derivation, not the signature, moved.
 _js_defer_counter_path() {
-    local install_dir="$1" run_id="$2"
-    printf '%s/.sweep-defer-%s' "$install_dir" "$(_js_sanitise_run_id "$run_id")"
+    local install_dir="$1" run_id="$2" dir
+    if [ -n "$STATE_FILE" ]; then
+        dir="$(dirname "$STATE_FILE")"
+    else
+        dir="$install_dir"
+    fi
+    printf '%s/.sweep-defer-%s' "$dir" "$(_js_sanitise_run_id "$run_id")"
 }
 
 # _js_defer_counter_read <path> <key> — one counter value (0 when absent).
@@ -1710,6 +2125,18 @@ _js_run_bounded() {
     # are unaffected. Without this, every instant bounded call stalls ~N s
     # even though the wrapped command completed instantly (commit 961dfe59
     # regression — see LESSONS/2026-10-01-js-run-bounded-orphaned-sleep-stall).
+    #
+    # KNOWN ISSUE (recorded here; NO behaviour change): the watchdog's
+    # `sleep` child is NOT reaped together with the watcher — the watcher
+    # subshell dies, its `sleep` child does not ⇒ every bounded call leaves
+    # ONE orphaned `sleep` behind (POK `awk-01-watchdog-process-leak`: a
+    # burst of probes exhausts the process table and yields bogus verdict
+    # flips). The O(n) journal rewrite (commit 5f8528869) added THREE more
+    # bounded awk calls to the boot path (the journal update + the two
+    # per-entry history scanners), so the leak RATE per boot-path sweep is
+    # marginally higher than before that change. This is a pre-existing,
+    # SEPARATE defect (it is not what the size guard bounds); this note
+    # records the rate change only.
     (
         sleep "$timeout_s" 2>/dev/null
         kill -KILL "$pid" 2>/dev/null
@@ -2007,13 +2434,75 @@ _js_defer_counter_delete() {
     return 0
 }
 
-# _js_serving_defer <journal> <target> <run_id> <age> <reason> <detail>
+# _js_size_guard_defer_decision <journal> <target> <run_id> <reason>
+# The BOUNDED defer DECISION for the launcher-side size guard (Q1=C).
+#
+# RC CONTRACT — the SAME vocabulary as the reader it wraps
+# (`_js_history_has_defer_reason`), so the verdict can be handed to
+# `_js_serving_defer` unchanged (that helper consumes the reader's rc
+# directly):
+#   0 — the decision RAN and says "a defer row IS ALREADY journaled for
+#       this (txn, reason)" ⇒ the write-once rule applies (nothing to
+#       write);
+#   1 — the decision RAN and says "NO defer row is journaled yet" ⇒ the
+#       caller MAY write one;
+#   2 — the decision is UNKNOWN: the extractor was UNAVAILABLE (awk gone /
+#       broken), the watchdog fired (the pass wedged past its bound), or
+#       the WHOLE decision exceeded its HARD budget. The caller MUST
+#       REFUSE TO ACT (write NOTHING). A missing decision must NEVER read
+#       as "no defer row" (rc 1) — that is the silent-skip defect this
+#       helper exists to close.
+#
+# WHY A SEPARATE HELPER (and not a bare call at the call site): the
+# decision is a CHEAP DECIDE — ONE O(n) per-entry scan of the history (the
+# same reader the write-once check uses) — and it is BOUNDED twice:
+#   (1) the scan itself runs under the bounded awk seam (`_js_awk_bounded`
+#       → `_js_run_bounded $_JS_AWK_TIMEOUT_S`), so a wedged awk can never
+#       pin the boot path;
+#   (2) the WHOLE decision (journal read + history extraction + scan) is
+#       bounded by the SAME hard budget (`$_JS_AWK_TIMEOUT_S` — one knob
+#       for the operator and for the tests; it is read at CALL time, so a
+#       test that shortens it after sourcing shortens BOTH bounds).
+# The elapsed check below is what makes (2) a budget over the WHOLE
+# decision: the awk seam bounds each pass individually, but three passes
+# could add up to 3× the budget.
+#
+# The budget is reported in the caller's WARN (the operator must see the
+# size AND the budget that was exceeded).
+_js_size_guard_defer_decision() {
+    local jp="$1" target="$2" run_id="$3" reason="$4"
+    local budget="${_JS_AWK_TIMEOUT_S}" t0 t1 rc=0
+    t0="$(date +%s 2>/dev/null)" || t0=""
+    [ -n "$t0" ] || t0=0
+    _js_history_has_defer_reason "$jp" "$target" "$run_id" "$reason" || rc=$?
+    t1="$(date +%s 2>/dev/null)" || t1=""
+    [ -n "$t1" ] || t1=0
+    # rc 2 = the decision could not be made (UNAVAILABLE / wedged / the
+    # journal could not be read at all) ⇒ the verdict is UNKNOWN.
+    [ "$rc" -le 1 ] || return 2
+    # the HARD budget over the whole decision — an over-budget verdict is
+    # NOT trusted (the journal may have been rewritten under the scan).
+    if [ $(( t1 - t0 )) -ge "$budget" ]; then
+        return 2
+    fi
+    return "$rc"
+}
+
+# _js_serving_defer <journal> <target> <run_id> <age> <reason> <detail> [decision]
 # The DEFER disposition: a journaled `sweep_deferred` row (a HOLD — it
 # closes nothing; it is NOT a terminal event), the txn left OPEN, and NO
 # quarantine / counter / cooldown / rollback. The row carries an explicit,
 # GREPPABLE reason marker (which conjunct was missing) — matrix row 6.
+#
+# The OPTIONAL 7th argument carries a PRE-COMPUTED write-once verdict in
+# the READER's vocabulary ("0" = a defer row IS already journaled for this
+# (txn, reason) · "1" = no defer row is journaled yet). A caller that
+# already paid for the bounded decision (the launcher-side size guard —
+# Q1=C) passes it here so the O(n) history scan is not paid for twice.
+# When the argument is absent the decision is computed here (the
+# historical path, unchanged).
 _js_serving_defer() {
-    local journal="$1" target="$2" run_id="$3" age="$4" reason="$5" detail="$6"
+    local journal="$1" target="$2" run_id="$3" age="$4" reason="$5" detail="$6" decision="${7:-}"
     local drc=0
     # F6 (code-council W5) — WRITE-ONCE per (txn, reason). The defer row is
     # ~150-200B and the T15 hook fires per CHILD EXIT; in a crash loop the
@@ -2025,7 +2514,11 @@ _js_serving_defer() {
     # SILENTLY DISARMED. One row per (txn, reason) bounds the growth by
     # the distinct-reason count; the log line still fires every time so
     # the observation stays visible.
-    _js_history_has_defer_reason "$journal" "$target" "$run_id" "$reason" || drc=$?
+    if [ -n "$decision" ]; then
+        drc="$decision"
+    else
+        _js_history_has_defer_reason "$journal" "$target" "$run_id" "$reason" || drc=$?
+    fi
     if [ "$drc" -eq 2 ]; then
         # The history could not be read (extractor UNAVAILABLE) — the
         # write-once check is UNKNOWN. Take the SAFE branch (the txn is
@@ -2456,10 +2949,29 @@ _js_sweep_flipped_disposition() {
             ;;
     esac
     if [ "$jsize" -ge "$jguard" ]; then
+        # Q1=C — the over-threshold defer ACTION is BOUNDED. The DECISION
+        # (the write-once check: "is a defer row already journaled for
+        # this txn?") is a cheap decide — one O(n) history scan under the
+        # bounded awk seam — with a HARD budget over the whole decision.
+        #
+        # If the decision cannot be made (the extractor was UNAVAILABLE,
+        # the watchdog fired, or the budget was exceeded) the launcher
+        # REFUSES TO ACT: it writes NOTHING (the journal stays byte-
+        # identical), it leaves the txn OPEN, and it WARNs with the
+        # JOURNAL SIZE and the BUDGET. It NEVER treats a missing decision
+        # as "there is no defer row" (rc 1) and never skips silently.
+        local ddec=0
+        _js_size_guard_defer_decision "$journal" "$target" "$run_id" "journal-size-guard" || ddec=$?
+        if [ "$ddec" -eq 2 ]; then
+            _log "WARN: journal sweep: journal size=${jsize}B ≥ guard=${jguard}B — defer decision budget (${_JS_AWK_TIMEOUT_S}s) exceeded/unavailable (awk rc=${_JS_LAST_AWK_RC}): REFUSING to act (no journal write; the txn is left OPEN)"
+            _js_sweep_release "$install_dir" "$lock_held"
+            return 0
+        fi
         _log "WARN: journal sweep: journal is ${jsize}B ≥ ${jguard}B (the launcher-side size guard) — CONSERVATIVE DEFER (never a rollback in this regime; the daemon-side closer parses in-process and is the only automatic rollback path)"
         _js_serving_defer "$journal" "$target" "$run_id" "$age" \
             "journal-size-guard" \
-            "the journal exceeds the launcher-side size guard — the launcher never rolls back in this regime"
+            "the journal exceeds the launcher-side size guard — the launcher never rolls back in this regime" \
+            "$ddec"
         _js_sweep_release "$install_dir" "$lock_held"
         return 0
     fi
@@ -2911,6 +3423,38 @@ _journal_sweep() {
         _js_lock_release "$install_dir"
         return 0
     fi
+    # ── the launcher-side size guard, applied to the PRE-FLIP branch (Q2) ──
+    # The FLIPPED branch has carried this guard since AM-P2-5 (a journal at
+    # or above the guard is a CONSERVATIVE DEFER: the launcher never rolls
+    # back in that regime — the daemon-side closer parses the journal
+    # in-process and is the only automatic rollback path). The PRE-FLIP
+    # branch had NO guard: it still appended a history row and rewrote
+    # `in_flight` on a journal of ANY size — two full-journal rewrites on
+    # exactly the shape (a big journal) the guard exists to keep the
+    # launcher's shell-side writers away from. The launcher-side writers
+    # are the O(n)-per-byte cost; the daemon-side closer is in-process.
+    #
+    # DISCLOSURE (release notes): at or above the launcher-side size guard
+    # (98304B by default) the launcher DECLINES TO ACT on a stale promote
+    # (flip) transaction — no launcher rollback, no commit-and-continue and
+    # no txn clear — so a stale flip transaction in such a journal is left
+    # to the daemon-side closer. The transaction stays OPEN; the next boot
+    # (or the daemon-side closer) disposes of it.
+    #
+    # Below the guard the behaviour is BYTE-IDENTICAL to the pre-fix
+    # behaviour (the clear still happens, with the same history row).
+    local pjsize="${#json}" pjguard="${SWEEP_JOURNAL_SIZE_GUARD_BYTES}"
+    case "$pjguard" in
+        ''|*[!0-9]*)
+            _log "WARN: journal sweep: SWEEP_JOURNAL_SIZE_GUARD_BYTES='${SWEEP_JOURNAL_SIZE_GUARD_BYTES}' is not a plain integer — substituting the documented default (98304); fix the .env"
+            pjguard=98304
+            ;;
+    esac
+    if [ "$pjsize" -ge "$pjguard" ]; then
+        _log "WARN: journal sweep: journal is ${pjsize}B ≥ ${pjguard}B (the launcher-side size guard) — DECLINING TO ACT on the stale pre-flip $kind txn (target=${target:-?}, age ${age}s): no launcher rollback and no commit-and-continue — a stale flip transaction in a ≥${pjguard}B journal is left to the daemon-side closer; the txn is left OPEN"
+        _js_lock_release "$install_dir"
+        return 0
+    fi
     _log "journal sweep: stale pre-flip $kind txn (age ${age}s, target=${target:-?}, owner pid ${owner:-?}) — clearing, boot proceeds"
     _js_history_append "$journal" "sweep" \
         "sweep: orphaned pre-flip $kind txn (target=${target:-?}, owner pid ${owner:-?}, age ${age}s) cleared — never flipped" \
@@ -2937,7 +3481,10 @@ _notify_once() {
 }
 
 # ── Restart-state persistence (belt-and-braces to ADR-010) ─────────────────
-# INSTALL_DIR/.launcher-state — tiny key=value file, atomic write (tmp+mv).
+# $STATE_FILE — tiny key=value file, atomic write (tmp+mv). Defaults to
+# INSTALL_DIR/.launcher-state; relocatable via ENSEMBLE_LAUNCHER_STATE_FILE
+# (design §v — assigned in main() AFTER load_env_file so the override can
+# come from the install .env; default byte-identical when unset).
 # Keys: last_exit, crash_count, window_start, last_backoff, notified_75.
 # Absent or corrupt file → reset to defaults (never fatal).
 
@@ -3342,13 +3889,35 @@ main() {
         exit 78
     fi
 
-    STATE_FILE="$INSTALL_DIR/.launcher-state"
-
     # Env first (ADR-014): INSTALL_DIR/.env staged from repo .env.prod.
     # Exports win over the binary's own .env load (run_app.py only sets
     # unset vars) — precedence is structural.
     _log "ensemble launcher starting (INSTALL_DIR=$INSTALL_DIR)"
     load_env_file "$INSTALL_DIR/.env"
+
+    # STATE_FILE (design §v relocation): default UNCHANGED —
+    # "$INSTALL_DIR/.launcher-state" (the VM's crash-loop burst budget
+    # depends on this path staying exactly where it is when the override
+    # is unset). Assigned AFTER load_env_file — NOT before it — because
+    # the override must be readable from the install .env: the Stage-2
+    # wiring writes ENSEMBLE_LAUNCHER_STATE_FILE into INSTALL_DIR/.env
+    # (relocating state into the writable set of a root-owned top dir).
+    # Precedence (F-07): .env value → inherited env → default (the := fires
+    # only when neither source set it; load_env_file's export already beat
+    # the inherited value for keys present in .env — ADR-014 discipline).
+    # The .env side is LAST-wins (the loader exports sequentially, so the
+    # last export wins) and an EMPTY .env value clears the inherited value
+    # → the := default fires. scripts/watchdog-watcher.sh resolves the SAME
+    # file with the SAME rules (and the SAME value-resolution rule for
+    # trailing whitespace / inline comments — F-06); the parity rows in
+    # tests/test_watchdog_watcher.sh pin the agreement.
+    # Pre-relocation this line sat BEFORE load_env_file; nothing between
+    # the cd and the env load consumed STATE_FILE, so the move is
+    # behavior-neutral for the unset case. Exported so every run_loop
+    # child inherits it (same pattern as MALLOC_ARENA_MAX below).
+    : "${ENSEMBLE_LAUNCHER_STATE_FILE:=$INSTALL_DIR/.launcher-state}"
+    export ENSEMBLE_LAUNCHER_STATE_FILE
+    STATE_FILE="$ENSEMBLE_LAUNCHER_STATE_FILE"
 
     # Allocator cap (resource-cost-control O1, 2026-10-18): default glibc
     # to 2 malloc arenas BEFORE the daemon child starts. MALLOC_ARENA_MAX
@@ -3359,6 +3928,15 @@ main() {
     # in main(), so every `run_loop` cycle's child inherits it.
     : "${MALLOC_ARENA_MAX:=2}"
     export MALLOC_ARENA_MAX
+
+    # Supervisor-env PATH (design §iv Layer 2 — see the _path_* family):
+    # probe the inherited PATH, no-op when npx/uvx/node already resolve
+    # (the VM case — systemd's default PATH carries them), otherwise
+    # synthesize from stable anchors + the dynamic nvm default. Must run
+    # AFTER load_env_file (an .env-staged ENSEMBLE_LAUNCHER_PATH takes the
+    # same precedence) and BEFORE _journal_sweep/binary resolve so the
+    # daemon child inherits the resolved PATH.
+    _path_ensure
 
     # Journal sweep BEFORE resolving the binary (ADR-012).
     _journal_sweep

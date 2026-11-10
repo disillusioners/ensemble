@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-10-24
 
+## [0.29.11] — 2026-11-10
+
+### Fixed — POK active-entry admission cap raised 64 → 256 (`feature/pok-cap-256`)
+
+- POK active-entry admission cap 64 → 256 (Emperor directive 2026-11-10) — the per-project cap on active operating-knowledge entries (`POK_ACTIVE_CAP_PER_PROJECT`, `daemon/services/pok_service.py`), enforced in Python only (no SQL CHECK/trigger/migration encodes the count, so no schema migration was added). Admission remains refuse-never-evict at the new cap. The 64-cap had blocked all agent writes to the store.
+
+## [0.29.10] — 2026-11-10
+
+### Added — macOS deployment topology: canonical deployment guide + launcher supervisor-env PATH/STATE_FILE leg + Makefile live-install guard (`feature/macos-deployment-topology`; design `.agents/shared/planning/macos-deployment-topology/`)
+
+- **docs/deployment.md (1048L)** — opens with a one-page quick start (fresh macOS box → launchd-supervised, health-checked daemon; adversarial 13-step fresh-box walk verified, no failing step), then the dev/demo/live topology across Mac + VM, upgrade/rollback, the Linux/VM systemd runbook (labelled operator runbook, NOT a fresh-box procedure), and the staged hardening plan (Stage 1 relocation + Stage 2). README/setup/development/usage re-pointed: guard-era caller forms (INSTALL_DIR always required; live-set targets additionally need `ENSEMBLE_INSTALL_LIVE=1`), full-URL health checks (`http://127.0.0.1:9797/livez` + `/readyz`), `.env.prod` + DB provisioning, UI URL named (127.0.0.1:9797, loopback-only), absolute `/usr/libexec/PlistBuddy` + missing-tool sentinels, no-tilde/no-spaces INSTALL_DIR discipline.
+- **Launcher supervisor-env PATH strategy** — probe→synthesize PATH (VM no-op byte-proven; boot log carries `source=`/`delta=`/`resolved_path=` for the VM drill); `ENSEMBLE_LAUNCHER_PATH` override exported verbatim; `ENSEMBLE_LAUNCHER_STATE_FILE` override (.env→inherited→default precedence, default byte-identical); `_env_strip_value` shared byte-identical in launcher+watchdog (trailing-ws trim, unquoted-# cut, quote layer; `.env` PATH key refused with loud WARN); nvm alias codenames resolved bounded 3-hop; defer-counter follows the state dir.
+- **Makefile live-install guard, final refinements** — arm 3b — the F6 absolute-path arm (one implementation, two labels): non-absolute INSTALL_DIR refuses; `$$HOME` help fix; D1 every `$(INSTALL_DIR)` recipe sink quoted; D2 dead-refuse removal; D3 comment; 122-node guard suite. (Base guard + F-01..F-05 refusal-path closure landed earlier in the v0.29.9 window.)
+- **Wedge note — MITIGATION, not a cure:** the launcher journal-sweep O(n) rewrite removes the measured O(n²) per-boot blowup; pathological journal growth remains possible — watchdog + journal sweep stay the standing defenses.
+- **Planning ground truth lands in-repo** — architecture-recommendation, g5 Stage-1 relocation, stage-2 hardening, rehearsals a–d transcripts (launchd demo, relocation, staged flip, /usr/local-shape), datacenter-scripts README patch draft, v0.29.10 operator deploy checklist.
+- **Tests:** launcher 371/0/1, watchdog 90/0, guard 121/1 (sudo-skip expected); tester full sign-off + delta re-verification under `.agents/tester/RESULTS/2026-11-10-wi-52666630-*.md`.
+
 ## [0.29.9] — 2026-11-10
 
 ### Added — Decision Module P1, SHADOW-ONLY (Emperor-ratified 2026-11-09): the proxy-decisions thin client, seam registry, shadow overlay, kill channel (`feature/decision-module-p1`; design `.agents/shared/planning/decision-module/`)

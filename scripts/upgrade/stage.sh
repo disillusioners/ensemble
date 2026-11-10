@@ -132,6 +132,7 @@ done
 
 resolve_env "${TARGET_ARG:-${TARGET:-demo}}"
 require_live_guard "$UP_TARGET"
+require_demo_guard "$UP_TARGET" upgrade-stage
 echo_env_triple
 
 # ── VERSION discipline (ADR-009 D3) ─────────────────────────────────────────

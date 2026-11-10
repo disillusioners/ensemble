@@ -464,33 +464,66 @@ else
 fi
 assert_contains "C7 Linux branch uses GNU date -d" 'date -u -d "+${COOLDOWN_S} seconds"' "$(cat "$LIB_SH")"
 assert_contains "C7 BSD branch keeps -ju -v form" 'date -ju -v+${COOLDOWN_S}S' "$(cat "$LIB_SH")"
+# The ONE implementation: the cooldown stamp is built by lib.sh's own
+# `_cooldown_until_iso` helper — a REPLICA embedded in this test would
+# drift from the shipped code and make a confirmed defect look refuted
+# (POK probe-01: the 3-arm ladder ends at the tree's OWN production
+# builder). The helper is what the pins below exercise.
+assert_contains "C7 lib.sh exposes the cooldown-stamp helper" '_cooldown_until_iso()' "$(cat "$LIB_SH")"
 
-# Live verification on this GNU host: dispatch arms must produce a
-# future timestamp (cooldown_until) when the cooldown is armed. On
-# pre-fix, the BSD-only ``date -ju -v+...`` form failed silently and
-# ``|| until=$(_now_iso)`` disarmed the cooldown. On post-fix, the Linux
-# arm fires and produces a future timestamp.
-COOLDOWN_EPOCH="$(bash -c '
-    _now_epoch() { date +%s; }
-    _now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-    COOLDOWN_S=600
-    case "$(uname -s)" in
-        Darwin|*BSD*|*bsd*)
-            until="$(date -ju -v+${COOLDOWN_S}S -f "%Y-%m-%dT%H:%M:%SZ" "$(_now_iso)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
-                || until="$(_now_iso)" ;;
-        Linux|GNU*|*GNU*)
-            until="$(date -u -d "+${COOLDOWN_S} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
-                || until="$(_now_iso)" ;;
-        *) until="$(_now_iso)" ;;
-    esac
-    date -d "$until" +%s 2>/dev/null
-')"
+# Live verification on THIS host: the dispatch must produce a FUTURE
+# timestamp (cooldown_until) when the cooldown is armed. On pre-fix, the
+# BSD-only ``date -ju -v+...`` form failed silently and the
+# ``|| until=$(_now_iso)`` fallback disarmed the cooldown. On post-fix,
+# the host's own family fires and produces a future timestamp.
+#
+# The check runs the REAL implementation (lib.sh's `_cooldown_until_iso`)
+# and converts the stamp with lib.sh's OWN portable `_iso_to_epoch`. The
+# previous check ran an EMBEDDED REPLICA of the dispatch and converted the
+# stamp with the GNU-only ``date -d "$until" +%s`` — BSD `date` has no
+# `-d`, so that conversion returned EMPTY on every macOS host: the check
+# was RED there for a PLATFORM reason, not a code reason.
+COOLDOWN_EPOCH="$(bash -c '. "$1"; _cd_stamp="$(_cooldown_until_iso)"; [ -n "$_cd_stamp" ] || exit 1; _iso_to_epoch "$_cd_stamp"' _ "$LIB_SH" 2>/dev/null)"
 NOW_E="$(date +%s)"
 if [ -n "$COOLDOWN_EPOCH" ] && [ "$COOLDOWN_EPOCH" -gt "$NOW_E" ]; then
-    _pass "C7 cooldown produces a future timestamp on GNU (delta=$((COOLDOWN_EPOCH - NOW_E))s, expect ~600s)"
+    _pass "C7 cooldown produces a future timestamp on this host (delta=$((COOLDOWN_EPOCH - NOW_E))s, expect ~600s)"
 else
-    _fail "C7 cooldown produces a future timestamp on GNU" ">now ($NOW_E)" "got '$COOLDOWN_EPOCH'"
+    _fail "C7 cooldown produces a future timestamp on this host" ">now ($NOW_E)" "got '$COOLDOWN_EPOCH'"
 fi
+
+# BOTH arms, on THIS host, through the `_COOLDOWN_DATE_UNAME` selection
+# override + a deterministic `date` STUB (the stub OWNS the answer;
+# everything it does not own is forwarded to the real date). macOS's real
+# `date` cannot run the GNU form at all (`-d` is not a BSD flag) and GNU's
+# real `date` cannot run the BSD form (`-j`/`-v`), so a stub is the ONLY
+# way to exercise the other family here — the same discipline as the
+# launcher's 8f-pre `_ts_off` stub (a stubbed date that answers exactly
+# the two forms under test).
+C7_STUB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/c7-cooldown.XXXXXX")"
+_register_fixture "$C7_STUB_DIR"
+cat > "$C7_STUB_DIR/date" <<'C7_STUB_DATE'
+#!/bin/sh
+# date STUB (tests only): answers the two cooldown-arm forms; every other
+# invocation is forwarded to the real date.
+if [ "$1" = "-u" ] && [ "$2" = "-d" ]; then
+    printf 'GNUSTUB-COOLDOWN\n'
+    exit 0
+fi
+case "${2:-}" in
+    -v+*S|-v-*)
+        printf 'BSDSTUB-COOLDOWN\n'
+        exit 0
+        ;;
+esac
+exec /bin/date "$@"
+C7_STUB_DATE
+chmod +x "$C7_STUB_DIR/date"
+C7_GNU_STAMP="$(PATH="$C7_STUB_DIR:$PATH" _COOLDOWN_DATE_UNAME=Linux bash -c '. "$1"; _cooldown_until_iso' _ "$LIB_SH" 2>/dev/null)"
+assert_eq "C7 the GNU arm is selected by the test hook (stubbed date)" \
+    "GNUSTUB-COOLDOWN" "$C7_GNU_STAMP"
+C7_BSD_STAMP="$(PATH="$C7_STUB_DIR:$PATH" _COOLDOWN_DATE_UNAME=Darwin bash -c '. "$1"; _cooldown_until_iso' _ "$LIB_SH" 2>/dev/null)"
+assert_eq "C7 the BSD arm is selected by the test hook (stubbed date)" \
+    "BSDSTUB-COOLDOWN" "$C7_BSD_STAMP"
 
 # ===========================================================================
 section "C8 — old-format in_flight (no displaced_version) → halt-for-human (P1 / C-4)"

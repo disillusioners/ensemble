@@ -10,67 +10,96 @@
 # install` would kill the live daemon via scripts/stop-ensemble.sh — all
 # with zero env, zero args, zero intent. This guard is the root-cause fix.
 #
-# ARMS (every refusal exits 78 BEFORE any side effect; the guard never
-# creates, removes or writes anything):
+# ARMS — the refusal arms in the ORDER THEY FIRE (execution order). The
+# labels below are NOT code section numbers: the code's own `── N.` headers
+# are a SEPARATE, file-layout index, and each arm names the code section it
+# lives in wherever it points at one. Every refusal exits 78 BEFORE any side
+# effect; the guard never creates, removes or writes anything. (The last
+# entry is not a refusal — it is the canonicalization the classification
+# depends on, and it runs earlier, inside the classification.)
 #
-#   0. INERT DEFAULT — INSTALL_DIR unset/empty → refuse with guidance.
-#      There is no default install dir anymore, so bare `make install` /
-#      `make uninstall` can never resolve to live by construction.
+#   ONE MESSAGE SHAPE: every refusal goes through _refuse_unverifiable() — or
+#   an inline heredoc reproducing the same first-line shape AND the same
+#   guidance block — so a second message shape is never introduced.
 #
-#   1. ENVIRONMENT INTEGRITY — HOME unset/empty → refuse. The protected set
-#      is derived from $HOME (and SUDO_USER's home); an unset/empty HOME
-#      silently shrank that set (F-02) so the live dir stopped being
-#      protected and the guard exited 0. Every environment value this script
-#      reads is captured up front with ${var:-}: `set -u` aborts only the
-#      SUBSHELL that touches an unbound name, and this script deliberately
-#      runs WITHOUT `set -e`, so the parent would carry on with an empty
-#      value — a silent fail-open.
+#   * INERT DEFAULT — INSTALL_DIR unset/empty → refuse with guidance.
+#     There is no default install dir anymore, so bare `make install` /
+#     `make uninstall` can never resolve to live by construction.
+#     (code section 0)
 #
-#   2. UNVERIFIABLE SPELLING — STRUCTURAL: no confirm var opens it.
-#      2a. tilde spellings other than '~/' (leg 1 behavior, unchanged).
-#      2b. RAW VALUE REFUSAL (F-01) — the raw INSTALL_DIR must be exactly
-#          what the guard verified: no whitespace, no quotes, no shell
-#          metacharacters ( ; | & $ ` < > ( ) ), no glob characters, and no
-#          difference from its normalized spelling. `make` substitutes
-#          $(INSTALL_DIR) TEXTUALLY into the recipe and the shell then
-#          re-parses it: a trailing space is stripped by word splitting
-#          (the recipe deletes the live tree) and ';' / '|' are true command
-#          separators (arbitrary commands run). The guard compares the
-#          NORMALIZED path while the recipe consumes the RAW one, so a
-#          value the guard cannot verify must never reach the recipe.
+#   * ENVIRONMENT INTEGRITY — HOME unset/empty → refuse. The protected set
+#     is derived from $HOME (and SUDO_USER's home); an unset/empty HOME
+#     silently shrank that set (F-02) so the live dir stopped being
+#     protected and the guard exited 0. Every environment value this script
+#     reads is captured up front with ${var:-}: `set -u` aborts only the
+#     SUBSHELL that touches an unbound name, and this script deliberately
+#     runs WITHOUT `set -e`, so the parent would carry on with an empty
+#     value — a silent fail-open.
+#     (code section 1)
 #
-#   3. LIVE/DEMO CONFIRM GATE — when the requested dir canonicalizes to a
-#      protected install dir, the guard refuses unless the operator set the
-#      per-path confirm var:
+#   * UNVERIFIABLE SPELLING — STRUCTURAL: no confirm var opens it.
+#     (a) tilde spellings other than '~/' (leg 1 behavior, unchanged).
+#     (b) RAW VALUE REFUSAL (F-01) — the raw INSTALL_DIR must be exactly
+#         what the guard verified: no whitespace, no quotes, no shell
+#         metacharacters ( ; | & $ ` < > ( ) ), no glob characters, and no
+#         difference from its normalized spelling. `make` substitutes
+#         $(INSTALL_DIR) TEXTUALLY into the recipe and the shell then
+#         re-parses it: a trailing space is stripped by word splitting
+#         (the recipe deletes the live tree) and ';' / '|' are true command
+#         separators (arbitrary commands run). The guard compares the
+#         NORMALIZED path while the recipe consumes the RAW one, so a
+#         value the guard cannot verify must never reach the recipe.
+#     (code section 2)
 #
-#        ENSEMBLE_INSTALL_LIVE=1   → confirms actions on any LIVE dir
-#        ENSEMBLE_INSTALL_DEMO=1   → confirms actions on the DEMO dir
+#   * ABSOLUTE-PATH ARM — STRUCTURAL: no confirm var opens it. INSTALL_DIR
+#     must be an ABSOLUTE path (one that starts with '/'). A relative path
+#     resolves against whatever directory the recipe happens to run in, so
+#     the path the guard checks and the path a recipe would delete can be
+#     two DIFFERENT paths: '..' run from a repo root is the repo's parent,
+#     'agents' run from a repo root is that repo's own agents/ tree. The
+#     arm judges the TILDE-EXPANDED form, so '~/x' (expanded to $HOME/x
+#     before the guard sees it) stays absolute and is NOT refused here; '~'
+#     and '~user/...' never reach this arm (the UNVERIFIABLE SPELLING arm
+#     refuses them first). It runs BEFORE the live/demo classification (code
+#     sections 7-8) and before the containment arm (code section 9), so no
+#     confirm var can ever open a relative path.
+#     (code section 3b)
 #
-#      Two per-path vars, deliberately NOT interchangeable: confirming the
-#      demo must never implicitly confirm live. Naming follows the repo's
-#      existing per-family confirm-var convention (deploy.sh:
-#      ENSEMBLE_DEPLOY_LIVE; scripts/upgrade/lib.sh: ENSEMBLE_UPGRADE_LIVE
-#      — each family owns its own, kept disjoint by design; no collision
-#      with the launcher leg's ENSEMBLE_LAUNCHER_PATH / ENSEMBLE_LAUNCHER_
-#      STATE_FILE).
+#   * LIVE/DEMO CONFIRM GATE — when the requested dir canonicalizes to a
+#     protected install dir, the guard refuses unless the operator set the
+#     per-path confirm var:
+#       ENSEMBLE_INSTALL_LIVE=1   → confirms actions on any LIVE dir
+#       ENSEMBLE_INSTALL_DEMO=1   → confirms actions on the DEMO dir
 #
-#   4. CONTAINMENT ARM — STRUCTURAL: no confirm var opens it. The target
-#      must not BE a protected home, must not be an ANCESTOR of a protected
-#      install dir (e.g. $HOME itself, /opt, /) and must not be INSIDE one
-#      (e.g. <live>/data) — F-04. `rm -rf` of an ancestor destroys the
-#      protected tree; `rm -rf` of a descendant is the same incident one
-#      level down. The classification (arm 3) runs FIRST, so a live/demo dir
-#      itself is still gated by its confirm var (not by this arm).
+#     Two per-path vars, deliberately NOT interchangeable: confirming the
+#     demo must never implicitly confirm live. Naming follows the repo's
+#     existing per-family confirm-var convention (deploy.sh:
+#     ENSEMBLE_DEPLOY_LIVE; scripts/upgrade/lib.sh: ENSEMBLE_UPGRADE_LIVE
+#     — each family owns its own, kept disjoint by design; no collision
+#     with the launcher leg's ENSEMBLE_LAUNCHER_PATH / ENSEMBLE_LAUNCHER_
+#     STATE_FILE).
+#     (code sections 7-8)
 #
-#   5. CANONICALIZATION — case-folded comparison on case-insensitive
-#      filesystems (Darwin/APFS) and LONGEST-EXISTING-PREFIX physical
-#      resolution. F-05: bash's BUILTIN `pwd -P` echoes the TYPED casing
-#      (/USERS/… compared unequal to the real tree), so the absolute
-#      /bin/pwd -P is preferred; and a path whose intermediate components do
-#      not exist (<home>/ghost/../live) is resolved through its deepest
-#      existing ancestor — physically resolved, remaining segments
-#      re-appended, '..' folded lexically — so it compares correctly
-#      against the protected set.
+#   * CONTAINMENT ARM — STRUCTURAL: no confirm var opens it. The target
+#     must not BE a protected home, must not be an ANCESTOR of a protected
+#     install dir (e.g. $HOME itself, /opt, /) and must not be INSIDE one
+#     (e.g. <live>/data) — F-04. `rm -rf` of an ancestor destroys the
+#     protected tree; `rm -rf` of a descendant is the same incident one
+#     level down. The classification (code sections 7-8) runs FIRST, so a
+#     live/demo dir itself is still gated by its confirm var (not by this
+#     arm).
+#     (code section 9)
+#
+#   * CANONICALIZATION — case-folded comparison on case-insensitive
+#     filesystems (Darwin/APFS) and LONGEST-EXISTING-PREFIX physical
+#     resolution. F-05: bash's BUILTIN `pwd -P` echoes the TYPED casing
+#     (/USERS/… compared unequal to the real tree), so the absolute
+#     /bin/pwd -P is preferred; and a path whose intermediate components do
+#     not exist (<home>/ghost/../live) is resolved through its deepest
+#     existing ancestor — physically resolved, remaining segments
+#     re-appended, '..' folded lexically — so it compares correctly
+#     against the protected set.
+#     (code section 3)
 #
 # PROTECTED LIVE SET (extensible, operator directive #2.2):
 #   * built-ins:  $HOME/agents-ensemble  (both Layer-1 HOME shapes — below)
@@ -85,7 +114,11 @@
 #                 unchanged and the HOME candidates cannot be dropped by a
 #                 bad override. Extension entries are exact paths (no ~ or
 #                 Layer-1 expansion); each is confirmed by the same
-#                 ENSEMBLE_INSTALL_LIVE=1 var. Entries are split on ':',
+#                 ENSEMBLE_INSTALL_LIVE=1 var.
+#   * Layer-1 SIBLING (cross-env, lib.sh:898-899): when HOME ends with
+#                 EITHER install name, the sibling dir (dirname(HOME)/<name>)
+#                 is a candidate too — HOME=…/agents-ensemble-demo makes
+#                 …/agents-ensemble a LIVE candidate, and vice versa. Entries are split on ':',
 #                 trimmed of surrounding whitespace, empty entries skipped,
 #                 globbing disabled (an entry containing '*' cannot expand).
 #   The demo dir stays HOME-derived only ($HOME/agents-ensemble-demo, both
@@ -126,6 +159,17 @@
 #
 #   bash scripts/install-dir-guard.sh --target install
 #
+# --require-live (OPT-IN mode, additive): some targets write HOST state that
+#   the INSTALL_DIR axis cannot express (plist-install / watchdog-install
+#   copy the staged plist into $HOME/Library/LaunchAgents REGARDLESS of
+#   INSTALL_DIR). The flag adds ONE extra rule: the requested dir must
+#   classify as LIVE (and a live dir still needs ENSEMBLE_INSTALL_LIVE=1).
+#   It is evaluated AFTER the per-path gate and the containment arm, so the
+#   canonical live refusal and the structural containment refusal still fire
+#   first; ENSEMBLE_INSTALL_DEMO never opens a demo dir under this mode.
+#   Without the flag the guard is byte-for-byte unchanged for every existing
+#   consumer.
+#
 # INSTALL_DIR is read from the environment (the Makefile exports it, so
 # env-set and command-line `make install INSTALL_DIR=…` both arrive — and
 # the path never crosses a shell-quoting boundary at the call site).
@@ -158,7 +202,8 @@
 
 set -u
 
-# ── environment capture (set -u safety — see arm 1 in the header) ───────────
+# ── environment capture (set -u safety — see the ENVIRONMENT INTEGRITY arm
+#    in the header) ───────────────────────────────────────────────────────────
 # Every variable this script reads from the environment is bound HERE, before
 # any logic runs. `set -u` aborts only the subshell that touches an unbound
 # name; with no `set -e` the parent would continue with an empty value.
@@ -170,27 +215,22 @@ ENSEMBLE_INSTALL_LIVE="${ENSEMBLE_INSTALL_LIVE:-0}"
 ENSEMBLE_INSTALL_DEMO="${ENSEMBLE_INSTALL_DEMO:-0}"
 
 usage() {
-    echo "usage: install-dir-guard.sh --target <make-target>  (INSTALL_DIR via env)" >&2
+    echo "usage: install-dir-guard.sh --target <make-target> [--require-live]  (INSTALL_DIR via env)" >&2
 }
 
 TARGET=""
+REQUIRE_LIVE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --target)
             [ $# -ge 2 ] || { usage; exit 78; }
             TARGET="$2"; shift 2 ;;
+        --require-live)
+            REQUIRE_LIVE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "install-dir-guard: unknown arg '$1'" >&2; usage; exit 78 ;;
     esac
 done
-
-refuse() {
-    # refuse <first-line>… — 78, message to stderr
-    printf 'make %s: REFUSING — %s\n' "${TARGET:-<unknown>}" "$1" >&2
-    shift
-    printf '%s\n' "$@" >&2
-    exit 78
-}
 
 _refuse_unverifiable() {
     # _refuse_unverifiable <detail line>… — 78, message to stderr.
@@ -410,6 +450,52 @@ _canon_dir() {
 }
 
 DIR_NORM="$(_norm "$INSTALL_DIR_ENV")"
+
+# ── 3b. ABSOLUTE-PATH ARM — STRUCTURAL: no confirm var opens it ─────────────
+# A RELATIVE INSTALL_DIR is refused outright. A relative path resolves
+# against whatever directory the recipe happens to run in, so the path the
+# guard checks and the path a recipe would delete can be two DIFFERENT
+# paths: '..' run from a repo root is the repo's parent, 'agents' run from a
+# repo root is the repo's own agents/ tree. The guard therefore requires an
+# absolute path — one that starts with '/'.
+#
+# The arm judges the TILDE-EXPANDED form ($DIR_NORM), not the raw spelling:
+# '~/x' expands to $HOME/x before the guard sees it, so it stays absolute
+# and is NOT refused here (it proceeds to the live/demo classification
+# exactly as before). '~' and '~user/...' never reach this arm — the
+# UNVERIFIABLE SPELLING arm (code section 2) refuses them first, with its
+# own wording.
+#
+# It runs BEFORE the classification (code section 7) and before the
+# containment arm (code section 9), so no confirm var can ever open a
+# relative path.
+case "$DIR_NORM" in
+    /*) ;;
+    *)
+        cat >&2 <<EOF
+make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR '$INSTALL_DIR_ENV' is not an absolute path.
+  The guard requires an absolute path (one that starts with '/'). A relative
+  path resolves against whatever directory the recipe happens to run in, so
+  the path the guard checks and the path a recipe would delete can be two
+  different paths — '..' in one directory is the parent of another, and
+  'agents' in a repo root is that repo's own agents/ tree.
+  A leading '~/' IS accepted: it is expanded to \$HOME before the guard sees
+  it, so '~/agents-ensemble' is judged as the absolute \$HOME/agents-ensemble.
+  Spell the path absolutely:  make ${TARGET:-<unknown>} INSTALL_DIR=/path/to/install
+  Protected live dirs (\$HOME/agents-ensemble, /opt/ensemble, plus any
+  ENSEMBLE_LIVE_INSTALL_DIRS entries) additionally require
+  ENSEMBLE_INSTALL_LIVE=1; the demo dir (\$HOME/agents-ensemble-demo)
+  requires ENSEMBLE_INSTALL_DEMO=1.
+  Under sudo (env vars do not survive plain sudo), the sudo-correct form:
+    sudo env ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR=/path/to/install
+  Sanctioned lanes (prefer these):
+    deploy :  ENSEMBLE_DEPLOY_LIVE=1 scripts/deploy.sh live
+    upgrade:  ENSEMBLE_UPGRADE_LIVE=1 scripts/upgrade/promote.sh live --f2-verified-closed
+EOF
+        exit 78
+        ;;
+esac
+
 DIR_CANON="$(_canon_dir "$DIR_NORM")"
 
 # ── 4. comparison helpers (case-folded on case-insensitive filesystems) ──────
@@ -531,6 +617,26 @@ _cand_class() {
                     fi
                     ;;
             esac
+            # Layer-1 SIBLING shape (lib.sh:898-899, :907-914): when <home>
+            # ends with EITHER install name, the cross-env sibling is a
+            # candidate too (HOME=…/agents-ensemble-demo ⇒ …/agents-ensemble
+            # is a LIVE candidate, and vice versa).
+            case "$base" in
+                agents-ensemble|agents-ensemble-demo)
+                    if [ "$base" != "$name" ]; then
+                        cand="$(dirname "$h")/$name"
+                        cand_n="$(_norm "$cand")"
+                        cand_c="$(_canon_dir "$cand_n")"
+                        if _eq "$want" "$cand_n" || _eq "$want" "$cand_c"; then
+                            case "$name" in
+                                agents-ensemble)      printf 'live\n' ;;
+                                agents-ensemble-demo) printf 'demo\n' ;;
+                            esac
+                            return 0
+                        fi
+                    fi
+                    ;;
+            esac
         done
     done
     # Built-in non-HOME live dirs + the extensible set (colon-separated,
@@ -612,8 +718,8 @@ esac
 # confirm vars open a path that IS the protected install dir, not a path
 # that swallows it.
 #
-# The classification (section 8) runs FIRST: a live/demo dir itself stays
-# gated by its confirm var (ENSEMBLE_INSTALL_LIVE / ENSEMBLE_INSTALL_DEMO),
+# The classification (code sections 7-8) runs FIRST: a live/demo dir itself
+# stays gated by its confirm var (ENSEMBLE_INSTALL_LIVE / ENSEMBLE_INSTALL_DEMO),
 # exactly as before.
 _contains_refusal() {
     # _contains_refusal <relation> <target> <anchor>
@@ -659,6 +765,12 @@ _protected_install_paths() {
         case "$base" in
             agents-ensemble|agents-ensemble-demo)
                 printf '%s\n' "$(_norm "$h")"
+                # Layer-1 SIBLING (lib.sh:898-899): cross-env candidate —
+                # dirname(<home>)/<name> for the OTHER install name.
+                for name in agents-ensemble agents-ensemble-demo; do
+                    [ "$(basename "$h")" != "$name" ] || continue
+                    printf '%s\n' "$(_norm "$(dirname "$h")/$name")"
+                done
                 ;;
         esac
     done
@@ -715,5 +827,33 @@ EOF
 $(_protected_home_paths)
 EOF
 done
+
+# ── --require-live mode (opt-in; additive) ──────────────────────────────────
+# The plist-install / watchdog-install targets write HOST launchd state
+# ($HOME/Library/LaunchAgents/ensemble-prod.plist) REGARDLESS of INSTALL_DIR
+# — a sandbox or demo INSTALL_DIR would silently overwrite the running prod
+# unit with one pointing at that tree. The flag adds ONE extra rule for
+# those targets: the requested dir must classify as LIVE (and a live dir
+# still needs ENSEMBLE_INSTALL_LIVE=1, via the per-path gate above).
+# Evaluated AFTER the per-path gate and the containment arm, so the canonical
+# live refusal and the structural containment refusal still fire first, and
+# ENSEMBLE_INSTALL_DEMO never opens a demo dir under this mode. Without the
+# flag the guard is byte-for-byte unchanged for every existing consumer.
+if [ "$REQUIRE_LIVE" = "1" ] && [ "$CLASS" != "live" ]; then
+    cat >&2 <<EOF
+make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR does not resolve to a LIVE install dir ($DIR_CANON).
+  This target writes the HOST launchd unit
+  ($HOME/Library/LaunchAgents/ensemble-prod.plist) — the prod unit must point
+  at the live install, never at a sandbox or demo tree (a sandbox INSTALL_DIR
+  would silently overwrite the running prod unit).
+  To install the prod launchd unit:
+    ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR='$INSTALL_DIR_ENV'
+  Under sudo (env vars do not survive plain sudo), the sudo-correct form:
+    sudo env ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR='$INSTALL_DIR_ENV'
+  The demo launchd agent is a hand-duplicate with its own Label
+  (com.ensemble.watchdog.demo) — see the Makefile's demo-usage note.
+EOF
+    exit 78
+fi
 
 exit 0

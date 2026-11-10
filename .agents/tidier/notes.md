@@ -871,3 +871,19 @@ Diff f2611f07..HEAD, 5 FE files (+487/−10). 0 High / 4 Medium / 8 Low.
 - Deferred to Reviewer (craftsmanship-adjacent, not adjudicated here): `count_active_in_family` family-boundary regex vs hyphenated slug tails; `ensure_embedding` dead-code status (wired elsewhere or remove); the `UNSET` vs `[]` "clear to default" subtlety at the tool boundary.
 - Process note: the disclose-only set is a REAL gap, not a doc nit — four council findings whose only record is a commit body. Commit bodies are not part of any promote payload and are not grepped by ceremony gates, so "recorded" and "durable" diverged. The new planning file converts it to an explicit OPEN item; the leader must paste the substance in.
 - House lesson: a fold that stages a helper used by its own new leg must re-run the pack in the SAME staging step. `7404949ef` recorded "service 43/43 … Tree clean" while the tree raised `AttributeError` on the no-op-echo path (helper landed one commit late). `git status` clean ≠ complete; only the pack run says so.
+
+## 2026-11-09 — launcher journal-sweep-fix tidier pass (worktree feature/launcher-journal-sweep-fix, range 818411107..361cba6b, 5 files +574/−52), Iteration 001
+- Commission: quality-only pass, report-first; council-deferred items (W3/S1/S3/S4/S5) fenced OUT of the worker prompts (independence discipline) and filtered at aggregation — NOT re-litigated.
+- Dispatch: 3 parallel workers (readable-code + static-hygiene + robustness), fan-in 3/3 — 35 raw findings deduped to 26 (1 High / 6 Medium / 19 Low); 6 applied in-worktree, 20 report-only, plus 8 deferred-to-Reviewer notes.
+- High (1): the cap's failure path is swallowed with NO trace and the caller's warning branch is unreachable → the bound this branch adds can silently die (init_guard.py:592/:591/:649). 2-line fix (log inside each except block) keeps the "never raises" contract; DECISION for the Developer.
+- Applied (6, zero-behavior, in-worktree, UNCOMMITTED): launcher.sh — env var `_JS_` ownership prefix (2 sites) + stdin re-assembly comment + `_js_journal_read` header contract now lists BRACKET-UNBALANCED/UNTERMINATED STRING/VALIDATOR-UNAVAILABLE; daemon/mcp/init_guard.py — `JOURNAL_HISTORY_MAX_PER_SERVER: int = 20`; tests/unit/tools/test_mcp_init_guard.py — dead `import json as _j` removed + module-docstring index bullet for the R3 cap group.
+- Deliberately LEFT (report-only): awk-body edits (the `;` empty statement, the redundant `n = length(buf)`) — inside the council-signed equivalence artifact; the magic-literal + parse-rule dedupe in the test oracle (full fix is the mirror-test DECISION); the `Any` annotations (module convention — `_resolve_install_dir() -> Any`).
+- Green evidence (both gates re-run AFTER the cleanup): init_guard pytest 27 passed / 0 failed (0.80 s) == the registered PACKS.md count; launcher suite 296 passed / 0 failed / 1 skipped == the standing row's HEAD count. Import provenance proven (daemon.__file__ = <worktree>). `bash -n launcher.sh` clean; AST parse clean on both python files.
+- Verdict: NEEDS-WORK (1 High — narrow, 2-line observability fix); 6 Medium, 19 Low.
+- NOTE (merge hygiene, repo convention o): this append leaves .agents/tidier/notes.md dirty in the WORKTREE. Before any merge: stash-by-path → merge --no-ff → stash pop → `git checkout --ours .agents/tidier/notes.md && git add` (never drop the stash).
+- Subsequent release gate (2026-11-10): the launcher and guard gates are SEPARATE, not one composite gate.
+  Launcher: PASS (10/10 legs; round-1 FAIL retained above as evidence, round-2 PASS at 7b0b7955d).
+  Guard: PASS (18 legs, zero net-new; its own red rounds retained as evidence; the guard gate ran at
+  5861419dc and the post-gate tips carry only path-limited artifact commits plus BASE content
+  — v0.29.11's POK surface — which is cited, not re-gated).
+  Neither verdict covers the other lane's bytes; see .agents/tester/RESULTS/ for both artifacts.

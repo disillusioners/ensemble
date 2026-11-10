@@ -287,28 +287,71 @@ class TestAc16DisputeAndArchive:
 
 
 class TestAc19TerminalityCured:
-    def test_64_cap_refuse_then_archive_cure_then_succeed(
-        self, svc: POKService
-    ) -> None:
+    def test_active_cap_constant_is_256(self) -> None:
+        """The shipped active-entry cap is PINNED.
+
+        The refusal leg below seeds the active counter (it never
+        inserts hundreds of real rows), so this leg is the named guard
+        against a regression of the cap back to the old 64.
+        """
         from daemon.services.pok_service import POK_ACTIVE_CAP_PER_PROJECT
 
-        for i in range(POK_ACTIVE_CAP_PER_PROJECT):
+        assert POK_ACTIVE_CAP_PER_PROJECT == 256
+
+    def test_active_cap_refuse_then_archive_cure_then_succeed(
+        self, svc: POKService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Refuse at the SHIPPED cap, name the cure, then succeed.
+
+        FAST + honest: the admission gate's only input is the repo's
+        active COUNTER, so the counter is seeded at the real shipped
+        cap instead of inserting hundreds of real rows. Three real rows
+        ARE inserted (small and honest) so the archive-cure TARGET
+        exists and the refuse → archive → succeed flow runs end-to-end.
+        """
+        from daemon.services import pok_service as pok_mod
+
+        cap = pok_mod.POK_ACTIVE_CAP_PER_PROJECT
+        # The refusal mechanics below are cap-agnostic (the counter is
+        # seeded), so THIS pin is what makes the refusal leg itself
+        # red when the cap regresses to the old 64.
+        assert cap == 256
+
+        seeded = 3
+        for i in range(seeded):
             svc.upsert(
                 project_id="p2",
                 slug=f"f{i:02d}-a-x",
                 body=f"filler fact {i} unique content here",
                 agent_id="developer",
             )
-        assert svc._repo.count_active("p2") == POK_ACTIVE_CAP_PER_PROJECT
+        # Seed the counter at the SHIPPED cap: the real rows plus the
+        # gap that fills the cap. Archiving one row drops the reported
+        # count by one, so the cured retry genuinely succeeds below.
+        real_count = svc._repo.count_active
+        monkeypatch.setattr(
+            svc._repo,
+            "count_active",
+            lambda pid: real_count(pid) + (cap - seeded),
+        )
+        assert svc._repo.count_active("p2") == cap
+
         # refuse-never-evict — the refusal names the archive cure
         with pytest.raises(POKError) as ei:
             svc.upsert(
                 project_id="p2",
                 slug="one-too-many",
-                body="the 65th active fact",
+                body="the next active fact",
                 agent_id="developer",
             )
         assert ei.value.code == "pok_active_cap"
+        # the limit is rendered FROM THE CONSTANT — this phrase only
+        # exists if the constant was read at refusal time (a hardcoded
+        # literal would fail it).
+        assert f"{cap}-cap refuses rather than evicts" in ei.value.message
+        # ...and the refusal still names the archive cure.
+        assert "archive" in ei.value.message.lower()
+        assert "pok_curate" in ei.value.message
         cure = ei.value.details.get("oldest_least_verified")
         assert cure, "the refusal must NAME the cure target"
         # archive the named cure → the write succeeds
@@ -316,7 +359,7 @@ class TestAc19TerminalityCured:
         out = svc.upsert(
             project_id="p2",
             slug="one-too-many",
-            body="the 65th active fact",
+            body="the next active fact",
             agent_id="developer",
         )
         assert out.action == "created"

@@ -304,6 +304,84 @@ assert_eq "missing env file tolerated (exit 0)" "0" "$?"
 )
 assert_eq "values containing '=' parsed whole" "0" "$?"
 
+# 6e. F-06: a value with TRAILING WHITESPACE is trimmed (the launcher and
+# the watchdog must resolve the SAME trimmed path).
+(
+    . "$LAUNCHER"
+    printf 'TRAILING=/indented   \n' > "$ENV_TEST_DIR/env4"
+    load_env_file "$ENV_TEST_DIR/env4"
+    [ "${TRAILING:-}" = "/indented" ] || exit 33
+    exit 0
+)
+assert_eq "6e env value: trailing whitespace trimmed" "0" "$?"
+
+# 6f. F-06: an UNQUOTED inline comment suffix is stripped.
+(
+    . "$LAUNCHER"
+    printf 'CMT=/path/to/state   # a trailing comment\n' > "$ENV_TEST_DIR/env5"
+    load_env_file "$ENV_TEST_DIR/env5"
+    [ "${CMT:-}" = "/path/to/state" ] || exit 34
+    exit 0
+)
+assert_eq "6f env value: unquoted inline comment stripped" "0" "$?"
+
+# 6g. F-06: a '#' NOT preceded by whitespace is PART of the value.
+(
+    . "$LAUNCHER"
+    printf 'HASH=pa#ss\n' > "$ENV_TEST_DIR/env6"
+    load_env_file "$ENV_TEST_DIR/env6"
+    [ "${HASH:-}" = "pa#ss" ] || exit 35
+    exit 0
+)
+assert_eq "6g env value: '#' without preceding whitespace kept" "0" "$?"
+
+# 6h. F-06: a '#' INSIDE a quoted value is NOT a comment.
+(
+    . "$LAUNCHER"
+    printf 'QUOTEDHASH="a # b"\n' > "$ENV_TEST_DIR/env7"
+    load_env_file "$ENV_TEST_DIR/env7"
+    [ "${QUOTEDHASH:-}" = "a # b" ] || exit 36
+    exit 0
+)
+assert_eq "6h env value: '#' inside quotes kept" "0" "$?"
+
+# 6i. FIX 7(b): a PATH= line in .env is IGNORED (PATH is supervisor-owned —
+# the launchd anchor + the Layer-2 synthesis decide it) and the refusal is
+# logged loudly, naming the key AND the file.
+(
+    . "$LAUNCHER"
+    printf 'PATH=/bogus\nKEEPME=ok\n' > "$ENV_TEST_DIR/env8"
+    load_env_file "$ENV_TEST_DIR/env8" 2>"$ENV_TEST_DIR/env8.err"
+    [ "${PATH:-}" != "/bogus" ] || exit 37
+    [ "${KEEPME:-}" = "ok" ] || exit 38
+    grep -q 'PATH key in env file IGNORED' "$ENV_TEST_DIR/env8.err" || exit 39
+    grep -q 'env8' "$ENV_TEST_DIR/env8.err" || exit 40
+    exit 0
+)
+assert_eq "6i env PATH key: refused (not exported) + loud WARN" "0" "$?"
+
+# 6j. F-07 / residual (e): a DUPLICATE key in .env resolves LAST-wins (the
+# loader exports sequentially — the last export wins; the watchdog agrees).
+(
+    . "$LAUNCHER"
+    printf 'DUPKEY=first\nDUPKEY=second\n' > "$ENV_TEST_DIR/env9"
+    load_env_file "$ENV_TEST_DIR/env9"
+    [ "${DUPKEY:-}" = "second" ] || exit 41
+    exit 0
+)
+assert_eq "6j env duplicate key: LAST occurrence wins" "0" "$?"
+
+# 6k. the VALUE-level trim: whitespace around the VALUE (e.g. a space
+# right after '=') is trimmed — the line-level trim alone would not do it.
+(
+    . "$LAUNCHER"
+    printf 'SPACED=   value-with-spaces   \n' > "$ENV_TEST_DIR/env10"
+    load_env_file "$ENV_TEST_DIR/env10"
+    [ "${SPACED:-}" = "value-with-spaces" ] || exit 42
+    exit 0
+)
+assert_eq "6k env value: whitespace around the value trimmed" "0" "$?"
+
 # ─── 7. State file round-trip + corrupt tolerance ───────────────────────────
 section "state file"
 STATE_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-state.XXXXXX")"
@@ -455,18 +533,111 @@ _js_count() {   # rollback_window_count "24h" value
 # §4.2.2 note under P3-PIN-01..04). The helper keeps the fixtures' INTENT
 # (a 700s-stale txn, a 30s-fresh txn, a 25h-old window, a 300s-future
 # cooldown) and makes them real on both dialects.
+#
+# ROUND-5 fix (launcher-journal-sweep-fix, D4): the BSD arm built
+# `date -u -v"${off}"S` with the offset VERBATIM — and BSD date rejects an
+# UNSIGNED positive adjustment (`-v300S`: "Cannot apply date adjustment")
+# while accepting the signed form (`-v+300S`). The only positive-offset
+# caller (`_ts_off 300`, the 8f cooldown seed) therefore returned EMPTY on
+# every macOS/BSD host and 8f's "cooldown_until in the FUTURE" precondition
+# silently degenerated to `cooldown_until:""` (the fixture was VACUOUS —
+# gate item 8f / anomaly d4a3134c). The sign is now normalised explicitly
+# for the BSD arm (negative offsets already carry their `-`); the GNU arm
+# (`-d "@$((now+off))"`) is untouched.
+#
+# SELECTION IS OBSERVABLE (test-only): `_TS_OFF_UNAME` overrides the
+# `uname -s` dispatch so the GNU arm can be pinned on a BSD host (the GNU
+# arm CANNOT be exercised by macOS's real `date` — see the 8f-pre block
+# below for the stubbed pin). Production behaviour is unchanged: the
+# default is `uname -s`.
 _ts_off() {
-    local off="$1" now
-    now="$(date -u +%s)"
-    case "$(uname -s)" in
-        Darwin|*BSD*|*bsd*) date -u -v"${off}"S +%Y-%m-%dT%H:%M:%SZ ;;
-        *) date -u -d "@$(( now + off ))" +%Y-%m-%dT%H:%M:%SZ ;;
+    local off="$1" now voff
+    case "${_TS_OFF_UNAME:-$(uname -s)}" in
+        Darwin|*BSD*|*bsd*)
+            case "$off" in
+                -*) voff="$off" ;;
+                *)  voff="+$off" ;;
+            esac
+            date -u -v"${voff}"S +%Y-%m-%dT%H:%M:%SZ ;;
+        *)
+            now="$(date -u +%s)"
+            date -u -d "@$(( now + off ))" +%Y-%m-%dT%H:%M:%SZ ;;
     esac
 }
 
 STALE_TS="$(_ts_off -700)"
 FRESH_TS="$(_ts_off -30)"
 OLD25H_TS="$(_ts_off -90000)"
+
+# ─── 8f-pre. _ts_off portability: BOTH date dialects, NON-VACUOUS ──────────
+# The 8f fixture's stated precondition is "cooldown_until in the FUTURE".
+# Pre-round-5 that precondition was NOT established on macOS (the seed was
+# the empty string), so the fixture degenerated toward plain 8a. These pins
+# establish it on BOTH dialect families:
+#   - the BSD arm runs against the host's REAL date here (macOS);
+#   - the GNU arm CANNOT be exercised by macOS's `date` (`-d` is a GNU
+#     flag), so it is pinned with a DETERMINISTIC FAKE `date` on PATH plus
+#     the `_TS_OFF_UNAME=Linux` selection override — the stub's fixed
+#     `now` (1000000000) makes the +300 arithmetic exactly assertable.
+# Verified-on-this-host leg: BSD real. Verified-by-stub leg: GNU.
+section "8f-pre _ts_off portability (BSD real date + GNU stubbed date)"
+TS_OFF_PRE="$(date -u +%s)"
+TS_BSD_NEG="$(_ts_off -700)"
+case "$TS_BSD_NEG" in
+    ""|*Cannot*) _fail "8f-pre BSD -700s offset non-empty (real BSD date)" "ISO ts" "$TS_BSD_NEG" ;;
+    *) _pass ;;
+esac
+TS_OFF_MID="$(date -u +%s)"
+TS_BSD_POS="$(_ts_off 300)"
+case "$TS_BSD_POS" in
+    ""|*Cannot*) _fail "8f-pre BSD +300s offset non-empty (real BSD date — the D4 defect)" "ISO ts" "$TS_BSD_POS" ;;
+    *) _pass ;;
+esac
+# the +300s stamp must BE ≈300 s in the future (± 20 s tolerance for the
+# two `date -u +%s` probes that bracket the call)
+if TS_OFF_EPOCH="$(_js_iso_to_epoch "$TS_BSD_POS" 2>/dev/null)" && [ -n "$TS_OFF_EPOCH" ] \
+   && [ "$TS_OFF_EPOCH" -ge $(( TS_OFF_PRE + 280 )) ] \
+   && [ "$TS_OFF_EPOCH" -le $(( TS_OFF_MID + 320 )) ]; then
+    _pass
+else
+    _fail "8f-pre BSD +300s stamp is ≈300s in the future (non-vacuous 8f seed)" \
+        "now+300 ±20s" "epoch=${TS_OFF_EPOCH:-EMPTY} (bounds ${TS_OFF_PRE}+280..${TS_OFF_MID}+320)"
+fi
+# the negative arm must be ≈700 s in the PAST (the same tolerance)
+if TS_NEG_EPOCH="$(_js_iso_to_epoch "$TS_BSD_NEG" 2>/dev/null)" && [ -n "$TS_NEG_EPOCH" ] \
+   && [ "$TS_NEG_EPOCH" -le $(( TS_OFF_PRE - 680 )) ] \
+   && [ "$TS_NEG_EPOCH" -ge $(( TS_OFF_MID - 720 )) ]; then
+    _pass
+else
+    _fail "8f-pre BSD -700s stamp is ≈700s in the past" \
+        "now-700 ±20s" "epoch=${TS_NEG_EPOCH:-EMPTY}"
+fi
+
+# GNU arm via a deterministic stub (the stub OWNS `now`: 1000000000, so
+# `now + 300` is exactly 1000000300 and the assertion is exact, not
+# approximate). The stub forwards anything it does not own to the real
+# date so the helper's GNU arm is the only thing under test.
+TS_GNU_STUB="$JS_TEST_DIR/gnudate-stub"
+mkdir -p "$TS_GNU_STUB"
+printf '#!/bin/sh\n# GNU date STUB (tests only): accepts the two forms _ts_off uses.\nif [ "$1" = "-u" ] && [ "$2" = "+%%s" ]; then echo 1000000000; exit 0; fi\nif [ "$1" = "-u" ] && [ "$2" = "-d" ]; then\n    printf '"'"'GNUSTUB-%%s\\n'"'"' "${3#@}"; exit 0\nfi\nexec /bin/date "$@"\n' > "$TS_GNU_STUB/date"
+chmod +x "$TS_GNU_STUB/date"
+TS_GNU_POS="$(_TS_OFF_UNAME=Linux PATH="$TS_GNU_STUB:$PATH" _ts_off 300)"
+case "$TS_GNU_POS" in
+    GNUSTUB-1000000300) _pass ;;
+    "")
+        _fail "8f-pre GNU +300s arm selected + arithmetic exact (stubbed date)" \
+            "GNUSTUB-1000000300" "empty (the GNU arm was not selected or the stub was bypassed)" ;;
+    *)
+        _fail "8f-pre GNU +300s arm selected + arithmetic exact (stubbed date)" \
+            "GNUSTUB-1000000300" "$TS_GNU_POS" ;;
+esac
+TS_GNU_NEG="$(_TS_OFF_UNAME=Linux PATH="$TS_GNU_STUB:$PATH" _ts_off -700)"
+case "$TS_GNU_NEG" in
+    GNUSTUB-999999300) _pass ;;
+    *) _fail "8f-pre GNU -700s arm selected + arithmetic exact (stubbed date)" \
+        "GNUSTUB-999999300" "${TS_GNU_NEG:-empty}" ;;
+esac
+
 
 # 8a. stale + flipped:true → sweep-rollback: current repointed to previous,
 #     sweep_rollback history event, counter incremented, cooldown armed,
@@ -551,8 +722,28 @@ assert_eq "8e in_flight cleared (recovery completed)" "null" "$(_js_field "$JS_E
 
 # 8f. D-FA4.2: active cooldown NEVER refuses the sweep — cooldown_until in
 #     the FUTURE + stale flipped → rollback still executes + cooldown re-armed.
+#     (Round-5 D4: the fixture's PRECONDITION is now established AND PINNED.
+#     Pre-fix the BSD arm built `date -v300S` — illegal on BSD — and seeded
+#     an EMPTY cooldown_until, so on every macOS host this fixture silently
+#     degenerated toward plain 8a (no future cooldown was ever in play). The
+#     two pins below are the non-vacuity gate: the seed must be a NON-EMPTY
+#     stamp ≈300 s in the future BEFORE the sweep runs.)
 JS_F="$JS_TEST_DIR/f"; _js_fixture "$JS_F"
-_js_seed "$JS_F" "$STALE_TS" true 1 "$STALE_TS" "\"$(_ts_off 300)\"" promote 1
+JS_F_SEED_PRE="$(date -u +%s)"
+JS_F_SEED="$(_ts_off 300)"
+case "$JS_F_SEED" in
+    ""|*Cannot*) _fail "8f seeded cooldown_until non-empty (precondition established on THIS host)" "ISO ts ≈ now+300s" "$JS_F_SEED" ;;
+    *) _pass ;;
+esac
+if JS_F_SEED_EPOCH="$(_js_iso_to_epoch "$JS_F_SEED" 2>/dev/null)" && [ -n "$JS_F_SEED_EPOCH" ] \
+   && [ "$JS_F_SEED_EPOCH" -ge $(( JS_F_SEED_PRE + 280 )) ] \
+   && [ "$JS_F_SEED_EPOCH" -le $(( $(date -u +%s) + 320 )) ]; then
+    _pass
+else
+    _fail "8f seeded cooldown_until ≈300s in the future (non-vacuous on THIS host)" \
+        "now+300 ±20s" "epoch=${JS_F_SEED_EPOCH:-EMPTY}"
+fi
+_js_seed "$JS_F" "$STALE_TS" true 1 "$STALE_TS" "\"$JS_F_SEED\"" promote 1
 _js_run "$JS_F"
 assert_eq "8f cooldown-active sweep-rollback still executes: rc 0" "0" "$?"
 assert_eq "8f current repointed despite cooldown" "releases/v0.10.5" "$(readlink "$JS_F/current")"
@@ -881,9 +1072,10 @@ assert_eq "8w dead owner → acquire succeeds via stale-break (0)" "0" "$?"
 # Two arms: (1) a regression pin that _journal_sweep at the current
 # branch DOES NOT use unbounded pipe reads or `wait` against subprocesses
 # — the brief premise was a "sweep pipe_read wedge" but HEAD code uses
-# pure bash JSON parsing; the live-install launcher is byte-identical to
-# the BASE (post-v0.16.8) commit — HEAD carries the bounded-subprocess pass
-# that converges at the next v0.16.9 promote. (2) correctness tests
+# pure bash JSON parsing; the repo now carries the O(n) journal-sweep
+# rewrite (_js_journal_read / _js_json_sub) while the LIVE install still
+# carries the PRE-rewrite launcher until the next promote, so the two
+# bodies legitimately differ right now. (2) correctness tests
 # for the bounded-run helper _js_run_bounded and the bounded pid-alive
 # wrapper _js_pid_alive_bounded (genuine D-state kill-0 / wedged-cmd
 # wedge defense; the kill -0 call IS a real blocking risk at HEAD).
@@ -917,12 +1109,16 @@ else
     _pass "8b-r1 _journal_sweep has no pipe reads (regression pin)"
 fi
 
-# 8b-r2: live-install launcher state (informational). TF3 (2026-10-12):
-# the probe path is OPT-IN via ENS_TEST_LIVE_LAUNCHER — there is NO
-# default live-install path and NO default stat probe (zero-live-contact
-# bar for agent-driven test runs; the probe only ever fired when a live
-# install existed, but the hardcoded path made that unconditional).
-# Operators who want the live-copy comparison run:
+# 8b-r2: OPT-IN live-install comparison (informational). The probe path is
+# OPT-IN via ENS_TEST_LIVE_LAUNCHER — there is NO default live-install
+# path and NO default stat probe (zero-live-contact bar for agent-driven
+# test runs). The repo now carries the O(n) journal-sweep rewrite
+# (_js_journal_read / _js_json_sub); the LIVE install still carries the
+# PRE-rewrite launcher until the next promote, so the two bodies
+# legitimately differ right now. This row is NOT a convergence proof and
+# does NOT prove the repo and live copies are equivalent: the operator's
+# real convergence check is `cmp` against the LIVE launcher.sh, NOT this
+# suite row. Operators who want the live-copy comparison run:
 #   ENS_TEST_LIVE_LAUNCHER=/path/to/live/install/launcher.sh bash tests/test_launcher.sh
 LIVE_LAUNCHER="${ENS_TEST_LIVE_LAUNCHER:-}"
 if [ -n "$LIVE_LAUNCHER" ] && [ -f "$LIVE_LAUNCHER" ]; then
@@ -934,21 +1130,21 @@ if [ -n "$LIVE_LAUNCHER" ] && [ -f "$LIVE_LAUNCHER" ]; then
     ' "$LIVE_LAUNCHER")"
     if [ "$SWEEP_BODY" = "$LIVE_SWEEP_BODY" ]; then
         _pass
-        printf 'INFO: 8b-r2 repo _journal_sweep body ≡ live-install copy (post-promote convergence)\n'
+        printf 'INFO: 8b-r2 repo _journal_sweep body == live-install copy (opt-in comparison only; NOT a convergence proof)\n'
     else
-        # informational pass — the promote train converges the copies
-        printf 'INFO: 8b-r2 live-install _journal_sweep \u2260 repo HEAD (next promote will close)\n'
+        # informational pass — the live install is pre-rewrite; this row is NOT a convergence proof
+        printf 'INFO: 8b-r2 live-install _journal_sweep \u2260 repo HEAD (expected: repo carries the O(n) rewrite, live is pre-rewrite until next promote)\n'
         LIVE_KILLS=$(printf '%s' "$LIVE_SWEEP_BODY" | sed -e 's/#.*$//' | grep -c '_js_pid_alive_bounded\|_js_run_bounded' || true)
         if [ "$LIVE_KILLS" -gt 0 ]; then
             _pass
-            printf 'INFO: 8b-r2 live-install _journal_sweep body has the bounded-subprocess pass\n'
+            printf 'INFO: 8b-r2 live-install _journal_sweep body still has the bounded-subprocess pass (pre-rewrite; informational)\n'
         else
             _pass
-            printf 'INFO: 8b-r2 live-install _journal_sweep body pre-promote (no bounded pass; will land at next promote)\n'
+            printf 'INFO: 8b-r2 live-install _journal_sweep body pre-rewrite (informational; real convergence check is cmp against the LIVE launcher.sh)\n'
         fi
     fi
 else
-    _skip "8b-r2 repo _journal_sweep body ≡ live-install copy — no live-install path configured (set ENS_TEST_LIVE_LAUNCHER to opt in)"
+    _skip "8b-r2 opt-in live-install comparison — no live-install path configured (set ENS_TEST_LIVE_LAUNCHER to opt in); this row is NOT a convergence proof"
 fi
 
 # 8b-c1: _js_run_bounded — fast command returns the inner rc (0 / nonzero)
@@ -1168,6 +1364,860 @@ else
         "load_env_file line < export line" \
         "load_env_file=${loadenv_line:-absent} export=${export_line:-absent}"
 fi
+
+# ─── 13. Supervisor-env PATH strategy (design §iv Layer 2) ─────────────────
+section "supervisor PATH strategy (§iv Layer 2)"
+LP_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-pathtest.XXXXXX")"
+# Fake-HOME fence (hermetic): a fake nvm tree + tool stubs. NO real
+# ~/.nvm reads anywhere below — HOME is always overridden inside the
+# subshells that exercise nvm resolution.
+mkdir -p "$LP_TEST_DIR/home/.nvm/alias" \
+         "$LP_TEST_DIR/home/.local/bin" \
+         "$LP_TEST_DIR/home/.nvm/versions/node/v22.9.1/bin" \
+         "$LP_TEST_DIR/home/.nvm/versions/node/v22.21.1/bin" \
+         "$LP_TEST_DIR/home/.nvm/versions/node/v22.29.0/bin" \
+         "$LP_TEST_DIR/home2/.nvm/alias" \
+         "$LP_TEST_DIR/home3/.nvm/alias" \
+         "$LP_TEST_DIR/emptyhome" \
+         "$LP_TEST_DIR/stubs"
+printf '22\n' > "$LP_TEST_DIR/home/.nvm/alias/default"
+for v in 22.9.1 22.21.1; do
+    printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home/.nvm/versions/node/v$v/bin/node"
+    chmod +x "$LP_TEST_DIR/home/.nvm/versions/node/v$v/bin/node"
+    # real nvm version bins ship npx next to node
+    printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home/.nvm/versions/node/v$v/bin/npx"
+    chmod +x "$LP_TEST_DIR/home/.nvm/versions/node/v$v/bin/npx"
+done
+# v22.29.0 exists but its bin/node is NOT executable — resolution must
+# verify the binary, not just the directory.
+printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home/.nvm/versions/node/v22.29.0/bin/node"
+chmod 644 "$LP_TEST_DIR/home/.nvm/versions/node/v22.29.0/bin/node"
+printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home/.local/bin/uvx"
+chmod +x "$LP_TEST_DIR/home/.local/bin/uvx"
+printf '22.21.1\n' > "$LP_TEST_DIR/home2/.nvm/alias/default"   # full-version alias
+mkdir -p "$LP_TEST_DIR/home2/.nvm/versions/node/v22.21.1/bin"
+printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home2/.nvm/versions/node/v22.21.1/bin/node"
+chmod +x "$LP_TEST_DIR/home2/.nvm/versions/node/v22.21.1/bin/node"
+printf '99\n' > "$LP_TEST_DIR/home3/.nvm/alias/default"        # alias → nothing
+for t in npx uvx node; do
+    printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/stubs/$t"
+    chmod +x "$LP_TEST_DIR/stubs/$t"
+done
+
+# 13.0 the family is defined after sourcing (source-guard contract).
+if declare -F _path_ensure >/dev/null 2>&1 \
+    && declare -F _path_synth_dirs >/dev/null 2>&1 \
+    && declare -F _path_nvm_bin >/dev/null 2>&1 \
+    && declare -F _path_version_gt >/dev/null 2>&1 \
+    && declare -F _path_has >/dev/null 2>&1; then
+    _pass
+else
+    _fail "_path_* family defined after sourcing" "all 5 defined" "missing"
+fi
+
+# 13.a PROBE NO-OP under a VM-shaped PATH: npx/uvx/node all resolve
+# (systemd's default-PATH luck, made guaranteed by the stubs) → _path_ensure
+# returns 0 and PATH is BYTE-UNCHANGED (the VM compatibility proof).
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    export PATH
+    before="$PATH"
+    _path_ensure || exit 41
+    [ "$PATH" = "$before" ] || exit 42
+    exit 0
+)
+assert_eq "13.a probe no-op: VM-shaped PATH byte-unchanged" "0" "$?"
+
+# 13.b probe no-op logs the no-op line and NEVER the synthesis line.
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/bin:/bin"
+    export PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/probe.err"
+assert_contains "13.b probe no-op logged" "probe no-op, PATH unchanged" "$(cat "$LP_TEST_DIR/probe.err")"
+if grep -q "synthesized PATH extended" "$LP_TEST_DIR/probe.err"; then
+    _fail "13.b probe no-op must not synthesize" "no synthesis log" "$(cat "$LP_TEST_DIR/probe.err")"
+else
+    _pass
+fi
+
+# 13.c SYNTHESIS under a launchd-minimal PATH + fake HOME: nvm bin and
+# .local/bin prepended, inherited PATH retained as suffix, every added dir
+# exists, and npx resolves afterwards.
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH="/usr/bin:/bin"
+    export HOME PATH
+    _path_ensure || exit 43
+    case ":$PATH:" in *":$LP_TEST_DIR/home/.nvm/versions/node/v22.21.1/bin:"*) ;; *) exit 44 ;; esac
+    case ":$PATH:" in *":$LP_TEST_DIR/home/.local/bin:"*) ;; *) exit 45 ;; esac
+    case "$PATH" in *":/usr/bin:/bin") ;; *) exit 46 ;; esac
+    command -v npx >/dev/null 2>&1 || exit 47
+    oldIFS="$IFS"; IFS=:
+    for d in $PATH; do
+        [ -n "$d" ] || continue
+        [ -d "$d" ] || { IFS="$oldIFS"; exit 48; }
+    done
+    IFS="$oldIFS"
+    exit 0
+)
+assert_eq "13.c synthesis: nvm+anchors prepended, suffix kept, dirs exist" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH="/usr/bin:/bin"
+    export HOME PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/synth.err"
+assert_contains "13.c synthesis logged" "synthesized PATH extended" "$(cat "$LP_TEST_DIR/synth.err")"
+
+# 13.d _path_nvm_bin unit table (fake HOME ONLY — never the real ~/.nvm).
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"; export HOME
+    out="$(_path_nvm_bin)"
+    # NUMERIC latest: v22.21.1 > v22.9.1 (lexicographic glob order picks
+    # v22.21.1 FIRST — a naive last-glob-match would pick v22.9.1).
+    [ "$out" = "$LP_TEST_DIR/home/.nvm/versions/node/v22.21.1/bin" ] || exit 49
+    exit 0
+)
+assert_eq "13.d nvm bin: numeric-latest version wins (v22.21.1 over v22.9.1)" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home2"; export HOME
+    out="$(_path_nvm_bin)"
+    [ "$out" = "$LP_TEST_DIR/home2/.nvm/versions/node/v22.21.1/bin" ] || exit 50
+    exit 0
+)
+assert_eq "13.d nvm bin: full-version alias resolves exactly" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"; export HOME
+    # alias 22 also matches v22.29.0 (glob v22*) whose bin/node is NOT
+    # executable → must be skipped in favor of v22.21.1.
+    out="$(_path_nvm_bin)"
+    [ "$out" = "$LP_TEST_DIR/home/.nvm/versions/node/v22.21.1/bin" ] || exit 51
+    exit 0
+)
+assert_eq "13.d nvm bin: non-executable bin/node dir skipped" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home3"; export HOME   # alias 99 → no version dirs
+    out="$(_path_nvm_bin)"
+    [ -z "$out" ] || exit 52
+    exit 0
+)
+assert_eq "13.d nvm bin: dangling alias → empty (no fabricated path)" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/emptyhome"; export HOME   # no .nvm at all
+    out="$(_path_nvm_bin)"
+    [ -z "$out" ] || exit 53
+    exit 0
+)
+assert_eq "13.d nvm bin: absent nvm → empty" "0" "$?"
+
+# 13.e ENSEMBLE_LAUNCHER_PATH override: exported VERBATIM (full
+# replacement — design §iv step 1), beating both the probe and synthesis
+# even with a fully-populated fake nvm tree present.
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH="/usr/bin:/bin"
+    ENSEMBLE_LAUNCHER_PATH="/custom/a:/custom/b:/usr/bin:/bin"
+    export HOME PATH ENSEMBLE_LAUNCHER_PATH
+    _path_ensure || exit 54
+    [ "$PATH" = "/custom/a:/custom/b:/usr/bin:/bin" ] || exit 55
+    exit 0
+)
+assert_eq "13.e override: PATH exported verbatim (full replacement)" "0" "$?"
+
+# 13.f set-but-EMPTY override falls through to the probe (not a wipe).
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/bin:/bin"
+    ENSEMBLE_LAUNCHER_PATH=""
+    export PATH ENSEMBLE_LAUNCHER_PATH
+    before="$PATH"
+    _path_ensure || exit 56
+    [ "$PATH" = "$before" ] || exit 57
+    exit 0
+)
+assert_eq "13.f empty override treated as unset (probe path)" "0" "$?"
+
+# 13.g nothing-addable → loud WARNING, rc 0 (never wedges boot). On hosts
+# where /opt/homebrew/bin or /usr/local/bin exists the anchors ARE added
+# and the post-synthesis "still unresolved" WARNING fires instead — either
+# branch must warn and return 0.
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/emptyhome"
+    PATH="/usr/bin:/bin"
+    export HOME PATH
+    _path_ensure
+    rc=$?
+    [ "$rc" = "0" ] || exit 58
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/nothing.err"
+assert_eq "13.g nothing-addable: rc 0 (boot proceeds)" "0" "$?"
+if grep -q "WARNING" "$LP_TEST_DIR/nothing.err"; then
+    _pass
+else
+    _fail "13.g nothing-addable: loud WARNING emitted" "WARNING present" "$(cat "$LP_TEST_DIR/nothing.err")"
+fi
+
+# 13.h source-guard pins (design §iv test mandates).
+# h1 — probe-before-synthesis-export inside _path_ensure (comment-stripped
+#      body; the override branch's export is a separate documented path).
+PENSURE_BODY="$(awk '
+    /^_path_ensure\(\)/ { in_fn=1; next }
+    in_fn && /^}/ { in_fn=0; next }
+    in_fn { print }
+' "$LAUNCHER" | sed -e 's/#.*$//' -e '/^[[:space:]]*$/d')"
+probe_line="$(printf '%s\n' "$PENSURE_BODY" | grep -n 'for t in npx uvx node' | head -1 | cut -d: -f1)"
+synthexport_line="$(printf '%s\n' "$PENSURE_BODY" | grep -n 'export PATH="\$synth' | head -1 | cut -d: -f1)"
+if [ -n "$probe_line" ] && [ -n "$synthexport_line" ] && [ "$probe_line" -lt "$synthexport_line" ]; then
+    _pass
+else
+    _fail "13.h probe precedes the synthesis export" "probe line < synth-export line" \
+        "probe=${probe_line:-absent} synth=${synthexport_line:-absent}"
+fi
+# h2 — NO baked version literals anywhere (launcher + prod plist).
+for pinfile in "$LAUNCHER" "$REPO_ROOT/scripts/ensemble-prod.plist"; do
+    if grep -Eq '/versions/node/v[0-9]+\.' "$pinfile"; then
+        _fail "13.h no baked nvm version literal ($(basename "$pinfile"))" "absent" \
+            "$(grep -E '/versions/node/v[0-9]+\.' "$pinfile" | head -2)"
+    else
+        _pass
+    fi
+done
+# h3 — dynamic nvm wiring present + override var referenced.
+assert_contains "13.h dynamic nvm alias read present" '.nvm/alias/default' "$(cat "$LAUNCHER")"
+assert_contains "13.h ENSEMBLE_LAUNCHER_PATH override wired" 'ENSEMBLE_LAUNCHER_PATH' "$(cat "$LAUNCHER")"
+
+# 13.i END-TO-END VM NO-OP PROOF: a REAL main() boot (resolve_install_dir ->
+# load_env_file -> STATE_FILE default -> MALLOC -> _path_ensure ->
+# _journal_sweep -> resolve_binary -> run_loop) under a VM-shaped PATH where
+# npx/uvx/node resolve (systemd's packaging luck, made guaranteed by the
+# sandbox vmbin). The stub "ensemble-prod" child dumps its inherited env:
+# the PATH must arrive BYTE-IDENTICAL (probe no-op, nothing synthesized)
+# and the launcher state must land at the CLASSIC path.
+#
+# Hermeticity (F2): this cell's subject is the VM-shaped boot's state-file
+# resolution (classic path when the override is unset). An AMBIENT
+# ENSEMBLE_LAUNCHER_STATE_FILE (Stage-2 override) is POLLUTION that must be
+# excluded -- exactly like the sibling cells isolate their state (see :1663
+# `unset PATH`, :1781 `unset ENSEMBLE_LAUNCHER_STATE_FILE`). The boot
+# invocation below uses `env -u` so the child never inherits the ambient
+# var, regardless of the caller's environment. The body is factored into a
+# helper so both legs exercise the IDENTICAL assertions (no copy drift).
+_vmboot_13i() {
+    # args: $1 = leg label, $2 = err file, $3 = child-env dump
+    local inst="$LP_TEST_DIR/vmboot-$1"
+    rm -rf "$inst"
+    mkdir -p "$inst/data"
+    printf 'PORT=18971\nENSEMBLE_SELF_ENV=1\n' > "$inst/.env"
+    cat > "$inst/ensemble-prod" <<EOF
+#!/bin/sh
+env > "$3"
+exit 0
+EOF
+    chmod +x "$inst/ensemble-prod"
+    mkdir -p "$LP_TEST_DIR/vmbin"
+    for t in npx uvx node; do
+        printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/vmbin/$t"
+        chmod +x "$LP_TEST_DIR/vmbin/$t"
+    done
+    VM_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    cd "$inst" || return 68
+    # HERMETIC: unset the ambient override for THIS boot so the child resolves
+    # the CLASSIC state path. The override is the shipped Stage-2 contract
+    # (honoured when set); this cell tests state-file resolution, not it.
+    PATH="$LP_TEST_DIR/vmbin:$VM_PATH" \
+    HOME="$LP_TEST_DIR/emptyhome" \
+    ENSEMBLE_INSTALL_DIR="$inst" \
+    env -u ENSEMBLE_LAUNCHER_STATE_FILE \
+        /bin/bash "$LAUNCHER" >/dev/null 2>"$2"
+    rc=$?
+    [ "$rc" = "0" ] || return 69
+    grep -q "^PATH=$LP_TEST_DIR/vmbin:$VM_PATH$" "$3" || return 70
+    [ -f "$inst/.launcher-state" ] || return 71
+    return 0
+}
+
+# Leg (i): ambient var UNSET (the historical case).
+_vmboot_13i A "$LP_TEST_DIR/vmboot-a.err" "$LP_TEST_DIR/vmboot-a-child-env.txt"
+rc=$?
+assert_eq "13.i VM-shaped boot: child PATH byte-identical, classic state path (ambient unset)" "0" "$rc"
+if grep -q "probe no-op, PATH unchanged" "$LP_TEST_DIR/vmboot-a.err" 2>/dev/null; then
+    _pass
+else
+    _fail "13.i VM-shaped boot logged the probe no-op (ambient unset)" \
+        "probe no-op line in launcher stderr" "$(cat "$LP_TEST_DIR/vmboot-a.err" 2>/dev/null | head -3)"
+fi
+
+# Leg (ii): ambient var deliberately EXPORTED into this cell's env -- the
+# hermeticity proof. With the fix in place the boot still resolves the
+# CLASSIC path (it must NOT flip to the ambient path) and the SAME
+# assertions hold. (Non-vacuity: remove the `env -u` above and this leg
+# flips to the ambient path, proving the unset is what keeps it hermetic.)
+ENSEMBLE_LAUNCHER_STATE_FILE="/tmp/ambient-pollution-should-not-win/.launcher-state" \
+    _vmboot_13i B "$LP_TEST_DIR/vmboot-b.err" "$LP_TEST_DIR/vmboot-b-child-env.txt"
+rc=$?
+assert_eq "13.i VM-shaped boot: child PATH byte-identical, classic state path (ambient exported)" "0" "$rc"
+if grep -q "probe no-op, PATH unchanged" "$LP_TEST_DIR/vmboot-b.err" 2>/dev/null; then
+    _pass
+else
+    _fail "13.i VM-shaped boot logged the probe no-op (ambient exported)" \
+        "probe no-op line in launcher stderr" "$(cat "$LP_TEST_DIR/vmboot-b.err" 2>/dev/null | head -3)"
+fi
+# Hermeticity proof: the ambient path must NOT have been written.
+if [ -f "/tmp/ambient-pollution-should-not-win/.launcher-state" ]; then
+    _fail "13.i hermeticity: ambient ENSEMBLE_LAUNCHER_STATE_FILE must NOT be written" \
+        "absent" "present (ambient leak)"
+else
+    _pass
+fi
+
+# 13.j F-10: an nvm alias CODENAME ("lts/*", "lts/krypton") resolves to a
+# CONCRETE version — the old one-hop glob ("…/node/v<token>*") was dead for
+# those, so on macOS (the only source of npx) the synthesis yielded NOTHING
+# and npx stayed unresolved — the exact rehearsal-a failure mode.
+# 13.j1 "lts/*" → the HIGHEST version among the codename files.
+(
+    . "$LAUNCHER"
+    H="$LP_TEST_DIR/home-lts"
+    rm -rf "$H"
+    mkdir -p "$H/.nvm/alias/lts" \
+             "$H/.nvm/versions/node/v22.21.1/bin" \
+             "$H/.nvm/versions/node/v20.11.1/bin"
+    printf 'lts/*\n' > "$H/.nvm/alias/default"
+    printf '22.21.1\n' > "$H/.nvm/alias/lts/krypton"
+    printf '20.11.1\n' > "$H/.nvm/alias/lts/argon"
+    for v in 22.21.1 20.11.1; do
+        printf '#!/bin/sh\nexit 0\n' > "$H/.nvm/versions/node/v$v/bin/node"
+        chmod +x "$H/.nvm/versions/node/v$v/bin/node"
+    done
+    HOME="$H"; export HOME
+    out="$(_path_nvm_bin)"
+    [ "$out" = "$H/.nvm/versions/node/v22.21.1/bin" ] || exit 82
+    exit 0
+)
+assert_eq "13.j nvm alias 'lts/*' resolves to the highest version" "0" "$?"
+
+# 13.j2 "lts/krypton" (a codename PATH) resolves through the alias FILE.
+(
+    . "$LAUNCHER"
+    H="$LP_TEST_DIR/home-lts2"
+    rm -rf "$H"
+    mkdir -p "$H/.nvm/alias/lts" "$H/.nvm/versions/node/v22.21.1/bin"
+    printf 'lts/krypton\n' > "$H/.nvm/alias/default"
+    printf '22.21.1\n' > "$H/.nvm/alias/lts/krypton"
+    printf '#!/bin/sh\nexit 0\n' > "$H/.nvm/versions/node/v22.21.1/bin/node"
+    chmod +x "$H/.nvm/versions/node/v22.21.1/bin/node"
+    HOME="$H"; export HOME
+    out="$(_path_nvm_bin)"
+    [ "$out" = "$H/.nvm/versions/node/v22.21.1/bin" ] || exit 83
+    exit 0
+)
+assert_eq "13.j nvm alias 'lts/krypton' resolves through the alias file" "0" "$?"
+
+# 13.j3 an UNRESOLVABLE alias → prints NOTHING (graceful — never wedges).
+(
+    . "$LAUNCHER"
+    H="$LP_TEST_DIR/home-lts3"
+    rm -rf "$H"
+    mkdir -p "$H/.nvm/alias"
+    printf 'lts/*\n' > "$H/.nvm/alias/default"
+    HOME="$H"; export HOME
+    out="$(_path_nvm_bin)"
+    [ -z "$out" ] || exit 84
+    exit 0
+)
+assert_eq "13.j nvm alias unresolvable → empty (graceful, no wedge)" "0" "$?"
+
+# 13.j4 a SELF-REFERENTIAL alias is bounded (max 3 hops) → no hang.
+(
+    . "$LAUNCHER"
+    H="$LP_TEST_DIR/home-lts4"
+    rm -rf "$H"
+    mkdir -p "$H/.nvm/alias/lts"
+    printf 'lts/loop\n' > "$H/.nvm/alias/default"
+    printf 'lts/loop\n' > "$H/.nvm/alias/lts/loop"
+    HOME="$H"; export HOME
+    out="$(_path_nvm_bin)"
+    [ -z "$out" ] || exit 85
+    exit 0
+)
+assert_eq "13.j nvm alias loop: bounded hops → empty (no hang)" "0" "$?"
+
+# 13.k F-11: EVERY _path_ensure branch logs the three facts a VM drill can
+# assert — source= (which branch), delta= (what was prepended / whether the
+# inherited PATH was retained), resolved_path= (the final PATH value).
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH="/usr/bin:/bin"
+    export HOME PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/synthfacts.err"
+assert_contains "13.k synth branch logs source=synthesized" \
+    "source=synthesized" "$(cat "$LP_TEST_DIR/synthfacts.err")"
+assert_contains "13.k synth branch logs the prepended delta" \
+    "delta=prepended:" "$(cat "$LP_TEST_DIR/synthfacts.err")"
+assert_contains "13.k synth branch logs the resolved PATH" \
+    "resolved_path=" "$(cat "$LP_TEST_DIR/synthfacts.err")"
+assert_contains "13.k synth branch states the inherited PATH is kept as suffix" \
+    "inherited PATH is retained as the suffix" "$(cat "$LP_TEST_DIR/synthfacts.err")"
+
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/bin:/bin"
+    export PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/probefacts.err"
+assert_contains "13.k probe branch logs source=probe-satisfied" \
+    "source=probe-satisfied" "$(cat "$LP_TEST_DIR/probefacts.err")"
+assert_contains "13.k probe branch logs delta=none" \
+    "delta=none" "$(cat "$LP_TEST_DIR/probefacts.err")"
+assert_contains "13.k probe branch logs the resolved PATH" \
+    "resolved_path=" "$(cat "$LP_TEST_DIR/probefacts.err")"
+if grep -q "delta=prepended" "$LP_TEST_DIR/probefacts.err"; then
+    _fail "13.k probe branch must log NO delta" "no delta=prepended" \
+        "$(cat "$LP_TEST_DIR/probefacts.err")"
+else
+    _pass
+fi
+
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/bin:/bin"
+    ENSEMBLE_LAUNCHER_PATH="/custom/a:/custom/b"
+    export PATH ENSEMBLE_LAUNCHER_PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/ovrfacts.err"
+assert_contains "13.k override branch logs its source" \
+    "source=ensemble_launcher_path_override" "$(cat "$LP_TEST_DIR/ovrfacts.err")"
+assert_contains "13.k override branch logs the full-replacement delta" \
+    "delta=full-replacement" "$(cat "$LP_TEST_DIR/ovrfacts.err")"
+
+# 13.k2 .env-SOURCED ENSEMBLE_LAUNCHER_PATH (unpinned until now): the install
+# .env is staged by the launcher itself (ADR-014 -- load_env_file runs BEFORE
+# _path_ensure), so a staged ENSEMBLE_LAUNCHER_PATH must participate in the
+# Layer-2 precedence: it is exported VERBATIM (top precedence -- the inherited
+# PATH is NOT retained) and the log names source=ensemble_launcher_path_override
+# with delta=full-replacement. The inherited value is set to a DECOY inside the
+# subshell so the row proves the .env wins (ADR-014) rather than merely
+# arriving; the ambient var is unset first for hermeticity.
+(
+    . "$LAUNCHER"
+    unset ENSEMBLE_LAUNCHER_PATH
+    ENSEMBLE_LAUNCHER_PATH="/ambient/decoy/should/not/win"
+    export ENSEMBLE_LAUNCHER_PATH
+    # stage the .env with the real override value
+    mkdir -p "$LP_TEST_DIR/dotenvpath"
+    printf 'ENSEMBLE_LAUNCHER_PATH=/from/dotenv/verbatim:/also/here\n' > "$LP_TEST_DIR/dotenvpath/.env"
+    # resolve via the real load_env_file + _path_ensure (main()'s sequence)
+    INSTALL_DIR="$LP_TEST_DIR/dotenvpath"
+    cd "$INSTALL_DIR" || exit 72
+    load_env_file "$INSTALL_DIR/.env"
+    _path_ensure
+    printf 'PATH=%s\n' "$PATH"
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/dotenvpath.err"
+# The .env value must win over the inherited decoy AND replace the PATH
+# verbatim (top precedence -- no inherited suffix retained).
+grep -q '^PATH=/from/dotenv/verbatim:/also/here$' "$LP_TEST_DIR/dotenvpath.err" 2>/dev/null
+# (PATH is logged via resolved_path=... on the override line, not on stdout;
+#  re-check against the captured stderr instead)
+if grep -q 'source=ensemble_launcher_path_override' "$LP_TEST_DIR/dotenvpath.err" && \
+   grep -q 'delta=full-replacement' "$LP_TEST_DIR/dotenvpath.err" && \
+   grep -q 'resolved_path=/from/dotenv/verbatim:/also/here' "$LP_TEST_DIR/dotenvpath.err"; then
+    _pass
+else
+    _fail "13.k2 .env-sourced ENSEMBLE_LAUNCHER_PATH: verbatim export + top precedence" \
+        "source=ensemble_launcher_path_override + delta=full-replacement + resolved_path=/from/dotenv/verbatim:/also/here" \
+        "$(cat "$LP_TEST_DIR/dotenvpath.err" 2>/dev/null | head -5)"
+fi
+
+# 13.l FIX 7(a): set -u / empty-PATH hardening. An UNSET PATH must not
+# abort the launcher (set -u) and no PATH may end up with an EMPTY
+# component (POSIX resolves a leading/trailing ':' as the CWD).
+(
+    . "$LAUNCHER"
+    unset PATH
+    _path_has /usr/bin
+    rc_has=$?
+    _path_ensure
+    rc=$?
+    [ "$rc" = "0" ] || exit 86
+    [ "$rc_has" = "1" ] || exit 87
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/unsetpath.err"
+assert_eq "13.l PATH unset: no set -u abort, _path_has safe" "0" "$?"
+if grep -q "unbound variable" "$LP_TEST_DIR/unsetpath.err"; then
+    _fail "13.l PATH unset: must not reference an unbound PATH" \
+        "no unbound variable" "$(cat "$LP_TEST_DIR/unsetpath.err")"
+else
+    _pass
+fi
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH=""
+    export HOME PATH
+    _path_ensure || exit 88
+    [ -n "$PATH" ] || exit 89
+    case "$PATH" in
+        :*) exit 90 ;;      # leading empty component
+        *:) exit 91 ;;      # trailing empty component
+    esac
+    case ":$PATH:" in
+        *::*) exit 92 ;;    # empty component in the middle
+    esac
+    exit 0
+)
+assert_eq "13.l PATH empty: no empty PATH component, no abort" "0" "$?"
+
+# ─── 14. STATE_FILE relocation (design §v) ─────────────────────────────────
+section "STATE_FILE relocation (§v)"
+
+# 14.a the default expression is EXACTLY the design's (default unchanged:
+# unset env ⇒ classic path — the VM burst-budget dependency).
+assert_contains "14.a default expression byte-pin" \
+    ': "${ENSEMBLE_LAUNCHER_STATE_FILE:=$INSTALL_DIR/.launcher-state}"' "$(cat "$LAUNCHER")"
+
+# 14.b ORDERING RESOLUTION: the assignment sits AFTER load_env_file (it
+# was BEFORE at :2821/:2827 pre-relocation) so the override is readable
+# from the install .env (Stage-2 wiring).
+loadenv_line="$(grep -n 'load_env_file "\$INSTALL_DIR/.env"' "$LAUNCHER" | head -1 | cut -d: -f1)"
+statefile_line="$(grep -n 'ENSEMBLE_LAUNCHER_STATE_FILE:=\$INSTALL_DIR/.launcher-state' "$LAUNCHER" | head -1 | cut -d: -f1)"
+if [ -n "$loadenv_line" ] && [ -n "$statefile_line" ] && [ "$loadenv_line" -lt "$statefile_line" ]; then
+    _pass
+else
+    _fail "14.b STATE_FILE default after load_env_file (.env readability)" \
+        "load_env_file line < STATE_FILE line" \
+        "load_env_file=${loadenv_line:-absent} statefile=${statefile_line:-absent}"
+fi
+
+# 14.c …and BEFORE _journal_sweep (run-loop consumers + the sweep-defer
+# derivation see the relocated value).
+jsweep_line="$(grep -n '^[[:space:]]*_journal_sweep[[:space:]]*$' "$LAUNCHER" | head -1 | cut -d: -f1)"
+if [ -n "$jsweep_line" ] && [ -n "$statefile_line" ] && [ "$statefile_line" -lt "$jsweep_line" ]; then
+    _pass
+else
+    _fail "14.c STATE_FILE default before _journal_sweep" \
+        "STATE_FILE line < _journal_sweep line" \
+        "statefile=${statefile_line:-absent} sweep=${jsweep_line:-absent}"
+fi
+
+# 14.d the direct hardcode is GONE (single derivation site in main()).
+assert_eq "14.d no direct STATE_FILE hardcode remains" "0" \
+    "$(grep -c 'STATE_FILE="\$INSTALL_DIR/\.launcher-state"' "$LAUNCHER")"
+
+# 14.e exported so run_loop children inherit it (upgrade-tools seam).
+assert_contains "14.e export ENSEMBLE_LAUNCHER_STATE_FILE present" \
+    "export ENSEMBLE_LAUNCHER_STATE_FILE" "$(cat "$LAUNCHER")"
+
+# 14.f defer-counter derivation: dirname(STATE_FILE) when set (relocated),
+# classic install_dir when unset (byte-identical); sanitisation unchanged.
+(
+    . "$LAUNCHER"
+    STATE_FILE=""
+    p="$(_js_defer_counter_path "$LP_TEST_DIR/inst" "run-1")"
+    [ "$p" = "$LP_TEST_DIR/inst/.sweep-defer-run-1" ] || exit 59
+    STATE_FILE="$LP_TEST_DIR/inst/data/.launcher-state"
+    p="$(_js_defer_counter_path "$LP_TEST_DIR/inst" "run-1")"
+    [ "$p" = "$LP_TEST_DIR/inst/data/.sweep-defer-run-1" ] || exit 60
+    p="$(_js_defer_counter_path "$LP_TEST_DIR/inst" "bad/id 1")"
+    [ "$p" = "$LP_TEST_DIR/inst/data/.sweep-defer-bad_id_1" ] || exit 61
+    exit 0
+)
+assert_eq "14.f defer path: unset→install_dir, set→dirname(STATE_FILE), sanitised" "0" "$?"
+
+# 14.g write/read roundtrip through a RELOCATED state file (override path).
+(
+    . "$LAUNCHER"
+    STATE_FILE="$LP_TEST_DIR/reloc/.launcher-state"
+    mkdir -p "$LP_TEST_DIR/reloc"
+    STATE_LAST_EXIT=1 STATE_CRASH_COUNT=2 STATE_WINDOW_START=3
+    STATE_LAST_BACKOFF=20 STATE_NOTIFIED_75=0 STATE_LAST_UPTIME=5
+    write_state || exit 62
+    STATE_LAST_EXIT="" STATE_CRASH_COUNT=""
+    read_state
+    [ "$STATE_LAST_EXIT" = "1" ] && [ "$STATE_CRASH_COUNT" = "2" ] || exit 63
+    [ -f "$LP_TEST_DIR/reloc/.launcher-state" ] || exit 64
+    exit 0
+)
+assert_eq "14.g state roundtrip honors the relocated STATE_FILE" "0" "$?"
+
+# ─── 14.h … STATE_FILE resolution parity (F-07 / residual e) ────────────────
+# The launcher's EFFECTIVE ENSEMBLE_LAUNCHER_STATE_FILE, computed exactly
+# the way main() computes it: load_env_file (the REAL function) and then
+# the REAL default expression — EXTRACTED from launcher.sh (never hardcoded
+# here, so a change to the launcher's default is caught, not mirrored).
+launcher_state_file() {
+    local inst="$1" envf="$2" inh="${3-}" defexpr
+    defexpr="$(grep -F ': "${ENSEMBLE_LAUNCHER_STATE_FILE:=$INSTALL_DIR/.launcher-state}"' "$LAUNCHER" | head -1)"
+    [ -n "$defexpr" ] || return 1
+    (
+        . "$LAUNCHER"
+        INSTALL_DIR="$inst"
+        unset ENSEMBLE_LAUNCHER_STATE_FILE
+        [ -n "$inh" ] && export ENSEMBLE_LAUNCHER_STATE_FILE="$inh"
+        load_env_file "$envf"
+        eval "$defexpr"
+        printf '%s' "${ENSEMBLE_LAUNCHER_STATE_FILE:-}"
+    )
+}
+
+STATE_PAR_DIR="$LP_TEST_DIR/statepar"
+mkdir -p "$STATE_PAR_DIR"
+
+# 14.h PRECEDENCE (F-07): the .env value WINS over the inherited env — the
+# launcher's export beats the inherited value (ADR-014 discipline). The
+# watchdog must agree (the parity rows live in tests/test_watchdog_watcher.sh).
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$STATE_PAR_DIR/from-dotenv" > "$STATE_PAR_DIR/.env"
+assert_eq "14.h .env wins over the inherited env" \
+    "$STATE_PAR_DIR/from-dotenv" \
+    "$(launcher_state_file "$STATE_PAR_DIR" "$STATE_PAR_DIR/.env" "$STATE_PAR_DIR/from-env")"
+
+# 14.i DUPLICATE KEY (F-07 / residual e): the LAST occurrence wins on both
+# sides (the loader exports sequentially — the last export wins).
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$STATE_PAR_DIR/first" > "$STATE_PAR_DIR/dup.env"
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$STATE_PAR_DIR/second" >> "$STATE_PAR_DIR/dup.env"
+assert_eq "14.i duplicate .env key: LAST occurrence wins" \
+    "$STATE_PAR_DIR/second" \
+    "$(launcher_state_file "$STATE_PAR_DIR" "$STATE_PAR_DIR/dup.env" "$STATE_PAR_DIR/from-env")"
+
+# 14.j an EMPTY .env value clears the inherited value → the default fires
+# (the launcher's export wipes the inherited value; the := default then
+# assigns — the watchdog resolves the same default).
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE=\n' > "$STATE_PAR_DIR/empty.env"
+assert_eq "14.j empty .env value → the classic default" \
+    "$STATE_PAR_DIR/.launcher-state" \
+    "$(launcher_state_file "$STATE_PAR_DIR" "$STATE_PAR_DIR/empty.env" "$STATE_PAR_DIR/from-env")"
+
+# 14.k NO override anywhere → the classic default path (byte-identical —
+# the VM's crash-loop burst budget depends on that exact path).
+: > "$STATE_PAR_DIR/none.env"
+assert_eq "14.k no override anywhere → the classic default" \
+    "$STATE_PAR_DIR/.launcher-state" \
+    "$(launcher_state_file "$STATE_PAR_DIR" "$STATE_PAR_DIR/none.env")"
+
+# 14.l the default expression is still the ONLY functional default site
+# (the watchdog's resolver mirrors it byte-for-byte).
+assert_eq "14.l single functional classic-path default in launcher.sh" "1" \
+    "$(grep -cF ': "${ENSEMBLE_LAUNCHER_STATE_FILE:=$INSTALL_DIR/.launcher-state}"' "$LAUNCHER")"
+
+# ─── 15. Plist template + Makefile staging (design §iv Layer 1) ────────────
+section "plist template + Makefile staging (§iv Layer 1)"
+PROD_PLIST="$REPO_ROOT/scripts/ensemble-prod.plist"
+WATCH_PLIST="$REPO_ROOT/scripts/ensemble-watchdog-watcher.plist"
+PLIST_PATH_VALUE="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# 15.a the stable-anchor PATH, byte-exact per design §iv Layer 1.
+assert_contains "15.a prod plist carries the exact anchor PATH" \
+    "<string>$PLIST_PATH_VALUE</string>" "$(cat "$PROD_PLIST")"
+
+# 15.b inside an EnvironmentVariables dict.
+assert_contains "15.b prod plist has EnvironmentVariables dict" \
+    "<key>EnvironmentVariables</key>" "$(cat "$PROD_PLIST")"
+
+# 15.c the stale "deliberately ABSENT" note is gone (reconciled ADR-014).
+assert_eq "15.c stale ABSENT comment removed" "0" \
+    "$(grep -c 'deliberately ABSENT' "$PROD_PLIST")"
+
+# 15.d XML validity, both templates (python3 is a repo dev assumption).
+if command -v python3 >/dev/null 2>&1; then
+    if python3 -c 'import sys, xml.etree.ElementTree as ET
+for f in sys.argv[1:]:
+    ET.parse(f)
+' "$PROD_PLIST" "$WATCH_PLIST" 2>/dev/null; then
+        _pass
+    else
+        _fail "15.d plist templates are well-formed XML" "both parse" "parse error"
+    fi
+else
+    _skip "15.d plist XML validity (python3 unavailable)"
+fi
+
+# 15.e Makefile staging carries the PATH through — using the REAL awk
+# program EXTRACTED FROM THE MAKEFILE. (The old row hardcoded a
+# byte-identical COPY of the program: drift-unguarded — a Makefile change
+# silently diverged.) The extraction is CONTENT-based (any single-quoted
+# awk program containing INSTALL_DIR_PLACEHOLDER), so it survives the
+# program moving into a variable, and it FAILS LOUDLY when the program
+# cannot be found or when the Makefile carries MORE THAN ONE DISTINCT
+# program. The Makefile is only ever READ (never written, never run).
+#
+# _makefile_awk_programs <makefile> — the DISTINCT staging programs (the
+# Makefile's $$ escapes un-escaped), one per line. READ-ONLY.
+#
+# QUOTE PAIRING IS PER-LINE, NEVER FILE-WIDE (2026-11-10 fix): the previous
+# extractor paired single quotes across the WHOLE file
+# (re.finditer(r"'([^']*)'", src)), so ONE apostrophe inside a Makefile
+# COMMENT (e.g. "clients like Chrome's" / "pyinstaller's" / "config.yaml's")
+# shifted the pairing and the placeholder-bearing program was never captured
+# — 0 programs extracted, the 15.e row failed and 15.e2/15.e3 passed
+# VACUOUSLY (everything "rejected" via extraction failure, not placeholder
+# detection). Each line that carries the literal INSTALL_DIR_PLACEHOLDER is
+# now scanned ON ITS OWN: single quotes are paired sequentially WITHIN that
+# line only (never across lines), the quoted segments that themselves contain
+# the placeholder are kept, and "$$" is un-escaped to "$". The LOUD-REFUSAL
+# contract is unchanged: 0 DISTINCT programs or >1 DISTINCT programs → the
+# row fails loudly (a Makefile restructure must break this guard loudly,
+# never silently diverge).
+_makefile_awk_programs() {
+    python3 - "$1" <<'PYEOF'
+import sys
+try:
+    src = open(sys.argv[1], encoding="utf-8").read()
+except OSError:
+    sys.exit(1)
+progs = []
+unterminated = []
+for raw in src.splitlines():
+    if "INSTALL_DIR_PLACEHOLDER" not in raw:
+        continue
+    segs = []
+    buf = None
+    for ch in raw:
+        if ch == "'":
+            if buf is None:
+                buf = []
+            else:
+                segs.append("".join(buf))
+                buf = None
+        elif buf is not None:
+            buf.append(ch)
+    if buf is not None:
+        # ODD number of single quotes on this line: the trailing segment is
+        # unterminated (the program may span lines and cannot be extracted
+        # per-line). Recorded as a HINT for the loud refusal — it never
+        # refuses on its own, so an apostrophe in an unrelated comment cannot
+        # fail an otherwise-correct extraction.
+        tail = "".join(buf)
+        if "INSTALL_DIR_PLACEHOLDER" in tail:
+            unterminated.append(raw.strip())
+    for t in segs:
+        if "INSTALL_DIR_PLACEHOLDER" not in t:
+            continue
+        t = t.replace("$$", "$")
+        if t not in progs:
+            progs.append(t)
+if not progs and unterminated:
+    sys.stderr.write(
+        "no complete staging program extracted; unterminated single quote on a "
+        "placeholder-bearing line: " + unterminated[0] + "\n")
+    sys.exit(2)
+for p in progs:
+    print(p)
+PYEOF
+}
+
+# _makefile_awk_program <makefile> — the ONE staging program on stdout;
+# rc 1 when the Makefile carries ZERO or MORE THAN ONE distinct program
+# (the drift guard refuses rather than silently testing a stale copy).
+# The extractor's stderr diagnostic is folded into the refusal message, so a
+# failing extraction says WHY (e.g. a multi-line program) and not merely "0".
+_makefile_awk_program() {
+    local progs n rc diag diagf
+    diagf="$LP_TEST_DIR/.staging-extract-diag.txt"
+    mkdir -p "$LP_TEST_DIR" 2>/dev/null
+    progs="$(_makefile_awk_programs "$1" 2>"$diagf")"
+    rc=$?
+    diag="$(cat "$diagf" 2>/dev/null)"
+    if [ "$rc" != "0" ]; then
+        printf 'drift guard: %s — extraction FAILED (rc=%s)%s\n' \
+            "$1" "$rc" "${diag:+: $diag}" >&2
+        return 1
+    fi
+    n="$(printf '%s\n' "$progs" | grep -c '[^[:space:]]' || true)"
+    if [ "$n" != "1" ]; then
+        printf 'drift guard: %s carries %s DISTINCT staging programs (exactly 1 required)%s\n' \
+            "$1" "$n" "${diag:+ — $diag}" >&2
+        return 1
+    fi
+    printf '%s' "$progs"
+}
+
+# _staging_ok <makefile> <plist> — rc 0 when the REAL (extracted) program
+# stages the plist correctly: the PATH survives and EVERY placeholder is
+# dropped.
+_staging_ok() {
+    local mk="$1" plist="$2" prog out
+    prog="$(_makefile_awk_program "$mk")" || return 1
+    [ -n "$prog" ] || return 1
+    out="$LP_TEST_DIR/stage-drift/data/ensemble-prod.plist"
+    mkdir -p "$LP_TEST_DIR/stage-drift/data" || return 1
+    INSTALL_DIR="$LP_TEST_DIR/stage-drift" awk "$prog" "$plist" > "$out" 2>/dev/null || return 1
+    grep -qF "<string>$PLIST_PATH_VALUE</string>" "$out" || return 1
+    if grep -q 'INSTALL_DIR_PLACEHOLDER' "$out"; then return 1; fi
+    return 0
+}
+
+if _staging_ok "$REPO_ROOT/Makefile" "$PROD_PLIST"; then
+    _pass
+else
+    _fail "15.e staging substitution (REAL Makefile program) preserves PATH, drops placeholders" \
+        "extracted program stages the plist" "extraction or substitution failed"
+fi
+
+# 15.e2 NON-VACUITY (negative): a PERTURBED COPY of the Makefile (the real
+# one is NEVER written) whose staging program no longer substitutes the
+# placeholder MUST be caught by the same assertion.
+cp "$REPO_ROOT/Makefile" "$LP_TEST_DIR/Makefile.perturbed"
+sed -i.bak 's/INSTALL_DIR_PLACEHOLDER/INSTALL_DIR_PLACEHOLDER_X/g' "$LP_TEST_DIR/Makefile.perturbed"
+if _staging_ok "$LP_TEST_DIR/Makefile.perturbed" "$PROD_PLIST"; then
+    _fail "15.e2 drift guard is not vacuous (a broken staging program must be CAUGHT)" \
+        "broken program rejected" "broken program accepted — the guard is vacuous"
+else
+    _pass
+fi
+
+# 15.e3 NON-VACUITY (negative): a Makefile copy with NO placeholder-aware
+# staging program at all must fail LOUDLY (the extraction refuses).
+cp "$REPO_ROOT/Makefile" "$LP_TEST_DIR/Makefile.noplaceholder"
+sed -i.bak2 's/INSTALL_DIR_PLACEHOLDER/PLACEHOLDER/g' "$LP_TEST_DIR/Makefile.noplaceholder"
+if _makefile_awk_program "$LP_TEST_DIR/Makefile.noplaceholder" >/dev/null 2>&1; then
+    _fail "15.e3 extraction must fail loudly when no staging program is found" \
+        "extraction refuses" "extraction accepted a program-less Makefile"
+else
+    _pass
+fi
+
+# 15.f leg-1 guard wiring INTACT in both plist make targets (regression
+# census — the full matrix is tests/unit/test_makefile_install_guard.py).
+assert_contains "15.f plist-install still runs the guard" \
+    '$(GUARD_SCRIPT) --target plist-install' "$(cat "$REPO_ROOT/Makefile")"
+assert_contains "15.f watchdog-install still runs the guard" \
+    '$(GUARD_SCRIPT) --target watchdog-install' "$(cat "$REPO_ROOT/Makefile")"
+
+# 15.g the watchdog plist deliberately has NO EnvironmentVariables (design:
+# its tools — curl/osascript/sed/head — all live in /usr/bin:/bin, inside
+# launchd's default PATH; §viii row 4 scopes Layer 1 to the PROD template).
+assert_eq "15.g watchdog plist carries no EnvironmentVariables (by design)" "0" \
+    "$(grep -c 'EnvironmentVariables' "$WATCH_PLIST")"
+# ── MERGE PROVENANCE (feature/launcher-journal-sweep-fix × origin/latest) ──────
+# Upstream carried THESE pins under a different section number: it inserted
+# three sections ahead of them (its macOS PATH / STATE_FILE / plist legs took
+# §13/§14/§15), so the js-pin block became §16 on its side. Upstream's
+# numbering was §16a≡§13a … §16g≡§13g … §16j≡§13j … §16k≡§13k.
+# This merge restores OUR §13a..§13k numbering:
+#   * the ASSERT-LABEL namespaces are DISJOINT — upstream's new legs use
+#     DOTTED labels (13.a..13.l, 14.a..14.l, 15.a..15.g); these pins use
+#     UNDOTTED ones (13a..13k, 14a..14f). No shadowing, both sides coexist.
+#   * the assertion CONTENT is byte-identical (only the section number moved) —
+#     verified by a normalized 13↔16 diff against both parents.
 
 # ─── 13. _js_journal_read / _js_json_sub O(n) rewrite (launcher-journal-sweep-fix) ──
 # The per-character bash loops were O(n²) (25.2 s @ 37 KB measured; ~31 min
@@ -1594,11 +2644,230 @@ for _jsf_case in case_0124_trunc_torn_flat_077 case_0154_trunc_torn_hist_027 cas
         "rc=1" "$(_jsf_read "$JSF_CASE_DIR/$_jsf_case")"
 done
 
+# ─── 14. the launcher-side size guard: bounded defer decision (Q1=C) ─────────
+#                + the pre-flip branch's guard (Q2=i) ────────────────────────
+# The launcher-side size guard (SWEEP_JOURNAL_SIZE_GUARD_BYTES, 98304 by
+# default) is the regime boundary. Q1=C bounds the over-threshold DEFER
+# ACTION: the write-once DECISION runs under the bounded awk seam with a
+# HARD budget, and a decision that cannot be made (the extractor is gone,
+# the watchdog fires, the budget is exceeded) makes the launcher REFUSE TO
+# ACT — no journal write, the txn left OPEN, a WARN naming the JOURNAL
+# SIZE and the BUDGET. A missing decision must NEVER read as "there is no
+# defer row" (rc 1).
+#
+# Q2=i gives the PRE-FLIP branch the SAME guard semantics: at or above the
+# threshold the launcher declines to act (no launcher rollback, no
+# commit-and-continue, no txn clear) and leaves the transaction to the
+# daemon-side closer. Below the threshold the behaviour is unchanged.
+section "js size guard: bounded defer decision (Q1=C) + pre-flip guard (Q2)"
+
+JSG_GUARD_BYTES=98304
+
+# _js_seed_big <dir> <started_iso> <flipped> [pad_bytes]
+# A journal that CROSSES the size guard: one extra history row carrying a
+# long padded detail. The document stays balanced and parseable (the sweep
+# reads it like any other journal) — only its SIZE differs.
+_js_seed_big() {
+    local d="$1" started="$2" flipped="$3" pad="${4:-120000}"
+    local padstr
+    padstr="$(head -c "$pad" /dev/zero | tr '\000' 'x')"
+    printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"%s","flipped":%s,"owner_pid":999999},"rollback_window_count":{"24h":1,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[{"ts":"%s","event":"pad","detail":"%s"}]}\n' \
+        "$started" "$flipped" "$started" "$started" "$padstr" > "$d/releases/state.json"
+}
+
+# _js_run_log <dir> [awk_timeout_s] — the sweep's LOG (stderr) + rc.
+# The awk bound is overridden AFTER sourcing the launcher (the shipped
+# `_JS_AWK_TIMEOUT_S` is set unconditionally at source time, so an
+# override before the source would be overwritten).
+_js_run_log() {
+    ( . "$LAUNCHER"; _JS_AWK_TIMEOUT_S="${2:-$_JS_AWK_TIMEOUT_S}"; INSTALL_DIR="$1" _journal_sweep 2>&1 )
+}
+
+# A fake awk that forwards EVERY call to the real awk EXCEPT the
+# defer-DECISION scan (its program text carries the _JS_HIST_REASON
+# marker) — that one wedges forever, so the bounded seam's watchdog fires
+# and the decision comes back UNAVAILABLE (rc 2). The marker keeps the
+# fake surgical: the sweep's other passes (the balance validator, the
+# extractors) still run for real, so the sweep REACHES the size guard.
+JSF_REAL_AWK="$(command -v awk 2>/dev/null)"
+JSF_DECIDE_WEDGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf-decide.XXXXXX")"
+cat > "$JSF_DECIDE_WEDGE_DIR/awk" <<JSF_DECIDE_AWK
+#!/bin/sh
+# Fake awk: wedges ONLY for the defer-decision scan (the _JS_HIST_REASON
+# marker); every other call is forwarded to the real awk.
+for _a in "\$@"; do
+    case "\$_a" in
+        *_JS_HIST_REASON*) exec sleep 300 ;;
+    esac
+done
+exec "$JSF_REAL_AWK" "\$@"
+JSF_DECIDE_AWK
+chmod +x "$JSF_DECIDE_WEDGE_DIR/awk"
+
+# ── 14a. over-threshold, NORMAL (in-budget) → the CONSERVATIVE DEFER ──────
+JSG_A="$JS_TEST_DIR/sg-a"; _js_fixture "$JSG_A"; _js_seed_big "$JSG_A" "$STALE_TS" true
+JSG_A_SIZE="$(wc -c < "$JSG_A/releases/state.json" | tr -d ' ')"
+JSG_A_LOG="$(_js_run_log "$JSG_A")"
+assert_contains "14a over-threshold: the CONSERVATIVE DEFER WARN fires" \
+    "CONSERVATIVE DEFER" "$JSG_A_LOG"
+assert_contains "14a over-threshold: the defer row is journaled (the write-once HOLD)" \
+    '"event":"sweep_deferred"' "$(_js_journal "$JSG_A")"
+assert_contains "14a over-threshold: the defer row carries the size-guard reason" \
+    "journal-size-guard" "$(_js_journal "$JSG_A")"
+assert_contains "14a over-threshold: the txn stays OPEN" \
+    '"owner_pid":999999' "$(_js_journal "$JSG_A")"
+assert_eq "14a over-threshold: NO rollback (the current symlink is untouched)" \
+    "releases/v0.10.6" "$(readlink "$JSG_A/current")"
+assert_eq "14a over-threshold: the rollback counter is NOT incremented" \
+    "1" "$(_js_count "$JSG_A")"
+assert_eq "14a over-threshold: the cooldown is NOT armed" \
+    "null" "$(_js_field "$JSG_A" cooldown_until)"
+# the SECOND sweep must NOT write a second row: the decision's rc-0
+# verdict ("a row IS already journaled") is what the write-once rule
+# rides on — a broken hand-off would double the row (and, at this size,
+# double the boot-path write cost).
+_js_run_log "$JSG_A" >/dev/null 2>&1
+assert_eq "14a over-threshold: the defer row is written ONCE (write-once)" \
+    "1" "$(printf '%s' "$(_js_journal "$JSG_A")" | grep -o '"event":"sweep_deferred"' | wc -l | tr -d ' ')"
+
+# ── 14b. over-threshold, FORCED OVERRUN → REFUSE TO ACT (no journal write) ─
+JSG_B="$JS_TEST_DIR/sg-b"; _js_fixture "$JSG_B"; _js_seed_big "$JSG_B" "$STALE_TS" true
+JSG_B_SHA_BEFORE="$(shasum -a 256 "$JSG_B/releases/state.json" | awk '{print $1}')"
+JSG_B_BYTES_BEFORE="$(wc -c < "$JSG_B/releases/state.json" | tr -d ' ')"
+JSG_B_LOG="$(PATH="$JSF_DECIDE_WEDGE_DIR:$PATH" _js_run_log "$JSG_B" 2)"
+JSG_B_SHA_AFTER="$(shasum -a 256 "$JSG_B/releases/state.json" | awk '{print $1}')"
+assert_contains "14b overrun: the WARN names the JOURNAL SIZE" \
+    "journal size=" "$JSG_B_LOG"
+assert_contains "14b overrun: the WARN names the guard" \
+    "guard=${JSG_GUARD_BYTES}B" "$JSG_B_LOG"
+assert_contains "14b overrun: the WARN names the BUDGET" \
+    "defer decision budget (2s)" "$JSG_B_LOG"
+assert_contains "14b overrun: the WARN refuses to act" \
+    "REFUSING to act" "$JSG_B_LOG"
+assert_contains "14b overrun: the WARN names the size-guard regime" \
+    "≥ guard=${JSG_GUARD_BYTES}B" "$JSG_B_LOG"
+assert_eq "14b overrun: the journal is BYTE-IDENTICAL (sha256 unchanged)" \
+    "$JSG_B_SHA_BEFORE" "$JSG_B_SHA_AFTER"
+assert_eq "14b overrun: the journal size is unchanged" \
+    "$JSG_B_BYTES_BEFORE" "$(wc -c < "$JSG_B/releases/state.json" | tr -d ' ')"
+assert_contains "14b overrun: the txn stays OPEN" \
+    '"owner_pid":999999' "$(_js_journal "$JSG_B")"
+assert_eq "14b overrun: the lock is RELEASED" \
+    "absent" "$([ -d "$JSG_B/releases/rollback.lock.d" ] && echo present || echo absent)"
+assert_eq "14b overrun: NO crash (the sweep returns 0)" \
+    "0" "$( ( . "$LAUNCHER"; _JS_AWK_TIMEOUT_S=2; PATH="$JSF_DECIDE_WEDGE_DIR:$PATH" INSTALL_DIR="$JSG_B" _journal_sweep >/dev/null 2>&1; echo $? ) )"
+
+# ── 14c. over-threshold, stale flipped:true → NO rollback, txn left OPEN ──
+# (the defer ROW is written — that is the documented CONSERVATIVE DEFER;
+# what must NOT happen is a rollback: no current repoint, no quarantine,
+# no counter, no cooldown, and the txn stays OPEN).
+JSG_C="$JS_TEST_DIR/sg-c"; _js_fixture "$JSG_C"; _js_seed_big "$JSG_C" "$STALE_TS" true
+JSG_C_LOG="$(_js_run_log "$JSG_C")"
+assert_contains "14c over-threshold stale flipped:true: the CONSERVATIVE DEFER WARN fires" \
+    "CONSERVATIVE DEFER" "$JSG_C_LOG"
+assert_eq "14c over-threshold stale flipped:true: NO rollback (current symlink untouched)" \
+    "releases/v0.10.6" "$(readlink "$JSG_C/current")"
+assert_eq "14c over-threshold stale flipped:true: the journal current is NOT repointed" \
+    "v0.10.5" "$(_js_field "$JSG_C" current)"
+assert_eq "14c over-threshold stale flipped:true: nothing is quarantined" \
+    "[]" "$( . "$LAUNCHER"; _js_json_sub "$(_js_journal "$JSG_C")" quarantined 2>/dev/null )"
+assert_eq "14c over-threshold stale flipped:true: the rollback counter is NOT incremented" \
+    "1" "$(_js_count "$JSG_C")"
+assert_eq "14c over-threshold stale flipped:true: the cooldown is NOT armed" \
+    "null" "$(_js_field "$JSG_C" cooldown_until)"
+assert_contains "14c over-threshold stale flipped:true: the txn stays OPEN" \
+    '"owner_pid":999999' "$(_js_journal "$JSG_C")"
+
+# ── 14d. BELOW-threshold control → the rollback DOES happen (unchanged) ────
+JSG_D="$JS_TEST_DIR/sg-d"; _js_fixture "$JSG_D"; _js_seed "$JSG_D" "$STALE_TS" true 1 "$STALE_TS" null promote 1
+_js_run "$JSG_D"
+assert_eq "14d below-threshold control: the rollback happens (current repointed to previous)" \
+    "releases/v0.10.5" "$(readlink "$JSG_D/current")"
+assert_contains "14d below-threshold control: the sweep_rollback event is journaled" \
+    '"event":"sweep_rollback"' "$(_js_journal "$JSG_D")"
+assert_eq "14d below-threshold control: the txn is closed" \
+    "null" "$(_js_field "$JSG_D" in_flight)"
+
+# ── 14e. Q2: over-threshold stale PRE-FLIP → the launcher DECLINES ───────
+JSG_E="$JS_TEST_DIR/sg-e"; _js_fixture "$JSG_E"; _js_seed_big "$JSG_E" "$STALE_TS" false
+ln -sfn "releases/v0.10.5" "$JSG_E/current"   # pre-flip: still on the serving release
+JSG_E_SHA_BEFORE="$(shasum -a 256 "$JSG_E/releases/state.json" | awk '{print $1}')"
+JSG_E_LOG="$(_js_run_log "$JSG_E")"
+assert_contains "14e pre-flip over-threshold: the DECLINE WARN fires" \
+    "DECLINING TO ACT" "$JSG_E_LOG"
+assert_contains "14e pre-flip over-threshold: the WARN names the regime" \
+    "journal is" "$JSG_E_LOG"
+assert_contains "14e pre-flip over-threshold: the WARN names the consequence" \
+    "daemon-side closer" "$JSG_E_LOG"
+assert_contains "14e pre-flip over-threshold: the WARN says the txn is left OPEN" \
+    "txn is left OPEN" "$JSG_E_LOG"
+assert_eq "14e pre-flip over-threshold: the journal is BYTE-IDENTICAL (sha256 unchanged)" \
+    "$JSG_E_SHA_BEFORE" "$(shasum -a 256 "$JSG_E/releases/state.json" | awk '{print $1}')"
+assert_contains "14e pre-flip over-threshold: the txn stays OPEN" \
+    '"owner_pid":999999' "$(_js_journal "$JSG_E")"
+assert_eq "14e pre-flip over-threshold: NO sweep event (nothing was cleared)" \
+    "absent" "$(printf '%s' "$(_js_journal "$JSG_E")" | grep -q '"event":"sweep"' && echo present || echo absent)"
+assert_eq "14e pre-flip over-threshold: the rollback counter is NOT incremented" \
+    "1" "$(_js_count "$JSG_E")"
+
+# ── 14f. Q2 control: BELOW-threshold pre-flip → the clear STILL happens ───
+JSG_F="$JS_TEST_DIR/sg-f"; _js_fixture "$JSG_F"; _js_seed "$JSG_F" "$STALE_TS" false
+ln -sfn "releases/v0.10.5" "$JSG_F/current"
+_js_run "$JSG_F"
+assert_eq "14f pre-flip below-threshold: the clear STILL happens (in_flight null)" \
+    "null" "$(_js_field "$JSG_F" in_flight)"
+assert_contains "14f pre-flip below-threshold: the sweep history event is recorded" \
+    '"event":"sweep"' "$(_js_journal "$JSG_F")"
+assert_eq "14f pre-flip below-threshold: the current symlink is untouched" \
+    "releases/v0.10.5" "$(readlink "$JSG_F/current")"
+
+# ─── F4: _env_strip_value byte-parity (launcher.sh <-> watchdog-watcher.sh) ──
+# The two implementations MUST stay byte-identical (F-06: one value-resolution
+# rule, duplicated by design because the watchdog is standalone). The pin
+# compares the REAL file bytes (extracted function bodies), so it FAILS if
+# either side is edited -- it cannot be satisfied by a stub.
+section "env-strip-value byte-parity (F4)"
+
+_env_strip_value_body() {  # <file>
+    awk '/^_env_strip_value\(\) \{/,/^\}/' "$1"
+}
+
+# Positive pin: the two bodies are byte-identical today.
+if [ "$(_env_strip_value_body "$LAUNCHER")" = "$(_env_strip_value_body "$REPO_ROOT/scripts/watchdog-watcher.sh")" ]; then
+    _pass
+else
+    _fail "F4 _env_strip_value byte-identical (launcher.sh vs scripts/watchdog-watcher.sh)" \
+        "identical bodies" "bodies differ"
+fi
+assert_eq "F4 _env_strip_value byte-parity (launcher.sh vs scripts/watchdog-watcher.sh)" \
+    "$(_env_strip_value_body "$LAUNCHER")" \
+    "$(_env_strip_value_body "$REPO_ROOT/scripts/watchdog-watcher.sh")"
+
+# Non-vacuity (negative): perturb a /tmp COPY of one side -- the SAME
+# comparison must go RED. The real files are NEVER written.
+cp "$REPO_ROOT/scripts/watchdog-watcher.sh" "$LP_TEST_DIR/watchdog-perturbed.sh"
+python3 - "$LP_TEST_DIR/watchdog-perturbed.sh" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+needle = "printf '%s' \"$v\""
+assert needle in s, "perturbation target not found"
+s = s.replace(needle, "printf '%s' \"$v\" ", 1)
+open(p, "w").write(s)
+PYEOF
+if [ "$(_env_strip_value_body "$LAUNCHER")" = "$(_env_strip_value_body "$LP_TEST_DIR/watchdog-perturbed.sh")" ]; then
+    _fail "F4 parity pin is not vacuous (a perturbed side must be CAUGHT)" \
+        "bodies differ" "bodies still identical -- pin is vacuous"
+else
+    _pass
+fi
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
-       "$RB_TEST_DIR5" "$JSF_TEST_DIR" "$JSF_PERF_DIR" \
-       "$JSF_NOAWK_DIR" "$JSF_FAKE_DIR" "$JSF_WEDGE_DIR" 2>/dev/null
+       "$RB_TEST_DIR5" "$LP_TEST_DIR" "$JSF_TEST_DIR" "$JSF_PERF_DIR" \
+       "$JSF_NOAWK_DIR" "$JSF_FAKE_DIR" "$JSF_WEDGE_DIR" \
+       "$JSF_DECIDE_WEDGE_DIR" 2>/dev/null
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'

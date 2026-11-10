@@ -47,6 +47,7 @@ shell export can never silently weaken the gate under test.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -756,6 +757,62 @@ class TestMakefileWiring:
         text = STOP_SCRIPT.read_text()  # read-only reference
         assert text.startswith("#!/bin/bash")
 
+    def test_port_sink_quoted_in_stop_recipes(self, fake_home):
+        """D1 pin (PROD_PORT_FALLBACK sink): the port must reach the stop
+        script as a QUOTED argument.
+
+        ``$(PROD_PORT_FALLBACK)`` is the raw text after ``PORT=`` in the
+        repo's .env.prod (Makefile:75) — a repo-controlled file. Unquoted at
+        the sink it is a word-splitting / command-separator surface: a
+        ``PORT=9797; echo x > f`` line would run as a command. The guard
+        refusal aborts the recipe BEFORE the sink, so this is
+        defence-in-depth (NOT a guard bypass); the threat model is an
+        operator-controlled repo file.
+
+        Behavioral pin: ``make -n`` PRINTS the recipe without executing it,
+        so the printed stop-script invocation must carry the port QUOTED,
+        with the argv order unchanged (install dir, then port — two
+        arguments). The port value is pinned deterministically by
+        overriding ENV_PROD_FILE (the file Makefile:75 reads), so the
+        assertion does not depend on whatever .env.prod exists.
+
+        UNION NOTE (2026-11-10, round #2): the stop-by-port leg reads its
+        port from the TARGET dir's own staged PORT (STOP_PORT — the P1-core
+        scoping: the repo's .env.prod port IS the live prod port, and killing
+        it from a sandbox dir is exactly the incident class this lane
+        exists for; the target refuses closed when the dir stages none). The
+        QUOTING property — the pin's actual subject — is identical for both
+        sources, so this pin stages the value in the SOURCE each recipe reads
+        and asserts the quoted sink in both. The quoting assertion is
+        UNCHANGED; only the value's origin differs, and it is still
+        deterministic.
+        """
+        sandbox = fake_home / "sbx"
+        sandbox.mkdir()
+        port_file = fake_home / "port.env"
+        port_file.write_text("PORT=9797\n")
+        # the stop-by-port recipe reads the TARGET dir's own staged PORT
+        (sandbox / ".env").write_text("PORT=12345\n")
+        for target, expected_port in (
+            ("stop", "9797"),
+            ("install", "9797"),
+            ("stop-by-port", "12345"),
+        ):
+            r = run_make(
+                ["-n", target, f"INSTALL_DIR={sandbox}", f"ENV_PROD_FILE={port_file}"],
+                fake_home,
+            )
+            assert r.returncode == 0, (target, r.stdout, r.stderr)
+            calls = [
+                ln for ln in r.stdout.splitlines()
+                if "stop-ensemble.sh" in ln and "bash" in ln
+            ]
+            assert calls, f"{target}: no stop-ensemble.sh invocation printed"
+            for ln in calls:
+                assert f'"{sandbox}"' in ln, (target, ln)
+                assert f'"{expected_port}"' in ln, f"{target}: port sink is NOT quoted: {ln}"
+                assert ln.index(f'"{sandbox}"') < ln.index(f'"{expected_port}"'), (target, ln)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # P0 SECURITY HOTFIX MATRIX — F-01 … F-05 refusal rows
@@ -820,6 +877,18 @@ STRUCTURAL_LINE = "This refusal is STRUCTURAL: no confirm var opens it"
 #: Live / demo classification wording (UNCHANGED by this hotfix).
 LIVE_ARM = "REFUSING — INSTALL_DIR resolves to a LIVE install dir"
 DEMO_ARM = "REFUSING — INSTALL_DIR resolves to the DEMO install"
+
+#: Absolute-path arm (F6) — a RELATIVE INSTALL_DIR is refused outright.
+#: The first line is "REFUSING — INSTALL_DIR '<spelling>' is not an absolute
+#: path."; the tail anchor below is the wording that distinguishes this arm
+#: from the raw-value arm ("cannot be verified safely.") and from the live /
+#: demo classification wording.
+ABSOLUTE_ARM_TAIL = "is not an absolute path."
+
+
+def absolute_first_line(spelling: str) -> str:
+    """The exact first line of the absolute-path refusal for a spelling."""
+    return f"REFUSING — INSTALL_DIR '{spelling}' is not an absolute path."
 
 #: F-01 case table: (case-id, value template, detail anchor, make template).
 #:
@@ -1269,11 +1338,15 @@ class TestCaseAndPathResolutionArm:
     resolution.
 
     An uppercase spelling of a live dir (Darwin/APFS is case-insensitive), a
-    spelling whose INTERMEDIATE does not exist (<home>/ghost/../live), a
-    RELATIVE spelling resolved against the cwd, and a symlink alias must all
-    still classify as live. The physical resolution uses /bin/pwd -P (BSD) —
-    bash's builtin `pwd -P` echoes the TYPED casing, which compares unequal
-    to the real tree.
+    spelling whose INTERMEDIATE does not exist (<home>/ghost/../live) and a
+    symlink alias must all still classify as live. The physical resolution
+    uses /bin/pwd -P (BSD) — bash's builtin `pwd -P` echoes the TYPED
+    casing, which compares unequal to the real tree.
+
+    A RELATIVE spelling is no longer part of this matrix: the absolute-path
+    arm (F6, TestAbsolutePathArm) refuses every relative spelling before
+    the classification can run, so the relative-live row below is now
+    refused one arm earlier.
     """
 
     @pytest.mark.skipif(
@@ -1317,8 +1390,18 @@ class TestCaseAndPathResolutionArm:
         assert sentinel_of(live).exists()
 
     def test_relative_live_spelling_refused(self, fake_home):
-        """A RELATIVE live spelling ("agents-ensemble") is resolved against
-        the CWD: with cwd=$HOME it is the live dir and must be refused.
+        """A RELATIVE live spelling ("agents-ensemble") is refused EARLIER —
+        as 'not an absolute path' — because the absolute-path arm (F6) runs
+        BEFORE the live/demo classification.
+
+        BEHAVIOUR CHANGE (F6, deliberate and contract-mandated): this row
+        used to assert the LIVE wording, because the guard resolved the
+        relative spelling against its cwd and matched the live dir. The
+        absolute-path arm is UNCONDITIONAL by design — no confirm var may
+        open a relative path — so the refusal now happens one arm earlier.
+        The live dir is still protected either way (it is never deleted), and
+        the '~/agents-ensemble' spelling still reaches the LIVE classification
+        (pinned by TestAbsolutePathArm.test_tilde_form_is_judged_on_its_expanded_form).
 
         Guard-level: the guard resolves a relative INSTALL_DIR against its
         own cwd, so the probe runs with cwd=$HOME. Make-level: make resolves
@@ -1331,7 +1414,9 @@ class TestCaseAndPathResolutionArm:
             "uninstall", fake_home, install_dir="agents-ensemble", cwd=fake_home,
         )
         assert r.returncode == GUARD_REFUSE_RC, r.stderr
-        assert LIVE_ARM in r.stderr, r.stderr
+        assert absolute_first_line("agents-ensemble") in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL in r.stderr, r.stderr
+        assert LIVE_ARM not in r.stderr, r.stderr
         assert sentinel_of(live).exists()
 
         m = run_make(
@@ -1340,7 +1425,8 @@ class TestCaseAndPathResolutionArm:
             fake_home, cwd=fake_home,
         )
         _assert_make_refused(m, "relative-live")
-        assert LIVE_ARM in m.stderr, m.stderr
+        assert absolute_first_line("agents-ensemble") in m.stderr, m.stderr
+        assert LIVE_ARM not in m.stderr, m.stderr
         assert sentinel_of(live).exists()
 
     def test_symlink_alias_of_live_refused(self, fake_home):
@@ -1360,3 +1446,823 @@ class TestCaseAndPathResolutionArm:
         assert LIVE_ARM in m.stderr, m.stderr
         assert sentinel_of(live).exists()
         assert alias.exists()  # the alias itself is not a protected dir
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F6 — ABSOLUTE-PATH ARM (the guard requires an absolute INSTALL_DIR)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAbsolutePathArm:
+    """F6 — INSTALL_DIR MUST BE AN ABSOLUTE PATH.
+
+    A relative path resolves against whatever directory the recipe happens
+    to run in, so the path the guard checks and the path a recipe would
+    delete can be two DIFFERENT paths: '..' run from a repo root is the
+    repo's parent, 'agents' run from a repo root is that repo's own
+    agents/ tree. The guard therefore refuses every relative spelling.
+
+    ORDERING (pinned by the rows below):
+      * the unverifiable-spelling arm runs FIRST — './x' keeps the
+        raw-value wording ("The path is not in normalized form") and '~' /
+        '~user/...' keep the tilde wording ("cannot be verified safely");
+      * the absolute-path arm runs NEXT, BEFORE the live/demo classification
+        and BEFORE the containment arm, so NO confirm var can ever open a
+        relative path;
+      * the arm judges the TILDE-EXPANDED form: '~/x' expands to $HOME/x
+        before the guard sees it, so it stays absolute and reaches the LIVE
+        classification exactly as before.
+
+    SAFETY: every make-level relative probe runs with the make cwd inside a
+    NESTED sandbox (tmp_path/"a"/"b"), so even a hypothetical
+    `rm -rf ".."` would stay inside the pytest tmp tree. The make-level
+    probes NEVER run with the cwd at the repo root.
+    """
+
+    #: Relative spellings refused at guard level. 'agents' is the repo's own
+    #: agents/ tree — the shape the tester reported.
+    RELATIVE_SPELLINGS = ("agents", "..", "foo/bar")
+
+    @pytest.mark.parametrize("spelling", RELATIVE_SPELLINGS)
+    def test_relative_path_refused_at_guard_level(self, fake_home, spelling):
+        """Every relative spelling refuses at rc 78 with the absolute-path
+        wording — and stays refused WITH the confirm var set (structural)."""
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+        # cwd = the fake home: a relative spelling COULD resolve to the live
+        # dir from here — the worst case the arm has to refuse.
+        r = run_guard(
+            "uninstall", fake_home, install_dir=spelling, cwd=fake_home,
+        )
+        assert r.returncode == GUARD_REFUSE_RC, (spelling, r.stderr)
+        assert absolute_first_line(spelling) in r.stderr, (spelling, r.stderr)
+        assert ABSOLUTE_ARM_TAIL in r.stderr, (spelling, r.stderr)
+        assert sentinel_of(live).exists(), spelling
+        assert sentinel_of(sbx).exists(), spelling
+
+        # STRUCTURAL: ENSEMBLE_INSTALL_LIVE=1 does NOT open a relative path
+        r_conf = run_guard(
+            "uninstall", fake_home, install_dir=spelling, cwd=fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r_conf.returncode == GUARD_REFUSE_RC, (spelling, r_conf.stderr)
+        assert absolute_first_line(spelling) in r_conf.stderr, (spelling, r_conf.stderr)
+        assert sentinel_of(live).exists(), spelling
+        assert sentinel_of(sbx).exists(), spelling
+
+    def test_relative_path_refusal_precedes_the_confirm_gate(self, fake_home):
+        """The arm runs BEFORE the live/demo classification: a relative
+        spelling that WOULD have been live is refused as 'not an absolute
+        path', never as a live dir — so no confirm var can reach it."""
+        live = make_live_shaped(fake_home)
+        r = run_guard(
+            "uninstall", fake_home, install_dir="agents-ensemble", cwd=fake_home,
+        )
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert ABSOLUTE_ARM_TAIL in r.stderr, r.stderr
+        assert LIVE_ARM not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+    def test_dot_slash_spelling_refused_by_the_raw_value_arm(self, fake_home):
+        """'./x' is caught EARLIER, by the raw-value arm — its wording must
+        NOT change (the absolute-path arm never sees it)."""
+        sbx = _safe_sandbox(fake_home)
+        r = run_guard("uninstall", fake_home, install_dir="./x", cwd=fake_home)
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert RAW_VALUE_FIRST_LINE in r.stderr, r.stderr
+        assert DETAIL_NOT_NORMALIZED in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL not in r.stderr, r.stderr
+        assert sentinel_of(sbx).exists()
+
+    def test_empty_install_dir_keeps_the_inert_default_message(self, fake_home):
+        """The EMPTY spelling keeps arm 0's message — the inert-default
+        refusal must not silently become the absolute-path refusal."""
+        live = make_live_shaped(fake_home)
+        r = run_guard("uninstall", fake_home, install_dir="")
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert "INSTALL_DIR is not set" in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+    @pytest.mark.parametrize("spelling", ("..", "agents"))
+    def test_relative_path_refused_at_make_level_in_a_nested_sandbox(
+        self, fake_home, tmp_path, spelling,
+    ):
+        """MAKE-LEVEL: the recipe must NOT expand to a destructive rm -rf.
+
+        The make cwd is a NESTED sandbox (tmp_path/"a"/"b"), so a
+        hypothetical `rm -rf ".."` would delete tmp_path/"a" — contained
+        inside the pytest tmp tree. The cwd is NEVER the repo root.
+        """
+        nested = tmp_path / "a" / "b"
+        nested.mkdir(parents=True)
+        (tmp_path / "a" / "SENTINEL_A").write_text("do-not-delete")
+        (nested / "SENTINEL_B").write_text("do-not-delete")
+        live = make_live_shaped(fake_home)
+
+        r = run_make(
+            ["-f", str(MAKEFILE), f"GUARD_SCRIPT={GUARD}",
+             "uninstall", f"INSTALL_DIR={spelling}"],
+            fake_home, cwd=nested,
+        )
+        _assert_make_refused(r, spelling)
+        assert "Error 78" in r.stderr, (spelling, r.stderr)
+        assert absolute_first_line(spelling) in r.stderr, (spelling, r.stderr)
+        # the recipe never ran: the "Removing <dir>" banner is the recipe's
+        # first echo — it must NOT be there
+        assert "Removing" not in r.stdout, (spelling, r.stdout)
+        # and the nested sandbox tree is still intact
+        assert (tmp_path / "a" / "SENTINEL_A").exists(), spelling
+        assert (nested / "SENTINEL_B").exists(), spelling
+        assert sentinel_of(live).exists(), spelling
+
+    def test_absolute_path_is_allowed(self, fake_home):
+        """POSITIVE CONTROL: an absolute sandbox path is NOT refused."""
+        sbx = _safe_sandbox(fake_home)
+        r = run_guard("uninstall", fake_home, install_dir=str(sbx))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == "" and r.stderr == "", (r.stdout, r.stderr)
+        assert sentinel_of(sbx).exists()
+
+    def test_tilde_form_is_judged_on_its_expanded_form(self, fake_home):
+        """POSITIVE CONTROL: '~/…' is judged on the EXPANDED form, so it is
+        never refused as relative — '~/agents-ensemble' still reaches the
+        LIVE classification, and a safe '~/…' is allowed."""
+        live = make_live_shaped(fake_home)
+        safe_tilde = _safe_sandbox(fake_home, "sandbox-tilde")
+
+        r = run_guard("uninstall", fake_home, install_dir="~/agents-ensemble")
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+        r_safe = run_guard("uninstall", fake_home, install_dir=f"~/{safe_tilde.name}")
+        assert r_safe.returncode == 0, r_safe.stderr
+        assert r_safe.stdout == "" and r_safe.stderr == "", (
+            r_safe.stdout, r_safe.stderr,
+        )
+        assert sentinel_of(safe_tilde).exists()
+
+    def test_tilde_form_reaches_the_live_classification_at_make_level(self, fake_home):
+        """MAKE-LEVEL: the Makefile expands '~/' to $HOME/ before the guard
+        sees it, so the value is absolute and reaches the LIVE
+        classification — the absolute-path arm must not fire."""
+        live = make_live_shaped(fake_home)
+        r = run_make(["uninstall", "INSTALL_DIR=~/agents-ensemble"], fake_home)
+        _assert_make_refused(r, "tilde-live")
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+# ══════════════════════════════════════════════════════════════════════════
+# ADDED 2026-11-09 (phase 2 of the live-install-guard mission) — APPEND-ONLY
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Two gaps closed on top of the 51-test matrix above (which is UNCHANGED —
+# every pre-existing test body, name and order is byte-identical):
+#
+#   P1-core — stop-by-port: the legacy port kill took its port from the
+#     REPO's .env.prod (the live prod port 9797) while the guard gates the
+#     DIR axis → a sandbox INSTALL_DIR passed the guard and the kill still
+#     landed on the live daemon (inverted protection: the correct live
+#     spelling is refused, the sandbox spelling reaches live). The kill port
+#     is now read from the TARGET install dir's own staged PORT
+#     ($(INSTALL_DIR)/.env) and the target fails closed when that dir has
+#     no staged PORT.
+#
+#   P2 — plist-install / watchdog-install write HOST launchd state
+#     ($HOME/Library/LaunchAgents/…) REGARDLESS of INSTALL_DIR: a sandbox
+#     dir passed the INSTALL_DIR gate and silently overwrote the running
+#     prod unit with one pointing at the sandbox. The guard's new opt-in
+#     --require-live mode closes that (the dir must BE the live install; a
+#     live dir still needs ENSEMBLE_INSTALL_LIVE=1).
+#
+# CARVE-OUT (same rules as the file header, honored here verbatim):
+#   * every real make invocation runs with HOME = a fresh tmp fake home;
+#     every path any recipe can touch lives under tmp.
+#   * scripts/stop-ensemble.sh is NEVER executed — the stop-by-port
+#     proceed-arm is proven at guard level and via `make -n` (dry run);
+#     the make-level refusal arm dies BEFORE the stop script line, and the
+#     suite asserts the script's banner never printed.
+#   * the make-level plist/watchdog proceed arms write into the FAKE home's
+#     Library/LaunchAgents (tmp) — never on the real host; neither recipe
+#     invokes launchctl (it only prints the bootstrap hint).
+#   * the sudo arm stays behind `sudo -n` (not needed here — no new sudo
+#     arm is added; the sudo-correct FORM is asserted in the refusal text).
+
+
+def run_guard_require_live(
+    target: str,
+    home: Path,
+    install_dir: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess:
+    """Guard-level probe WITH the opt-in --require-live mode (P2).
+
+    A sibling of run_guard (which is left byte-identical): the host launchd
+    gate is a MODE of the same script, so the probe adds the flag instead of
+    changing the shared helper. The guard never writes.
+    """
+    env = _base_env(home, extra_env)
+    if install_dir is not None:
+        env["INSTALL_DIR"] = install_dir
+    return subprocess.run(
+        ["bash", str(GUARD), "--target", target, "--require-live"],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+class TestStopByPortPortScoping:
+    """P1-core: the legacy port kill must be bound to the GATED dir.
+
+    Before: `make stop-by-port INSTALL_DIR=<sandbox>` expanded to
+    `STOP_BY_PORT=1 bash scripts/stop-ensemble.sh <sandbox> 9797` — the
+    repo's prod port, i.e. the LIVE daemon's port, regardless of the dir
+    the guard had just approved. After: the port comes from
+    $(INSTALL_DIR)/.env and the target refuses when that dir stages none.
+    """
+
+    def test_inert_refusal(self, fake_home):
+        """Bare `make stop-by-port` → the guard's inert refusal fires first
+        (INSTALL_DIR unset → no dir to scope the kill to)."""
+        r = run_make(["stop-by-port"], fake_home)
+        assert r.returncode != 0
+        assert "INSTALL_DIR is not set" in r.stderr
+
+    def test_missing_staged_port_refuses_and_names_ownership_stop(
+        self, fake_home, tmp_path
+    ):
+        """A dir with NO staged PORT → refuse with exit 78 BEFORE the stop
+        script runs, and name the exact ownership-scoped command.
+
+        Non-vacuity: the stop script's ownership banner never printed AND
+        the STOP_BY_PORT kill line was never reached (make prints recipe
+        lines as it executes them, so its absence proves the refusal came
+        first).
+        """
+        sbx = tmp_path / "sbx-no-env"
+        sbx.mkdir()
+        r = run_make(["stop-by-port", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert f"make stop INSTALL_DIR='{sbx}'" in r.stdout
+        assert sbx.exists()
+        assert "Stopping processes owned by" not in r.stdout
+        assert "STOP_BY_PORT=1" not in r.stdout
+
+    def test_confirmed_live_dir_without_staged_port_still_refuses(self, fake_home):
+        """Fail-closed even for a CONFIRMED live dir: without a staged PORT
+        the kill cannot be scoped to the dir, so it is refused rather than
+        falling back to an unscoped port."""
+        live = make_live_shaped(fake_home)
+        r = run_make(
+            ["stop-by-port", f"INSTALL_DIR={live}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert f"make stop INSTALL_DIR='{live}'" in r.stdout
+        assert sentinel_of(live).exists()
+
+    def test_kill_port_is_read_from_the_target_dir_not_the_repo(
+        self, fake_home, tmp_path
+    ):
+        """`make -n stop-by-port` with a dir whose OWN .env stages
+        PORT=12345 → the kill targets 12345, never the repo's prod port."""
+        sbx = tmp_path / "sbx-with-port"
+        sbx.mkdir()
+        (sbx / ".env").write_text("PORT=12345\n")
+        r = run_make(["-n", "stop-by-port", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode == 0, r.stderr
+        assert "12345" in r.stdout
+        assert "9797" not in r.stdout
+        # upstream (D1) quotes the dir AND the port sink; the port is the
+        # dir's own staged port, never the repo's prod port
+        assert f'scripts/stop-ensemble.sh "{sbx}" "12345"' in r.stdout
+
+    def test_no_repo_prod_port_leaks_into_the_kill(self, fake_home, tmp_path):
+        """A dir with no staged PORT → the expanded kill line carries NO
+        port VALUE at all (the quoted port slot is empty), never the repo's
+        prod port (the old wiring took it from .env.prod)."""
+        sbx = tmp_path / "sbx-no-env"
+        sbx.mkdir()
+        r = run_make(["-n", "stop-by-port", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode == 0, r.stderr
+        kill_lines = [ln for ln in r.stdout.splitlines() if "stop-ensemble.sh" in ln]
+        assert kill_lines, r.stdout
+        assert "9797" not in r.stdout
+        assert str(sbx) in kill_lines[0]
+        # STRONG pin (the docstring's property): the kill command carries NO
+        # port VALUE — upstream (D1) quotes the port sink, so the slot is
+        # present but EMPTY: the (quoted) install dir is followed by an empty
+        # quoted port and nothing else.
+        parts = shlex.split(kill_lines[0])
+        assert parts[:3] == [
+            "STOP_BY_PORT=1", "bash", "scripts/stop-ensemble.sh",
+        ], parts
+        assert len(parts) == 5, f"a port VALUE leaked into the kill: {parts}"
+        assert parts[3] == str(sbx), parts
+        assert parts[4] == "", f"a port VALUE leaked into the kill: {parts}"
+
+    def test_recipe_no_longer_reads_the_repo_prod_port(self):
+        """Static wiring pin: the stop-by-port recipe is bound to
+        $(STOP_PORT) (the target dir's own staged port), not to
+        $(PROD_PORT_FALLBACK) (the repo's .env.prod)."""
+        text = MAKEFILE.read_text()
+        block = text.split("\nstop-by-port:\n", 1)[1]
+        recipe = block.split("\n\n", 1)[0]
+        assert "PROD_PORT_FALLBACK" not in recipe, recipe
+        assert "STOP_PORT" in recipe, recipe
+
+    def test_guard_level_pass_for_unclassified_dir(self, fake_home, tmp_path):
+        """Guard-level proceed arm for the DIR axis (the guard never
+        writes; the stop script is never executed by this suite)."""
+        sbx = tmp_path / "sbx"
+        sbx.mkdir()
+        r = run_guard("stop-by-port", fake_home, install_dir=str(sbx))
+        assert r.returncode == 0, r.stderr
+
+
+class TestHostLaunchdInstallRequiresLive:
+    """P2: the host launchd write must only ever come from the LIVE install.
+
+    plist-install / watchdog-install copy the staged plist into
+    $HOME/Library/LaunchAgents/ REGARDLESS of INSTALL_DIR, so a sandbox dir
+    (which the INSTALL_DIR gate happily opens) used to overwrite the running
+    prod unit with one pointing at the sandbox. The guard's opt-in
+    --require-live mode closes that hole; the canonical live refusal still
+    fires FIRST for an unconfirmed live dir.
+    """
+
+    @staticmethod
+    def _launch_agents(home: Path) -> Path:
+        return home / "Library" / "LaunchAgents"
+
+    def test_plist_install_refuses_sandbox_and_writes_no_launchd_unit(
+        self, fake_home, tmp_path
+    ):
+        """REFUSAL arm (sandbox dir): the refusal names the exact confirm
+        var and the sudo-correct form, and NO host launchd unit was
+        written (HOME is the tmp fake home → the mkdir + cp never ran)."""
+        sbx = tmp_path / "sbx"
+        sbx.mkdir()
+        r = run_make(["plist-install", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert "REFUSING" in r.stderr
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+        assert (
+            f"sudo env ENSEMBLE_INSTALL_LIVE=1 make plist-install INSTALL_DIR='{sbx}'"
+            in r.stderr
+        )
+        assert not self._launch_agents(fake_home).exists()
+        assert not (
+            self._launch_agents(fake_home) / "ensemble-prod.plist"
+        ).exists()
+
+    def test_watchdog_install_refuses_sandbox_and_writes_no_launchd_unit(
+        self, fake_home, tmp_path
+    ):
+        """REFUSAL arm (sandbox dir) for the watchdog agent — same
+        non-vacuity proof: no LaunchAgents dir, no unit file."""
+        sbx = tmp_path / "sbx"
+        sbx.mkdir()
+        r = run_make(["watchdog-install", f"INSTALL_DIR={sbx}"], fake_home)
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+        assert (
+            f"sudo env ENSEMBLE_INSTALL_LIVE=1 make watchdog-install INSTALL_DIR='{sbx}'"
+            in r.stderr
+        )
+        assert not self._launch_agents(fake_home).exists()
+        assert not (
+            self._launch_agents(fake_home) / "ensemble-watchdog-watcher.plist"
+        ).exists()
+
+    def test_demo_dir_is_not_opened_by_the_demo_confirm(self, fake_home):
+        """ENSEMBLE_INSTALL_DEMO=1 must NOT open a demo dir under
+        --require-live: the prod-named launchd unit must point at live."""
+        demo = fake_home / "agents-ensemble-demo"
+        demo.mkdir()
+        r = run_make(
+            ["plist-install", f"INSTALL_DIR={demo}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
+        )
+        assert r.returncode != 0
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+        assert not self._launch_agents(fake_home).exists()
+
+    @pytest.mark.parametrize("target", ["plist-install", "watchdog-install"])
+    def test_live_dir_without_confirm_gets_the_canonical_live_refusal(
+        self, fake_home, target
+    ):
+        """ORDERING: for a live dir WITHOUT the confirm var the EXISTING
+        per-path live refusal fires first (its message shape is unchanged);
+        the --require-live refusal must not shadow or pre-empt it."""
+        live = make_live_shaped(fake_home)
+        r = run_make([target, f"INSTALL_DIR={live}"], fake_home)
+        assert r.returncode != 0
+        assert "resolves to a LIVE install dir" in r.stderr
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+        assert not self._launch_agents(fake_home).exists()
+
+    def test_guard_require_live_refuses_unclassified_dir(self, fake_home, tmp_path):
+        """Guard level: --require-live refuses a sandbox dir (exit 78)."""
+        sbx = tmp_path / "sbx"
+        sbx.mkdir()
+        r = run_guard_require_live("plist-install", fake_home, install_dir=str(sbx))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+
+    def test_guard_require_live_refuses_demo_even_with_demo_confirm(self, fake_home):
+        """Guard level: a demo dir stays refused under --require-live even
+        with ENSEMBLE_INSTALL_DEMO=1."""
+        demo = fake_home / "agents-ensemble-demo"
+        demo.mkdir()
+        r = run_guard_require_live(
+            "watchdog-install",
+            fake_home,
+            install_dir=str(demo),
+            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
+        )
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE=1" in r.stderr
+
+    def test_guard_require_live_passes_for_confirmed_live_dir(self, fake_home):
+        """Guard level: a confirmed live dir passes (the mode adds the live
+        requirement, it does not replace the confirm var)."""
+        live = make_live_shaped(fake_home)
+        r = run_guard_require_live(
+            "plist-install",
+            fake_home,
+            install_dir=str(live),
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode == 0, r.stderr
+
+    def test_plist_install_proceeds_for_confirmed_live_dir(self, fake_home):
+        """SUCCESS arm: a confirmed live dir installs the staged plist into
+        the FAKE home's LaunchAgents (tmp — never the real host)."""
+        live = make_live_shaped(fake_home)
+        (live / "data").mkdir()
+        (live / "data" / "ensemble-prod.plist").write_text("<plist/>\n")
+        r = run_make(
+            ["plist-install", f"INSTALL_DIR={live}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode == 0, r.stderr
+        installed = self._launch_agents(fake_home) / "ensemble-prod.plist"
+        assert installed.exists()
+        assert installed.read_text() == "<plist/>\n"
+
+    def test_watchdog_install_proceeds_for_confirmed_live_dir(self, fake_home):
+        """SUCCESS arm for the watchdog agent (fake home only)."""
+        live = make_live_shaped(fake_home)
+        (live / "data").mkdir()
+        (live / "data" / "ensemble-watchdog-watcher.plist").write_text("<plist/>\n")
+        r = run_make(
+            ["watchdog-install", f"INSTALL_DIR={live}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode == 0, r.stderr
+        installed = self._launch_agents(fake_home) / "ensemble-watchdog-watcher.plist"
+        assert installed.exists()
+        assert installed.read_text() == "<plist/>\n"
+
+    @pytest.mark.parametrize("target", ["plist-install", "watchdog-install"])
+    def test_recipes_pass_the_require_live_flag(self, target):
+        """Static wiring pin: both host-launchd targets front the guard
+        with --require-live."""
+        text = MAKEFILE.read_text()
+        block = text.split(f"\n{target}:\n", 1)[1]
+        first_line = block.split("\n", 1)[0]
+        assert "$(GUARD_SCRIPT) --target" in first_line, target
+        assert "--require-live" in first_line, target
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ADDED 2026-11-09 (phase 3 of the live-install-guard mission) — APPEND-ONLY
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Continues the phase-2 block above (same ADDED banner style; the phase-2
+# banner text itself is NOT rewritten, and the first 1051 lines of this file
+# stay byte-identical).
+#
+#   E1 — live-install SUBPATH classification (both parts):
+#     (1) a protected root AND every path INSIDE it (any depth) share its
+#         class — `~/agents-ensemble/data` is LIVE and refuses exactly like
+#         the root does (`rm -rf $HOME/agents-ensemble/data` destroys the
+#         live install's data). The match is PATH-COMPONENT aware: a
+#         NAME-PREFIX SIBLING ("…/agents-ensemble-backup") is a separate
+#         tree and stays allowed BY DESIGN.
+#     (2) the candidate set now mirrors lib.sh:902-917
+#         (_install_dir_candidates): under a Layer-1 HOME the cross-env
+#         SIBLING is a candidate too (HOME=…/agents-ensemble-demo ⇒
+#         …/agents-ensemble is a LIVE candidate).
+#
+#   P3a — deploy lane demo confirm: `scripts/deploy.sh demo` now needs
+#     ENSEMBLE_INSTALL_DEMO=1 (same incident class as its live gate).
+#   P3b — upgrade lane demo confirm: the MUTATING upgrade wrappers
+#     (stage/promote/rollback) now need ENSEMBLE_INSTALL_DEMO=1 for the
+#     demo target (the default target of all three). status.sh stays
+#     ungated (read-only); the sandbox lane is exempt.
+#
+# CARVE-OUT (same rules as the file header, honored here verbatim):
+#   * every real invocation runs with HOME = a fresh tmp fake home; every
+#     path any recipe can touch lives under tmp.
+#   * the deploy/upgrade scripts are invoked ONLY in their refusal arms
+#     (no confirm var → the gate fires before any mutation) or in a
+#     dry-run / pre-mutation-gate arm (--dry-run for deploy; the VERSION
+#     gate for the upgrade scripts) — never in a mutating lane.
+#   * scripts/stop-ensemble.sh is NEVER executed.
+
+
+def run_script(
+    script: str,
+    args: list[str],
+    home: Path,
+    extra_env: dict[str, str] | None = None,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess:
+    """Run a repo script (deploy/upgrade lane) with a fake HOME.
+
+    The scripts resolve their own REPO_ROOT from BASH_SOURCE, so cwd is the
+    repo root. The SCRUBBED_VARS scrub applies (ENSEMBLE_INSTALL_DEMO among
+    them) — an ambient export can never silently open the gate under test.
+    """
+    env = _base_env(home, extra_env)
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / script), *args],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+class TestLiveSubpathContainment:
+    """E1 part 1: root-or-inside containment (path-component aware)."""
+
+    def test_live_subpath_depth1_refused_without_confirm(self, fake_home):
+        """`$HOME/agents-ensemble/data` is LIVE → refused with the canonical
+        live refusal. Non-vacuity: the sentinel inside the subdir survives
+        (the unguarded rm -rf did NOT run)."""
+        live = make_live_shaped(fake_home)
+        sub = live / "data"
+        sub.mkdir()
+        (sub / "SENTINEL").write_text("keep")
+        r = run_make(["uninstall", f"INSTALL_DIR={sub}"], fake_home)
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert "INSIDE the protected install dir" in r.stderr
+        assert "STRUCTURAL: no confirm var opens it" in r.stderr
+        assert (sub / "SENTINEL").exists(), "ungated rm -rf ran on a live SUBPATH"
+
+    def test_live_subpath_deep_refused_without_confirm(self, fake_home):
+        """Depth is irrelevant: …/agents-ensemble/data/deep/x is LIVE too."""
+        live = make_live_shaped(fake_home)
+        deep = live / "data" / "deep" / "x"
+        deep.mkdir(parents=True)
+        (deep / "SENTINEL").write_text("keep")
+        r = run_make(["uninstall", f"INSTALL_DIR={deep}"], fake_home)
+        assert r.returncode != 0
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+        assert (deep / "SENTINEL").exists(), "ungated rm -rf ran on a live SUBPATH"
+
+    def test_live_subpath_refused_even_with_confirm(self, fake_home):
+        """STRENGTHENED by the union (upstream 0f60f1ab9): containment is
+        now STRUCTURAL -- no confirm var opens a path inside the protected
+        root, so the subpath is refused EVEN WITH ENSEMBLE_INSTALL_LIVE=1.
+        (Adapted from the branch's old
+        `test_live_subpath_proceeds_with_confirm`, which asserted the
+        opposite under the branch's weaker containment-as-classification.)"""
+        live = make_live_shaped(fake_home)
+        sub = live / "data"
+        sub.mkdir()
+        (sub / "SENTINEL").write_text("ok-to-delete")
+        r = run_make(
+            ["uninstall", f"INSTALL_DIR={sub}"],
+            fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r.returncode != 0
+        assert "Error 78" in r.stderr
+        assert "STRUCTURAL: no confirm var opens it" in r.stderr
+        assert (sub / "SENTINEL").exists(), "the structural refusal must not run rm -rf"
+    def test_name_prefix_siblings_are_not_live(self, fake_home):
+        """DOCUMENTED DECISION (guard header): a NAME-PREFIX SIBLING is a
+        separate tree and stays ALLOWED — only the tree inside the
+        protected root is gated. Both spellings are pinned."""
+        make_live_shaped(fake_home)
+        for name in ("agents-ensemble-backup", "agents-ensembleX"):
+            sib = fake_home / name
+            sib.mkdir()
+            r = run_guard("uninstall", fake_home, install_dir=str(sib))
+            assert r.returncode == 0, (name, r.stderr)
+            assert "LIVE install dir" not in r.stderr, name
+
+    def test_symlink_into_live_root_refused(self, fake_home, tmp_path):
+        """A symlink alias pointing AT the live root resolves physically
+        (cd + pwd -P) and is caught."""
+        live = make_live_shaped(fake_home)
+        alias = tmp_path / "alias-to-live-root"
+        alias.symlink_to(live)
+        r = run_guard("uninstall", fake_home, install_dir=str(alias))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+    def test_symlink_into_live_subdir_refused(self, fake_home, tmp_path):
+        """A symlink alias pointing INTO the live root (a subdir) is LIVE
+        too — physical resolution happens BEFORE classification."""
+        live = make_live_shaped(fake_home)
+        sub = live / "data"
+        sub.mkdir()
+        alias = tmp_path / "alias-to-live-data"
+        alias.symlink_to(sub)
+        r = run_guard("uninstall", fake_home, install_dir=str(alias))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+    def test_not_yet_existing_subpath_refused_textually(self, fake_home):
+        """A spelling that does not exist yet is still caught TEXTUALLY
+        (the root exists, the leaf does not)."""
+        make_live_shaped(fake_home)
+        r = run_guard(
+            "uninstall", fake_home,
+            install_dir=f"{fake_home}/agents-ensemble/newdir",
+        )
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+    def test_demo_subpath_refused_even_with_confirm(self, fake_home):
+        """STRENGTHENED by the union (upstream 0f60f1ab9): containment is
+        now STRUCTURAL for the demo root too -- no confirm var opens a path
+        inside it, so the subpath is refused EVEN WITH ENSEMBLE_INSTALL_DEMO=1."""
+        demo = fake_home / "agents-ensemble-demo"
+        sub = demo / "data"
+        sub.mkdir(parents=True)
+        (sub / "SENTINEL").write_text("keep")
+        refused = run_guard("uninstall", fake_home, install_dir=str(sub))
+        assert refused.returncode == GUARD_REFUSE_RC
+        assert "STRUCTURAL: no confirm var opens it" in refused.stderr
+        opened = run_guard("uninstall", fake_home, install_dir=str(sub),
+                           extra_env={"ENSEMBLE_INSTALL_DEMO": "1"})
+        assert opened.returncode == GUARD_REFUSE_RC, "structural refusal must not open"
+        assert "STRUCTURAL: no confirm var opens it" in opened.stderr
+        assert (sub / "SENTINEL").exists()
+    def test_opt_ensemble_subpath_refused(self, fake_home):
+        """The built-in /opt/ensemble live dir extends to its subpaths."""
+        r = run_guard("uninstall", fake_home, install_dir="/opt/ensemble/sub")
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+    def test_extension_entry_subpath_refused(self, fake_home, tmp_path):
+        """An ENSEMBLE_LIVE_INSTALL_DIRS entry extends to its subpaths."""
+        ext = tmp_path / "ext-entry"
+        sub = ext / "sub"
+        sub.mkdir(parents=True)
+        r = run_guard(
+            "uninstall", fake_home, install_dir=str(sub),
+            extra_env={"ENSEMBLE_LIVE_INSTALL_DIRS": str(ext)},
+        )
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+
+
+class TestLayer1SiblingCandidate:
+    """E1 part 2: the candidate set mirrors lib.sh:902-917.
+
+    Under a Layer-1 HOME (HOME ends with an install name) the cross-env
+    SIBLING is a candidate too — lib.sh:898-899 documents it ("plus the
+    sibling <name> next to it (cross-env resolution, e.g. the flipped live
+    daemon resolving the demo install)").
+    """
+
+    def test_live_sibling_under_demo_home_is_live(self, tmp_path):
+        """HOME=…/agents-ensemble-demo ⇒ the sibling …/agents-ensemble is a
+        LIVE candidate (phase-1 probe: this was rc=0, i.e. ungated)."""
+        home = tmp_path / "layer1" / "agents-ensemble-demo"
+        home.mkdir(parents=True)
+        sibling = tmp_path / "layer1" / "agents-ensemble"
+        sibling.mkdir()
+        r = run_guard("uninstall", home, install_dir=str(sibling))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_LIVE" in r.stderr
+        assert "resolves to a LIVE install dir" in r.stderr
+
+    def test_demo_sibling_under_live_home_is_demo(self, tmp_path):
+        """HOME=…/agents-ensemble ⇒ the sibling …/agents-ensemble-demo is a
+        DEMO candidate (phase-1 probe: this was rc=0, i.e. ungated)."""
+        home = tmp_path / "layer1" / "agents-ensemble"
+        home.mkdir(parents=True)
+        sibling = tmp_path / "layer1" / "agents-ensemble-demo"
+        sibling.mkdir()
+        r = run_guard("uninstall", home, install_dir=str(sibling))
+        assert r.returncode == GUARD_REFUSE_RC
+        assert "ENSEMBLE_INSTALL_DEMO" in r.stderr
+        assert "ENSEMBLE_INSTALL_LIVE" not in r.stderr
+
+
+class TestDemoLaneConfirmGates:
+    """P3a (deploy lane) + P3b (upgrade lane): the demo lane now demands
+    ENSEMBLE_INSTALL_DEMO=1 — one var per PATH, not one per lane."""
+
+    def test_deploy_demo_refuses_without_confirm(self, fake_home):
+        """REFUSAL arm (deploy.sh demo, no var): exit 78, and the refusal
+        names BOTH exact commands."""
+        r = run_script("scripts/deploy.sh", ["demo"], fake_home)
+        assert r.returncode == 78
+        assert "REFUSING to deploy to demo" in r.stderr
+        assert "ENSEMBLE_INSTALL_DEMO=1 make deploy-demo" in r.stderr
+        assert "ENSEMBLE_INSTALL_DEMO=1 make stage-demo" in r.stderr
+
+    def test_deploy_demo_refusal_precedes_any_mutation(self, fake_home):
+        """Non-vacuity: the refusal fires in phase 0 — no demo env source
+        was generated in the repo and the demo install dir was not created."""
+        demo_env = REPO_ROOT / ".env.prod.demo"
+        existed_before = demo_env.exists()
+        mtime_before = demo_env.stat().st_mtime if existed_before else None
+        r = run_script("scripts/deploy.sh", ["demo"], fake_home)
+        assert r.returncode == 78
+        assert demo_env.exists() == existed_before, "the demo env source was generated"
+        if existed_before:
+            assert demo_env.stat().st_mtime == mtime_before, "the demo env source was rewritten"
+        assert not (fake_home / "agents-ensemble-demo").exists()
+
+    def test_deploy_demo_passes_the_gate_with_confirm(self, fake_home):
+        """SUCCESS arm: with the confirm var the demo gate opens and the
+        run reaches the staging phase. --dry-run keeps it side-effect free
+        (deploy.sh's run() prints instead of executing)."""
+        r = run_script(
+            "scripts/deploy.sh", ["demo", "--dry-run", "--skip-build"], fake_home,
+            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
+        )
+        assert "REFUSING to deploy to demo" not in r.stderr, r.stderr
+        assert "phase 1/5 build" in r.stdout
+        assert "phase 2/5 stage" in r.stdout
+        assert not (fake_home / "agents-ensemble-demo").exists()
+
+    def test_deploy_demo_gate_is_static_before_the_first_mutating_phase(self):
+        """Static placement pin: the demo arm sits in phase 0, before the
+        build (:219-226), the staging block (:325-338) and the ownership-
+        scoped stop (:347)."""
+        text = (REPO_ROOT / "scripts" / "deploy.sh").read_text()
+        gate = text.index("REFUSING to deploy to demo")
+        assert gate < text.index('run "PyInstaller build (bare, branch-safe)"')
+        assert gate < text.index('run "stage binary"')
+        assert gate < text.index('run "stop owned processes"')
+
+    @pytest.mark.parametrize(
+        "script,make_target",
+        [
+            ("scripts/upgrade/stage.sh", "upgrade-stage"),
+            ("scripts/upgrade/promote.sh", "upgrade-promote"),
+            ("scripts/upgrade/rollback.sh", "upgrade-rollback"),
+        ],
+    )
+    def test_upgrade_demo_refuses_without_confirm(self, fake_home, script, make_target):
+        """REFUSAL arm (upgrade lane, demo target, no var): exit 78 naming
+        the exact make command for that wrapper. Non-vacuity: the demo
+        install dir was not created."""
+        r = run_script(script, ["demo"], fake_home)
+        assert r.returncode == 78, r.stderr
+        assert "REFUSING to operate on demo" in r.stderr
+        assert f"ENSEMBLE_INSTALL_DEMO=1 make {make_target}" in r.stderr
+        assert not (fake_home / "agents-ensemble-demo").exists()
+
+    def test_upgrade_stage_demo_passes_the_gate_with_confirm(self, fake_home):
+        """SUCCESS arm: with the confirm var the demo gate opens and the
+        NEXT gate (the explicit-VERSION rule) fires instead — still before
+        any mutation (stage.sh's VERSION check precedes the staging)."""
+        r = run_script(
+            "scripts/upgrade/stage.sh", ["demo"], fake_home,
+            extra_env={"ENSEMBLE_INSTALL_DEMO": "1"},
+        )
+        assert "REFUSING to operate on demo" not in r.stderr, r.stderr
+        assert "explicit VERSION required" in r.stderr
+        assert not (fake_home / "agents-ensemble-demo").exists()
+
+    def test_upgrade_sandbox_lane_is_exempt(self, fake_home):
+        """The SANDBOX lane must NOT hit the demo gate — it reaches its own
+        resolution refusal (a sandbox needs an explicit dir + port)."""
+        r = run_script("scripts/upgrade/stage.sh", ["sandbox"], fake_home)
+        assert "REFUSING to operate on demo" not in r.stderr, r.stderr
+        assert "sandbox target requires" in r.stderr
+
+    def test_upgrade_status_stays_ungated(self, fake_home):
+        """status.sh is READ-ONLY (status.sh:18-20) → it keeps NO demo
+        gate: it observes, it does not mutate."""
+        r = run_script("scripts/upgrade/status.sh", ["demo"], fake_home)
+        assert "REFUSING to operate on demo" not in r.stderr, r.stderr

@@ -339,8 +339,12 @@ out="$(HOME="$FAKE_HOME" TARGET=live VERSION=vX \
     bash "$FAKE_REPO/scripts/upgrade/promote.sh" live --f2-verified-closed 2>&1)"; rc=$?
 assert_eq "f2 gate: no guard still 78 (guard primary)" "78" "$rc"
 assert_contains "f2 gate: guard refusal fires, not the F2 one" "REFUSING to operate on live" "$out"
-# (d) demo lane: the flag is NEVER required (and the gate does not fire).
-out="$(HOME="$FAKE_HOME" TARGET=demo VERSION=vX \
+# (d) demo lane: the F2 flag is NEVER required there (the F2 gate is
+#     live-only) — but the DEMO lane's OWN confirm gate (require_demo_guard,
+#     ENSEMBLE_INSTALL_DEMO=1) IS required, so this leg CONFIRMS the demo
+#     target and then asserts it reaches the not-staged refusal (the demo
+#     leg is unaffected by the F2 gate, NOT by the demo confirm).
+out="$(HOME="$FAKE_HOME" ENSEMBLE_INSTALL_DEMO=1 TARGET=demo VERSION=vX \
     bash "$FAKE_REPO/scripts/upgrade/promote.sh" demo 2>&1)"; rc=$?
 assert_eq "f2 gate: demo lane unaffected (not-staged refusal)" "78" "$rc"
 assert_contains "f2 gate: demo reaches not-staged, not f2" "does not exist — stage it first" "$out"
