@@ -43,9 +43,9 @@ The approver's positive record (~45 spot-checks, one false claim = the KV ground
 
 ## What could not be discharged
 
-**Nothing blocking.** Carried (unchanged, gated): AC12 live metadata re-measurement (prod fenced this round); D4 multi-model corroboration (blocked on the proxy `coding`-alias defect D7). Residuals honestly named rather than hidden: paraphrase dispute-laundering; oblique-prose injection social-engineering (shared with all injected channels — canary-doctrine scope); curator-absence at a full-cap project (loud refusal names the cure).
+**Nothing blocking.** Carried (unchanged, gated): AC12 live metadata re-measurement (prod fenced this round); D4 multi-model corroboration (blocked on the proxy `coding`-alias defect D7). Residuals honestly named rather than hidden: paraphrase dispute-laundering; oblique-prose injection social-engineering (shared with all injected channels — canary-doctrine scope); curator-absence at a full 64-cap project (loud refusal names the cure).
 
-> **⚠ SUPERSEDED 2026-11-10 — Emperor directive (source: Discord).** The **"64-cap"** qualifier in the residual above is HISTORICAL and the sentence stays byte-intact. The cap itself is now the raised value `[active cap 256 — Emperor directive 2026-11-10]` (`decisions.md` **ER-2**), so the residual reads "curator-absence at a full raised-cap project". The residual's substance is unchanged: the cap is finite, refused-never-evicting, and the loud refusal names the archive cure. Live constant set: `decisions.md` **A-13** (single source of truth).
+> **⚠ SUPERSEDED 2026-11-10 — Emperor directive (source: Discord).** The **"64-cap"** qualifier in the residual above is HISTORICAL and the sentence stays byte-intact — it is restored verbatim to its round-2 wording ("… curator-absence at a full 64-cap project (loud refusal names the cure).") and must not be re-worded. Only the *number* has moved: the active cap is now the raised value `[active cap 256 — Emperor directive 2026-11-10]` (`decisions.md` **ER-2**), so read "full 64-cap" as "full at whatever the live active cap is" (the raised value is in A-13). The residual's substance is unchanged: the cap is finite, refused-never-evicting, and the loud refusal names the archive cure. Live constant set: `decisions.md` **A-13** (single source of truth).
 
 
 ---

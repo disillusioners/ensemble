@@ -129,7 +129,7 @@ declared/observed inline; `[DISPUTED]`; ranking = decay × observed × access; s
 
 - **UNIVERSAL-READ INVARIANT (Emperor ruling, 2026-11-07, source: Discord):** `pok_query` returns **ALL entries of the project to ANY agent on it, regardless of audience tags** — *injection is curated; reading is free.* The audience field affects ACTIVE injection ONLY; it never filters retrieval. ("It's for active injection — if agent want read them they can read any.")
 
-### 4.7 Sizing constants (unchanged by the ER-1 audience ruling; the active cap was raised by Emperor directive 2026-11-10 — per-view) [`active cap 256 — Emperor directive 2026-11-10`]
+### 4.7 Sizing constants (unchanged by the ER-1 audience ruling; the active cap was raised by Emperor directive 2026-11-10 — per-view) [active cap 256 — Emperor directive 2026-11-10]
 
 > **Single source of truth: `decisions.md` A-13.** The table below MIRRORS A-13 for reading convenience; if the two ever disagree, A-13 wins. Do not introduce a bare, unmarked numeric restatement of any value from this table elsewhere in the artifact set — reference A-13 instead.
 

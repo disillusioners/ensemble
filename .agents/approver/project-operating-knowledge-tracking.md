@@ -41,7 +41,7 @@ Iteration-001 delta check (post-verdict, tracking-vs-worker evidence): ALL 8 pri
 - 001-B1 infra_assets omission -> infra row present, receipts verified (models + 9 tools _tool_registry.py:1589-1597 + exactly 3 grants + critic deny). Reuse bar re-broken in NEW forms (002-B1', 002-B5').
 - 001-B2 supersede/pin integrity -> curator-only pinned-supersede + disputed path-independent bounder verified coherent (defense-in-depth).
 - 001-B3 vacuous scope predicate -> project_id != SYSTEM_DEFAULT_PROJECT_ID verified vs real normalizer (project_normalizer.py:6-45); AC10 pins both directions; P-1 project-row precondition surfaced as decision (option (a)/(b)).
-- 001-B4 cap arithmetic -> recomputed OK at iteration time (the numbers as of 2026-11-06, and the "identical across all 4 files" duplication invariant, are SUPERSEDED — see the dated forward-pointer at the end of this file; the LIVE constant set is single-sourced in `.agents/shared/planning/project-operating-knowledge/decisions.md` A-13).
+- 001-B4 cap arithmetic -> 240/64/4/2600/8/0.25/30 identical across all 4 files; 80+8x300+60=2540<=2600 and pinned 1340<=2600 recomputed OK.
 - 001-B5 grant sweep -> empty-allow inheritance CONFIRMED (_tool_registry.py:326-331); 40-agent sweep mechanically real; universal grant now reasoned.
 - 001-B6 registration surfaces -> TOOL_REQUIRED_AGENTS avoidance reasoned; registry 60->61 + VOCABULARY_VERSION 6->7 consistent (A-16/A-21); AC8 pins the F-1 regeneration trap via house generator.
 - 001-B7 pin verb -> pok_curate (pin/dispute) in the 4-tool surface + authorization matrix (arch 4.3).
