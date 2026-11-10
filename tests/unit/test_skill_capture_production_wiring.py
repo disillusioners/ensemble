@@ -59,21 +59,30 @@ def restore_router_dispatcher():
 
 
 def _manager_double(dispatcher, metrics_service):
-    """A manager double carrying the collaborators the boot seam touches.
+    """A manager double carrying ONLY what the capture binding needs.
 
     ``_skill_metrics_service`` is a REAL :class:`SkillMetricsService` — its
     ``_skill_job_dispatcher`` starts ABSENT, so the only thing that can put
     a dispatcher there is the production seam (or a test-side injection,
     which is exactly what the leg-2 mutation adds).
+
+    Every OTHER collaborator is left ``None`` on purpose: the production
+    seam guards each setter with ``if getattr(manager, ..., None) is not
+    None``, so ``None`` means the seam SKIPS that setter. A test that
+    drove the seam with all collaborators present would leave the
+    process-wide router globals (``get_store`` / ``get_search`` /
+    ``get_metrics`` / ``get_evolution`` / trigger-repo / usage-repo)
+    wired for the rest of the pytest session — cross-test pollution that
+    would redden unrelated router tests.
     """
     return SimpleNamespace(
-        _skill_store_service=object(),
-        _skill_search_service=object(),
+        _skill_store_service=None,
+        _skill_search_service=None,
         _skill_metrics_service=metrics_service,
-        _skill_evolution_service=object(),
-        _skill_trigger_repo=object(),
+        _skill_evolution_service=None,
+        _skill_trigger_repo=None,
         _skill_job_dispatcher=dispatcher,
-        _skill_usage_repo=object(),
+        _skill_usage_repo=None,
     )
 
 
