@@ -5,7 +5,19 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — 2026-10-24
+## [Unreleased]
+
+## [0.29.16] — 2026-11-10
+
+### Changed — ⚠ CALLER-VISIBLE: compare_images input-resolution vocabulary renamed `workdir_*` → `path_*` (image-tools unconfined local-path read; 32bd02a70, merge 85bd6a37b)
+
+- **Consumers that string-match `compare_images` structured envelopes MUST update before upgrading.** In the `input-not-found` failure envelope (`daemon/tools/compare_tools.py`, resolver renamed `_resolve_workdir_input` → `_resolve_path_input`), the `reason` values are renamed: `workdir_invalid` → `path_invalid`, `workdir_unreadable` → `path_unreadable`, `workdir_unknown` → `path_unknown`; and on successful path resolution the `source` field changes `"workdir"` → `"path"`. The old names no longer occur in the tool's output. The rename rides the semantic change below (local paths are no longer workdir-scoped), so the vocabulary now names the actual behavior. Substrate-id resolution (32-hex ids, bridge 404 reasons) is unchanged — that route emits no `source` field at all; the only `source` the tool ever emits is `"path"` on successful local-path resolution (compare_tools.py:872).
+
+### Added — image-tools unconfined local-path read, operator policy (32bd02a70; tidier pass c310fe492; tester sign-off 46570ce33; merge 85bd6a37b)
+
+- **`explain_image` / `compare_images` now accept ANY readable local filesystem path** — no directory confinement (previously main_directory ∪ related_directories only). Absolute paths read as-is; relative paths anchor at the calling project's main directory (an anchor, NOT a boundary — a resolved target outside the anchor is read normally), with a documented fallback to the process cwd when the project lookup fails (debug-logged; compare_tools.py:826-838); symlinks to readable files are followed. The security floor is unchanged vs be8ee6295: URL loads keep the SSRF guard (private/loopback reject, manual redirect walk, 10 MB cap, MIME validation), and local reads keep the 10 MB cap, magic-byte/extension MIME validation, and non-regular-file rejection. Every failure is honest — missing file, unreadable, oversize, non-image bytes — never a scope refusal.
+- **Internal seam renames (not wire-visible):** `_load_image_from_path(path, workdir=scope_roots)` → `_load_image_from_path(path, base_dir=...)` (`_load_image_as_data_uri(image)` gains the same anchor-only `base_dir` param), where `base_dir` anchors relative paths only; compare facade `_resolve_workdir_input` → `_resolve_path_input` and `_get_project_scope_roots()` → `_get_project_base_dir()`; the workdir scope helpers themselves (`_resolve_scope_roots`, `_is_within_scope`) were deleted outright (see the caller-visible callout above).
+- **Prompt artifacts updated to match the policy:** `agents/image-reader/rule.md` + `soul.md`, tools_notes for designer/developer/leader/worker, `agents/.prompt-artifacts.sha256` re-pinned; tidier fix-pass-1 c310fe492 (single live dispatch, honest NUL envelope, pin hardening); tester verification `.agents/tester/RESULTS/2026-11-10-image-unconfined-local-read-verification.md` (46570ce33 — SHIP).
 
 ## [0.29.11] — 2026-11-10
 
