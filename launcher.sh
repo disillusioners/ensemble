@@ -188,9 +188,16 @@ resolve_install_dir() {
 #   KEY="quoted value"        (matching surrounding quotes are stripped)
 #   KEY='single quoted'
 #   # comment / blank lines   (skipped)
+#   KEY=value   # trailing comment   (the comment suffix is stripped — F-06)
 # Malformed lines (no '=', invalid key charset) are logged and skipped.
 # A missing file is NOT fatal: log loudly and continue with the inherited
 # environment (prod may rely on plist-passed env).
+#
+# F-06: the VALUE-RESOLUTION RULE lives in _env_strip_value below and is
+# duplicated BY DESIGN (byte-identical semantics) in
+# scripts/watchdog-watcher.sh — the watchdog is a standalone script and must
+# not depend on launcher.sh. The parity rows in
+# tests/test_watchdog_watcher.sh pin the two implementations together.
 load_env_file() {
     local env_file="$1" line key value
     if [ ! -f "$env_file" ]; then
@@ -224,15 +231,306 @@ load_env_file() {
             _log "WARN: env file line with invalid key skipped: $line"
             continue
         fi
-        # strip one layer of matching surrounding quotes
-        if [ "${#value}" -ge 2 ]; then
-            case "$value" in
-                \"*\") value="${value#\"}"; value="${value%\"}" ;;
-                \'*\') value="${value#\'}"; value="${value%\'}" ;;
-            esac
+        # PATH is SUPERVISOR-OWNED (design §iv Layer 1 + Layer 2): the
+        # launchd anchor and the _path_ensure synthesis decide the PATH.
+        # A PATH= line in .env would silently override BOTH — the rule used
+        # to be comment-only; now it is ENFORCED (loud WARN + the key is
+        # NOT exported).
+        if [ "$key" = "PATH" ]; then
+            _log "WARNING: PATH key in env file IGNORED ($env_file) — PATH is supervisor-owned (launchd anchor / _path_ensure synthesis); a PATH= line in .env would silently override it"
+            continue
         fi
+        # one layer of matching surrounding quotes + the unquoted inline
+        # comment suffix (F-06) — ONE rule, shared with the watchdog.
+        value="$(_env_strip_value "$value")"
         export "$key=$value"
     done < "$env_file"
+    return 0
+}
+
+# _env_strip_value <value> — the ONE .env value-resolution rule (F-06).
+# The value is expected to be TRIMMED already (both callers trim first).
+#   1. a value WRAPPED IN MATCHING QUOTES is quoted → any '#' inside it is
+#      part of the value ("a # b" survives) and ONE quote layer is stripped;
+#   2. an UNQUOTED value loses everything from the first '#' THAT IS
+#      PRECEDED BY WHITESPACE ("/p # c" → "/p"); a '#' NOT preceded by
+#      whitespace ("pa#ss") is part of the value;
+#   3. one layer of matching surrounding quotes is stripped afterwards
+#      (e.g. the '"a"' left by cutting a trailing comment).
+# Prints the resolved value. Pure — no side effects, no eval.
+_env_strip_value() {
+    local v="$1" i c prev=""
+    if [ "${#v}" -ge 2 ]; then
+        case "$v" in
+            \"*\") printf '%s' "${v:1:${#v}-2}"; return 0 ;;
+            \'*\') printf '%s' "${v:1:${#v}-2}"; return 0 ;;
+        esac
+    fi
+    i=0
+    while [ "$i" -lt "${#v}" ]; do
+        c="${v:$i:1}"
+        if [ "$c" = "#" ]; then
+            case "$prev" in
+                [[:space:]])
+                    v="${v:0:$i}"
+                    v="${v%"${v##*[![:space:]]}"}"
+                    break
+                    ;;
+            esac
+        fi
+        prev="$c"
+        i=$((i + 1))
+    done
+    if [ "${#v}" -ge 2 ]; then
+        case "$v" in
+            \"*\") v="${v:1:${#v}-2}" ;;
+            \'*\') v="${v:1:${#v}-2}" ;;
+        esac
+    fi
+    printf '%s' "$v"
+}
+
+# ── Supervisor-env PATH strategy (design §iv, Layer 2 — launcher surface) ──
+# Two complementary layers, both required (architecture-recommendation.md §iv;
+# rehearsal-a A/B proof: minimal launchd PATH ⇒ context7 stdio MCP
+# FileNotFoundError, healthy:False; anchored PATH ⇒ healthy:True):
+#   Layer 1 (macOS supervisor-env): scripts/ensemble-prod.plist carries a
+#           STABLE-ANCHOR EnvironmentVariables.PATH (no user dirs, no nvm
+#           version dirs — version dirs rot when nvm updates).
+#   Layer 2 (THIS block, cross-platform shared launcher): probe the
+#           inherited PATH; no-op when the needed tool class already
+#           resolves; otherwise synthesize from stable anchors + the DYNAMIC
+#           nvm default ($HOME/.nvm/alias/default read at boot — NEVER a
+#           baked version dir). Required-tools provenance: npx
+#           (context7.py:56), uvx (webfetch.py:36), node (npx runtime); the
+#           daemon's spawn seams pass commands verbatim PATH-resolved, so
+#           the fix is supervisor/PATH-layer ONLY — no daemon code changes.
+# VM no-op contract: under systemd's default PATH npx/uvx/node already
+# resolve ⇒ the probe logs one line and changes NOTHING (burst budget,
+# env loading, every other behavior byte-identical).
+#
+# Pure functions (unit-tested by tests/test_launcher.sh §13 — source guard:
+# sourcing must not run anything; _path_ensure is called from main() only).
+
+# _path_has <dir> — exact colon-component membership test against the
+# CURRENT PATH. No word-splitting games, no external tools.
+_path_has() {
+    case ":${PATH:-}:" in
+        *":$1:"*) return 0 ;;
+    esac
+    return 1
+}
+
+# _path_ver_str_gt <verA> <verB> — numeric dot-component compare of two
+# VERSION strings ("22.21.1" vs "22.9.1"; a leading "v" is tolerated).
+# Missing components read as 0; any non-numeric component ⇒ not-greater
+# (stable fallback). Pure bash — `sort -V` is GNU-only and this must run on
+# the macOS/BSD supervisor too.
+_path_ver_str_gt() {
+    local a="${1#v}" b="${2#v}"
+    local -a A B
+    local IFS=. i ai bi
+    read -ra A <<< "$a" || return 1
+    read -ra B <<< "$b" || return 1
+    for i in 0 1 2 3; do
+        ai="${A[i]:-}"; bi="${B[i]:-}"
+        [ -n "$ai" ] || ai=0
+        [ -n "$bi" ] || bi=0
+        case "${ai}${bi}" in *[!0-9]*) return 1 ;; esac
+        if [ "$ai" -gt "$bi" ]; then return 0; fi
+        if [ "$ai" -lt "$bi" ]; then return 1; fi
+    done
+    return 1
+}
+
+# _path_version_gt <dirA> <dirB> — numeric dot-component compare of the
+# version SUFFIX of two nvm version dirs (…/node/vX.Y.Z). Delegates to the
+# string comparator above (same semantics — shared with the alias resolver,
+# which compares bare version strings).
+_path_version_gt() {
+    _path_ver_str_gt "${1##*/v}" "${2##*/v}"
+}
+
+# _nvm_alias_version <token> <depth> — resolve an nvm ALIAS token to a
+# CONCRETE version string (F-10). nvm's alias/default may hold a CODENAME
+# ("lts/*", "lts/krypton") rather than a version — the old one-hop glob
+# ("…/node/v<token>*") is dead for those, so on macOS (the only source of
+# npx) the synthesis yielded NOTHING and npx stayed unresolved — exactly
+# the rehearsal-a failure mode this block exists to prevent.
+# Resolution (BOUNDED to 3 hops so a self-referential alias cannot loop):
+#   token without "/"        → already version-ish ("22", "22.21.1") → as-is;
+#   alias/<token> is a FILE  → its content is the next token (recurse);
+#   alias/<token> is a DIR   → every entry file's content is a version →
+#                              the HIGHEST version wins;
+#   token contains a glob    → expand alias/<token>, HIGHEST version wins.
+# Prints the version string (leading "v" stripped); prints NOTHING when the
+# token is unresolvable (the caller then warns — boot is never wedged).
+_nvm_alias_version() {
+    local token="$1" depth="$2" f content best="" v alias_dir=""
+    local max_hops=3
+    [ -n "$token" ] || return 0
+    [ "$depth" -lt "$max_hops" ] || return 0
+    case "$token" in
+        */*) ;;
+        *) printf '%s' "${token#v}"; return 0 ;;
+    esac
+    f="${HOME:-}/.nvm/alias/$token"
+    if [ -f "$f" ]; then
+        content="$(head -n 1 "$f" 2>/dev/null)"
+        content="${content%%$'\r'}"
+        content="${content#"${content%%[![:space:]]*}"}"
+        content="${content%"${content##*[![:space:]]}"}"
+        content="${content%%[[:space:]]*}"
+        _nvm_alias_version "$content" "$((depth + 1))"
+        return 0
+    fi
+    if [ -d "$f" ]; then
+        for v in "$f"*; do
+            [ -f "$v" ] || continue
+            content="$(head -n 1 "$v" 2>/dev/null)"
+            content="${content%%$'\r'}"
+            content="${content#"${content%%[![:space:]]*}"}"
+            content="${content%"${content##*[![:space:]]}"}"
+            content="${content%%[[:space:]]*}"
+            [ -n "$content" ] || continue
+            if [ -z "$best" ] || _path_ver_str_gt "$content" "$best"; then
+                best="$content"
+            fi
+        done
+        [ -n "$best" ] && printf '%s' "${best#v}"
+        return 0
+    fi
+    case "$token" in
+        *'*'*|*'?'*)
+            # the token may CARRY a glob ("lts/*") → expand it. The alias
+            # dir stays quoted; the token is unquoted so the shell performs
+            # the pathname expansion (it is the first whitespace-delimited
+            # word of the alias file, so it carries no spaces).
+            alias_dir="${HOME:-}/.nvm/alias"
+            for v in "$alias_dir"/$token; do
+                [ -f "$v" ] || continue
+                content="$(head -n 1 "$v" 2>/dev/null)"
+                content="${content%%$'\r'}"
+                content="${content#"${content%%[![:space:]]*}"}"
+                content="${content%"${content##*[![:space:]]}"}"
+                content="${content%%[[:space:]]*}"
+                [ -n "$content" ] || continue
+                if [ -z "$best" ] || _path_ver_str_gt "$content" "$best"; then
+                    best="$content"
+                fi
+            done
+            [ -n "$best" ] && printf '%s' "${best#v}"
+            ;;
+    esac
+    return 0
+}
+
+# _path_nvm_bin — the nvm DEFAULT version's bin dir, resolved DYNAMICALLY
+# (design §iv: "read $HOME/.nvm/alias/default, glob $HOME/.nvm/versions/
+# node/v<alias>*, take latest, verify bin/node executable — NEVER hardcode
+# a version dir"). The alias token is first RESOLVED to a concrete version
+# (F-10: "lts/*" / "lts/krypton" are codenames, not versions). Highest
+# VERSION wins (numeric compare — lexicographic glob order would pick
+# v22.9.3 over v22.21.1). Prints the bin dir, or nothing when nvm is
+# absent/unresolvable.
+_path_nvm_bin() {
+    local alias_file="${HOME:-}/.nvm/alias/default" alias="" d best="" ver=""
+    [ -n "${HOME:-}" ] || return 0
+    [ -f "$alias_file" ] || return 0
+    alias="$(head -n 1 "$alias_file" 2>/dev/null)"
+    alias="${alias%%$'\r'}"
+    alias="${alias%%[[:space:]]*}"   # first token ("22" / "22.21.1" / "lts/*")
+    [ -n "$alias" ] || return 0
+    ver="$(_nvm_alias_version "$alias" 0)"
+    [ -n "$ver" ] || return 0
+    for d in "$HOME/.nvm/versions/node/v$ver"*; do
+        [ -d "$d" ] || continue
+        [ -x "$d/bin/node" ] || continue
+        if [ -z "$best" ] || _path_version_gt "$d" "$best"; then
+            best="$d"
+        fi
+    done
+    [ -n "$best" ] && printf '%s\n' "$best/bin"
+    return 0
+}
+
+# _path_synth_dirs — the §iv candidate set in order: stable anchors, then
+# the dynamic nvm default. Prints EXISTING dirs only (newline-separated);
+# the caller filters dirs already present in the CURRENT PATH.
+_path_synth_dirs() {
+    local d
+    for d in /opt/homebrew/bin /usr/local/bin "${HOME:-}/.local/bin"; do
+        [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"
+    done
+    _path_nvm_bin
+    return 0
+}
+
+# _path_ensure — the Layer-2 entry point (called from main, AFTER
+# load_env_file so an .env-staged ENSEMBLE_LAUNCHER_PATH participates in
+# the same precedence, and BEFORE _journal_sweep/binary resolve so every
+# launcher child and the daemon inherit the resolved PATH):
+#   1. ENSEMBLE_LAUNCHER_PATH set → export VERBATIM (top precedence —
+#      full replacement, not a prepend; design §iv step 1).
+#   2. Probe: npx/uvx/node ALL resolve → one log line, change NOTHING
+#      (the VM no-op case).
+#   3. Synthesize (any missing): prepend existing anchor/nvm dirs not
+#      already in PATH; inherited PATH retained as suffix. Nothing
+#      addable → loud WARNING, proceed — optional MCP tooling must never
+#      wedge daemon boot (behavior degrades to the pre-block status quo).
+#
+# F-11 (observability only — WHEN synthesis fires and WHAT it prepends are
+# UNCHANGED): EVERY branch now logs the three facts a VM drill can assert:
+#   source=      which branch produced the final PATH
+#                (ensemble_launcher_path_override | probe-satisfied |
+#                 synthesized | none-addable);
+#   delta=       exactly what was prepended (and whether the inherited PATH
+#                was retained as the suffix — the override branch is a FULL
+#                replacement);
+#   resolved_path=the final PATH value (a PATH is not a secret; the drill
+#                needs the real value to assert the delta).
+# The "VM no-op / changes NOTHING" claim is therefore CHECKABLE from the
+# log: source=probe-satisfied + delta=none ⇒ the PATH was not touched.
+_path_ensure() {
+    local t missing="" synth="" added="" d still=""
+    if [ -n "${ENSEMBLE_LAUNCHER_PATH:-}" ]; then
+        export PATH="$ENSEMBLE_LAUNCHER_PATH"
+        _log "PATH: ENSEMBLE_LAUNCHER_PATH override exported verbatim (§iv Layer 2, top precedence)"
+        _log "PATH: source=ensemble_launcher_path_override delta=full-replacement (the inherited PATH is NOT retained — the override replaces it) resolved_path=$PATH"
+        return 0
+    fi
+    for t in npx uvx node; do
+        command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+    done
+    if [ -z "$missing" ]; then
+        _log "PATH: npx/uvx/node all resolve on the inherited PATH — probe no-op, PATH unchanged"
+        _log "PATH: source=probe-satisfied delta=none (the inherited PATH is retained verbatim) resolved_path=${PATH:-}"
+        return 0
+    fi
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        _path_has "$d" && continue
+        synth="${synth:+$synth:}$d"
+        added="$added $d"
+    done < <(_path_synth_dirs)
+    if [ -z "$synth" ]; then
+        _log "WARNING: PATH probe missing:${missing} — no existing stable anchors and nvm default unresolvable; proceeding on the inherited PATH (optional MCP tooling may be unavailable)"
+        _log "PATH: source=none-addable delta=none (the inherited PATH is retained verbatim) resolved_path=${PATH:-}"
+        return 0
+    fi
+    # "${PATH:+:$PATH}" — set -u safe (an UNSET PATH must not abort the
+    # launcher) and EMPTY-PATH safe (a trailing ":" is an empty PATH
+    # component, which POSIX resolves as the CWD on the command search
+    # path). Inert on any host with a non-empty PATH.
+    export PATH="$synth${PATH:+:$PATH}"
+    _log "PATH: probe missing:${missing} — synthesized PATH extended with:${added} (stable anchors + dynamic nvm default; inherited PATH retained as suffix)"
+    _log "PATH: source=synthesized delta=prepended:${synth} (the inherited PATH is retained as the suffix) resolved_path=$PATH"
+    for t in npx uvx node; do
+        command -v "$t" >/dev/null 2>&1 || still="$still $t"
+    done
+    if [ -n "$still" ]; then
+        _log "WARNING: PATH synthesis complete but still unresolved:${still} — proceeding (optional MCP tooling degraded, never blocking boot)"
+    fi
     return 0
 }
 
@@ -1295,9 +1593,21 @@ _js_sanitise_run_id() {
 # 27KB ⇒ ≈285× at the incident size) with NO launcher-side size guard,
 # and an INVERTED over-count doctrine (this counter gates the ROLLBACK
 # itself ⇒ over-count = a wrongful rollback; the live count was 2/3).
+#
+# Design §v relocation: the counter relocates WITH the state file — its
+# directory is dirname($STATE_FILE) whenever STATE_FILE is set (runtime
+# always sets it, classic or overridden), else the classic $install_dir
+# (the sourced/unit-test shape and the byte-identical pre-relocation
+# behavior when the override is unset). Callers keep passing install_dir —
+# the derivation, not the signature, moved.
 _js_defer_counter_path() {
-    local install_dir="$1" run_id="$2"
-    printf '%s/.sweep-defer-%s' "$install_dir" "$(_js_sanitise_run_id "$run_id")"
+    local install_dir="$1" run_id="$2" dir
+    if [ -n "$STATE_FILE" ]; then
+        dir="$(dirname "$STATE_FILE")"
+    else
+        dir="$install_dir"
+    fi
+    printf '%s/.sweep-defer-%s' "$dir" "$(_js_sanitise_run_id "$run_id")"
 }
 
 # _js_defer_counter_read <path> <key> — one counter value (0 when absent).
@@ -2937,7 +3247,10 @@ _notify_once() {
 }
 
 # ── Restart-state persistence (belt-and-braces to ADR-010) ─────────────────
-# INSTALL_DIR/.launcher-state — tiny key=value file, atomic write (tmp+mv).
+# $STATE_FILE — tiny key=value file, atomic write (tmp+mv). Defaults to
+# INSTALL_DIR/.launcher-state; relocatable via ENSEMBLE_LAUNCHER_STATE_FILE
+# (design §v — assigned in main() AFTER load_env_file so the override can
+# come from the install .env; default byte-identical when unset).
 # Keys: last_exit, crash_count, window_start, last_backoff, notified_75.
 # Absent or corrupt file → reset to defaults (never fatal).
 
@@ -3342,13 +3655,35 @@ main() {
         exit 78
     fi
 
-    STATE_FILE="$INSTALL_DIR/.launcher-state"
-
     # Env first (ADR-014): INSTALL_DIR/.env staged from repo .env.prod.
     # Exports win over the binary's own .env load (run_app.py only sets
     # unset vars) — precedence is structural.
     _log "ensemble launcher starting (INSTALL_DIR=$INSTALL_DIR)"
     load_env_file "$INSTALL_DIR/.env"
+
+    # STATE_FILE (design §v relocation): default UNCHANGED —
+    # "$INSTALL_DIR/.launcher-state" (the VM's crash-loop burst budget
+    # depends on this path staying exactly where it is when the override
+    # is unset). Assigned AFTER load_env_file — NOT before it — because
+    # the override must be readable from the install .env: the Stage-2
+    # wiring writes ENSEMBLE_LAUNCHER_STATE_FILE into INSTALL_DIR/.env
+    # (relocating state into the writable set of a root-owned top dir).
+    # Precedence (F-07): .env value → inherited env → default (the := fires
+    # only when neither source set it; load_env_file's export already beat
+    # the inherited value for keys present in .env — ADR-014 discipline).
+    # The .env side is LAST-wins (the loader exports sequentially, so the
+    # last export wins) and an EMPTY .env value clears the inherited value
+    # → the := default fires. scripts/watchdog-watcher.sh resolves the SAME
+    # file with the SAME rules (and the SAME value-resolution rule for
+    # trailing whitespace / inline comments — F-06); the parity rows in
+    # tests/test_watchdog_watcher.sh pin the agreement.
+    # Pre-relocation this line sat BEFORE load_env_file; nothing between
+    # the cd and the env load consumed STATE_FILE, so the move is
+    # behavior-neutral for the unset case. Exported so every run_loop
+    # child inherits it (same pattern as MALLOC_ARENA_MAX below).
+    : "${ENSEMBLE_LAUNCHER_STATE_FILE:=$INSTALL_DIR/.launcher-state}"
+    export ENSEMBLE_LAUNCHER_STATE_FILE
+    STATE_FILE="$ENSEMBLE_LAUNCHER_STATE_FILE"
 
     # Allocator cap (resource-cost-control O1, 2026-10-18): default glibc
     # to 2 malloc arenas BEFORE the daemon child starts. MALLOC_ARENA_MAX
@@ -3359,6 +3694,15 @@ main() {
     # in main(), so every `run_loop` cycle's child inherits it.
     : "${MALLOC_ARENA_MAX:=2}"
     export MALLOC_ARENA_MAX
+
+    # Supervisor-env PATH (design §iv Layer 2 — see the _path_* family):
+    # probe the inherited PATH, no-op when npx/uvx/node already resolve
+    # (the VM case — systemd's default PATH carries them), otherwise
+    # synthesize from stable anchors + the dynamic nvm default. Must run
+    # AFTER load_env_file (an .env-staged ENSEMBLE_LAUNCHER_PATH takes the
+    # same precedence) and BEFORE _journal_sweep/binary resolve so the
+    # daemon child inherits the resolved PATH.
+    _path_ensure
 
     # Journal sweep BEFORE resolving the binary (ADR-012).
     _journal_sweep

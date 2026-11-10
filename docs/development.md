@@ -74,7 +74,7 @@ The `dev.sh` script starts the FastAPI backend with hot-reload:
    - `PERSISTENCE_DB_PATH=./data_dev/instances.db`
    - `ENSEMBLE_DATA_DIR=./data_dev` (lifespan resolves the checkpointer
      DB path from `ensemble.json`, which lives here)
-8. **Sets dev port** — Always uses port **8079** (avoids conflict with production on 8088)
+8. **Sets dev port** — Always uses port **8079** (production serves on **9797**)
 9. **Starts uvicorn** — With `--reload` flag for auto-reload on code changes
 
 ### Frontend
@@ -393,21 +393,37 @@ Requires frontend to be built first (`make build` is called automatically).
 ### Production Install
 
 ```bash
-make install
+# INSTALL_DIR is required (bare `make install` refuses, exit 78).
+# A live target dir additionally needs ENSEMBLE_INSTALL_LIVE=1
+# (under sudo: sudo env ENSEMBLE_INSTALL_LIVE=1 make install INSTALL_DIR='<path>').
+# Absolute path: a leading '~/…' is expanded once by the Makefile before the guard
+# sees it (it resolves to the same live path); spaces / trailing slash / '$' refuse:
+make install INSTALL_DIR="$HOME/agents-ensemble"
 ```
+
+**Positive example — installing ONTO a live path** (both parts explicit; the confirm var states intent, not the path):
+
+```bash
+export INSTALL_DIR="$HOME/agents-ensemble" ENSEMBLE_INSTALL_LIVE=1
+make install          INSTALL_DIR="$INSTALL_DIR"   # → .env.prod staged to .env, launcher, plists
+make plist-install    INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/ensemble-prod.plist
+make watchdog-install INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+```
+
+Never `sudo` the two plist targets. A target path **outside** the live set needs no confirm var at all: `make install INSTALL_DIR="$HOME/agents-ensemble-fresh"`.
 
 This:
 1. Builds the binary (`make pyinstaller`)
-2. Stops any existing process on port 8088
+2. Stops any existing process on port 9797
 3. Backs up existing installation
-4. Copies binary, agents, config, and frontend to `~/agents-ensemble`
-5. Sets production port to 8088
+4. Copies binary, agents, config, and frontend to the given `INSTALL_DIR`
+5. Sets production port to 9797 (from `.env.prod` → `$INSTALL_DIR/.env`)
 
 ### Start/Stop Production
 
 ```bash
 make start   # Stop existing + run start.sh
-make stop    # Kill process on port 8088
+make stop    # Stop the daemon — ownership-scoped by INSTALL_DIR (INSTALL_DIR required; NEVER port-based)
 ```
 
 ## Makefile Reference
@@ -418,14 +434,14 @@ make stop    # Kill process on port 8088
 | `make sync` | Install Python deps with uv |
 | `make dev` | Full dev workflow: stop + sync + start |
 | `make start` | Stop existing + start daemon |
-| `make stop` | Stop daemon on port 8088 |
+| `make stop` | Stop daemon (ownership-scoped by `INSTALL_DIR`; never port-based) |
 | `make build` | Build frontend (`npm install && npm run build`) |
 | `make pyinstaller` | Build production binary to `dist/ensemble-prod` |
-| `make install` | Build and install to `~/agents-ensemble` |
+| `make install` | Build and install to `INSTALL_DIR` (required; live dirs need `ENSEMBLE_INSTALL_LIVE=1`) |
 | `make install-deps` | Install Python deps in production directory |
 | `make clean` | Remove build artifacts |
 | `make pyinstaller-clean` | Remove PyInstaller files |
-| `make uninstall` | Remove production installation |
+| `make uninstall` | Remove production installation (refuses on live dirs without `ENSEMBLE_INSTALL_LIVE=1`, exit 78) |
 
 ## Environment Variables
 
@@ -444,7 +460,7 @@ make stop    # Kill process on port 8088
 | `OPENAI_MODEL_TITLE` | (none) | Separate model for title generation |
 | `OPENAI_MODEL_VISION` | (none) | Vision-capable model for image processing |
 | `HOST` | `0.0.0.0` | Server bind host |
-| `PORT` | `8079` (dev) / `8088` (prod) | Server port |
+| `PORT` | `8079` (dev) / `9797` (prod, from `.env.prod`) | Server port |
 | `DATA_DIR` | `./data_dev` (dev) | Database directory |
 | `PERSISTENCE_DB_PATH` | `$DATA_DIR/instances.db` | Instance database path |
 | `ENSEMBLE_DATA_DIR` | `$DATA_DIR` (dev) | Directory holding `ensemble.json` (which records the checkpointer DB path) |

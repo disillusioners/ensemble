@@ -67,8 +67,27 @@
       therefore "stay down" from the daemon's perspective, with OS-level
       pacing providing an eventual retry probe.
 
-  EnvironmentVariables: deliberately ABSENT. All env (PORT=9797, DB, LLM
-  keys) comes from INSTALL_DIR/.env, exported by launcher.sh (ADR-014).
+  EnvironmentVariables.PATH (design §iv Layer 1 — macOS supervisor-env
+  layer): the template carries a STABLE-ANCHOR PATH —
+  /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin — zero
+  user dirs, zero nvm version dirs (version dirs rot when nvm updates).
+  This is REQUIRED on macOS, A/B-proven (rehearsal-a): minimal launchd
+  PATH ⇒ context7 stdio MCP `FileNotFoundError: [Errno 2]`, healthy:False;
+  anchored PATH block ⇒ `running on stdio`, healthy:True. The launcher's
+  probe/synthesize block (launcher.sh §iv Layer 2) resolves the nvm
+  default DYNAMICALLY at boot on top of this anchor PATH — the plist
+  never bakes one.
+
+  ADR-014 reconciliation (the old "EnvironmentVariables: deliberately
+  ABSENT" note conflated two axes): ADR-014 governs env-FILE authority
+  for APPLICATION configuration — all of PORT=9797, DB, LLM keys still
+  comes from INSTALL_DIR/.env, exported by launcher.sh (unchanged). PATH
+  is a supervisor-environment/host-execution concern on a different axis:
+  Linux zeroes supervisor env so the env file wins (systemd's default
+  PATH happens to resolve the tools); macOS launchd supplies a DEFAULT
+  PATH that does not, so the supervisor context must positively supply
+  it. PATH must NEVER be persisted to .env (rot across Node/tool
+  upgrades).
 -->
 <plist version="1.0">
 <dict>
@@ -80,6 +99,12 @@
         <string>/bin/bash</string>
         <string>INSTALL_DIR_PLACEHOLDER/launcher.sh</string>
     </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
 
     <key>RunAtLoad</key>
     <true/>
