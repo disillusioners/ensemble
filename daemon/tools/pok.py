@@ -170,8 +170,6 @@ def create_pok_tools(
             )
         return project_id, name, None
 
-    @register_tool_category(CATEGORY_NAME)
-    @tool
     def pok_upsert(
         slug: str,
         body: str,
@@ -278,14 +276,22 @@ def create_pok_tools(
             ),
         }
 
-    # The admission cap is a LIVE constant — the ``@tool`` decorator
-    # baked the docstring into the tool description at decoration
-    # time, so the concrete limit is substituted AFTER decoration.
-    # Never hardcode the limit in the prose: a stale literal would
-    # silently disagree with POK_ACTIVE_CAP_PER_PROJECT.
-    pok_upsert.description = (pok_upsert.description or "").replace(
-        "<active_cap>", str(POK_ACTIVE_CAP_PER_PROJECT)
-    )
+    # The admission cap is a LIVE constant. Substitute the placeholder
+    # in the PLAIN function's ``__doc__`` BEFORE the ``@tool``
+    # decoration bakes it into the tool description (and any
+    # args_schema doc). This is a pure string op on our own object —
+    # no post-construction attribute writes on the tool object (an
+    # upstream ``frozen=True`` on BaseTool would otherwise break every
+    # instance spawn, since ``create_pok_tools`` runs bare in the
+    # spawn path). Never hardcode the limit in the prose: a stale
+    # literal would silently disagree with POK_ACTIVE_CAP_PER_PROJECT.
+    if pok_upsert.__doc__:
+        pok_upsert.__doc__ = pok_upsert.__doc__.replace(
+            "<active_cap>", str(POK_ACTIVE_CAP_PER_PROJECT)
+        )
+
+    pok_upsert = tool(pok_upsert)
+    pok_upsert = register_tool_category(CATEGORY_NAME)(pok_upsert)
 
     @register_tool_category(CATEGORY_NAME)
     @tool

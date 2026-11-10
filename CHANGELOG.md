@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-10-24
 
+- POK active-entry admission cap 64 → 256 (Emperor directive 2026-11-10)
+
 ## [0.29.9] — 2026-11-10
 
 ### Added — Decision Module P1, SHADOW-ONLY (Emperor-ratified 2026-11-09): the proxy-decisions thin client, seam registry, shadow overlay, kill channel (`feature/decision-module-p1`; design `.agents/shared/planning/decision-module/`)

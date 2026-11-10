@@ -90,7 +90,7 @@ Two additive `.sql` files (house rule), CHECK-closed vocabularies (incl. the new
 - **Writers:** all agents on a non-default project. Attribution = factory-captured `agent_id`; **attribution ≠ authorization**.
 - **Slug bound:** `[a-z0-9-]` ≤44 (`pok_slug_oversize`). **Write-time fence:** `pok_body_structural_token` (newline / leading `#` at body start / `[SYSTEM CONTEXT:` / ```). **Escape-aware budget:** `len(escape_for_context_block(body)) ≤ 240` (`pok_body_oversize`).
 - Transaction: exact-dup no-op echo; normalized-hash dispute-laundering guard; supersede txn; disputed flip; **archived flip (forward-only)**.
-- Admission: 64 refuse-never-evict (refusal names oldest-least-verified + archive cure); family admission >3 active → `pok_family_full`.
+- Admission: refuse-never-evict at POK_ACTIVE_CAP_PER_PROJECT (256) active entries (refusal names oldest-least-verified + archive cure); family admission >3 active → `pok_family_full`.
 - **Grant model:** `pok` NOT privileged; 40-agent sweep per §7 (B4 rules — watcher excluded, `nest-report` LAST).
 
 ### 4.3 Update / supersede / curate / archive — authorization model
@@ -129,7 +129,7 @@ declared/observed inline; `[DISPUTED]`; ranking = decay × observed × access; s
 
 - **UNIVERSAL-READ INVARIANT (Emperor ruling, 2026-11-07, source: Discord):** `pok_query` returns **ALL entries of the project to ANY agent on it, regardless of audience tags** — *injection is curated; reading is free.* The audience field affects ACTIVE injection ONLY; it never filters retrieval. ("It's for active injection — if agent want read them they can read any.")
 
-### 4.7 Sizing constants (unchanged by the ruling — per-view)
+### 4.7 Sizing constants (unchanged by the ER-1 audience ruling; active cap raised to 256 by Emperor directive 2026-11-10 — per-view)
 
 | Constant | Value | Role |
 |---|---|---|

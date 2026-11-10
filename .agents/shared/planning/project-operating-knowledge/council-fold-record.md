@@ -42,7 +42,7 @@ disclosures relayed in the same micro-fold batch.
 | W2 | Per-dispatch assembly is the design's freshness mechanism (§4.5.1); the ari-seam adaptation delivers the operation view ONCE per (instance×project) — no refresh on repeat dispatches, and post-compaction suppression applies. Routed: restore the freshness mechanism via the `set_injection` stable-id/supersede channel in Phase 2. | DISCLOSE (no code) |
 | A4 | `pok_curate` pin-cap-2 check-then-act TOCTOU — two concurrent curators can overshoot to 3. Curator-only, bounded (≤3). | DISCLOSE (no code) |
 | A8 | Per-entry overhead comment assumes a 10-digit stale mark; a 6-digit day-mark costs 15-16c — the 332c/entry bound still holds inside the 92c slack. | DISCLOSE (no code) |
-| A10 | Every `pok_query` pays an up-to-64-row bookkeeping UPDATE + an N+1 lineage walk; the insertion path does not. v1 acceptable; Phase-2 perf pass. | DISCLOSE (no code) |
+| A10 | Every `pok_query` pays an up-to-the-active-cap (256)-row bookkeeping UPDATE + an N+1 lineage walk; the insertion path does not. Bound derives from the admission cap, now 256 (4x the v1-at-64 judgement) — re-disclosed at the 256 raise. v1 acceptable; Phase-2 perf pass. | DISCLOSE (no code) |
 | D-3 | `POK_ARI_SEAM_INJECTED_PROJECTS` is an unbounded set (typical usage is one project per instance; optional cap/LRU is a Phase-2 option). | DISCLOSE (no code) |
 | D-4 | No-op-echo in-memory `last_verified` may trail the DB re-stamp (conservative — clock-skew only). | DISCLOSE (no code) |
 | D-5 | A11 asserts ≤2,900 + per-entry ≤332, not the exact 2,803. | DISCLOSE (no code) |

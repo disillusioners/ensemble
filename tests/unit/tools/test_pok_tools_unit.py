@@ -101,10 +101,12 @@ class TestRegistrationSurface:
         """The LLM-facing admission prose names the LIVE cap.
 
         The docstring carries a placeholder that the factory
-        substitutes from POK_ACTIVE_CAP_PER_PROJECT AFTER the @tool
+        substitutes from POK_ACTIVE_CAP_PER_PROJECT before the @tool
         decoration — so the prose can never go stale against the
         constant, and no hardcoded limit survives in the description.
         """
+        from unittest.mock import patch
+
         from daemon.services.pok_service import POK_ACTIVE_CAP_PER_PROJECT
 
         tools = create_pok_tools(
@@ -116,6 +118,29 @@ class TestRegistrationSurface:
         assert "<active_cap>" not in description
         assert f"at {POK_ACTIVE_CAP_PER_PROJECT} active" in description
         assert "64 active entries" not in description
+
+        # Discriminating: the description must READ from the constant
+        # at build time, not bake a hardcoded literal.
+        import daemon.tools.pok as pok_mod
+
+        with patch.object(pok_mod, "POK_ACTIVE_CAP_PER_PROJECT", 999):
+            patched_tools = create_pok_tools(
+                _manager(tool_env, "p1", "developer"),
+                current_instance_id="inst-1",
+                agent_id="developer",
+            )
+            patched_description = patched_tools[0].description or ""
+            assert "at 999 active" in patched_description
+
+        # No raw placeholder survives anywhere on the built tool.
+        built = tools[0]
+        assert "<active_cap>" not in (built.description or "")
+        args_schema = getattr(built, "args_schema", None)
+        if args_schema is not None:
+            assert "<active_cap>" not in (getattr(args_schema, "__doc__", None) or "")
+        func = getattr(built, "func", None)
+        if func is not None:
+            assert "<active_cap>" not in (getattr(func, "__doc__", None) or "")
 
 
 class TestServerSideScoping:
