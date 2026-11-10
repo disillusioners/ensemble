@@ -784,3 +784,192 @@ def test_pg_a4_measure_instrument_runs_against_postgres(pg_engine):
         ).scalar()
     assert raw is not None
     assert snapshot["taken_at"], "the reading must carry its timestamp"
+
+
+# ── (d) the stamp's NULL-safety contract (the COALESCE guard) ───────────
+#
+# Leader ruling 2026-11-10: the PG branch of ``_json_set_text_sql`` was
+# ``metadata || jsonb_build_object(...)`` with NO ``COALESCE`` — and on
+# PostgreSQL ``NULL::jsonb || <anything>`` evaluates to NULL, so a
+# stamp onto a NULL-metadata row was SILENTLY LOST (no error, no
+# counter, no anomaly). The SQLite branch always had the guard
+# (``json_set(COALESCE(column,'{}'), …)``). The fix adds the PG-side
+# ``COALESCE(column, '{}'::jsonb)``; these three pins hold BOTH
+# dialects to the SAME observable behaviour for a NULL input.
+#
+# The NULL row is the LEGACY shape: the DB column is ``metadata`` and
+# nullable with no server default, so pre-default rows exist with NULL.
+# Every pin seeds it with a Core insert that OMITS the column — the
+# ORM's ``default_factory=dict`` would mask the NULL and the guard
+# would never be exercised.
+
+
+def _insert_null_metadata_row(engine) -> str:
+    """Insert ONE ``job_queue_items`` row with a NULL ``metadata``
+    column (the legacy-NULL shape), via a Core insert that omits the
+    column entirely so no ORM default fires."""
+    from sqlalchemy import insert as sa_insert
+
+    job_id = str(uuid.uuid4())
+    with engine.begin() as conn:
+        conn.execute(
+            sa_insert(JobItem.__table__).values(
+                job_id=job_id,
+                agent_id="skill-keeper",
+                agent_dir="agents/skill-keeper",
+                message="Evolve skill (NULL metadata row)",
+                source="skill_evolution",
+                project_id="pg-dialect-project",
+                priority=5,
+                job_type=JOB_TYPE_EVOLUTION,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                # ``metadata`` (DB column) deliberately ABSENT → NULL.
+            )
+        )
+    return job_id
+
+
+def _read_metadata(engine, job_id: str) -> Any:
+    """Read the raw ``metadata`` column back (DB name, not the ORM
+    attribute ``job_metadata``), without any ORM-level coercion.
+
+    Cross-dialect normalisation: PG's JSONB returns a decoded object
+    while SQLite's JSON column returns the stored TEXT — a str payload
+    is deserialised so BOTH dialects present the same logical value
+    (``None`` stays ``None`` in both).
+    """
+    import json as _json
+
+    with Session(engine) as session:
+        raw = session.execute(
+            text(
+                "SELECT metadata FROM job_queue_items "
+                "WHERE job_id = :job_id"
+            ),
+            {"job_id": job_id},
+        ).scalar()
+    if isinstance(raw, str):
+        return _json.loads(raw)
+    return raw
+
+
+def test_pg_stamp_message_id_lands_on_a_null_metadata_row(
+    pg_engine, pg_job_repo, captured_sql
+):
+    """(d-a) PG: the stamp on a NULL-metadata row LANDS — never lost.
+
+    Drives the PUBLIC production method (``stamp_message_id``, whose
+    call site is the live enqueue path in ``instance_messaging.py``)
+    against the real PG server, on a legacy NULL row. Before the
+    COALESCE fix this UPDATE "succeeded" while setting the column to
+    NULL — the message_id vanished with no error at all.
+    """
+    job_id = _insert_null_metadata_row(pg_engine)
+    assert _read_metadata(pg_engine, job_id) is None, (
+        "the fixture must seed a genuinely NULL row (the ORM default "
+        "would mask the NULL and the pin would be vacuous)"
+    )
+
+    pg_job_repo.stamp_message_id(job_id, "msg-null-123")
+
+    stamped = _read_metadata(pg_engine, job_id)
+    assert stamped is not None, (
+        "the stamp was SILENTLY LOST on PG: NULL::jsonb || "
+        "jsonb_build_object(...) evaluates to NULL, so the UPDATE "
+        "wrote NULL over the NULL and no error, counter, or anomaly "
+        "recorded the loss"
+    )
+    assert stamped.get("message_id") == "msg-null-123", (
+        f"the stamped value must round-trip (got {stamped!r})"
+    )
+
+    # Runtime fact, not a docstring claim: the statement the server
+    # actually RECEIVED must carry the NULL guard.
+    updates = [s for s in captured_sql if "UPDATE job_queue_items" in s]
+    assert updates, "the stamp must have issued an UPDATE"
+    assert "coalesce" in updates[-1].lower(), (
+        "the PG stamp statement must carry the COALESCE NULL-guard — "
+        f"received: {updates[-1]}"
+    )
+
+
+def test_sqlite_stamp_message_id_lands_on_a_null_metadata_row(tmp_path):
+    """(d-b) SQLite: the same NULL contract (its branch always had it).
+
+    The SQLite branch reaches for ``json_set(COALESCE(column,'{}'),…)``
+    — this pin holds it in place so a future "simplification" cannot
+    silently drop the guard while the PG branch keeps it.
+    """
+    from sqlalchemy import create_engine
+
+    sqlite_engine = create_engine(
+        f"sqlite:///{tmp_path / 'stamp_null.db'}",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+    try:
+        SQLModel.metadata.create_all(sqlite_engine)
+        job_id = _insert_null_metadata_row(sqlite_engine)
+        assert _read_metadata(sqlite_engine, job_id) is None, (
+            "the fixture must seed a genuinely NULL row"
+        )
+
+        JobRepository(sqlite_engine).stamp_message_id(job_id, "msg-null-456")
+
+        stamped = _read_metadata(sqlite_engine, job_id)
+        assert stamped is not None, (
+            "the SQLite stamp must land on a NULL row "
+            "(json_set over NULL yields NULL without the COALESCE)"
+        )
+        assert stamped.get("message_id") == "msg-null-456"
+    finally:
+        sqlite_engine.dispose()
+
+
+def test_both_dialects_agree_on_the_null_metadata_stamp(pg_engine):
+    """(d-c) PARITY: the same NULL input → the same observable outcome.
+
+    The point of the split is that the two backends behave ALIKE for
+    the same data, not merely that each is internally consistent.
+    Both compiled fragments must carry the guard, AND both engines
+    must land the same stamped object from the same NULL input.
+    """
+    from sqlalchemy import create_engine
+
+    # The guard must appear in BOTH fragments the helper produces.
+    pg_fragment = JobRepository(pg_engine)._json_set_text_sql(
+        "metadata", "message_id", "message_id"
+    )
+    sqlite_engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+    try:
+        sqlite_fragment = JobRepository(sqlite_engine)._json_set_text_sql(
+            "metadata", "message_id", "message_id"
+        )
+        assert "coalesce" in pg_fragment.lower(), (
+            f"the PG fragment must carry the COALESCE guard (got "
+            f"{pg_fragment!r})"
+        )
+        assert "coalesce" in sqlite_fragment.lower(), (
+            f"the SQLite fragment must carry the COALESCE guard (got "
+            f"{sqlite_fragment!r})"
+        )
+
+        # Same NULL input, same outcome, both real engines.
+        SQLModel.metadata.create_all(sqlite_engine)
+        pg_job_id = _insert_null_metadata_row(pg_engine)
+        sqlite_job_id = _insert_null_metadata_row(sqlite_engine)
+        JobRepository(pg_engine).stamp_message_id(pg_job_id, "msg-shared")
+        JobRepository(sqlite_engine).stamp_message_id(sqlite_job_id, "msg-shared")
+
+        pg_meta = _read_metadata(pg_engine, pg_job_id)
+        sqlite_meta = _read_metadata(sqlite_engine, sqlite_job_id)
+        assert pg_meta == sqlite_meta == {"message_id": "msg-shared"}, (
+            "the two dialects must land the SAME stamped object from "
+            f"the same NULL input (pg={pg_meta!r} sqlite={sqlite_meta!r})"
+        )
+    finally:
+        sqlite_engine.dispose()

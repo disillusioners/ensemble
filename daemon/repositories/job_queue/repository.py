@@ -369,13 +369,21 @@ class JobRepository:
         The two supported backends use different syntax for in-place
         JSON mutation:
 
-        * PostgreSQL JSONB: ``column || jsonb_build_object('key', :param)``
-          — the ``||`` operator is atomic, treats NULL as empty, and
-          overwrites an existing key (matching the intended semantics
-          of ``stamp_message_id``).
+        * PostgreSQL: ``COALESCE(column, '{}'::jsonb) || jsonb_build_object(
+          'key', :param)`` — the ``||`` operator is atomic and overwrites
+          an existing key. The ``COALESCE`` is REQUIRED, not cosmetic:
+          on PostgreSQL ``NULL::jsonb || <anything>`` evaluates to NULL,
+          so without it a NULL column would make the whole assignment
+          NULL and the stamp would be silently lost (the SQLite branch
+          has always had the equivalent guard via ``json_set``'s
+          ``COALESCE``).
         * SQLite: ``json_set(COALESCE(column, '{}'), '$.key', :param)`` —
           ``COALESCE`` keeps the call safe when the column is NULL,
           and ``json_set`` overwrites an existing key.
+
+        The two branches are pinned to the SAME observable behaviour for
+        a NULL column: the key lands and the column is a JSON object
+        afterwards (see ``tests/postgres/test_skill_revival_pg_dialect.py``).
 
         The ``key`` is interpolated as a static constant and ``param``
         is interpolated as a bound-parameter reference. Callers MUST
@@ -394,9 +402,13 @@ class JobRepository:
         if self.engine.dialect.name == "postgresql":
             # ``jsonb_build_object`` accepts ``anyelement``, so an
             # untyped bound param raises ``IndeterminateDatatype``; the
-            # explicit ``CAST`` anchors it.
+            # explicit ``CAST`` anchors it. The ``COALESCE`` guards the
+            # NULL column: on PG ``NULL::jsonb || …`` yields NULL (the
+            # stamp would be silently lost), so mirror the SQLite
+            # branch's ``COALESCE`` contract.
             return (
-                f"{column} || jsonb_build_object('{key}', "
+                f"COALESCE({column}, '{{}}'::jsonb) || "
+                f"jsonb_build_object('{key}', "
                 f"CAST(:{param} AS text))"
             )
         # SQLite: ``{{}}`` escapes to the literal ``{}`` default JSON
@@ -3383,8 +3395,13 @@ SET admission_state = 'queued',
         (mirrors the gold-template pattern in
         ``InstanceRepository.set_metadata``):
 
-        * PostgreSQL: ``metadata || jsonb_build_object('message_id', :message_id)``
+        * PostgreSQL: ``COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('message_id', :message_id)``
         * SQLite:     ``json_set(COALESCE(metadata, '{}'), '$.message_id', :message_id)``
+
+        Both branches land the key even when the column is NULL (on PG
+        ``NULL::jsonb || …`` would otherwise yield NULL and silently
+        drop the stamp — the ``COALESCE`` is the guard, pinned in
+        ``tests/postgres/test_skill_revival_pg_dialect.py``).
 
         No-op when the row does not exist (``rowcount = 0`` is not an
         error; the caller will handle the missing row on the next read).
