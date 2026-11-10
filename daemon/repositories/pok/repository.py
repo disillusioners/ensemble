@@ -286,7 +286,7 @@ class POKRepository:
     ) -> ProjectOperatingKnowledge | None:
         """The refusal-naming candidate (§4.2 admission): oldest active
         row, least verify_count — the archive-cure target the
-        64-cap refusal names. Never the pinned rows (curator-owned).
+        active-cap refusal names. Never the pinned rows (curator-owned).
         """
         stmt = select(ProjectOperatingKnowledge).where(
             ProjectOperatingKnowledge.project_id == project_id,

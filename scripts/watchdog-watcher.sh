@@ -39,9 +39,11 @@
 # P2.3 B4 / T8b (ADR-025(b)) — daemon-independent alert sources: besides
 # /livez, the watcher file-watches two daemon-DOWN channels, readable
 # without the daemon process:
-#   (a) INSTALL_DIR/.launcher-state — the launcher's burst-abort marker
-#       (last_exit=1 + crash_count > BUDGET_MAX_CRASHES, launcher.sh
-#       budget_tick/write_state) — one notify per abort occurrence;
+#   (a) the launcher's state file — the burst-abort marker (last_exit=1 +
+#       crash_count > BUDGET_MAX_CRASHES, launcher.sh budget_tick/
+#       write_state) — one notify per abort occurrence; resolved via
+#       ENSEMBLE_LAUNCHER_STATE_FILE (inherited env → INSTALL_DIR/.env
+#       parse → classic $INSTALL_DIR/.launcher-state, design §v);
 #   (b) INSTALL_DIR/releases/state.json — journal halt (halt_for_human)
 #       and sweep_rollback history events (the same terminal classes the
 #       in-daemon SSE emits; plain sweep-clears stay quiet, R3.4).
@@ -149,21 +151,107 @@ mkdir -p "$DATA_DIR" 2>/dev/null || {
 # Same tolerant parsing as stop-ensemble.sh's env reader: optional
 # `export ` prefix, optional surrounding quotes, digits-only validation.
 CANONICAL_PORT_DEFAULT="9797"
+# ── Shared .env value-resolution rule (F-06) ────────────────────────────────
+# IDENTICAL semantics to launcher.sh's _env_strip_value — the two scripts are
+# STANDALONE (the watchdog is staged on its own and must not depend on
+# launcher.sh), so the rule is duplicated BY DESIGN; the parity rows in
+# tests/test_watchdog_watcher.sh pin the two implementations together.
+# The value is expected to be TRIMMED already (both callers trim first).
+#   1. a value WRAPPED IN MATCHING QUOTES is quoted → any '#' inside it is
+#      part of the value ("a # b" survives) and ONE quote layer is stripped;
+#   2. an UNQUOTED value loses everything from the first '#' THAT IS
+#      PRECEDED BY WHITESPACE ("/p # c" → "/p"); a '#' NOT preceded by
+#      whitespace ("pa#ss") is part of the value;
+#   3. one layer of matching surrounding quotes is stripped afterwards
+#      (e.g. the '"a"' left by cutting a trailing comment).
+# Prints the resolved value. Pure — no side effects, no eval.
+_env_strip_value() {
+    local v="$1" i c prev=""
+    if [ "${#v}" -ge 2 ]; then
+        case "$v" in
+            \"*\") printf '%s' "${v:1:${#v}-2}"; return 0 ;;
+            \'*\') printf '%s' "${v:1:${#v}-2}"; return 0 ;;
+        esac
+    fi
+    i=0
+    while [ "$i" -lt "${#v}" ]; do
+        c="${v:$i:1}"
+        if [ "$c" = "#" ]; then
+            case "$prev" in
+                [[:space:]])
+                    v="${v:0:$i}"
+                    v="${v%"${v##*[![:space:]]}"}"
+                    break
+                    ;;
+            esac
+        fi
+        prev="$c"
+        i=$((i + 1))
+    done
+    if [ "${#v}" -ge 2 ]; then
+        case "$v" in
+            \"*\") v="${v:1:${#v}-2}" ;;
+            \'*\') v="${v:1:${#v}-2}" ;;
+        esac
+    fi
+    printf '%s' "$v"
+}
+
+# _env_value <env_file> <key> — the value of <key> in <env_file>.
+# rc 0 = the key is PRESENT (the value is printed — possibly EMPTY);
+# rc 1 = the key is ABSENT (nothing printed).
+# LAST occurrence wins (the launcher's load_env_file exports sequentially, so
+# the last export wins — the watcher must agree, F-07).
+# Line handling mirrors launcher.sh's load_env_file exactly: CRLF stripped,
+# surrounding whitespace trimmed, blank/comment lines skipped, optional
+# `export ` prefix, first '=' splits, whitespace trimmed around key+value,
+# value resolved by _env_strip_value.
+_env_value() {
+    local env_file="$1" want="$2" line key value out="" present=0
+    [ -f "$env_file" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [ -z "$line" ] && continue
+        case "$line" in
+            \#*) continue ;;
+        esac
+        case "$line" in
+            export\ *) line="${line#export }" ;;
+        esac
+        case "$line" in
+            *=*) ;;
+            *) continue ;;
+        esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        [ "$key" = "$want" ] || continue
+        out="$(_env_strip_value "$value")"
+        present=1
+    done < "$env_file"
+    [ "$present" = "1" ] || return 1
+    printf '%s' "$out"
+    return 0
+}
+
 _resolve_port() {
     if [ -n "$PORT_OVERRIDE" ]; then
         printf '%s' "$PORT_OVERRIDE"
         return 0
     fi
     local env_file="$INSTALL_DIR/.env" raw=""
-    raw="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}PORT[[:space:]]*=[[:space:]]*//p' "$env_file" 2>/dev/null | head -1)"
-    raw="${raw%$'\r'}"
-    case "$raw" in
-        \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
-        \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
-    esac
-    if printf '%s' "$raw" | grep -Eq '^[0-9]+$'; then
-        printf '%s' "$raw"
-        return 0
+    # LAST occurrence wins (F-07 sibling seam): the launcher exports the
+    # .env values sequentially, so the daemon runs on the LAST PORT= line —
+    # the watcher must watch THAT port, not the first one.
+    if raw="$(_env_value "$env_file" PORT)"; then
+        case "$raw" in
+            ''|*[!0-9]*) : ;;
+            *) printf '%s' "$raw"; return 0 ;;
+        esac
     fi
     # F-4 (P2.3 review cycle 2, MINOR): when .env is absent/unreadable OR
     # has no digits-only PORT= line, fall back to the canonical port AND
@@ -175,6 +263,58 @@ _resolve_port() {
     printf '%s' "${CANONICAL_PORT_DEFAULT}"
 }
 PORT="$(_resolve_port)"
+
+# ── Launcher-state resolution (design §v relocation) ────────────────────────
+# ENSEMBLE_LAUNCHER_STATE_FILE — where the launcher persists its restart
+# state; the burst-abort marker source (a) below reads the SAME file.
+#
+# F-07: the resolution order was INVERTED vs the launcher (here the INHERITED
+# env beat .env; there .env beat the inherited env) and the duplicate-key
+# rule differed (here .env FIRST-wins via `head -1`; there the loader
+# exports sequentially so the LAST wins) — the two sides could therefore
+# watch DIFFERENT FILES. The order is now EXACTLY the launcher's:
+#   .env value (LAST occurrence wins) → inherited env → the classic default
+#   "$INSTALL_DIR/.launcher-state" (byte-identical to the pre-relocation
+#   path — the VM's crash-loop burst budget depends on that path).
+# An EMPTY .env value clears the inherited value (the launcher's export
+# does exactly the same) → the default fires — full launcher parity.
+# The value is resolved with the SHARED rule (_env_strip_value /
+# _env_value — identical semantics to launcher.sh's load_env_file): the
+# trailing-whitespace and inline-comment shapes both sides agree on (F-06).
+# At startup the resolution is LOGGED with all three candidates (inherited,
+# .env, resolved) so a drift between the launcher and the watcher is
+# VISIBLE. The log is emitted only when a candidate exists: with no
+# override anywhere the resolution IS the default and the watcher stays
+# silent (the "healthy → silent" contract).
+_resolve_launcher_state_file() {
+    local env_file="$INSTALL_DIR/.env"
+    local inherited="${ENSEMBLE_LAUNCHER_STATE_FILE:-}"
+    local dotenv="" dotenv_present=0 resolved="" dotenv_display=""
+    if dotenv="$(_env_value "$env_file" ENSEMBLE_LAUNCHER_STATE_FILE)"; then
+        dotenv_present=1
+    fi
+    if [ "$dotenv_present" = "1" ] && [ -n "$dotenv" ]; then
+        resolved="$dotenv"
+    elif [ "$dotenv_present" = "0" ] && [ -n "$inherited" ]; then
+        resolved="$inherited"
+    fi
+    if [ "$dotenv_present" = "1" ] || [ -n "$inherited" ]; then
+        if [ "$dotenv_present" = "0" ]; then
+            dotenv_display="<absent>"
+        elif [ -z "$dotenv" ]; then
+            dotenv_display="<empty>"
+        else
+            dotenv_display="$dotenv"
+        fi
+        _log "launcher-state: inherited=${inherited:-<unset>} dotenv=${dotenv_display} resolved=${resolved:-$INSTALL_DIR/.launcher-state}"
+    fi
+    if [ -z "$resolved" ]; then
+        printf '%s' "$INSTALL_DIR/.launcher-state"
+        return 0
+    fi
+    printf '%s' "$resolved"
+}
+LAUNCHER_STATE_FILE="$(_resolve_launcher_state_file)"
 
 # ── State I/O ───────────────────────────────────────────────────────────────
 read_state() {
@@ -304,7 +444,10 @@ JOURNAL_HALTAIL_DETAIL_RE='"event": *"halt", *"detail": *"[^"]*'
 JOURNAL_SWEEPTAIL_DETAIL_RE='"event": *"sweep_rollback", *"detail": *"[^"]*'
 
 check_burst_abort() {
-    local f="$INSTALL_DIR/.launcher-state" last_exit count
+    # The marker path honors ENSEMBLE_LAUNCHER_STATE_FILE (design §v):
+    # inherited env → .env parse → classic default, resolved once at
+    # startup into LAUNCHER_STATE_FILE (see _resolve_launcher_state_file).
+    local f="$LAUNCHER_STATE_FILE" last_exit count
     last_exit="$(_file_kv "$f" last_exit)"
     count="$(_file_kv "$f" crash_count)"
     if [ "$last_exit" = "1" ] \

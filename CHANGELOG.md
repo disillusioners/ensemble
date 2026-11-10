@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-10-24
 
+## [0.29.11] — 2026-11-10
+
+### Fixed — POK active-entry admission cap raised 64 → 256 (`feature/pok-cap-256`)
+
+- POK active-entry admission cap 64 → 256 (Emperor directive 2026-11-10) — the per-project cap on active operating-knowledge entries (`POK_ACTIVE_CAP_PER_PROJECT`, `daemon/services/pok_service.py`), enforced in Python only (no SQL CHECK/trigger/migration encodes the count, so no schema migration was added). Admission remains refuse-never-evict at the new cap. The 64-cap had blocked all agent writes to the store.
+
+## [0.29.10] — 2026-11-10
+
+### Added — macOS deployment topology: canonical deployment guide + launcher supervisor-env PATH/STATE_FILE leg + Makefile live-install guard (`feature/macos-deployment-topology`; design `.agents/shared/planning/macos-deployment-topology/`)
+
+- **docs/deployment.md (1048L)** — opens with a one-page quick start (fresh macOS box → launchd-supervised, health-checked daemon; adversarial 13-step fresh-box walk verified, no failing step), then the dev/demo/live topology across Mac + VM, upgrade/rollback, the Linux/VM systemd runbook (labelled operator runbook, NOT a fresh-box procedure), and the staged hardening plan (Stage 1 relocation + Stage 2). README/setup/development/usage re-pointed: guard-era caller forms (INSTALL_DIR always required; live-set targets additionally need `ENSEMBLE_INSTALL_LIVE=1`), full-URL health checks (`http://127.0.0.1:9797/livez` + `/readyz`), `.env.prod` + DB provisioning, UI URL named (127.0.0.1:9797, loopback-only), absolute `/usr/libexec/PlistBuddy` + missing-tool sentinels, no-tilde/no-spaces INSTALL_DIR discipline.
+- **Launcher supervisor-env PATH strategy** — probe→synthesize PATH (VM no-op byte-proven; boot log carries `source=`/`delta=`/`resolved_path=` for the VM drill); `ENSEMBLE_LAUNCHER_PATH` override exported verbatim; `ENSEMBLE_LAUNCHER_STATE_FILE` override (.env→inherited→default precedence, default byte-identical); `_env_strip_value` shared byte-identical in launcher+watchdog (trailing-ws trim, unquoted-# cut, quote layer; `.env` PATH key refused with loud WARN); nvm alias codenames resolved bounded 3-hop; defer-counter follows the state dir.
+- **Makefile live-install guard, final refinements** — arm 3b — the F6 absolute-path arm (one implementation, two labels): non-absolute INSTALL_DIR refuses; `$$HOME` help fix; D1 every `$(INSTALL_DIR)` recipe sink quoted; D2 dead-refuse removal; D3 comment; 122-node guard suite. (Base guard + F-01..F-05 refusal-path closure landed earlier in the v0.29.9 window.)
+- **Wedge note — MITIGATION, not a cure:** the launcher journal-sweep O(n) rewrite removes the measured O(n²) per-boot blowup; pathological journal growth remains possible — watchdog + journal sweep stay the standing defenses.
+- **Planning ground truth lands in-repo** — architecture-recommendation, g5 Stage-1 relocation, stage-2 hardening, rehearsals a–d transcripts (launchd demo, relocation, staged flip, /usr/local-shape), datacenter-scripts README patch draft, v0.29.10 operator deploy checklist.
+- **Tests:** launcher 371/0/1, watchdog 90/0, guard 121/1 (sudo-skip expected); tester full sign-off + delta re-verification under `.agents/tester/RESULTS/2026-11-10-wi-52666630-*.md`.
+
+## [0.29.9] — 2026-11-10
+
+### Added — Decision Module P1, SHADOW-ONLY (Emperor-ratified 2026-11-09): the proxy-decisions thin client, seam registry, shadow overlay, kill channel (`feature/decision-module-p1`; design `.agents/shared/planning/decision-module/`)
+
+- **The overlay NEVER decides — observes + logs only.** P1 ships DORMANT by default: per-seam default OFF, apply is SUPERSET-ONLY (a consult may add context it may never remove), and only seam S1 (snapshot-search consult) is registered — **S2/S3/S4 stay UNREGISTERED**; arming is gated on the disclosed A-list (see the staged verification artifact). The S1 consult is DETACHED (council round 3): a bounded background task inside the overlay, strong-referenced, never-apply, so `search()` returns byte-identical results whether the overlay is armed or not.
+- **Thin client over the proxy's `/v1/decisions` shape** (`daemon/decision/`) — the client emits the OpenAI-decisions shape and the proxy canonicalizes R3/R4 (the client never emits criteria); connect-phase faults reach no socket; the switch cache invalidates narrowly (spy-pinned) and honours the global-master poison.
+- **Kill channel is a daemon-settings surface, NOT an agent tunable** — `settings:write`, DB-backed (`app_settings` managed-key rows — data rows, not schema); unreadable kill tier fails CLOSED; boot seed never overwrites a verified tier; the store tier beats a shouting env.
+- **Cost ceiling: USD 50/mo GLOBAL → auto-trip to shadow-off + operator notify.** The token meter reads all three usage shapes (`total_tokens` / `prompt+completion` / `input+output`) so the ceiling binds on every provider shape; trip effects write both per-seam keys + the global master and suppress subsequent consults pre-socket.
+- **Content-free logging (v1) + TYPE-only exception surfaces** — logs carry ids/hashes/scores only; every exception render goes through one shared helper emitting `type(exc).__name__` (round-2 full-leak class closed with mutant-proven pins: 0 needle hits at HEAD vs 8 on the exact leak mutant; package-wide walker 0 offenders vs 11 on the round-2 tree).
+- **Defensive config install** — absent/unreadable/invalid decision configs construct NO `SeamRegistry` at all (spy-proven); the canonical lowercase config contract carries a nested seams tier and the sanctioned `set_override` write path; per-key raw-yaml leaf accessor is fail-soft.
+- **`decision_overlay` metrics family** registered through the wiring registrar and admitted into the metrics census (L3); in-binary registration — the family simply does not exist on an old binary (inert on rollback).
+- **Rollback = FIX-LOSS, not incompatibility** — the lane authors ZERO `.sql` (migration census delta vs live is EMPTY; `rollback_safe=true source=explicit` under delta-empty-legitimate); managed-key registrations and the metrics family are both inert under an old binary.
+- **Tests + evidence** — `tests/unit/decision/` (16 files, 221 nodes) in the registered pack `decision_module_p1_unit_test` (serial, per-variable credential scrub, fence self-test + vacuous-verdict guard); council-blocker pins D1–D4; council rounds 3–5 pins; the re-derivable mutation matrix with self-verifying pins. Tester verdict: **GO-WITH-DISCLOSED-LIMITATIONS @ `c7fdee903`** (functional gate + re-gate + re-gate2 evidence riders under `.agents/tester/RESULTS/2026-11-09-decision-module-p1-*.md`).
+
 ### Fixed — critical-notes ids are resolved by representation (cap 50 → 200) (`feature/critical-notes-cap-fix`)
 
 > **Scope + forensic note (2026-10-31 review round):** *this fix is about the CLASS, not any live row: rows whose STORED id is a pure representation variant (whitespace / zero-width / unicode dash / case / hyphenless 32-hex) become removable, pinnable, updatable and supersedable again. It does NOT repair the incident that motivated the investigation — that incident was forensically resolved (byte-verified, read-only) as caller-side id mis-transcription on an already-deleted canonical row; no store defect existed. Structurally malformed ids (wrong hex count) are NOT auto-resolved — the not-found error names the stored form (`repr()`-escaped) for an exact-bytes retry.*

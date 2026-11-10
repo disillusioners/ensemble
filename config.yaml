@@ -681,3 +681,35 @@ vscode:
   # =0 on the env var.
   webview_csp_fix: null
 
+# Decision Module Configuration (P1, shadow-only)
+#
+# D1-ADJACENT (leader ruling): the shipped config.yaml must NOT carry
+# an ACTIVE decision: block — "configured" must require an operator
+# ACTION in every case (the DECISION_* env signal, or a hand-added
+# decision: block here). The block below is FULLY COMMENTED OUT; an
+# operator who wants the yaml opt-in path uncomments it.
+#
+# Field names mirror daemon/config.py:DecisionConfig exactly.
+# Serves both the config_path attribute chain (decision.global_enabled,
+# decision.seams.snapshot_l3_selection_enabled, decision.seams.snapshot_l3_selection_stage)
+# and the store-key mapped yaml_switch_tier().
+#
+# OPT-IN PATH 1 — the DECISION_* env signal (documented in .env.example):
+#   DECISION_BASE_URL / DECISION_API_KEY present in the environment.
+# OPT-IN PATH 2 — a hand-added decision: block here (uncomment below):
+#
+# decision:
+#   base_url: ""                 # Empty string falls back to OPENAI_BASE_URL (reuse, never mint)
+#   api_key: ""                  # Empty string falls back to OPENAI_API_KEY (reuse, never mint)
+#   model: ""                    # Empty string resolves to 'decision' (never OPENAI_MODEL)
+#   timeout_s: 5.0
+#   cost_ceiling_usd: 50.0       # Ratified global ceiling (USD 50/month)
+#   token_ceiling: 10000000      # Global token ceiling fail-safe
+#   cost_floor_per_attempt_usd: 0.0005  # D3 per-attempt conservative floor
+#   pricing_usd_per_million_tokens: ""   # JSON rate table, e.g. '{"decision": 1.20}'
+#   global_enabled: false        # Global master switch (default OFF)
+#   seams:
+#     snapshot_l3_selection_enabled: false       # S1 snapshot L3 selection switch (default OFF)
+#     snapshot_l3_selection_stage: "shadow"      # S1 stage: shadow | deciding (P1 shadow-only)
+
+

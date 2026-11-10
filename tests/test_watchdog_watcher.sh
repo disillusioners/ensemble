@@ -64,6 +64,12 @@ cleanup() {
     rm -rf "$TMP"
 }
 trap cleanup EXIT INT TERM
+# Hermeticity (F2 sweep): this suite must be green even when an ambient
+# ENSEMBLE_LAUNCHER_STATE_FILE is exported by the caller (the Stage-2
+# override). Unset it here so every cell starts from a clean slate;
+# cells that TEST the inherited-env override set it inline for that one
+# watcher invocation (13a, 13c, 14.e, 14.f, 14.h, ...).
+unset ENSEMBLE_LAUNCHER_STATE_FILE
 
 # High port, unlikely to collide; verified free below.
 PORT=19139
@@ -392,6 +398,262 @@ RC12b=$?
 [ "$RC12b" -eq 0 ] && _pass || _fail "empty launcher state: watcher must still exit 0 (got $RC12b)"
 [ "$(wc -l < "$TMP/notify.log" 2>/dev/null | tr -d ' ')" = "2" ] && _pass || _fail "empty launcher state: must not notify"
 [ ! -f "$INST4/data/.watchdog-alerts-state" ] && _pass || _fail "empty launcher state: must not create alert state"
+
+# ─── 13. Launcher-state override (design §v relocation) ────────────────────
+# ENSEMBLE_LAUNCHER_STATE_FILE: inherited env → INSTALL_DIR/.env parse →
+# classic default. The burst-abort marker (a) must be found at the
+# RELOCATED location; the classic path stays byte-identical when the
+# override is absent everywhere. Each case seeds the abort marker ONLY at
+# the location the resolution is expected to pick, so the notify (or its
+# absence) is the discrimination — a wrong resolution finds no marker.
+ABORT_MARKER_BODY() {
+    printf 'last_exit=1\ncrash_count=6\nwindow_start=%s\nlast_backoff=0\nnotified_75=0\nlast_uptime=3\n' \
+        "$(( $(date +%s) - 60 ))"
+}
+
+echo "== watcher: ENSEMBLE_LAUNCHER_STATE_FILE override (env / .env / default) =="
+
+# 13a. INHERITED ENV override honored.
+INST5="$TMP/inst5"
+mkdir -p "$INST5/data"
+printf 'PORT=%s\n' "$PORT" > "$INST5/.env"
+mkdir -p "$TMP/reloc-env"
+ABORT_MARKER_BODY > "$TMP/reloc-env/.launcher-state"
+rm -f "$TMP/notify.log"
+ENSEMBLE_LAUNCHER_STATE_FILE="$TMP/reloc-env/.launcher-state" \
+WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify.log" \
+    bash "$WATCHER" "$INST5" >"$TMP/ovr1.out" 2>&1
+[ $? -eq 0 ] && _pass || _fail "13a env override: watcher exits 0"
+[ "$(wc -l < "$TMP/notify.log" 2>/dev/null | tr -d ' ')" = "1" ] \
+    && _pass || _fail "13a env override: abort marker found at the RELOCATED path (expected 1 notify)"
+grep -q "WATCHDOG\[launcher-abort\]" "$TMP/ovr1.out" \
+    && _pass || _fail "13a env override: must log WATCHDOG[launcher-abort]"
+grep -q '^abort_seen=6$' "$INST5/data/.watchdog-alerts-state" 2>/dev/null \
+    && _pass || _fail "13a env override: latch records the relocated marker's count"
+
+# 13b. .ENV PARSE honored (double-quoted value — same tolerant shape as the
+# PORT parser), with the inherited env scrubbed.
+INST6="$TMP/inst6"
+mkdir -p "$INST6/data" "$TMP/reloc-envfile"
+printf 'PORT=%s\n' "$PORT" > "$INST6/.env"
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE="%s"\n' "$TMP/reloc-envfile/.launcher-state" >> "$INST6/.env"
+ABORT_MARKER_BODY > "$TMP/reloc-envfile/.launcher-state"
+rm -f "$TMP/notify.log"
+env -u ENSEMBLE_LAUNCHER_STATE_FILE \
+    WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify.log" \
+    bash "$WATCHER" "$INST6" >"$TMP/ovr2.out" 2>&1
+[ $? -eq 0 ] && _pass || _fail "13b .env override: watcher exits 0"
+[ "$(wc -l < "$TMP/notify.log" 2>/dev/null | tr -d ' ')" = "1" ] \
+    && _pass || _fail "13b .env override: quoted .env value parsed and honored (expected 1 notify)"
+
+# 13c. PRECEDENCE (F-07): the .env value WINS over the inherited env —
+# the launcher's effective order is .env (last occurrence wins) → inherited
+# env → default, and the watcher must resolve the SAME file (the old order
+# was INVERTED here, so the two sides could watch DIFFERENT files). The
+# inherited target holds an EMPTY file (no marker) — a notify can only
+# mean the .env path was read.
+INST7="$TMP/inst7"
+mkdir -p "$INST7/data" "$TMP/reloc-env2" "$TMP/reloc-envfile2"
+printf 'PORT=%s\n' "$PORT" > "$INST7/.env"
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE="%s"\n' "$TMP/reloc-envfile2/.launcher-state" >> "$INST7/.env"
+: > "$TMP/reloc-env2/.launcher-state"               # inherited target: NO marker
+ABORT_MARKER_BODY > "$TMP/reloc-envfile2/.launcher-state"   # .env target: marker
+rm -f "$TMP/notify.log"
+ENSEMBLE_LAUNCHER_STATE_FILE="$TMP/reloc-env2/.launcher-state" \
+WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify.log" \
+    bash "$WATCHER" "$INST7" >"$TMP/ovr3.out" 2>&1
+[ "$(wc -l < "$TMP/notify.log" 2>/dev/null | tr -d ' ')" = "1" ] \
+    && _pass || _fail "13c precedence: the .env value beats the inherited env (expected 1 notify from the .env path)"
+
+# 13d. DEFAULT UNCHANGED: no override anywhere → the CLASSIC
+# $INSTALL_DIR/.launcher-state is still the marker source (the VM/legacy
+# shape — byte-identical behavior; section 10 exercises the same path).
+INST8="$TMP/inst8"
+mkdir -p "$INST8/data"
+printf 'PORT=%s\n' "$PORT" > "$INST8/.env"
+ABORT_MARKER_BODY > "$INST8/.launcher-state"
+rm -f "$TMP/notify.log"
+env -u ENSEMBLE_LAUNCHER_STATE_FILE \
+    WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify.log" \
+    bash "$WATCHER" "$INST8" >"$TMP/ovr4.out" 2>&1
+[ "$(wc -l < "$TMP/notify.log" 2>/dev/null | tr -d ' ')" = "1" ] \
+    && _pass || _fail "13d default: classic .launcher-state still honored (expected 1 notify)"
+
+# 13e. SOURCE PINS: the FUNCTIONAL default lives at exactly ONE site (the
+# resolver's printf fallback — comments may document the path), the
+# resolver reads the override var, and the consumer uses the resolved
+# LAUNCHER_STATE_FILE (no re-hardcode).
+if [ "$(grep -c 'printf .%s. "\$INSTALL_DIR/\.launcher-state"' "$WATCHER")" = "1" ]; then
+    _pass
+else
+    _fail "13e single functional classic-path default (the resolver fallback; found $(grep -c 'printf .%s. "\$INSTALL_DIR/\.launcher-state"' "$WATCHER"))"
+fi
+grep -q '_resolve_launcher_state_file' "$WATCHER" \
+    && _pass || _fail "13e resolver function present"
+grep -q 'local f="\$LAUNCHER_STATE_FILE"' "$WATCHER" \
+    && _pass || _fail "13e check_burst_abort consumes the resolved path (no re-hardcode)"
+
+# ─── 14. F-06 / F-07: value-resolution + launcher-parity rows ──────────────
+# The watcher's resolution must EXACTLY match the launcher's:
+#   .env value (LAST occurrence wins) → inherited env → the classic default.
+# The launcher side is proved by a REAL sandboxed launcher boot (the stub
+# child dumps its inherited environment — the launcher EXPORTS the resolved
+# value to every child), so BOTH sides are compared against the SAME .env
+# fixture. Nothing here touches the live install, the live daemon or the
+# real ~/.nvm: every fixture lives under $TMP and every boot is sandboxed.
+LAUNCHER="$REPO_ROOT/launcher.sh"
+
+# launcher_resolved_state_file <install-dir> <env-file> [inherited] — the
+# launcher's EFFECTIVE ENSEMBLE_LAUNCHER_STATE_FILE (real sandboxed boot).
+launcher_resolved_state_file() {
+    local inst="$1" envf="$2" inh="${3-}" dump="$TMP/launcher-boot-env.txt"
+    rm -f "$dump"
+    mkdir -p "$inst/data"
+    cat > "$inst/ensemble-prod" <<EOF
+#!/bin/sh
+env > "$dump"
+exit 0
+EOF
+    chmod +x "$inst/ensemble-prod"
+    cp "$envf" "$inst/.env"
+    if [ -n "$inh" ]; then
+        ENSEMBLE_LAUNCHER_STATE_FILE="$inh" \
+        ENSEMBLE_INSTALL_DIR="$inst" \
+            bash "$LAUNCHER" >/dev/null 2>"$TMP/launcher-boot.err"
+    else
+        env -u ENSEMBLE_LAUNCHER_STATE_FILE \
+        ENSEMBLE_INSTALL_DIR="$inst" \
+            bash "$LAUNCHER" >/dev/null 2>"$TMP/launcher-boot.err"
+    fi
+    sed -n 's/^ENSEMBLE_LAUNCHER_STATE_FILE=//p' "$dump" 2>/dev/null | head -1
+}
+
+# watchdog_resolved_state_file <install-dir> <env-file> [inherited] — the
+# watcher's resolved path, read from its startup resolution log line.
+watchdog_resolved_state_file() {
+    local inst="$1" envf="$2" inh="${3-}"
+    mkdir -p "$inst/data"
+    cp "$envf" "$inst/.env"
+    if [ -n "$inh" ]; then
+        ENSEMBLE_LAUNCHER_STATE_FILE="$inh" \
+            bash "$WATCHER" "$inst" >"$TMP/wd-res.out" 2>&1
+    else
+        env -u ENSEMBLE_LAUNCHER_STATE_FILE \
+            bash "$WATCHER" "$inst" >"$TMP/wd-res.out" 2>&1
+    fi
+    sed -n 's/^.*launcher-state: .* resolved=//p' "$TMP/wd-res.out" | head -1
+}
+
+# parity_row <name> <env-file> [inherited] <expected-path> — the watcher
+# AND the launcher must resolve the SAME path.
+parity_row() {
+    local name="$1" envf="$2" inh="${3-}" want="$4" got
+    got="$(watchdog_resolved_state_file "$TMP/parity-wd" "$envf" "$inh")"
+    [ "$got" = "$want" ] \
+        && _pass || _fail "$name: watcher resolves $want" "$want" "$got"
+    got="$(launcher_resolved_state_file "$TMP/parity-boot" "$envf" "$inh")"
+    [ "$got" = "$want" ] \
+        && _pass || _fail "$name: launcher resolves $want" "$want" "$got"
+}
+
+echo "== watcher: F-06 value resolution + launcher parity =="
+
+# 14.a TRAILING WHITESPACE: both sides resolve the SAME trimmed path (the
+# old watcher kept the trailing blanks → a non-existent path → the
+# burst-abort alert was LOST silently).
+PA="$TMP/parity-a"
+mkdir -p "$PA"
+printf 'PORT=%s\nENSEMBLE_LAUNCHER_STATE_FILE=%s   \n' "$PORT" "$PA/state" > "$PA/env"
+parity_row "14.a trailing whitespace" "$PA/env" "" "$PA/state"
+
+# 14.b an UNQUOTED inline comment suffix is stripped by BOTH sides.
+PB="$TMP/parity-b"
+mkdir -p "$PB"
+printf 'PORT=%s\nENSEMBLE_LAUNCHER_STATE_FILE=%s   # the relocated state\n' \
+    "$PORT" "$PB/state" > "$PB/env"
+parity_row "14.b inline comment" "$PB/env" "" "$PB/state"
+
+# 14.c a '#' NOT preceded by whitespace is PART of the value (both sides).
+PC="$TMP/parity-c"
+mkdir -p "$PC"
+printf 'PORT=%s\nENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$PORT" "$PC/pa#ss" > "$PC/env"
+parity_row "14.c '#' without whitespace kept" "$PC/env" "" "$PC/pa#ss"
+
+# 14.d a '#' INSIDE a quoted value is NOT a comment (both sides).
+PD="$TMP/parity-d"
+mkdir -p "$PD/a # b"
+printf 'PORT=%s\nENSEMBLE_LAUNCHER_STATE_FILE="%s"\n' "$PORT" "$PD/a # b" > "$PD/env"
+parity_row "14.d '#' inside quotes kept" "$PD/env" "" "$PD/a # b"
+
+# 14.e PRECEDENCE (F-07): the .env value beats the inherited env on BOTH
+# sides (the old watcher order was INVERTED → the two sides could watch
+# DIFFERENT files).
+PE="$TMP/parity-e"
+mkdir -p "$PE"
+printf 'PORT=%s\nENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$PORT" "$PE/from-dotenv" > "$PE/env"
+parity_row "14.e .env beats the inherited env" "$PE/env" "$PE/from-env" "$PE/from-dotenv"
+
+# 14.f DUPLICATE KEY (F-07 / residual e): the LAST occurrence wins on BOTH
+# sides (the old watcher took the FIRST match via `head -1`).
+PF="$TMP/parity-f"
+mkdir -p "$PF"
+printf 'PORT=%s\nENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$PORT" "$PF/first" > "$PF/env"
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$PF/second" >> "$PF/env"
+parity_row "14.f duplicate key: LAST wins" "$PF/env" "$PF/from-env" "$PF/second"
+
+# 14.g BEHAVIOURAL (F-06): the trailing-whitespace .env value still finds
+# the burst-abort marker (before the fix the watcher resolved a
+# non-existent path → the alert was lost with NO operator misconfiguration).
+PG="$TMP/parity-g"
+mkdir -p "$PG/inst/data" "$PG/state-dir"
+printf 'PORT=%s\nENSEMBLE_LAUNCHER_STATE_FILE=%s   \n' \
+    "$PORT" "$PG/state-dir/.launcher-state" > "$PG/inst/.env"
+ABORT_MARKER_BODY > "$PG/state-dir/.launcher-state"
+rm -f "$TMP/notify.log"
+env -u ENSEMBLE_LAUNCHER_STATE_FILE \
+    WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify.log" \
+    bash "$WATCHER" "$PG/inst" >"$TMP/ovr-g.out" 2>&1
+[ "$(wc -l < "$TMP/notify.log" 2>/dev/null | tr -d ' ')" = "1" ] \
+    && _pass || _fail "14.g behavioural: the trimmed .env value still finds the abort marker (expected 1 notify)"
+
+# 14.h the startup log names the inherited-env candidate, the .env candidate
+# AND the resolved path (drift visibility, F-07).
+PH="$TMP/parity-h"
+mkdir -p "$PH/inst/data"
+printf 'PORT=%s\nENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$PORT" "$PH/from-dotenv" \
+    > "$PH/inst/.env"
+ENSEMBLE_LAUNCHER_STATE_FILE="$PH/from-env" \
+    bash "$WATCHER" "$PH/inst" >"$TMP/ovr-h.out" 2>&1
+grep -q "launcher-state: inherited=$PH/from-env " "$TMP/ovr-h.out" \
+    && _pass || _fail "14.h startup log names the inherited-env candidate" \
+    "inherited=$PH/from-env" "$(cat "$TMP/ovr-h.out" 2>/dev/null | head -3)"
+grep -q "dotenv=$PH/from-dotenv " "$TMP/ovr-h.out" \
+    && _pass || _fail "14.h startup log names the .env candidate" \
+    "dotenv=$PH/from-dotenv" "$(cat "$TMP/ovr-h.out" 2>/dev/null | head -3)"
+grep -q "resolved=$PH/from-dotenv" "$TMP/ovr-h.out" \
+    && _pass || _fail "14.h startup log names the resolved path" \
+    "resolved=$PH/from-dotenv" "$(cat "$TMP/ovr-h.out" 2>/dev/null | head -3)"
+
+# 14.j the VALUE-level trim (whitespace right after '=') — both sides.
+PJ="$TMP/parity-j"
+mkdir -p "$PJ"
+printf 'PORT=%s\nENSEMBLE_LAUNCHER_STATE_FILE=   %s   \n' "$PORT" "$PJ/state" > "$PJ/env"
+parity_row "14.j whitespace around the value trimmed" "$PJ/env" "" "$PJ/state"
+
+# 14.i the NO-override case stays SILENT (the "healthy → silent" contract):
+# with no candidate anywhere the resolution IS the default and there is
+# nothing to disclose.
+PI="$TMP/parity-i"
+mkdir -p "$PI/inst/data"
+printf 'PORT=%s\n' "$PORT" > "$PI/inst/.env"
+env -u ENSEMBLE_LAUNCHER_STATE_FILE \
+    bash "$WATCHER" "$PI/inst" >"$TMP/ovr-i.out" 2>&1
+if grep -q 'launcher-state:' "$TMP/ovr-i.out"; then
+    _fail "14.i no override anywhere → the resolution stays unlogged" \
+        "no launcher-state line" "$(cat "$TMP/ovr-i.out" 2>/dev/null | head -3)"
+else
+    _pass
+fi
 
 # ─── summary ────────────────────────────────────────────────────────────────
 echo

@@ -2869,11 +2869,54 @@ class InstanceManager:
             self._snapshot_repo,
             snapshot_embedding_service=self._snapshot_embedding_service,
         )
+        # Decision Module (P1, shadow-only) — overlay wiring.
+        # D1: the PRODUCTION construction goes through the SINGLE named
+        # factory, which stamps the configured predicate from the
+        # EXPLICIT decision signal (resolve_values, not from_source).
+        #
+        # B-2 (council round 4) — the dependency is DEFENSIVE. The
+        # decision config is OPTIONAL: a config object without the
+        # section (a ``MagicMock(spec=Config)`` fixture, a legacy
+        # config, a partially-initialised config) must NOT raise out of
+        # the manager — the module is simply NOT INSTALLED (inert, seam
+        # OFF, no overlay in the search service). That is the doctrine:
+        # fail CLOSED to inert, never fail the boot.
+        self._decision_kill_resolver = None
+        self._decision_overlay = None
+        try:
+            from daemon.services.decision.factory import (
+                build_decision_overlay_defensively,
+            )
+
+            _dec = build_decision_overlay_defensively(
+                engine=self._engine,
+                config=self.config,
+                settings_service_getter=lambda: self._settings_service,
+                board_service=self._board_service,
+            )
+            if _dec is not None:
+                self._decision_kill_resolver = _dec.kill_resolver
+                self._decision_overlay = _dec.overlay
+            else:
+                # B-2 — the decision config is absent or invalid: the
+                # module is NOT INSTALLED (inert, seam OFF). The
+                # manager does NOT raise.
+                logger.warning(
+                    "[DecisionModule] overlay NOT installed "
+                    "(no usable decision config — inert)"
+                )
+        except Exception as exc:  # noqa: BLE001 — the module is OPTIONAL
+            # TYPE only (B-1): the daemon log is agent-readable.
+            logger.warning(
+                "[DecisionModule] overlay NOT installed (non-fatal): %s",
+                type(exc).__name__,
+            )
         self._snapshot_search_service = SnapshotSearchService(
             snapshot_repo=self._snapshot_repo,
             embedding_service=self._snapshot_embedding_service,
             llm_config=snapshot_llm_config,
             staleness_fn=compute_staleness_report,
+            decision_overlay=self._decision_overlay,
         )
         # R16 — monitoring counters (Wave 3). Always wired (the
         # service holds no expensive state and the row count is the
@@ -4376,6 +4419,18 @@ class InstanceManager:
         if self.config.mcp_pool.enabled and self._warmup_task is None:
             self._warmup_task = asyncio.create_task(self._warmup_and_report())
             logger.debug("MCP warmup task started from initialize()")
+
+        # Re-verify Decision Module kill switches at boot (records verify counters and drops stale cache)
+        if hasattr(self, "_decision_kill_resolver") and self._decision_kill_resolver is not None:
+            try:
+                await self._decision_kill_resolver.reverify(["snapshot.l3.selection"])
+            except Exception as exc:
+                # B-1 — the daemon log is AGENT-READABLE, so an
+                # interpolated exception is a content leak: TYPE only.
+                logger.warning(
+                    "[DecisionModule] boot reverify failed (non-fatal): %s",
+                    type(exc).__name__,
+                )
 
         # Eagerly warm tool metadata + tiktoken encoder in the background
         # so the first ``spawn_instance`` after startup doesn't pay the
@@ -6134,6 +6189,26 @@ class InstanceManager:
         attribute (``manager._settings_service``) — degrade-to-empty on
         unwired seams."""
         self._settings_service = service
+        if hasattr(self, "_decision_kill_resolver") and self._decision_kill_resolver is not None:
+            if hasattr(service, "register_override_changed_callback"):
+                # A1: narrow the D2 poison-clear to the DECISION namespace.
+                # The settings service keys live in ``MANAGED_KEYS``
+                # (daemon/services/settings_service.py); every decision key
+                # is ``decision_``-prefixed — ``GLOBAL_ENABLED_KEY`` =
+                # ``"decision_global_enabled"`` (daemon/services/decision/
+                # config.py:125, kill.py:105) and the per-seam keys built by
+                # ``seam_enabled_key`` / ``seam_stage_key`` =
+                # ``decision_seam_<flat>_{enabled,stage}``. A non-decision
+                # settings write must NOT clear the write-failure poison
+                # (fail-closed is preserved: the resolver still reports OFF
+                # while the poison stands).
+                service.register_override_changed_callback(
+                    lambda key: (
+                        self._decision_kill_resolver.invalidate(None)
+                        if isinstance(key, str) and key.startswith("decision_")
+                        else None
+                    )
+                )
 
     def set_pending_system_execution(self, instance_id: str, spec: dict) -> None:
         """Arm the post-turn executor trigger marker (D-FA1.4). Called by the

@@ -1,6 +1,6 @@
 # Usage Guide — agents-ensemble HTTP API
 
-This guide covers the complete HTTP API for operating the agents-ensemble multi-agent daemon. All endpoints are prefixed with `/api`. The daemon runs on port **8079** in development and port **8088** in production.
+This guide covers the complete HTTP API for operating the agents-ensemble multi-agent daemon. All endpoints are prefixed with `/api`. The daemon runs on port **8079** in development and port **9797** in production.
 
 > **Base URL**: `http://localhost:8079/api` (development)
 

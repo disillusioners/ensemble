@@ -666,6 +666,18 @@ class TestP11BootNoBehaviorChange:
     PRE_MERGE_SPAN = "6b571771d..2c6b7ab94"
     SANCTIONED_PATH = "daemon/routers/sources.py"
 
+    # B-3 (council round 4) — the DECISION lane's sanctioned change to
+    # daemon/manager.py. The guard is about the SOURCE-GC lane's own
+    # diff: manager.py is not frozen forever, it is frozen against the
+    # SOURCE-GC lane. The sanction is SCOPED — every hunk of the
+    # manager.py drift in the span must carry a decision-lane marker, so
+    # any OTHER manager.py drift (a source-gc change, an unrelated
+    # lane's edit) still REDS. The source-gc guard's intent is
+    # untouched: only the decision lane's own manager.py wiring is
+    # sanctioned.
+    DECISION_LANE_SANCTIONED_PATH = "daemon/manager.py"
+    DECISION_LANE_MARKER = "decision"
+
     # The EXACT added lines of the leader-sanctioned None guard (content
     # pin, indentation preserved; diff '+' prefixes stripped). The file
     # pin requires these contiguous; the history pin requires this list
@@ -716,8 +728,12 @@ class TestP11BootNoBehaviorChange:
         ).strip()
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
+        # B-3 — daemon/manager.py is excluded from the blanket no-drift
+        # check (the DECISION lane legitimately changed it); its drift
+        # is checked by the scoped decision-lane sanction below.
         others = [p for p in self.NOT_TOUCHED_PATHS
-                  if p != self.SANCTIONED_PATH]
+                  if p not in (self.SANCTIONED_PATH,
+                               self.DECISION_LANE_SANCTIONED_PATH)]
         out_others = self._git("diff", "--stat", span, "--", *others)
         assert out_others.strip() == "", (
             f"unexpected post-merge drift in NOT-TOUCHED paths:\n{out_others}"
@@ -742,4 +758,49 @@ class TestP11BootNoBehaviorChange:
         assert added == self.SANCTIONED_HUNK_LINES, (
             "daemon/routers/sources.py diff is not EXACTLY the sanctioned "
             f"None-guard hunk.\nadded={added!r}"
+        )
+
+    def test_the_decision_lane_manager_drift_is_confined_to_decision_hunks(self):
+        """B-3 — the SANCTIONED decision-lane manager.py drift.
+
+        Every hunk of the daemon/manager.py drift in the post-merge span
+        must carry a decision-lane marker. A manager.py change from ANY
+        other lane (the source-gc lane included) lands in a hunk with no
+        decision marker and REDS here — the guard's intent (the source-gc
+        lane must not drift manager.py) is preserved; only the decision
+        lane's own wiring is sanctioned.
+        """
+        merge = self._git(
+            "rev-list", "--first-parent", "--merges", "-1", "HEAD"
+        ).strip()
+        assert merge, "no first-parent merge found"
+        span = f"{merge}..HEAD"
+        diff = self._git(
+            "diff", "--unified=0", span, "--", self.DECISION_LANE_SANCTIONED_PATH
+        )
+        if not diff.strip():
+            return  # nothing sanctioned in this span — vacuously clean
+        hunks: list[list[str]] = []
+        current: list[str] = []
+        for line in diff.splitlines():
+            if line.startswith("@@"):
+                if current:
+                    hunks.append(current)
+                current = []
+                continue
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
+                current.append(line)
+        if current:
+            hunks.append(current)
+        assert hunks, "the manager.py diff has no content lines"
+        offenders = [
+            hunk for hunk in hunks
+            if not any(
+                self.DECISION_LANE_MARKER in line.lower() for line in hunk
+            )
+        ]
+        assert offenders == [], (
+            "daemon/manager.py drifted OUTSIDE the decision lane in the "
+            f"post-merge span — every hunk must carry a decision marker.\n"
+            f"offending hunks={offenders!r}"
         )

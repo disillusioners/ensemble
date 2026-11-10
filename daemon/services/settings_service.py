@@ -81,8 +81,11 @@ v1.3 (2026-10-29, metrics-collection P0): adds the SEVEN metrics
 knobs (``limits.metrics_enabled`` / ``limits.metrics_listener_port`` /
 ``limits.metrics_scrape_interval_hint_s`` /
 ``limits.metrics_census_interval_s`` / ``limits.metrics_sampler_interval_s``
-/ ``limits.metrics_textfile_dir`` / ``limits.metrics_cardinality_cap``)
-— the registry now carries SIXTEEN entries. ``len(MANAGED_KEYS)`` is
+/ ``limits.metrics_textfile_dir`` / ``limits.metrics_cardinality_cap``);
+v1.4 (2026-11-09, decision-module P1) adds the THREE decision switches
+(``decision_global_enabled`` / ``decision_seam_snapshot_l3_selection_enabled``
+/ ``decision_seam_snapshot_l3_selection_stage``) — the registry now
+carries NINETEEN entries. ``len(MANAGED_KEYS)`` is
 the authoritative census; this prose is history, not truth.
 """
 
@@ -94,7 +97,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import Engine
 from sqlmodel import Session, select
@@ -162,9 +165,26 @@ class ManagedKeySpec:
     # bound" and preserves every pre-existing key's behavior
     # byte-for-byte.
     gt: float | None = None
+    # ``allowed_values`` is OPTIONAL and additive (decision-module P1):
+    # for string-valued keys with a closed vocabulary (e.g. stage: shadow|deciding).
+    # ``None`` (the default) means "any valid value_type value".
+    allowed_values: (
+        tuple[Any, ...] | list[Any] | set[Any] | frozenset[Any] | None
+    ) = None
     requires_restart: bool = True
     sensitive: bool = False
     description: str = ""
+    # (f) council round 3 — the PER-KEY raw-leaf accessor. When set,
+    # the key's RAW yaml SECTION is read THROUGH this zero-arg callable
+    # instead of the boot-time limits dict: the decision keys live in
+    # the ``decision:`` section, which the limits accessor never
+    # captured. ``None`` (the default) means "use the passed-in limits
+    # dict" — every pre-existing key behaves byte-for-byte as before.
+    # The accessor may RAISE; :func:`_raw_yaml_leaf` fails soft (an
+    # unreadable section means the yaml tier is ABSENT for that key,
+    # never a boot/wire failure — the settings service must never break
+    # because the decision module changed).
+    raw_yaml_section: Callable[[], Any] | None = None
 
     def constraint_desc(self) -> str:
         """Human-readable constraint for log lines / 422 details
@@ -172,6 +192,12 @@ class ManagedKeySpec:
         ``failed validation (ge=5,le=20)`` — multi-part when several
         bounds apply)."""
         parts: list[str] = []
+        if self.allowed_values is not None:
+            if isinstance(self.allowed_values, (set, frozenset, list, tuple)):
+                vals: Any = sorted(self.allowed_values)
+            else:
+                vals = self.allowed_values
+            parts.append(f"allowed_values={vals}")
         if self.gt is not None:
             parts.append(f"gt={self.gt}")
         if self.ge is not None:
@@ -188,15 +214,30 @@ class ManagedKeySpec:
 #: O3, 2026-10-18) plus ``limits.chart_render_concurrency`` (resource-
 #: cost-control O2, 2026-10-18). Landed since, without a prose census
 #: bump: the checkpoint A4 pair (soak-gate-mcp-warmup),
-#: ``limits.manager_pool_size`` (devops incident fix item #7) and the
-#: SEVEN metrics-collection knobs (metrics-collection P0, 2026-10-29) —
-#: the registry now carries SIXTEEN entries. Adding keys later is a
-#: registry entry + nothing else (the ladder, CRUD, API and FE render
-#: generically off the registry); ``len(MANAGED_KEYS)`` is the
-#: authoritative census.
+#: ``limits.manager_pool_size`` (devops incident fix item #7), the
+#: SEVEN metrics-collection knobs (metrics-collection P0, 2026-10-29)
+#: and the THREE decision-module switches (decision-module P1,
+#: 2026-11-09) — the registry now carries NINETEEN entries. Adding keys
+#: later is a registry entry + nothing else (the ladder, CRUD, API and
+#: FE render generically off the registry); ``len(MANAGED_KEYS)`` is
+#: the authoritative census.
 #: The registry default MUST mirror the backing pydantic Field default —
 #: chain: ``daemon.constants`` → ``LimitsConfig`` Field → this registry
 #: default (ONE truth).
+def _raw_decision_section() -> Any:
+    """The DECISION yaml section accessor — the per-key hook (f).
+
+    Returns whatever ``daemon.config.raw_yaml_decision()`` captured for
+    the ``decision:`` section (or ``None`` when nothing was captured).
+    The import is lazy (``daemon.config`` imports this module's
+    siblings late in boot) and MAY raise — :func:`_raw_yaml_leaf`
+    fails soft around it.
+    """
+    from daemon.config import raw_yaml_decision
+
+    return raw_yaml_decision()
+
+
 MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     # ── v1 (db-backed-settings, 2026-10-15) — the original semaphore knob ──
     "limits.llm_concurrency": ManagedKeySpec(
@@ -600,6 +641,60 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "default."
         ),
     ),
+    # ── Decision Module (P1, shadow-only) ─────────────────────────────
+    "decision_global_enabled": ManagedKeySpec(
+        key="decision_global_enabled",
+        config_path="decision.global_enabled",
+        raw_yaml_section=_raw_decision_section,
+        env_var="DECISION_ENABLED",
+        value_type="int",
+        default=0,
+        ge=0,
+        le=1,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Decision Module global master switch (P1). 0=disabled, 1=enabled. "
+            "Takes effect on the next consult without restart. Effective precedence: "
+            "DB override > env DECISION_ENABLED > config.yaml decision.global_enabled > 0."
+        ),
+    ),
+    "decision_seam_snapshot_l3_selection_enabled": ManagedKeySpec(
+        key="decision_seam_snapshot_l3_selection_enabled",
+        config_path="decision.seams.snapshot_l3_selection_enabled",
+        raw_yaml_section=_raw_decision_section,
+        env_var="DECISION_SEAM_SNAPSHOT_L3_SELECTION",
+        value_type="int",
+        default=0,
+        ge=0,
+        le=1,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Decision Module per-seam switch for snapshot L3 candidate selection (S1). "
+            "0=disabled, 1=enabled. Takes effect on the next consult without restart. "
+            "Effective precedence: DB override > env DECISION_SEAM_SNAPSHOT_L3_SELECTION > "
+            "config.yaml decision.seams.snapshot_l3_selection_enabled > 0."
+        ),
+    ),
+    "decision_seam_snapshot_l3_selection_stage": ManagedKeySpec(
+        key="decision_seam_snapshot_l3_selection_stage",
+        config_path="decision.seams.snapshot_l3_selection_stage",
+        raw_yaml_section=_raw_decision_section,
+        env_var="DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE",
+        value_type="str",
+        default="shadow",
+        allowed_values={"shadow", "deciding"},
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Decision Module per-seam stage for snapshot L3 selection (S1). "
+            "Allowed values: shadow, deciding. P1 is shadow-only. Takes effect "
+            "on the next consult without restart. Effective precedence: "
+            "DB override > env DECISION_SEAM_SNAPSHOT_L3_SELECTION_STAGE > "
+            "config.yaml decision.seams.snapshot_l3_selection_stage > shadow."
+        ),
+    ),
 }
 
 
@@ -673,6 +768,13 @@ def parse_and_validate(spec: ManagedKeySpec, raw: Any) -> tuple[bool, Any, str |
         value = _coerce_value(spec.value_type, raw)
     except (ValueError, TypeError) as exc:
         return False, None, "parse", str(exc)
+    if spec.allowed_values is not None and value not in spec.allowed_values:
+        return (
+            False,
+            value,
+            "validation",
+            f"value {value!r} fails constraint {spec.constraint_desc()}",
+        )
     if spec.gt is not None and value <= spec.gt:
         return (
             False,
@@ -995,6 +1097,26 @@ class SettingsService:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+        self._override_changed_callbacks: list[Callable[[str], None]] = []
+
+    def register_override_changed_callback(self, callback: Callable[[str], None]) -> None:
+        """Register a callback invoked when an override is set or cleared.
+
+        Callback signature: ``callback(key: str) -> None``.
+        Invoked synchronously after DB commit.
+        """
+        self._override_changed_callbacks.append(callback)
+
+    def _notify_override_changed(self, key: str) -> None:
+        for cb in self._override_changed_callbacks:
+            try:
+                cb(key)
+            except Exception as exc:
+                logger.warning(
+                    "[Settings] override changed callback failed for %s: %s",
+                    key,
+                    exc,
+                )
 
     def get_overrides(self) -> dict[str, Any]:
         """Return ``{key: decoded value}`` for every VALID registered
@@ -1032,6 +1154,7 @@ class SettingsService:
         with Session(self._engine) as session:
             session.merge(row)
             session.commit()
+        self._notify_override_changed(spec.key)
 
     def clear_override(self, key: str) -> bool:
         """Delete the override row for a registered key (idempotent —
@@ -1046,7 +1169,8 @@ class SettingsService:
                 return False
             session.delete(row)
             session.commit()
-            return True
+        self._notify_override_changed(spec.key)
+        return True
 
 
 # =============================================================================
@@ -1081,21 +1205,49 @@ def _raw_yaml_leaf(raw_yaml_limits: Any, spec: ManagedKeySpec) -> Any:
 
     ``raw_yaml_limits`` is the SECTION dict captured by the
     ``daemon/config.py`` accessor (the section named by the FIRST
-    component of ``config_path`` — ``limits`` today); the remaining
-    components walk to the leaf. ABSENT means "not literally present
-    in config.yaml" — the pydantic-merged field is NEVER consulted
-    (it cannot distinguish a yaml literal from the field default;
-    deriving from it would mis-attribute ``source="yaml"`` on a
-    default-only install and fail the default-tier test).
+    component of ``config_path`` — ``limits`` for the limits keys);
+    the remaining components walk to the leaf. ABSENT means "not
+    literally present in config.yaml" — the pydantic-merged field is
+    NEVER consulted (it cannot distinguish a yaml literal from the
+    field default; deriving from it would mis-attribute
+    ``source="yaml"`` on a default-only install and fail the
+    default-tier test).
+
+    THE PER-KEY SECTION ACCESSOR (f, council round 3). A key whose
+    spec carries ``raw_yaml_section`` reads its section THROUGH that
+    accessor (the decision keys' ``decision:`` section is captured by
+    ``daemon.config.raw_yaml_decision``, not by the limits accessor);
+    the remaining components walk exactly as for every other key.
+    There is NO name-based special-case: the spec declares its own
+    section source.
+
+    FAIL-SOFT (f). The WHOLE body is guarded: an accessor that raises
+    (a broken decision config path, an import failure) or a walk that
+    faults means the yaml tier is ABSENT for that key — the lower
+    tiers stay active and the caller resolves on them. The settings
+    service must never break because the decision module changed; the
+    log carries the failure CLASS only.
     """
-    if not isinstance(raw_yaml_limits, dict):
-        return None
-    node: Any = raw_yaml_limits
-    for part in spec.config_path.split(".")[1:]:
-        if not isinstance(node, dict) or part not in node:
+    try:
+        if spec.raw_yaml_section is not None:
+            node: Any = spec.raw_yaml_section()
+        else:
+            node = raw_yaml_limits
+        if not isinstance(node, dict):
             return None
-        node = node[part]
-    return node
+        for part in spec.config_path.split(".")[1:]:
+            if not isinstance(node, dict) or part not in node:
+                return None
+            node = node[part]
+        return node
+    except Exception as exc:  # noqa: BLE001 — fail-soft: ABSENT, never a raise
+        logger.warning(
+            "[Settings] raw yaml leaf read failed for %s (%s) — treating "
+            "the yaml tier as ABSENT for this key",
+            spec.key,
+            type(exc).__name__,
+        )
+        return None
 
 
 def _get_config_value(config: Any, config_path: str) -> Any:

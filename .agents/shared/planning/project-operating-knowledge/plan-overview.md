@@ -67,7 +67,7 @@ Pack registration; **Tier-2 whole-tree dual-side** — mechanical; no Tier-1 leg
 | **Audience misclassification (ER-1)** | 🟡 | **Universal read means nothing is hidden (dev can `pok_query` anything); curator-adjustable; dogfood classifications recorded (§4.5)** |
 | **Ari-seam staleness** | 🟡 | **Per-dispatch fresh read; mid-lane `pok_query`** |
 | Content forgery via body | 🟡 | Two-layer fence (AC17) |
-| Terminal 64-cap lockout | 🟡 | Curator archive (AC19) |
+| Terminal active-cap lockout | 🟡 | Curator archive (AC19) |
 | Ordering regress | 🟡 | Family-atomic + adjacency + pinned-drag + tightened regex; contrast family atomic; **spine assertion is per-view (operation view holds fully)** |
 | Pinned×family overflow | 🟡 | 6≤8 rows; 2,811≤2,900 chars incl. wrapper — per-view (AC11) |
 | Escape-expansion truncation | 🟡 | Post-escape budget at write (AC20) |

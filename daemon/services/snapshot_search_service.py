@@ -20,7 +20,7 @@ Three-stage hybrid paralleling
    cost discipline). Beyond the cap the pipeline degrades
    gracefully to BM25+cosine+tag-overlap order.
 
-Graceful degradation (same shape as the skill side):
+Graceful degradation (same outcome as the skill side):
 
 * Stage 2 failure (embedding API down or per-candidate error) →
   fall back to BM25+tag-overlap order.
@@ -107,6 +107,7 @@ from .skill_search_service import (  # DRIFT-PIN: direct import — sibling-drif
     _tokenize,
 )
 from .snapshot_embedding_service import SnapshotEmbeddingService
+from .decision.port import DecisionOverlayPort, extract_snapshot_ids
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,7 @@ class SnapshotSearchService:
         embedding_service: SnapshotEmbeddingService,
         llm_config: dict[str, Any],
         staleness_fn: Any,
+        decision_overlay: DecisionOverlayPort | None = None,
     ) -> None:
         """Store dependencies for the three pipeline stages.
 
@@ -274,11 +276,14 @@ class SnapshotSearchService:
                 service uses the ``freshness`` + ``snapshot_age_days``
                 keys for the result envelope and ignores the rest
                 (Wave 2b's tool wrapper adds the rest).
+            decision_overlay: Optional DecisionOverlayPort instance
+                for S1 overlay consults.
         """
         self._repo = snapshot_repo
         self._embedding_service = embedding_service
         self._llm_config = dict(llm_config) if llm_config else {}
         self._staleness_fn = staleness_fn
+        self._decision_overlay = decision_overlay
 
     # --------------------------------------------------------
     # Public API
@@ -371,9 +376,10 @@ class SnapshotSearchService:
                 #
                 # SCORE-SCALE OPACITY NOTE (Wave 2a review fold-in):
                 # this fallback's scores live on the TAG-OVERLAP
-                # scale (bounded, ≈[0, 1]), NOT the happy path's
-                # composite scale (``bm25 + cosine``, unbounded —
-                # see ``_embedding_rerank``). The two branches are
+                # scale (integer count of overlapping tags as float,
+                # 0..N, unbounded), NOT the happy path's composite
+                # scale (``bm25 + cosine``, unbounded — see
+                # ``_embedding_rerank``). The two branches are
                 # therefore never comparable to each other, and the
                 # switch is silent by design — only the ORDER within
                 # one path is meaningful, and no score value ever
@@ -396,6 +402,8 @@ class SnapshotSearchService:
             # configured — graceful-degrade path: the search lands
             # with BM25+cosine+tag-overlap order rather than
             # spending wall-clock on a guaranteed-outbound call.
+            # Coverage note: the path below bypasses _llm_select entirely
+            # so no overlay consult occurs on that path.
             if not self._llm_config.get("model"):
                 final_snapshots = [s for s, _ in reranked[:limit]]
             else:
@@ -592,16 +600,18 @@ class SnapshotSearchService:
         BM25+cosine+tag-overlap order.
 
         The chat-completion prompt lists each candidate's
-        ``title`` + ``task_summary`` + ``tags`` (NOT the full
-        digest — too verbose for a short context window). The
-        model returns JSON ``{"selected": [<id>, ...]}``;
-        unmapped ids are dropped with a warning.
+        ``title`` + ``summary`` + ``tags`` + its
+        ``stage2_score`` (NOT the full digest — too verbose for a
+        short context window). The model returns JSON
+        ``{"selected": [<id>, ...]}``; unmapped ids are dropped
+        with a warning.
 
         Args:
             query: User search text (echoed back to the LLM so
                 it can ground its relevance calls).
-            reranked: ``(snapshot, composite_score)`` pairs from
-                stage 2, in descending composite order.
+            reranked: ``(snapshot, stage2_score)`` pairs from
+                stage 2, in descending order (see the SCALE NOTE
+                below for the branch-dependent scale semantics).
             limit: Maximum snapshots to return.
             client: Optional pre-built OpenAI-compatible client
                 (test seam).
@@ -613,9 +623,11 @@ class SnapshotSearchService:
 
         Raises:
             Exception: Propagates any exception from the LLM
-                call or the JSON parser. The public ``search``
-                method catches and falls back to the rerank
-                order.
+                call. The public ``search`` method catches it and
+                falls back to the rerank order. A MALFORMED
+                response is NOT an exception here: the JSON parser
+                returns ``None`` and this method falls back to the
+                stage-2 order locally.
         """
         if not reranked:
             return []
@@ -625,8 +637,21 @@ class SnapshotSearchService:
         candidates = reranked[:_LLM_SELECT_TOP_N]
 
         # Build the prompt — minimal per-candidate surface.
+        #
+        # SCALE NOTE (``stage2_score``): the value below is the
+        # stage-2 score of the candidate.  On the happy path that is
+        # the composite ``bm25 + cosine`` (unbounded), or ``bm25 + 0.0``
+        # when a candidate lacks cached embeddings (where a rendered
+        # 0.0 cosine contribution means "no embedding cached", not
+        # "semantically dissimilar"); on the stage-2 embedding-FAILURE
+        # path the WHOLE list is replaced with tag-overlap-scale values
+        # (unbounded integer count) — see the opacity note in ``search``.
+        # The two scales are NOT comparable and are NOT normalized here.
+        # Within ONE prompt every value comes from ONE branch (the
+        # fallback replaces the list wholesale), so intra-prompt
+        # comparison stays consistent.
         lines: list[str] = []
-        for snap, _score in candidates:
+        for snap, score in candidates:
             sid = getattr(snap, "id", "?")
             title = getattr(snap, "title", "") or ""
             task_summary = getattr(snap, "task_summary", "") or ""
@@ -639,7 +664,7 @@ class SnapshotSearchService:
             summary = task_summary or preview or "(no summary)"
             lines.append(
                 f"- id={sid} title={title!r} tags=[{tag_line}] "
-                f"summary={summary[:300]!r}"
+                f"summary={summary[:300]!r} stage2_score={score:.6f}"
             )
         candidates_block = "\n".join(lines)
 
@@ -665,6 +690,20 @@ class SnapshotSearchService:
         )
 
         parsed = self._parse_selection(response_text, limit=limit)
+        if parsed is None:
+            # Malformed response — the parser could not locate a
+            # selection object. Fall back HERE, locally, to the
+            # stage-2 order: the SAME ``reranked[:limit]`` slice the
+            # exception path in ``search`` uses. (The parser returns
+            # ``None`` rather than raising, so the public ``search``
+            # method never sees this case.)  A WELL-FORMED but empty
+            # selection (``{"selected": []}``) means the LLM declined
+            # to pick — that must stay empty.
+            logger.warning(
+                "[SnapshotSearch] LLM selection response was malformed "
+                "(no JSON object located) - using the stage-2 order"
+            )
+            return [snap for snap, _ in reranked[:limit]]
         if not parsed:
             return []
 
@@ -682,6 +721,37 @@ class SnapshotSearchService:
                 )
             if len(picked) >= limit:
                 break
+
+        # S1 Decision Overlay hook — call OUTWARD at the last point where
+        # picked is final and prompt/evidence is still live.
+        # The shipped selection MUST NOT change: this is the C1 shadow
+        # call, DETACHED (council round 3): the consult runs as a
+        # bounded background task inside the overlay (strong-referenced,
+        # never-apply, contained TYPE-ONLY) and this method returns
+        # `picked` immediately — search() is byte-identical whether the
+        # overlay is armed or not. The DETACHMENT SEMANTIC (disclosed):
+        # the kill gate is read INSIDE the task, so a kill written
+        # between dispatch and execution may not be honoured for that
+        # one in-flight consult — bounded at one consult.
+        if self._decision_overlay is not None:
+            candidate_ids = extract_snapshot_ids([s for s, _ in candidates])
+            heuristic_ids = extract_snapshot_ids(picked)
+            context = {
+                "query": query,
+                "candidate_ids": candidate_ids,
+                "heuristic_ids": heuristic_ids,
+                "candidates_block": candidates_block,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "limit": limit,
+            }
+            # Never raises (containment lives inside the overlay).
+            self._decision_overlay.consult_detached(
+                "snapshot.l3.selection",
+                heuristic_outcome=heuristic_ids,
+                context=context,
+            )
+
         return picked
 
     # --------------------------------------------------------
@@ -788,8 +858,8 @@ class SnapshotSearchService:
         Tolerant of markdown code fences (re-uses the skill-side
         :func:`_extract_json_object`) and minor JSON-shape variants.
         Returns ``None`` when no JSON object can be located — the
-        public ``search`` method catches and falls back to the
-        rerank order.
+        caller (:meth:`_llm_select`) handles that case locally and
+        falls back to the stage-2 rerank order.
         """
         json_text = _extract_json_object(raw_text or "")
         if not json_text:
