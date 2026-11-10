@@ -24,13 +24,16 @@ FastAPI ``lifespan``) — and asserts the **production boot result**:
   (``daemon.routers.skills._skill_job_dispatcher``), so a test-side
   injection into the service alone can never satisfy the assertions.
 
-Named mutations (both legs are executed by the implementing lane and the
-RED output is recorded in the lane report):
+Named mutations (all three legs are executed by the implementing lane and
+the RED output is recorded in the lane report):
 
 * **leg 1** — remove the production binding from
   ``daemon/api.py::_wire_skills_router_services`` ⇒ this module goes RED;
 * **leg 2** — leg 1 PLUS a test-side injection into the metrics service
-  (the shape that fooled every prior gate) ⇒ this module stays RED.
+  (the shape that fooled every prior gate) ⇒ this module stays RED;
+* **leg 3** (round-2 F2) — remove the single
+  ``_wire_skills_router_services(manager)`` call line from
+  ``daemon.api.lifespan`` ⇒ this module goes RED (the static pin below).
 """
 
 from types import SimpleNamespace
@@ -135,6 +138,37 @@ class TestSkillCaptureProductionWiring:
         assert skills_router._skill_job_dispatcher is production_dispatcher, (
             "the REST skills seam and the CAPTURE seam must hold the same "
             "production dispatcher instance"
+        )
+
+    def test_lifespan_still_calls_the_production_seam(self):
+        """F2 (round-2): ``daemon.api.lifespan`` still calls the boot seam.
+
+        Deleting the single ``_wire_skills_router_services(manager)`` call
+        line inside ``lifespan`` would leave every drive-the-seam test
+        green while production binds NOTHING at boot — the exact hole
+        class this phase exists to close. This pin is static: it reads the
+        seam's name out of the lifespan function's own code object.
+
+        ``lifespan`` is decorated with ``@asynccontextmanager``: the module
+        attribute is the ``functools.wraps`` ``helper`` closure, whose OWN
+        ``__code__`` merely constructs ``_AsyncGeneratorContextManager``.
+        The real body is reachable only through ``__wrapped__``
+        (``inspect.unwrap``) — pinning against the RAW attribute would be
+        permanently red, and pinning against nothing would be vacuous.
+        """
+        import inspect
+
+        from daemon import api
+
+        lifespan_body = inspect.unwrap(api.lifespan)
+        assert (
+            "_wire_skills_router_services"
+            in lifespan_body.__code__.co_names
+        ), (
+            "daemon.api.lifespan no longer calls the production boot seam "
+            "_wire_skills_router_services — production would boot with NO "
+            "capture-lane dispatcher binding while every seam-driving test "
+            "stays green"
         )
 
     def test_production_seam_is_boot_safe_without_skill_services(self):

@@ -563,7 +563,8 @@ def _wire_skills_router_services(manager: Any) -> None:
     """Wire the skills router's collaborators at BOOT — the production seam.
 
     Extracted verbatim from the ``lifespan`` block (a PURE MOVE: same
-    statements, same order, same log line) so the production wiring is
+    statements, same order, same log call — one field added,
+    ``capture_dispatcher=``) so the production wiring is
     callable — and therefore TESTABLE — as the real seam instead of a
     test-side COPY of it. A copy goes green when production drops the
     wiring; the real seam goes RED.
@@ -605,25 +606,39 @@ def _wire_skills_router_services(manager: Any) -> None:
     # we call here. Defensive getattr on manager attributes in case
     # a future refactor skips one of the service constructions —
     # missing services will surface as 503s at request time rather
-    # than crashing the lifespan.
-    if getattr(manager, "_skill_store_service", None) is not None:
-        get_store.set_service(manager._skill_store_service)
-    if getattr(manager, "_skill_search_service", None) is not None:
-        get_search.set_service(manager._skill_search_service)
-    if getattr(manager, "_skill_metrics_service", None) is not None:
-        get_metrics.set_service(manager._skill_metrics_service)
-    if getattr(manager, "_skill_evolution_service", None) is not None:
-        get_evolution.set_service(manager._skill_evolution_service)
+    # than crashing the lifespan. EACH attribute is resolved ONCE via
+    # getattr below and the SAME resolved value feeds BOTH the guard
+    # and the boot log call at the end of this function, so a manager
+    # that lacks an attribute can never raise AttributeError out of
+    # the LOG line either (partial-boot parity between guard and log).
+    _skill_store_service = getattr(manager, "_skill_store_service", None)
+    _skill_search_service = getattr(manager, "_skill_search_service", None)
+    _skill_metrics_service = getattr(manager, "_skill_metrics_service", None)
+    _skill_evolution_service = getattr(
+        manager, "_skill_evolution_service", None
+    )
+    _skill_trigger_repo = getattr(manager, "_skill_trigger_repo", None)
+    _skill_job_dispatcher = getattr(manager, "_skill_job_dispatcher", None)
+    _skill_usage_repo = getattr(manager, "_skill_usage_repo", None)
+
+    if _skill_store_service is not None:
+        get_store.set_service(_skill_store_service)
+    if _skill_search_service is not None:
+        get_search.set_service(_skill_search_service)
+    if _skill_metrics_service is not None:
+        get_metrics.set_service(_skill_metrics_service)
+    if _skill_evolution_service is not None:
+        get_evolution.set_service(_skill_evolution_service)
 
     # Trigger repository — module-level global + setter (no factory).
-    if getattr(manager, "_skill_trigger_repo", None) is not None:
-        set_skill_trigger_repo(manager._skill_trigger_repo)
+    if _skill_trigger_repo is not None:
+        set_skill_trigger_repo(_skill_trigger_repo)
 
     # Job dispatcher — module-level global + setter. This is the
     # chokepoint the ``POST /api/skills/{id}/fix`` endpoint calls into
     # to enqueue a ``skill_evolution`` JobItem on ``system_parallel_queue``.
-    if getattr(manager, "_skill_job_dispatcher", None) is not None:
-        set_skill_job_dispatcher(manager._skill_job_dispatcher)
+    if _skill_job_dispatcher is not None:
+        set_skill_job_dispatcher(_skill_job_dispatcher)
 
     # Job dispatcher — ALSO into the SkillMetricsService (the CAPTURED lane).
     # The ROUTER setter above binds the REST-facing dispatcher; the CAPTURE
@@ -633,31 +648,32 @@ def _wire_skills_router_services(manager: Any) -> None:
     # Binding it HERE makes the PRODUCTION BOOT — not a test-side injection —
     # the owner of the capture lane's dispatcher.
     metrics_service = getattr(manager, "_skill_metrics_service", None)
-    if metrics_service is not None and getattr(manager, "_skill_job_dispatcher", None) is not None:
-        metrics_service.set_job_dispatcher(manager._skill_job_dispatcher)
+    if metrics_service is not None and _skill_job_dispatcher is not None:
+        metrics_service.set_job_dispatcher(_skill_job_dispatcher)
 
     # Usage repository — module-level global + setter. The
     # ``GET /api/skills/{id}/usage-records`` endpoint reads through
     # this repo for per-event usage history (vs. the metrics
     # service's aggregate view).
-    if getattr(manager, "_skill_usage_repo", None) is not None:
-        set_skill_usage_repo(manager._skill_usage_repo)
+    if _skill_usage_repo is not None:
+        set_skill_usage_repo(_skill_usage_repo)
 
     logger.info(
         "Skills router wired: store=%s search=%s metrics=%s evolution=%s "
         "triggers=%s dispatcher=%s usage_repo=%s capture_dispatcher=%s",
-        manager._skill_store_service is not None,
-        manager._skill_search_service is not None,
-        manager._skill_metrics_service is not None,
-        manager._skill_evolution_service is not None,
-        manager._skill_trigger_repo is not None,
-        manager._skill_job_dispatcher is not None,
-        manager._skill_usage_repo is not None,
+        _skill_store_service is not None,
+        _skill_search_service is not None,
+        _skill_metrics_service is not None,
+        _skill_evolution_service is not None,
+        _skill_trigger_repo is not None,
+        _skill_job_dispatcher is not None,
+        _skill_usage_repo is not None,
         # The CAPTURED lane's dispatcher handle (the capture enqueue path
-        # reads the metrics service's own handle, not the router's).
-        getattr(manager, "_skill_metrics_service", None) is not None
+        # reads the metrics service's own handle, not the router's) —
+        # the SAME getattr-resolved values as the guards above.
+        _skill_metrics_service is not None
         and getattr(
-            getattr(manager, "_skill_metrics_service", None),
+            _skill_metrics_service,
             "_skill_job_dispatcher",
             None,
         ) is not None,

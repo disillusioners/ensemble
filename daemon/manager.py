@@ -8177,14 +8177,39 @@ class InstanceManager:
                     else DEFAULT_FIX_BURST_WINDOW_SECONDS
                 ),
             )
+            # Round-2 S4: log the RESOLVED evolution-lane state, not the
+            # bare config default. The per-call admission gate resolves
+            # the env kill-switch (``ENSEMBLE_SKILL_EVOLUTION_ENABLED``)
+            # OVER the constructed config default
+            # (``skill_job_dispatcher.py:208-235``), so printing the raw
+            # ``_evolution_lane_enabled`` attribute misreports the lane
+            # whenever the env kill-switch is set. An INVALID env token
+            # raises ``ValueError`` there (fail-closed on FIRST USE) —
+            # the boot log must never crash boot, so the resolved probe
+            # is guarded and the phase-2 runbook's
+            # ``/proc/<pid>/environ`` check stays the authoritative env
+            # read.
+            _disp = self._skill_job_dispatcher
+            _evo_config_default = _disp._evolution_lane_enabled
+            try:
+                _evo_resolved = is_evolution_lane_enabled(_evo_config_default)
+                _evo_env_note = "env-resolved-or-default"
+            except ValueError as exc:
+                _evo_resolved = False
+                _evo_env_note = (
+                    f"invalid env token ({exc}); lane refuses on first use"
+                )
             logger.info(
                 "SkillJobDispatcher wired to manager "
-                "(evolution_lane_enabled=%s, fix_cooldown_seconds=%s, "
+                "(evolution_lane_resolved=%s [%s], "
+                "evolution_lane_config_default=%s, fix_cooldown_seconds=%s, "
                 "fix_burst_cap=%s, fix_burst_window_seconds=%s)",
-                self._skill_job_dispatcher._evolution_lane_enabled,
-                self._skill_job_dispatcher._fix_cooldown_seconds,
-                self._skill_job_dispatcher._fix_burst_cap,
-                self._skill_job_dispatcher._fix_burst_window_seconds,
+                _evo_resolved,
+                _evo_env_note,
+                _evo_config_default,
+                _disp._fix_cooldown_seconds,
+                _disp._fix_burst_cap,
+                _disp._fix_burst_window_seconds,
             )
 
         # Wire the metrics service's job dispatcher handle so the
