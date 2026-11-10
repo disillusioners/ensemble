@@ -543,10 +543,20 @@ class TestSkillFixTruthfulness:
         assert "job-42" in result
         assert "NOT dispatched" not in result
 
-    async def test_tool_dispatcher_missing_still_reports_record_only(
+    async def test_tool_dispatcher_missing_reports_neutral_header_and_no_job(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        """The Phase-2 interregnum path (no dispatcher) keeps its wording."""
+        """The Phase-2 interregnum path (no dispatcher) stays truthful.
+
+        D-G1 (reviewer must-fix): the header is DURABILITY-NEUTRAL — it
+        names the subject and carries NO durability claim, because the
+        branch body is the only place a verdict may live. This pin
+        therefore asserts BOTH the neutral header AND the truthful
+        negative, so it can never again stay green while a durability
+        claim in the output is false (the old shape — a header claiming
+        "recorded" over a body that created nothing — is exactly the
+        contradiction class this pin now forbids).
+        """
         from daemon.services.skill_job_dispatcher import (
             SKILL_EVOLUTION_KILL_SWITCH_ENV,
         )
@@ -562,8 +572,17 @@ class TestSkillFixTruthfulness:
             "skill_id": "sk-x",
             "issue_description": "broken",
         })
-        assert "Skill fix request recorded" in result
+        # (a) the header is the NEUTRAL phrase (never the old
+        #     "request recorded" shape).
+        assert "Skill fix request for skill" in result
+        assert "Skill fix request recorded" not in result
+        # (b) the truthful negative — the body must SAY nothing was
+        #     dispatched and no job was created.
         assert "dispatcher not yet available" in result
+        assert (
+            "NOTHING was dispatched and no skill-keeper job was created"
+            in result
+        )
 
 
 # =============================================================================

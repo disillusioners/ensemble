@@ -22,7 +22,7 @@ Test classes
 * :class:`TestServicesMissing` — when the four service/dispatcher
   attributes are explicitly ``None``, the four read/write tools
   return the expected soft-fail message, ``skill_fix`` returns its
-  user-facing record message with the "dispatcher not yet available"
+  durability-neutral header with the "dispatcher not yet available"
   note, and ``skill_feedback`` returns the "metrics service not yet
   available" soft-fail.
 * :class:`TestServicesAvailable` — when each service is wired up
@@ -94,7 +94,7 @@ STORE_SERVICE_MISSING_NEEDLE = (
     "Skill store service not yet available"
 )
 LATER_PHASE_NEEDLE = "later phase"
-FIX_RECORDED_NEEDLE = "Skill fix request recorded"
+FIX_HEADER_NEEDLE = "Skill fix request for skill"
 DISPATCHER_MISSING_NEEDLE = "dispatcher not yet available"
 FEEDBACK_RECORDED_NEEDLE = "recorded"
 FEEDBACK_PHASE4_NEEDLE = "Phase 4"
@@ -311,16 +311,17 @@ class TestServicesMissing:
     async def test_skill_fix_returns_user_facing_message_when_dispatcher_missing(
         self, skill_tools
     ):
-        """``skill_fix`` always records the request. When the
-        dispatcher is missing, the response also notes that the
-        dispatcher is not yet available.
+        """``skill_fix`` always answers with a durability-neutral
+        header (D-G1: no durability claim lives in the header). When
+        the dispatcher is missing, the response also says that NOTHING
+        was dispatched and no skill-keeper job was created.
         """
         tool = skill_tools["skill_fix"]
         result = await tool.ainvoke({
             "skill_id": "sk-fix-target",
             "issue_description": "Outdated regex in matcher",
         })
-        assert FIX_RECORDED_NEEDLE in result
+        assert FIX_HEADER_NEEDLE in result
         assert DISPATCHER_MISSING_NEEDLE in result
         # Issue description is echoed into the Summary line so the
         # skill-keeper agent has full context for the next pass.
@@ -813,7 +814,7 @@ class TestEdgeCases:
             "issue_description": "broken",
         })
 
-        assert FIX_RECORDED_NEEDLE in result
+        assert FIX_HEADER_NEEDLE in result
         assert DISPATCHER_MISSING_NEEDLE in result
         # Spy services must NOT have been awaited \u2014 any await would
         # have raised the AssertionError above.
@@ -826,9 +827,8 @@ class TestEdgeCases:
     async def test_skill_fix_uses_dispatcher_when_available(self):
         """When ``_skill_job_dispatcher.dispatch_fix`` is wired up,
         ``skill_fix`` calls it (with a sync OR async dispatch_fix).
-        The agent-facing response still reports "recorded" because
-        the user-facing confirmation is deterministic regardless of
-        dispatcher success.
+        The agent-facing header stays durability-neutral (D-G1) and
+        the admission verdict lives in the body line.
         """
         from daemon.tools.skill_tools import create_skill_tools
 
@@ -852,8 +852,8 @@ class TestEdgeCases:
         call = dispatcher.dispatch_fix.await_args
         assert call.kwargs.get("skill_id") == "sk-x"
         assert call.kwargs.get("issue_description") == "broken"
-        # User-facing confirmation is preserved.
-        assert FIX_RECORDED_NEEDLE in result
+        # The neutral header + the admission verdict are preserved.
+        assert FIX_HEADER_NEEDLE in result
         # Dispatcher-missing note is NOT present when the dispatcher
         # ran (the ``dispatcher is None or dispatch_method is None``
         # branch is skipped).

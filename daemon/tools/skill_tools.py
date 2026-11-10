@@ -1552,8 +1552,17 @@ Note:
         # ``skill_view``-consumable, so an agent that copies it back into
         # ``skill_view`` fails (the wi-76d89e11 verbatim-id contract).
         echo_id = skill_id if isinstance(skill_id, str) else str(skill_id)
+        # D-G1 (reviewer must-fix): the header is DURABILITY-NEUTRAL. It
+        # used to say "request recorded" — a claim the drop branch then
+        # contradicted with "the request was NOT recorded". An agent that
+        # reads (or truncates to) the first line believed a record
+        # existed while the body said the opposite. The header now names
+        # the subject only; EVERY branch's durability verdict lives in
+        # its own body line (the success branch says "was admitted"; the
+        # drop says NOT recorded; the recorded-fault says persisted +
+        # the job id; the absent-dispatcher says NOTHING was dispatched).
         lines: list[str] = [
-            f"\U0001f4dd Skill fix request recorded for skill '{echo_id}'.",
+            f"\U0001f4dd Skill fix request for skill '{echo_id}'.",
             "",
             "User-reported issue:",
             "---",
@@ -1694,6 +1703,11 @@ never claims a record that does not exist:
   counter under the ``fix_dispatch_fault`` token + a WARNING log + a
   sink record);
 * a job persisted ⇒ "was recorded" AND the job id is named.
+* the header is DURABILITY-NEUTRAL (D-G1, reviewer must-fix): it names
+  the subject ("📝 Skill fix request for skill '<skill_id>'.") and
+  carries NO durability claim — every branch's verdict lives in its
+  own body line, so an agent that reads (or truncates to) the header
+  can never inherit a claim the body contradicts.
 
 Args:
     skill_id: The skill's UUID4 identifier.
@@ -1722,14 +1736,14 @@ Behavior:
 Returns:
     A multi-line response. Dispatched::
 
-        📝 Skill fix request recorded for skill '<skill_id>'.
+        📝 Skill fix request for skill '<skill_id>'.
         ... issue / suggested-fix fences ...
         ✅ Dispatched: Tier-3 skill_evolution job <job_id> was admitted
         — the skill-keeper agent will pick it up from the job queue.
 
     Gate refused (lane disabled or cooldown)::
 
-        📝 Skill fix request recorded for skill '<skill_id>'.
+        📝 Skill fix request for skill '<skill_id>'.
         ... issue / suggested-fix fences ...
         ⛔ NOT dispatched: the skill-evolution admission lane is
         disabled (kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off, or
@@ -1738,7 +1752,7 @@ Returns:
 
     Dispatcher fault, NO job persisted::
 
-        📝 Skill fix request recorded for skill '<skill_id>'.
+        📝 Skill fix request for skill '<skill_id>'.
         ... issue / suggested-fix fences ...
         ⛔ NOT dispatched: the dispatcher raised during dispatch (<err>).
         The request was NOT recorded: NO skill-keeper job was persisted
@@ -1747,7 +1761,7 @@ Returns:
 
     Dispatcher fault AFTER the job was persisted::
 
-        📝 Skill fix request recorded for skill '<skill_id>'.
+        📝 Skill fix request for skill '<skill_id>'.
         ... issue / suggested-fix fences ...
         ✅ Dispatched: Tier-3 skill_evolution job <job_id> was persisted
         for this request — the skill-keeper agent will pick it up from

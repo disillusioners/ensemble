@@ -579,6 +579,93 @@ class _RecordingReporter:
         return {"accepted": True}
 
 
+class TestDG1HeaderIsDurabilityNeutral:
+    """D-G1 — the header carries NO durability claim on ANY branch.
+
+    The F-G2 derivation introduced an internal CONTRADICTION: the
+    header still said "📝 Skill fix request recorded for skill ...",
+    while the drop branch's body said "the request was NOT recorded".
+    An agent that reads (or truncates to) the first line believed a
+    record existed; the body said the opposite. The header is now
+    durability-neutral — EVERY branch's verdict lives in its own body
+    line — and this pin keeps the contradiction class
+    un-reintroducible across all three outcomes (drop, absent
+    dispatcher, success).
+    """
+
+    #: The exact old header phrase — asserted ABSENT from the whole
+    #: output wherever the branch verdict says otherwise.
+    OLD_HEADER_PHRASE = "Skill fix request recorded"
+
+    #: The neutral header prefix — the SAME line on every branch.
+    NEUTRAL_HEADER_PREFIX = "📝 Skill fix request for skill"
+
+    @pytest.mark.asyncio
+    async def test_the_drop_case_never_carries_a_recorded_header(
+        self, engine, canon
+    ):
+        """The drop: the header must NOT claim a record anywhere."""
+        result, enqueued = await _drive_faulty_skill_fix(
+            engine, canon, mode="pre"
+        )
+
+        assert enqueued == [], "the drop must have persisted no row"
+        assert self.OLD_HEADER_PHRASE not in result, (
+            "the drop must not carry the old 'recorded' header — the body "
+            f"says the opposite: {result!r}"
+        )
+        assert result.splitlines()[0].startswith(self.NEUTRAL_HEADER_PREFIX), (
+            f"the header must be the neutral line: {result.splitlines()[0]!r}"
+        )
+        # the verdict lives in the BODY
+        assert "was NOT recorded" in result
+
+    @pytest.mark.asyncio
+    async def test_the_absent_dispatcher_case_never_carries_a_recorded_header(
+        self, engine, canon
+    ):
+        """No dispatcher: the same neutral header, no durability claim."""
+        manager, _fs = _make_manager(engine, canon, dispatcher_missing=True)
+        tools = _tools(manager)
+        result = await tools["skill_fix"].ainvoke(
+            {"skill_id": FULL_SKILL_ID, "issue_description": "stale regex"}
+        )
+
+        assert self.OLD_HEADER_PHRASE not in result, (
+            "the absent-dispatcher case must not carry the old 'recorded' "
+            f"header — nothing was dispatched: {result!r}"
+        )
+        assert result.splitlines()[0].startswith(self.NEUTRAL_HEADER_PREFIX), (
+            f"the header must be the neutral line: {result.splitlines()[0]!r}"
+        )
+        assert (
+            "NOTHING was dispatched and no skill-keeper job was created"
+            in result
+        ), f"the verdict must live in the body: {result!r}"
+
+    @pytest.mark.asyncio
+    async def test_the_success_case_header_is_the_same_neutral_line(
+        self, engine, canon
+    ):
+        """Success: the SAME neutral header; the verdict is in the body."""
+        result, enqueued = await _drive_faulty_skill_fix(
+            engine, canon, mode="ok"
+        )
+
+        assert len(enqueued) == 1, (
+            f"the success case must have admitted the job: {enqueued!r}"
+        )
+        assert self.OLD_HEADER_PHRASE not in result, (
+            f"the success header must be the SAME neutral line: {result!r}"
+        )
+        assert result.splitlines()[0].startswith(self.NEUTRAL_HEADER_PREFIX), (
+            f"the header must be the neutral line: {result.splitlines()[0]!r}"
+        )
+        assert "was admitted" in result, (
+            f"the verdict must live in the body: {result!r}"
+        )
+
+
 class _FaultCarryingThePersistedJobId(RuntimeError):
     """A dispatcher fault that CARRIES the persisted job id.
 
