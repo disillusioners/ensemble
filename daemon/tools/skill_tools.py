@@ -1439,6 +1439,10 @@ Note:
         dispatcher = getattr(manager, "_skill_job_dispatcher", None)
         dispatch_error: str | None = None
         dispatched_job_id: str | None = None
+        # F-G2.1 — the faulted exception itself, kept so its OWN carrier
+        # (a ``persisted_job_id`` attribute) can be preferred over a DB
+        # read (the ruling's option (1) — see the read-back below).
+        dispatch_fault: BaseException | None = None
         # H2 (tidier): the durable re-fix burst cap is a DESIGNED
         # refusal, not a dispatcher fault. It is caught STRUCTURALLY,
         # BEFORE the blanket ``except Exception`` below.
@@ -1496,6 +1500,7 @@ Note:
                         e,
                     )
                     dispatch_error = str(e)
+                    dispatch_fault = e
             else:
                 # Dispatcher object exists but lacks ``dispatch_fix``
                 # (or it's not callable) — treat as "not yet
@@ -1515,15 +1520,26 @@ Note:
         persisted_outcome: str = ""
         persisted_job_id: str | None = None
         if dispatch_error is not None:
-            persisted_outcome, persisted_job_id = (
-                await _read_back_persisted_fix_job(
-                    manager,
-                    skill_id=skill_id,
-                    project_id=project_id,
-                    issue_description=issue_description,
-                    suggested_fix=suggested_fix,
+            # F-G2.1, option (1) FIRST: an exception that CARRIES the
+            # persisted job id is the dispatcher's own statement that a
+            # row was committed for THIS admission — it is preferred over
+            # any DB read (and it closes the one case a key-based read
+            # cannot reach: a row whose idempotency key was suffixed).
+            carried_job_id = getattr(dispatch_fault, "persisted_job_id", None)
+            if isinstance(carried_job_id, str) and carried_job_id:
+                persisted_outcome = FIX_OUTCOME_RECORDED
+                persisted_job_id = carried_job_id
+            else:
+                # F-G2.1, option (2): read the real outcome back.
+                persisted_outcome, persisted_job_id = (
+                    await _read_back_persisted_fix_job(
+                        manager,
+                        skill_id=skill_id,
+                        project_id=project_id,
+                        issue_description=issue_description,
+                        suggested_fix=suggested_fix,
+                    )
                 )
-            )
             await _announce_fix_dispatch_fault(
                 manager,
                 skill_id=skill_id,

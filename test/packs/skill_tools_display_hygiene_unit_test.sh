@@ -35,7 +35,7 @@
 #      counter under the `fix_dispatch_fault` token + a WARNING log + a
 #      sink record). The pins drive the REAL dispatcher over a faulty
 #      job store — only the persistence boundary is doubled.
-#   2. The MUTATION MATRIX (M-E3a..f) — pack-level plants: plant the
+#   2. The MUTATION MATRIX (M-E3a..g) — pack-level plants: plant the
 #      defect → the discriminating leg must go RED → restore → the same
 #      leg must go GREEN. RESTORE SEMANTICS: every mutable file's
 #      PRISTINE content+sha256 is captured BEFORE phase 2 (with a
@@ -408,6 +408,14 @@ PYEOF
 '    return (FIX_OUTCOME_RECORDED, job_id)' \
 '    return (FIX_OUTCOME_NOT_RECORDED, None)' \
 "$PIN_FILE::TestFG2GenericFaultIsDerivedFromTheOutcome::test_the_post_insert_fault_names_the_persisted_job"
+
+  # M-E3g (F-G2) — the dispatcher-carried id is IGNORED: the outcome
+  # source falls back to the DB read, so the carrier pin (which
+  # requires the carried id to be NAMED) MUST go RED.
+  leg "M-E3g" "daemon/tools/skill_tools.py" \
+'            carried_job_id = getattr(dispatch_fault, "persisted_job_id", None)' \
+'            carried_job_id = None' \
+"$PIN_FILE::TestFG2GenericFaultIsDerivedFromTheOutcome::test_the_carrier_id_wins_over_the_read_back"
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
   echo "mutation failures: $MUTATION_FAILURES"

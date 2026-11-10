@@ -579,6 +579,17 @@ class _RecordingReporter:
         return {"accepted": True}
 
 
+class _FaultCarryingThePersistedJobId(RuntimeError):
+    """A dispatcher fault that CARRIES the persisted job id.
+
+    The carrier contract the dispatcher would satisfy with ONE line
+    (attach the committed job id to the exception it raises). The tool
+    prefers it over a DB read.
+    """
+
+    persisted_job_id: str = ""
+
+
 def _make_fault_manager(engine, canon, *, mode):
     """A manager double wired with the REAL dispatcher over a faulty store."""
     repo = JobRepository(engine)
@@ -720,6 +731,32 @@ class TestFG2GenericFaultIsDerivedFromTheOutcome:
         assert rows, "the sink file must carry the record"
         assert any("fix_dispatch_fault" in line for line in rows), (
             f"the sink record must carry the stable reason token: {rows!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_carrier_id_wins_over_the_read_back(self, engine, canon):
+        """Pin 4 — the dispatcher's OWN carrier is preferred (option 1).
+
+        An exception that CARRIES the persisted job id is the
+        dispatcher's statement that a row was committed for THIS
+        admission. It is preferred over a DB read — and it is the only
+        source that can reach a row whose idempotency key was suffixed
+        (a fresh-admission key is suffixed when a TERMINAL predecessor
+        already held it, and a key-based read then misses the row).
+        """
+        fault = _FaultCarryingThePersistedJobId("dispatcher exploded")
+        fault.persisted_job_id = "job-carried-by-the-dispatcher"
+
+        result = await _drive_skill_fix(fault)
+
+        assert "job-carried-by-the-dispatcher" in result, (
+            "the carrier id must be named: " f"{result!r}"
+        )
+        assert "was persisted for this request" in result, (
+            f"the carrier means the request WAS recorded: {result!r}"
+        )
+        assert FALSE_DURABILITY_SENTENCE not in result, (
+            f"the old constant must not reach the agent: {result!r}"
         )
 
     @pytest.mark.asyncio
