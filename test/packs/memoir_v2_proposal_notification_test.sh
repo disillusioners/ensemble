@@ -77,7 +77,7 @@ if [ ! -f "$TARGET" ]; then
 fi
 
 # The MEASURED node count at the pin (2026-11-10, this worktree,
-# ``--collect-only``): TestEnqueueBridge (10) + TestNoPinAuthority (3) = 13.
+# ``--collect-only``): TestEnqueueBridge (13) + TestNoPinAuthority (3) = 16.
 #
 # TestEnqueueBridge grew 9 -> 10 in the phase-6 closure delta: the W-3
 # leg pins that a pending proposal whose episode is later PINNED or
@@ -87,7 +87,20 @@ fi
 # the work; the prior leg tied at importance=9 and detected nothing.
 # RED at the parent commit 78bde0c0a — see
 # docs/memoir-v2/implementation-notes.md §16.4 receipts (h)/(i)/(k).)
-EXPECTED_PASSED_N=13
+#
+# TestEnqueueBridge grew 10 -> 13 in the phase-6 CLOSURE-4 delta:
+#   * the F-1 BRIDGE leg — the bridged message is ONE line and carries
+#     NO ``[SYSTEM CONTEXT: ...]`` marker (the title is untrusted text;
+#     a newline could forge a live fake header in Ari's lane);
+#   * the THRESHOLD RE-CHECK leg — an episode re-scored BELOW the
+#     threshold after staging is neither announced nor rendered (the
+#     predicate sits beside the W-3 filters, so both paths share it);
+#   * the COMPARE-AND-SET leg — two concurrent producers deliver the
+#     episode exactly ONCE (the parent read the gate and then wrote
+#     unconditionally: 9 of 12 concurrent trials double-delivered).
+# All three RED at the parent commit 6b7a68e6e (executed — see
+# docs/memoir-v2/implementation-notes.md §16.9).
+EXPECTED_PASSED_N=16
 
 SELECTOR="TestEnqueueBridge or TestNoPinAuthority"
 

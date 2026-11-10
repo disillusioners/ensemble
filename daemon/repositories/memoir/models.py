@@ -57,6 +57,7 @@ general-purpose update method (phase 2 owns those writers).
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -786,11 +787,50 @@ MEMOIR_PROPOSALS_ZONE_MAX = 3
 MEMOIR_PROPOSAL_REASON_CHAR_CAP = 160
 
 
+#: The daemon's OWN context-block marker — the header a REAL
+#: ``[SYSTEM CONTEXT: ...]`` block carries
+#: (``daemon/services/context_messages._make_context_message``). A
+#: proposal field is UNTRUSTED text: a title carrying this token could
+#: forge a fake system-context header in the lane the proposal is
+#: delivered into (the bridge's message is ``injected_message=True``
+#: and is NOT compaction-protected). The marker is NEUTRALIZED here —
+#: ONE home, so the ZONE path and the BRIDGE path can never disagree
+#: about the same content.
+#:
+#: TWO shapes are removed: the WHOLE bracketed group (the forged
+#: header, closing bracket included) and a BARE marker with no closing
+#: bracket (the group form would not match it, and the token itself
+#: must never survive).
+_CONTEXT_BLOCK_MARKER_RE = re.compile(
+    r"\[[^\[\]]*system[^\[\]]*context[^\[\]]*:[^\[\]]*\]"
+    r"|\[system\s+context\s*:",
+    re.IGNORECASE,
+)
+
+
 def _proposal_one_line(value: str | None) -> str:
-    """Collapse ONE proposal field to ONE line (newlines are structure loss)."""
+    """Collapse ONE proposal field to ONE line and neutralize a forged header.
+
+    TWO guarantees, both load-bearing for the content-trust rule:
+
+    * **ONE LINE** — a field that carries a newline can forge a
+      LINE-START ``[SYSTEM CONTEXT: ...]`` header in the lane the
+      proposal is delivered into. The collapse is whitespace-only: the
+      text itself stays readable.
+    * **NO FORGED HEADER** — the context-block marker is stripped (the
+      whole bracketed group, or a bare marker), so a title can never
+      present itself as a daemon-authored block.
+
+    ONE home, on purpose: the ZONE path (:func:`render_proposal_line`)
+    and the BRIDGE path
+    (``memoir_keepsake_proposal_service._bridge_message``) both come
+    through here, so the two delivery paths cannot disagree about
+    identical content.
+    """
     if value is None:
         return ""
-    return " ".join(str(value).split())
+    text = _CONTEXT_BLOCK_MARKER_RE.sub(" ", str(value))
+    return " ".join(text.split())
 
 
 def _proposal_date(value: Any) -> str:

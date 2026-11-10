@@ -78,9 +78,9 @@ fi
 
 # The MEASURED node count at the pin (2026-11-10, this worktree,
 # ``--collect-only``): TestQualification (6) + TestOnceEver (6)
-# + TestCandidateWindow (3) + TestProposalsZoneSelection (5)
-# + TestProposalsZoneRender (6) + TestAdmissionLadder (6)
-# + TestReflectionPassIntegration (3) + TestFetchCapMultiplier (4) = 39.
+# + TestCandidateWindow (4) + TestProposalsZoneSelection (5)
+# + TestProposalsZoneRender (7) + TestAdmissionLadder (6)
+# + TestReflectionPassIntegration (3) + TestFetchCapMultiplier (6) = 43.
 #
 # TestAdmissionLadder grew 5 -> 6 in the phase-6 DELTA: the canonical
 # §A6 quote's PRESENCE pin (the source copy soft-wraps, so that leg is
@@ -99,6 +99,13 @@ fi
 # 78bde0c0a (executed — see docs/memoir-v2/implementation-notes.md
 # §16.4 receipt (h)).
 #
+# TestCandidateWindow grew 3 -> 4 in the phase-6 CLOSURE-4 delta: the
+# OVERLAP DETECTOR — a row inserted ABOVE the cursor while the scan
+# runs must not make the window re-read a row it already examined (the
+# old OFFSET paging could: 3 rows produced 2 distinct ids). RED at the
+# parent commit 6b7a68e6e (executed — see implementation-notes.md
+# §16.9).
+#
 # TestFetchCapMultiplier grew 0 -> 4 in the phase-6 CLOSURE-3 delta: the
 # fetch-cap multiplier knob (the SANCTIONED ESCAPE for a pathological
 # corpus). The legs are (a) the DEFAULT keeps the MEASURED boundary
@@ -111,10 +118,22 @@ fi
 # failed / 48 deselected — see docs/memoir-v2/implementation-notes.md
 # §16.8).
 #
+# TestFetchCapMultiplier grew 4 -> 6 in the phase-6 CLOSURE-4 delta: the
+# TWO UNPINNED SAFETY ROWS — the band's CEILING (20) and FLOOR (1).
+# Both are VALUE pins on the clamp (a wide request clamps DOWN to 20; a
+# zero request clamps UP to 1), so raising the ceiling or dropping the
+# floor REDs them (executed — implementation-notes.md §16.9).
+#
+# TestProposalsZoneRender grew 6 -> 7 in the phase-6 CLOSURE-4 delta:
+# the F-1 ZONE leg — a proposal title can never present itself as a
+# daemon-authored ``[SYSTEM CONTEXT: ...]`` block (the zone line stays
+# ONE line and carries no marker). RED at the parent commit 6b7a68e6e
+# (executed — implementation-notes.md §16.9).
+#
 # LANE RULE (binding): this delta's own legs land selector-registered and
 # re-pinned IN THE SAME COMMIT — every class below is named EXPLICITLY, so
 # a leg no pack selects can never hide from the gate.
-EXPECTED_PASSED_N=39
+EXPECTED_PASSED_N=43
 
 SELECTOR=(
   "TestQualification or TestOnceEver or TestCandidateWindow"

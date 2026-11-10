@@ -35,10 +35,14 @@ WHAT THIS MODULE OWNS
 
 4. **The ledger slot is consumed ONLY on an ACCEPTED enqueue (V2-23 →
    V2-40, the invariant that survived the mechanism change).** The row is
-   flipped ``pending → enqueued`` (+ ``notified_at``) ONLY after the
-   bridge returns; an enqueue failure — or the absence of a running ari
-   instance — leaves the row ``pending``, so the day's slot is NOT
-   consumed and a later pass may retry.
+   flipped ``pending → enqueued`` (+ ``notified_at``) by a
+   COMPARE-AND-SET — a conditional ``UPDATE`` whose rowcount is
+   asserted, so exactly ONE producer can claim a row — and the enqueue
+   runs INSIDE that same transaction: an enqueue failure (or the absence
+   of a running ari instance) ROLLS THE CLAIM BACK, so the row stays
+   ``pending``, the day's slot is NOT consumed, and a later pass may
+   retry. The gate, the selection and the claim share ONE transaction
+   (one snapshot).
 
    THE 1/DAY GATE KEYS ON THE CONSUMPTION DAY, NEVER ON THE STAGING
    DATE. ``proposal_date`` is stamped when the row is STAGED; it is not
@@ -83,17 +87,23 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from daemon.config import MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT
 from daemon.repositories.memoir.models import (
     MEMOIR_PROPOSAL_REASON_CHAR_CAP,
+    MEMOIR_UNTITLED_TITLE,
     MemoirEpisode,
     MemoirProposalLedger,
     render_proposal_line,
 )
+#: The proposal field sanitizer — ONE home, shared with the ZONE path
+#: (:func:`render_proposal_line` uses it for the title and the reason),
+#: so the bridge and the zone can never disagree about the same
+#: content (the F-1 content-trust hole).
+from daemon.repositories.memoir.models import _proposal_one_line  # noqa: PLC2701
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc
 
 logger = logging.getLogger(__name__)
@@ -383,16 +393,33 @@ class MemoirKeepsakeProposalService:
         so it never LEAVES the window: an unbounded head of terse rows
         starves the eligible rows behind them on EVERY pass (a PERMANENT
         wedge, not the self-healing ledgered case). The scan therefore
-        PAGES: it reads up to the RESOLVED fetch-cap multiplier (3 by
-        default — ``MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE``) × the window
-        per pass and keeps collecting until it holds ``limit`` ELIGIBLE
-        rows, applying the floor in Python as it goes.
+        OVER-FETCHES: it reads up to the RESOLVED fetch-cap multiplier
+        (3 by default — ``MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE``) × the
+        window per pass and keeps collecting until it holds ``limit``
+        ELIGIBLE rows, applying the floor in Python as it goes.
+
+        ONE STATEMENT, NOT PAGES. The window is read in a SINGLE
+        ``SELECT … LIMIT fetch_cap``. The earlier shape PAGED with
+        ``OFFSET`` over a table that MUTATES between pages (a row
+        inserted above the cursor shifts the window, so a row already
+        examined is read AGAIN — measured: 3 rows produced 2 distinct
+        ids). A total ORDER does not prevent that: it makes the order
+        deterministic, not the page boundaries stable. ONE statement
+        reads ONE snapshot, so a row can never be examined twice — the
+        over-fetch is unchanged (the same prefix of the same order is
+        examined, and the same rows are eligible), and the COST BOUND
+        is unchanged (never more than ``fetch_cap`` rows are read per
+        pass). The trade is disclosed: the database now returns up to
+        ``fetch_cap`` rows in one call instead of ``limit`` rows per
+        page — the ORDER BY is the dominant cost either way, and the
+        rows are bounded by the same cap.
 
         THE BOUND IS HONEST AND DISCLOSED. A pathological corpus whose
         whole head-of-line is terse can still defer the eligible rows
-        behind it — the bound is 3 × the window, NOT an unbounded walk
-        (an unbounded walk would trade starvation for a full-corpus scan
-        on every tick). THE DEFERRAL IS PERMANENT WHILE THE TERSE HEAD
+        behind it — the bound is the RESOLVED multiplier × the window,
+        NOT an unbounded walk (an unbounded walk would trade starvation
+        for a full-corpus scan on every tick). THE DEFERRAL IS PERMANENT
+        WHILE THE TERSE HEAD
         REMAINS: a skipped row is never ledgered, so it never leaves the
         window, and once the head fills the fetch cap the eligible rows
         behind it are unreachable on EVERY pass — the deferral resolves
@@ -441,7 +468,7 @@ class MemoirKeepsakeProposalService:
             MemoirEpisode.id.notin_(ledgered),
         )
         # A TOTAL order — the id breaks an exact effective/created_at
-        # tie — so the pages of the over-fetch cannot overlap.
+        # tie — so the window is read in a DETERMINISTIC order.
         order = (
             effective.desc(),
             MemoirEpisode.created_at.desc(),
@@ -455,33 +482,28 @@ class MemoirKeepsakeProposalService:
         fetch_cap = target * _resolve_fetch_cap_multiplier()
         eligible: list[MemoirEpisode] = []
         skipped_ineligible = 0
-        fetched = 0
         with Session(self._engine) as session:
-            while fetched < fetch_cap and len(eligible) < target:
-                page_size = min(target, fetch_cap - fetched)
-                statement = (
-                    select(MemoirEpisode)
-                    .where(*base_filters)
-                    .order_by(*order)
-                    .offset(fetched)
-                    .limit(page_size)
-                )
-                rows = list(session.exec(statement).all())
-                if not rows:
+            # ONE STATEMENT, ONE SNAPSHOT — the window is read in a
+            # single bounded SELECT, so a row can never be examined
+            # twice (the old OFFSET paging could re-read a row when the
+            # table mutated between pages).
+            statement = (
+                select(MemoirEpisode)
+                .where(*base_filters)
+                .order_by(*order)
+                .limit(fetch_cap)
+            )
+            rows = list(session.exec(statement).all())
+            for row in rows:
+                if not self.is_enduring(row):
+                    # The SUBSTANCE FLOOR — skipped and NEVER ledgered,
+                    # so it stays in the window; the over-fetch is what
+                    # keeps it from starving the rows behind it.
+                    skipped_ineligible += 1
+                    continue
+                eligible.append(row)
+                if len(eligible) >= target:
                     break
-                for row in rows:
-                    fetched += 1
-                    if not self.is_enduring(row):
-                        # The SUBSTANCE FLOOR — skipped and NEVER ledgered,
-                        # so it stays in the window; the over-fetch is what
-                        # keeps it from starving the rows behind it.
-                        skipped_ineligible += 1
-                        continue
-                    eligible.append(row)
-                    if len(eligible) >= target:
-                        break
-                if len(rows) < page_size:
-                    break  # the corpus is exhausted
         return CandidateScan(
             episodes=tuple(eligible), skipped_ineligible=skipped_ineligible
         )
@@ -571,6 +593,64 @@ class MemoirKeepsakeProposalService:
         proposal, but an ``enqueued`` row has ALREADY been announced and
         is never the next announcement (re-announcing it would starve
         every later proposal — see :meth:`notify_once`).
+
+        THE QUALIFICATION IS RE-CHECKED HERE, NOT ONLY AT STAGING. A
+        row is staged against the episode's THEN-effective poignancy;
+        the episode can be RE-SCORED afterwards (the reflection pass
+        re-scores what it wrote), and a proposal whose episode has since
+        fallen BELOW the threshold is no longer a proposal — it is
+        neither announced nor rendered. The predicate sits beside the
+        W-3 filters so ONE selection serves BOTH paths (the notify
+        target narrows the SAME query) and neither can drift from the
+        other.
+        """
+        statement = self._zone_selection_statement(
+            limit=max(0, int(limit)),
+            agent_id=agent_id,
+            statuses=statuses,
+        )
+        with Session(self._engine) as session:
+            return self._select_zone_rows_in(session, statement)
+
+    def _select_zone_rows_in(
+        self,
+        session: Session,
+        statement: Any,
+    ) -> list[ProposalCandidateRow]:
+        """Materialize ONE zone selection — the session-taking half.
+
+        The bridge's claim transaction needs the gate and the selection
+        to share ONE transaction (:meth:`notify_once`), so the query is
+        built by the caller and materialized HERE.
+        """
+        rows = session.execute(statement).all()
+        return [
+            ProposalCandidateRow(
+                ledger_id=str(row[0]),
+                episode_id=str(row[1]),
+                title=row[2],
+                event_at=row[3],
+                effective_poignancy=(None if row[4] is None else int(row[4])),
+                reason=str(row[5] or ""),
+                proposal_date=str(row[6]),
+                notification_status=str(row[7]),
+                proposed_at=row[8],
+            )
+            for row in rows
+        ]
+
+    def _zone_selection_statement(
+        self,
+        *,
+        limit: int,
+        agent_id: str | None,
+        statuses: tuple[str, ...] | None,
+    ) -> Any:
+        """BUILD the zone selection — the statement, not the rows.
+
+        Split from the materialization so the bridge's claim
+        transaction can run the SAME selection inside its own
+        transaction (one query, one truth).
         """
         owner = agent_id or self._agent_id
         wanted = (
@@ -579,7 +659,7 @@ class MemoirKeepsakeProposalService:
             else tuple(statuses)
         )
         effective = func.coalesce(MemoirEpisode.poignancy, MemoirEpisode.importance)
-        statement = (
+        return (
             select(
                 MemoirProposalLedger.id,
                 MemoirProposalLedger.episode_id,
@@ -600,26 +680,14 @@ class MemoirKeepsakeProposalService:
                 MemoirProposalLedger.notification_status.in_(list(wanted)),
                 MemoirEpisode.is_keepsake.is_(False),
                 MemoirEpisode.superseded_by.is_(None),
+                # THE RE-CHECKED THRESHOLD — the episode's EFFECTIVE
+                # poignancy must STILL reach the qualification bar
+                # (the same predicate the candidate scan uses).
+                effective >= MEMOIR_KEEPSAKE_POIGNANCY_THRESHOLD,
             )
             .order_by(effective.desc(), MemoirProposalLedger.proposed_at.desc())
             .limit(max(0, int(limit)))
         )
-        with Session(self._engine) as session:
-            rows = session.execute(statement).all()
-        return [
-            ProposalCandidateRow(
-                ledger_id=str(row[0]),
-                episode_id=str(row[1]),
-                title=row[2],
-                event_at=row[3],
-                effective_poignancy=(None if row[4] is None else int(row[4])),
-                reason=str(row[5] or ""),
-                proposal_date=str(row[6]),
-                notification_status=str(row[7]),
-                proposed_at=row[8],
-            )
-            for row in rows
-        ]
 
     def count_notified_today(
         self,
@@ -641,46 +709,94 @@ class MemoirKeepsakeProposalService:
         after any downstream status advance (``sent`` / ``failed``); a
         ``pending`` row has no ``notified_at`` and consumes nothing.
         """
+        with Session(self._engine) as session:
+            return self._count_notified_today_in(
+                session, day=day, agent_id=agent_id
+            )
+
+    def _count_notified_today_in(
+        self,
+        session: Session,
+        *,
+        day: str | None = None,
+        agent_id: str | None = None,
+    ) -> int:
+        """The 1/day gate — the session-taking half.
+
+        The bridge's claim transaction reads the gate INSIDE its own
+        transaction (one truth: the gate and the claim see the same
+        snapshot), so the count is materialized HERE.
+        """
         owner = agent_id or self._agent_id
         day_key = day or self._clock().date().isoformat()
         day_start = datetime.combine(
             date.fromisoformat(day_key), time.min, tzinfo=timezone.utc
         )
         day_end = day_start + timedelta(days=1)
-        with Session(self._engine) as session:
-            total = session.exec(
-                select(func.count())
-                .select_from(MemoirProposalLedger)
-                .where(
-                    MemoirProposalLedger.agent_id == owner,
-                    MemoirProposalLedger.notified_at >= day_start,
-                    MemoirProposalLedger.notified_at < day_end,
-                )
-            ).first()
+        total = session.exec(
+            select(func.count())
+            .select_from(MemoirProposalLedger)
+            .where(
+                MemoirProposalLedger.agent_id == owner,
+                MemoirProposalLedger.notified_at >= day_start,
+                MemoirProposalLedger.notified_at < day_end,
+            )
+        ).first()
         return int(total or 0)
 
     def mark_enqueued(self, ledger_id: str, *, now: datetime | None = None) -> bool:
         """Consume the slot for ONE row: ``pending → enqueued`` (+ stamp).
 
-        Called ONLY after an ACCEPTED enqueue (V2-23 → V2-40's surviving
-        invariant). Returns ``True`` when the row moved.
+        CONDITIONAL — A COMPARE-AND-SET. The row is moved ONLY if it is
+        STILL ``pending``; a row another producer already claimed is
+        NOT overwritten (overwriting it is exactly the double delivery
+        the claim exists to prevent). The method returns whether the
+        row moved.
 
         The stamp is COERCED TO AWARE UTC: ``notified_at`` IS the gate's
         calendar-day key, so it must carry ONE unambiguous instant (the
         house assume-UTC policy for a naive value).
+
+        The bridge's own claim runs this SAME compare-and-set INSIDE
+        its transaction (:meth:`notify_once`) — this wrapper is the
+        standalone form for a caller that owns no transaction.
         """
         if not ledger_id:
             return False
         moment = coerce_to_aware_utc(now or self._clock())
         with Session(self._engine) as session:
-            row = session.get(MemoirProposalLedger, ledger_id)
-            if row is None:
-                return False
-            row.notification_status = PROPOSAL_STATUS_ENQUEUED
-            row.notified_at = moment
-            session.add(row)
-            session.commit()
-        return True
+            moved = self._mark_enqueued_in(session, ledger_id, now=moment) == 1
+            if moved:
+                session.commit()
+            else:
+                session.rollback()
+        return moved
+
+    def _mark_enqueued_in(
+        self,
+        session: Session,
+        ledger_id: str,
+        *,
+        now: datetime,
+    ) -> int:
+        """The compare-and-set itself — it returns the ROWCOUNT.
+
+        The ROWCOUNT IS THE ASSERTION: ``1`` means this caller moved
+        the row, ``0`` means somebody else already holds it (the loser
+        of the race must deliver NOTHING). The caller asserts on it.
+        """
+        result = session.execute(
+            update(MemoirProposalLedger)
+            .where(
+                MemoirProposalLedger.id == ledger_id,
+                MemoirProposalLedger.notification_status == PROPOSAL_STATUS_PENDING,
+            )
+            .values(
+                notification_status=PROPOSAL_STATUS_ENQUEUED,
+                notified_at=now,
+            )
+        )
+        return int(result.rowcount or 0)
 
     # ── the active-instance resolution (ND-22) ──────────────────────────
 
@@ -691,6 +807,22 @@ class MemoirKeepsakeProposalService:
         LIMIT 1`` — the instance lane the bridge delivers into. A missing
         running instance is NOT an error: the slot stays ``pending`` and a
         later pass retries (V2-D 6.2's own wording).
+        """
+        with Session(self._engine) as session:
+            return self._resolve_active_instance_id_in(session, agent_id=agent_id)
+
+    def _resolve_active_instance_id_in(
+        self,
+        session: Session,
+        *,
+        agent_id: str | None = None,
+    ) -> str | None:
+        """Ari's RUNNING instance id — the session-taking half.
+
+        The bridge's claim transaction resolves the lane INSIDE its own
+        transaction, so the lookup must not open a SECOND connection
+        (a nested session on a shared SQLite connection would roll the
+        outer transaction back).
         """
         owner = agent_id or self._agent_id
         try:
@@ -705,8 +837,7 @@ class MemoirKeepsakeProposalService:
                 .order_by(Instance.updated_at.desc())
                 .limit(1)
             )
-            with Session(self._engine) as session:
-                found = session.exec(statement).first()
+            found = session.exec(statement).first()
             return str(found) if found else None
         except Exception as exc:  # noqa: BLE001 — never fail the pass
             logger.warning(
@@ -719,9 +850,23 @@ class MemoirKeepsakeProposalService:
     # ── the bridge (V2-D 6.2 / V2-40 / B4) ──────────────────────────────
 
     def _bridge_message(self, row: ProposalCandidateRow) -> str:
-        """Compose the bridged message (plan §3.1's shape, one line)."""
-        title = (row.title or "(untitled)").strip()
-        return (
+        """Compose the bridged message (plan §3.1's shape, ONE line).
+
+        THE TITLE IS UNTRUSTED TEXT. It reaches Ari's lane as a
+        daemon-minted (``injected_message=True``) HumanMessage that is
+        NOT compaction-protected, so a title carrying a newline could
+        forge a LINE-START ``[SYSTEM CONTEXT: ...]`` header — a fake
+        system-context block in the very lane that trusts those blocks.
+
+        THE SAME SANITIZER THE ZONE PATH USES (:func:`_proposal_one_line`
+        — one line, no forged header) is applied here, so the two
+        delivery paths can never disagree about identical content. The
+        composed message is sanitized as a WHOLE (not only the title):
+        the guarantee must hold for the shipped bytes, whatever the
+        template carries.
+        """
+        title = _proposal_one_line(row.title) or MEMOIR_UNTITLED_TITLE
+        return _proposal_one_line(
             f"[system:memoir-proposal] Ari has reflected and proposed 1 new "
             f"keepsake: '{title}'. Review via briefing."
         )
@@ -768,8 +913,8 @@ class MemoirKeepsakeProposalService:
         """Enqueue AT MOST ONE proposal notification for today.
 
         Returns ``(enqueued, failure_reason)``. The slot is consumed ONLY
-        on success (:meth:`mark_enqueued`): every failure path leaves the
-        row ``pending`` so the day's slot survives for a later retry.
+        on success: every failure path leaves the row ``pending`` so the
+        day's slot survives for a later retry.
 
         The candidate is the STRONGEST row that has NOT been announced
         — ``pending`` only, in the briefing's own ordering. An
@@ -779,6 +924,33 @@ class MemoirKeepsakeProposalService:
         renders it. A day that already consumed its slot is silent
         (V2-D 6.1 / R8) — measured on the CONSUMPTION day
         (:meth:`count_notified_today`), not on the staging date.
+
+        THE CLAIM IS A COMPARE-AND-SET, INSIDE ONE TRANSACTION. The
+        gate used to be READ and the row then WRITTEN unconditionally:
+        two producers that read the gate together both saw an open day
+        and both delivered the SAME episode (measured: 9 of 12
+        concurrent trials double-delivered). The fix is a CONDITIONAL
+        UPDATE (``WHERE id = ? AND notification_status = 'pending'``)
+        whose ROWCOUNT is asserted: exactly ONE producer can move the
+        row, and the loser delivers NOTHING. The gate, the selection and
+        the claim share ONE transaction, so they read one snapshot.
+
+        THE ENQUEUE RUNS INSIDE THAT TRANSACTION. The slot is consumed
+        ONLY on an ACCEPTED enqueue (V2-23 → V2-40), so a failed
+        enqueue ROLLS THE CLAIM BACK — the row stays ``pending`` and
+        the day's slot is NOT consumed, exactly as before. The cost is
+        a transaction held across the bridge call (bounded by
+        ``MEMOIR_PROPOSAL_ENQUEUE_TIMEOUT_S``, once a day).
+
+        THE SINGLE-PRODUCER ASSUMPTION (DISCLOSED). Today's blast
+        radius is ZERO: the reflection worker runs ONE proposal pass at
+        a time (``max_workers=1``), so no two producers can race. The
+        compare-and-set makes the DURABLE-STATE invariant correct
+        regardless — but the assumption itself ESCALATES TO CRITICAL the
+        moment a second producer exists (a second worker, a second
+        daemon, a manual trigger): the row-count assertion would then
+        be the only thing standing between the lane and a double
+        delivery.
         """
         owner = agent_id or self._agent_id
         # The gate's day key and the row's stamp must name the SAME
@@ -786,31 +958,56 @@ class MemoirKeepsakeProposalService:
         # for a naive value) — a local-timezone ``now`` would otherwise
         # count a UTC day the stamp does not belong to.
         moment = coerce_to_aware_utc(now or self._clock())
-        if self.count_notified_today(
-            day=moment.date().isoformat(), agent_id=owner
-        ) > 0:
-            return False, "daily_slot_consumed"
-        open_rows = self.select_zone_rows(
-            limit=1, agent_id=owner, statuses=(PROPOSAL_STATUS_PENDING,)
-        )
-        if not open_rows:
-            return False, "no_proposal"
-        row = open_rows[0]
-        instance_id = self.resolve_active_instance_id(agent_id=owner)
-        if not instance_id:
-            # NO ACTIVE INSTANCE — the slot is PRESERVED (V2-D 6.2).
-            return False, "no_active_instance"
-        try:
-            self._enqueue(instance_id, self._bridge_message(row), MEMOIR_PROPOSAL_SOURCE)
-        except Exception as exc:  # noqa: BLE001 — never fail the pass
-            logger.warning(
-                "[MemoirProposal] enqueue bridge failed (%s: %s) — the "
-                "proposal stays pending (the daily slot is NOT consumed)",
-                type(exc).__name__,
-                exc,
+        with Session(self._engine) as session:
+            # THE GATE — inside the claim's own transaction.
+            if (
+                self._count_notified_today_in(
+                    session, day=moment.date().isoformat(), agent_id=owner
+                )
+                > 0
+            ):
+                return False, "daily_slot_consumed"
+            open_rows = self._select_zone_rows_in(
+                session,
+                self._zone_selection_statement(
+                    limit=1,
+                    agent_id=owner,
+                    statuses=(PROPOSAL_STATUS_PENDING,),
+                ),
             )
-            return False, f"enqueue_failed:{type(exc).__name__}"
-        self.mark_enqueued(row.ledger_id, now=moment)
+            if not open_rows:
+                return False, "no_proposal"
+            row = open_rows[0]
+            instance_id = self._resolve_active_instance_id_in(session, agent_id=owner)
+            if not instance_id:
+                # NO ACTIVE INSTANCE — the slot is PRESERVED (V2-D 6.2).
+                return False, "no_active_instance"
+            # THE CLAIM — a compare-and-set: only a row that is STILL
+            # ``pending`` can move, and the ROWCOUNT says whether it
+            # did. Exactly one producer can win it.
+            claimed = self._mark_enqueued_in(
+                session, row.ledger_id, now=moment
+            )
+            if claimed != 1:
+                # ANOTHER PRODUCER GOT THERE FIRST — deliver nothing.
+                session.rollback()
+                return False, "already_claimed"
+            try:
+                self._enqueue(
+                    instance_id,
+                    self._bridge_message(row),
+                    MEMOIR_PROPOSAL_SOURCE,
+                )
+            except Exception as exc:  # noqa: BLE001 — never fail the pass
+                session.rollback()
+                logger.warning(
+                    "[MemoirProposal] enqueue bridge failed (%s: %s) — the "
+                    "proposal stays pending (the daily slot is NOT consumed)",
+                    type(exc).__name__,
+                    exc,
+                )
+                return False, f"enqueue_failed:{type(exc).__name__}"
+            session.commit()
         logger.info(
             "[MemoirProposal] bridged 1 keepsake proposal to %s… "
             "(ledger=%s, slot consumed for %s)",
