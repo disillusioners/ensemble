@@ -267,6 +267,7 @@ class _DrainHarness:
             {
                 "argv": list(argv),
                 "install_dir": Path(str(install_dir)),
+                "extra_env": dict(extra_env or {}),
                 "unit_prefix": unit_prefix,
                 "unit_properties": (
                     list(unit_properties) if unit_properties is not None else None
@@ -275,11 +276,19 @@ class _DrainHarness:
         )
         return self.EXECUTOR_PID, "(stubbed)"
 
-    def arm_and_drain(self, kind: str, run_id: str, target: str = "v0.0.1-test") -> bool:
+    def arm_and_drain(
+        self,
+        kind: str,
+        run_id: str,
+        target: str = "v0.0.1-test",
+        env: str = "demo",
+        install_dir: Path | None = None,
+    ) -> bool:
+        install = Path(install_dir) if install_dir is not None else self.install
         uj.write_pending_op(
-            self.install,
+            install,
             uj.PendingOp(
-                run_id=run_id, kind=kind, env="demo", target=target,
+                run_id=run_id, kind=kind, env=env, target=target,
                 armed_by_instance="inst-drain-h",
             ),
         )
@@ -287,10 +296,10 @@ class _DrainHarness:
         self.mgr._pending_system_executions[iid] = {
             "instance_id": iid,
             "kind": kind,
-            "install_dir": str(self.install),
+            "install_dir": str(install),
             "scripts_dir": str(self.scripts),
             "run_id": run_id,
-            "env": "demo",
+            "env": env,
             "target": target,
         }
         return asyncio.run(self.mgr.drain_pending_system_execution(iid))
@@ -656,3 +665,166 @@ class TestLiveSoakPolicyRefusal:
         deadline = text.find("_enforce_deadline")
         assert deadline > 0
         assert guard < deadline, "the live soak guard must precede the deadline arming"
+
+
+# ── BLOCKER-1 (2026-11-10): the DEMO-lane confirm forwarding ────────────────
+#
+# scripts/upgrade/lib.sh now demands ENSEMBLE_INSTALL_DEMO=1 for a DEMO
+# upgrade (require_demo_guard — the DEMO counterpart of the LIVE lane's
+# ENSEMBLE_UPGRADE_LIVE). The executor strips confirm vars from the ambient
+# environment, so WITHOUT a forwarding seam a daemon-armed DEMO promote
+# would ALWAYS exit 78 and the daemon's own demo lane would be dead.
+#
+# The forwarding is EXPLICIT-EXTRA ONLY (never the allowlist / prefix path)
+# and SCOPED: minted only when the arm's target is demo AND the arm's
+# install dir provably IS the demo install (the candidates lib.sh resolves).
+# These pins drive the REAL drain seam with the spawn stubbed.
+
+
+class TestDemoArmConfirmForwarding:
+    """The daemon's demo lane must survive the demo confirm gate."""
+
+    @staticmethod
+    def _prepare_install(path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "releases").mkdir(parents=True, exist_ok=True)
+        uj.journal_init(path)
+        uj.ensure_extensions(path)
+        return path
+
+    def test_demo_target_forwards_the_confirm_var(
+        self, drain: _DrainHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(a) A demo-target arm whose install dir IS the demo install
+        ($HOME/agents-ensemble-demo) ⇒ ENSEMBLE_INSTALL_DEMO=1 rides the
+        explicit-extra merge, and the constructed executor env carries it."""
+        home = tmp_path / "fake-home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        demo_install = self._prepare_install(home / "agents-ensemble-demo")
+        assert drain.arm_and_drain(
+            "promote", "r-demo-fwd-1", install_dir=demo_install,
+        ) is True
+        assert drain.calls, "the spawn seam was never reached"
+        extra = drain.calls[0]["extra_env"]
+        assert extra.get("ENSEMBLE_INSTALL_DEMO") == "1", extra
+        # the var reaches the executor env through the explicit-extra merge
+        built = uj.executor_env(extra)
+        assert built.get("ENSEMBLE_INSTALL_DEMO") == "1", built
+
+    def test_live_target_does_not_forward_the_demo_confirm(
+        self, drain: _DrainHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) A live-target arm ⇒ NOT forwarded: the live lane keeps its own
+        ENSEMBLE_UPGRADE_LIVE factor and the demo confirm never leaks in."""
+        home = tmp_path / "fake-home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        demo_install = self._prepare_install(home / "agents-ensemble-demo")
+        assert drain.arm_and_drain(
+            "promote", "r-demo-fwd-live", env="live", install_dir=demo_install,
+        ) is True
+        extra = drain.calls[0]["extra_env"]
+        assert "ENSEMBLE_INSTALL_DEMO" not in extra, extra
+
+    def test_sandbox_target_does_not_forward_the_demo_confirm(
+        self, drain: _DrainHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) A sandbox-target arm ⇒ NOT forwarded (the sandbox lane is
+        exempt from the demo gate by design)."""
+        home = tmp_path / "fake-home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        demo_install = self._prepare_install(home / "agents-ensemble-demo")
+        assert drain.arm_and_drain(
+            "promote", "r-demo-fwd-sbx", env="sandbox", install_dir=demo_install,
+        ) is True
+        extra = drain.calls[0]["extra_env"]
+        assert "ENSEMBLE_INSTALL_DEMO" not in extra, extra
+
+    def test_unknown_target_does_not_forward_the_demo_confirm(
+        self, drain: _DrainHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) An unknown / empty target ⇒ NOT forwarded (fail-closed)."""
+        home = tmp_path / "fake-home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        demo_install = self._prepare_install(home / "agents-ensemble-demo")
+        assert drain.arm_and_drain(
+            "promote", "r-demo-fwd-unknown", env="", install_dir=demo_install,
+        ) is True
+        extra = drain.calls[0]["extra_env"]
+        assert "ENSEMBLE_INSTALL_DEMO" not in extra, extra
+
+    def test_demo_target_with_a_non_demo_install_dir_is_not_forwarded(
+        self, drain: _DrainHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) A demo-target arm whose install dir is NOT a demo candidate ⇒
+        NOT forwarded — the scoping is never a blanket export."""
+        home = tmp_path / "fake-home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        other = self._prepare_install(tmp_path / "not-the-demo-install")
+        assert drain.arm_and_drain(
+            "promote", "r-demo-fwd-other", install_dir=other,
+        ) is True
+        extra = drain.calls[0]["extra_env"]
+        assert "ENSEMBLE_INSTALL_DEMO" not in extra, extra
+
+    def test_layer1_demo_home_shape_is_forwarded(
+        self, drain: _DrainHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Layer-1 demo HOME shape (HOME's basename IS the demo install
+        dir) is a demo candidate too — the pin mirrors lib.sh's
+        _install_dir_candidates."""
+        home = tmp_path / "layer1" / "agents-ensemble-demo"
+        home.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        demo_install = self._prepare_install(home)
+        assert drain.arm_and_drain(
+            "promote", "r-demo-fwd-layer1", install_dir=demo_install,
+        ) is True
+        extra = drain.calls[0]["extra_env"]
+        assert extra.get("ENSEMBLE_INSTALL_DEMO") == "1", extra
+
+    def test_restart_arm_does_not_forward_the_demo_confirm(
+        self, drain: _DrainHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The RESTART lane is untouched by the demo gate (it has its own
+        live-only guard) ⇒ never forwards the demo confirm."""
+        home = tmp_path / "fake-home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        demo_install = self._prepare_install(home / "agents-ensemble-demo")
+        assert drain.arm_and_drain(
+            "restart", "r-demo-fwd-restart", install_dir=demo_install,
+        ) is True
+        extra = drain.calls[0]["extra_env"]
+        assert "ENSEMBLE_INSTALL_DEMO" not in extra, extra
+
+    def test_confirm_var_is_not_in_the_allowlist_or_the_prefixes(self) -> None:
+        """DISCIPLINE pin: the var rides the EXPLICIT-extra merge ONLY — the
+        allowlist and the prefix list stay untouched (the allowlist's own
+        comments pin that confirm vars cross the systemd boundary through the
+        explicit-extra merge alone)."""
+        assert "ENSEMBLE_INSTALL_DEMO" not in uj.EXECUTOR_ENV_ALLOWLIST
+        assert "ENSEMBLE_INSTALL_DEMO" not in uj.EXECUTOR_ENV_PREFIXES
+        assert not any(
+            p.startswith("ENSEMBLE_INSTALL_DEMO") for p in uj.EXECUTOR_ENV_PREFIXES
+        )
+
+    def test_ambient_demo_confirm_does_not_leak_through_executor_env(self) -> None:
+        """DISCIPLINE pin: an AMBIENT ENSEMBLE_INSTALL_DEMO=1 in the daemon's
+        own environment is stripped by executor_env (allowlist path) — only
+        the explicit-extra merge carries it."""
+        import os as _os
+        prev = _os.environ.get("ENSEMBLE_INSTALL_DEMO")
+        _os.environ["ENSEMBLE_INSTALL_DEMO"] = "1"
+        try:
+            env = uj.executor_env(None)
+            assert "ENSEMBLE_INSTALL_DEMO" not in env, env
+        finally:
+            if prev is None:
+                _os.environ.pop("ENSEMBLE_INSTALL_DEMO", None)
+            else:
+                _os.environ["ENSEMBLE_INSTALL_DEMO"] = prev

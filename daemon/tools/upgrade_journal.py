@@ -1801,6 +1801,75 @@ def is_verified_arm(op: PendingOp | None) -> bool:
     )
 
 
+def demo_arm_extras(target: str, install_dir: Path) -> dict[str, str]:
+    """Demo-lane confirm forwarding for a DAEMON-ARMED promote.
+
+    WHY (2026-11-10, BLOCKER-1): ``scripts/upgrade/lib.sh`` gained
+    ``require_demo_guard`` — a DEMO upgrade now demands
+    ``ENSEMBLE_INSTALL_DEMO=1`` (the Makefile guard's per-path DEMO var),
+    the same shape as the LIVE lane's ``ENSEMBLE_UPGRADE_LIVE``. The daemon's
+    executor strips confirm vars from the ambient environment
+    (``EXECUTOR_ENV_ALLOWLIST`` + ``EXECUTOR_ENV_PREFIXES``), so a
+    daemon-armed DEMO promote would ALWAYS exit 78 — the daemon's own demo
+    lane would be dead. The LIVE lane already solves this the sanctioned
+    way: the drain seam merges the arm's extras into the EXPLICIT-extra dict
+    (``_verified_arm_extras`` → ``extra_env.update(env_ext)``), which is
+    threaded into the transient unit verbatim via ``--setenv``. This helper is
+    the DEMO counterpart of that merge.
+
+    DISCIPLINE (mirrors the live lane exactly):
+      * EXPLICIT-EXTRA ONLY — the var rides the per-call-site extra_env
+        merge. It is NEVER added to ``EXECUTOR_ENV_ALLOWLIST`` and NEVER
+        matched by ``EXECUTOR_ENV_PREFIXES``: the allowlist's own comments
+        pin that confirm vars cross the systemd boundary through the
+        explicit-extra merge only.
+      * SCOPED, never blanket-exported — the var is minted ONLY when the
+        arm's target is demo AND the arm's install dir PROVABLY resolves to
+        the DEMO install (the candidates below). live / sandbox / dev /
+        unknown / empty targets, and a demo target whose dir is not a demo
+        candidate, are NOT forwarded (fail-closed) — the executor then hits
+        the gate and refuses loudly, exactly as the unverified live path
+        does.
+      * RATIONALE — the gate's intent is catching an accidental HUMAN
+        invocation (``make upgrade-stage`` with no intent, mutating the demo
+        install). A daemon-armed demo promote is deliberate by construction
+        (an arm is an explicit operator action), and pre-branch there was no
+        gate there at all.
+
+    CANDIDATES — the demo install dir, resolved the way
+    ``scripts/upgrade/lib.sh`` resolves it (``_install_dir_candidates`` for
+    the demo name, lib.sh:902-917): ``$HOME/agents-ensemble-demo`` and
+    ``$HOME`` itself when HOME's basename IS ``agents-ensemble-demo`` (the
+    Layer-1 service-user shape). Same pin-discipline as the shell-side
+    mirrors (e.g. ``scripts/stop-ensemble.sh``'s ``_default_install_dir``):
+    the shape is inlined HERE, minimal — the whole guard is NOT re-implemented
+    in Python. Deliberately NARROWER than lib.sh's full candidate list: the
+    Layer-1 sibling case is not forwarded (fail-closed).
+
+    Returns ``{}`` for every non-matching shape — the caller merges the
+    result into the executor's extra_env like any other explicit extra.
+    """
+    if target != "demo":
+        return {}
+    home = os.environ.get("HOME", "")
+    if not home:
+        return {}
+    try:
+        resolved = Path(install_dir).resolve()
+    except OSError:  # pragma: no cover - defensive
+        return {}
+    candidates = [Path(home) / "agents-ensemble-demo"]
+    if Path(home).name == "agents-ensemble-demo":
+        candidates.append(Path(home))
+    for cand in candidates:
+        try:
+            if cand.resolve() == resolved:
+                return {"ENSEMBLE_INSTALL_DEMO": "1"}
+        except OSError:  # pragma: no cover - defensive
+            continue
+    return {}
+
+
 def _verified_arm_extras(op: PendingOp | None) -> tuple[list[str], dict[str, str]]:
     """Shared verified-arm expansion — ``(argv_extension, extra_env_extension)``.
 

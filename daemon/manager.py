@@ -6365,6 +6365,25 @@ class InstanceManager:
                     argv_ext, env_ext = _uj._verified_arm_extras(op)
                     argv = argv + argv_ext
                     extra_env.update(env_ext)
+                # BLOCKER-1 (2026-11-10): the DEMO lane's confirm gate
+                # (scripts/upgrade/lib.sh require_demo_guard) needs
+                # ENSEMBLE_INSTALL_DEMO=1, and the executor strips confirm
+                # vars from the ambient environment — so a daemon-armed DEMO
+                # promote would ALWAYS exit 78 and the daemon's own demo lane
+                # would be dead. The LIVE lane solves this the sanctioned
+                # way (the explicit-extra merge above); this is its DEMO
+                # counterpart: the var rides the per-call-site extra_env
+                # merge (threaded into the transient unit via --setenv),
+                # NEVER the allowlist/prefix path.
+                #
+                # SCOPED (fail-closed): minted ONLY when the arm's target is
+                # demo AND the arm's install dir provably IS the demo
+                # install (the candidates lib.sh resolves). live / sandbox /
+                # dev / unknown targets — and a demo target pointing at a
+                # non-demo dir — are NOT forwarded: the executor then hits
+                # the gate and refuses loudly, exactly like the unverified
+                # live path.
+                extra_env.update(_uj.demo_arm_extras(env, install_dir))
             else:
                 logger.warning(
                     "drain_pending_system_execution: unknown kind=%r for %s",
