@@ -42,6 +42,16 @@ from daemon.repositories.skill.repository import (
 )
 from daemon.manager import InstanceManager
 from daemon.services import skill_deactivation as e4
+# The lane's SAFE sink redirect + the shared-path sentinel (the
+# order-dependent leak fix: a teardown may never restore None).
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
+from daemon.services import skill_capture_observability as observability
 from daemon.services.skill_deactivation import (
     CANONICAL_INACTIVE,
     REFUSAL_NO_WINNER_DECISION,
@@ -87,6 +97,27 @@ R1_TEST_ID = "083d5a58-0000-4000-8000-000000000002"
 # ============================================================
 # Fixtures
 # ============================================================
+
+
+@pytest.fixture(autouse=True)
+def _observability_sandbox(tmp_path, request):
+    """Point the sink at a SCRATCH dir for every test in this file.
+
+    The teardown NEVER restores the override to ``None``: that
+    re-exposed the checkout's REAL data dir for every later write (the
+    order-dependent sink leak).  It restores the SAFE session redirect
+    and runs the shared-path sentinel.
+    """
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    try:
+        yield tmp_path
+    finally:
+        restore_safe_sink_redirect()
+        observability.reset_counters()
+        lane_test_end(request.node.nodeid, before)
 
 
 @pytest.fixture()

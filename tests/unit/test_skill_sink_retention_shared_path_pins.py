@@ -62,6 +62,8 @@ import ast
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -70,6 +72,18 @@ from pathlib import Path
 import pytest
 
 from daemon.services import skill_capture_observability as observability
+
+# The lane's SAFE sink redirect + the shared-path sentinel (the
+# order-dependent leak fix: a teardown may never restore None).
+from tests.helpers.skill_sink_redirect import (
+    LANE_ROW_MARKERS,
+    assert_sink_never_reaches_real_dir,
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    scrub_data_dir_env,
+    snapshot_real_sink_dir,
+)
 
 #: The repository root — the lane's files are addressed from here.
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -88,11 +102,22 @@ LANE_TEST_FILES = (
     "tests/unit/test_skill_sink_retention_shared_path_pins.py",
 )
 
+#: The lane's SUPPORT modules (the static house-guard scans these too —
+#: a support module is just as able to carry a destructive call).
+LANE_SUPPORT_FILES = (
+    "tests/helpers/skill_sink_redirect.py",
+)
+
 #: The lane's PACK scripts (the static house-guard scans these too).
 LANE_PACK_SCRIPTS = (
     "test/packs/skill_capture_observability_unit_test.sh",
     "test/packs/skill_evolution_unit_test.sh",
     "test/packs/skill_stale_deactivation_unit_test.sh",
+    # The pack that CAUSED the F-G1 incident (the file-level `rm -f` of
+    # the shared daily sink).  The tester's gate flagged the omission of
+    # this very pack from the static class-proof — the scan is READ-ONLY,
+    # so covering another lane's pack costs nothing.
+    "test/packs/metrics_capture_lane_off_seam_unit_test.sh",
 )
 
 #: The destructive filesystem calls a lane test must never make.  The
@@ -189,13 +214,25 @@ def sink_snapshot(directory: Path) -> dict[str, bytes]:
 
 
 @pytest.fixture(autouse=True)
-def _sink_sandbox(tmp_path):
-    """Point the sink at a SCRATCH dir for every test in this file."""
+def _sink_sandbox(tmp_path, request):
+    """Point the sink at a SCRATCH dir for every test in this file.
+
+    The teardown NEVER restores the override to ``None``: that
+    re-exposed the checkout's REAL data dir for every later write (the
+    order-dependent sink leak).  It restores the SAFE session redirect
+    and runs the shared-path sentinel.
+    """
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
     observability.configure_sink(tmp_path)
     try:
         yield tmp_path
     finally:
-        observability.configure_sink(None)
+        # NEVER restore to None: that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink
+        # leak).  Restore the SAFE session redirect instead.
+        restore_safe_sink_redirect()
+        lane_test_end(request.node.nodeid, before)
 
 
 def _sink_dir(tmp_path) -> Path:
@@ -382,7 +419,7 @@ def test_p6_no_lane_test_file_carries_a_destructive_filesystem_call():
     """
     offenders: list[str] = []
 
-    for relative in LANE_TEST_FILES:
+    for relative in LANE_TEST_FILES + LANE_SUPPORT_FILES:
         path = REPO_ROOT / relative
         assert path.exists(), f"lane test file missing: {relative}"
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -434,55 +471,144 @@ def test_p6_no_lane_test_file_carries_a_destructive_filesystem_call():
 # ── P7 (house guard, sentinel) — a lane write touches NO shared path ────
 
 
-def test_p7_a_lane_write_leaves_the_real_sink_dir_byte_identical(tmp_path):
-    """P7 — the sentinel: the shared sink dir is untouched by a lane write.
+@pytest.mark.timeout(600)
+def test_p7_the_lane_files_run_together_never_reach_the_real_sink_dir(tmp_path):
+    """P7 — the CLASS-level sentinel: the lane's files, TOGETHER.
 
-    The house rule (F-G1 lesson): the shared sink is EVIDENCE — snapshot
-    the bytes before the run, diff after, and treat any shrink as an
-    incident.  A clean END state can be the residue of destruction, not
-    cleanliness.
+    THE REPRODUCTION THAT PROVED THE DEFECT: each of the lane's files
+    on its OWN wrote 0 bytes into the checkout's real sink dir, but the
+    SAME FILES RUN TOGETHER wrote thousands of bytes into it.  The leak
+    was ORDER-DEPENDENT: a file's fixture teardown restored the sink
+    override to ``None`` (= the checkout's real data dir), and a later
+    file's test then wrote with no redirect in force.
 
-    The pin asserts all three of: no file vanished, no file shrank, and
-    no row carrying this run's marker landed in the shared dir.
+    So this pin runs the lane's three affected files TOGETHER, in a
+    SUBPROCESS, under the DEVELOPER's direct-pytest condition (the
+    data-dir env knobs scrubbed — otherwise the pack-level sandbox would
+    mask the very leak the pin looks for), and asserts that the
+    checkout's real sink dir is untouched.
+
+    The pin is not vacuous: the inner run is the leak's own reproduction,
+    and the sentinel in the lane's fixtures (``lane_test_start`` /
+    ``lane_test_end``) turns a rogue teardown into a FAILED test.
+
+    Named mutation: restore the override to ``None`` in one of the lane
+    files' teardowns → this pin (and the lane's own sentinel) REDs.
     """
-    marker = marker_for_run()
+    inner_sandbox = tmp_path / "inner-sandbox"
+    inner_sandbox.mkdir()
+    env = scrub_data_dir_env()
+    # pytest's tmp_path base follows TMPDIR ⇒ the inner run's scratch
+    # files stay observable under the sandbox.
+    env["TMPDIR"] = str(inner_sandbox)
+
     before = sink_snapshot(REAL_SINK_DIR)
-
-    # The lane's own write — through the PUBLIC path.
-    written = observability.append_run_record(
-        {"stage": "pin", "marker": marker},
+    completed = subprocess.run(
+        [
+            sys.executable, "-m", "pytest",
+            "tests/unit/test_skill_sink_retention_shared_path_pins.py",
+            "tests/unit/test_skill_fix_burst_guard.py",
+            "tests/services/test_skill_capture_observability.py",
+            # no recursion: this pin does not run inside the inner run
+            "--deselect",
+            "tests/unit/test_skill_sink_retention_shared_path_pins.py::"
+            "test_p7_the_lane_files_run_together_never_reach_the_real_sink_dir",
+            "-q", "--tb=line",
+        ],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=540,
     )
-
-    resolved = observability.resolve_sink_dir()
-    assert str(resolved).startswith(str(tmp_path)), (
-        f"the sink resolved to {resolved} — the lane's write must go to the "
-        "test's scratch dir, never to a shared path"
+    assert completed.returncode == 0, (
+        "the lane's files must pass when run TOGETHER — the combination "
+        "is the leak's own reproduction, so a failure here is the "
+        "order-dependent defect:\n"
+        f"{completed.stdout[-4000:]}\n{completed.stderr[-2000:]}"
     )
-    assert written is not None and written.exists()
 
     after = sink_snapshot(REAL_SINK_DIR)
-
     vanished = sorted(set(before) - set(after))
     assert not vanished, (
-        f"a lane write DELETED a shared sink file: {vanished} — the real "
-        "sink dir must be byte-identical after a lane write"
+        f"running the lane's files together DELETED a shared sink file: "
+        f"{vanished} — the checkout's real sink dir must be untouched"
     )
     shrunk = sorted(
         name for name in before
         if name in after and len(after[name]) < len(before[name])
     )
     assert not shrunk, (
-        f"a shared sink file SHRANK across a lane write: {shrunk} — a shrink "
-        "is an incident (rows were destroyed), not a cleanup"
+        f"running the lane's files together SHRANK a shared sink file: "
+        f"{shrunk} — a shrink is an incident (rows were destroyed)"
     )
-    leaked = sorted(
-        name for name, blob in after.items()
-        if marker.encode("utf-8") in blob
-    )
-    assert not leaked, (
-        f"a lane write landed a row in the REAL sink dir: {leaked} — the "
-        "sink must be redirected to the test's scratch dir"
-    )
+    appeared = sorted(set(after) - set(before))
+    for name in appeared:
+        rows = [
+            line for line in after[name].decode("utf-8", "ignore").splitlines()
+            if line.strip()
+        ]
+        assert not (rows and all(
+            any(marker in row for marker in LANE_ROW_MARKERS) for row in rows
+        )), (
+            f"running the lane's files together created {name} in the "
+            "checkout's real sink dir, and every row in it is ours — the "
+            "lane's sink write escaped its scratch dir (the order-dependent "
+            "leak)"
+        )
+    for name, blob in after.items():
+        text = blob.decode("utf-8", "ignore")
+        hit = [marker for marker in LANE_ROW_MARKERS if marker in text]
+        assert not hit, (
+            f"a lane row landed in the checkout's real sink dir: {name} "
+            f"(markers {hit}) — the lane's files, run together, must never "
+            "reach the shared data dir"
+        )
+
+
+def test_p9_the_sentinel_catches_a_teardown_that_restores_none():
+    """P9 — the guard BITES: a rogue teardown is caught, not tolerated.
+
+    Two halves, both deterministic:
+
+    * the observation helper refuses to pass while the override is
+      unset (``None`` = the checkout's real data dir);
+    * the NEXT lane test's start boundary fails when the previous lane
+      test left the override unset — that is the FAILED-level detector
+      for the order-dependent leak.
+    """
+    observability.configure_sink(None)
+    try:
+        with pytest.raises(AssertionError) as excinfo:
+            assert_sink_never_reaches_real_dir(None)
+        assert "override" in str(excinfo.value), (
+            f"the guard must name the override: {excinfo.value}"
+        )
+    finally:
+        restore_safe_sink_redirect()
+
+    # The rogue state is RECORDED by the end boundary (the state the
+    # next lane test will look at) …
+    observability.configure_sink(None)
+    try:
+        with pytest.raises(AssertionError):
+            lane_test_end(
+                "tests/unit/test_skill_sink_retention_shared_path_pins.py::"
+                "p9_simulated_rogue_teardown",
+                None,
+            )
+    finally:
+        restore_safe_sink_redirect()
+
+    # … and the NEXT lane test's start boundary fails on it.
+    with pytest.raises(AssertionError) as excinfo:
+        lane_test_start(
+            "tests/unit/test_skill_sink_retention_shared_path_pins.py::"
+            "p9_the_next_lane_test"
+        )
+    assert "real data dir" in str(excinfo.value) or "override" in str(
+        excinfo.value
+    ), f"the guard must explain itself: {excinfo.value}"
 
 
 # ── P8 (house guard) — the cleanup is ROW-GRANULAR, never file-level ────

@@ -34,6 +34,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import daemon.services.skill_capture_observability as observability
+
+# The lane's SAFE sink redirect + the shared-path sentinel (the
+# order-dependent leak fix: a teardown may never restore None).
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
 from daemon.tools.skill_evolution_tools import create_skill_evolution_tools
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -58,6 +68,27 @@ def _run_in_fresh_interpreter(code: str) -> str:
 
 
 # ── Pin 1: C2 tools seam counter + sink record (with NO raw prompt) ─────────
+
+
+@pytest.fixture(autouse=True)
+def _observability_sandbox(tmp_path, request):
+    """Point the sink at a SCRATCH dir for every test in this file.
+
+    The teardown NEVER restores the override to ``None``: that
+    re-exposed the checkout's REAL data dir for every later write (the
+    order-dependent sink leak).  It restores the SAFE session redirect
+    and runs the shared-path sentinel.
+    """
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    try:
+        yield tmp_path
+    finally:
+        restore_safe_sink_redirect()
+        observability.reset_counters()
+        lane_test_end(request.node.nodeid, before)
 
 
 @pytest.mark.asyncio

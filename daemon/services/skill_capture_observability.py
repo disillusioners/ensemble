@@ -14,24 +14,25 @@ operator looks first.
 ======================================  =====================  =====================
 Signal                                  Observable today        Turns on in Phase 2
 ======================================  =====================  =====================
-Capture ADMISSION counters              PARTIAL — the           the counter's *non-zero*
-                                        dispatcher's OWN        admission rate
-                                        capture-lane-off gate
-                                        counts the refusal, but
-                                        the PRODUCTION capture
-                                        refusal site
-                                        (skill_metrics_service
-                                        .py:595-596 — the
-                                        metrics lane) returns
-                                        BEFORE that gate is
-                                        reached, so the
-                                        "capture_lane_off"
-                                        counter needs the
-                                        metrics-lane wiring
-                                        before it moves in
-                                        production (C2 — see
-                                        record_capture_lane_
-                                        disabled_refusal)
+Capture ADMISSION counters               COMPLETE — all three    the counter's *non-zero*
+                                         production capture-     admission rate
+                                         lane-off refusal        
+                                         sites (the metrics      
+                                         seam, the tools seam    
+                                         and the dispatcher      
+                                         gate) count on the      
+                                         SAME key                
+                                         ("capture_lane_off")    
+                                         BEFORE refusing; the    
+                                         twin seam               
+                                         (check_and_capture) has 
+                                         no capture-enable       
+                                         check, so it never      
+                                         refuses because the     
+                                         lane is off (the        
+                                         metrics lane owns the   
+                                         cross-path + twin-seam  
+                                         pins)                   
 EXECUTION-refusal rows                  YES —                  the population size
                                         terminal_reason=       the refused-execution
                                         'lane_disabled' is     rate
@@ -56,18 +57,18 @@ Keeper transcript retention             NO — the 168 h TTL     Phase 2 must ex
                                                                  BEFORE the first flip
 ======================================  =====================  =====================
 
-HONESTY NOTE (C2 — the "observable today" column is NOT a claim that
-every counter moves in production today): the "capture_lane_off"
-ADMISSION counter is incremented by the dispatcher's own capture gate
-(SkillJobDispatcher.enqueue_capture) and by the public helper
-record_capture_lane_disabled_refusal — but the PRODUCTION capture flow
-enters through SkillMetricsService._check_capture_eligibility, whose
-capture-lane-off refusal returns BEFORE the dispatcher is ever reached.
-That call site lives in the METRICS lane
-(daemon/services/skill_metrics_service.py), which this module's lane
-does not own, so the wiring is PENDING the metrics lane's edit. The
-helper is the ready-to-serve seam for that edit; the exact patch text
-is carried in the fix-wave report.
+HONESTY NOTE (C2 — the "observable today" column states WHICH SIGNALS
+move, not how loud they are): the "capture_lane_off" ADMISSION counter
+is COMPLETE in production today.  All three production capture-lane-off
+refusal sites count on the SAME key BEFORE refusing — the metrics seam
+(daemon/services/skill_metrics_service.py:659, counting through
+_record_capture_lane_off_refusal at :140, called at :682), the tools
+seam (daemon/tools/skill_evolution_tools.py:522 → :539) and the
+dispatcher gate (daemon/services/skill_job_dispatcher.py:1126 → :1136,
+which uses the generic record_admission_refusal entry point).  The twin
+seam (check_and_capture) has NO capture-enable check, so it never
+refuses because the capture lane is off.  The metrics lane owns the
+cross-path + twin-seam pins; this module does not duplicate them.
 
 D1 — THE REFUSAL SEMANTICS (do not conflate, decisions.md DS-19)
 ------------------------------------------------------------------
@@ -321,16 +322,34 @@ def record_capture_lane_disabled_refusal(
 ) -> None:
     """Count AND record a capture-lane-OFF ADMISSION refusal.
 
-    **This is the seam the METRICS lane calls.** The production capture
-    refusal lives at ``SkillMetricsService._check_capture_eligibility``
-    (``daemon/services/skill_metrics_service.py:595-596`` — the
-    ``if not _resolve_capture_enabled(): return None`` guard). That
-    file belongs to the metrics lane, so the CALL SITE cannot be edited
-    from the observability lane; this helper is the ready-to-serve
-    counterpart: the metrics owner calls it at the refusal site and
-    BOTH the counter and the sink record are written.
+    THE ``capture_lane_off`` ADMISSION COUNTER IS **COMPLETE** IN
+    PRODUCTION TODAY.  All three production capture-lane-off refusal
+    sites count on the SAME counter key BEFORE refusing:
 
-    What it does (in order):
+    1. the METRICS seam — ``SkillMetricsService._check_capture_eligibility``
+       (``daemon/services/skill_metrics_service.py:659`` — the
+       ``if not _resolve_capture_enabled():`` guard).  It counts through
+       the metrics lane's wrapper ``_record_capture_lane_off_refusal``
+       (``:140``), which is called at ``:682`` and resolves THIS helper
+       at ``:176``.  That call site USED TO BE **PARTIAL** — the counter
+       moved for the tools-lane seam only — and would go UNCOUNTED
+       without this call;
+    2. the TOOLS seam — ``daemon/tools/skill_evolution_tools.py:522``
+       (the ``if not _resolve_capture_enabled():`` gate) calls THIS
+       helper at ``:539``;
+    3. the DISPATCHER gate — ``daemon/services/skill_job_dispatcher.py:1126``
+       counts the SAME key through the GENERIC entry point
+       ``observability.record_admission_refusal("capture_lane_off")``
+       (``:1136``) and writes its own sink record (``:1145``); it does
+       NOT call this helper.
+
+    The TWIN seam (``check_and_capture`` in
+    ``daemon/services/skill_metrics_service.py``) has NO capture-enable
+    check, so it never refuses because the capture lane is off.  The
+    metrics lane owns the cross-path + twin-seam pins; this module does
+    not duplicate them.
+
+    What this helper does (in order):
 
     1. increments ``admission_refusals['capture_lane_off']`` — the
        ADMISSION-refusal counter (DS-19: never merged with the
@@ -401,9 +420,25 @@ def configure_sink(data_dir: str | Path | None = None) -> None:
     The daemon resolves the data dir from the environment; TESTS point
     the sink at a scratch dir so a test run never writes into the
     checkout's ``data/`` tree.
+
+    ``None`` means "the resolved default" — the checkout's real data
+    tree when the daemon runs with no data-dir env var.  A TEST fixture
+    teardown must therefore NOT restore ``None``: that re-exposes the
+    shared data dir for every later write (the order-dependent sink
+    leak).  Restore a scratch dir instead.
     """
     global _SINK_DIR_OVERRIDE
     _SINK_DIR_OVERRIDE = data_dir
+
+
+def sink_override() -> str | Path | None:
+    """Return the sink redirect in force (``None`` = the resolved default).
+
+    The test surface uses this to assert that the redirect is never
+    ``None`` — i.e. that the checkout's real data dir is never
+    re-exposed between tests.
+    """
+    return _SINK_DIR_OVERRIDE
 
 
 def resolve_sink_dir(data_dir: str | Path | None = None) -> Path:
