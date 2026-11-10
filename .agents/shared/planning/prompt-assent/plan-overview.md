@@ -8,7 +8,14 @@
 | Branch | `feature/prompt-assent` |
 | Base commit | `0efdf106f3f66ccb400405f4137694592b72097d` (VERIFIED) |
 | Status | **Draft — Ready for Architect Review** |
-| Planning set | [`plan-overview.md`](plan-overview.md) · [`phase1-plan.md`](phase1-plan.md) · [`phase2-plan.md`](phase2-plan.md) · [`phase3-plan.md`](phase3-plan.md) · [`phase4-plan.md`](phase4-plan.md) · [`decisions.md`](decisions.md) · [`risks.md`](risks.md) · [`doctrine.md`](doctrine.md) · [`research/approval-path.md`](research/approval-path.md) · [`research/trust-anchors.md`](research/trust-anchors.md) · [`technical-analysis.md`](technical-analysis.md) |
+| Planning set | [`plan-overview.md`](plan-overview.md) · [`phase1-plan.md`](phase1-plan.md) · [`phase2-plan.md`](phase2-plan.md) · [`phase3-plan.md`](phase3-plan.md) · [`phase4-plan.md`](phase4-plan.md) · [`decisions.md`](decisions.md) · [`risks.md`](risks.md) · [`doctrine.md`](doctrine.md) · [`architecture-recommendation.md`](architecture-recommendation.md) · [`research/approval-path.md`](research/approval-path.md) · [`research/trust-anchors.md`](research/trust-anchors.md) · [`technical-analysis.md`](technical-analysis.md) |
+
+> **Binding order.** **`architecture-recommendation.md` @ `df8da01a6` WINS ON CONFLICT** with every
+> document in this set. It resolves D-1…D-9 and J-1…J-3, adds the rulings **AR-1** (mint-context
+> binding: channel **and** user) and **AR-2** (the 4-verb action set), and closes the plan-council
+> criticals **K-2 / K-3 / K-7 / K-8 / K-9** with ride-alongs **O-A…O-L**. Where a document below
+> says otherwise, the ruling wins. **Reconciliation pass 1 (2026-11-10)** transcribed the amended
+> ruling into the phase work-orders; the per-phase must-apply deltas are in each phase doc's header.
 
 ---
 
@@ -50,7 +57,7 @@ The doctrine is the **north star**, and three clauses drive the entire shape of 
 
 | # | Item | Why it is in |
 |---|---|---|
-| **S-1** | A new privileged **`ari`-EXACTLY** tool `prompt_assent` (category key **`prompt-assent`**), with `action ∈ {mint, approve, reject}` | BLESSED-1, BLESSED-5; DECIDED-3 |
+| **S-1** | A new privileged **`ari`-EXACTLY** tool `prompt_assent` (category key **`prompt-assent`**), with the **4-verb action set `action ∈ {list, mint, approve, reject}`** (AR-2) | BLESSED-1, BLESSED-5; DECIDED-3 **superseded by AR-2** @ `df8da01a6` |
 | **S-2** | A **new PG table `prompt_assent_tokens`** — one row per minted token, storing `token_hash` (never the raw token), the item binding, TTL, status, attempts | D-1; a new table rides the `create_all` seam and therefore **avoids** the `_ensure_postgres_columns` one-transaction boot-abort surface |
 | **S-3** | The new table's **own** `*.sql` migration in `daemon/migrations/versions/` | House rule: every new SQLModel table requires its own `.sql` — zero exceptions |
 | **S-4** | A new auth-method lane value **`assent-relay`** + a dedicated actor constructor + an **attestation-bearing** repository entrypoint | D-8 — the relay actor needs a name that is neither `internal` (banned by F4) nor a forged `session` |
@@ -58,7 +65,7 @@ The doctrine is the **north star**, and three clauses drive the entire shape of 
 | **S-6** | **Audit payload extension** of `prompt_audit_events` — relay provenance keys, **append-only**, same transaction as the state change | BLESSED-3; DECIDED-1 |
 | **S-7** | A **service-level acceptance path** — a single shared predicate `is_acceptable_approver(actor, attestation)` consulted by the classic prompt surface | BLESSED-4; DECIDED-4 |
 | **S-8** | `repo.list_pending()` + `svc.list_pending()` + an **ari-facing read** surface | BLESSED-5; DECIDED-2 — a pending list does not exist today |
-| **S-9** | The **kill-switch** `ENSEMBLE_PROMPT_ASSENT_ENABLED`, read at call time; the tool stays registered | BLESSED-6; D-2 |
+| **S-9** | The **kill-switch** `ENSEMBLE_PROMPT_ASSENT_ENABLED` (class **`PromptAssentConfig`**), read at call time; the tool stays registered; **`mint` is refused too** when off; **default OFF (fail-closed)**; **ONE shared default constant** consumed by both the P2 resolver and the P4 class | BLESSED-6; **D-2 RULED — default OFF @ `df8da01a6`** |
 | **S-10** | The **ari-EXACTLY registration** (category + `agents/ari/meta.json` allow entry + in-body `agent_id` gate) and the **complete pin set** | BLESSED-1; the SAME-PR rule (`daemon/tools/_tool_registry.py:366-417`) |
 | **S-11** | The **full test matrix** (happy path + five mandated refusals + the token-store + registration proofs) | BLESSED-6; house testing conventions |
 | **S-12** | A **STAGED RELEASE** (no live promote) | The ceremony belongs to the Emperor |
@@ -84,9 +91,9 @@ The doctrine is the **north star**, and three clauses drive the entire shape of 
 
 | Phase | Name | Objective | Tasks | Coupling | Status |
 |-------|------|-----------|-------|----------|--------|
-| **1** | **Token, lane and ledger primitives** | A durable per-item token store, the `assent-relay` actor lane, an attestation-bearing repository entrypoint, and the audit payload extension | 9 | tight with P2 (the tool consumes the token API) · tight with P3 (the service consumes the repo entrypoint) · independent of P4 | pending |
-| **2** | **Tool surface and registration** | The `prompt_assent` tool, its `ari`-EXACTLY three-layer registration, the complete pin set, and the pending-list read surface | 9 | tight with P1 (token API) · tight with P3 (the tool calls the service) · loose with P4 (the kill-switch config lands in P4) | pending |
-| **3** | **Acceptance path and provenance flow** | The service-level acceptance path, the shared approver predicate, the end-to-end provenance chain, and the FE-unchanged proof | 7 | tight with P1 (repo entrypoint) · tight with P2 (tool) · independent of P4 | pending |
+| **1** | **Token, lane and ledger primitives** | A durable per-item token store (mint-context + `render_sha256`, **no** `token_display`, **no** hard FK), the **one shared canonical-render helper**, the **D-4 consume hook**, the adapter **`is_group_dm` discriminator**, the `assent-relay` actor lane, an attestation-bearing repository entrypoint, and the audit payload extension | **12** | tight with P2 (the tool consumes the token API) · tight with P3 (the service consumes the repo entrypoint) · independent of P4 | pending |
+| **2** | **Tool surface and registration** | The `prompt_assent` tool (4-verb, **gated mint**), the **three-factor gate** (its single implementation owner, O-E), the **K-9 in-RAM hourly budget**, its `ari`-EXACTLY three-layer registration, the complete pin set, and the pending-list read surface | **11** | tight with P1 (token API) · tight with P3 (the tool calls the service) · loose with P4 (the kill-switch config lands in P4) | pending |
+| **3** | **Acceptance path and provenance flow** | The daemon-derived nested identity extraction, the AR-1 channel + `mint_user_id` predicates, the attestation assembly, the counter-before-transition ordering, the end-to-end provenance chain, the **amended matrix + named counter-mutations**, and the FE-unchanged proof | **8** | tight with P1 (repo entrypoint) · tight with P2 (tool) · independent of P4 | pending |
 | **4** | **Guardrails, test matrix, staged release** | The kill-switch, the full test matrix, the metrics-vocabulary bump, the STAGED RELEASE, and the runbook | 8 | loose with P1–P3 (the matrix exercises them) · independent of P2's registration except the count pins | pending |
 
 ### Shared-context grouping
@@ -100,7 +107,7 @@ house rule on concurrent commits in a shared worktree).
 | **C-1 — token persistence** | **P1** | `daemon/repositories/prompt_assent/{models,repository}.py` (NEW) · `daemon/migrations/versions/<ts>_create_prompt_assent_tokens.sql` (NEW) · `daemon/api.py` (create_all seam) |
 | **C-2 — prompt-version core** | **P1** (repo side) → **P3** (service side) | `daemon/repositories/prompt_version/repository.py` · `daemon/repositories/prompt_version/models.py` · `daemon/services/prompt_version_service.py` |
 | **C-3 — tool surface** | **P2** | `daemon/tools/prompt_assent.py` (NEW) · `daemon/tools/instance.py` · `daemon/tools/_tool_registry.py` · `daemon/checkpoint_metrics.py` · `agents/ari/meta.json` |
-| **C-4 — configuration** | **P4** | `daemon/config.py` (`PromptAssistConfig`) |
+| **C-4 — configuration** | **P4** | `daemon/config.py` (**`PromptAssentConfig`**, `ENSEMBLE_PROMPT_ASSENT_` prefix; the shared default-OFF constant + `hourly_mismatch_budget`) |
 | **C-5 — tests** | **P4** (matrix) · **P2** (registration pins) | `tests/unit/tools/test_prompt_assent_registration.py` (NEW) · `tests/unit/test_prompt_assent_lane.py` (NEW) · the 15+ existing pin files |
 | **C-6 — release surface** | **P4** | `CHANGELOG.md` · `docs/runbooks/prompt-assent.md` (NEW) · the staged release artefacts |
 
@@ -148,7 +155,7 @@ owner for C-2, merge P1 and P3 into one phase — but do **not** let two agents 
                                     ▼
                     ┌─────────────────────────────────────────────┐
                     │ P4  Guardrails, test matrix, staged release │
-                    │  • PromptAssistConfig kill-switch           │
+                    │  • PromptAssentConfig kill-switch (OFF)     │
                     │  • FULL TEST MATRIX (happy + 5 refusals)    │
                     │  • metrics vocabulary bump (v8→v9)          │
                     │  • runbook + CHANGELOG                      │
@@ -164,10 +171,12 @@ owner for C-2, merge P1 and P3 into one phase — but do **not** let two agents 
 
 **Soft dependency (mitigated, not blocking):**
 - **P4's kill-switch class.** P2's tool must read the switch at call time, but the
-  `PromptAssistConfig` class lands in P4. **Mitigation:** P2's tool resolves the switch through a
-  **defensive resolver** that treats a missing config class as **off** — so P2 alone is safe to
-  land (the tool refuses with `lane-disabled`), and P4's class is what turns the lane ON. This is
-  fail-closed and removes the ordering hazard entirely.
+  **`PromptAssentConfig`** class lands in P4. **⚠ The architect RECONCILED this split @
+  `df8da01a6` (D-2):** there is **ONE fail-closed OFF default constant**, consumed by **both** the
+  P2 resolver and the P4 class — the prior "resolver off / class on" arrangement is a **defect
+  under either default**. **Mitigation:** the default is **OFF** (RULED), so P2's defensive
+  resolver and P4's class can never disagree; a pin proves both read the same constant. P2 alone
+  remains safe to land (the tool refuses `lane-disabled`).
 
 ---
 
@@ -220,11 +229,12 @@ Emperor's ceremony — NOT in this lane, NOT in the developer lane):**
 
 | # | Step | Expected observation |
 |---|---|---|
+| **E2E-0** | **⚠ ARMING STEP (O-C) — the lane must be ARMED before any other E2E step, or every subsequent step is vacuous.** Because D-2 was **RULED default OFF**, an unarmed environment refuses every call with `lane-disabled` — and an unarmed E2E would "pass" for the wrong reason. Set `ENSEMBLE_PROMPT_ASSENT_ENABLED=1` in the environment under test and **restart the daemon** (the switch is read at call time from the process env) | The lane is armed: a call now proceeds past the kill-switch to the ari gate and the factor gates. **An unarmed E2E is treated as NOT RUN, not as passed** — the E2E report must state the armed/unarmed state explicitly |
 | **E2E-1** | A PENDING `prompt_versions` row exists for `agents/ari/tools_note.md` (the T3.5 re-stamp candidate), in state `pending_approval`, CORE class | The row is visible to `repo.list_pending()` |
-| **E2E-2** | Ari calls `prompt_assent(action="mint", version_id=<that row>)` | The response carries the item identity, the **diff** (pending content vs effective content, rendered from `repo.get_effective` — `daemon/repositories/prompt_version/repository.py:1900-1945` — vs the pending row's `content`, the same pair the REST diff route uses, `daemon/routers/prompts.py:560-600`, `against=effective`), the **token** (grouped), and the expiry |
+| **E2E-2** | Ari calls `prompt_assent(action="mint", version_id=<that row>)` **inside a live, fresh factor-2 user-origin window** (the mint gate, K-2 — a mint without one is refused `no-user-origin-turn` and writes **no** token row) | The response carries the item identity, the **canonical diff** (pending content vs effective content, rendered by the **one shared helper** — the effective side **is** included), the **token** (grouped), the expiry, **and `render_sha256`** — the sha256 of the **exact canonical render bytes** shown to the Emperor. The mint context (`source_id`, `channel_id`, `is_dm`, `user_id`) is derived **daemon-side from the window's message row**, never from tool args; a mint outside a **1:1 DM** is refused `mint-requires-private-channel` |
 | **E2E-3** | Ari shows the Emperor the diff + token in chat; the Emperor replies with the token **verbatim** in that message's content | The reply's `source` classifies as user-origin; the window is stamped for Ari's instance |
 | **E2E-4** | Ari calls `prompt_assent(action="approve", version_id=<that row>, token=<echoed>, user_confirmed=True)` **in that same turn** | The row transitions to `approved`; one `prompt_audit_events` row is written with the full relay provenance |
-| **E2E-5** | Read the ledger back | The event's payload carries approving user (`discord:<user_id>`), source, approving **message id**, relay agent `ari`, timestamp, `token_fingerprint` — and **no raw token** anywhere |
+| **E2E-5** | Read the ledger back | The event's payload carries approving user (`discord:<user_id>` — the **nested** `metadata["discord"]["user_id"]`), source, approving **message id** (daemon **and** platform-side), relay agent `ari`, timestamp, `token_fingerprint`, and **`render_sha256`** — and **no raw token** anywhere |
 | **E2E-6** | The effective prompt for `agents/ari/tools_note.md` now reflects the approved content | `repo.get_effective` returns the newly approved content |
 
 **Explicitly NOT executed now.** The artifact write path is **human-session-only** by design
@@ -243,7 +253,7 @@ step itself.
 | 5 | A token is single-use and item-bound | Replay matrix cells (`token-already-used`, `token-item-mismatch`, `token-superseded`) | Zero second transitions; every replay refused with its distinct code |
 | 6 | The token never appears in durable state | Grep the token table + the audit ledger for the raw token after a mint→approve cycle | **Zero** hits; only `sha256(token)[:12]` fingerprints |
 | 7 | The lane is `ari`-EXACTLY | The ari-ONLY census (the category appears in `agents/ari/meta.json` and **nowhere else** across every `agents/*/meta.json` — `tests/unit/test_notify_user_registration.py:23-25`) + the in-body gate | The category is in ari's allow list and in **no other** agent's; a non-ari caller receives the generic not-ari envelope |
-| 8 | The kill-switch disables the lane without removing the surface | With `ENSEMBLE_PROMPT_ASSENT_ENABLED=0`, call the tool | Refusal `lane-disabled`; the tool is **still registered** (refusal-at-call, never construction-absence) |
+| 8 | The kill-switch disables the lane without removing the surface | With `ENSEMBLE_PROMPT_ASSENT_ENABLED` **unset** (the RULED **default OFF** state), call the tool; then with it set to `1`, call again | Unset ⇒ refusal `lane-disabled`; the tool is **still registered** (refusal-at-call, never construction-absence); the **not-ari** envelope still wins over the switch (gate order); **`mint` is refused too**; set to `1` ⇒ the call proceeds past the switch (the ON-path test **arms the env explicitly**) |
 | 9 | The pin set is complete and green | The three canonical greps (`daemon/tools/_tool_registry.py:412-417`) → bump every hit; run the affected unit tests | Zero failures; the count assertion reads **21** everywhere |
 | 10 | The lane is released **staged only** | The staged release artefacts | No live promote; no ceremony performed by this lane |
 
@@ -257,7 +267,7 @@ step itself.
 | **H-2** | **The new table rides the `create_all` seam (`daemon/api.py:1142-1143`) and thereby AVOIDS the `_ensure_postgres_columns` one-transaction boot-abort surface (`daemon/manager.py:10036-10038`).** Both facts are stated deliberately: the new-table rule is what keeps this lane off the boot-abort path | **P1** — a missed import at the seam = **no table on PG** = every token INSERT fails (the "N1 REQUIRED seam" note at `daemon/api.py:1142-1143`). A brand-new table needs **no** `_ensure_postgres_columns` mirror. If anyone later adds a **column** to an existing table for this lane, they re-open the boot-abort surface — treat that as a release-gate event |
 | **H-3** | **No Docker — native only** | Every phase |
 | **H-4** | **STAGED RELEASE ONLY — no live promote from this lane. The ceremony belongs to the Emperor** | **P4** — deliver a staged release + runbook; stop there |
-| **H-5** | **Kill-switch env knob** (`ENSEMBLE_PROMPT_ASSIST_ENABLED`); read at call time; the tool stays registered. **D-2 recommends fail-open (default ON) — flagged for the architect** | **P4** (config class) + **P2** (call-time read) |
+| **H-5** | **Kill-switch env knob** (`ENSEMBLE_PROMPT_ASSENT_ENABLED`, class **`PromptAssentConfig`**); read at call time; the tool stays registered; **`mint` refused too**; **indeterminate values fail CLOSED**; **default OFF (fail-closed) — RULED @ `df8da01a6`**; **ONE shared default constant** consumed by both the P2 resolver and the P4 class (the prior "resolver off / class on" split is a **defect under either default**) | **P4** (config class + the shared constant) + **P2** (call-time read) |
 | **H-6** | **Net-new tests = FAILED-list diff vs a TRUE pre-fix base, same commands.** A test already failing before the change does not count as a new red | **P4** |
 | **H-7** | **Env scrub PER-VARIABLE.** `env -u POSTGRES_*` is a **silent NO-OP** (bash does not glob env names) — scrub one by one: `env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT <cmd>` | Every test phase |
 | **H-8** | **pytest conventions per `.agents/tester/rules/ensure.md`**: `testpaths=["tests"]`; four dirs deselected (integration / postgres / slow / conformance); `timeout=30` + `thread`; `-p no:timeout`; pass explicit `tests/` lists; `pytest -q` buffers tracebacks to session end ⇒ `tee LOG >/dev/null` + `tail -2 LOG`; use the **worktree's own venv**, never the main checkout's `.venv`; always `cd` into the worktree first | **P4** (and every phase's test step) |
@@ -275,7 +285,7 @@ Full register with mitigations and structural pins: [`risks.md`](risks.md).
 |---|---|---|
 | Authorization | **The lane can change Ari's own guardrails** — a self-modifying trust boundary | Token bound to the item and shown **with the diff**; the ledger records the full chain; the lane is privileged + ari-EXACTLY; **D-2** is the architect's dormancy lever |
 | Freshness | **Window staleness via silent resume** (`daemon/manager.py:11503`) — an earlier turn's window can survive | **D-6 / J-2** — a ≤10-minute `stamped_at` bound on top of `expires_at` |
-| Entropy | **Guessing loop** against a short token | **D-3 / J-1** — 8 chars / 40 bits (house value); if 6 chars is kept, the attempt counter + lockout-at-5 + a per-instance bound become mandatory |
+| Entropy | **Guessing loop** against a short token | **D-3 / J-1 RULED** — 8 chars / 40 bits (house value; the ~6-char is rejected); the **per-item attempt counter + lockout-at-5** (durable, PG, **P1**); the **per-relay-instance hourly budget** (in-RAM, keyed by `instance_id`, default 10, **P2** — D-3b); the **counters commit in their own transaction** (D-4) so a rollback cannot silently disarm them; refusals never burn |
 | Confused deputy | **Ari presents a stale or truncated diff** | **J-3** — bind the token to a **content hash** of the pending row (anti confused-deputy) |
 | Boot safety | A schema change aborts boot (one-transaction ensure list) | **D-1**'s new-table rule avoids the ensure list entirely |
 | Audit integrity | Provenance drifts apart from the state change | Same-transaction write + **SP-2** (no UPDATE/DELETE on `prompt_audit_events`) + **SP-1** (content-hash binding) |
@@ -290,14 +300,21 @@ Full register with mitigations and structural pins: [`risks.md`](risks.md).
 > the architect's ruling before the developer lane lands them. Each carries the technical
 > analysis's recommendation; the architect may overrule any of them. Full rationale in
 > [`decisions.md`](decisions.md).
+>
+> **⚠ STATUS UPDATE — reconciliation pass 1 (`df8da01a6`):** the architect has **RULED** on all
+> nine decisions and all three judgement calls. The rows below now carry the ruling; the
+> **overrule-cost** column records what the architect accepted as the price of that ruling.
+> **The only items still open are Emperor-owned** (architect §8): the kill-switch default flip
+> timing, guild-channel approval, and the persona surface (D-7) — none of which blocks the
+> developer lane.
 
 ### The nine numbered decisions (D-1 … D-9)
 
 | # | Decision | Options | **Recommendation** | Cost of overruling |
 |---|---|---|---|---|
 | **D-1** | Token store persistence | (a) new PG table · (b) columns on `prompt_versions` · (c) in-memory | **(a) new PG table `prompt_assent_tokens`** — no `_ensure_postgres_columns` entry ⇒ **no boot-abort surface**; survives restart; independent GC; correct if two daemons ever share a PG | (b) puts a mint write on the hottest prompt table and re-opens the one-transaction boot-abort surface (`daemon/manager.py:10036-10038`); (c) loses tokens across a routine daemon restart inside a 60-minute window |
-| **D-2** | Kill-switch default | fail-open (default ON) · fail-closed (default OFF) | **fail-open (default ON)** — read at call time, tool stays registered, gate order = ari → switch → 3-factor → mutate. Mirrors the two closest precedents (`notify_user`, `prompt_reload`) | The architect's explicit lever to keep the lane dormant until first use. **This lane is the first in the tree that can change a live agent's own guardrails through a chat message** — if the Emperor wants that posture, default-OFF costs one env var per environment |
-| **D-3** | Token length | 8 chars / 40 bits (house) · 6 chars / 30 bits (commission) | **8 chars** — costs nothing operationally; removes the brute-force argument | 6 chars is acceptable **only** with the per-item attempt counter + lockout-at-5 + a global per-relay-instance bound (§J-1) |
+| **D-2** | Kill-switch default | fail-open (default ON) · fail-closed (default OFF) | **RULED — default OFF (fail-closed) @ `df8da01a6`** — the architect **OVERRULED** the planner's fail-open recommendation. Read at call time; the tool stays registered; **`mint` refused too**; the switch sits **behind** the ari gate; indeterminate values **fail closed**; **ONE shared default constant** consumed by both the P2 resolver and the P4 class. Rationale of record: first lane that can change a live agent's **own guardrails** through a chat message; the house's most recent Emperor-ratified posture for a novel authority surface (Decision Module P1, 2026-11-09) is *"dormant by default, nothing decides anything"*; the FE lane covers approvals meanwhile | **Ruled — no longer open.** Flipping to ON is **one env var per environment**, no code change (architect §8 decision 1; Emperor-owned, non-blocking for the developer lane) |
+| **D-3** | Token length | 8 chars / 40 bits (house) · 6 chars / 30 bits (commission) | **RULED — 8 chars / 40 bits** @ `df8da01a6` (the commission's ~6-char is **rejected**); echo matching reuses `nonce_in_content` **verbatim** (`daemon/tools/upgrade_journal.py:231-246`) with `nonce_normalize` semantics — **no new regex**. **D-3b (K-9): the hourly per-relay-instance bound has a ruled mechanism** — an **in-RAM** counter keyed by relay `instance_id`, owned by **P2** (tool gate), configurable via `PromptAssentConfig.hourly_mismatch_budget` (default **10**), exhaustion → `mismatch-budget-exceeded`. In-RAM is deliberate: per-process defence-in-depth, **not a trust decision**; the **durable** leg is the PG per-token `attempts` + lockout | **Ruled.** Disclosed limitation: **multi-daemon deployments do not share the RAM budget** (per-instance by design) — the only ledgered residual in the set |
 | **D-4** | Single-use enforcement point | consume-on-success (separate txn) · consume inside the transition txn | **transition-then-consume, preferably same-transaction** — the state-machine CAS already blocks double-apply; the ordering exists so a *refusal* never burns the Emperor's token | Consume-then-transition burns the token on a non-decision. Same-transaction requires extending a **core** method (`atomic_transition`) — an architect call |
 | **D-5** | Which chat sources, and the per-source "approving user" key | discord-first · all registered chat types | **discord first**, with the user key taken from the adapter metadata `user_id` — **not** from `external_user_id` (a guild-channel `external_user_id` is a **CHANNEL**) | A broader source set requires explicit per-source extraction rules; an implicit extraction is a correctness bug waiting to happen |
 | **D-6** | Extra window-freshness bound | none (promote parity) · bound `stamped_at` to ≤10 min | **bound it** — the silent-resume path (`daemon/manager.py:11503`) can leave an earlier turn's window alive; this lane changes live personas | Promote parity would accept a 60-minute-old window — looser than we want for a persona-changing lane |
@@ -313,7 +330,7 @@ ruling.
 
 | # | Judgement call | Analysis position | **What the architect is being asked** |
 |---|---|---|---|
-| **J-1** | **Token length: 8 chars (recommended) vs the commission's "~6-char"** | 8 base32 chars / 40 bits — the house `mint_nonce` value (`daemon/tools/upgrade_journal.py:205-208`). It costs nothing operationally and removes the brute-force argument | Accept 8, or keep 6 — in which case the **per-item attempt counter + lockout-at-5 + a per-relay-instance bound (≤10 mismatches/hour)** become **mandatory**. Note the token is **not** the security boundary: factors 2+3 are conjunctive and agent-originated messages **cannot** arm factor 2 (`daemon/manager.py:6132-6133`) |
+| **J-1** | **Token length: 8 chars vs the commission's "~6-char"** | 8 base32 chars / 40 bits — the house `mint_nonce` value (`daemon/tools/upgrade_journal.py:205-208`). It costs nothing operationally and removes the brute-force argument | **RULED — 8 chars @ `df8da01a6`.** 6 chars is **rejected**. The counter + lockout remain **mandatory regardless**; the **K-9 hourly budget** (D-3b) is the ruled mechanism. Note the token is **not** the security boundary: factors 2+3 are conjunctive and agent-originated messages **cannot** arm factor 2 (`daemon/manager.py:6132-6133`) |
 | **J-2** | **Window freshness bound: ≤10 minutes (recommended) vs promote parity** | Require `window["stamped_at"]` to be within **10 minutes** of the tool call, in addition to `expires_at`; refusal `user-origin-window-stale` | Accept the extra fourth check, or accept promote parity (any unexpired window). It exists because the dispatch funnel **skips the stamp on a silent resume** (`daemon/manager.py:11503`), so a paused→resumed Ari can hold an earlier turn's window |
 | **J-3** | **Content-hash binding of the token to the pending row (anti confused-deputy)** | Bind the token to a **content hash** of the pending row, so a mutated pending row invalidates the token. Cost: one hash column, computed at mint and re-checked at approve. This is an addition **beyond** the commission's three factors | Accept this **fourth** binding as in-scope for Phase 1, or defer it. Ari is a confused deputy by construction; this is what stops a prompt-injected Ari from getting a token approved against a **stale or truncated diff** |
 
@@ -388,7 +405,7 @@ the migration directory's current file count (**127**).
 
 | Phase | File | Delivers | Exit criterion |
 |---|---|---|---|
-| **1** | [`phase1-plan.md`](phase1-plan.md) | The token table (+ its own `.sql`), the `assent-relay` actor lane, the attestation-bearing repo entrypoint, the audit payload extension | A token can be minted, found, consumed and swept in PG; a relay actor can be constructed **only** with a complete attestation; an audit event carries the full relay provenance — all without touching the FE path |
+| **1** | [`phase1-plan.md`](phase1-plan.md) | The token table (+ its own `.sql`, mint-context + `render_sha256`, **no** `token_display`, **no** hard FK), the canonical-render helper, the D-4 consume hook, the `is_group_dm` discriminator, the `assent-relay` actor lane, the attestation-bearing repo entrypoint, the audit payload extension | A token can be minted, found, consumed and swept in PG; a relay actor can be constructed **only** with a complete attestation; an audit event carries the full relay provenance — all without touching the FE path |
 | **2** | [`phase2-plan.md`](phase2-plan.md) | The `prompt_assent` tool, the three-layer ari-EXACTLY registration, the complete (grep-derived) pin set, the pending-list read surface | `prompt_assent` is registered, privileged, ari-only, and the pin suite is green with the count at **21** |
-| **3** | [`phase3-plan.md`](phase3-plan.md) | The service-level acceptance path, the shared approver predicate, the 3-factor gate with the freshness bound, the end-to-end provenance chain | The **mandatory test matrix** passes — the happy path with a real token echo, and all five mandated refusals; the FE path is provably unchanged |
-| **4** | [`phase4-plan.md`](phase4-plan.md) | The kill-switch, the full test matrix, the metrics-vocabulary bump, the runbook, and the **STAGED RELEASE** | The lane is disabled by env, disabled-by-default in a fresh environment per D-2's ruling, documented, and released **staged only** |
+| **3** | [`phase3-plan.md`](phase3-plan.md) | The daemon-derived identity extraction, the AR-1 channel + user predicates, the attestation assembly, the counter-before-transition ordering, the end-to-end provenance chain, and the amended matrix (**the 3-factor gate itself is P2's** — O-E) | The **mandatory test matrix** passes — the happy path with a real token echo, and all five mandated refusals; the FE path is provably unchanged |
+| **4** | [`phase4-plan.md`](phase4-plan.md) | The kill-switch (**default OFF**, one shared constant), the `hourly_mismatch_budget` key, the full test matrix, the **rendered-bytes SP-1**, the runbook (with its five mandated disclosures), the metrics-vocabulary bump, and the **STAGED RELEASE** | The lane is disabled by env, disabled-by-default in a fresh environment per D-2's ruling, documented, and released **staged only** |

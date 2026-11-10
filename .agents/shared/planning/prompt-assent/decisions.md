@@ -18,6 +18,15 @@
 | `DECIDED` | Fixed by the technical analysis (the question was closed *in* the analysis, not open). Binding on implementation. |
 | `RECOMMENDED-PENDING-ARCHITECT` | The analysis closed the question with a recommendation; the architect must ratify before the developer lane lands it. |
 | `OPEN-JUDGEMENT` | The analysis explicitly flagged its own proposal as a judgement call to be overruled if the architect disagrees. |
+| `RULED` | **Decided by the architect** in `architecture-recommendation.md`. Binding on implementation. Supersedes the prior `RECOMMENDED-PENDING-ARCHITECT` / `OPEN-JUDGEMENT` status of the same entry. |
+
+> **⚠ STATUS UPDATE — reconciliation pass 1 (`df8da01a6`).** The architect has **RULED** on
+> **D-1…D-9** and **J-1…J-3** and added the rulings **AR-1** (mint-context binding: channel
+> **and** user) and **AR-2** (the 4-verb action set). **This ledger is now a record of rulings,
+> not of proposals.** Entries below marked `RULED` carry the architect's verdict, its amendments,
+> and the overrule cost the architect accepted. **D-2 / D-4 / D-5 / DECIDED-3 are SUPERSEDED-BY
+> @ `df8da01a6`** — the original reasoning is preserved for the audit trail, but the ruling is
+> what the developer builds against. `architecture-recommendation.md` **wins on conflict**.
 
 ---
 
@@ -29,6 +38,11 @@
 **Decision.** One new privileged tool, category key **`prompt-assent`**, tool name **`prompt_assent`**,
 with two mutating actions — `APPROVE` and `REJECT` (reject carries a reason). It acts **on a
 PENDING `prompt_versions` row identified by id**.
+> **⚠ AMENDED @ `df8da01a6` (AR-2).** The commission's "two mutating actions" framing is
+> **incomplete**: the tool carries the **4-verb** action set `{list, mint, approve, reject}`.
+> `APPROVE`/`REJECT` remain the two **decision** actions; `mint` is a third **mutating** action
+> (ledgered in the **token table** — mint writes **NO** `prompt_audit_events` row, per D-9), and
+> `list` is a **read**. All four share one category (ari is the only consumer). See DECIDED-3.
 
 **Rationale.** The commission's blessed shape. The three-layer access posture is inherited from
 the `notify-user` precedent (`daemon/tools/notify_user.py:19-30`): privileged category (never
@@ -251,16 +265,36 @@ Rationale, in the order that decided it:
 - (b)'s only real advantage — a single-statement CAS carrying the token match — is already
   delivered by the state machine (see D-4).
 
-**Proposed row shape.** `token_id` (PK, uuid4 hex) · `version_id` · `agent_id` · `version_tag` ·
+**RULED row shape (architect @ `df8da01a6`, D-1 AGREE + AMEND).** `token_id` (PK, uuid4 hex) ·
+`version_id` (**indexed SOFT reference — NO hard FK**, O-B) · `agent_id` · `version_tag` ·
 `artifact` · `version` (the item binding) · `token_hash` (`sha256(token)` — **never** the raw
-token) · `token_display` · `issued_at` · `ttl_expires_at` · `superseded_at` · `consumed_at` ·
-`consumed_by_message_id` · `attempts` · `status` (`live|consumed|superseded|revoked`).
+token; UNIQUE) · **`render_sha256`** (sha256 of the **canonical render**; J-3/K-7 — **NEVER** a
+copy of `prompt_versions.content_hash`) · **mint-context**: `mint_source_id`, `mint_channel_id`,
+`mint_is_dm`, **`mint_user_id`** (daemon-derived — K-8), `minted_external_user_id` (AR-1) ·
+`issued_at` · `ttl_expires_at` (TTL = `NONCE_TTL_S` imported SSOT, 60 min) · `superseded_at` ·
+`consumed_at` · `consumed_by_message_id` · `attempts` (default 0) · `status`
+(`live|consumed|superseded|revoked`).
+
+**⚠ AMENDMENTS:** (1) **NO `token_display` column** — the grouped render minus dashes *is* the raw
+secret; render the grouped form from the raw token **at mint time only**. (2) **Partial unique
+index** `UNIQUE (version_id) WHERE status='live'` — single-active-token is structural against
+double-mint races. (3) **`render_sha256` retires the `content_hash`/`content_sha256` naming** —
+one name everywhere (token-table column, mint response, attestation, audit payload). (4) **No hard
+FK** — the audit-survival precedent (`daemon/repositories/prompt_version/models.py:464-466`).
+(5) Indexes: `UNIQUE (token_hash)` · partial `UNIQUE (version_id) WHERE status='live'` ·
+`(version_id, status)` — names byte-identical to `__table_args__`.
+
+**Re-mint supersedes AND revokes** the prior token (`superseded_at` + status flip; the prior
+token then reads `token-superseded`, **deliberately distinct** from `token-already-used`),
+re-renders the diff, and is refused while a live token exists unless explicitly forced
+(`mint-live-token-exists`).
 
 ---
 
 ### D-2 — Kill-switch default: fail-open vs fail-closed
 
-**Status:** `RECOMMENDED-PENDING-ARCHITECT`
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (architect OVERRULED: default OFF,
+fail-closed).** The recommendation below is **historical**; the ruling below it is binding.
 **Question.** Should the lane default ON (fail-open) or OFF (fail-closed)?
 
 House precedent, verified: `NotifyUserConfig.enabled` → **default `True`**
@@ -273,14 +307,29 @@ call time** and the tool **stays registered** when off (`daemon/tools/prompt_rel
 (ii) gate order is **ari → switch → 3-factor → mutation**
 (`daemon/tools/notify_user.py:703-715`).
 
-**The honest counter-argument for the architect.** Default-OFF/ON is *not* the security boundary
+**⚖ THE RULING (architect @ `df8da01a6`).** **Default OFF (fail-closed)** — the architect
+**OVERRULED** the recommendation above. `ENSEMBLE_PROMPT_ASSENT_ENABLED` / `PromptAssentConfig`
+everywhere. Semantics: read **at call time**; the tool **stays registered** when off (refusal
+`lane-disabled`, never construction-absence); **`mint` is refused too** when off; the switch sits
+**behind** the ari gate; **indeterminate/invalid values fail CLOSED**. **ONE fail-closed OFF
+default constant** consumed by **both** the P2 defensive resolver and the P4 config class — the
+prior "resolver off / class on" split is a defect under either default and is reconciled here.
+
+**Rationale of record.** This is the first lane in the tree that can change a live agent's **own
+guardrails** through a chat message; the house's most recent Emperor-ratified posture for a novel
+authority surface (Decision Module P1, 2026-11-09: *"dormant by default, nothing decides
+anything"*) is exactly this shape; the FE lane fully covers approvals meanwhile. **The flip to ON
+is one env var + restart per environment — no code change** (Emperor-owned, architect §8.1).
+
+**The honest counter-argument for the architect** (now resolved against the recommendation):
+Default-OFF/ON is *not* the security boundary
 here: the lane already sits behind four independent gates (privileged-category strip; the
 per-agent allow; the in-body `agent_id` gate; the user-turn window; the content echo). Default-OFF
 adds a **fifth** gate protecting operators who have not deliberately armed the lane — it does not
 make an unarmed lane unsafe. **But** this lane is the first in the tree that can change a live
 agent's **own guardrails** through a chat message (including Ari's `soul`/`rule`/`workflow`).
 If the Emperor wants the lane dormant until he has used it once, option (b) costs one env var
-(`ENSEMBLE_PROMPT_ASSIST_ENABLED=0`) per environment and buys that assurance.
+(`ENSEMBLE_PROMPT_ASSENT_ENABLED=0`) per environment and buys that assurance.
 **This is a judgement the Emperor owns — see `plan-overview.md` → Open Questions.**
 
 ---
@@ -316,11 +365,28 @@ attempt counter + lockout + a global per-instance bound (see `risks.md` → Risk
 
 ### D-4 — Single-use enforcement point
 
-**Status:** `RECOMMENDED-PENDING-ARCHITECT`
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE + AMEND: keyword-only hook;
+counters in their OWN transaction; render-hash re-check inside the hook's transaction).** The
+reasoning below is **historical**; the ruling below it is binding.
 **Question.** Where is the token consumed?
 
 **Recommendation: transition-then-consume, preferably same-transaction.** Consume **only on a
 successful transition**, and only **after** the state change lands.
+
+**⚖ THE RULING (architect @ `df8da01a6`).** **Transition-then-consume, with the consume
+co-transactional.** Mechanism: `atomic_transition` gains a **narrow, keyword-only, private,
+default-`None`** typed hook executed **inside its existing transaction** — one code path, **no
+forked CAS+audit copy**. The hook performs, in order: **(i) the render-hash re-check** — re-render
+the canonical diff **from the row as read inside the transaction** and compare to the token's
+`render_sha256`; mismatch ⇒ raise ⇒ rollback ⇒ `token-content-mismatch` (**O-L** — the
+authoritative check lives **ONLY** here); **(ii) the consume-CAS** (`UPDATE … WHERE token_id=? AND
+status='live'`); rowcount 0 ⇒ raise ⇒ rollback ⇒ typed refusal.
+
+**⚠ BLOCKING RULE (overturns the "same-transaction" framing above for the counters).** The
+**attempt-counter increment and the lockout revocation commit in their OWN transaction OUTSIDE
+the guarded transition** — before it opens, on the **refusal path only**. Inside it, every
+refusal's rollback resets the counter and the lockout **never fires** (D-3's defence-in-depth
+would be silently inert).
 
 **Why single-use is already structurally guaranteed.** `atomic_transition`'s CAS is
 `UPDATE … WHERE version_id=? AND state='pending_approval'`
@@ -346,14 +412,27 @@ optional guard hook — a change to a **core** method, worth it only if the arch
 
 ### D-5 — Which chat sources are in scope, and the per-source "approving user" key
 
-**Status:** `RECOMMENDED-PENDING-ARCHITECT`
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE + CORRECTION: the user key is the
+NESTED `metadata["discord"]["user_id"]`, REQUIRED, fail-closed).** The reasoning below is
+**historical**; the ruling below it is binding.
 **Question.** Which registered chat sources can relay an approval, and where does the approving
 user identity come from?
 
 **Recommendation: discord first** (the commission's *"e.g. my-discord-bot"*), with the user key
 taken from the **adapter metadata `user_id`**, **not** from `external_user_id`.
 
-Rationale: Discord's canonical `external_user_id` is `dm:<user_id>` in a DM but
+**⚖ THE RULING (architect @ `df8da01a6`).** **Discord-first**, with a **lane-side policy on the
+daemon-owned `source_type`** (the same registry `classify_user_origin` matches) — never a
+source-id prefix re-derivation. Extraction contract (from the message row the window's
+`message_id` selects): `source_id` = the window source's prefix before the first `":"`;
+**`user_id` = `message_metadata["discord"]["user_id"]` — NESTED, REQUIRED, fail-closed
+`extraction-incomplete`** (a top-level `metadata.get("user_id")` returns `None` and must never be
+used); `guild_id`, `channel_id`, `channel_type`, `is_dm`, `is_group_dm`, `message_id` from the
+same dict; `user_name`/display name **cosmetic only, never authority**; **`external_user_id` is
+never the approving-user key** (its guild form is a CHANNEL) — it remains the destination
+identity. **`approver_subject = f"{source_id}:{user_id}"`.**
+
+**Rationale:** Discord's canonical `external_user_id` is `dm:<user_id>` in a DM but
 `<guild_id>:<channel_id>` in a guild channel (`daemon/sources/adapters/discord/adapter.py:994-1021`)
 — in a guild channel it identifies a **CHANNEL, not a user**. The adapter metadata carries the
 author identity (`daemon/sources/adapters/discord/adapter.py:1035-1058`).
@@ -584,7 +663,16 @@ tool**, **not** a new HTTP route.
 
 ### DECIDED-3 — Tool shape: **one tool**, `action ∈ {mint, approve, reject}`
 
-**Status:** `DECIDED`
+**Status:** `DECIDED` — **SUPERSEDED-BY AR-2 @ `df8da01a6`: the action set is the 4-verb
+`{list, mint, approve, reject}`.** The three-verb reading below is **historical**; the ruling is
+binding.
+
+**⚖ THE RULING (architect @ `df8da01a6`, AR-2 — reconciling a planner inconsistency across
+BLESSED-1 / DECIDED-3 / phase-2).** ONE tool `prompt_assent`, **`action ∈ {list, mint, approve,
+reject}`**. `list` = read (any channel, ari-gated); `mint` = mutating, **ledgered in the token
+table**; `approve`/`reject` = mutating, **ledgered in `prompt_audit_events`**. One category grants
+all four (ari is the only consumer; split the category only if a second read-only consumer ever
+appears).
 **Decision.** One tool, three actions.
 
 **Rationale.**
@@ -671,7 +759,34 @@ of refusing a legitimate approval whose window is older than 10 minutes but stil
 
 ### J-3 — Content-hash binding of the token to the pending row (anti confused-deputy)
 
-**Status:** `OPEN-JUDGEMENT` — **NOT part of D-1…D-9; the architect must rule on it separately**
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE + AMEND, K-7): IN-SCOPE for Phase 1,
+but the binding is to the **NAMED CANONICAL RENDER**, not to a content re-read.** The proposal
+below is **historical**; the ruling below it is binding.
+
+**⚖ THE RULING (architect @ `df8da01a6`, J-3 / K-7).** Bind the token to the **named canonical
+render**, not to a content re-read:
+1. **One shared helper** (e.g. `daemon/services/prompt_version_diff.py`) owns the render — a pure
+   lift-and-shift of `_unified_diff` (`daemon/routers/prompts.py:431-435`, stdlib `difflib`) plus
+   the canonical input assembly (pending content, **effective content**, item key, labels, and a
+   **render format tag `"v1"`**). The REST diff route **imports the helper** (FE output
+   byte-identical — pinned by test); the tool's mint path renders through it. **The tool layer
+   never imports the router.**
+2. **`render_sha256 = sha256(canonical_render)`** — computed at mint **from the exact bytes placed
+   in the mint response**, re-checked at approve **inside the D-4 hook's transaction** (O-L).
+   Surfaced to the human in the mint response and carried in the audit payload.
+3. **The effective side IS included.** If the effective side moves underneath (a newer version
+   approved), the pending row's meaning changes and the outstanding token MUST invalidate
+   (`token-content-mismatch`) rather than silently approve against a different baseline. **The CAS
+   alone cannot see effective-side motion.**
+4. **Copying `prompt_versions.content_hash` is FORBIDDEN** (`models.py:369` — sha256 of raw
+   content): it satisfies SP-1's letter and **silently no-ops J-3** — a pending-content mutation
+   after mint *would* trip it, but an effective-side mutation or a rendered-view divergence would
+   not, and the shown-bytes guarantee disappears. **SP-1 is rewritten** to pin the canonical-render
+   hash; a test pins that the token column is NOT populated from `prompt_versions.content_hash`.
+
+**Cost of deferring J-3 (rejected):** a prompt-injected ari lands a valid approval against a
+stale/truncated diff and the ledger records consent never given — the worst failure mode of a
+trust-model change.
 **Analysis position (technical-analysis.md Risk 10).** Bind the token to a **content hash of the
 pending row** so that a mutated pending row invalidates the token.
 **Why.** *Ari is a confused deputy by construction.* It renders the diff and the token and relays
@@ -681,8 +796,65 @@ Emperor approved is provably the token for the bytes he was shown.
 **Cost.** One hash column on the token row (`content_hash`), computed at mint time from the
 pending row's content, and re-checked at approve time — a mutated pending row then yields
 `token-item-mismatch` (or a dedicated `token-content-mismatch`).
-**What the architect is being asked.** Whether to accept this **fourth** binding as in-scope for
+> **⚠ SUPERSEDED BY THE RULING ABOVE (K-7).** The `content_hash` naming is **retired** — the
+> binding is to the **canonical render** (`render_sha256`), the column-copy of
+> `prompt_versions.content_hash` is **forbidden**, and the re-check is **only** inside the D-4
+> hook's transaction (O-L). This paragraph is the **historical** proposal, not build guidance.
+**What the architect was asked.** Whether to accept this **fourth** binding as in-scope for
 Phase 1 (it is an addition **beyond** the commission's three factors), or to defer it.
+**ANSWERED:** **accepted and amended** — in scope for Phase 1, bound to the canonical render.
+
+---
+
+## Part D-bis — The architect's NEW rulings (AR-1, AR-2) @ `df8da01a6`
+
+### AR-1 — Mint-context binding: channel **AND** user
+
+**Status:** `RULED` — **NEW RULING (amendment pass 1).** Binding on implementation.
+
+**The seam it closes.** `classify_user_origin` authenticates the **CHANNEL**, not the **HUMAN**
+— and `is_dm` alone does not fix it, because a Discord **group DM** (≤10 recipients) classifies
+`is_dm=True` (`daemon/sources/adapters/discord/adapter.py:1043` — there is **zero** group
+discrimination in the adapter today). A second occupant of the bound channel would satisfy all
+three commission factors **and** a channel-only check, with faithful-looking provenance.
+
+**Four conjunctive legs:**
+
+1. **Mint is gated (K-2).** `mint` requires a live, fresh factor-2 user-origin window — same
+   freshness semantics as approve (D-6 amendment). The mint context
+   `(source_id, channel_id, is_dm, user_id, external_user_id)` is derived **from the window's
+   message row** (`daemon/manager.py:6126-6133` stamp → the row the `message_id` selects →
+   nested `metadata["discord"]`) — **NEVER from tool args**. Without this, a prompt-injected ari
+   mints for any CORE pending row, renders diff+token into any reachable surface, and supersedes
+   the Emperor's live token (DoS + authority-fabrication primitive). `list` remains ungated by
+   window (read-only, ari-gated only).
+2. **1:1-DM discrimination (K-3).** Private = `is_dm AND NOT is_group_dm`. The adapter gains a
+   **lane-scoped, additive** `is_group_dm: bool` discriminator — **owned by P1** — with a
+   **pre-ship runtime confirmation** (live probe: 1:1 DM vs group DM must classify distinctly).
+   **Fail-closed rule: absent/unparseable discriminator = NOT private** (mirrors D-6's
+   absent-stamp rule) — older rows simply cannot mint/approve until the discriminator ships.
+3. **User equality (K-8 — CLOSED, not an accepted residual).** The token row stores the
+   daemon-derived `mint_user_id`. At approve, the approving turn's daemon-derived `user_id` must
+   equal `mint_user_id` — refusal **`token-approver-mismatch`**. Neither value is ever
+   tool-supplied, so this is **not** a forgery surface.
+4. **Refusals.** `mint-requires-private-channel` (mint-side, pinned at step M-4c),
+   `token-channel-mismatch` (approve-side channel inequality), `token-approver-mismatch`
+   (approve-side user inequality).
+
+**Scope limit.** Phase 1 is **1:1-DM-only**. Guild-channel approval with a **pinned approver
+identity** remains a **deferred design**; a tool-asserted approver hint is **rejected** as a
+forgery surface. Legitimate cross-channel or cross-user use is a **re-mint** — cheap, and it
+re-shows the diff.
+
+### AR-2 — The action set
+
+**Status:** `RULED` — **NEW RULING.** ONE tool `prompt_assent`, **`action ∈ {list, mint,
+approve, reject}`**. Supersedes the three-verb reading in DECIDED-3 above.
+
+**Where each action is ledgered.** `list` = read (any channel, ari-gated); `mint` = mutating,
+**ledgered in the token table** (mint writes **NO** `prompt_audit_events` row — D-9);
+`approve`/`reject` = mutating, **ledgered in `prompt_audit_events`**. One category grants all four
+(ari is the only consumer; split the category only if a second read-only consumer ever appears).
 
 ---
 
@@ -700,7 +872,7 @@ Phase 1 (it is an addition **beyond** the commission's three factors), or to def
 | R-8 | A separate relay-audit table | A second write path; two sources of truth; a relay row can exist without its state row (or vice versa) if the writes are not in one transaction |
 | R-9 | `shared_meta_kv` pending-list snapshot | Drift risk in a security-relevant list; the write hooks would have to land in two places, one of which is a service bypass |
 | R-10 | New HTTP route for the pending list | No new public endpoint is needed for the only consumer; the tool composes mint + diff in one response |
-| R-11 | `notify_user`'s per-destination hourly cap carrying over | An approval lane is **per-item**, not per-destination; the per-item attempt counter is the right analogue |
+| R-11 | `notify_user`'s per-destination hourly cap carrying over | An approval lane is **per-item**, not per-destination; the per-item attempt counter is the right analogue. **⚠ AMENDED @ `df8da01a6`:** a *per-relay-instance* hourly bound DOES carry — but as the **K-9 / D-3b in-RAM budget** (keyed by relay `instance_id`, default 10, P2-owned), **not** as `notify_user`'s per-destination ledger-based cap |
 | R-12 | The promote lane's `issued_to_instance` binding | Meaningless for a per-item token; bind to `(version_id, agent_id, version_tag, artifact, version)` instead |
 | R-13 | The promote lane's dry-run mint step | A prompt lane has no dry-run — minting must be an **explicit, separately audited** action (`action="mint"`) |
 | R-14 | Widening `session` or reusing `bearer` | Forges the FE lane / is refused by the clamp (`daemon/repositories/prompt_version/repository.py:1433-1444`) |

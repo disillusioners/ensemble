@@ -18,6 +18,17 @@
 > `approve()`/`reject()` internal-actor refusal a **"blocker"**. It is a **design decision**
 > (D-8), not a blocker — the resolution is the `assent-relay` lane plus an attestation-bearing
 > repository entrypoint.
+>
+> **⚠ RULING SYNC (added by the reconciliation pass, 2026-11-10).** Three further items in this
+> note were corrected against `architecture-recommendation.md` @ `df8da01a6`:
+> **(i)** the kill-switch config class is **`PromptAssentConfig`** and the env var is
+> **`ENSEMBLE_PROMPT_ASSENT_ENABLED`** — the "default ON" written in §7 item 12 is **OVERRULED**;
+> the ruled default is **OFF (fail-closed)**, with ONE shared default constant across the P2
+> resolver and the P4 config class; **(ii)** the in-body gate constant is
+> **`PROMPT_ASSENT_AUTHORIZED_AGENT`** (the house-derived uppercase of the category
+> `prompt-assent`, matching `PROMPT_RELOAD_AUTHORIZED_AGENT` for `prompt-reload`); **(iii)** the
+> tool's action set is the **4-verb** `{list, mint, approve, reject}` (**AR-2**), not the
+> three-verb set implied in §4.5. **`architecture-recommendation.md` wins on conflict.**
 
 # prompt-assist — Trust Anchors & Tooling Precedents (research note)
 
@@ -446,10 +457,10 @@ registration is SILENTLY INVISIBLE" — `daemon/tools/instance.py:6794-6796`,
 | 3a | Factory wrapper | `daemon/tools/instance.py` — import (`:291-293` pattern) + `create_prompt_assist_tools_if_available(...)` (pattern `:2896-2927`) | always constructs; refusals happen at call time |
 | 3b | Construction extend | `daemon/tools/instance.py:6810-6814` (notify extend) / `:7013` (prompt-reload extend) — inside `create_instance_tools` | MUST precede `create_help_tool` / `scan_tools_for_full_docs` / `_apply_tool_filter` (`:6798-6802`) |
 | 4 | Authorization (strip) | `_apply_tool_filter` — per-agent allow list + privileged-category default-deny strip; referenced at `daemon/tools/instance.py:6800-6802` and `daemon/tools/_tool_registry.py:191-204` | the exact `def _apply_tool_filter` line was NOT located in this lane (see §0 caveats) — grep it before citing |
-| 5 | Layer-3 in-body gate | `daemon/tools/prompt_assist.py` — `PROMPT_ASSIST_AUTHORIZED_AGENT = "ari"` (pattern `daemon/tools/prompt_reload.py:70`) | the category alone cannot spell the audience |
+| 5 | Layer-3 in-body gate | `daemon/tools/prompt_assist.py` — `PROMPT_ASSENT_AUTHORIZED_AGENT = "ari"` (pattern `daemon/tools/prompt_reload.py:70`) | the category alone cannot spell the audience |
 | 6 | Documentation | the tool docstring + `tool_help` wiring — house pattern `daemon/tools/upgrade_tools.py:3201` (`Use tool_help("system_upgrade") for details.`); `scan_tools_for_full_docs` (referenced `daemon/tools/instance.py:6799-6800`, definition `daemon/tools/_tool_registry.py:901` area) | the help tool snapshots the tool list — the extend must precede it |
 | 7 | Manager handle | `daemon/manager.py:1778` (`self._prompt_version_service = PromptVersionService(...)`, import `:162`) — the factory reads the mounted service; `daemon/manager.py:213` is the prompt-reload lane's manager note | manager.py is where the service is MOUNTED, not where tools are built (build is `daemon/tools/instance.py`) |
-| 8 | Kill-switch config | new `PromptAssistConfig(BaseSettings)` — pattern `daemon/config.py:3166-3224`; wire the field at `daemon/config.py:6826`-style | read AT CALL TIME; tool stays registered |
+| 8 | Kill-switch config | new `PromptAssentConfig(BaseSettings)` — pattern `daemon/config.py:3166-3224`; wire the field at `daemon/config.py:6826`-style | read AT CALL TIME; tool stays registered |
 | 9 | Audit ledger + migration | `daemon/repositories/<x>_audit/{models,repository}.py` + `daemon/migrations/versions/<ts>_create_<x>_audit.sql` (precedent `20261025_000001_create_notify_audit.sql`) + `daemon/api.py:1142-1143` (create_all seam; prompt_versions precedent `daemon/api.py:1089-1123`) | every new SQLModel table needs its own `*.sql` in `daemon/migrations/versions/` |
 | 10 | Metrics vocabulary | `daemon/checkpoint_metrics.py:244-263` (+ the frozen artifact label set regenerated in the SAME change) | the F-1 trap class |
 | 11 | Agent allow entry | `agents/ari/meta.json` — append `"prompt-assist"` at the tail of `tools.allow` (`:44-47`) | the array-order pin (`tests/unit/test_board_registration.py:295-306`) |
@@ -559,7 +570,7 @@ new mint site must be reconciled with it (`:557-575`, `:622-641`).
    **at the tail** (`:44-47`) — the array-order pin lives at
    `tests/unit/test_board_registration.py:295-306`; the ari-ONLY census is
    `tests/unit/test_notify_user_registration.py:23-25`.
-10. **Layer-3 (in-body gate):** add `PROMPT_ASSIST_AUTHORIZED_AGENT = "ari"` in the tool
+10. **Layer-3 (in-body gate):** add `PROMPT_ASSENT_AUTHORIZED_AGENT = "ari"` in the tool
     module (pattern `daemon/tools/prompt_reload.py:70`) and refuse every other caller with
     the notify-exact generic envelope (`daemon/tools/notify_user.py:703-711`).
 11. **Pin census:** bump all 14 registry-enumerated pin files
@@ -569,8 +580,9 @@ new mint site must be reconciled with it (`:557-575`, `:622-641`).
     `tests/unit/metrics/test_metrics_vocabulary_amendment.py:30`) and
     `daemon/checkpoint_metrics.py:244-263` — in the SAME commit (SAME-PR rule
     `daemon/tools/_tool_registry.py:366-417`).
-12. **Kill-switch:** add a `PromptAssistConfig(BaseSettings)` modelled on
-    `daemon/config.py:3166-3224` (`ENSEMBLE_PROMPT_ASSIST_ENABLED`, default ON), read at CALL
+12. **Kill-switch:** add a `PromptAssentConfig(BaseSettings)` modelled on
+    `daemon/config.py:3166-3224` (`ENSEMBLE_PROMPT_ASSENT_ENABLED`, **default OFF — ruled
+    fail-closed @ `df8da01a6`; the "default ON" originally written here is OVERRULED**), read at CALL
     time, tool stays registered (pattern `daemon/tools/prompt_reload.py:25-28`, `:76-91`).
 13. **Audit ledger:** new table + `*.sql` migration in `daemon/migrations/versions/`
     (precedent `20261025_000001_create_notify_audit.sql`), content-free rows

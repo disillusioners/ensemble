@@ -1,5 +1,21 @@
 # prompt-assent — Technical Analysis (architect-facing)
 
+> **⚠ SUPERSEDED IN PART — reconciliation pass 1 (`df8da01a6`).** This document is the
+> **pre-ruling** analysis. The architect has since **RULED** on every open question it raised
+> (D-1…D-9, J-1…J-3) and added **AR-1** (mint-context binding: channel **and** user) and **AR-2**
+> (the 4-verb action set), closing the plan-council criticals **K-2 / K-3 / K-7 / K-8 / K-9**.
+> **`architecture-recommendation.md` @ `df8da01a6` WINS ON CONFLICT** with this document. The
+> reasoning below is retained as the **audit trail**; where it differs from the ruling, the ruling
+> is binding. Three of this document's own recommendations were **overruled or amended**:
+> - the **kill-switch default** (§3) — ruled **default OFF (fail-closed)**, not default ON;
+> - the **3-verb action set** (§8 Q8) — ruled the **4-verb** `{list, mint, approve, reject}` (AR-2);
+> - the **`token_display` column** (§1 Q1) — **dropped**; and the `content_hash` naming there is
+>   **retired** in favour of **`render_sha256`** over the **canonical render** (J-3/K-7), with
+>   copying `prompt_versions.content_hash` **forbidden and pinned**.
+>
+> The `PromptAssentConfig` / `ENSEMBLE_PROMPT_ASSENT_` naming in this file has been corrected to
+> the canonical spelling (architect §7 defect 1).
+
 **Commission:** "prompt-assent" — the conversational approval lane (*The Emperor's Word / Assent*).
 **Role of this document:** technical-analysis channel of a planning lane. It equips the architect
 and the plan-creation worker that follows. It is NOT the plan.
@@ -139,7 +155,7 @@ version_id        FK-ish (no hard FK — mirror the audit table's deliberate no-
 agent_id, version_tag, artifact, version   (the item binding — replaces the promote's
                   issued_to_instance, which is meaningless per-item)
 token_hash        sha256(token) — NEVER the raw token
-token_display     the grouped rendering shown to the Emperor
+(no token_display column — the grouped form is rendered from the raw token at mint time only)
 issued_at, ttl_expires_at, superseded_at, consumed_at, consumed_by_message_id
 attempts          failed-attempt counter
 status            live | consumed | superseded | revoked
@@ -300,7 +316,7 @@ operators who have not deliberately armed the lane — it does not make an unarm
 **Options.**
 (a) **Default ON** (house precedent: notify_user, prompt_reload, both default ON). The lane is
     inert until a human actually says the token in a registered chat channel.
-(b) **Default OFF** — fail-closed; requires an explicit `ENSEMBLE_PROMPT_ASSIST_ENABLED=1` per
+(b) **Default OFF** — fail-closed; requires an explicit `ENSEMBLE_PROMPT_ASSENT_ENABLED=1` per
     environment. Strongest "no surprise on promote" posture; costs one operator action per
     environment before the feature works.
 (c) Default ON but **armed per-deployment by a separate "arm" record** — over-engineered for
@@ -308,6 +324,13 @@ operators who have not deliberately armed the lane — it does not make an unarm
 
 **RECOMMENDATION: (a) default ON**, mirroring the two closest precedents, **with two
 conditions**:
+
+> **⚠ OVERRULED @ `df8da01a6` (D-2).** The architect ruled **default OFF (fail-closed)**, not
+> default ON: this is the first lane that can change a live agent's **own guardrails** through a
+> chat message, and the house's most recent Emperor-ratified posture for a novel authority surface
+> (Decision Module P1, 2026-11-09) is *"dormant by default, nothing decides anything"*. The flip
+> to ON is one env var per environment — no code change. **ONE shared fail-closed OFF default
+> constant** is consumed by both the P2 defensive resolver and the P4 config class.
 1. the switch is read **at call time** and the tool **stays registered** when off (refusal-at-call,
    never construction-absence) — `prompt_reload.py:25-28`;
 2. the gate ORDER is: **ari gate → kill-switch → 3-factor gates → mutation** (`notify_user.py:703-715`),
@@ -659,12 +682,15 @@ also mentions a **LIST companion** and a **mint** step (Ari "shows the Emperor w
 the token is "re-mintable").
 
 **Options.**
-1. One tool, `action ∈ {mint, approve, reject}`.
+1. One tool, `action ∈ {mint, approve, reject}`. **⚠ SUPERSEDED @ `df8da01a6` (AR-2): the ruled
+   action set is the 4-verb `{list, mint, approve, reject}`.**
 2. Two tools: `prompt_assent` (mutator: approve|reject) + `prompt_assent_pending`
    (reader: list + diff).
 3. Three tools (add a dedicated mint tool).
 
-**RECOMMENDATION: option 1 — one tool, three actions.** Reasons:
+**RECOMMENDATION: option 1 — one tool, three actions.** **⚠ SUPERSEDED @ `df8da01a6` (AR-2): the
+ruled action set is `{list, mint, approve, reject}`** — the reasoning below survives, but the verb
+count is four. Reasons:
 - it preserves the commission's "a NEW privileged ari-EXACTLY tool" (suggested `prompt_assent`)
   literally;
 - `mint` is a **state-changing** operation (it writes a token row and supersedes any prior
@@ -754,7 +780,7 @@ rows (id, agent, artifact, version, submitted-at) **without** minting. Minting i
 | 5 | `daemon/tools/_tool_registry.py` `PRIVILEGED_TOOL_CATEGORIES` | add `"prompt-assent"` → **entry #21** (the set is `:418-773`; `prompt-reload` at `:751-772` is the style template, incl. the "opt-in only / ari-exactly / kill-switch read at call time / SAME-PR" rationale prose) |
 | 6 | `daemon/tools/instance.py` | factory `create_prompt_assent_tools_if_available(...)` (pattern `:2896-2927` — always constructs; the tool refuses cleanly when a handle is missing) + the **extend inside `create_instance_tools`** (`:6810-6814` / `:7013` pattern). **Placement is load-bearing:** it MUST precede `create_help_tool` / `scan_tools_for_full_docs` / `_apply_tool_filter` (`:6791-6802`) — *"a later extend is either invisible to the help tool or BYPASSES the privileged strip"* |
 | 7 | `daemon/tools/prompt_assent.py` | in-body gate `PROMPT_ASSENT_AUTHORIZED_AGENT = "ari"` (pattern `prompt_reload.py:70`) + the notify-exact generic not-ari envelope (`notify_user.py:703-711`) — *"a LITERAL tool name in an allow list bypasses the category gate, so the category alone cannot spell 'ari only'"* (`notify_user.py:19-30`) |
-| 8 | `daemon/config.py` | new `PromptAssistConfig(BaseSettings)` (pattern `NotifyUserConfig` `:3166-3224`, prefix `ENSEMBLE_PROMPT_ASSIST_`) + the field wiring at the `:6826` site. Auto-covered by the tests' `ENSEMBLE_` prefix tracker (`config.py:3171-3173`) — **no conftest edit** |
+| 8 | `daemon/config.py` | new `PromptAssentConfig(BaseSettings)` (pattern `NotifyUserConfig` `:3166-3224`, prefix `ENSEMBLE_PROMPT_ASSENT_`) + the field wiring at the `:6826` site. Auto-covered by the tests' `ENSEMBLE_` prefix tracker (`config.py:3171-3173`) — **no conftest edit** |
 | 9 | `daemon/manager.py` | the service/handle the factory reads (pattern `manager.py:1778` — `self._prompt_version_service`; the notify factory reads `manager.engine` + `_source_repository` + `_instance_repository`) + the token-store handle |
 | 10 | `daemon/api.py` | the **create_all seam** for the new table (precedent `daemon/api.py:1142-1143` — *"N1 REQUIRED seam — a missed import = no table on PG"*). Brand-new table → **no `_ensure_postgres_columns` mirror needed** |
 | 11 | `daemon/repositories/prompt_assent/{models,repository}.py` **(NEW)** | the token table + the store (mint / find / consume / attempt-count / sweep) |
@@ -862,7 +888,7 @@ artifact that will be copied forward next time). The research note's §4.4 list 
 | ID | Decision | Options | My recommendation |
 |---|---|---|---|
 | **D-1** | Token store | (a) new PG table · (b) columns on `prompt_versions` · (c) in-memory | **(a) new PG table** — no `_ensure_postgres_columns` entry → no boot-abort surface; survives restart; independent GC |
-| **D-2** | Kill-switch default | fail-open (default ON) · fail-closed (default OFF) | **fail-open (default ON)**, read at call time, tool stays registered, gate order = ari → switch → 3-factor → mutate. *(Deviate only if the Emperor wants the lane dormant until first use.)* |
+| **D-2** | Kill-switch default | fail-open (default ON) · fail-closed (default OFF) | **⚠ OVERRULED @ `df8da01a6` — RULED: fail-closed (default OFF)**, read at call time, tool stays registered, `mint` refused too, gate order = ari → switch → 3-factor → mutate, indeterminate values fail closed, ONE shared default constant across P2/P4. *(The flip to ON is one env var per environment — Emperor-owned, architect §8.1.)* |
 | **D-3** | Token length | 8 chars / 40 bits (house) · 6 chars / 30 bits (commission) | **8 chars** — costs nothing operationally, removes the brute-force argument. **6 acceptable only with the per-item attempt counter + lockout + a global per-instance bound** |
 | **D-4** | Single-use enforcement point | consume-on-success (separate txn) · consume inside the transition txn (requires extending `atomic_transition`) | **transition-then-consume, preferably same-transaction.** The state-machine CAS already blocks double-apply; the ordering matters only so a *refusal* never burns the Emperor's token |
 | **D-5** | Which chat sources are in scope, and the per-source "approving user" key | discord-only first · all registered chat types | **discord first** (the commission's "e.g. my-discord-bot"), with the user key taken from the adapter metadata (`user_id`), **not** from `external_user_id` (a guild-channel `external_user_id` is a CHANNEL) |
