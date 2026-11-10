@@ -57,7 +57,7 @@
 
 ### Sizing constants
 
-**A-13 — SINGLE SOURCE OF TRUTH for the live sizing constant set.** body 240 (escaped) · slug ≤44 · entry ≤332 · active 256 (POK_ACTIVE_CAP_PER_PROJECT, per project) · pin 2 (per project) · family-max 3 · **block 2,900 full-render PER-VIEW** / 8 · threshold = selector-configured, non-pinned only · window 30d. **This row is the ONE authoritative restatement of the set** — every other site in the artifact set MUST reference A-13 instead of re-typing the numbers, or (where a file genuinely must carry a value) use the house marker form `[active cap 256 — Emperor directive 2026-11-10]`. No bare, unmarked `256` outside this row. The prior "identical across all 4 files" duplication invariant is RETIRED (it re-armed a four-site numeric fragility that ER-2 broke).
+**A-13 — SINGLE SOURCE OF TRUTH for the live sizing constant set.** body 240 (escaped) · slug ≤44 · entry ≤332 · active 256 (POK_ACTIVE_CAP_PER_PROJECT, per project) · pin 2 (per project) · family-max 3 · **block 2,900 full-render PER-VIEW** / 8 · threshold = selector-configured, non-pinned only · window 30d. **This row is the ONE authoritative restatement of the set** — every other site in the artifact set MUST reference A-13 instead of re-typing the ACTIVE-CAP value (`256`), or (where a file genuinely must carry that value) use the house marker form `[active cap 256 — Emperor directive 2026-11-10]`. No bare, unmarked `256` outside this row; the per-view block/entry budget constants are derived closed-form values restated in place and are NOT single-sourced. The prior "identical across all 4 files" duplication invariant is RETIRED (it re-armed a four-site numeric fragility that ER-2 broke).
 
 ### REQUIRED same-lane companion
 
