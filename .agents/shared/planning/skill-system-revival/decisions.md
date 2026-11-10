@@ -888,4 +888,57 @@ gate-time accounting differently.
 
 ---
 
+## DS-58 — Round-6 (tidier cleanup) rulings: one writer, the gauge survives AND is wired, the narrative teaches the live predicate
+
+**Context.** The tidier's craftsmanship pass (`tidier-report.md`, sha `b43482c5`) filed 4 findings against this lane's own
+files: **M1** (a duplicated dual-column writer in the repository, with two value-object types), **M2** (the A4 divergence gauge
+has no production consumer), **M3** (unused imports — several of them the lane's own), **L3** (a stale narrative teaching the
+retired `has_applied_for_instance` predicate) and **L10** (a raw-text anchor pin). The dispatcher's standing constraint for
+this round: where the tidier and the leader conflict, the LEADER WINS.
+
+**Ruling.**
+
+1. **M1 — ONE writer. The orphaned `deactivate_with_receipt` (with `DeactivationResult` and `SkillDeactivationRefused`) is
+   DELETED, not kept-with-a-note.** The zero-caller proof was run per symbol, repo-wide: `deactivate_with_receipt` → its own
+   test file + one prose comment; `DeactivationResult` → the defining module + the pack's mutation templates;
+   `SkillDeactivationRefused` → its own test file only. Nothing in production called any of them. The invariants it pinned
+   were RE-POINTED, not dropped: the E4 lane's own pin file already proves the pair-moves-as-a-pair, the A/B refusal and the
+   prior-pair/reversal on the LIVE writer (`daemon/services/skill_deactivation.py::write_skill_pair`), mutation-proved by that
+   lane's pack; the TWO invariants E4 does not cover (no third column moves; a missing row returns `None`) were re-pointed onto
+   the LIVE writer in `tests/unit/test_skill_dual_column_live_writer.py` with their own mutation legs. An unexplained survivor
+   is the failure mode; a duplicated writer is the tidier's failure mode. Neither remains.
+
+2. **M2 — THE GAUGE SURVIVES AND IS WIRED (LEADER RULING, tidier overruled).** The tidier proposed dropping the gauge and its
+   test until a consumer exists; the leader protects it as the live A4 deliverable. The gauge is therefore UNCHANGED and now
+   has a REAL consumer: `scripts/audit/skill_counter_reconcile.py` DELEGATES to `SkillRepository.within_identity_key_divergence`
+   (through its `divergence_reading` function) and reports its reading under `divergence` in `--measure` — delegated, never re-implemented, with the import deferred into the
+   reading function so the write paths stay light. The feasibility check ran BEFORE the change (engine/session compatibility,
+   import cycle, bootstrap side effect, and the F-4 import trap). The gauge's own semantics and its own pin file are untouched.
+
+3. **L3 — a narrative must not teach a dead predicate.** The retargeted integration files `tests/integration/test_skill_capture.py`
+   and `tests/integration/test_skill_cross_phase_flow_c.py` were reworded and the stale test names renamed to name the live
+   outcome-fields predicate. The retired predicate STAYS in the repository with its existing
+   "NOT A CAPTURE-GATE PREDICATE" note — the tidier honoured that keep, and so does this ruling.
+
+4. **M3 — the unused names go; the `# noqa: F401` model imports stay.** Four files, five names removed. Two corrections to the
+   finding were verified before acting: the `json` claim was CORRECT (the occurrences are response `.json()` methods, not module
+   use), and `pytest` in the capture-lane read file IS used even though the tidier did not list it — a removal attempt was
+   reverted before the commit.
+
+5. **L10 — ROUTED to Dev-B; this lane's own raw-text audit found ONE true raw-text-anchor pin and RE-AIMED it at behaviour.**
+   The keeper read-scope pin belongs to Dev-B's lane and was reported, not touched. In this lane's own pins, the label-agreement
+   pin in `tests/unit/metrics/test_metrics_census_polarity.py` used raw string equality as a behaviour proxy (a prose edit alone
+   could satisfy it). It now asserts WHICH DEFECT each label names BY BEHAVIOUR (the R-ii census-polarity site must report the
+   gated-off sense; the R-i capture-active site must report the live per-read process fact), with the label attachment asserted
+   per site. The mutation leg still discriminates. The remaining source-reading pins are either guarded by behavioural siblings
+   or are doc-content requirements by nature, and were deliberately kept.
+
+**Consequence for the lane's claims.** The lane's red accounting is unchanged in shape but honest in scope: NET-NEW = 0 across
+the touched files AND the registered-pack registry (§17 item 36). The packs touched this round are
+`skill_dual_column_deactivation_unit_test` (3 legs), `skill_counter_drift_unit_test` (8 legs) and
+`metrics_census_polarity_unit_test` (3 legs), each re-run green with sha-verified restores.
+
+
+---
+
 *End of the decision log. Companion plan: `phase1-plan.md`.*
