@@ -413,10 +413,23 @@ class TestTrustedAnchor:
             f"{sorted(names)}"
         )
 
-        anchor_source = inspect.getsource(filesystem._trusted_scope_anchor)
-        assert "current_trusted_workdir()" in anchor_source, (
+        # Re-aimed at BEHAVIOUR (the raw-text hole): the previous form
+        # asserted the LITERAL "current_trusted_workdir()" appeared in the
+        # source, which a COMMENT could satisfy — prose editing would keep
+        # the pin green while the anchor stopped consulting the factory
+        # binding. The AST walk (the neighbouring pattern above) requires a
+        # genuine CALL node; an AST node cannot be satisfied by prose.
+        anchor_tree = ast.parse(
+            inspect.getsource(filesystem._trusted_scope_anchor)
+        )
+        anchor_calls = {
+            node.func.id
+            for node in ast.walk(anchor_tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "current_trusted_workdir" in anchor_calls, (
             "the scoped resolver's base must come from the trusted-workdir "
-            "binding the factory sets"
+            f"binding the factory sets — calls found: {sorted(anchor_calls)}"
         )
 
 
