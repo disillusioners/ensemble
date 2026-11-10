@@ -624,8 +624,70 @@ Seven places where the second-gate brief was wrong or imprecise, each caught by 
 
 ---
 
-*Machine-readable marker for the release checker. The FINAL VERDICT below is the verdict of the LATEST gate round (the second gate). The first-gate FAIL at the top of this file is RETAINED EVIDENCE — it is the record that the five commits under test answer, and it must not be edited or removed. The checker reads the FINAL occurrence of this marker block; earlier red rounds are informational.*
+---
+---
+
+# THIRD ROUND — post-union covering leg (the test-file union has landed)
+
+**Date:** 2026-11-10 (local +07) · **Verifier:** tester (test leader)
+**Gated commit:** **`46d4b6e1b2cb3e20a1146ff150eeb412450b84ed`** · gate-2 tip `f4b85000c` · BASE `818411107`
+**Type:** MERGE — parents `f4b85000c` (ours) + `9091f9208` (upstream `origin/latest` v0.29.11)
+**Scope:** the only post-gate conflict was `tests/test_launcher.sh` (the union resolution). This round is the independent covering evidence for that file, plus a verification of the release classifier's attribution of `launcher.sh`.
+
+**Rounds 1 and 2 above are untouched.** Round 1's FAIL and round 2's PASS both stay as the evidence trail.
+
+---
+
+# VERDICT: 🟢 **PASS** at `46d4b6e1b` — union covered, attribution verified
+
+**Legs:** 6 workers dispatched, 6 adjudicated · **all six green** · 0 timeouts · 0 source edits by the tester · 0 live-path writes.
+
+| # | Item | Result | Evidence |
+|---|---|---|---|
+| 1 | Launcher pack at the tip | ✅ **PASS** | `launcher tests: 418 passed, 0 failed, 1 skipped` / `ALL PASS`, exit 0, **99 s**. **+75** vs the gated 343/0/1S (0 failed, 0 skipped, no removals). Byte-attributable: `launcher.sh` `6723d1b8…` and `tests/test_launcher.sh` `09a44a79…`, both unchanged before→after and both equal to `git show HEAD:`. §13g (`:2341`) / §13j (`:2402`) / §13k (`:2557`) all present and inside the passing set |
+| 2 | Cap pack | ✅ **PASS** | `27 passed in 0.80s`; `27 tests collected` separately. **Per-file merge attribution: `daemon/mcp/init_guard.py` and the pack are byte-identical to HEAD** across three diff views (`--stat HEAD`, `--cached --stat HEAD`, `--stat 9091f9208`) while the surrounding daemon moved ⇒ the cap behaviour holds under the merged daemon. (The gate-2 "daemon-side control" role is **retired** — the daemon did move; this is now a green union leg, not a control) |
+| 3 | **§13g/§13j/§13k non-vacuity tripwire** | ✅ **HOLDS** | Pristine control 418/0/1S; **mutant `j < tn` → `j <= tn` @ `:884` (`_js_json_sub`) ⇒ 404 passed / 14 failed / 1 skipped**, deterministic 3/3, one-line/one-site edit (mutant sha `6bacbae5…`); restore sha256 identical → 418/0/1S. All 14 reds are **§13k**, with the exact truncation signature (`expected: 1 actual: 0`; EMPTY-stdout asserts seeing 6/4/12/8 bytes; `case_0124/0154/0230` returning rc 0 and emitting 1/1/**77** bytes). Byte-level probe: pristine `rc=1 bytes=0` → mutant `rc=0 bytes=6/4/8` |
+| 4 | 220 KB deferred-path timing (UTF-8) | ✅ **PASS — no regression** | Paired same-host A/B, 8 interleaved reps: pre-merge median **3.798 s** vs merge **3.790 s** (**Δ median −0.306 s**, merge marginally faster), max 8.173 → **5.234 s**. Exit 0 in all 21 runs; journal 220,000 → 220,375 B every run (+375 B = exactly **one** `sweep_deferred` row; original 1,500 rows an exact prefix). Function-entry census **identical to gate-2: 29 entries**, every count matching. Internal `LC_ALL=C` pin survives the merge (22/22 runs, `launcher.sh:694`, `:696`). Host was at load ≈17, so the idle-host gate-2 figure (1.773 s) is not comparable — the paired A/B is the load-robust evidence |
+| 5 | Upstream's macOS PATH/STATE_FILE leg | ✅ **PASS — ran, not skipped out** | §13 Supervisor-env PATH strategy (`:1369`), §14 STATE_FILE relocation (`:1891`), §15 Plist template (`:2022`). **§13/§14 are unconditional on this host** — no `_skip`, no `uname`/`Darwin`/`launchd` guard. §15's only guard is `command -v python3` → python3 3.14.6 present ⇒ `15.d` ran. The **only** skip in the whole pack is `8b-r2` (opt-in live-install, `ENS_TEST_LIVE_LAUNCHER` unset) — **not** a PATH/STATE_FILE assert. Reconciled against `/tmp/n1-launcher/pack.log`: section headers present and PATH-strategy runtime output (probe no-op / synthesis / override) captured |
+| 6 | Merge attribution of `launcher.sh` | ✅ **VERIFIED (with a numeric correction)** | 11 hunks, **all class (P)** PATH/env/`_env_strip_value`/STATE_FILE/`_path_ensure`/MALLOC: **355 added / 11 removed**. **(J) journal lines = 0. (O) other = 0.** All **14** journal/awk functions **byte-identical** across the merge (`_js_journal_read` `e182a361…`, `_js_json_sub` `40b74406…`, `_js_journal_update` `b9e03307…`, `_js_history_append` `60dd957f…`, `_js_history_has_defer_reason` `40fc15f4…`, `_js_history_has_event_for_target` `e57ca2d3…`, `_js_size_guard_defer_decision` `c9859e23…`, `_js_sweep_flipped_disposition` `c51d2580…`, `_js_serving_defer` `ba84e5df…`, `_journal_sweep` `4778ba2c…`, `_js_awk_bounded` `b33c90f2…`, `_js_awk_pass` `f58cf472…`, `_js_awk_rc_begin` `986c5526…`, `_js_awk_rc_end` `f3318052…`). O(n) machinery unchanged: 1 `_js_awk_bounded` call inside each of the three rewritten functions, at both revs |
+| — | MAIN hygiene | ✅ **PASS** | MAIN's single stray untracked file (`added`, 10 B, `NO - file\n`, sha `71529999…`, ~12.9 h stale, proven untracked and un-ignored) removed by `rm -- added` only (never `git clean`). Porcelain now **0 lines**; HEAD `9a54a836c` unmoved; live installs untouched. *(MAIN is `behind 9` vs `origin/latest` — pre-existing, untouched.)* |
+
+## §T1 — Attribution: "0 journal lines" holds; "49 PATH lines" does not reconcile
+
+The release classifier's substantive claim is **TRUE and is the load-bearing one**: the entire upstream launcher delta is the PATH/env/STATE_FILE family, with **zero** journal lines, and **every journal function is byte-identical** between the gated tip and the shipped tip. That is exactly what makes rounds 1–2 valid coverage for the shipped journal bytes, and it is why `--post` is sufficient.
+
+**But the stated figure "49 PATH lines" is not reproducible:** the delta is **355 added / 11 removed**, of which 68 added lines contain the token `PATH` (15 of them non-comment code). No natural subset yields 49. **The release record should cite the verified numbers (355/11, 0 journal) rather than the opaque 49** — the conclusion is unaffected, but an unreconcilable figure in a release classification is the kind of thing that gets re-litigated later.
+
+## §T2 — The union reworded the `8b-r2` skip (retires a gate-1 claim)
+
+The skip is unchanged in kind (same cell, same env gate) but its **label changed**: from *"repo `_journal_sweep` body ≡ live-install copy — no live-install path configured"* to *"opt-in live-install comparison — no live-install path configured (set `ENS_TEST_LIVE_LAUNCHER` to opt in); **this row is NOT a convergence proof**"*. The old wording implied the cell verified repo↔live convergence; it never did. **This is an honesty improvement and should be noted in the release record**, because the gate-1 report quoted the old wording.
+
+## §T3 — PACKS.md needs a count refresh (report only — the giter owns the ledger)
+
+Row `:4526` reads `✅ HEAD 343/0/1S`; the tip measures **418/0/1S**. Proposed: replace `343` → **`418`**, failed/skipped unchanged. **PACKS.md was NOT edited** by this gate. (Also still open from round 2: register `tests/test_journal_splice.sh`, and add the `8b-c2` QUARANTINE row.)
+
+## §T4 — Residual coverage gap (new, named, not a blocker)
+
+**The second `j < tn` occurrence at `launcher.sh:1135` — `_js_journal_update`'s composite scanner — has ZERO pin coverage.** A supplementary mutant at that site alone runs **418/0/1S, ALL PASS**. It is currently **inert by construction**: `_js_journal_update` calls `_js_journal_read` first and returns 1 on a torn document, so the composite scanner is never reached with the triggering pre-image (byte-diff probe: identical outputs across torn / last-field-composite / history-append / counter / quarantine paths). **Not exploitable today — but if any refactor drops or bypasses the validator read gate, the writer-side bound would be unprotected by any test.** The guard condition is the validator read gate; if that gate moves, this becomes a real hole.
+
+**Scope correction on the tripwire scope:** the round-2 expectation was that the mutant would redden §13g/§13j/§13k. It can only redden **§13k** — §13g pins `_js_journal_read`'s string-context discrimination and §13j pins the rc vocabulary, and neither function contains the `j < tn` loop. Their greenness is **correct, not a gap**. Only §13k exists to pin that bound, and it went red on 14 of its 20 labels (its 3 reader-side `torn journal read refused` labels correctly stayed green — dual-shape).
+
+**Union survival of the pins is byte-proven:** §13g/§13j/§13k label sets are identical pre-merge and post-union (**4 / 22 / 8**), and the entire `13g → 14` block is **19,704 bytes on both sides, byte-identical**, only line-shifted by upstream's three inserted sections. Nothing was dropped.
+
+## §T5 — Coverage caveat stated honestly
+
+The `n1` pack log records **section headers + aggregate counts**, not per-assert IDs. So for §13/§14/§15 the *execution* proof is **aggregate + structure** (section headers present, no skip guards, 418 passed / 0 failed / 1 skipped), not line-level per-assert PASS records. That is sufficient to say the macOS leg **ran and passed**; it is not sufficient to prove any individual label printed its own PASS line. Stated plainly rather than upgraded.
+
+## §T6 — Release posture
+
+**🟢 GO.** The union landed at `46d4b6e1b`; the shipped journal bytes are byte-identical to the gated bytes (14/14 functions); the test-file union is covered by 418/0/1S with the truncation tripwire proven live (§13k red 14/20 on the mutant, green on restore); upstream's macOS PATH/STATE_FILE leg ran green and was not skipped out; the 220 KB deferred path shows no regression on a paired same-host A/B; and MAIN is clean.
+
+**Open, non-blocking, owner-routed:** PACKS.md `test_launcher` 343→418 refresh; `tests/test_journal_splice.sh` registration; the `8b-c2` QUARANTINE row; the POK 64-cap curation; the `:1135` pin-coverage gap; and the two over-claiming commit subjects (`5f8528869` "pin LC_ALL=C" — zero hunks, the pin pre-existed; `2686d47c7` — lib.sh never had the named defect). The serving-green bash-3.2 hypothesis still needs a live re-smoke (anomaly `4b67edb4`).
+
+---
+
+*Machine-readable marker for the release checker. This is the THIRD gate round; the FINAL VERDICT below is the verdict of the LATEST round. Round 1's FAIL and round 2's PASS are RETAINED EVIDENCE and must not be edited or removed. The checker reads the FINAL occurrence of this marker block; earlier rounds are informational.*
 
 ## FINAL VERDICT: PASS
-GATED_COMMIT: 7b0b7955db5834905bd01b3ba91fb32981f88f22
-GATE_DATE: 2026-11-10T11:50:31Z
+GATED_COMMIT: 46d4b6e1b2cb3e20a1146ff150eeb412450b84ed
+GATE_DATE: 2026-11-10T12:44:36Z
