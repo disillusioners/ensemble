@@ -790,7 +790,8 @@ def _resolve_workdir_input(
     """Resolve a workdir path → ``data:`` URI dict via the daemon-side read.
 
     Reuses ``_load_image_from_path`` from ``daemon/tools/image_tools.py``
-    which already enforces the project workdir confinement. The
+    which already enforces the project's local-path scope confinement
+    (main directory plus every declared related directory). The
     facade holds the daemon-side read (P2-WP3 — workdir-confined
     ``explain_image`` is NOT used inside the facade per plan §5 P2-WP3
     risks).
@@ -798,7 +799,7 @@ def _resolve_workdir_input(
     Args:
         image_ref: A filesystem path (absolute or project-relative).
         manager: The InstanceManager instance — used to look up the
-            project's workdir via ``_project_repository``.
+            project's declared directories via ``_project_repository``.
         project_id: The caller's project id (resolved upstream).
 
     Returns:
@@ -808,19 +809,27 @@ def _resolve_workdir_input(
     """
     from daemon.tools.image_tools import _load_image_from_path
 
-    # Resolve workdir from the project (mirrors the existing
-    # image-tools workdir-confined read path).
-    workdir: str | None = None
+    # Resolve the project's allowed local roots (main directory plus
+    # every declared related directory) — the same scope the image tool
+    # confines local reads to.
+    scope_roots: list[str] = []
     if project_id is not None:
         try:
             project = manager._project_repository.get(project_id)
             if project is not None:
-                workdir = getattr(project, "main_directory", None)
+                main_directory = getattr(project, "main_directory", None)
+                if isinstance(main_directory, str) and main_directory.strip():
+                    scope_roots.append(main_directory)
+                related = getattr(project, "related_directories", None)
+                if isinstance(related, (list, tuple, set, frozenset)):
+                    for entry in related:
+                        if isinstance(entry, str) and entry.strip():
+                            scope_roots.append(entry)
         except Exception:
-            workdir = None
+            scope_roots = []
 
     try:
-        data_uri = _load_image_from_path(image_ref, workdir=workdir)
+        data_uri = _load_image_from_path(image_ref, workdir=scope_roots)
     except ValueError as exc:
         # ``_load_image_from_path`` raises ``ValueError`` for path
         # confinement / magic-byte / size / non-regular-file
