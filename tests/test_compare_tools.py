@@ -37,9 +37,7 @@ Coverage lanes:
 
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -52,9 +50,9 @@ import daemon.tools.compare_tools as compare_tools_module
 
 # Two 32-hex substrate ids for tests that exercise the input
 # resolution path; the input-not-found path uses a third non-hex id
-# so the resolver routes it through the workdir branch (which then
-# 404s because the test has no workdir wired — the same expected
-# input-not-found surface).
+# so the resolver routes it through the local-path branch (which then
+# fails path resolution against the real filesystem — the same
+# expected input-not-found surface, surfaced as ``path_invalid``).
 _SUBSTRATE_ID_A = "0123456789abcdef0123456789abcdef"
 _SUBSTRATE_ID_B = "fedcba9876543210fedcba9876543210"
 
@@ -222,6 +220,26 @@ def _comparator_row(
         created_at=created_at,
         project_id=None,
     )
+
+
+def _project_manager(main_directory: str, related=()) -> MagicMock:
+    """A ``_make_manager()`` whose project repo returns the given dirs.
+
+    Dedupes the SimpleNamespace project-mock the unconfined-path tests
+    each built inline: ``_resolve_path_input`` / ``compare_images`` read
+    ``main_directory`` (the RELATIVE-path anchor, never a boundary) and
+    ``related_directories`` is carried only to prove declared scope plays
+    no part in path admission.
+    """
+    manager = _make_manager()
+    manager._project_repository = MagicMock()
+    manager._project_repository.get = MagicMock(
+        return_value=SimpleNamespace(
+            main_directory=main_directory,
+            related_directories=list(related),
+        )
+    )
+    return manager
 
 
 # ── Factory shape ────────────────────────────────────────────────────────────
@@ -1604,25 +1622,27 @@ class TestInputResolutionSubstrate:
         mock_invoke.assert_not_awaited()
 
 
-# ── P2-WP2 review MINOR-5 — Distinct workdir failure reasons ─────────────────
+# ── P2-WP2 review MINOR-5 — Distinct local-path failure reasons ─────────────
 
 
-class TestInputResolutionWorkdirReasons:
-    """P2-WP2 review MINOR-5 — distinct ``reason`` per workdir failure class.
+class TestInputResolutionPathReasons:
+    """P2-WP2 review MINOR-5 — distinct ``reason`` per local-path failure.
 
-    The facade distinguishes three workdir-input failure modes
+    The facade distinguishes three local-path input failure modes
     (each surfaces a distinct ``reason`` string so the caller / a
     future operator can branch / triage without parsing prose):
 
-      * ``workdir_invalid`` — ``_load_image_from_path`` raised
-        ``ValueError`` (confinement / magic-byte / size /
-        non-regular-file rejection; the validator refused the
-        path before the open call).
-      * ``workdir_unreadable`` — ``_load_image_from_path`` raised
+      * ``path_invalid`` — ``_load_image_from_path`` raised
+        ``ValueError`` (missing file / non-regular file / size cap /
+        magic-byte rejection). The path was not a usable image.
+      * ``path_unreadable`` — ``_load_image_from_path`` raised
         ``OSError`` (filesystem read failure: permissions, I/O,
-        post-validator unlink race).
-      * ``workdir_unknown`` — any other ``Exception`` (defensive
+        post-resolution unlink race).
+      * ``path_unknown`` — any other ``Exception`` (defensive
         catch-all for unforeseen failures: encoding errors, OOM).
+
+    None of these is a scope refusal: the path confinement is gone, so
+    every local-path failure is an HONEST load failure.
 
     Each test patches ``_load_image_from_path`` to raise the
     canonical exception class and asserts the envelope's
@@ -1635,10 +1655,10 @@ class TestInputResolutionWorkdirReasons:
         yield
         compare_tools_module._inflight_reuse.clear()
 
-    async def test_workdir_value_error_returns_workdir_invalid(self):
-        """``ValueError`` from ``_load_image_from_path`` → ``workdir_invalid``.
+    async def test_path_value_error_returns_path_invalid(self):
+        """``ValueError`` from ``_load_image_from_path`` → ``path_invalid``.
 
-        Confinement / magic-byte / size rejection falls here.
+        Missing file / magic-byte / size rejection falls here.
         """
         from daemon.tools.compare_tools import create_compare_tools
 
@@ -1647,33 +1667,33 @@ class TestInputResolutionWorkdirReasons:
 
         with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
             # ``_load_image_from_path`` is imported lazily inside
-            # ``_resolve_workdir_input`` from
+            # ``_resolve_path_input`` from
             # ``daemon.tools.image_tools`` — patch the import source
             # so the facade's lazy import binds to the mock.
             with patch(
                 "daemon.tools.image_tools._load_image_from_path",
                 side_effect=ValueError(
-                    "Path 'img.png' is outside the project workdir boundary."
+                    "Image file does not exist: img.png"
                 ),
             ):
                 tools = create_compare_tools(manager, "test-instance-id")
                 result = await tools[0].coroutine(
-                    image_a="img.png",  # not a 32-hex → workdir branch
+                    image_a="img.png",  # not a 32-hex → path branch
                     image_b=_SUBSTRATE_ID_B,
                 )
 
         envelope = json.loads(result)
         assert envelope["kind"] == "input-not-found"
-        assert envelope["reason"] == "workdir_invalid"
-        assert "outside the project workdir" in envelope["error"]
+        assert envelope["reason"] == "path_invalid"
+        assert "does not exist" in envelope["error"]
         # No spawn — the agent is never invoked on a bad image.
         mock_invoke.assert_not_awaited()
 
-    async def test_workdir_oserror_returns_workdir_unreadable(self):
-        """``OSError`` from ``_load_image_from_path`` → ``workdir_unreadable``.
+    async def test_path_oserror_returns_path_unreadable(self):
+        """``OSError`` from ``_load_image_from_path`` → ``path_unreadable``.
 
-        Filesystem read failure falls here (validator passed; the
-        read itself failed — typically permissions or I/O).
+        Filesystem read failure falls here (path resolved; the read
+        itself failed — typically permissions or I/O).
         """
         from daemon.tools.compare_tools import create_compare_tools
 
@@ -1693,12 +1713,12 @@ class TestInputResolutionWorkdirReasons:
 
         envelope = json.loads(result)
         assert envelope["kind"] == "input-not-found"
-        assert envelope["reason"] == "workdir_unreadable"
+        assert envelope["reason"] == "path_unreadable"
         assert "Permission denied" in envelope["error"]
         mock_invoke.assert_not_awaited()
 
-    async def test_workdir_unexpected_error_returns_workdir_unknown(self):
-        """Any other ``Exception`` → ``workdir_unknown``.
+    async def test_path_unexpected_error_returns_path_unknown(self):
+        """Any other ``Exception`` → ``path_unknown``.
 
         Defensive catch-all so a future unforeseen failure mode
         (encoding error, OOM, etc.) surfaces with a distinct
@@ -1723,20 +1743,21 @@ class TestInputResolutionWorkdirReasons:
 
         envelope = json.loads(result)
         assert envelope["kind"] == "input-not-found"
-        assert envelope["reason"] == "workdir_unknown"
+        assert envelope["reason"] == "path_unknown"
         assert "RuntimeError" in envelope["error"]
         mock_invoke.assert_not_awaited()
 
 
-# ── D1 parity — related_directories are part of the facade's scope ──────────
+# ── Local paths are UNCONFINED — any readable path resolves ─────────────────
 
 
-class TestWorkdirScopeIncludesRelatedDirectories:
-    """``compare_images`` confines a local path to main ∪ related dirs.
+class TestPathInputUnconfined:
+    """``compare_images`` reads ANY readable local path (no confinement).
 
-    Parity with ``explain_image``: the project declaration, not just its
-    main directory, defines the allowed local scope. A video/review asset
-    living in a declared related directory must resolve.
+    Parity with ``explain_image``: operator policy 2026-11-10 removed the
+    directory confinement. A path outside the project's main directory (and
+    outside every related directory) is READ, not refused; a nonexistent
+    path is an honest load error.
     """
 
     @pytest.fixture(autouse=True)
@@ -1745,59 +1766,142 @@ class TestWorkdirScopeIncludesRelatedDirectories:
         yield
         compare_tools_module._inflight_reuse.clear()
 
-    def test_related_directory_path_resolves(self, tmp_path):
-        """A file inside a declared related directory produces a data URI."""
-        from daemon.tools.compare_tools import _resolve_workdir_input
-
-        main = tmp_path / "frontend-engine"
-        main.mkdir()
-        video = tmp_path / "video-lab"
-        (video / "prod-v2").mkdir(parents=True)
-        image = video / "prod-v2" / "contact-sheet.png"
-        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
-
-        manager = _make_manager()
-        manager._project_repository = MagicMock()
-        manager._project_repository.get = MagicMock(
-            return_value=SimpleNamespace(
-                main_directory=str(main),
-                related_directories=[str(video)],
-            )
-        )
-
-        row = _resolve_workdir_input(
-            str(image), manager=manager, project_id="pid"
-        )
-
-        assert "data_uri" in row, row
-        assert row["data_uri"].startswith("data:image/png;base64,")
-
-    def test_path_outside_main_and_related_is_rejected(self, tmp_path):
-        """A path outside both roots stays ``workdir_invalid``."""
-        from daemon.tools.compare_tools import _resolve_workdir_input
+    def test_path_outside_project_everywhere_resolves(self, tmp_path):
+        """A file outside main + related dirs produces a data URI."""
+        from daemon.tools.compare_tools import _resolve_path_input
 
         main = tmp_path / "frontend-engine"
         main.mkdir()
         video = tmp_path / "video-lab"
         video.mkdir()
-        outside = tmp_path / "elsewhere.png"
+        outside = tmp_path / "elsewhere" / "deep" / "contact-sheet.png"
+        outside.parent.mkdir(parents=True)
         outside.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
 
+        manager = _project_manager(str(main), related=[str(video)])
+
+        row = _resolve_path_input(str(outside), manager=manager, project_id="pid")
+
+        assert "data_uri" in row, row
+        assert row["data_uri"].startswith("data:image/png;base64,")
+        assert row["source"] == "path"
+
+    def test_path_with_no_project_resolves(self, tmp_path):
+        """No project context → absolute paths still resolve."""
+        from daemon.tools.compare_tools import _resolve_path_input
+
+        image = tmp_path / "shot.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
         manager = _make_manager()
-        manager._project_repository = MagicMock()
-        manager._project_repository.get = MagicMock(
-            return_value=SimpleNamespace(
-                main_directory=str(main),
-                related_directories=[str(video)],
+
+        row = _resolve_path_input(str(image), manager=manager, project_id=None)
+
+        assert "data_uri" in row, row
+
+    def test_relative_path_anchors_at_main_directory(self, tmp_path):
+        """A relative path resolves against the project's main directory."""
+        from daemon.tools.compare_tools import _resolve_path_input
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        (main / "draft.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
+        manager = _project_manager(str(main))
+
+        row = _resolve_path_input("draft.png", manager=manager, project_id="pid")
+
+        assert "data_uri" in row, row
+
+    def test_missing_path_is_an_honest_error(self, tmp_path):
+        """A nonexistent path stays ``path_invalid`` with an honest message."""
+        from daemon.tools.compare_tools import _resolve_path_input
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+
+        manager = _project_manager(str(main))
+
+        row = _resolve_path_input(
+            str(tmp_path / "nothing-here.png"), manager=manager, project_id="pid"
+        )
+
+        assert row["reason"] == "path_invalid"
+        assert "does not exist" in row["message"]
+        assert "outside" not in row["message"].lower()
+
+    async def test_compare_images_dispatches_outside_path(self, tmp_path):
+        """END-TO-END: an outside-project path reaches the comparator."""
+        from daemon.tools.compare_tools import create_compare_tools
+
+        main = tmp_path / "frontend-engine"
+        main.mkdir()
+        outside = tmp_path / "some-other-place" / "asset.png"
+        outside.parent.mkdir(parents=True)
+        outside.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
+        manager = _project_manager(str(main))
+        findings = _valid_findings_json()
+        mock_invoke = AsyncMock(return_value=(findings, "child-id"))
+
+        with patch("daemon.tools.compare_tools.invoke_agent_and_wait", mock_invoke):
+            tools = create_compare_tools(manager, "test-instance-id")
+            result = await tools[0].coroutine(
+                image_a=str(outside),
+                image_b=_SUBSTRATE_ID_A,
             )
+
+        assert result == findings
+        kwargs = mock_invoke.call_args.kwargs
+        assert kwargs["images"][0].startswith("data:image/png;base64,")
+
+
+# ── Doc parity — the facade documents UNCONFINED local paths ────────────────
+
+_CONFINEMENT_PHRASES = (
+    "confine",
+    "allowed director",
+    "related director",
+    "project workdir",
+    "workdir boundary",
+    "outside the project",
+)
+
+
+class TestCompareImagesDocsDropConfinement:
+    """``compare_images`` documents unconfined local reads.
+
+    Parity with ``explain_image``: the same operator policy removed the
+    directory confinement, so the tool description must not keep promising
+    it. Positive and negative assertions are SEPARATE (a phrase that also
+    appears in an unrelated sentence must not fail the negative side).
+    """
+
+    def test_description_has_no_confinement_language(self):
+        from daemon.tools.compare_tools import create_compare_tools
+
+        description = " ".join(
+            (create_compare_tools(_make_manager(), "iid")[0].description or "")
+            .lower()
+            .split()
         )
 
-        row = _resolve_workdir_input(
-            str(outside), manager=manager, project_id="pid"
+        for phrase in _CONFINEMENT_PHRASES:
+            assert phrase not in description, (
+                f"compare_images.description still mentions {phrase!r} — "
+                "the local-path confinement was removed."
+            )
+
+    def test_description_promises_any_readable_path(self):
+        from daemon.tools.compare_tools import create_compare_tools
+
+        description = " ".join(
+            (create_compare_tools(_make_manager(), "iid")[0].description or "")
+            .lower()
+            .split()
         )
 
-        assert row["reason"] == "workdir_invalid"
-        assert str(main) in row["message"]
+        assert "any readable path" in description
 
 
 # ── P2-WP3 — Single-call shape ──────────────────────────────────────────────

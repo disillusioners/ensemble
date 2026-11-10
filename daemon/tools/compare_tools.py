@@ -60,11 +60,11 @@ child instead of spawning a fresh one.
 P2-WP3 path→data-URI bridge
 ---------------------------
 The facade accepts BOTH substrate ids (32-hex, returned by
-``image_save``) AND project-workdir paths. The bridge
+``image_save``) AND local filesystem paths — ANY readable path on the
+daemon host (no directory confinement). The bridge
 (``daemon/services/tmp_image_bridge.py`` — Option B per
-bridge-design.md §3) handles substrate ids; workdir paths are
-resolved daemon-side inline via ``_load_image_from_path``
-(``daemon/tools/image_tools.py:318-371``). Both paths produce
+bridge-design.md §3) handles substrate ids; paths are resolved
+daemon-side inline via ``_load_image_from_path``. Both produce
 ``data:`` URIs ready for the ``images=[]`` dispatch parameter.
 
 Fail-loud model gate (P2-WP3 AC-5)
@@ -78,7 +78,6 @@ quietly resolve to the daemon default and the comparator would lose
 its vision capability without any error).
 """
 
-import base64
 import json
 import logging
 import re
@@ -160,7 +159,7 @@ _KIND_TIMEOUT = "timeout"
 _KIND_MISSING_AGENT = "missing-agent"
 _KIND_VISION_FAILURE = "vision-failure"
 # WP3 addition — facade input resolution failure (substrate id 404,
-# workdir path missing / outside confinement, magic-byte reject).
+# local path missing / unreadable / oversize / magic-byte reject).
 _KIND_INPUT_NOT_FOUND = "input-not-found"
 # WP3 addition — agent return did not parse as the findings schema.
 # Surfaces as a structured envelope so the caller can branch without
@@ -173,9 +172,9 @@ _KIND_SCHEMA_INVALID = "schema-invalid"
 _MONITOR_KV_KEY = "design.comparator.monitor"
 
 # Substrate id pattern (P1-WP10 anchor — must byte-match
-# ``daemon/tools/image_tools.py:640`` and the HTTP router regex).
+# ``daemon/tools/image_tools.py::_ID_REGEX`` and the HTTP router regex).
 # 32 lowercase hex characters. The facade accepts EITHER this shape
-# OR a project-workdir path.
+# OR a local filesystem path.
 _SUBSTRATE_ID_REGEX = re.compile(r"^[a-f0-9]{32}$")
 
 # Findings schema enum sets (P2-WP3 AC-1 / AC-7). Pinned here as
@@ -720,7 +719,7 @@ def _resolve_substrate_input(
     Args:
         image_ref: The 32-hex substrate id.
         manager: The InstanceManager instance — ``tmp_image_store`` is
-            read from the manager (mirrors ``image_tools.py:652``).
+            read from the manager (mirrors ``image_tools.py::_get_store``).
 
     Returns:
         A dict with EITHER ``{"data_uri": str, "provenance": dict | None,
@@ -733,7 +732,7 @@ def _resolve_substrate_input(
     # ``image_tools`` substrate tools).
     from daemon.services.tmp_image_bridge import resolve_data_uris
 
-    # Store wiring — mirrors ``daemon/tools/image_tools.py:651-654``.
+    # Store wiring — mirrors ``daemon/tools/image_tools.py::_get_store``.
     try:
         store = manager.tmp_image_store
     except Exception as exc:
@@ -781,25 +780,27 @@ def _resolve_substrate_input(
     return row
 
 
-def _resolve_workdir_input(
+def _resolve_path_input(
     image_ref: str,
     *,
     manager: "InstanceManager",
     project_id: str | None,
 ) -> dict[str, Any]:
-    """Resolve a workdir path → ``data:`` URI dict via the daemon-side read.
+    """Resolve a local filesystem path → ``data:`` URI dict (no confinement).
 
-    Reuses ``_load_image_from_path`` from ``daemon/tools/image_tools.py``
-    which already enforces the project's local-path scope confinement
-    (main directory plus every declared related directory). The
-    facade holds the daemon-side read (P2-WP3 — workdir-confined
-    ``explain_image`` is NOT used inside the facade per plan §5 P2-WP3
-    risks).
+    Reuses ``_load_image_from_path`` from ``daemon/tools/image_tools.py``,
+    which reads ANY readable path on the daemon host: no directory
+    confinement, 10 MB cap, magic-byte / extension MIME validation, and
+    symlink resolution (a link to a readable file is read like the file).
+
+    Every failure is an HONEST one — missing file, unreadable file, size
+    cap, non-regular file, non-image bytes — never a scope refusal.
 
     Args:
-        image_ref: A filesystem path (absolute or project-relative).
-        manager: The InstanceManager instance — used to look up the
-            project's declared directories via ``_project_repository``.
+        image_ref: A filesystem path (absolute, or relative to the calling
+            project's main directory).
+        manager: The InstanceManager instance — used to resolve the calling
+            project's main directory as the RELATIVE-path anchor.
         project_id: The caller's project id (resolved upstream).
 
     Returns:
@@ -809,69 +810,66 @@ def _resolve_workdir_input(
     """
     from daemon.tools.image_tools import _load_image_from_path
 
-    # Resolve the project's allowed local roots (main directory plus
-    # every declared related directory) — the same scope the image tool
-    # confines local reads to.
-    scope_roots: list[str] = []
+    # Relative-path anchor only — the calling project's main directory.
+    # NOT a boundary: absolute paths are read as-is, and a resolved target
+    # outside the anchor is read normally.
+    base_dir: str | None = None
     if project_id is not None:
         try:
             project = manager._project_repository.get(project_id)
             if project is not None:
                 main_directory = getattr(project, "main_directory", None)
                 if isinstance(main_directory, str) and main_directory.strip():
-                    scope_roots.append(main_directory)
-                related = getattr(project, "related_directories", None)
-                if isinstance(related, (list, tuple, set, frozenset)):
-                    for entry in related:
-                        if isinstance(entry, str) and entry.strip():
-                            scope_roots.append(entry)
-        except Exception:
-            scope_roots = []
+                    base_dir = main_directory
+        except Exception as exc:
+            # Silent anchor fallback: relative paths then resolve against
+            # the process cwd. Debug-only so a hot-path broken repo does
+            # not spam INFO, while the fallback stays traceable in the
+            # DEBUG file log.
+            logger.debug(
+                "compare_images: relative-path anchor lookup failed (%s); "
+                "falling back to process cwd.",
+                exc,
+            )
+            base_dir = None
 
     try:
-        data_uri = _load_image_from_path(image_ref, workdir=scope_roots)
+        data_uri = _load_image_from_path(image_ref, base_dir=base_dir)
     except ValueError as exc:
-        # ``_load_image_from_path`` raises ``ValueError`` for path
-        # confinement / magic-byte / size / non-regular-file
-        # failures (P2-WP3 workdir validator semantics). These are
-        # REJECTED paths, not read failures — the validator refused
-        # the path before the open call. Distinct ``reason`` from
-        # OSError below so the caller can branch between
-        # "validator rejected the path" and "filesystem won't read".
+        # ``_load_image_from_path`` raises ``ValueError`` for missing /
+        # non-regular / oversize / non-image paths. These are REJECTED
+        # inputs, distinct from the OSError branch below so the caller can
+        # branch between "not a usable image path" and "filesystem won't
+        # read it".
         return {
             "error": "input-not-found",
             "image_id": image_ref,
-            "reason": "workdir_invalid",
+            "reason": "path_invalid",
             "message": str(exc),
         }
     except OSError as exc:
-        # ``_load_image_from_path`` raises ``OSError`` for actual
-        # filesystem read failures (permissions, I/O, missing after
-        # the validator passed — defensive since the strict
-        # resolver can race a concurrent unlink). Distinct from
-        # ``workdir_invalid`` so the caller knows the validator
-        # passed and the read is the failure surface.
+        # Actual filesystem read failures (permissions, I/O, a file
+        # unlinked after resolution).
         return {
             "error": "input-not-found",
             "image_id": image_ref,
-            "reason": "workdir_unreadable",
+            "reason": "path_unreadable",
             "message": f"{type(exc).__name__}: {exc}",
         }
     except Exception as exc:
-        # Anything else — defensive catch-all for unforeseen
-        # failures (encoding errors, OOM, etc.). Distinct reason
-        # so the caller / future operator can triage without
-        # parsing prose.
+        # Anything else — defensive catch-all for unforeseen failures
+        # (encoding errors, OOM, etc.). Distinct reason so the caller /
+        # future operator can triage without parsing prose.
         return {
             "error": "input-not-found",
             "image_id": image_ref,
-            "reason": "workdir_unknown",
+            "reason": "path_unknown",
             "message": f"{type(exc).__name__}: {exc}",
         }
     return {
         "data_uri": data_uri,
         "image_id": image_ref,
-        "source": "workdir",
+        "source": "path",
     }
 
 
@@ -885,8 +883,8 @@ def _resolve_input(
 
     Dispatch:
       * 32-hex substrate id → bridge (substrate store read).
-      * Anything else → workdir path → daemon-side read with workdir
-        confinement.
+      * Anything else → local filesystem path → daemon-side read with
+        no directory confinement.
 
     The facade NEVER raises — every failure path returns the
     ``_KIND_INPUT_NOT_FOUND`` envelope shape the caller can branch on.
@@ -894,7 +892,8 @@ def _resolve_input(
     Args:
         image_ref: The raw caller-supplied string.
         manager: The InstanceManager instance.
-        project_id: The caller's project id (for workdir resolution).
+        project_id: The caller's project id (used only to resolve the
+            relative-path anchor).
 
     Returns:
         A dict with EITHER ``{"data_uri": str, ...}`` on success,
@@ -909,7 +908,7 @@ def _resolve_input(
         }
     if _looks_like_substrate_id(image_ref):
         return _resolve_substrate_input(image_ref, manager=manager)
-    return _resolve_workdir_input(
+    return _resolve_path_input(
         image_ref, manager=manager, project_id=project_id
     )
 
@@ -931,7 +930,8 @@ def _resolve_inputs_pair(
     Args:
         image_a, image_b: The two caller-supplied image addresses.
         manager: The InstanceManager instance.
-        project_id: The caller's project id (for workdir resolution).
+        project_id: The caller's project id (used only to resolve the
+            relative-path anchor).
 
     Returns:
         ``(uri_a, uri_b, error_json)`` — exactly one of
@@ -1265,10 +1265,11 @@ def create_compare_tools(
         Args:
             image_a: First image address. Accepts the substrate
                 32-hex id (returned by ``image_save`` /
-                ``image_list``) OR a project-workdir path (resolved
-                by the WP3 bridge; the facade runs the path→data-URI
-                conversion daemon-side so a workdir-confined caller
-                does not need direct ``data_dir`` access).
+                ``image_list``) OR a local filesystem path — any
+                readable path on the daemon host, absolute or
+                relative to the project's main directory. The facade
+                runs the path→data-URI conversion daemon-side, so the
+                caller needs no direct file or ``data_dir`` access.
             image_b: Second image address — same shape as
                 ``image_a``.
             criteria: Optional list of caller-supplied criteria
@@ -1308,12 +1309,17 @@ def create_compare_tools(
 
             Structured error envelope (JSON) on failure::
 
-                {"kind": "timeout" | "missing-agent" | "vision-failure",
+                {"kind": "timeout" | "missing-agent" | "vision-failure"
+                       | "input-not-found" | "schema-invalid",
                  "error": "<human-readable detail>"}
 
             The envelope ``kind`` distinguishes the failure class;
             the LLM and the calling agent can branch on it without
-            parsing prose.
+            parsing prose. ``input-not-found`` covers facade input
+            resolution failures (substrate id 404, local path missing
+            / unreadable / oversize / magic-byte reject);
+            ``schema-invalid`` covers an agent return that does not
+            parse as the findings schema.
         """
         pid = project_id or _get_project_id()
 
@@ -1369,7 +1375,7 @@ def create_compare_tools(
 
         # Input resolution (P2-WP3). Run BEFORE the dispatch so a
         # missing image never wastes a spawn / enqueue. The bridge
-        # handles substrate ids; workdir paths are read daemon-side
+        # handles substrate ids; local paths are read daemon-side
         # inline. On any failure the facade surfaces
         # ``kind: input-not-found`` immediately — never spawns the
         # comparator with a bad image.
