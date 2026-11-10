@@ -4,7 +4,7 @@ Phase 4 of the Memoir Store v1 lane (plan:
 ``.agents/shared/planning/ari-memoir-store/phase4-plan.md`` — the whole
 phase; decisions D4.1-D4.16).
 
-Five callable tools, four families (pin/unpin are one family):
+Six callable tools, four families (pin/unpin are one family):
 
 * ``memoir_write(text, title?, importance?, event_at?, stars?, keepsake?,
   reason?, actor?)`` — THE HOT APPEND. One INSERT; the write never blocks
@@ -24,10 +24,14 @@ Five callable tools, four families (pin/unpin are one family):
   NO ``k`` parameter (the §5.4 signature is binding; the window bounds are
   named ``since``/``until`` because ``from``/``to`` are Python keywords —
   AM-42). The timeline writes NO access stats (DD-12).
+* ``memoir_about(star)`` — the CONSTELLATION card for one entity: the
+  canonical identity, the two-tier description, the connected episodes and
+  the 1-hop neighbours. The stored heat moves ONLY on a real hit — an
+  empty card (ND-23) and a FAILED episode fetch are both NOT hits.
 
 THE GATE ORDER IS AUTH-FIRST (D4.2/AM-16, following the exemplar's CODE,
 not its comment) and lives in ONE helper (``_gate`` — the tidier H1: the
-five bodies had drifted into three spellings of the same refusal):
+six bodies had drifted into three spellings of the same refusal):
 
 1. ``_is_memoir_authorized(caller_agent_id)`` — the FACTORY-CAPTURED
    ``agent_id`` (DD-13: never a caller-supplied scoping key) ⇒
@@ -103,6 +107,9 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ..config import MEMOIR_ENABLED_ENV_VAR
+from ..repositories.memoir.constellation_repository import (
+    MemoirConstellationRepository,
+)
 from ..repositories.memoir.models import PIN_ACTORS
 from ..repositories.memoir.repository import (
     MemoirAdmissionError,
@@ -110,24 +117,28 @@ from ..repositories.memoir.repository import (
     MemoirWriteError,
     as_aware_utc,
 )
+from ..repositories.memoir.syntheses_repository import MemoirSynthesesRepository
 from ..services.memoir_retrieval import (
+    MEMOIR_EPISODES_SECTION_HEADER,
     MEMOIR_RECALL_DEFAULT_K,
+    MEMOIR_SYNTHESES_SECTION_HEADER,
     MemoirRecallError,
     MemoirRetrievalService,
+    render_synthesis,
 )
 from ..services.timestamps import now_utc, to_utc_iso
 from ._tool_registry import register_tool_category
-from .memoir_knob import memoir_enabled, memoir_tool_help
+from .memoir_knob import memoir_enabled, memoir_reflection_enabled, memoir_tool_help
 
 logger = logging.getLogger(__name__)
 
 # Size rationale (~1,170 lines, refreshed 2026-11-05): the memoir TOOL
-# surface is one module because the five tools share ONE refusal
+# surface is one module because the six tools share ONE refusal
 # vocabulary, ONE gate (``_gate``), ONE provenance read and ONE help
 # template set — the cohesion is the frozen D4.8 contract, not a
-# missing extraction. The bulk is the five Pydantic input schemas +
+# missing extraction. The bulk is the six Pydantic input schemas +
 # their agent-facing field prose (the description text IS the tool's
-# contract and must live beside the schema it describes) and the five
+# contract and must live beside the schema it describes) and the six
 # ``_full_doc_`` bodies; neither is delegated-worthy behaviour. The
 # behaviours themselves are thin: each body gates, validates, makes ONE
 # repository/service call, and renders. If this file grows a sixth
@@ -163,6 +174,7 @@ MEMOIR_TOOL_NAMES: frozenset[str] = frozenset(
         "memoir_unpin",
         "memoir_recall",
         "memoir_timeline",
+        "memoir_about",
     }
 )
 
@@ -290,7 +302,7 @@ _RECALL_CODE_MAP: dict[str, str] = {
 def _is_memoir_authorized(agent_id: str) -> bool:
     """Is this agent allowed to call the memoir tools?
 
-    ONE shared helper, called by ALL FIVE tool bodies — the set lives in
+    ONE shared helper, called by ALL SIX tool bodies — the set lives in
     exactly one place (the ``_is_metrics_authorized`` shape,
     ``daemon/tools/metrics_read.py:403-414``).
 
@@ -309,7 +321,7 @@ def _refuse(label: str, code: str, message: str) -> str:
 
 
 #: The kill-switch refusal's consequence clause — ONE template, one
-#: per-tool action noun (tidier H1). The five bodies had drifted into
+#: per-tool action noun (tidier H1). The six bodies had drifted into
 #: three spellings ("nothing was recorded" / "nothing was changed" /
 #: "the memory is unreadable while disabled"); the template keeps the
 #: wording action-specific without duplicating the sentence.
@@ -319,7 +331,7 @@ _DISABLED_CONSEQUENCE_TEMPLATE = "nothing was {action}"
 def _gate(label: str, action: str, agent_id: str, manager: Any) -> str | None:
     """The SHARED gates 1-2 of D4.2 — auth FIRST, then the kill-switch.
 
-    Called by ALL FIVE tool bodies (the ``_is_memoir_authorized`` habit,
+    Called by ALL SIX tool bodies (the ``_is_memoir_authorized`` habit,
     extended): the order and the wording live HERE, once. Auth-first
     means an unauthorized caller learns NOTHING about the knob's state
     and touches no DB (D4.2/AM-16).
@@ -391,11 +403,60 @@ def _memoir_service_for(manager: Any) -> MemoirRetrievalService | None:
     module stays PURE and passes no embedder symbol. The caller's config
     is forwarded so the service can resolve the LLM fallback and the
     memoir embedding dimensions; ``None`` config degrades to lexical-only.
+
+    THE DUAL-RECALL ARM (V2-D 2.4 / §3.3): the syntheses repository and
+    the reflection-lane check are attached HERE — the ONE place that
+    builds the service. The lane check is a CALL-TIME read (the house
+    knob shape), so flipping ``ENSEMBLE_MEMOIR_REFLECTION_ENABLED``
+    changes the next recall's envelope without a restart. With the lane
+    OFF the service produces BYTE-IDENTICAL v1 output.
     """
     repo = _memoir_repository_for(manager)
     if repo is None:
         return None
-    return MemoirRetrievalService(repo, config=getattr(manager, "config", None))
+    engine = getattr(manager, "_engine", None)
+    config = getattr(manager, "config", None)
+    syntheses_repository = None
+    constellation_repository = None
+    if engine is not None:
+        try:
+            syntheses_repository = MemoirSynthesesRepository(engine)
+            constellation_repository = MemoirConstellationRepository(engine)
+        except Exception as exc:  # noqa: BLE001 — never break the read
+            logger.warning(
+                "[Memoir] the dual-recall repositories could not be built "
+                "(%s) — the recall runs in its v1 shape",
+                type(exc).__name__,
+            )
+            syntheses_repository = None
+            constellation_repository = None
+    return MemoirRetrievalService(
+        repo,
+        config=config,
+        syntheses_repository=syntheses_repository,
+        reflection_enabled=lambda: memoir_reflection_enabled(config),
+        constellation_repository=constellation_repository,
+    )
+
+
+def _memoir_constellation_repository_for(manager: Any) -> Any:
+    """Build the constellation repository over the caller's engine."""
+    engine = getattr(manager, "_engine", None)
+    if engine is None:
+        return None
+    try:
+        from ..repositories.memoir.constellation_repository import (
+            MemoirConstellationRepository,
+        )
+
+        return MemoirConstellationRepository(engine)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[Memoir] the constellation repository could not be built "
+            "(%s)",
+            type(exc).__name__,
+        )
+        return None
 
 
 def _map_write_error(exc: MemoirWriteError, label: str) -> str:
@@ -511,6 +572,18 @@ def _render_episode_block(projection: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_synthesis_block(synthesis: dict[str, Any]) -> str:
+    """One shipped synthesis, rendered for the tool result (§3.3).
+
+    The shape is ``[synthesis:ID] (verb, confidence=…) claim`` plus a
+    ``sources:`` line — the belief and its provenance. The rendering
+    lives in the SERVICE (``render_synthesis``) so the bytes the budget
+    measured and the bytes the tool ships cannot drift apart; this
+    wrapper only splits the section header off.
+    """
+    return render_synthesis(synthesis)
+
+
 def create_memoir_tools(
     manager: Any,
     *,
@@ -518,7 +591,7 @@ def create_memoir_tools(
     agent_id: str = "",
     agent_tag: str | None = None,
 ) -> list:
-    """Build the five memoir tools for one instance/agent.
+    """Build the six memoir tools for one instance/agent.
 
     Args:
         manager: The ``InstanceManager`` — the tools read ONLY its
@@ -535,7 +608,7 @@ def create_memoir_tools(
         agent_tag: The caller's version tag (signature parity; unused).
 
     Returns:
-        A list of the five ``@tool``-decorated callables. NO
+        A list of the six ``@tool``-decorated callables. NO
         ``*_if_available`` wrapper (D4.6): a degraded boot leaves the
         tools PRESENT and loudly refusing.
     """
@@ -722,6 +795,19 @@ def create_memoir_tools(
                 default=None,
                 description=(
                     "Optional lexical narrowing term inside the window."
+                ),
+            ),
+        ]
+
+    class MemoirAboutInput(BaseModel):
+        """Input schema for memoir_about."""
+
+        star: Annotated[
+            str,
+            Field(
+                description=(
+                    "The star (entity) name to retrieve a dossier for "
+                    "(<=100 chars)."
                 ),
             ),
         ]
@@ -1055,6 +1141,21 @@ def create_memoir_tools(
                 f"{result.dropped} dropped for budget, "
                 f"rank={result.rank_basis}"
             )
+            # THE DUAL-RECALL ENVELOPE (V2-D 2.4 / §3.3): the beliefs
+            # LEAD — the syntheses section renders FIRST and the episode
+            # blocks follow it byte-identically. With the reflection lane
+            # OFF there is no section at all and the envelope is the v1
+            # envelope, byte for byte.
+            syntheses = list(getattr(result, "syntheses", None) or [])
+            if syntheses:
+                synth_blocks = "\n".join(
+                    _render_synthesis_block(synthesis) for synthesis in syntheses
+                )
+                return (
+                    f"{header}\n{MEMOIR_SYNTHESES_SECTION_HEADER}\n"
+                    f"{synth_blocks}\n{MEMOIR_EPISODES_SECTION_HEADER}\n"
+                    f"{blocks}\n{result.footer}"
+                ).strip()
             return f"{header}\n{blocks}\n{result.footer}".strip()
         except MemoirRecallError as exc:
             return _map_recall_error(exc, label)
@@ -1137,6 +1238,88 @@ def create_memoir_tools(
                 "an unexpected error occurred (logged server-side)",
             )
 
+    @register_tool_category(MEMOIR_CATEGORY_KEY)
+    @tool(args_schema=MemoirAboutInput)
+    async def memoir_about(star: str) -> str:
+        """Retrieve an entity dossier from the Constellation graph. Use tool_help("memoir_about") for details."""
+        label = "memoir_about"
+        try:
+            refusal = _gate(label, "read", caller_agent_id, manager)
+            if refusal is not None:
+                return refusal
+            if not isinstance(star, str) or not star.strip():
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_QUERY_REQUIRED,
+                    "star is required (non-empty)",
+                )
+            star_name = star.strip()
+            if len(star_name) > 100:
+                return _refuse(
+                    label,
+                    MEMOIR_CODE_STARS_OUT_OF_BOUNDS,
+                    f"star name too long: {len(star_name)} > 100",
+                )
+
+            def _sync() -> str:
+                repo = _memoir_constellation_repository_for(manager)
+                if repo is None:
+                    return _refuse(
+                        label,
+                        MEMOIR_CODE_INTERNAL_ERROR,
+                        "the constellation store is not available on this manager "
+                        "(no engine)",
+                    )
+                star_row = repo.resolve_star(caller_agent_id, star_name)
+                if star_row is None:
+                    # FORGIVING (case-insensitive) RESOLUTION — one home in
+                    # the repository, ALIAS-AWARE.  The pre-fix shape ran a
+                    # Python scan over every star row and never consulted
+                    # the alias table, so an alias differing only in case
+                    # resolved to nothing while a canonical name resolved.
+                    try:
+                        star_row = repo.resolve_star_casefold(
+                            caller_agent_id, star_name
+                        )
+                    except Exception:  # noqa: BLE001
+                        star_row = None
+                if star_row is None:
+                    return _refuse(
+                        label,
+                        MEMOIR_CODE_NOT_FOUND,
+                        f"star not found: {star_name}",
+                    )
+                card = repo.get_star_card(caller_agent_id, star_row.id)
+                from daemon.services.memoir_constellation_service import (
+                    MemoirConstellationService,
+                )
+
+                # THE ONE FORMATTER (the drift fix): the SERVICE renders
+                # the dossier — the tool keeps no second inline renderer
+                # (two formatters drift).  The render carries the fetch
+                # verdict, so the heat gate below can be honest.
+                svc = MemoirConstellationService(repo, agent_id=caller_agent_id)
+                render = svc.render_dossier(star_row, card)
+                # THE HEAT GATE (V2-D 3.3): the stored accumulator moves
+                # ONLY on a REAL hit — an EMPTY card (ND-23) and a FAILED
+                # episode fetch are both NOT hits, so the fail-soft
+                # "(none)" render never inflates the heat.
+                if render.episode_count > 0:
+                    try:
+                        repo.increment_heat(caller_agent_id, star_row.id, 1.0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                return render.text
+
+            return await asyncio.to_thread(_sync)
+        except Exception:  # noqa: BLE001
+            logger.exception("memoir_about failed")
+            return _refuse(
+                label,
+                MEMOIR_CODE_INTERNAL_ERROR,
+                "an unexpected error occurred (logged server-side)",
+            )
+
     # ── the tool_help surface (the ``_full_doc_`` contract) ─────────────
     # D0.7: the resolved knob state is embedded from the knob module's
     # own text — the wording has exactly one home.
@@ -1197,6 +1380,13 @@ def create_memoir_tools(
         "an act of attention and never reorders future recalls. An "
         "inverted window (since after until) is refused." + shared_tail
     )
+    memoir_about._full_doc_ = (
+        "Retrieve an entity dossier from the Constellation graph: canonical "
+        "identity, type, consolidated description, effective heat, recent "
+        "connected episodes, and 1-hop neighbor stars. A star with zero "
+        "linked episodes returns an empty-dossier SUCCESS. Unauthorized "
+        "callers and a disabled surface are refused." + shared_tail
+    )
 
     return [
         memoir_write,
@@ -1204,6 +1394,7 @@ def create_memoir_tools(
         memoir_unpin,
         memoir_recall,
         memoir_timeline,
+        memoir_about,
     ]
 
 

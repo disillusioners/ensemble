@@ -995,6 +995,28 @@ class InstanceManager:
             MemoirPersonaVersion,
             MemoirSynthesis,
         )
+        # Memoir Store v2 Phase 1 (T1.3): register the SIX v2 substrate
+        # tables BEFORE create_all so the PG boot path lands them on
+        # existing PG databases (SQLModel.metadata.create_all is the PG
+        # source-of-truth per the app_settings / resource_monitor /
+        # board / bash_spawn / PSL / memoir-v1 precedent).
+        #
+        # V2-D 1.2: these are BRAND-NEW tables, so they carry NO
+        # ``_ensure_postgres_columns`` entry — ``create_all`` OWNS them.
+        # Only the EVOLUTION of an EXISTING table (the four new
+        # ``memoir_episodes`` columns) needs the ensure, and that is the
+        # two-entry pair added below.
+        #
+        # The SQLite path is the Phase-1 .sql file
+        # (20261109_021154_create_memoir_v2_tables.sql).
+        from .repositories.memoir.models import (  # noqa: F401  # memoir v2 P1: register before create_all
+            MemoirJevLedger,
+            MemoirLine,
+            MemoirProposalLedger,
+            MemoirReflectionState,
+            MemoirStar,
+            MemoirStarAlias,
+        )
         # POK Phase 1 (project-operating-knowledge, Emperor GO
         # 2026-11-07): register the 2 lane tables BEFORE create_all so
         # the PG boot path lands them on existing PG databases
@@ -9809,6 +9831,66 @@ class InstanceManager:
             (
                 "CREATE INDEX IF NOT EXISTS idx_memoir_episodes_tsv "
                 "ON memoir_episodes USING GIN (tsv)"
+            ),
+            # ── Memoir Store v2 Phase 1 (memoir v2 P1) ──
+            # TWO entries: the DDL evolution of the EXISTING
+            # ``memoir_episodes`` table and the cutover-bounded legacy
+            # seed. The SIX brand-new v2 tables need NO ensure entry
+            # (V2-D 1.2) — ``create_all`` owns them via the model
+            # registration above.
+            #
+            # (1) THE DDL — four columns on ``memoir_episodes``:
+            #     ``poignancy_status`` (TEXT, NULL), ``poignancy``
+            #     (INTEGER, NULL), ``poignancy_attempts`` (INTEGER NOT
+            #     NULL DEFAULT 0) and ``reflected_at`` (TIMESTAMPTZ,
+            #     NULL).
+            #
+            #     ``TIMESTAMPTZ`` IS MANDATORY (C1 / V2-26): the model
+            #     declares ``reflected_at`` as ``DateTime(timezone=True)``,
+            #     and ``DATETIME`` is SQLite-specific — it is a DDL
+            #     SYNTAX ERROR on PostgreSQL and would ABORT EVERY PG
+            #     BOOT. The SQLite counterpart declares it ``DATETIME``
+            #     (SQLite's own spelling of the same affinity).
+            #
+            #     ``IF NOT EXISTS`` LIVES ONLY HERE: the companion .sql
+            #     migration MUST use the plain ``ADD COLUMN`` form,
+            #     because SQLite has no ``ADD COLUMN IF NOT EXISTS`` and
+            #     the bare form would break every fresh-SQLite boot
+            #     (V2-D 1.1 / V2-21).
+            #
+            # (2) THE DML — the cutover-bounded legacy seed (SF11 /
+            #     V2-33): rows written BEFORE the cutover are stamped
+            #     ``poignancy_status='legacy'`` so the v2 scoring worker
+            #     can tell "never scored" (NULL) from "predates the
+            #     cutover" ('legacy'). The literal is SPACE-SEPARATED and
+            #     carries an EXPLICIT UTC OFFSET (``'2026-11-09 00:00:00+00'``):
+            #     this method is POSTGRES-ONLY (the SQLite counterpart is a
+            #     migration) and ``created_at`` is ``timestamptz``, so a bare
+            #     timestamp literal would be read in the SESSION TimeZone and
+            #     the cutover would silently move with the connection zone.
+            #     The 'T' separator is also avoided: the companion SQLite
+            #     migration compares LEXICOGRAPHICALLY and 'T' (0x54) > ' '
+            #     (0x20) would misclassify the day.
+            #
+            # PLACEMENT IS AN AUDITABILITY / OWNERSHIP CHOICE ONLY —
+            # ORDER IS NOT A CONTAINMENT MEASURE (D1.5 / AM-9): the
+            # ensure is ONE transaction over ONE shared statement list,
+            # executed by this method's own loop with NO per-statement
+            # try/except. A failure in ANY entry — the memoir statements
+            # OR an inherited lane's — rolls the whole ensure back and
+            # ABORTS THE BOOT.
+            (
+                "ALTER TABLE memoir_episodes "
+                "ADD COLUMN IF NOT EXISTS poignancy_status TEXT, "
+                "ADD COLUMN IF NOT EXISTS poignancy INTEGER, "
+                "ADD COLUMN IF NOT EXISTS poignancy_attempts INTEGER "
+                "NOT NULL DEFAULT 0, "
+                "ADD COLUMN IF NOT EXISTS reflected_at TIMESTAMPTZ"
+            ),
+            (
+                "UPDATE memoir_episodes SET poignancy_status = 'legacy' "
+                "WHERE poignancy_status IS NULL "
+                "AND created_at < '2026-11-09 00:00:00+00'"
             ),
             # ── POK Phase 2 — trust tier (addendum T-1, 2026-11-07) ──
             # ``project_operating_knowledge.source_tier`` — the

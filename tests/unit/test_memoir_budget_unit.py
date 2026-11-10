@@ -154,8 +154,15 @@ def test_a_dropped_episode_is_neither_returned_nor_marked(repo, service):
 # ── the footer bytes ──────────────────────────────────────────────────────
 
 
-def test_the_footer_carries_the_counts_and_the_disclosure(repo, service):
+def test_the_footer_carries_the_counts_and_the_disclosure(repo, service, monkeypatch):
     """D2.10 / D2.11: the footer is the agent-visible envelope."""
+    # The v1 SHAPE: the reflection lane is OFF. The ``syntheses=`` token
+    # rides the LANE (never the match count) — with the lane ON a service
+    # without a syntheses repository honestly reports ``syntheses=0``
+    # (the v2 disclosure, pinned in the v2 dual-recall suite). The
+    # ABSOLUTE absence pin below is therefore a LANE-OFF claim, and the
+    # v1 envelope is exactly the lane-OFF envelope.
+    monkeypatch.setenv("ENSEMBLE_MEMOIR_REFLECTION_ENABLED", "false")
     repo.insert_episode(agent_id="ari", body="the preserved first day")
     result = service.recall("ari", "preserved", k=5)
     footer = result.footer
@@ -175,6 +182,9 @@ def test_the_footer_carries_the_counts_and_the_disclosure(repo, service):
     assert "semantic_reason=no_embedder" in footer
     assert "stats_updated=true" in footer
     assert "note=partial_recall" not in footer
+    # THE ABSOLUTE v1 BYTE-PIN: the v1 footer carries NO syntheses
+    # token at all (not ``syntheses=0`` — no token).
+    assert "syntheses=" not in footer
 
 
 def test_the_footer_carries_the_partial_recall_note(repo):

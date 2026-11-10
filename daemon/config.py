@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any, Callable, Dict, Literal
+from typing import Annotated, Any, Callable, Dict, Literal, NamedTuple
 from urllib.parse import urlparse
 
 import yaml
@@ -3536,6 +3536,15 @@ MEMOIR_RESOLUTION_CONFIG = "config"
 MEMOIR_RESOLUTION_INDETERMINATE = "indeterminate"
 MEMOIR_RESOLUTION_UNPARSEABLE = "unparseable"
 MEMOIR_RESOLUTION_ERROR = "error"
+# The NUMERIC half of the vocabulary (added with the proposal lane's
+# fetch-cap multiplier). The Enabled-flags codes above are UNCHANGED — a
+# v1 pin reads them verbatim; these two are ADDITIVE and say what the
+# boolean codes cannot: that a legal value was set by the operator
+# (``explicit_value``) or that a legal-but-out-of-range value was
+# CLAMPED into the legal band (``clamped``). ``indeterminate`` remains
+# the GARBAGE row (a fail-closed value, never a wide one).
+MEMOIR_RESOLUTION_EXPLICIT_VALUE = "explicit_value"
+MEMOIR_RESOLUTION_CLAMPED = "clamped"
 
 
 def classify_memoir_enabled(raw: str) -> tuple[bool, str, str | None]:
@@ -3665,6 +3674,937 @@ class DecisionConfig(BaseSettings):
         description="Global master kill switch for Decision Module. Default False. Env: DECISION_ENABLED.",
     )
     seams: DecisionSeamsConfig = Field(default_factory=DecisionSeamsConfig)
+
+# ── the Memoir Store v2 three-class numeric governance (V2-16 / §3-A4) ──
+#
+# ONE shared classifier, consumed by EVERY v2 numeric field through a
+# ``mode="before"`` Pydantic validator. The three classes (the §3-A4
+# truth tables) are:
+#
+# | Class | Knobs | Unset | Garbage / out-of-range |
+# |---|---|---|---|
+# | Enabled flags | ``ENSEMBLE_MEMOIR_REFLECTION_ENABLED`` | ON + one WARNING naming the var (DR-3 verbatim) | fail-CLOSED OFF + WARNING naming the value |
+# | Budget bounds | syntheses/pass, chars/synthesis, LLM calls/pass, nightly cap, trigger sum | constitutional default + AGGREGATE WARNING naming every unset budget knob | CLAMP to default + WARNING naming value AND default. NEVER zero |
+# | Cadence tunables | tick intervals, timeouts, debounce base/ceiling, force-fire | default, SILENT | default + WARNING |
+#
+# WHY THIS EXISTS (the anomaly it closes): a bare ``Field(gt=...)`` on a
+# numeric raises ``ValidationError`` on an unparseable env var, and the
+# unguarded ``load_config`` at ``api.py``/``__main__.py`` then takes the
+# daemon DOWN. House anomaly ``33028b27``. The v2 lane simply must not
+# EXTEND that defect — so every v2 numeric goes through this classifier,
+# which NEVER raises.
+#
+# NEVER ZERO: a zero cap masquerades as a kill-switch, which violates the
+# one-truth-per-concept rule (a "disabled" budget and a "disabled lane"
+# are different facts). A garbage budget knob clamps to the constitutional
+# default, never to zero.
+
+#: The three numeric knob classes (§3-A4).
+NUMERIC_CLASS_ENABLED = "enabled"
+NUMERIC_CLASS_BUDGET = "budget"
+NUMERIC_CLASS_CADENCE = "cadence"
+
+#: The once-per-process log dedupe for the v2 knob warnings. A CHANGED
+#: value re-warns; a repeated resolution stays quiet. This is a LOG guard
+#: only — the resolved VALUE is never memoized here.
+_V2_KNOB_WARNED: set[str] = set()
+
+
+def _reset_v2_knob_warnings() -> None:
+    """Clear the once-per-process knob-warning dedupe (test seam)."""
+    _V2_KNOB_WARNED.clear()
+
+
+def _emit_v2_knob_warning(message: str) -> None:
+    """Emit a v2 knob warning ONCE per process (the house dedupe shape).
+
+    A repeated resolution stays quiet; a CHANGED message re-warns (the
+    dedupe is keyed on the message text).
+    """
+    if message in _V2_KNOB_WARNED:
+        return
+    _V2_KNOB_WARNED.add(message)
+    logger.warning(message)
+
+
+class NumericResolution(NamedTuple):
+    """The resolved numeric value plus its PROVENANCE.
+
+    The provenance is what a per-lane resolver needs and what the scalar
+    view cannot carry: WHICH truth-table row produced the value
+    (``resolution``), the offending raw string for the garbage row
+    (``rejected_value``), and the value a clamp landed on
+    (``clamped_to``). The value itself stays in ``value``.
+    """
+
+    value: Any
+    resolution: str
+    rejected_value: str | None
+    clamped_to: Any | None
+    raw: Any
+
+
+def _resolve_numeric(
+    raw: Any,
+    *,
+    default: float,
+    numeric_class: str,
+    name: str,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> NumericResolution:
+    """Classify ONE numeric knob value — the shared three-class helper.
+
+    The function NEVER raises and NEVER returns zero for a garbage input:
+    a garbage value always resolves to the constitutional default (or the
+    nearest legal value), so a mis-typed tuning knob can never take the
+    daemon down and can never masquerade as a kill-switch.
+
+    This is the ONE truth-table implementation for the numeric class:
+    :func:`_classify_numeric` is its scalar view, and the per-lane
+    resolvers consume the PROVENANCE this function returns. There is no
+    second reader of what a numeric value MEANS (the A2 debt budget is
+    capped at the one known duplicate).
+
+    Args:
+        raw: The incoming value — the raw env string, a YAML number, or
+            ``None`` (unset). A non-string, non-numeric type is treated
+            as garbage (fail-safe, never raise).
+        default: The constitutional default for this knob.
+        numeric_class: One of ``NUMERIC_CLASS_BUDGET`` /
+            ``NUMERIC_CLASS_CADENCE`` (the ``NUMERIC_CLASS_ENABLED``
+            class is a boolean flag and is served by
+            :func:`_classify_enabled_flag`).
+        name: The knob's env-var name — quoted in the WARNING.
+        minimum: The lowest legal value. A value below it clamps UP to
+            it (for a BUDGET this means "never zero": the minimum is at
+            least 1).
+        maximum: The highest legal value. A value above it clamps DOWN.
+
+    Returns:
+        The :class:`NumericResolution` — the resolved value plus the
+        truth-table row that produced it.
+    """
+    if raw is None:
+        # UNSET: the default stands. Budget knobs are named in the
+        # AGGREGATE warning by the model (not here); cadence knobs are
+        # SILENT by design (tuning, not governance).
+        return NumericResolution(
+            value=default,
+            resolution=MEMOIR_RESOLUTION_DEFAULT,
+            rejected_value=None,
+            clamped_to=None,
+            raw=raw,
+        )
+    if isinstance(raw, bool):
+        # A boolean is not a number; treat it as garbage rather than
+        # silently coercing True to 1.
+        value: float | None = None
+    elif isinstance(raw, (int, float)):
+        value = float(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            # EMPTY == ABSENT (the house truth table, row 2).
+            return NumericResolution(
+                value=default,
+                resolution=MEMOIR_RESOLUTION_DEFAULT,
+                rejected_value=None,
+                clamped_to=None,
+                raw=raw,
+            )
+        try:
+            value = float(text)
+        except ValueError:
+            value = None
+    else:
+        value = None
+
+    # An INTEGER field must resolve to an integer: pydantic refuses a
+    # fractional float for an ``int`` field (a ValidationError ⇒ a boot
+    # abort), so a fractional value is treated as GARBAGE here — it
+    # resolves to the constitutional default with a WARNING.
+    integral = isinstance(default, int) and not isinstance(default, bool)
+
+    if value is None or (integral and not float(value).is_integer()):
+        # GARBAGE: clamp to the default and WARN, naming the value AND
+        # the default. NEVER zero, NEVER a raise.
+        _emit_v2_knob_warning(
+            f"[MemoirV2] {name}={raw!r} is not a valid number — using the "
+            f"default {default:g} ({numeric_class} knob; the daemon never "
+            f"aborts on a mis-set tuning value)"
+        )
+        return NumericResolution(
+            value=default,
+            resolution=MEMOIR_RESOLUTION_INDETERMINATE,
+            rejected_value=raw if isinstance(raw, str) else str(raw),
+            clamped_to=None,
+            raw=raw,
+        )
+
+    clamped = value
+    if minimum is not None and clamped < minimum:
+        clamped = float(minimum)
+    if maximum is not None and clamped > maximum:
+        clamped = float(maximum)
+    resolved_value: Any = int(clamped) if integral else clamped
+    if clamped != value:
+        _emit_v2_knob_warning(
+            f"[MemoirV2] {name}={raw!r} is out of range — clamped to "
+            f"{clamped:g} ({numeric_class} knob; the default is {default:g})"
+        )
+        return NumericResolution(
+            value=resolved_value,
+            resolution=MEMOIR_RESOLUTION_CLAMPED,
+            rejected_value=None,
+            clamped_to=resolved_value,
+            raw=raw,
+        )
+    return NumericResolution(
+        value=resolved_value,
+        resolution=MEMOIR_RESOLUTION_EXPLICIT_VALUE,
+        rejected_value=None,
+        clamped_to=None,
+        raw=raw,
+    )
+
+
+def _classify_numeric(
+    raw: Any,
+    *,
+    default: float,
+    numeric_class: str,
+    name: str,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> Any:
+    """Classify ONE numeric knob value — the shared three-class helper.
+
+    The function NEVER raises and NEVER returns zero for a garbage input:
+    a garbage value always resolves to the constitutional default (or the
+    nearest legal value), so a mis-typed tuning knob can never take the
+    daemon down and can never masquerade as a kill-switch.
+
+    Args:
+        raw: The incoming value — the raw env string, a YAML number, or
+            ``None`` (unset). A non-string, non-numeric type is treated
+            as garbage (fail-safe, never raise).
+        default: The constitutional default for this knob.
+        numeric_class: One of ``NUMERIC_CLASS_BUDGET`` /
+            ``NUMERIC_CLASS_CADENCE`` (the ``NUMERIC_CLASS_ENABLED``
+            class is a boolean flag and is served by
+            :func:`_classify_enabled_flag`).
+        name: The knob's env-var name — quoted in the WARNING.
+        minimum: The lowest legal value. A value below it clamps UP to
+            it (for a BUDGET this means "never zero": the minimum is at
+            least 1).
+        maximum: The highest legal value. A value above it clamps DOWN.
+
+    Returns:
+        The resolved numeric value.
+    """
+    return _resolve_numeric(
+        raw,
+        default=default,
+        numeric_class=numeric_class,
+        name=name,
+        minimum=minimum,
+        maximum=maximum,
+    ).value
+
+
+def _classify_enabled_flag(
+    raw: Any,
+    *,
+    name: str,
+    default: bool = True,
+) -> bool:
+    """Classify ONE enabled-flag knob — the boolean half of §3-A4.
+
+    The Enabled-flags class of the truth table: UNSET resolves to the
+    default (ON for the v2 lane) and is NEVER silent — the model emits
+    the loud WARNING naming the variable. A GARBAGE value fails CLOSED
+    (OFF) and warns, naming the value. The function NEVER raises, so a
+    mis-set kill-switch can never abort the boot.
+
+    THE WARNING LIVES IN THE KNOB MODULE, NOT HERE (the house
+    precedent — ``daemon/tools/memoir_knob.py`` owns the operator-facing
+    log lines, and the model is the CLASSIFIER, mechanism N-2). Emitting
+    the warning from the model would fire it on EVERY ``Config()``
+    construction — the config object is built in many places — and the
+    v1 knob's own warning-count pin would count a warning that has
+    nothing to do with the v1 knob. The knob module resolves the raw
+    value and warns once per boot.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            # EMPTY == ABSENT (the house truth table, row 2).
+            return default
+        lowered = text.lower()
+        if lowered in MEMOIR_TRUTHY_VALUES:
+            return True
+        if lowered in MEMOIR_FALSY_VALUES:
+            return False
+        # GARBAGE -> fail CLOSED (DR-3).
+        return False
+    # A non-string, non-bool type is garbage -> fail CLOSED.
+    return False
+
+
+#: The env-var name of the reflection kill-switch (§3-A4 Enabled-flags).
+MEMOIR_REFLECTION_ENABLED_ENV_VAR = "ENSEMBLE_MEMOIR_REFLECTION_ENABLED"
+
+#: The budget-bound knobs — the field → env-var map used by the AGGREGATE
+#: unset warning and by the budget-bound before-validator.
+_MEMOIR_REFLECTION_BUDGET_ENV_VARS: dict[str, str] = {
+    "max_syntheses_per_pass": "ENSEMBLE_MEMOIR_REFLECTION_MAX_SYNTHESES_PER_PASS",
+    "max_chars_per_synthesis": "ENSEMBLE_MEMOIR_REFLECTION_MAX_CHARS_PER_SYNTHESIS",
+    "max_llm_calls_per_pass": "ENSEMBLE_MEMOIR_REFLECTION_MAX_LLM_CALLS_PER_PASS",
+    "constellation_max_llm_calls_per_pass": (
+        "ENSEMBLE_MEMOIR_REFLECTION_CONSTELLATION_MAX_LLM_CALLS_PER_PASS"
+    ),
+    "trigger_sum": "ENSEMBLE_MEMOIR_REFLECTION_TRIGGER_SUM",
+    "nightly_cap": "ENSEMBLE_MEMOIR_REFLECTION_NIGHTLY_CAP",
+}
+
+#: The cadence-tunable knobs — the field → env-var map. These are SILENT
+#: when unset.
+_MEMOIR_REFLECTION_CADENCE_ENV_VARS: dict[str, str] = {
+    "tick_budget_s": "ENSEMBLE_MEMOIR_REFLECTION_TICK_BUDGET_S",
+    "call_timeout_s": "ENSEMBLE_MEMOIR_REFLECTION_CALL_TIMEOUT_S",
+    "tick_interval_s": "ENSEMBLE_MEMOIR_REFLECTION_TICK_INTERVAL_S",
+    "debounce_base_s": "ENSEMBLE_MEMOIR_REFLECTION_DEBOUNCE_BASE_S",
+    "debounce_ceiling_s": "ENSEMBLE_MEMOIR_REFLECTION_DEBOUNCE_CEILING_S",
+    "force_fire_s": "ENSEMBLE_MEMOIR_REFLECTION_FORCE_FIRE_S",
+    "scan_window_days": "ENSEMBLE_MEMOIR_REFLECTION_SCAN_WINDOW_DAYS",
+}
+
+
+class MemoirReflectionConfig(BaseSettings):
+    """The Memoir Store v2 REFLECTION lane knobs (phase 2, T2.4).
+
+    An ISOLATED section — the plan's N1 / V2-D 4.9 precedent: the
+    reflection knobs live in their own model with their own env prefix
+    and are NOT folded into the v1 ``MemoirConfig`` section, and there is
+    NO global knob-resolver clone (the classifier is shared, the RESOLVER
+    is per-lane).
+
+    The env prefix is ``ENSEMBLE_MEMOIR_REFLECTION_``:
+
+    * ``ENSEMBLE_MEMOIR_REFLECTION_ENABLED`` — the kill-switch
+      (Enabled-flags class: unset ON + WARNING, garbage OFF + WARNING,
+      never a ``ValidationError``);
+    * ``ENSEMBLE_MEMOIR_REFLECTION_MAX_SYNTHESES_PER_PASS`` — budget bound;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_MAX_CHARS_PER_SYNTHESIS`` — budget bound;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_MAX_LLM_CALLS_PER_PASS`` — budget bound;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_CONSTELLATION_MAX_LLM_CALLS_PER_PASS`` —
+      budget bound (DECOUPLED from the synthesis cap, V2-31 / SF7);
+    * ``ENSEMBLE_MEMOIR_REFLECTION_TRIGGER_SUM`` — budget bound;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_NIGHTLY_CAP`` — budget bound;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_TICK_BUDGET_S`` — cadence tunable;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_CALL_TIMEOUT_S`` — cadence tunable;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_TICK_INTERVAL_S`` — cadence tunable;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_DEBOUNCE_BASE_S`` — cadence tunable;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_DEBOUNCE_CEILING_S`` — cadence tunable;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_FORCE_FIRE_S`` — cadence tunable;
+    * ``ENSEMBLE_MEMOIR_REFLECTION_SCAN_WINDOW_DAYS`` — cadence tunable.
+
+    EVERY numeric goes through the shared ``_classify_numeric`` helper
+    through a ``mode="before"`` validator, so a garbage value clamps to
+    the constitutional default and NEVER aborts the boot (§3-A4 /
+    Register #12 / V2-16). NO bare ``Field(gt=...)`` on a v2 numeric.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_MEMOIR_REFLECTION_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the reflection lane (Enabled-flags "
+                    "class). Unset resolves ON with a loud WARNING; a "
+                    "garbage value fails CLOSED (OFF) with a WARNING; "
+                    "neither raises. Env: ENSEMBLE_MEMOIR_REFLECTION_ENABLED.",
+    )
+    max_syntheses_per_pass: int = Field(
+        default=5,
+        description="Maximum accepted syntheses per pass (§3.2). "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_MAX_SYNTHESES_PER_PASS.",
+    )
+    max_chars_per_synthesis: int = Field(
+        default=1000,
+        description="Maximum characters per synthesis claim (§3.2). A "
+                    "longer claim is REJECTED, never truncated. "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_MAX_CHARS_PER_SYNTHESIS.",
+    )
+    max_llm_calls_per_pass: int = Field(
+        default=4,
+        description="Maximum LLM calls per reflection pass (§3.2), "
+                    "incremented AT DISPATCH. The JEV call counts towards "
+                    "it. Env: ENSEMBLE_MEMOIR_REFLECTION_MAX_LLM_CALLS_PER_PASS.",
+    )
+    constellation_max_llm_calls_per_pass: int = Field(
+        default=2,
+        description="The DECOUPLED constellation-extraction budget (V2-31 / "
+                    "SF7) — constellation extraction never starves core "
+                    "synthesis generation. "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_CONSTELLATION_MAX_LLM_CALLS_PER_PASS.",
+    )
+    trigger_sum: int = Field(
+        default=25,
+        description="The derived trigger threshold: the in-day pass fires "
+                    "when the DERIVED unreflected sum reaches this. "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_TRIGGER_SUM.",
+    )
+    nightly_cap: int = Field(
+        default=30,
+        description="Maximum episodes consumed by one nightly pass (§3.2). "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_NIGHTLY_CAP.",
+    )
+    tick_budget_s: float = Field(
+        default=60.0,
+        description="The per-pass wall-clock budget in seconds (§3.2). A "
+                    "pass that would exceed it defers the remainder. "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_TICK_BUDGET_S.",
+    )
+    call_timeout_s: float = Field(
+        default=45.0,
+        description="The per-LLM-call timeout in seconds (§3.2). "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_CALL_TIMEOUT_S.",
+    )
+    tick_interval_s: int = Field(
+        default=30,
+        description="The worker tick interval in seconds (§3.1). "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_TICK_INTERVAL_S.",
+    )
+    debounce_base_s: float = Field(
+        default=60.0,
+        description="The base idle-debounce window in seconds (§3.1). "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_DEBOUNCE_BASE_S.",
+    )
+    debounce_ceiling_s: float = Field(
+        default=960.0,
+        description="The ceiling of the doubling idle-debounce window "
+                    "in seconds (§3.1). "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_DEBOUNCE_CEILING_S.",
+    )
+    force_fire_s: float = Field(
+        default=3600.0,
+        description="The force-fire interval in seconds (§3.1) — the "
+                    "continuous-load escape hatch. "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_FORCE_FIRE_S.",
+    )
+    scan_window_days: int = Field(
+        default=2,
+        description="The scan window in days for the regular intake (§3.2). "
+                    "The nightly catch-up pass walks the pre-cutover "
+                    "backlog without this restriction. "
+                    "Env: ENSEMBLE_MEMOIR_REFLECTION_SCAN_WINDOW_DAYS.",
+    )
+
+    #: WHICH budget knobs are unset (recorded by the after-validator; the
+    #: knob module turns this into the AGGREGATE warning). Private: never
+    #: env-bound, never serialized.
+    _unset_budget_knobs: tuple[str, ...] = PrivateAttr(default=())
+
+    # ── the three-class before-validators (§3-A4 / Register #12) ──────────
+
+    @model_validator(mode="before")
+    @classmethod
+    def _env_tier_wins(cls, data: Any) -> Any:
+        """The ENV tier wins over the init/yaml tier — and the UNSET case
+        is LOUD.
+
+        Two jobs, one home (the ``MemoirConfig`` precedent, D0.4):
+
+        1. A present env value overrides an init/yaml value — the
+           operator's knob must not be silently shadowed by a config file
+           (§3-A4 names that shadowing as a defect of the bare-Field
+           pattern);
+        2. An ABSENT env value injects ``None`` for ``enabled`` so the
+           field validator runs and emits the loud UNSET WARNING. An
+           absent field would otherwise take its default SILENTLY — and
+           "unset ⇒ ON" is admissible only because it is never silent.
+        """
+        if not isinstance(data, dict):
+            return data
+        merged = dict(data)
+        raw = os.environ.get(MEMOIR_REFLECTION_ENABLED_ENV_VAR)
+        if raw is not None and raw.strip():
+            merged["enabled"] = raw
+        elif "enabled" not in merged:
+            merged["enabled"] = None
+        return merged
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _classify_enabled_flag(cls, value: Any) -> Any:
+        """The Enabled-flags class — unset ON, garbage fail-CLOSED OFF."""
+        return _classify_enabled_flag(
+            value, name=MEMOIR_REFLECTION_ENABLED_ENV_VAR, default=True
+        )
+
+    @field_validator(
+        "max_syntheses_per_pass",
+        "max_chars_per_synthesis",
+        "max_llm_calls_per_pass",
+        "constellation_max_llm_calls_per_pass",
+        "trigger_sum",
+        "nightly_cap",
+        mode="before",
+    )
+    @classmethod
+    def _classify_budget_bound(cls, value: Any, info: Any) -> Any:
+        """The Budget-bounds class — clamp to the default, NEVER zero.
+
+        A garbage budget knob CLAMPS to the constitutional default and
+        WARNS naming the value AND the default. The minimum is 1: a zero
+        cap would masquerade as a kill-switch.
+        """
+        name = _MEMOIR_REFLECTION_BUDGET_ENV_VARS.get(info.field_name, info.field_name)
+        default = cls.model_fields[info.field_name].default
+        return _classify_numeric(
+            value,
+            default=default,
+            numeric_class=NUMERIC_CLASS_BUDGET,
+            name=name,
+            minimum=1,
+        )
+
+    @field_validator(
+        "tick_budget_s",
+        "call_timeout_s",
+        "debounce_base_s",
+        "debounce_ceiling_s",
+        "force_fire_s",
+        mode="before",
+    )
+    @classmethod
+    def _classify_cadence_tunable(cls, value: Any, info: Any) -> Any:
+        """The Cadence-tunables class — default, SILENT when unset."""
+        name = _MEMOIR_REFLECTION_CADENCE_ENV_VARS.get(info.field_name, info.field_name)
+        default = cls.model_fields[info.field_name].default
+        return _classify_numeric(
+            value,
+            default=default,
+            numeric_class=NUMERIC_CLASS_CADENCE,
+            name=name,
+            minimum=0.001,
+        )
+
+    @field_validator(
+        "tick_interval_s",
+        "scan_window_days",
+        mode="before",
+    )
+    @classmethod
+    def _classify_cadence_count(cls, value: Any, info: Any) -> Any:
+        """The Cadence-tunables class for the INTEGER knobs.
+
+        An integer knob resolves to an integer — a fractional value is
+        GARBAGE (the constitutional default), never a ``ValidationError``.
+        """
+        name = _MEMOIR_REFLECTION_CADENCE_ENV_VARS.get(info.field_name, info.field_name)
+        default = cls.model_fields[info.field_name].default
+        return _classify_numeric(
+            value,
+            default=default,
+            numeric_class=NUMERIC_CLASS_CADENCE,
+            name=name,
+            minimum=1,
+        )
+
+    @model_validator(mode="after")
+    def _record_budget_knob_state(self) -> "MemoirReflectionConfig":
+        """Record WHICH budget knobs are unset — the knob module warns.
+
+        The AGGREGATE warning itself lives in
+        :mod:`daemon.tools.memoir_knob` (the house precedent: the knob
+        module owns the operator-facing log lines, and the model is the
+        CLASSIFIER). This validator only RECORDS the fact — the knob
+        module reads it and emits the warning once per boot, so the
+        warning never fires on every ``Config()`` construction.
+        """
+        self._unset_budget_knobs = tuple(
+            env_name
+            for env_name in _MEMOIR_REFLECTION_BUDGET_ENV_VARS.values()
+            if os.environ.get(env_name, "").strip() == ""
+        )
+        return self
+
+
+# ── the POIGNANCY lane's knobs (phase 4, T4.4 / V2-D 4.7) ───────────────
+#
+# The env-var name of the poignancy kill-switch (§3-A4 Enabled-flags).
+MEMOIR_POIGNANCY_ENABLED_ENV_VAR = "ENSEMBLE_MEMOIR_POIGNANCY_ENABLED"
+
+#: The budget-bound knobs — the field → env-var map used by the AGGREGATE
+#: unset warning and by the budget-bound before-validator.
+#:
+#: ``backfill_max`` is the ONLY budget-bound knob in this family, and its
+#: constitutional default is ZERO — zero means "the backfill is DISABLED",
+#: which is a MEANINGFUL state, not a masquerading kill-switch. The
+#: shared classifier's "never zero" rule (a budget cap masquerading as a
+#: kill-switch) does NOT apply here: the floor is 0, so a garbage value
+#: resolves to 0 (the backfill stays OFF — the fail-SAFE side) and a
+#: negative value clamps to 0.
+_MEMOIR_POIGNANCY_BUDGET_ENV_VARS: dict[str, str] = {
+    "backfill_max": "ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX",
+}
+
+#: The cadence-tunable knobs — the field → env-var map. These are SILENT
+#: when unset (tuning, not governance).
+_MEMOIR_POIGNANCY_CADENCE_ENV_VARS: dict[str, str] = {
+    "tick_s": "ENSEMBLE_MEMOIR_POIGNANCY_TICK_S",
+    "batch_cap": "ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP",
+}
+
+#: THE per-knob numeric SPEC — ``field → (env name, numeric class, floor)``.
+#:
+#: ONE source, consumed by BOTH tiers: the model's own ``mode="before"``
+#: validators (the BOOT tier) and the worker's per-tick reader (the LIVE
+#: tier). Two hand-written copies of the class/floor assignment would be
+#: exactly the drift class §3-A4 exists to prevent — the boot tier and
+#: the worker tier must never disagree about what a value MEANS.
+_MEMOIR_POIGNANCY_NUMERIC_SPEC: dict[str, tuple[str, str, float]] = {
+    "backfill_max": (
+        "ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX",
+        NUMERIC_CLASS_BUDGET,
+        0,
+    ),
+    "tick_s": ("ENSEMBLE_MEMOIR_POIGNANCY_TICK_S", NUMERIC_CLASS_CADENCE, 1),
+    "batch_cap": (
+        "ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP",
+        NUMERIC_CLASS_CADENCE,
+        1,
+    ),
+}
+
+
+class MemoirPoignancyConfig(BaseSettings):
+    """The Memoir Store v2 POIGNANCY lane knobs (phase 4, T4.4).
+
+    An ISOLATED section — the plan's N1 / V2-D 4.9 precedent: the
+    poignancy knobs live in their own model with their own env prefix
+    and are NOT folded into the v1 ``MemoirConfig`` section, and the
+    worker NEVER calls the global knob resolver (``resolve_memoir_knob``)
+    — the CLASSIFIER is shared, the RESOLVER is per-lane.
+
+    The env prefix is ``ENSEMBLE_MEMOIR_POIGNANCY_``:
+
+    * ``ENSEMBLE_MEMOIR_POIGNANCY_ENABLED`` — the kill-switch
+      (Enabled-flags class: unset ON + WARNING, garbage OFF + WARNING,
+      never a ``ValidationError``);
+    * ``ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX`` — the opt-in legacy
+      backfill budget (Budget-bounds class, default 0 = disabled);
+    * ``ENSEMBLE_MEMOIR_POIGNANCY_TICK_S`` — the worker tick interval
+      (Cadence class);
+    * ``ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP`` — the episodes scored per
+      tick (Cadence class).
+
+    EVERY numeric goes through the shared ``_classify_numeric`` helper
+    through a ``mode="before"`` validator, so a garbage value clamps to
+    the constitutional default and NEVER aborts the boot (§3-A4 /
+    Register #12 / V2-16). NO bare ``Field(gt=...)`` on a v2 numeric.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_MEMOIR_POIGNANCY_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the poignancy scoring lane "
+                    "(Enabled-flags class). Unset resolves ON with a loud "
+                    "WARNING; a garbage value fails CLOSED (OFF) with a "
+                    "WARNING; neither raises. "
+                    "Env: ENSEMBLE_MEMOIR_POIGNANCY_ENABLED.",
+    )
+    backfill_max: int = Field(
+        default=0,
+        description="The opt-in legacy backfill budget: how many "
+                    "'legacy' (pre-cutover) episodes are scored per pass. "
+                    "0 (the default) means NO legacy episode is ever "
+                    "scored (V2-14 / §3-A3). "
+                    "Env: ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX.",
+    )
+    tick_s: int = Field(
+        default=20,
+        description="The worker tick interval in seconds (V2-D 4.2 / "
+                    "§3.1). Env: ENSEMBLE_MEMOIR_POIGNANCY_TICK_S.",
+    )
+    batch_cap: int = Field(
+        default=10,
+        description="The maximum episodes scored per tick (V2-D 4.2 / "
+                    "§3.1). Env: ENSEMBLE_MEMOIR_POIGNANCY_BATCH_CAP.",
+    )
+
+    #: WHICH budget knobs are unset (recorded by the after-validator; the
+    #: knob module turns this into the AGGREGATE warning). Private: never
+    #: env-bound, never serialized.
+    _unset_budget_knobs: tuple[str, ...] = PrivateAttr(default=())
+
+    # ── the three-class before-validators (§3-A4 / Register #12) ──────────
+
+    @model_validator(mode="before")
+    @classmethod
+    def _env_tier_wins(cls, data: Any) -> Any:
+        """The ENV tier wins over the init/yaml tier — and the UNSET case
+        is LOUD.
+
+        The same shape as the reflection section: a present env value
+        overrides an init/yaml value, and an ABSENT env value injects
+        ``None`` for ``enabled`` so the field validator runs and the
+        "unset ⇒ ON" case is never silent.
+        """
+        if not isinstance(data, dict):
+            return data
+        merged = dict(data)
+        raw = os.environ.get(MEMOIR_POIGNANCY_ENABLED_ENV_VAR)
+        if raw is not None and raw.strip():
+            merged["enabled"] = raw
+        elif "enabled" not in merged:
+            merged["enabled"] = None
+        return merged
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _classify_enabled_flag(cls, value: Any) -> Any:
+        """The Enabled-flags class — unset ON, garbage fail-CLOSED OFF."""
+        return _classify_enabled_flag(
+            value, name=MEMOIR_POIGNANCY_ENABLED_ENV_VAR, default=True
+        )
+
+    @field_validator("backfill_max", mode="before")
+    @classmethod
+    def _classify_budget_bound(cls, value: Any, info: Any) -> Any:
+        """The Budget-bounds class — clamp to the default, floor ZERO.
+
+        The floor is 0 (not 1) BECAUSE 0 is this knob's constitutional
+        default and its meaningful "disabled" state: a garbage value
+        resolves to 0 (the backfill stays off — the fail-safe side) and
+        a negative value clamps to 0. The class and the floor come from
+        the shared SPEC, so this validator and the worker's per-tick
+        reader cannot drift.
+        """
+        name, numeric_class, floor = _MEMOIR_POIGNANCY_NUMERIC_SPEC.get(
+            info.field_name,
+            (info.field_name, NUMERIC_CLASS_BUDGET, 0),
+        )
+        default = cls.model_fields[info.field_name].default
+        return _classify_numeric(
+            value,
+            default=default,
+            numeric_class=numeric_class,
+            name=name,
+            minimum=floor,
+        )
+
+    @field_validator(
+        "tick_s",
+        "batch_cap",
+        mode="before",
+    )
+    @classmethod
+    def _classify_cadence_count(cls, value: Any, info: Any) -> Any:
+        """The Cadence-tunables class for the INTEGER knobs.
+
+        An integer knob resolves to an integer — a fractional value is
+        GARBAGE (the constitutional default), never a ``ValidationError``.
+        The class and the floor come from the shared SPEC.
+        """
+        name, numeric_class, floor = _MEMOIR_POIGNANCY_NUMERIC_SPEC.get(
+            info.field_name,
+            (info.field_name, NUMERIC_CLASS_CADENCE, 1),
+        )
+        default = cls.model_fields[info.field_name].default
+        return _classify_numeric(
+            value,
+            default=default,
+            numeric_class=numeric_class,
+            name=name,
+            minimum=floor,
+        )
+
+    @model_validator(mode="after")
+    def _record_budget_knob_state(self) -> "MemoirPoignancyConfig":
+        """Record WHICH budget knobs are unset — the knob module warns.
+
+        The AGGREGATE warning itself lives in
+        :mod:`daemon.tools.memoir_knob` (the house precedent: the knob
+        module owns the operator-facing log lines, and the model is the
+        CLASSIFIER). This validator only RECORDS the fact.
+        """
+        self._unset_budget_knobs = tuple(
+            env_name
+            for env_name in _MEMOIR_POIGNANCY_BUDGET_ENV_VARS.values()
+            if os.environ.get(env_name, "").strip() == ""
+        )
+        return self
+
+
+# ── the WAKE-REFRESH lane's knob (phase 6, T6.5 / V2-D 6.4 / §3-A4) ─────
+#
+# The env-var name of the wake-refresh kill-switch (Enabled-flags class).
+MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR = "ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED"
+
+
+class MemoirWakeRefreshConfig(BaseSettings):
+    """The Memoir Store v2 WAKE-REFRESH lane's knob (phase 6, T6.5).
+
+    An ISOLATED section — the N1 / V2-D 4.9 precedent the reflection and
+    poignancy lanes already follow: the wake-refresh knobs live in their
+    own model with their own env prefix and are NOT folded into the v1
+    ``MemoirConfig`` section. The CLASSIFIER is shared
+    (:func:`_classify_enabled_flag`); the RESOLVER is per-lane — the
+    seam re-reads the env tier LIVE at call time so a mid-run flip takes
+    effect on the next qualifying wake WITHOUT a restart.
+
+    ONE field only: this lane has no numeric knobs (the payload budget is
+    the briefing's own DR-1 ceiling, not a tuning surface), so no
+    Budget-bounds or Cadence class member exists here.
+
+    The truth table is the Enabled-flags row of §3-A4 (DR-3):
+
+    | ``ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED`` | Resolved | Log (once/boot) |
+    |---|---|---|
+    | absent / empty | ON (the default) | WARNING — unset + the off hint |
+    | true/1/yes/on/t/y | ON | INFO |
+    | false/0/no/off/f/n | OFF | INFO |
+    | any other value | OFF (fail CLOSED) | WARNING naming the value |
+
+    A mis-set knob NEVER raises and NEVER aborts the boot: a
+    ``ValidationError`` out of ``load_config`` would take the daemon down
+    (the house anomaly ``33028b27``); the surface simply stays closed.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_MEMOIR_WAKE_REFRESH_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the wake-refresh context block "
+                    "(Enabled-flags class). Unset resolves ON with a loud "
+                    "WARNING; a garbage value fails CLOSED (OFF) with a "
+                    "WARNING; neither raises. "
+                    "Env: ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _env_tier_wins(cls, data: Any) -> Any:
+        """A present env value overrides the init/yaml tier.
+
+        The same shape as the reflection / poignancy sections: the
+        operator's env knob must not be silently shadowed by a config
+        file, and the precedence rule lives INSIDE the model so a
+        consumer never re-reads the env for the VALUE.
+        """
+        if not isinstance(data, dict):
+            return data
+        merged = dict(data)
+        raw = os.environ.get(MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR)
+        if raw is not None and raw.strip():
+            merged["enabled"] = raw
+        return merged
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _classify_enabled_flag(cls, value: Any) -> Any:
+        """The Enabled-flags class — unset ON, garbage fail-CLOSED OFF."""
+        return _classify_enabled_flag(
+            value, name=MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR, default=True
+        )
+
+
+# ── the PROPOSAL lane's knob (phase 6, closure #3) ───────────────────────
+#
+# The env-var name of the keepsake-proposal candidate-window's fetch-cap
+# multiplier (the SANCTIONED ESCAPE for a pathological corpus).
+MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR = (
+    "ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER"
+)
+
+#: The constitutional DEFAULT for the fetch-cap multiplier — 3, the
+#: bounded over-fetch W-2 shipped with (``MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE``
+#: in ``daemon/services/memoir_keepsake_proposal_service.py`` aliases this
+#: constant, so the value has exactly ONE home).
+MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT = 3
+
+#: The LOWEST legal multiplier. 1 means "no over-fetch" (the window only);
+#: 0 is illegal — a zero cap would masquerade as a kill-switch (the house
+#: NEVER-ZERO rule).
+MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MIN = 1
+
+#: The HIGHEST legal multiplier. The bound keeps the escape a BOUNDED
+#: scan (never an unbounded corpus walk — the cost constitution: reflection
+#: must never become a rewrite hazard).
+MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MAX = 20
+
+
+class MemoirProposalConfig(BaseSettings):
+    """The Memoir Store v2 PROPOSAL lane's knob (phase 6, closure #3).
+
+    An ISOLATED section — the N1 / V2-D 4.9 precedent the reflection,
+    poignancy and wake-refresh lanes already follow: the proposal knobs
+    live in their own model with their own env prefix and are NOT folded
+    into the v1 ``MemoirConfig`` section. The CLASSIFIER is shared
+    (:func:`_classify_numeric`); the RESOLVER is per-lane
+    (``daemon.tools.memoir_knob.resolve_memoir_proposal_fetch_cap_multiplier``)
+    and re-reads the env tier LIVE at call time, so an operator raises the
+    bound WITHOUT a restart.
+
+    ONE field only: ``fetch_cap_multiplier`` — how many times the window
+    the candidate scan may over-fetch per pass. The DEFAULT is 3 (the
+    bounded over-fetch W-2 shipped with); raising it is the SANCTIONED
+    ESCAPE for a pathological corpus whose whole head-of-line is terse
+    (a permanent deferral at the default bound).
+
+    The truth table is the Budget-bounds row of §3-A4 (DR-3):
+
+    | ``ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER`` | Resolved | Log |
+    |---|---|---|
+    | absent / empty | the default (3) | WARNING — unset budget knobs are never silent |
+    | a legal integer in [1, 20] | that value | INFO |
+    | a legal integer outside [1, 20] | CLAMPED into the band | WARNING naming the clamp |
+    | any other value | the default (3), fail CLOSED | WARNING naming the value |
+
+    A mis-set knob NEVER raises and NEVER aborts the boot: a
+    ``ValidationError`` out of ``load_config`` would take the daemon down
+    (the house anomaly ``33028b27``); the bound simply stays where it
+    was.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_MEMOIR_PROPOSAL_")
+
+    fetch_cap_multiplier: int = Field(
+        default=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT,
+        description="How many times the candidate window the keepsake-"
+                    "proposal scan may over-fetch per pass (the SANCTIONED "
+                    "ESCAPE for a pathological corpus). Unset resolves to "
+                    "this default with a loud WARNING; a garbage value "
+                    "fails CLOSED to this default with a WARNING; a legal "
+                    "value outside [1, 20] is CLAMPED into the band with a "
+                    "WARNING. Env: ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER.",
+    )
+
+    @field_validator("fetch_cap_multiplier", mode="before")
+    @classmethod
+    def _classify_budget_bound(cls, value: Any) -> Any:
+        """The Budget-bounds class — clamp to the default, NEVER zero.
+
+        A garbage budget knob CLAMPS to the constitutional default and
+        WARNS naming the value AND the default. The minimum is 1: a zero
+        cap would masquerade as a kill-switch.
+        """
+        return _classify_numeric(
+            value,
+            default=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT,
+            numeric_class=NUMERIC_CLASS_BUDGET,
+            name=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR,
+            minimum=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MIN,
+            maximum=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MAX,
+        )
 
 
 class MemoirConfig(BaseSettings):
@@ -5856,6 +6796,54 @@ class Config(BaseSettings):
     # and the ENV tier wins over the yaml tier (resolved INSIDE the
     # model, so the precedence rule has exactly one home).
     memoir: MemoirConfig = Field(default_factory=MemoirConfig)
+    # Memoir Store v2 (phase 2, T2.4): the REFLECTION lane's isolated
+    # knob section (class MemoirReflectionConfig, env prefix
+    # ENSEMBLE_MEMOIR_REFLECTION_). ISOLATED by design (N1 / V2-D 4.9):
+    # the reflection knobs are NOT folded into the v1 ``memoir:`` section
+    # and there is NO global knob-resolver clone — the CLASSIFIER is
+    # shared (``_classify_numeric``), the RESOLVER is per-lane.
+    # ENV-ONLY (the ``nest_report`` precedent): this section has NO
+    # ``config.yaml`` block and ``load_config`` has NO pass-through for
+    # it, so a hand-added yaml block is silently ignored and the ENV
+    # tier is always the live one. (A yaml tier would ALSO shadow the
+    # env knob — the defect §3-A4 names.)
+    memoir_reflection: MemoirReflectionConfig = Field(
+        default_factory=MemoirReflectionConfig
+    )
+    # Memoir Store v2 (phase 4, T4.4): the POIGNANCY lane's isolated
+    # knob section (class MemoirPoignancyConfig, env prefix
+    # ENSEMBLE_MEMOIR_POIGNANCY_). ISOLATED by design (N1 / V2-D 4.9):
+    # the poignancy knobs are NOT folded into the v1 ``memoir:`` section
+    # and the worker NEVER calls the global knob resolver — the
+    # CLASSIFIER is shared (``_classify_numeric`` /
+    # ``_classify_enabled_flag``), the RESOLVER is per-lane.
+    # ENV-ONLY (the ``memoir_reflection`` precedent): this section has NO
+    # ``config.yaml`` block and ``load_config`` has NO pass-through for
+    # it, so a hand-added yaml block is silently ignored and the ENV tier
+    # is always the live one.
+    memoir_poignancy: MemoirPoignancyConfig = Field(
+        default_factory=MemoirPoignancyConfig
+    )
+    # Memoir Store v2 (phase 6, T6.5): the WAKE-REFRESH lane's isolated
+    # knob section (class MemoirWakeRefreshConfig, env prefix
+    # ENSEMBLE_MEMOIR_WAKE_REFRESH_). ISOLATED by design (N1 / V2-D 6.4 /
+    # the memoir_reflection precedent), and ENV-ONLY (no config.yaml
+    # block, no load_config pass-through): the seam re-reads the env tier
+    # LIVE at call time, so a mid-run flip lands on the next qualifying
+    # wake without a restart.
+    memoir_wake_refresh: MemoirWakeRefreshConfig = Field(
+        default_factory=MemoirWakeRefreshConfig
+    )
+    # Memoir Store v2 (phase 6, closure #3): the PROPOSAL lane's isolated
+    # knob section (class MemoirProposalConfig, env prefix
+    # ENSEMBLE_MEMOIR_PROPOSAL_). ISOLATED by design (N1 / V2-D 4.9 / the
+    # memoir_reflection precedent), and ENV-ONLY (no config.yaml block, no
+    # load_config pass-through): the lane's resolver re-reads the env tier
+    # LIVE at call time, so an operator raises the candidate-window
+    # over-fetch bound WITHOUT a restart.
+    memoir_proposal: MemoirProposalConfig = Field(
+        default_factory=MemoirProposalConfig
+    )
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)

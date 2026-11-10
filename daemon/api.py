@@ -116,6 +116,7 @@ from daemon.routers import (
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
+from daemon.routers.memoir import router as memoir_router  # /api/memoir/persona (Phase 5: JEV persona approval)
 # wedge-capture: ``wedge_capture_router`` is re-exported by
 # ``daemon.routers`` (see the import block above) — no second direct
 # import, so there is exactly ONE binding of the name.
@@ -476,6 +477,86 @@ def inject_reports_live_view_root(config, data_dir) -> bool:
         ),
     )
     return True
+
+
+def _memoir_lane_llm_config(config: Any) -> dict[str, Any]:
+    """The shared MEMOIR-LANE LLM config dict — ONE builder.
+
+    Both memoir lanes (the reflection engine and the poignancy scorer)
+    call the house HA facade (``daemon.services.llm_failover``), which
+    reads the backup URL from the RAW dict. Without ``base_url_backup``
+    in that dict the facade is built UNCONFIGURED: every attempt uses
+    the primary and NO swap can ever occur.
+
+    ONE builder for both lanes, because a per-lane copy of this dict is
+    exactly how the ``base_url_backup`` key gets typo'd in one lane and
+    not the other (the defect the reflection lane already paid for).
+
+    Args:
+        config: The loaded daemon config (its ``llm`` section supplies
+            the base URLs, the API key and the model).
+
+    Returns:
+        The raw ``llm_config`` dict for the memoir-lane services.
+    """
+    llm = getattr(config, "llm", None)
+    return {
+        "base_url": getattr(llm, "base_url", None),
+        # ``base_url_backup`` reaches the HA facade through the RAW dict
+        # (never stripped). Without it the failover path can NEVER swap
+        # (see ``daemon/services/llm_failover.py``).
+        "base_url_backup": getattr(llm, "base_url_backup", None),
+        "api_key": getattr(llm, "api_key", None),
+        "model": getattr(llm, "model", None),
+    }
+
+
+def _reflection_llm_config(config: Any) -> dict[str, Any]:
+    """The reflection lane's LLM config dict — the IMPORTABLE seam.
+
+    The Memoir Store v2 reflection engine calls the LLM through the
+    house HA facade (``daemon.services.llm_failover``), which reads the
+    backup URL from the RAW dict. Without ``base_url_backup`` in that
+    dict the facade is built UNCONFIGURED: every attempt uses the
+    primary and NO swap can ever occur.
+
+    This helper is the ONE place the dict is built. It is module-level
+    (not a closure inside ``lifespan``) so the wiring can be pinned by
+    a test that drives the REAL dict — an AST-only pin that read the
+    dict's KEY NAMES could not see a typo'd ATTRIBUTE, which leaves the
+    value permanently ``None`` while every key-spelling pin stays
+    GREEN.
+
+    Args:
+        config: The loaded daemon config (its ``llm`` section supplies
+            the base URLs, the API key and the model).
+
+    Returns:
+        The raw ``llm_config`` dict for
+        :class:`~daemon.services.memoir_reflection_service.MemoirReflectionService`.
+    """
+    return _memoir_lane_llm_config(config)
+
+
+def _poignancy_llm_config(config: Any) -> dict[str, Any]:
+    """The POIGNANCY lane's LLM config dict — the IMPORTABLE seam.
+
+    The Memoir Store v2 poignancy scorer calls the LLM through the same
+    house HA facade as the reflection lane, so it needs the same raw
+    dict — INCLUDING ``base_url_backup``, which is what makes the
+    failover swap possible. It is built by the SHARED builder (see
+    :func:`_memoir_lane_llm_config`) so the two lanes can never drift
+    apart on the key set.
+
+    Args:
+        config: The loaded daemon config (its ``llm`` section supplies
+            the base URLs, the API key and the model).
+
+    Returns:
+        The raw ``llm_config`` dict for
+        :class:`~daemon.services.memoir_poignancy_service.MemoirPoignancyService`.
+    """
+    return _memoir_lane_llm_config(config)
 
 
 @asynccontextmanager
@@ -2903,6 +2984,168 @@ async def lifespan(app: FastAPI):
             "ENSEMBLE_MEMOIR_ENABLED and restart to enable"
         )
 
+    # ─────────────────────────────────────────────────────────────
+    # Memoir Store v2 — the REFLECTION worker ("the dream"), phase 2
+    # (plan: v2-phase2-plan.md T2.3; flags V2-5, V2-24, V2-35).
+    #
+    # The SAME shape as the embedding worker above: a lifespan task on
+    # ``app.state``, a DEDICATED single-thread executor
+    # (``memoir-reflect``), a per-tick knob re-read with park/resume,
+    # and a cancel+await in the shutdown sequence below.
+    #
+    # The lane's own kill-switch (``ENSEMBLE_MEMOIR_REFLECTION_ENABLED``)
+    # is read at BOOT to decide whether the task is created at all; a
+    # RUNNING worker parks per tick instead (D3.12's shape). A failure
+    # to start is ADVISORY: the daemon boots without the dream.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.memoir_reflection_service import (
+        MemoirReflectionService,
+    )
+    from daemon.services.memoir_reflection_worker import (
+        MemoirReflectionWorker,
+    )
+    from daemon.repositories.memoir.constellation_repository import (
+        MemoirConstellationRepository,
+    )
+    from daemon.repositories.memoir.reflection_repository import (
+        MemoirReflectionRepository,
+    )
+    from daemon.repositories.memoir.syntheses_repository import (
+        MemoirSynthesesRepository,
+    )
+    from daemon.repositories.memoir.repository import (
+        MemoirPersonaRepository,
+    )
+    from daemon.services.memoir_keepsake_proposal_service import (
+        MemoirKeepsakeProposalService,
+    )
+    from daemon.tools.memoir_knob import resolve_memoir_reflection_knob
+
+    _reflection_boot_knob = resolve_memoir_reflection_knob(config)
+    if _reflection_boot_knob.enabled:
+        try:
+            _reflection_engine = manager.engine
+            # The KEEPSAKE PROPOSAL lane (phase 6, T6.1/T6.3): constructed
+            # against the SAME engine, bound to the manager so its enqueue
+            # bridge can reach the event loop (the RDRS lane-6 precedent).
+            # A construction failure must not take the reflection worker
+            # down — the proposal phase is a downstream CONSUMER.
+            try:
+                _keepsake_proposal_service = MemoirKeepsakeProposalService(
+                    _reflection_engine,
+                    manager=manager,
+                )
+            except Exception as _proposal_boot_exc:  # noqa: BLE001 — advisory
+                _keepsake_proposal_service = None
+                daemon_logger.warning(
+                    "[MemoirProposal] service failed to construct (the "
+                    f"reflection lane continues without proposals): "
+                    f"{_proposal_boot_exc}"
+                )
+            _reflection_service = MemoirReflectionService(
+                reflection_repository=MemoirReflectionRepository(_reflection_engine),
+                syntheses_repository=MemoirSynthesesRepository(_reflection_engine),
+                constellation_repository=MemoirConstellationRepository(
+                    _reflection_engine
+                ),
+                persona_repository=MemoirPersonaRepository(_reflection_engine),
+                keepsake_proposal_service=_keepsake_proposal_service,
+                config=config,
+                llm_config=_reflection_llm_config(config),
+            )
+            memoir_reflection_worker = MemoirReflectionWorker(
+                _reflection_service,
+                config=config,
+            )
+            memoir_reflection_worker_task = asyncio.create_task(
+                memoir_reflection_worker.run(),
+                name="memoir-reflection-worker",
+            )
+            # Strong references — the naming precedent is
+            # ``app.state.memoir_embedding_worker_task`` above.
+            app.state.memoir_reflection_worker_task = memoir_reflection_worker_task
+            app.state.memoir_reflection_worker = memoir_reflection_worker
+            daemon_logger.info(
+                "[MemoirReflect] worker started: interval="
+                f"{getattr(config.memoir_reflection, 'tick_interval_s', 30)}s "
+                "thread=memoir-reflect"
+            )
+        except Exception as memoir_reflect_boot_exc:  # noqa: BLE001 — advisory
+            app.state.memoir_reflection_worker_task = None
+            app.state.memoir_reflection_worker = None
+            daemon_logger.warning(
+                f"[MemoirReflect] worker failed to start (the recall keeps "
+                f"its v1 shape): {memoir_reflect_boot_exc}"
+            )
+    else:
+        app.state.memoir_reflection_worker_task = None
+        app.state.memoir_reflection_worker = None
+        daemon_logger.info(
+            "[MemoirReflect] worker not started: the reflection knob is OFF "
+            f"at boot (resolution={_reflection_boot_knob.resolution}); flip "
+            "ENSEMBLE_MEMOIR_REFLECTION_ENABLED and restart to enable"
+        )
+
+
+    # ─────────────────────────────────────────────────────────────
+    # Memoir Store v2 — the POIGNANCY worker (phase 4, T4.3/T4.5).
+    #
+    # The SAME shape as the embedding worker and the reflection worker
+    # above: a lifespan task on ``app.state``, a DEDICATED executor
+    # (``memoir-poignancy`` — two threads, SEQUENTIAL scoring; see
+    # ``daemon/services/memoir_poignancy_worker.py``), a per-tick knob
+    # re-read with park/resume, and a cancel+await in the shutdown
+    # sequence below.
+    #
+    # THE TASK IS CREATED UNCONDITIONALLY (the lane's OFF state is a
+    # PER-TICK PARK, not a boot gate): AC4 requires that flipping
+    # ENSEMBLE_MEMOIR_POIGNANCY_ENABLED back to ``true`` RESUMES the
+    # scoring backlog — a boot-gated task would never exist to resume.
+    # A failure to start is ADVISORY: the daemon boots without the
+    # scorer and the episodes simply stay unscored.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.memoir_poignancy_service import (
+        MemoirPoignancyService,
+    )
+    from daemon.services.memoir_poignancy_worker import (
+        MemoirPoignancyWorker,
+    )
+    from daemon.tools.memoir_knob import resolve_memoir_poignancy_knob
+
+    _poignancy_boot_knob = resolve_memoir_poignancy_knob(config)
+    try:
+        _poignancy_service = MemoirPoignancyService(
+            repository=MemoirRepository(manager.engine),
+            config=config,
+            llm_config=_poignancy_llm_config(config),
+        )
+        memoir_poignancy_worker = MemoirPoignancyWorker(
+            _poignancy_service,
+            config=config,
+        )
+        memoir_poignancy_worker_task = asyncio.create_task(
+            memoir_poignancy_worker.run(),
+            name="memoir-poignancy-worker",
+        )
+        # Strong references — the naming precedent is
+        # ``app.state.memoir_reflection_worker_task`` above.
+        app.state.memoir_poignancy_worker_task = memoir_poignancy_worker_task
+        app.state.memoir_poignancy_worker = memoir_poignancy_worker
+        daemon_logger.info(
+            "[MemoirPoignancy] worker started: interval="
+            f"{getattr(config.memoir_poignancy, 'tick_s', 20)}s "
+            f"batch={getattr(config.memoir_poignancy, 'batch_cap', 10)} "
+            f"backfill_max={getattr(config.memoir_poignancy, 'backfill_max', 0)} "
+            f"thread=memoir-poignancy (resolution={_poignancy_boot_knob.resolution})"
+        )
+    except Exception as memoir_poignancy_boot_exc:  # noqa: BLE001 — advisory
+        app.state.memoir_poignancy_worker_task = None
+        app.state.memoir_poignancy_worker = None
+        daemon_logger.warning(
+            f"[MemoirPoignancy] worker failed to start (the episodes stay "
+            f"unscored): {memoir_poignancy_boot_exc}"
+        )
+
 
     # ─────────────────────────────────────────────────────────────
     # OAuth2 auth background machinery (Phase 2, T2.4/T2.8).
@@ -3715,6 +3958,40 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"[MemoirEmbed] worker shutdown error: {e}")
         app.state.memoir_embedding_worker_task = None
+
+    # Stop the Memoir Store v2 reflection worker ("the dream", phase 2
+    # T2.3): cancel + await — the same shape as the embedding worker
+    # above. The worker's loop re-raises CancelledError, so the await
+    # returns promptly; an in-flight pass is bounded by the per-call
+    # timeout and abandoned cleanly (the executor is daemon-lifetime).
+    if hasattr(app.state, "memoir_reflection_worker_task"):
+        reflection_task = app.state.memoir_reflection_worker_task
+        if reflection_task is not None and not reflection_task.done():
+            reflection_task.cancel()
+            try:
+                await reflection_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"[MemoirReflect] worker shutdown error: {e}")
+        app.state.memoir_reflection_worker_task = None
+
+    # Stop the Memoir Store v2 poignancy worker (phase 4, T4.3): cancel +
+    # await — the same shape as the workers above. The worker's loop
+    # re-raises CancelledError, so the await returns promptly; an
+    # in-flight scoring call is bounded by the per-call timeout and
+    # abandoned cleanly (the executor is daemon-lifetime).
+    if hasattr(app.state, "memoir_poignancy_worker_task"):
+        poignancy_task = app.state.memoir_poignancy_worker_task
+        if poignancy_task is not None and not poignancy_task.done():
+            poignancy_task.cancel()
+            try:
+                await poignancy_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"[MemoirPoignancy] worker shutdown error: {e}")
+        app.state.memoir_poignancy_worker_task = None
 
 
     # Stop the A3 promote-txn hold's release driver (soak-gate-mcp-warmup).
@@ -5607,6 +5884,7 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # — BEFORE the SPA catch-all (api.py:3641) so Starlette
     # first-match-wins resolves /api/prompts/* to this router.
     api_router.include_router(prompts_router)         # /api/prompts (Phase B T5)
+    api_router.include_router(memoir_router)          # /api/memoir/persona (Phase 5: JEV persona approval)
 
     # OAuth2 Phase 3 (T3.12 / FR-41): the MCP-KB key-management CRUD —
     # the ONE new OAuth2-human-lane family (§5.6: 30 legacy + 1 new).

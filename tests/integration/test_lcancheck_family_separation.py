@@ -175,12 +175,16 @@ _WITNESS_DOCSTRING_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # net-new pair): the pok block's stable id ``pok:{project_id}`` is the
 # SIXTH supported kind (the _stable_id_for table grew; the family-
 # separation contract now covers six kinds).
+# "memoir_refresh" re-point 2026-11-10 (Memoir v2 phase 6, T6.4 / N3):
+# the wake-refresh block's stable id ``memoir_refresh:{instance_id}`` is
+# the SEVENTH supported kind (the closed list grew by exactly one).
 _STABLE_ID_SUPPORTED_KINDS: tuple[str, ...] = (
     "project",
     "shared_meta_kv",
     "attestation_nudge",
     "attestation_final_report_reminder",
     "memoir",
+    "memoir_refresh",
     "pok",
 )
 
@@ -1164,11 +1168,12 @@ class TestFamilySeparationContractPins:
         )
 
     def test_stable_id_supported_kinds_are_exactly_five(self):
-        """The five surviving kinds are exactly ``project``,
-        ``shared_meta_kv``, ``attestation_nudge``,
-        ``attestation_final_report_reminder``, ``memoir``. If a
-        sixth kind is added (or one is removed), the kind-retirement
-        contract is broken."""
+        """The supported kinds are ``project``, ``shared_meta_kv``,
+        ``attestation_nudge``, ``attestation_final_report_reminder``,
+        ``memoir``, ``pok`` and ``memoir_refresh`` (the last added by
+        Memoir v2 phase 6 / T6.4). If a kind is added (or one is
+        removed), the kind-retirement contract is broken — the pin's
+        NAME stays historical; the ASSERTION is the exact set."""
         # Probe via the error message — the supported-kinds list
         # is the canonical message string.
         try:

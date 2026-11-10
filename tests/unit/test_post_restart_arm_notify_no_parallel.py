@@ -125,19 +125,30 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     #   (b) it is registered UNCONDITIONALLY, so the OFF-state route
     #       table grows by this one family — accepted for the same
     #       reason the wedge-capture and metrics families above are.
-    # The guard's intent is UNCHANGED: an unauthorized 39th mount
+    # The guard's intent is UNCHANGED: an unauthorized 40th mount
     # still fails this test loudly.
     "nest_reports_router",  # /api/nest-reports (anomaly domain read door)
     "plane_router",         # /api/plane
     "tmp_images_router",    # /api/tmp_images
     "prompts_router",       # /api/prompts (agent-prompt-immutability Phase B T5)
+    # memoir store v2 (phase 5, 2026-11-09): the JEV persona approval
+    # surface (/api/memoir/persona). The rationale the guard demands:
+    #   (a) it is NOT an HTTP endpoint for the wake — it is the memoir
+    #       persona read/approval surface, and it adds no wake path;
+    #   (b) it is registered UNCONDITIONALLY (an ordinary include site, NOT
+    #       under `if auth_enabled:`), so the OFF-state route table grows by
+    #       this one family — accepted like the wedge-capture/metrics ones;
+    #   (c) the accompanying censuses (test_router_scope_manifest.py, 39;
+    #       test_router_class_manifest.py) were updated in the SAME commit as
+    #       the mount (2128cf7d2); THIS pin was re-pinned in the same fix pass.
+    "memoir_router",        # /api/memoir/persona (Phase 5: JEV persona approval)
     # oauth2-auth v1 DESIGNED mounts (refreshed pin): +2 over the
     # unconditional set, both registered ONLY under `if auth_enabled:`
     # in daemon/api.py (OFF-state route table untouched, G3.2).
     # Accounting matches tests/unit/test_router_scope_manifest.py
-    # (37 textual include_router matches = 34 unconditional + these
+    # (39 textual include_router matches = 36 unconditional + these
     # 2 auth-ON-gated families + the 1 gateway-flag-gated WebSocket
-    # mount). The guard's intent is UNCHANGED: an unauthorized 38th
+    # mount). The guard's intent is UNCHANGED: an unauthorized 40th
     # mount still fails this test loudly.
     "mcp_kb_keys_router",   # /api/mcp/kb/keys (OAuth2 human lane)
     "auth_router",          # /api/auth/*
@@ -177,7 +188,7 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     #       quick-wins fix pass: the scope cage's count was NOT updated
     #       in that commit — the census drifted, and this file's pin
     #       stayed stale until the fix pass below.)
-    # The guard's intent is UNCHANGED: an unauthorized 38th mount still
+    # The guard's intent is UNCHANGED: an unauthorized 40th mount still
     # fails this test loudly.
     "mcp_gateway_router",   # /api/mcps-gateway/ws (WebSocket, kill-switch gated)
 )

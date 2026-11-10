@@ -52,7 +52,10 @@ from typing import Any, Sequence
 
 from daemon.repositories.memoir.models import (
     KEEPSAKE_LINE_TEMPLATE,
+    MEMOIR_PROPOSALS_ZONE_CHAR_BUDGET,
+    MEMOIR_PROPOSALS_ZONE_MAX,
     MEMOIR_UNTITLED_TITLE,
+    PROPOSALS_ZONE_HEADER,
 )
 from daemon.repositories.memoir.models import (
     render_keepsake_line as render_keepsake_line_shared,
@@ -302,6 +305,75 @@ def _fit_dynamic_lines(lines: Sequence[str], budget_tokens: int) -> list[str]:
     return kept
 
 
+def admit_proposal_lines(
+    lines: Sequence[str] | None,
+    *,
+    char_budget: int = MEMOIR_PROPOSALS_ZONE_CHAR_BUDGET,
+    max_lines: int = MEMOIR_PROPOSALS_ZONE_MAX,
+) -> list[str]:
+    """The ``[PROPOSALS]`` zone admission — its OWN measured section.
+
+    WHY A SEPARATE ZONE (the arithmetic trap §3-A6 closed): persona +
+    keepsake admission alone (~6,000 tokens ≈ 24,000 chars) can fill the
+    whole 24,000-char ceiling, so bolting proposals into the STABLE text
+    would trip the stable-overage rung and silently kill EVERY dynamic
+    episode whenever keepsake admission is full. Proposals therefore get
+    their own measured section with their own admission bound, applied at
+    extraction time.
+
+    Measurement discipline (W-1): the bound is measured on the SHIPPED
+    bytes — each line is escaped first (ADR-7), and the header wrapper
+    (``PROPOSALS_ZONE_HEADER`` + its newline) is INCLUDED in the
+    measurement, because those bytes ship too.
+
+    Weakest-first dropping is the CALLER's rung (``render_briefing_body``
+    applies the total-based trim per the V2-D 6.5 ladder); this function
+    only enforces the STRUCTURAL admission: at most ``max_lines`` lines
+    and at most ``char_budget`` characters of shipped zone text.
+    """
+    if not lines:
+        return []
+    escaped = [_escape_for_context_block(line) for line in lines]
+    kept: list[str] = []
+    overhead = len(PROPOSALS_ZONE_HEADER) + 1  # the header line + its newline
+    total = overhead
+    for line in escaped[: max(0, int(max_lines))]:
+        candidate = total + len(line) + 1  # + the line's own newline
+        if candidate > char_budget:
+            # THE BOUND IS THE BOUND — and the lines arrive STRONGEST-FIRST,
+            # so the first line that does not fit ends the admission: every
+            # line after it is WEAKER than the one refused. (Admitting a
+            # later weaker line while dropping a stronger one would invert
+            # the drop-weakest-first order the trim rung owns.) A line is
+            # never truncated — a truncated claim reads as a different claim.
+            break
+        kept.append(line)
+        total = candidate
+    return kept
+
+
+def _compose_briefing_body(*, stable: str, dynamic_lines: Sequence[str],
+                           proposal_lines: Sequence[str]) -> str:
+    """Join the shipped sections exactly as the block ships them."""
+    parts: list[str] = [stable]
+    if dynamic_lines:
+        parts.append("\n".join([_RECENT_HEADER, *dynamic_lines]))
+    if proposal_lines:
+        parts.append("\n".join([PROPOSALS_ZONE_HEADER, *proposal_lines]))
+    parts.append(MEMOIR_AFFORDANCE_LINE)
+    return "\n\n".join(parts)
+
+
+def escape_for_context_block(content: str) -> str:
+    """Alias of :func:`_escape_for_context_block` (an exported spelling).
+
+    Tests measure the SAME escape the renderer applies; exposing it here
+    keeps the two from drifting without importing the heavier
+    ``context_messages`` module at import time.
+    """
+    return _escape_for_context_block(content)
+
+
 def _escape_for_context_block(content: str) -> str:
     """The module's ADR-7 escaper (``context_messages.escape_for_context_block``).
 
@@ -309,9 +381,9 @@ def _escape_for_context_block(content: str) -> str:
     import cycle (``context_messages`` lazily imports THIS module at the
     seam).
     """
-    from .context_messages import escape_for_context_block
+    from .context_messages import escape_for_context_block as _escape
 
-    return escape_for_context_block(content)
+    return _escape(content)
 
 
 def render_briefing_body(
@@ -320,8 +392,9 @@ def render_briefing_body(
     keepsakes: Sequence[Any],
     episodes: Sequence[Any],
     provenance_class: str = "",
+    proposal_lines: Sequence[str] | None = None,
 ) -> str | None:
-    """Render the briefing body — the two zones + the backstop (D5.7/D5.8).
+    """Render the briefing body — the zones + the backstop (D5.7/D5.8/T6.2).
 
     Returns the full escaped body, or ``None`` when the block is
     WITHHELD (the stable zone alone exceeds the 48,000-char absolute
@@ -332,6 +405,24 @@ def render_briefing_body(
     ceilings are measured on the SHIPPED bytes — each zone is escaped
     first (ADR-7), then measured, so the number in the disclosure is
     the number the agent actually receives.
+
+    THE ADMISSION LADDER (V2-D 6.5 — CANONICAL SEMANTICS LIVE
+    EXCLUSIVELY IN THE VERBATIM §A6 QUOTE, cross-referenced here and
+    NEVER paraphrased; see
+    ``.agents/shared/planning/ari-memoir-store/v2-architecture-recommendation.md``
+    §A6 and ``v2-phase6-plan.md`` V2-D 6.5):
+
+    > with explicit rung order **fit dynamic → trim dynamic → trim
+    > proposals (drop weakest first) → rung-2 withhold**
+
+    This function implements exactly those rungs in that order. The
+    measurement basis is ``stable_chars`` (the escaped stable zone
+    ALONE): the withhold (> 48,000) is reachable ONLY by
+    stable-zone overflow, and the total-based proposals trim is
+    reachable only when ``stable_chars + dynamic_chars`` lands within
+    the proposals zone's own bound (≤ 1,000 chars) of the 24,000-char
+    ceiling — the reachability analysis recorded in V2-D 6.5, pinned by
+    ``tests/unit/test_memoir_keepsake_proposals.py``.
     """
     stable_raw = _render_stable_text(
         persona_body=persona_body,
@@ -349,31 +440,54 @@ def render_briefing_body(
         )
         return None
 
-    parts: list[str] = [stable]
-
     if stable_chars > MEMOIR_SECTION_CHAR_CEILING:
-        # First backstop rung: stable in full, dynamic dropped, the
-        # overage disclosed (AM-43/DR-1). The stable zone is NEVER
-        # truncated — "never truncated" and "hard ceiling" reconcile
-        # by the OUTCOME.
-        parts.append(
+        # First backstop rung: stable in full, dynamic and proposals
+        # dropped, the overage disclosed (AM-43/DR-1). The stable zone is
+        # NEVER truncated — "never truncated" and "hard ceiling"
+        # reconcile by the OUTCOME.
+        parts = [
+            stable,
             MEMOIR_STABLE_OVERAGE_DISCLOSURE.format(
                 chars=stable_chars,
                 over=stable_chars - MEMOIR_SECTION_CHAR_CEILING,
-            )
-        )
-    else:
-        dynamic_lines = _fit_dynamic_lines(
-            _render_dynamic_lines(episodes),
-            MEMOIR_DYNAMIC_TOKEN_BUDGET,
-        )
-        if dynamic_lines:
-            parts.append(
-                "\n".join([_RECENT_HEADER, *dynamic_lines])
-            )
+            ),
+            MEMOIR_AFFORDANCE_LINE,
+        ]
+        return "\n\n".join(parts)
 
-    parts.append(MEMOIR_AFFORDANCE_LINE)
-    return "\n\n".join(parts)
+    # ── FIT DYNAMIC ──────────────────────────────────────────────────
+    dynamic_lines = _fit_dynamic_lines(
+        _render_dynamic_lines(episodes),
+        MEMOIR_DYNAMIC_TOKEN_BUDGET,
+    )
+    # The proposals zone's OWN structural admission (≤ 1,000 chars
+    # including the header wrapper, at most 3 lines) — measured on the
+    # shipped bytes, W-1.
+    admitted_proposals = admit_proposal_lines(proposal_lines)
+
+    body = _compose_briefing_body(
+        stable=stable,
+        dynamic_lines=dynamic_lines,
+        proposal_lines=admitted_proposals,
+    )
+    # ── TRIM DYNAMIC (oldest first) ──────────────────────────────────
+    while len(body) > MEMOIR_SECTION_CHAR_CEILING and dynamic_lines:
+        dynamic_lines = dynamic_lines[:-1]  # the tail is the oldest
+        body = _compose_briefing_body(
+            stable=stable,
+            dynamic_lines=dynamic_lines,
+            proposal_lines=admitted_proposals,
+        )
+    # ── TRIM PROPOSALS (drop weakest first) ──────────────────────────
+    # The selection is strongest-first, so the tail IS the weakest.
+    while len(body) > MEMOIR_SECTION_CHAR_CEILING and admitted_proposals:
+        admitted_proposals = admitted_proposals[:-1]
+        body = _compose_briefing_body(
+            stable=stable,
+            dynamic_lines=dynamic_lines,
+            proposal_lines=admitted_proposals,
+        )
+    return body
 
 
 def memoir_block_present(messages: Sequence[Any] | None, agent_id: str | None = None) -> bool:
@@ -461,12 +575,34 @@ async def _guarded_read(
         return default
 
 
-async def _build_memoir_briefing_message(
+def _read_proposal_lines(engine: Any, agent_id: str) -> list[str]:
+    """The proposals zone's line bodies — one sync read (off-loop by caller).
+
+    The service is constructed against the CALLER'S engine (the fence:
+    this module never builds an engine). A ledger failure raises out of
+    here and is degraded by the ``_guarded_read`` wrapper at the build
+    site — the zone disappears, the rest of the briefing ships.
+    """
+    from daemon.services.memoir_keepsake_proposal_service import (
+        MemoirKeepsakeProposalService,
+    )
+
+    service = MemoirKeepsakeProposalService(engine, agent_id=agent_id)
+    return service.zone_lines(limit=MEMOIR_PROPOSALS_ZONE_MAX, agent_id=agent_id)
+
+
+async def _render_briefing_body_for(
     agent_id: str,
     instance_id: str,
     manager: Any,
-):
-    """Build the turn-1 memoir block, or ``None`` (D5.1's builder).
+) -> str | None:
+    """Render the briefing BODY (persona + keepsakes + proposals + dynamic).
+
+    The ONE render path shared by the TURN-1 briefing block (kind
+    ``memoir``) and the WAKE-REFRESH block (kind ``memoir_refresh``,
+    phase 6 / SF6): both carry the same fresh payload, and the refresh
+    lane must not grow a second renderer that could drift from the
+    briefing's (the single-source discipline).
 
     Off-loop, deadline-bounded reads (AM-37/AM-38): every repository
     read runs in a worker thread under ``asyncio.wait_for``. A failed
@@ -475,6 +611,10 @@ async def _build_memoir_briefing_message(
     The repository wraps the CALLER'S engine (``manager._engine``) —
     this module never builds an engine and never reads an ambient
     ``POSTGRES_*`` variable (the fence).
+
+    Returns the escaped body, or ``None`` when the block is withheld (the
+    stable zone alone exceeds the 48,000-char absolute bound) or when no
+    engine/agent is available.
     """
     engine = getattr(manager, "_engine", None)
     if engine is None or not agent_id:
@@ -504,15 +644,42 @@ async def _build_memoir_briefing_message(
 
     provenance_class = _capture_provenance_class(manager, instance_id)
 
-    body = render_briefing_body(
+    # ── The [PROPOSALS] zone (phase 6, T6.2 / V2-D 6.5 / N2) ──────────
+    # ONE extra guarded read: the zone's strongest-first proposal lines.
+    # The read is its OWN failure domain (a ledger problem degrades the
+    # zone to "no proposals", never the persona/keepsakes/dynamic zones).
+    proposal_lines = await _guarded_read(
+        "proposals",
+        _read_proposal_lines,
+        engine,
+        agent_id,
+        default=[],
+    )
+
+    return render_briefing_body(
         persona_body=(persona.body if persona is not None else None),
         keepsakes=keepsakes or [],
         episodes=episodes or [],
         provenance_class=provenance_class,
+        proposal_lines=proposal_lines or [],
     )
+
+
+async def _build_memoir_briefing_message(
+    agent_id: str,
+    instance_id: str,
+    manager: Any,
+):
+    """Build the turn-1 memoir block, or ``None`` (D5.1's builder).
+
+    Wraps :func:`_render_briefing_body_for` into the ``memoir`` kind +
+    ``memoir:{agent_id}`` stable id. The rendering (and every budget /
+    backstop rule) lives in the ONE shared render path.
+    """
+    body = await _render_briefing_body_for(agent_id, instance_id, manager)
     if body is None:
-        # Withheld (AM-43): the WARNING is already logged; ``None``
-        # propagates so the consumer finds NO block and writes NO flag.
+        # Withheld (AM-43) or no engine: ``None`` propagates so the
+        # consumer finds NO block and writes NO flag.
         return None
 
     from .context_messages import (
@@ -549,7 +716,11 @@ __all__ = [
     "render_keepsake_line",
     "render_dynamic_line",
     "render_briefing_body",
+    "admit_proposal_lines",
+    "escape_for_context_block",
     "memoir_block_present",
     "knob_allows",
+    "_read_proposal_lines",
+    "_render_briefing_body_for",
     "_build_memoir_briefing_message",
 ]

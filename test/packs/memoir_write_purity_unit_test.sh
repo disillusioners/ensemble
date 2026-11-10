@@ -79,7 +79,13 @@ fi
 #  `-lt 1` let a silently-shortened selection pass; an exact count
 #  turns "a test disappeared" into a RED instead of a quieter green
 #  (tidier M12). Re-measure and move this constant deliberately.
-EXPECTED_PASSED_N=14
+#:
+#: RE-MEASURED (2026-11-09, the phase-4 fix round): the pin said 14
+#: while the module has carried 15 tests for several commits — a
+#: PRE-EXISTING drift that made this gate RED (a false-red gate, not a
+#: silent green) and that the fix round found while amending the
+#: module's D2_1_SURFACE census. The measured value is 15.
+EXPECTED_PASSED_N=15
 
 LOG="$(mktemp -t memoir_write_purity_unit_test.XXXXXX)"
 trap 'rm -f "${LOG}"' EXIT

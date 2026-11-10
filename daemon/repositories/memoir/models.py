@@ -1,7 +1,18 @@
-"""The four Memoir Store tables — layer 1 (episodes), 3 (persona), 4 (syntheses).
+"""The Memoir Store tables — TEN of them: the v1 four (episodes, persona,
+persona versions, syntheses) plus the six v2 Constellation/Gate tables
+(``memoir_star``, ``memoir_star_alias``, ``memoir_line``,
+``memoir_reflection_state``, ``memoir_proposal_ledger``,
+``memoir_jev_ledger``).
+
+The "four" in this module's original docstring was TRUE for v1 and FALSE
+from phase 1 of the v2 lane onward; the census pin
+(``tests/unit/test_memoir_schema_contract.py``) has named the v2 six
+since they landed.
 
 Phase 1 of the Memoir Store v1 lane (plan:
-``.agents/shared/planning/ari-memoir-store/phase1-plan.md``).
+``.agents/shared/planning/ari-memoir-store/phase1-plan.md``); the v2 six
+are registered in v2 phase 1
+(``v2-phase1-plan.md``).
 
 Design contract refs: ``design.md`` §3 (the three storage kinds — the
 relational table is the TRUTH, the ``tsv`` column is the LEXICAL half,
@@ -57,6 +68,7 @@ general-purpose update method (phase 2 owns those writers).
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -283,6 +295,31 @@ class MemoirEpisode(SQLModel, table=True):
         default=None,
         sa_column=Column(Text, ForeignKey("memoir_episodes.id"), nullable=True),
     )
+    # ── Memoir Store v2 evolution (V2-D 1.3 / V2-D 1.4 / V2-10) ──────────
+    # Four columns, added by the Phase-1 .sql migration (plain
+    # ``ADD COLUMN``, SQLite-safe) and by the PostgreSQL ensure in
+    # ``daemon/manager.py`` (``TIMESTAMPTZ`` for ``reflected_at``).
+    #
+    # ``importance`` is WRITE-FROZEN (the v1 lane sealed it) — the v2
+    # poignancy score is a SEPARATE axis that never rewrites the
+    # importance the user granted (V2-10 / §3-A2).
+    #
+    # ``poignancy_status`` is the NULLABLE state marker: NULL means
+    # "never scored", ``'legacy'`` means "pre-cutover row stamped by the
+    # migration seed", and the scoring worker owns the rest of the
+    # vocabulary.
+    poignancy_status: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    poignancy: int | None = Field(
+        default=None, sa_column=Column(Integer, nullable=True)
+    )
+    poignancy_attempts: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default="0")
+    )
+    reflected_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
 
 
 # The dynamic-zone index is DESC-ordered, which cannot be expressed with
@@ -404,6 +441,310 @@ class MemoirSynthesis(SQLModel, table=True):
     )
 
 
+# ── Memoir Store v2 — the Constellation substrate (V2-D 1.2 / 1.5 / 1.6) ──
+#
+# Six NEW tables, created on PostgreSQL by the model registration in
+# ``daemon/manager.py`` (the late-import block BEFORE
+# ``SQLModel.metadata.create_all``) and on SQLite by the Phase-1
+# migration ``daemon/migrations/versions/20261109_021154_create_memoir_v2_tables.sql``.
+#
+# V2-D 1.2 — these are BRAND-NEW tables, so they carry NO
+# ``_ensure_postgres_columns`` entry: ``create_all`` owns them.
+#
+# MODEL-BOUND CHECK CONSTRAINTS (V2-D 1.5): the CHECK constraints are
+# bound to the MODELS, not only to the ``.sql`` — on PG the tables are
+# built by ``create_all`` FROM THE MODELS (the runner is SQLite-only, so
+# the ``.sql`` never runs there). SQLModel's ``Field()`` does not emit
+# CHECK, so without ``__table_args__`` the PG tables would carry no
+# vocabulary constraint at all.
+#
+# TWO-AXIS TIME (V2-D 1.6): ``created_at`` is the WRITE time; the
+# ``first_seen_at`` / ``last_touched_at`` / ``first_mentioned_at`` /
+# ``last_mentioned_at`` family is the EVENT time. The past can be
+# written about late, and the constellation's temporal queries run on
+# the event axis.
+#
+# 3-SITE INDEX LOCKSTEP: the index names AND column lists are
+# byte-identical to the companion ``.sql`` migration and to the schema
+# pack's parity assertion.
+
+
+class MemoirStar(SQLModel, table=True):
+    """One canonical entity node of the Constellation.
+
+    A star is the CANONICAL surface form of an entity — "the Emperor",
+    not "my dear". Alternative surface forms live in
+    :class:`MemoirStarAlias` and resolve back to this row.
+
+    ``heat`` is the accumulated-recall accumulator (never negative —
+    the ``heat >= 0.0`` CHECK is the data's guarantee). ``description``
+    carries the LightRAG summarization, and ``description_as_of`` is
+    its 24h cooldown watermark (V2-D 1.7): ``last_touched_at`` moves on
+    every mention and therefore cannot carry the summarization time.
+    """
+
+    __tablename__ = "memoir_star"
+
+    __table_args__ = (
+        CheckConstraint(
+            "star_type IN ('person', 'project', 'place', 'concept', 'domain')",
+            name="ck_memoir_star_star_type",
+        ),
+        CheckConstraint("heat >= 0.0", name="ck_memoir_star_heat"),
+        UniqueConstraint(
+            "agent_id", "name", name="uq_memoir_star_agent_name"
+        ),
+    )
+
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    agent_id: str = Field(sa_column=Column(Text, nullable=False))
+    name: str = Field(sa_column=Column(Text, nullable=False))
+    star_type: str = Field(sa_column=Column(Text, nullable=False))
+    description: str = Field(
+        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+    )
+    description_as_of: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    first_seen_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    last_touched_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    heat: float = Field(
+        default=0.0, sa_column=Column(REAL, nullable=False, server_default="0.0")
+    )
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+# The DESC-ordered index cannot be expressed with the string column
+# references ``__table_args__`` accepts — so it is declared here, after
+# the class, against the live table columns. The name and the column
+# list stay in 3-site lockstep with the .sql.
+Index(
+    "idx_memoir_star_agent_heat",
+    MemoirStar.__table__.c.agent_id,
+    MemoirStar.__table__.c.heat.desc(),
+)
+
+
+class MemoirStarAlias(SQLModel, table=True):
+    """One alternative surface form bound to a canonical star.
+
+    "my dear", "the Emperor", "Your Majesty" — every one of them is an
+    ALIAS of exactly one canonical star, per agent. The
+    ``uq_memoir_alias_agent_alias`` unique constraint is what makes the
+    alias table an IDENTITY map rather than a suggestion list: one alias
+    resolves to one star, forever.
+    """
+
+    __tablename__ = "memoir_star_alias"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "alias", name="uq_memoir_alias_agent_alias"
+        ),
+        Index("idx_memoir_star_alias_star", "star_id"),
+    )
+
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    agent_id: str = Field(sa_column=Column(Text, nullable=False))
+    star_id: str = Field(
+        sa_column=Column(Text, ForeignKey("memoir_star.id"), nullable=False)
+    )
+    alias: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class MemoirLine(SQLModel, table=True):
+    """One weighted co-occurrence edge: this star, mentioned in this episode.
+
+    ``mention_count`` counts how many times the star was mentioned in
+    the episode. The CRASH-RECOVERY GUARD (SF2 / V2-29) is
+    ``last_pass_id``: the id of the extraction pass that last touched
+    the line. A pass that dies mid-extraction and re-runs with the SAME
+    ``pass_id`` must NOT double-count, so the increment is applied only
+    when ``last_pass_id IS DISTINCT FROM`` the incoming pass id.
+    """
+
+    __tablename__ = "memoir_line"
+
+    __table_args__ = (
+        CheckConstraint("mention_count > 0", name="ck_memoir_line_mention_count"),
+        UniqueConstraint(
+            "star_id", "episode_id", name="uq_memoir_line_star_episode"
+        ),
+        Index("idx_memoir_line_episode", "episode_id"),
+    )
+
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    agent_id: str = Field(sa_column=Column(Text, nullable=False))
+    star_id: str = Field(
+        sa_column=Column(Text, ForeignKey("memoir_star.id"), nullable=False)
+    )
+    episode_id: str = Field(
+        sa_column=Column(Text, ForeignKey("memoir_episodes.id"), nullable=False)
+    )
+    mention_count: int = Field(
+        default=1, sa_column=Column(Integer, nullable=False, server_default="1")
+    )
+    last_pass_id: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    first_mentioned_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    last_mentioned_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+# The second DESC-ordered index — declared after the class, against the
+# live table columns (the ``__table_args__`` string form cannot express
+# DESC). 3-site lockstep with the .sql.
+Index(
+    "idx_memoir_line_agent",
+    MemoirLine.__table__.c.agent_id,
+    MemoirLine.__table__.c.last_mentioned_at.desc(),
+)
+
+
+class MemoirReflectionState(SQLModel, table=True):
+    """The durable nightly-reflection watermark and its claimant.
+
+    ONE row per agent: ``last_nightly_date`` is the date of the last
+    completed nightly reflection, and ``claimed_at`` is the timestamp of
+    the claim on the CURRENT run (a crashed run leaves the claim behind
+    so the next run can decide whether it is stale).
+    """
+
+    __tablename__ = "memoir_reflection_state"
+
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    last_nightly_date: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    claimed_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+
+
+class MemoirProposalLedger(SQLModel, table=True):
+    """The durable keepsake-proposal and notification ledger (C3 / W2).
+
+    The ledger is what makes "at most ONE notification per day" and
+    "at most ONE proposal per episode" RESTART-SAFE: the state lives in
+    the database, not in process memory.
+
+    ``notification_status`` carries the CLOSED FOUR-TOKEN vocabulary
+    (``pending`` / ``enqueued`` / ``sent`` / ``failed``). ``enqueued`` is
+    the stamp that enforces the 1/day rule: the row is claimed AFTER an
+    accepted enqueue (V2-23 → V2-40 — a FAILED bridge leaves the row
+    ``pending``, so the slot is never burned by an undelivered
+    notification); ``sent`` is reserved for the future delivery
+    confirmation. The 1/day gate itself counts the CONSUMPTION day
+    (``notified_at``), not ``proposal_date``: the latter is the STAGING
+    stamp, and a row staged on D and enqueued on D+1 must consume D+1's
+    slot. The vocabulary is bound to the MODEL (V2-D 1.5) and is
+    TEST-ENFORCED — a fifth token is rejected by the database, not
+    merely absent from the source.
+    """
+
+    __tablename__ = "memoir_proposal_ledger"
+
+    __table_args__ = (
+        CheckConstraint(
+            "notification_status IN ('pending', 'enqueued', 'sent', 'failed')",
+            name="ck_memoir_proposal_ledger_notification_status",
+        ),
+        UniqueConstraint(
+            "agent_id", "episode_id", name="uq_memoir_proposal_agent_episode"
+        ),
+        Index("idx_memoir_proposal_ledger_date", "agent_id", "proposal_date"),
+    )
+
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    agent_id: str = Field(sa_column=Column(Text, nullable=False))
+    episode_id: str = Field(
+        sa_column=Column(Text, ForeignKey("memoir_episodes.id"), nullable=False)
+    )
+    proposal_date: str = Field(sa_column=Column(Text, nullable=False))
+    proposed_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    notification_status: str = Field(sa_column=Column(Text, nullable=False))
+    notified_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    reason: str = Field(
+        default="", sa_column=Column(Text, nullable=False, server_default=text("''"))
+    )
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class MemoirJevLedger(SQLModel, table=True):
+    """The durable JEV classification and candidate-retry ledger (B2).
+
+    A JEV candidate that cannot be classified (or whose diff cannot be
+    built) must NOT be silently dropped: the retry state lives here, so
+    a daemon restart resumes the work instead of losing it.
+
+    ``classification`` is NULLABLE — a candidate is parked BEFORE
+    classification completes — and ``status`` carries the
+    ``pending`` / ``drafted`` / ``suppressed`` / ``terminal`` vocabulary.
+    """
+
+    __tablename__ = "memoir_jev_ledger"
+
+    __table_args__ = (
+        CheckConstraint(
+            "classification IS NULL OR classification IN ('conflict', "
+            "'boundary_change', 'new_rule', 'reinforcement', 'none')",
+            name="ck_memoir_jev_ledger_classification",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'drafted', 'suppressed', 'terminal')",
+            name="ck_memoir_jev_ledger_status",
+        ),
+        UniqueConstraint(
+            "agent_id", "synthesis_id", name="uq_memoir_jev_synthesis"
+        ),
+        Index("idx_memoir_jev_status", "agent_id", "status"),
+    )
+
+    id: str = Field(sa_column=Column(Text, primary_key=True))
+    agent_id: str = Field(sa_column=Column(Text, nullable=False))
+    synthesis_id: str = Field(
+        sa_column=Column(Text, ForeignKey("memoir_syntheses.id"), nullable=False)
+    )
+    classification: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    attempts: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default="0")
+    )
+    last_error: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True)
+    )
+    status: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    updated_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
 # ── THE KEEPSAKE LINE (D5.7 / AM-24 / W-1) ───────────────────────────────
 #: The ONE keepsake-line template. It LIVES IN THE REPOSITORY PACKAGE so
 #: D2.12's admission arithmetic measures the SAME bytes the briefing
@@ -421,6 +762,120 @@ KEEPSAKE_LINE_TEMPLATE = (
 
 #: The placeholder title the briefing renders when an episode has none.
 MEMOIR_UNTITLED_TITLE = "(untitled)"
+
+# ── THE PROPOSAL LINE (v2 phase 6, T6.2 / V2-D 6.5 / N2) ─────────────────
+#: The ONE proposal-line template. It lives HERE for the SAME reason the
+#: keepsake template does (W-1): the proposals-zone ADMISSION measures
+#: the exact bytes the briefing ships — the wrapper, the title quoting,
+#: the ``event_at``/``poignancy`` fields and the (bounded) reason — so
+#: the ≤ 1,000-char zone bound holds for every future read instead of
+#: being claimed and under-enforced.
+#:
+#: The line shape is the plan's §3.1 shape VERBATIM:
+#: ``- [proposal] "<title>" (event_at=<date>, poignancy=<N>): <reason>``.
+PROPOSAL_LINE_TEMPLATE = (
+    '- [proposal] "{title}" (event_at={event_at}, poignancy={poignancy}): '
+    "{reason}"
+)
+
+#: The header of the briefing's OWN measured proposals zone (ND-20). It
+#: is part of the measured bytes: admission counts the header + lines.
+PROPOSALS_ZONE_HEADER = "### Proposals for Keepsake Review"
+
+#: The proposals-zone admission bound, INCLUSIVE of the header wrapper
+#: and of every shipped line (V2-D 6.5 / §3-A6 — measure the shipped
+#: bytes, W-1 lesson).
+MEMOIR_PROPOSALS_ZONE_CHAR_BUDGET = 1000
+
+#: The hard structural cap on rendered proposals (N2).
+MEMOIR_PROPOSALS_ZONE_MAX = 3
+
+#: The per-reason cap. The reason is COMPOSED by the proposal service
+#: (never free text from a model in phase 6 — there is no LLM call in
+#: this phase), so this bound is a rendering guard, not a truncation
+#: policy for user data: an over-long reason is REFUSED at admission
+#: (the line cannot fit the zone), never silently truncated.
+MEMOIR_PROPOSAL_REASON_CHAR_CAP = 160
+
+
+#: The daemon's OWN context-block marker — the header a REAL
+#: ``[SYSTEM CONTEXT: ...]`` block carries
+#: (``daemon/services/context_messages._make_context_message``). A
+#: proposal field is UNTRUSTED text: a title carrying this token could
+#: forge a fake system-context header in the lane the proposal is
+#: delivered into (the bridge's message is ``injected_message=True``
+#: and is NOT compaction-protected). The marker is NEUTRALIZED here —
+#: ONE home, so the ZONE path and the BRIDGE path can never disagree
+#: about the same content.
+#:
+#: TWO shapes are removed: the WHOLE bracketed group (the forged
+#: header, closing bracket included) and a BARE marker with no closing
+#: bracket (the group form would not match it, and the token itself
+#: must never survive).
+_CONTEXT_BLOCK_MARKER_RE = re.compile(
+    r"\[[^\[\]]*system[^\[\]]*context[^\[\]]*:[^\[\]]*\]"
+    r"|\[system\s+context\s*:",
+    re.IGNORECASE,
+)
+
+
+def _proposal_one_line(value: str | None) -> str:
+    """Collapse ONE proposal field to ONE line and neutralize a forged header.
+
+    TWO guarantees, both load-bearing for the content-trust rule:
+
+    * **ONE LINE** — a field that carries a newline can forge a
+      LINE-START ``[SYSTEM CONTEXT: ...]`` header in the lane the
+      proposal is delivered into. The collapse is whitespace-only: the
+      text itself stays readable.
+    * **NO FORGED HEADER** — the context-block marker is stripped (the
+      whole bracketed group, or a bare marker), so a title can never
+      present itself as a daemon-authored block.
+
+    ONE home, on purpose: the ZONE path (:func:`render_proposal_line`)
+    and the BRIDGE path
+    (``memoir_keepsake_proposal_service._bridge_message``) both come
+    through here, so the two delivery paths cannot disagree about
+    identical content.
+    """
+    if value is None:
+        return ""
+    text = _CONTEXT_BLOCK_MARKER_RE.sub(" ", str(value))
+    return " ".join(text.split())
+
+
+def _proposal_date(value: Any) -> str:
+    """Render ``event_at`` as a bare date, identically to the dynamic zone."""
+    if value is None:
+        return ""
+    if hasattr(value, "date"):
+        try:
+            return value.date().isoformat()
+        except Exception:  # pragma: no cover - defensive
+            return str(value)
+    return str(value)[:10]
+
+
+def render_proposal_line(
+    *,
+    title: str | None,
+    event_at: Any,
+    poignancy: int | None,
+    reason: str | None,
+) -> str:
+    """Render ONE proposal line from the byte-pinned template (T6.2).
+
+    The SINGLE SOURCE of the rendered proposal line: the briefing renders
+    with this function AND the zone admission MEASURES with it, so the
+    measured bytes and the shipped bytes are identical by construction.
+    """
+    clean_title = _proposal_one_line(title) or MEMOIR_UNTITLED_TITLE
+    return PROPOSAL_LINE_TEMPLATE.format(
+        title=clean_title,
+        event_at=_proposal_date(event_at),
+        poignancy="" if poignancy is None else int(poignancy),
+        reason=_proposal_one_line(reason),
+    )
 
 #: The provenance class admission MEASURES with. The briefing's
 #: ``pclass`` is NOT row state — it is captured ONCE per briefing build
@@ -469,10 +924,21 @@ def render_keepsake_line(
 __all__ = [
     "KEEPSAKE_ADMISSION_PCLASS",
     "KEEPSAKE_LINE_TEMPLATE",
+    "MEMOIR_PROPOSAL_REASON_CHAR_CAP",
+    "MEMOIR_PROPOSALS_ZONE_CHAR_BUDGET",
+    "MEMOIR_PROPOSALS_ZONE_MAX",
     "MEMOIR_UNTITLED_TITLE",
+    "PROPOSALS_ZONE_HEADER",
+    "PROPOSAL_LINE_TEMPLATE",
     "MemoirEpisode",
+    "MemoirJevLedger",
+    "MemoirLine",
     "MemoirPersona",
     "MemoirPersonaVersion",
+    "MemoirProposalLedger",
+    "MemoirReflectionState",
+    "MemoirStar",
+    "MemoirStarAlias",
     "MemoirSynthesis",
     "PERSONA_SOURCES",
     "PERSONA_STATUSES",
@@ -481,4 +947,5 @@ __all__ = [
     "StarsListType",
     "SYNTHESIS_VERBS",
     "render_keepsake_line",
+    "render_proposal_line",
 ]

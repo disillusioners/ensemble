@@ -99,7 +99,20 @@ def _now() -> datetime:
 
 
 def _shipped_memoir_ensure_statements() -> list[str]:
-    """The memoir entries of the shared ensure list, read from the source."""
+    """The memoir entries of the shared ensure list, read from the source.
+
+    Memoir Store v2 (V2-D 1.10) — the census flips 2 -> 4: this file's
+    filter is ``memoir_episodes`` ONLY, so it sees the two v1 memoir
+    entries (the ``tsv`` ALTER + the GIN index) AND the two v2 entries
+    (the four-column DDL ALTER + the cutover-bounded legacy seed
+    UPDATE).
+
+    THE ASYMMETRY IS DELIBERATE (V2-D 1.10): the sibling
+    ``test_memoir_retrieval_pg.py`` uses a NARROWER filter
+    (``memoir_episodes`` AND (``tsv`` OR ``GIN``)) and therefore STAYS
+    at 2 — neither v2 entry mentions ``tsv`` or ``GIN``. Updating BOTH
+    assertions to the same number would be a defect, not symmetry.
+    """
     tree = ast.parse(MANAGER_PY.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
@@ -119,7 +132,7 @@ def _shipped_memoir_ensure_statements() -> list[str]:
                 and isinstance(element.value, str)
                 and "memoir_episodes" in element.value
             ]
-            assert len(memoir) == 2, memoir
+            assert len(memoir) == 4, memoir
             return memoir
     raise AssertionError("the shared ensure statement list was not found")
 

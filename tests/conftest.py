@@ -850,3 +850,56 @@ def _disable_plane_sync_in_tests(request, monkeypatch):
                 "PLANE_SYNC_ENABLED", "PLANE_MCP_ENABLED"):
         monkeypatch.delenv(var, raising=False)
     yield
+
+
+# ==================== install-audit lane fence (house rule) ====================
+
+
+@pytest.fixture(autouse=True)
+def _fence_install_audit_lane(tmp_path, monkeypatch):
+    """Fence the install-audit preferred lane when it would resolve INSIDE
+    the checkout.
+
+    ``daemon.services.install_audit.resolve_install_audit_path`` derives its
+    preferred base from ``Path.cwd()`` when no explicit ``workdir`` is given.
+    A unit test that forgot to ``chdir`` therefore appends ``kms_issue`` /
+    ``mcp_install`` rows to the TRACKED
+    ``.agents/shared/planning/designer-agent/install-audit.jsonl`` (nest
+    anomaly ``ff69c247``; hand-restored once, verified clean sha).
+
+    House rule: a test must NEVER resolve a live-shaped path. This fixture
+    enforces it structurally, not by convention:
+
+    * a base OUTSIDE the repo root is honored unchanged (tests that
+      deliberately ``monkeypatch.chdir(tmp_path)`` keep their current
+      semantics — nothing about them moves);
+    * a base INSIDE the repo root is redirected to a per-test temp fence.
+
+    The guard is fail-closed on the RESOLVED path, so ``cd``-style aliasing
+    cannot slip past it.
+    """
+    from pathlib import Path
+
+    import daemon.services.install_audit as install_audit
+
+    repo_root = Path(__file__).resolve().parents[1]
+    fence = tmp_path / "install-audit-fence"
+    real_resolve = install_audit.resolve_install_audit_path
+
+    def _inside_repo(candidate: Path) -> bool:
+        try:
+            candidate.resolve().relative_to(repo_root)
+        except ValueError:
+            return False
+        return True
+
+    def fenced_resolve(workdir=None):
+        base = Path(workdir) if workdir else Path.cwd()
+        if _inside_repo(base):
+            return real_resolve(fence)
+        return real_resolve(workdir)
+
+    monkeypatch.setattr(
+        install_audit, "resolve_install_audit_path", fenced_resolve
+    )
+    yield

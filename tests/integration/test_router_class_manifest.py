@@ -110,6 +110,13 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # ("pd"); no public/module_lane carve-out (D3 fail-closed posture
     # guards auth-OFF via per-endpoint 503).
     "/api/prompts": frozenset({"pd"}),
+    # Memoir Store v2 Phase 5 — persona gate HTTP surface (V2-37).
+    # Mounted at /api/memoir/persona (3 endpoints: GET /pending,
+    # POST /{id}/approve, POST /{id}/reject). Every endpoint carries
+    # an explicit @require_scope prompts:read|prompts:approve AND
+    # an inline 503 AUTH_NOT_CONFIGURED gate, so the family classifies
+    # as protected-default ("pd").
+    "/api/memoir": frozenset({"pd"}),
     # Phase C / agent-prompt-immutability F1 (overnight, 2026-10-14):
     # the custom_agents_router mounts at /api/custom-agents (the
     # canonical R-A1/R-A2 4-endpoint family: POST + GET (list) + GET
@@ -389,4 +396,7 @@ class TestRouterClassManifest:
         # checkpoint read-path plan / Track-1 item 4 added the
         # /api/metrics family — the api_families count grew from 32
         # to 33.
-        assert len(api_families) == 34, sorted(api_families)
+        # Phase 5 / Memoir Store v2 persona gate added the
+        # /api/memoir family — the api_families count grew from 34
+        # to 35.
+        assert len(api_families) == 35, sorted(api_families)

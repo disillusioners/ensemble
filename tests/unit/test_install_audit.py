@@ -172,3 +172,50 @@ def test_default_workdir_is_cwd(tmp_path, monkeypatch):
     path, is_fallback = resolve_install_audit_path()
     assert is_fallback is False
     assert path == tmp_path / INSTALL_AUDIT_RELATIVE_PATH
+
+
+# ── the house-rule fence (nest anomaly ff69c247) ─────────────────────────
+
+
+def test_fence_redirects_a_repo_cwd_into_a_temp_dir(tmp_path, monkeypatch):
+    """A unit test must NEVER resolve the tracked planning-tree audit file.
+
+    ``tests/conftest.py::_fence_install_audit_lane`` is the load-bearing
+    guard: it redirects any resolution whose base lands INSIDE the checkout
+    into a per-test temp dir. This leg proves the redirect actually engages
+    (the resolved path is the test's own ``tmp_path`` fence, not merely
+    "somewhere else") and that the tracked file is never touched.
+
+    Before the fence, a unit run from a worktree CWD appended ``kms_issue``
+    rows to the TRACKED
+    ``.agents/shared/planning/designer-agent/install-audit.jsonl``.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    tracked = repo_root / INSTALL_AUDIT_RELATIVE_PATH
+    before = tracked.stat().st_mtime_ns if tracked.exists() else None
+
+    # Go through the MODULE attribute (not the module-level import above):
+    # the fence patches ``install_audit.resolve_install_audit_path``, which
+    # is the exact function ``append_install_audit`` calls — the only write
+    # path in production. A direct from-import of the function would pin the
+    # pre-fence object and prove nothing.
+    import daemon.services.install_audit as install_audit
+
+    monkeypatch.chdir(repo_root)
+    path, is_fallback = install_audit.resolve_install_audit_path()
+    assert is_fallback is False
+    assert path.resolve().is_relative_to(tmp_path.resolve()), (
+        f"the install-audit fence did not engage: {path} is not under {tmp_path}"
+    )
+    assert not path.resolve().is_relative_to(repo_root.resolve())
+
+    result = append_install_audit(
+        event=EVENT_MCP_INSTALL, name="fence-probe", actor="unit-test"
+    )
+    assert result.written is True
+    assert Path(result.path).resolve().is_relative_to(tmp_path.resolve())
+
+    after = tracked.stat().st_mtime_ns if tracked.exists() else None
+    assert after == before, (
+        "a unit test wrote the TRACKED install-audit.jsonl — the fence leaked"
+    )

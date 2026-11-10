@@ -69,12 +69,34 @@ def sqlite_engine():
 # ── the model registry census ─────────────────────────────────────────────
 
 
-def test_the_four_memoir_tables_are_registered():
-    """Exactly the four memoir tables are in the SQLModel metadata."""
+#: The v2 (Memoir Store v2 Phase 1) tables — registered by the same
+#: late-import block. See
+#: ``.agents/shared/planning/ari-memoir-store/v2-phase1-plan.md``.
+MEMOIR_V2_TABLE_NAMES = {
+    "memoir_star",
+    "memoir_star_alias",
+    "memoir_line",
+    "memoir_reflection_state",
+    "memoir_proposal_ledger",
+    "memoir_jev_ledger",
+}
+
+
+def test_the_memoir_tables_are_registered():
+    """The memoir model registry carries the v1 FOUR plus the v2 SIX.
+
+    Memoir Store v2 (Phase 1) DELIBERATELY amends this census: the
+    v2 lane registers SIX new tables (``memoir_star`` /
+    ``memoir_star_alias`` / ``memoir_line`` /
+    ``memoir_reflection_state`` / ``memoir_proposal_ledger`` /
+    ``memoir_jev_ledger``) into the SAME metadata. The census stays
+    EXACT — it is not loosened to a subset — it simply names the ten
+    tables that now exist.
+    """
     registered = {
         name for name in SQLModel.metadata.tables if name.startswith("memoir_")
     }
-    assert registered == MEMOIR_TABLE_NAMES
+    assert registered == MEMOIR_TABLE_NAMES | MEMOIR_V2_TABLE_NAMES
 
 
 def test_the_model_table_names_match_the_table_names():
@@ -245,10 +267,20 @@ def test_the_down_section_drops_every_memoir_table():
 
 
 def test_the_lane_adds_exactly_one_migration_file():
-    """The census DELTA is +1 — asserted as a DELTA, not as an absolute."""
+    """The census DELTA is +1 — asserted as a DELTA, not as an absolute.
+
+    Memoir Store v2 (Phase 1) DELIBERATELY amends this leg: the
+    memoir migration FILES are now TWO — the v1 substrate
+    (``20261105_102821_create_memoir_tables.sql``) and the v2 substrate
+    (``20261109_021154_create_memoir_v2_tables.sql``). The v1 lane's own
+    DELTA is still measured EXACTLY, by the git-derived leg below
+    (over the v1 lane's OWN branch range, which this lane does not
+    touch).
+    """
     memoir_files = sorted(p.name for p in MIGRATIONS_DIR.glob("*memoir*.sql"))
-    assert len(memoir_files) == 1, memoir_files
-    assert memoir_files[0] == MEMOIR_MIGRATION.name
+    assert len(memoir_files) == 2, memoir_files
+    assert MEMOIR_MIGRATION.name in memoir_files
+    assert "20261109_021154_create_memoir_v2_tables.sql" in memoir_files
 
 
 def test_every_migration_prefix_is_unique_and_distinct_count_matches():
@@ -398,7 +430,26 @@ def test_stars_column_has_no_mutable_default():
 
 
 def test_the_syntheses_table_has_no_writer_in_the_tree():
-    """DD-2 — the table is schema-only and EMPTY in v1."""
+    """DD-2 (v1) RETIRED BY PHASE 2 — the table is no longer write-less.
+
+    THE PIN MOVED, AND THE MOVE IS THE PLAN: phase 2 of the Memoir Store
+    v2 lane (``.agents/shared/planning/ari-memoir-store/v2-phase2-plan.md``
+    §1, objective 2) exists to ACTIVATE the syntheses layer — "Deliver
+    the Reflection Engine ('The Dream') and **activate the Syntheses
+    layer**". The v1 clause ("the table is schema-only and EMPTY in v1")
+    was a TRUE statement about v1 and a FALSE statement about the tree
+    that phase 2 ships.
+
+    THE STRONGER PIN (what replaces it): the writer set is EXACTLY
+    known — the ONE named writer (the syntheses repository) plus the
+    schema/audit records and the readers. A NEW writer (a stray module
+    that inserts rows behind the repository's back) still flips this RED.
+
+    THE RAW-SQL CLAUSE IS UNCHANGED: no module may write the table with
+    a literal SQL statement — every write goes through the repository,
+    so the dedup key, the citation guard and the atomic supersession are
+    never bypassed.
+    """
     result = subprocess.run(
             ["git", "grep", "-l", "memoir_syntheses", "--", "daemon/"],
         cwd=REPO_ROOT,
@@ -406,22 +457,36 @@ def test_the_syntheses_table_has_no_writer_in_the_tree():
         text=True,
         timeout=60,
     )
+    # FAIL-CLOSED: rc == 0 means `git grep` ran and produced matches; a
+    # broken object store / non-git tree returns >1 and would otherwise
+    # yield an empty hit list that trivially satisfies the allow-list.
+    assert result.returncode == 0, (
+        f"writer-census pin is vacuous: `git grep` rc={result.returncode} "
+        f"(stderr={result.stderr.strip()!r})"
+    )
     hits = [line for line in result.stdout.splitlines() if line.strip()]
-    # Only the model, the package export, the manager's registration and
-    # the audit-record .sql may reference the table. A WRITER would add
-    # another file.
+    # The model, the package export, the manager's registration, the ONE
+    # named writer (the syntheses repository), the reflection service
+    # (the engine that CALLS the writer) and the audit-record .sql files.
     allowed = {
         "daemon/repositories/memoir/models.py",
         "daemon/repositories/memoir/__init__.py",
         "daemon/manager.py",
-        # The .sql is the persistent AUDIT RECORD of the schema change
-        # (DD-18) — it CREATES the empty table and never writes a row.
+        # THE NAMED WRITER — the only module that writes a synthesis row.
+        "daemon/repositories/memoir/syntheses_repository.py",
+        # The engine that calls the writer (it never writes directly).
+        "daemon/services/memoir_reflection_service.py",
+        # The .sql files are the persistent AUDIT RECORD of the schema
+        # changes (DD-18) — they CREATE the table and never write a row.
         "daemon/migrations/versions/20261105_102821_create_memoir_tables.sql",
+        "daemon/migrations/versions/20261109_021154_create_memoir_v2_tables.sql",
     }
     unexpected = [hit for hit in hits if hit.split(":")[0] not in allowed]
     assert not unexpected, f"memoir_syntheses is referenced by: {unexpected}"
 
-    # And no SQL writer anywhere in the shipped tree.
+    # And no RAW SQL writer anywhere in the shipped tree — every write
+    # goes through the repository (so the dedup key, the citation guard
+    # and the atomic supersession are never bypassed).
     for needle in (
         "INSERT INTO memoir_syntheses",
         "UPDATE memoir_syntheses",
@@ -433,5 +498,11 @@ def test_the_syntheses_table_has_no_writer_in_the_tree():
             capture_output=True,
             text=True,
             timeout=60,
+        )
+        # rc 1 = "no matches" (the expected answer); rc > 1 = git error, which
+        # must FAIL rather than masquerade as "no writer exists".
+        assert writer.returncode in (0, 1), (
+            f"raw-SQL writer scan is vacuous for {needle!r}: `git grep` "
+            f"rc={writer.returncode} (stderr={writer.stderr.strip()!r})"
         )
         assert not writer.stdout.strip(), f"a writer exists for {needle}"
