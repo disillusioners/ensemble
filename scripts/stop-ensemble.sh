@@ -235,7 +235,25 @@ fi
 [ -n "$INSTALL_DIR" ] || _die "empty INSTALL_DIR"
 
 # Absolute, no trailing slash — cwd comparisons are exact.
-INSTALL_DIR="$(cd "$INSTALL_DIR" 2>/dev/null && pwd)" || _die "cannot resolve INSTALL_DIR '$1'"
+# GUARD-1 (2026-11-10): the resolution failure used to die through `_die`
+# with the message "cannot resolve INSTALL_DIR '$1'" — under `set -u` a BARE
+# invocation (no positional dir) that reached this line (i.e. one that
+# carried the confirm var) died with a bash `unbound variable` error (rc 1)
+# instead of a clean, named refusal. Refuse in the guard family's shape
+# (exit 78 — the repo's config-refuse code, the same code the demo/live
+# confirm gates use) and name the exact command to run.
+if ! _resolved_install_dir="$(cd "$INSTALL_DIR" 2>/dev/null && pwd)"; then
+    cat >&2 <<EOF
+stop-ensemble: REFUSING — the install dir cannot be resolved (${INSTALL_DIR}).
+  The stop path resolves the install dir physically (cd + pwd) BEFORE the
+  ownership scan; an unresolvable dir would scan NOTHING and read as a
+  silent no-op stop ("nothing running") when the truth is "no such install".
+  Pass an existing, readable install dir:
+    bash scripts/stop-ensemble.sh '<install-dir>' <port> --force
+EOF
+    exit 78
+fi
+INSTALL_DIR="$_resolved_install_dir"
 # Physical (symlink-free) form too: lsof reports PHYSICAL cwds (/tmp →
 # /private/tmp on macOS), while launchd/cmdlines may carry the logical
 # path. Ownership checks accept either form.

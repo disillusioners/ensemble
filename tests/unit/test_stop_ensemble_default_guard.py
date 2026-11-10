@@ -261,3 +261,40 @@ class TestExplicitDirUnchanged:
         assert f"scoping to INSTALL_DIR={live}" in r.stdout
         assert "no processes owned by" in r.stdout
         assert "REFUSING" not in r.stderr
+
+
+class TestUnresolvableInstallDir:
+    """GUARD-1: a resolution failure must refuse CLEANLY (exit 78, named),
+    never die through a bash `unbound variable` error.
+
+    The bare+confirm-var shape resolves to `$HOME/agents-ensemble` (or
+    `$HOME` itself); when that dir does not exist the physical resolution
+    (`cd + pwd`) fails. The old code died through `_die … '$1'` — under
+    `set -u` a BARE invocation has no `$1`, so the script aborted with a
+    bash error (rc 1) instead of a clean, named refusal.
+    """
+
+    def test_bare_with_confirm_and_absent_default_dir_refuses_cleanly(
+        self, tmp_path
+    ):
+        """Bare + confirm var + absent default dir → exit 78, named."""
+        home = tmp_path / "home-no-install"
+        home.mkdir()
+        r = run_stop([], home, extra_env={"ENSEMBLE_INSTALL_LIVE": "1"})
+        assert r.returncode == REFUSE_RC, (r.returncode, r.stdout, r.stderr)
+        assert "REFUSING" in r.stderr
+        assert "cannot be resolved" in r.stderr
+        assert "bash scripts/stop-ensemble.sh '<install-dir>'" in r.stderr
+        assert "unbound variable" not in r.stderr
+
+    def test_explicit_missing_install_dir_refuses_cleanly(self, tmp_path):
+        """The explicit shape with a missing dir refuses cleanly too (same
+        named refusal — the resolution is shared)."""
+        missing = tmp_path / "not-there"
+        home = tmp_path / "home"
+        home.mkdir()
+        r = run_stop([str(missing)], home)
+        assert r.returncode == REFUSE_RC, (r.returncode, r.stdout, r.stderr)
+        assert "REFUSING" in r.stderr
+        assert str(missing) in r.stderr
+        assert "unbound variable" not in r.stderr

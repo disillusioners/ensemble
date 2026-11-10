@@ -47,6 +47,7 @@ shell export can never silently weaken the gate under test.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -754,6 +755,7 @@ class TestMakefileWiring:
         """Documentation-pin: this suite never executes the stop script;
         the only make-level proceed target is the stop-free uninstall."""
         text = STOP_SCRIPT.read_text()  # read-only reference
+        assert text.startswith("#!/bin/bash")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1493,8 +1495,8 @@ class TestStopByPortPortScoping:
 
     def test_no_repo_prod_port_leaks_into_the_kill(self, fake_home, tmp_path):
         """A dir with no staged PORT → the expanded kill line carries NO
-        port at all (empty), never the repo's prod port (the old wiring
-        took it from .env.prod)."""
+        port token at all (empty), never the repo's prod port (the old
+        wiring took it from .env.prod)."""
         sbx = tmp_path / "sbx-no-env"
         sbx.mkdir()
         r = run_make(["-n", "stop-by-port", f"INSTALL_DIR={sbx}"], fake_home)
@@ -1503,6 +1505,16 @@ class TestStopByPortPortScoping:
         assert kill_lines, r.stdout
         assert "9797" not in r.stdout
         assert str(sbx) in kill_lines[0]
+        # STRONG pin (the docstring's property): the kill command carries NO
+        # port token at all — the (quoted) install dir is the LAST token and
+        # nothing follows it. upstream quotes the dir sink (F-01), so the
+        # expansion is: STOP_BY_PORT=1 bash scripts/stop-ensemble.sh "<dir>"
+        parts = shlex.split(kill_lines[0])
+        assert parts[:3] == [
+            "STOP_BY_PORT=1", "bash", "scripts/stop-ensemble.sh",
+        ], parts
+        assert len(parts) == 4, f"a port token leaked into the kill: {parts}"
+        assert parts[3] == str(sbx), parts
 
     def test_recipe_no_longer_reads_the_repo_prod_port(self):
         """Static wiring pin: the stop-by-port recipe is bound to
