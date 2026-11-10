@@ -67,6 +67,7 @@ SCRUB=(
   -u ENSEMBLE_SELF_ENV
   -u ENSEMBLE_MEMOIR_ENABLED
   -u ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED
+  -u ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER
 )
 
 TARGET="tests/unit/test_memoir_keepsake_proposals.py"
@@ -79,7 +80,7 @@ fi
 # ``--collect-only``): TestQualification (6) + TestOnceEver (6)
 # + TestCandidateWindow (3) + TestProposalsZoneSelection (5)
 # + TestProposalsZoneRender (6) + TestAdmissionLadder (6)
-# + TestReflectionPassIntegration (3) = 35.
+# + TestReflectionPassIntegration (3) + TestFetchCapMultiplier (4) = 39.
 #
 # TestAdmissionLadder grew 5 -> 6 in the phase-6 DELTA: the canonical
 # §A6 quote's PRESENCE pin (the source copy soft-wraps, so that leg is
@@ -98,15 +99,28 @@ fi
 # 78bde0c0a (executed — see docs/memoir-v2/implementation-notes.md
 # §16.4 receipt (h)).
 #
+# TestFetchCapMultiplier grew 0 -> 4 in the phase-6 CLOSURE-3 delta: the
+# fetch-cap multiplier knob (the SANCTIONED ESCAPE for a pathological
+# corpus). The legs are (a) the DEFAULT keeps the MEASURED boundary
+# (29 terse ⇒ the tail still stages; 30 terse ⇒ the permanent
+# deferral), (b) a RAISED multiplier reaches the eligible tail, (c) a
+# GARBAGE multiplier fails CLOSED to the default (never a wide scan),
+# (d) an UNSET multiplier resolves to the default with the LOUD
+# budget-class warning. RED at the parent commit 019741440 (executed —
+# the scratch `git archive` parent tree + THIS commit's test file: 4
+# failed / 48 deselected — see docs/memoir-v2/implementation-notes.md
+# §16.8).
+#
 # LANE RULE (binding): this delta's own legs land selector-registered and
 # re-pinned IN THE SAME COMMIT — every class below is named EXPLICITLY, so
 # a leg no pack selects can never hide from the gate.
-EXPECTED_PASSED_N=35
+EXPECTED_PASSED_N=39
 
 SELECTOR=(
   "TestQualification or TestOnceEver or TestCandidateWindow"
   "or TestProposalsZoneSelection or TestProposalsZoneRender"
   "or TestAdmissionLadder or TestReflectionPassIntegration"
+  "or TestFetchCapMultiplier"
 )
 
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-300}"

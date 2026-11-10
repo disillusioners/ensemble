@@ -1173,7 +1173,7 @@ Every receipt below carries that parent-RED proof.
 
 | Pack | Nodes | Selector |
 |---|---|---|
-| `memoir_v2_keepsake_proposals_test` | **35** | `TestQualification`, `TestOnceEver`, `TestCandidateWindow`, `TestProposalsZoneSelection`, `TestProposalsZoneRender`, `TestAdmissionLadder`, `TestReflectionPassIntegration` |
+| `memoir_v2_keepsake_proposals_test` | **39** | `TestQualification`, `TestOnceEver`, `TestCandidateWindow`, `TestProposalsZoneSelection`, `TestProposalsZoneRender`, `TestAdmissionLadder`, `TestReflectionPassIntegration`, `TestFetchCapMultiplier` |
 | `memoir_v2_proposal_notification_test` | **13** | `TestEnqueueBridge`, `TestNoPinAuthority` |
 | `memoir_v2_wake_refresh_test` | **40** | `TestStableIdRegistration`, `TestRefreshSeam`, `TestWakeRefreshKnob`, `TestStampPurity`, `TestWakeSourceThreading`, `TestStructuralSupersede` |
 
@@ -1192,6 +1192,18 @@ commit adds ONE more leg
 (`EXPECTED_PASSED_N=35` / `13`), re-pinned IN THIS COMMIT (the lane rule:
 this delta's legs land selector-registered AND re-pinned in the same
 commit).
+
+**CLOSURE-3 RE-PIN (measured, not asserted).** The closure-3 delta adds
+`TestFetchCapMultiplier` (4 legs — the fetch-cap multiplier knob, the
+SANCTIONED ESCAPE for a pathological corpus; §16.6 disclosure 14), so
+the keepsake pack MEASURES **39** at this commit (`--collect-only`:
+`39/52 tests collected (13 deselected)`) and the notification pack still
+MEASURES **13** (`13/52 tests collected (39 deselected)` — the new class
+is selected by EXACTLY ONE pack, the lane rule). Both pack scripts carry
+the same numbers (`EXPECTED_PASSED_N=39` / `13`), re-pinned IN THIS
+COMMIT; the new class is named EXPLICITLY in the keepsake pack's
+selector, and the knob's env var is added to BOTH packs' per-variable
+env scrub (an ambient value must never leak into a pack run).
 
 ### 16.6 Disclosures
 
@@ -1287,7 +1299,19 @@ commit).
     wording here — "the deferral self-heals as soon as the terse head
     leaves the window" — was WRONG and is corrected by this entry: while
     the terse head is in the window, the deferral does NOT heal on its
-    own.
+    own. **THE ESCAPE IS A KNOB (phase 6, closure #3) — NOT A MECHANISM
+    CHANGE.** The bound above is the DEFAULT and STAYS the default (the
+    cost constitution: reflection must never become a rewrite hazard). An
+    operator whose corpus is pathological raises
+    `ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER` (a Budget-bounds
+    knob, clamped to [1, 20]; unset ⇒ 3 with a LOUD WARNING; garbage ⇒
+    fail CLOSED to 3) and the scan over-fetches further — a BOUNDED
+    wider scan, NO schema change, NO unbounded default (the value is read
+    LIVE at each scan, so no restart is needed). The DEEPER fix —
+    LEDGERED SKIPS (a skipped row LEAVES the window) or a SQL-side
+    substance filter — is a **V3 CANDIDATE, RECORDED AND NOT BUILT**: a
+    SQL-side filter is NOT dialect-neutral (`length()` vs `char_length()`),
+    and a ledgered skip changes the ledger's contract.
 11. **THE W-3 PREDICATE NOW COVERS SUPERSESSION (F4).** `is_keepsake =
     False` alone left a superseded episode's pending proposal eligible
     for BOTH the notify target and the zone — it was announced and
@@ -1314,6 +1338,34 @@ commit).
     unchanged (rows examined and rejected) but its CEILING moved: it can
     now count up to 3 × the window per pass (the over-fetch), not just
     the window.
+14. **THE FETCH-CAP MULTIPLIER KNOB (phase 6, closure #3) — the truth
+    table, the escape, and the V3 candidate.** The knob is
+    `ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER`: an ISOLATED config
+    section (`daemon.config.MemoirProposalConfig`, env prefix
+    `ENSEMBLE_MEMOIR_PROPOSAL_`, attached to `Config` as
+    `memoir_proposal`) + a PER-LANE resolver
+    (`daemon.tools.memoir_knob.resolve_memoir_proposal_fetch_cap_multiplier`)
+    over the SHARED classifier (`daemon.config._classify_numeric`) — NO
+    new local truth table (the A2 debt budget stays capped at the one
+    known duplicate). The scan reads it LIVE at every call
+    (`fetch_cap = target × multiplier`), so an operator widens the bound
+    without a restart.
+
+    | `ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER` | Resolved | Source | Resolution | Log |
+    |---|---|---|---|---|
+    | absent / empty | 3 | config | `default` | **WARNING** (an unset budget knob is never silent) |
+    | a legal integer in [1, 20] | that value | env | `explicit_value` | INFO |
+    | a legal integer outside [1, 20] | CLAMPED into the band | env | `clamped` | WARNING (names the clamp) |
+    | any other value | 3 (fail CLOSED — NEVER a wide scan) | env | `indeterminate` | WARNING (names the value) |
+
+    THE SHARED CLASSIFIER NOW CARRIES ITS PROVENANCE: `_classify_numeric`
+    delegates to a new `_resolve_numeric`, which returns the SAME resolved
+    value PLUS the truth-table row that produced it. The scalar API is
+    byte-preserved (every existing caller is unchanged, and the two
+    warning texts are unchanged); the provenance is what lets a per-lane
+    resolver report WHICH row fired WITHOUT a second reader of what a
+    value MEANS. The two new resolution codes (`explicit_value`,
+    `clamped`) are ADDITIVE — the Enabled-flags codes are untouched.
 
 ### 16.7 THE PLAN DEFECT — §3.1's 1/day gate SQL is not date-rollover safe
 
@@ -1368,3 +1420,30 @@ proposal invisible forever. The three cross-day legs
 `…::test_no_calendar_day_receives_two_notifications`) pin (i) exactly-one
 announcement across a rollover, (ii) the starved row landing, and
 (iii) no calendar day receiving two.
+
+### 16.8 THE CLOSURE-3 RECEIPTS (the parent-RED + the mutation proofs)
+
+The fetch-cap multiplier knob (§16.6 disclosure 14) landed with FOUR legs
+in `TestFetchCapMultiplier` (the phase-6 module — the lane rule: the
+delta's own legs are selector-registered AND re-pinned in the SAME
+commit; §16.5). Every leg that CLAIMS to detect the knob's behaviour
+carries an executed receipt below.
+
+| Leg | What was mutated | Executed output |
+|---|---|---|
+| ALL FOUR | THE PARENT's production tree (`git archive 019741440` → a scratch tree) + THIS commit's test file | **4 failed / 48 deselected** — `ImportError: cannot import name 'resolve_memoir_proposal_fetch_cap_multiplier' from 'daemon.tools.memoir_knob' (/tmp/…-parent-red/daemon/tools/memoir_knob.py)`. The new API is imported LAZILY inside the legs ON PURPOSE: a module-level import would have turned four per-leg failures into ONE collection error for the whole file (a coarse RED that cannot tell the legs apart). |
+| (b) — the WIRING detector | THE WIRING REVERTED (the scan reads the constant again: `fetch_cap = target * MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE`) | **1 failed / 3 passed** — `TestFetchCapMultiplier::test_a_raised_multiplier_reaches_the_eligible_tail`: `assert 0 >= 1  +  where 0 = ProposalPassOutcome(staged=0, skipped_existing=0, skipped_ineligible=30, …).staged`. The raised multiplier had NO effect ⇒ the leg bites on the WIRING, not on the knob's arithmetic. |
+| (c) — the FAIL-CLOSED detector | THE GARBAGE ROW FAILS OPEN (the shared classifier returns the band's MAXIMUM for a garbage value instead of the constitutional default) | **1 failed / 3 passed** — `TestFetchCapMultiplier::test_a_garbage_multiplier_fails_closed_to_the_default`: `MemoirProposalFetchCapKnobState(multiplier=20, resolution='indeterminate', …)` ⇒ the leg bites on the fail-CLOSED row (a garbage value NEVER widens the scan). |
+| (d) — the LOUD-DEFAULT detector | THE UNSET DEFAULT GOES SILENT (the resolver's unset branch emits `INFO` instead of `WARNING`) | **1 failed / 3 passed** — `TestFetchCapMultiplier::test_an_unset_multiplier_resolves_to_the_default_with_a_loud_warning` ⇒ the leg bites on the budget-class "an unset budget knob is NEVER silent" rule (the state label AND the emitted record). |
+
+**LEG (a) IS A CHARACTERIZATION PIN, AND THAT IS ITS JOB.** It pins the
+DEFAULT's MEASURED boundary — 29 terse rows ⇒ `staged >= 1` (the tail is
+still reached), 30 terse rows ⇒ `staged = 0` (the head exactly fills the
+3x cap ⇒ the PERMANENT deferral) — because the knob must NOT move the
+default. It therefore stays GREEN under the three mutations above (it
+does not claim to detect them); it is RED at the PARENT only because the
+resolver does not exist there. The three DETECTOR legs are (b) (the
+wiring), (c) (the fail-closed garbage) and (d) (the loud unset).
+
+ALL MUTATIONS WERE APPLIED IN A SCRATCH TREE (`/tmp/…`), NEVER IN THE
+WORKTREE, and the scratch trees were discarded afterwards.

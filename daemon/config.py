@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any, Callable, Dict, Literal
+from typing import Annotated, Any, Callable, Dict, Literal, NamedTuple
 from urllib.parse import urlparse
 
 import yaml
@@ -3536,6 +3536,15 @@ MEMOIR_RESOLUTION_CONFIG = "config"
 MEMOIR_RESOLUTION_INDETERMINATE = "indeterminate"
 MEMOIR_RESOLUTION_UNPARSEABLE = "unparseable"
 MEMOIR_RESOLUTION_ERROR = "error"
+# The NUMERIC half of the vocabulary (added with the proposal lane's
+# fetch-cap multiplier). The Enabled-flags codes above are UNCHANGED — a
+# v1 pin reads them verbatim; these two are ADDITIVE and say what the
+# boolean codes cannot: that a legal value was set by the operator
+# (``explicit_value``) or that a legal-but-out-of-range value was
+# CLAMPED into the legal band (``clamped``). ``indeterminate`` remains
+# the GARBAGE row (a fail-closed value, never a wide one).
+MEMOIR_RESOLUTION_EXPLICIT_VALUE = "explicit_value"
+MEMOIR_RESOLUTION_CLAMPED = "clamped"
 
 
 def classify_memoir_enabled(raw: str) -> tuple[bool, str, str | None]:
@@ -3623,6 +3632,148 @@ def _emit_v2_knob_warning(message: str) -> None:
     logger.warning(message)
 
 
+class NumericResolution(NamedTuple):
+    """The resolved numeric value plus its PROVENANCE.
+
+    The provenance is what a per-lane resolver needs and what the scalar
+    view cannot carry: WHICH truth-table row produced the value
+    (``resolution``), the offending raw string for the garbage row
+    (``rejected_value``), and the value a clamp landed on
+    (``clamped_to``). The value itself stays in ``value``.
+    """
+
+    value: Any
+    resolution: str
+    rejected_value: str | None
+    clamped_to: Any | None
+    raw: Any
+
+
+def _resolve_numeric(
+    raw: Any,
+    *,
+    default: float,
+    numeric_class: str,
+    name: str,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> NumericResolution:
+    """Classify ONE numeric knob value — the shared three-class helper.
+
+    The function NEVER raises and NEVER returns zero for a garbage input:
+    a garbage value always resolves to the constitutional default (or the
+    nearest legal value), so a mis-typed tuning knob can never take the
+    daemon down and can never masquerade as a kill-switch.
+
+    This is the ONE truth-table implementation for the numeric class:
+    :func:`_classify_numeric` is its scalar view, and the per-lane
+    resolvers consume the PROVENANCE this function returns. There is no
+    second reader of what a numeric value MEANS (the A2 debt budget is
+    capped at the one known duplicate).
+
+    Args:
+        raw: The incoming value — the raw env string, a YAML number, or
+            ``None`` (unset). A non-string, non-numeric type is treated
+            as garbage (fail-safe, never raise).
+        default: The constitutional default for this knob.
+        numeric_class: One of ``NUMERIC_CLASS_BUDGET`` /
+            ``NUMERIC_CLASS_CADENCE`` (the ``NUMERIC_CLASS_ENABLED``
+            class is a boolean flag and is served by
+            :func:`_classify_enabled_flag`).
+        name: The knob's env-var name — quoted in the WARNING.
+        minimum: The lowest legal value. A value below it clamps UP to
+            it (for a BUDGET this means "never zero": the minimum is at
+            least 1).
+        maximum: The highest legal value. A value above it clamps DOWN.
+
+    Returns:
+        The :class:`NumericResolution` — the resolved value plus the
+        truth-table row that produced it.
+    """
+    if raw is None:
+        # UNSET: the default stands. Budget knobs are named in the
+        # AGGREGATE warning by the model (not here); cadence knobs are
+        # SILENT by design (tuning, not governance).
+        return NumericResolution(
+            value=default,
+            resolution=MEMOIR_RESOLUTION_DEFAULT,
+            rejected_value=None,
+            clamped_to=None,
+            raw=raw,
+        )
+    if isinstance(raw, bool):
+        # A boolean is not a number; treat it as garbage rather than
+        # silently coercing True to 1.
+        value: float | None = None
+    elif isinstance(raw, (int, float)):
+        value = float(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            # EMPTY == ABSENT (the house truth table, row 2).
+            return NumericResolution(
+                value=default,
+                resolution=MEMOIR_RESOLUTION_DEFAULT,
+                rejected_value=None,
+                clamped_to=None,
+                raw=raw,
+            )
+        try:
+            value = float(text)
+        except ValueError:
+            value = None
+    else:
+        value = None
+
+    # An INTEGER field must resolve to an integer: pydantic refuses a
+    # fractional float for an ``int`` field (a ValidationError ⇒ a boot
+    # abort), so a fractional value is treated as GARBAGE here — it
+    # resolves to the constitutional default with a WARNING.
+    integral = isinstance(default, int) and not isinstance(default, bool)
+
+    if value is None or (integral and not float(value).is_integer()):
+        # GARBAGE: clamp to the default and WARN, naming the value AND
+        # the default. NEVER zero, NEVER a raise.
+        _emit_v2_knob_warning(
+            f"[MemoirV2] {name}={raw!r} is not a valid number — using the "
+            f"default {default:g} ({numeric_class} knob; the daemon never "
+            f"aborts on a mis-set tuning value)"
+        )
+        return NumericResolution(
+            value=default,
+            resolution=MEMOIR_RESOLUTION_INDETERMINATE,
+            rejected_value=raw if isinstance(raw, str) else str(raw),
+            clamped_to=None,
+            raw=raw,
+        )
+
+    clamped = value
+    if minimum is not None and clamped < minimum:
+        clamped = float(minimum)
+    if maximum is not None and clamped > maximum:
+        clamped = float(maximum)
+    resolved_value: Any = int(clamped) if integral else clamped
+    if clamped != value:
+        _emit_v2_knob_warning(
+            f"[MemoirV2] {name}={raw!r} is out of range — clamped to "
+            f"{clamped:g} ({numeric_class} knob; the default is {default:g})"
+        )
+        return NumericResolution(
+            value=resolved_value,
+            resolution=MEMOIR_RESOLUTION_CLAMPED,
+            rejected_value=None,
+            clamped_to=resolved_value,
+            raw=raw,
+        )
+    return NumericResolution(
+        value=resolved_value,
+        resolution=MEMOIR_RESOLUTION_EXPLICIT_VALUE,
+        rejected_value=None,
+        clamped_to=None,
+        raw=raw,
+    )
+
+
 def _classify_numeric(
     raw: Any,
     *,
@@ -3657,57 +3808,14 @@ def _classify_numeric(
     Returns:
         The resolved numeric value.
     """
-    if raw is None:
-        # UNSET: the default stands. Budget knobs are named in the
-        # AGGREGATE warning by the model (not here); cadence knobs are
-        # SILENT by design (tuning, not governance).
-        return default
-    if isinstance(raw, bool):
-        # A boolean is not a number; treat it as garbage rather than
-        # silently coercing True to 1.
-        value: float | None = None
-    elif isinstance(raw, (int, float)):
-        value = float(raw)
-    elif isinstance(raw, str):
-        text = raw.strip()
-        if not text:
-            return default
-        try:
-            value = float(text)
-        except ValueError:
-            value = None
-    else:
-        value = None
-
-    # An INTEGER field must resolve to an integer: pydantic refuses a
-    # fractional float for an ``int`` field (a ValidationError ⇒ a boot
-    # abort), so a fractional value is treated as GARBAGE here — it
-    # resolves to the constitutional default with a WARNING.
-    integral = isinstance(default, int) and not isinstance(default, bool)
-
-    if value is None or (integral and not float(value).is_integer()):
-        # GARBAGE: clamp to the default and WARN, naming the value AND
-        # the default. NEVER zero, NEVER a raise.
-        _emit_v2_knob_warning(
-            f"[MemoirV2] {name}={raw!r} is not a valid number — using the "
-            f"default {default:g} ({numeric_class} knob; the daemon never "
-            f"aborts on a mis-set tuning value)"
-        )
-        return default
-
-    clamped = value
-    if minimum is not None and clamped < minimum:
-        clamped = float(minimum)
-    if maximum is not None and clamped > maximum:
-        clamped = float(maximum)
-    if clamped != value:
-        _emit_v2_knob_warning(
-            f"[MemoirV2] {name}={raw!r} is out of range — clamped to "
-            f"{clamped:g} ({numeric_class} knob; the default is {default:g})"
-        )
-    if integral:
-        return int(clamped)
-    return clamped
+    return _resolve_numeric(
+        raw,
+        default=default,
+        numeric_class=numeric_class,
+        name=name,
+        minimum=minimum,
+        maximum=maximum,
+    ).value
 
 
 def _classify_enabled_flag(
@@ -4311,6 +4419,96 @@ class MemoirWakeRefreshConfig(BaseSettings):
         """The Enabled-flags class — unset ON, garbage fail-CLOSED OFF."""
         return _classify_enabled_flag(
             value, name=MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR, default=True
+        )
+
+
+# ── the PROPOSAL lane's knob (phase 6, closure #3) ───────────────────────
+#
+# The env-var name of the keepsake-proposal candidate-window's fetch-cap
+# multiplier (the SANCTIONED ESCAPE for a pathological corpus).
+MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR = (
+    "ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER"
+)
+
+#: The constitutional DEFAULT for the fetch-cap multiplier — 3, the
+#: bounded over-fetch W-2 shipped with (``MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE``
+#: in ``daemon/services/memoir_keepsake_proposal_service.py`` aliases this
+#: constant, so the value has exactly ONE home).
+MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT = 3
+
+#: The LOWEST legal multiplier. 1 means "no over-fetch" (the window only);
+#: 0 is illegal — a zero cap would masquerade as a kill-switch (the house
+#: NEVER-ZERO rule).
+MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MIN = 1
+
+#: The HIGHEST legal multiplier. The bound keeps the escape a BOUNDED
+#: scan (never an unbounded corpus walk — the cost constitution: reflection
+#: must never become a rewrite hazard).
+MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MAX = 20
+
+
+class MemoirProposalConfig(BaseSettings):
+    """The Memoir Store v2 PROPOSAL lane's knob (phase 6, closure #3).
+
+    An ISOLATED section — the N1 / V2-D 4.9 precedent the reflection,
+    poignancy and wake-refresh lanes already follow: the proposal knobs
+    live in their own model with their own env prefix and are NOT folded
+    into the v1 ``MemoirConfig`` section. The CLASSIFIER is shared
+    (:func:`_classify_numeric`); the RESOLVER is per-lane
+    (``daemon.tools.memoir_knob.resolve_memoir_proposal_fetch_cap_multiplier``)
+    and re-reads the env tier LIVE at call time, so an operator raises the
+    bound WITHOUT a restart.
+
+    ONE field only: ``fetch_cap_multiplier`` — how many times the window
+    the candidate scan may over-fetch per pass. The DEFAULT is 3 (the
+    bounded over-fetch W-2 shipped with); raising it is the SANCTIONED
+    ESCAPE for a pathological corpus whose whole head-of-line is terse
+    (a permanent deferral at the default bound).
+
+    The truth table is the Budget-bounds row of §3-A4 (DR-3):
+
+    | ``ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER`` | Resolved | Log |
+    |---|---|---|
+    | absent / empty | the default (3) | WARNING — unset budget knobs are never silent |
+    | a legal integer in [1, 20] | that value | INFO |
+    | a legal integer outside [1, 20] | CLAMPED into the band | WARNING naming the clamp |
+    | any other value | the default (3), fail CLOSED | WARNING naming the value |
+
+    A mis-set knob NEVER raises and NEVER aborts the boot: a
+    ``ValidationError`` out of ``load_config`` would take the daemon down
+    (the house anomaly ``33028b27``); the bound simply stays where it
+    was.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_MEMOIR_PROPOSAL_")
+
+    fetch_cap_multiplier: int = Field(
+        default=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT,
+        description="How many times the candidate window the keepsake-"
+                    "proposal scan may over-fetch per pass (the SANCTIONED "
+                    "ESCAPE for a pathological corpus). Unset resolves to "
+                    "this default with a loud WARNING; a garbage value "
+                    "fails CLOSED to this default with a WARNING; a legal "
+                    "value outside [1, 20] is CLAMPED into the band with a "
+                    "WARNING. Env: ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER.",
+    )
+
+    @field_validator("fetch_cap_multiplier", mode="before")
+    @classmethod
+    def _classify_budget_bound(cls, value: Any) -> Any:
+        """The Budget-bounds class — clamp to the default, NEVER zero.
+
+        A garbage budget knob CLAMPS to the constitutional default and
+        WARNS naming the value AND the default. The minimum is 1: a zero
+        cap would masquerade as a kill-switch.
+        """
+        return _classify_numeric(
+            value,
+            default=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT,
+            numeric_class=NUMERIC_CLASS_BUDGET,
+            name=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR,
+            minimum=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MIN,
+            maximum=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MAX,
         )
 
 
@@ -6540,6 +6738,16 @@ class Config(BaseSettings):
     # wake without a restart.
     memoir_wake_refresh: MemoirWakeRefreshConfig = Field(
         default_factory=MemoirWakeRefreshConfig
+    )
+    # Memoir Store v2 (phase 6, closure #3): the PROPOSAL lane's isolated
+    # knob section (class MemoirProposalConfig, env prefix
+    # ENSEMBLE_MEMOIR_PROPOSAL_). ISOLATED by design (N1 / V2-D 4.9 / the
+    # memoir_reflection precedent), and ENV-ONLY (no config.yaml block, no
+    # load_config pass-through): the lane's resolver re-reads the env tier
+    # LIVE at call time, so an operator raises the candidate-window
+    # over-fetch bound WITHOUT a restart.
+    memoir_proposal: MemoirProposalConfig = Field(
+        default_factory=MemoirProposalConfig
     )
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)

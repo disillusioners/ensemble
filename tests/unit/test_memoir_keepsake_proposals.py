@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import logging
 import pathlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -51,6 +52,10 @@ import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine
 
+from daemon.config import (
+    MEMOIR_RESOLUTION_DEFAULT,
+    MEMOIR_RESOLUTION_INDETERMINATE,
+)
 from daemon.repositories.memoir.models import (
     MEMOIR_PROPOSALS_ZONE_CHAR_BUDGET,
     MEMOIR_PROPOSALS_ZONE_MAX,
@@ -500,6 +505,207 @@ class TestCandidateWindow:
         ledger_episode_ids = {row.episode_id for row in _ledger_rows(engine)}
         for episode_id in eligible_ids:
             assert episode_id in ledger_episode_ids
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Phase 6, closure #3 — the fetch-cap multiplier knob (the SANCTIONED
+# ESCAPE for a pathological corpus)
+#
+# THE FOUR LEGS:
+#   (a) the DEFAULT keeps the MEASURED boundary (29 terse rows ⇒ the
+#       eligible tail still stages; 30 terse rows ⇒ the permanent
+#       deferral);
+#   (b) a RAISED multiplier reaches the eligible tail (the escape works);
+#   (c) a GARBAGE multiplier fails CLOSED to the default (never a wide
+#       scan) and the scan behaves EXACTLY as the default;
+#   (d) an UNSET multiplier resolves to the default with the LOUD
+#       budget-class warning.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+#: The knob's env-var name — a LITERAL on purpose: this module must stay
+#: importable against the PARENT tree (the parent-RED proof runs it
+#: there), where the constant does not exist yet. The literal IS the
+#: contract pin.
+FETCH_CAP_ENV_VAR = "ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER"
+
+
+def _resolve_fetch_cap_multiplier():
+    """Resolve the proposal lane's fetch-cap multiplier knob.
+
+    LAZY on purpose: the parent-RED proof runs THIS module against the
+    PARENT tree, where the resolver does not exist. A module-level
+    import would break the COLLECTION of every leg in the file (the
+    proof would show one collection error instead of four per-leg
+    failures), so the new API is imported inside the legs.
+    """
+    from daemon.tools.memoir_knob import (
+        resolve_memoir_proposal_fetch_cap_multiplier,
+    )
+
+    return resolve_memoir_proposal_fetch_cap_multiplier()
+
+
+class TestFetchCapMultiplier:
+    """The fetch-cap multiplier knob — the SANCTIONED ESCAPE.
+
+    The bounded over-fetch (W-2) is the DEFAULT and stays the default
+    (the cost constitution: reflection must never become a rewrite
+    hazard). Above the default bound a pathological corpus — one whose
+    whole head-of-line is TERSE — defers the eligible rows PERMANENTLY
+    (a skipped row is never ledgered, so it never leaves the window).
+    THIS knob is the escape: an operator raises it (a BOUNDED wider
+    scan, no schema change, no unbounded default) and the scan reaches
+    the eligible tail.
+
+    The knob's truth table (Budget-bounds class, §3-A4 / DR-3):
+
+    | ``ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER`` | Resolved | Log |
+    |---|---|---|
+    | absent / empty | 3 (the constitutional default) | WARNING |
+    | a legal integer in [1, 20] | that value | INFO |
+    | a legal integer outside [1, 20] | CLAMPED into the band | WARNING |
+    | any other value | 3 (fail CLOSED) | WARNING |
+    """
+
+    @staticmethod
+    def _fresh_engine():
+        """A throwaway in-memory SQLite (the fixture's shape) for a SECOND
+        corpus — the ledger is once-ever, so the 29-row and the 30-row
+        scenarios cannot share one engine."""
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(engine)
+        return engine
+
+    @staticmethod
+    def _terse_head(repo, count):
+        """``count`` TERSE rows at the head (high poignancy, no substance)."""
+        for index in range(count):
+            _insert(
+                repo,
+                importance=10,
+                title=f"Terse {index}",
+                body=f"terse {index}",
+            )
+
+    @staticmethod
+    def _eligible_tail(repo, count):
+        """``count`` ELIGIBLE rows behind the head."""
+        return [
+            _insert(repo, importance=9, title=f"Eligible {index}")
+            for index in range(count)
+        ]
+
+    def test_the_default_multiplier_holds_the_measured_boundary(
+        self, engine, repo, service, monkeypatch
+    ):
+        """(a) The DEFAULT (3) reproduces the MEASURED boundary.
+
+        29 terse rows ⇒ the head does NOT fill the 3x cap ⇒ the eligible
+        tail is still reached (``staged >= 1``). 30 terse rows ⇒ the head
+        EXACTLY fills the cap ⇒ the tail is unreachable (``staged == 0``)
+        — the PERMANENT deferral the disclosure names.
+        """
+        monkeypatch.delenv(FETCH_CAP_ENV_VAR, raising=False)
+        state = _resolve_fetch_cap_multiplier()
+        assert state.multiplier == 3, state
+        assert state.resolution == MEMOIR_RESOLUTION_DEFAULT, state
+
+        self._terse_head(repo, 29)
+        self._eligible_tail(repo, 5)
+        outcome = service.process_pass(notify=False)
+        assert outcome.staged >= 1, outcome
+
+        engine2 = self._fresh_engine()
+        try:
+            repo2 = MemoirRepository(engine2)
+            service2 = MemoirKeepsakeProposalService(
+                engine2, clock=lambda: FIXED_NOW
+            )
+            self._terse_head(repo2, 30)
+            self._eligible_tail(repo2, 5)
+            outcome2 = service2.process_pass(notify=False)
+            assert outcome2.staged == 0, outcome2
+        finally:
+            engine2.dispose()
+
+    def test_a_raised_multiplier_reaches_the_eligible_tail(
+        self, engine, repo, service, monkeypatch
+    ):
+        """(b) The ESCAPE works: a RAISED multiplier reaches the tail.
+
+        At the default the 30-row terse head FILLS the cap and the
+        eligible rows behind it are unreachable. With the multiplier
+        raised (10) the fetch cap is 10 x the window, the scan pages
+        past the head, and the eligible rows STAGE.
+        """
+        from daemon.config import MEMOIR_RESOLUTION_EXPLICIT_VALUE
+
+        monkeypatch.setenv(FETCH_CAP_ENV_VAR, "10")
+        state = _resolve_fetch_cap_multiplier()
+        assert state.multiplier == 10, state
+        assert state.resolution == MEMOIR_RESOLUTION_EXPLICIT_VALUE, state
+
+        self._terse_head(repo, 30)
+        eligible_ids = self._eligible_tail(repo, 5)
+        outcome = service.process_pass(notify=False)
+        assert outcome.staged >= 1, outcome
+        ledger_episode_ids = {row.episode_id for row in _ledger_rows(engine)}
+        for episode_id in eligible_ids:
+            assert episode_id in ledger_episode_ids
+
+    def test_a_garbage_multiplier_fails_closed_to_the_default(
+        self, engine, repo, service, monkeypatch
+    ):
+        """(c) A GARBAGE multiplier fails CLOSED to the default (3).
+
+        NEVER a wide scan: the resolved multiplier is 3 and the scan
+        behaves EXACTLY as the default does — the 30-row terse head
+        still defers the eligible tail.
+        """
+        monkeypatch.setenv(FETCH_CAP_ENV_VAR, "wide")
+        state = _resolve_fetch_cap_multiplier()
+        assert state.multiplier == 3, state
+        assert state.resolution == MEMOIR_RESOLUTION_INDETERMINATE, state
+        assert state.rejected_value == "wide", state
+
+        self._terse_head(repo, 30)
+        self._eligible_tail(repo, 5)
+        outcome = service.process_pass(notify=False)
+        assert outcome.staged == 0, outcome
+
+    def test_an_unset_multiplier_resolves_to_the_default_with_a_loud_warning(
+        self, caplog, monkeypatch
+    ):
+        """(d) UNSET ⇒ the default (3) with the LOUD budget-class warning.
+
+        An unset BUDGET knob is never silent (the house budget-class
+        rule): the resolution is DEFAULT and the operator line is a
+        WARNING that names the knob.
+        """
+        from daemon.tools.memoir_knob import reset_boot_log_state
+
+        monkeypatch.delenv(FETCH_CAP_ENV_VAR, raising=False)
+        # The once-per-boot log guard would suppress a REPEATED line —
+        # reset it so this leg observes the emission itself.
+        reset_boot_log_state()
+        with caplog.at_level(logging.WARNING, logger="daemon.tools.memoir_knob"):
+            state = _resolve_fetch_cap_multiplier()
+        assert state.multiplier == 3, state
+        assert state.resolution == MEMOIR_RESOLUTION_DEFAULT, state
+        assert state.log_level == "WARNING", state
+        assert FETCH_CAP_ENV_VAR in state.message, state
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and FETCH_CAP_ENV_VAR in record.getMessage()
+        ]
+        assert warnings, [record.getMessage() for record in caplog.records]
 
 
 # ─────────────────────────────────────────────────────────────────────────

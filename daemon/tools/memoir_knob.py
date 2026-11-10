@@ -984,9 +984,204 @@ def memoir_wake_refresh_enabled(config: "Config | None" = None) -> bool:
     return resolve_memoir_wake_refresh_knob(config).enabled
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Memoir Store v2 — the PROPOSAL lane's knob (phase 6, closure #3)
+#
+# THE SAME PER-LANE SHAPE as the reflection / poignancy / wake-refresh
+# resolvers: the CLASSIFIER is shared (``daemon.config._classify_numeric``
+# — the truth table lives in ONE place), the RESOLVER is per-lane, and
+# the operator-facing log line is owned HERE (mechanism N-2: the model
+# classifies, the knob module speaks).
+#
+# The lane (``daemon.services.memoir_keepsake_proposal_service``) calls
+# :func:`resolve_memoir_proposal_fetch_cap_multiplier` at CALL TIME —
+# never a boot-cached value — so an operator widens (or narrows) the
+# bounded over-fetch WITHOUT a restart.
+#
+# THE KNOB IS THE SANCTIONED ESCAPE, NOT A DEFAULT CHANGE: the bounded
+# scan stays the DEFAULT (the cost constitution — reflection must never
+# become a rewrite hazard), and this multiplier is how an operator
+# reaches an eligible tail that the default bound defers.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MemoirProposalFetchCapKnobState:
+    """The resolved PROPOSAL fetch-cap multiplier plus its provenance.
+
+    The shape mirrors :class:`MemoirWakeRefreshKnobState` with the
+    enabled flag replaced by the resolved NUMERIC — a health surface can
+    still render every lane with one code path.
+    """
+
+    multiplier: int
+    resolution: str
+    source: str
+    rejected_value: str | None
+    message: str
+    log_level: str
+
+
+def resolve_memoir_proposal_fetch_cap_multiplier() -> MemoirProposalFetchCapKnobState:
+    """Resolve the PROPOSAL fetch-cap multiplier NOW (call-time read).
+
+    The truth table is the Budget-bounds row of §3-A4 (DR-3): unset ⇒ the
+    constitutional default (3) with a LOUD WARNING (an unset budget knob
+    is never silent); a legal value in [1, 20] ⇒ honoured (INFO); a legal
+    value outside the band ⇒ CLAMPED with a WARNING; any other value ⇒ the
+    default, fail CLOSED, with a WARNING naming the value. The function
+    NEVER raises — a knob that cannot be resolved keeps the default bound
+    and the daemon keeps running.
+
+    NO CONFIG TIER (and NO ``config`` parameter, deliberately): the knob's
+    section is ENV-ONLY (no ``config.yaml`` block), so there is no second
+    source that could disagree about what the default is — and a
+    boot-frozen section value must never leak into a LIVE resolution. The
+    env tier is read at CALL TIME, so the operator raises the bound
+    without a restart.
+
+    Returns:
+        The resolved :class:`MemoirProposalFetchCapKnobState`.
+    """
+    from daemon.config import (
+        MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT,
+        MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR,
+        MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MAX,
+        MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MIN,
+        MEMOIR_RESOLUTION_CLAMPED,
+        MEMOIR_RESOLUTION_DEFAULT,
+        MEMOIR_RESOLUTION_ERROR,
+        MEMOIR_RESOLUTION_EXPLICIT_VALUE,
+        MEMOIR_RESOLUTION_INDETERMINATE,
+        NUMERIC_CLASS_BUDGET,
+        MemoirProposalConfig,
+        _resolve_numeric,
+    )
+
+    raw = os.environ.get(MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR)
+    env_present = raw is not None and bool(raw.strip())
+
+    try:
+        if env_present:
+            # The ENV tier decides — the LIVE read. The SHARED classifier
+            # is the only thing that decides what the value MEANS (the
+            # A2 debt budget is capped at the one known duplicate: there
+            # is NO second truth table here).
+            resolved = _resolve_numeric(
+                raw,
+                default=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT,
+                numeric_class=NUMERIC_CLASS_BUDGET,
+                name=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR,
+                minimum=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MIN,
+                maximum=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MAX,
+            )
+            source = "env"
+        else:
+            # The env tier is ABSENT: the CONFIG tier decides. The
+            # section is ENV-ONLY, so this is the constitutional default
+            # — and it is LOUD (the budget class's "an unset budget knob
+            # is never silent" rule).
+            section = MemoirProposalConfig()
+            resolved = _resolve_numeric(
+                None,
+                default=int(section.fetch_cap_multiplier),
+                numeric_class=NUMERIC_CLASS_BUDGET,
+                name=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR,
+                minimum=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MIN,
+                maximum=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_MAX,
+            )
+            source = "config"
+    except Exception as exc:  # noqa: BLE001 — a knob never raises
+        state = MemoirProposalFetchCapKnobState(
+            multiplier=MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT,
+            resolution=MEMOIR_RESOLUTION_ERROR,
+            source="none",
+            rejected_value=None,
+            message=(
+                f"[MemoirProposal] {MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR} "
+                f"could not be resolved ({exc}) — the candidate-window "
+                f"over-fetch stays at the constitutional default "
+                f"{MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT} (fail closed)"
+            ),
+            log_level="ERROR",
+        )
+        _emit_proposal_once(state)
+        return state
+
+    multiplier = int(resolved.value)
+    if resolved.resolution == MEMOIR_RESOLUTION_DEFAULT:
+        message = (
+            f"[MemoirProposal] {MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR} "
+            f"is unset — the candidate-window over-fetch uses the "
+            f"constitutional default {multiplier} (unset budget knobs are "
+            f"never silent; set the knob to widen the bound for a "
+            f"pathological corpus)"
+        )
+        log_level = "WARNING"
+    elif resolved.resolution == MEMOIR_RESOLUTION_EXPLICIT_VALUE:
+        message = (
+            f"[MemoirProposal] {MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR}="
+            f"{multiplier} — the candidate-window over-fetch is {multiplier} × "
+            f"the window per pass"
+        )
+        log_level = "INFO"
+    elif resolved.resolution == MEMOIR_RESOLUTION_CLAMPED:
+        message = (
+            f"[MemoirProposal] {MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR}="
+            f"{resolved.raw!r} is out of range — clamped to {multiplier} "
+            f"(the constitutional default is "
+            f"{MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT}; the bound "
+            f"stays a BOUNDED scan)"
+        )
+        log_level = "WARNING"
+    elif resolved.resolution == MEMOIR_RESOLUTION_INDETERMINATE:
+        message = (
+            f"[MemoirProposal] {MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR}="
+            f"{resolved.raw!r} is not a valid number — the candidate-window "
+            f"over-fetch stays at the constitutional default {multiplier} "
+            f"(fail closed; a garbage value never widens the scan)"
+        )
+        log_level = "WARNING"
+    else:  # pragma: no cover — defensive (the classifier has four rows)
+        message = (
+            f"[MemoirProposal] {MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_ENV_VAR} "
+            f"resolved to {multiplier} ({resolved.resolution})"
+        )
+        log_level = "WARNING"
+
+    state = MemoirProposalFetchCapKnobState(
+        multiplier=multiplier,
+        resolution=resolved.resolution,
+        source=source,
+        rejected_value=resolved.rejected_value,
+        message=message,
+        log_level=log_level,
+    )
+    _emit_proposal_once(state)
+    return state
+
+
+def _emit_proposal_once(state: MemoirProposalFetchCapKnobState) -> None:
+    """Emit the proposal-lane line ONCE per boot (the shared log guard).
+
+    Keyed by the message (the SAME ``_EMITTED`` set the other lanes use),
+    so a repeated resolution stays quiet while a CHANGED value re-warns.
+    """
+    if state.message in _EMITTED:
+        return
+    _EMITTED.add(state.message)
+    logger.log(
+        logging.ERROR
+        if state.log_level == "ERROR"
+        else (logging.WARNING if state.log_level == "WARNING" else logging.INFO),
+        state.message,
+    )
+
+
 __all__ = [
     "MemoirKnobState",
     "MemoirPoignancyKnobState",
+    "MemoirProposalFetchCapKnobState",
     "MemoirReflectionKnobState",
     "MemoirWakeRefreshKnobState",
     "emit_boot_state",
@@ -999,6 +1194,7 @@ __all__ = [
     "reset_boot_log_state",
     "resolve_memoir_knob",
     "resolve_memoir_poignancy_knob",
+    "resolve_memoir_proposal_fetch_cap_multiplier",
     "resolve_memoir_reflection_knob",
     "resolve_memoir_wake_refresh_knob",
 ]

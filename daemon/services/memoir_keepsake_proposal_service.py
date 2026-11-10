@@ -87,6 +87,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from daemon.config import MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT
 from daemon.repositories.memoir.models import (
     MEMOIR_PROPOSAL_REASON_CHAR_CAP,
     MemoirEpisode,
@@ -120,14 +121,24 @@ MEMOIR_PROPOSAL_MIN_BODY_CHARS = 80
 #: selection) in a single tick.
 MEMOIR_PROPOSAL_STAGE_CAP_PER_PASS = 10
 
-#: The BOUNDED OVER-FETCH multiplier (W-2). The candidate window pages up
-#: to this multiple of the window per pass, collecting ELIGIBLE rows —
-#: the substance floor is enforced read-side (dialect-neutral: it must
-#: stay in Python), so a terse head-of-line would otherwise hold the
-#: slots on EVERY pass and starve the eligible rows behind it. The bound
-#: is deliberate: an unbounded walk would trade starvation for a
-#: full-corpus scan on every tick.
-MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE = 3
+#: The BOUNDED OVER-FETCH multiplier (W-2) — the CONSTITUTIONAL DEFAULT.
+#: The candidate window pages up to this multiple of the window per pass,
+#: collecting ELIGIBLE rows — the substance floor is enforced read-side
+#: (dialect-neutral: it must stay in Python), so a terse head-of-line
+#: would otherwise hold the slots on EVERY pass and starve the eligible
+#: rows behind it. The bound is deliberate: an unbounded walk would trade
+#: starvation for a full-corpus scan on every tick.
+#:
+#: The value itself lives in ``daemon.config`` (the knob section's home)
+#: so the config model and the service can never disagree about it; this
+#: name stays the lane's public handle on the DEFAULT. An operator
+#: overrides it at CALL TIME through
+#: ``ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER`` (the SANCTIONED
+#: ESCAPE for a pathological corpus — see
+#: :func:`_resolve_fetch_cap_multiplier`).
+MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE = (
+    MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER_DEFAULT
+)
 
 #: The bridge's `.result()` timeout (the RDRS lane-6 precedent value).
 MEMOIR_PROPOSAL_ENQUEUE_TIMEOUT_S = 8.0
@@ -154,6 +165,30 @@ PROPOSAL_STATUSES: frozenset[str] = frozenset(
         PROPOSAL_STATUS_FAILED,
     }
 )
+
+
+def _resolve_fetch_cap_multiplier() -> int:
+    """The fetch-cap multiplier — resolved LIVE at every scan.
+
+    The knob is the SANCTIONED ESCAPE for a pathological corpus (a head
+    of terse rows that FILLS the default bound): the bounded scan stays
+    the DEFAULT (the cost constitution — reflection must never become a
+    rewrite hazard), and this multiplier is how an operator reaches the
+    eligible tail behind it — a BOUNDED wider scan, no schema change, no
+    unbounded default.
+
+    The DEFERRED import is the house pattern for a service that consumes
+    the knob module (``daemon.services.memoir_reflection_service`` /
+    ``memoir_retrieval`` / ``context_messages`` all do this): the knob
+    module owns the operator-facing log line, and the SHARED classifier
+    owns the truth table. The value is read at CALL TIME — an operator
+    raises the bound WITHOUT a restart.
+    """
+    from daemon.tools.memoir_knob import (
+        resolve_memoir_proposal_fetch_cap_multiplier,
+    )
+
+    return int(resolve_memoir_proposal_fetch_cap_multiplier().multiplier)
 
 
 @dataclass(frozen=True)
@@ -348,9 +383,10 @@ class MemoirKeepsakeProposalService:
         so it never LEAVES the window: an unbounded head of terse rows
         starves the eligible rows behind them on EVERY pass (a PERMANENT
         wedge, not the self-healing ledgered case). The scan therefore
-        PAGES: it reads up to ``MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE``
-        (3) × the window per pass and keeps collecting until it holds
-        ``limit`` ELIGIBLE rows, applying the floor in Python as it goes.
+        PAGES: it reads up to the RESOLVED fetch-cap multiplier (3 by
+        default — ``MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE``) × the window
+        per pass and keeps collecting until it holds ``limit`` ELIGIBLE
+        rows, applying the floor in Python as it goes.
 
         THE BOUND IS HONEST AND DISCLOSED. A pathological corpus whose
         whole head-of-line is terse can still defer the eligible rows
@@ -367,6 +403,24 @@ class MemoirKeepsakeProposalService:
         eligible rows never reached, the corpus never walked. The
         disclosure lives in ``docs/memoir-v2/implementation-notes.md``
         §16.6.
+
+        THE ESCAPE IS A KNOB, NOT A MECHANISM CHANGE. The bound above is
+        the DEFAULT and stays the default (the cost constitution:
+        reflection must never become a rewrite hazard). An operator whose
+        corpus is pathological RAISES
+        ``ENSEMBLE_MEMOIR_PROPOSAL_FETCH_CAP_MULTIPLIER`` (a Budget-bounds
+        knob, clamped to [1, 20]; unset ⇒ 3 with a loud WARNING; garbage
+        ⇒ fail CLOSED to 3; the value is read LIVE at each scan, so NO
+        restart is needed) and the scan over-fetches further — a BOUNDED
+        wider scan, NO schema change, NO unbounded default.
+
+        THE DEEPER FIX IS A V3 CANDIDATE (RECORDED, NOT BUILT). A
+        LEDGERED-SKIP ledger (a skipped row LEAVES the window) or a
+        SQL-side substance filter would make the deferral self-healing —
+        but a SQL-side filter is NOT dialect-neutral (SQLite's
+        ``length()`` and PostgreSQL's ``char_length()`` do not count the
+        same thing) and a ledgered skip changes the ledger's contract.
+        Neither is built here.
         """
         owner = agent_id or self._agent_id
         target = max(0, int(limit))
@@ -393,7 +447,12 @@ class MemoirKeepsakeProposalService:
             MemoirEpisode.created_at.desc(),
             MemoirEpisode.id.asc(),
         )
-        fetch_cap = target * MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE
+        # The fetch cap is the RESOLVED multiplier (3 by default) × the
+        # window — read LIVE at this call, so an operator widens the
+        # bound for a pathological corpus without a restart. The knob
+        # NEVER widens the scan on a garbage value (fail closed to the
+        # constitutional default).
+        fetch_cap = target * _resolve_fetch_cap_multiplier()
         eligible: list[MemoirEpisode] = []
         skipped_ineligible = 0
         fetched = 0
