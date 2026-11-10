@@ -945,4 +945,37 @@ the touched files AND the registered-pack registry (§17 item 36). The packs tou
 
 ---
 
+## DS-59 — Round-7 amendment: the F-4 import trap is STILL OPEN (re-probed, not believed)
+
+**Context.** §17 item 35 (and DS-57) recorded the F-4 import trap: a `daemon.tools.*` import registers ~52 metric
+families IN-PROCESS through the ATTRIBUTE import at `daemon/tools/nest_report.py:159`, which fires the PEP-562
+`__getattr__` of `daemon/services/anomaly_service.py` and reaches the metrics wiring package. The item was closed as
+**INERT** for the committed exposition artifact (rendered in a SUBPROCESS) with the hardening **ROUTED, not built**.
+The E1/D lane has since landed the **M9 vocabulary consolidation** — a stdlib-only leaf
+`daemon/services/anomaly_vocab.py` (one vocabulary, one canonicaliser) that `daemon/services/anomaly_service.py`
+imports at module level. The round-7 dispatch required a RE-PROBE and forbade a closure claim without evidence.
+
+**Ruling.** **THE TRAP STILL FIRES — the residual is recorded as STILL OPEN; no closure is claimed.** The re-probe
+(2026-11-10) gives numbers IDENTICAL to the recorded baseline: a fresh interpreter importing `daemon.tools`,
+`daemon.tools.nest_report`, `daemon.tools.nest_report_read`, `daemon.tools.skill_evolution_tools` or
+`daemon.tools.instance` registers **15 → 67 metric families (+52)** with `daemon.services.metrics_query.wiring` in
+`sys.modules`. **What the M9 work did achieve (recorded for fairness):** the duplicated vocabulary copy is gone and the
+module import is PURE (importing `daemon/services/anomaly_service.py` alone registers 15 and does NOT import the
+wiring). **Why the trap survives:** the leaf's point-of-use resolvers still import the wiring package —
+`daemon/services/anomaly_vocab.py:140-146` (`resolve_anomaly_categories`) and `:149-156` (`resolve_reserved`), plus
+`daemon/services/anomaly_service.py:210-218` (`_resolve_anomaly_severities`) — and the attribute-by-attribute probe
+shows each of `ANOMALY_CATEGORIES`, `ANOMALY_SEVERITIES` and `RESERVED` still pulls the wiring in (+52 each) when the
+ATTRIBUTE import at `daemon/tools/nest_report.py:159` fires the PEP-562 `__getattr__`.
+
+**Consequence.** The residual RISK §17 item 35 warned about still stands (an in-process render still diverges: 29 → 81
+`# HELP` lines after a `daemon.tools` import), so an in-process-vs-artifact comparison remains the first live victim.
+The durable hardening — a frozen, import-pure vocabulary with NO point-of-use wiring import, or a lazy import in
+`daemon/tools/nest_report.py` plus extending the import-purity pin to a `daemon.tools.*` module — remains **ROUTED, not
+built**: the files that would carry it belong to other lanes and were READ-ONLY in this round. The §17 item 35 STATUS
+is amended (the historical finding, mechanism and original measurements are kept intact); the §19.1 row that cites it
+(C-39) stays token-consistent and now names DS-59 alongside DS-57.
+
+
+---
+
 *End of the decision log. Companion plan: `phase1-plan.md`.*
