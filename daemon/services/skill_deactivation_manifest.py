@@ -20,9 +20,14 @@ disposition:
   manifest, so the row is never served, even before the boot reconciliation
   has run (the exclusion is **enforced in code**, not merely documented).
 * ``deactivation`` → ``operator_path_only`` — the row is NEVER deactivated by
-  the shipped reconciliation (no rule matches it), and the operator script
-  refuses to deactivate a declared artifact unless the operator passes the
-  explicit ``--allow-declared-artifact`` override.
+  the shipped reconciliation (no rule matches it), and the operator path
+  refuses to deactivate a declared artifact unless the operator opts in
+  through the **Python-API keyword** ``allow_declared_artifact=True`` on
+  ``SkillStaleDeactivator``. **There is NO CLI flag for this override and
+  none is intended** — ``scripts/audit/skill_stale_deactivate.py`` registers
+  no such option, so the operator script has no escape hatch and never
+  touches a declared artifact. (Adding one would contradict the pinned
+  property that no shipped call site declares a winner.)
 
 The FULL row id is not recoverable from the repo (the same gap the plan
 records for the 6 captured-origin ids), so the manifest carries the

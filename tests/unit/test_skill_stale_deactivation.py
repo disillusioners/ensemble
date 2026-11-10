@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1395,3 +1396,112 @@ class TestTheBrake:
         after = skill_repo.get(row.id)
         assert after.status == "ab_testing"
         assert after.is_active is False
+
+
+# ============================================================
+# H1 — the documented interface matches the script's argparse surface
+# ============================================================
+
+
+def _every_docstring(path: Path) -> list[str]:
+    """Every docstring in a module (module, class, function, method)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docs: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(
+            node,
+            (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            doc = ast.get_docstring(node, clean=False)
+            if doc:
+                docs.append(doc)
+    return docs
+
+
+def _registered_cli_flags(script: Path) -> set[str]:
+    """The option strings the operator script's parser ACTUALLY registers."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "skill_stale_deactivate_flag_surface", script
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    parser = module.build_parser()
+    flags: set[str] = set()
+    for action in parser._actions:
+        flags.update(action.option_strings)
+    return flags
+
+
+class TestTheDocumentedInterfaceMatchesTheScript:
+    """H1 — a docstring may only name a CLI flag the operator script HAS.
+
+    The defect this pins: both the manifest module and the deactivator's
+    constructor docstring told the operator to pass
+    ``--allow-declared-artifact``. The script never registered that flag —
+    the override exists ONLY as the Python-API keyword
+    ``allow_declared_artifact=True``. An operator following the doc hit
+    argparse "unrecognized arguments" with no documented escape.
+    """
+
+    def test_every_documented_cli_flag_exists_in_the_argparse_surface(self):
+        """Named mutation: re-add the ``--allow-declared-artifact`` sentence to
+        the manifest docstring -> this pin goes RED (the doc names a flag the
+        script does not register).
+        """
+        registered = _registered_cli_flags(OPERATOR_SCRIPT)
+        documented: set[str] = set()
+        for module_path in (E4_MODULE, MANIFEST_MODULE):
+            for doc in _every_docstring(module_path):
+                documented.update(
+                    re.findall(r"--[A-Za-z0-9][A-Za-z0-9-]*", doc)
+                )
+        assert documented, (
+            "no CLI flag is named in either docstring — the argparse-surface "
+            "pin would be vacuous, so the docstring text must name at least "
+            "the flags it genuinely uses"
+        )
+        undocumented = sorted(documented - registered)
+        assert not undocumented, (
+            f"the E4 docstrings name CLI flag(s) {undocumented} that "
+            f"scripts/audit/skill_stale_deactivate.py does NOT register "
+            f"(registered: {sorted(registered)}) — the doc lies to the "
+            f"operator about the interface"
+        )
+
+    def test_the_declared_artifact_override_is_documented_as_a_python_api_keyword(
+        self,
+    ):
+        """Both docstrings must name the REAL interface and say that no CLI
+        flag exists.
+
+        Named mutation: delete the ``allow_declared_artifact`` keyword from
+        the manifest docstring -> this pin goes RED.
+        """
+        for module_path in (E4_MODULE, MANIFEST_MODULE):
+            text = module_path.read_text(encoding="utf-8")
+            flat = " ".join(text.split())
+            assert "allow_declared_artifact" in flat, (
+                f"{module_path.name} must document the REAL interface — the "
+                f"Python-API keyword allow_declared_artifact"
+            )
+            assert "NO CLI flag" in flat, (
+                f"{module_path.name} must state plainly that NO CLI flag "
+                f"exists for this override (and that none is intended)"
+            )
+
+    def test_the_script_registers_no_declared_artifact_escape_flag(self):
+        """LEADER RULING: no CLI escape flag may be added.
+
+        Named mutation: add ``--allow-declared-artifact`` to
+        ``build_parser()`` -> this pin goes RED.
+        """
+        registered = _registered_cli_flags(OPERATOR_SCRIPT)
+        assert "--allow-declared-artifact" not in registered, (
+            "the operator script must NOT register a declared-artifact escape "
+            "flag — the leader ruling is REWORD, DO NOT ADD THE FLAG "
+            "(a CLI escape would contradict the pinned 'no winner declared "
+            "by any shipped call site' property)"
+        )

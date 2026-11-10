@@ -790,7 +790,10 @@ class SkillStaleDeactivator:
         allow_declared_artifact: Opt-in override that permits the operator
             path to touch a row carrying a declared disposition. Defaults to
             ``False`` — the shipped reconciliation NEVER touches a declared
-            artifact.
+            artifact. This is a **Python-API keyword only**: there is NO CLI
+            flag for it and none is intended —
+            ``scripts/audit/skill_stale_deactivate.py`` registers no such
+            option, so the operator script can never override the guard.
     """
 
     def __init__(

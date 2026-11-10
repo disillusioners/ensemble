@@ -42,6 +42,11 @@
 #           REDs (the dual-column contract is broken).
 #   M-E4k — flip the resolver's default to ON ⇒ the "inert by default"
 #           pin REDs (the deactivator is constructed and the receipt is written).
+#   M-H1a — the manifest docstring names a CLI flag the operator script does
+#           NOT register ⇒ the "the documented interface matches the argparse
+#           surface" pin REDs.
+#   M-H1b — a ``--allow-declared-artifact`` CLI escape flag is added to the
+#           operator script ⇒ the "no CLI escape flag" pin REDs.
 #
 # FENCES: per-variable env scrub, worktree-local interpreter, dual-layer
 # timeout, sha-verified PRISTINE restore, VACUOUS-GREEN guard, no PG, no
@@ -71,6 +76,7 @@ PIN="tests/unit/test_skill_stale_deactivation.py"
 E4_PY="daemon/services/skill_deactivation.py"
 INJ_PY="daemon/services/skill_injection_service.py"
 SCRIPT_PY="scripts/audit/skill_stale_deactivate.py"
+MANIFEST_PY="daemon/services/skill_deactivation_manifest.py"
 
 echo "=== Test Pack: skill_stale_deactivation_unit_test (E4) ==="
 echo "REPO_ROOT=$REPO_ROOT"
@@ -79,7 +85,7 @@ if [ ! -x "$PY" ]; then
   echo "RESULT: FAIL (MISSING-INTERPRETER — the worktree-local .venv/bin/python is absent)"
   exit 1
 fi
-for f in "$PIN" "$E4_PY" "$INJ_PY" "$SCRIPT_PY"; do
+for f in "$PIN" "$E4_PY" "$INJ_PY" "$SCRIPT_PY" "$MANIFEST_PY"; do
   if [ ! -f "$f" ]; then
     echo "RESULT: FAIL (MISSING-ARTIFACT — $f)"
     exit 1
@@ -125,7 +131,7 @@ fi
 
 # ── phase 2: the mutation matrix ───────────────────────────────────────────
 echo "--- phase 2: the mutation matrix (plant → RED → sha-restore → GREEN) ---"
-MUTABLE_FILES=("$E4_PY" "$INJ_PY" "$SCRIPT_PY")
+MUTABLE_FILES=("$E4_PY" "$INJ_PY" "$SCRIPT_PY" "$MANIFEST_PY")
 PRISTINE="$(mktemp -d /tmp/skill-stale-deactivation-pristine-XXXXXX)"
 CLEANED=0
 restore_all() {
@@ -296,6 +302,31 @@ leg "M-E4k" "$E4_PY" \
   '    return _resolve_switch(SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, False)' \
   '    return _resolve_switch(SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV, True)  # MUTATION: default ON'
 
+# M-H1a — the manifest docstring names a CLI flag the script does NOT
+# register (the H1 defect: a docstring that lies about the interface).
+leg "M-H1a" "$MANIFEST_PY" \
+  '  touches a declared artifact. (Adding one would contradict the pinned
+' \
+  '  touches a declared artifact. (Adding one would contradict the pinned
+  MUTATION: the operator passes the explicit
+  ``--allow-declared-artifact`` override.)
+'
+
+# M-H1b — a CLI escape flag is added to the operator script (the escape the
+# LEADER RULING forbids: REWORD, DO NOT ADD THE FLAG).
+leg "M-H1b" "$SCRIPT_PY" \
+  '    parser.add_argument(
+        "--apply",
+' \
+  '    parser.add_argument(
+        "--allow-declared-artifact",
+        action="store_true",
+        help="MUTATION: a CLI escape flag the leader ruling forbids.",
+    )
+    parser.add_argument(
+        "--apply",
+'
+
 # Final manifest check.
 for f in "${MUTABLE_FILES[@]}"; do
   key="$(printf '%s' "$f" | sha256sum | cut -d' ' -f1 | cut -c1-16)"
@@ -312,5 +343,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (11 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (13 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0
