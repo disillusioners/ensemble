@@ -1,0 +1,66 @@
+===============================================================
+INTERPRETER PROVENANCE — Phase-1 skill-system-revival
+Measured 2026-11-09. All reads; no daemon booted; no binary executed.
+===============================================================
+
+--- 1. WORKTREE VENVS (CPython version) ---
+ensemble-src                               Python 3.13.15
+ensemble-src-wt-skill-revival-phase1       Python 3.14.7
+ensemble-src-wt-skill-revival-base1        Python 3.14.7
+ensemble-src-wt-stage-v0297                Python 3.14.7
+ensemble-src-wt-stage-v0296                Python 3.14.7
+ensemble-src-wt-pok                        Python 3.14.7
+ensemble-src-wt-memoir-v2                  Python 3.14.7
+ensemble-src-wt-scripts-pin                (no .venv)
+
+--- 2. LIVE RELEASE BINARIES (grep -a on bytes; NOT executed) ---
+v0.29.7  size=82029384
+   libpython : libpython3.14 
+   cpython   : cpython-314 
+v0.29.6  size=82013888
+   libpython : libpython3.14 
+   cpython   : cpython-314 
+v0.29.5  size=82013728
+   libpython : libpython3.14 
+   cpython   : cpython-314 
+
+--- 3. THE MEASUREMENT COMMAND for the Phase-1 staged artifact ---
+   (run against the STAGED artifact, then compare with live v0.29.7 above)
+   grep -aoE 'libpython3\.[0-9]+' <staged>/ensemble-prod | sort -u
+   grep -aoE 'cpython-3[0-9]+'   <staged>/ensemble-prod | sort -u
+
+--- 4. REPO INTERPRETER PIN: NONE ---
+   .python-version ABSENT
+   runtime.txt ABSENT
+   pyproject.toml : requires-python = ">=3.13"
+   uv.lock        : requires-python = ">=3.13"
+   => a FLOOR, not a pin. uv's default python moved 3.13 -> 3.14 since 2026-08-24.
+
+--- 5. MANIFEST GAP (the unrecorded variable) ---
+   live manifest.json top-level scalar keys:
+     version: 'v0.29.7'
+     binary_version: '0.29.7'
+     staged_at: '2026-11-09T03:39:30Z'
+     pipeline_scripts_floor_commit: '2147c0298a09a5d7c5a0caeea04cdc51ed1ebcaa'
+     known_schema_gen: '20261107_122648_create_source_gc_archive_tables.sql'
+     contains_contract_phase: True
+     rollback_safe: True
+     launcher_sha256: 'c4f640e11c31a505e2e63d6c66d7728dc2bb79f7cd2856ba9077a0a8236daf2a'
+     binary_sha256: '69fccb24af9f40068a5e892b1348cfa1d73230ef3cd1443b053c938bce71d7e6'
+     config_sha256: '87a037f5d82ddb944c8f43a8e9cd0493528a95e2c9fbe9930f78ac7ac15187b2'
+     agents_tree_sha256: '9bfc72fd2c810a26f4105c74fc7d8af19e92d999a620d3d01836eeaef09afcd5'
+     frontend_tree_sha256: 'f4e344acf497293da156b8c1315cd1da5e7d930e02bf38aaa967eb7fefe239ba'
+     plugins_tree_sha256: '4715cf64dad62d209c91206c560e475d7fa4cec8f67f6182ffbcd21b723685a7'
+     agents_manifest: <dict len=379>
+     frontend_manifest: <dict len=95>
+     plugins_manifest: <dict len=4930>
+     -> NO python/interpreter key present.
+
+--- 6. INTERPRETER DIFFERENTIAL: 3.13 vs 3.14 on the skill blast radius ---
+   file set: 12 files / 459 tests (see base-leg/file-set.txt)
+   leg313.txt: 3 failed, 456 passed in 29.27s
+   leg314.txt: 3 failed, 456 passed, 1 warning in 30.60s
+   failed-lists: IDENTICAL (3 stable reds both sides)
+   => the interpreter is NOT a confounder for this lane's red/green math.
+   => but both legs MUST share an interpreter; never use the canonical
+      checkout's stale 3.13 venv as a base leg.

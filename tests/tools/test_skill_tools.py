@@ -22,7 +22,7 @@ Test classes
 * :class:`TestServicesMissing` — when the four service/dispatcher
   attributes are explicitly ``None``, the four read/write tools
   return the expected soft-fail message, ``skill_fix`` returns its
-  user-facing record message with the "dispatcher not yet available"
+  durability-neutral header with the "dispatcher not yet available"
   note, and ``skill_feedback`` returns the "metrics service not yet
   available" soft-fail.
 * :class:`TestServicesAvailable` — when each service is wired up
@@ -94,7 +94,7 @@ STORE_SERVICE_MISSING_NEEDLE = (
     "Skill store service not yet available"
 )
 LATER_PHASE_NEEDLE = "later phase"
-FIX_RECORDED_NEEDLE = "Skill fix request recorded"
+FIX_HEADER_NEEDLE = "Skill fix request for skill"
 DISPATCHER_MISSING_NEEDLE = "dispatcher not yet available"
 FEEDBACK_RECORDED_NEEDLE = "recorded"
 FEEDBACK_PHASE4_NEEDLE = "Phase 4"
@@ -254,9 +254,11 @@ class TestServicesMissing:
     ``manager._skill_store_service``, ``manager._skill_job_dispatcher``,
     and ``manager._skill_metrics_service`` are all ``None``, every tool
     returns the appropriate soft-fail string. The 4 read/write tools
-    return a "service not yet available" message; ``skill_fix`` always
-    records the request but adds a "dispatcher not yet available"
-    note; ``skill_feedback`` returns the "metrics service not yet
+    return a "service not yet available" message; ``skill_fix``
+    answers with its durability-neutral header and adds a "dispatcher
+    not yet available" note (nothing is recorded anywhere — the
+    response is the only record); ``skill_feedback`` returns the
+    "metrics service not yet
     available" message.
     """
 
@@ -311,19 +313,30 @@ class TestServicesMissing:
     async def test_skill_fix_returns_user_facing_message_when_dispatcher_missing(
         self, skill_tools
     ):
-        """``skill_fix`` always records the request. When the
-        dispatcher is missing, the response also notes that the
-        dispatcher is not yet available.
+        """``skill_fix`` answers with a durability-neutral header
+        (D-G1: no durability claim lives in the header) and, when the
+        dispatcher is missing, adds the "dispatcher not yet available"
+        note.
+
+        SCOPE (D-G5): this pin asserts the HEADER SHAPE and the
+        dispatcher's absence note ONLY — it does NOT assert the
+        durability body ("NOTHING was dispatched … no skill-keeper job
+        was created"). That durability coverage lives in the
+        strengthened lane-gate pin
+        (``tests/unit/test_skill_evolution_lane_gate.py``) and in the
+        D-G1 coherence pins.
         """
         tool = skill_tools["skill_fix"]
         result = await tool.ainvoke({
             "skill_id": "sk-fix-target",
             "issue_description": "Outdated regex in matcher",
         })
-        assert FIX_RECORDED_NEEDLE in result
+        assert FIX_HEADER_NEEDLE in result
         assert DISPATCHER_MISSING_NEEDLE in result
-        # Issue description is echoed into the Summary line so the
-        # skill-keeper agent has full context for the next pass.
+        # The issue description is echoed into the response so the
+        # skill-keeper agent has full context for the next pass. (The
+        # pin asserts its PRESENCE in the response — not any specific
+        # line: the tool has no "Summary" line.)
         assert "Outdated regex" in result
 
     @pytest.mark.asyncio
@@ -516,7 +529,9 @@ class TestServicesAvailable:
         result = await tools["skill_list"].ainvoke({})
 
         assert service.list_skills.await_count == 1
-        # The bullet line carries the skill name, category, and status.
+        # The response carries the skill name, the category and the
+        # status. (The pin asserts their PRESENCE — not their position
+        # on one bullet line.)
         assert "Demo" in result
         assert "workflow" in result
         assert "active" in result
@@ -584,8 +599,10 @@ class TestServicesAvailable:
 
         result = await tools["skill_list"].ainvoke({})
 
-        # The header line "Skills (0 of 0 total):" appears regardless
-        # of whether the underlying service returned any rows.
+        # A "Skills" header and a zero count appear regardless of
+        # whether the underlying service returned any rows. (The pin
+        # asserts the "Skills" marker and the "0" — not the exact
+        # header line.)
         assert "Skills" in result
         assert "0" in result
 
@@ -774,8 +791,7 @@ class TestEdgeCases:
     ):
         """When ``_skill_job_dispatcher`` is ``None``, ``skill_fix``
         does NOT attempt any service dispatch \u2014 it just emits the
-        user-facing "recorded" message with the dispatcher-missing
-        note.
+        user-facing header with the dispatcher-missing note.
 
         To verify that no service slots were touched, rebuild the
         tools with a fresh manager where the read/write services are
@@ -813,7 +829,7 @@ class TestEdgeCases:
             "issue_description": "broken",
         })
 
-        assert FIX_RECORDED_NEEDLE in result
+        assert FIX_HEADER_NEEDLE in result
         assert DISPATCHER_MISSING_NEEDLE in result
         # Spy services must NOT have been awaited \u2014 any await would
         # have raised the AssertionError above.
@@ -826,9 +842,12 @@ class TestEdgeCases:
     async def test_skill_fix_uses_dispatcher_when_available(self):
         """When ``_skill_job_dispatcher.dispatch_fix`` is wired up,
         ``skill_fix`` calls it (with a sync OR async dispatch_fix).
-        The agent-facing response still reports "recorded" because
-        the user-facing confirmation is deterministic regardless of
-        dispatcher success.
+        The agent-facing header stays durability-neutral (D-G1).
+
+        SCOPE (D-G5): the admission VERDICT is NOT asserted here — this
+        pin checks that the dispatcher was invoked with the expected
+        kwargs, that the header is the neutral one, and that the
+        dispatcher-missing note is ABSENT.
         """
         from daemon.tools.skill_tools import create_skill_tools
 
@@ -852,8 +871,10 @@ class TestEdgeCases:
         call = dispatcher.dispatch_fix.await_args
         assert call.kwargs.get("skill_id") == "sk-x"
         assert call.kwargs.get("issue_description") == "broken"
-        # User-facing confirmation is preserved.
-        assert FIX_RECORDED_NEEDLE in result
+        # The neutral header is present. (D-G5: the admission VERDICT
+        # is NOT asserted here — this pin checks the header shape and
+        # the dispatcher's invocation only.)
+        assert FIX_HEADER_NEEDLE in result
         # Dispatcher-missing note is NOT present when the dispatcher
         # ran (the ``dispatcher is None or dispatch_method is None``
         # branch is skipped).
@@ -1155,3 +1176,38 @@ class TestReviewFixes:
         # Service returned an empty payload — the response is the
         # JSON-encoded ``{"injected": [], "low_match": []}``.
         assert "injected" in result and "low_match" in result
+
+
+# ---- sink sandbox (house safe redirect) ----
+# The capture-lane sink resolves its data dir from a PROCESS-GLOBAL
+# override.  A fixture that installs a redirect and then restores the
+# override to ``None`` re-exposes the checkout's REAL data dir for every
+# later write (the order-dependent sink leak).  This fixture NEVER
+# restores ``None``: it restores the SAFE session scratch dir and runs
+# the shared-path sentinel.  See tests/helpers/skill_sink_redirect.py.
+from daemon.services import skill_capture_observability as observability
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
+
+@pytest.fixture(autouse=True)
+def _sink_sandbox(tmp_path, request):
+    """Redirect the capture sink into ``tmp_path``; never restore None."""
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    observability.set_anomaly_reporter(None)
+    try:
+        yield tmp_path
+    finally:
+        # NEVER restore to None — that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink leak).
+        restore_safe_sink_redirect()
+        observability.reset_counters()
+        observability.set_anomaly_reporter(None)
+        lane_test_end(request.node.nodeid, before)

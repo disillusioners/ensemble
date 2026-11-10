@@ -1,0 +1,12 @@
+........................................................................ [ 15%]
+........................................................................ [ 31%]
+........................................................................ [ 47%]
+........................................................................ [ 62%]
+..............................FFF....................................... [ 78%]
+........................................................................ [ 94%]
+...........................                                              [100%]
+=========================== short test summary info ============================
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_initialized_when_config_present
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_none_when_skill_evolution_disabled
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_have_correct_dependencies
+3 failed, 456 passed in 29.27s

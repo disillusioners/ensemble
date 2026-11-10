@@ -1,0 +1,12 @@
+tests/unit/test_skill_seeding.py
+tests/unit/test_skill_clone_service.py
+tests/unit/test_skill_capture_killswitch.py
+tests/services/test_skill_job_dispatcher.py
+tests/tools/test_skill_evolution_tools.py
+tests/services/test_skill_evolution_service.py
+tests/services/test_skill_search_service.py
+tests/services/test_skill_embedding_service.py
+tests/manager/test_skill_service_init.py
+tests/services/test_skill_metrics_service.py
+tests/services/test_skill_metric_scan.py
+tests/unit/services/test_context_injection.py

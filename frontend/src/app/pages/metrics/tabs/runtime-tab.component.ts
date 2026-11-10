@@ -10,8 +10,10 @@ import { MetricsRangeOption } from '../metrics-range';
 import { metricsCentralTab } from '../tabs.manifest';
 
 /**
- * The Runtime module tab — the readiness composite (F9) plus the wedge-capture families (F1, F3),
- * which are bound NOW and dark until R-ii wires `capture_active`.
+ * The Runtime module tab — the readiness composite (F9) plus the wedge-capture families (F1, F3).
+ * Both blockers are FIXED: R-i (wiring `capture_active` from the wedge-capture process fact) and
+ * R-ii (the `census inverted` polarity) landed server-side, so F1/F3 report live whenever the
+ * wedge-capture watchdog is live and dark/capture_off when it is not.
  *
  * The body is the shared central implementation (the six central tabs
  * differ only in their manifest entry); the per-kind+unit-group panel

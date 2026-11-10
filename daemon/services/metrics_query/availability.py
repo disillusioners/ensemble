@@ -58,7 +58,11 @@ class AvailabilityFacts:
     census_gated: bool = False
     #: Whether the census sampler thread is running.
     census_running: bool = False
-    #: Whether the wedge capture is active.
+    #: Whether the wedge capture process is live — the WEDGE-CAPTURE
+    #: PROCESS FACT (the watchdog handle exists and is not ``None``),
+    #: resolved per read by the provider.  Not a switch value: the
+    #: sibling ``listener_enabled`` fact is switch-invariant by the same
+    #: reasoning.
     capture_active: bool = False
 
 
@@ -80,12 +84,16 @@ def derive_availability(
         # "F6 availability → census_not_running (the switch state is NOT
         # inferable)").  The census_gated fact is checked SECOND.
         #
-        # The POLARITY of `census.gated` itself is R-i — an OUT-OF-LANE
-        # defect in daemon/services/metrics_census.py (the property
-        # returns "enabled" where its docstring says "gated off"), and
-        # it is NOT fixed here: this lane only reads the PUBLIC property
+        # The POLARITY of `census.gated` itself is R-ii — the defect in
+        # daemon/services/metrics_census.py (the property returned
+        # "enabled" where its docstring says "gated off"), FIXED here in
+        # the same change (`metrics_census.py` now returns
+        # ``not self._gate()``).  R-i (the unwired ``capture_active``
+        # fact) is a SEPARATE defect, also fixed in this change at the
+        # ``daemon/api.py`` construction site.  Neither fix adds a check
+        # site: the query package still only reads the PUBLIC property
         # (the two-check-sites invariant; AM-13/AM-18/D-11b).  The pin
-        # below therefore asserts only the ORDER, never the polarity.
+        # below therefore asserts only the ORDER.
         if not facts.census_running:
             return {"state": "dark", "reason": "census_not_running"}
         if facts.census_gated:

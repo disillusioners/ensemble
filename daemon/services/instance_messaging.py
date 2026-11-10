@@ -39,6 +39,7 @@ from ..utils import parse_think_tags, serialize_message
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
+from .skill_identity_dedupe import inject_skills_deduped
 from .pool_orchestrator import safe_notify_all_pools
 from .resource_monitor.charge import (
     note_message_append as _charge_note_message_append,
@@ -4405,11 +4406,12 @@ class InstanceMessagingService:
                                     (
                                         injection_text,
                                         injected_skill_ids,
-                                    ) = await injection_service.inject_skills(
+                                    ) = await inject_skills_deduped(
+                                        injection_service,
                                         message,
-                                        skill_project_id,
-                                        instance_id,
-                                        message_id,
+                                        project_id=skill_project_id,
+                                        instance_id=instance_id,
+                                        message_id=message_id,
                                         agent_id=skill_instance_meta.agent_id,
                                     )
                                     if injection_text:

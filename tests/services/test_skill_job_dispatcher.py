@@ -22,6 +22,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import json
+
 import pytest
 
 
@@ -347,9 +349,20 @@ class TestEnqueueCapture:
         assert kwargs["queue_id"] == "q-parallel-1"
         assert kwargs["agent_id"] == "skill-keeper"
         # task_details lives verbatim in metadata.
-        assert kwargs["metadata"] == {"task_details": task_details}
+        assert kwargs["metadata"]["task_details"] == task_details
         assert kwargs["metadata"]["task_details"]["iterations"] == 8
         assert kwargs["metadata"]["task_details"]["duration_seconds"] == 90
+        # D (2026-11-09 — phase1-plan §8 row 29): the metadata ALSO
+        # carries the per-run observability stamps — a stable run id,
+        # the prompt SOURCE and the prompt SHAPE. The shape never
+        # carries the raw prompt (credential hygiene, DS-18).
+        assert kwargs["metadata"]["capture_run_id"]
+        assert kwargs["metadata"]["prompt_source"] == "completion_hook"
+        shape = kwargs["metadata"]["prompt_shape"]
+        assert shape["length_bucket"] in ("short", "medium", "long")
+        assert shape["has_agent_id"] is True
+        assert shape["sha256_16"]
+        assert task_details["task_message"] not in json.dumps(shape)
 
 
 # =============================================================================
@@ -545,3 +558,38 @@ class TestJobTypeConstants:
         from daemon.services.skill_job_dispatcher import SOURCE_TAG
 
         assert SOURCE_TAG == "skill_evolution"
+
+
+# ---- sink sandbox (house safe redirect) ----
+# The capture-lane sink resolves its data dir from a PROCESS-GLOBAL
+# override.  A fixture that installs a redirect and then restores the
+# override to ``None`` re-exposes the checkout's REAL data dir for every
+# later write (the order-dependent sink leak).  This fixture NEVER
+# restores ``None``: it restores the SAFE session scratch dir and runs
+# the shared-path sentinel.  See tests/helpers/skill_sink_redirect.py.
+from daemon.services import skill_capture_observability as observability
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
+
+@pytest.fixture(autouse=True)
+def _sink_sandbox(tmp_path, request):
+    """Redirect the capture sink into ``tmp_path``; never restore None."""
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    observability.set_anomaly_reporter(None)
+    try:
+        yield tmp_path
+    finally:
+        # NEVER restore to None — that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink leak).
+        restore_safe_sink_redirect()
+        observability.reset_counters()
+        observability.set_anomaly_reporter(None)
+        lane_test_end(request.node.nodeid, before)

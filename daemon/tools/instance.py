@@ -2463,6 +2463,154 @@ def _make_workdir_aware(
         return wrapped_func
 
 
+def _make_read_scope_aware(
+    tool,  # Can be a function or StructuredTool
+    get_caller_agent_id: Callable[[], str | None],
+    get_trusted_workdir: Callable[[], str | None],
+):
+    """Bind the CALLING AGENT'S IDENTITY + the TRUSTED workdir to a read tool.
+
+    The identity is what makes the agent's DECLARED ``read_scope``
+    (``agents/<name>/meta.json``) readable at the enforcement site in
+    ``daemon/tools/filesystem.py``. Without this binding the scope is
+    unreadable at the resolver and the fence cannot exist.
+
+    Why the IDENTITY and not the scope value: the binding is made by
+    the FACTORY, never by the tool's arguments — an agent can neither
+    widen its own scope nor pass a forged one. The scope value itself
+    is resolved from the agent's own ``meta.json`` at the enforcement
+    site, so there is exactly ONE place that decides what a scope means.
+
+    The TRUSTED WORKDIR is the second half of the fence (Phase-1 fix
+    round 1, D1). The scope's base must be the daemon-resolved project
+    workdir, NEVER the tool-call's ``workdir`` ARGUMENT — that argument
+    is agent-supplied, and anchoring to it let the agent move its own
+    boundary (``read_file("/etc/passwd", workdir="/")`` returned the
+    file). Both bindings travel together, per call.
+
+    This mirrors ``_make_workdir_aware``'s structure (the tool's
+    category / ``_full_doc_`` metadata is preserved by the shared
+    ``_rebuild_structured_tool`` helper).
+
+    Args:
+        tool: The tool to wrap (function or StructuredTool)
+        get_caller_agent_id: Callable returning the calling agent's id
+        get_trusted_workdir: Callable returning the daemon-resolved
+            project workdir (the read anchor)
+
+    Returns:
+        Wrapped tool with the ambient caller identity + trusted workdir
+        bound per call.
+    """
+    from functools import wraps
+    from langchain_core.tools import StructuredTool
+
+    from .filesystem import (
+        declared_read_scope,
+        reset_caller_agent_id,
+        reset_trusted_workdir,
+        set_caller_agent_id,
+        set_trusted_workdir,
+    )
+
+    def _scope_refusal(agent_id: str | None, supplied_workdir) -> str | None:
+        """Refuse an AGENT-SUPPLIED ``workdir`` for a scoped agent.
+
+        POLICY (the dispatcher's ruling, D1 property 2): for a scoped
+        agent the ``workdir`` argument MUST NOT be able to move the
+        read base. This implementation **REJECTS** it — a scoped agent
+        that supplies a ``workdir`` gets a refusal naming the trusted
+        anchor, instead of a silently-ignored argument (a silent
+        ignore would let the agent believe it had moved the boundary).
+
+        The auto-filled default (the inner ``_make_workdir_aware``
+        wrapper fills ``workdir`` when the agent omitted it) is NOT
+        agent-supplied, so it is never refused — and it equals the
+        trusted anchor by construction.
+        """
+        scope = declared_read_scope(agent_id)
+        if not scope:
+            return None
+        if supplied_workdir is None or not str(supplied_workdir).strip():
+            return None
+        anchor = get_trusted_workdir()
+        return (
+            f"ERROR: read scope {scope!r} fixes the read anchor at the "
+            f"daemon-resolved workdir ({anchor}); the 'workdir' argument is "
+            f"not accepted for a scoped agent (got {supplied_workdir!r}). "
+            "Pass a RELATIVE path — it is resolved against the anchor."
+        )
+
+    if isinstance(tool, StructuredTool):
+        original_func = getattr(tool, 'coroutine', None) or getattr(tool, 'func', None)
+        if original_func is None:
+            return tool
+
+        if asyncio.iscoroutinefunction(original_func):
+            @wraps(original_func)
+            async def wrapped_func(*args, **kwargs):
+                agent_id = get_caller_agent_id()
+                refusal = _scope_refusal(agent_id, kwargs.get('workdir'))
+                if refusal:
+                    return refusal
+                token = set_caller_agent_id(agent_id)
+                workdir_token = set_trusted_workdir(get_trusted_workdir())
+                try:
+                    return await original_func(*args, **kwargs)
+                finally:
+                    reset_trusted_workdir(workdir_token)
+                    reset_caller_agent_id(token)
+        else:
+            @wraps(original_func)
+            def wrapped_func(*args, **kwargs):
+                agent_id = get_caller_agent_id()
+                refusal = _scope_refusal(agent_id, kwargs.get('workdir'))
+                if refusal:
+                    return refusal
+                token = set_caller_agent_id(agent_id)
+                workdir_token = set_trusted_workdir(get_trusted_workdir())
+                try:
+                    return original_func(*args, **kwargs)
+                finally:
+                    reset_trusted_workdir(workdir_token)
+                    reset_caller_agent_id(token)
+
+        return _rebuild_structured_tool(tool, wrapped_func)
+
+    func = tool
+
+    if asyncio.iscoroutinefunction(func):
+        @wraps(func)
+        async def wrapped_func(*args, **kwargs):
+            agent_id = get_caller_agent_id()
+            refusal = _scope_refusal(agent_id, kwargs.get('workdir'))
+            if refusal:
+                return refusal
+            token = set_caller_agent_id(agent_id)
+            workdir_token = set_trusted_workdir(get_trusted_workdir())
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                reset_trusted_workdir(workdir_token)
+                reset_caller_agent_id(token)
+    else:
+        @wraps(func)
+        def wrapped_func(*args, **kwargs):
+            agent_id = get_caller_agent_id()
+            refusal = _scope_refusal(agent_id, kwargs.get('workdir'))
+            if refusal:
+                return refusal
+            token = set_caller_agent_id(agent_id)
+            workdir_token = set_trusted_workdir(get_trusted_workdir())
+            try:
+                return func(*args, **kwargs)
+            finally:
+                reset_trusted_workdir(workdir_token)
+                reset_caller_agent_id(token)
+
+    return wrapped_func
+
+
 def _make_instance_id_aware(
     tool,  # Can be a function or StructuredTool
     get_default_instance_id: Callable[[], str | None]
@@ -3067,6 +3215,22 @@ def create_instance_tools(
     # too (it shadows the outer var), so we pin the caller's id here under
     # a distinct name for the team_members authorization check.
     caller_agent_id: str = agent_id or ""
+
+    # B3 (Phase-1 plan §6 B3, row 17b): the read-scope binding. The
+    # calling agent's IDENTITY is what makes the agent's declared
+    # ``read_scope`` readable at the enforcement site in
+    # ``daemon/tools/filesystem.py``. Absent declaration ⇒ no scope ⇒
+    # every other agent's read behavior is byte-identical to base.
+    def get_current_caller_agent_id() -> str | None:
+        return caller_agent_id or None
+
+    # B3 fix round 1 (D1): the TRUSTED read anchor. It is the
+    # daemon-resolved project workdir — the SAME directory the read
+    # tool defaults to — and it is NEVER taken from the tool-call's
+    # ``workdir`` ARGUMENT (that argument is agent-supplied; anchoring
+    # the scope to it let the agent move its own boundary).
+    def get_trusted_workdir() -> str | None:
+        return _get_project_workdir(manager, current_instance_id)
 
     # Defensively capture the caller's version tag before defining closures.
     # This snapshot is a regression guard against future closure code that
@@ -6339,11 +6503,34 @@ Returns:
         _make_workdir_aware(bash, get_current_workdir),
         get_current_instance_id,
     )
-    list_directory_aware = _make_workdir_aware(list_directory, get_current_workdir)
-    read_file_aware = _make_workdir_aware(read_file, get_current_workdir)
+    # B3: the two READ call sites carry the scope-aware binding (the
+    # write/edit call sites deliberately do NOT — write-path scope is
+    # explicitly out of scope per the plan §6 B3).
+    # D-N1 (iteration 2): the two WALK tools carry the SAME binding. They
+    # were the second surface with the same anchor bug — bounded against
+    # the AGENT-SUPPLIED `workdir`, so `grep_files(path=<out-of-anchor>,
+    # workdir="/")` returned live CONTENT to the keeper.
+    list_directory_aware = _make_read_scope_aware(
+        _make_workdir_aware(list_directory, get_current_workdir),
+        get_current_caller_agent_id,
+        get_trusted_workdir,
+    )
+    read_file_aware = _make_read_scope_aware(
+        _make_workdir_aware(read_file, get_current_workdir),
+        get_current_caller_agent_id,
+        get_trusted_workdir,
+    )
     write_file_aware = _make_workdir_aware(write_file, get_current_workdir)
-    glob_files_aware = _make_workdir_aware(glob_files, get_current_workdir)
-    grep_files_aware = _make_workdir_aware(grep_files, get_current_workdir)
+    glob_files_aware = _make_read_scope_aware(
+        _make_workdir_aware(glob_files, get_current_workdir),
+        get_current_caller_agent_id,
+        get_trusted_workdir,
+    )
+    grep_files_aware = _make_read_scope_aware(
+        _make_workdir_aware(grep_files, get_current_workdir),
+        get_current_caller_agent_id,
+        get_trusted_workdir,
+    )
     edit_file_aware = _make_workdir_aware(edit_file, get_current_workdir)
     
     # Base tools (available in all instances) - with auto workdir support

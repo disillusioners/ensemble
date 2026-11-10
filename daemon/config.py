@@ -5274,6 +5274,47 @@ class SkillEvolutionConfig(EmbeddingConfig):
             "3x in 38 minutes)."
         ),
     )
+    # ── Durable re-fix burst cap (2026-11-09 — phase1-plan §9 E1) ──
+    # The RAM cooldown above DRAINS ON RESTART and a sliding window
+    # still permits a slow trickle (one admission per 30 min, forever).
+    # This cap is the durable backstop: it counts COMMITTED
+    # ``skill_evolution`` FIX admissions for the SAME SKILL within
+    # ``fix_burst_window_seconds`` and refuses the next one
+    # ("refused: burst cap" + an anomaly row). The count is keyed on
+    # the SKILL IDENTITY in the job metadata — NOT on the
+    # ``idempotency_key`` (a re-admission is suffixed with ``#<uuid8>``,
+    # so a job-keyed count could never trip).
+    #
+    # The knobs live HERE (the config surface) rather than as new
+    # ``ENSEMBLE_*`` env flags — the house rule is "no new ENSEMBLE_*
+    # flags without owner authorization". As with every field of this
+    # config, pydantic's ``env_prefix`` ALSO exposes them as
+    # ``SKILL_EVOLUTION_FIX_BURST_CAP`` /
+    # ``SKILL_EVOLUTION_FIX_BURST_WINDOW_SECONDS``; those aliases set
+    # the CONSTRUCTED DEFAULT only.
+    fix_burst_cap: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Max FIX admissions per skill within "
+            "fix_burst_window_seconds. The next admission inside the "
+            "window is refused ('refused: burst cap') with an anomaly "
+            "row; 0 disables the cap. Default 3 per 24h — the "
+            "2026-10-21 burst re-FIXed one skill 3x in 37 minutes. "
+            "MUST be >= 0: a NEGATIVE value is rejected at load rather "
+            "than silently clamped to 0 (which would DISARM the cap)."
+        ),
+    )
+    fix_burst_window_seconds: int = Field(
+        default=86400,
+        ge=1,
+        description=(
+            "Window (seconds) for the durable FIX burst cap. Default "
+            "86400 (24h) — the Phase-2 observation window. MUST be >= 1: "
+            "a zero/negative window is rejected at load rather than "
+            "silently disarming the cap."
+        ),
+    )
 
 
 class LoopBreakerConfig(BaseSettings):

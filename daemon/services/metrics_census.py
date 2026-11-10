@@ -331,8 +331,16 @@ class CensusSampler:
 
         This property adds NO new check site: it calls the same
         ``_gate()`` the census tick already calls.
+
+        POLARITY (R-ii): ``_gate()`` returns the ENABLED sense — the
+        module-level metrics gate answers ``True`` when the census may
+        do DB work — while this property is documented as a GATED-OFF
+        fact.  The negation below is what makes the property agree with
+        its own docstring and with every consumer: a consumer reading
+        ``gated`` gets ``True`` exactly when the census is gated OFF,
+        and ``False`` while it is enabled and publishing.
         """
-        return self._gate()
+        return not self._gate()
 
     @property
     def dsn(self) -> str | None:

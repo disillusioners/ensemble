@@ -11,7 +11,9 @@ import { metricsCentralTab } from '../tabs.manifest';
 
 /**
  * The DB Pool module tab — the DB pool gauges and counters (F4, F5) plus the PostgreSQL census
- * (F6), which is bound NOW and dark until R-i fixes the census polarity.
+ * (F6), which is bound NOW. Both blockers are FIXED: R-i (the `capture_active` wiring) and R-ii
+ * (the census `gated` polarity) landed server-side, so F6 reports live whenever the census is
+ * enabled AND running AND publishing (else dark/census_gated / census_not_running / series_absent).
  *
  * The body is the shared central implementation (the six central tabs
  * differ only in their manifest entry); the per-kind+unit-group panel

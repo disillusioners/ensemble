@@ -5,9 +5,12 @@ three-way form (a two-way form was the defect class the fold ledger
 recorded):
 
 * the **declared-route** census (the scope-decorated routes) reads
-  **113** — the three query routes joined the family, and the
+  **114** — the three query routes joined the family, the
   nest-anomaly-report lane's ``/api/nest-reports`` DOMAIN route added
-  TWO scope-decorated routes (the family + the cluster detail);
+  TWO scope-decorated routes (the family + the cluster detail), and the
+  capture-lane read site added ONE (``GET /api/metrics/capture-lane``,
+  workstream A / I3 — a scope-decorated route on the SAME metrics
+  router, so the mount census is unchanged);
 * the **mount** census stays **38** — the domain route is ONE new
   mount (``/api/nest-reports``);
 * the **class-manifest** family count stays **34** — the new family is
@@ -36,7 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 API_PY = REPO_ROOT / "daemon" / "api.py"
 
 #: The three-way cage form (declared-route · mount · class manifest).
-DECLARED_ROUTE_CENSUS = 113
+DECLARED_ROUTE_CENSUS = 114
 MOUNT_CENSUS = 38
 CLASS_MANIFEST_FAMILIES = 34
 
@@ -80,7 +83,7 @@ def app_routes():
 class TestThreeWayCage:
     """The three-way cage form — all three pins at once."""
 
-    def test_the_declared_route_census_reads_113(self, app_routes):
+    def test_the_declared_route_census_reads_114(self, app_routes):
         declared = [
             route
             for route in app_routes

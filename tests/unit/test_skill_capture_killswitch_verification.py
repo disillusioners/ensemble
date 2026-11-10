@@ -318,7 +318,7 @@ class TestDefaultOffSeamInertness:
         ab_test_repo = SkillABTestRepository(verif_engine)
         # Replace the real repo methods with Mocks at the boundary so we
         # can spy on them — same pattern as the dev's ks_* fixtures.
-        usage_repo.has_applied_for_instance = MagicMock(return_value=False)
+        usage_repo.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         # ALL external collaborators mocked — these are the boundaries
         # whose non-invocation we use to prove the gate fires.
@@ -386,7 +386,7 @@ class TestDefaultOffSeamInertness:
         # NO agent-metadata lookup.
         verif_metrics_service._verif_agent_id_resolver.assert_not_called()
         # NO usage-record DB read.
-        verif_metrics_service._verif_usage_repo.has_applied_for_instance \
+        verif_metrics_service._verif_usage_repo.has_genuinely_evolved_for_instance \
             .assert_not_called()
         # NO instance metadata touch.
         verif_metrics_service._verif_instance_repo.get.assert_not_called()
@@ -949,3 +949,38 @@ class TestCombinedOffScenarioAllSeamsSilent:
         })
         assert "verif-combined-id" in create_result or "\u2705" in create_result
         store_service.create_skill.assert_awaited_once()
+
+
+# ---- sink sandbox (house safe redirect) ----
+# The capture-lane sink resolves its data dir from a PROCESS-GLOBAL
+# override.  A fixture that installs a redirect and then restores the
+# override to ``None`` re-exposes the checkout's REAL data dir for every
+# later write (the order-dependent sink leak).  This fixture NEVER
+# restores ``None``: it restores the SAFE session scratch dir and runs
+# the shared-path sentinel.  See tests/helpers/skill_sink_redirect.py.
+from daemon.services import skill_capture_observability as observability
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
+
+@pytest.fixture(autouse=True)
+def _sink_sandbox(tmp_path, request):
+    """Redirect the capture sink into ``tmp_path``; never restore None."""
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    observability.set_anomaly_reporter(None)
+    try:
+        yield tmp_path
+    finally:
+        # NEVER restore to None — that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink leak).
+        restore_safe_sink_redirect()
+        observability.reset_counters()
+        observability.set_anomaly_reporter(None)
+        lane_test_end(request.node.nodeid, before)

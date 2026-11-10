@@ -23,7 +23,13 @@
 #   2. tests/tools/test_skill_tools_pf_surface.py — the sibling corpus
 #      (the folded W4 pin: the ``— source: db`` suffix additivity and
 #      the knob-OFF byte-shape).
-#   3. The MUTATION MATRIX (M1-M6 + M2b + M7-M9) — pack-level plants:
+#   2b. tests/unit/test_skill_evolution_lane_gate.py — the Phase-1
+#      workstream-B2 pins (the inline `skill_evolve` lane gate). The
+#      plan body claimed this pack already ran this file; it did NOT
+#      (the claim was STALE — the approver flagged it). The pack now
+#      runs it, and the M-B2a..d mutation legs live inside it.
+#   3. The MUTATION MATRIX (M1-M6 + M2b + M7-M9 + M-B2a..d) — pack-level
+#      plants:
 #      plant the defect → the discriminating leg must go RED → restore
 #      → the same leg must go GREEN. RESTORE SEMANTICS (gate F1 fix):
 #      every mutable file's PRISTINE content+sha256 is captured BEFORE
@@ -47,7 +53,7 @@
 #   - INTERNAL TIMER (gate F2 fix): the pack asserts its own wall-clock
 #     budget after every phase and every mutation leg; overrun prints
 #     RESULT: TIMEOUT and exits 124. Budget via
-#     SKILL_ID_VERBATIM_BUDGET_S (default 300 = the house cap; the
+#     SKILL_ID_VERBATIM_BUDGET_S (default 420 = the house cap; the
 #     registered PACKS.md invocation also wraps ``timeout 300``).
 #   - CONCURRENCY FENCE (gate F1 fix): flock keyed on the checkout's
 #     realpath — a second concurrent run against the SAME checkout
@@ -74,7 +80,7 @@
 #   bash test/packs/skill_id_verbatim_contract_unit_test.sh
 #   SKILL_ID_VERBATIM_MUTATIONS=0 bash test/packs/skill_id_verbatim_contract_unit_test.sh
 #     — skip the mutation matrix (the pin only).
-#   SKILL_ID_VERBATIM_BUDGET_S=300 bash test/packs/skill_id_verbatim_contract_unit_test.sh
+#   SKILL_ID_VERBATIM_BUDGET_S=420 bash test/packs/skill_id_verbatim_contract_unit_test.sh
 #     — override the internal wall-clock budget (seconds).
 #
 # Pack exit: 0 PASS / 1 FAIL / 124 TIMEOUT. The RESULT label always
@@ -93,7 +99,7 @@ echo "=== Test Pack: skill_id_verbatim_contract_unit_test ==="
 # The pack measures its own elapsed wall time from PACK_START and
 # asserts it against BUDGET_S after every phase and every mutation leg.
 PACK_START="$(date +%s)"
-BUDGET_S="${SKILL_ID_VERBATIM_BUDGET_S:-300}"
+BUDGET_S="${SKILL_ID_VERBATIM_BUDGET_S:-420}"
 elapsed_s() { echo $(( $(date +%s) - PACK_START )); }
 check_budget() {
   local elapsed label="${1:-}"
@@ -129,6 +135,7 @@ MUTABLE_FILES=(
   "daemon/services/skill_injection_service.py"
   "daemon/services/project_skill_source/service.py"
   "daemon/services/skill_search_service.py"
+  "daemon/tools/skill_evolution_tools.py"
 )
 
 _pristine_key() { printf '%s' "$1" | sha256sum | cut -d' ' -f1 | cut -c1-16; }
@@ -214,6 +221,10 @@ run_pytest() {
 
 PIN_FILE="tests/tools/test_skill_id_verbatim_contract.py"
 SIBLING_FILE="tests/tools/test_skill_tools_pf_surface.py"
+# Phase-1 workstream B2 (the lane gate) — the plan body claimed this
+# pack already ran this file; it did NOT (the claim was stale). The
+# B2 mutation legs live inside it.
+LANE_GATE_FILE="tests/unit/test_skill_evolution_lane_gate.py"
 
 # --- phase 0: the IMPORT GUARD (mandatory — pin-spec.md §H, W5) -----------
 # The pack MUST prove that ``import daemon`` resolves to THIS checkout
@@ -274,7 +285,7 @@ check_budget "after phase 0"
 # --- phase 1: the pin + the sibling corpus --------------------------------
 echo "--- phase 1: the contract pin ---"
 PHASE1_LOG="$FAKE_HOME/phase1.log"
-run_pytest "$PIN_FILE" "$SIBLING_FILE" >"$PHASE1_LOG" 2>&1
+run_pytest "$PIN_FILE" "$SIBLING_FILE" "$LANE_GATE_FILE" >"$PHASE1_LOG" 2>&1
 PHASE1_RC=$?
 tail -3 "$PHASE1_LOG"
 echo "[timer] phase 1 done: $(elapsed_s)s elapsed / budget ${BUDGET_S}s"
@@ -460,6 +471,116 @@ PYEOF
         return True
 ' \
     "$PIN_FILE::TestProjectFileDiscriminatorParity"
+
+  # ---------------------------------------------------------------------
+  # Phase-1 workstream B2 — the inline skill_evolve lane gate.
+  # ---------------------------------------------------------------------
+
+  # M-B2a — the lane check is DELETED. With the lane OFF the tool must
+  # refuse; without the check it reaches the service → RED.
+  #
+  # The plant text carries the FOLLOWING call so it stays UNIQUE: the
+  # B2 fix round 1 (D3) added a SECOND gated path (``skill_resolve_ab``)
+  # and the bare gate block now occurs twice in the module.
+  leg "M-B2a" "daemon/tools/skill_evolution_tools.py" \
+'        lane_reason = _evolution_lane_refusal_reason(manager)
+        if lane_reason is not None:
+            return _lane_refusal(lane_reason)
+
+        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "evolve_skill",
+' \
+'        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "evolve_skill",
+' \
+"$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_lane_off_returns_the_honest_refusal_envelope"
+
+  # M-B2b — the check is INVERTED (`if lane_enabled: refuse`). With the
+  # lane OFF nothing is refused and the service is reached → RED.
+  leg "M-B2b" "daemon/tools/skill_evolution_tools.py" \
+'        if lane_reason is not None:
+            return _lane_refusal(lane_reason)
+
+        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "evolve_skill",
+' \
+'        if lane_reason is None:
+            return _lane_refusal(lane_reason)
+
+        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "evolve_skill",
+' \
+"$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_lane_off_returns_the_honest_refusal_envelope"
+
+  # M-B2c — the check reads the kill-switch DIRECTLY instead of the
+  # manager accessor. The accessor is the SINGLE resolution point; the
+  # accessor-consulted pin → RED.
+  leg "M-B2c" "daemon/tools/skill_evolution_tools.py" \
+'    lane_probe = getattr(manager, "is_skill_evolution_lane_enabled", None)
+    if not callable(lane_probe):
+        return "lane state accessor absent (fail-closed)"
+    try:
+        if bool(lane_probe()):
+            return None
+    except Exception as probe_err:  # noqa: BLE001 — fail-closed on purpose
+        return f"lane state probe failed ({probe_err}) (fail-closed)"
+    return (
+        "kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off / "
+        "evolution_lane_enabled=False"
+    )
+' \
+'    import os as _os
+
+    if _os.environ.get("ENSEMBLE_SKILL_EVOLUTION_ENABLED", "0") == "1":
+        return None
+    return (
+        "kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off / "
+        "evolution_lane_enabled=False"
+    )
+' \
+"$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_the_manager_accessor_is_the_single_resolution_point"
+
+  # M-B2d — the refusal envelope CLAIMS SUCCESS. A refusal that reads
+  # like a success is a FALSE PASS → RED.
+  leg "M-B2d" "daemon/tools/skill_evolution_tools.py" \
+'    "NO skill-keeper job was created and no skill was modified — "
+    "this message is the only record of the request."
+' \
+'    "Evolution complete: the skill was evolved successfully."
+' \
+"$LANE_GATE_FILE::TestInlineEvolveLaneGate::test_refusal_envelope_never_claims_success"
+
+  # M-B2e (B2 fix round 1 — D3) — the SECOND inline mutation path
+  # (``skill_resolve_ab``) loses its gate. The reviewer drove the
+  # ungated path with the lane OFF and it DEACTIVATED a live skill arm
+  # (``{"resolved": true, "reason": "threshold_met"}`` →
+  # ``_skill_repo.deactivate('a')``), so the plan's §6 B2 premise
+  # ("the ONE reachable mutation path") was FALSE. With the gate
+  # deleted the tool reaches the service again → RED.
+  leg "M-B2e" "daemon/tools/skill_evolution_tools.py" \
+'        lane_reason = _evolution_lane_refusal_reason(manager)
+        if lane_reason is not None:
+            return _lane_refusal(lane_reason)
+
+        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "check_ab_test_resolution",
+' \
+'        return await _invoke_service(
+            manager,
+            "_skill_evolution_service",
+            "check_ab_test_resolution",
+' \
+"$LANE_GATE_FILE::TestInlineResolveAbLaneGate::test_lane_off_refuses_the_ab_resolution"
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"

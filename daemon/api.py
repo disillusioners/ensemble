@@ -2572,6 +2572,18 @@ async def lifespan(app: FastAPI):
             census=app.state.metrics_census,
             ring=_metrics_ring,
             listener_enabled=app.state.metrics_listener is not None,
+            # LATE-BINDING by necessity: the wedge-capture watchdog is
+            # created ~665 lines BELOW this construction site (the
+            # wedge-capture start block), so a direct attribute read here
+            # would either raise or capture a permanent ``None``.  The
+            # resolver is read per request, exactly like
+            # ``listener_enabled`` is a process fact rather than a switch
+            # — and ``getattr`` is the house pattern for an attribute
+            # that may not exist yet (``daemon/routers/wedge_capture.py``,
+            # ``metrics_query/wiring/sources.py``).
+            capture_active=lambda: (
+                getattr(app.state, "wedge_capture_watchdog", None) is not None
+            ),
             sampler_interval_s=_metrics_sampler_interval_s,
         )
         app.state.metrics_query = _metrics_query_provider

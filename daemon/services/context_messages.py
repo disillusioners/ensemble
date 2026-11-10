@@ -54,6 +54,7 @@ from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJE
 from daemon.config import _resolve_kv_ambient_system_default_enabled
 from daemon.loader import estimate_tokens
 from .pok_injection import POK_BLOCK_TITLE, POK_HEADER_LINE, POK_INJECTION_FLAG
+from .skill_identity_dedupe import inject_skills_deduped
 from .skill_metrics_service import REPLACED_SKILLS_METADATA_KEY
 
 # Phase-2 selector lazy import keeps the module-level surface
@@ -2324,7 +2325,8 @@ async def _run_skill_search(
 
     effective_message_id = message_id if message_id is not None else instance_id
     try:
-        result = await service.inject_skills(
+        result = await inject_skills_deduped(
+            service,
             user_query,
             project_id=project_id,
             instance_id=instance_id,

@@ -152,12 +152,20 @@ class TestRouteExistence:
         from daemon.routers.metrics import router as metrics_router
 
         paths = {getattr(r, "path", None) for r in metrics_router.routes}
-        assert paths == {
+        # The FOUR original surfaces …
+        expected = {
             "/metrics",
             "/metrics/families",
             "/metrics/snapshot",
             "/metrics/series",
         }
+        # … plus the ADDITIVE capture-lane read surface (I3/m4): a JSON read
+        # of the capture-lane counters. It rides the SAME router (no new
+        # module, no new mount — D4 Option A still holds) and is
+        # EXPOSITION-NEUTRAL: it registers no family, so the Prometheus body
+        # and its committed baseline artifact are untouched.
+        expected.add("/metrics/capture-lane")
+        assert paths == expected
 
 
 class TestEnvelopeShape:

@@ -1,0 +1,178 @@
+........................................................................ [ 15%]
+........................................................................ [ 31%]
+.................................F...................................... [ 47%]
+........................................................................ [ 62%]
+..............................FFF....................................... [ 78%]
+........................................................................ [ 94%]
+...........................                                              [100%]
+=================================== FAILURES ===================================
+__________ TestCheckABTestResolution.test_ab_resolution_threshold_met __________
+tests/services/test_skill_evolution_service.py:1915: in test_ab_resolution_threshold_met
+    assert old_after.is_active is False
+E   AssertionError: assert True is False
+E    +  where True = Skill(is_active=True, total_applied=0, id='40f64fbc-ea09-4207-bf3e-3337d02f02d8', status='active', total_completions=0...:00', content='content for old', source_skill_bank_id=None, last_used_at=None, category='workflow', total_selections=0).is_active
+_____________ test_skill_services_initialized_when_config_present ______________
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+E   sqlite3.OperationalError: near "EXISTS": syntax error
+
+The above exception was the direct cause of the following exception:
+daemon/migrations/runner.py:677: in apply_migration
+    conn.execute(text(stmt))
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1419: in execute
+    return meth(
+.venv/lib/python3.14/site-packages/sqlalchemy/sql/elements.py:527: in _execute_on_connection
+    return connection._execute_clauseelement(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1641: in _execute_clauseelement
+    ret = self._execute_context(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1846: in _execute_context
+    return self._exec_single_context(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1986: in _exec_single_context
+    self._handle_dbapi_exception(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:2363: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+E   sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) near "EXISTS": syntax error
+E   [SQL: ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+
+The above exception was the direct cause of the following exception:
+tests/manager/test_skill_service_init.py:25: in test_skill_services_initialized_when_config_present
+    manager = InstanceManager(config)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+daemon/manager.py:1017: in __init__
+    applied = migration_runner.run_pending_migrations()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/migrations/runner.py:870: in run_pending_migrations
+    execution_time = self.apply_migration(migration)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/migrations/runner.py:724: in apply_migration
+    raise MigrationError(
+E   daemon.migrations.runner.MigrationError: Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+E   [SQL: ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.migrations.runner:runner.py:330 Skipping invalid migration file 20260713_000001_create_skill_bank.sql: Missing -- UP section in migration: 20260713_000001_create_skill_bank.sql
+WARNING  daemon.migrations.runner:runner.py:330 Skipping invalid migration file 20260927_000001_create_maintenance_runs_table.sql: Missing -- UP section in migration: 20260927_000001_create_maintenance_runs_table.sql
+ERROR    daemon.migrations.runner:runner.py:723 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+[SQL: ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+____________ test_skill_services_none_when_skill_evolution_disabled ____________
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+E   sqlite3.OperationalError: near "EXISTS": syntax error
+
+The above exception was the direct cause of the following exception:
+daemon/migrations/runner.py:677: in apply_migration
+    conn.execute(text(stmt))
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1419: in execute
+    return meth(
+.venv/lib/python3.14/site-packages/sqlalchemy/sql/elements.py:527: in _execute_on_connection
+    return connection._execute_clauseelement(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1641: in _execute_clauseelement
+    ret = self._execute_context(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1846: in _execute_context
+    return self._exec_single_context(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1986: in _exec_single_context
+    self._handle_dbapi_exception(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:2363: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+E   sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) near "EXISTS": syntax error
+E   [SQL: ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+
+The above exception was the direct cause of the following exception:
+tests/manager/test_skill_service_init.py:44: in test_skill_services_none_when_skill_evolution_disabled
+    manager = InstanceManager(config)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+daemon/manager.py:1017: in __init__
+    applied = migration_runner.run_pending_migrations()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/migrations/runner.py:870: in run_pending_migrations
+    execution_time = self.apply_migration(migration)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/migrations/runner.py:724: in apply_migration
+    raise MigrationError(
+E   daemon.migrations.runner.MigrationError: Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+E   [SQL: ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.migrations.runner:runner.py:330 Skipping invalid migration file 20260713_000001_create_skill_bank.sql: Missing -- UP section in migration: 20260713_000001_create_skill_bank.sql
+WARNING  daemon.migrations.runner:runner.py:330 Skipping invalid migration file 20260927_000001_create_maintenance_runs_table.sql: Missing -- UP section in migration: 20260927_000001_create_maintenance_runs_table.sql
+ERROR    daemon.migrations.runner:runner.py:723 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+[SQL: ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+________________ test_skill_services_have_correct_dependencies _________________
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+E   sqlite3.OperationalError: near "EXISTS": syntax error
+
+The above exception was the direct cause of the following exception:
+daemon/migrations/runner.py:677: in apply_migration
+    conn.execute(text(stmt))
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1419: in execute
+    return meth(
+.venv/lib/python3.14/site-packages/sqlalchemy/sql/elements.py:527: in _execute_on_connection
+    return connection._execute_clauseelement(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1641: in _execute_clauseelement
+    ret = self._execute_context(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1846: in _execute_context
+    return self._exec_single_context(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1986: in _exec_single_context
+    self._handle_dbapi_exception(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:2363: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py:1967: in _exec_single_context
+    self.dialect.do_execute(
+.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: in do_execute
+    cursor.execute(statement, parameters)
+E   sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) near "EXISTS": syntax error
+E   [SQL: ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+
+The above exception was the direct cause of the following exception:
+tests/manager/test_skill_service_init.py:59: in test_skill_services_have_correct_dependencies
+    manager = InstanceManager(config)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+daemon/manager.py:1017: in __init__
+    applied = migration_runner.run_pending_migrations()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/migrations/runner.py:870: in run_pending_migrations
+    execution_time = self.apply_migration(migration)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/migrations/runner.py:724: in apply_migration
+    raise MigrationError(
+E   daemon.migrations.runner.MigrationError: Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+E   [SQL: ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.migrations.runner:runner.py:330 Skipping invalid migration file 20260713_000001_create_skill_bank.sql: Missing -- UP section in migration: 20260713_000001_create_skill_bank.sql
+WARNING  daemon.migrations.runner:runner.py:330 Skipping invalid migration file 20260927_000001_create_maintenance_runs_table.sql: Missing -- UP section in migration: 20260927_000001_create_maintenance_runs_table.sql
+ERROR    daemon.migrations.runner:runner.py:723 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+[SQL: ALTER TABLE job_queues DROP CONSTRAINT IF EXISTS ck_job_queues_queue_type]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-skill-revival-base1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/services/test_skill_evolution_service.py::TestCheckABTestResolution::test_ab_resolution_threshold_met
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_initialized_when_config_present
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_none_when_skill_evolution_disabled
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_have_correct_dependencies
+4 failed, 455 passed, 1 warning in 32.87s

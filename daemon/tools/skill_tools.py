@@ -44,6 +44,8 @@ from langchain_core.tools import tool
 from daemon.repositories.project_skill_file.models import (
     ProjectSkillUsageRecord,
 )
+from daemon.services import skill_capture_observability as observability
+from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.project_skill_source.model import (
     ADDRESS_PREFIX,
     PSEUDO_ID_PREFIX,
@@ -54,6 +56,7 @@ from daemon.services.project_skill_source.model import (
 from daemon.services.project_skill_source.service import (
     ProjectSkillBodyUnavailable,
 )
+from daemon.services.skill_job_dispatcher import SkillFixBurstCapRefused
 from daemon.services.skill_search_service import _bm25_rank
 from ._tool_registry import register_tool_category
 
@@ -237,6 +240,219 @@ async def _file_only_bm25_search(
     return {"injected": injected, "low_match": low_match, "degraded": "file_only"}
 
 
+# ── F-G2 — the skill_fix dispatch-fault truthfulness ─────────────────────
+#
+# The tester gate (2026-11-10, F-G2) proved the generic-fault branch of
+# ``skill_fix`` renders "request is still recorded above for the next
+# skill-keeper run" while EMPIRICALLY 0 rows persist when the dispatch
+# raises BEFORE the insert (no job row, no counter, no anomaly). The
+# agent was told its work was recorded; nothing was. That is the
+# Oct-22-class failure this workstream exists to kill: work requested,
+# work lost, nothing said.
+#
+# Two invariants replace the constant string:
+#
+# * F-G2.1 — the generic envelope's truthfulness is DERIVED from the
+#   REAL persistence outcome (a read-back through the PUBLIC accessors),
+#   never from a constant. No job ⇒ "NOT recorded, nothing will be
+#   picked up". A job ⇒ "WAS recorded" AND the job id is NAMED.
+# * F-G2.2 — a DROPPED request is VISIBLE: an anomaly row + a refusal
+#   counter under its OWN reason token + a WARNING log carrying that
+#   token + a sink record (the house refusal pattern).
+
+#: The stable reason token for a DROPPED fix request (F-G2.2). It is
+#: DISTINCT from the cap refusal (``fix_burst_cap``) and from a
+#: successful admission, so the drop is countable and alertable.
+FIX_DISPATCH_FAULT_REASON = "fix_dispatch_fault"
+
+#: The outcome states of the read-back (F-G2.1).
+FIX_OUTCOME_RECORDED = "recorded"
+FIX_OUTCOME_NOT_RECORDED = "not_recorded"
+FIX_OUTCOME_UNCONFIRMED = "unconfirmed"
+
+
+def _fix_idempotency_key(project_id: str | None, skill_id: str) -> str | None:
+    """Return the dispatcher's own idempotency key for a FIX admission.
+
+    The dispatcher composes ``skill_fix:<normalized_project>:<skill_id>``
+    (``daemon/services/skill_job_dispatcher.py``); the read-back must ask
+    for EXACTLY the same key or the row is not found.
+
+    Returns:
+        The key, or ``None`` when the project id cannot be normalized
+        (the daemon's system default is not initialized yet).
+    """
+    try:
+        normalized = normalize_project_id(project_id)
+    except Exception:  # noqa: BLE001 — a boot-order gap must not raise
+        return None
+    return f"skill_fix:{normalized}:{skill_id}"
+
+
+async def _read_back_persisted_fix_job(
+    manager: Any,
+    *,
+    skill_id: str,
+    project_id: str | None,
+    issue_description: str,
+    suggested_fix: str | None,
+) -> tuple[str, str | None]:
+    """Resolve what a faulted FIX admission ACTUALLY persisted (F-G2.1).
+
+    The outcome is read back through the PUBLIC accessors only:
+
+    ``manager.job_queue_service`` (public property) →
+    ``JobQueueService.repository`` (public property) →
+    ``JobRepository.find_by_idempotency_key`` (public method).
+
+    The row is identified by the dispatcher's OWN idempotency key AND by
+    its metadata identity (the skill id, the evolution type and the
+    direction text composed from THIS very request) — so a row that
+    belongs to a DIFFERENT request (a previous FIX for the same skill,
+    or a predecessor that already went terminal) is never misreported
+    as this request's record.
+
+    Args:
+        manager: The instance manager (the public accessors hang off it).
+        skill_id: The skill the FIX request was filed against.
+        project_id: The project scope of the request.
+        issue_description: The filed issue text.
+        suggested_fix: The filed suggested fix (may be ``None``).
+
+    Returns:
+        ``(outcome, job_id)``:
+
+        * ``(FIX_OUTCOME_RECORDED, job_id)`` — a job for THIS request
+          exists and ``job_id`` names it.
+        * ``(FIX_OUTCOME_NOT_RECORDED, None)`` — no job for this request
+          exists.
+        * ``(FIX_OUTCOME_UNCONFIRMED, None)`` — the outcome could not be
+          read (no job store reachable, or the read failed). The caller
+          then uses the fail-closed wording.
+    """
+    job_service = getattr(manager, "job_queue_service", None)
+    if job_service is None:
+        # The public property is the contract; the private attribute is
+        # the fallback for a manager double that only wires the latter.
+        job_service = getattr(manager, "_job_queue_service", None)
+    if job_service is None:
+        return (FIX_OUTCOME_UNCONFIRMED, None)
+    repository = getattr(job_service, "repository", None)
+    finder = getattr(repository, "find_by_idempotency_key", None)
+    if not callable(finder):
+        return (FIX_OUTCOME_UNCONFIRMED, None)
+    key = _fix_idempotency_key(project_id, skill_id)
+    if key is None:
+        return (FIX_OUTCOME_UNCONFIRMED, None)
+    try:
+        job = await asyncio.to_thread(finder, key)
+    except Exception as err:  # noqa: BLE001 — a read fault must not raise
+        logger.warning(
+            "skill_fix %s: the persisted outcome could not be read "
+            "(%s: %s)",
+            FIX_DISPATCH_FAULT_REASON,
+            type(err).__name__,
+            err,
+        )
+        return (FIX_OUTCOME_UNCONFIRMED, None)
+    if job is None:
+        return (FIX_OUTCOME_NOT_RECORDED, None)
+    job_id = getattr(job, "job_id", None)
+    if not isinstance(job_id, str) or not job_id:
+        # A non-JobItem return (a double, a mis-wired repository) is
+        # NEVER evidence of a persisted job.
+        return (FIX_OUTCOME_NOT_RECORDED, None)
+    metadata = getattr(job, "job_metadata", None)
+    if not isinstance(metadata, dict):
+        return (FIX_OUTCOME_NOT_RECORDED, None)
+    if metadata.get("skill_id") != skill_id:
+        return (FIX_OUTCOME_NOT_RECORDED, None)
+    if metadata.get("evolution_type") != "FIX":
+        return (FIX_OUTCOME_NOT_RECORDED, None)
+    expected_direction = issue_description
+    if suggested_fix:
+        expected_direction = (
+            f"{issue_description}\n\nSuggested fix: {suggested_fix}"
+        )
+    if metadata.get("direction") != expected_direction:
+        # The row belongs to a DIFFERENT request for the same skill —
+        # naming it would be the same lie this branch exists to kill.
+        return (FIX_OUTCOME_NOT_RECORDED, None)
+    return (FIX_OUTCOME_RECORDED, job_id)
+
+
+async def _announce_fix_dispatch_fault(
+    manager: Any,
+    *,
+    skill_id: str,
+    error: str,
+    outcome: str,
+    job_id: str | None,
+) -> None:
+    """Make a fix-dispatch fault VISIBLE (F-G2.2).
+
+    The house refusal pattern is: an anomaly row + a counter + a WARNING
+    log + a sink record. A faulted dispatch used to leave NO residue at
+    all — the agent was told its request was recorded and nothing was.
+
+    * A DROPPED request (no job persisted) increments the ADMISSION
+      refusal counter under its OWN reason token — a drop is not an
+      admission, and the token is distinct from the cap refusal and from
+      a successful admission, so the drop is countable and alertable.
+    * A fault that left the request RECORDED is NOT counted as a refusal
+      (a row WAS minted — counting it as a refusal would merge two
+      different signals), but it is still announced and logged.
+    """
+    dropped = outcome != FIX_OUTCOME_RECORDED
+    if dropped:
+        observability.record_admission_refusal(FIX_DISPATCH_FAULT_REASON)
+    observability.append_run_record(
+        observability.build_run_record(
+            stage="admission",
+            outcome="refused" if dropped else "admitted_after_fault",
+            refusal_reason=FIX_DISPATCH_FAULT_REASON if dropped else None,
+            extra={
+                "skill_id": skill_id,
+                "persisted_outcome": outcome,
+                "persisted_job_id": job_id,
+                "error": error,
+            },
+        )
+    )
+    if dropped:
+        logger.warning(
+            "skill_fix %s: the FIX request for skill %s was DROPPED "
+            "(no skill-keeper job persisted): %s",
+            FIX_DISPATCH_FAULT_REASON,
+            skill_id,
+            error,
+        )
+    else:
+        logger.warning(
+            "skill_fix %s: the dispatcher raised AFTER the FIX job %s was "
+            "persisted for skill %s (the request IS recorded): %s",
+            FIX_DISPATCH_FAULT_REASON,
+            job_id,
+            skill_id,
+            error,
+        )
+    await observability.emit_lane_anomaly(
+        category=observability.CATEGORY_LANE_DEVIATION,
+        description=(
+            f"skill_fix dispatch fault ({FIX_DISPATCH_FAULT_REASON}) for "
+            f"skill {skill_id}: {error}"
+        ),
+        severity="major",
+        suspected_cause=(
+            "the skill-evolution dispatcher raised during the FIX "
+            "admission; the request was "
+            + ("DROPPED (no job persisted)" if dropped else "persisted")
+        ),
+        job_service=getattr(manager, "job_queue_service", None),
+        holder=manager,
+    )
+
+
 def create_skill_tools(
     manager: "InstanceManager", current_instance_id: str
 ) -> list:
@@ -399,7 +615,14 @@ def create_skill_tools(
         lines.append(f"# {getattr(file_skill, 'name', '<unknown>')}")
         lines.append("")
         lines.append(f"- address: {getattr(file_skill, 'address', '')}")
-        lines.append(f"- id: {getattr(file_skill, 'id', '')}")
+        # E3.3 (board wi-d340f16c bullet 3 — display hygiene): the
+        # agent-facing ``- id:`` line must carry the CONSUMABLE address
+        # (``pf:<ns>:<name>``), never the internal ``pf-<sha16>``
+        # pseudo-id. The pseudo-id stays available ADDITIVELY under
+        # ``- pseudo_id:`` (the internal key continuity the injection
+        # path and the embedding rows depend on).
+        lines.append(f"- id: {getattr(file_skill, 'address', '')}")
+        lines.append(f"- pseudo_id: {getattr(file_skill, 'id', '')}")
         lines.append(f"- namespace: {getattr(file_skill, 'namespace', '')}")
         lines.append(f"- project_id: {getattr(file_skill, 'project_id', '')}")
         lines.append(f"- root_path: {root}")
@@ -1216,6 +1439,14 @@ Note:
         dispatcher = getattr(manager, "_skill_job_dispatcher", None)
         dispatch_error: str | None = None
         dispatched_job_id: str | None = None
+        # F-G2.1 — the faulted exception itself, kept so its OWN carrier
+        # (a ``persisted_job_id`` attribute) can be preferred over a DB
+        # read (the ruling's option (1) — see the read-back below).
+        dispatch_fault: BaseException | None = None
+        # H2 (tidier): the durable re-fix burst cap is a DESIGNED
+        # refusal, not a dispatcher fault. It is caught STRUCTURALLY,
+        # BEFORE the blanket ``except Exception`` below.
+        burst_cap_refusal: SkillFixBurstCapRefused | None = None
         if dispatcher is not None:
             dispatch_method = getattr(dispatcher, "dispatch_fix", None)
             if dispatch_method is not None and callable(dispatch_method):
@@ -1240,6 +1471,28 @@ Note:
                         if isinstance(result, str) and result
                         else None
                     )
+                except SkillFixBurstCapRefused as e:
+                    # H2 (tidier) — the DESIGNED refusal, caught BEFORE
+                    # the blanket catch. The blanket catch swallowed it
+                    # and rendered the generic note, including the
+                    # UNTRUE "request is still recorded above for the next
+                    # skill-keeper run": the cap REFUSED the dispatch, so
+                    # NO job exists and NOTHING will pick it up. An
+                    # agent told "your request is recorded" believes a
+                    # fix is pending when nothing was recorded.
+                    #
+                    # The REST route already handles this exception
+                    # structurally (HTTP 429, M2-pinned) and reads the
+                    # stable token off the refusal class (``e.reason``)
+                    # rather than hard-coding a literal — the agent-facing
+                    # envelope mirrors that vocabulary, so the two can
+                    # never drift (M11: one token per concept).
+                    logger.warning(
+                        "skill_fix burst cap refused for skill %s: %s",
+                        skill_id,
+                        e,
+                    )
+                    burst_cap_refusal = e
                 except Exception as e:
                     logger.warning(
                         "skill_fix dispatcher raised for skill %s: %s",
@@ -1247,6 +1500,7 @@ Note:
                         e,
                     )
                     dispatch_error = str(e)
+                    dispatch_fault = e
             else:
                 # Dispatcher object exists but lacks ``dispatch_fix``
                 # (or it's not callable) — treat as "not yet
@@ -1257,9 +1511,58 @@ Note:
                     "method; falling back to log-only"
                 )
                 dispatch_method = None
-        short_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
+        # F-G2.1 / F-G2.2 — a faulted dispatch's truthfulness is DERIVED
+        # from the REAL persistence outcome: the row is read back through
+        # the PUBLIC accessors, and a dropped request is announced (an
+        # anomaly row + a refusal counter under its OWN reason token + a
+        # WARNING log + a sink record). The envelope below renders THAT
+        # outcome — never a constant string.
+        persisted_outcome: str = ""
+        persisted_job_id: str | None = None
+        if dispatch_error is not None:
+            # F-G2.1, option (1) FIRST: an exception that CARRIES the
+            # persisted job id is the dispatcher's own statement that a
+            # row was committed for THIS admission — it is preferred over
+            # any DB read (and it closes the one case a key-based read
+            # cannot reach: a row whose idempotency key was suffixed).
+            carried_job_id = getattr(dispatch_fault, "persisted_job_id", None)
+            if isinstance(carried_job_id, str) and carried_job_id:
+                persisted_outcome = FIX_OUTCOME_RECORDED
+                persisted_job_id = carried_job_id
+            else:
+                # F-G2.1, option (2): read the real outcome back.
+                persisted_outcome, persisted_job_id = (
+                    await _read_back_persisted_fix_job(
+                        manager,
+                        skill_id=skill_id,
+                        project_id=project_id,
+                        issue_description=issue_description,
+                        suggested_fix=suggested_fix,
+                    )
+                )
+            await _announce_fix_dispatch_fault(
+                manager,
+                skill_id=skill_id,
+                error=dispatch_error,
+                outcome=persisted_outcome,
+                job_id=persisted_job_id,
+            )
+        # E3.1 (board wi-d340f16c bullet 1 — display hygiene): echo the
+        # FULL id, never the 8-hex prefix. The 8-hex form is NOT
+        # ``skill_view``-consumable, so an agent that copies it back into
+        # ``skill_view`` fails (the wi-76d89e11 verbatim-id contract).
+        echo_id = skill_id if isinstance(skill_id, str) else str(skill_id)
+        # D-G1 (reviewer must-fix): the header is DURABILITY-NEUTRAL. It
+        # used to say "request recorded" — a claim the drop branch then
+        # contradicted with "the request was NOT recorded". An agent that
+        # reads (or truncates to) the first line believed a record
+        # existed while the body said the opposite. The header now names
+        # the subject only; EVERY branch's durability verdict lives in
+        # its own body line (the success branch says "was admitted"; the
+        # drop says NOT recorded; the recorded-fault says persisted +
+        # the job id; the absent-dispatcher says NOTHING was dispatched).
         lines: list[str] = [
-            f"\U0001f4dd Skill fix request recorded for skill '{short_id}'.",
+            f"\U0001f4dd Skill fix request for skill '{echo_id}'.",
             "",
             "User-reported issue:",
             "---",
@@ -1284,6 +1587,51 @@ Note:
                 f"{dispatched_job_id} was admitted — the skill-keeper "
                 "agent will pick it up from the job queue."
             )
+        elif burst_cap_refusal is not None:
+            # H2 (tidier): the durable re-fix burst cap REFUSED the
+            # admission. The lane is ON — the CAP refused. The envelope
+            # is a FIRST-CLASS refusal: NO job was created, NOTHING will
+            # be picked up, and the stable reason token travels to the
+            # agent (the REST route reads the same ``e.reason``).
+            lines.append("")
+            lines.append(
+                "\u26d4 NOT dispatched: the durable re-fix burst cap "
+                "REFUSED this FIX admission "
+                f"(reason={burst_cap_refusal.reason}). The request was "
+                "REFUSED at dispatch — NO skill-keeper job was created "
+                "and NOTHING will be picked up. This message is the only "
+                "record of the request."
+            )
+        elif persisted_job_id is not None:
+            # F-G2.1 — the dispatch raised, but the row WAS persisted:
+            # the request IS recorded and the job id is NAMED (the
+            # agent can look it up). The fault is in the reporting
+            # path, not in the admission.
+            lines.append("")
+            lines.append(
+                "\u2705 Dispatched: Tier-3 skill_evolution job "
+                f"{persisted_job_id} was persisted for this request — the "
+                "skill-keeper agent will pick it up from the job queue."
+            )
+            lines.append(
+                f"Note: the dispatcher raised during dispatch "
+                f"({dispatch_error}) AFTER the job was persisted — the "
+                "admission itself succeeded and the request IS recorded."
+            )
+        elif dispatch_error is not None:
+            # F-G2.1 — the dispatch raised and NO job was persisted for
+            # this request. The envelope says so; the old wording
+            # ("request is still recorded above for the next skill-keeper
+            # run") was empirically FALSE — 0 rows persist when the
+            # dispatch raises before the insert.
+            lines.append("")
+            lines.append(
+                "\u26d4 NOT dispatched: the dispatcher raised during "
+                f"dispatch ({dispatch_error}). The request was NOT "
+                "recorded: NO skill-keeper job was persisted for it and "
+                "NOTHING will be picked up. This message is the only "
+                "record of the request."
+            )
         elif (
             dispatcher is not None
             and dispatch_method is not None
@@ -1301,16 +1649,15 @@ Note:
                 "record of the request."
             )
         if dispatcher is None or dispatch_method is None:
+            # F-G2 (same class, sibling branch): the old wording claimed
+            # the request "is queued as a note for the next skill-keeper
+            # run" — but with no dispatcher NOTHING was queued anywhere.
+            # The transcript is the only record.
             lines.append("")
             lines.append(
-                "Note: dispatcher not yet available; request is queued as a "
-                "note for the next skill-keeper run."
-            )
-        if dispatch_error is not None:
-            lines.append("")
-            lines.append(
-                f"Note: dispatcher raised during dispatch ({dispatch_error}); "
-                "request is still recorded above for the next skill-keeper run."
+                "Note: dispatcher not yet available — NOTHING was dispatched "
+                "and no skill-keeper job was created. This message is the "
+                "only record of the request."
             )
         return "\n".join(lines)
 
@@ -1342,9 +1689,25 @@ The admission is gated:
 * Non-terminal duplicate → collapses onto the live job via the
   ``skill_fix:<project>:<skill>`` idempotency key.
 
-The dispatcher is best-effort: if it is absent or raises, the request
-is still logged via the ``logger.warning`` path AND reflected in the
-response text so the agent sees a deterministic confirmation.
+The dispatcher is best-effort: if it is absent or raises, the fault is
+logged via the ``logger.warning`` path AND reflected in the response
+text so the agent sees a deterministic confirmation.
+
+TRUTHFUL FAULT ENVELOPE (F-G2, tester gate 2026-11-10): when the
+dispatcher raises, the response is DERIVED from the REAL persistence
+outcome (the job row is read back through the public accessors) — it
+never claims a record that does not exist:
+
+* no job persisted ⇒ "the request was NOT recorded … NOTHING will be
+  picked up" (the drop is also announced: an anomaly row + a refusal
+  counter under the ``fix_dispatch_fault`` token + a WARNING log + a
+  sink record);
+* a job persisted ⇒ "was recorded" AND the job id is named.
+* the header is DURABILITY-NEUTRAL (D-G1, reviewer must-fix): it names
+  the subject ("📝 Skill fix request for skill '<skill_id>'.") and
+  carries NO durability claim — every branch's verdict lives in its
+  own body line, so an agent that reads (or truncates to) the header
+  can never inherit a claim the body contradicts.
 
 Args:
     skill_id: The skill's UUID4 identifier.
@@ -1364,27 +1727,45 @@ Behavior:
   admission outcome TRUTHFULLY (job id when dispatched; "NOT
   dispatched" when the gate refused).
 * When the dispatcher is absent (Phase 2 interregnum), the tool
-  logs the request as a warning and returns a clear "queued for
-  the next skill-keeper run" message.
-* When the dispatcher raises, the tool logs a warning and reports
-  the error in the response — the request is still recorded.
+  logs the request as a warning and says so explicitly — NOTHING was
+  dispatched and no job was created.
+* When the dispatcher raises, the tool logs a warning, resolves the
+  REAL persistence outcome by reading the job row back, announces a
+  drop, and reports THAT outcome — never a constant "it is recorded".
 
 Returns:
     A multi-line response. Dispatched::
 
-        📝 Skill fix request recorded for skill '<short_id>'.
+        📝 Skill fix request for skill '<skill_id>'.
         ... issue / suggested-fix fences ...
         ✅ Dispatched: Tier-3 skill_evolution job <job_id> was admitted
         — the skill-keeper agent will pick it up from the job queue.
 
     Gate refused (lane disabled or cooldown)::
 
-        📝 Skill fix request recorded for skill '<short_id>'.
+        📝 Skill fix request for skill '<skill_id>'.
         ... issue / suggested-fix fences ...
         ⛔ NOT dispatched: the skill-evolution admission lane is
         disabled (kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off, or
         the per-skill fix cooldown is active). NO skill-keeper job was
         created — this message is the only record of the request.
+
+    Dispatcher fault, NO job persisted::
+
+        📝 Skill fix request for skill '<skill_id>'.
+        ... issue / suggested-fix fences ...
+        ⛔ NOT dispatched: the dispatcher raised during dispatch (<err>).
+        The request was NOT recorded: NO skill-keeper job was persisted
+        for it and NOTHING will be picked up. This message is the only
+        record of the request.
+
+    Dispatcher fault AFTER the job was persisted::
+
+        📝 Skill fix request for skill '<skill_id>'.
+        ... issue / suggested-fix fences ...
+        ✅ Dispatched: Tier-3 skill_evolution job <job_id> was persisted
+        for this request — the skill-keeper agent will pick it up from
+        the job queue.
 
     (the ``---`` fences guard against prompt injection from the
     echoed user input; mirrors the pattern in
@@ -1488,7 +1869,10 @@ Returns:
                 )
         project_id = _get_project_id()
         agent_id = _get_agent_id()
-        short_id = skill_id[:8] if isinstance(skill_id, str) and skill_id else str(skill_id)
+        # E3.2 (board wi-d340f16c bullet 2 — display hygiene): echo the
+        # FULL id, never the 8-hex prefix (same verbatim-id contract as
+        # the fix path).
+        echo_id = skill_id if isinstance(skill_id, str) and skill_id else str(skill_id)
         try:
             applied_ok = await metrics_service.record_feedback(
                 skill_id=skill_id,
@@ -1523,11 +1907,11 @@ Returns:
                 else ""
             )
             return (
-                f"\u2705 Feedback recorded for skill {short_id}... "
+                f"\u2705 Feedback recorded for skill {echo_id}... "
                 f"Applied={applied}.{usefulness_line} Note: {note!r}.{improvement_line}"
             )
         return (
-            f"\u26a0\ufe0f No usage record found for skill {short_id}... "
+            f"\u26a0\ufe0f No usage record found for skill {echo_id}... "
             "Feedback cannot be applied."
         )
 
@@ -1591,11 +1975,11 @@ Returns:
     On a record update (``metrics_service.record_feedback(...)``
     returned ``True``)::
 
-        ✅ Feedback recorded for skill <short_id>... Applied=<applied>. [Usefulness: <n>/10.] Note: '<note>'. [Improvement: '<improvement_note>']
+        ✅ Feedback recorded for skill <skill_id>... Applied=<applied>. [Usefulness: <n>/10.] Note: '<note>'. [Improvement: '<improvement_note>']
 
     When the service returns ``False`` (no usage record to stamp)::
 
-        ⚠️ No usage record found for skill <short_id>... Feedback cannot be applied.
+        ⚠️ No usage record found for skill <skill_id>... Feedback cannot be applied.
 
     When ``manager._skill_metrics_service`` is absent (Phase-wiring
     in progress)::

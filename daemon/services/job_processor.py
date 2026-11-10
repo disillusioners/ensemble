@@ -24,6 +24,7 @@ from daemon.services.job_queue_service import (
     TERMINAL_CANCEL_STATUSES,
 )
 from daemon.services.job_lock_manager import JobLockManager
+from daemon.services import skill_capture_observability as observability
 from daemon.repositories import SQLModelProjectRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 
@@ -811,6 +812,20 @@ class JobProcessor:
                     job.job_id[:8],
                 )
                 return False
+            # D: the EXECUTION-refusal counter — a signal DISTINCT from
+            # the admission-refusal counter (a refused execution DID
+            # write a terminal row; a refused admission wrote none).
+            observability.record_execution_refusal("lane_disabled")
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="execution",
+                    agent_id=None,
+                    prompt_source="job_processor",
+                    outcome="refused",
+                    refusal_reason="lane_disabled",
+                    extra={"job_id": job.job_id},
+                )
+            )
             return True
 
         return await self._terminally_refuse_active_skill_evolution_job(
@@ -847,6 +862,19 @@ class JobProcessor:
                 job.job_id[:8],
             )
             return False
+        # D: the EXECUTION-refusal counter (a signal DISTINCT from the
+        # admission-refusal counter — see the queued branch above).
+        observability.record_execution_refusal("lane_disabled")
+        observability.append_run_record(
+            observability.build_run_record(
+                stage="execution",
+                agent_id=None,
+                prompt_source="job_processor",
+                outcome="refused",
+                refusal_reason="lane_disabled",
+                extra={"job_id": job.job_id},
+            )
+        )
         return True
 
     async def _process_next_job(self) -> None:
