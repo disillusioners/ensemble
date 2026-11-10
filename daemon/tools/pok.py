@@ -170,6 +170,32 @@ def create_pok_tools(
             )
         return project_id, name, None
 
+    def _substitute_active_cap(fn: Any) -> Any:
+        """Substitute the LIVE admission cap into the docstring BEFORE
+        ``@tool`` bakes it into the tool description (and any
+        ``args_schema`` doc).
+
+        This runs on the PLAIN function object — a pure string op on
+        our own ``__doc__``, never a post-construction attribute write
+        on the tool object (an upstream ``frozen=True`` on ``BaseTool``
+        would otherwise break every instance spawn, since
+        ``create_pok_tools`` runs bare in the spawn path).
+
+        Load-bearing: the constant is read from the MODULE GLOBAL
+        inside the body. It must NOT be captured as a default argument
+        — a default binds at ``def`` time and would freeze the value,
+        defeating the discriminating test that patches
+        ``daemon.tools.pok.POK_ACTIVE_CAP_PER_PROJECT``.
+        """
+        if fn.__doc__:
+            fn.__doc__ = fn.__doc__.replace(
+                "<active_cap>", str(POK_ACTIVE_CAP_PER_PROJECT)
+            )
+        return fn
+
+    @register_tool_category(CATEGORY_NAME)
+    @tool
+    @_substitute_active_cap
     def pok_upsert(
         slug: str,
         body: str,
@@ -275,23 +301,6 @@ def create_pok_tools(
                 else {}
             ),
         }
-
-    # The admission cap is a LIVE constant. Substitute the placeholder
-    # in the PLAIN function's ``__doc__`` BEFORE the ``@tool``
-    # decoration bakes it into the tool description (and any
-    # args_schema doc). This is a pure string op on our own object —
-    # no post-construction attribute writes on the tool object (an
-    # upstream ``frozen=True`` on BaseTool would otherwise break every
-    # instance spawn, since ``create_pok_tools`` runs bare in the
-    # spawn path). Never hardcode the limit in the prose: a stale
-    # literal would silently disagree with POK_ACTIVE_CAP_PER_PROJECT.
-    if pok_upsert.__doc__:
-        pok_upsert.__doc__ = pok_upsert.__doc__.replace(
-            "<active_cap>", str(POK_ACTIVE_CAP_PER_PROJECT)
-        )
-
-    pok_upsert = tool(pok_upsert)
-    pok_upsert = register_tool_category(CATEGORY_NAME)(pok_upsert)
 
     @register_tool_category(CATEGORY_NAME)
     @tool
