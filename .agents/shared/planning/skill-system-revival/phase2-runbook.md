@@ -402,15 +402,21 @@ is **REFUSED** and enumerated as `skipped_open_ab_test`; the pair-resolver refus
 * **⇒ GO/NO-GO:** the gauge must read **exactly 32** at the pre-flight. A value **> 32** is a drift — investigate.
   A value **< 32** is a **winner declared somewhere** — **STOP**.
 
-**(b) The A3 predicate — the ADMITTED population (the gate) and the EXCLUDED population (the monitor).**
+**(b) The A3 predicate — the CANDIDATE band (the gate) vs the BLOCKER band (the monitor) — ROUND-2 F1 BAND MAP.**
 `has_genuinely_evolved_for_instance` (`daemon/repositories/skill/repository.py:1699`) is the **three-conjunct** predicate
-`selected = TRUE AND task_succeeded = TRUE AND feedback_applied IS NOT NULL`. **The ADMITTED population** (the same three
-conjuncts) is what the capture lane fires on: it **must be > 0**, or the eligibility gate has nothing to fire on and the
-lane can never admit. The **EXCLUDED** population `selected AND task_succeeded AND feedback_applied IS NULL`
-(`:1717-1719`) — **3 457** rows on the 2026-11-09 census, **3 535** on the 2026-11-10 live census — is **excluded BY
-CONSTRUCTION**, so a non-zero value there is the shipped predicate WORKING: it is a **MONITOR, not a gate**.
-*(Phase-3 correction: the earlier text made this excluded population the gate and demanded 0 from it — a gate that could
-never pass.)* See §8 step 8.1 for the exact reads.
+`selected = TRUE AND task_succeeded = TRUE AND feedback_applied IS NOT NULL`. Derived from the Gate-4 code
+(`daemon/services/skill_metrics_service.py:733-772`): those predicate rows are the genuinely-evolved **EVIDENCE** — when an
+instance HAS such a row, `:765-769` REFUSES capture (`return None`). The two bands therefore map as:
+* **CANDIDATE band = `feedback_applied IS NULL`** — **THE GATE (§8.1(a))**: selected+succeeded rows with no feedback
+  evidence ⇒ the instance is NOT genuinely evolved ⇒ capture MAY still fire (`:765` falls through). This is the only
+  PREDICTIVE population: it **must be > 0**, and **0 is the STOP** (nothing left to capture ⇒ the lane can never admit).
+* **BLOCKER band = `feedback_applied IS NOT NULL`** — **THE MONITOR (§8.1(b))**: capture is BLOCKED on those instances
+  (evidence present ⇒ CANNOT capture), so a non-zero count is NORMAL and EXPECTED — **never a gate, NEVER a STOP**.
+Live census (2026-11-10T21:52Z, read-only): candidate **3 544** rows / 3 525 instances; blocker **5 996** rows / 5 944
+instances (candidate **3 457** rows on the 2026-11-09 census). *(Round-2 correction history: the round-1 text mapped the
+GATE onto the blocker band with "STOP if 0" — trivially satisfied, so the gate passed by accident — and demoted the
+candidate band to a monitor. Both are inverted above; band map quoted from code in the round-2 lane report.)*
+See §8 step 8.1 for the exact reads.
 
 **(c) The capture-lane-off counter is COMPLETE — three sites, one key.**
 `admission_refusals["capture_lane_off"]` is incremented **before** the refusal at **all three** production refusal
@@ -673,8 +679,13 @@ selected = TRUE  AND  task_succeeded = TRUE  AND  feedback_applied IS NOT NULL
 ```
 
 **What the 3 457 is.** The census window `selected AND task_succeeded AND feedback_applied IS NULL` = **3 457 rows** on the
-2026-11-09 census — the population that the OLD predicate would have admitted as "genuinely evolved". With the shipped
-predicate, **the delta is 0 by construction** (`daemon/repositories/skill/repository.py:1717-1719`).
+2026-11-09 census. Under the OLD (feedback-absent) predicate this window would have been FALSELY admitted as
+"genuinely evolved"; the shipped predicate's `feedback_applied IS NOT NULL` conjunct refuses every one of those
+admissions, so the **false-ADMISSION delta is 0 by construction** (`daemon/repositories/skill/repository.py:1717-1719`).
+**ROUND-2 F1 clarification (load-bearing):** "excluded by construction" means excluded FROM THE GENUINELY-EVOLVED SET
+ONLY — it is NOT exclusion from capture. Precisely because these rows carry no feedback evidence, the instances behind
+them are NOT genuinely evolved, so the capture gate MAY still fire on them: **this window IS the capture CANDIDATE band**
+(§8.1(a) below, the gate). Live: **3 544 rows / 3 525 instances** (2026-11-10T21:52Z census).
 
 **THE INSTRUMENT LIMIT — stated honestly (this is a leader-list item to note).**
 `scripts/audit/skill_counter_reconcile.py` is the **A4** instrument: its `measure_snapshot()`
@@ -683,30 +694,39 @@ from `skills.total_applied` and `skill_usage_records where applied is true`, `:1
 gauge** (`divergence`, `:212`, delegated to `SkillRepository.within_identity_key_divergence`).
 **It does NOT measure A3's 3 457-row population.** There is **no shipped CLI instrument for A3's false-eligible
 population** — the figure is a census constant carried in the predicate's docstring and pinned by
-`tests/unit/test_skill_capture_attribution_seam.py` (`:38`, `:289-290`).
+`tests/unit/test_skill_capture_attribution_seam.py` (`:38`, `:289-290`). *(That "false-eligible" window IS the
+CANDIDATE band — the capture-eligible population, §8.1(a) — so it is measured live by the SELECT below, just not by a
+shipped CLI instrument.)*
 
 **⇒ What the operator can read live, derived from the shipped predicate** (read-only; the predicate's own terms, the
 `skill_usage_records` table at `daemon/repositories/skill/models.py:368`):
 
 ```bash
-# (a) THE GATE — the ADMITTED population (what the capture lane can fire on):
-psql -Atc "SELECT count(*) FROM skill_usage_records WHERE selected AND task_succeeded AND feedback_applied IS NOT NULL;"
-```
-**Expected: > 0** — the genuinely-evolved (admitted) population. **STOP if it is 0:** with an empty admitted population the
-capture eligibility gate has NOTHING to fire on, so the lane can never admit — that is the real "no work" signal.
-
-```bash
-# (b) THE MONITOR — the EXCLUDED population (NOT a gate):
+# (a) THE GATE — the CANDIDATE band (the population the capture lane can STILL fire on):
 psql -Atc "SELECT count(*) FROM skill_usage_records WHERE selected AND task_succeeded AND feedback_applied IS NULL;"
 ```
-**Expected: ≈3 535 on the 2026-11-10 live census (3 457 on 2026-11-09) — a NON-ZERO value is NORMAL.** This population is
-**excluded BY CONSTRUCTION** (`feedback_applied IS NULL` is one of the three negated conjuncts), so a non-zero count here is
-the SHIPPED PREDICATE WORKING, not a fault. It is a MONITOR (a sudden drop means the usage rows changed shape), **never a
-gate**.
+**Expected: > 0 — live census 3 544 rows / 3 525 instances (2026-11-10T21:52Z; 3 457 on 2026-11-09).**
+**STOP if it is 0:** the candidate band is the only PREDICTIVE population — these selected+succeeded rows carry no
+feedback evidence, so the instances behind them are NOT genuinely evolved and the capture gate MAY still fire
+(`skill_metrics_service.py:765` falls through). An empty candidate band means NOTHING IS LEFT TO CAPTURE ⇒ the lane can
+never admit ⇒ **the gate fails**.
 
-> **WHY THIS READ WAS REPOINTED (Phase-3 correction).** The earlier text made (b) the gate and demanded **0** from it — a
-> gate that could never pass while the excluded population is non-empty (it read **3 535** on 2026-11-10). The gate is (a),
-> the ADMITTED population; (b) is the monitor.
+```bash
+# (b) THE MONITOR — the BLOCKER band (NOT a gate, NEVER a STOP):
+psql -Atc "SELECT count(*) FROM skill_usage_records WHERE selected AND task_succeeded AND feedback_applied IS NOT NULL;"
+```
+**Expected: ≈5 996 on the 2026-11-10T21:52Z live census (5 944 distinct instances) — a NON-ZERO value is NORMAL.** This
+band is BLOCKED from capture BY CONSTRUCTION (`feedback_applied IS NOT NULL` is the genuinely-evolved EVIDENCE the
+predicate demands — `repository.py:1755`; the Gate-4 code REFUSES capture when it finds it, `skill_metrics_service.py:765-769`),
+so a non-zero count here is the SHIPPED PREDICATE WORKING, not a fault. It is a MONITOR (a sudden drop means the usage rows
+changed shape), **never a gate**.
+
+> **WHY THIS READ WAS CORRECTED AGAIN (Phase-3 round-2 F1).** The round-1 text put the GATE on (b) — the blocker band —
+> with "STOP if 0": a gate that is TRIVIALLY satisfied because the blocker band is ~always non-zero (it read **5 996**
+> on 2026-11-10T21:52Z), so the gate passed by accident while the real predictive population was demoted to a monitor.
+> The band map is derived from the Gate-4 code (`daemon/services/skill_metrics_service.py:733-772`, quoted in the
+> round-2 lane report): `feedback_applied IS NULL` = CANDIDATE = the gate, expected > 0, STOP if 0;
+> `feedback_applied IS NOT NULL` = BLOCKER = monitor only. The gate is (a), the monitor is (b).
 
 ### 8.2 A4 — the drift convergence, with the ≥ 24 h gate
 
@@ -940,7 +960,7 @@ decision in Phase 2 (`phase1-plan.md` §10 — *"The manifest must say, per agen
 | **R3** | **`_READ_SCOPE_CACHE` same-tick + same-length staleness** — an edit that preserves the byte length AND lands inside the filesystem's timestamp tick can still be served stale. `st_ctime_ns` closes the `utime`-restore case but does **not** eliminate the window. | **OPEN, DISCLOSED (D-N15).** The cache is keyed on the meta.json's identity (path + `st_mtime_ns` + `st_size` + `st_ctime_ns`) and the `stat()` IS the invalidation trigger — so **no restart is needed** for a scope edit; only the narrow same-tick/same-length window survives. | `daemon/tools/filesystem.py:255-274` (the RESIDUAL disclosure), `:275` (the cache), `:332-344` (the lookup), `:347-372` (`_meta_identity_matches`) |
 | **R4** | **Roster / `skill_injection` changes need a daemon restart** | **BY CONSTRUCTION.** `get_registry()` builds the registry **once per process** and `discover()` parses `meta.json` at that moment, freezing `skill_injection`. | `daemon/registry.py:1525-1545`, `:627-637`, `:690`, `:756` |
 | **R5** | **The leaking test files (the sink-leak class)** — routed to the tester | **ROUTED TO THE TESTER for the final pass** — this lane does not own those files. The concrete instance: `test_p9_the_sentinel_catches_a_teardown_that_restores_none` poisons `tests/helpers/skill_sink_redirect.py::_LAST_LANE_STATE` and does not restore it in `finally` ⇒ 12 later errors in one session. | `phase1-plan.md` §17 item 37 (`:1037`) · gate finding **F-G9** (`.agents/tester/RESULTS/2026-11-10-skill-revival-phase1-tester-gate.md:150`) |
-| **R7** | **The capture lane's dispatcher binding was COVERED-BY-TEST-SIDE-INJECTION ONLY** — every pre-Phase-3 pin injected the dispatcher into the `SkillMetricsService` from the test side, so a production-boot disconnect would not have reddened any suite | **CLOSED by Phase 3** (branch `feature/skill-capture-prod-wiring`): the binding is now made explicitly at the api boot seam (`daemon/api.py::_wire_skills_router_services`) and pinned by a production-wiring test that drives the REAL seam (`tests/unit/test_skill_capture_production_wiring.py`, both mutation legs proved RED). **DISCLOSURE:** the manager-side binding (`daemon/manager.py:8196-8197`, inside `InstanceManager.set_job_queue_service`) was **already** present and already ran in production — the earlier "no production caller" reading was a grep-scoped miss, not a live defect; the Phase-3 work closes the COVERAGE hole, not a live break. | `daemon/manager.py:8196-8197` · `daemon/api.py` (`_wire_skills_router_services`) · `tests/unit/test_skill_capture_production_wiring.py` |
+| **R7** | **The capture lane's dispatcher binding was COVERED-BY-TEST-SIDE-INJECTION ONLY** — every pre-Phase-3 pin injected the dispatcher into the `SkillMetricsService` from the test side, so a production-boot disconnect would not have reddened any suite | **CLOSED by Phase 3** (branch `feature/skill-capture-prod-wiring`): the binding is now made explicitly at the api boot seam (`daemon/api.py::_wire_skills_router_services`), pinned by a production-wiring test that drives the REAL seam, and pinned AGAIN at the call site (`lifespan` still calls the seam — round-2 F2 static pin), with **all three mutation legs proved RED** (leg 1 = binding removed; leg 2 = binding removed + test-side injection STILL RED; leg 3 = `lifespan` call line removed → ONLY the static pin reddens). **DISCLOSURE:** the manager-side binding (`daemon/manager.py:8196-8197`, inside `InstanceManager.set_job_queue_service`) was **already** present and already ran in production — the earlier "no production caller" reading was a grep-scoped miss, not a live defect; the Phase-3 work closes the COVERAGE hole, not a live break. | `daemon/manager.py:8196-8197` · `daemon/api.py` (`_wire_skills_router_services` + `lifespan` call) · `tests/unit/test_skill_capture_production_wiring.py` |
 | **R6** | **The live-PG leg's first-run provisioning** — it self-provisions a disposable cluster, so **no pre-existing PG server is needed**, but it **REQUIRES native PG 16 binaries** on the host | **DISCLOSED.** If the binaries are absent the pack prints *"the live-PG leg is NOT VERIFIED on this host"* and exits 1. | `test/packs/skill_revival_pg_dialect_unit_test.sh:115-131` (the binary discovery + the message), `:136` (port 54333), `:141-147` (teardown), `:189` (createdb over TCP) |
 
 > **OPEN ITEM (R5's count).** The leader's brief calls these *"the four leaking test files"*. **The number four could not
@@ -972,7 +992,7 @@ decision in Phase 2 (`phase1-plan.md` §10 — *"The manifest must say, per agen
 | **P5** | The **metrics door answers** | `GET /api/metrics/capture-lane` | **200** (not 503) |
 | **P6** | The **counter baseline** is captured | the §6.8 "BEFORE" block | `/tmp/capture-lane.before.json` exists |
 | **P7** | The **A4 gauge** is at the baseline | `--measure` | `diverging_keys = 32`, `drift` recorded |
-| **P8** | The **A3 admitted (genuinely-evolved) population** is non-empty | the §8.1 SELECT (a) | `> 0` |
+| **P8** | The **A3 candidate band** (`feedback_applied IS NULL` — the only predictive, capture-eligible population) is non-empty | the §8.1 SELECT (a) | `> 0` — **STOP if 0** (live ≈3 544 rows / 3 525 instances, 2026-11-10T21:52Z) |
 | **P9** | The **live-PG leg** is green here | `bash test/packs/skill_revival_pg_dialect_unit_test.sh` | `RESULT: PASS` |
 | **P10** | The **bounded dual-side check** is green | the §8.3 pack loop | every pack `RESULT: PASS` |
 | **P11** | The **sink** is present and readable | `ls -la /home/nea/agents-ensemble/data/skill-capture-observability/` | readable |
@@ -984,7 +1004,7 @@ decision in Phase 2 (`phase1-plan.md` §10 — *"The manifest must say, per agen
 1. The release is **not live** (§12 — this is a ceremony, not a flip).
 2. The capture-lane metrics read returns **503** (no counter read ⇒ no go/no-go).
 3. The A4 divergence gauge is **not 32** — **> 32** is drift, **< 32** is an undeclared winner.
-4. The A3 **admitted** population is **0** — the capture lane has nothing to fire on. (The EXCLUDED population, §8.1(b), is a MONITOR: a non-zero value there is NORMAL and is **not** a stop condition.)
+4. The A3 **candidate band** (`feedback_applied IS NULL`, §8.1(a)) is **0** — nothing is left to capture, so the lane can never admit. (The **blocker band** `feedback_applied IS NOT NULL`, §8.1(b), is a MONITOR ONLY: its non-zero value is NORMAL and is **never** a stop condition.)
 5. The live-PG pack prints **NOT VERIFIED on this host**.
 6. Any bounded dual-side pack is **red** and the red is **not base-proven**.
 7. The brake read-back does not show **`is_paused = t`**.

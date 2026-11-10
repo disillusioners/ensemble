@@ -60,8 +60,13 @@ process; the flag-carrying restart landed at **19:37:11**, *after* the observati
 
 **⇒ The hole that is REAL, and that Phase 3 must close: there is NO regression test over the production binding.**
 Every existing pin injects the dispatcher **test-side** (`tests/services/test_skill_capture_observability.py:690`,
-`tests/unit/test_skill_capture_killswitch_verification.py:348`, `tests/integration/test_skill_capture.py:176`, …). Delete
-`daemon/manager.py:8196-8197` and the entire suite stays green — a green suite that proves nothing about production.
+`tests/unit/test_skill_capture_killswitch_verification.py:348`, `tests/integration/test_skill_capture.py:176`, …).
+**Scope of the claim, stated precisely (round-2 S2):** at HEAD `0efdf106f` the api seam did not exist yet, so the
+green-suite proof below held for the production binding **as a whole**. Post-fix the two bindings are NOT symmetric:
+the **api-seam binding is under test** (Phase 3's regression suite drives `daemon.api._wire_skills_router_services`
+and pins the `lifespan` call), while the **manager-side binding** (`daemon/manager.py:8196-8197`) **remains
+untested** — deleting it alone still leaves the suite green; it is the idempotent FALLBACK for boot paths that
+never run the api `lifespan`. Deleting the api seam NOW goes RED.
 That is the shape of hole the commission describes; the commission's *explanation* of it is wrong.
 
 ---
@@ -154,7 +159,7 @@ at `daemon/config.py:6890`, so it is **never** `None` in production).
 
 ### 1.5 The capture path, end to end (for the record)
 
-`daemon/services/job_queue_service.py:3606` / `:3647` → `manager._skill_metrics_service` →
+`daemon/services/job_queue_service.py:3617` / `:3665` → `manager._skill_metrics_service` →
 `SkillMetricsService.record_task_completion` → `_check_capture_eligibility` (gate 0 = `ENSEMBLE_SKILL_CAPTURE_ENABLED`,
 `daemon/services/skill_metrics_service.py:663`) → `evolution_service.check_and_capture` → **`:812-816` →
 `SkillJobDispatcher.enqueue_capture`** (`daemon/services/skill_job_dispatcher.py:1084`, its own kill-switch gate at
@@ -256,7 +261,7 @@ recovery.
 
 | # | Defect | Fix |
 |---|---|---|
-| 1 | **§8.1 A3 mislabelled gate** — the operator read counts `selected AND task_succeeded AND feedback_applied IS NULL` (the population the shipped predicate **excludes BY CONSTRUCTION** — 3 457 at the 2026-11-09 census, 3 535 live) and demands **0** ⇒ it can never pass while the population is non-empty. | Repoint the read to the population the gate is actually about: the **ADMITTED** population `selected AND task_succeeded AND feedback_applied IS NOT NULL` (the genuinely-evolved population), whose **0** reading is the meaningful STOP (an empty eligible population means the capture lane can never admit). The excluded population demotes to a **MONITOR** (expected ≈3 535; a non-zero value is NORMAL and is **not** a failure). |
+| 1 | **§8.1 A3 gate bands INVERTED (round-2 F1 — this row supersedes its own original fix, which mapped the gate onto the WRONG band).** `feedback_applied IS NOT NULL` is the **BLOCKER band**: those rows are the genuinely-evolved EVIDENCE, `has_genuinely_evolved_for_instance` returns True on them, and the Gate-4 code (`daemon/services/skill_metrics_service.py:733-772`) REFUSES capture (`:765-769` `return None`) — 5 996 rows / 5 944 instances live (2026-11-10T21:52Z census). A gate on this band with "STOP if 0" is TRIVIALLY satisfied (it is ~always non-zero) ⇒ the gate passed by accident. | The GATE is §8.1(a) = the **CANDIDATE band** `feedback_applied IS NULL` — the only PREDICTIVE population: these are selected+succeeded rows with NO feedback evidence, so the instance is NOT genuinely evolved and capture MAY still fire (`:765` falls through). **Expected > 0, STOP if 0** — an empty candidate band means nothing is left to capture ⇒ the lane can never admit ⇒ the gate FAILS. Live census 3 544 rows / 3 525 instances (2026-11-10T21:52Z). The blocker band demotes to §8.1(b) **MONITOR ONLY — never a gate, NEVER carries a STOP**; its non-zero value is the shipped predicate WORKING. Band map derived from the Gate-4 code + the predicate (`daemon/repositories/skill/repository.py:1699-1758`), quoted in the round-2 lane report; grep-derived sweep across runbook + plan, every occurrence reconciled. |
 | 2 | Per-pack timeout `300` | `900` (two sites: §8.3 pack loop + the live-PG leg). |
 | 3 | Live port `8079` (the dev port) | `9797` (the live port) — every live command in the runbook. |
 | 4 | **C10 scope noise** — counts `category IN ('tool-failure','queue-scheduling')` over **all** anomaly rows in the window, so unrelated lanes' rows are read as skill-capture deviations. | Tighten to the lane's own rows: `AND instance_id = 'daemon:skill-capture-observability'` (the lane reporter, `daemon/services/skill_capture_observability.py:139`) — the daemon-side reporter identity used by every lane anomaly site. |
