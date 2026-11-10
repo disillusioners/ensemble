@@ -422,8 +422,35 @@ class SkillJobDispatcher:
         self._fix_cooldown_seconds = max(0, int(fix_cooldown_seconds))
         # Durable burst cap (E1) — the RAM cooldown above is the FAST
         # path; this is the backstop that survives a restart.
-        self._fix_burst_cap = max(0, int(fix_burst_cap))
-        self._fix_burst_window_seconds = max(0, int(fix_burst_window_seconds))
+        #
+        # The CONFIG surface rejects a negative cap/window at load
+        # (``ge=0`` / ``ge=1``) — a negative cap would be clamped to 0
+        # and SILENTLY DISARM the durable guard. The clamps below are
+        # the defence for a DIRECT construction (a test double, a
+        # caller that builds the dispatcher itself); when they bite,
+        # the raw value is named so the disarm is never silent.
+        raw_burst_cap = int(fix_burst_cap)
+        self._fix_burst_cap = max(0, raw_burst_cap)
+        raw_burst_window = int(fix_burst_window_seconds)
+        self._fix_burst_window_seconds = max(0, raw_burst_window)
+        if raw_burst_cap != self._fix_burst_cap:
+            logger.warning(
+                "SkillJobDispatcher: fix_burst_cap=%s is NEGATIVE — clamped "
+                "to %s. NOTE: 0 DISABLES the durable FIX burst cap. The "
+                "config surface rejects a negative cap at load (ge=0); "
+                "this warning covers a DIRECT construction.",
+                raw_burst_cap,
+                self._fix_burst_cap,
+            )
+        if raw_burst_window != self._fix_burst_window_seconds:
+            logger.warning(
+                "SkillJobDispatcher: fix_burst_window_seconds=%s is "
+                "NEGATIVE — clamped to %s. The config surface rejects a "
+                "non-positive window at load (ge=1); this warning covers "
+                "a DIRECT construction.",
+                raw_burst_window,
+                self._fix_burst_window_seconds,
+            )
         self._anomaly_reporter = anomaly_reporter
         # (normalized_project_id, skill_id) -> monotonic timestamp of
         # the last ACCEPTED FIX admission. RAM-only by design: it is

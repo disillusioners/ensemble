@@ -525,3 +525,98 @@ def test_m11_the_route_envelope_carries_the_class_token():
         f"(got {detail.get('reason')!r}, expected "
         f"{SkillFixBurstCapRefused.reason!r})"
     )
+
+
+# ── M19 — a negative burst knob is REJECTED at load, never clamped ──────
+
+
+def _skill_evolution_config(**overrides):
+    """Build a ``SkillEvolutionConfig`` with the env lane scrubbed."""
+    from daemon.config import SkillEvolutionConfig
+
+    return SkillEvolutionConfig(**overrides)
+
+
+def test_m19_a_negative_burst_cap_is_rejected_loudly_at_load(monkeypatch):
+    """A NEGATIVE cap must be a loud config error, never a silent 0.
+
+    A negative cap was clamped to 0 by the dispatcher — and 0 DISABLES
+    the durable guard, so a typo DISARMED the burst cap without a word.
+
+    Named mutation: drop the ``ge=0`` from ``fix_burst_cap`` → this pin
+    goes RED (the negative value is accepted).
+    """
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("SKILL_EVOLUTION_FIX_BURST_CAP", "-1")
+    with pytest.raises(ValidationError):
+        _skill_evolution_config()
+
+    monkeypatch.delenv("SKILL_EVOLUTION_FIX_BURST_CAP", raising=False)
+    with pytest.raises(ValidationError):
+        _skill_evolution_config(fix_burst_cap=-1)
+
+
+def test_m19_a_non_positive_burst_window_is_rejected_loudly_at_load(monkeypatch):
+    """A zero/negative window must be a loud config error.
+
+    Named mutation: drop the ``ge=1`` from ``fix_burst_window_seconds``
+    → this pin goes RED (a zero window is accepted).
+    """
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("SKILL_EVOLUTION_FIX_BURST_WINDOW_SECONDS", "0")
+    with pytest.raises(ValidationError):
+        _skill_evolution_config()
+
+    monkeypatch.delenv(
+        "SKILL_EVOLUTION_FIX_BURST_WINDOW_SECONDS", raising=False
+    )
+    with pytest.raises(ValidationError):
+        _skill_evolution_config(fix_burst_window_seconds=0)
+
+
+def test_m19_the_explicit_zero_cap_still_survives(monkeypatch):
+    """The documented "0 disables the cap" semantics MUST NOT break.
+
+    Named mutation: change ``ge=0`` to ``ge=1`` → this pin goes RED (an
+    explicit 0 — the documented disable — is rejected at load).
+    """
+    monkeypatch.delenv("SKILL_EVOLUTION_FIX_BURST_CAP", raising=False)
+    config = _skill_evolution_config(fix_burst_cap=0)
+    assert config.fix_burst_cap == 0, (
+        "an explicit 0 must SURVIVE the config load — 0 is the documented "
+        f"'disable the cap' value (got {config.fix_burst_cap!r})"
+    )
+
+    monkeypatch.setenv("SKILL_EVOLUTION_FIX_BURST_CAP", "0")
+    config = _skill_evolution_config()
+    assert config.fix_burst_cap == 0, (
+        "an explicit 0 via the env alias must SURVIVE the config load"
+    )
+
+
+def test_m19_a_directly_constructed_negative_cap_is_logged(caplog):
+    """The dispatcher's clamp must never disarm the cap SILENTLY.
+
+    Named mutation: delete the WARNING in the dispatcher constructor →
+    this pin goes RED (the clamp is silent again).
+    """
+    dispatcher = SkillJobDispatcher(
+        job_service=object(),
+        queue_repo=object(),
+        evolution_lane_enabled=True,
+        fix_cooldown_seconds=0,
+        fix_burst_cap=-1,
+    )
+    assert dispatcher._fix_burst_cap == 0
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelname == "WARNING" and "fix_burst_cap" in record.getMessage()
+    ]
+    assert warnings, (
+        "a negative fix_burst_cap clamped to 0 (which DISABLES the durable "
+        "burst cap) must be logged at WARNING naming the raw value"
+    )
+    assert "-1" in warnings[0].getMessage()

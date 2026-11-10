@@ -5198,19 +5198,25 @@ class SkillEvolutionConfig(EmbeddingConfig):
     # the CONSTRUCTED DEFAULT only.
     fix_burst_cap: int = Field(
         default=3,
+        ge=0,
         description=(
             "Max FIX admissions per skill within "
             "fix_burst_window_seconds. The next admission inside the "
             "window is refused ('refused: burst cap') with an anomaly "
             "row; 0 disables the cap. Default 3 per 24h — the "
-            "2026-10-21 burst re-FIXed one skill 3x in 37 minutes."
+            "2026-10-21 burst re-FIXed one skill 3x in 37 minutes. "
+            "MUST be >= 0: a NEGATIVE value is rejected at load rather "
+            "than silently clamped to 0 (which would DISARM the cap)."
         ),
     )
     fix_burst_window_seconds: int = Field(
         default=86400,
+        ge=1,
         description=(
             "Window (seconds) for the durable FIX burst cap. Default "
-            "86400 (24h) — the Phase-2 observation window."
+            "86400 (24h) — the Phase-2 observation window. MUST be >= 1: "
+            "a zero/negative window is rejected at load rather than "
+            "silently disarming the cap."
         ),
     )
 
