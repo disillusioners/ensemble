@@ -5,12 +5,12 @@ three-way form (a two-way form was the defect class the fold ledger
 recorded):
 
 * the **declared-route** census (the scope-decorated routes) reads
-  **113** — the three query routes joined the family, and the
+  **116** — the three query routes joined the family, and the
   nest-anomaly-report lane's ``/api/nest-reports`` DOMAIN route added
   TWO scope-decorated routes (the family + the cluster detail);
-* the **mount** census stays **38** — the domain route is ONE new
+* the **mount** census stays **39** — the domain route is ONE new
   mount (``/api/nest-reports``);
-* the **class-manifest** family count stays **34** — the new family is
+* the **class-manifest** family count stays **35** — the new family is
   pinned as protected-default (the metrics-router precedent).
 
 Plus the family's scope: the query routes carry the family's EXISTING
@@ -18,6 +18,7 @@ Plus the family's scope: the query routes carry the family's EXISTING
 
 This pack is D1 (HEAD-only): it asserts the three-way form at once, so
 a cage that drifted in ANY direction reds.
+(The counts moved 113 -> 116, 38 -> 39, 34 -> 35 for the memoir-v2 phase-5 mount.)
 """
 
 from __future__ import annotations
@@ -36,9 +37,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 API_PY = REPO_ROOT / "daemon" / "api.py"
 
 #: The three-way cage form (declared-route · mount · class manifest).
-DECLARED_ROUTE_CENSUS = 113
-MOUNT_CENSUS = 38
-CLASS_MANIFEST_FAMILIES = 34
+#: Re-pinned for the memoir-v2 phase-5 mount (2128cf7d2); the sibling pins are test_router_scope_manifest.py (116/39) + test_router_class_manifest.py (35).
+DECLARED_ROUTE_CENSUS = 116
+MOUNT_CENSUS = 39
+CLASS_MANIFEST_FAMILIES = 35
 
 #: The scope the family carries — the ANY-OF set the three query routes
 #: declare (the metrics-agent-tools lane minted ``metrics:read`` so a
@@ -80,7 +82,7 @@ def app_routes():
 class TestThreeWayCage:
     """The three-way cage form — all three pins at once."""
 
-    def test_the_declared_route_census_reads_113(self, app_routes):
+    def test_the_declared_route_census_reads_116(self, app_routes):
         declared = [
             route
             for route in app_routes
@@ -93,7 +95,7 @@ class TestThreeWayCage:
             f"(pinned {DECLARED_ROUTE_CENSUS})"
         )
 
-    def test_the_mount_census_stays_38(self):
+    def test_the_mount_census_stays_39(self):
         source = API_PY.read_text(encoding="utf-8")
         matches = re.findall(r"api_router\.include_router\(", source)
         assert len(matches) == MOUNT_CENSUS, (
@@ -102,7 +104,7 @@ class TestThreeWayCage:
             "existing /api/metrics mount; they add none"
         )
 
-    def test_the_class_manifest_family_count_stays_34(self):
+    def test_the_class_manifest_family_count_stays_35(self):
         from tests.integration.test_router_class_manifest import (
             PINNED_MANIFEST_AUTH_ON,
         )
