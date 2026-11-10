@@ -646,7 +646,11 @@ class TestProductionWiring:
     def test_the_gate_classifies_through_the_reflection_services_caller(
         self, engine, persona_repo
     ):
-        from daemon.services.memoir_reflection_service import MemoirReflectionService
+        from daemon.services.memoir_reflection_service import (
+            MEMOIR_REFLECTION_CALL_TIMEOUT_S,
+            MemoirReflectionService,
+            ReflectionSettings,
+        )
 
         calls: list[str] = []
 
@@ -659,18 +663,30 @@ class TestProductionWiring:
                 })
             return "# Ari Persona\n\nUpdated with the new directive."
 
+        # THE SETTINGS ARE NON-DEFAULT (F3) — the pin must DISCRIMINATE.
+        # With the default 45.0 the assertion below compared the gate's
+        # timeout against 45.0, so a hard-coded 45.0 in the gate's
+        # construction was INVISIBLE (measured: 0 red nodes).  A
+        # non-default value makes that mutation RED.
+        settings = ReflectionSettings(call_timeout_s=7.25)
         service = MemoirReflectionService(
             reflection_repository=MagicMock(),
             syntheses_repository=MagicMock(),
             persona_repository=persona_repo,
             llm_caller=fake_llm,
+            settings=settings,
         )
 
         gate = service._persona_gate
         assert isinstance(gate, MemoirPersonaGateService)
         # THE SAME CALLER OBJECT — the gate does not build its own lane.
         assert gate._llm_caller is fake_llm
-        # The gate rides the reflection service's timeout knob (F2).
+        # The gate rides the reflection service's timeout knob (F2) —
+        # and the knob is NOT at its default, so the comparison is real.
+        assert float(service.settings.call_timeout_s) == 7.25
+        assert float(service.settings.call_timeout_s) != float(
+            MEMOIR_REFLECTION_CALL_TIMEOUT_S
+        )
         assert gate._call_timeout_s == float(service.settings.call_timeout_s)
 
         syn = _make_synthesis(

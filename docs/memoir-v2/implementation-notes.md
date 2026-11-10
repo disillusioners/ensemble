@@ -657,6 +657,75 @@ independent mutation-grade review found 2 CRITICALs, 3 unpinned
 properties and 3 advisories against the phase-5 implementation; this
 commit is the fix round for all of them except the carried F4 (§15.5).
 
+**THE DELTA (2026-11-10, this commit) — what THIS commit changes.** The
+delta re-review of `2d0898c11` confirmed C1's invariant closed and C2
+fully closed, and found ONE CRITICAL raise-path residual plus five
+advisories. **The delta's findings are labelled ΔF1..ΔF6 here** — they
+are NOT the earlier fix round's F1/F2/F3 (the doubly-broken fallback
+lane and the router's production branch).
+
+* **ΔF1 (CRITICAL) — the raise path.** `process_candidate` can raise
+  AFTER the classification was paid for and BEFORE any ledger row
+  exists (the composition `try` covers only `compose_persona_document`;
+  `create_draft` / `submit` sit OUTSIDE it). The pre-fix shape let
+  that escape the candidate loop, and the `finally`-park then wrote the
+  candidate as `classification=NULL, attempts=0,
+  last_error='deferred:composition_budget'`. Four measured harms: the
+  attempt counter froze at 0 (the terminal-at-5 ladder was UNREACHABLE
+  on this path); the PAID classification was discarded (a re-classify
+  AND a re-compose on EVERY pass — 8 classify calls over 8 passes for
+  ONE candidate); the lane hit a PERMANENT HEAD-OF-LINE STALL
+  (`get_pending_candidates` orders `created_at ASC`, so the poison row
+  was re-selected first every pass and broke the loop before anyone
+  else — two later candidates stayed `pending` through 8 passes); and a
+  store failure was MASKED as a budget deferral. **THE MECHANISM:** the
+  per-candidate `process_candidate(...)` call is now wrapped in a
+  `try/except` INSIDE the loop. On an exception the candidate is
+  JOURNALED (`_journal_gate_error`): the classification already paid
+  for is PRESERVED, the attempt counter advances by one, the
+  diagnostic is `gate_error: <Type>: <message>` (a NON-deferral
+  marker), the status is `terminal` at `MAX_ATTEMPTS` and `pending`
+  below it, and the id is marked processed so the `finally`-park does
+  not clobber the row. **The pass CONTINUES** — the failure is
+  contained, so the lane does not stall. §15.2 row 11 is the receipt.
+  **RE-VERIFIED IN THIS WORKTREE (2026-11-10):** the four harms were
+  re-measured under the exact-shape revert (the bare finally-park) with
+  8 passes over 3 candidates whose proposal store always fails: **8
+  classify calls over 8 passes** for ONE candidate (the paid
+  classification re-paid every pass), `attempts=0` frozen,
+  `classification=None`, `last_error='deferred:composition_budget'`
+  (the store failure MASKED as a deferral), and the two later
+  candidates STILL `pending` after 8 passes (the head-of-line stall).
+  The SAME probe on the FIXED shape measures 3 classify calls (one per
+  candidate — the stored classification is reused on every retry), the
+  attempt ladder 3/5 → 4/5 → 5/5 → `terminal`, the classification
+  PRESERVED (`'new_rule'`), and the diagnostic
+  `gate_error: RuntimeError: the proposal store exploded`.
+* **ΔF2 — the false claim.** The C1 bullet below claimed "a candidate
+  whose classification is ALREADY KNOWN keeps it". That was FALSE on
+  the current-pass raise path (the classification was paid for and then
+  DISCARDED). The bullet — and the `_park_unprocessed_candidates`
+  docstring — now state the post-fix truth.
+* **ΔF3 — the timeout pin.** `TestProductionWiring`'s timeout
+  assertion compared against `float(service.settings.call_timeout_s)`,
+  which DEFAULTS to 45.0 — a hard-coded 45.0 in the gate's construction
+  was invisible (measured: 0 red nodes). The leg now drives
+  NON-default settings (`call_timeout_s=7.25`), so that mutation
+  REDDENS (§15.2 row 12).
+* **ΔF4 — the two missing PLAN-DEFECT entries.** §15.6 now records all
+  THREE plan omissions (the comparator, the budget-deferral
+  disposition, and the mutation-application site).
+* **ΔF5 — row 4's membership.** §15.2 row 4 claimed 1 red node; the
+  exact-shape revert reddens 2 (the row-4 and row-4b recipes' red sets
+  are a UNION). The true membership is now stated.
+* **ΔF6 — the boot-frozen gate timeout (DISCLOSED CARRY).** After
+  construction, `apply_settings(7.0)` leaves the gate at 45.0
+  (service 7.0 / gate 45.0) — the gate's per-call timeout is frozen at
+  construction time. Impact ≈ 0 today (the lane rides the reflection
+  caller's caller), but "one truth per knob" is only half true. §15.7
+  records it. NOT changed here: live-knob propagation is a bigger
+  change than this commit's scope.
+
 * **C1 — the silent production loss.** The per-pass composition budget
   ended the candidate loop with a bare `break`, so a candidate the
   budget never reached was **dropped with NO ledger row**. The ONLY
@@ -669,11 +738,15 @@ commit is the fix round for all of them except the carried F4 (§15.5).
   the ids it processed and, after the loop, parks EVERY candidate it did
   NOT process (`_park_unprocessed_candidates`) as a `pending` ledger row
   with `last_error='deferred:composition_budget'`. A candidate whose
-  classification is ALREADY KNOWN keeps it (the retry must not re-pay
-  the classifier); a candidate that was never classified is stored with
-  `classification=NULL` and is classified on the next pass (it was never
-  classified — there is nothing to store). A candidate that ALREADY has
-  a row is left alone, so a diagnostic `last_error` is never clobbered.
+  classification is ALREADY KNOWN **from an earlier pass** keeps it (the
+  retry must not re-pay the classifier); a candidate that was never
+  classified is stored with `classification=NULL` and is classified on
+  the next pass (it was never classified — there is nothing to store).
+  **A candidate whose classification was determined THIS pass and then
+  RAISED is NOT parked at all** — the raise path journals it with that
+  classification PRESERVED (ΔF1; `gate_error: …`, never the deferral
+  marker). A candidate that ALREADY has a row is left alone, so a
+  diagnostic `last_error` is never clobbered.
 * **C2 — the gate integrity.** The two AC6 legs were SELF-MUTATING
   (they asserted a property of a subclass the test itself defined) and
   were therefore UNFALSIFIABLE. They are now production-revert recipes
@@ -736,8 +809,9 @@ and the packs were re-run GREEN after the restore.
 | 2 | **AC6 (b)** — `_require_human_lane` removed from the production `approve()` | `tests/unit/test_memoir_v2_persona_proposal.py::TestMutationLegB::test_the_production_approve_refuses_a_non_session_actor` | `Failed: DID NOT RAISE <class 'daemon.services.prompt_version_service.HumanLaneRequiredError'>` (:177) | the PRODUCTION `approve()` refuses a non-session actor (no subclass, no mutant) | sha256-identical (`b3b7abe8ff85`) |
 | | | `…::TestHumanLaneEnforcement::test_approve_with_bearer_lane_raises_human_lane_required_error` | `Failed: DID NOT RAISE <class '…HumanLaneRequiredError'>` (:142) | the refusal is fail-closed — the version stays `pending_approval` | sha256-identical |
 | 3 | **AC6 (c)** — the route stops mapping `HumanLaneRequiredError` to 403 | `tests/unit/test_memoir_v2_persona_router.py::TestMutationLegC::test_bearer_approval_is_refused` | `assert 500 == 403` (:391) | the HTTP surface maps the refusal to 403 `HUMAN_LANE_REQUIRED` | sha256-identical (`b4943fe42e67`) |
-| 4 | **C1** — the bare composition-budget break (no ledger row — the pre-fix shape) | `tests/unit/test_memoir_v2_persona_composition.py::TestCompositionBudgetPerPass::test_a_budget_deferred_candidate_is_parked_and_picked_up_next_pass` | `assert None is not None` (:244) | a candidate the budget never reached is PARKED — without the row it is LOST from the JEV lane forever | sha256-identical (`fbf22ad83d53`) |
-| 4b | **C1(b)** — the park is skipped when NO candidate was processed (the failure path) | `tests/unit/test_memoir_v2_persona_composition.py::TestCompositionBudgetPerPass::test_a_candidate_that_raises_is_parked_not_lost` | `assert None is not None` | the park is UNCONDITIONAL — a candidate that RAISES is parked too, and so is every candidate after it | sha256-identical (`fbf22ad83d53`) |
+| 4 | **C1** — the bare composition-budget break (no ledger row — the pre-fix shape) | `tests/unit/test_memoir_v2_persona_composition.py::TestCompositionBudgetPerPass::test_a_budget_deferred_candidate_is_parked_and_picked_up_next_pass` | `assert None is not None` (:276) | a candidate the budget never reached is PARKED — without the row it is LOST from the JEV lane forever | sha256-identical (`fbf22ad83d53`) |
+| | | `tests/unit/test_memoir_v2_persona_composition.py::TestRaisePathParkSemantics::test_the_gate_error_marker_and_the_budget_deferral_marker_stay_distinguishable` | `assert None is not None` (:571) | **THE ROW-4 / ROW-4b UNION (ΔF5 — the true membership is 2 NODES, not 1):** the exact-shape revert (the park removed) reddens this node AND the row-4 node above. The other four raise-path legs stay GREEN under this recipe — the raise path is journaled by the handler, NOT by the park — so the two recipes are INDEPENDENT. | sha256-identical (`641484ebe9c0`) |
+| 4b | **C1(b)** — the park is skipped when NO candidate was processed (the failure path) | `tests/unit/test_memoir_v2_persona_composition.py::TestRaisePathParkSemantics::test_the_gate_error_marker_and_the_budget_deferral_marker_stay_distinguishable` | `assert None is not None` (:571) | **THE NODE CHANGED (ΔF1):** the leg this recipe named (`test_a_candidate_that_raises_is_parked_not_lost`) **RATIFIED the stall** — it asserted only `status=='pending'` for a raising candidate, so the DISCARDED classification, the FROZEN attempt counter and the HEAD-OF-LINE STALL all passed. It is REPLACED by `TestRaisePathParkSemantics` (5 legs). The property this recipe proved (the deferral marker still lands on a candidate the budget never reached) is now proved by the marker-distinguishability leg; the RAISE path has its own recipe (row 11). | sha256-identical (`641484ebe9c0`) |
 | 5 | **C3(a)** — the SUPPRESSED classes draft + submit (the suppression rule removed) | `tests/unit/test_memoir_v2_jev_classifier.py::TestSuppressionRule::test_a_reinforcement_candidate_never_creates_or_submits_a_version` | `AssertionError: assert 'drafted' == 'suppressed'` (:382) | `reinforcement` NEVER creates or submits a version (V2-D 5.2) | sha256-identical |
 | | | `…::TestSuppressionRule::test_a_trivial_candidate_never_creates_or_submits_a_version` | `AssertionError: assert 'pending' == 'suppressed'` (:407) | the same for the heuristic `none` path | sha256-identical |
 | 6 | **C3(b)** — the heuristic result is IGNORED (the LLM is called for every candidate) | `tests/unit/test_memoir_v2_jev_classifier.py::TestHeuristicOrdering::test_a_trivial_candidate_makes_zero_llm_calls` | `assert ['You are the…r backticks.'] == []` (:440) | the rule filter runs FIRST — a trivial candidate makes ZERO LLM calls (V2-D 5.1) | sha256-identical |
@@ -747,6 +821,12 @@ and the packs were re-run GREEN after the restore.
 | 9 | **F2(b)** — the per-call timeout is HARD-CODED (it stops riding the knob) | (the same node) | `assert 45.0 == 12.5` (:619) | the local lane's timeout RIDES `call_timeout_s` (no second copy of the truth) | sha256-identical |
 | 10 | **PREC** — the precedence resolution removed (a multi-label response is refused) | `tests/unit/test_memoir_v2_jev_classifier.py::TestPrecedenceResolution::test_a_multi_label_response_resolves_by_precedence` | `JevClassificationError: Classification "['new_rule', 'conflict']" not in ('conflict', 'boundary_change', 'new_rule', 'reinforcement', 'none')` | a multi-label response resolves by the documented precedence | sha256-identical |
 | | | `…::TestPrecedenceResolution::test_a_compound_string_response_resolves_by_precedence` | `JevClassificationError: Classification 'boundary_change, new_rule' not in (…)` | the same for a compound string | sha256-identical |
+| 11 | **ΔF1** — the bare finally-park on the RAISE path (the pre-fix control flow: the raise ESCAPES the candidate loop and the `finally`-park writes `classification=NULL, attempts=0, last_error='deferred:composition_budget'`) | `tests/unit/test_memoir_v2_persona_composition.py::TestRaisePathParkSemantics::test_a_raising_candidate_is_journaled_as_a_gate_error_not_a_deferral` | `RuntimeError: the proposal store exploded` (:389) | the raise is CONTAINED and JOURNALED as `gate_error: …` (never the deferral marker), with the attempt consumed | sha256-identical (`641484ebe9c0`) |
+| | | `…::TestRaisePathParkSemantics::test_a_raising_candidate_terminalizes_by_pass_five` | `RuntimeError: the proposal store exploded` (:428) | the retry ladder TERMINALIZES (the attempt counter advances to `MAX_ATTEMPTS`) | sha256-identical |
+| | | `…::TestRaisePathParkSemantics::test_a_later_clean_candidate_still_drafts_in_the_same_pass` | `RuntimeError: the proposal store exploded` (:465) | NO HEAD-OF-LINE STALL — the pass continues and a later CLEAN candidate drafts in the SAME pass | sha256-identical |
+| | | `…::TestRaisePathParkSemantics::test_a_raise_after_classification_preserves_the_classification` | `RuntimeError: the proposal store exploded` (:511) | the PAID classification is PRESERVED — the retry does NOT re-pay the classifier (1 classify call across 2 passes) | sha256-identical |
+| | | `…::TestRaisePathParkSemantics::test_the_gate_error_marker_and_the_budget_deferral_marker_stay_distinguishable` | `RuntimeError: the proposal store exploded` (:563) | a gate error and a budget deferral are DISTINGUISHABLE ledger states | sha256-identical |
+| 12 | **ΔF3** — the gate's per-call timeout HARD-CODED (it stops riding the knob) | `tests/unit/test_memoir_v2_jev_classifier.py::TestProductionWiring::test_the_gate_classifies_through_the_reflection_services_caller` | `AssertionError: assert 45.0 == 7.25` | the gate's timeout RIDES the reflection service's `call_timeout_s` — driven with NON-DEFAULT settings (`7.25`), so the hard-coded 45.0 is VISIBLE (pre-fix the same mutation was INVISIBLE: 0 red nodes) | sha256-identical (`79168a361a20`) |
 
 **NO RECEIPT CLAIMS A PROPERTY IT DOES NOT EXERCISE.** Rows 1-3 are
 now production reverts (they were receipts of nothing before). The
@@ -760,19 +840,19 @@ Every class in every module is now named EXPLICITLY in the pack's `-k`
 selector, and the node-count pins move in the SAME commit as the legs
 (the LANE RULE of §14):
 
-| Pack | Before (phase 5) | After (this fix round) | Verdict |
-|---|---|---|---|
-| `memoir_v2_jev_classifier_test` | 14 | **26** | PASS |
-| `memoir_v2_persona_composition_test` | 5 | **7** | PASS |
-| `memoir_v2_persona_proposal_test` | 5 | **5** | PASS |
-| `memoir_v2_persona_router_test` | 12 | **15** | PASS |
+| Pack | Before (phase 5) | After (the fix round) | After (THIS delta) | Verdict |
+|---|---|---|---|---|
+| `memoir_v2_jev_classifier_test` | 14 | **26** | **26** (ΔF3 strengthens a pin, the node count does not move) | PASS |
+| `memoir_v2_persona_composition_test` | 5 | **7** | **11** (the ratifying raise-path leg is REPLACED by 5 legs) | PASS |
+| `memoir_v2_persona_proposal_test` | 5 | **5** | **5** | PASS |
+| `memoir_v2_persona_router_test` | 12 | **15** | **15** | PASS |
 
 The class census (measured with `--collect-only -q`):
 
 | Module | Classes (node counts) |
 |---|---|
 | `test_memoir_v2_jev_classifier.py` | `TestJevHeuristicFilter` (6) · `TestJevLlmClassifier` (4) · `TestCandidateParkingInJevLedger` (3) · `TestHeuristicOrdering` (2) · `TestLocalFallbackLane` (2) · `TestPrecedenceResolution` (5) · `TestSuppressionRule` (2) · `TestMutationLegA` (1) · `TestProductionWiring` (1) |
-| `test_memoir_v2_persona_composition.py` | `TestPersonaComposition` (1) · `TestUnbuildableDiffParking` (3) · `TestCompositionBudgetPerPass` (3) |
+| `test_memoir_v2_persona_composition.py` | `TestPersonaComposition` (1) · `TestUnbuildableDiffParking` (3) · `TestCompositionBudgetPerPass` (3) · `TestRaisePathParkSemantics` (5) |
 | `test_memoir_v2_persona_proposal.py` | `TestProposalCreationAndIsolation` (1) · `TestHumanLaneEnforcement` (3) · `TestMutationLegB` (1) |
 | `test_memoir_v2_persona_router.py` | `TestMemoirPersonaRouter` (11) · `TestProductionRepositoryResolution` (3) · `TestMutationLegC` (1) |
 
@@ -836,6 +916,97 @@ doubly-broken local lane was dormant. The local lane is now FIXED and
 exercised by `TestLocalFallbackLane`, and the wiring itself is pinned
 by `TestProductionWiring` (the gate's `_llm_caller` IS the reflection
 service's caller object, and the gate rides the reflection service's
-`call_timeout_s` knob).
+`call_timeout_s` knob — with NON-DEFAULT settings, so the pin
+discriminates: ΔF3 / §15.2 row 12).
+
+### 15.6 THE PLAN DEFECTS — three omissions the plan still carries
+
+These are the plan-side gaps this lane found. They are recorded here
+because the fix belongs to the PLAN, not to the code: a plan that
+leaves a disposition undefined will keep permitting a silent loss.
+
+1. **THE COMPARATOR (this one already existed — §15.4).** The plan
+   writes the gated classes as `conflict > boundary_change > new_rule`
+   — a TAXONOMY PRIORITY — and never defines a COMPARATOR: nothing said
+   what an ambiguous or multi-label classifier response RESOLVES to.
+   The implementation supplied one (`JEV_CLASSIFICATION_PRECEDENCE`,
+   §15.4) and the caller's ruling is requested there.
+2. **THE BUDGET-DEFERRAL DISPOSITION (NEW — ΔF4).** The plan's §3.3
+   (Persona Document Composition Specification) and its task T5.3 fix
+   the per-pass composition ceiling
+   (`MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS = 1`) and the
+   unbuildable-diff parking, but they **never state the DISPOSITION of
+   a candidate the composition budget did NOT reach**. §3.3's
+   "Once-Marker Discipline (ND-14)" says what happens to a candidate
+   that WAS evaluated (`status='drafted'` or `'suppressed'`), and its
+   "Unbuildable Diff Handling" says what happens to a candidate whose
+   diff failed — but a candidate the budget never reached falls through
+   BOTH. **That omission is what permitted the silent loss (C1):** with
+   no disposition required, the implementation ended the loop with a
+   bare `break` and the candidate simply VANISHED from the JEV lane (no
+   ledger row, no re-selection — the ledger is the only re-selection
+   source). **THE PLAN SHOULD REQUIRE:** every candidate a pass does
+   not evaluate MUST land a ledger row stating its disposition (the
+   budget-deferral marker), so the ledger stays the single re-selection
+   source. The same requirement now covers the RAISE path (ΔF1): a
+   candidate whose evaluation FAILED must land a row carrying a
+   FAILURE marker (`gate_error: …`), never the deferral marker.
+3. **THE MUTATION-APPLICATION SITE (NEW — ΔF4).** AC6 (Mutation) reads:
+   *"Defaulting to `none` on classifier exception flips AC2 RED;
+   removing `_require_human_lane` from `approve()` flips AC4 RED;
+   approving via bearer token flips AC5 RED."* It names the MUTATION
+   but never **WHERE the mutation is applied** — and the two
+   implementations that satisfy those words are not equivalent. A leg
+   that asserts a property of a subclass the TEST ITSELF defines (a
+   self-mutating mutant) proves NOTHING about production: it passes
+   whatever the production code does, so it cannot fail. **THE PLAN
+   SHOULD REQUIRE PRODUCTION-REVERT recipes:** the leg asserts
+   PRODUCTION behavior, and the mutation is applied to the PRODUCTION
+   file, run, observed RED, and restored byte-identically (§15.2 rows
+   1-3 are the corrected form of that requirement; rows 11-12 are this
+   delta's).
+
+### 15.7 THE DISCLOSED CARRIES (this delta)
+
+**ΔF6 — THE GATE'S PER-CALL TIMEOUT IS BOOT-FROZEN.** The gate is
+constructed with `call_timeout_s=float(self._settings.call_timeout_s)`
+(`daemon/services/memoir_reflection_service.py:394`), so the value is
+copied at CONSTRUCTION time. The worker re-resolves the settings every
+tick and calls `apply_settings(...)` — which the SERVICE adopts but the
+gate does not. MEASURED (2026-11-10, this worktree):
+
+```
+at construction:      service=45.0  gate=45.0
+after apply_settings: service=7.0   gate=45.0
+gate rides the knob?  False
+```
+
+**THE IMPACT IS ≈ 0 TODAY** — in production the lane rides the
+reflection service's injected caller (the gate's own fallback lane,
+which is the only consumer of `_call_timeout_s`, is dormant). But
+"one truth per knob" is only HALF true: the gate holds a snapshot of
+the knob, not the knob. **NOT CHANGED HERE** — live-knob propagation
+(the worker re-resolving the gate's timeout, or the gate reading the
+service's settings per call) is a bigger change than this commit's
+scope, and it is DISCLOSED rather than silently inherited.
+
+**THE RAISE PATH'S COMPOSITION CALL IS NOT COUNTED AGAINST THE
+PER-PASS CEILING.** A raise that happens AFTER the composition
+(`create_draft` / `submit` failing) has already spent one composition
+LLM call, but the raise path never returns an outcome, so the counter
+`composition_calls` is not incremented — and because the raise path
+CONTINUES the loop (instead of taking the post-increment `break`), the
+per-pass ceiling can be overshot by the number of FAILING candidates in
+that pass. MEASURED on the fixed shape (8 passes over 3 candidates whose
+proposal store always fails): 15 composition calls, i.e. 3 per pass
+while the ceiling is 1. On the HAPPY path the ceiling holds (the
+post-increment `break` stops the loop); the overshoot is specific to a
+FAILING store — and a failing store is exactly when the pass must keep
+going rather than stall. The overshoot is bounded by the candidate
+count (≤ 5 re-selected + ≤ 4 new). **NOT CHANGED HERE** (the fix is a
+budget-accounting redesign — the ceiling's PRE-check is scoped to the
+retry path, so a FRESH candidate is only stopped by the post-increment
+`break` — which is beyond this commit's scope) — DISCLOSED here so the
+next reader does not read the ceiling as a hard bound.
 
 

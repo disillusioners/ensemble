@@ -39,6 +39,8 @@ from daemon.repositories.memoir.models import (
 from daemon.repositories.memoir.repository import MemoirPersonaRepository
 from daemon.services.memoir_briefing import MEMOIR_PERSONA_TOKEN_BUDGET
 from daemon.services.memoir_persona_gate import (
+    DEFERRED_COMPOSITION_BUDGET,
+    GATE_ERROR_PREFIX,
     MAX_ATTEMPTS,
     MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
     TERMINAL_UNBUILDABLE_DIFF,
@@ -83,6 +85,36 @@ def _make_synthesis(engine, claim="A new belief", verb="CREATE"):
         session.commit()
         session.refresh(syn)
         return syn
+
+
+class _ExplodingRepo(MemoirPersonaRepository):
+    """A persona store whose ``create_draft`` ALWAYS raises.
+
+    The raise happens AFTER the classification was paid for and AFTER
+    the composition succeeded, but BEFORE any ledger row exists — the
+    exact raise path the gate must journal (F1).
+    """
+
+    def create_draft(self, agent_id, body, source="ari"):
+        raise RuntimeError("the proposal store exploded")
+
+
+class _FirstCallExplodingRepo(MemoirPersonaRepository):
+    """A persona store whose FIRST ``create_draft`` raises.
+
+    The later calls succeed — so a pass can hold a raising candidate
+    AND a clean one (the no-head-of-line-stall leg).
+    """
+
+    def __init__(self, engine):
+        super().__init__(engine)
+        self.create_draft_calls = 0
+
+    def create_draft(self, agent_id, body, source="ari"):
+        self.create_draft_calls += 1
+        if self.create_draft_calls == 1:
+            raise RuntimeError("the proposal store exploded")
+        return super().create_draft(agent_id, body, source=source)
 
 
 class TestPersonaComposition:
@@ -307,16 +339,35 @@ class TestCompositionBudgetPerPass:
         assert len(classify_calls) == 1
         assert len(comp_calls) == 1
 
-    def test_a_candidate_that_raises_is_parked_not_lost(self, engine, persona_repo):
-        """THE PARK IS UNCONDITIONAL: a candidate that RAISES is parked too.
+class TestRaisePathParkSemantics:
+    """THE RAISE PATH (F1) — a candidate that RAISES is JOURNALED.
 
-        The gate's `process_candidate` can raise (a store failure).  If
-        the park only ran on the normal exit, the raising candidate AND
-        every candidate after it would be dropped from the JEV lane.
-        """
-        class _ExplodingRepo(MemoirPersonaRepository):
-            def create_draft(self, agent_id, body, source="ari"):
-                raise RuntimeError("the proposal store exploded")
+    ``process_candidate`` can raise AFTER the classification was paid for
+    and BEFORE any ledger row exists (the composition ``try`` covers only
+    ``compose_persona_document``; ``create_draft`` / ``submit`` sit
+    OUTSIDE it).  The pre-fix shape let that escape the candidate loop:
+    the pass ABORTED, the PAID classification was discarded, the attempt
+    counter stayed at 0 (the terminal-at-5 ladder was unreachable), a
+    store failure was MASKED as a budget deferral, and the poison row
+    was re-selected FIRST on every pass — a permanent HEAD-OF-LINE
+    stall of the whole JEV lane.
+
+    These legs pin the post-fix semantics:
+
+    * the failure is CONTAINED and JOURNALED (``gate_error: …`` — never
+      the deferral marker), with the attempt consumed;
+    * the retry ladder TERMINALIZES at ``MAX_ATTEMPTS``;
+    * the pass CONTINUES — a later CLEAN candidate still drafts in the
+      SAME pass (no stall);
+    * the PAID classification is PRESERVED — the retry does NOT re-pay
+      the classifier;
+    * the two markers stay DISTINGUISHABLE in the ledger.
+    """
+
+    def test_a_raising_candidate_is_journaled_as_a_gate_error_not_a_deferral(
+        self, engine, persona_repo
+    ):
+        """The raise is CONTAINED and JOURNALED — not a deferral, not a loss."""
 
         def fake_llm(prompt):
             if "Taxonomy:" in prompt:
@@ -331,18 +382,200 @@ class TestCompositionBudgetPerPass:
             persona_repository=_ExplodingRepo(engine),
             llm_caller=fake_llm,
         )
-        syn1 = _make_synthesis(engine, claim="Rule 1 to integrate")
-        syn2 = _make_synthesis(engine, claim="Rule 2 to integrate")
+        syn = _make_synthesis(engine, claim="Rule 1 to integrate")
 
-        with pytest.raises(RuntimeError):
+        # The pass does NOT raise — the failure is contained inside the
+        # candidate loop (pre-fix: the RuntimeError escaped the pass).
+        svc.process_pass(
+            new_syntheses=[syn],
+            max_composition_calls=MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
+        )
+
+        entry = svc.get_ledger_entry(syn.id)
+        assert entry is not None
+        # THE ATTEMPT WAS CONSUMED (pre-fix: frozen at 0, so the
+        # terminal-at-5 ladder was unreachable on this path).
+        assert entry.attempts >= 1
+        # THE DIAGNOSTIC IS A GATE ERROR, NOT A DEFERRAL (pre-fix: the
+        # store failure was MASKED as 'deferred:composition_budget').
+        assert entry.last_error is not None
+        assert entry.last_error.startswith("gate_error:")
+        assert entry.last_error != DEFERRED_COMPOSITION_BUDGET
+        assert "deferred" not in entry.last_error
+        assert entry.status == "pending"
+
+    def test_a_raising_candidate_terminalizes_by_pass_five(
+        self, engine, persona_repo
+    ):
+        """The retry ladder TERMINALIZES — the attempt counter advances."""
+
+        def fake_llm(prompt):
+            if "Taxonomy:" in prompt:
+                return json.dumps({
+                    "classification": "new_rule",
+                    "reasoning": "Valid new rule.",
+                })
+            return "# Ari Persona\n\nUpdated with rule."
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=_ExplodingRepo(engine),
+            llm_caller=fake_llm,
+        )
+        syn = _make_synthesis(engine, claim="Rule 1 to integrate")
+
+        for attempt in range(MAX_ATTEMPTS):
             svc.process_pass(
-                new_syntheses=[syn1, syn2],
+                new_syntheses=[syn] if attempt == 0 else [],
                 max_composition_calls=MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
             )
 
-        # BOTH candidates are parked — the one that raised and the one
-        # after it.  Neither is lost.
-        for syn in (syn1, syn2):
-            entry = svc.get_ledger_entry(syn.id)
-            assert entry is not None
-            assert entry.status == "pending"
+        entry = svc.get_ledger_entry(syn.id)
+        assert entry is not None
+        assert entry.attempts >= MAX_ATTEMPTS
+        assert entry.status == "terminal"
+        assert entry.last_error.startswith("gate_error:")
+
+    def test_a_later_clean_candidate_still_drafts_in_the_same_pass(
+        self, engine, persona_repo
+    ):
+        """NO HEAD-OF-LINE STALL — the pass CONTINUES past a raising
+        candidate, and the later CLEAN candidate drafts in the SAME pass.
+
+        Pre-fix the raise escaped the loop: the pass aborted, so the
+        later candidate was never even reached.
+        """
+
+        def fake_llm(prompt):
+            if "Taxonomy:" in prompt:
+                return json.dumps({
+                    "classification": "new_rule",
+                    "reasoning": "Valid new rule.",
+                })
+            return "# Ari Persona\n\nUpdated with rule."
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=_FirstCallExplodingRepo(engine),
+            llm_caller=fake_llm,
+        )
+        syn1 = _make_synthesis(engine, claim="Rule 1 to integrate")
+        syn2 = _make_synthesis(engine, claim="Rule 2 to integrate")
+
+        outcomes = svc.process_pass(
+            new_syntheses=[syn1, syn2],
+            max_composition_calls=2,
+        )
+
+        # THE LATER CLEAN CANDIDATE DRAFTED IN THE SAME PASS.
+        assert len(outcomes) == 1
+        assert outcomes[0].synthesis_id == syn2.id
+        assert outcomes[0].status == "drafted"
+        entry2 = svc.get_ledger_entry(syn2.id)
+        assert entry2 is not None
+        assert entry2.status == "drafted"
+
+        # AND THE RAISING CANDIDATE IS STILL JOURNALED (not lost).
+        entry1 = svc.get_ledger_entry(syn1.id)
+        assert entry1 is not None
+        assert entry1.status == "pending"
+        assert entry1.attempts >= 1
+        assert entry1.last_error.startswith("gate_error:")
+
+    def test_a_raise_after_classification_preserves_the_classification(
+        self, engine, persona_repo
+    ):
+        """THE PAID CLASSIFICATION SURVIVES THE RAISE — the retry does NOT
+        re-pay the classifier."""
+
+        classify_calls: list[str] = []
+        comp_calls: list[str] = []
+
+        def counting_llm(prompt):
+            if "Taxonomy:" in prompt:
+                classify_calls.append(prompt)
+                return json.dumps({
+                    "classification": "new_rule",
+                    "reasoning": "Valid new rule.",
+                })
+            comp_calls.append(prompt)
+            return "# Ari Persona\n\nUpdated with rule."
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=_ExplodingRepo(engine),
+            llm_caller=counting_llm,
+        )
+        syn = _make_synthesis(engine, claim="Rule to integrate")
+
+        svc.process_pass(
+            new_syntheses=[syn],
+            max_composition_calls=MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
+        )
+
+        entry = svc.get_ledger_entry(syn.id)
+        assert entry is not None
+        # THE CLASSIFICATION IS PRESERVED (pre-fix: it was DISCARDED, so
+        # every pass re-classified AND re-composed the candidate).
+        assert entry.classification == "new_rule"
+        assert len(classify_calls) == 1
+
+        # THE RETRY REUSES THE STORED CLASSIFICATION — no second
+        # classifier call.
+        retry_svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=persona_repo,
+            llm_caller=counting_llm,
+        )
+        outcomes = retry_svc.process_pass(
+            new_syntheses=[],
+            max_composition_calls=MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
+        )
+        assert len(classify_calls) == 1  # NO re-pay
+        assert len(outcomes) == 1
+        assert outcomes[0].status == "drafted"
+        assert outcomes[0].classification == "new_rule"
+        assert len(comp_calls) == 2  # the composition is re-paid, the
+        # classification is NOT
+
+    def test_the_gate_error_marker_and_the_budget_deferral_marker_stay_distinguishable(
+        self, engine, persona_repo
+    ):
+        """A GATE ERROR and a BUDGET DEFERRAL are different ledger states."""
+
+        def fake_llm(prompt):
+            if "Taxonomy:" in prompt:
+                return json.dumps({
+                    "classification": "new_rule",
+                    "reasoning": "Valid new rule.",
+                })
+            return "# Ari Persona\n\nUpdated with rule."
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=_FirstCallExplodingRepo(engine),
+            llm_caller=fake_llm,
+        )
+        raising = _make_synthesis(engine, claim="Rule 1 to integrate")
+        composed = _make_synthesis(engine, claim="Rule 2 to integrate")
+        deferred = _make_synthesis(engine, claim="Rule 3 to integrate")
+
+        svc.process_pass(
+            new_syntheses=[raising, composed, deferred],
+            max_composition_calls=1,
+        )
+
+        gate_error_entry = svc.get_ledger_entry(raising.id)
+        deferral_entry = svc.get_ledger_entry(deferred.id)
+        assert gate_error_entry is not None
+        assert deferral_entry is not None
+
+        # THE GATE ERROR IS NOT A DEFERRAL.
+        assert gate_error_entry.last_error.startswith("gate_error:")
+        assert gate_error_entry.last_error != DEFERRED_COMPOSITION_BUDGET
+        # THE DEFERRAL IS NOT A GATE ERROR.
+        assert deferral_entry.last_error == DEFERRED_COMPOSITION_BUDGET
+        assert not deferral_entry.last_error.startswith("gate_error:")
+        # AND THE TWO MARKERS NEVER OVERLAP.
+        assert DEFERRED_COMPOSITION_BUDGET not in gate_error_entry.last_error
+        assert GATE_ERROR_PREFIX not in deferral_entry.last_error

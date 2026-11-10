@@ -26,6 +26,11 @@ reflection syntheses warrant durable persona evolution:
      'pending' (last_error='deferred:composition_budget') — the ledger is the
      only re-selection source, so a candidate with no row would be lost
      forever.
+   - A candidate whose processing RAISES is JOURNALED, not parked: the
+     attempt is consumed (attempts+1), the classification already paid for
+     is PRESERVED, and the diagnostic is 'gate_error: <Type>: <message>' —
+     never the deferral marker (F1).  The failure is CONTAINED: the pass
+     CONTINUES with the next candidate (no head-of-line stall).
 3. Persona document composition & unbuildable diff parking (B3 / V2-39):
    - Composes proposed_body within <= 2000 tokens (``MEMOIR_PERSONA_TOKEN_BUDGET``).
    - Over-budget, unbuildable, or empty diffs park candidate in ledger;
@@ -111,6 +116,14 @@ MAX_ATTEMPTS = 5
 #: per-pass composition budget was exhausted (C1).  It is NOT a
 #: failure: the candidate is intact and re-selectable from the ledger.
 DEFERRED_COMPOSITION_BUDGET = "deferred:composition_budget"
+
+#: The marker prefix written when a candidate's processing RAISED (F1).
+#: It is DISTINCT from the deferral marker on purpose: a budget
+#: deferral means "the candidate is intact and will be re-selected",
+#: while a gate error means "the candidate's evaluation FAILED" (the
+#: attempt was consumed and the diagnostic is the exception).  The two
+#: must never be confused in the ledger.
+GATE_ERROR_PREFIX = "gate_error: "
 
 
 class JevClassificationError(RuntimeError):
@@ -266,6 +279,13 @@ class MemoirPersonaGateService:
 
             call_timeout_s = MEMOIR_REFLECTION_CALL_TIMEOUT_S
         self._call_timeout_s = float(call_timeout_s)
+        #: The classification determined by the LAST ``process_candidate``
+        #: call on THIS instance (``None`` when that call raised BEFORE a
+        #: classification was determined).  The raise path in
+        #: ``process_pass`` reads it so a PAID classification is never
+        #: discarded (F1).  The gate is driven by ONE thread (the
+        #: reflection worker), so a plain attribute is safe here.
+        self._last_classification: str | None = None
 
     # ── Database ledger access ──────────────────────────────────────────
 
@@ -582,6 +602,12 @@ class MemoirPersonaGateService:
         claim = getattr(synthesis, "claim", "")
         verb = getattr(synthesis, "verb", None)
 
+        # The RAISE PATH reads this (F1): it is the classification this
+        # call determined, so a later raise can PRESERVE the paid work
+        # instead of discarding it.  Reset FIRST — a raise before any
+        # classification must leave it ``None``.
+        self._last_classification = None
+
         if not synthesis_id:
             raise ValueError("synthesis must have an 'id'")
 
@@ -654,6 +680,10 @@ class MemoirPersonaGateService:
 
         cat = classification_res.classification
         reason = classification_res.reasoning
+        # The classification is now PAID FOR — record it so the raise
+        # path (F1) can preserve it instead of re-classifying the
+        # candidate on every later pass.
+        self._last_classification = cat
 
         # Step 3: Check category routing
         if cat in JEV_SUPPRESSED_CLASSES:
@@ -790,17 +820,43 @@ class MemoirPersonaGateService:
         processed_ids: set[str] = set()
         try:
             for cand in candidates_to_process:
-                # Check if this candidate already classified as gated but pending composition
-                existing = self.get_ledger_entry(cand.id)
-                if existing and existing.classification in JEV_GATED_CLASSES and existing.status == "pending":
-                    if composition_calls >= max_composition_calls:
-                        # Defer to next pass — the ledger row ALREADY exists,
-                        # so the candidate stays re-selectable.
-                        continue
+                cand_id = getattr(cand, "id", "")
+                try:
+                    # Check if this candidate already classified as gated but pending composition
+                    existing = self.get_ledger_entry(cand.id)
+                    if existing and existing.classification in JEV_GATED_CLASSES and existing.status == "pending":
+                        if composition_calls >= max_composition_calls:
+                            # Defer to next pass — the ledger row ALREADY exists,
+                            # so the candidate stays re-selectable.
+                            continue
 
-                outcome = self.process_candidate(cand)
+                    outcome = self.process_candidate(cand)
+                except Exception as exc:
+                    # ── THE RAISE PATH (F1) ────────────────────────────
+                    # ``process_candidate`` can raise AFTER the
+                    # classification was paid for and BEFORE any ledger
+                    # row exists (the composition ``try`` covers only
+                    # ``compose_persona_document``; ``create_draft`` /
+                    # ``submit`` sit OUTSIDE it).  The pre-fix shape
+                    # let that escape the loop: the pass ABORTED (a
+                    # HEAD-OF-LINE STALL — the poison row is re-selected
+                    # first every pass and breaks the loop before anyone
+                    # else), the PAID classification was discarded (a
+                    # re-classify + re-compose EVERY pass), the attempt
+                    # counter stayed at 0 (the terminal-at-5 ladder was
+                    # unreachable), and a store failure was MASKED as a
+                    # budget deferral.
+                    #
+                    # HERE the failure is CONTAINED: the candidate is
+                    # JOURNALED (attempts consumed, classification
+                    # preserved, a NON-deferral diagnostic), the id is
+                    # marked processed, and the pass CONTINUES with the
+                    # next candidate.
+                    if self._journal_gate_error(cand_id, exc):
+                        processed_ids.add(cand_id)
+                    continue
                 outcomes.append(outcome)
-                processed_ids.add(getattr(cand, "id", ""))
+                processed_ids.add(cand_id)
                 if outcome.proposed_body is not None or (outcome.last_error and "diff" in outcome.last_error):
                     composition_calls += 1
                 if composition_calls >= max_composition_calls:
@@ -823,6 +879,98 @@ class MemoirPersonaGateService:
 
         return outcomes
 
+    def _journal_gate_error(self, synthesis_id: str, exc: BaseException) -> bool:
+        """Journal a candidate whose processing RAISED (F1).
+
+        The raise path must leave the ledger in a state that says
+        "this candidate FAILED", never "this candidate was merely
+        deferred".  The row carries:
+
+        * the classification if one was already determined — the PAID
+          work is preserved, so the retry does NOT re-pay the
+          classifier (``None`` only when the raise happened BEFORE any
+          classification);
+        * ``attempts`` incremented by ONE — the attempt was consumed, so
+          the retry ladder can reach ``MAX_ATTEMPTS`` and TERMINALIZE
+          (the pre-fix shape froze the counter at 0, so the ladder was
+          unreachable on this path);
+        * a NON-deferral diagnostic — ``gate_error: <Type>: <message>`` —
+          so a store failure is never MASKED as a budget deferral;
+        * ``status='terminal'`` once the attempts reach ``MAX_ATTEMPTS``,
+          else ``'pending'`` (the candidate stays re-selectable).
+
+        Returns:
+            True when the row was written — the caller then marks the
+            candidate processed so the ``finally``-park does not touch
+            it.  False when the row could NOT be written (a store
+            outage); the caller then leaves the candidate unprocessed so
+            the park still gets a chance to give it a row: a store
+            failure must never SILENTLY lose a candidate.
+        """
+        if not synthesis_id:
+            # An un-addressable candidate (no id) cannot be keyed in the
+            # ledger — there is nothing to re-select it by.
+            logger.error(
+                "[MemoirPersonaGate] a raising candidate carries no id — "
+                "it cannot be journaled (nothing to re-select it by): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return False
+
+        prior_attempts = 0
+        classification: str | None = None
+        try:
+            existing = self.get_ledger_entry(synthesis_id)
+        except Exception as read_exc:  # pragma: no cover - store outage
+            logger.error(
+                "[MemoirPersonaGate] could not read the ledger row for "
+                "synthesis %s while journaling a gate error: %s",
+                synthesis_id,
+                read_exc,
+            )
+            existing = None
+        if existing is not None:
+            prior_attempts = int(existing.attempts or 0)
+            classification = existing.classification
+        if classification is None:
+            # The classification this pass already PAID for (F1).
+            classification = self._last_classification
+
+        attempts = prior_attempts + 1
+        terminal = attempts >= MAX_ATTEMPTS
+        status = "terminal" if terminal else "pending"
+        last_error = f"{GATE_ERROR_PREFIX}{type(exc).__name__}: {exc}"
+
+        try:
+            self.record_ledger_entry(
+                synthesis_id=synthesis_id,
+                classification=classification,
+                attempts=attempts,
+                last_error=last_error,
+                status=status,
+            )
+        except Exception as write_exc:  # pragma: no cover - store outage
+            logger.error(
+                "[MemoirPersonaGate] could not journal the gate error for "
+                "synthesis %s: %s",
+                synthesis_id,
+                write_exc,
+            )
+            return False
+
+        logger.warning(
+            "[MemoirPersonaGate] synthesis %s raised in the gate "
+            "(attempt %d/%d, status=%s): %s: %s",
+            synthesis_id,
+            attempts,
+            MAX_ATTEMPTS,
+            status,
+            type(exc).__name__,
+            exc,
+        )
+        return True
+
     def _park_unprocessed_candidates(
         self,
         candidates: Sequence[Any],
@@ -838,12 +986,19 @@ class MemoirPersonaGateService:
         The parked row carries:
         * the classification if it is ALREADY KNOWN (a candidate that was
           classified in an earlier pass keeps its stored classification —
-          the retry must NOT re-pay the classifier);
+          the retry must NOT re-pay the classifier).  NOTE: a candidate
+          whose classification was determined THIS pass and then RAISED
+          is NOT parked here — the raise path journals it with its
+          classification PRESERVED (F1, ``_journal_gate_error``); only a
+          candidate the pass never got to (the budget ended the loop) is
+          parked without a classification;
         * ``attempts`` as they stand (a candidate parked by an earlier
           CLASSIFICATION FAILURE keeps its attempt count — it is already
           parked and must not be re-counted);
         * a deferral marker in ``last_error`` (``deferred:composition_budget``)
           so the deferral is visible and is NOT mistaken for a failure.
+          A candidate whose processing RAISED never carries this marker
+          — it carries ``gate_error: …`` (F1).
         """
         for cand in candidates:
             synthesis_id = getattr(cand, "id", "")
@@ -931,6 +1086,7 @@ class MemoirPersonaGateService:
 __all__ = [
     "DEFERRED_COMPOSITION_BUDGET",
     "DiffOverBudgetError",
+    "GATE_ERROR_PREFIX",
     "JEV_CLASSIFICATIONS",
     "JEV_CLASSIFICATION_PRECEDENCE",
     "JEV_GATED_CLASSES",
