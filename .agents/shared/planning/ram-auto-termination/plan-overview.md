@@ -217,7 +217,7 @@ wants that; the skill's default sequential ordering is preserved here for review
 | 8 | **Test host OOM** — the harness genuinely allocates RAM; a mis-sized test could OOM the CI/dev box | **High** | Medium | P6 mandate: ceilings are **small and injected** (MiB-scale), the allocator sizes are **explicitly bounded in the test code**, and the harness asserts the host's free memory before spawning. Never use the production **3 GiB** default in a test |
 | 9 | **Fenced-off substrate** — reaching for `resource_pid_map`'s dormant columns (the obvious "enforcement audit" landing zone) breaks `tests/test_resource_control_seam.py` | Medium | Medium | The Fence section above states the constraint; DQ5 frames a RAM-only registry as the substrate; P7 records the unfencing as a user-gated follow-up, not an inline change. |
 | 10 | **Coverage hole: `setsid` escapees** — a command that calls `setsid` leaves its process group, so neither the tree measurement nor the group kill reaches it (documented gap in BOTH lanes: `proc_tools.py:1677-1683`, `bash.py:590-600`) | Medium | Medium | DQ3 framing states the gap explicitly; note the orphan-reaper's Phase-4 env-stamp sweep already reaps such escapees at cleanup points, so the RAM guard is not the only net. Frame "setsid-aware tree discovery" as an explicit DQ3 sub-option. |
-| 11 | **Boot-abort on a bad env value** — house rule: out-of-range env validated OUTSIDE the try/except at `load_config()` ABORTS BOOT (`config.py:911-916`, `api.py:2266-2278`) | Medium | Low | Clamp bounds generously (e.g. MiB ceiling `ge=64, le=1048576`), and P6 includes the config ladder case "out-of-range env aborts boot" as an explicit, asserted test. |
+| 11 | **Boot-abort on a bad env value** — house rule: out-of-range env validated OUTSIDE the try/except at `load_config()` ABORTS BOOT (`config.py:911-916`, `api.py:2266-2278`) | Medium | Low | Clamp bounds generously (the ruled ceiling clamp is `ge=64, le=65536`), and P6 includes the config ladder case "out-of-range env aborts boot" as an explicit, asserted test. |
 | 12 | **Two enforcement ports competing** — the RAM guard (default-ON, non-user-gated) lands beside the T4 seam (`enabled=false`, `user_gated=true`) and the observe-only fence test | Medium | Low | P1/DQ9 makes the separation structural: P1 lives OUTSIDE the T4 seam and does not read or write `resource_limit_policy`; the fence test must still pass unchanged. |
 | 13 | **Overlap with the resource monitor's own child accounting** — `resource_pid_map` already tracks peak RSS at exit for registered children; two sources of truth could disagree | Low | Medium | Document the relationship: `resource_pid_map.peak_rss_kb` is the **exit-time floor** (a documented under-report — `bash.py:1096-1109`), the RAM guard's peak is the **watchdog's own sampled peak**. Different semantics; do not merge them. |
 
@@ -276,7 +276,12 @@ for what is binding; read the **framing** for why the alternatives were rejected
 > "migration-backed `reap_reason` extension" (**moot** — DQ10 rules no durable
 > verdict, and `reap_reason` is plain TEXT with no CHECK constraint) · **P9**
 > `list_group_members` as the injectable primitive (**hardcodes `/proc`**, and
-> per-spawn invocation costs 9.49 ms/scan — it cannot serve as the hermetic seam).
+> per-spawn invocation costs 9.49 ms/scan — it cannot serve as the hermetic seam) ·
+> **Q1** the "**4th task**" proc-seam framing (arch doc §7's `(4th task)`
+> parenthetical and the rev-1 "watchdog as the 4th task, mirroring `timeout_task`"
+> shape — **superseded by leader ruling Q1: no 4th task**; the proc lane registers
+> with the guard thread → status mapping → release, and the arch doc's §7
+> parenthetical has since been struck so the two documents no longer contradict).
 
 ### DQ1 — Tree RAM metric
 
@@ -444,7 +449,9 @@ inject small values without a restart. The YAML block stays comment-only.
 - **Sanitization**: the persisted command must be the sanitized form —
   executable + argv-shape only, never the `env` overlay (which carries
   `__ENS_SECRET__`/`__KMS_REF__` markers). Reuse `_sanitize_command_for_registry`
-  (`bash.py:966-979`).
+  (`bash.py:966-979`) — **that helper sanitizes for the REGISTRY row only**; the
+  event and envelope payloads carry **usage numbers only** (§4.3 negative space), and
+  the helper's presence here grants **no** permission to include argv anywhere.
 
 **Data needs:** the architect rules on the event kind name, the counter names, and
 whether the event is emitted per breach (once) — it must NOT be per poll tick.
