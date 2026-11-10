@@ -3016,12 +3016,32 @@ async def lifespan(app: FastAPI):
     from daemon.repositories.memoir.repository import (
         MemoirPersonaRepository,
     )
+    from daemon.services.memoir_keepsake_proposal_service import (
+        MemoirKeepsakeProposalService,
+    )
     from daemon.tools.memoir_knob import resolve_memoir_reflection_knob
 
     _reflection_boot_knob = resolve_memoir_reflection_knob(config)
     if _reflection_boot_knob.enabled:
         try:
             _reflection_engine = manager.engine
+            # The KEEPSAKE PROPOSAL lane (phase 6, T6.1/T6.3): constructed
+            # against the SAME engine, bound to the manager so its enqueue
+            # bridge can reach the event loop (the RDRS lane-6 precedent).
+            # A construction failure must not take the reflection worker
+            # down — the proposal phase is a downstream CONSUMER.
+            try:
+                _keepsake_proposal_service = MemoirKeepsakeProposalService(
+                    _reflection_engine,
+                    manager=manager,
+                )
+            except Exception as _proposal_boot_exc:  # noqa: BLE001 — advisory
+                _keepsake_proposal_service = None
+                daemon_logger.warning(
+                    "[MemoirProposal] service failed to construct (the "
+                    f"reflection lane continues without proposals): "
+                    f"{_proposal_boot_exc}"
+                )
             _reflection_service = MemoirReflectionService(
                 reflection_repository=MemoirReflectionRepository(_reflection_engine),
                 syntheses_repository=MemoirSynthesesRepository(_reflection_engine),
@@ -3029,6 +3049,7 @@ async def lifespan(app: FastAPI):
                     _reflection_engine
                 ),
                 persona_repository=MemoirPersonaRepository(_reflection_engine),
+                keepsake_proposal_service=_keepsake_proposal_service,
                 config=config,
                 llm_config=_reflection_llm_config(config),
             )

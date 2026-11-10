@@ -1010,3 +1010,140 @@ retry path, so a FRESH candidate is only stopped by the post-increment
 next reader does not read the ceiling as a hard bound.
 
 
+
+---
+
+## 16. Phase 6 — Keepsake Proposals & Wake-Refresh (implementation notes + AC6 receipts)
+
+Phase 6 delivers the LAST build phase: `MemoirKeepsakeProposalService`
+(qualification, once-ever staging, the measured `[PROPOSALS]` briefing
+zone, the 1/day enqueue bridge) and the wake-refresh context seam
+(`memoir_refresh`), per plan `v2-phase6-plan.md` (§3.1, §3.2, T6.1–T6.6).
+
+### 16.1 What shipped (file census)
+
+| File | Change |
+|---|---|
+| `daemon/services/memoir_keepsake_proposal_service.py` | NEW — the service (qualification, once-ever staging, zone selection, the bridge, `process_pass`) |
+| `daemon/repositories/memoir/models.py` | `PROPOSAL_LINE_TEMPLATE`, `PROPOSALS_ZONE_HEADER`, `MEMOIR_PROPOSALS_ZONE_CHAR_BUDGET` (1000), `MEMOIR_PROPOSALS_ZONE_MAX` (3), `MEMOIR_PROPOSAL_REASON_CHAR_CAP`, `render_proposal_line` |
+| `daemon/services/memoir_briefing.py` | `admit_proposal_lines` (the zone's own measured admission), the ladder in `render_briefing_body`, `_render_briefing_body_for` (the ONE shared render path used by BOTH the briefing and the refresh), `_read_proposal_lines`, `escape_for_context_block` (exported spelling) |
+| `daemon/services/context_messages.py` | `CONTEXT_KIND_MEMOIR_REFRESH`, `MEMOIR_REFRESH_BLOCK_TITLE`, `MEMOIR_REFRESH_SOURCE`, `_assemble_memoir_refresh`, `_maybe_memoir_refresh_message`, the `wake_source` parameter, the `memoir_refresh` branch in `_stable_id_for` + the UPDATED closed-list ValueError message, the refresh evaluation at BOTH assembly sites, `_make_context_message(source=…)` |
+| `daemon/services/instance_messaging.py` | the `wake_source=message_source` thread at the dispatch site |
+| `daemon/services/memoir_reflection_service.py` | the `keepsake_proposal_service` seam + the proposal phase in `_run_pass` (isolated, never fails the pass) |
+| `daemon/tools/memoir_knob.py` | `MemoirWakeRefreshKnobState`, `resolve_memoir_wake_refresh_knob`, `memoir_wake_refresh_enabled`, `_emit_wake_refresh_once` |
+| `daemon/config.py` | `MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR`, `MemoirWakeRefreshConfig`, the `memoir_wake_refresh` section on `Config` |
+| `daemon/api.py` | the proposal service constructed against the shared engine and passed to the reflection service (advisory-failure wrapper) |
+| `tests/unit/test_memoir_keepsake_proposals.py` | NEW (30 nodes) |
+| `tests/unit/test_memoir_wake_refresh.py` | NEW (40 nodes) |
+| `test/packs/memoir_v2_keepsake_proposals_test.sh` | NEW pack (pin 30) |
+| `test/packs/memoir_v2_proposal_notification_test.sh` | NEW pack (pin 9) |
+| `test/packs/memoir_v2_wake_refresh_test.sh` | NEW pack (pin 40) |
+| `tests/integration/test_lcancheck_family_separation.py` | the `_STABLE_ID_SUPPORTED_KINDS` set grew by `memoir_refresh` (the closed list grew by exactly one) |
+
+### 16.2 THE PLAN-DEFINED GAPS (recorded, not improvised around)
+
+The plan names an "enduring significance" HEURISTIC but never defines
+it, and it names no substance floor, no per-pass staging cap and no
+proposal-line reason bound. These are the definitions this build
+adopted, each recorded so a reviewer can overrule them explicitly:
+
+| Gap | The rule adopted | Where |
+|---|---|---|
+| the "enduring significance" heuristic | NOT a keepsake, NOT superseded, and a collapsed body of ≥ 80 chars (a terse line scored 9 is an intensity signal, not an enduring one) | `MemoirKeepsakeProposalService.is_enduring` / `MEMOIR_PROPOSAL_MIN_BODY_CHARS` |
+| the per-pass staging cap | 10 candidates per pass (a large backfill must not flood the ledger/zone in one tick) | `MEMOIR_PROPOSAL_STAGE_CAP_PER_PASS` |
+| the proposal reason | COMPOSED from row facts (`enduring significance: effective poignancy N/10[, K star(s)]`), capped at 160 chars — never model text (there is NO LLM call in this phase) | `compose_reason` / `MEMOIR_PROPOSAL_REASON_CHAR_CAP` |
+| the bridge message | the plan's §3.1 sentence verbatim, carrying the title | `_bridge_message` |
+| no active ari instance | the row stays `pending` (slot preserved); NO `failed` transition is written — a missing instance is a RETRYABLE condition, not a proposal failure | `notify_once` |
+
+The plan's `notification_status` vocabulary (4 tokens) is untouched: this
+phase writes `pending` and `enqueued` only; `sent` stays reserved and
+`failed` stays available but is NOT used for transient bridge failures
+(see the row above) — the same choice V2-23 → V2-40's invariant implies.
+
+### 16.3 THE §A6 ADMISSION LADDER — the code cross-references the quote
+
+`render_briefing_body` implements the ladder and its docstring CARRIES
+the verbatim V2-D 6.5 quote (cross-referenced, never paraphrased):
+
+> with explicit rung order **fit dynamic → trim dynamic → trim proposals (drop weakest first) → rung-2 withhold**
+
+The measured basis is `stable_chars` (the escaped STABLE zone alone) for
+the rung-2 withhold; the total-based trims measure the COMPOSED body.
+Both readings are the plan's own (§V2-D 6.5's measurement-basis bullet),
+and the reachability claim is pinned by
+`TestAdmissionLadder::test_the_total_based_trim_is_reachable_within_1000_chars_of_the_ceiling`:
+because the zone is admitted at ≤ 1,000 chars, the total-based proposals
+trim can fire only when `stable + dynamic` lands within the zone's own
+bound of 24,000.
+
+The zone's own admission (`admit_proposal_lines`) measures the SHIPPED
+bytes — each line escaped first, the header wrapper INCLUDED — and stops
+at the first line that does not fit (the lines arrive strongest-first, so
+admitting a later, weaker line while dropping a stronger one would invert
+the drop-weakest-first order the trim rung owns).
+
+### 16.4 THE AC6 MUTATION RECEIPTS (production reverts, byte-identical restores)
+
+Every recipe below was applied to the PRODUCTION file in this worktree on
+2026-11-10, run, observed RED, and restored **byte-identically**
+(`sha256sum -c` before/after == OK for all three touched files). The
+ambient `ENSEMBLE_*` knob family was scrubbed per-variable; no
+`POSTGRES_*` variable was read (throwaway SQLite only).
+
+| # | Recipe (the PRODUCTION revert) | Node(s) that went RED | Observed RED marker | Restore |
+|---|---|---|---|---|
+| **(a) AC6(a)** | `mark_enqueued(...)` moved ABOVE `self._enqueue(...)` in `notify_once` — the slot consumed BEFORE the enqueue is accepted | `TestEnqueueBridge::test_a_failed_enqueue_leaves_the_row_pending` | `AssertionError: assert 'enqueued' == 'pending'` (the row was consumed despite the failed bridge) | `sha256sum -c` OK |
+| **(b) AC6(b)** | the trim rungs SWAPPED in `render_briefing_body` — proposals trimmed before dynamic | `TestAdmissionLadder::test_rung_2_trim_dynamic_before_any_proposal_is_dropped` | `AssertionError: assert 5 == (5 - 1)` — zero dynamic lines trimmed because the proposals were eaten first | `sha256sum -c` OK |
+| **(c) AC6(c)** | the alarm body line REPLACED with `[SYSTEM CONTEXT: Memoir Refresh] MUTANT(c) alarm body` in `self_alarm_service.compose_alarm_message` | `TestStampPurity::test_the_alarm_template_is_untouched_by_the_refresh` | `AssertionError: assert '[SYSTEM CONTEXT: Memoir' not in message` | `sha256sum -c` OK |
+| **(d) AC6(d)** | the once-ever PRE-CHECK deleted from `process_pass` (`if False:`) | `TestOnceEver::test_a_second_pass_never_re_proposes_the_same_episode` | `AssertionError: the ONCE-EVER skip must happen BEFORE any staging attempt — stage_candidate was called for ['8a50…']` | `sha256sum -c` OK |
+
+**WHY (d) IS NOT VACUOUS (the phase-5 lesson, applied).** The unique
+constraint would ALSO swallow the duplicate write as the same skip — a
+naive `staged == 0` assertion would stay GREEN with the pre-check
+deleted, because the DB does the same job. The leg therefore SPIES on
+`stage_candidate` and asserts the second pass makes ZERO staging
+attempts: the once-ever rule is a READ-side decision (V2-36), and the
+constraint is only the racing fallback.
+
+Files touched by the recipes (sha256 before == after):
+`memoir_keepsake_proposal_service.py`, `memoir_briefing.py`,
+`self_alarm_service.py`.
+
+### 16.5 Pack pins (measured with `--collect-only`, same-commit)
+
+| Pack | Nodes | Selector |
+|---|---|---|
+| `memoir_v2_keepsake_proposals_test` | **30** | `TestQualification`, `TestOnceEver`, `TestProposalsZoneSelection`, `TestProposalsZoneRender`, `TestAdmissionLadder`, `TestReflectionPassIntegration` |
+| `memoir_v2_proposal_notification_test` | **9** | `TestEnqueueBridge`, `TestNoPinAuthority` |
+| `memoir_v2_wake_refresh_test` | **40** | `TestStableIdRegistration`, `TestRefreshSeam`, `TestWakeRefreshKnob`, `TestStampPurity`, `TestWakeSourceThreading`, `TestStructuralSupersede` |
+
+Every class in both new modules is selected by exactly one pack (the lane
+rule: a leg no pack selects is a leg the gate cannot see).
+
+### 16.6 Disclosures
+
+1. **THE GATE ORDER IS A CONJUNCTION — cost-ordered, not prose-ordered.**
+   `_assemble_memoir_refresh` evaluates `wake_source == "scheduler"`
+   FIRST, then the knob, then the instance-row read. The plan's §3.2 prose
+   lists the agent gate before the `wake_source` gate, but the three
+   conditions are ANDed, so no ordering changes the outcome — and the
+   chosen order keeps every non-scheduler assembly (i.e. nearly all of
+   the daemon's traffic) entirely DB-free. Pinned by
+   `TestRefreshSeam::test_a_non_scheduler_assembly_costs_no_db_read`.
+2. **NO `failed` TRANSITION ON BRIDGE FAILURE.** See §16.2 — a transient
+   bridge failure is retryable, so the row stays `pending`. Writing
+   `failed` would convert a momentary loop outage into a permanently
+   dead proposal row (the vocabulary allows it; the plan's §3.1 wording
+   says "status remains 'pending'").
+3. **THE REFRESH IS NOT GATED ON THE v1 BRIEFING KNOB.** The lane's own
+   `ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED` decides. That is the plan's
+   gate chain verbatim; the two lanes are independent by construction
+   (pinned by `test_a_briefing_knob_off_does_not_disable_the_refresh`).
+4. **NO LLM CALLS in phase 6** — heuristic + render only. Pinned at the
+   AST level (`TestNoPinAuthority::test_the_service_makes_no_llm_calls`).
+5. **NO PIN AUTHORITY** — the service holds no reference to
+   `set_pin`/`clear_pin`/`memoir_pin` (AST census, same class). Pinning
+   remains the v1 `memoir_pin(id, reason, actor)` confirmation path.
+6. **The proposal zone is read through the CALLER'S engine** — the
+   briefing builds it via `_guarded_read`, so a ledger failure degrades
+   ONLY the zone (the persona / keepsakes / dynamic zones still ship).

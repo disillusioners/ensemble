@@ -4902,6 +4902,12 @@ class InstanceMessagingService:
                     # them all (bare RemoveMessage) or leaking the
                     # replaced content.
                     auto_load_invalidated=bool(_auto_load_sweep_agent_id),
+                    # Memoir phase 6 (V2-Q1 amendment): the CURRENT
+                    # dispatch's source, threaded so the wake-refresh seam
+                    # can gate on ``wake_source == "scheduler"``. The
+                    # signal does not exist at the assembly seam
+                    # natively; ``message_source`` is exactly it.
+                    wake_source=message_source,
                 )
                 # 2026-07-29 refactor: ``_ephemeral_msgs`` is now
                 # always ``[]`` in ``human_messages`` mode (skills

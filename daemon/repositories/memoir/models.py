@@ -746,6 +746,81 @@ KEEPSAKE_LINE_TEMPLATE = (
 #: The placeholder title the briefing renders when an episode has none.
 MEMOIR_UNTITLED_TITLE = "(untitled)"
 
+# ── THE PROPOSAL LINE (v2 phase 6, T6.2 / V2-D 6.5 / N2) ─────────────────
+#: The ONE proposal-line template. It lives HERE for the SAME reason the
+#: keepsake template does (W-1): the proposals-zone ADMISSION measures
+#: the exact bytes the briefing ships — the wrapper, the title quoting,
+#: the ``event_at``/``poignancy`` fields and the (bounded) reason — so
+#: the ≤ 1,000-char zone bound holds for every future read instead of
+#: being claimed and under-enforced.
+#:
+#: The line shape is the plan's §3.1 shape VERBATIM:
+#: ``- [proposal] "<title>" (event_at=<date>, poignancy=<N>): <reason>``.
+PROPOSAL_LINE_TEMPLATE = (
+    '- [proposal] "{title}" (event_at={event_at}, poignancy={poignancy}): '
+    "{reason}"
+)
+
+#: The header of the briefing's OWN measured proposals zone (ND-20). It
+#: is part of the measured bytes: admission counts the header + lines.
+PROPOSALS_ZONE_HEADER = "### Proposals for Keepsake Review"
+
+#: The proposals-zone admission bound, INCLUSIVE of the header wrapper
+#: and of every shipped line (V2-D 6.5 / §3-A6 — measure the shipped
+#: bytes, W-1 lesson).
+MEMOIR_PROPOSALS_ZONE_CHAR_BUDGET = 1000
+
+#: The hard structural cap on rendered proposals (N2).
+MEMOIR_PROPOSALS_ZONE_MAX = 3
+
+#: The per-reason cap. The reason is COMPOSED by the proposal service
+#: (never free text from a model in phase 6 — there is no LLM call in
+#: this phase), so this bound is a rendering guard, not a truncation
+#: policy for user data: an over-long reason is REFUSED at admission
+#: (the line cannot fit the zone), never silently truncated.
+MEMOIR_PROPOSAL_REASON_CHAR_CAP = 160
+
+
+def _proposal_one_line(value: str | None) -> str:
+    """Collapse ONE proposal field to ONE line (newlines are structure loss)."""
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
+
+
+def _proposal_date(value: Any) -> str:
+    """Render ``event_at`` as a bare date, identically to the dynamic zone."""
+    if value is None:
+        return ""
+    if hasattr(value, "date"):
+        try:
+            return value.date().isoformat()
+        except Exception:  # pragma: no cover - defensive
+            return str(value)
+    return str(value)[:10]
+
+
+def render_proposal_line(
+    *,
+    title: str | None,
+    event_at: Any,
+    poignancy: int | None,
+    reason: str | None,
+) -> str:
+    """Render ONE proposal line from the byte-pinned template (T6.2).
+
+    The SINGLE SOURCE of the rendered proposal line: the briefing renders
+    with this function AND the zone admission MEASURES with it, so the
+    measured bytes and the shipped bytes are identical by construction.
+    """
+    clean_title = _proposal_one_line(title) or MEMOIR_UNTITLED_TITLE
+    return PROPOSAL_LINE_TEMPLATE.format(
+        title=clean_title,
+        event_at=_proposal_date(event_at),
+        poignancy="" if poignancy is None else int(poignancy),
+        reason=_proposal_one_line(reason),
+    )
+
 #: The provenance class admission MEASURES with. The briefing's
 #: ``pclass`` is NOT row state — it is captured ONCE per briefing build
 #: from the reader's manager (AM-24), so admission cannot know it. It
@@ -793,7 +868,12 @@ def render_keepsake_line(
 __all__ = [
     "KEEPSAKE_ADMISSION_PCLASS",
     "KEEPSAKE_LINE_TEMPLATE",
+    "MEMOIR_PROPOSAL_REASON_CHAR_CAP",
+    "MEMOIR_PROPOSALS_ZONE_CHAR_BUDGET",
+    "MEMOIR_PROPOSALS_ZONE_MAX",
     "MEMOIR_UNTITLED_TITLE",
+    "PROPOSALS_ZONE_HEADER",
+    "PROPOSAL_LINE_TEMPLATE",
     "MemoirEpisode",
     "MemoirJevLedger",
     "MemoirLine",
@@ -811,4 +891,5 @@ __all__ = [
     "StarsListType",
     "SYNTHESIS_VERBS",
     "render_keepsake_line",
+    "render_proposal_line",
 ]

@@ -4241,6 +4241,79 @@ class MemoirPoignancyConfig(BaseSettings):
         return self
 
 
+# ── the WAKE-REFRESH lane's knob (phase 6, T6.5 / V2-D 6.4 / §3-A4) ─────
+#
+# The env-var name of the wake-refresh kill-switch (Enabled-flags class).
+MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR = "ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED"
+
+
+class MemoirWakeRefreshConfig(BaseSettings):
+    """The Memoir Store v2 WAKE-REFRESH lane's knob (phase 6, T6.5).
+
+    An ISOLATED section — the N1 / V2-D 4.9 precedent the reflection and
+    poignancy lanes already follow: the wake-refresh knobs live in their
+    own model with their own env prefix and are NOT folded into the v1
+    ``MemoirConfig`` section. The CLASSIFIER is shared
+    (:func:`_classify_enabled_flag`); the RESOLVER is per-lane — the
+    seam re-reads the env tier LIVE at call time so a mid-run flip takes
+    effect on the next qualifying wake WITHOUT a restart.
+
+    ONE field only: this lane has no numeric knobs (the payload budget is
+    the briefing's own DR-1 ceiling, not a tuning surface), so no
+    Budget-bounds or Cadence class member exists here.
+
+    The truth table is the Enabled-flags row of §3-A4 (DR-3):
+
+    | ``ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED`` | Resolved | Log (once/boot) |
+    |---|---|---|
+    | absent / empty | ON (the default) | WARNING — unset + the off hint |
+    | true/1/yes/on/t/y | ON | INFO |
+    | false/0/no/off/f/n | OFF | INFO |
+    | any other value | OFF (fail CLOSED) | WARNING naming the value |
+
+    A mis-set knob NEVER raises and NEVER aborts the boot: a
+    ``ValidationError`` out of ``load_config`` would take the daemon down
+    (the house anomaly ``33028b27``); the surface simply stays closed.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_MEMOIR_WAKE_REFRESH_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the wake-refresh context block "
+                    "(Enabled-flags class). Unset resolves ON with a loud "
+                    "WARNING; a garbage value fails CLOSED (OFF) with a "
+                    "WARNING; neither raises. "
+                    "Env: ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _env_tier_wins(cls, data: Any) -> Any:
+        """A present env value overrides the init/yaml tier.
+
+        The same shape as the reflection / poignancy sections: the
+        operator's env knob must not be silently shadowed by a config
+        file, and the precedence rule lives INSIDE the model so a
+        consumer never re-reads the env for the VALUE.
+        """
+        if not isinstance(data, dict):
+            return data
+        merged = dict(data)
+        raw = os.environ.get(MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR)
+        if raw is not None and raw.strip():
+            merged["enabled"] = raw
+        return merged
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _classify_enabled_flag(cls, value: Any) -> Any:
+        """The Enabled-flags class — unset ON, garbage fail-CLOSED OFF."""
+        return _classify_enabled_flag(
+            value, name=MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR, default=True
+        )
+
+
 class MemoirConfig(BaseSettings):
     """Configuration for the Memoir Store surface (phase 0, D0.4).
 
@@ -6457,6 +6530,16 @@ class Config(BaseSettings):
     # is always the live one.
     memoir_poignancy: MemoirPoignancyConfig = Field(
         default_factory=MemoirPoignancyConfig
+    )
+    # Memoir Store v2 (phase 6, T6.5): the WAKE-REFRESH lane's isolated
+    # knob section (class MemoirWakeRefreshConfig, env prefix
+    # ENSEMBLE_MEMOIR_WAKE_REFRESH_). ISOLATED by design (N1 / V2-D 6.4 /
+    # the memoir_reflection precedent), and ENV-ONLY (no config.yaml
+    # block, no load_config pass-through): the seam re-reads the env tier
+    # LIVE at call time, so a mid-run flip lands on the next qualifying
+    # wake without a restart.
+    memoir_wake_refresh: MemoirWakeRefreshConfig = Field(
+        default_factory=MemoirWakeRefreshConfig
     )
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)

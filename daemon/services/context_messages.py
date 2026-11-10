@@ -150,6 +150,26 @@ CONTEXT_KIND_MEMOIR = "memoir"
 # half is confirmed to carry it (the AM-22 discipline — a builder-
 # written flag would consume the flag on a graph-discarded half).
 CONTEXT_KIND_POK = "pok"
+
+# Memoir Store v2 (phase 6, T6.4 / V2-D 6.4 / V2-Q1 amended Option B): the
+# WAKE-REFRESH block kind. Evaluated ONLY on a SCHEDULER wake of ari (the
+# ``wake_source`` thread — see ``_maybe_memoir_refresh_message``), the block
+# renders the FRESH briefing payload (persona, keepsakes, the [PROPOSALS]
+# zone, dynamic catch-up) ALONGSIDE the scheduler's own message.
+#
+# NO ONCE-FLAG: the refresh must re-fire on EVERY qualifying wake. Dedup
+# across turns is STRUCTURAL — the stable id ``memoir_refresh:{instance_id}``
+# makes ``add_messages`` supersede the prior refresh row in place, so a
+# session that wakes N times carries exactly ONE current refresh block.
+# Stamping ``context_kind`` also lands the block in the truthy-keyed hoist
+# bucket, so compaction preserves it verbatim with zero new plumbing.
+#
+# THE L4 PRODUCT RULING IS NOT VIOLATED: the scheduler's OWN message stays
+# an unstamped bare ``MessageType.HUMAN`` (``scheduler`` is deliberately
+# absent from ``INTERNAL_STAMPED_SOURCE_PREFIXES``). This block is a
+# SEPARATE, parallel, stamped context message — it never touches the alarm
+# template or the wake message's kwargs.
+CONTEXT_KIND_MEMOIR_REFRESH = "memoir_refresh"
 _AMBIENT_KV_FRESH: bool | None = None
 _AMBIENT_KV_FRESH_BOOT_LOG_EMITTED = False
 
@@ -162,6 +182,7 @@ def _make_context_message(
     title: str,
     content: str,
     id_: str | None = None,
+    source: str | None = None,
 ) -> HumanMessage:
     """Factory for any ``[SYSTEM CONTEXT: …]`` tagged HumanMessage.
 
@@ -185,16 +206,29 @@ def _make_context_message(
             id (via :func:`_stable_id_for`) so LangGraph's
             ``add_messages`` reducer SUPERSEDES the prior checkpoint
             entry in place instead of appending a duplicate.
+        source: Optional ``source`` stamp. ``None`` (the default) adds
+            NOTHING to ``additional_kwargs`` — the pre-phase-6 shape,
+            byte-identical for every existing caller. The memoir
+            WAKE-REFRESH block passes ``"memoir_refresh"`` so the
+            message's provenance is legible to the attestation scanner's
+            exclusion ladder and to graph-side diagnostics (the
+            plan §3.2 emission shape).
 
     Returns:
         A fresh ``HumanMessage`` with the canonical
         ``[SYSTEM CONTEXT: <title>]\\n\\n<content>`` body and the
         identifying ``additional_kwargs``.
     """
+    additional_kwargs: dict[str, Any] = {
+        "injected_message": True,
+        "context_kind": kind,
+    }
+    if source is not None:
+        additional_kwargs["source"] = source
     return HumanMessage(
         content=f"{CONTEXT_PREFIX}{title}{CONTEXT_SUFFIX}{content}",
         id=id_ if id_ is not None else str(uuid.uuid4()),
-        additional_kwargs={"injected_message": True, "context_kind": kind},
+        additional_kwargs=additional_kwargs,
     )
 
 
@@ -522,6 +556,151 @@ async def _maybe_memoir_briefing_message(
         return None
 
 
+# ── Memoir WAKE-REFRESH block (phase 6, T6.4 / V2-D 6.4 / V2-Q1) ──────────
+#
+# A SEPARATE parallel stamped context block, built on a SCHEDULER wake of
+# ari. It is NOT the briefing: there is NO once-flag (every qualifying
+# wake re-renders fresh memory), and dedup across turns is structural —
+# the stable id ``memoir_refresh:{instance_id}`` collapses N refreshes to
+# exactly ONE current checkpoint row via ``add_messages`` supersede.
+#
+# THE GATE IS A CONJUNCTION (V2-Q1): ari-only → the
+# ``ENSEMBLE_MEMOIR_WAKE_REFRESH_ENABLED`` knob → ``wake_source ==
+# "scheduler"``. The builder evaluates the three in COST order (the
+# threaded source first, the row read last) — the AND makes order
+# outcome-neutral, and the cost order keeps the daemon's ordinary
+# traffic DB-free (implementation-notes §16.6.1). The wake signal does
+# NOT exist at the assembly seam natively — it is THREADED from the
+# dispatch site (``instance_messaging._process_message_with_tracking``
+# holds ``message_source``) through ``assemble_context_messages`` into
+# this builder. Gating on ``instance_metadata.original_source`` is WRONG
+# by construction: it is first-write-only and identifies the session's
+# FOUNDING source, not the current wake.
+#
+# THE L4 PRODUCT RULING SURVIVES: the scheduler's own message stays an
+# unstamped bare ``MessageType.HUMAN`` (``scheduler`` is deliberately
+# absent from ``INTERNAL_STAMPED_SOURCE_PREFIXES``). This block composes
+# ALONGSIDE it; nothing here touches the alarm template or the wake
+# message's kwargs.
+
+#: The refresh block's title — ``_make_context_message`` renders the
+#: canonical ``[SYSTEM CONTEXT: Memoir Refresh]`` prefix around it.
+MEMOIR_REFRESH_BLOCK_TITLE = "Memoir Refresh"
+
+#: The ``source`` stamp the refresh block carries (plan §3.2).
+MEMOIR_REFRESH_SOURCE = "memoir_refresh"
+
+
+async def _assemble_memoir_refresh(
+    instance_id: str,
+    manager: Any,
+    repo: Any,
+    *,
+    wake_source: str | None,
+) -> HumanMessage | None:
+    """The wake-refresh gate body: the plan's AND-chain, cheapest first.
+
+    THE GATE IS A PURE CONJUNCTION (V2-Q1): ``agent_id == "ari"`` AND the
+    lane's own knob AND ``wake_source == "scheduler"``. All three must
+    hold; evaluating them in a different ORDER cannot change the outcome,
+    so this body orders them by COST — the threaded source (no I/O)
+    first, the knob (env/config read, no I/O) second, the instance-row
+    read (DB) last. Had the row read come first, every assembly for every
+    instance would pay a DB round trip just to learn it is not ari.
+
+    The agent identity comes from the ROW — never a caller-supplied key
+    (DD-13), the v1 briefing seam's own discipline.
+    """
+    if wake_source != "scheduler":
+        # NOT a scheduler wake — zero refresh blocks (ND-12). This gate
+        # deliberately does NOT read ``original_source``: it is
+        # first-write-only and identifies the session's FOUNDING source,
+        # not the current wake.
+        return None
+
+    from .memoir_briefing import (
+        MEMOIR_AGENT_ID,
+        MEMOIR_READ_TIMEOUT_S,
+        _render_briefing_body_for,
+    )
+    from daemon.tools.memoir_knob import resolve_memoir_wake_refresh_knob
+
+    try:
+        if not resolve_memoir_wake_refresh_knob(
+            getattr(manager, "config", None)
+        ).enabled:
+            return None
+    except Exception:  # noqa: BLE001 — the knob never raises; be defensive
+        return None
+
+    row = await asyncio.wait_for(
+        asyncio.to_thread(repo.get, instance_id),
+        timeout=MEMOIR_READ_TIMEOUT_S,
+    )
+    if row is None:
+        return None
+    agent_id = getattr(row, "agent_id", None)
+    if agent_id != MEMOIR_AGENT_ID:
+        # ari-only (the memoir lane's identity, read from the ROW).
+        return None
+
+    body = await _render_briefing_body_for(agent_id, instance_id, manager)
+    if body is None:
+        return None
+    return _make_context_message(
+        CONTEXT_KIND_MEMOIR_REFRESH,
+        MEMOIR_REFRESH_BLOCK_TITLE,
+        body,
+        id_=_stable_id_for("memoir_refresh", instance_id=instance_id),
+        source=MEMOIR_REFRESH_SOURCE,
+    )
+
+
+async def _maybe_memoir_refresh_message(
+    instance_id: str,
+    manager: Any,
+    instance_repository: Any,
+    *,
+    wake_source: str | None = None,
+) -> HumanMessage | None:
+    """The whole-build budget wrapper for the WAKE-REFRESH block.
+
+    Mirrors ``_maybe_memoir_briefing_message``: the ≤5 s budget covers the
+    knob read, the off-loop row read and the content reads; a breach (or
+    any failure) logs and returns ``None`` — the wake proceeds without a
+    refresh, never delayed by memoir health.
+    """
+    from .memoir_briefing import MEMOIR_BUILD_BUDGET_S
+
+    repo = (
+        instance_repository
+        if instance_repository is not None
+        else getattr(manager, "_instance_repository", None)
+    )
+    if repo is None:
+        return None
+    try:
+        return await asyncio.wait_for(
+            _assemble_memoir_refresh(
+                instance_id, manager, repo, wake_source=wake_source
+            ),
+            timeout=MEMOIR_BUILD_BUDGET_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"[ContextMessages] memoir refresh exceeded the "
+            f"{MEMOIR_BUILD_BUDGET_S}s whole-build budget for "
+            f"{instance_id[:8]}... — degraded (no refresh block)"
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 — never delay the wake
+        logger.warning(
+            f"[ContextMessages] memoir refresh build failed for "
+            f"{instance_id[:8]}...: {exc}"
+        )
+        return None
+
+
 # ── POK context block (project-operating-knowledge Phase 1, T6) ───────────
 #
 # The AUDIENCE-DIMENSIONED operating-knowledge block (ER-1 /
@@ -697,6 +876,7 @@ def _stable_id_for(
     ``shared_meta_kv``        ``kv:{context_key}``                            ``context_key``
     ``attestation_nudge``     ``attestation_nudge:{instance_id}``             ``instance_id``
     ``memoir``                ``memoir:{agent_id}``                           ``agent_id``
+    ``memoir_refresh``        ``memoir_refresh:{instance_id}``                ``instance_id``
     ``pok``                   ``pok:{project_id}``                            ``project_id``
     ========================  =============================================  =========================
 
@@ -802,6 +982,19 @@ def _stable_id_for(
                 "_stable_id_for('memoir') requires agent_id"
             )
         return f"memoir:{agent_id}"
+    if kind == "memoir_refresh":
+        # Memoir Store v2 (phase 6, T6.4 / V2-D 6.4 / N3): the
+        # WAKE-REFRESH block is keyed per INSTANCE. There is NO
+        # once-flag — the block re-fires on every qualifying scheduler
+        # wake, and successive wakes SUPERSEDE in place to exactly one
+        # current row (``add_messages`` stable-id supersede). The suffix
+        # is the instance, so two different sessions never collapse into
+        # one refresh.
+        if not instance_id:
+            raise ValueError(
+                "_stable_id_for('memoir_refresh') requires instance_id"
+            )
+        return f"memoir_refresh:{instance_id}"
     if kind == "pok":
         # POK Phase 1 (2026-11-07): the operating-knowledge block is
         # keyed per PROJECT — the audience dimension varies the
@@ -818,7 +1011,8 @@ def _stable_id_for(
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
         "for 'project', 'shared_meta_kv', 'attestation_nudge', "
-        "'attestation_final_report_reminder', 'memoir', and 'pok' blocks"
+        "'attestation_final_report_reminder', 'memoir', 'memoir_refresh', "
+        "and 'pok' blocks"
     )
 
 
@@ -2371,6 +2565,7 @@ async def assemble_context_messages(
     message_id: str | None = None,
     project_already_injected: bool = False,
     auto_load_invalidated: bool = False,
+    wake_source: str | None = None,
 ) -> tuple[list[HumanMessage], list[HumanMessage]]:
     """Async orchestrator returning ``(persistent_msgs, ephemeral_msgs)``.
 
@@ -2472,6 +2667,15 @@ async def assemble_context_messages(
             every turn after the first to honour the once-per-
             instance ``project_injected`` flag. Default ``False``
             for backward-compatible first-turn callers.
+        wake_source: The CURRENT dispatch's source tag (memoir phase 6,
+            V2-Q1 amendment). Threaded from the dispatch site so the
+            WAKE-REFRESH seam can answer "is this a scheduler wake?"
+            WITHOUT reading ``instance_metadata.original_source`` (which
+            is first-write-only and identifies the session's FOUNDING
+            source, not the current wake). ``None`` on every path that
+            does not know its source (retry, read-path rebuild, graph
+            slot) — and ``None`` means "no wake-refresh block", so the
+            default preserves byte-identical behaviour everywhere.
 
     Returns:
         ``(persistent_msgs, ephemeral_msgs)`` tuple.
@@ -2568,6 +2772,21 @@ async def assemble_context_messages(
         )
         if memoir_msg is not None:
             persistent_after_inject.append(memoir_msg)
+
+        # ── Memoir WAKE-REFRESH (phase 6, T6.4 / V2-D 6.4 / V2-Q1) ────
+        # A SEPARATE stamped block on a SCHEDULER wake. NO once-flag: the
+        # block re-fires on every qualifying wake and the stable id
+        # ``memoir_refresh:{instance_id}`` supersedes in place, so a
+        # session that wakes N times carries exactly ONE current refresh.
+        # Evaluated on BOTH assembly branches (the turn-1 path below).
+        refresh_msg = await _maybe_memoir_refresh_message(
+            instance_id=instance_id,
+            manager=manager,
+            instance_repository=instance_repository,
+            wake_source=wake_source,
+        )
+        if refresh_msg is not None:
+            persistent_after_inject.append(refresh_msg)
 
         # ── POK refresh (POK Phase 1, T6) — PERSISTENT, every-turn gate ──
         # The once-flag is read FRESH each assembly (this refresh branch
@@ -2933,6 +3152,20 @@ async def assemble_context_messages(
     if memoir_msg is not None:
         persistent_msgs.append(memoir_msg)
 
+    # ── 6. Memoir WAKE-REFRESH (phase 6, T6.4 / V2-D 6.4 / V2-Q1) ──────
+    # The SAME seam as the refresh branch above, evaluated on the TURN-1
+    # path too (a wake can be the session's first dispatch). Gated on the
+    # threaded ``wake_source == "scheduler"`` inside the builder — this
+    # call is a NO-OP for every non-scheduler assembly.
+    refresh_msg = await _maybe_memoir_refresh_message(
+        instance_id=instance_id,
+        manager=manager,
+        instance_repository=instance_repository,
+        wake_source=wake_source,
+    )
+    if refresh_msg is not None:
+        persistent_msgs.append(refresh_msg)
+
     return (persistent_msgs, ephemeral_msgs)
 
 
@@ -2950,6 +3183,9 @@ __all__ = [
     "CONTEXT_KIND_SHARED_META_KV",
     "CONTEXT_KIND_SNAPSHOT_DIGEST",
     "CONTEXT_KIND_MEMOIR",
+    "CONTEXT_KIND_MEMOIR_REFRESH",
+    "MEMOIR_REFRESH_BLOCK_TITLE",
+    "MEMOIR_REFRESH_SOURCE",
     "CONTEXT_KIND_POK",
     "POK_INJECTION_FLAG",
     "SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS",

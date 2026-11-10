@@ -800,18 +800,205 @@ def memoir_poignancy_enabled(config: "Config | None" = None) -> bool:
     return resolve_memoir_poignancy_knob(config).enabled
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Memoir Store v2 — the WAKE-REFRESH lane's knob (phase 6, T6.5 / V2-D 6.4)
+#
+# THE SAME PER-LANE SHAPE as the reflection / poignancy resolvers: the
+# CLASSIFIER is shared (``daemon.config._classify_enabled_flag`` — the
+# truth table lives in ONE place), the RESOLVER is per-lane, and the
+# operator-facing log line is owned HERE (mechanism N-2: the model
+# classifies, the knob module speaks).
+#
+# The seam (``daemon/services/context_messages._maybe_memoir_refresh_message``)
+# calls :func:`resolve_memoir_wake_refresh_knob` at CALL TIME — never a
+# boot-cached value — so flipping the env mid-run takes effect on the
+# next qualifying wake.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MemoirWakeRefreshKnobState:
+    """The resolved WAKE-REFRESH-lane state plus its provenance.
+
+    The shape mirrors :class:`MemoirReflectionKnobState` so a health
+    surface can render all three lanes with one code path.
+    """
+
+    enabled: bool
+    resolution: str
+    source: str
+    rejected_value: str | None
+    message: str
+    log_level: str
+
+
+def resolve_memoir_wake_refresh_knob(
+    config: "Config | None" = None,
+) -> MemoirWakeRefreshKnobState:
+    """Resolve the WAKE-REFRESH-lane kill-switch NOW (call-time read).
+
+    The truth table is the Enabled-flags row of §3-A4 (DR-3): unset ⇒ ON
+    + one WARNING; garbage ⇒ OFF (fail closed) + a WARNING naming the
+    value; explicit true/false honoured; a resolution ERROR ⇒ OFF. The
+    function NEVER raises — a knob that cannot be resolved disables its
+    lane and the daemon keeps running.
+
+    Args:
+        config: The resolved daemon configuration, when the caller has
+            one. Its ``memoir_wake_refresh`` section is the config tier;
+            ``None`` means the section is built from the environment
+            alone.
+
+    Returns:
+        The resolved :class:`MemoirWakeRefreshKnobState`.
+    """
+    from daemon.config import (
+        MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR,
+        MemoirWakeRefreshConfig,
+    )
+
+    raw = os.environ.get(MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR)
+    env_present = raw is not None and bool(raw.strip())
+
+    try:
+        if config is not None:
+            section = getattr(config, "memoir_wake_refresh", None)
+        else:
+            section = None
+        if section is None:
+            section = MemoirWakeRefreshConfig()
+        # THE ENV TIER IS READ LIVE and WINS over the boot-frozen section
+        # (the reflection resolver's shape): the section decides ONLY when
+        # the env tier is absent.
+        env_enabled: bool | None = None
+        if env_present:
+            env_enabled = _classify_enabled_flag(
+                raw,
+                name=MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR,
+                default=True,
+            )
+        enabled = env_enabled if env_enabled is not None else bool(section.enabled)
+    except Exception as exc:  # noqa: BLE001 — a knob never raises
+        state = MemoirWakeRefreshKnobState(
+            enabled=False,
+            resolution=MEMOIR_RESOLUTION_ERROR,
+            source="none",
+            rejected_value=None,
+            message=(
+                f"[MemoirRefresh] {MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR} could "
+                f"not be resolved ({exc}) — the wake-refresh block is "
+                f"DISABLED (fail closed)"
+            ),
+            log_level="ERROR",
+        )
+        _emit_wake_refresh_once(state)
+        return state
+
+    if env_present:
+        lowered = raw.strip().lower()
+        if lowered in MEMOIR_FALSY_VALUES:
+            message = (
+                f"[MemoirRefresh] {MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR}=false — "
+                f"the wake-refresh context block is DISABLED (scheduler wakes "
+                f"carry no memoir refresh; the briefing and the alarm are "
+                f"untouched)"
+            )
+            resolution = MEMOIR_RESOLUTION_EXPLICIT_OFF
+            log_level = "INFO"
+        elif lowered in MEMOIR_TRUTHY_VALUES:
+            message = (
+                f"[MemoirRefresh] {MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR}=true — "
+                f"the wake-refresh context block is ENABLED"
+            )
+            resolution = MEMOIR_RESOLUTION_EXPLICIT_ON
+            log_level = "INFO"
+        else:
+            message = (
+                f"[MemoirRefresh] {MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR}="
+                f"{raw!r} is not a recognised boolean — the wake-refresh "
+                f"block is DISABLED (fail closed); accepted spellings are "
+                f"true/false, 1/0, yes/no, on/off, t/f, y/n"
+            )
+            resolution = MEMOIR_RESOLUTION_INDETERMINATE
+            log_level = "WARNING"
+        state = MemoirWakeRefreshKnobState(
+            enabled=enabled,
+            resolution=resolution,
+            source="env",
+            rejected_value=(
+                raw if resolution == MEMOIR_RESOLUTION_INDETERMINATE else None
+            ),
+            message=message,
+            log_level=log_level,
+        )
+        _emit_wake_refresh_once(state)
+        return state
+
+    if enabled:
+        message = (
+            f"[MemoirRefresh] {MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR} is unset — "
+            f"the wake-refresh block is ENABLED by default; set "
+            f"`{MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR}=false` to disable it"
+        )
+        resolution = MEMOIR_RESOLUTION_DEFAULT
+        log_level = "WARNING"
+    else:
+        message = (
+            f"[MemoirRefresh] {MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR} is unset "
+            f"and the configuration disables the wake-refresh block "
+            f"(memoir_wake_refresh.enabled=false) — it is DISABLED"
+        )
+        resolution = MEMOIR_RESOLUTION_CONFIG
+        log_level = "INFO"
+    state = MemoirWakeRefreshKnobState(
+        enabled=enabled,
+        resolution=resolution,
+        source="config",
+        rejected_value=None,
+        message=message,
+        log_level=log_level,
+    )
+    _emit_wake_refresh_once(state)
+    return state
+
+
+def _emit_wake_refresh_once(state: MemoirWakeRefreshKnobState) -> None:
+    """Emit the wake-refresh line ONCE per boot (the shared log guard).
+
+    Keyed by the message (the SAME ``_EMITTED`` set the other lanes use),
+    so a repeated resolution stays quiet while a CHANGED value re-warns.
+    """
+    if state.message in _EMITTED:
+        return
+    _EMITTED.add(state.message)
+    logger.log(
+        logging.ERROR
+        if state.log_level == "ERROR"
+        else (logging.WARNING if state.log_level == "WARNING" else logging.INFO),
+        state.message,
+    )
+
+
+def memoir_wake_refresh_enabled(config: "Config | None" = None) -> bool:
+    """``True`` when the WAKE-REFRESH block may be built. Read at CALL TIME."""
+    return resolve_memoir_wake_refresh_knob(config).enabled
+
+
 __all__ = [
     "MemoirKnobState",
     "MemoirPoignancyKnobState",
     "MemoirReflectionKnobState",
+    "MemoirWakeRefreshKnobState",
     "emit_boot_state",
     "memoir_enabled",
     "memoir_knob_state",
     "memoir_poignancy_enabled",
     "memoir_reflection_enabled",
     "memoir_tool_help",
+    "memoir_wake_refresh_enabled",
     "reset_boot_log_state",
     "resolve_memoir_knob",
     "resolve_memoir_poignancy_knob",
     "resolve_memoir_reflection_knob",
+    "resolve_memoir_wake_refresh_knob",
 ]

@@ -339,6 +339,7 @@ class MemoirReflectionService:
         constellation_repository: Any = None,
         persona_repository: Any = None,
         persona_gate: Any = None,
+        keepsake_proposal_service: Any = None,
         settings: ReflectionSettings | None = None,
         config: Any = None,
         llm_config: dict[str, Any] | None = None,
@@ -351,6 +352,12 @@ class MemoirReflectionService:
         self._constellation = constellation_repository
         self._persona_repo = persona_repository
         self._persona_gate = persona_gate
+        #: The KEEPSAKE PROPOSAL service (phase 6, T6.1/T6.3). Injected by
+        #: the lifespan wiring; ``None`` (the default) means the lane is
+        #: not wired and the pass skips the proposal phase entirely — so
+        #: every existing construction site and test double keeps working
+        #: byte-identically.
+        self._keepsake_proposals = keepsake_proposal_service
         self._settings = settings or ReflectionSettings()
         #: The resolved daemon configuration (the config tier of the
         #: knobs — the worker re-resolves the settings per tick).
@@ -865,6 +872,28 @@ class MemoirReflectionService:
             except Exception:  # noqa: BLE001 — never fail the pass
                 logger.warning(
                     "[MemoirReflection] the Persona Gate (JEV) evaluation failed — "
+                    "the pass continues"
+                )
+
+        # ── THE KEEPSAKE PROPOSAL PHASE (phase 6, T6.1/T6.3 / V2-D 6.1) ─
+        # Execution ordering (the §2-Q4 doctrine): commit synthesis →
+        # constellation → JEV → KEEPSAKE PROPOSAL. Every step is a
+        # CONSUMER of the durable synthesis; a proposal failure must never
+        # roll back or block it, so the call is isolated here and the
+        # service itself never raises.
+        #
+        # NO LLM CALLS in this phase: qualification and staging are
+        # heuristic over rows already in the database, and the reason text
+        # is composed from row facts (plan §1/§4).
+        if self._keepsake_proposals is not None:
+            try:
+                self._keepsake_proposals.process_pass(
+                    now=now,
+                    agent_id=self._settings.agent_id,
+                )
+            except Exception:  # noqa: BLE001 — never fail the pass
+                logger.warning(
+                    "[MemoirReflection] the keepsake proposal phase failed — "
                     "the pass continues"
                 )
 
