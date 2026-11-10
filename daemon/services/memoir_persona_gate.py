@@ -286,6 +286,15 @@ class MemoirPersonaGateService:
         #: discarded (F1).  The gate is driven by ONE thread (the
         #: reflection worker), so a plain attribute is safe here.
         self._last_classification: str | None = None
+        #: THE PER-PASS COMPOSITION COUNTER (P5-W1).  It is charged AT THE
+        #: COMPOSE CALL SITE — the instant a composition LLM request is
+        #: issued — never inferred afterwards from the outcome shape.  The
+        #: pre-fix heuristic (``proposed_body is not None`` or a
+        #: ``"diff"`` error string) MISSED a composition that succeeded and
+        #: then raised in ``create_draft`` / ``submit``: the pass went on to
+        #: compose a SECOND candidate, spending two LLM calls against a
+        #: declared cap of one.  ``process_pass`` resets it at pass start.
+        self._composition_calls_this_pass: int = 0
 
     # ── Database ledger access ──────────────────────────────────────────
 
@@ -711,6 +720,9 @@ class MemoirPersonaGateService:
             )
 
         # Gated classes (conflict, boundary_change, new_rule) -> compose proposed_body
+        # THE BUDGET IS CHARGED HERE (P5-W1): a composition attempt is a
+        # paid LLM request whether or not it later yields a usable diff.
+        self._composition_calls_this_pass += 1
         try:
             proposed_body = self.compose_persona_document(
                 active_persona_body=active_body,
@@ -816,7 +828,10 @@ class MemoirPersonaGateService:
                 candidates_to_process.append(s)
                 seen_ids.add(sid)
 
-        composition_calls = 0
+        # THE PER-PASS BUDGET (P5-W1): charge every composition attempt at
+        # its call site (``process_candidate``) and read the counter here —
+        # never re-derive it from the outcome shape.
+        self._composition_calls_this_pass = 0
         processed_ids: set[str] = set()
         try:
             for cand in candidates_to_process:
@@ -825,7 +840,7 @@ class MemoirPersonaGateService:
                     # Check if this candidate already classified as gated but pending composition
                     existing = self.get_ledger_entry(cand.id)
                     if existing and existing.classification in JEV_GATED_CLASSES and existing.status == "pending":
-                        if composition_calls >= max_composition_calls:
+                        if self._composition_calls_this_pass >= max_composition_calls:
                             # Defer to next pass — the ledger row ALREADY exists,
                             # so the candidate stays re-selectable.
                             continue
@@ -854,12 +869,23 @@ class MemoirPersonaGateService:
                     # next candidate.
                     if self._journal_gate_error(cand_id, exc):
                         processed_ids.add(cand_id)
+                    # THE RAISE PATH ALSO OBEYS THE BUDGET (P5-W1): a
+                    # candidate that raised AFTER its compose call already
+                    # spent the attempt, so the pass must not go on to buy a
+                    # second composition.  (Pre-fix this ``continue`` skipped
+                    # the post-candidate budget check entirely.)
+                    if (
+                        self._composition_calls_this_pass
+                        >= max_composition_calls
+                    ):
+                        break
                     continue
                 outcomes.append(outcome)
                 processed_ids.add(cand_id)
-                if outcome.proposed_body is not None or (outcome.last_error and "diff" in outcome.last_error):
-                    composition_calls += 1
-                if composition_calls >= max_composition_calls:
+                # The counter was charged at the call site.  Reaching the cap
+                # ends the candidate loop; the unprocessed remainder is parked
+                # by the ``finally`` below (it is NOT dropped).
+                if self._composition_calls_this_pass >= max_composition_calls:
                     # Reached composition budget for this pass — the REMAINING
                     # candidates are parked below (they are NOT dropped).
                     break
@@ -1004,24 +1030,40 @@ class MemoirPersonaGateService:
             synthesis_id = getattr(cand, "id", "")
             if not synthesis_id or synthesis_id in processed_ids:
                 continue
-            existing = self.get_ledger_entry(synthesis_id)
-            if existing is not None:
-                # ALREADY parked (the row IS the re-selection handle) —
-                # keep it, and keep its diagnostic last_error intact.
+            # PER-CANDIDATE ISOLATION (P5-W2): the park runs in a
+            # ``finally``, so one failed ledger write must not abort the
+            # loop and lose every candidate after it (the same head-of-line
+            # class as F1).  A failed park is LOGGED and the loop continues;
+            # the next pass re-selects from whatever rows did land.
+            try:
+                existing = self.get_ledger_entry(synthesis_id)
+                if existing is not None:
+                    # ALREADY parked (the row IS the re-selection handle) —
+                    # keep it, and keep its diagnostic last_error intact.
+                    continue
+                self.record_ledger_entry(
+                    synthesis_id=synthesis_id,
+                    classification=None,
+                    attempts=0,
+                    last_error=DEFERRED_COMPOSITION_BUDGET,
+                    status="pending",
+                )
+                logger.info(
+                    "[MemoirPersonaGate] synthesis %s deferred by the per-pass "
+                    "composition budget — parked as 'pending' so the next pass "
+                    "re-selects it (no candidate is lost)",
+                    synthesis_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — isolation, never abort the park
+                logger.warning(
+                    "[MemoirPersonaGate] could not park synthesis %s after the "
+                    "composition-budget deferral (store error: %s: %s) — "
+                    "continuing with the remaining candidates",
+                    synthesis_id,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
-            self.record_ledger_entry(
-                synthesis_id=synthesis_id,
-                classification=None,
-                attempts=0,
-                last_error=DEFERRED_COMPOSITION_BUDGET,
-                status="pending",
-            )
-            logger.info(
-                "[MemoirPersonaGate] synthesis %s deferred by the per-pass "
-                "composition budget — parked as 'pending' so the next pass "
-                "re-selects it (no candidate is lost)",
-                synthesis_id,
-            )
 
     # ── LLM dispatch helper ──────────────────────────────────────────────
 

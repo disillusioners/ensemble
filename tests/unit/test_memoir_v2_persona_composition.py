@@ -579,3 +579,96 @@ class TestRaisePathParkSemantics:
         # AND THE TWO MARKERS NEVER OVERLAP.
         assert DEFERRED_COMPOSITION_BUDGET not in gate_error_entry.last_error
         assert GATE_ERROR_PREFIX not in deferral_entry.last_error
+
+
+# ── P5-W1: the budget is charged AT THE COMPOSE CALL SITE ────────────────
+
+
+class TestCompositionBudgetChargedAtCallSite:
+    """The per-pass cap counts PAID ATTEMPTS, not outcome shapes.
+
+    PRE-FIX DEFECT (P5-W1, executed): ``composition_calls`` was inferred
+    after the fact from ``outcome.proposed_body is not None or "diff" in
+    outcome.last_error``.  A candidate whose composition SUCCEEDED and then
+    raised in ``create_draft`` produced neither signal, so the pass went on
+    to compose a SECOND candidate — two composition LLM calls in one pass
+    against a declared cap of one.
+    """
+
+    def test_a_compose_that_raises_after_success_consumes_the_budget(
+        self, engine, persona_repo
+    ):
+        comp_calls: list[str] = []
+
+        def counting_llm(prompt):
+            if "Taxonomy:" in prompt:
+                return json.dumps({
+                    "classification": "new_rule",
+                    "reasoning": "Valid new rule.",
+                })
+            comp_calls.append(prompt)
+            return "# Ari Persona\n\nUpdated with rule."
+
+        svc = MemoirPersonaGateService(
+            engine,
+            persona_repository=_FirstCallExplodingRepo(engine),
+            llm_caller=counting_llm,
+        )
+        first = _make_synthesis(engine, claim="Rule 1 to integrate")
+        second = _make_synthesis(engine, claim="Rule 2 to integrate")
+
+        svc.process_pass(
+            new_syntheses=[first, second],
+            max_composition_calls=MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS,
+        )
+
+        # ONE paid composition attempt — the candidate that raised AFTER a
+        # successful compose still spent it.
+        assert len(comp_calls) == 1, (
+            f"the pass spent {len(comp_calls)} composition calls against a "
+            f"cap of {MEMOIR_PERSONA_COMPOSITION_MAX_LLM_CALLS_PER_PASS}"
+        )
+        # ...and the candidate the cap never reached is parked, not lost.
+        second_entry = svc.get_ledger_entry(second.id)
+        assert second_entry is not None
+        assert second_entry.status == "pending"
+        assert second_entry.last_error == DEFERRED_COMPOSITION_BUDGET
+
+
+# ── P5-W2: the park loop isolates per-candidate failures ────────────────
+
+
+class TestParkLoopIsolation:
+    """One failed ledger write must not lose every later candidate.
+
+    The park runs in a ``finally`` (C1); pre-fix a store error inside it
+    aborted the loop, so every candidate after the failing one stayed
+    ROWLESS — permanently invisible to ``get_pending_candidates()``.
+    """
+
+    def test_a_failed_park_does_not_abort_the_remaining_candidates(
+        self, engine, persona_repo
+    ):
+        svc = MemoirPersonaGateService(
+            engine, persona_repository=persona_repo, llm_caller=lambda p: "{}"
+        )
+        first = _make_synthesis(engine, claim="Rule A")
+        second = _make_synthesis(engine, claim="Rule B")
+
+        real_record = svc.record_ledger_entry
+
+        def flaky_record(**kwargs):
+            if kwargs.get("synthesis_id") == first.id:
+                raise RuntimeError("the ledger store exploded")
+            return real_record(**kwargs)
+
+        svc.record_ledger_entry = flaky_record
+
+        svc._park_unprocessed_candidates([first, second], set())
+
+        # The FIRST park failed (nothing landed for it), the SECOND landed.
+        assert svc.get_ledger_entry(first.id) is None
+        second_entry = svc.get_ledger_entry(second.id)
+        assert second_entry is not None
+        assert second_entry.status == "pending"
+        assert second_entry.last_error == DEFERRED_COMPOSITION_BUDGET

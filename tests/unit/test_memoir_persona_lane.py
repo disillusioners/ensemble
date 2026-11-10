@@ -196,6 +196,15 @@ def test_submit_is_a_seam_without_a_v1_caller():
         text=True,
         timeout=60,
     )
+    # FAIL-CLOSED (P5-W3): a pin that only inspects stdout silently PASSES
+    # wherever `git grep` cannot run (no git tree, broken object store) —
+    # an empty hit list would then certify an unrestricted caller set.
+    # rc == 0 is therefore REQUIRED; rc == 1 (no matches) is a failure too,
+    # because the repository module itself must always match.
+    assert result.returncode == 0, (
+        f"allowed-caller pin is vacuous: `git grep` rc={result.returncode} "
+        f"(stderr={result.stderr.strip()!r})"
+    )
     hits = [line for line in result.stdout.splitlines() if line.strip()]
     allowed = {
         "daemon/repositories/memoir/repository.py",
@@ -204,12 +213,12 @@ def test_submit_is_a_seam_without_a_v1_caller():
         "daemon/routers/memoir.py",
         "daemon/api.py",
     }
-    outside = [
-        hit
-        for hit in hits
-        if hit not in allowed
-    ]
-    assert not outside, f"unexpected caller of MemoirPersonaRepository: {outside}"
+    # SET EQUALITY, not a subset: an allowed file that stops referencing the
+    # repository is as much a pin event as a new caller appearing.
+    assert set(hits) == allowed, (
+        f"allowed-caller set drifted: unexpected={sorted(set(hits) - allowed)} "
+        f"missing={sorted(allowed - set(hits))}"
+    )
 
 
 def test_get_current_is_none_without_a_persona(repo):
