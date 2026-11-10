@@ -518,6 +518,28 @@ PYEOF
 ' \
 "$PIN_FILE::TestResolverLeg::test_a_project_write_with_a_marker_literal_is_project"
 
+  # M-B1k (code-review council F-3) — the pathlib METHOD branch
+  # (rename / replace / chmod on a path-like receiver) is blanked out.
+  # The drift-proofing oracle goes blind to the natural future spelling
+  # of a move ⇒ the probe pin MUST go RED.
+  leg "M-B1k" "tests/unit/test_skill_keeper_confinement.py" \
+'            elif attr in _PATH_METHOD_ATTRS and _is_pathlike_receiver(
+                recv, scope_nodes
+            ):
+                # ``Path(x).rename(y)`` / ``Path(x).replace(y)`` — BOTH
+                # ends are project-surface: the receiver loses its name
+                # and the ARGUMENT is where the file lands. Both are
+                # emitted (argument-position-correct).
+                out.append((recv, sub))
+                out.append((sub.args[0] if sub.args else None, sub))
+            elif attr == _PATH_CHMOD_ATTR and _is_pathlike_receiver(
+                recv, scope_nodes
+            ):
+                out.append((recv, sub))
+' \
+'' \
+"$PIN_FILE::TestResolverLeg::test_the_classifier_catches_the_pathlib_rename_and_replace_forms"
+
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
   echo "mutation failures: $MUTATION_FAILURES"

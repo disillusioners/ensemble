@@ -415,13 +415,10 @@ PYEOF
   # M-B3c — the default scope becomes "project" for EVERY agent. The
   # no-other-agent-changes pin → RED.
   leg "M-B3c" "daemon/tools/filesystem.py" \
-'    scope = _load_declared_read_scope(agent_id)
-    _READ_SCOPE_CACHE[agent_id] = scope
-    return scope
+'    scope, path, mtime_ns, size = _load_declared_read_scope(agent_id)
 ' \
-'    scope = _load_declared_read_scope(agent_id) or READ_SCOPE_PROJECT
-    _READ_SCOPE_CACHE[agent_id] = scope
-    return scope
+'    scope, path, mtime_ns, size = _load_declared_read_scope(agent_id)
+    scope = scope or READ_SCOPE_PROJECT
 ' \
 "$PIN_FILE::TestOtherAgentsAreUnchanged::test_another_agent_reads_an_absolute_path_outside_the_workdir"
 
@@ -430,11 +427,11 @@ PYEOF
   leg "M-B3d" "daemon/tools/filesystem.py" \
 '    if not agent_id:
         return None
-    cached = _READ_SCOPE_CACHE.get(agent_id, ...)
+    cached = _READ_SCOPE_CACHE.get(agent_id)
 ' \
 '    if not agent_id or agent_id == "skill-keeper":
         return None
-    cached = _READ_SCOPE_CACHE.get(agent_id, ...)
+    cached = _READ_SCOPE_CACHE.get(agent_id)
 ' \
 "$PIN_FILE::TestKeeperReadScopeEnforcement::test_read_file_refuses_an_absolute_in_workdir_path"
 
@@ -557,6 +554,38 @@ PYEOF
 ' \
 '' \
 "$PIN_FILE::TestListDirectoryDoesNotEnumerateDeniedBasenames::test_a_scoped_agent_does_not_see_dotenv_names_with_show_hidden"
+
+  # M-B3i (code-review council F-1) — the SYMLINK drop is removed from
+  # the scoped candidate filter. A file symlink inside the anchor points
+  # OUTSIDE it; the walker enumerates it and grep READS it, so the
+  # exfil content comes back. The grep pin MUST go RED.
+  leg "M-B3i" "daemon/tools/filesystem.py" \
+'    return [
+        f
+        for f in files
+        if not _is_scope_denied_basename(f.name) and not f.is_symlink()
+    ]
+' \
+'    return [f for f in files if not _is_scope_denied_basename(f.name)]
+' \
+"$PIN_FILE::TestSymlinkExfiltrationIsClosed::test_grep_returns_nothing_from_an_outward_symlink"
+
+  # M-B3j (code-review council F-5) — the scope cache stops keying on the
+  # meta.json IDENTITY (it reverts to a plain value cache, never
+  # invalidated). A scope declared AFTER the first lookup stays invisible
+  # ⇒ the fence fails OPEN. The pin MUST go RED.
+  leg "M-B3j" "daemon/tools/filesystem.py" \
+'    cached = _READ_SCOPE_CACHE.get(agent_id)
+    if cached is not None:
+        scope, path, mtime_ns, size = cached
+        if _meta_identity_matches(path, mtime_ns, size):
+            return scope
+' \
+'    cached = _READ_SCOPE_CACHE.get(agent_id)
+    if cached is not None:
+        return cached[0]
+' \
+"$PIN_FILE::TestScopeCacheInvalidatesOnEdit::test_a_newly_declared_scope_is_honoured_without_a_restart"
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
