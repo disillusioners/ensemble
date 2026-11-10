@@ -380,7 +380,15 @@ class TestE33PfViewEchoesTheAddress:
 class TestH2BurstCapRefusalIsTruthful:
     @pytest.mark.asyncio
     async def test_the_false_durability_sentence_is_absent(self):
-        """Pin 1 — the UNTRUE sentence must never reach the agent."""
+        """Pin 1 — the UNTRUE sentence must never reach the agent.
+
+        F-G2 removed that sentence from the GENERIC branch as well (the
+        generic branch now renders a DERIVED outcome). So the
+        "sentence absent" assertion alone can NO LONGER discriminate the
+        H2 plant — the pin must also assert that the DESIGNED refusal
+        still renders its OWN first-class shape and is NOT degraded into
+        the generic fault note.
+        """
         from daemon.services.skill_job_dispatcher import (
             SkillFixBurstCapRefused,
         )
@@ -392,6 +400,14 @@ class TestH2BurstCapRefusalIsTruthful:
         assert FALSE_DURABILITY_SENTENCE not in result, (
             "the burst-cap refusal must not claim the request is still "
             f"recorded for a later run: {result!r}"
+        )
+        assert "burst cap" in result, (
+            "the designed refusal must keep its own shape — the cap "
+            f"refusal must NOT be degraded into the generic fault note: {result!r}"
+        )
+        assert "dispatcher raised during dispatch" not in result, (
+            "the designed refusal must NOT be rendered as a generic "
+            f"dispatcher fault: {result!r}"
         )
 
     @pytest.mark.asyncio
