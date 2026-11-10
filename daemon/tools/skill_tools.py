@@ -54,6 +54,7 @@ from daemon.services.project_skill_source.model import (
 from daemon.services.project_skill_source.service import (
     ProjectSkillBodyUnavailable,
 )
+from daemon.services.skill_job_dispatcher import SkillFixBurstCapRefused
 from daemon.services.skill_search_service import _bm25_rank
 from ._tool_registry import register_tool_category
 
@@ -1223,6 +1224,10 @@ Note:
         dispatcher = getattr(manager, "_skill_job_dispatcher", None)
         dispatch_error: str | None = None
         dispatched_job_id: str | None = None
+        # H2 (tidier): the durable re-fix burst cap is a DESIGNED
+        # refusal, not a dispatcher fault. It is caught STRUCTURALLY,
+        # BEFORE the blanket ``except Exception`` below.
+        burst_cap_refusal: SkillFixBurstCapRefused | None = None
         if dispatcher is not None:
             dispatch_method = getattr(dispatcher, "dispatch_fix", None)
             if dispatch_method is not None and callable(dispatch_method):
@@ -1247,6 +1252,28 @@ Note:
                         if isinstance(result, str) and result
                         else None
                     )
+                except SkillFixBurstCapRefused as e:
+                    # H2 (tidier) — the DESIGNED refusal, caught BEFORE
+                    # the blanket catch. The blanket catch swallowed it
+                    # and rendered the generic note, including the
+                    # UNTRUE "request is still recorded above for the next
+                    # skill-keeper run": the cap REFUSED the dispatch, so
+                    # NO job exists and NOTHING will pick it up. An
+                    # agent told "your request is recorded" believes a
+                    # fix is pending when nothing was recorded.
+                    #
+                    # The REST route already handles this exception
+                    # structurally (HTTP 429, M2-pinned) and reads the
+                    # stable token off the refusal class (``e.reason``)
+                    # rather than hard-coding a literal — the agent-facing
+                    # envelope mirrors that vocabulary, so the two can
+                    # never drift (M11: one token per concept).
+                    logger.warning(
+                        "skill_fix burst cap refused for skill %s: %s",
+                        skill_id,
+                        e,
+                    )
+                    burst_cap_refusal = e
                 except Exception as e:
                     logger.warning(
                         "skill_fix dispatcher raised for skill %s: %s",
@@ -1294,6 +1321,21 @@ Note:
                 f"\u2705 Dispatched: Tier-3 skill_evolution job "
                 f"{dispatched_job_id} was admitted — the skill-keeper "
                 "agent will pick it up from the job queue."
+            )
+        elif burst_cap_refusal is not None:
+            # H2 (tidier): the durable re-fix burst cap REFUSED the
+            # admission. The lane is ON — the CAP refused. The envelope
+            # is a FIRST-CLASS refusal: NO job was created, NOTHING will
+            # be picked up, and the stable reason token travels to the
+            # agent (the REST route reads the same ``e.reason``).
+            lines.append("")
+            lines.append(
+                "\u26d4 NOT dispatched: the durable re-fix burst cap "
+                "REFUSED this FIX admission "
+                f"(reason={burst_cap_refusal.reason}). The request was "
+                "REFUSED at dispatch — NO skill-keeper job was created "
+                "and NOTHING will be picked up. This message is the only "
+                "record of the request."
             )
         elif (
             dispatcher is not None

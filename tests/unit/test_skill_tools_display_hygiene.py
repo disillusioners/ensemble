@@ -132,6 +132,42 @@ def _tools(manager):
     return {t.name: t for t in create_skill_tools(manager, INSTANCE_ID)}
 
 
+#: The EXACT sentence the blanket catch used to render — and which is
+#: UNTRUE for a designed refusal (no job exists, nothing will pick it
+#: up). Asserted as a FULL PHRASE, never as a fragment: the envelope
+#: echoes the caller's text, so a short needle would match for the wrong
+#: reason.
+FALSE_DURABILITY_SENTENCE = (
+    "request is still recorded above for the next skill-keeper run"
+)
+
+
+async def _drive_skill_fix(raiser) -> str:
+    """Drive ``skill_fix`` with a dispatcher whose ``dispatch_fix`` raises.
+
+    The dispatcher is INJECTED (``manager._skill_job_dispatcher``) — never
+    an env switch: the lane is simulated at the object boundary, exactly
+    as the B2 pins do.
+    """
+    manager = MagicMock()
+    manager._skill_search_service = MagicMock()
+    manager._skill_store_service = MagicMock()
+    manager._skill_metrics_service = MagicMock()
+    manager._project_skill_source = None
+    manager._project_skill_file_repository = None
+    manager._project_skill_usage_repository = None
+    dispatcher = MagicMock()
+    dispatcher.dispatch_fix = MagicMock(side_effect=raiser)
+    manager._skill_job_dispatcher = dispatcher
+    tools = _tools(manager)
+    return await tools["skill_fix"].ainvoke(
+        {
+            "skill_id": FULL_SKILL_ID,
+            "issue_description": "stale regex",
+        }
+    )
+
+
 # =============================================================================
 # E3.1 — skill_fix echoes the FULL id
 # =============================================================================
@@ -296,4 +332,116 @@ class TestE33PfViewEchoesTheAddress:
         again = await tools["skill_view"].ainvoke({"skill_id": emitted})
         assert again.splitlines()[0] == "# beta-skill", (
             f"the emitted id {emitted!r} must be verbatim-consumable: {again!r}"
+        )
+
+
+# =============================================================================
+# H2 — the designed burst-cap refusal must NOT be reported as a fault
+# =============================================================================
+#
+# The tidier's HIGH finding (H2): ``skill_fix``'s blanket ``except
+# Exception`` swallowed ``SkillFixBurstCapRefused`` (a DESIGNED refusal:
+# the evolution lane is ON and the durable re-fix burst CAP refused the
+# admission) and rendered the generic note — including the UNTRUE
+# "request is still recorded above for the next skill-keeper run": the
+# cap REFUSED the dispatch, so NO job exists and nothing will pick it
+# up. An agent told "your request is recorded" believes a fix is
+# pending when nothing was recorded.
+#
+# The REST route already handles the same exception structurally (HTTP
+# 429, M2-pinned) and reads the stable token off the refusal class
+# (``e.reason``) instead of hard-coding a literal. The agent-facing
+# envelope mirrors that vocabulary.
+
+
+class TestH2BurstCapRefusalIsTruthful:
+    @pytest.mark.asyncio
+    async def test_the_false_durability_sentence_is_absent(self):
+        """Pin 1 — the UNTRUE sentence must never reach the agent."""
+        from daemon.services.skill_job_dispatcher import (
+            SkillFixBurstCapRefused,
+        )
+
+        result = await _drive_skill_fix(
+            SkillFixBurstCapRefused("refused: burst cap — 3 FIX admissions")
+        )
+
+        assert FALSE_DURABILITY_SENTENCE not in result, (
+            "the burst-cap refusal must not claim the request is still "
+            f"recorded for a later run: {result!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_truthful_markers_reach_the_agent(self):
+        """Pin 2 — cap-tripped + no job + nothing picked up + the token."""
+        from daemon.services.skill_job_dispatcher import (
+            SkillFixBurstCapRefused,
+        )
+
+        result = await _drive_skill_fix(
+            SkillFixBurstCapRefused("refused: burst cap — 3 FIX admissions")
+        )
+
+        assert "NOT dispatched" in result, (
+            f"the refusal must use the lane's first-class refusal shape: {result!r}"
+        )
+        assert "burst cap" in result, (
+            f"the refusal must name the cap that tripped: {result!r}"
+        )
+        assert "NO skill-keeper job was created" in result, (
+            f"the refusal must state that no job exists: {result!r}"
+        )
+        assert "NOTHING will be picked up" in result, (
+            f"the refusal must state that nothing will pick it up: {result!r}"
+        )
+        # The stable reason token — the SAME one the REST route returns
+        # (read off the refusal class, never hard-coded).
+        assert SkillFixBurstCapRefused.reason in result, (
+            f"the refusal must carry the reason token: {result!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_claims_no_success(self):
+        """Pin 3 — the lane's success-blocklist discipline."""
+        from daemon.services.skill_job_dispatcher import (
+            SkillFixBurstCapRefused,
+        )
+
+        result = await _drive_skill_fix(
+            SkillFixBurstCapRefused("refused: burst cap — 3 FIX admissions")
+        )
+
+        for forbidden in (
+            "✅",
+            "Dispatched:",
+            "was admitted",
+            "Evolution complete",
+            "successfully",
+            "has been evolved",
+        ):
+            assert forbidden not in result, (
+                f"the refusal must not claim success: {forbidden!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_generic_dispatcher_error_still_renders_the_generic_note(self):
+        """Pin 4 — the non-vacuity twin.
+
+        The structural catch must NOT swallow every dispatcher error: a
+        plain fault still renders the generic envelope, which is where
+        the "still recorded" sentence legitimately belongs (the request
+        WAS recorded in the transcript, and a real fault is not a
+        designed refusal).
+        """
+        result = await _drive_skill_fix(RuntimeError("dispatcher exploded"))
+
+        assert "dispatcher raised during dispatch" in result, (
+            f"a generic dispatcher fault must keep the generic note: {result!r}"
+        )
+        assert "dispatcher exploded" in result, (
+            f"the generic note must carry the fault text: {result!r}"
+        )
+        assert FALSE_DURABILITY_SENTENCE in result, (
+            "the generic path must keep its own durability wording: "
+            f"{result!r}"
         )
