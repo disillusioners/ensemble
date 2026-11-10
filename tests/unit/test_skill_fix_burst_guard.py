@@ -870,3 +870,136 @@ async def test_m18_the_transient_degradation_keeps_its_own_outcome(tmp_path):
         "the transient degradation must NOT be blurred into 'cap_degraded' "
         f"— got {outcomes}"
     )
+
+
+# ── M5 — the operator env docs must cover the knobs the code resolves ──
+
+
+def _env_example_text() -> str:
+    return (
+        Path(__file__).resolve().parents[2] / ".env.example"
+    ).read_text(encoding="utf-8")
+
+
+def _prod_env_example_text() -> str:
+    return (
+        Path(__file__).resolve().parents[2] / ".env.prod.example"
+    ).read_text(encoding="utf-8")
+
+
+def _the_knobs_the_code_resolves() -> set[str]:
+    """The env names the CODE resolves for the three new knobs.
+
+    Derived from the code (not hard-coded) so a renamed config field
+    moves the expectation with it.
+    """
+    from daemon.config import SkillEvolutionConfig
+    from daemon.services.skill_deactivation import (
+        SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV,
+    )
+
+    prefix = SkillEvolutionConfig.model_config.get("env_prefix", "")
+    knobs = {
+        f"{prefix}FIX_BURST_CAP",
+        f"{prefix}FIX_BURST_WINDOW_SECONDS",
+        SKILL_STALE_DEACTIVATION_KILL_SWITCH_ENV,
+    }
+    return knobs
+
+
+def _documented_rows(text: str) -> set[str]:
+    """Every env name that has a row (assignment OR a comment row)."""
+    import re
+
+    rows = set()
+    for line in text.splitlines():
+        match = re.match(r"^\s*#?\s*([A-Z][A-Z0-9_]*)\s*=", line)
+        if match:
+            rows.add(match.group(1))
+            continue
+        match = re.match(r"^\s*#\s*([A-Z][A-Z0-9_]*)\b", line)
+        if match:
+            rows.add(match.group(1))
+    return rows
+
+
+def test_m5_every_new_knob_is_documented_in_the_env_example():
+    """The three new knobs must be documented in ``.env.example``.
+
+    Named mutation: drop the ``SKILL_EVOLUTION_FIX_BURST_CAP`` row from
+    ``.env.example`` → this pin goes RED.
+    """
+    documented = _documented_rows(_env_example_text())
+    missing = sorted(_the_knobs_the_code_resolves() - documented)
+    assert not missing, (
+        f"the code resolves {missing} but .env.example does not document "
+        "them — an operator cannot discover or tune a knob they cannot see"
+    )
+
+
+def test_m5_the_prod_env_example_documents_the_knobs_too():
+    """The prod env example carries a skill block — it must list them.
+
+    Named mutation: drop the ``SKILL_EVOLUTION_FIX_BURST_CAP`` row from
+    ``.env.prod.example`` → this pin goes RED.
+    """
+    documented = _documented_rows(_prod_env_example_text())
+    missing = sorted(_the_knobs_the_code_resolves() - documented)
+    assert not missing, (
+        f".env.prod.example does not document {missing} — the prod skill "
+        "block lists every sibling knob"
+    )
+
+
+def test_m5_the_env_docs_state_the_unset_by_absence_semantics():
+    """The knobs are UNSET-BY-ABSENCE — never set to an EMPTY value.
+
+    An empty ``KEY=`` is a pydantic ``ValidationError`` for the two int
+    knobs, so the docs must say so.
+
+    Named mutation: delete the "never set these to empty" sentence from
+    ``.env.example`` → this pin goes RED.
+    """
+    text = " ".join(_env_example_text().split())
+    assert "UNSET-BY-ABSENCE" in text, (
+        ".env.example must state that the burst knobs are unset-by-absence"
+    )
+    assert "EMPTY value" in text, (
+        ".env.example must state that an EMPTY value (KEY=) is an error, "
+        "not 'use the default' — the tidier probed it: it raises a "
+        "pydantic ValidationError"
+    )
+
+
+def test_m5_the_plan_no_longer_claims_there_is_no_new_env_var():
+    """The plan's E1 bullet claimed "no new env var" — that was FALSE.
+
+    The two knobs resolve under the config's existing ``env_prefix``
+    alias, and the E4 brake is a genuinely new env var (DS-54).
+
+    Named mutation: re-add the ``**no new env var**`` claim to the E1
+    bullet → this pin goes RED.
+    """
+    plan = (
+        Path(__file__).resolve().parents[2]
+        / ".agents"
+        / "shared"
+        / "planning"
+        / "skill-system-revival"
+        / "phase1-plan.md"
+    ).read_text(encoding="utf-8")
+
+    assert "**no new env var**" not in plan, (
+        "the plan still claims 'no new env var' — the two burst knobs "
+        "resolve as SKILL_EVOLUTION_FIX_BURST_CAP / "
+        "SKILL_EVOLUTION_FIX_BURST_WINDOW_SECONDS through the config's "
+        "env_prefix alias, and the E4 brake is a new env var (DS-54)"
+    )
+    for name in (
+        "SKILL_EVOLUTION_FIX_BURST_CAP",
+        "SKILL_EVOLUTION_FIX_BURST_WINDOW_SECONDS",
+        "ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED",
+    ):
+        assert name in plan, (
+            f"the plan must name {name} — the env surface it documents"
+        )
