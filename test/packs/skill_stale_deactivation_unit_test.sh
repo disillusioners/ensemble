@@ -47,6 +47,12 @@
 #           surface" pin REDs.
 #   M-H1b — a ``--allow-declared-artifact`` CLI escape flag is added to the
 #           operator script ⇒ the "no CLI escape flag" pin REDs.
+#   M-H3a — the receipt is written only AFTER the apply loop (the pre-H3
+#           flip-then-save shape) ⇒ the mid-failure-receipt pins RED.
+#   M-H3b — the mid-apply CRITICAL log is downgraded to WARNING ⇒ the
+#           CRITICAL-log pin REDs.
+#   M-H3c — every receipt entry is suppressed (the ``applied`` flag is
+#           ignored) ⇒ the "a claimed row is retried" pin RED.
 #
 # FENCES: per-variable env scrub, worktree-local interpreter, dual-layer
 # timeout, sha-verified PRISTINE restore, VACUOUS-GREEN guard, no PG, no
@@ -258,8 +264,8 @@ leg "M-E4e" "$SCRIPT_PY" \
 
 # M-E4f — a row is dropped from the receipt.
 leg "M-E4f" "$E4_PY" \
-  '        receipt.entries.extend(touched)' \
-  '        receipt.entries.extend(touched[:-1])  # MUTATION: a row is dropped'
+  '        receipt.entries.extend(planned)' \
+  '        receipt.entries.extend(planned[:-1])  # MUTATION: a row is dropped'
 
 # M-E4g — the second run CHANGES STATE: the rule re-matches an
 # already-deactivated row AND the suppression is dropped ⇒ the idempotence
@@ -327,6 +333,47 @@ leg "M-H1b" "$SCRIPT_PY" \
         "--apply",
 '
 
+# M-H3a — the receipt is written only AFTER the apply loop (flip-then-save).
+leg "M-H3a" "$E4_PY" \
+  '        # Rotate the PREVIOUS receipt exactly once per run (the same
+        # content the single pre-H3 write used to rotate), then write the
+        # PLANNED receipt — BEFORE the first flip.
+        rotate_receipt(self._receipt_path, receipt.run_id or "unknown")
+        _atomic_write_json(self._receipt_path, receipt.to_json())
+@@E4@@
+                _atomic_write_json(self._receipt_path, receipt.to_json())
+        except Exception as apply_err:@@E4@@
+            raise
+        try:
+            _atomic_write_json(self.candidate_manifest_path, manifest)' \
+  '        # MUTATION: the receipt is written only AFTER the loop (flip-then-save)
+@@E4@@
+        except Exception as apply_err:@@E4@@
+            raise
+        save_receipt(self._receipt_path, receipt)
+        try:
+            _atomic_write_json(self.candidate_manifest_path, manifest)'
+
+# M-H3b — the mid-apply CRITICAL log is downgraded to the generic WARNING.
+leg "M-H3b" "$E4_PY" \
+  '            logger.critical(
+                "[SkillDeactivation] APPLY FAILED mid-run (run_id=%s): "' \
+  '            logger.warning(  # MUTATION: downgraded from CRITICAL
+                "[SkillDeactivation] APPLY FAILED mid-run (run_id=%s): "'
+
+# M-H3c — every receipt entry is suppressed (the ``applied`` flag is
+# ignored) ⇒ a claimed-but-unflipped row is stranded forever.
+leg "M-H3c" "$E4_PY" \
+  '        return {
+            (entry.skill_id, entry.rule_id)
+            for entry in self.entries
+            if entry.applied
+        }' \
+  '        return {
+            (entry.skill_id, entry.rule_id)
+            for entry in self.entries
+        }'
+
 # Final manifest check.
 for f in "${MUTABLE_FILES[@]}"; do
   key="$(printf '%s' "$f" | sha256sum | cut -d' ' -f1 | cut -c1-16)"
@@ -343,5 +390,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (13 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (16 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0

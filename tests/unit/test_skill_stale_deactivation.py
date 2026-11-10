@@ -1570,3 +1570,217 @@ class TestTheRefusalEnvelopeShape:
         # The class token is the fallback when no specific reason is given.
         generic = PairResolutionRefused()
         assert generic.reason == PairResolutionRefused.reason
+
+
+# ============================================================
+# H3 — NO flipped row may exist without a recorded prior pair
+# ============================================================
+
+
+class _InjectedFlipFailure(RuntimeError):
+    """The failure injected BETWEEN two row flips."""
+
+
+def _two_desynced_rows(skill_repo):
+    """Two R5-shaped rows (is_active=False, status='ab_testing')."""
+    rows = [
+        _make_skill(
+            skill_repo,
+            name=f"desynced-{index}",
+            is_active=False,
+            status="ab_testing",
+        )
+        for index in (1, 2)
+    ]
+    return rows
+
+
+class TestTheReceiptIsWrittenBeforeTheRowsAreFlipped:
+    """H3 — the receipt is the ONLY reversal record, so it is written FIRST.
+
+    Before this, the apply loop flipped every row and only THEN wrote the
+    receipt. A disk failure in between left flipped rows with NO record of
+    their prior ``(is_active, status)`` pair — unrecoverable, because
+    there is no DB-side copy of the receipt by design (DS-10).
+    """
+
+    def test_a_failure_between_two_flips_leaves_a_reversible_receipt(
+        self, repos, data_dir, monkeypatch, caplog
+    ):
+        """PIN (a) — the mid-failure receipt can reverse BOTH rows.
+
+        Named mutation: revert to flip-then-save (write the receipt only
+        AFTER the loop) → this pin goes RED (the on-disk receipt carries
+        no entry for the row that was flipped).
+        """
+        import daemon.services.skill_deactivation as e4_module
+
+        skill_repo, _ab_test_repo = repos
+        rows = _two_desynced_rows(skill_repo)
+        deactivator = _deactivator(repos, data_dir)
+
+        # Fail the SECOND flip (between the two row writes).
+        real_write = e4_module.write_skill_pair
+        calls = {"n": 0}
+
+        def _flaky_write(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise _InjectedFlipFailure("the disk gave up mid-apply")
+            return real_write(*args, **kwargs)
+
+        monkeypatch.setattr(
+            e4_module, "write_skill_pair", _flaky_write
+        )
+
+        with caplog.at_level("CRITICAL"):
+            with pytest.raises(_InjectedFlipFailure):
+                deactivator.reconcile(dry_run=False)
+
+        # 1. The CRITICAL log must carry the run id + every claimed row
+        #    with its prior pair (enough for a manual repair).
+        critical = [
+            record
+            for record in caplog.records
+            if record.levelname == "CRITICAL"
+            and "SkillDeactivation" in record.getMessage()
+        ]
+        assert critical, (
+            "a mid-apply failure must be logged at CRITICAL — the WARNING "
+            "downgrade hides the fact that rows were flipped"
+        )
+        message = critical[0].getMessage()
+        assert "APPLY FAILED mid-run" in message
+        for row in rows:
+            assert row.id in message, (
+                f"the CRITICAL log must name the claimed row {row.id}"
+            )
+            assert "ab_testing" in message, (
+                "the CRITICAL log must carry the rows' PRIOR pairs"
+            )
+
+        # 2. The on-disk receipt must carry BOTH rows with their prior
+        #    pairs — the flipped one AND the intended-but-unflipped one.
+        payload = json.loads(
+            deactivator.receipt_path.read_text(encoding="utf-8")
+        )
+        entries = {entry["skill_id"]: entry for entry in payload["entries"]}
+        assert set(entries) == {row.id for row in rows}, (
+            "the mid-failure receipt must carry EVERY claimed row — the "
+            "prior pair of the flipped row is otherwise unrecoverable"
+        )
+        for row in rows:
+            assert entries[row.id]["before"] == {
+                "is_active": False,
+                "status": "ab_testing",
+            }, (
+                "the receipt must record the row's PRIOR pair — that pair "
+                "is the ONLY input to the reversal"
+            )
+
+    def test_the_reversal_reconstructs_the_exact_prior_state(
+        self, repos, data_dir, monkeypatch
+    ):
+        """PIN (b) — ``--reactivate`` restores the EXACT prior state.
+
+        Named mutation: revert to flip-then-save → this pin goes RED (the
+        receipt carries no entry, so the reversal restores nothing).
+        """
+        import daemon.services.skill_deactivation as e4_module
+
+        skill_repo, _ab_test_repo = repos
+        rows = _two_desynced_rows(skill_repo)
+        deactivator = _deactivator(repos, data_dir)
+
+        real_write = e4_module.write_skill_pair
+        calls = {"n": 0}
+
+        def _flaky_write(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise _InjectedFlipFailure("the disk gave up mid-apply")
+            return real_write(*args, **kwargs)
+
+        monkeypatch.setattr(e4_module, "write_skill_pair", _flaky_write)
+
+        with pytest.raises(_InjectedFlipFailure):
+            deactivator.reconcile(dry_run=False)
+
+        # The first row WAS flipped before the failure.
+        flipped = skill_repo.get(rows[0].id)
+        assert (flipped.is_active, flipped.status) == (False, "inactive"), (
+            "the fixture must actually flip the first row before the "
+            "injected failure (otherwise the pin proves nothing)"
+        )
+        unflipped = skill_repo.get(rows[1].id)
+        assert (unflipped.is_active, unflipped.status) == (
+            False,
+            "ab_testing",
+        ), "the second row must NOT have been flipped"
+
+        # The reversal restores the EXACT prior state of BOTH rows.
+        results = deactivator.reactivate(
+            deactivator.receipt_path, apply=True
+        )
+        assert len(results) == 2, (
+            "the reversal must cover BOTH claimed rows — the flipped one "
+            "and the intended-but-unflipped one"
+        )
+        for row in rows:
+            restored = skill_repo.get(row.id)
+            assert (restored.is_active, restored.status) == (
+                False,
+                "ab_testing",
+            ), (
+                f"the reversal must restore the EXACT prior pair of "
+                f"{row.id} from the mid-failure receipt"
+            )
+
+    def test_a_claimed_but_unflipped_row_is_retried_by_the_next_boot(
+        self, repos, data_dir, monkeypatch
+    ):
+        """A row that was CLAIMED but never written is NOT suppressed.
+
+        The suppression store is the receipt; if a claimed-but-unflipped
+        row were suppressed, the boot reconciliation (the self-healing
+        half) would never touch it again and it would be stranded
+        forever, invisibly.
+
+        Named mutation: suppress every receipt entry (ignore the
+        ``applied`` flag) → this pin goes RED (the unflipped row is
+        stranded).
+        """
+        import daemon.services.skill_deactivation as e4_module
+
+        skill_repo, _ab_test_repo = repos
+        rows = _two_desynced_rows(skill_repo)
+        deactivator = _deactivator(repos, data_dir)
+
+        real_write = e4_module.write_skill_pair
+        calls = {"n": 0}
+
+        def _flaky_write(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise _InjectedFlipFailure("the disk gave up mid-apply")
+            return real_write(*args, **kwargs)
+
+        monkeypatch.setattr(e4_module, "write_skill_pair", _flaky_write)
+
+        with pytest.raises(_InjectedFlipFailure):
+            deactivator.reconcile(dry_run=False)
+
+        # The next boot (a fresh deactivator, the same receipt) must
+        # still normalise the row that was never flipped.
+        monkeypatch.setattr(
+            e4_module, "write_skill_pair", real_write
+        )
+        report = _deactivator(repos, data_dir).reconcile(dry_run=False)
+
+        touched = {entry.skill_id for entry in report.entries}
+        assert rows[1].id in touched, (
+            "the row that was CLAIMED but never flipped must be retried by "
+            "the next boot — a claimed row is not a flipped row"
+        )
+        healed = skill_repo.get(rows[1].id)
+        assert (healed.is_active, healed.status) == (False, "inactive")

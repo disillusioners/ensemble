@@ -219,7 +219,19 @@ class SkillPair:
 
 @dataclass
 class DeactivationEntry:
-    """One TOUCHED row — the reversible unit of the receipt."""
+    """One row this run CLAIMED — the reversible unit of the receipt.
+
+    ``applied`` says whether the row was ACTUALLY flipped. The receipt is
+    written BEFORE the first flip (H3 — the receipt is the ONLY reversal
+    record, so a flipped row must never lack a recorded prior pair), so an
+    entry can exist for a row that was never written: the flag is the
+    difference between "claimed and flipped" and "claimed, not yet
+    flipped".
+
+    The flag also keeps the SUPPRESSION honest: only a FLIPPED row is
+    suppressed, so a row that was claimed but never written is retried by
+    the next boot (the boot reconciliation is the self-healing half).
+    """
 
     skill_id: str
     name: str
@@ -231,6 +243,9 @@ class DeactivationEntry:
     project_id: Optional[str] = None
     reason: str = "rule_match"
     reactivated_at: Optional[str] = None
+    #: ``True`` once the row was actually flipped. ``False`` while the
+    #: entry is a PLANNED-but-not-yet-written row.
+    applied: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -244,6 +259,7 @@ class DeactivationEntry:
             "project_id": self.project_id,
             "reason": self.reason,
             "reactivated_at": self.reactivated_at,
+            "applied": self.applied,
         }
 
     @classmethod
@@ -265,6 +281,10 @@ class DeactivationEntry:
             project_id=payload.get("project_id"),
             reason=str(payload.get("reason") or "rule_match"),
             reactivated_at=payload.get("reactivated_at"),
+            # H3 — a receipt written BEFORE the ``applied`` field existed
+            # carries ONLY flipped rows, so a MISSING field means
+            # "applied" (legacy receipts keep their suppression).
+            applied=bool(payload.get("applied", True)),
         )
 
 
@@ -369,10 +389,17 @@ class DeactivationReceipt:
 
         File-backed (the receipt lives in the data dir), so it survives a
         process restart — this is the "process-once suppression" of R3.5.
+
+        H3 — only a row that was ACTUALLY FLIPPED is suppressed. The
+        receipt is written before the first flip, so it can also carry a
+        row that was CLAIMED but never written (a mid-apply failure);
+        suppressing that row would strand it forever, so the next boot
+        retries it (the boot reconciliation is the self-healing half).
         """
         return {
             (entry.skill_id, entry.rule_id)
             for entry in self.entries
+            if entry.applied
         }
 
     def is_suppressed(self, skill_id: str, rule_id: str) -> bool:
@@ -1136,7 +1163,15 @@ class SkillStaleDeactivator:
             )
 
         # ── APPLY ─────────────────────────────────────────────
-        touched: list[DeactivationEntry] = []
+        # H3 — PERSIST BEFORE YOU MUTATE. The receipt is the ONLY
+        # reversal + suppression record (DS-10 — there is no DB-side copy
+        # by design). If a row is flipped and the receipt write then
+        # fails, the row's prior ``(is_active, status)`` pair is
+        # UNRECOVERABLE. So the receipt is written FIRST, carrying the
+        # PLANNED entries (each with its prior pair), and it is rewritten
+        # atomically as EACH row flips. The invariant is therefore:
+        # NO FLIPPED ROW CAN EXIST WITHOUT A RECORDED PRIOR PAIR.
+        planned: list[DeactivationEntry] = []
         for entry in entries:
             declared = match_declared_disposition(
                 _skill_by_id(self._skill_repo, entry.skill_id)
@@ -1158,20 +1193,9 @@ class SkillStaleDeactivator:
             if entry.rule_id == RULE_R1:
                 # Defensive: R1 is a REFUSAL rule - never written.
                 continue
-            if entry.after == SkillPair(*CANONICAL_INACTIVE) and (
-                entry.before.is_active
-            ):
-                deactivate_skill(self._skill_repo, entry.skill_id)
-            else:
-                write_skill_pair(
-                    self._skill_repo,
-                    entry.skill_id,
-                    is_active=entry.after.is_active,
-                    status=entry.after.status,
-                )
-            touched.append(entry)
+            planned.append(entry)
 
-        receipt.entries.extend(touched)
+        receipt.entries.extend(planned)
         # The refusal / observation lists describe the CURRENT run — they are
         # REPLACED, not appended, so the receipt cannot grow without bound
         # across boots (the every-boot sweep re-reports the same refusals).
@@ -1181,7 +1205,70 @@ class SkillStaleDeactivator:
         receipt.observations = list(observations)
         receipt.run_id = run_id
         receipt.updated_at_iso = now
-        save_receipt(self._receipt_path, receipt)
+
+        # Rotate the PREVIOUS receipt exactly once per run (the same
+        # content the single pre-H3 write used to rotate), then write the
+        # PLANNED receipt — BEFORE the first flip.
+        rotate_receipt(self._receipt_path, receipt.run_id or "unknown")
+        _atomic_write_json(self._receipt_path, receipt.to_json())
+
+        touched: list[DeactivationEntry] = []
+        try:
+            for entry in planned:
+                if entry.after == SkillPair(*CANONICAL_INACTIVE) and (
+                    entry.before.is_active
+                ):
+                    deactivate_skill(self._skill_repo, entry.skill_id)
+                else:
+                    write_skill_pair(
+                        self._skill_repo,
+                        entry.skill_id,
+                        is_active=entry.after.is_active,
+                        status=entry.after.status,
+                    )
+                entry.applied = True
+                touched.append(entry)
+                # Per-row incremental persistence: the receipt is rewritten
+                # atomically as EACH row flips, so a failure between two
+                # flips still leaves a receipt that carries the prior pair
+                # of BOTH the already-flipped row AND the
+                # intended-but-unflipped one.
+                _atomic_write_json(self._receipt_path, receipt.to_json())
+        except Exception as apply_err:  # noqa: BLE001 — re-raised below
+            # CRITICAL (not the generic WARNING): the rows are flipped and
+            # the receipt is the only record that can reverse them. The
+            # log carries the run id + every claimed row with its PRIOR
+            # pair and whether it was flipped — enough for a manual
+            # repair. The boot caller's containment stays as-is (it logs a
+            # WARNING and continues); the CRITICAL line is the loud one.
+            logger.critical(
+                "[SkillDeactivation] APPLY FAILED mid-run (run_id=%s): "
+                "%s: %s — %d of %d claimed rows were flipped. The "
+                "receipt on disk (%s) carries the PRIOR (is_active, "
+                "status) pair of EVERY claimed row; MANUAL REPAIR: reverse "
+                "the run with --reactivate <receipt> (the rows that were "
+                "never flipped are no-ops). CLAIMED ROWS: %s",
+                run_id,
+                type(apply_err).__name__,
+                apply_err,
+                len(touched),
+                len(planned),
+                self._receipt_path,
+                json.dumps(
+                    [
+                        {
+                            "skill_id": item.skill_id,
+                            "rule_id": item.rule_id,
+                            "before": item.before.to_json(),
+                            "after": item.after.to_json(),
+                            "applied": item.applied,
+                        }
+                        for item in planned
+                    ],
+                    sort_keys=True,
+                ),
+            )
+            raise
         try:
             _atomic_write_json(self.candidate_manifest_path, manifest)
         except OSError:  # pragma: no cover — the manifest is an audit extra

@@ -4,8 +4,12 @@ WHY THIS MODULE EXISTS
 
 Three refusals in the skill lane were shaped three different ways:
 
-* ``SkillDeactivationRefused`` (``daemon/repositories/skill/repository.py``)
-  carried a **class attribute** ``reason`` and no ``detail``;
+* a REPOSITORY-level refusal class carried a **class attribute**
+  ``reason`` and no ``detail``. That class was DELETED by the metrics
+  lane after it proved ZERO production callers — the live dual-column
+  writer is E4's ``daemon/services/skill_deactivation.py::write_skill_pair``
+  (and the sanctioned ``SkillRepository.deactivate``), so the orphaned
+  second writer and its two value-object types are gone;
 * ``PairResolutionRefused`` (``daemon/services/skill_deactivation.py``)
   carried an **instance attribute** ``reason`` and a ``detail``;
 * ``SkillFixBurstCapRefused`` (``daemon/services/skill_job_dispatcher.py``)
@@ -16,7 +20,11 @@ A caller therefore had to know WHICH refusal it held to read the reason:
 ``e.reason`` on one, ``e.reason`` (instance) on another, and "look at
 the router" on the third. Two of them even named the SAME refusal with
 two different literal tokens (``"skipped_open_ab_test"`` in the receipt
-vocabulary vs ``"open_ab_test"`` on the repository class).
+vocabulary vs ``"open_ab_test"`` on the deleted repository class).
+
+With the repository-level class deleted, this base unifies the TWO LIVE
+refusals — ``PairResolutionRefused`` and ``SkillFixBurstCapRefused`` —
+and the duplicated literal token went with the deleted class.
 
 THE CONTRACT (one shape for every skill-lane refusal)
 
