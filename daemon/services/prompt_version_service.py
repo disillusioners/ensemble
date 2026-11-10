@@ -1022,6 +1022,18 @@ class PromptVersionService:
         """
         return await asyncio.to_thread(self._repo.count_pending)
 
+    async def list_pending(self, limit: int = 50) -> list[Any]:
+        """List CORE rows in state ``pending_approval`` (task 1.9).
+
+        The enumeration PRIMITIVE behind the Phase-2 read surface: rows
+        ordered by ``created_at``, CORE-only (clones
+        :meth:`count_pending`'s predicate), bounded (default 50). No
+        agent filter — the relay lane must be able to approve any
+        agent's row (DECIDED-2). The FE's ``GET /api/prompts/versions``
+        and ``pending-count`` are untouched (separate repo methods).
+        """
+        return await asyncio.to_thread(self._repo.list_pending, limit)
+
     # --------------------------------------------------------
     # User Directive #3 (2026-10-14, RESOLUTION-CORE) — MEMORY-class
     # creator + class-aware create_draft forwarding
