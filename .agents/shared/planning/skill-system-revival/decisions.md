@@ -1126,4 +1126,64 @@ ruling that it "describes already-shipped behavior" no longer holds.
 
 ---
 
+## DS-63 — The §19.1 ledger's row count is DERIVED, never asserted; §17 items 38–45 are CREATED with real content; C-40 is a POINTER defect and C-42 is a SPAN row
+
+**Context.** The §19.1 body-ledger cross-check table drifted under concurrent editing (2026-11-10 ledger repair). Three MEASURED defects, not
+re-derived assumptions: (i) the preamble asserted a hand-counted row count — "44 rows (C-1..C-44)", later "superseded by the measured 38" — while the
+table actually held 45 rows (C-1..C-45); (ii) §17's numbered list ran 1..37 and then 46 (items 38–45 did not exist) while four ledger rows cited
+them — the mechanical existence check found exactly six missing referenced numbers (38, 39, 40, 41, 44, 45); (iii) the B lane reported STRONG-form
+cross-check failures on C-40 and C-42, and NO canonical check form was defined anywhere in the plan or in this log — the strong form lived only in that
+lane's ad-hoc procedure.
+
+**Ruling.**
+
+1. **THE ROW COUNT IS DERIVED, NEVER ASSERTED.** The preamble no longer carries a typed row count. It carries the DERIVATION COMMAND —
+   `grep -c '^| C-[0-9]' .agents/shared/planning/skill-system-revival/phase1-plan.md` — the measured value (45 at this repair) and the RULE: **if the
+   command's output ≠ the table's last row id, the TABLE drifted — fix the TABLE, not the count.** The earlier "44" and "38" are WITHDRAWN as hand-counts.
+   A ledger that counts itself by hand is the very drift it exists to detect. The command is also recorded in §17 item 30, next to the companion
+   existence check.
+
+2. **THE CANONICAL CHECK FORM IS DEFINED ONCE, IN THE §19.1 PREAMBLE.** FORM 1 (per-token: every backticked token of the row's contract must be present in
+   the BODY and in `decisions.md`) applies to every row. FORM 2 (strict single-line co-occurrence) applies to a row whose contract names ONE fact. The
+   MULTI-ITEM-SPAN RULE is the only FORM-2 exception: a row whose contract names identifiers disclosed in DIFFERENT body items is checked by FORM 1
+   over its cited region and is reported as SPAN, not as a failure. The BODY-CITATION RULE completes the form: a row's cited body item must HOLD its
+   contract — when it does not, the POINTER is wrong (fix the pointer, or create the missing item with real content); the content is never adjusted to fit a
+   wrong pointer.
+
+3. **§17 ITEMS 38–45 ARE CREATED WITH REAL CONTENT; NO OTHER LANE'S ITEM IS TOUCHED.** Items 1–37 and 46 are byte-identical and no existing item was
+   renumbered. The eight new items carry the lanes' OWN facts, sourced from §19's dispositions (items 37–45), this log (DS-58, DS-60), the tidier report
+   and the worktree itself: **38** = M2 (the A4 divergence gauge is WIRED), **39** = L3 (the stale `has_applied_for_instance` narrative is reworded), **40** =
+   M3 (the unused imports are removed), **41** = L10 (the raw-text label pin is re-aimed at behaviour), **42** = M1 (the orphaned dual-column writer is
+   DELETED), **43** = H4 (the 356-line `reconcile` method is a disclosed fast-follow), **44** = the round-8 `capture_lane_off` counter enumeration, **45** =
+   the F-10 dual-column guarantee boundary. Every item states the fact, its code anchor, what changed and where it is evidenced; none asserts anything the
+   worktree does not show. Items 38/39/40/41/44/45 land on the numbers the ledger rows already cite (C-41, C-42, C-43, C-44), so those rows' citations
+   RESOLVE without rewriting another lane's row; items 42 and 43 carry the two dispositions no row cites.
+
+4. **C-40 IS A POINTER DEFECT — THE POINTER WAS FIXED, THE CONTENT WAS NOT.** The body and the ledger say the SAME thing: the M1 disposition and the
+   row's contract token agree, and all four tokens co-occur on ONE body line. What was wrong was the ledger's BODY-CITATION cell, which named "§17 item
+   37" — and §17 item 37 is the per-lane-sink structural redesign, which does not carry M1's contract. **THE ONLY CELL CHANGED IS THAT POINTER**
+   (`§17 item 37` → `§17 item 42`, the new item that holds M1). C-40's contract cell, its gated-criterion cell, its §19-row cell, its ruling cell and its
+   IDENTICAL? cell are byte-untouched. **This is NEITHER of the two kinds the B lane reported it as: it is not a body-vs-ledger content disagreement (they
+   agree), and it is not a token-extraction artifact (the tokens are present and co-occur on one line).**
+
+5. **C-42 IS A TOKEN-EXTRACTION ARTIFACT OF THE STRICT FORM (kind (ii)) — THE FORM WAS AMENDED, THE CONTENT WAS NOT.** C-42's contract names three test
+   files that are legitimately disclosed in TWO different items (the L3 narrative item and the L10 label-pin item), so the strict single-line co-occurrence
+   form cannot pass it even when every token is present. Under FORM 1 all three tokens are present in the body and in this log, so C-42's content is correct
+   and IDENTICAL? = Y stands. The fix is therefore in the FORM (the MULTI-ITEM-SPAN RULE), not in C-42 and not in the body. **WHAT WOULD REVERSE THIS
+   CLASSIFICATION:** if C-42's contract were narrowed to ONE fact (one file), FORM 2 would apply and the row would be held to single-line co-occurrence; or
+   if the three files were disclosed in ONE item, the span would disappear and FORM 2 would apply again.
+
+6. **DISCLOSED, NOT FIXED (owner lanes' call): two §19.1 contract tokens are stale against the worktree.** The C-43 token
+   `daemon/services/skill_metrics_service.py:659` names the metrics seam's HISTORICAL gate line; in this worktree the gate is at `:663` and the recorder call
+   at `:682`. **The body and the ledger AGREE (both say `:659`), so IDENTICAL? = Y is unaffected** — the drift is against the code, not between the ledger
+   and the body, and the plan's anchor rule makes the worktree authoritative on line numbers. Correcting the token would edit another lane's contract cell,
+   so it is REPORTED here and left to that lane. (The same family: §19 item 42's declared-disposition anchor `:1091` is now `:1126`; C-30's pop-and-translate
+   anchor `:931-933` is now the translate block at `:955`+.)
+
+**What would reverse this.** A house ruling that the ledger's row count belongs in the table's own preamble as a typed number; or that §19.1's check form
+may remain lane-specific (the B lane's ad-hoc strong form) rather than being defined once in the preamble; or that §17 items 38–45 must be renumbered onto a
+single contiguous run ending at 46 — which would require renumbering another lane's items 1–37, explicitly declined here.
+
+---
+
 *End of the decision log. Companion plan: `phase1-plan.md`.*
