@@ -1311,7 +1311,17 @@ _js_history_has_defer_reason() {
     [ -n "$target" ] || return 1
     [ -n "$reason" ] || return 1
     json="$(_js_journal_read "$jp")" || rc=$?
-    [ "$rc" -eq 0 ] || return "$rc"
+    if [ "$rc" -ne 0 ]; then
+        # The journal could not be READ at all (rc 1 = the balance check
+        # says the document is NOT TRUSTWORTHY; rc 2 = the validator was
+        # UNAVAILABLE). That is NOT "no defer row": the write-once check
+        # is UNKNOWN. The rc contract above says the caller MUST NOT read
+        # rc 2 as "none" — so a READ failure is reported as rc 2 too (the
+        # conservative class), never as the rc-1 content verdict. Before
+        # this, a torn journal answered "no defer row yet" and the caller
+        # read that as a licence to write (Q1=C).
+        return 2
+    fi
     hist="$(_js_json_sub "$json" "history")" || rc=$?
     if [ "$rc" -eq 2 ]; then
         # The EXTRACTOR was UNAVAILABLE — the history could not be read, so
@@ -1805,6 +1815,18 @@ _js_run_bounded() {
     # are unaffected. Without this, every instant bounded call stalls ~N s
     # even though the wrapped command completed instantly (commit 961dfe59
     # regression — see LESSONS/2026-10-01-js-run-bounded-orphaned-sleep-stall).
+    #
+    # KNOWN ISSUE (recorded here; NO behaviour change): the watchdog's
+    # `sleep` child is NOT reaped together with the watcher — the watcher
+    # subshell dies, its `sleep` child does not ⇒ every bounded call leaves
+    # ONE orphaned `sleep` behind (POK `awk-01-watchdog-process-leak`: a
+    # burst of probes exhausts the process table and yields bogus verdict
+    # flips). The O(n) journal rewrite (commit 5f8528869) added THREE more
+    # bounded awk calls to the boot path (the journal update + the two
+    # per-entry history scanners), so the leak RATE per boot-path sweep is
+    # marginally higher than before that change. This is a pre-existing,
+    # SEPARATE defect (it is not what the size guard bounds); this note
+    # records the rate change only.
     (
         sleep "$timeout_s" 2>/dev/null
         kill -KILL "$pid" 2>/dev/null
@@ -2102,13 +2124,75 @@ _js_defer_counter_delete() {
     return 0
 }
 
-# _js_serving_defer <journal> <target> <run_id> <age> <reason> <detail>
+# _js_size_guard_defer_decision <journal> <target> <run_id> <reason>
+# The BOUNDED defer DECISION for the launcher-side size guard (Q1=C).
+#
+# RC CONTRACT — the SAME vocabulary as the reader it wraps
+# (`_js_history_has_defer_reason`), so the verdict can be handed to
+# `_js_serving_defer` unchanged (that helper consumes the reader's rc
+# directly):
+#   0 — the decision RAN and says "a defer row IS ALREADY journaled for
+#       this (txn, reason)" ⇒ the write-once rule applies (nothing to
+#       write);
+#   1 — the decision RAN and says "NO defer row is journaled yet" ⇒ the
+#       caller MAY write one;
+#   2 — the decision is UNKNOWN: the extractor was UNAVAILABLE (awk gone /
+#       broken), the watchdog fired (the pass wedged past its bound), or
+#       the WHOLE decision exceeded its HARD budget. The caller MUST
+#       REFUSE TO ACT (write NOTHING). A missing decision must NEVER read
+#       as "no defer row" (rc 1) — that is the silent-skip defect this
+#       helper exists to close.
+#
+# WHY A SEPARATE HELPER (and not a bare call at the call site): the
+# decision is a CHEAP DECIDE — ONE O(n) per-entry scan of the history (the
+# same reader the write-once check uses) — and it is BOUNDED twice:
+#   (1) the scan itself runs under the bounded awk seam (`_js_awk_bounded`
+#       → `_js_run_bounded $_JS_AWK_TIMEOUT_S`), so a wedged awk can never
+#       pin the boot path;
+#   (2) the WHOLE decision (journal read + history extraction + scan) is
+#       bounded by the SAME hard budget (`$_JS_AWK_TIMEOUT_S` — one knob
+#       for the operator and for the tests; it is read at CALL time, so a
+#       test that shortens it after sourcing shortens BOTH bounds).
+# The elapsed check below is what makes (2) a budget over the WHOLE
+# decision: the awk seam bounds each pass individually, but three passes
+# could add up to 3× the budget.
+#
+# The budget is reported in the caller's WARN (the operator must see the
+# size AND the budget that was exceeded).
+_js_size_guard_defer_decision() {
+    local jp="$1" target="$2" run_id="$3" reason="$4"
+    local budget="${_JS_AWK_TIMEOUT_S}" t0 t1 rc=0
+    t0="$(date +%s 2>/dev/null)" || t0=""
+    [ -n "$t0" ] || t0=0
+    _js_history_has_defer_reason "$jp" "$target" "$run_id" "$reason" || rc=$?
+    t1="$(date +%s 2>/dev/null)" || t1=""
+    [ -n "$t1" ] || t1=0
+    # rc 2 = the decision could not be made (UNAVAILABLE / wedged / the
+    # journal could not be read at all) ⇒ the verdict is UNKNOWN.
+    [ "$rc" -le 1 ] || return 2
+    # the HARD budget over the whole decision — an over-budget verdict is
+    # NOT trusted (the journal may have been rewritten under the scan).
+    if [ $(( t1 - t0 )) -ge "$budget" ]; then
+        return 2
+    fi
+    return "$rc"
+}
+
+# _js_serving_defer <journal> <target> <run_id> <age> <reason> <detail> [decision]
 # The DEFER disposition: a journaled `sweep_deferred` row (a HOLD — it
 # closes nothing; it is NOT a terminal event), the txn left OPEN, and NO
 # quarantine / counter / cooldown / rollback. The row carries an explicit,
 # GREPPABLE reason marker (which conjunct was missing) — matrix row 6.
+#
+# The OPTIONAL 7th argument carries a PRE-COMPUTED write-once verdict in
+# the READER's vocabulary ("0" = a defer row IS already journaled for this
+# (txn, reason) · "1" = no defer row is journaled yet). A caller that
+# already paid for the bounded decision (the launcher-side size guard —
+# Q1=C) passes it here so the O(n) history scan is not paid for twice.
+# When the argument is absent the decision is computed here (the
+# historical path, unchanged).
 _js_serving_defer() {
-    local journal="$1" target="$2" run_id="$3" age="$4" reason="$5" detail="$6"
+    local journal="$1" target="$2" run_id="$3" age="$4" reason="$5" detail="$6" decision="${7:-}"
     local drc=0
     # F6 (code-council W5) — WRITE-ONCE per (txn, reason). The defer row is
     # ~150-200B and the T15 hook fires per CHILD EXIT; in a crash loop the
@@ -2120,7 +2204,11 @@ _js_serving_defer() {
     # SILENTLY DISARMED. One row per (txn, reason) bounds the growth by
     # the distinct-reason count; the log line still fires every time so
     # the observation stays visible.
-    _js_history_has_defer_reason "$journal" "$target" "$run_id" "$reason" || drc=$?
+    if [ -n "$decision" ]; then
+        drc="$decision"
+    else
+        _js_history_has_defer_reason "$journal" "$target" "$run_id" "$reason" || drc=$?
+    fi
     if [ "$drc" -eq 2 ]; then
         # The history could not be read (extractor UNAVAILABLE) — the
         # write-once check is UNKNOWN. Take the SAFE branch (the txn is
@@ -2551,10 +2639,29 @@ _js_sweep_flipped_disposition() {
             ;;
     esac
     if [ "$jsize" -ge "$jguard" ]; then
+        # Q1=C — the over-threshold defer ACTION is BOUNDED. The DECISION
+        # (the write-once check: "is a defer row already journaled for
+        # this txn?") is a cheap decide — one O(n) history scan under the
+        # bounded awk seam — with a HARD budget over the whole decision.
+        #
+        # If the decision cannot be made (the extractor was UNAVAILABLE,
+        # the watchdog fired, or the budget was exceeded) the launcher
+        # REFUSES TO ACT: it writes NOTHING (the journal stays byte-
+        # identical), it leaves the txn OPEN, and it WARNs with the
+        # JOURNAL SIZE and the BUDGET. It NEVER treats a missing decision
+        # as "there is no defer row" (rc 1) and never skips silently.
+        local ddec=0
+        _js_size_guard_defer_decision "$journal" "$target" "$run_id" "journal-size-guard" || ddec=$?
+        if [ "$ddec" -eq 2 ]; then
+            _log "WARN: journal sweep: journal size=${jsize}B ≥ guard=${jguard}B — defer decision budget (${_JS_AWK_TIMEOUT_S}s) exceeded/unavailable (awk rc=${_JS_LAST_AWK_RC}): REFUSING to act (no journal write; the txn is left OPEN)"
+            _js_sweep_release "$install_dir" "$lock_held"
+            return 0
+        fi
         _log "WARN: journal sweep: journal is ${jsize}B ≥ ${jguard}B (the launcher-side size guard) — CONSERVATIVE DEFER (never a rollback in this regime; the daemon-side closer parses in-process and is the only automatic rollback path)"
         _js_serving_defer "$journal" "$target" "$run_id" "$age" \
             "journal-size-guard" \
-            "the journal exceeds the launcher-side size guard — the launcher never rolls back in this regime"
+            "the journal exceeds the launcher-side size guard — the launcher never rolls back in this regime" \
+            "$ddec"
         _js_sweep_release "$install_dir" "$lock_held"
         return 0
     fi
@@ -3003,6 +3110,38 @@ _journal_sweep() {
     # "txn left open" shape).
     if [ "$owner_dead" = "0" ] && [ "$hb_stale" = "0" ]; then
         _log "journal sweep: stale pre-flip $kind txn (age ${age}s, target=${target:-?}) — owner ALIVE (heartbeat fresh) — leaving the txn OPEN (AM-P2-18 owner-liveness conjunct)"
+        _js_lock_release "$install_dir"
+        return 0
+    fi
+    # ── the launcher-side size guard, applied to the PRE-FLIP branch (Q2) ──
+    # The FLIPPED branch has carried this guard since AM-P2-5 (a journal at
+    # or above the guard is a CONSERVATIVE DEFER: the launcher never rolls
+    # back in that regime — the daemon-side closer parses the journal
+    # in-process and is the only automatic rollback path). The PRE-FLIP
+    # branch had NO guard: it still appended a history row and rewrote
+    # `in_flight` on a journal of ANY size — two full-journal rewrites on
+    # exactly the shape (a big journal) the guard exists to keep the
+    # launcher's shell-side writers away from. The launcher-side writers
+    # are the O(n)-per-byte cost; the daemon-side closer is in-process.
+    #
+    # DISCLOSURE (release notes): at or above the launcher-side size guard
+    # (98304B by default) the launcher DECLINES TO ACT on a stale promote
+    # (flip) transaction — no launcher rollback, no commit-and-continue and
+    # no txn clear — so a stale flip transaction in such a journal is left
+    # to the daemon-side closer. The transaction stays OPEN; the next boot
+    # (or the daemon-side closer) disposes of it.
+    #
+    # Below the guard the behaviour is BYTE-IDENTICAL to the pre-fix
+    # behaviour (the clear still happens, with the same history row).
+    local pjsize="${#json}" pjguard="${SWEEP_JOURNAL_SIZE_GUARD_BYTES}"
+    case "$pjguard" in
+        ''|*[!0-9]*)
+            _log "WARN: journal sweep: SWEEP_JOURNAL_SIZE_GUARD_BYTES='${SWEEP_JOURNAL_SIZE_GUARD_BYTES}' is not a plain integer — substituting the documented default (98304); fix the .env"
+            pjguard=98304
+            ;;
+    esac
+    if [ "$pjsize" -ge "$pjguard" ]; then
+        _log "WARN: journal sweep: journal is ${pjsize}B ≥ ${pjguard}B (the launcher-side size guard) — DECLINING TO ACT on the stale pre-flip $kind txn (target=${target:-?}, age ${age}s): no launcher rollback and no commit-and-continue — a stale flip transaction in a ≥${pjguard}B journal is left to the daemon-side closer; the txn is left OPEN"
         _js_lock_release "$install_dir"
         return 0
     fi

@@ -1707,11 +1707,189 @@ for _jsf_case in case_0124_trunc_torn_flat_077 case_0154_trunc_torn_hist_027 cas
         "rc=1" "$(_jsf_read "$JSF_CASE_DIR/$_jsf_case")"
 done
 
+# ─── 14. the launcher-side size guard: bounded defer decision (Q1=C) ─────────
+#                + the pre-flip branch's guard (Q2=i) ────────────────────────
+# The launcher-side size guard (SWEEP_JOURNAL_SIZE_GUARD_BYTES, 98304 by
+# default) is the regime boundary. Q1=C bounds the over-threshold DEFER
+# ACTION: the write-once DECISION runs under the bounded awk seam with a
+# HARD budget, and a decision that cannot be made (the extractor is gone,
+# the watchdog fires, the budget is exceeded) makes the launcher REFUSE TO
+# ACT — no journal write, the txn left OPEN, a WARN naming the JOURNAL
+# SIZE and the BUDGET. A missing decision must NEVER read as "there is no
+# defer row" (rc 1).
+#
+# Q2=i gives the PRE-FLIP branch the SAME guard semantics: at or above the
+# threshold the launcher declines to act (no launcher rollback, no
+# commit-and-continue, no txn clear) and leaves the transaction to the
+# daemon-side closer. Below the threshold the behaviour is unchanged.
+section "js size guard: bounded defer decision (Q1=C) + pre-flip guard (Q2)"
+
+JSG_GUARD_BYTES=98304
+
+# _js_seed_big <dir> <started_iso> <flipped> [pad_bytes]
+# A journal that CROSSES the size guard: one extra history row carrying a
+# long padded detail. The document stays balanced and parseable (the sweep
+# reads it like any other journal) — only its SIZE differs.
+_js_seed_big() {
+    local d="$1" started="$2" flipped="$3" pad="${4:-120000}"
+    local padstr
+    padstr="$(head -c "$pad" /dev/zero | tr '\000' 'x')"
+    printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"%s","flipped":%s,"owner_pid":999999},"rollback_window_count":{"24h":1,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[{"ts":"%s","event":"pad","detail":"%s"}]}\n' \
+        "$started" "$flipped" "$started" "$started" "$padstr" > "$d/releases/state.json"
+}
+
+# _js_run_log <dir> [awk_timeout_s] — the sweep's LOG (stderr) + rc.
+# The awk bound is overridden AFTER sourcing the launcher (the shipped
+# `_JS_AWK_TIMEOUT_S` is set unconditionally at source time, so an
+# override before the source would be overwritten).
+_js_run_log() {
+    ( . "$LAUNCHER"; _JS_AWK_TIMEOUT_S="${2:-$_JS_AWK_TIMEOUT_S}"; INSTALL_DIR="$1" _journal_sweep 2>&1 )
+}
+
+# A fake awk that forwards EVERY call to the real awk EXCEPT the
+# defer-DECISION scan (its program text carries the _JS_HIST_REASON
+# marker) — that one wedges forever, so the bounded seam's watchdog fires
+# and the decision comes back UNAVAILABLE (rc 2). The marker keeps the
+# fake surgical: the sweep's other passes (the balance validator, the
+# extractors) still run for real, so the sweep REACHES the size guard.
+JSF_REAL_AWK="$(command -v awk 2>/dev/null)"
+JSF_DECIDE_WEDGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf-decide.XXXXXX")"
+cat > "$JSF_DECIDE_WEDGE_DIR/awk" <<JSF_DECIDE_AWK
+#!/bin/sh
+# Fake awk: wedges ONLY for the defer-decision scan (the _JS_HIST_REASON
+# marker); every other call is forwarded to the real awk.
+for _a in "\$@"; do
+    case "\$_a" in
+        *_JS_HIST_REASON*) exec sleep 300 ;;
+    esac
+done
+exec "$JSF_REAL_AWK" "\$@"
+JSF_DECIDE_AWK
+chmod +x "$JSF_DECIDE_WEDGE_DIR/awk"
+
+# ── 14a. over-threshold, NORMAL (in-budget) → the CONSERVATIVE DEFER ──────
+JSG_A="$JS_TEST_DIR/sg-a"; _js_fixture "$JSG_A"; _js_seed_big "$JSG_A" "$STALE_TS" true
+JSG_A_SIZE="$(wc -c < "$JSG_A/releases/state.json" | tr -d ' ')"
+JSG_A_LOG="$(_js_run_log "$JSG_A")"
+assert_contains "14a over-threshold: the CONSERVATIVE DEFER WARN fires" \
+    "CONSERVATIVE DEFER" "$JSG_A_LOG"
+assert_contains "14a over-threshold: the defer row is journaled (the write-once HOLD)" \
+    '"event":"sweep_deferred"' "$(_js_journal "$JSG_A")"
+assert_contains "14a over-threshold: the defer row carries the size-guard reason" \
+    "journal-size-guard" "$(_js_journal "$JSG_A")"
+assert_contains "14a over-threshold: the txn stays OPEN" \
+    '"owner_pid":999999' "$(_js_journal "$JSG_A")"
+assert_eq "14a over-threshold: NO rollback (the current symlink is untouched)" \
+    "releases/v0.10.6" "$(readlink "$JSG_A/current")"
+assert_eq "14a over-threshold: the rollback counter is NOT incremented" \
+    "1" "$(_js_count "$JSG_A")"
+assert_eq "14a over-threshold: the cooldown is NOT armed" \
+    "null" "$(_js_field "$JSG_A" cooldown_until)"
+# the SECOND sweep must NOT write a second row: the decision's rc-0
+# verdict ("a row IS already journaled") is what the write-once rule
+# rides on — a broken hand-off would double the row (and, at this size,
+# double the boot-path write cost).
+_js_run_log "$JSG_A" >/dev/null 2>&1
+assert_eq "14a over-threshold: the defer row is written ONCE (write-once)" \
+    "1" "$(printf '%s' "$(_js_journal "$JSG_A")" | grep -o '"event":"sweep_deferred"' | wc -l | tr -d ' ')"
+
+# ── 14b. over-threshold, FORCED OVERRUN → REFUSE TO ACT (no journal write) ─
+JSG_B="$JS_TEST_DIR/sg-b"; _js_fixture "$JSG_B"; _js_seed_big "$JSG_B" "$STALE_TS" true
+JSG_B_SHA_BEFORE="$(shasum -a 256 "$JSG_B/releases/state.json" | awk '{print $1}')"
+JSG_B_BYTES_BEFORE="$(wc -c < "$JSG_B/releases/state.json" | tr -d ' ')"
+JSG_B_LOG="$(PATH="$JSF_DECIDE_WEDGE_DIR:$PATH" _js_run_log "$JSG_B" 2)"
+JSG_B_SHA_AFTER="$(shasum -a 256 "$JSG_B/releases/state.json" | awk '{print $1}')"
+assert_contains "14b overrun: the WARN names the JOURNAL SIZE" \
+    "journal size=" "$JSG_B_LOG"
+assert_contains "14b overrun: the WARN names the guard" \
+    "guard=${JSG_GUARD_BYTES}B" "$JSG_B_LOG"
+assert_contains "14b overrun: the WARN names the BUDGET" \
+    "defer decision budget (2s)" "$JSG_B_LOG"
+assert_contains "14b overrun: the WARN refuses to act" \
+    "REFUSING to act" "$JSG_B_LOG"
+assert_contains "14b overrun: the WARN names the size-guard regime" \
+    "≥ guard=${JSG_GUARD_BYTES}B" "$JSG_B_LOG"
+assert_eq "14b overrun: the journal is BYTE-IDENTICAL (sha256 unchanged)" \
+    "$JSG_B_SHA_BEFORE" "$JSG_B_SHA_AFTER"
+assert_eq "14b overrun: the journal size is unchanged" \
+    "$JSG_B_BYTES_BEFORE" "$(wc -c < "$JSG_B/releases/state.json" | tr -d ' ')"
+assert_contains "14b overrun: the txn stays OPEN" \
+    '"owner_pid":999999' "$(_js_journal "$JSG_B")"
+assert_eq "14b overrun: the lock is RELEASED" \
+    "absent" "$([ -d "$JSG_B/releases/rollback.lock.d" ] && echo present || echo absent)"
+assert_eq "14b overrun: NO crash (the sweep returns 0)" \
+    "0" "$( ( . "$LAUNCHER"; _JS_AWK_TIMEOUT_S=2; PATH="$JSF_DECIDE_WEDGE_DIR:$PATH" INSTALL_DIR="$JSG_B" _journal_sweep >/dev/null 2>&1; echo $? ) )"
+
+# ── 14c. over-threshold, stale flipped:true → NO rollback, txn left OPEN ──
+# (the defer ROW is written — that is the documented CONSERVATIVE DEFER;
+# what must NOT happen is a rollback: no current repoint, no quarantine,
+# no counter, no cooldown, and the txn stays OPEN).
+JSG_C="$JS_TEST_DIR/sg-c"; _js_fixture "$JSG_C"; _js_seed_big "$JSG_C" "$STALE_TS" true
+JSG_C_LOG="$(_js_run_log "$JSG_C")"
+assert_contains "14c over-threshold stale flipped:true: the CONSERVATIVE DEFER WARN fires" \
+    "CONSERVATIVE DEFER" "$JSG_C_LOG"
+assert_eq "14c over-threshold stale flipped:true: NO rollback (current symlink untouched)" \
+    "releases/v0.10.6" "$(readlink "$JSG_C/current")"
+assert_eq "14c over-threshold stale flipped:true: the journal current is NOT repointed" \
+    "v0.10.5" "$(_js_field "$JSG_C" current)"
+assert_eq "14c over-threshold stale flipped:true: nothing is quarantined" \
+    "[]" "$( . "$LAUNCHER"; _js_json_sub "$(_js_journal "$JSG_C")" quarantined 2>/dev/null )"
+assert_eq "14c over-threshold stale flipped:true: the rollback counter is NOT incremented" \
+    "1" "$(_js_count "$JSG_C")"
+assert_eq "14c over-threshold stale flipped:true: the cooldown is NOT armed" \
+    "null" "$(_js_field "$JSG_C" cooldown_until)"
+assert_contains "14c over-threshold stale flipped:true: the txn stays OPEN" \
+    '"owner_pid":999999' "$(_js_journal "$JSG_C")"
+
+# ── 14d. BELOW-threshold control → the rollback DOES happen (unchanged) ────
+JSG_D="$JS_TEST_DIR/sg-d"; _js_fixture "$JSG_D"; _js_seed "$JSG_D" "$STALE_TS" true 1 "$STALE_TS" null promote 1
+_js_run "$JSG_D"
+assert_eq "14d below-threshold control: the rollback happens (current repointed to previous)" \
+    "releases/v0.10.5" "$(readlink "$JSG_D/current")"
+assert_contains "14d below-threshold control: the sweep_rollback event is journaled" \
+    '"event":"sweep_rollback"' "$(_js_journal "$JSG_D")"
+assert_eq "14d below-threshold control: the txn is closed" \
+    "null" "$(_js_field "$JSG_D" in_flight)"
+
+# ── 14e. Q2: over-threshold stale PRE-FLIP → the launcher DECLINES ───────
+JSG_E="$JS_TEST_DIR/sg-e"; _js_fixture "$JSG_E"; _js_seed_big "$JSG_E" "$STALE_TS" false
+ln -sfn "releases/v0.10.5" "$JSG_E/current"   # pre-flip: still on the serving release
+JSG_E_SHA_BEFORE="$(shasum -a 256 "$JSG_E/releases/state.json" | awk '{print $1}')"
+JSG_E_LOG="$(_js_run_log "$JSG_E")"
+assert_contains "14e pre-flip over-threshold: the DECLINE WARN fires" \
+    "DECLINING TO ACT" "$JSG_E_LOG"
+assert_contains "14e pre-flip over-threshold: the WARN names the regime" \
+    "journal is" "$JSG_E_LOG"
+assert_contains "14e pre-flip over-threshold: the WARN names the consequence" \
+    "daemon-side closer" "$JSG_E_LOG"
+assert_contains "14e pre-flip over-threshold: the WARN says the txn is left OPEN" \
+    "txn is left OPEN" "$JSG_E_LOG"
+assert_eq "14e pre-flip over-threshold: the journal is BYTE-IDENTICAL (sha256 unchanged)" \
+    "$JSG_E_SHA_BEFORE" "$(shasum -a 256 "$JSG_E/releases/state.json" | awk '{print $1}')"
+assert_contains "14e pre-flip over-threshold: the txn stays OPEN" \
+    '"owner_pid":999999' "$(_js_journal "$JSG_E")"
+assert_eq "14e pre-flip over-threshold: NO sweep event (nothing was cleared)" \
+    "absent" "$(printf '%s' "$(_js_journal "$JSG_E")" | grep -q '"event":"sweep"' && echo present || echo absent)"
+assert_eq "14e pre-flip over-threshold: the rollback counter is NOT incremented" \
+    "1" "$(_js_count "$JSG_E")"
+
+# ── 14f. Q2 control: BELOW-threshold pre-flip → the clear STILL happens ───
+JSG_F="$JS_TEST_DIR/sg-f"; _js_fixture "$JSG_F"; _js_seed "$JSG_F" "$STALE_TS" false
+ln -sfn "releases/v0.10.5" "$JSG_F/current"
+_js_run "$JSG_F"
+assert_eq "14f pre-flip below-threshold: the clear STILL happens (in_flight null)" \
+    "null" "$(_js_field "$JSG_F" in_flight)"
+assert_contains "14f pre-flip below-threshold: the sweep history event is recorded" \
+    '"event":"sweep"' "$(_js_journal "$JSG_F")"
+assert_eq "14f pre-flip below-threshold: the current symlink is untouched" \
+    "releases/v0.10.5" "$(readlink "$JSG_F/current")"
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
        "$RB_TEST_DIR5" "$JSF_TEST_DIR" "$JSF_PERF_DIR" \
-       "$JSF_NOAWK_DIR" "$JSF_FAKE_DIR" "$JSF_WEDGE_DIR" 2>/dev/null
+       "$JSF_NOAWK_DIR" "$JSF_FAKE_DIR" "$JSF_WEDGE_DIR" \
+       "$JSF_DECIDE_WEDGE_DIR" 2>/dev/null
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'
