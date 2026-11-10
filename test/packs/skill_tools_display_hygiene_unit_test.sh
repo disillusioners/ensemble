@@ -35,7 +35,7 @@
 #      counter under the `fix_dispatch_fault` token + a WARNING log + a
 #      sink record). The pins drive the REAL dispatcher over a faulty
 #      job store — only the persistence boundary is doubled.
-#   2. The MUTATION MATRIX (M-E3a..g) — pack-level plants: plant the
+#   2. The MUTATION MATRIX (M-E3a..h) — pack-level plants: plant the
 #      defect → the discriminating leg must go RED → restore → the same
 #      leg must go GREEN. RESTORE SEMANTICS: every mutable file's
 #      PRISTINE content+sha256 is captured BEFORE phase 2 (with a
@@ -325,12 +325,8 @@ PYEOF
 
   # M-E3a — the `skill_fix` echo goes back to the bare 8-hex token.
   leg "M-E3a" "daemon/tools/skill_tools.py" \
-'        echo_id = skill_id if isinstance(skill_id, str) else str(skill_id)
-        lines: list[str] = [
-' \
-'        echo_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
-        lines: list[str] = [
-' \
+'        echo_id = skill_id if isinstance(skill_id, str) else str(skill_id)' \
+'        echo_id = skill_id[:8] if isinstance(skill_id, str) else skill_id' \
 "$PIN_FILE::TestE31SkillFixEchoesTheFullId::test_the_echo_carries_the_full_uuid4"
 
   # M-E3b — the `skill_feedback` echo goes back to the bare 8-hex token.
@@ -406,7 +402,7 @@ PYEOF
   # NAMED) MUST go RED.
   leg "M-E3f" "daemon/tools/skill_tools.py" \
 '    return (FIX_OUTCOME_RECORDED, job_id)' \
-'    return (FIX_OUTCOME_NOT_RECORDED, None)' \
+'    return (FIX_OUTCOME_NOT_RECORDED, None)  # M-E3f plant' \
 "$PIN_FILE::TestFG2GenericFaultIsDerivedFromTheOutcome::test_the_post_insert_fault_names_the_persisted_job"
 
   # M-E3g (F-G2) — the dispatcher-carried id is IGNORED: the outcome
@@ -416,6 +412,18 @@ PYEOF
 '            carried_job_id = getattr(dispatch_fault, "persisted_job_id", None)' \
 '            carried_job_id = None' \
 "$PIN_FILE::TestFG2GenericFaultIsDerivedFromTheOutcome::test_the_carrier_id_wins_over_the_read_back"
+
+  # M-E3h (D-G1, reviewer must-fix) — the header regains the
+  # unqualified "recorded" claim, contradicting the drop branch's body
+  # again: the coherence pin MUST go RED. The header line contains
+  # single quotes (the f-string id), so this plant arg uses the
+  # DOUBLE-quoted form (the M-E3c precedent) with the inner double
+  # quotes escaped — the no-apostrophe rule is about SINGLE-quoted
+  # shell args, and the header is otherwise unplantable.
+  leg "M-E3h" "daemon/tools/skill_tools.py" \
+"            f\"\\U0001f4dd Skill fix request for skill '{echo_id}'.\"," \
+"            f\"\\U0001f4dd Skill fix request recorded for skill '{echo_id}'.\"," \
+"$PIN_FILE::TestDG1HeaderIsDurabilityNeutral::test_the_drop_case_never_carries_a_recorded_header"
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
   echo "mutation failures: $MUTATION_FAILURES"
