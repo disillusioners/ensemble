@@ -469,6 +469,38 @@ class TestCandidateWindow:
         for episode_id in eligible_ids:
             assert episode_id in ledger_episode_ids
 
+    def test_terse_head_of_line_does_not_starve_eligible_rows(
+        self, engine, repo, service
+    ):
+        """W-2 (CRITICAL): 10 TERSE poignancy-10 rows + 2 eligible ⇒
+        the 2 stage.
+
+        The substance floor (>= 80 collapsed characters) is enforced
+        READ-SIDE — after the window's LIMIT — so before the fix the
+        terse rows held every slot and were skipped. A skipped row is
+        never ledgered, so it never LEFT the window: every later pass
+        saw the same head and staged NOTHING (a PERMANENT wedge, not the
+        self-healing ledgered case). The scan now over-fetches (bounded
+        at 3x the window per pass) and collects ELIGIBLE rows.
+        """
+        for index in range(10):
+            _insert(
+                repo,
+                importance=10,
+                title=f"Terse {index}",
+                body=f"terse {index}",
+            )
+        eligible_ids = [
+            _insert(repo, importance=9, title=f"Eligible {index}")
+            for index in range(2)
+        ]
+
+        outcome = service.process_pass(notify=False)
+        assert outcome.staged == 2, outcome
+        ledger_episode_ids = {row.episode_id for row in _ledger_rows(engine)}
+        for episode_id in eligible_ids:
+            assert episode_id in ledger_episode_ids
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # AC2 — the [PROPOSALS] zone (selection, shape, admission)
@@ -529,19 +561,31 @@ class TestProposalsZoneSelection:
         assert len(service.select_zone_rows(limit=3)) == 3
 
     def test_a_pinned_episode_is_not_rendered_in_the_zone(self, engine, repo, service):
-        """W-3: a pending proposal whose episode is later pinned is NOT
-        rendered; an unpinned pending proposal still is."""
-        pinned_episode = _insert(repo, importance=9, title="Pinned memory")
-        unpinned_episode = _insert(repo, importance=9, title="Still proposable")
-        service.process_pass(notify=False)
+        """W-3: a pending proposal whose episode is later PINNED or
+        SUPERSEDED is NOT rendered; the still-proposable pending
+        proposal (deliberately UNPINNED — the proposal lane never pins)
+        is.
 
-        # Pin the first episode AFTER staging — the proposal row stays
-        # ``pending``, but the episode is no longer proposable.
+        The excluded episodes OUTRANK the survivor (importance 10 vs 9)
+        so the FILTER — not the ordering — is what removes them; the
+        pre-fix leg tied at importance=9 and was vacuous (green-at-base:
+        the ordering alone chose the survivor).
+        """
+        pinned_episode = _insert(repo, importance=10, title="Pinned memory")
+        superseded_episode = _insert(repo, importance=10, title="Superseded memory")
+        survivor_episode = _insert(repo, importance=9, title="Still proposable")
+        assert service.process_pass(notify=False).staged == 3
+
+        # Pin one episode and supersede the other AFTER staging — the
+        # proposal rows stay ``pending``, but the episodes are no longer
+        # proposable.
         _set_keepsake(engine, pinned_episode, True)
+        _set_superseded(engine, superseded_episode)
 
         rendered = {row.episode_id for row in service.select_zone_rows()}
-        assert unpinned_episode in rendered
+        assert survivor_episode in rendered
         assert pinned_episode not in rendered
+        assert superseded_episode not in rendered
 
 
 class TestProposalsZoneRender:
@@ -1059,20 +1103,32 @@ class TestEnqueueBridge:
 
 
     def test_a_pinned_episode_is_not_announced_by_the_bridge(self, engine, repo):
-        """W-3: a pending proposal whose episode is later pinned is NOT
-        announced; an unpinned pending proposal still is."""
-        pinned_episode = _insert(repo, importance=9, title="Pinned memory")
-        unpinned_episode = _insert(repo, importance=9, title="Still proposable")
-        # Stage with no running instance so both rows stay ``pending``.
+        """W-3: a pending proposal whose episode is later PINNED or
+        SUPERSEDED is NOT announced; the still-proposable pending
+        proposal (deliberately UNPINNED — the proposal lane never pins)
+        is.
+
+        THE EXCLUDED EPISODES OUTRANK THE SURVIVOR (importance 10 vs 9)
+        ON PURPOSE: the SELECTION — not the ordering — must do the
+        filtering. The pre-fix leg tied both episodes at importance=9,
+        so the ordering alone (``proposed_at`` DESC) chose the survivor
+        and the leg stayed GREEN even with the filter removed — a
+        vacuous pin (green-at-base).
+        """
+        pinned_episode = _insert(repo, importance=10, title="Pinned memory")
+        superseded_episode = _insert(repo, importance=10, title="Superseded memory")
+        survivor_episode = _insert(repo, importance=9, title="Still proposable")
+        # Stage with no running instance so every row stays ``pending``.
         service = MemoirKeepsakeProposalService(engine, clock=lambda: FIXED_NOW)
         outcome = service.process_pass(notify=False)
-        assert outcome.staged == 2
+        assert outcome.staged == 3
 
-        # Pin one episode AFTER staging.
+        # Pin one episode and supersede the other AFTER staging.
         _set_keepsake(engine, pinned_episode, True)
+        _set_superseded(engine, superseded_episode)
 
         # With a running ari instance, the bridge announces the strongest
-        # PENDING proposal that is still proposable — the unpinned one.
+        # PENDING proposal that is still proposable — the survivor.
         sent: list[str] = []
         _running_ari_instance(engine)
         bridge_service = MemoirKeepsakeProposalService(
@@ -1084,11 +1140,16 @@ class TestEnqueueBridge:
         assert len(sent) == 1
         assert "Still proposable" in sent[0]
         assert "Pinned memory" not in sent[0]
+        assert "Superseded memory" not in sent[0]
 
-        # The pinned episode's row remains pending (never announced).
+        # THE DIRECT SELECTION PIN — the ledger row keyed by the
+        # survivor's episode_id is the one that moved to ``enqueued``;
+        # both excluded episodes' rows stay ``pending`` (never
+        # announced, so neither consumes the day's slot).
         rows = {row.episode_id: row for row in _ledger_rows(engine)}
+        assert rows[survivor_episode].notification_status == PROPOSAL_STATUS_ENQUEUED
         assert rows[pinned_episode].notification_status == PROPOSAL_STATUS_PENDING
-        assert rows[unpinned_episode].notification_status == PROPOSAL_STATUS_ENQUEUED
+        assert rows[superseded_episode].notification_status == PROPOSAL_STATUS_PENDING
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -1033,10 +1033,10 @@ zone, the 1/day enqueue bridge) and the wake-refresh context seam
 | `daemon/tools/memoir_knob.py` | `MemoirWakeRefreshKnobState`, `resolve_memoir_wake_refresh_knob`, `memoir_wake_refresh_enabled`, `_emit_wake_refresh_once` |
 | `daemon/config.py` | `MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR`, `MemoirWakeRefreshConfig`, the `memoir_wake_refresh` section on `Config` |
 | `daemon/api.py` | the proposal service constructed against the shared engine and passed to the reflection service (advisory-failure wrapper) |
-| `tests/unit/test_memoir_keepsake_proposals.py` | NEW (30 nodes → **43** in the phase-6 delta: the canonical-quote presence leg + the three cross-day legs) |
+| `tests/unit/test_memoir_keepsake_proposals.py` | NEW (30 nodes → **43** in the phase-6 delta: the canonical-quote presence leg + the three cross-day legs; → **48** now: the phase-6 closure delta's W-3 legs + this closure's W-2 leg — see §16.5) |
 | `tests/unit/test_memoir_wake_refresh.py` | NEW (40 nodes) |
-| `test/packs/memoir_v2_keepsake_proposals_test.sh` | NEW pack (pin 30 → **31** in the phase-6 delta: the canonical-quote presence leg) |
-| `test/packs/memoir_v2_proposal_notification_test.sh` | NEW pack (pin 9 → **12** in the phase-6 delta: the three cross-day legs) |
+| `test/packs/memoir_v2_keepsake_proposals_test.sh` | NEW pack (pin 30 → **31** in the phase-6 delta: the canonical-quote presence leg; the pin has since moved to **35** — see §16.5) |
+| `test/packs/memoir_v2_proposal_notification_test.sh` | NEW pack (pin 9 → **12** in the phase-6 delta: the three cross-day legs; the pin has since moved to **13** — see §16.5) |
 | `test/packs/memoir_v2_wake_refresh_test.sh` | NEW pack (pin 40) |
 | `tests/integration/test_lcancheck_family_separation.py` | the `_STABLE_ID_SUPPORTED_KINDS` set grew by `memoir_refresh` (the closed list grew by exactly one) |
 
@@ -1146,16 +1146,52 @@ Files touched by the recipes (sha256 before == after):
 `memoir_keepsake_proposal_service.py`, `memoir_briefing.py`,
 `self_alarm_service.py`.
 
+**THE PHASE-6 CLOSURE-2 RECEIPTS (parent-RED + counter-mutation).**
+The four closure findings (F1 the vacuous W-3 bridge leg, F2 the third
+exclusion class starving permanently, F3 the non-discriminating recipe
+(d), F4 the W-3 predicate missing supersession) were all proven with
+SCRATCH-ONLY mutations: the parent's tree extracted with
+`git archive 78bde0c0a` into `/tmp`, the fixed test file copied in, the
+mutation applied THERE. NO mutation was ever applied to this worktree's
+own files.
+
+**THE NEW BINDING LANE RULE (reviewer-minted, binding from here on):
+GREEN-AT-BASE IS NOT A PIN — a leg claiming to detect a behaviour must
+be shown RED at the parent commit before it counts as a detector.**
+Every receipt below carries that parent-RED proof.
+
+| # | Recipe (SCRATCH-ONLY) | Node(s) that went RED | Observed RED marker |
+|---|---|---|---|
+| **(h) F1/F2/F4 — PARENT-RED** | the PARENT's production tree (`git archive 78bde0c0a`) + THIS commit's FIXED test file | `TestEnqueueBridge::test_a_pinned_episode_is_not_announced_by_the_bridge` + `TestProposalsZoneSelection::test_a_pinned_episode_is_not_rendered_in_the_zone` + `TestCandidateWindow::test_terse_head_of_line_does_not_starve_eligible_rows` | `AssertionError: assert 'Still proposable' in "[system:memoir-proposal] Ari has reflected and proposed 1 new keepsake: 'Superseded memory'. Review via briefing."` — the parent ANNOUNCED the superseded episode; `assert '630e64be…' not in {'3bcb4046…', '630e64be…'}` — the parent RENDERED it; `assert 0 == 2 … ProposalPassOutcome(staged=0, skipped_existing=0, skipped_ineligible=10, enqueued=False, enqueue_failure=None, proposal_ids=())` — the terse head-of-line starved the eligible rows (the permanent wedge). **3 failed / 41 passed.** |
+| **(i) F1 — the KEEPSAKE filter's bite** | THIS commit's tree, `is_keepsake.is_(False)` DROPPED from `select_zone_rows` | the same two W-3 legs | **2 failed** — with the filter removed the pinned episode is announced AND rendered |
+| **(j) F1 — the PRIOR leg was vacuous** | the SAME mutation as (i) + the PRE-FIX test file (`git show 78bde0c0a:tests/unit/test_memoir_keepsake_proposals.py`) | — | **1 failed, 1 passed** — the OLD BRIDGE leg stayed GREEN (both episodes tied at importance=9, so the ORDERING alone chose the survivor: the leg detected nothing); the OLD ZONE leg DID bite for the keepsake filter (the zone renders a SET, so the pinned row was visible) |
+| **(k) F4 — the SUPERSEDED filter's bite** | THIS commit's tree, `superseded_by.is_(None)` DROPPED from `select_zone_rows` | the same two W-3 legs | **2 failed** — without the filter the superseded episode is announced AND rendered |
+| **(l) F3 — recipe (d) AS PRESCRIBED** | THIS commit's tree, the read-side once-ever PRE-CHECK disabled (`if self.has_proposal(...)` → `if False:`) | — | **48 passed / 0 failed — NON-DISCRIMINATING.** The query-side `notin_` already excludes ledgered rows, so the read-side pre-check is UNREACHABLE for a ledgered row. (d) is marked non-discriminating in disclosure 12 |
+| **(m) F3 — recipe (d)′ (RE-DERIVED)** | THIS commit's tree, the query-side `notin_` DROPPED and the read-side skip KEPT | `TestOnceEver::test_a_second_pass_never_re_proposes_the_same_episode` + `test_any_prior_outcome_skips_permanently[pending|enqueued|sent|failed]` + `test_the_unique_constraint_is_the_racing_guard_and_is_swallowed` + `TestCandidateWindow::test_ledgered_head_of_line_does_not_starve_eligible_rows` | **7 failed / 41 passed** — the ledgered head-of-line eats the window slots again. This is the discriminating recipe that replaces (d) |
+
 ### 16.5 Pack pins (measured with `--collect-only`, same-commit)
 
 | Pack | Nodes | Selector |
 |---|---|---|
-| `memoir_v2_keepsake_proposals_test` | **31** | `TestQualification`, `TestOnceEver`, `TestProposalsZoneSelection`, `TestProposalsZoneRender`, `TestAdmissionLadder`, `TestReflectionPassIntegration` |
-| `memoir_v2_proposal_notification_test` | **12** | `TestEnqueueBridge`, `TestNoPinAuthority` |
+| `memoir_v2_keepsake_proposals_test` | **35** | `TestQualification`, `TestOnceEver`, `TestCandidateWindow`, `TestProposalsZoneSelection`, `TestProposalsZoneRender`, `TestAdmissionLadder`, `TestReflectionPassIntegration` |
+| `memoir_v2_proposal_notification_test` | **13** | `TestEnqueueBridge`, `TestNoPinAuthority` |
 | `memoir_v2_wake_refresh_test` | **40** | `TestStableIdRegistration`, `TestRefreshSeam`, `TestWakeRefreshKnob`, `TestStampPurity`, `TestWakeSourceThreading`, `TestStructuralSupersede` |
 
 Every class in both new modules is selected by exactly one pack (the lane
 rule: a leg no pack selects is a leg the gate cannot see).
+
+**THE TABLE WAS STALE — corrected here (measured, not asserted).** It
+read `31` / `12` while the packs MEASURED `34` / `13` at the parent
+commit `78bde0c0a`: the phase-6 closure delta landed its legs without
+re-pinning this table, and `TestCandidateWindow` was missing from the
+selector list even though the pack script already selected it. THIS
+commit adds ONE more leg
+(`TestCandidateWindow::test_terse_head_of_line_does_not_starve_eligible_rows`
+— the W-2 bounded-over-fetch detector), so the MEASURED counts are now
+**35** and **13**; both pack scripts carry the same numbers
+(`EXPECTED_PASSED_N=35` / `13`), re-pinned IN THIS COMMIT (the lane rule:
+this delta's legs land selector-registered AND re-pinned in the same
+commit).
 
 ### 16.6 Disclosures
 
@@ -1202,7 +1238,67 @@ rule: a leg no pack selects is a leg the gate cannot see).
     read-side ledger skip in the pass loop (`has_proposal` /
     `is_enduring`) STAYS as the belt-and-braces race guard for a row
     that gains a ledger entry between the window read and the staging
-    write.
+    write. THE SUBSTANCE FLOOR IS THE THIRD EXCLUSION AND IT LIVES
+    READ-SIDE (see disclosure 10): a terse row is skipped, never
+    ledgered, and therefore never leaves the window — the bounded
+    over-fetch is what stops it from starving the rows behind it.
+9. **THE PRIOR W-3 BRIDGE LEG WAS VACUOUS (green-at-base) — corrected
+   HERE, not in a report.** The leg pinned "a pinned episode is not
+   announced" with BOTH episodes at importance=9: the notify target is
+   the SINGLE strongest pending row, so the tie fell to `proposed_at`
+   DESC — the ORDERING alone chose the survivor and the leg stayed GREEN
+   even with the `is_keepsake` filter removed (executed: 1 failed / 1
+   passed under that mutation — the old BRIDGE leg passed; the old ZONE
+   leg did bite for the keepsake filter, because the zone renders a SET
+   and the pinned row was visible in it). The leg is reworked in this
+   commit: the excluded episode now OUTRANKS the survivor (importance 10
+   vs 9) and the selected `episode_id` is asserted directly (the ledger
+   row keyed by the survivor's episode_id is the one that moved to
+   `enqueued`). A disclosure that exists only in a report does not
+   exist — this is its home.
+10. **THE BOUNDED OVER-FETCH (W-2) — its bound AND its deferral.** The
+    substance floor (>= 80 collapsed characters) is enforced READ-SIDE,
+    IN PYTHON: SQL cannot express it DIALECT-NEUTRALLY (SQLite's
+    `length()` and PostgreSQL's `char_length()` do not count the same
+    thing), so no `length()` was added to any query. Because a skipped
+    row is never ledgered, it never leaves the window — a terse
+    head-of-line starved the eligible rows behind it on EVERY pass (a
+    PERMANENT wedge; executed at the parent: `staged=0,
+    skipped_ineligible=10`). The scan now PAGES: up to
+    `MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE` (3) × the window per pass,
+    collecting ELIGIBLE rows until it holds `limit`. **THE BOUND IS
+    HONEST AND THE DEFERRAL IS DISCLOSED:** a pathological corpus whose
+    whole head-of-line is terse still defers the eligible rows behind it
+    to a LATER pass — the bound is 3 × the window, NOT an unbounded walk
+    (an unbounded walk would trade starvation for a full-corpus scan on
+    every tick). The deferral self-heals as soon as the terse head
+    leaves the window.
+11. **THE W-3 PREDICATE NOW COVERS SUPERSESSION (F4).** `is_keepsake =
+    False` alone left a superseded episode's pending proposal eligible
+    for BOTH the notify target and the zone — it was announced and
+    CONSUMED the day's single announcement slot, starving a valid
+    proposal (executed: the parent announced 'Superseded memory').
+    `superseded_by IS NULL` now sits beside it in `select_zone_rows`
+    (one line, both paths — the notify target narrows the SAME
+    selection), and both W-3 legs now carry a pinned AND a superseded
+    episode, each OUTRANKING the survivor so the filter — not the
+    ordering — does the work.
+12. **RECIPE (d) IS NON-DISCRIMINATING — (d)′ REPLACES IT.** Deleting
+    the read-side once-ever pre-check leaves the whole selection GREEN
+    (48/48): the query-side `notin_` already excludes ledgered rows, so
+    the pre-check is unreachable for them. The discriminating recipe is
+    (d)′ — drop the query-side `notin_` and KEEP the read-side skip ⇒
+    **7 RED** (the six `TestOnceEver` legs + the ledgered head-of-line
+    leg). Both the mark and the re-derived recipe live HERE, with their
+    executed outputs in §16.4.
+13. **`skipped_ineligible` NOW COUNTS THE SCAN'S OWN SKIPS.** The scan
+    returns only ELIGIBLE rows (that is the fix), so the substance-floor
+    skips are counted by the SCAN (`CandidateScan.skipped_ineligible`)
+    and carried into the outcome; the pass loop's `is_enduring` check
+    stays as the race guard. The counter's MEANING for the caller is
+    unchanged (rows examined and rejected) but its CEILING moved: it can
+    now count up to 3 × the window per pass (the over-fetch), not just
+    the window.
 
 ### 16.7 THE PLAN DEFECT — §3.1's 1/day gate SQL is not date-rollover safe
 

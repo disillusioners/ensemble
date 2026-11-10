@@ -79,9 +79,13 @@ fi
 # ``--collect-only``): TestEnqueueBridge (10) + TestNoPinAuthority (3) = 13.
 #
 # TestEnqueueBridge grew 9 -> 10 in the phase-6 closure delta: the W-3
-# leg pins that a pending proposal whose episode is later pinned is NOT
-# announced by the bridge (no-spam doctrine), while an unpinned pending
-# proposal still is.
+# leg pins that a pending proposal whose episode is later PINNED or
+# SUPERSEDED is NOT announced by the bridge (no-spam doctrine), while the
+# still-proposable pending proposal is. (phase-6 closure-2: the excluded
+# episodes OUTRANK the survivor, so the FILTER — not the ordering — does
+# the work; the prior leg tied at importance=9 and detected nothing.
+# RED at the parent commit 78bde0c0a — see
+# docs/memoir-v2/implementation-notes.md §16.4 receipts (h)/(i)/(k).)
 EXPECTED_PASSED_N=13
 
 SELECTOR="TestEnqueueBridge or TestNoPinAuthority"

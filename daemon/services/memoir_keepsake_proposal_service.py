@@ -120,6 +120,15 @@ MEMOIR_PROPOSAL_MIN_BODY_CHARS = 80
 #: selection) in a single tick.
 MEMOIR_PROPOSAL_STAGE_CAP_PER_PASS = 10
 
+#: The BOUNDED OVER-FETCH multiplier (W-2). The candidate window pages up
+#: to this multiple of the window per pass, collecting ELIGIBLE rows —
+#: the substance floor is enforced read-side (dialect-neutral: it must
+#: stay in Python), so a terse head-of-line would otherwise hold the
+#: slots on EVERY pass and starve the eligible rows behind it. The bound
+#: is deliberate: an unbounded walk would trade starvation for a
+#: full-corpus scan on every tick.
+MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE = 3
+
 #: The bridge's `.result()` timeout (the RDRS lane-6 precedent value).
 MEMOIR_PROPOSAL_ENQUEUE_TIMEOUT_S = 8.0
 
@@ -166,6 +175,22 @@ class ProposalCandidateRow:
     proposal_date: str
     notification_status: str
     proposed_at: datetime
+
+
+@dataclass(frozen=True)
+class CandidateScan:
+    """The window scan's result — the ELIGIBLE candidates + the census.
+
+    ``episodes`` holds only ELIGIBLE rows (strongest first, at most the
+    window's ``limit``). ``skipped_ineligible`` counts the rows the scan
+    examined and rejected on the substance floor — the read-side
+    exclusion the SQL cannot express DIALECT-NEUTRALLY (SQLite's
+    ``length()`` and PostgreSQL's ``char_length()`` do not count the
+    same thing).
+    """
+
+    episodes: tuple[MemoirEpisode, ...] = ()
+    skipped_ineligible: int = 0
 
 
 @dataclass(frozen=True)
@@ -295,27 +320,50 @@ class MemoirKeepsakeProposalService:
         *,
         limit: int = MEMOIR_PROPOSAL_STAGE_CAP_PER_PASS,
         agent_id: str | None = None,
-    ) -> list[MemoirEpisode]:
-        """The candidate episodes, STRONGEST first.
+    ) -> CandidateScan:
+        """The candidate episodes, STRONGEST first — ELIGIBLE ones only.
 
-        The window ONLY EVER contains ELIGIBLE candidates: both
-        exclusions (keepsake, superseded, and the once-ever ledger) are
-        enforced IN THE QUERY so a ledgered / superseded / already-pinned
-        row cannot eat one of the ``limit`` slots and starve the
-        eligible rows below it (W-1 — the post-window read-side skip
-        left the slots occupied; the council's probe: 12 ledgered
-        poignancy-9 rows starved the remaining 2). The ledger exclusion
-        is an agent-scoped ``notin_`` subquery — the SAME predicate
-        the staging write enforces (``agent_id, episode_id``), so the
-        once-ever check is one SQL predicate, not a second JOIN.
+        WHERE EACH EXCLUSION LIVES:
 
-        The read-side ledger skip in the pass loop
-        (``has_proposal`` / ``is_enduring``) STAYS as the
-        belt-and-braces race guard: a row can gain a ledger entry (or
-        be pinned / superseded) between the window read and the
-        staging write.
+        * **IN THE QUERY (the threshold + all THREE exclusions).** The
+          poignancy threshold, plus the ``is_keepsake`` flag, the
+          ``superseded_by`` pointer, and the agent-scoped once-ever
+          ledger (an agent-scoped ``notin_`` subquery over the SAME
+          ``(agent_id, episode_id)`` predicate the staging write
+          enforces — one SQL predicate, not a second JOIN).
+          A ledgered / superseded / already-pinned row therefore cannot
+          OCCUPY one of the ``limit`` slots and starve the eligible rows
+          below it (W-1 — the post-window read-side skip left the slots
+          occupied; the council's probe: 12 ledgered poignancy-9 rows
+          starved the remaining 2).
+        * **READ-SIDE, IN PYTHON (the substance floor).** The collapsed
+          body must carry at least :data:`MEMOIR_PROPOSAL_MIN_BODY_CHARS`
+          characters. SQL cannot express that DIALECT-NEUTRALLY —
+          SQLite's ``length()`` and PostgreSQL's ``char_length()`` do not
+          count the same thing — so the floor stays in Python.
+
+        THE BOUNDED OVER-FETCH (W-2). The floor is enforced AFTER the
+        query, so a HIGH-poignancy-but-terse row would otherwise hold a
+        window slot and be skipped — and a skipped row is never ledgered,
+        so it never LEAVES the window: an unbounded head of terse rows
+        starves the eligible rows behind them on EVERY pass (a PERMANENT
+        wedge, not the self-healing ledgered case). The scan therefore
+        PAGES: it reads up to ``MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE``
+        (3) × the window per pass and keeps collecting until it holds
+        ``limit`` ELIGIBLE rows, applying the floor in Python as it goes.
+
+        THE BOUND IS HONEST AND DISCLOSED. A pathological corpus whose
+        whole head-of-line is terse can still defer the eligible rows
+        behind it to a LATER pass — the bound is 3 × the window, NOT an
+        unbounded walk (an unbounded walk would trade starvation for a
+        full-corpus scan on every tick). The deferral self-heals as soon
+        as the terse head leaves the window. The disclosure lives in
+        ``docs/memoir-v2/implementation-notes.md`` §16.6.
         """
         owner = agent_id or self._agent_id
+        target = max(0, int(limit))
+        if target == 0:
+            return CandidateScan(episodes=(), skipped_ineligible=0)
         effective = func.coalesce(MemoirEpisode.poignancy, MemoirEpisode.importance)
         # W-1: exclude ineligible rows IN THE QUERY (same-class
         # completion for both the ledger exclusion and the superseded
@@ -323,20 +371,53 @@ class MemoirKeepsakeProposalService:
         ledgered = select(MemoirProposalLedger.episode_id).where(
             MemoirProposalLedger.agent_id == owner,
         )
-        statement = (
-            select(MemoirEpisode)
-            .where(
-                MemoirEpisode.agent_id == owner,
-                effective >= MEMOIR_KEEPSAKE_POIGNANCY_THRESHOLD,
-                MemoirEpisode.is_keepsake.is_(False),
-                MemoirEpisode.superseded_by.is_(None),
-                MemoirEpisode.id.notin_(ledgered),
-            )
-            .order_by(effective.desc(), MemoirEpisode.created_at.desc())
-            .limit(max(0, int(limit)))
+        base_filters = (
+            MemoirEpisode.agent_id == owner,
+            effective >= MEMOIR_KEEPSAKE_POIGNANCY_THRESHOLD,
+            MemoirEpisode.is_keepsake.is_(False),
+            MemoirEpisode.superseded_by.is_(None),
+            MemoirEpisode.id.notin_(ledgered),
         )
+        # A TOTAL order — the id breaks an exact effective/created_at
+        # tie — so the pages of the over-fetch cannot overlap.
+        order = (
+            effective.desc(),
+            MemoirEpisode.created_at.desc(),
+            MemoirEpisode.id.asc(),
+        )
+        fetch_cap = target * MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE
+        eligible: list[MemoirEpisode] = []
+        skipped_ineligible = 0
+        fetched = 0
         with Session(self._engine) as session:
-            return list(session.exec(statement).all())
+            while fetched < fetch_cap and len(eligible) < target:
+                page_size = min(target, fetch_cap - fetched)
+                statement = (
+                    select(MemoirEpisode)
+                    .where(*base_filters)
+                    .order_by(*order)
+                    .offset(fetched)
+                    .limit(page_size)
+                )
+                rows = list(session.exec(statement).all())
+                if not rows:
+                    break
+                for row in rows:
+                    fetched += 1
+                    if not self.is_enduring(row):
+                        # The SUBSTANCE FLOOR — skipped and NEVER ledgered,
+                        # so it stays in the window; the over-fetch is what
+                        # keeps it from starving the rows behind it.
+                        skipped_ineligible += 1
+                        continue
+                    eligible.append(row)
+                    if len(eligible) >= target:
+                        break
+                if len(rows) < page_size:
+                    break  # the corpus is exhausted
+        return CandidateScan(
+            episodes=tuple(eligible), skipped_ineligible=skipped_ineligible
+        )
 
     def stage_candidate(
         self,
@@ -409,7 +490,11 @@ class MemoirKeepsakeProposalService:
         DEFAULT — a ``sent`` / ``failed`` row is history, not an open
         question — AND ``is_keepsake = False`` (W-3: an already-pinned
         episode is no longer proposable, so its pending proposal is
-        neither announced nor rendered — the no-spam doctrine), then
+        neither announced nor rendered — the no-spam doctrine) AND
+        ``superseded_by IS NULL`` (W-3's SAME-CLASS completion: a
+        superseded record is a retracted belief, so its pending proposal
+        is neither announced nor rendered either — otherwise it would
+        consume the day's single announcement slot), then
         ``ORDER BY COALESCE(poignancy, importance) DESC,
         proposed_at DESC`` and the caller's cap (the zone renders at most
         ``MEMOIR_PROPOSALS_ZONE_MAX`` lines).
@@ -447,6 +532,7 @@ class MemoirKeepsakeProposalService:
                 MemoirProposalLedger.agent_id == owner,
                 MemoirProposalLedger.notification_status.in_(list(wanted)),
                 MemoirEpisode.is_keepsake.is_(False),
+                MemoirEpisode.superseded_by.is_(None),
             )
             .order_by(effective.desc(), MemoirProposalLedger.proposed_at.desc())
             .limit(max(0, int(limit)))
@@ -692,7 +778,12 @@ class MemoirKeepsakeProposalService:
         skipped_ineligible = 0
         proposal_ids: list[str] = []
         try:
-            for episode in self.scan_candidates(limit=limit, agent_id=owner):
+            scan = self.scan_candidates(limit=limit, agent_id=owner)
+            # The scan's census carries the substance-floor skips; the
+            # check below STAYS as the race guard (a row that turned
+            # ineligible between the window read and the staging write).
+            skipped_ineligible = scan.skipped_ineligible
+            for episode in scan.episodes:
                 if not self.is_enduring(episode):
                     skipped_ineligible += 1
                     continue
@@ -765,12 +856,14 @@ class MemoirKeepsakeProposalService:
 
 
 __all__ = [
+    "CandidateScan",
     "MEMOIR_KEEPSAKE_POIGNANCY_THRESHOLD",
     "MEMOIR_PROPOSAL_AGENT_ID",
     "MEMOIR_PROPOSAL_ENQUEUE_TIMEOUT_S",
     "MEMOIR_PROPOSAL_MIN_BODY_CHARS",
     "MEMOIR_PROPOSAL_SOURCE",
     "MEMOIR_PROPOSAL_STAGE_CAP_PER_PASS",
+    "MEMOIR_PROPOSAL_WINDOW_FETCH_MULTIPLE",
     "MemoirKeepsakeProposalService",
     "PROPOSAL_STATUSES",
     "PROPOSAL_STATUS_ENQUEUED",

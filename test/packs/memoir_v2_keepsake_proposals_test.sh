@@ -77,9 +77,9 @@ fi
 
 # The MEASURED node count at the pin (2026-11-10, this worktree,
 # ``--collect-only``): TestQualification (6) + TestOnceEver (6)
-# + TestCandidateWindow (2) + TestProposalsZoneSelection (5)
+# + TestCandidateWindow (3) + TestProposalsZoneSelection (5)
 # + TestProposalsZoneRender (6) + TestAdmissionLadder (6)
-# + TestReflectionPassIntegration (3) = 34.
+# + TestReflectionPassIntegration (3) = 35.
 #
 # TestAdmissionLadder grew 5 -> 6 in the phase-6 DELTA: the canonical
 # §A6 quote's PRESENCE pin (the source copy soft-wraps, so that leg is
@@ -90,10 +90,18 @@ fi
 # query-side exclusion so a ledgered/superseded row can no longer eat
 # a window slot and starve eligible rows below the LIMIT.
 #
+# TestCandidateWindow grew 2 -> 3 in the phase-6 CLOSURE-2 delta: the
+# W-2 probe (a TERSE head-of-line) pins the bounded over-fetch — the
+# substance floor is enforced read-side, so without the over-fetch a
+# terse head holds the window slots on EVERY pass (a permanent wedge,
+# not the self-healing ledgered case). RED at the parent commit
+# 78bde0c0a (executed — see docs/memoir-v2/implementation-notes.md
+# §16.4 receipt (h)).
+#
 # LANE RULE (binding): this delta's own legs land selector-registered and
 # re-pinned IN THE SAME COMMIT — every class below is named EXPLICITLY, so
 # a leg no pack selects can never hide from the gate.
-EXPECTED_PASSED_N=34
+EXPECTED_PASSED_N=35
 
 SELECTOR=(
   "TestQualification or TestOnceEver or TestCandidateWindow"
