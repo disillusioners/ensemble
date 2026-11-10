@@ -1272,20 +1272,15 @@ def create_memoir_tools(
                     )
                 star_row = repo.resolve_star(caller_agent_id, star_name)
                 if star_row is None:
+                    # FORGIVING (case-insensitive) RESOLUTION — one home in
+                    # the repository, ALIAS-AWARE.  The pre-fix shape ran a
+                    # Python scan over every star row and never consulted
+                    # the alias table, so an alias differing only in case
+                    # resolved to nothing while a canonical name resolved.
                     try:
-                        from sqlmodel import Session, select
-                        from daemon.repositories.memoir.models import MemoirStar
-
-                        with Session(repo.engine) as session:
-                            rows = session.exec(
-                                select(MemoirStar).where(
-                                    MemoirStar.agent_id == caller_agent_id
-                                )
-                            ).all()
-                            for row in rows:
-                                if str(row.name).strip().casefold() == star_name.casefold():
-                                    star_row = row
-                                    break
+                        star_row = repo.resolve_star_casefold(
+                            caller_agent_id, star_name
+                        )
                     except Exception:  # noqa: BLE001
                         star_row = None
                 if star_row is None:

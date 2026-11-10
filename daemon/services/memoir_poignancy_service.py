@@ -77,6 +77,7 @@ from daemon.llm_error_classifier import (
     RETRYABLE_STATUS_CODES,
     classify_transient_apierror_body,
 )
+from daemon.services.memoir_reflection_service import _clamp_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -545,6 +546,13 @@ class MemoirPoignancyService:
         (V2-10 / §3-A2).
         """
         prompt = build_poignancy_prompt(episode)
+        # APPLY THE PROMPT BUDGET (phase-4 carry: ``max_prompt_tokens`` was
+        # plumbed into the settings and NEVER read — a decorative knob).
+        # The clamp is the reflection lane's canonical one (single truth for
+        # the "cut at a line boundary, never mid-line" rule); the body is
+        # already truncated to MEMOIR_POIGNANCY_BODY_CHARS, so this is the
+        # defence for unusually long titles/tags, not the primary bound.
+        prompt = _clamp_prompt(prompt, int(self._settings.max_prompt_tokens))
         tokens = _estimate_tokens(prompt)
         try:
             raw = self._llm_caller(prompt)

@@ -612,12 +612,21 @@ def _estimate_tokens(text: str) -> int:
     return estimate_tokens(text)
 
 
-# ── THE EMBEDDING TERMINAL PREDICATE (W-2, single-sourced) ───────────────
-#: The error-string marker that makes an embedding row terminal on the
-#: next scan (D3.7/AM-30 — the worker's own vocabulary). It LIVES HERE
-#: so the SQL scan window and the worker's Python belt predicate cannot
-#: drift: the worker imports BOTH this marker and the predicate below.
-MEMOIR_EMBEDDING_TERMINAL_MARKER = "terminal:"
+# ── THE TERMINAL MARKER VOCABULARY (single-sourced) ──────────────────────
+#: THE terminal marker, verbatim: ``terminal:<reason>``. ONE string, shared
+#: by the two lanes that IMPORT it — the embedding lane and the poignancy
+#: lane. (The JEV persona gate writes its own ``terminal:<reason>`` strings
+#: and does NOT import this constant; it is deliberately NOT claimed here.)
+#: The per-lane names below are
+#: ALIASES of this constant — they are NOT independent literals, so the
+#: vocabulary cannot drift between a writer and a scan predicate
+#: (phase-4 tidier reconcile: the file previously carried TWO identical
+#: ``"terminal:"`` literals under two names, and the "single-sourced"
+#: comment over-claimed while both existed).
+MEMOIR_TERMINAL_MARKER = "terminal:"
+
+#: The embedding lane's name for :data:`MEMOIR_TERMINAL_MARKER` (alias).
+MEMOIR_EMBEDDING_TERMINAL_MARKER = MEMOIR_TERMINAL_MARKER
 
 #: The per-row embedding attempt budget (D3.7 — attempts at/over the cap
 #: are terminal). Single-sourced here; the worker re-exports it.
@@ -683,7 +692,7 @@ def memoir_row_is_terminal(row: Any, attempt_cap: int = MEMOIR_EMBEDDING_ATTEMPT
 #: marker, resets the attempt counter and drops the stale score, so the
 #: row re-enters the scoring queue (the service surface is
 #: :meth:`daemon.services.memoir_poignancy_service.MemoirPoignancyService.requeue_episode`).
-MEMOIR_POIGNANCY_TERMINAL_MARKER = "terminal:"
+MEMOIR_POIGNANCY_TERMINAL_MARKER = MEMOIR_TERMINAL_MARKER
 
 #: The per-row scoring attempt budget (AC3 — attempts at/over the cap are
 #: terminal). Single-sourced here; the worker re-exports it.
@@ -1163,6 +1172,12 @@ class MemoirRepository:
         status. Restoring ``NULL`` would move it into the ALWAYS-scored
         set and BYPASS the backfill fence (V2-14 / §3-A3) — the
         constitutional default the operator raised deliberately.
+
+        THE DEFAULT IS ``False`` AND IT STAYS THERE (LEADER RULING,
+        2026-11-10): the legacy restore is an EXPLICIT OPT-IN for a
+        legacy row the operator deliberately wants re-scored — it is
+        never inferred from the row's current status, so a plain requeue
+        can never accidentally re-open the V2-14 legacy backfill window.
 
         Args:
             episode_id: The episode to requeue.
@@ -1732,12 +1747,15 @@ __all__ = [
     "MEMOIR_BODY_WORD_CAP",
     "MEMOIR_EMBEDDING_ATTEMPT_CAP",
     "MEMOIR_EMBEDDING_TERMINAL_MARKER",
+    "MEMOIR_TERMINAL_MARKER",
     "MEMOIR_IMPORTANCE_MAX",
     "MEMOIR_IMPORTANCE_MIN",
     "MEMOIR_INSERT_COLUMNS",
     "MEMOIR_INSERT_SQL",
     "MEMOIR_KEEPSAKE_ZONE_TOKEN_BUDGET",
     "MEMOIR_PIN_COUNT_CAP",
+    "MEMOIR_POIGNANCY_ATTEMPT_CAP",
+    "MEMOIR_POIGNANCY_TERMINAL_MARKER",
     "MEMOIR_RANK_CANDIDATES",
     "MEMOIR_STARS_MAX_ENTRIES",
     "MEMOIR_STAR_CHAR_CAP",
