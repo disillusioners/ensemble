@@ -243,3 +243,69 @@ Collected **459** (gate: 459) · **∪ = ∩ = 3** · census **x3/3** on all thr
 - Confinement / E1 / E3 / E4 / F / G / A / D: ✅ verified on real objects
 - F-10: ✅ closed
 - **Gate verdict: PASS-WITH-NOTES — cleared to proceed to staged verification (v0.29.10), with F-G1's fix verified and F-G2/F-G3 routed.**
+
+---
+
+# ARTIFACT RE-VERIFICATION (22d36a071) — 2026-11-10, last gate before staging
+
+**VERDICT: ARTIFACT-GREEN.** *This gate verifies artifact sha* **`22d36a0714cbfcee6e6b29244b5d457354e66d92`** *(branch `feature/skill-system-revival-phase1`).* This is a **bounded** re-verification of the lane's own surfaces — NOT a full re-gate. The council/tidier findings, the ledger re-derivation, the 19-pack full registry, the six-file leak-class closure and D-G6 were **not** re-audited (closed elsewhere, per the dispatch).
+
+## A. Pin, tree, and the foreign delta
+- **HEAD == pin `22d36a071` (MATCH).** All five foreign tags **v0.29.8 / .9 / .10 / .11 / .12 = ANCESTOR_YES** (verified locally).
+- `git status --short`: **only** ` M .agents/shared/planning/designer-agent/install-audit.jsonl` (foreign, mtime 2026-11-09 22:29, unchanged during the runs) → **no `daemon/**` or `tests/**` dirt, no live pytest against the worktree**. Tree verdict: **QUIET (docs-only)**. (The two `.agents/tester/` docs showed a touch-only mtime bump, content-identical to HEAD — not source-dirty.)
+- Foreign delta since the gate's previous pin: **50 commits, 66 files, +10,502/−483** (v0.29.10 macOS topology · v0.29.11 launcher-journal + make-install-guard · v0.29.12 · the planning-artifacts commit). `origin/latest` is now **0 behind / 142 ahead** — the earlier **17-behind** disclosure is **RESOLVED**.
+- Base worktree `ae5bbafed`: porcelain **empty before AND after** → the comparison reference is intact.
+
+## B. Red set — BOTH scopes, ≥3 runs, `grep '^FAILED'` ONLY
+| leg | BASE @ `ae5bbafed` | ARTIFACT @ `22d36a071` |
+|---|---|---|
+| 1 | **3F / 456P** (42 s) | **3F / 456P** (43.9 s) |
+| 2 | **3F / 456P** (40 s) | **3F / 456P** (47.8 s) |
+| 3 | **3F / 456P** (43 s) | **3F / 456P** (49.0 s) |
+
+- Collected: **459 both sides** — unchanged, i.e. the catch-up merge added **no nodes** to the lane's radius.
+- ∩ = ∪ = **the 3 `tests/manager/test_skill_service_init.py` nodes** (the SQLite `20260714_000001` family), **x3/3 on BOTH sides**, identical root cause. The `^ERROR` lines (3/run) are that same pre-existing migration cause — excluded by the classifier, per the pinned rule.
+- **NET-NEW (touched-file scope) = 0.**
+- **Registered-pack scope: 0 new failing nodes.** The 12 lane packs below are all rc=0; the only reds anywhere remain the pre-existing base trio (which appear in the gzip pack, not in this 12-pack subset).
+- Quarantine list: `TestCheckABTestResolution::test_ab_resolution_threshold_met` and `::test_ab_resolution_force_resolve` did **not** appear in ANY leg on either side.
+
+## C. The lane's pin packs (12) — ALL PASS
+| # | Pack | RESULT | rc | wall | counts | failing nodes | Δ vs earlier |
+|---|---|---|---|---|---|---|---|
+| 1 | skill_keeper_confinement_behavioral (MUT=0) | PASS | 0 | 22 s | 19P | none | same 19P |
+| 2 | skill_keeper_read_scope (MUT=0) | PASS | 0 | 44 s | 68P | none | same 68P |
+| 3 | skill_id_verbatim_contract (MUT=0) | PASS | 0 | 92 s | 135P | none | same 135P |
+| 4 | skill_tools_display_hygiene (MUT=0) | PASS | 0 | 30 s | 22P | none | same 22P |
+| 5 | skill_capture_killswitch (MUT=0) | PASS | 0 | 16 s | 206P | none | same 206P |
+| 6 | metrics_census_polarity (MUT=0) | PASS | 0 | 6 s | 13P | none | same 13P |
+| 7 | skill_evolution | PASS | 0 | 142 s | 112P (47+6+26+10+23, 1 deselected) | none | same 112P |
+| 8 | skill_stale_deactivation (MUT=0) | PASS | 0 | 22 s | 56P | none | same 56P |
+| 9 | skill_injection_budget (MUT=0) | PASS | 0 | 5 s | 33P | none | same 33P |
+| 10 | context_skills | PASS | 0 | 8 s | 164P | none | same 164P |
+| 11 | skill_sink_class_containment | PASS | 0 | 180 s | **4P** | none | **NOTICE: node count 3→4** (concurrent extension); floor+presence contract holds |
+| 12 | skill_tools_surface (D-G6) | PASS | 0 | 12 s | 37P | none | same 37P |
+
+**Pack 7's G acceptance:** 3 consecutive full-file-set runs → **0 reds / 0 reds / 0 reds**; the AB node and its sibling green in all three.
+**No source mutation:** every matrix-bearing pack ran with its `*_MUTATIONS=0` knob (8 of them); packs 7/10/11/12 declare no matrix.
+
+## D. PostgreSQL dialect leg — PASS (real PG, not compiled-only)
+`tests/postgres/test_skill_revival_pg_dialect.py` → **15 collected / 15 passed / 0 failed**, **17.3 s**.
+Provisioning: `initdb -A trust` (PG16) into a `mktemp -d` datadir → `pg_ctl` on **127.0.0.1:54333** (unix socket relocated into the datadir) → `createdb` over TCP → **`current_database() = ensemble_test` asserted BEFORE the run**. Ambient live DSN (`10.44.0.2` / `ensemble_prod` / `5432`) scrubbed **per-variable**; `PYTEST_XDIST_WORKER` absent (serial).
+**Teardown proven:** `pg_ctl stop -m fast`, datadir removed, `ss -ltnp | grep :54333` → **0 hits**.
+
+## E. Environment + artifact sanity
+- Scrub proof: ambient surface had **8** entries; after the full-family per-variable scrub → **`ENSEMBLE_AUTH` = 0, `POSTGRES` = 0**. (The real auth family is 7 names — `DISCOVERY_URL / ALLOWED_ORIGINS / EXTERNAL_REDIRECT_BASE` included; a 2-name scrub is insufficient and a glob is a no-op.)
+- All three skill switches (`ENSEMBLE_SKILL_CAPTURE_ENABLED` / `_EVOLUTION_ENABLED` / `_STALE_DEACTIVATION_ENABLED`) = **UNSET**.
+- Migrations: **126** `.sql`, **zero** duplicate full-timestamp prefixes. Prompt baseline: **`PROMPT-BASELINE: OK — 181 versioned artifact(s) match`** (rc=0). Interpreter **3.14.7**.
+
+## F. Sink hygiene — the requirement is **NOT MET at START** (pre-existing; **not** gate-introduced)
+`data/skill-capture-observability/` held **1 file / 205,082 B / 632 rows** *before* this re-verification (85 admitted / 547 refused: 343 `capture_lane_off` · 85 `evolution_lane_off` · 68 `lane_disabled` · 34 `fix_cooldown` · 17 `forced_resolve_below_sample_size`; ts 09:42–12:07Z), stable across a 20 s resample.
+**Delta from THIS re-verification's runs: 0 files / 0 B** — the red-set legs and all 12 packs added nothing (the leak-class closure holds in operation). The `0 files / 0 B` requirement is therefore **NOT MET**, and the residue is **pre-existing** (the plan's L7 already flags it for deletion before merge). **Not deleted by the gate** — it is gitignored lane residue and unilateral deletion of evidence is not the tester's call.
+
+## G. Not verified / limits (explicit)
+1. **Mutation matrices were NOT re-run** (MUTATIONS=0 on all eight matrix-bearing packs). Those legs remain **dated measurements** (house fact, §Disclosures 8) — they are not re-proven by this verification.
+2. **The 50-commit foreign delta was NOT re-audited** — explicitly out of the bounded scope. The red-set, pack and PG legs cover only the lane's surfaces.
+3. **Pack 11 reported 4 nodes, not 3** (concurrent extension of the containment pin) — its floor + node-presence contract holds; 180 s vs 94 s is load, not a regression.
+4. The foreign `install-audit.jsonl` dirty entry persists (docs/planning, +9 rows, predates the gate).
+
+**Bottom line for the handoff: the artifact at `22d36a0714cbfcee6e6b29244b5d457354e66d92` is ARTIFACT-GREEN — net-new reds 0 in both scopes, all 12 lane pin packs PASS, the PostgreSQL dialect leg PASS on a real disposable cluster with proven teardown, base clean, tree quiet. The one unmet requirement is sink 0/0, which is pre-existing residue with a zero delta from this verification.**
