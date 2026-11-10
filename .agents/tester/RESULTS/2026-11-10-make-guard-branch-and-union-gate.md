@@ -737,6 +737,38 @@ itself (still refused by default, opened only by its own confirm var).
   uncommitted in the worktree when the gate left it, and another actor landed it. Recorded for provenance.
 - `5861419dc` remains a true ancestor of the branch tip (no rewrite, no force-push).
 
+## 7.13 Post-gate tip movement — MEASURED (closes §7.12)
+
+Between the gate and the artifact's final commit the branch advanced to **`13cd41652`**. The movement was
+measured rather than assumed:
+
+| Group over `5861419dc..13cd41652` | Count | Contents |
+|---|---|---|
+| **PRODUCT-GUARD** | **0** | none |
+| PRODUCT-DAEMON | 4 | `daemon/__init__.py`, `daemon/repositories/pok/repository.py`, `daemon/services/pok_service.py`, `daemon/tools/pok.py` — **POK cap 64→256** |
+| TESTS | 3 | `tests/test_api.py` (version pin), `tests/unit/services/test_pok_service_unit.py`, `tests/unit/tools/test_pok_tools_unit.py` |
+| DOCS/OTHER | 15 | POK planning docs, `PACKS.md`, CHANGELOG, `pyproject.toml`, `uv.lock`, this artifact, a POK verification report |
+
+Total: **22 files, +1015/−42**. v0.29.11 (`9091f9208`) entered via merge `7aa1ffbb`; its own content is the
+**POK cap 64→256 surface + the version bump** — and it touched **none** of the gate subjects
+(`Makefile`, `scripts/install-dir-guard.sh`, `scripts/stop-ensemble.sh`, `scripts/deploy.sh`, `scripts/upgrade/*`,
+`daemon/tools/upgrade_journal.py`, `daemon/manager.py`, `tests/unit/test_makefile_install_guard.py`,
+`tests/unit/test_stop_ensemble_default_guard.py`, `tests/unit/tools/test_upgrade_preflight_daemon_side.py`).
+
+```
+PRODUCT_GUARD_CHANGED_SINCE_GATE: NO
+PRODUCT_DAEMON_CHANGED_SINCE_GATE: YES  (POK cap only)
+TESTS_CHANGED_SINCE_GATE:          YES (POK tests + a version pin)
+V02911_TOUCHED_GATE_SUBJECTS:      NO
+GATE_COVERAGE_OF_CURRENT_TIP:      PARTIAL
+```
+
+**Verdict on coverage: `PARTIAL` — not `FULL`, and not `INVALIDATED`.** Every file this gate actually
+exercised is **byte-unchanged**, so **the make-guard verdict stands**; but the current tip carries a **POK
+surface the gate never ran**. If the release must certify the POK surface **together with** change set A,
+a re-gate at the sha that will actually ship is required. **The `FINAL VERDICT` block above/below refers to
+`GATED_COMMIT`, not to the moving tip.**
+
 ## FINAL VERDICT: PASS
 GATED_COMMIT: 5861419dc8d47a05760f8a248d94e113d59da32e
 GATE_DATE: 2026-11-10T12:04:16Z
