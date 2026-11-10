@@ -1520,3 +1520,38 @@ class TestSkillsRouterServiceUnavailable:
             json={"name": "x", "condition_type": "y", "condition_json": {}, "action": "z"},
         )
         assert r.status_code == 503
+
+
+# ---- sink sandbox (house safe redirect) ----
+# The capture-lane sink resolves its data dir from a PROCESS-GLOBAL
+# override.  A fixture that installs a redirect and then restores the
+# override to ``None`` re-exposes the checkout's REAL data dir for every
+# later write (the order-dependent sink leak).  This fixture NEVER
+# restores ``None``: it restores the SAFE session scratch dir and runs
+# the shared-path sentinel.  See tests/helpers/skill_sink_redirect.py.
+from daemon.services import skill_capture_observability as observability
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
+
+@pytest.fixture(autouse=True)
+def _sink_sandbox(tmp_path, request):
+    """Redirect the capture sink into ``tmp_path``; never restore None."""
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    observability.set_anomaly_reporter(None)
+    try:
+        yield tmp_path
+    finally:
+        # NEVER restore to None — that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink leak).
+        restore_safe_sink_redirect()
+        observability.reset_counters()
+        observability.set_anomaly_reporter(None)
+        lane_test_end(request.node.nodeid, before)

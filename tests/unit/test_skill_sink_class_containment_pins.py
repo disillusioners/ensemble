@@ -30,6 +30,14 @@ invariant, so a new poisoner fails a node instead of silently leaking:
   list.  Nothing here is an authored tuple of offenders: only the
   SANCTIONED site is authored (a policy fact); the class is derived.
 
+* **N1b — WRITER REDIRECT (maintained).**  The 15 files the measured
+  census proved write into the REAL sink dir when run directly never manage
+  the override, so the derived census cannot see them.  They are MAINTAINED
+  here as ``WRITER_SET`` (rationale in its comment).  N1b asserts every
+  member installs a safe redirect (``configure_sink(`` +
+  ``restore_safe_sink_redirect()``); a redirect-less member FAILS, naming
+  the file.
+
 * **N2 — MARKER ORACLE (dynamic, per member).**  Each class member is
   driven in a SUBPROCESS with the sink NOT redirected (no
   ``ENSEMBLE_DATA_DIR``, no ``DATA_DIR``) and a UNIQUE PER-RUN MARKER.
@@ -92,6 +100,39 @@ TESTS_ROOT = REPO_ROOT / "tests"
 SANCTIONED_POISON_SITES: dict[str, int] = {
     "tests/unit/test_skill_sink_retention_shared_path_pins.py": 2,
 }
+
+#: The WRITER SET — the 15 test files the static census + marker-driven
+#: adjudication (2026-11-10) proved write into the REAL
+#: ``data/skill-capture-observability/`` dir when run DIRECTLY (no
+#: ``ENSEMBLE_DATA_DIR`` / ``DATA_DIR``).  They never manage the override
+#: themselves, so the derived-override census (``sink_override_managers``)
+#: cannot see them — they are MAINTAINED HERE as an explicit list.
+#:
+#: WHY NOT DERIVED: the sink-writing seam is reached TRANSITIVELY through
+#: the daemon service layer (``skill_job_dispatcher`` / ``skill_evolution_service``
+#: / ``job_processor`` / ``skill_tools``) — a direct-import AST scan produces
+#: 47 false positives (job_queue tests import the modules but never drive the
+#: sink) and 4 false negatives (the integration/router tests reach the seam
+#: through the service layer).  A transitive closure scan is too expensive
+#: and too noisy.  The maintained list is the ground truth from the measured
+#: census; N1b below makes ANY listed writer without a safe redirect fail.
+WRITER_SET: tuple[str, ...] = (
+    "tests/integration/test_skill_capture.py",
+    "tests/integration/test_skill_cross_phase_flow_c.py",
+    "tests/integration/test_skill_evolution_e2e.py",
+    "tests/services/test_skill_evolution_service.py",
+    "tests/services/test_skill_job_dispatcher.py",
+    "tests/tools/test_skill_tools.py",
+    "tests/tools/test_skill_tools_pf_surface.py",
+    "tests/unit/routers/test_skills.py",
+    "tests/unit/routers/test_skills_pf_refusals.py",
+    "tests/unit/test_skill_capture_attribution_seam.py",
+    "tests/unit/test_skill_capture_gate_twin_parity.py",
+    "tests/unit/test_skill_capture_killswitch.py",
+    "tests/unit/test_skill_capture_killswitch_verification.py",
+    "tests/unit/test_skill_evolution_lane_gate.py",
+    "tests/unit/test_skill_gate4_attribution_consumer.py",
+)
 
 #: The per-variable env scrub the house requires for every run.
 HOUSE_ENV_SCRUB: tuple[str, ...] = (
@@ -264,6 +305,15 @@ def sink_override_managers() -> list[str]:
     return sorted(members)
 
 
+def writer_set_members() -> list[str]:
+    """The WRITER SET — files that can write into the real sink dir.
+
+    Maintained explicitly (see ``WRITER_SET``); cannot be derived
+    reliably by static means (see the docstring there).  Returned sorted.
+    """
+    return sorted(WRITER_SET)
+
+
 def _is_under(path: Path, parent: Path) -> bool:
     try:
         path.resolve().relative_to(parent.resolve())
@@ -370,7 +420,8 @@ def _class_run(tmp_path_factory) -> dict:
     """Drive the WHOLE derived class once; N2 and N3 read the result."""
     workdir = tmp_path_factory.mktemp("sink-class")
     before = snapshot_real_sink_dir()
-    runs = [_drive_member(member, workdir) for member in sink_override_managers()]
+    members = sorted(set(sink_override_managers()) | set(writer_set_members()))
+    runs = [_drive_member(member, workdir) for member in members]
     after = snapshot_real_sink_dir()
     return {"runs": runs, "before": before, "after": after}
 
@@ -431,6 +482,59 @@ def test_n1_no_test_file_may_restore_the_sink_override_to_none():
     assert sites.get(
         "tests/unit/test_skill_sink_retention_shared_path_pins.py", []
     ), "the census found nothing — the scanner is broken (non-vacuity)"
+
+
+# ── N1b — every WRITER must install a safe sink redirect ──────────────────
+
+
+def test_n1b_every_writer_must_install_a_safe_sink_redirect():
+    """N1b — the writer set cannot write outside ``tmp_path``.
+
+    Each member of the WRITER SET must contain BOTH a ``configure_sink(...)``
+    call (installing a redirect into a scratch dir) AND a call to
+    ``restore_safe_sink_redirect()`` (the sanctioned restore — never
+    ``None``).  A NEW writer that appears without a redirect FAILS this
+    node loudly, naming the file — this is the "fails if ANY test file in
+    the class can write outside tmp_path" requirement.
+
+    The writer set is maintained explicitly (see ``WRITER_SET``) because it
+    cannot be derived reliably by static means; N1b is what makes a
+    redirect-less member of that set (or a member that drops its redirect)
+    fail rather than silently leak.
+    """
+    missing: list[str] = []
+    for rel in writer_set_members():
+        path = REPO_ROOT / rel
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:  # pragma: no cover — a vanished writer
+            missing.append(f"{rel}: file unreadable")
+            continue
+        has_configure = "configure_sink(" in text
+        has_restore = "restore_safe_sink_redirect()" in text
+        if not (has_configure and has_restore):
+            missing.append(
+                f"{rel}: "
+                + ("missing configure_sink( " if not has_configure else "")
+                + ("missing restore_safe_sink_redirect()" if not has_restore else "")
+            )
+
+    assert not missing, (
+        "a writer in the WRITER SET does not install a safe sink redirect "
+        "— it can write into the checkout's REAL data dir:\n  "
+        + "\n  ".join(missing)
+        + "\nUse the house pattern: lane_test_start / configure_sink(tmp_path) "
+        "/ restore_safe_sink_redirect() / lane_test_end "
+        "(tests/helpers/skill_sink_redirect.py)."
+    )
+
+    # Non-vacuity: the check must actually inspect the writers.  The set is
+    # non-empty and every member was checked above.
+    assert writer_set_members(), "the writer set is empty — N1b is vacuous"
+    assert len(writer_set_members()) == len(WRITER_SET), (
+        "writer_set_members() must return the full WRITER_SET"
+    )
+
 
 
 # ── N2 — the marker oracle ─────────────────────────────────────────────────
