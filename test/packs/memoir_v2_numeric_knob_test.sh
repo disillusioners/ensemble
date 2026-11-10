@@ -48,8 +48,8 @@ if [ ! -f "$TARGET" ]; then
   exit 1
 fi
 
-# The MEASURED node count at the pin (2026-11-09, this worktree).
-EXPECTED_PASSED_N=36
+# The MEASURED node count at the pin (re-measured 2026-11-10, this worktree).
+EXPECTED_PASSED_N=42
 
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-300}"
 LOG="${TMPDIR:-/tmp}/memoir_v2_numeric_knob_test.log"
