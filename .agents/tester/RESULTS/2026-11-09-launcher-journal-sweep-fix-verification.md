@@ -320,3 +320,303 @@ The prior report against `361cba6b3` is treated as a **claim set**, not ground t
 | Prior-lane corpora reused | `/tmp/ljf-perf/out/`, `/tmp/ljf-boot/`, `/tmp/ljf-boot-ab/`, `/tmp/sweepdiff/`, `/tmp/diffproof/` |
 
 **Gated-tree integrity.** `git status --porcelain` = exactly one line (` M .agents/tidier/notes.md` — a **pre-existing foreign** tidier-lane edit, untouched by every worker and by the tester) before and after every leg; `git diff --cached` empty; no untracked files; `launcher.sh` sha256 `008f88909bd401f0541323f3e4eb3e08c92c70144077d936a445d026a438254e` unchanged throughout; no worktree added; no push, merge or tag; **no live install path written or executed against**; no daemon signalled; port 8088 untouched.
+
+
+---
+---
+
+# SECOND GATE — closure verification round
+
+**Date:** 2026-11-10 (local +07) · **Verifier:** tester (test leader)
+**Gated commit:** **`7b0b7955db5834905bd01b3ba91fb32981f88f22`** · BASE `818411107` · FIRST_GATE `f02e2dfa1`
+**Branch:** `feature/launcher-journal-sweep-fix` · **Worktree:** `/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble-wt-launcher-fix`
+**Delta under test (5 commits, claimed order — verified):** `5f8528869` (B1/B2/B3 → O(n) walkers; pin LC_ALL=C; macOS `date -v` fix) → `3bcde2c44` (Q1 guard-as-bound + Q2 pre-flip guard) → `2686d47c7` (Q4 portable cooldown) → `39567b769` + `7b0b7955d` (ledger/counts).
+**This round does NOT delete the first round above.** The first-gate FAIL record is the evidence that these five commits answer; it stays.
+
+---
+
+# VERDICT: 🟢 **PASS** — the wedge is closed; the branch is releasable on this gate
+
+**Legs:** 10 workers dispatched, 10 adjudicated · **7 PASS · 2 PASS-WITH-CLASSIFIED · 1 EXPECTED-FAIL-CLOSED** · 0 timeouts · 0 re-dispatches · 0 tester source edits · 0 live-path writes · 0 retry-on-budget-exceeded.
+
+**One-line rationale:** the branch's first gate failed because three boot-path history walkers were O(n²) and the ≥96 KB size guard **routed into** them. At `7b0b7955d` all three are O(n) — measured, per-doubling ≈2× — the 220 KB boot went from **62.331 s → 1.773 s (35×)**, the 55 KB boot from **>300 s (timeout, never reached `starting:`) → 0.781 s (>384×)**, the size guard is now a **bound** (refuse-to-act, rc 2) instead of a router, and the output bytes are **byte-identical to the first-gate implementation** at every size that can be executed. The previously-failing defer path is now seconds-scale and scales linearly.
+
+| # | Gate item | Result | Evidence |
+|---|---|---|---|
+| 1 | Launcher pack | ✅ **PASS** | `launcher tests: 343 passed, 0 failed, 1 skipped` · `ALL PASS` · 96 s · skip = `8b-r2` (env-gated live-install). +39 pins **statically proven**: §14 holds exactly 39 assertion sites (14a×8, 14b×10, 14c×7, 14d×3, 14e×8, 14f×3); at `5f8528869` §14 has 0 sites and total sites moved 245→284 = **+39**, matching runtime 304→343 = **+39** |
+| 2 | Cap pack (daemon-side control) | ✅ **PASS** | `27 passed in 0.74s`; import proof clean (both paths in-worktree); `27 tests collected` separately. **Control property proven**: `daemon/mcp/init_guard.py` and the pack file were last touched at `e5545b458` — *before* the first gate — and the second-gate delta touches only `launcher.sh`, `scripts/upgrade/lib.sh`, two test files and PACKS.md ⇒ the daemon side did not move |
+| 3 | Concurrency pack | ✅ **PASS-WITH-CLASSIFIED** | raw **5F / 94P / 74S**, identical in the registered and the fully-scrubbed leg ⇒ reds are **not** coupled to the ambient prod PG env. Failing set **PARENT-IDENTICAL** by set-equality (no additions, no removals) against the first gate's 5 node ids, all `DetachedInstanceError` ≡ QUARANTINE.md row 134 |
+| 4 | Boot-sweep pack | ✅ **PASS-WITH-CLASSIFIED** | `PASS=51 FAIL=2` — exactly the claimed count, reproduced **4/4 runs** (15/22/20/18 s), deterministic. Both reds are **C5a**, parent-identical by **base-leg replay** (BASE launcher `c4f640e1…` and HEAD `09c2db10…` both → `serving_green_commit: NO`, `in_flight null: NO`, `sweep_deferred: YES`). C7 is GREEN at HEAD |
+| 5 | Journal-splice + syntax | ✅ **EXPECTED-FAIL-CLOSED** + syntax clean | `bash -n` exit 0 / empty at HEAD, at the **committed blob** and at the first-gate control; worktree ≡ committed blob (`cmp` clean, sha `09c2db10…`). FATAL F1 verbatim, **byte-identical** to the first-gate template, at preflight **stage 3**; `LIVE_PARENT=`/`LIVE_DIR=` **never assigned** on the `bash -x` trace (abort precedes mutation); zero writes under `~/agents-ensemble*` (entry count + **sorted-listing sha256** unchanged) |
+| 6 | **The four timing legs** | ✅ **PASS** | **Seconds on all four.** See §S1 |
+| 7 | Q1 guard-as-bound + `:1311` rc-mapping + Q2 pre-flip | ✅ **PASS** | Both Q1 refuse arms proven reachable (rc 2); all four refuse proofs; **no rc-1 masquerade** across 5 fixtures; Q2 decline proven with 4 proofs; below-threshold **A==B==C byte-identical** across three launchers. See §S2 |
+| 8 | Q4 portable cooldown | ✅ **PASS** | Premise correction **TRUE** (git-proven); parent leg **47P/3F** reproduced with **C7 among the reds**; 3/3 behavioural claims PASS. See §S3 |
+| 9 | Parity discipline | ✅ **PASS** | READ-path bodies **byte-identical** to the first gate; 220 KB label **intact and UNOBSERVED**; 32,862 B and 100,000 B parity **byte-identical**; D1 matrix **33/33 IDENTICAL**; determinism 3 distinct PIDs. See §S4 |
+| 10 | Byte-level audit + PACKS | ✅ **PASS** | **16/16** launcher hunks classified, **`??` set EMPTY**; file list exactly the 5 claimed files; all 5 commit claims match their numstat; PACKS honest on all four checks. See §S5 |
+
+---
+
+## §S1 — The closure evidence (item 6): the four timing legs, re-derived
+
+All legs on the **HEAD** launcher (sha `09c2db1009fd843676f44ad03f9d3290591c7f723a052da9c099c69b8e325d32`, 187,468 B), `env -u LC_ALL LANG=en_US.UTF-8`, n=3, median. The synthetic install is inert (stub binary, `PORT=19999` pinned in its `.env` before any boot, no daemon, no PG).
+
+| leg | fixture | bytes | entries | wall→`starting:` | total | exit | journal sha delta | census |
+|---|---|---|---|---|---|---|---|---|
+| **1** | `in_flight:null` | 220,000 | 1,500 | **0.146 s** (0.144–0.152) | 0.282 s | 0 | unchanged `f4c12ad7…` | sweep exits before any scanner |
+| **2** | stale flipped + seeded defer row (**HIT**) | 220,000 | 1,501 | **1.248 s** (1.172–1.875) | 2.081 s | 0 | unchanged `002274a9…` | `defer ×2` · `has_defer_reason ×2` · **`append ×0`** |
+| **3** | stale flipped, no seeded row (**append fires**) | 220,000 | 1,500 | **1.773 s** (1.672–2.116) | 2.534 s | 0 | **changed** `2895596a…`→`f1e24f24…` (+375 B = exactly 1 `sweep_deferred` row, txn left OPEN) | `defer ×2` · `has_defer_reason ×2` · **`append ×1`** · `journal_update ×1` |
+| **4** | append-firing | 55,000 | 375 | **0.781 s** (0.738–1.009) | 1.339 s | 0 | **changed** `336fdb8d…`→`d54a712d…` (+419 B = exactly 1 row) | `defer ×2` · `has_defer_reason ×2` · `append ×1` · `journal_update ×1` · `serving_probe ×2 (19999)` |
+
+**Acceptance ("seconds = PASS; minutes = FAIL"): met on all four.** No leg approached the 300 s budget.
+
+**Reachability proven by two independent methods that agree** — a `bash -x` trace (PS4 = `+ [${SECONDS}s] `) and a function-entry census over an instrumented copy. The trace shows the decisive decision values:
+
+```
+LEG 2:  + [1s] _js_size_guard_defer_decision … journal-size-guard
+       + [1s] _js_history_has_defer_reason  … journal-size-guard
+       + [1s] _js_serving_defer … journal-size-guard '…' 0   ← decision=0 ⇒ HIT
+       + [2s] _js_serving_defer … '…' 0                        (T15 hook)
+       counts: _js_history_append = 0
+
+LEG 3:  + [1s] _js_history_has_defer_reason … journal-size-guard
+       + [1s] _js_serving_defer … journal-size-guard '…' 1   ← decision=1 ⇒ MISS
+       + [1s] _js_history_append … sweep_deferred '… DEFERRED (journal-size-guard) …'
+       + [1s] _js_journal_update … history '[…]'
+       counts: _js_history_append = 1
+```
+
+The boot path sweeps **twice** per boot (main() before `starting:`, then the T15 run-loop hook after the child exits); the **write-once** rule is why `_js_history_append` fires **once**, not twice — confirmed by count and by the exact +375/+419 B journal delta.
+
+**Locale posture proven, not assumed:** launcher-side `LANG=[en_US.UTF-8] LC_ALL=[<unset>] LC_CTYPE=[UTF-8]`, but **inside the launcher's own awk seam `LC_ALL=[C]`** — the internal pin **holds** (proved with an awk `BEGIN` block prepended to the launcher's real program printing its own `ENVIRON` to `/dev/stderr`, leaving the extractor's stdout untouched).
+
+### Scaling — both boot-path shapes are O(n)
+
+**Append-firing (the append fires):**
+
+| bytes | 55,000 | 110,000 | 220,000 | 440,000 | 880,000 |
+|---|---|---|---|---|---|
+| median wall→`starting:` | 0.781 s | 0.898 s | 1.773 s | 4.329 s | 11.371 s |
+| ratio vs prior doubling | — | 1.15× * | **1.97×** | **2.44×** | **2.63×** |
+
+**Write-once-HIT (defer scan hits, append skipped):**
+
+| bytes | 55,000 | 110,000 | 220,000 | 440,000 | 880,000 |
+|---|---|---|---|---|---|
+| median wall→`starting:` | 0.631 s | 0.662 s | 1.248 s | 2.312 s | 5.218 s |
+| ratio vs prior doubling | — | 1.05× * | **1.89×** | **1.85×** | **2.26×** |
+
+\* the 55 KB→110 KB step is a **different code path**, not a scaling sample: 55,000 B is *below* the 98,304 B guard, so it takes the serving-green ladder (defer reason `observation-not-qualifying`) whereas 110/220/440/880 KB take the size-guard arm (`journal-size-guard`). The two regimes are flagged, not silently mixed. Function-level amortised confirmation: `_js_history_has_defer_reason` 0.050→0.231→0.304→0.883→1.369 s; `_js_history_has_event_for_target` 0.044→0.197→0.318→0.711→1.386 s; `_js_journal_read` 0.019→0.084→0.125→0.276→0.318 s — all ~1.5–3× per doubling.
+
+**The 880 KB → 1.76 MB cliff (4.65×) is proven environmental, not algorithmic.** Controls at the top size, no launcher involved: plain `cat` 0.0051 s @880 KB → **0.0039 s** @1.76 MB (zero growth), while the launcher's **single-pass, provably-O(n)** balance awk went 0.155 s → **3.672 s (23.7×)** — a one-pass awk cannot be 23.7× slower for 2× the data. Host state at the time: **swap 17,010 MB of 18,432 MB (92 %)**, ~58 MB free RAM of 16 GB, load 17.12. All five functions jumped at the same size together — the signature of host thrash. Re-running the largest size first reproduced 45.5 s; the 220 KB leg measured last gave 1.791 s against a 0.032 s spread versus a 2.349 s median when measured first. Anomaly `8fec9bf7-42bb-4b05-870f-41f0ad4effa4`. **Production journals are capped at 98,304 B — 18× smaller than even the 880 KB point, where the ratio is a textbook 2.26–2.63×.**
+
+### Versus the OLD implementation (first-gate numbers, cited — the OLD path was NOT re-run)
+
+| size | OLD (first gate) | HEAD (this gate) | improvement |
+|---|---|---|---|
+| 220 KB | **62.331 s** (×4.58/doubling) | **1.773 s** | **35×** |
+| 110 KB | 13.604 s | 0.898 s | 15× |
+| 55 KB | **>300 s — timeout, never reached `starting:`** | **0.781 s** | **>384×** |
+
+Against the brief's reference points (OLD 6,256 B → 3.140 s; 32,862 B → 57.143 s; 65,664 B → timeout), HEAD completes 55,000 B in 0.781 s.
+
+**9797-zero-hits assertion:** 288 log files produced this session — **0 lines contain `9797`**. The synthetic install's `.env` pinned `PORT=19999` before any boot and the launcher's own `load_env_file` exported it over the ambient `PORT=9797` (proved by the POSTURE probe `PORT=[19999]` and the LEG 4 trace `probe_port=19999`). `PORT` was **not** scrubbed. Port 19999 verified dead before booting; 19999 > 10000 per the mock-port rule; port 8088 never touched.
+
+---
+
+## §S2 — Q1 guard-as-bound, the `:1311` rc-mapping, and Q2 pre-flip (item 7)
+
+### Q1 — `_js_size_guard_defer_decision` (`launcher.sh:2162–2179`)
+
+Two refuse arms: reader-unavailable (`:2172`, `[ "$rc" -le 1 ] || return 2`) and budget-overrun (`:2175`, elapsed ≥ `_JS_AWK_TIMEOUT_S` ⇒ `return 2`). Budget knob: `_JS_AWK_TIMEOUT_S` (assigned `=60` at `:71`, read at **call** time, so a sourced override works).
+
+| probe | setup | rc | arm |
+|---|---|---|---|
+| control (no matching row) | budget 60, real clock | 1 | content verdict |
+| control (matching row) | budget 60, real clock | 0 | content verdict |
+| **P2b** | budget 1 + `date` shim advancing the epoch | **2** | **overrun arm** ✅ |
+| **P2c** | fake `awk` exiting 127 | **2** | **unavailable arm** ✅ |
+
+**Caller-level WARN (verbatim, `:2656`) — names size, guard and budget:**
+```
+WARN: journal sweep: journal size=98304B ≥ guard=98304B — defer decision budget (1s) exceeded/unavailable (awk rc=1): REFUSING to act (no journal write; the txn is left OPEN)
+```
+
+**The four refuse proofs:** journal sha256 **unchanged** (`5700958f…` → identical) · lock **released** (trace: acquire → PRESENT, release → absent) · txn **left OPEN** · **no history write** — `_js_history_append`, `_js_journal_update` and `_js_serving_defer` all **never called**, `sweep_deferred` rows = 0. **Green control:** without the arm the conservative defer *does* write (98,304 → 98,667 B, 1 `sweep_deferred` row) — so the refusal is caused by the arm, not an inert fixture. Reproduced identically on re-run.
+
+### `:1311` rc-mapping — **a torn/absent/empty journal can never masquerade as "none"**
+
+| fixture | rc | class |
+|---|---|---|
+| valid, matching DEFERRED row | 0 | content: row exists ✅ |
+| valid, no matching row | 1 | content: none ✅ |
+| valid, `history: []` | 1 | content: none ✅ |
+| **TORN** (ends `…,"history":[`) | **2** | read failure — **not 1** ✅ |
+| **ABSENT** (nonexistent path) | **2** | read failure — **not 1** ✅ |
+| **EMPTY** (0 bytes) | **2** | read failure — **not 1** ✅ |
+
+### Q2 — pre-flip guard (`:3116–3147`)
+
+**(a) ≥98,304 B ⇒ DECLINE TO ACT** (`:3144`):
+```
+WARN: journal sweep: journal is 98304B ≥ 98304B (the launcher-side size guard) — DECLINING TO ACT on the stale pre-flip promote txn (target=v0.10.6, age 7379s): no launcher rollback and no commit-and-continue — a stale flip transaction in a ≥98304B journal is left to the daemon-side closer; the txn is left OPEN
+```
+All four proofs PASS (sha256 unchanged · lock released · txn OPEN · no write). **Green control:** below the threshold the branch **acts** — history row written (`"event":"sweep"` … `cleared — never flipped`) and `"in_flight": null`.
+
+**(b) Below-threshold byte-identity vs the first gate — IDENTICAL** (clock frozen):
+
+| leg | launcher | resulting journal sha256 |
+|---|---|---|
+| A | first gate `f02e2dfa1` | `84772ed7bc86e164…` |
+| B | Q2 parent `5f8528869` | `84772ed7bc86e164…` |
+| C | HEAD `7b0b7955` | `84772ed7bc86e164…` |
+
+A == B == C, with identical log lines. **Measurement rule banked:** with an *unfrozen* clock A ≠ C by exactly one field (`age 7392s` vs `age 7393s`) — the history row embeds wall-clock age. **Freezing the clock is mandatory for any cross-launcher journal-byte comparison in this codebase.**
+
+**(c) The brief's "verbatim" disclosure string does not exist** — `grep -F` against HEAD **and the whole tree** → **NOT FOUND anywhere**. The real comment (`:3127–3132`) is semantically equivalent (decline to act / no rollback / no commit-and-continue / no txn clear / left to the daemon-side closer / txn stays OPEN) and the **code matches the comment**. Documentation-accuracy finding against the brief, not a code defect.
+
+---
+
+## §S3 — Q4 portable cooldown (item 8): premise correction TRUE, parent leg reproduced
+
+**Premise: the BSD arm pre-existed.** The parent `lib.sh` (`3bcde2c44`) and BASE `lib.sh` (`818411107`) are **byte-identical** (sha `292190a2…241c26`, 7,306 lines) and both carry `date -ju -v+${COOLDOWN_S}S` at `:2355`. `git log -S 'date -ju -v+'` shows the BSD arm introduced by `35cb9c2e6` — an **ancestor of BASE**; the `case "$(uname -s)"` dispatch and the GNU arm came later (`83f0b53a5`); the `_COOLDOWN_DATE_UNAME` hook was introduced by Q4 itself.
+
+**Refinement the gate must state plainly:** the parent already used the **signed** `-v+${COOLDOWN_S}S` — so **lib.sh never had the unsigned-offset defect**. The Q4 lib.sh delta is a refactor (`_cooldown_until_iso`), the test hook, a **negative-offset** branch, and turning the parent's *silent* `|| until=$(_now_iso)` disarm into a **stderr warning**. **The C7 green flip is driven by the test change**, not by a lib.sh repair.
+
+**Parent leg: `PASS=47 FAIL=3`** — exactly the claimed count. The reds: `C5a GREEN ⇒ the serving-green commit-close`, `C5a the txn is closed`, and **`C7 cooldown produces a future timestamp on GNU`**:
+```
+FAIL: C7 cooldown produces a future timestamp on GNU
+      expected: >now (1794306800)
+      actual:   got ''
+```
+C7's parent red is **platform-bound, not defect-bound** — the parent's C7 embedded a *replica* of the dispatch that produced the stamp correctly via the BSD arm and then converted it with the **GNU-only** `date -d "$until" +%s`, which BSD `date` has no `-d` for ⇒ empty ⇒ the `> now` comparison failed. **On a GNU host the parent's C7 would have been green.** This is a macOS-only red of the stale-pin family: re-pin, don't "fix" the product.
+
+**Delta arithmetic closes:** the pack diff adds exactly 3 assertions and flips C7 green ⇒ `47 + 3 + 1 = 51 PASS`, `3 − 1 = 2 FAIL` — matching the HEAD leg (51/2) measured independently.
+
+**Part C — all three behavioural claims PASS.** (1) BSD real-binary arm yields **exactly +300 s** (real `/bin/date`, no stub; stamp `2026-11-10T10:38:57Z`, `_iso_to_epoch` `1794307137`, delta 300 s, no fallback warning). (2) GNU stub selection works (`-u -d +300 seconds …` → `GNUSTUB-COOLDOWN`; default Darwin selection on the same stub → `-ju -v+300S -f …` → `BSDSTUB-COOLDOWN`). (3) Selection follows the override — with real `uname -s` = Darwin throughout, `_COOLDOWN_DATE_UNAME=Linux` selects the **GNU** arm, `=Darwin` the BSD arm, `=Plan9` fails closed to NOW with a stderr warning; the `*)` branch prints the **real** uname ('Darwin') while the *selection* used the override ('Plan9') — the two inputs provably distinct.
+
+---
+
+## §S4 — Parity discipline (item 9)
+
+**READ-path bodies byte-identical to the first gate:**
+
+| function | diff | verdict |
+|---|---|---|
+| `_js_journal_read` | 0 bytes | ✅ **byte-identical** (sha `e182a361…`, 3,998 B both) |
+| `_js_json_sub` | 0 bytes | ✅ **byte-identical** (sha `40b74406…`, 6,343 B both) |
+| `_js_history_append` | 0 bytes | ✅ **byte-identical** (sha `60dd957f…`, 1,780 B both) |
+| `_js_history_has_defer_reason` | 2 hunks | rc-mapping **+** the B2 rewrite — both disclosed (§S6) |
+| `_js_history_has_event_for_target` | rewritten | per-entry loop → one awk `split`/`index` pass |
+| `_js_journal_update` | rewritten | per-char scan → one bounded awk pass (vectorised, split-once) + a new scanner-unavailable refuse arm; `_js_journal_write` (tmp+`mv`) byte-identical |
+
+**The 220 KB label is intact.** The RESULTS blob is byte-identical to the `f02e2dfa1` blob (`c3f2382e…`, diff empty) and still reads *"220 KB byte-parity was NOT executed … Parity is proven **only up to 32,862 B**"*, corroborated at two further lines. **Not upgraded anywhere.**
+
+**B1 parity legs** (one isolated `/bin/bash` per leg, `LC_ALL=C`, `TZ=UTC`, `date` shim-frozen to `2026-11-10T00:00:00Z`, 18-var scrub):
+
+| size | OLD | NEW | output | verdict |
+|---|---|---|---|---|
+| 32,862 B | 24.914 s | **0.221 s** | 32,969 B, sha `46e0c887…` both | **IDENTICAL** (`diff -u` empty) |
+| 100,000 B | **229.485 s** | **0.428 s** | 100,106 B, sha `6fdf642d…` both | **IDENTICAL** (`diff -u` empty) |
+
+**220 KB OLD-vs-NEW parity remains NOT EXECUTED** — the label is unchanged and correct; this gate does not upgrade it. **Determinism:** identical sha256 across three distinct PIDs at 32,862 B and two at 100,000 B. **The developer's own D1 value-parity matrix, re-run at HEAD: 33/33 IDENTICAL, no diffs.**
+
+---
+
+## §S5 — Byte-level regression audit + PACKS (item 10)
+
+**16/16 `launcher.sh` hunks classified, `??` set EMPTY:** C1 (B1 rewrite) ×3 · C2 (B2) ×1 · C3 (B3) ×1 · C4 (Q1 guard) ×5 · C5 (Q2 pre-flip) ×1 · C6 (rc-mapping) ×1 · **C7 (locale pin) ×0** · **C8 (macOS date fix) ×0 in `launcher.sh`** · C9 (comments) ×4.
+
+**Ordering facts verified inside the hunks, not taken on faith:** Q1's decline precedes the size-guard's `_js_serving_defer` call, and Q2's decline precedes **both** `_js_history_append` (`:3149`) and `_js_journal_update in_flight` (`:3155`) — so the disclosure's *"no launcher rollback, no commit-and-continue and no txn clear"* **matches the actual code path**, not merely the comment.
+
+**`scripts/upgrade/lib.sh`: 2/2 hunks, both Q4** (new `_cooldown_until_iso`; `journal_count_rollback` de-duplication). Both C7 literal forms survive (`date -ju -v+${COOLDOWN_S}S` ×3, `date -u -d "+${COOLDOWN_S} seconds"` ×2) ⇒ the boot-sweep static pins still resolve.
+
+**File list: exactly the 5 claimed files.** Commit claims all match their numstat (`5f8528869` → launcher + test; `3bcde2c44` → launcher + §14 pins; `2686d47c7` → lib.sh + boot-sweep test; `39567b769`/`7b0b7955d` → PACKS.md only). **5 commits, claimed order, zero merges.**
+
+**PACKS.md — all four checks pass.** (a) `test_journal_splice` (`:4610`) carries the **honest macOS cell** — *"ENVIRONMENT-GATED on macOS — NOT '1 portability red'"*, quoting the F1 abort, marking the later sections **UNVERIFIED here**, and pointing at `6ca4043d` with the fix direction, explicitly *"NOT a product red"*. (b) The launcher standing row (`:4517`) = **HEAD 343/0/1S** with its carrying commits cited; the arithmetic closes independently (304 + 39 §14 assertions = 343). (c) Stale tokens: **`HEAD 50/0` = 0**, `HEAD 296/0` = 0, `HEAD 304/0` = 0; the two surviving substrings are correctly-labelled historicals, not standing counts. (d) All four gate packs registered, all paths resolve on disk, no row points at a missing script.
+
+**The "17 vs 16" commit-count discrepancy is resolved:** `rev-list --count 818411107..7b0b7955d` = **16** (exclusive); the brief's "17" is a **self-inclusive** count, and `818411107^..` = 19 because the base is a merge. **Boundary convention, not a contradiction.**
+
+---
+
+## §S6 — Corrections to the gate brief (my own errors, on the record)
+
+Seven places where the second-gate brief was wrong or imprecise, each caught by a worker and corrected against evidence:
+
+1. **The fixture premise was wrong.** "`in_flight` null/absent ⇒ forces the deferred path" is false — null/absent *early-exits* before any history read. The reaching shape is a stale **flipped** promote txn.
+2. **The brief's claimed commit count** (17) is self-inclusive; the exclusive count is 16.
+3. **The Q1 probe method was wrong.** "Set the budget to 1" does **not** exercise the overrun arm — `date +%s` has whole-second granularity, so the arm fires only on a second-boundary race (rc stayed 1 in 8/8 runs). It requires a clock shim.
+4. **The Q2 "verbatim" disclosure string does not exist** in HEAD or anywhere in the tree; the real comment is semantically equivalent but differently worded.
+5. **The "rc-mapping only" expectation understated the brief's own commit range** — the defer_reason delta legitimately contains the B2 rewrite (commit `5f8528869`, *"O(n) journal update + history scanners"*, plural), which commit attribution proves.
+6. **The 100 KB OLD-leg ceiling was self-contradictory** in my brief (a blanket ≤32,862 B ceiling vs an explicit one-leg instruction at 100 KB). The specific instruction governed; the leg completed in 229.5 s with rc=0 and **corrected my expectation** — the write-path OLD does not wedge until ~220 KB.
+7. **The "in_flight null ⇒ path forced" and the timing-leg locale** — the four legs must be measured under an explicit UTF-8 env (`env -u LC_ALL LANG=en_US.UTF-8`) to be comparable with the first gate's UTF-8 numbers.
+
+---
+
+## §S7 — Pre-existing reds, classified (none is branch-caused)
+
+| red | where | classification |
+|---|---|---|
+| 5 nodes in `tests/test_instance_metadata_atomic.py` | concurrency pack | **QUARANTINE row 134**; file byte-identical base↔HEAD; `daemon.mcp.*` not imported by the failure path ⇒ 0 branch-caused |
+| `C5a GREEN ⇒ the serving-green commit-close` · `C5a the txn is closed` | boot-sweep pack | **pre-existing, parent-identical by base-leg replay.** Root cause: the fixture helper speaks HTTP/1.1 keep-alive with a **non-newline-terminated** body; bash **3.2.57** discards the partial buffer on `read -r -t` timeout ⇒ empty body ⇒ version absent ⇒ DEFER. A 4-cell matrix pins it: keep-alive + no newline ❌ · keep-alive + newline ❌ (readyz-absent) · keep-alive + both newline-terminated ✅ · HTTP/1.0 close-after-response ✅. C5b passes because a non-200 `/livez` short-circuits before the body read |
+| `C7 cooldown … on GNU` (parent leg only) | boot-sweep pack | **platform-bound, macOS-only** — the parent's C7 converted a BSD-produced stamp with GNU-only `date -d`. **Green at HEAD** |
+| `8b-c2 slow command: rc 124` | launcher pack | **BASE-only-flaky (1/3)**, timing-sensitive 1-second deadline observed at 2 s; not a lane regression and not a lane fix |
+| `8b-r2` skip | launcher pack | env-gated live-install cell; `ENS_TEST_LIVE_LAUNCHER` deliberately unset |
+
+---
+
+## §S8 — Findings and follow-ups (none blocks the release GO)
+
+1. 🟡 **The serving-green arm may be permanently unreachable on bash-3.2 hosts.** A real FastAPI/uvicorn `/livez` also answers keep-alive with an **unterminated** JSON body. If that holds, the launcher's serving-green arm would appear permanently unable to reach GREEN — a **product** portability defect, not just the fixture's. **Not verified here** (no live daemon; fenced) and filed as anomaly `4b67edb4-0d43-4c24-a195-e4ef9556001a`. **A live re-smoke on a bash-3.2 host is the way to settle it.**
+2. 🟡 **The Q1 refusal WARN conflates two causes** — it quotes `awk rc=1` even in the *overrun* case, where the reader actually succeeded with a content verdict (rc 1 = "no matching row"). An operator can misread it as an extractor failure. Non-blocking; the unavailable arm genuinely produces rc 2.
+3. 🟡 **`5f8528869`'s subject over-claims.** C7 has **zero hunks**: `_js_awk_pass` already carried `LC_ALL=C exec awk` at `:396`/`:398` **identically at the first gate**, so every new scan is locale-pinned *by construction* — the subject describes **reliance on that seam, not a new pin**. There is also **no new locale-invariance pin** for the two rewritten history readers (§13d's locale section covers `_js_journal_read` only and pre-dates this range). **Release-note line**, same treatment as the Q4 subject (§S3).
+4. 🟡 **`2686d47c7`'s subject over-claims** — it names "the launcher `_ts_off` fix — its D4 defect", which describes the *launcher's* bug class; lib.sh never had the unsigned-offset defect (§S3). Same treatment.
+5. 🟢 **PACKS.md's boot-sweep rows overstate the A/B.** Rows `:4464`/`:4518` pair "BASE 38/0 ≡ HEAD 51/2", but the BASE pack had only 38 cells (pre-C5 re-shape), so that pairing is **not** an A/B on the re-shaped C5a cells and does not establish "C5a red at parent". The base-leg replay does. **Documentation finding; PACKS.md not edited** (read-only fence).
+6. 🟢 **Dead `local`s left by the rewrites** — `launcher.sh:1218` (`rest entry t_space t_end r_space r_end`) and `:1310` (`rest entry t_eq r_eq marker`), unused after the awk conversion. Cosmetic; they sit outside every diff hunk, which is why they produced no `??`. A shellcheck pass would flag them.
+7. 🟢 **The POK store has hit its hard 64-active cap** — three legs this round were refused (`pok_active_cap`). One worker correctly declined to archive `deploy-01-make-install-live-dir-hazard` (a live safety fact) to make room for a parity fact, and instead superseded the fact that was *actually wrong* (`launcher-02-defer-reason-quadratic`, which claimed B2/B3 are still O(n²) at head — false since `5f8528869`). **Curator/leader action required**; the global-64 and `launcher`-family-3/3 pressure should be routed accordingly.
+8. 🟢 **A `MOCK_TESTS.md` entry for the GNU-`date` stub was not written** — the gate's write fence confined the worker to `/tmp`; the spec is captured in the worker's report instead. **Owner action.**
+9. 🟢 **A QUARANTINE row for `8b-c2`** was deliberately **not** added — the brief restricts the commit to this one path, and editing the ledger would leave the gated tree dirty. **Ledger-owner action.** (Recorded as POK `gate-02-launcher-8b-c2-flaky`.)
+10. 🟢 **Host hygiene:** the 5-variable scrub used in this gate is **narrower than the repo's canonical 18-name scrub** — on this host `PLANE_MCP_WORKSPACE_SLUG` and `PLANE_BASE_URL` remain set. Presence/length were checked only; **no secret values were echoed** in this round (the first gate's credential leak was made an explicit firing offence in every brief). Future gate runs on this host should use `scripts/run_tests_scrubbed.sh` or add both Plane vars.
+11. 🟢 **Stale harness trap:** the first gate's scratch dir `/tmp/g7-item7a/launcher.sh` holds the **OLD** implementation (172,946 B, sha `008f8890…`). Any future leg reusing that directory must re-copy HEAD's launcher (187,468 B, sha `09c2db10…`).
+12. 🟢 **~80–160 orphaned `sleep 60`** from the `_js_awk_bounded` watchdog (0 `fork:` errors, no verdict impact, self-expiring in 60 s, not killed per fence) — the same trap seen in the first gate.
+
+---
+
+## §S9 — ensure.md validation (second gate)
+
+| Requirement | Tier | Status | Evidence |
+|---|---|---|---|
+| No regressions in changed packs | Core / Critical | ✅ **PASS** | launcher 343/0/1S · cap 27/0 · boot-sweep 51/2 (2 pre-existing) · concurrency 5F ≡ row 134 · NET-NEW ∅ unchanged from the first gate |
+| Deadlock / concurrency integrity | Core / Critical | ✅ **PASS-WITH-CLASSIFIED** | §S7 |
+| No sync DB calls on the asyncio event loop | Core / Critical | ✅ **PASS** | covered by the concurrency pack |
+| `dev.sh` includes `--timeout-graceful-shutdown 10` | Core / Critical | ✅ **PASS** | `dev.sh:155` live uvicorn invocation carries the literal with value 10 (unchanged by this delta) |
+| All callers of converted async functions properly await | Core / Important | ✅ **PASS** | AST-classified: **9 call sites, 9 awaited, 0 not-awaited**. **Out of this branch's change set** (`git diff 818411107..7b0b7955d` has zero hits for the three symbols) |
+| No dead code from the fix | Core / Nice-to-have | ✅ **PASS** | removal proven BASE-vs-HEAD; `_js_journal_read` **13** production call sites, `_js_json_sub` **12** ⇒ neither is dead code |
+
+**Release Gate not run** — blast radius is not big/critical/architecture per ensure.md § Gate Tiers. **No ensure.md contradiction encountered**; every validation was pack-mapped or a static check, scoped, dual-layer timedout, no bare `pytest`, no `-x`. **`ensure.md` itself was not modified** (user-owned, read-only).
+
+---
+
+## §S10 — Evidence index (second gate)
+
+| Artefact | Location |
+|---|---|
+| Launcher pack log | `/tmp/g2-launcher/pack.log` |
+| Cap pack log + import proof | `/tmp/g2-cap/` |
+| Concurrency pack, both env legs | `/tmp/g2-conc/` |
+| Boot-sweep pack + base-leg replay + 4-cell matrix | `/tmp/g2-bootsweep/` (`head.log`, `EVIDENCE.md`, `rep1..3`) |
+| Splice trace + syntax A/B | `/tmp/g2-splice/` |
+| Timing legs, fixtures, traces, scaling tables | `/tmp/g2-timing/` (56 MB, 468 files) |
+| Q1/Q2 probes, clock + awk shims, fixtures | `/tmp/g2-guards/` (`probes/p1..p6`, `shim/`, `shimawk/`) |
+| Q4 parent leg, lib.sh extractions, date stub | `/tmp/g2-q4/` |
+| Parity legs, D1 matrix, verdict artifact | `/tmp/g2-parity/` (`GATE2-ITEM9-PARITY-VERDICT.md`, `legs.out`, `d1_matrix.out`) |
+| Diff audit evidence | `/tmp/g2-audit/` (`launcher_U0.diff`, `lib_U0.diff`, `test_launcher.diff`, `test_boot.diff`) |
+
+**Gated-tree integrity.** `git status --porcelain` = exactly one line (` M .agents/tidier/notes.md` — the **pre-existing foreign** tidier-lane edit, untouched by every worker and by the tester) before and after every leg; `git diff --cached` empty; no untracked files; `launcher.sh` sha256 `09c2db10…` unchanged throughout; worktree ≡ committed blob; no worktree added; no push, merge or tag; **no live install path written or executed against**; no daemon signalled; port 8088 untouched; **0 hits on port 9797 from any probe**.
+
+---
+
+## §S11 — Closure statement
+
+**The first gate's FAIL is answered, not withdrawn.** Three O(n²) boot-path walkers (`_js_journal_update`, `_js_history_has_defer_reason`, `_js_history_has_event_for_target`) are now O(n) at `7b0b7955d`, measured at ≈2× per doubling across 55 KB → 880 KB in both boot-path shapes; the ≥96 KB size guard is now a **bound** (refuse-to-act, rc 2, WARN naming size + guard + budget, journal byte-unchanged, lock released, txn left OPEN) rather than a router into the quadratic; the pre-flip branch now declines to act above the guard and is **byte-identical below it**; a torn/absent/empty journal can no longer masquerade as "no defer reason"; and the journal output is **byte-identical** to the first-gate implementation at every size that can be executed.
+
+**Release posture: 🟢 GO on this gate.** The residuals above (§S8) are non-blocking: the serving-green bash-3.2 hypothesis needs a live re-smoke to settle; two commit subjects over-claim and want a release-note line; one PACKS.md pairing is overstated; the POK store needs curation; and three owner-level housekeeping items (QUARANTINE row, MOCK_TESTS entry, ledger registration) are queued. **None of them is a regression, and none is on the boot wedge.**
