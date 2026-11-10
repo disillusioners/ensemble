@@ -71,10 +71,32 @@ def _lane_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_counters():
+def _observability_sandbox(tmp_path):
+    """Point the sink at a scratch dir + reset the counters per test.
+
+    THE LEAK THIS CLOSES (E1/D lane's L7 finding, 2026-11-10).  Without a
+    sink destination, EVERY test in this file that drives the production
+    refusal seam wrote its ``skill-capture-*.jsonl`` record into the
+    CHECKOUT's ``data/skill-capture-observability/`` tree — ~1,260 B per
+    run, invisible to ``git status`` (the tree is gitignored), the residue
+    gate and the staging gate.  The fix is the sanctioned API
+    (``observability.configure_sink`` — the E1/D lane's L7 pattern); the
+    data-dir precedence chain is NOT re-implemented here.
+
+    The sink override wins over the environment
+    (``resolve_sink_dir`` consults ``_SINK_DIR_OVERRIDE`` first), so the
+    write lands under ``tmp_path`` even in the test that sets
+    ``ENSEMBLE_DATA_DIR`` itself.
+    """
+    observability.configure_sink(tmp_path)
     observability.reset_counters()
-    yield
-    observability.reset_counters()
+    observability.set_anomaly_reporter(None)
+    try:
+        yield tmp_path
+    finally:
+        observability.configure_sink(None)
+        observability.reset_counters()
+        observability.set_anomaly_reporter(None)
 
 
 async def _drive(service, *, task_message: str = "a prompt"):
