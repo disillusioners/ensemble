@@ -116,6 +116,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from daemon.services.anomaly_vocab import (
+    ANOMALY_CATEGORIES_FALLBACK as _SHARED_ANOMALY_CATEGORIES_FALLBACK,
+    RESERVED_FALLBACK as _SHARED_RESERVED_FALLBACK,
+    canonicalize_category,
+    resolve_anomaly_categories,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -136,7 +143,7 @@ DAEMON_REPORTER_INSTANCE_ID = "daemon:skill-capture-observability"
 #: event. ``other`` is the reserved fold target.
 CATEGORY_LANE_DEVIATION = "tool-failure"
 CATEGORY_BURST_CAP = "queue-scheduling"
-CATEGORY_FALLBACK = "other"
+CATEGORY_FALLBACK = _SHARED_RESERVED_FALLBACK
 
 #: Directory (under the daemon data dir) holding the sink files.
 SINK_DIR_NAME = "skill-capture-observability"
@@ -563,20 +570,14 @@ def resolve_anomaly_service(*holders: Any) -> Any | None:
 #: The frozen fallback vocabulary (used when the metrics package cannot
 #: be imported). Mirrors ``ANOMALY_CATEGORIES`` at
 #: ``daemon/services/metrics_query/wiring/vocab.py``.
+#:
+#: M9 — the CATEGORY vocabulary + its canonicaliser now live ONCE, in
+#: ``daemon/services/anomaly_vocab.py`` (an IMPORT-PURE leaf). The
+#: fallback tuple below is a RE-EXPORT of that module's tuple, so the
+#: two copies can never drift; the local name is kept because the
+#: M-1b parity pins import it from HERE.
 _ANOMALY_CATEGORIES_FALLBACK: tuple[str, ...] = (
-    "tool-failure",
-    "performance",
-    "resource-exhaustion",
-    "loop-stall",
-    "wedge-suspected",
-    "data-corruption",
-    "auth-permission",
-    "external-dependency",
-    "mcp-failure",
-    "llm-provider",
-    "queue-scheduling",
-    "environment-config",
-    "other",
+    _SHARED_ANOMALY_CATEGORIES_FALLBACK
 )
 
 
@@ -592,13 +593,7 @@ def _resolve_anomaly_categories() -> tuple[str, ...]:
         The closed vocabulary tuple (the canonical list when the metrics
         package is importable, the frozen fallback otherwise).
     """
-    try:  # the closed vocabulary (imported at the point of use)
-        from daemon.services.metrics_query.wiring.vocab import (
-            ANOMALY_CATEGORIES,
-        )
-        return tuple(ANOMALY_CATEGORIES)
-    except Exception:  # pragma: no cover — import guard
-        return _ANOMALY_CATEGORIES_FALLBACK
+    return resolve_anomaly_categories()
 
 
 def __getattr__(name: str) -> Any:
@@ -623,14 +618,16 @@ def _canonical_category(category: str) -> str:
     reserved fold target. An unknown category is folded — never
     invented.
 
-    The vocabulary is resolved AT THIS POINT (the only place it is
-    used) — see :func:`_resolve_anomaly_categories` for why the import
-    is not made at module level.
+    M9 — this delegates to the ONE canonicaliser
+    (:func:`daemon.services.anomaly_vocab.canonicalize_category`), which
+    the anomaly service also uses. The lane's own copy did NEITHER
+    lowercase NOR apply the synonym map, so the same input string
+    canonicalised two ways ("PERF" → "performance" in the anomaly
+    service, → "other" here). The vocabulary is still resolved AT THE
+    POINT OF USE — see :func:`_resolve_anomaly_categories` for why the
+    import is not made at module level.
     """
-    categories = _resolve_anomaly_categories()
-    if category in categories:
-        return category
-    return CATEGORY_FALLBACK
+    return canonicalize_category(category)[0]
 
 
 async def emit_lane_anomaly(

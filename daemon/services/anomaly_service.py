@@ -141,6 +141,14 @@ from daemon.repositories.anomaly.repository import (
     SEVERITY_RANK,
     cluster_key_hash,
 )
+from daemon.services.anomaly_vocab import (
+    ANOMALY_CATEGORIES_FALLBACK as _SHARED_ANOMALY_CATEGORIES_FALLBACK,
+    CATEGORY_SYNONYMS as _SHARED_CATEGORY_SYNONYMS,
+    RESERVED_FALLBACK as _SHARED_RESERVED_FALLBACK,
+    canonicalize_category,
+    resolve_anomaly_categories,
+    resolve_reserved,
+)
 from daemon.services.db_offload import offload as _db_offload
 from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY
 from daemon.services.secret_persistence_scrub import (
@@ -167,27 +175,21 @@ logger = logging.getLogger(__name__)
 #: The frozen fallback vocabularies (used when the metrics package cannot
 #: be imported). Mirror ``ANOMALY_CATEGORIES``, ``ANOMALY_SEVERITIES``,
 #: and ``RESERVED`` at ``daemon/services/metrics_query/wiring/vocab.py``.
+#:
+#: M9 — the CATEGORY vocabulary + its canonicaliser now live ONCE, in
+#: ``daemon/services/anomaly_vocab.py`` (an IMPORT-PURE leaf). The
+#: fallback tuple below is a RE-EXPORT of that module's tuple, so the
+#: two copies can never drift; the local name is kept because the
+#: M-1b parity pins import it from HERE.
 _ANOMALY_CATEGORIES_FALLBACK: tuple[str, ...] = (
-    "tool-failure",
-    "performance",
-    "resource-exhaustion",
-    "loop-stall",
-    "wedge-suspected",
-    "data-corruption",
-    "auth-permission",
-    "external-dependency",
-    "mcp-failure",
-    "llm-provider",
-    "queue-scheduling",
-    "environment-config",
-    "other",
+    _SHARED_ANOMALY_CATEGORIES_FALLBACK
 )
 _ANOMALY_SEVERITIES_FALLBACK: tuple[str, ...] = (
     "minor",
     "major",
     "critical",
 )
-_RESERVED_FALLBACK: str = "other"
+_RESERVED_FALLBACK: str = _SHARED_RESERVED_FALLBACK
 
 
 def _resolve_anomaly_categories() -> tuple[str, ...]:
@@ -202,13 +204,7 @@ def _resolve_anomaly_categories() -> tuple[str, ...]:
         The closed vocabulary tuple (the canonical list when the metrics
         package is importable, the frozen fallback otherwise).
     """
-    try:  # the closed vocabulary (imported at the point of use)
-        from daemon.services.metrics_query.wiring.vocab import (
-            ANOMALY_CATEGORIES,
-        )
-        return tuple(ANOMALY_CATEGORIES)
-    except Exception:  # pragma: no cover — import guard
-        return _ANOMALY_CATEGORIES_FALLBACK
+    return resolve_anomaly_categories()
 
 
 def _resolve_anomaly_severities() -> tuple[str, ...]:
@@ -224,13 +220,7 @@ def _resolve_anomaly_severities() -> tuple[str, ...]:
 
 def _resolve_reserved() -> str:
     """Resolve the reserved fold target (at the point of use)."""
-    try:  # the closed vocabulary (imported at the point of use)
-        from daemon.services.metrics_query.wiring.vocab import (
-            RESERVED,
-        )
-        return str(RESERVED)
-    except Exception:  # pragma: no cover — import guard
-        return _RESERVED_FALLBACK
+    return resolve_reserved()
 
 
 def __getattr__(name: str) -> Any:
@@ -294,49 +284,11 @@ _ERROR_MARKERS: tuple[str, ...] = ("ERROR:", "REFUSED —")
 #: The synonym map for the write-time category fold (R1). The raw
 #: input is lowercased and stripped; an EXACT canonical match wins;
 #: otherwise a synonym folds; otherwise the reserved ``other``.
-CATEGORY_SYNONYMS: dict[str, str] = {
-    "tool failure": "tool-failure",
-    "tool-failures": "tool-failure",
-    "tool-error": "tool-failure",
-    "tool_error": "tool-failure",
-    "toolerror": "tool-failure",
-    "perf": "performance",
-    "slow": "performance",
-    "latency": "performance",
-    "resource-exhausted": "resource-exhaustion",
-    "resource exhaustion": "resource-exhaustion",
-    "oom": "resource-exhaustion",
-    "out-of-memory": "resource-exhaustion",
-    "loop-stall": "loop-stall",
-    "loop": "loop-stall",
-    "stuck-loop": "loop-stall",
-    "wedge": "wedge-suspected",
-    "wedge-suspect": "wedge-suspected",
-    "wedged": "wedge-suspected",
-    "corruption": "data-corruption",
-    "data-corrupt": "data-corruption",
-    "corrupt-data": "data-corruption",
-    "auth": "auth-permission",
-    "permission": "auth-permission",
-    "auth-permissions": "auth-permission",
-    "unauthorized": "auth-permission",
-    "external": "external-dependency",
-    "external-dependencies": "external-dependency",
-    "dependency-failure": "external-dependency",
-    "mcp": "mcp-failure",
-    "mcp-failures": "mcp-failure",
-    "mcp-error": "mcp-failure",
-    "llm": "llm-provider",
-    "llm-failures": "llm-provider",
-    "provider-error": "llm-provider",
-    "queue": "queue-scheduling",
-    "scheduling": "queue-scheduling",
-    "queue-scheduling-delay": "queue-scheduling",
-    "config": "environment-config",
-    "environment": "environment-config",
-    "misconfiguration": "environment-config",
-    "env-config": "environment-config",
-}
+#:
+#: M9 — the map now lives ONCE, in ``daemon/services/anomaly_vocab.py``;
+#: this is a RE-EXPORT (the name stays in this module's ``__all__`` for
+#: its external consumers) so the two copies cannot drift.
+CATEGORY_SYNONYMS: dict[str, str] = _SHARED_CATEGORY_SYNONYMS
 
 
 class AnomalyInputError(ValueError):
@@ -754,18 +706,7 @@ class AnomalyService:
             ``(canonical, fold_notice)`` — the notice is ``None`` when
             the input was already canonical.
         """
-        text = (raw or "").strip().lower()
-        reserved = _resolve_reserved()
-        canonical = reserved
-        if text:
-            categories = _resolve_anomaly_categories()
-            if text in categories:
-                canonical = text
-            else:
-                canonical = CATEGORY_SYNONYMS.get(text, reserved)
-        if canonical == text:
-            return canonical, None
-        return canonical, f'category "{text}" folded to "{canonical}"'
+        return canonicalize_category(raw)
 
     def normalize_severity(self, raw: object) -> str:
         """Normalize the severity tier (R3).

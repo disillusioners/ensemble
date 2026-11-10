@@ -231,3 +231,117 @@ def test_anomaly_service_deferred_vocabulary_matches_canonical():
         "the anomaly_service deferred or fallback vocabulary has drifted from "
         "the canonical vocabulary at daemon/services/metrics_query/wiring/vocab.py"
     )
+
+
+# ── Pin 5: M9 — the two canonicalisers agree on BEHAVIOUR ─────────────────
+
+
+def test_m9_both_entry_points_canonicalise_identically():
+    """The same input string must canonicalise the SAME way through BOTH
+    entry points.
+
+    The lane's own canonicaliser (``skill_capture_observability``) did
+    NEITHER lowercase NOR apply ``CATEGORY_SYNONYMS``, while the
+    canonical one (``AnomalyService.normalize_category``) did both — so
+    the SAME string canonicalised two ways ("PERF" -> "performance" in
+    the anomaly service, -> "other" in the observability lane).
+
+    Named mutation: make the observability canonicaliser skip the
+    lowercase -> this pin goes RED.
+    """
+    output = _run_in_fresh_interpreter(
+        "from daemon.services.anomaly_service import AnomalyService\n"
+        "from daemon.services.skill_capture_observability import (\n"
+        "    _canonical_category,\n"
+        ")\n"
+        "service = AnomalyService.__new__(AnomalyService)\n"
+        "samples = [\n"
+        "    'tool-failure', 'TOOL-FAILURE', ' Tool Failure ', 'perf',\n"
+        "    'PERF', 'oom', 'OOM', 'unknown-thing', '', 'Wedge', 'queue',\n"
+        "]\n"
+        "ok = True\n"
+        "for raw in samples:\n"
+        "    a = service.normalize_category(raw)[0]\n"
+        "    b = _canonical_category(raw)\n"
+        "    if a != b:\n"
+        "        ok = False\n"
+        "print(ok)\n"
+    )
+
+    assert output.splitlines()[-1] == "True", (
+        "the two anomaly-canonicalisation entry points DISAGREE — the same "
+        "input string canonicalises two ways. The vocabulary + the "
+        "canonicaliser must live ONCE (daemon/services/anomaly_vocab.py) "
+        "and both services must delegate to it."
+    )
+
+
+def test_m9_the_canonicalisation_behaviour_is_the_canonical_one():
+    """The canonicaliser must lowercase AND apply the synonym map.
+
+    The agreement pin above catches DIVERGENCE between the two entry
+    points; this one catches a SHARED defect (both entry points
+    delegating to a canonicaliser that stopped folding the synonyms).
+
+    Named mutation: drop the ``CATEGORY_SYNONYMS.get(...)`` fold from
+    ``daemon/services/anomaly_vocab.py`` → this pin goes RED.
+    """
+    output = _run_in_fresh_interpreter(
+        "from daemon.services.anomaly_service import AnomalyService\n"
+        "from daemon.services.skill_capture_observability import (\n"
+        "    _canonical_category,\n"
+        ")\n"
+        "service = AnomalyService.__new__(AnomalyService)\n"
+        "expected = {\n"
+        "    'tool-failure': 'tool-failure',\n"
+        "    'TOOL-FAILURE': 'tool-failure',\n"
+        "    ' Tool Failure ': 'tool-failure',\n"
+        "    'perf': 'performance',\n"
+        "    'PERF': 'performance',\n"
+        "    'oom': 'resource-exhaustion',\n"
+        "    'OOM': 'resource-exhaustion',\n"
+        "    'unknown-thing': 'other',\n"
+        "    '': 'other',\n"
+        "    'Wedge': 'wedge-suspected',\n"
+        "    'queue': 'queue-scheduling',\n"
+        "}\n"
+        "ok = True\n"
+        "for raw, want in expected.items():\n"
+        "    if service.normalize_category(raw)[0] != want:\n"
+        "        ok = False\n"
+        "    if _canonical_category(raw) != want:\n"
+        "        ok = False\n"
+        "print(ok)\n"
+    )
+
+    assert output.splitlines()[-1] == "True", (
+        "the anomaly canonicalisation BEHAVIOUR drifted — the canonicaliser "
+        "must lowercase + strip, match the closed vocabulary, and then "
+        "apply CATEGORY_SYNONYMS (e.g. 'PERF' -> 'performance', "
+        "'Wedge' -> 'wedge-suspected'); an unknown category folds to the "
+        "reserved 'other'"
+    )
+
+
+def test_m9_the_shared_vocabulary_module_is_import_pure():
+    """The shared vocabulary module must register NO metric families.
+
+    Importing ANY submodule of the metrics wiring PACKAGE executes its
+    ``__init__``, which registers the phase's metric families at import
+    time (an import-time side effect that diverged the committed
+    exposition artifact).
+
+    Named mutation: import the wiring vocabulary at module level in
+    ``daemon/services/anomaly_vocab.py`` -> this pin goes RED.
+    """
+    output = _run_in_fresh_interpreter(
+        "import sys\n"
+        "import daemon.services.anomaly_vocab\n"
+        "print('daemon.services.metrics_query.wiring' in sys.modules)\n"
+    )
+
+    assert output.splitlines()[-1] == "False", (
+        "importing daemon.services.anomaly_vocab pulled in the metrics "
+        "wiring package — its __init__ registers metric families at "
+        "import time, which diverges the committed exposition artifact"
+    )
