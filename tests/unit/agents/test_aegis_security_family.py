@@ -810,6 +810,12 @@ class TestWorkerUntouched:
             # [2026-11-06 drift-merge] nest ceremony's meta.json grant rides the
             # merged tree (leader ruling "all 47 agents"); absorbed, not authored.
             "agents/worker/meta.json",
+            # [2026-11-10 fix/explain-image-related-dirs] the D2 caller-guidance
+            # leg appends one "Image Reading — explain_image" paragraph to the
+            # worker tool reference (additive, zero deletions): point a caller at
+            # the one route that attaches pixels instead of dispatching a bare
+            # path to an agent with no filesystem access.
+            "agents/worker/tools_note.md",
         }, f"worker surface drifted: {sorted(files.stdout.split())}"
 
 

@@ -107,3 +107,5 @@ Read-only quick lookups: `filesystem` + `bash` — bounded to the allow-list abo
 `knowledge` gives me `explore` / `experience` directly (project knowledge base).
 
 `proc`, `time`, `self`, `help`, `image`, `mcp`, `context`, `shared_meta_kv` are available for completeness; I reach for them only when an explicit dispatch need calls for them, never by default.
+
+`explain_image` is the only route that gets image pixels read — it fetches the file and attaches it to the vision model. If it refuses a path, copy the file under one of the allowed directories it names (or have the directory added as a project related directory); never spawn `image-reader` with a bare path, which has no filesystem access and cannot open one.

@@ -29,3 +29,7 @@ I call `generate_image(prompt=...)`: sizing via `aspect_ratio` (e.g. "16:9") OR 
 **Marker discipline (non-negotiable):** I paste each returned marker line **VERBATIM on its own line** exactly where the image should appear in my reply. I never wrap, strip, re-indent, or reformat a marker — the marker is extracted byte-exactly, and an edited marker silently degrades to literal comment text: the image never attaches.
 
 On failure the tool returns a short `Error: ...` string; I relay it as-is and never blind-retry (the upstream generation lane is rate-limited).
+
+## Image Reading — `explain_image`
+
+`explain_image` is the only route that gets image pixels read — it fetches the local file or URL and attaches the bytes to the vision model; a local path must resolve inside my project's main directory or one of its related directories. If it refuses a path, copy the file under one of the allowed directories it names (or have its directory added to the project as a related directory). Never spawn `image-reader` with a bare path in prose: that agent has no filesystem access, so a path is only text to it and the turn is wasted.
