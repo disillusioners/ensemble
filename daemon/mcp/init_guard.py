@@ -149,6 +149,19 @@ STATE_QUARANTINED = "quarantined"
 #: The journal event name — one line per STATE TRANSITION.
 JOURNAL_EVENT = "mcp_server_state"
 
+#: Bound the ``mcp_server_state`` history class (launcher-journal-sweep-fix
+#: R3). The writer appends ONE entry per state transition and nothing
+#: anywhere capped ``history`` growth — on the affected Mac this class was
+#: 88 % of 1,461 journal entries, and the launcher's per-boot journal read
+#: was O(n²) in the byte count (the boot wedge this branch fixes). Policy:
+#: keep the LAST N entries PER SERVER (per-server, so one flappy server
+#: cannot evict another's history), applied as PURE ENTRY REMOVAL after
+#: each append — every non-MCP entry and every top-level field passes
+#: through verbatim, and the result stays valid JSON the OLD launcher
+#: generation can also validate. Entries exist only per TRANSITION, so
+#: N=20 is generous headroom while bounding the class at N × servers.
+JOURNAL_HISTORY_MAX_PER_SERVER: int = 20
+
 
 class McpServerQuarantined(RuntimeError):
     """Raised when an init is refused because the server is quarantined.
@@ -543,6 +556,84 @@ def _resolve_install_dir() -> Any:
         return None
 
 
+def _mcp_entry_server_key(entry: dict[str, Any]) -> str:
+    """The per-server grouping key of ONE ``mcp_server_state`` history row.
+
+    The writer's detail shape is ``server=<name> state=<state> <detail>``
+    (see ``_write_journal``); the server token before `` state=`` groups
+    the trim. Rows that do not match the shape (hand-edited journals,
+    future writer drift) group into ONE shared bucket so the cap still
+    bounds them — grouping-only, the rows themselves are never rewritten.
+    """
+    detail = entry.get("detail")
+    if not isinstance(detail, str) or not detail.startswith("server="):
+        return "\x00unshaped"
+    rest = detail[len("server="):]
+    pos = rest.find(" state=")
+    if pos <= 0:
+        return "\x00unshaped"
+    return rest[:pos]
+
+
+def _trim_mcp_journal_history(_uj: Any, install_dir: Any) -> bool:
+    """Bound the ``mcp_server_state`` history class — keep-last-N-per-server.
+
+    PURE ENTRY REMOVAL: walks ``history`` newest-last and drops this
+    event's rows beyond the last ``JOURNAL_HISTORY_MAX_PER_SERVER`` per
+    server; every non-MCP entry and every top-level field is carried
+    through :func:`journal_write` verbatim (the doc round-trips
+    structurally — ADR-034), so the output stays valid JSON the OLD
+    launcher generation can also validate. Returns True iff a write
+    happened. Best-effort by contract: ANY failure (torn journal,
+    unreadable, write error) is swallowed WITH a WARNING — the cap is
+    hygiene, never a reason to break the transition write that already
+    succeeded. The WARNING names the phase (read/write) and carries the
+    exception class + reason, so a torn journal reads as the DAEMON's
+    view (JSON parse — ``JournalTorn``), distinguishable from the
+    launcher's balance-check view of the same document.
+    """
+    phase = "read"
+    try:
+        data = _uj.journal_read(install_dir)
+        history = data.get("history")
+        if not isinstance(history, list):
+            return False
+        # Reverse walk: an mcp row survives iff fewer than N mcp rows for its
+        # server come AFTER it. Non-mcp rows (and non-dict junk rows) always
+        # survive at their original positions — order of survivors is
+        # preserved, so the trim is a pure subsequence shrink.
+        seen_after: dict[str, int] = {}
+        keep = [True] * len(history)
+        for idx in range(len(history) - 1, -1, -1):
+            entry = history[idx]
+            if (
+                not isinstance(entry, dict)
+                or entry.get("event") != JOURNAL_EVENT
+            ):
+                continue
+            server = _mcp_entry_server_key(entry)
+            count = seen_after.get(server, 0)
+            if count >= JOURNAL_HISTORY_MAX_PER_SERVER:
+                keep[idx] = False
+                continue
+            seen_after[server] = count + 1
+        trimmed = [entry for idx, entry in enumerate(history) if keep[idx]]
+        if len(trimmed) == len(history):
+            return False
+        data["history"] = trimmed
+        phase = "write"
+        _uj.journal_write(install_dir, data)
+    except Exception as exc:  # noqa: BLE001 — hygiene never raises
+        logger.warning(
+            "MCP journal history trim skipped (%s failed): %s: %s",
+            phase,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
+
+
 def _write_journal(server: str, state: str, detail: str) -> None:
     """Append ONE history line to the promote journal. Never raises."""
     try:
@@ -563,11 +654,21 @@ def _write_journal(server: str, state: str, detail: str) -> None:
             JOURNAL_EVENT,
             f"server={server} state={state} {detail}",
         )
+        # R3 (launcher-journal-sweep-fix): bound this event class right
+        # after the append. The new entry is the newest row of its server
+        # and can never be its own trim victim. Best-effort: the append is
+        # already durable — a trim failure must not fail the transition.
+        # The helper NEVER raises (its whole body sits in one try that
+        # logs a WARNING and returns False), so no caller-side guard is
+        # needed — the old caller-side warning here was provably dead.
+        _trim_mcp_journal_history(_uj, install_dir)
     except Exception as exc:  # noqa: BLE001 — observability never breaks init
         logger.warning(
-            "MCP state-transition journal write failed (server=%s state=%s): %s",
+            "MCP state-transition journal write failed (server=%s state=%s): "
+            "%s: %s",
             server,
             state,
+            type(exc).__name__,
             exc,
         )
 
@@ -968,6 +1069,7 @@ __all__ = [
     "INIT_FAILURE_THRESHOLD",
     "INIT_RECOVERY_TIMEOUT_S",
     "JOURNAL_EVENT",
+    "JOURNAL_HISTORY_MAX_PER_SERVER",
     "McpInitRefused",
     "McpServerQuarantined",
     "STATE_DEGRADED",
