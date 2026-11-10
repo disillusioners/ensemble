@@ -8,17 +8,40 @@
 # install the DEFAULT target of every make invocation: a stray `make
 # uninstall` from a worktree would `rm -rf` the live tree, and `make
 # install` would kill the live daemon via scripts/stop-ensemble.sh — all
-# with zero env, zero args, zero intent. This guard is the root-cause fix:
+# with zero env, zero args, zero intent. This guard is the root-cause fix.
 #
-#   1. INERT DEFAULT — the Makefile now ships `INSTALL_DIR ?=` (empty).
-#      Every mutating target runs this guard as its FIRST recipe side
-#      effect; an empty INSTALL_DIR is refused with guidance. Bare `make
-#      install` / `make uninstall` can never resolve to live by
-#      construction: there IS no default anymore.
-#   2. LIVE-CONFIRM GATE — when INSTALL_DIR (env, make arg — both reach
-#      this script via the Makefile's `export INSTALL_DIR`) canonicalizes
-#      to a protected install dir, the guard refuses unless the operator
-#      set the per-path confirm var:
+# ARMS (every refusal exits 78 BEFORE any side effect; the guard never
+# creates, removes or writes anything):
+#
+#   0. INERT DEFAULT — INSTALL_DIR unset/empty → refuse with guidance.
+#      There is no default install dir anymore, so bare `make install` /
+#      `make uninstall` can never resolve to live by construction.
+#
+#   1. ENVIRONMENT INTEGRITY — HOME unset/empty → refuse. The protected set
+#      is derived from $HOME (and SUDO_USER's home); an unset/empty HOME
+#      silently shrank that set (F-02) so the live dir stopped being
+#      protected and the guard exited 0. Every environment value this script
+#      reads is captured up front with ${var:-}: `set -u` aborts only the
+#      SUBSHELL that touches an unbound name, and this script deliberately
+#      runs WITHOUT `set -e`, so the parent would carry on with an empty
+#      value — a silent fail-open.
+#
+#   2. UNVERIFIABLE SPELLING — STRUCTURAL: no confirm var opens it.
+#      2a. tilde spellings other than '~/' (leg 1 behavior, unchanged).
+#      2b. RAW VALUE REFUSAL (F-01) — the raw INSTALL_DIR must be exactly
+#          what the guard verified: no whitespace, no quotes, no shell
+#          metacharacters ( ; | & $ ` < > ( ) ), no glob characters, and no
+#          difference from its normalized spelling. `make` substitutes
+#          $(INSTALL_DIR) TEXTUALLY into the recipe and the shell then
+#          re-parses it: a trailing space is stripped by word splitting
+#          (the recipe deletes the live tree) and ';' / '|' are true command
+#          separators (arbitrary commands run). The guard compares the
+#          NORMALIZED path while the recipe consumes the RAW one, so a
+#          value the guard cannot verify must never reach the recipe.
+#
+#   3. LIVE/DEMO CONFIRM GATE — when the requested dir canonicalizes to a
+#      protected install dir, the guard refuses unless the operator set the
+#      per-path confirm var:
 #
 #        ENSEMBLE_INSTALL_LIVE=1   → confirms actions on any LIVE dir
 #        ENSEMBLE_INSTALL_DEMO=1   → confirms actions on the DEMO dir
@@ -30,6 +53,24 @@
 #      — each family owns its own, kept disjoint by design; no collision
 #      with the launcher leg's ENSEMBLE_LAUNCHER_PATH / ENSEMBLE_LAUNCHER_
 #      STATE_FILE).
+#
+#   4. CONTAINMENT ARM — STRUCTURAL: no confirm var opens it. The target
+#      must not BE a protected home, must not be an ANCESTOR of a protected
+#      install dir (e.g. $HOME itself, /opt, /) and must not be INSIDE one
+#      (e.g. <live>/data) — F-04. `rm -rf` of an ancestor destroys the
+#      protected tree; `rm -rf` of a descendant is the same incident one
+#      level down. The classification (arm 3) runs FIRST, so a live/demo dir
+#      itself is still gated by its confirm var (not by this arm).
+#
+#   5. CANONICALIZATION — case-folded comparison on case-insensitive
+#      filesystems (Darwin/APFS) and LONGEST-EXISTING-PREFIX physical
+#      resolution. F-05: bash's BUILTIN `pwd -P` echoes the TYPED casing
+#      (/USERS/… compared unequal to the real tree), so the absolute
+#      /bin/pwd -P is preferred; and a path whose intermediate components do
+#      not exist (<home>/ghost/../live) is resolved through its deepest
+#      existing ancestor — physically resolved, remaining segments
+#      re-appended, '..' folded lexically — so it compares correctly
+#      against the protected set.
 #
 # PROTECTED LIVE SET (extensible, operator directive #2.2):
 #   * built-ins:  $HOME/agents-ensemble  (both Layer-1 HOME shapes — below)
@@ -44,7 +85,9 @@
 #                 unchanged and the HOME candidates cannot be dropped by a
 #                 bad override. Extension entries are exact paths (no ~ or
 #                 Layer-1 expansion); each is confirmed by the same
-#                 ENSEMBLE_INSTALL_LIVE=1 var.
+#                 ENSEMBLE_INSTALL_LIVE=1 var. Entries are split on ':',
+#                 trimmed of surrounding whitespace, empty entries skipped,
+#                 globbing disabled (an entry containing '*' cannot expand).
 #   The demo dir stays HOME-derived only ($HOME/agents-ensemble-demo, both
 #   HOME shapes) — the one protected demo path.
 #
@@ -87,14 +130,20 @@
 # env-set and command-line `make install INSTALL_DIR=…` both arrive — and
 # the path never crosses a shell-quoting boundary at the call site).
 #
-# CANONICALIZATION (mirrors scripts/upgrade/lib.sh semantics exactly —
-# _canon_dir / _install_dir_candidates / _is_canonical_install_dir):
-#   * existing dirs resolve PHYSICALLY (cd + pwd -P): trailing slashes,
+# CANONICALIZATION (mirrors scripts/upgrade/lib.sh semantics for the
+# existing-shape comparisons — _canon_dir / _install_dir_candidates /
+# _is_canonical_install_dir — and extends them for F-05):
+#   * existing dirs resolve PHYSICALLY (cd + /bin/pwd -P): trailing slashes,
 #     `//`, `./`, `..`, relative paths and SYMLINK ALIASES of a protected
 #     tree all normalize onto the same string and are caught;
-#   * non-existent paths compare textually after `~` expansion, slash
-#     normalization and `./`-segment removal — a not-yet-created live
-#     spelling (`~/agents-ensemble/`) is still refused;
+#   * non-existent paths resolve through their LONGEST EXISTING PREFIX:
+#     the deepest existing ancestor is resolved physically, the remaining
+#     segments are re-appended and '..' is folded lexically. A
+#     not-yet-created live spelling (~/agents-ensemble/) is still refused,
+#     and a not-yet-created INTERMEDIATE (~/ghost/../agents-ensemble) can
+#     no longer slip past as an unrelated string;
+#   * on a case-insensitive filesystem (Darwin) the comparison is
+#     case-folded, so /USERS/…/AGENTS-ENSEMBLE matches the real tree;
 #   * compared in BOTH directions (requested dir textual + physical vs
 #     candidate textual + physical) so symlink aliases are caught whether
 #     the alias is the requested path or the protected tree itself.
@@ -108,6 +157,17 @@
 # ============================================================================
 
 set -u
+
+# ── environment capture (set -u safety — see arm 1 in the header) ───────────
+# Every variable this script reads from the environment is bound HERE, before
+# any logic runs. `set -u` aborts only the subshell that touches an unbound
+# name; with no `set -e` the parent would continue with an empty value.
+# Capture + refuse explicitly is the fail-CLOSED alternative.
+HOME="${HOME:-}"
+SUDO_USER="${SUDO_USER:-}"
+ENSEMBLE_LIVE_INSTALL_DIRS="${ENSEMBLE_LIVE_INSTALL_DIRS:-}"
+ENSEMBLE_INSTALL_LIVE="${ENSEMBLE_INSTALL_LIVE:-0}"
+ENSEMBLE_INSTALL_DEMO="${ENSEMBLE_INSTALL_DEMO:-0}"
 
 usage() {
     echo "usage: install-dir-guard.sh --target <make-target>  (INSTALL_DIR via env)" >&2
@@ -132,9 +192,41 @@ refuse() {
     exit 78
 }
 
+_refuse_unverifiable() {
+    # _refuse_unverifiable <detail line>… — 78, message to stderr.
+    # The ONE "the spelling cannot be verified" refusal: shared by the
+    # tilde arm (2a) and the raw-value arm (2b), so both keep the same
+    # first-line shape and the same guidance block.
+    local detail
+    printf 'make %s: REFUSING — INSTALL_DIR spelling '"'"'%s'"'"' cannot be verified safely.\n' \
+        "${TARGET:-<unknown>}" "$(_display_spelling "$INSTALL_DIR_ENV")" >&2
+    for detail in "$@"; do
+        printf '  %s\n' "$detail" >&2
+    done
+    cat >&2 <<EOF
+  Spell the path absolutely:  make ${TARGET:-<unknown>} INSTALL_DIR=/path/to/install
+  Protected live dirs (\$HOME/agents-ensemble, /opt/ensemble, plus any
+  ENSEMBLE_LIVE_INSTALL_DIRS entries) additionally require
+  ENSEMBLE_INSTALL_LIVE=1; the demo dir (\$HOME/agents-ensemble-demo)
+  requires ENSEMBLE_INSTALL_DEMO=1.
+  Under sudo (env vars do not survive plain sudo), the sudo-correct form:
+    sudo env ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR=/path/to/install
+  Sanctioned lanes (prefer these):
+    deploy :  ENSEMBLE_DEPLOY_LIVE=1 scripts/deploy.sh live
+    upgrade:  ENSEMBLE_UPGRADE_LIVE=1 scripts/upgrade/promote.sh live --f2-verified-closed
+EOF
+    exit 78
+}
+
+_display_spelling() {
+    # Render a spelling for the message without letting a control character
+    # break the one-line first-line shape.
+    printf '%s' "$1" | tr -c '[:print:]' '?'
+}
+
 INSTALL_DIR_ENV="${INSTALL_DIR:-}"
 
-# ── 1. inert default: no INSTALL_DIR at all ──────────────────────────────────
+# ── 0. inert default: no INSTALL_DIR at all ──────────────────────────────────
 if [ -z "$INSTALL_DIR_ENV" ]; then
     cat >&2 <<EOF
 make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR is not set.
@@ -151,39 +243,60 @@ EOF
     exit 78
 fi
 
-# ── 2. canonicalize the requested dir ────────────────────────────────────────
-# The confirm var opens paths positively identified as live; it must not open paths the guard cannot canonicalize.
-case "$INSTALL_DIR_ENV" in
-    "~/"*)
-        ;;
-    "~"*)
-        cat >&2 <<EOF
-make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR spelling '$INSTALL_DIR_ENV' cannot be verified safely.
-  Tilde spellings other than '~/' (such as '~user/...' or bare '~') cannot
-  be reliably canonicalized by this guard prior to shell expansion.
-  Spell the path absolutely:  make ${TARGET:-<unknown>} INSTALL_DIR=/path/to/install
-  Protected live dirs (\$HOME/agents-ensemble, /opt/ensemble, plus any
-  ENSEMBLE_LIVE_INSTALL_DIRS entries) additionally require
-  ENSEMBLE_INSTALL_LIVE=1; the demo dir (\$HOME/agents-ensemble-demo)
-  requires ENSEMBLE_INSTALL_DEMO=1.
+# ── 1. environment integrity: HOME must be known (F-02) ──────────────────────
+# The protected set is HOME-derived. An unset/empty HOME does not merely
+# "widen" the guard — it SILENTLY SHRINKS the protected set: the $HOME
+# candidates vanish, the live dir is no longer classified, and the script
+# falls through to the "not a protected dir — proceed" branch and exits 0.
+# Fail CLOSED instead.
+if [ -z "$HOME" ]; then
+    cat >&2 <<EOF
+make ${TARGET:-<unknown>}: REFUSING — HOME is unset or empty, so the protected install set cannot be determined.
+  The protected live/demo set is derived from \$HOME (and SUDO_USER's home).
+  With HOME unset the \$HOME candidates would be silently dropped, the
+  protected set would shrink, and the live install would no longer be
+  recognised — the guard would exit 0 and let the recipe run.
+  Set HOME to the operator's home and retry:
+    HOME=/Users/<you> make ${TARGET:-<unknown>} INSTALL_DIR=/path/to/install
   Under sudo (env vars do not survive plain sudo), the sudo-correct form:
-    sudo env ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR=/path/to/install
+    sudo env HOME=/Users/<you> ENSEMBLE_INSTALL_LIVE=1 make ${TARGET:-<unknown>} INSTALL_DIR=/path/to/install
   Sanctioned lanes (prefer these):
     deploy :  ENSEMBLE_DEPLOY_LIVE=1 scripts/deploy.sh live
     upgrade:  ENSEMBLE_UPGRADE_LIVE=1 scripts/upgrade/promote.sh live --f2-verified-closed
 EOF
-        exit 78
+    exit 78
+fi
+
+# ── 2. unverifiable spelling — STRUCTURAL (no confirm var opens it) ─────────
+# 2a. tilde spellings other than '~/' cannot be canonicalized prior to
+#     shell expansion.
+case "$INSTALL_DIR_ENV" in
+    "~/"*)
+        ;;
+    "~"*)
+        _refuse_unverifiable \
+            "Tilde spellings other than '~/' (such as '~user/...' or bare '~') cannot" \
+            "be reliably canonicalized by this guard prior to shell expansion."
         ;;
 esac
 
-# Textual pre-normalization: expand a leading `~/`, collapse `//`, strip
-# trailing slashes, drop `./` segments (bash 3.2-safe; `..` is left for the
-# physical pass — any existing dir resolves through cd+pwd -P below).
-_norm() {
+# 2b. RAW VALUE REFUSAL (F-01). `make` substitutes $(INSTALL_DIR) TEXTUALLY
+#     into the recipe and the shell re-parses it, so the recipe sees a
+#     different string than the guard verified:
+#       * a trailing space is stripped by word splitting → `rm -rf` hits the
+#         live tree the guard thought was a different path;
+#       * ';' / '|' / '&' are true command separators → arbitrary commands
+#         run inside a make recipe;
+#       * quotes, '$', '`', '<', '>', '(' , ')' and glob characters change
+#         the parse again.
+#     The guard compares the NORMALIZED path; the recipe consumes the RAW
+#     one. A value that differs from its normalized form, or that carries
+#     characters a shell would re-parse, cannot be verified — so it is
+#     refused STRUCTURALLY: no confirm var opens it.
+_norm_spelling() {
+    # Textual normalization WITHOUT tilde expansion — the raw-form
+    # comparison must treat the supported '~/' prefix as spelled.
     local p="$1"
-    case "$p" in
-        "~/"*) p="$HOME${p#\~}" ;;
-    esac
     p="$(printf '%s' "$p" | sed -e 's://*:/:g' -e 's:/*$::')"
     while :; do
         case "$p" in
@@ -194,23 +307,158 @@ _norm() {
     done
     printf '%s' "$p"
 }
-# Physical form of an EXISTING path (cd + pwd -P, mirrors lib.sh _canon_dir);
-# falls back to the (normalized) raw string when the path does not exist.
+
+if [ "$(_norm_spelling "$INSTALL_DIR_ENV")" != "$INSTALL_DIR_ENV" ]; then
+    _refuse_unverifiable \
+        "The path is not in normalized form (redundant '//', a trailing slash, or" \
+        "'./' segments): the guard verifies the normalized spelling while the make" \
+        "recipe consumes the raw value, so the two would not be the same path."
+fi
+
+# Character class: everything except a conservative path alphabet is refused.
+# The leading '~' of a supported '~/' spelling is checked separately above.
+_RAW_CHECK="$INSTALL_DIR_ENV"
+case "$_RAW_CHECK" in
+    "~/"*) _RAW_CHECK="${_RAW_CHECK#\~}" ;;
+esac
+case "$_RAW_CHECK" in
+    *[!A-Za-z0-9_./+=:@%^,-]*)
+        _refuse_unverifiable \
+            "The path contains whitespace, quotes, shell metacharacters" \
+            "( ; | & \$ \` < > ( ) ), glob characters or other characters a" \
+            "shell would re-parse. make expands the value into the recipe" \
+            "textually, so the recipe could run more than the path you named."
+        ;;
+esac
+
+# ── 3. canonicalize the requested dir ────────────────────────────────────────
+# The confirm var opens paths positively identified as live; it must not open paths the guard cannot canonicalize.
+_norm() {
+    local p="$1"
+    case "$p" in
+        "~/"*) p="$HOME${p#\~}" ;;
+    esac
+    _norm_spelling "$p"
+}
+
+# Physical form of a path: the deepest EXISTING ancestor is resolved
+# physically (cd + /bin/pwd -P), the remaining segments are re-appended and
+# '..' is folded lexically. Mirrors scripts/upgrade/lib.sh _canon_dir for
+# existing paths and extends it for paths whose intermediates do not exist
+# (F-05: <home>/ghost/../live used to compare as an unrelated string).
+_pwd_phys() {
+    # /bin/pwd -P (BSD) is preferred over bash's builtin `pwd -P`, which
+    # echoes the TYPED casing on a case-insensitive filesystem.
+    if [ -x /bin/pwd ]; then
+        /bin/pwd -P 2>/dev/null
+    else
+        pwd -P
+    fi
+}
+
+_fold_dots() {
+    # Lexically fold '.' and '..' segments of an absolute path.
+    local p="$1" seg stack="" oldifs="$IFS"
+    IFS='/'
+    set -f
+    for seg in $p; do
+        case "$seg" in
+            ''|'.') continue ;;
+            '..')
+                case "$stack" in
+                    */*) stack="${stack%/*}" ;;
+                    *) stack="" ;;
+                esac
+                ;;
+            *) stack="$stack/$seg" ;;
+        esac
+    done
+    set +f
+    IFS="$oldifs"
+    if [ -z "$stack" ]; then
+        printf '/'
+    else
+        printf '%s' "$stack"
+    fi
+}
+
 _canon_dir() {
-    (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"
+    local p="$1" rest="" cur="" base out=""
+    case "$p" in
+        /*) ;;
+        '') printf '%s' "$p"; return 0 ;;
+        *) p="$( (cd . 2>/dev/null && _pwd_phys) )/$p" ;;
+    esac
+    cur="$p"
+    while [ -n "$cur" ]; do
+        if [ -e "$cur" ]; then break; fi
+        case "$cur" in
+            /) cur=""; break ;;
+        esac
+        rest="/$(basename "$cur")$rest"
+        cur="$(dirname "$cur")"
+    done
+    if [ -z "$cur" ]; then
+        # nothing on the path exists: lexical fold of the whole path
+        _fold_dots "$p"
+        return 0
+    fi
+    base="$( (cd "$cur" 2>/dev/null && _pwd_phys) )"
+    [ -n "$base" ] || base="$cur"
+    out="$(_fold_dots "$base$rest")"
+    printf '%s' "$out"
 }
 
 DIR_NORM="$(_norm "$INSTALL_DIR_ENV")"
 DIR_CANON="$(_canon_dir "$DIR_NORM")"
 
-# ── 3. homes under protection: $HOME + SUDO_USER's real home ─────────────────
+# ── 4. comparison helpers (case-folded on case-insensitive filesystems) ──────
+_CASE_FOLD=0
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+    _CASE_FOLD=1
+fi
+
+_fold() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+_eq() {
+    # _eq <a> <b> — equality, case-folded on Darwin.
+    if [ "$_CASE_FOLD" = "1" ]; then
+        [ "$(_fold "$1")" = "$(_fold "$2")" ]
+    else
+        [ "$1" = "$2" ]
+    fi
+}
+
+_is_ancestor_of() {
+    # _is_ancestor_of <ancestor> <target> — true when <ancestor> is a
+    # STRICT ancestor of <target> (path-component aware, case-folded on
+    # Darwin).
+    local a="$1" t="$2"
+    if [ "$_CASE_FOLD" = "1" ]; then
+        a="$(_fold "$a")"
+        t="$(_fold "$t")"
+    fi
+    [ -n "$a" ] || return 1
+    [ "$a" != "$t" ] || return 1
+    case "$a" in
+        /) return 0 ;;
+    esac
+    case "$t" in
+        "$a"/*) return 0 ;;
+    esac
+    return 1
+}
+
+# ── 5. homes under protection: $HOME + SUDO_USER's real home ─────────────────
 # Under sudo, HOME points at the TARGET user's home (env_reset), which
 # would silently ungate the operator's real live dir — see the SUDO/ROOT
 # decision block above. Resolve SUDO_USER's home and protect its candidates
 # too. Resolution: getent (Linux) → dscl (macOS) → /home/<user> (Linux
 # convention; fail-CLOSED: a wrong guess only widens the protected set).
 _sudo_user_home() {
-    [ -n "${SUDO_USER:-}" ] || return 1
+    [ -n "$SUDO_USER" ] || return 1
     case "$SUDO_USER" in root) return 1 ;; esac
     local cand=""
     if command -v getent >/dev/null 2>&1; then
@@ -226,12 +474,36 @@ _sudo_user_home() {
 }
 HOME_ALT="$(_sudo_user_home)"
 
-# ── 4. classify the requested dir against the protected set ──────────────────
+# ── 6. the extensible live set (colon-separated, PATH syntax) ───────────────
+# The old form was `for ext in /opt/ensemble "$(printf '%s' "$VAR" | tr ':' '\n')"`
+# — the QUOTED command substitution collapsed the whole list into ONE word,
+# so no extension entry ever matched and the documented knob protected
+# NOTHING (F-03). Split properly here: one entry per line, surrounding
+# whitespace trimmed, empty entries skipped, globbing disabled so an entry
+# containing '*' cannot expand.
+_live_ext_list() {
+    local rest="$ENSEMBLE_LIVE_INSTALL_DIRS" entry trimmed
+    set -f
+    while [ -n "$rest" ]; do
+        entry="${rest%%:*}"
+        case "$rest" in
+            *:*) rest="${rest#*:}" ;;
+            *) rest="" ;;
+        esac
+        trimmed="${entry#"${entry%%[![:space:]]*}"}"
+        trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+        [ -n "$trimmed" ] || continue
+        printf '%s\n' "$trimmed"
+    done
+    set +f
+}
+
+# ── 7. classify the requested dir against the protected set ──────────────────
 # _cand_class <normalized-or-physical-path> — echoes live|demo when the path
 # matches a protected install candidate for ANY protected home (textually or
 # physically); empty output otherwise.
 _cand_class() {
-    local want="$1" h base cand cand_n cand_c name cls ext
+    local want="$1" h base name cand cand_n cand_c ext ext_n ext_c
     for h in "$HOME" "$HOME_ALT"; do
         [ -n "$h" ] || continue
         for name in agents-ensemble agents-ensemble-demo; do
@@ -239,7 +511,7 @@ _cand_class() {
             cand="$h/$name"
             cand_n="$(_norm "$cand")"
             cand_c="$(_canon_dir "$cand_n")"
-            if [ "$want" = "$cand_n" ] || [ "$want" = "$cand_c" ]; then
+            if _eq "$want" "$cand_n" || _eq "$want" "$cand_c"; then
                 case "$name" in
                     agents-ensemble)      printf 'live\n' ;;
                     agents-ensemble-demo) printf 'demo\n' ;;
@@ -250,7 +522,7 @@ _cand_class() {
             base="$(basename "$h")"
             case "$base" in
                 "$name")
-                    if [ "$want" = "$(_norm "$h")" ] || [ "$want" = "$(_canon_dir "$h")" ]; then
+                    if _eq "$want" "$(_norm "$h")" || _eq "$want" "$(_canon_dir "$h")"; then
                         case "$name" in
                             agents-ensemble)      printf 'live\n' ;;
                             agents-ensemble-demo) printf 'demo\n' ;;
@@ -263,15 +535,25 @@ _cand_class() {
     done
     # Built-in non-HOME live dirs + the extensible set (colon-separated,
     # exact paths, live class only).
-    for ext in /opt/ensemble "$(printf '%s' "${ENSEMBLE_LIVE_INSTALL_DIRS:-}" | tr ':' '\n')"; do
-        [ -n "$ext" ] || continue
+    for ext in /opt/ensemble; do
         ext_n="$(_norm "$ext")"
         ext_c="$(_canon_dir "$ext_n")"
-        if [ "$want" = "$ext_n" ] || [ "$want" = "$ext_c" ]; then
+        if _eq "$want" "$ext_n" || _eq "$want" "$ext_c"; then
             printf 'live\n'
             return 0
         fi
     done
+    while IFS= read -r ext; do
+        [ -n "$ext" ] || continue
+        ext_n="$(_norm "$ext")"
+        ext_c="$(_canon_dir "$ext_n")"
+        if _eq "$want" "$ext_n" || _eq "$want" "$ext_c"; then
+            printf 'live\n'
+            return 0
+        fi
+    done <<EOF
+$(_live_ext_list)
+EOF
     return 1
 }
 
@@ -283,10 +565,10 @@ if [ -z "$CLASS" ]; then
     CLASS="$(_cand_class "$DIR_NORM")"
 fi
 
-# ── 5. per-path confirm gate ────────────────────────────────────────────────
+# ── 8. per-path confirm gate ────────────────────────────────────────────────
 case "$CLASS" in
     live)
-        if [ "${ENSEMBLE_INSTALL_LIVE:-0}" != "1" ]; then
+        if [ "$ENSEMBLE_INSTALL_LIVE" != "1" ]; then
             cat >&2 <<EOF
 make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR resolves to a LIVE install dir ($DIR_CANON).
   Live installs are the running production orchestrator; mutating them by
@@ -305,7 +587,7 @@ EOF
         fi
         ;;
     demo)
-        if [ "${ENSEMBLE_INSTALL_DEMO:-0}" != "1" ]; then
+        if [ "$ENSEMBLE_INSTALL_DEMO" != "1" ]; then
             cat >&2 <<EOF
 make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR resolves to the DEMO install ($DIR_CANON).
   Demo mutations are gated behind an explicit confirm (same incident class).
@@ -319,9 +601,119 @@ EOF
         fi
         ;;
     *)
-        # Not a protected dir — proceed silently; the target's own recipe
-        # prints its banners.
+        # Not a protected dir — the containment arm below still applies.
         ;;
 esac
+
+# ── 9. containment arm (F-04) — STRUCTURAL: no confirm var opens it ────────
+# A recursive delete of an ANCESTOR of a protected install dir destroys the
+# protected tree; a recursive delete of a DESCENDANT is the same incident
+# one level down. Both are refused regardless of any confirm var — the
+# confirm vars open a path that IS the protected install dir, not a path
+# that swallows it.
+#
+# The classification (section 8) runs FIRST: a live/demo dir itself stays
+# gated by its confirm var (ENSEMBLE_INSTALL_LIVE / ENSEMBLE_INSTALL_DEMO),
+# exactly as before.
+_contains_refusal() {
+    # _contains_refusal <relation> <target> <anchor>
+    local relation="$1" target="$2" anchor="$3"
+    cat >&2 <<EOF
+make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR resolves to $target, which $relation the protected install dir $anchor.
+  A recursive delete of that path would destroy the protected install tree
+  $anchor — the incident class this guard exists for (2026-11-09).
+  This refusal is STRUCTURAL: no confirm var opens it (ENSEMBLE_INSTALL_LIVE /
+  ENSEMBLE_INSTALL_DEMO do not apply here — they open a path that IS the
+  protected install dir, not one that swallows it).
+  Choose an install dir that is neither an ancestor of, nor inside, a
+  protected install dir:
+    make ${TARGET:-<unknown>} INSTALL_DIR=/path/to/install
+  Sanctioned lanes (prefer these):
+    deploy :  ENSEMBLE_DEPLOY_LIVE=1 scripts/deploy.sh live
+    upgrade:  ENSEMBLE_UPGRADE_LIVE=1 scripts/upgrade/promote.sh live --f2-verified-closed
+EOF
+    exit 78
+}
+
+
+# Protected HOME anchors ($HOME, SUDO_USER's home) and protected install
+# anchors (live/demo dirs). The ancestor (CONTAINS) arm applies to both;
+# the descendant (INSIDE) arm applies to the install anchors only (a plain
+# subdir of a HOME is a normal, safe install location).
+_protected_home_paths() {
+    local h
+    for h in "$HOME" "$HOME_ALT"; do
+        [ -n "$h" ] || continue
+        printf '%s\n' "$(_norm "$h")"
+    done
+}
+
+_protected_install_paths() {
+    local h name base ext
+    for h in "$HOME" "$HOME_ALT"; do
+        [ -n "$h" ] || continue
+        for name in agents-ensemble agents-ensemble-demo; do
+            printf '%s\n' "$(_norm "$h/$name")"
+        done
+        base="$(basename "$h")"
+        case "$base" in
+            agents-ensemble|agents-ensemble-demo)
+                printf '%s\n' "$(_norm "$h")"
+                ;;
+        esac
+    done
+    printf '%s\n' "/opt/ensemble"
+    while IFS= read -r ext; do
+        [ -n "$ext" ] || continue
+        printf '%s\n' "$(_norm "$ext")"
+    done <<EOF
+$(_live_ext_list)
+EOF
+}
+
+# The requested dir, in both forms, for comparison against the anchors.
+for _form in "$DIR_CANON" "$DIR_NORM"; do
+    [ -n "$_form" ] || continue
+    # ── CONTAINS arm: the requested path is a STRICT ANCESTOR of a protected
+    #    install dir (e.g. $HOME, /opt, /) → its recursive delete would take
+    #    the protected tree with it.
+    while IFS= read -r _anchor; do
+        [ -n "$_anchor" ] || continue
+        _anchor_n="$(_norm "$_anchor")"
+        _anchor_c="$(_canon_dir "$_anchor_n")"
+        if _is_ancestor_of "$_form" "$_anchor_c" || _is_ancestor_of "$_form" "$_anchor_n"; then
+            _contains_refusal "CONTAINS" "$_form" "$_anchor_c"
+        fi
+    done <<EOF
+$(_protected_install_paths)
+EOF
+    # ── INSIDE arm: the requested path is INSIDE a protected install dir
+    #    (e.g. <live>/data) → same incident one level down.
+    while IFS= read -r _anchor; do
+        [ -n "$_anchor" ] || continue
+        _anchor_n="$(_norm "$_anchor")"
+        _anchor_c="$(_canon_dir "$_anchor_n")"
+        if _is_ancestor_of "$_anchor_c" "$_form" || _is_ancestor_of "$_anchor_n" "$_form"; then
+            _contains_refusal "is INSIDE" "$_form" "$_anchor_c"
+        fi
+    done <<EOF
+$(_protected_install_paths)
+EOF
+    # ── HOME anchors: the requested path IS a protected home, or is a strict
+    #    ancestor of one. (A home always holds a protected install dir inside
+    #    it, so the CONTAINS arm above normally fires first — this is the
+    #    backstop that names the home itself.)
+    while IFS= read -r _anchor; do
+        [ -n "$_anchor" ] || continue
+        _anchor_n="$(_norm "$_anchor")"
+        _anchor_c="$(_canon_dir "$_anchor_n")"
+        if _eq "$_form" "$_anchor_n" || _eq "$_form" "$_anchor_c" \
+           || _is_ancestor_of "$_form" "$_anchor_c" || _is_ancestor_of "$_form" "$_anchor_n"; then
+            _contains_refusal "CONTAINS" "$_form" "$_anchor_c"
+        fi
+    done <<EOF
+$(_protected_home_paths)
+EOF
+done
 
 exit 0
