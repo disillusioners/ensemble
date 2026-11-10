@@ -1555,3 +1555,159 @@ NEVER IN THE WORKTREE, and every restore was verified byte-identical
 mutated: the commit is pathspec-limited and the foreign
 `.agents/approver/**` entries were left untouched (byte-identical,
 uncommitted).
+
+## 17. THE TIDIER PASS (2026-11-10) — what changed, and what is DELIBERATELY deferred
+
+This section is the DEFERRAL LEDGER for the tidier pass. Three rules govern
+it, inherited from §14 and the house lane rules: **(i)** a disclosure that
+lives only in a commit message does not exist — it lives HERE; **(ii)** every
+deferral names the code site and the CURE, so the next lane can act without
+re-deriving the analysis; **(iii)** a leader ruling is recorded with its
+RATIONALE, not just its verdict — a bare "decided: keep" is indistinguishable
+from drift.
+
+### 17.1 The commits (all pathspec-limited; foreign `.agents/approver/**` never staged)
+
+| Batch | Scope |
+|---|---|
+| B1 | install-audit test-isolation fence (`tests/conftest.py:859`, `tests/unit/test_install_audit.py`) — nest anomaly `ff69c247` |
+| B2 | persona gate: compose-site budget charging (P5-W1), park isolation (P5-W2), fail-closed/set-equality caller pin (P5-W3) |
+| C1 | schema/dialect group: the Postgres cutover literal carries an explicit UTC offset, alias filter → SQL, `increment_heat` → `RETURNING`, `models.py` docstring census, schema-contract pins fail-closed |
+| C2 | poignancy/repository/tools: terminal-marker single-sourcing, `__all__` completion, `restore_legacy` contract, `max_prompt_tokens` APPLIED, alias-aware casefold star resolution |
+
+### 17.2 THE DEFERRAL — `record_line` TOCTOU vs pass-unit atomicity
+
+**Site:** `daemon/repositories/memoir/constellation_repository.py:355` (the
+rationale comment is at the code site; this is the record of record).
+
+**Defect:** `record_line` reads for an existing `(star_id, episode_id)` row and
+then inserts on a miss — a read-then-insert with a non-atomic gap. A
+concurrent extraction can win the gap; the UNIQUE constraint then raises
+`IntegrityError` to *this* caller.
+
+**The attempted cure, and why it was REVERTED:** a SAVEPOINT-scoped insert
+makes the read-then-insert atomic. It was implemented and MEASURED, and it
+**broke pass-unit atomicity on SQLite**: pysqlite's `SAVEPOINT`/`RELEASE`
+quirk means `RELEASE` commits the *outer* work, so the edges stopped rolling
+back with the marks —
+`TestTheDurablePassIdentity::test_the_edges_roll_back_with_the_marks` went
+RED and the edge PERSISTED through the injected watermark fault. Trading a
+narrow lost-race exception for a lost transaction boundary is a strictly
+worse failure (it breaks V2-29 pass atomicity, which is a correctness
+property; the race is a rare exception on a single-threaded worker).
+
+**Why the residual race is acceptable today:** one reflection worker per
+agent, single-threaded, so the gap needs a second writer to lose. The UNIQUE
+constraint still guarantees no duplicate row — the failure mode is an
+exception, never corruption.
+
+**THE CURE (named, not applied):** a dialect-safe
+`INSERT … ON CONFLICT DO NOTHING` upsert removes the read entirely, so there
+is no gap to lose and no savepoint to break SQLite. Both target dialects
+(PostgreSQL, SQLite ≥ 3.24) support that form.
+
+### 17.3 LEADER RULING — the gate's terminal constants stay DECOUPLED
+
+**Site:** `daemon/services/memoir_persona_gate.py:111-112`
+(`TERMINAL_GATE_UNAVAILABLE = "terminal:gate_unavailable"`,
+`TERMINAL_UNBUILDABLE_DIFF = "terminal:unbuildable_diff"`).
+
+**Ruling:** they are NOT rewritten to compose from
+`MEMOIR_TERMINAL_MARKER` (`daemon/repositories/memoir/repository.py:626`).
+The gate imports nothing from the repository module for this purpose
+(`grep -c MEMOIR_TERMINAL_MARKER daemon/services/memoir_persona_gate.py` = 0)
+and stays that way.
+
+**Rationale:** the shared *prefix* is a display/park convention, not a
+contract the gate must inherit. Coupling a service to the repository's export
+surface to remove four characters of duplication would make every future
+repository refactor a potential gate break, and the gate's two strings are
+GATE-SCOPED vocabulary (they name gate outcomes, not storage states). The
+reconcile in this pass therefore fixed the DOCSTRING instead of the code: the
+marker block now claims only the two lanes that actually import it. That is
+the honest fix — the previous text over-claimed the gate's participation,
+which is exactly the defect class the block was written to criticise.
+
+### 17.4 LEADER RULING — `_clamp_prompt` stays a module-level cross-module private import
+
+**Site:** `daemon/services/memoir_poignancy_service.py:80` (import),
+`:555` (use).
+
+**Ruling:** keep `from daemon.services.memoir_reflection_service import
+_clamp_prompt` at MODULE level. The predecessor's WIP had it as a
+function-local import; it was hoisted because no cycle exists —
+`memoir_reflection_service` imports only `daemon.repositories.memoir.models`
+and `daemon.services.timestamps` (zero `poignancy` references), and a
+post-hoist import smoke ran clean.
+
+**Rationale:** the clamp implements the "cut at a line boundary, never
+mid-line" rule, which must have ONE truth; duplicating it into the poignancy
+service would let the two lanes drift on prompt truncation. A cross-module
+**private** import is the lesser smell.
+
+**DEFERRED COSMETIC:** promote `_clamp_prompt` to a public name (or a shared
+`daemon/services/prompt_budget.py` home) if a third consumer appears. Not done
+here — a rename touches the reflection lane's internals for zero behavioural
+gain, and this pass is closed for code changes.
+
+### 17.5 Other deferrals and judgement calls (with rationale)
+
+1. **`resolve_star_casefold` narrows the folding to SQL `lower()`**
+   (`constellation_repository.py:240`). The pre-fix tool used Python
+   `.casefold()`, which is Unicode-aware (`ß`→`ss`); SQL `lower()` is
+   ASCII-folding. **Deliberate:** star names are machine identifiers, not
+   prose. **Escape hatch:** the resolution is single-homed in the repository,
+   so a Unicode need becomes ONE change (a `casefold`-ed column or an
+   in-Python filter) instead of a hunt for every ad-hoc scan. The alias
+   awareness the tool lacked is the actual behavioural gain here.
+2. **`increment_heat` adopts `UPDATE … RETURNING`**
+   (`constellation_repository.py:564`), removing an `expire_all()` + second
+   `SELECT` (two statements, and a read that can race another writer).
+   **Dialect floor:** `RETURNING` needs SQLite ≥ 3.35 (host measures 3.53)
+   and is native on PostgreSQL. A `row is None` result now means "star
+   absent", which is the same `KeyError` contract the pre-fix `rowcount == 0`
+   branch enforced.
+3. **Two DISTINCT cutover literals are intentional**
+   (`daemon/manager.py:9799` = `'2026-11-09 00:00:00+00'`; the SQLite
+   migration `20261109_021154_create_memoir_v2_tables.sql:196` =
+   `'2026-11-09 00:00:00'`). The manager statement lives inside
+   `_ensure_postgres_columns` (`manager.py:8188`), is Postgres-only, and
+   compares a `timestamptz` — without the offset the literal would be read in
+   the SESSION TimeZone and the cutover would silently move with the
+   connection zone. The SQLite side compares LEXICOGRAPHICALLY in text, where
+   a `+00` suffix would be part of the string. **Do not "unify" them.**
+4. **The install-audit fence is an autouse, function-scoped fixture request**
+   (`tests/conftest.py:859`), so every test in the suite pays one `tmp_path`
+   allocation. Accepted: the alternative (per-module opt-in) re-opens the
+   leak the moment a new test forgets the decorator, and that is exactly how
+   `ff69c247` happened. **Residual, disclosed:** the fence patches the
+   MODULE attribute `install_audit.resolve_install_audit_path` — the function
+   `append_install_audit` calls (`install_audit.py:169`, the sole production
+   write path). A future *from-import* alias of that function would bypass
+   the fence; the fence is a structural guard against the observed failure
+   shape, not a sandbox.
+5. **Compose-budget counter is a plain instance attribute**
+   (`memoir_persona_gate.py:297`, charged at `:725`). Safe because the gate is
+   driven by ONE reflection worker thread; that assumption is written at the
+   field. If the gate ever goes concurrent, the counter must become
+   thread-local or move into the pass frame.
+6. **`__all__` completion** (`repository.py:1747-1750`) is surface honesty
+   only — `MEMOIR_POIGNANCY_ATTEMPT_CAP` and
+   `MEMOIR_POIGNANCY_TERMINAL_MARKER` were already imported cross-module by
+   `memoir_poignancy_worker.py:93-96`; `__all__` simply declared a smaller
+   public surface than the module actually has. No behaviour change.
+7. **Not fixed, out of craftsmanship scope (Reviewer / later lanes):**
+   the per-chunk Tier-2 scan cost, the seed re-run idempotence pin, and
+   `_find_star_by_casefold`'s Python-memory scan are correctness/performance
+   items carried in the phase-3 ledger, not tidier findings. They are NOT
+   re-opened here.
+
+### 17.6 Pre-existing reds, attributed (NOT this pass's)
+
+| Suite | Shape | Attribution |
+|---|---|---|
+| `tests/unit/test_configure_builtin_idempotency.py` | 15 failed / 2 passed | The retired `opendesign` builtin template: `{"detail":"Built-in server template 'opendesign' not found"} → 404 != 201`. Proved pre-existing by re-running with `tests/conftest.py` reverted to HEAD — identical 15/2. |
+| `tests/unit/test_memoir_inner_soul_redirect_test` | RED | The FOREIGN uncommitted `.agents/approver/` WIP trips its tree-fence. Clears when that lane's owner commits/stashes. |
+
+Both were verified to PREDATE the tidier pass; neither is caused by a commit
+in §17.1.
