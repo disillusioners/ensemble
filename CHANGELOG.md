@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-10-24
 
+## [0.29.11] — 2026-11-10
+
+### Fixed — POK active-entry admission cap raised 64 → 256 (`feature/pok-cap-256`)
+
+- POK active-entry admission cap 64 → 256 (Emperor directive 2026-11-10) — the per-project cap on active operating-knowledge entries (`POK_ACTIVE_CAP_PER_PROJECT`, `daemon/services/pok_service.py`), enforced in Python only (no SQL CHECK/trigger/migration encodes the count, so no schema migration was added). Admission remains refuse-never-evict at the new cap. The 64-cap had blocked all agent writes to the store.
+
 ## [0.29.10] — 2026-11-10
 
 ### Added — macOS deployment topology: canonical deployment guide + launcher supervisor-env PATH/STATE_FILE leg + Makefile live-install guard (`feature/macos-deployment-topology`; design `.agents/shared/planning/macos-deployment-topology/`)

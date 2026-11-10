@@ -288,7 +288,10 @@ def _validate_payload() -> None:
     if oversized:
         raise SystemExit(f"REFUSED (family cap): {oversized}")
     if len(SEED_ENTRIES) > POK_ACTIVE_CAP_PER_PROJECT:
-        raise SystemExit("REFUSED: payload exceeds the 64-active cap")
+        raise SystemExit(
+            "REFUSED: payload exceeds the "
+            f"{POK_ACTIVE_CAP_PER_PROJECT}-active cap"
+        )
     print(f"[validate] {len(SEED_ENTRIES)} entries fence+bound clean")
 
 
