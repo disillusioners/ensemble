@@ -2,7 +2,7 @@
 
 **Lane:** skill-system-revival Phase 3 · SCOPE A+B+C (implementation only — staging is a LATER dispatch)
 **Board:** `wi-4d1fa093` · **PM:** ENSEMBLE-27
-**Worktree:** `/home/nea/ensemble-src-wt-skill-capture-wiring` · **Branch:** `feature/skill-capture-prod-wiring` @ `0efdf106f` (= `origin/latest`, v0.29.15, upstream UNSET)
+**Worktree:** `/home/nea/ensemble-src-wt-skill-capture-wiring` · **Branch:** `feature/skill-capture-prod-wiring` @ `0efdf106f` (= `origin/latest`, v0.29.15, upstream UNSET) · plan revised against tip `77dc7eea0` — every `file:line` below says **base** (`0efdf106f`) or **HEAD** (`77dc7eea0`); unlabelled means valid at both. The quoted commission block keeps the commission’s own base numbering
 **Author:** coder lane · **Date:** 2026-11-10 (UTC)
 
 ---
@@ -16,9 +16,9 @@ The commission (and Phase-2's anomaly `3248db8f`) states:
 > module-level `set_skill_job_dispatcher` (`daemon/routers/skills.py:183`) … The name collision is what every prior gate
 > missed."*
 
-**That statement is FALSE at HEAD `0efdf106f`.** `SkillMetricsService.set_job_dispatcher` **does** have a production caller —
-`daemon/manager.py:8197`, inside `InstanceManager.set_job_queue_service`, which the production boot reaches
-unconditionally at `daemon/api.py:1502`. The "no production caller" claim is a **grep-scoped miss**: the caller lives in
+**That statement is FALSE at the base revision `0efdf106f`** — the pre-Phase-3 tree (the commission’s "HEAD" was that tree; this branch has since advanced to `77dc7eea0`). `SkillMetricsService.set_job_dispatcher` **does** have a production caller —
+`daemon/manager.py:8197` (base; `:8222` at HEAD), inside `InstanceManager.set_job_queue_service`, which the production boot reaches
+unconditionally at `daemon/api.py:1502` (base). The "no production caller" claim is a **grep-scoped miss**: the caller lives in
 `daemon/manager.py`, which the Phase-2 search evidently did not cover (the search covered `daemon/api.py` +
 `daemon/routers/` + `daemon/services/`).
 
@@ -43,7 +43,7 @@ SAME OBJECT?                          = True
 19:37:45 - daemon.api   - INFO - Skills router wired: store=True search=True metrics=True evolution=True triggers=True dispatcher=True usage_repo=True
 ```
 
-`daemon/manager.py:8176` (`"SkillJobDispatcher wired to manager"`) is logged **before** `daemon/manager.py:8197`
+`daemon/manager.py:8180-8181` (base; `:8202-8203` at HEAD — `"SkillJobDispatcher wired to manager"`) is logged **before** `daemon/manager.py:8196-8197` (base; `:8221-8222` at HEAD)
 (`metrics.set_job_dispatcher(...)`) in the SAME method body — so the service binding ran in both live boots.
 
 **⇒ What was actually broken in the Phase-2 window** (this is the finding that matters operationally):
@@ -61,10 +61,10 @@ process; the flag-carrying restart landed at **19:37:11**, *after* the observati
 **⇒ The hole that is REAL, and that Phase 3 must close: there is NO regression test over the production binding.**
 Every existing pin injects the dispatcher **test-side** (`tests/services/test_skill_capture_observability.py:690`,
 `tests/unit/test_skill_capture_killswitch_verification.py:348`, `tests/integration/test_skill_capture.py:176`, …).
-**Scope of the claim, stated precisely (round-2 S2):** at HEAD `0efdf106f` the api seam did not exist yet, so the
+**Scope of the claim, stated precisely (round-2 S2):** at the base revision `0efdf106f` the api seam did not exist yet, so the
 green-suite proof below held for the production binding **as a whole**. Post-fix the two bindings are NOT symmetric:
 the **api-seam binding is under test** (Phase 3's regression suite drives `daemon.api._wire_skills_router_services`
-and pins the `lifespan` call), while the **manager-side binding** (`daemon/manager.py:8196-8197`) **remains
+and pins the `lifespan` call), while the **manager-side binding** (`daemon/manager.py:8221-8222` at HEAD; `:8196-8197` at base) **remains
 untested** — deleting it alone still leaves the suite green; it is the idempotent FALLBACK for boot paths that
 never run the api `lifespan`. Deleting the api seam NOW goes RED.
 That is the shape of hole the commission describes; the commission's *explanation* of it is wrong.
@@ -88,7 +88,7 @@ That is the shape of hole the commission describes; the commission's *explanatio
 * **Target object:** the module-level global `_skill_job_dispatcher` of `daemon.routers.skills`.
 * **Reader:** `_require_skill_dispatcher()` (`daemon/routers/skills.py:238-251`, 503 when unset) → the REST
   `POST /api/skills/{id}/fix` endpoint (`daemon/routers/skills.py:1364`).
-* **Production caller:** `daemon/api.py:3886-3887` (see §1.3).
+* **Production caller:** `daemon/api.py:3886-3887` (base; `:640-641` inside `_wire_skills_router_services` at HEAD) — see §1.3.
 
 ### 1.2 The SERVICE setter — `daemon/services/skill_metrics_service.py:327` — **the REAL setter for the capture lane**
 
@@ -109,12 +109,12 @@ That is the shape of hole the commission describes; the commission's *explanatio
 816:                     task_details,
 ```
 
-* **Production caller:** `daemon/manager.py:8195-8197` (see §1.4) — **the caller the Phase-2 search missed**.
+* **Production caller:** `daemon/manager.py:8195-8197` (base; `:8220-8222` at HEAD) — see §1.4 — **the caller the Phase-2 search missed**.
 
-### 1.3 The api.py:3887 seam — what production constructs and passes there
+### 1.3 The api.py:3887 seam (base tree) — what production constructs and passes there
 
 ```python
-# daemon/api.py (inside `lifespan`, 4-space indent — unconditional)
+# daemon/api.py at base `0efdf106f` — inside `lifespan`, 4-space indent, unconditional (at HEAD the same statements live in `_wire_skills_router_services`, `daemon/api.py:637-641`)
 3883:     # Job dispatcher — module-level global + setter. This is the
 3884:     # chokepoint the ``POST /api/skills/{id}/fix`` endpoint calls into
 3885:     # to enqueue a ``skill_evolution`` JobItem on ``system_parallel_queue``.
@@ -129,24 +129,24 @@ The instance passed is **`manager._skill_job_dispatcher`** — a `SkillJobDispat
 8148:             self._skill_job_dispatcher = SkillJobDispatcher(
 8149:                 job_service=service,
 8150:                 queue_repo=queue_repo,
-8151:                 evolution_lane_enabled=bool(getattr(_skill_evo_cfg, "evolution_lane_enabled", False)),
+8158:                 evolution_lane_enabled=bool(getattr(_skill_evo_cfg, "evolution_lane_enabled", False)),
 ...
-8176:             logger.info("SkillJobDispatcher wired to manager (...)", ...)
+8180:             logger.info("SkillJobDispatcher wired to manager (...)", ...)   # `:8202` at HEAD
 ```
 
-### 1.4 The production call site of the SERVICE setter — `daemon/manager.py:8195-8197`
+### 1.4 The production call site of the SERVICE setter — `daemon/manager.py:8195-8197` (base; `:8220-8222` at HEAD)
 
 ```python
-# daemon/manager.py — inside `InstanceManager.set_job_queue_service` (def at :8092)
-8192:         # Wire the metrics service's job dispatcher handle so the
-8193:         # CAPTURED flow (Phase 5) can actually enqueue capture jobs
-8194:         # instead of just computing eligibility. The metrics service
+# daemon/manager.py at base `0efdf106f` — inside `InstanceManager.set_job_queue_service` (def at :8092, same at HEAD)
+# the five-line comment above the trio starts at :8190; the trio itself is:
 8195:         metrics = getattr(self, "_skill_metrics_service", None)
 8196:         if metrics is not None and self._skill_job_dispatcher is not None:
 8197:             metrics.set_job_dispatcher(self._skill_job_dispatcher)
+# at HEAD the same trio is :8220-8222 — the round-2 S4 resolved-evolution-lane
+# log probe was inserted above it, shifting the block by +25 lines.
 ```
 
-Reached in production by `daemon/api.py:1502` (unconditional, inside `lifespan`):
+Reached in production by `daemon/api.py:1502` (base; `:1623` at HEAD — unconditional, inside `lifespan`):
 
 ```python
 1501:     # Wire services into InstanceManager
@@ -171,7 +171,7 @@ at `daemon/config.py:6890`, so it is **never** `None` in production).
 
 ### 2.1 The change
 
-**Extract** the skills-router wiring block (`daemon/api.py:3847-3906`) into a module-level function and add ONE
+**Extract** the skills-router wiring block (`daemon/api.py:3847-3906` at base) into a module-level function and add ONE
 production binding line to it:
 
 ```python
@@ -204,13 +204,13 @@ and in `lifespan`, the block becomes one call:
 | Boot-safe | The injection is guarded (`metrics_service is not None and dispatcher is not None`); with the skill flags OFF the services still exist and the binding is harmless — the ON/OFF decision stays with the lane gates (`ENSEMBLE_SKILL_CAPTURE_ENABLED`, `ENSEMBLE_SKILL_EVOLUTION_ENABLED`). |
 | No test-only symbols in production code | The new code imports nothing from `tests/`; the moved block's imports are unchanged (`daemon.routers.skills`). |
 | No import cycles | The function body only touches `manager` attributes and the already-imported router module. |
-| Minimal diff | The block is a **pure move** (no semantic change) + **one** binding statement + one call site. `daemon/manager.py:8196-8197` stays (same instance, idempotent — it is the manager-owned fallback for any boot path that does not run the api lifespan). |
+| Minimal diff | The block is a **pure move** (no semantic change) + **one** binding statement + one call site. `daemon/manager.py:8221-8222` (HEAD; `:8196-8197` at base) stays (same instance, idempotent — it is the manager-owned fallback for any boot path that does not run the api lifespan). |
 
 ### 2.3 Why the block is extracted rather than tested through a copy
 
 A test that re-implements the wiring is vacuous (it goes green when production drops the line). The extracted function is
 **the production code**, called by the production boot — so the regression test drives the real seam. The extraction is a
-pure move: same statements, same order, same log line.
+pure move: same statements, same order, same log call — ONE field added in round 2 (`capture_dispatcher=`), nothing else.
 
 ---
 
@@ -240,15 +240,15 @@ boot result**:
 
 The test **never** calls `SkillMetricsService.set_job_dispatcher` itself.
 
-### 3.2 Mutation legs (both run, both documented in the report)
+### 3.2 Mutation legs (run; leg 2 re-proven by an independent harness)
 
 | Leg | Mutation | Expected |
 |---|---|---|
 | **1** | Remove the production binding line from `_wire_skills_router_services` (the injection alone) | **RED** — the metrics service keeps its absent/None dispatcher; assertion 1 fails. |
 | **2** | Leg-1 mutation **plus** a test-side injection (`metrics.set_job_dispatcher(fake)` inside the test — the shape that fooled every prior gate) | **STILL RED** — assertion 1 is an IDENTITY check against `manager._skill_job_dispatcher`; the fake is not the production instance, and assertion 2 (cross-seam identity) is broken by the fake. |
 
-Both legs are executed against the real tree with the exact commands recorded in the report, and the tree is restored
-(sha256-verified) afterwards.
+Both legs were executed against the real tree with the exact commands recorded in the report. **DISCLOSURE (round 2):**
+the leg-2 run was DEGENERATE — `daemon/api.py` was not restored between leg 1 and leg 2, so leg 2 was effectively leg 1 re-run; the PROPERTY it exists to prove (binding removed + a test-side injection ⇒ STILL RED at the identity assertion) was independently re-proven by a separately authored harness. The tree is restored (sha256-verified) afterwards.
 
 ---
 
