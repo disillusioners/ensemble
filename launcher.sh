@@ -727,8 +727,38 @@ _js_journal_write() {
 # _js_journal_update <path> <field> <raw-json-or-scalar> — read-modify-write
 # ONE top-level field atomically; <raw> spliced verbatim (strings arrive
 # pre-quoted, objects/numbers/bools/null raw).
+#
+# O(n) (launcher-journal-sweep-fix, R3): the replaced implementation
+# consumed the OLD VALUE ONE CHARACTER AT A TIME (`rest="${rest:1}"` in the
+# two value-scan loops) — O(n) per step under LC_ALL=C and O(n) per
+# CHARACTER under a UTF-8 locale ⇒ O(n²) overall. That scan was 100% of
+# `_js_history_append`'s cost (the append re-writes the WHOLE history
+# array): measured 16.9 s @ 32 KB and 106.2 s @ 32 KB under the daemon's
+# UTF-8 env (6.3×/locale), >300 s @ 220 KB — the boot wedge this lane
+# exists to close. ONE POSIX awk pass owns the scan now.
+#
+# BYTE-EQUIVALENCE (the contract this rewrite MUST hold — the output is
+# byte-identical to the replaced implementation for the same input):
+#   - the ANCHOR is unchanged: the FIRST occurrence of the field token
+#     wins (`head`/`rest` still use the same `"$field"` globs, and the
+#     quoted-token presence gate is still checked BEFORE the splice — a
+#     bare field NAME that never appears as `"field"` still refuses);
+#   - the WHITESPACE TRIM is still BASH's own `[![:space:]]` trim — it is
+#     ASCII-only in EVERY locale (probed on macOS: a U+00A0 is NOT
+#     stripped under either en_US.UTF-8 or C), so the trim is
+#     locale-invariant and stays in bash;
+#   - the VALUE SCAN is byte-equivalent to the replaced character loop:
+#     the same structural characters (`{ } [ ] ,`) are compared and the
+#     same escape-aware quote rule applies, and only ASCII characters are
+#     ever compared — a multibyte UTF-8 byte can never be mistaken for a
+#     structural one, so a character-wise scan and a byte-wise scan stop
+#     at the SAME place and yield the SAME tail;
+#   - the SPLICE is unchanged: `head + ": " + raw + tail`.
+# The awk pass runs under the launcher's single awk seam, which pins
+# LC_ALL=C (see `_js_awk_pass`) — byte-oriented, so the scan is
+# locale-invariant BY CONSTRUCTION.
 _js_journal_update() {
-    local jp="$1" field="$2" raw="$3" json rest head out="" c depth rc=0
+    local jp="$1" field="$2" raw="$3" json rest head out="" tail rc=0 arc=0
     _js_awk_rc_begin
     json="$(_js_journal_read "$jp")" || rc=$?
     _js_awk_rc_end
@@ -741,52 +771,94 @@ _js_journal_update() {
     fi
     [ "$rc" -eq 0 ] || return 1
     case "$json" in
-        *"\"$field\""*) ;;
+        *"$field"*) ;;
         *) return 1 ;;
     esac
-    # Walk the object; replace the value that follows "field":.
+    # Walk the object; replace the value that follows "field".
     rest="$json"
-    while [ -n "$rest" ]; do
-        case "$rest" in
-            *"\"$field\""*)
-                head="${rest%%\"$field\"*}\"$field\""
-                rest="${rest#*\"$field\"}"
-                rest="${rest#*:}"
-                # drop leading whitespace of the old value
-                rest="${rest#"${rest%%[![:space:]]*}"}"
-                # consume the old value by bracket/quote scanning
-                depth=0
-                if [ "${rest:0:1}" = "\"" ]; then
-                    # string value: skip to closing quote (escape-aware)
-                    rest="${rest:1}"
-                    while [ -n "$rest" ]; do
-                        c="${rest:0:1}"
-                        if [ "$c" = "\\" ]; then rest="${rest:2}"; continue; fi
-                        [ "$c" = "\"" ] && { rest="${rest:1}"; break; }
-                        rest="${rest:1}"
-                    done
-                else
-                    while [ -n "$rest" ]; do
-                        c="${rest:0:1}"
-                        case "$c" in
-                            '{'|'[') depth=$((depth + 1)) ;;
-                            '}'|']')
-                                if [ "$depth" -eq 0 ]; then break; fi
-                                depth=$((depth - 1)) ;;
-                            ',')
-                                [ "$depth" -eq 0 ] && break ;;
-                        esac
-                        rest="${rest:1}"
-                    done
-                fi
-                out="$head: $raw$rest"
-                break
-                ;;
-            *)
-                break
-                ;;
-        esac
-    done
+    case "$rest" in
+        *"\"$field\""*) ;;
+        # The field NAME occurs in the document but never as a quoted
+        # token (field=history against {"xhistory":…}) — the replaced
+        # loop matched nothing and left `out` empty ⇒ refuse (the same
+        # verdict, decided before the splice instead of after it).
+        *) return 1 ;;
+    esac
+    head="${rest%%\"$field\"*}\"$field\""
+    rest="${rest#*\"$field\"}"
+    rest="${rest#*:}"
+    # drop leading whitespace of the old value
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    # ONE awk pass returns the tail that follows the old value: the
+    # string case (a leading quote) skips to the escape-aware closing
+    # quote; the composite case walks the bracket depth to the first
+    # top-level `,` / `}` / `]`. Both are the replaced loops' rules,
+    # byte-for-byte.
+    _js_awk_rc_begin
+    tail="$(_js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            n = length(buf)
+            if (n >= 1 && substr(buf, 1, 1) == "\"") {
+                # STRING VALUE — VECTORIZED (the validator parity idiom,
+                # proven in the balance validator):: split ONCE on the quote boundaries and
+                # visit only the SEGMENTS; each boundary quote is escaped
+                # iff the backslash run before it has odd length, so the
+                # first unescaped quote closes the string. Only ASCII
+                # structural characters are compared — byte-equivalent to
+                # the replaced per-character loop.
+                s = substr(buf, 2)
+                m = split(s, q, "\"")
+                pos = 0
+                found = 0
+                for (j = 1; j < m; j++) {
+                    pos += length(q[j]) + 1   # the segment bytes + the quote byte
+                    t = q[j]
+                    if (match(t, /\\+$/) > 0 && RLENGTH % 2 == 1) continue
+                    found = 1
+                    break
+                }
+                if (found) start = pos + 2    # the closing quote is consumed
+                else start = n + 1            # unterminated: everything consumed
+            } else {
+                # COMPOSITE VALUE — VECTORIZED (the _js_json_sub idiom):
+                # split the value ONCE on the structural characters and
+                # visit only those (~3 per history entry, never a
+                # per-byte walk). The terminator is NOT consumed (the
+                # replaced loop broke on it); EOF ⇒ the tail is empty.
+                tn = split(buf, seg, "[],{}[]")
+                pos = length(seg[1])
+                depth = 0
+                start = n + 1
+                for (j = 1; j < tn; j++) {
+                    pos++
+                    c = substr(buf, pos, 1)
+                    if (c == "{" || c == "[") depth++
+                    else if (c == "}" || c == "]") {
+                        if (depth == 0) { start = pos; break }
+                        depth--
+                    } else if (c == ",") {
+                        if (depth == 0) { start = pos; break }
+                    }
+                    pos += length(seg[j + 1])
+                }
+            }
+            printf "%s", substr(buf, start)
+        }
+    ' <<<"$rest")" || arc=$?
+    _js_awk_rc_end
+    if [ "$arc" -ne 0 ]; then
+        # The SCANNER was UNAVAILABLE (awk missing / wedged): the extent
+        # of the old value is UNKNOWN, so the splice is REFUSED — a wrong
+        # extent would truncate or corrupt the journal.
+        _log "WARN: journal update refused — $jp: the value scanner is UNAVAILABLE (awk rc=$_JS_LAST_AWK_RC); the journal is left untouched"
+        return 1
+    fi
+    out="$head: $raw$tail"
     [ -n "$out" ] || return 1
     _js_journal_write "$jp" "$out"
 }
@@ -1159,42 +1231,62 @@ _js_history_has_event_for_target() {
     case "$hist" in
         ''|null|\[\]) return 1 ;;
     esac
-    t_space="target $target "
-    t_end="target $target\""
-    r_space="run_id $run_id "
-    r_end="run_id $run_id\""
-    rest="$hist"
-    while :; do
-        case "$rest" in
-            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
-            *) break ;;
-        esac
-        case "$rest" in
-            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
-            *) entry="$rest" ;;
-        esac
-        # the EVENT KIND must be in THIS entry
-        # the event-kind literal — the house writers emit the COMPACT form
-        # ("event":"x"); the spaced form ("event": "x") is tolerated too
-        # (a hand-edited journal must not silently change a verdict).
-        case "$entry" in
-            *"\"event\":\"$event\""*|*"\"event\": \"$event\""*) ;;
-            *) continue ;;
-        esac
-        # the TARGET must be in THIS entry, delimiter-anchored
-        case "$entry" in
-            *"$t_space"*|*"$t_end"*) ;;
-            *) continue ;;
-        esac
-        if [ -n "$run_id" ]; then
-            case "$entry" in
-                *"$r_space"*|*"$r_end"*) ;;
-                *) continue ;;
-            esac
-        fi
-        return 0
-    done
-    return 1
+    # O(n) SCAN (launcher-journal-sweep-fix, R4): the replaced loop walked
+    # the history ONE ENTRY AT A TIME and each step re-sliced the WHOLE
+    # remainder (`rest="${rest#*'{"ts":'}"` + `entry="${rest%%'{"ts":'*}"`)
+    # — O(n) per ENTRY ⇒ O(n·entries) = quadratic in BYTES (measured
+    # ×3.8–4.1 per doubling; 125 s @ 220 KB under the daemon's UTF-8 env).
+    # ONE POSIX awk pass answers the question for ALL entries: the document
+    # is split ONCE on the entry marker and each entry is matched with
+    # LITERAL substring searches (index()).
+    #
+    # SEMANTICS UNCHANGED (every quirk preserved):
+    #   - the entry boundary is still the LITERAL `{"ts":` marker matched
+    #     ANYWHERE (even inside a string value — a detail carrying that
+    #     byte sequence still splits an entry, exactly as before);
+    #   - the text BEFORE the first marker is still discarded (no marker
+    #     at all ⇒ no entries ⇒ "not found", rc 1);
+    #   - the event-kind literals keep BOTH forms (compact + spaced);
+    #   - the target/run_id checks keep BOTH delimiter anchors (the
+    #     space form and the closing-quote form);
+    #   - run_id is still skipped when empty;
+    #   - "first entry that matches all conjuncts wins" — same order.
+    # The literal index() searches are byte-exact equivalents of the
+    # replaced `case` globs: every needle in those globs was a quoted
+    # expansion (literal already — no glob metacharacters were active).
+    # The parameters travel via the ENVIRONMENT (never `awk -v` — no
+    # escape sequence can be mangled), under the launcher's single awk
+    # seam, which pins LC_ALL=C (see `_js_awk_pass`).
+    local _JS_HIST_EVENT="$event" _JS_HIST_TARGET="$target" _JS_HIST_RUN_ID="$run_id"
+    export _JS_HIST_EVENT _JS_HIST_TARGET _JS_HIST_RUN_ID
+    rc=0
+    _js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            ev = ENVIRON["_JS_HIST_EVENT"]
+            tg = ENVIRON["_JS_HIST_TARGET"]
+            rid = ENVIRON["_JS_HIST_RUN_ID"]
+            n = split(buf, seg, /\{"ts":/)
+            for (i = 2; i <= n; i++) {
+                e = seg[i]
+                if (index(e, "\"event\":\"" ev "\"") == 0 && \
+                    index(e, "\"event\": \"" ev "\"") == 0) continue
+                if (index(e, "target " tg " ") == 0 && \
+                    index(e, "target " tg "\"") == 0) continue
+                if (rid != "") {
+                    if (index(e, "run_id " rid " ") == 0 && \
+                        index(e, "run_id " rid "\"") == 0) continue
+                }
+                exit 0
+            }
+            exit 1
+        }
+    ' <<<"$hist" || rc=$?
+    return "$rc"
 }
 
 # _js_history_has_defer_reason <journal> <target> <run_id> <reason>
@@ -1230,43 +1322,46 @@ _js_history_has_defer_reason() {
     case "$hist" in
         ''|null|'[]') return 1 ;;
     esac
-    marker="DEFERRED ($reason)"
-    t_eq="target=$target,"
-    r_eq="run_id=$run_id,"
-    rest="$hist"
-    while :; do
-        case "$rest" in
-            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
-            *) break ;;
-        esac
-        case "$rest" in
-            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
-            *) entry="$rest" ;;
-        esac
-        # the EVENT KIND must be in THIS entry (compact or spaced form)
-        case "$entry" in
-            *"\"event\":\"sweep_deferred\""*|*"\"event\": \"sweep_deferred\""*) ;;
-            *) continue ;;
-        esac
-        # the REASON marker must be in THIS entry
-        case "$entry" in
-            *"$marker"*) ;;
-            *) continue ;;
-        esac
-        # the TXN identity must be in THIS entry, delimiter-anchored
-        if [ -n "$run_id" ]; then
-            case "$entry" in
-                *"$r_eq"*) ;;
-                *) continue ;;
-            esac
-        fi
-        case "$entry" in
-            *"$t_eq"*) ;;
-            *) continue ;;
-        esac
-        return 0
-    done
-    return 1
+    # O(n) SCAN (launcher-journal-sweep-fix, R4): the same single-pass
+    # mechanism as `_js_history_has_event_for_target` (see its block
+    # comment) — split ONCE on the `{"ts":` marker, match each entry with
+    # literal index() searches. SEMANTICS UNCHANGED: the entry boundary,
+    # the discarded pre-first-marker text, the compact+spaced event
+    # forms, the `,`-anchored `target=<ver>,` / `run_id=<id>,` txn
+    # anchors, the `DEFERRED (<reason>)` marker (stable across ticks) and
+    # the run_id-skipped-when-empty rule are all the replaced loop's.
+    # LC_ALL=C is pinned at the `_js_awk_pass` seam; the parameters travel
+    # via the ENVIRONMENT (never `awk -v`).
+    local _JS_HIST_REASON="$reason" _JS_HIST_TARGET="$target" _JS_HIST_RUN_ID="$run_id"
+    export _JS_HIST_REASON _JS_HIST_TARGET _JS_HIST_RUN_ID
+    rc=0
+    _js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            rs = ENVIRON["_JS_HIST_REASON"]
+            tg = ENVIRON["_JS_HIST_TARGET"]
+            rid = ENVIRON["_JS_HIST_RUN_ID"]
+            marker = "DEFERRED (" rs ")"
+            t_eq = "target=" tg ","
+            r_eq = "run_id=" rid ","
+            n = split(buf, seg, /\{"ts":/)
+            for (i = 2; i <= n; i++) {
+                e = seg[i]
+                if (index(e, "\"event\":\"sweep_deferred\"") == 0 && \
+                    index(e, "\"event\": \"sweep_deferred\"") == 0) continue
+                if (index(e, marker) == 0) continue
+                if (rid != "" && index(e, r_eq) == 0) continue
+                if (index(e, t_eq) == 0) continue
+                exit 0
+            }
+            exit 1
+        }
+    ' <<<"$hist" || rc=$?
+    return "$rc"
 }
 
 # _js_sanitise_run_id <run_id> — filename-safe form (AM-P2-20). The

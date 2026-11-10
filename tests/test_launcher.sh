@@ -455,18 +455,111 @@ _js_count() {   # rollback_window_count "24h" value
 # §4.2.2 note under P3-PIN-01..04). The helper keeps the fixtures' INTENT
 # (a 700s-stale txn, a 30s-fresh txn, a 25h-old window, a 300s-future
 # cooldown) and makes them real on both dialects.
+#
+# ROUND-5 fix (launcher-journal-sweep-fix, D4): the BSD arm built
+# `date -u -v"${off}"S` with the offset VERBATIM — and BSD date rejects an
+# UNSIGNED positive adjustment (`-v300S`: "Cannot apply date adjustment")
+# while accepting the signed form (`-v+300S`). The only positive-offset
+# caller (`_ts_off 300`, the 8f cooldown seed) therefore returned EMPTY on
+# every macOS/BSD host and 8f's "cooldown_until in the FUTURE" precondition
+# silently degenerated to `cooldown_until:""` (the fixture was VACUOUS —
+# gate item 8f / anomaly d4a3134c). The sign is now normalised explicitly
+# for the BSD arm (negative offsets already carry their `-`); the GNU arm
+# (`-d "@$((now+off))"`) is untouched.
+#
+# SELECTION IS OBSERVABLE (test-only): `_TS_OFF_UNAME` overrides the
+# `uname -s` dispatch so the GNU arm can be pinned on a BSD host (the GNU
+# arm CANNOT be exercised by macOS's real `date` — see the 8f-pre block
+# below for the stubbed pin). Production behaviour is unchanged: the
+# default is `uname -s`.
 _ts_off() {
-    local off="$1" now
-    now="$(date -u +%s)"
-    case "$(uname -s)" in
-        Darwin|*BSD*|*bsd*) date -u -v"${off}"S +%Y-%m-%dT%H:%M:%SZ ;;
-        *) date -u -d "@$(( now + off ))" +%Y-%m-%dT%H:%M:%SZ ;;
+    local off="$1" now voff
+    case "${_TS_OFF_UNAME:-$(uname -s)}" in
+        Darwin|*BSD*|*bsd*)
+            case "$off" in
+                -*) voff="$off" ;;
+                *)  voff="+$off" ;;
+            esac
+            date -u -v"${voff}"S +%Y-%m-%dT%H:%M:%SZ ;;
+        *)
+            now="$(date -u +%s)"
+            date -u -d "@$(( now + off ))" +%Y-%m-%dT%H:%M:%SZ ;;
     esac
 }
 
 STALE_TS="$(_ts_off -700)"
 FRESH_TS="$(_ts_off -30)"
 OLD25H_TS="$(_ts_off -90000)"
+
+# ─── 8f-pre. _ts_off portability: BOTH date dialects, NON-VACUOUS ──────────
+# The 8f fixture's stated precondition is "cooldown_until in the FUTURE".
+# Pre-round-5 that precondition was NOT established on macOS (the seed was
+# the empty string), so the fixture degenerated toward plain 8a. These pins
+# establish it on BOTH dialect families:
+#   - the BSD arm runs against the host's REAL date here (macOS);
+#   - the GNU arm CANNOT be exercised by macOS's `date` (`-d` is a GNU
+#     flag), so it is pinned with a DETERMINISTIC FAKE `date` on PATH plus
+#     the `_TS_OFF_UNAME=Linux` selection override — the stub's fixed
+#     `now` (1000000000) makes the +300 arithmetic exactly assertable.
+# Verified-on-this-host leg: BSD real. Verified-by-stub leg: GNU.
+section "8f-pre _ts_off portability (BSD real date + GNU stubbed date)"
+TS_OFF_PRE="$(date -u +%s)"
+TS_BSD_NEG="$(_ts_off -700)"
+case "$TS_BSD_NEG" in
+    ""|*Cannot*) _fail "8f-pre BSD -700s offset non-empty (real BSD date)" "ISO ts" "$TS_BSD_NEG" ;;
+    *) _pass ;;
+esac
+TS_OFF_MID="$(date -u +%s)"
+TS_BSD_POS="$(_ts_off 300)"
+case "$TS_BSD_POS" in
+    ""|*Cannot*) _fail "8f-pre BSD +300s offset non-empty (real BSD date — the D4 defect)" "ISO ts" "$TS_BSD_POS" ;;
+    *) _pass ;;
+esac
+# the +300s stamp must BE ≈300 s in the future (± 20 s tolerance for the
+# two `date -u +%s` probes that bracket the call)
+if TS_OFF_EPOCH="$(_js_iso_to_epoch "$TS_BSD_POS" 2>/dev/null)" && [ -n "$TS_OFF_EPOCH" ] \
+   && [ "$TS_OFF_EPOCH" -ge $(( TS_OFF_PRE + 280 )) ] \
+   && [ "$TS_OFF_EPOCH" -le $(( TS_OFF_MID + 320 )) ]; then
+    _pass
+else
+    _fail "8f-pre BSD +300s stamp is ≈300s in the future (non-vacuous 8f seed)" \
+        "now+300 ±20s" "epoch=${TS_OFF_EPOCH:-EMPTY} (bounds ${TS_OFF_PRE}+280..${TS_OFF_MID}+320)"
+fi
+# the negative arm must be ≈700 s in the PAST (the same tolerance)
+if TS_NEG_EPOCH="$(_js_iso_to_epoch "$TS_BSD_NEG" 2>/dev/null)" && [ -n "$TS_NEG_EPOCH" ] \
+   && [ "$TS_NEG_EPOCH" -le $(( TS_OFF_PRE - 680 )) ] \
+   && [ "$TS_NEG_EPOCH" -ge $(( TS_OFF_MID - 720 )) ]; then
+    _pass
+else
+    _fail "8f-pre BSD -700s stamp is ≈700s in the past" \
+        "now-700 ±20s" "epoch=${TS_NEG_EPOCH:-EMPTY}"
+fi
+
+# GNU arm via a deterministic stub (the stub OWNS `now`: 1000000000, so
+# `now + 300` is exactly 1000000300 and the assertion is exact, not
+# approximate). The stub forwards anything it does not own to the real
+# date so the helper's GNU arm is the only thing under test.
+TS_GNU_STUB="$JS_TEST_DIR/gnudate-stub"
+mkdir -p "$TS_GNU_STUB"
+printf '#!/bin/sh\n# GNU date STUB (tests only): accepts the two forms _ts_off uses.\nif [ "$1" = "-u" ] && [ "$2" = "+%%s" ]; then echo 1000000000; exit 0; fi\nif [ "$1" = "-u" ] && [ "$2" = "-d" ]; then\n    printf '"'"'GNUSTUB-%%s\\n'"'"' "${3#@}"; exit 0\nfi\nexec /bin/date "$@"\n' > "$TS_GNU_STUB/date"
+chmod +x "$TS_GNU_STUB/date"
+TS_GNU_POS="$(_TS_OFF_UNAME=Linux PATH="$TS_GNU_STUB:$PATH" _ts_off 300)"
+case "$TS_GNU_POS" in
+    GNUSTUB-1000000300) _pass ;;
+    "")
+        _fail "8f-pre GNU +300s arm selected + arithmetic exact (stubbed date)" \
+            "GNUSTUB-1000000300" "empty (the GNU arm was not selected or the stub was bypassed)" ;;
+    *)
+        _fail "8f-pre GNU +300s arm selected + arithmetic exact (stubbed date)" \
+            "GNUSTUB-1000000300" "$TS_GNU_POS" ;;
+esac
+TS_GNU_NEG="$(_TS_OFF_UNAME=Linux PATH="$TS_GNU_STUB:$PATH" _ts_off -700)"
+case "$TS_GNU_NEG" in
+    GNUSTUB-999999300) _pass ;;
+    *) _fail "8f-pre GNU -700s arm selected + arithmetic exact (stubbed date)" \
+        "GNUSTUB-999999300" "${TS_GNU_NEG:-empty}" ;;
+esac
+
 
 # 8a. stale + flipped:true → sweep-rollback: current repointed to previous,
 #     sweep_rollback history event, counter incremented, cooldown armed,
@@ -551,8 +644,28 @@ assert_eq "8e in_flight cleared (recovery completed)" "null" "$(_js_field "$JS_E
 
 # 8f. D-FA4.2: active cooldown NEVER refuses the sweep — cooldown_until in
 #     the FUTURE + stale flipped → rollback still executes + cooldown re-armed.
+#     (Round-5 D4: the fixture's PRECONDITION is now established AND PINNED.
+#     Pre-fix the BSD arm built `date -v300S` — illegal on BSD — and seeded
+#     an EMPTY cooldown_until, so on every macOS host this fixture silently
+#     degenerated toward plain 8a (no future cooldown was ever in play). The
+#     two pins below are the non-vacuity gate: the seed must be a NON-EMPTY
+#     stamp ≈300 s in the future BEFORE the sweep runs.)
 JS_F="$JS_TEST_DIR/f"; _js_fixture "$JS_F"
-_js_seed "$JS_F" "$STALE_TS" true 1 "$STALE_TS" "\"$(_ts_off 300)\"" promote 1
+JS_F_SEED_PRE="$(date -u +%s)"
+JS_F_SEED="$(_ts_off 300)"
+case "$JS_F_SEED" in
+    ""|*Cannot*) _fail "8f seeded cooldown_until non-empty (precondition established on THIS host)" "ISO ts ≈ now+300s" "$JS_F_SEED" ;;
+    *) _pass ;;
+esac
+if JS_F_SEED_EPOCH="$(_js_iso_to_epoch "$JS_F_SEED" 2>/dev/null)" && [ -n "$JS_F_SEED_EPOCH" ] \
+   && [ "$JS_F_SEED_EPOCH" -ge $(( JS_F_SEED_PRE + 280 )) ] \
+   && [ "$JS_F_SEED_EPOCH" -le $(( $(date -u +%s) + 320 )) ]; then
+    _pass
+else
+    _fail "8f seeded cooldown_until ≈300s in the future (non-vacuous on THIS host)" \
+        "now+300 ±20s" "epoch=${JS_F_SEED_EPOCH:-EMPTY}"
+fi
+_js_seed "$JS_F" "$STALE_TS" true 1 "$STALE_TS" "\"$JS_F_SEED\"" promote 1
 _js_run "$JS_F"
 assert_eq "8f cooldown-active sweep-rollback still executes: rc 0" "0" "$?"
 assert_eq "8f current repointed despite cooldown" "releases/v0.10.5" "$(readlink "$JS_F/current")"
