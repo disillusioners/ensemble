@@ -1,5 +1,28 @@
 # Phase 1: Design Decision Gate (DQ1–DQ10 Adjudication)
 
+> **rev 2 — closure note (council cycle 1).** This phase is **CLOSED**: the
+> architect returned **10/10 binding rulings + R1 + the sequencing verdict**
+> (`architecture-recommendation.md`, §2 and §3). The task list below is retained
+> as the **record of what was asked**; it is **not** the live contract. The live
+> contract is the arch doc's frozen contracts (§4.1–§4.4) and the phase docs'
+> rev 2.
+>
+> **One premise in this file was falsified and is corrected here:** Task 11's
+> framing cited "the unit `MemoryMax=8G` / daemon band 5.3–6.0 GiB". **No unit
+> memory cap exists** (`MemoryMax=infinity`, `MemoryHigh=infinity` — verified via
+> `systemctl show` and by the absence of any `Memory*` directive in the unit or
+> its drop-ins); the 7G/8G figures were a **never-applied** runbook
+> recommendation, and the Oct-30 deaths were **kernel `oom-kill`** events, not
+> cgroup-cap kills. The ruling that came back: the ceiling is **ABSOLUTE
+> per-command bytes**, the guard is the **INNER** preventive layer, the unit cap
+> is the **OUTER** layer covering the orphan class, and the shipped default is
+> **3 GiB / 3 072 MiB** (arch doc §3.1–§3.3). The measured daemon band is
+> **2.69 → 3.31 GiB**.
+>
+> **Two items remain genuinely open** and are carried forward, not closed here:
+> the unit-cap drop-in is a **user action**, and the **3-vs-8 GiB confirmation**
+> must be surfaced in the final report and the Phase 7 operator memo.
+
 ## Objective
 
 Convert the ten framed design questions (DQ1–DQ10 in
@@ -26,7 +49,7 @@ frozen contracts that Phases 2–7 implement.
 | 8 | **Ruling DQ8 — observability.** The event kind, the counter names, the log prefix, and the sanitization rule | Task 6 | Ruling names the event kind string, the payload keys, the counter names, the logger prefix, and confirms the event fires **once per breach** (never per tick) |
 | 9 | **Ruling DQ9 — default-ON vs the T4 seam.** Confirm P1 sits outside `resource_limit_policy` and the `resource_pid_map` dormant columns; confirm `/control-capabilities` stays untouched | none | Ruling states the structural separation and names the fence test(s) that must keep passing **unmodified** |
 | 10 | **Ruling DQ10 — crash durability.** In-process vs durable verdict; if durable, the closed-vocab extension (`reap_reason` in `bash_spawn_registry` is a CLOSED SET) and the write frequency (once per killed command, never per tick) | Task 5 | Ruling states the durability posture and, if durable, the migration requirement and the new vocabulary member |
-| 11 | **Ruling — the Critical Interaction (R1).** The relationship between the per-command ceiling and the unit `MemoryMax=8G` / daemon band 5.3–6.0 GiB: is the ceiling absolute or relative to the daemon's band? Does the unit cap remain the outer backstop or become a secondary? | Task 7 | Ruling states the effective headroom formula, whether the shipped default changes, and what the operator runbook must say. **If the answer changes the default ceiling, the plan's default is amended here and the amendment is recorded in the decision record** |
+| 11 | **Ruling — the Critical Interaction (R1).** The relationship between the per-command ceiling and the unit cap / daemon band. **[CLOSED — premise corrected: no unit memory cap exists (`MemoryMax=infinity`); the 7G/8G figures were a never-applied runbook recommendation and the Oct-30 deaths were kernel `oom-kill` events. The ruling returned: ABSOLUTE per-command bytes · guard-INNER preventive layer / unit-cap-OUTER containment layer · shipped default 3 GiB / 3 072 MiB. See the rev-2 closure note at the head of this file and arch doc §3.1–§3.3.]** | Task 7 | Ruling states the effective headroom formula, whether the shipped default changes, and what the operator runbook must say. **If the answer changes the default ceiling, the plan's default is amended here and the amendment is recorded in the decision record** |
 | 12 | **Freeze the contracts.** Publish the tree-RAM reader contract (units, failure semantics, "unreadable" vs "zero"), the verdict-record shape, and the kill-ladder contract — so Phases 3 and 4 can proceed **in parallel** against a frozen interface | Tasks 1–4 | The three contracts are written down and referenced by later phases; any later change is a version bump, not a silent edit |
 
 ## Coupling
