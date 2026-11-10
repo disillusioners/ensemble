@@ -620,3 +620,12 @@ Seven places where the second-gate brief was wrong or imprecise, each caught by 
 **The first gate's FAIL is answered, not withdrawn.** Three O(n²) boot-path walkers (`_js_journal_update`, `_js_history_has_defer_reason`, `_js_history_has_event_for_target`) are now O(n) at `7b0b7955d`, measured at ≈2× per doubling across 55 KB → 880 KB in both boot-path shapes; the ≥96 KB size guard is now a **bound** (refuse-to-act, rc 2, WARN naming size + guard + budget, journal byte-unchanged, lock released, txn left OPEN) rather than a router into the quadratic; the pre-flip branch now declines to act above the guard and is **byte-identical below it**; a torn/absent/empty journal can no longer masquerade as "no defer reason"; and the journal output is **byte-identical** to the first-gate implementation at every size that can be executed.
 
 **Release posture: 🟢 GO on this gate.** The residuals above (§S8) are non-blocking: the serving-green bash-3.2 hypothesis needs a live re-smoke to settle; two commit subjects over-claim and want a release-note line; one PACKS.md pairing is overstated; the POK store needs curation; and three owner-level housekeeping items (QUARANTINE row, MOCK_TESTS entry, ledger registration) are queued. **None of them is a regression, and none is on the boot wedge.**
+
+
+---
+
+*Machine-readable marker for the release checker. The FINAL VERDICT below is the verdict of the LATEST gate round (the second gate). The first-gate FAIL at the top of this file is RETAINED EVIDENCE — it is the record that the five commits under test answer, and it must not be edited or removed. The checker reads the FINAL occurrence of this marker block; earlier red rounds are informational.*
+
+## FINAL VERDICT: PASS
+GATED_COMMIT: 7b0b7955db5834905bd01b3ba91fb32981f88f22
+GATE_DATE: 2026-11-10T11:50:31Z
