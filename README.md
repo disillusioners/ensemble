@@ -63,6 +63,8 @@ Verify the server is running:
 curl http://localhost:8079/api/health
 ```
 
+> **Deploying to a server?** [docs/deployment.md](docs/deployment.md) §0 is the one-page **production** quick start — install, supervise under launchd, verify healthy on a fresh macOS box.
+
 Expected response:
 ```json
 {"status":"ok","version":"0.3.6"}
@@ -263,6 +265,7 @@ For full configuration details, see [docs/setup.md](docs/setup.md).
 | Guide | Description |
 |-------|-------------|
 | [Setup Guide](docs/setup.md) | Complete installation and configuration |
+| [Deployment Guide](docs/deployment.md) | **Install, supervise, verify, upgrade and roll back the daemon on macOS** — one-page quick start first (fresh box → launchd-supervised, health-checked), then the dev/demo/live topology across Mac and VM, the Linux/VM systemd runbook, and the staged hardening plan |
 | [Architecture](docs/architecture.md) | System design and internals |
 | [Job Queue](docs/features/job-queue.md) | Priority scheduling and dead-letter queue |
 | [Configuration](docs/configuration/rag-configuration.md) | Configuration reference |
@@ -311,6 +314,8 @@ The Angular dev server runs on port 4199 with proxy to the backend API.
 
 ## Production Deployment
 
+> **Start here to deploy:** [docs/deployment.md](docs/deployment.md) opens with a **one-page quick start** that takes a fresh macOS box to a launchd-supervised daemon answering on `127.0.0.1:9797` — install, supervise, verify healthy — then covers upgrade, rollback, and the Linux/VM lane (an operator runbook, not a fresh-box procedure). **The section below is only the three-environment reference for a daemon you have already installed**; it is not an install procedure.
+
 ### Three-Environment Topology
 
 Production work on a single host uses three coexisting environments with always-distinct ports and databases:
@@ -338,11 +343,16 @@ Exit codes: `0` ok · `78` config refusal (missing env/binary/target, unconfirme
 
 ### Standard Installation
 
+`INSTALL_DIR` is required — a bare `make install` refuses with exit 78 — and a live-set target additionally needs `ENSEMBLE_INSTALL_LIVE=1`:
+
 ```bash
-make install
+export INSTALL_DIR="$HOME/agents-ensemble" ENSEMBLE_INSTALL_LIVE=1
+make install INSTALL_DIR="$INSTALL_DIR"   # stages .env.prod → .env, launcher, plists
 ```
 
-This builds the frontend and installs the complete application to `~/agents-ensemble/`.
+Then stage the launchd jobs: `make plist-install INSTALL_DIR="$INSTALL_DIR"` and `make watchdog-install INSTALL_DIR="$INSTALL_DIR"` (see the Deployment Guide §0). Never `sudo` the two plist targets. Write the path as `"$HOME/agents-ensemble"` — a leading `~/…` is expanded **once** by the Makefile before the guard sees it (it resolves to the same live path, so it still needs `ENSEMBLE_INSTALL_LIVE=1`), and a path containing **spaces** is **refused** (exit 78), not silently accepted.
+
+This builds the frontend and installs the complete application to `$INSTALL_DIR`.
 
 ### Standalone Binary
 
@@ -359,7 +369,7 @@ Creates a standalone executable with bundled frontend.
 | Development | `./data_dev/` |
 | Production | `./data/` |
 
-For complete deployment instructions, see [docs/setup.md](docs/setup.md).
+For the one-page quick start and the full deployment guide — install, supervise, verify, upgrade and roll back on macOS and Linux — see [docs/deployment.md](docs/deployment.md) (§0 is the quick start). For local installation and configuration detail, see [docs/setup.md](docs/setup.md).
 
 ---
 

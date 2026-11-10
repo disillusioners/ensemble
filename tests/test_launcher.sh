@@ -304,6 +304,84 @@ assert_eq "missing env file tolerated (exit 0)" "0" "$?"
 )
 assert_eq "values containing '=' parsed whole" "0" "$?"
 
+# 6e. F-06: a value with TRAILING WHITESPACE is trimmed (the launcher and
+# the watchdog must resolve the SAME trimmed path).
+(
+    . "$LAUNCHER"
+    printf 'TRAILING=/indented   \n' > "$ENV_TEST_DIR/env4"
+    load_env_file "$ENV_TEST_DIR/env4"
+    [ "${TRAILING:-}" = "/indented" ] || exit 33
+    exit 0
+)
+assert_eq "6e env value: trailing whitespace trimmed" "0" "$?"
+
+# 6f. F-06: an UNQUOTED inline comment suffix is stripped.
+(
+    . "$LAUNCHER"
+    printf 'CMT=/path/to/state   # a trailing comment\n' > "$ENV_TEST_DIR/env5"
+    load_env_file "$ENV_TEST_DIR/env5"
+    [ "${CMT:-}" = "/path/to/state" ] || exit 34
+    exit 0
+)
+assert_eq "6f env value: unquoted inline comment stripped" "0" "$?"
+
+# 6g. F-06: a '#' NOT preceded by whitespace is PART of the value.
+(
+    . "$LAUNCHER"
+    printf 'HASH=pa#ss\n' > "$ENV_TEST_DIR/env6"
+    load_env_file "$ENV_TEST_DIR/env6"
+    [ "${HASH:-}" = "pa#ss" ] || exit 35
+    exit 0
+)
+assert_eq "6g env value: '#' without preceding whitespace kept" "0" "$?"
+
+# 6h. F-06: a '#' INSIDE a quoted value is NOT a comment.
+(
+    . "$LAUNCHER"
+    printf 'QUOTEDHASH="a # b"\n' > "$ENV_TEST_DIR/env7"
+    load_env_file "$ENV_TEST_DIR/env7"
+    [ "${QUOTEDHASH:-}" = "a # b" ] || exit 36
+    exit 0
+)
+assert_eq "6h env value: '#' inside quotes kept" "0" "$?"
+
+# 6i. FIX 7(b): a PATH= line in .env is IGNORED (PATH is supervisor-owned —
+# the launchd anchor + the Layer-2 synthesis decide it) and the refusal is
+# logged loudly, naming the key AND the file.
+(
+    . "$LAUNCHER"
+    printf 'PATH=/bogus\nKEEPME=ok\n' > "$ENV_TEST_DIR/env8"
+    load_env_file "$ENV_TEST_DIR/env8" 2>"$ENV_TEST_DIR/env8.err"
+    [ "${PATH:-}" != "/bogus" ] || exit 37
+    [ "${KEEPME:-}" = "ok" ] || exit 38
+    grep -q 'PATH key in env file IGNORED' "$ENV_TEST_DIR/env8.err" || exit 39
+    grep -q 'env8' "$ENV_TEST_DIR/env8.err" || exit 40
+    exit 0
+)
+assert_eq "6i env PATH key: refused (not exported) + loud WARN" "0" "$?"
+
+# 6j. F-07 / residual (e): a DUPLICATE key in .env resolves LAST-wins (the
+# loader exports sequentially — the last export wins; the watchdog agrees).
+(
+    . "$LAUNCHER"
+    printf 'DUPKEY=first\nDUPKEY=second\n' > "$ENV_TEST_DIR/env9"
+    load_env_file "$ENV_TEST_DIR/env9"
+    [ "${DUPKEY:-}" = "second" ] || exit 41
+    exit 0
+)
+assert_eq "6j env duplicate key: LAST occurrence wins" "0" "$?"
+
+# 6k. the VALUE-level trim: whitespace around the VALUE (e.g. a space
+# right after '=') is trimmed — the line-level trim alone would not do it.
+(
+    . "$LAUNCHER"
+    printf 'SPACED=   value-with-spaces   \n' > "$ENV_TEST_DIR/env10"
+    load_env_file "$ENV_TEST_DIR/env10"
+    [ "${SPACED:-}" = "value-with-spaces" ] || exit 42
+    exit 0
+)
+assert_eq "6k env value: whitespace around the value trimmed" "0" "$?"
+
 # ─── 7. State file round-trip + corrupt tolerance ───────────────────────────
 section "state file"
 STATE_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-state.XXXXXX")"
@@ -881,9 +959,10 @@ assert_eq "8w dead owner → acquire succeeds via stale-break (0)" "0" "$?"
 # Two arms: (1) a regression pin that _journal_sweep at the current
 # branch DOES NOT use unbounded pipe reads or `wait` against subprocesses
 # — the brief premise was a "sweep pipe_read wedge" but HEAD code uses
-# pure bash JSON parsing; the live-install launcher is byte-identical to
-# the BASE (post-v0.16.8) commit — HEAD carries the bounded-subprocess pass
-# that converges at the next v0.16.9 promote. (2) correctness tests
+# pure bash JSON parsing; the repo now carries the O(n) journal-sweep
+# rewrite (_js_journal_read / _js_json_sub) while the LIVE install still
+# carries the PRE-rewrite launcher until the next promote, so the two
+# bodies legitimately differ right now. (2) correctness tests
 # for the bounded-run helper _js_run_bounded and the bounded pid-alive
 # wrapper _js_pid_alive_bounded (genuine D-state kill-0 / wedged-cmd
 # wedge defense; the kill -0 call IS a real blocking risk at HEAD).
@@ -917,12 +996,16 @@ else
     _pass "8b-r1 _journal_sweep has no pipe reads (regression pin)"
 fi
 
-# 8b-r2: live-install launcher state (informational). TF3 (2026-10-12):
-# the probe path is OPT-IN via ENS_TEST_LIVE_LAUNCHER — there is NO
-# default live-install path and NO default stat probe (zero-live-contact
-# bar for agent-driven test runs; the probe only ever fired when a live
-# install existed, but the hardcoded path made that unconditional).
-# Operators who want the live-copy comparison run:
+# 8b-r2: OPT-IN live-install comparison (informational). The probe path is
+# OPT-IN via ENS_TEST_LIVE_LAUNCHER — there is NO default live-install
+# path and NO default stat probe (zero-live-contact bar for agent-driven
+# test runs). The repo now carries the O(n) journal-sweep rewrite
+# (_js_journal_read / _js_json_sub); the LIVE install still carries the
+# PRE-rewrite launcher until the next promote, so the two bodies
+# legitimately differ right now. This row is NOT a convergence proof and
+# does NOT prove the repo and live copies are equivalent: the operator's
+# real convergence check is `cmp` against the LIVE launcher.sh, NOT this
+# suite row. Operators who want the live-copy comparison run:
 #   ENS_TEST_LIVE_LAUNCHER=/path/to/live/install/launcher.sh bash tests/test_launcher.sh
 LIVE_LAUNCHER="${ENS_TEST_LIVE_LAUNCHER:-}"
 if [ -n "$LIVE_LAUNCHER" ] && [ -f "$LIVE_LAUNCHER" ]; then
@@ -934,21 +1017,21 @@ if [ -n "$LIVE_LAUNCHER" ] && [ -f "$LIVE_LAUNCHER" ]; then
     ' "$LIVE_LAUNCHER")"
     if [ "$SWEEP_BODY" = "$LIVE_SWEEP_BODY" ]; then
         _pass
-        printf 'INFO: 8b-r2 repo _journal_sweep body ≡ live-install copy (post-promote convergence)\n'
+        printf 'INFO: 8b-r2 repo _journal_sweep body == live-install copy (opt-in comparison only; NOT a convergence proof)\n'
     else
-        # informational pass — the promote train converges the copies
-        printf 'INFO: 8b-r2 live-install _journal_sweep \u2260 repo HEAD (next promote will close)\n'
+        # informational pass — the live install is pre-rewrite; this row is NOT a convergence proof
+        printf 'INFO: 8b-r2 live-install _journal_sweep \u2260 repo HEAD (expected: repo carries the O(n) rewrite, live is pre-rewrite until next promote)\n'
         LIVE_KILLS=$(printf '%s' "$LIVE_SWEEP_BODY" | sed -e 's/#.*$//' | grep -c '_js_pid_alive_bounded\|_js_run_bounded' || true)
         if [ "$LIVE_KILLS" -gt 0 ]; then
             _pass
-            printf 'INFO: 8b-r2 live-install _journal_sweep body has the bounded-subprocess pass\n'
+            printf 'INFO: 8b-r2 live-install _journal_sweep body still has the bounded-subprocess pass (pre-rewrite; informational)\n'
         else
             _pass
-            printf 'INFO: 8b-r2 live-install _journal_sweep body pre-promote (no bounded pass; will land at next promote)\n'
+            printf 'INFO: 8b-r2 live-install _journal_sweep body pre-rewrite (informational; real convergence check is cmp against the LIVE launcher.sh)\n'
         fi
     fi
 else
-    _skip "8b-r2 repo _journal_sweep body ≡ live-install copy — no live-install path configured (set ENS_TEST_LIVE_LAUNCHER to opt in)"
+    _skip "8b-r2 opt-in live-install comparison — no live-install path configured (set ENS_TEST_LIVE_LAUNCHER to opt in); this row is NOT a convergence proof"
 fi
 
 # 8b-c1: _js_run_bounded — fast command returns the inner rc (0 / nonzero)
@@ -1169,7 +1252,849 @@ else
         "load_env_file=${loadenv_line:-absent} export=${export_line:-absent}"
 fi
 
-# ─── 13. _js_journal_read / _js_json_sub O(n) rewrite (launcher-journal-sweep-fix) ──
+# ─── 13. Supervisor-env PATH strategy (design §iv Layer 2) ─────────────────
+section "supervisor PATH strategy (§iv Layer 2)"
+LP_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-pathtest.XXXXXX")"
+# Fake-HOME fence (hermetic): a fake nvm tree + tool stubs. NO real
+# ~/.nvm reads anywhere below — HOME is always overridden inside the
+# subshells that exercise nvm resolution.
+mkdir -p "$LP_TEST_DIR/home/.nvm/alias" \
+         "$LP_TEST_DIR/home/.local/bin" \
+         "$LP_TEST_DIR/home/.nvm/versions/node/v22.9.1/bin" \
+         "$LP_TEST_DIR/home/.nvm/versions/node/v22.21.1/bin" \
+         "$LP_TEST_DIR/home/.nvm/versions/node/v22.29.0/bin" \
+         "$LP_TEST_DIR/home2/.nvm/alias" \
+         "$LP_TEST_DIR/home3/.nvm/alias" \
+         "$LP_TEST_DIR/emptyhome" \
+         "$LP_TEST_DIR/stubs"
+printf '22\n' > "$LP_TEST_DIR/home/.nvm/alias/default"
+for v in 22.9.1 22.21.1; do
+    printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home/.nvm/versions/node/v$v/bin/node"
+    chmod +x "$LP_TEST_DIR/home/.nvm/versions/node/v$v/bin/node"
+    # real nvm version bins ship npx next to node
+    printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home/.nvm/versions/node/v$v/bin/npx"
+    chmod +x "$LP_TEST_DIR/home/.nvm/versions/node/v$v/bin/npx"
+done
+# v22.29.0 exists but its bin/node is NOT executable — resolution must
+# verify the binary, not just the directory.
+printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home/.nvm/versions/node/v22.29.0/bin/node"
+chmod 644 "$LP_TEST_DIR/home/.nvm/versions/node/v22.29.0/bin/node"
+printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home/.local/bin/uvx"
+chmod +x "$LP_TEST_DIR/home/.local/bin/uvx"
+printf '22.21.1\n' > "$LP_TEST_DIR/home2/.nvm/alias/default"   # full-version alias
+mkdir -p "$LP_TEST_DIR/home2/.nvm/versions/node/v22.21.1/bin"
+printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/home2/.nvm/versions/node/v22.21.1/bin/node"
+chmod +x "$LP_TEST_DIR/home2/.nvm/versions/node/v22.21.1/bin/node"
+printf '99\n' > "$LP_TEST_DIR/home3/.nvm/alias/default"        # alias → nothing
+for t in npx uvx node; do
+    printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/stubs/$t"
+    chmod +x "$LP_TEST_DIR/stubs/$t"
+done
+
+# 13.0 the family is defined after sourcing (source-guard contract).
+if declare -F _path_ensure >/dev/null 2>&1 \
+    && declare -F _path_synth_dirs >/dev/null 2>&1 \
+    && declare -F _path_nvm_bin >/dev/null 2>&1 \
+    && declare -F _path_version_gt >/dev/null 2>&1 \
+    && declare -F _path_has >/dev/null 2>&1; then
+    _pass
+else
+    _fail "_path_* family defined after sourcing" "all 5 defined" "missing"
+fi
+
+# 13.a PROBE NO-OP under a VM-shaped PATH: npx/uvx/node all resolve
+# (systemd's default-PATH luck, made guaranteed by the stubs) → _path_ensure
+# returns 0 and PATH is BYTE-UNCHANGED (the VM compatibility proof).
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    export PATH
+    before="$PATH"
+    _path_ensure || exit 41
+    [ "$PATH" = "$before" ] || exit 42
+    exit 0
+)
+assert_eq "13.a probe no-op: VM-shaped PATH byte-unchanged" "0" "$?"
+
+# 13.b probe no-op logs the no-op line and NEVER the synthesis line.
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/bin:/bin"
+    export PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/probe.err"
+assert_contains "13.b probe no-op logged" "probe no-op, PATH unchanged" "$(cat "$LP_TEST_DIR/probe.err")"
+if grep -q "synthesized PATH extended" "$LP_TEST_DIR/probe.err"; then
+    _fail "13.b probe no-op must not synthesize" "no synthesis log" "$(cat "$LP_TEST_DIR/probe.err")"
+else
+    _pass
+fi
+
+# 13.c SYNTHESIS under a launchd-minimal PATH + fake HOME: nvm bin and
+# .local/bin prepended, inherited PATH retained as suffix, every added dir
+# exists, and npx resolves afterwards.
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH="/usr/bin:/bin"
+    export HOME PATH
+    _path_ensure || exit 43
+    case ":$PATH:" in *":$LP_TEST_DIR/home/.nvm/versions/node/v22.21.1/bin:"*) ;; *) exit 44 ;; esac
+    case ":$PATH:" in *":$LP_TEST_DIR/home/.local/bin:"*) ;; *) exit 45 ;; esac
+    case "$PATH" in *":/usr/bin:/bin") ;; *) exit 46 ;; esac
+    command -v npx >/dev/null 2>&1 || exit 47
+    oldIFS="$IFS"; IFS=:
+    for d in $PATH; do
+        [ -n "$d" ] || continue
+        [ -d "$d" ] || { IFS="$oldIFS"; exit 48; }
+    done
+    IFS="$oldIFS"
+    exit 0
+)
+assert_eq "13.c synthesis: nvm+anchors prepended, suffix kept, dirs exist" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH="/usr/bin:/bin"
+    export HOME PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/synth.err"
+assert_contains "13.c synthesis logged" "synthesized PATH extended" "$(cat "$LP_TEST_DIR/synth.err")"
+
+# 13.d _path_nvm_bin unit table (fake HOME ONLY — never the real ~/.nvm).
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"; export HOME
+    out="$(_path_nvm_bin)"
+    # NUMERIC latest: v22.21.1 > v22.9.1 (lexicographic glob order picks
+    # v22.21.1 FIRST — a naive last-glob-match would pick v22.9.1).
+    [ "$out" = "$LP_TEST_DIR/home/.nvm/versions/node/v22.21.1/bin" ] || exit 49
+    exit 0
+)
+assert_eq "13.d nvm bin: numeric-latest version wins (v22.21.1 over v22.9.1)" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home2"; export HOME
+    out="$(_path_nvm_bin)"
+    [ "$out" = "$LP_TEST_DIR/home2/.nvm/versions/node/v22.21.1/bin" ] || exit 50
+    exit 0
+)
+assert_eq "13.d nvm bin: full-version alias resolves exactly" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"; export HOME
+    # alias 22 also matches v22.29.0 (glob v22*) whose bin/node is NOT
+    # executable → must be skipped in favor of v22.21.1.
+    out="$(_path_nvm_bin)"
+    [ "$out" = "$LP_TEST_DIR/home/.nvm/versions/node/v22.21.1/bin" ] || exit 51
+    exit 0
+)
+assert_eq "13.d nvm bin: non-executable bin/node dir skipped" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home3"; export HOME   # alias 99 → no version dirs
+    out="$(_path_nvm_bin)"
+    [ -z "$out" ] || exit 52
+    exit 0
+)
+assert_eq "13.d nvm bin: dangling alias → empty (no fabricated path)" "0" "$?"
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/emptyhome"; export HOME   # no .nvm at all
+    out="$(_path_nvm_bin)"
+    [ -z "$out" ] || exit 53
+    exit 0
+)
+assert_eq "13.d nvm bin: absent nvm → empty" "0" "$?"
+
+# 13.e ENSEMBLE_LAUNCHER_PATH override: exported VERBATIM (full
+# replacement — design §iv step 1), beating both the probe and synthesis
+# even with a fully-populated fake nvm tree present.
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH="/usr/bin:/bin"
+    ENSEMBLE_LAUNCHER_PATH="/custom/a:/custom/b:/usr/bin:/bin"
+    export HOME PATH ENSEMBLE_LAUNCHER_PATH
+    _path_ensure || exit 54
+    [ "$PATH" = "/custom/a:/custom/b:/usr/bin:/bin" ] || exit 55
+    exit 0
+)
+assert_eq "13.e override: PATH exported verbatim (full replacement)" "0" "$?"
+
+# 13.f set-but-EMPTY override falls through to the probe (not a wipe).
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/bin:/bin"
+    ENSEMBLE_LAUNCHER_PATH=""
+    export PATH ENSEMBLE_LAUNCHER_PATH
+    before="$PATH"
+    _path_ensure || exit 56
+    [ "$PATH" = "$before" ] || exit 57
+    exit 0
+)
+assert_eq "13.f empty override treated as unset (probe path)" "0" "$?"
+
+# 13.g nothing-addable → loud WARNING, rc 0 (never wedges boot). On hosts
+# where /opt/homebrew/bin or /usr/local/bin exists the anchors ARE added
+# and the post-synthesis "still unresolved" WARNING fires instead — either
+# branch must warn and return 0.
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/emptyhome"
+    PATH="/usr/bin:/bin"
+    export HOME PATH
+    _path_ensure
+    rc=$?
+    [ "$rc" = "0" ] || exit 58
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/nothing.err"
+assert_eq "13.g nothing-addable: rc 0 (boot proceeds)" "0" "$?"
+if grep -q "WARNING" "$LP_TEST_DIR/nothing.err"; then
+    _pass
+else
+    _fail "13.g nothing-addable: loud WARNING emitted" "WARNING present" "$(cat "$LP_TEST_DIR/nothing.err")"
+fi
+
+# 13.h source-guard pins (design §iv test mandates).
+# h1 — probe-before-synthesis-export inside _path_ensure (comment-stripped
+#      body; the override branch's export is a separate documented path).
+PENSURE_BODY="$(awk '
+    /^_path_ensure\(\)/ { in_fn=1; next }
+    in_fn && /^}/ { in_fn=0; next }
+    in_fn { print }
+' "$LAUNCHER" | sed -e 's/#.*$//' -e '/^[[:space:]]*$/d')"
+probe_line="$(printf '%s\n' "$PENSURE_BODY" | grep -n 'for t in npx uvx node' | head -1 | cut -d: -f1)"
+synthexport_line="$(printf '%s\n' "$PENSURE_BODY" | grep -n 'export PATH="\$synth' | head -1 | cut -d: -f1)"
+if [ -n "$probe_line" ] && [ -n "$synthexport_line" ] && [ "$probe_line" -lt "$synthexport_line" ]; then
+    _pass
+else
+    _fail "13.h probe precedes the synthesis export" "probe line < synth-export line" \
+        "probe=${probe_line:-absent} synth=${synthexport_line:-absent}"
+fi
+# h2 — NO baked version literals anywhere (launcher + prod plist).
+for pinfile in "$LAUNCHER" "$REPO_ROOT/scripts/ensemble-prod.plist"; do
+    if grep -Eq '/versions/node/v[0-9]+\.' "$pinfile"; then
+        _fail "13.h no baked nvm version literal ($(basename "$pinfile"))" "absent" \
+            "$(grep -E '/versions/node/v[0-9]+\.' "$pinfile" | head -2)"
+    else
+        _pass
+    fi
+done
+# h3 — dynamic nvm wiring present + override var referenced.
+assert_contains "13.h dynamic nvm alias read present" '.nvm/alias/default' "$(cat "$LAUNCHER")"
+assert_contains "13.h ENSEMBLE_LAUNCHER_PATH override wired" 'ENSEMBLE_LAUNCHER_PATH' "$(cat "$LAUNCHER")"
+
+# 13.i END-TO-END VM NO-OP PROOF: a REAL main() boot (resolve_install_dir ->
+# load_env_file -> STATE_FILE default -> MALLOC -> _path_ensure ->
+# _journal_sweep -> resolve_binary -> run_loop) under a VM-shaped PATH where
+# npx/uvx/node resolve (systemd's packaging luck, made guaranteed by the
+# sandbox vmbin). The stub "ensemble-prod" child dumps its inherited env:
+# the PATH must arrive BYTE-IDENTICAL (probe no-op, nothing synthesized)
+# and the launcher state must land at the CLASSIC path.
+#
+# Hermeticity (F2): this cell's subject is the VM-shaped boot's state-file
+# resolution (classic path when the override is unset). An AMBIENT
+# ENSEMBLE_LAUNCHER_STATE_FILE (Stage-2 override) is POLLUTION that must be
+# excluded -- exactly like the sibling cells isolate their state (see :1663
+# `unset PATH`, :1781 `unset ENSEMBLE_LAUNCHER_STATE_FILE`). The boot
+# invocation below uses `env -u` so the child never inherits the ambient
+# var, regardless of the caller's environment. The body is factored into a
+# helper so both legs exercise the IDENTICAL assertions (no copy drift).
+_vmboot_13i() {
+    # args: $1 = leg label, $2 = err file, $3 = child-env dump
+    local inst="$LP_TEST_DIR/vmboot-$1"
+    rm -rf "$inst"
+    mkdir -p "$inst/data"
+    printf 'PORT=18971\nENSEMBLE_SELF_ENV=1\n' > "$inst/.env"
+    cat > "$inst/ensemble-prod" <<EOF
+#!/bin/sh
+env > "$3"
+exit 0
+EOF
+    chmod +x "$inst/ensemble-prod"
+    mkdir -p "$LP_TEST_DIR/vmbin"
+    for t in npx uvx node; do
+        printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/vmbin/$t"
+        chmod +x "$LP_TEST_DIR/vmbin/$t"
+    done
+    VM_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    cd "$inst" || return 68
+    # HERMETIC: unset the ambient override for THIS boot so the child resolves
+    # the CLASSIC state path. The override is the shipped Stage-2 contract
+    # (honoured when set); this cell tests state-file resolution, not it.
+    PATH="$LP_TEST_DIR/vmbin:$VM_PATH" \
+    HOME="$LP_TEST_DIR/emptyhome" \
+    ENSEMBLE_INSTALL_DIR="$inst" \
+    env -u ENSEMBLE_LAUNCHER_STATE_FILE \
+        /bin/bash "$LAUNCHER" >/dev/null 2>"$2"
+    rc=$?
+    [ "$rc" = "0" ] || return 69
+    grep -q "^PATH=$LP_TEST_DIR/vmbin:$VM_PATH$" "$3" || return 70
+    [ -f "$inst/.launcher-state" ] || return 71
+    return 0
+}
+
+# Leg (i): ambient var UNSET (the historical case).
+_vmboot_13i A "$LP_TEST_DIR/vmboot-a.err" "$LP_TEST_DIR/vmboot-a-child-env.txt"
+rc=$?
+assert_eq "13.i VM-shaped boot: child PATH byte-identical, classic state path (ambient unset)" "0" "$rc"
+if grep -q "probe no-op, PATH unchanged" "$LP_TEST_DIR/vmboot-a.err" 2>/dev/null; then
+    _pass
+else
+    _fail "13.i VM-shaped boot logged the probe no-op (ambient unset)" \
+        "probe no-op line in launcher stderr" "$(cat "$LP_TEST_DIR/vmboot-a.err" 2>/dev/null | head -3)"
+fi
+
+# Leg (ii): ambient var deliberately EXPORTED into this cell's env -- the
+# hermeticity proof. With the fix in place the boot still resolves the
+# CLASSIC path (it must NOT flip to the ambient path) and the SAME
+# assertions hold. (Non-vacuity: remove the `env -u` above and this leg
+# flips to the ambient path, proving the unset is what keeps it hermetic.)
+ENSEMBLE_LAUNCHER_STATE_FILE="/tmp/ambient-pollution-should-not-win/.launcher-state" \
+    _vmboot_13i B "$LP_TEST_DIR/vmboot-b.err" "$LP_TEST_DIR/vmboot-b-child-env.txt"
+rc=$?
+assert_eq "13.i VM-shaped boot: child PATH byte-identical, classic state path (ambient exported)" "0" "$rc"
+if grep -q "probe no-op, PATH unchanged" "$LP_TEST_DIR/vmboot-b.err" 2>/dev/null; then
+    _pass
+else
+    _fail "13.i VM-shaped boot logged the probe no-op (ambient exported)" \
+        "probe no-op line in launcher stderr" "$(cat "$LP_TEST_DIR/vmboot-b.err" 2>/dev/null | head -3)"
+fi
+# Hermeticity proof: the ambient path must NOT have been written.
+if [ -f "/tmp/ambient-pollution-should-not-win/.launcher-state" ]; then
+    _fail "13.i hermeticity: ambient ENSEMBLE_LAUNCHER_STATE_FILE must NOT be written" \
+        "absent" "present (ambient leak)"
+else
+    _pass
+fi
+
+# 13.j F-10: an nvm alias CODENAME ("lts/*", "lts/krypton") resolves to a
+# CONCRETE version — the old one-hop glob ("…/node/v<token>*") was dead for
+# those, so on macOS (the only source of npx) the synthesis yielded NOTHING
+# and npx stayed unresolved — the exact rehearsal-a failure mode.
+# 13.j1 "lts/*" → the HIGHEST version among the codename files.
+(
+    . "$LAUNCHER"
+    H="$LP_TEST_DIR/home-lts"
+    rm -rf "$H"
+    mkdir -p "$H/.nvm/alias/lts" \
+             "$H/.nvm/versions/node/v22.21.1/bin" \
+             "$H/.nvm/versions/node/v20.11.1/bin"
+    printf 'lts/*\n' > "$H/.nvm/alias/default"
+    printf '22.21.1\n' > "$H/.nvm/alias/lts/krypton"
+    printf '20.11.1\n' > "$H/.nvm/alias/lts/argon"
+    for v in 22.21.1 20.11.1; do
+        printf '#!/bin/sh\nexit 0\n' > "$H/.nvm/versions/node/v$v/bin/node"
+        chmod +x "$H/.nvm/versions/node/v$v/bin/node"
+    done
+    HOME="$H"; export HOME
+    out="$(_path_nvm_bin)"
+    [ "$out" = "$H/.nvm/versions/node/v22.21.1/bin" ] || exit 82
+    exit 0
+)
+assert_eq "13.j nvm alias 'lts/*' resolves to the highest version" "0" "$?"
+
+# 13.j2 "lts/krypton" (a codename PATH) resolves through the alias FILE.
+(
+    . "$LAUNCHER"
+    H="$LP_TEST_DIR/home-lts2"
+    rm -rf "$H"
+    mkdir -p "$H/.nvm/alias/lts" "$H/.nvm/versions/node/v22.21.1/bin"
+    printf 'lts/krypton\n' > "$H/.nvm/alias/default"
+    printf '22.21.1\n' > "$H/.nvm/alias/lts/krypton"
+    printf '#!/bin/sh\nexit 0\n' > "$H/.nvm/versions/node/v22.21.1/bin/node"
+    chmod +x "$H/.nvm/versions/node/v22.21.1/bin/node"
+    HOME="$H"; export HOME
+    out="$(_path_nvm_bin)"
+    [ "$out" = "$H/.nvm/versions/node/v22.21.1/bin" ] || exit 83
+    exit 0
+)
+assert_eq "13.j nvm alias 'lts/krypton' resolves through the alias file" "0" "$?"
+
+# 13.j3 an UNRESOLVABLE alias → prints NOTHING (graceful — never wedges).
+(
+    . "$LAUNCHER"
+    H="$LP_TEST_DIR/home-lts3"
+    rm -rf "$H"
+    mkdir -p "$H/.nvm/alias"
+    printf 'lts/*\n' > "$H/.nvm/alias/default"
+    HOME="$H"; export HOME
+    out="$(_path_nvm_bin)"
+    [ -z "$out" ] || exit 84
+    exit 0
+)
+assert_eq "13.j nvm alias unresolvable → empty (graceful, no wedge)" "0" "$?"
+
+# 13.j4 a SELF-REFERENTIAL alias is bounded (max 3 hops) → no hang.
+(
+    . "$LAUNCHER"
+    H="$LP_TEST_DIR/home-lts4"
+    rm -rf "$H"
+    mkdir -p "$H/.nvm/alias/lts"
+    printf 'lts/loop\n' > "$H/.nvm/alias/default"
+    printf 'lts/loop\n' > "$H/.nvm/alias/lts/loop"
+    HOME="$H"; export HOME
+    out="$(_path_nvm_bin)"
+    [ -z "$out" ] || exit 85
+    exit 0
+)
+assert_eq "13.j nvm alias loop: bounded hops → empty (no hang)" "0" "$?"
+
+# 13.k F-11: EVERY _path_ensure branch logs the three facts a VM drill can
+# assert — source= (which branch), delta= (what was prepended / whether the
+# inherited PATH was retained), resolved_path= (the final PATH value).
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH="/usr/bin:/bin"
+    export HOME PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/synthfacts.err"
+assert_contains "13.k synth branch logs source=synthesized" \
+    "source=synthesized" "$(cat "$LP_TEST_DIR/synthfacts.err")"
+assert_contains "13.k synth branch logs the prepended delta" \
+    "delta=prepended:" "$(cat "$LP_TEST_DIR/synthfacts.err")"
+assert_contains "13.k synth branch logs the resolved PATH" \
+    "resolved_path=" "$(cat "$LP_TEST_DIR/synthfacts.err")"
+assert_contains "13.k synth branch states the inherited PATH is kept as suffix" \
+    "inherited PATH is retained as the suffix" "$(cat "$LP_TEST_DIR/synthfacts.err")"
+
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/bin:/bin"
+    export PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/probefacts.err"
+assert_contains "13.k probe branch logs source=probe-satisfied" \
+    "source=probe-satisfied" "$(cat "$LP_TEST_DIR/probefacts.err")"
+assert_contains "13.k probe branch logs delta=none" \
+    "delta=none" "$(cat "$LP_TEST_DIR/probefacts.err")"
+assert_contains "13.k probe branch logs the resolved PATH" \
+    "resolved_path=" "$(cat "$LP_TEST_DIR/probefacts.err")"
+if grep -q "delta=prepended" "$LP_TEST_DIR/probefacts.err"; then
+    _fail "13.k probe branch must log NO delta" "no delta=prepended" \
+        "$(cat "$LP_TEST_DIR/probefacts.err")"
+else
+    _pass
+fi
+
+(
+    . "$LAUNCHER"
+    PATH="$LP_TEST_DIR/stubs:/usr/bin:/bin"
+    ENSEMBLE_LAUNCHER_PATH="/custom/a:/custom/b"
+    export PATH ENSEMBLE_LAUNCHER_PATH
+    _path_ensure
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/ovrfacts.err"
+assert_contains "13.k override branch logs its source" \
+    "source=ensemble_launcher_path_override" "$(cat "$LP_TEST_DIR/ovrfacts.err")"
+assert_contains "13.k override branch logs the full-replacement delta" \
+    "delta=full-replacement" "$(cat "$LP_TEST_DIR/ovrfacts.err")"
+
+# 13.k2 .env-SOURCED ENSEMBLE_LAUNCHER_PATH (unpinned until now): the install
+# .env is staged by the launcher itself (ADR-014 -- load_env_file runs BEFORE
+# _path_ensure), so a staged ENSEMBLE_LAUNCHER_PATH must participate in the
+# Layer-2 precedence: it is exported VERBATIM (top precedence -- the inherited
+# PATH is NOT retained) and the log names source=ensemble_launcher_path_override
+# with delta=full-replacement. The inherited value is set to a DECOY inside the
+# subshell so the row proves the .env wins (ADR-014) rather than merely
+# arriving; the ambient var is unset first for hermeticity.
+(
+    . "$LAUNCHER"
+    unset ENSEMBLE_LAUNCHER_PATH
+    ENSEMBLE_LAUNCHER_PATH="/ambient/decoy/should/not/win"
+    export ENSEMBLE_LAUNCHER_PATH
+    # stage the .env with the real override value
+    mkdir -p "$LP_TEST_DIR/dotenvpath"
+    printf 'ENSEMBLE_LAUNCHER_PATH=/from/dotenv/verbatim:/also/here\n' > "$LP_TEST_DIR/dotenvpath/.env"
+    # resolve via the real load_env_file + _path_ensure (main()'s sequence)
+    INSTALL_DIR="$LP_TEST_DIR/dotenvpath"
+    cd "$INSTALL_DIR" || exit 72
+    load_env_file "$INSTALL_DIR/.env"
+    _path_ensure
+    printf 'PATH=%s\n' "$PATH"
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/dotenvpath.err"
+# The .env value must win over the inherited decoy AND replace the PATH
+# verbatim (top precedence -- no inherited suffix retained).
+grep -q '^PATH=/from/dotenv/verbatim:/also/here$' "$LP_TEST_DIR/dotenvpath.err" 2>/dev/null
+# (PATH is logged via resolved_path=... on the override line, not on stdout;
+#  re-check against the captured stderr instead)
+if grep -q 'source=ensemble_launcher_path_override' "$LP_TEST_DIR/dotenvpath.err" && \
+   grep -q 'delta=full-replacement' "$LP_TEST_DIR/dotenvpath.err" && \
+   grep -q 'resolved_path=/from/dotenv/verbatim:/also/here' "$LP_TEST_DIR/dotenvpath.err"; then
+    _pass
+else
+    _fail "13.k2 .env-sourced ENSEMBLE_LAUNCHER_PATH: verbatim export + top precedence" \
+        "source=ensemble_launcher_path_override + delta=full-replacement + resolved_path=/from/dotenv/verbatim:/also/here" \
+        "$(cat "$LP_TEST_DIR/dotenvpath.err" 2>/dev/null | head -5)"
+fi
+
+# 13.l FIX 7(a): set -u / empty-PATH hardening. An UNSET PATH must not
+# abort the launcher (set -u) and no PATH may end up with an EMPTY
+# component (POSIX resolves a leading/trailing ':' as the CWD).
+(
+    . "$LAUNCHER"
+    unset PATH
+    _path_has /usr/bin
+    rc_has=$?
+    _path_ensure
+    rc=$?
+    [ "$rc" = "0" ] || exit 86
+    [ "$rc_has" = "1" ] || exit 87
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/unsetpath.err"
+assert_eq "13.l PATH unset: no set -u abort, _path_has safe" "0" "$?"
+if grep -q "unbound variable" "$LP_TEST_DIR/unsetpath.err"; then
+    _fail "13.l PATH unset: must not reference an unbound PATH" \
+        "no unbound variable" "$(cat "$LP_TEST_DIR/unsetpath.err")"
+else
+    _pass
+fi
+(
+    . "$LAUNCHER"
+    HOME="$LP_TEST_DIR/home"
+    PATH=""
+    export HOME PATH
+    _path_ensure || exit 88
+    [ -n "$PATH" ] || exit 89
+    case "$PATH" in
+        :*) exit 90 ;;      # leading empty component
+        *:) exit 91 ;;      # trailing empty component
+    esac
+    case ":$PATH:" in
+        *::*) exit 92 ;;    # empty component in the middle
+    esac
+    exit 0
+)
+assert_eq "13.l PATH empty: no empty PATH component, no abort" "0" "$?"
+
+# ─── 14. STATE_FILE relocation (design §v) ─────────────────────────────────
+section "STATE_FILE relocation (§v)"
+
+# 14.a the default expression is EXACTLY the design's (default unchanged:
+# unset env ⇒ classic path — the VM burst-budget dependency).
+assert_contains "14.a default expression byte-pin" \
+    ': "${ENSEMBLE_LAUNCHER_STATE_FILE:=$INSTALL_DIR/.launcher-state}"' "$(cat "$LAUNCHER")"
+
+# 14.b ORDERING RESOLUTION: the assignment sits AFTER load_env_file (it
+# was BEFORE at :2821/:2827 pre-relocation) so the override is readable
+# from the install .env (Stage-2 wiring).
+loadenv_line="$(grep -n 'load_env_file "\$INSTALL_DIR/.env"' "$LAUNCHER" | head -1 | cut -d: -f1)"
+statefile_line="$(grep -n 'ENSEMBLE_LAUNCHER_STATE_FILE:=\$INSTALL_DIR/.launcher-state' "$LAUNCHER" | head -1 | cut -d: -f1)"
+if [ -n "$loadenv_line" ] && [ -n "$statefile_line" ] && [ "$loadenv_line" -lt "$statefile_line" ]; then
+    _pass
+else
+    _fail "14.b STATE_FILE default after load_env_file (.env readability)" \
+        "load_env_file line < STATE_FILE line" \
+        "load_env_file=${loadenv_line:-absent} statefile=${statefile_line:-absent}"
+fi
+
+# 14.c …and BEFORE _journal_sweep (run-loop consumers + the sweep-defer
+# derivation see the relocated value).
+jsweep_line="$(grep -n '^[[:space:]]*_journal_sweep[[:space:]]*$' "$LAUNCHER" | head -1 | cut -d: -f1)"
+if [ -n "$jsweep_line" ] && [ -n "$statefile_line" ] && [ "$statefile_line" -lt "$jsweep_line" ]; then
+    _pass
+else
+    _fail "14.c STATE_FILE default before _journal_sweep" \
+        "STATE_FILE line < _journal_sweep line" \
+        "statefile=${statefile_line:-absent} sweep=${jsweep_line:-absent}"
+fi
+
+# 14.d the direct hardcode is GONE (single derivation site in main()).
+assert_eq "14.d no direct STATE_FILE hardcode remains" "0" \
+    "$(grep -c 'STATE_FILE="\$INSTALL_DIR/\.launcher-state"' "$LAUNCHER")"
+
+# 14.e exported so run_loop children inherit it (upgrade-tools seam).
+assert_contains "14.e export ENSEMBLE_LAUNCHER_STATE_FILE present" \
+    "export ENSEMBLE_LAUNCHER_STATE_FILE" "$(cat "$LAUNCHER")"
+
+# 14.f defer-counter derivation: dirname(STATE_FILE) when set (relocated),
+# classic install_dir when unset (byte-identical); sanitisation unchanged.
+(
+    . "$LAUNCHER"
+    STATE_FILE=""
+    p="$(_js_defer_counter_path "$LP_TEST_DIR/inst" "run-1")"
+    [ "$p" = "$LP_TEST_DIR/inst/.sweep-defer-run-1" ] || exit 59
+    STATE_FILE="$LP_TEST_DIR/inst/data/.launcher-state"
+    p="$(_js_defer_counter_path "$LP_TEST_DIR/inst" "run-1")"
+    [ "$p" = "$LP_TEST_DIR/inst/data/.sweep-defer-run-1" ] || exit 60
+    p="$(_js_defer_counter_path "$LP_TEST_DIR/inst" "bad/id 1")"
+    [ "$p" = "$LP_TEST_DIR/inst/data/.sweep-defer-bad_id_1" ] || exit 61
+    exit 0
+)
+assert_eq "14.f defer path: unset→install_dir, set→dirname(STATE_FILE), sanitised" "0" "$?"
+
+# 14.g write/read roundtrip through a RELOCATED state file (override path).
+(
+    . "$LAUNCHER"
+    STATE_FILE="$LP_TEST_DIR/reloc/.launcher-state"
+    mkdir -p "$LP_TEST_DIR/reloc"
+    STATE_LAST_EXIT=1 STATE_CRASH_COUNT=2 STATE_WINDOW_START=3
+    STATE_LAST_BACKOFF=20 STATE_NOTIFIED_75=0 STATE_LAST_UPTIME=5
+    write_state || exit 62
+    STATE_LAST_EXIT="" STATE_CRASH_COUNT=""
+    read_state
+    [ "$STATE_LAST_EXIT" = "1" ] && [ "$STATE_CRASH_COUNT" = "2" ] || exit 63
+    [ -f "$LP_TEST_DIR/reloc/.launcher-state" ] || exit 64
+    exit 0
+)
+assert_eq "14.g state roundtrip honors the relocated STATE_FILE" "0" "$?"
+
+# ─── 14.h … STATE_FILE resolution parity (F-07 / residual e) ────────────────
+# The launcher's EFFECTIVE ENSEMBLE_LAUNCHER_STATE_FILE, computed exactly
+# the way main() computes it: load_env_file (the REAL function) and then
+# the REAL default expression — EXTRACTED from launcher.sh (never hardcoded
+# here, so a change to the launcher's default is caught, not mirrored).
+launcher_state_file() {
+    local inst="$1" envf="$2" inh="${3-}" defexpr
+    defexpr="$(grep -F ': "${ENSEMBLE_LAUNCHER_STATE_FILE:=$INSTALL_DIR/.launcher-state}"' "$LAUNCHER" | head -1)"
+    [ -n "$defexpr" ] || return 1
+    (
+        . "$LAUNCHER"
+        INSTALL_DIR="$inst"
+        unset ENSEMBLE_LAUNCHER_STATE_FILE
+        [ -n "$inh" ] && export ENSEMBLE_LAUNCHER_STATE_FILE="$inh"
+        load_env_file "$envf"
+        eval "$defexpr"
+        printf '%s' "${ENSEMBLE_LAUNCHER_STATE_FILE:-}"
+    )
+}
+
+STATE_PAR_DIR="$LP_TEST_DIR/statepar"
+mkdir -p "$STATE_PAR_DIR"
+
+# 14.h PRECEDENCE (F-07): the .env value WINS over the inherited env — the
+# launcher's export beats the inherited value (ADR-014 discipline). The
+# watchdog must agree (the parity rows live in tests/test_watchdog_watcher.sh).
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$STATE_PAR_DIR/from-dotenv" > "$STATE_PAR_DIR/.env"
+assert_eq "14.h .env wins over the inherited env" \
+    "$STATE_PAR_DIR/from-dotenv" \
+    "$(launcher_state_file "$STATE_PAR_DIR" "$STATE_PAR_DIR/.env" "$STATE_PAR_DIR/from-env")"
+
+# 14.i DUPLICATE KEY (F-07 / residual e): the LAST occurrence wins on both
+# sides (the loader exports sequentially — the last export wins).
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$STATE_PAR_DIR/first" > "$STATE_PAR_DIR/dup.env"
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE=%s\n' "$STATE_PAR_DIR/second" >> "$STATE_PAR_DIR/dup.env"
+assert_eq "14.i duplicate .env key: LAST occurrence wins" \
+    "$STATE_PAR_DIR/second" \
+    "$(launcher_state_file "$STATE_PAR_DIR" "$STATE_PAR_DIR/dup.env" "$STATE_PAR_DIR/from-env")"
+
+# 14.j an EMPTY .env value clears the inherited value → the default fires
+# (the launcher's export wipes the inherited value; the := default then
+# assigns — the watchdog resolves the same default).
+printf 'ENSEMBLE_LAUNCHER_STATE_FILE=\n' > "$STATE_PAR_DIR/empty.env"
+assert_eq "14.j empty .env value → the classic default" \
+    "$STATE_PAR_DIR/.launcher-state" \
+    "$(launcher_state_file "$STATE_PAR_DIR" "$STATE_PAR_DIR/empty.env" "$STATE_PAR_DIR/from-env")"
+
+# 14.k NO override anywhere → the classic default path (byte-identical —
+# the VM's crash-loop burst budget depends on that exact path).
+: > "$STATE_PAR_DIR/none.env"
+assert_eq "14.k no override anywhere → the classic default" \
+    "$STATE_PAR_DIR/.launcher-state" \
+    "$(launcher_state_file "$STATE_PAR_DIR" "$STATE_PAR_DIR/none.env")"
+
+# 14.l the default expression is still the ONLY functional default site
+# (the watchdog's resolver mirrors it byte-for-byte).
+assert_eq "14.l single functional classic-path default in launcher.sh" "1" \
+    "$(grep -cF ': "${ENSEMBLE_LAUNCHER_STATE_FILE:=$INSTALL_DIR/.launcher-state}"' "$LAUNCHER")"
+
+# ─── 15. Plist template + Makefile staging (design §iv Layer 1) ────────────
+section "plist template + Makefile staging (§iv Layer 1)"
+PROD_PLIST="$REPO_ROOT/scripts/ensemble-prod.plist"
+WATCH_PLIST="$REPO_ROOT/scripts/ensemble-watchdog-watcher.plist"
+PLIST_PATH_VALUE="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# 15.a the stable-anchor PATH, byte-exact per design §iv Layer 1.
+assert_contains "15.a prod plist carries the exact anchor PATH" \
+    "<string>$PLIST_PATH_VALUE</string>" "$(cat "$PROD_PLIST")"
+
+# 15.b inside an EnvironmentVariables dict.
+assert_contains "15.b prod plist has EnvironmentVariables dict" \
+    "<key>EnvironmentVariables</key>" "$(cat "$PROD_PLIST")"
+
+# 15.c the stale "deliberately ABSENT" note is gone (reconciled ADR-014).
+assert_eq "15.c stale ABSENT comment removed" "0" \
+    "$(grep -c 'deliberately ABSENT' "$PROD_PLIST")"
+
+# 15.d XML validity, both templates (python3 is a repo dev assumption).
+if command -v python3 >/dev/null 2>&1; then
+    if python3 -c 'import sys, xml.etree.ElementTree as ET
+for f in sys.argv[1:]:
+    ET.parse(f)
+' "$PROD_PLIST" "$WATCH_PLIST" 2>/dev/null; then
+        _pass
+    else
+        _fail "15.d plist templates are well-formed XML" "both parse" "parse error"
+    fi
+else
+    _skip "15.d plist XML validity (python3 unavailable)"
+fi
+
+# 15.e Makefile staging carries the PATH through — using the REAL awk
+# program EXTRACTED FROM THE MAKEFILE. (The old row hardcoded a
+# byte-identical COPY of the program: drift-unguarded — a Makefile change
+# silently diverged.) The extraction is CONTENT-based (any single-quoted
+# awk program containing INSTALL_DIR_PLACEHOLDER), so it survives the
+# program moving into a variable, and it FAILS LOUDLY when the program
+# cannot be found or when the Makefile carries MORE THAN ONE DISTINCT
+# program. The Makefile is only ever READ (never written, never run).
+#
+# _makefile_awk_programs <makefile> — the DISTINCT staging programs (the
+# Makefile's $$ escapes un-escaped), one per line. READ-ONLY.
+#
+# QUOTE PAIRING IS PER-LINE, NEVER FILE-WIDE (2026-11-10 fix): the previous
+# extractor paired single quotes across the WHOLE file
+# (re.finditer(r"'([^']*)'", src)), so ONE apostrophe inside a Makefile
+# COMMENT (e.g. "clients like Chrome's" / "pyinstaller's" / "config.yaml's")
+# shifted the pairing and the placeholder-bearing program was never captured
+# — 0 programs extracted, the 15.e row failed and 15.e2/15.e3 passed
+# VACUOUSLY (everything "rejected" via extraction failure, not placeholder
+# detection). Each line that carries the literal INSTALL_DIR_PLACEHOLDER is
+# now scanned ON ITS OWN: single quotes are paired sequentially WITHIN that
+# line only (never across lines), the quoted segments that themselves contain
+# the placeholder are kept, and "$$" is un-escaped to "$". The LOUD-REFUSAL
+# contract is unchanged: 0 DISTINCT programs or >1 DISTINCT programs → the
+# row fails loudly (a Makefile restructure must break this guard loudly,
+# never silently diverge).
+_makefile_awk_programs() {
+    python3 - "$1" <<'PYEOF'
+import sys
+try:
+    src = open(sys.argv[1], encoding="utf-8").read()
+except OSError:
+    sys.exit(1)
+progs = []
+unterminated = []
+for raw in src.splitlines():
+    if "INSTALL_DIR_PLACEHOLDER" not in raw:
+        continue
+    segs = []
+    buf = None
+    for ch in raw:
+        if ch == "'":
+            if buf is None:
+                buf = []
+            else:
+                segs.append("".join(buf))
+                buf = None
+        elif buf is not None:
+            buf.append(ch)
+    if buf is not None:
+        # ODD number of single quotes on this line: the trailing segment is
+        # unterminated (the program may span lines and cannot be extracted
+        # per-line). Recorded as a HINT for the loud refusal — it never
+        # refuses on its own, so an apostrophe in an unrelated comment cannot
+        # fail an otherwise-correct extraction.
+        tail = "".join(buf)
+        if "INSTALL_DIR_PLACEHOLDER" in tail:
+            unterminated.append(raw.strip())
+    for t in segs:
+        if "INSTALL_DIR_PLACEHOLDER" not in t:
+            continue
+        t = t.replace("$$", "$")
+        if t not in progs:
+            progs.append(t)
+if not progs and unterminated:
+    sys.stderr.write(
+        "no complete staging program extracted; unterminated single quote on a "
+        "placeholder-bearing line: " + unterminated[0] + "\n")
+    sys.exit(2)
+for p in progs:
+    print(p)
+PYEOF
+}
+
+# _makefile_awk_program <makefile> — the ONE staging program on stdout;
+# rc 1 when the Makefile carries ZERO or MORE THAN ONE distinct program
+# (the drift guard refuses rather than silently testing a stale copy).
+# The extractor's stderr diagnostic is folded into the refusal message, so a
+# failing extraction says WHY (e.g. a multi-line program) and not merely "0".
+_makefile_awk_program() {
+    local progs n rc diag diagf
+    diagf="$LP_TEST_DIR/.staging-extract-diag.txt"
+    mkdir -p "$LP_TEST_DIR" 2>/dev/null
+    progs="$(_makefile_awk_programs "$1" 2>"$diagf")"
+    rc=$?
+    diag="$(cat "$diagf" 2>/dev/null)"
+    if [ "$rc" != "0" ]; then
+        printf 'drift guard: %s — extraction FAILED (rc=%s)%s\n' \
+            "$1" "$rc" "${diag:+: $diag}" >&2
+        return 1
+    fi
+    n="$(printf '%s\n' "$progs" | grep -c '[^[:space:]]' || true)"
+    if [ "$n" != "1" ]; then
+        printf 'drift guard: %s carries %s DISTINCT staging programs (exactly 1 required)%s\n' \
+            "$1" "$n" "${diag:+ — $diag}" >&2
+        return 1
+    fi
+    printf '%s' "$progs"
+}
+
+# _staging_ok <makefile> <plist> — rc 0 when the REAL (extracted) program
+# stages the plist correctly: the PATH survives and EVERY placeholder is
+# dropped.
+_staging_ok() {
+    local mk="$1" plist="$2" prog out
+    prog="$(_makefile_awk_program "$mk")" || return 1
+    [ -n "$prog" ] || return 1
+    out="$LP_TEST_DIR/stage-drift/data/ensemble-prod.plist"
+    mkdir -p "$LP_TEST_DIR/stage-drift/data" || return 1
+    INSTALL_DIR="$LP_TEST_DIR/stage-drift" awk "$prog" "$plist" > "$out" 2>/dev/null || return 1
+    grep -qF "<string>$PLIST_PATH_VALUE</string>" "$out" || return 1
+    if grep -q 'INSTALL_DIR_PLACEHOLDER' "$out"; then return 1; fi
+    return 0
+}
+
+if _staging_ok "$REPO_ROOT/Makefile" "$PROD_PLIST"; then
+    _pass
+else
+    _fail "15.e staging substitution (REAL Makefile program) preserves PATH, drops placeholders" \
+        "extracted program stages the plist" "extraction or substitution failed"
+fi
+
+# 15.e2 NON-VACUITY (negative): a PERTURBED COPY of the Makefile (the real
+# one is NEVER written) whose staging program no longer substitutes the
+# placeholder MUST be caught by the same assertion.
+cp "$REPO_ROOT/Makefile" "$LP_TEST_DIR/Makefile.perturbed"
+sed -i.bak 's/INSTALL_DIR_PLACEHOLDER/INSTALL_DIR_PLACEHOLDER_X/g' "$LP_TEST_DIR/Makefile.perturbed"
+if _staging_ok "$LP_TEST_DIR/Makefile.perturbed" "$PROD_PLIST"; then
+    _fail "15.e2 drift guard is not vacuous (a broken staging program must be CAUGHT)" \
+        "broken program rejected" "broken program accepted — the guard is vacuous"
+else
+    _pass
+fi
+
+# 15.e3 NON-VACUITY (negative): a Makefile copy with NO placeholder-aware
+# staging program at all must fail LOUDLY (the extraction refuses).
+cp "$REPO_ROOT/Makefile" "$LP_TEST_DIR/Makefile.noplaceholder"
+sed -i.bak2 's/INSTALL_DIR_PLACEHOLDER/PLACEHOLDER/g' "$LP_TEST_DIR/Makefile.noplaceholder"
+if _makefile_awk_program "$LP_TEST_DIR/Makefile.noplaceholder" >/dev/null 2>&1; then
+    _fail "15.e3 extraction must fail loudly when no staging program is found" \
+        "extraction refuses" "extraction accepted a program-less Makefile"
+else
+    _pass
+fi
+
+# 15.f leg-1 guard wiring INTACT in both plist make targets (regression
+# census — the full matrix is tests/unit/test_makefile_install_guard.py).
+assert_contains "15.f plist-install still runs the guard" \
+    '$(GUARD_SCRIPT) --target plist-install' "$(cat "$REPO_ROOT/Makefile")"
+assert_contains "15.f watchdog-install still runs the guard" \
+    '$(GUARD_SCRIPT) --target watchdog-install' "$(cat "$REPO_ROOT/Makefile")"
+
+# 15.g the watchdog plist deliberately has NO EnvironmentVariables (design:
+# its tools — curl/osascript/sed/head — all live in /usr/bin:/bin, inside
+# launchd's default PATH; §viii row 4 scopes Layer 1 to the PROD template).
+assert_eq "15.g watchdog plist carries no EnvironmentVariables (by design)" "0" \
+    "$(grep -c 'EnvironmentVariables' "$WATCH_PLIST")"
+# ─── 16. _js_journal_read / _js_json_sub O(n) rewrite (launcher-journal-sweep-fix) ──
 # The per-character bash loops were O(n²) (25.2 s @ 37 KB measured; ~31 min
 # extrapolated @ 215 KB) and ran on EVERY boot via _journal_sweep. The
 # replacements are vectorized POSIX awk passes. The pins below freeze the
@@ -1183,42 +2108,42 @@ _jsf_read() {  # <file> — read + validate, print stdout + rc marker
     ( . "$LAUNCHER"; _js_journal_read "$1"; echo "rc=$?" )
 }
 
-# ─── 13a. brackets inside string values + escaped quotes/backslashes (R6a) ─
+# ─── 16a. brackets inside string values + escaped quotes/backslashes (R6a) ─
 section "js journal read: brackets inside strings"
 printf '%s' '{"current":"v1","history":[{"detail":"has } and { inside \"quoted \\\" and \\\\ backslash\" brackets [yes]"}],"quarantined":[]}' \
     > "$JSF_TEST_DIR/escapes.json"
 _jsf_out="$(_jsf_read "$JSF_TEST_DIR/escapes.json")"
-assert_contains "13a escape-heavy journal validates" "rc=0" "$_jsf_out"
-assert_contains "13a output byte-exact (bracket-in-string intact)" \
+assert_contains "16a escape-heavy journal validates" "rc=0" "$_jsf_out"
+assert_contains "16a output byte-exact (bracket-in-string intact)" \
     '"detail":"has } and { inside \"quoted \\\" and \\\\ backslash\" brackets [yes]"' \
     "$_jsf_out"
 
-# ─── 13b. escape parity: a string closed after an escaped backslash run ──
+# ─── 16b. escape parity: a string closed after an escaped backslash run ──
 section "js journal read: escape parity"
 # The escape PARITY cases: a string closed after an escaped backslash run,
 # and a quote escaped by a backslash (must NOT close).
 printf '%s' '{"a":"ends with escaped backslash \\\\ and closes"}' > "$JSF_TEST_DIR/parity_ok.json"
-assert_contains "13b even-backslash-run then quote closes (valid)" "rc=0" "$(_jsf_read "$JSF_TEST_DIR/parity_ok.json")"
+assert_contains "16b even-backslash-run then quote closes (valid)" "rc=0" "$(_jsf_read "$JSF_TEST_DIR/parity_ok.json")"
 printf '%s' '{"a":"escaped \" quote never closes' > "$JSF_TEST_DIR/parity_torn.json"
-assert_contains "13b escaped quote does NOT close (unterminated → reject)" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/parity_torn.json")"
+assert_contains "16b escaped quote does NOT close (unterminated → reject)" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/parity_torn.json")"
 
-# ─── 13c. truncated/torn rejection (R6b) — torn tail → nonzero ───────────
+# ─── 16c. truncated/torn rejection (R6b) — torn tail → nonzero ───────────
 section "js journal read: torn tail rejection"
 printf '%s' '{"a":{"b":[1,2' > "$JSF_TEST_DIR/torn_bracket.json"
-assert_contains "13c torn bracket tail rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/torn_bracket.json")"
+assert_contains "16c torn bracket tail rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/torn_bracket.json")"
 printf '%s' '{"a":"unterminated' > "$JSF_TEST_DIR/torn_string.json"
-assert_contains "13c unterminated string rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/torn_string.json")"
+assert_contains "16c unterminated string rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/torn_string.json")"
 printf '%s' '{"a":{"b":1}}}' > "$JSF_TEST_DIR/extra_close.json"
-assert_contains "13c extra close rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/extra_close.json")"
+assert_contains "16c extra close rejected" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/extra_close.json")"
 printf '%s' '{"a":1}{"b":2}' > "$JSF_TEST_DIR/two_docs.json"
 # Balance-count contract (NOT a parser — pre-existing semantics): equal
 # open/close counts with no unterminated string is ACCEPTED, exactly as
 # the replaced loop accepted it. The pin freezes that contract.
-assert_contains "13c balance-only contract preserved (two docs accepted)" "rc=0" "$(_jsf_read "$JSF_TEST_DIR/two_docs.json")"
+assert_contains "16c balance-only contract preserved (two docs accepted)" "rc=0" "$(_jsf_read "$JSF_TEST_DIR/two_docs.json")"
 : > "$JSF_TEST_DIR/empty.json"
-assert_contains "13c empty journal rejected (pre-existing contract)" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/empty.json")"
+assert_contains "16c empty journal rejected (pre-existing contract)" "rc=1" "$(_jsf_read "$JSF_TEST_DIR/empty.json")"
 
-# ─── 13d. locale invariance (R1) — default, LC_ALL=C and UTF-8 agree ───
+# ─── 16d. locale invariance (R1) — default, LC_ALL=C and UTF-8 agree ───
 section "js journal read: locale invariance"
 # identical verdicts under default locale AND LC_ALL=C AND a UTF-8 locale
 # (the awk pass pins LC_ALL=C internally, so this holds by construction —
@@ -1226,34 +2151,34 @@ section "js journal read: locale invariance"
 _jsf_val="$( ( . "$LAUNCHER"; _js_journal_read "$JSF_TEST_DIR/escapes.json" >/dev/null; echo $? ) )"
 _jsf_c="$(LC_ALL=C bash -c '. "$1"; _js_journal_read "$2" >/dev/null; echo $?' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json")"
 _jsf_utf8="$(LC_ALL=en_US.UTF-8 bash -c '. "$1"; _js_journal_read "$2" >/dev/null; echo $?' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json" 2>/dev/null)"
-assert_eq "13d default locale verdict" "0" "$_jsf_val"
-assert_eq "13d LC_ALL=C verdict identical" "0" "$_jsf_c"
-assert_eq "13d UTF-8 locale verdict identical" "0" "${_jsf_utf8:-$_jsf_c}"
+assert_eq "16d default locale verdict" "0" "$_jsf_val"
+assert_eq "16d LC_ALL=C verdict identical" "0" "$_jsf_c"
+assert_eq "16d UTF-8 locale verdict identical" "0" "${_jsf_utf8:-$_jsf_c}"
 _jsf_torn_c="$(LC_ALL=C bash -c '. "$1"; _js_journal_read "$2" >/dev/null; echo $?' _ "$LAUNCHER" "$JSF_TEST_DIR/torn_bracket.json")"
-assert_eq "13d LC_ALL=C torn verdict identical" "1" "$_jsf_torn_c"
+assert_eq "16d LC_ALL=C torn verdict identical" "1" "$_jsf_torn_c"
 
-# ─── 13e. _js_json_sub: O(n) extractor semantics (R6d) ─────────────────────
+# ─── 16e. _js_json_sub: O(n) extractor semantics (R6d) ─────────────────────
 section "js json sub: O(n) extractor semantics"
 _jsf_sub() {  # <json> <key>
     ( . "$LAUNCHER"; _js_json_sub "$1" "$2"; echo "rc=$?" )
 }
 _jsf_sub_out="$(_jsf_sub '{"history":[{"detail":"esc \" and \\\\ inside"}],"quarantined":["v1"]}' history)"
-assert_contains "13e escaped-quote value extracted byte-exact" \
+assert_contains "16e escaped-quote value extracted byte-exact" \
     '[{"detail":"esc \" and \\\\ inside"}]' "$_jsf_sub_out"
-assert_contains "13e history extraction rc=0" "rc=0" "$_jsf_sub_out"
-assert_contains "13e quarantined extracted" '["v1"]rc=0' "$(_jsf_sub '{"quarantined":["v1"]}' quarantined | tr -d '\n')"
-assert_contains "13e missing key → rc=1" "rc=1" "$(_jsf_sub '{"a":{}}' nope)"
-assert_contains "13e scalar value → rc=1" "rc=1" "$(_jsf_sub '{"a":1}' a)"
-assert_contains "13e null value → rc=1" "rc=1" "$(_jsf_sub '{"a":null}' a)"
-assert_contains "13e spaced form tolerated" '[1,2]rc=0' "$(_jsf_sub '{"history" :  [1,2]}' history | tr -d '\n')"
+assert_contains "16e history extraction rc=0" "rc=0" "$_jsf_sub_out"
+assert_contains "16e quarantined extracted" '["v1"]rc=0' "$(_jsf_sub '{"quarantined":["v1"]}' quarantined | tr -d '\n')"
+assert_contains "16e missing key → rc=1" "rc=1" "$(_jsf_sub '{"a":{}}' nope)"
+assert_contains "16e scalar value → rc=1" "rc=1" "$(_jsf_sub '{"a":1}' a)"
+assert_contains "16e null value → rc=1" "rc=1" "$(_jsf_sub '{"a":null}' a)"
+assert_contains "16e spaced form tolerated" '[1,2]rc=0' "$(_jsf_sub '{"history" :  [1,2]}' history | tr -d '\n')"
 # The string-blind depth walk is PRESERVED DELIBERATELY (the replaced loop
 # never tracked string context either): a brace inside the TARGET's string
 # still terminates the extraction. Pin it — changing it would change
 # verdicts on existing journals.
-assert_eq "13e quirk preserved: brace-in-string terminates walk" \
+assert_eq "16e quirk preserved: brace-in-string terminates walk" \
     '{"x":"y}rc=0' "$(_jsf_sub '{"a":{"x":"y}z"},"b":1}' a | tr -d '\n')"
 
-# ─── 13f. perf gate: ~250 KB journal validates well inside 2 s (R6c) ───────
+# ─── 16f. perf gate: ~250 KB journal validates well inside 2 s (R6c) ───────
 section "js journal read: 250KB perf gate"
 JSF_PERF_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf-perf.XXXXXX")"
 JSF_PERF_JOURNAL="$JSF_PERF_DIR/state.json"
@@ -1269,28 +2194,28 @@ _jsf_perf_bytes=$(wc -c < "$JSF_PERF_JOURNAL" | tr -d ' ')
 if [ "$_jsf_perf_bytes" -ge 240000 ]; then
     _pass  # fixture really is ~250 KB class
 else
-    _fail "13f perf fixture is ~250 KB" ">= 240000 bytes" "$_jsf_perf_bytes"
+    _fail "16f perf fixture is ~250 KB" ">= 240000 bytes" "$_jsf_perf_bytes"
 fi
 # Watchdog form: _js_run_bounded 2 kills the read at 2 s. The O(n²) loop
 # this replaces needed ~31 min at 215 KB — it CANNOT pass this gate; the
 # awk pass finishes in ~50 ms.
 _jsf_perf_rc="$( ( . "$LAUNCHER"; _js_run_bounded 2 -- bash -c '. "$1"; _js_journal_read "$2" > /dev/null' _ "$LAUNCHER" "$JSF_PERF_JOURNAL" >/dev/null 2>&1; echo $? ) )"
-assert_eq "13f 250KB journal read completes inside the 2s watchdog" "0" "$_jsf_perf_rc"
+assert_eq "16f 250KB journal read completes inside the 2s watchdog" "0" "$_jsf_perf_rc"
 _jsf_perf_s0=$(date +%s)
 ( . "$LAUNCHER"; _js_journal_read "$JSF_PERF_JOURNAL" > "$JSF_PERF_DIR/read.out" 2>/dev/null )
 _jsf_perf_rc2=$?
 _jsf_perf_s1=$(date +%s)
-assert_eq "13f unbounded read rc=0" "0" "$_jsf_perf_rc2"
-if [ $(( _jsf_perf_s1 - _jsf_perf_s0 )) -le 2 ]; then _pass; else _fail "13f read elapsed ≤ 2s" "<= 2" "$(( _jsf_perf_s1 - _jsf_perf_s0 ))"; fi
+assert_eq "16f unbounded read rc=0" "0" "$_jsf_perf_rc2"
+if [ $(( _jsf_perf_s1 - _jsf_perf_s0 )) -le 2 ]; then _pass; else _fail "16f read elapsed ≤ 2s" "<= 2" "$(( _jsf_perf_s1 - _jsf_perf_s0 ))"; fi
 if cmp -s "$JSF_PERF_JOURNAL" "$JSF_PERF_DIR/read.out"; then
     _pass  # byte-exact roundtrip at scale
 else
-    _fail "13f 250KB read output byte-exact" "identical" "differs"
+    _fail "16f 250KB read output byte-exact" "identical" "differs"
 fi
 
-# ─── 13g. string-context discrimination (W1) ───────────────────────────────
-# COUNCIL FINDING W1. Every in-string bracket in §13a is BALANCED ({…},
-# […] inside the value), and every rejection in 13b/13c is caught by an
+# ─── 16g. string-context discrimination (W1) ───────────────────────────────
+# COUNCIL FINDING W1. Every in-string bracket in §16a is BALANCED ({…},
+# […] inside the value), and every rejection in 16b/16c is caught by an
 # IMBALANCE — so a validator that ignores string context entirely
 # produces the SAME totals and the SAME verdict on the whole existing
 # suite. This fixture carries an UNBALANCED in-string brace run: three
@@ -1302,36 +2227,36 @@ section "js journal read: string-context (W1)"
 # actually written (a shell-mangled fixture would be a false green).
 #   11 bytes, 4 × '{', 1 × '}', 0 × '\'   (i.e. genuinely unbalanced)
 printf '%s' '{"a":"{{{"}' > "$JSF_TEST_DIR/string_context.json"
-assert_eq "13g fixture bytes are exactly 11 (single-quoted literal)" \
+assert_eq "16g fixture bytes are exactly 11 (single-quoted literal)" \
     "11" "$(wc -c < "$JSF_TEST_DIR/string_context.json" | tr -d ' ')"
-assert_eq "13g fixture carries UNBALANCED in-string braces (4 open / 1 close)" \
+assert_eq "16g fixture carries UNBALANCED in-string braces (4 open / 1 close)" \
     "4/1/0" "$(tr -cd '{' < "$JSF_TEST_DIR/string_context.json" | wc -c | tr -d ' ')/$(tr -cd '}' < "$JSF_TEST_DIR/string_context.json" | wc -c | tr -d ' ')/$(tr -cd '\\' < "$JSF_TEST_DIR/string_context.json" | wc -c | tr -d ' ')"
 _jsf_w1_out="$(_jsf_read "$JSF_TEST_DIR/string_context.json")"
-assert_contains "13g unbalanced in-string braces validate (rc=0)" "rc=0" "$_jsf_w1_out"
-assert_contains "13g output byte-exact (in-string braces intact)" \
+assert_contains "16g unbalanced in-string braces validate (rc=0)" "rc=0" "$_jsf_w1_out"
+assert_contains "16g output byte-exact (in-string braces intact)" \
     '{"a":"{{{"}' "$_jsf_w1_out"
 
-# ─── 13h. escape parity: EVEN run adjacent to a quote CLOSES it (W2a) ──────
+# ─── 16h. escape parity: EVEN run adjacent to a quote CLOSES it (W2a) ──────
 # COUNCIL FINDING W2. Every backslash run adjacent to a quote elsewhere in
-# this section is ODD, and the even runs in 13a are followed by a SPACE,
+# this section is ODD, and the even runs in 16a are followed by a SPACE,
 # never a quote — so relaxing the parity test `RLENGTH % 2 == 1` to a
 # presence-only `RLENGTH > 0` passes the ENTIRE pre-existing suite. Here a
 # 2-backslash run sits immediately before the closing quote: the quote
-# CLOSES the string (valid JSON, §13's contract ⇒ rc=0). Presence-only
+# CLOSES the string (valid JSON, §16's contract ⇒ rc=0). Presence-only
 # keeps the string open ⇒ unbalanced ⇒ rc=1. Kills the M2 mutant.
 section "js journal read: escape parity — even run (W2a)"
 #   17 bytes, 2 × '\' (even run) immediately before the closing quote.
 printf '%s' '{"a":"x\\","b":2}' > "$JSF_TEST_DIR/parity_even_run.json"
-assert_eq "13h fixture bytes are exactly 17 (single-quoted literal)" \
+assert_eq "16h fixture bytes are exactly 17 (single-quoted literal)" \
     "17" "$(wc -c < "$JSF_TEST_DIR/parity_even_run.json" | tr -d ' ')"
-assert_eq "13h fixture carries an EVEN 2-backslash run" \
+assert_eq "16h fixture carries an EVEN 2-backslash run" \
     "2" "$(tr -cd '\\' < "$JSF_TEST_DIR/parity_even_run.json" | wc -c | tr -d ' ')"
 _jsf_w2a_out="$(_jsf_read "$JSF_TEST_DIR/parity_even_run.json")"
-assert_contains "13h even-backslash run before the quote validates (rc=0)" "rc=0" "$_jsf_w2a_out"
-assert_contains "13h output byte-exact (even run intact)" \
+assert_contains "16h even-backslash run before the quote validates (rc=0)" "rc=0" "$_jsf_w2a_out"
+assert_contains "16h output byte-exact (even run intact)" \
     '{"a":"x\\","b":2}' "$_jsf_w2a_out"
 
-# ─── 13i. escape parity: ODD (3-backslash) run adjacent to a quote (W2b) ───
+# ─── 16i. escape parity: ODD (3-backslash) run adjacent to a quote (W2b) ───
 # The 3-run ⇒ the following quote is ESCAPED ⇒ the string stays OPEN and
 # the NEXT quote closes it (valid JSON ⇒ rc=0). Parity inverted
 # (`RLENGTH % 2 == 0`) treats the 3-run as non-escaping ⇒ the first quote
@@ -1340,16 +2265,16 @@ assert_contains "13h output byte-exact (even run intact)" \
 section "js journal read: escape parity — odd run (W2b)"
 #   19 bytes, 3 × '\' (odd run) immediately before an escaped quote.
 printf '%s' '{"a":"x\\\"","b":2}' > "$JSF_TEST_DIR/parity_odd_run.json"
-assert_eq "13i fixture bytes are exactly 19 (single-quoted literal)" \
+assert_eq "16i fixture bytes are exactly 19 (single-quoted literal)" \
     "19" "$(wc -c < "$JSF_TEST_DIR/parity_odd_run.json" | tr -d ' ')"
-assert_eq "13i fixture carries an ODD 3-backslash run" \
+assert_eq "16i fixture carries an ODD 3-backslash run" \
     "3" "$(tr -cd '\\' < "$JSF_TEST_DIR/parity_odd_run.json" | wc -c | tr -d ' ')"
 _jsf_w2b_out="$(_jsf_read "$JSF_TEST_DIR/parity_odd_run.json")"
-assert_contains "13i odd-backslash run escapes the quote (rc=0)" "rc=0" "$_jsf_w2b_out"
-assert_contains "13i output byte-exact (odd run intact)" \
+assert_contains "16i odd-backslash run escapes the quote (rc=0)" "rc=0" "$_jsf_w2b_out"
+assert_contains "16i output byte-exact (odd run intact)" \
     '{"a":"x\\\"","b":2}' "$_jsf_w2b_out"
 
-# ─── 13j. rc vocabulary: UNAVAILABLE (2) is distinct from NOT-TRUSTED (1) ─
+# ─── 16j. rc vocabulary: UNAVAILABLE (2) is distinct from NOT-TRUSTED (1) ─
 # The launcher distinguishes THREE outcomes for its JSON passes:
 #   0 — the pass ran and the content is trustworthy;
 #   1 — the pass ran and the content is NOT trustworthy (bracket-unbalanced,
@@ -1392,20 +2317,20 @@ JSF_WEDGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-jsf-wedge.XXXXXX")"
 printf '#!/bin/sh\nexec sleep 300\n' > "$JSF_WEDGE_DIR/awk"
 chmod +x "$JSF_WEDGE_DIR/awk"
 
-# 13j.1 — no awk at all: the READ and the EXTRACTOR report rc=2 (the raw
+# 16j.1 — no awk at all: the READ and the EXTRACTOR report rc=2 (the raw
 #        awk status 127 must NOT leak, and must NOT read as "unbalanced").
 _jsf_noawk_read="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_journal_read "$2" >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json" 2>/dev/null)"
 _jsf_noawk_sub="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_json_sub "{\"a\":{\"b\":1}}" a >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" 2>/dev/null)"
-assert_contains "13j journal read without awk → rc=2 (unavailable, not 1)" "rc=2" "$_jsf_noawk_read"
-assert_contains "13j json sub without awk → rc=2 (unavailable, not 1)" "rc=2" "$_jsf_noawk_sub"
+assert_contains "16j journal read without awk → rc=2 (unavailable, not 1)" "rc=2" "$_jsf_noawk_read"
+assert_contains "16j json sub without awk → rc=2 (unavailable, not 1)" "rc=2" "$_jsf_noawk_sub"
 
-# 13j.2 — a wedged awk under the bound → rc=2 as well (a TIMEOUT is
+# 16j.2 — a wedged awk under the bound → rc=2 as well (a TIMEOUT is
 #        UNAVAILABLE, never "unbalanced"/1). The bound is shortened to 2 s
 #        for the test (the shipped value is 60 s — see _JS_AWK_TIMEOUT_S).
 _jsf_wedge_rc="$(PATH="$JSF_WEDGE_DIR:$PATH" "$_JSF_BASH" -c '. "$1"; _JS_AWK_TIMEOUT_S=2; _js_json_sub "{\"a\":{\"b\":1}}" a >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" 2>/dev/null)"
-assert_contains "13j wedged awk under the bound → rc=2 (not 1)" "rc=2" "$_jsf_wedge_rc"
+assert_contains "16j wedged awk under the bound → rc=2 (not 1)" "rc=2" "$_jsf_wedge_rc"
 
-# 13j.3 — the writers REFUSE on an unavailable extractor, and the journal
+# 16j.3 — the writers REFUSE on an unavailable extractor, and the journal
 #        is left byte-identical. The read succeeds (the validator ran) and
 #        the extraction fails (the interpreter vanished in between) — the
 #        exact shape that used to REPLACE the history array with one row
@@ -1414,42 +2339,42 @@ printf '%s' '{"current":"v1","history":[{"ts":"t","event":"sweep","detail":"d"}]
     > "$JSF_TEST_DIR/rc_journal.json"
 cp "$JSF_TEST_DIR/rc_journal.json" "$JSF_TEST_DIR/rc_journal.before"
 _jsf_hist_rc="$(JSF_FAKE_COUNTER="$JSF_FAKE_COUNTER" PATH="$JSF_FAKE_DIR:$PATH" "$_JSF_BASH" -c '. "$1"; _js_history_append "$2" "evt" "det" 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_journal.json" 2>/dev/null)"
-assert_contains "13j history append refused when the extractor is unavailable" "rc=1" "$_jsf_hist_rc"
-assert_contains "13j the refusal says UNAVAILABLE (visible to the operator)" "UNAVAILABLE" "$_jsf_hist_rc"
+assert_contains "16j history append refused when the extractor is unavailable" "rc=1" "$_jsf_hist_rc"
+assert_contains "16j the refusal says UNAVAILABLE (visible to the operator)" "UNAVAILABLE" "$_jsf_hist_rc"
 if cmp -s "$JSF_TEST_DIR/rc_journal.before" "$JSF_TEST_DIR/rc_journal.json"; then
     _pass
 else
-    _fail "13j history array untouched when the extractor is unavailable" "identical" "differs"
+    _fail "16j history array untouched when the extractor is unavailable" "identical" "differs"
 fi
 _jsf_cnt_rc="$(JSF_FAKE_COUNTER="$JSF_FAKE_COUNTER" PATH="$JSF_FAKE_DIR:$PATH" "$_JSF_BASH" -c '. "$1"; _js_count_rollback "$2" 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_journal.json" 2>/dev/null)"
-assert_contains "13j rollback counter refused when the extractor is unavailable" "rc=1" "$_jsf_cnt_rc"
+assert_contains "16j rollback counter refused when the extractor is unavailable" "rc=1" "$_jsf_cnt_rc"
 if cmp -s "$JSF_TEST_DIR/rc_journal.before" "$JSF_TEST_DIR/rc_journal.json"; then
     _pass
 else
-    _fail "13j 24h counter NOT reset when the extractor is unavailable" "identical" "differs"
+    _fail "16j 24h counter NOT reset when the extractor is unavailable" "identical" "differs"
 fi
 _jsf_quar_rc="$(JSF_FAKE_COUNTER="$JSF_FAKE_COUNTER" PATH="$JSF_FAKE_DIR:$PATH" "$_JSF_BASH" -c '. "$1"; _js_quarantine "$2" "v9.9.9" 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_journal.json" 2>/dev/null)"
-assert_contains "13j quarantine append refused when the extractor is unavailable" "rc=1" "$_jsf_quar_rc"
+assert_contains "16j quarantine append refused when the extractor is unavailable" "rc=1" "$_jsf_quar_rc"
 if cmp -s "$JSF_TEST_DIR/rc_journal.before" "$JSF_TEST_DIR/rc_journal.json"; then
     _pass
 else
-    _fail "13j quarantined[] untouched when the extractor is unavailable" "identical" "differs"
+    _fail "16j quarantined[] untouched when the extractor is unavailable" "identical" "differs"
 fi
 
-# 13j.4 — the sweep WARN names the check that actually ran (the launcher
+# 16j.4 — the sweep WARN names the check that actually ran (the launcher
 #        runs a BRACKET BALANCE CHECK, not a JSON parse) and distinguishes
 #        "the validator is unavailable" from "the content is not trusted".
 _jsf_warn_dir="$JSF_TEST_DIR/warn"
 mkdir -p "$_jsf_warn_dir/releases"
 printf '%s' '{"current":"v1","in_flight":{' > "$_jsf_warn_dir/releases/state.json"
 _jsf_warn_out="$( ( . "$LAUNCHER"; INSTALL_DIR="$_jsf_warn_dir" _journal_sweep ) 2>&1 >/dev/null )"
-assert_contains "13j the refusal WARN names the check it ran (balance-check only)" \
+assert_contains "16j the refusal WARN names the check it ran (balance-check only)" \
     "balance-check only — not a JSON parse" "$_jsf_warn_out"
 _jsf_warn2_out="$( ( PATH="$JSF_NOAWK_DIR"; . "$LAUNCHER"; INSTALL_DIR="$_jsf_warn_dir" _journal_sweep ) 2>&1 >/dev/null )"
-assert_contains "13j the unavailable WARN does NOT claim 'unbalanced'" \
+assert_contains "16j the unavailable WARN does NOT claim 'unbalanced'" \
     "validator is UNAVAILABLE" "$_jsf_warn2_out"
 
-# 13j.5 — the unavailable WARN quotes the REAL RAW awk status. Before the
+# 16j.5 — the unavailable WARN quotes the REAL RAW awk status. Before the
 #         round-3 fix the WARN read a stale `_JS_LAST_AWK_RC=0` at every
 #         site: the raw rc was set inside `_js_awk_bounded`, which ran as
 #         a pipeline segment (a subshell) AND behind the callers' `$(...)`
@@ -1460,13 +2385,13 @@ assert_contains "13j the unavailable WARN does NOT claim 'unbalanced'" \
 #         missing-awk PATH the raw status is 127 — a NON-ZERO, NON-0
 #         literal in the WARN text.
 _jsf_noawk_update="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_journal_update "$2" current v2 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/escapes.json" 2>/dev/null)"
-assert_contains "13j update-refusal WARN quotes the RAW awk status (awk rc=127, not a stale 0)" \
+assert_contains "16j update-refusal WARN quotes the RAW awk status (awk rc=127, not a stale 0)" \
     "awk rc=127" "$_jsf_noawk_update"
 _jsf_noawk_sweep="$( ( PATH="$JSF_NOAWK_DIR"; . "$LAUNCHER"; INSTALL_DIR="$_jsf_warn_dir" _journal_sweep ) 2>&1 >/dev/null )"
-assert_contains "13j sweep unavailable WARN quotes the RAW awk status (awk rc=127)" \
+assert_contains "16j sweep unavailable WARN quotes the RAW awk status (awk rc=127)" \
     "awk rc=127" "$_jsf_noawk_sweep"
 
-# 13j.6 — the read-unavailable refuse arms are LOUD (round-3 D2): when
+# 16j.6 — the read-unavailable refuse arms are LOUD (round-3 D2): when
 #         `_js_journal_read` ITSELF reports rc=2, the writers used to
 #         fall into `|| return 1` with NO WARN — the journal stayed
 #         untouched (safe) but the operator got zero signal. Each arm now
@@ -1476,35 +2401,35 @@ printf '%s' '{"current":"v1","history":[{"ts":"t","event":"sweep","detail":"d"}]
     > "$JSF_TEST_DIR/rc_read2.json"
 cp "$JSF_TEST_DIR/rc_read2.json" "$JSF_TEST_DIR/rc_read2.before"
 _jsf_hist_read2="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_history_append "$2" evt det 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
-assert_contains "13j history append WARNs when the journal READ is unavailable (raw rc quoted)" \
+assert_contains "16j history append WARNs when the journal READ is unavailable (raw rc quoted)" \
     "awk rc=127" "$_jsf_hist_read2"
 _jsf_hist_read2_rc="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_history_append "$2" evt det >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
-assert_eq "13j read-unavailable history-append refusal still returns rc=1" \
+assert_eq "16j read-unavailable history-append refusal still returns rc=1" \
     "rc=1" "$_jsf_hist_read2_rc"
 if cmp -s "$JSF_TEST_DIR/rc_read2.before" "$JSF_TEST_DIR/rc_read2.json"; then
     _pass
 else
-    _fail "13j history array untouched when the journal READ is unavailable" "identical" "differs"
+    _fail "16j history array untouched when the journal READ is unavailable" "identical" "differs"
 fi
 _jsf_cnt_read2="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_count_rollback "$2" 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
-assert_contains "13j rollback counter WARNs when the journal READ is unavailable (raw rc quoted)" \
+assert_contains "16j rollback counter WARNs when the journal READ is unavailable (raw rc quoted)" \
     "awk rc=127" "$_jsf_cnt_read2"
 _jsf_cnt_read2_rc="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_count_rollback "$2" >/dev/null 2>&1; echo "rc=$?"' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
-assert_eq "13j read-unavailable rollback refusal still returns rc=1" \
+assert_eq "16j read-unavailable rollback refusal still returns rc=1" \
     "rc=1" "$_jsf_cnt_read2_rc"
 if cmp -s "$JSF_TEST_DIR/rc_read2.before" "$JSF_TEST_DIR/rc_read2.json"; then
     _pass
 else
-    _fail "13j 24h counter untouched when the journal READ is unavailable" "identical" "differs"
+    _fail "16j 24h counter untouched when the journal READ is unavailable" "identical" "differs"
 fi
 _jsf_quar_read2="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_quarantine "$2" v9.9.9 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
-assert_contains "13j quarantine append WARNs when the journal READ is unavailable (raw rc quoted)" \
+assert_contains "16j quarantine append WARNs when the journal READ is unavailable (raw rc quoted)" \
     "awk rc=127" "$_jsf_quar_read2"
 _jsf_qurem_read2="$(PATH="$JSF_NOAWK_DIR" "$_JSF_BASH" -c '. "$1"; _js_quarantine_remove "$2" v9.9.9 2>&1 >/dev/null' _ "$LAUNCHER" "$JSF_TEST_DIR/rc_read2.json" 2>/dev/null)"
-assert_contains "13j quarantine removal WARNs when the journal READ is unavailable (raw rc quoted)" \
+assert_contains "16j quarantine removal WARNs when the journal READ is unavailable (raw rc quoted)" \
     "awk rc=127" "$_jsf_qurem_read2"
 
-# ─── 13k. PHANTOM-BRACKET truncation regression (the `j < tn` bound) ─────────
+# ─── 16k. PHANTOM-BRACKET truncation regression (the `j < tn` bound) ─────────
 # THE REGRESSION. The replaced bash loop counted brackets one character at a
 # time and returned 1 at EOF with the depth still open — a value missing its
 # final closing bracket was NEVER extracted. The O(n) awk rewrite replaced
@@ -1546,9 +2471,9 @@ printf '%s' '{"a":[{"x":1}'   > "$JSF_TORN_DIR/array_torn.json"
 for _jsf_shape in flat_value_torn flat_array_torn nested_object_torn array_torn; do
     _jsf_torn_json="$(cat "$JSF_TORN_DIR/$_jsf_shape.json")"
     _jsf_torn_rc="$(_jsf_sub_probe "$_jsf_torn_json" a "$JSF_TORN_DIR/$_jsf_shape.out")"
-    assert_eq "13k $_jsf_shape: value missing its final closing bracket => rc=1" \
+    assert_eq "16k $_jsf_shape: value missing its final closing bracket => rc=1" \
         "1" "$_jsf_torn_rc"
-    assert_eq "13k $_jsf_shape: EMPTY stdout (no truncated emission)" \
+    assert_eq "16k $_jsf_shape: EMPTY stdout (no truncated emission)" \
         "0" "$(wc -c < "$JSF_TORN_DIR/$_jsf_shape.out" | tr -d ' ')"
 done
 
@@ -1572,32 +2497,73 @@ printf '%s' '{"current":"v1","history":[{"ts":"2026-01-01T00:00:00Z","event":"sw
     > "$JSF_CASE_DIR/case_0230_trunc_torn_hist_103"
 
 # The byte-count assertion is the in-test guard against a shell-mangled
-# literal (the §13g/h/i discipline): the embedded bytes must be EXACTLY the
+# literal (the §16g/h/i discipline): the embedded bytes must be EXACTLY the
 # named file's bytes. The one-off pre-commit `cmp` against the corpus files
 # is the second, external half of that proof.
-assert_eq "13k named case case_0124_trunc_torn_flat_077 is byte-exact (77 bytes)" \
+assert_eq "16k named case case_0124_trunc_torn_flat_077 is byte-exact (77 bytes)" \
     "77" "$(wc -c < "$JSF_CASE_DIR/case_0124_trunc_torn_flat_077" | tr -d ' ')"
-assert_eq "13k named case case_0154_trunc_torn_hist_027 is byte-exact (27 bytes)" \
+assert_eq "16k named case case_0154_trunc_torn_hist_027 is byte-exact (27 bytes)" \
     "27" "$(wc -c < "$JSF_CASE_DIR/case_0154_trunc_torn_hist_027" | tr -d ' ')"
-assert_eq "13k named case case_0230_trunc_torn_hist_103 is byte-exact (103 bytes)" \
+assert_eq "16k named case case_0230_trunc_torn_hist_103 is byte-exact (103 bytes)" \
     "103" "$(wc -c < "$JSF_CASE_DIR/case_0230_trunc_torn_hist_103" | tr -d ' ')"
 
 for _jsf_case in case_0124_trunc_torn_flat_077 case_0154_trunc_torn_hist_027 case_0230_trunc_torn_hist_103; do
     _jsf_case_json="$(cat "$JSF_CASE_DIR/$_jsf_case")"
     _jsf_case_rc="$(_jsf_sub_probe "$_jsf_case_json" history "$JSF_CASE_DIR/$_jsf_case.out")"
-    assert_eq "13k $_jsf_case: SUB_history|1| (rc=1)" "1" "$_jsf_case_rc"
-    assert_eq "13k $_jsf_case: SUB_history|1| (empty stdout, no truncated emission)" \
+    assert_eq "16k $_jsf_case: SUB_history|1| (rc=1)" "1" "$_jsf_case_rc"
+    assert_eq "16k $_jsf_case: SUB_history|1| (empty stdout, no truncated emission)" \
         "0" "$(wc -c < "$JSF_CASE_DIR/$_jsf_case.out" | tr -d ' ')"
     # The READ side refuses the same torn document (the journal is not
     # trustworthy) — a writer must never see it.
-    assert_contains "13k $_jsf_case: torn journal read refused (rc=1)" \
+    assert_contains "16k $_jsf_case: torn journal read refused (rc=1)" \
         "rc=1" "$(_jsf_read "$JSF_CASE_DIR/$_jsf_case")"
 done
+
+# ─── F4: _env_strip_value byte-parity (launcher.sh <-> watchdog-watcher.sh) ──
+# The two implementations MUST stay byte-identical (F-06: one value-resolution
+# rule, duplicated by design because the watchdog is standalone). The pin
+# compares the REAL file bytes (extracted function bodies), so it FAILS if
+# either side is edited -- it cannot be satisfied by a stub.
+section "env-strip-value byte-parity (F4)"
+
+_env_strip_value_body() {  # <file>
+    awk '/^_env_strip_value\(\) \{/,/^\}/' "$1"
+}
+
+# Positive pin: the two bodies are byte-identical today.
+if [ "$(_env_strip_value_body "$LAUNCHER")" = "$(_env_strip_value_body "$REPO_ROOT/scripts/watchdog-watcher.sh")" ]; then
+    _pass
+else
+    _fail "F4 _env_strip_value byte-identical (launcher.sh vs scripts/watchdog-watcher.sh)" \
+        "identical bodies" "bodies differ"
+fi
+assert_eq "F4 _env_strip_value byte-parity (launcher.sh vs scripts/watchdog-watcher.sh)" \
+    "$(_env_strip_value_body "$LAUNCHER")" \
+    "$(_env_strip_value_body "$REPO_ROOT/scripts/watchdog-watcher.sh")"
+
+# Non-vacuity (negative): perturb a /tmp COPY of one side -- the SAME
+# comparison must go RED. The real files are NEVER written.
+cp "$REPO_ROOT/scripts/watchdog-watcher.sh" "$LP_TEST_DIR/watchdog-perturbed.sh"
+python3 - "$LP_TEST_DIR/watchdog-perturbed.sh" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+needle = "printf '%s' \"$v\""
+assert needle in s, "perturbation target not found"
+s = s.replace(needle, "printf '%s' \"$v\" ", 1)
+open(p, "w").write(s)
+PYEOF
+if [ "$(_env_strip_value_body "$LAUNCHER")" = "$(_env_strip_value_body "$LP_TEST_DIR/watchdog-perturbed.sh")" ]; then
+    _fail "F4 parity pin is not vacuous (a perturbed side must be CAUGHT)" \
+        "bodies differ" "bodies still identical -- pin is vacuous"
+else
+    _pass
+fi
 
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \
-       "$RB_TEST_DIR5" "$JSF_TEST_DIR" "$JSF_PERF_DIR" \
+       "$RB_TEST_DIR5" "$LP_TEST_DIR" "$JSF_TEST_DIR" "$JSF_PERF_DIR" \
        "$JSF_NOAWK_DIR" "$JSF_FAKE_DIR" "$JSF_WEDGE_DIR" 2>/dev/null
 
 # ─── summary ────────────────────────────────────────────────────────────────
