@@ -65,6 +65,15 @@ from daemon.services.skill_metrics_service import (
     SkillMetricsService,
 )
 
+# The lane's SAFE sink redirect + the shared-path sentinel (the
+# order-dependent leak fix: a teardown may never restore None).
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The counter key every capture-lane-OFF refusal moves.
@@ -81,17 +90,29 @@ EXPECTED_GUARDS = {
 
 
 @pytest.fixture(autouse=True)
-def _observability_sandbox(tmp_path):
-    """The dispatcher gate writes a SINK record — redirect it (L7)."""
+def _observability_sandbox(tmp_path, request):
+    """The dispatcher gate writes a SINK record — redirect it (L7).
+
+    The teardown NEVER restores the override to ``None``: that
+    re-exposes the checkout's REAL data dir for every later write (the
+    order-dependent sink leak).  It restores the SAFE session redirect
+    and runs the shared-path sentinel.
+    """
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
     observability.configure_sink(tmp_path)
     observability.reset_counters()
     observability.set_anomaly_reporter(None)
     try:
         yield tmp_path
     finally:
-        observability.configure_sink(None)
+        # NEVER restore to None: that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink
+        # leak).  Restore the SAFE session redirect instead.
+        restore_safe_sink_redirect()
         observability.reset_counters()
         observability.set_anomaly_reporter(None)
+        lane_test_end(request.node.nodeid, before)
 
 
 @pytest.fixture(autouse=True)

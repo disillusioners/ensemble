@@ -55,6 +55,15 @@ from daemon.services.skill_metrics_service import (
     SkillMetricsService,
 )
 
+# The lane's SAFE sink redirect + the shared-path sentinel (the
+# order-dependent leak fix: a teardown may never restore None).
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The checkout's REAL sink dir — the tree the leak polluted.
@@ -95,17 +104,29 @@ def _service(agent_id: str):
 
 
 @pytest.fixture(autouse=True)
-def _observability_sandbox(tmp_path):
-    """This file must not leak either — it drives the same seam."""
+def _observability_sandbox(tmp_path, request):
+    """This file must not leak either — it drives the same seam.
+
+    The teardown NEVER restores the override to ``None``: that
+    re-exposes the checkout's REAL data dir for every later write (the
+    order-dependent sink leak).  It restores the SAFE session redirect
+    and runs the shared-path sentinel.
+    """
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
     observability.configure_sink(tmp_path)
     observability.reset_counters()
     observability.set_anomaly_reporter(None)
     try:
         yield tmp_path
     finally:
-        observability.configure_sink(None)
+        # NEVER restore to None: that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink
+        # leak).  Restore the SAFE session redirect instead.
+        restore_safe_sink_redirect()
         observability.reset_counters()
         observability.set_anomaly_reporter(None)
+        lane_test_end(request.node.nodeid, before)
 
 
 def _real_sink_records() -> list[tuple[Path, str]]:
