@@ -105,6 +105,31 @@ check_budget() {
   fi
 }
 
+# ── ATOMIC SNAPSHOT (the manifest TOCTOU) ──────────────────────────────────
+# snapshot_copy <live-path> <copy-path> — copies <live-path> to <copy-path>
+# and echoes the sha256 OF THE COPY.
+#
+# WHY NOT `cp live copy` FOLLOWED BY `sha256sum live` (the shape this pack
+# used to have): those are TWO SEPARATE commands, so a concurrent writer that
+# lands between them makes the recorded sha describe bytes that were NEVER
+# copied.  The pack then restores the copy (byte-perfect) and compares the
+# live file against that stale sha ⇒ a FALSE FAIL with no defect behind it.
+# Observed 2026-11-10 during the gate re-verification: the FULL pack FAILED
+# on a tree another lane was editing, then PASSED on the same pack on a
+# quiescent tree (19 passed, 4 legs RED→GREEN).
+#
+# Deriving the digest FROM THE COPY makes the recorded sha describe exactly
+# the bytes the pack holds, so every restore/manifest comparison below is
+# self-consistent BY CONSTRUCTION — the recorded sha can only ever be the
+# sha of the bytes that were copied.
+snapshot_copy() {
+  local src="$1" dst="$2" sum
+  cp -- "$src" "$dst" || return 1
+  sum="$(sha256sum -- "$dst" | cut -d' ' -f1)" || return 1
+  [ -n "$sum" ] || return 1
+  printf '%s\n' "$sum"
+}
+
 run_pin() {
   timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$PIN" "$LEAK_PIN" "$CROSS_PIN" \
     -q --tb=line -p no:randomly --override-ini="addopts=" > "$1" 2>&1
@@ -135,8 +160,17 @@ CLEANED=0
 restore_all() {
   [ "$CLEANED" = 1 ] && return 0
   CLEANED=1
-  [ -f "$PRISTINE/content" ] && cp "$PRISTINE/content" "$SVC"
-  [ -f "$PRISTINE/$(basename "$PIN")" ] && cp "$PRISTINE/$(basename "$PIN")" "$PIN"
+  # Restore from the COPIES the pack holds.  The per-target copy (taken by
+  # snapshot_copy) wins over the first-pass copy: in the quiescent case the
+  # two are byte-identical, but the per-target copy is the one the mutation
+  # legs actually restore to — so the trap lands on the SAME bytes the legs
+  # verified, instead of reverting the file to an older snapshot.
+  if [ -f "$PRISTINE/$(basename "$SVC")" ]; then
+    cp -- "$PRISTINE/$(basename "$SVC")" "$SVC"
+  elif [ -f "$PRISTINE/content" ]; then
+    cp -- "$PRISTINE/content" "$SVC"
+  fi
+  [ -f "$PRISTINE/$(basename "$PIN")" ] && cp -- "$PRISTINE/$(basename "$PIN")" "$PIN"
   clean_marker_leaks
   rm -rf "$PRISTINE" "$SANDBOX"
 }
@@ -144,8 +178,13 @@ trap restore_all EXIT
 trap 'restore_all; exit 143' TERM
 trap 'restore_all; exit 130' INT
 
-cp "$SVC" "$PRISTINE/content"
-WANT="$(sha256sum "$SVC" | cut -d' ' -f1)"
+# ATOMIC: the recorded sha describes the COPY, never a second read of the
+# live path — a concurrent writer between the two commands can no longer
+# make the manifest compare a stale sha against a correctly-restored file.
+WANT="$(snapshot_copy "$SVC" "$PRISTINE/content")" || {
+  echo "RESULT: FAIL (pristine snapshot failed for $SVC)"
+  exit 1
+}
 echo "[pack] pristine: $SVC sha=$WANT"
 
 # plant <path> <old> <new> [expected_count] — the count defaults to 1.
@@ -341,8 +380,13 @@ leg "M-C2b" \
 #   (2) the per-run marker salt — `agent-c2` → `agent-c2-p<pid>-<epoch>` in
 #       BOTH the drive and its assertion, so the seam pin stays internally
 #       consistent while the leaked row becomes uniquely this run's.
-cp "$PIN" "$PRISTINE/$(basename "$PIN")"
-sha256sum "$PIN" | cut -d' ' -f1 > "$PRISTINE/$(basename "$PIN").want"
+# ATOMIC: the recorded sha describes the COPY, never a second read of the
+# live path (the manifest TOCTOU that produced a FALSE FAIL on a tree
+# another lane was editing).
+snapshot_copy "$PIN" "$PRISTINE/$(basename "$PIN")" > "$PRISTINE/$(basename "$PIN").want" || {
+  echo "RESULT: FAIL (pristine snapshot failed for $PIN)"
+  exit 1
+}
 file_leg "M-C2d" "$PIN" \
   '    observability.configure_sink(tmp_path)' \
   '    pass  # MUTATION: the sink is NOT redirected - the write escapes tmp_path' \
@@ -353,8 +397,11 @@ file_leg "M-C2d" "$PIN" \
 
 # M-C2e — remove the metrics seam's recorder call ⇒ that path's assertion
 # REDs, the other two stay GREEN (the path-sensitivity proof).
-cp "$SVC" "$PRISTINE/$(basename "$SVC")"
-sha256sum "$SVC" | cut -d' ' -f1 > "$PRISTINE/$(basename "$SVC").want"
+# ATOMIC: same treatment as the M-C2d snapshot above.
+snapshot_copy "$SVC" "$PRISTINE/$(basename "$SVC")" > "$PRISTINE/$(basename "$SVC").want" || {
+  echo "RESULT: FAIL (pristine snapshot failed for $SVC)"
+  exit 1
+}
 file_leg "M-C2e" "$SVC" \
   '            _record_capture_lane_off_refusal(
                 agent_id=agent_id,
