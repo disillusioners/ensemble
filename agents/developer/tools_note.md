@@ -108,4 +108,4 @@ Read-only quick lookups: `filesystem` + `bash` — bounded to the allow-list abo
 
 `proc`, `time`, `self`, `help`, `image`, `mcp`, `context`, `shared_meta_kv` are available for completeness; I reach for them only when an explicit dispatch need calls for them, never by default.
 
-`explain_image` is the only route that gets image pixels read — it fetches the file and attaches it to the vision model. A local path may be ANY readable path on the daemon host (absolute, or relative to the project's main directory; any format check is magic-byte based, 10 MB cap); a bad path returns an honest load error. Never spawn `image-reader` with a bare path, which has no filesystem access and cannot open one.
+`explain_image` is the only route that gets image pixels read — it fetches the file and attaches it to the vision model. A local path may be ANY readable path on the daemon host (absolute, or relative to the project's main directory; the format check is magic-byte based, 10 MB cap); a bad path returns an honest load error. Never spawn `image-reader` with a bare path, which has no filesystem access and cannot open one.

@@ -78,7 +78,6 @@ quietly resolve to the daemon default and the comparator would lose
 its vision capability without any error).
 """
 
-import base64
 import json
 import logging
 import re
@@ -173,7 +172,7 @@ _KIND_SCHEMA_INVALID = "schema-invalid"
 _MONITOR_KV_KEY = "design.comparator.monitor"
 
 # Substrate id pattern (P1-WP10 anchor — must byte-match
-# ``daemon/tools/image_tools.py:640`` and the HTTP router regex).
+# ``daemon/tools/image_tools.py::_ID_REGEX`` and the HTTP router regex).
 # 32 lowercase hex characters. The facade accepts EITHER this shape
 # OR a local filesystem path.
 _SUBSTRATE_ID_REGEX = re.compile(r"^[a-f0-9]{32}$")
@@ -720,7 +719,7 @@ def _resolve_substrate_input(
     Args:
         image_ref: The 32-hex substrate id.
         manager: The InstanceManager instance — ``tmp_image_store`` is
-            read from the manager (mirrors ``image_tools.py:652``).
+            read from the manager (mirrors ``image_tools.py::_get_store``).
 
     Returns:
         A dict with EITHER ``{"data_uri": str, "provenance": dict | None,
@@ -733,7 +732,7 @@ def _resolve_substrate_input(
     # ``image_tools`` substrate tools).
     from daemon.services.tmp_image_bridge import resolve_data_uris
 
-    # Store wiring — mirrors ``daemon/tools/image_tools.py:651-654``.
+    # Store wiring — mirrors ``daemon/tools/image_tools.py::_get_store``.
     try:
         store = manager.tmp_image_store
     except Exception as exc:
@@ -822,7 +821,16 @@ def _resolve_path_input(
                 main_directory = getattr(project, "main_directory", None)
                 if isinstance(main_directory, str) and main_directory.strip():
                     base_dir = main_directory
-        except Exception:
+        except Exception as exc:
+            # Silent anchor fallback: relative paths then resolve against
+            # the process cwd. Debug-only so a hot-path broken repo does
+            # not spam INFO, while the fallback stays traceable in the
+            # DEBUG file log.
+            logger.debug(
+                "compare_images: relative-path anchor lookup failed (%s); "
+                "falling back to process cwd.",
+                exc,
+            )
             base_dir = None
 
     try:
@@ -1301,12 +1309,17 @@ def create_compare_tools(
 
             Structured error envelope (JSON) on failure::
 
-                {"kind": "timeout" | "missing-agent" | "vision-failure",
+                {"kind": "timeout" | "missing-agent" | "vision-failure"
+                       | "input-not-found" | "schema-invalid",
                  "error": "<human-readable detail>"}
 
             The envelope ``kind`` distinguishes the failure class;
             the LLM and the calling agent can branch on it without
-            parsing prose.
+            parsing prose. ``input-not-found`` covers facade input
+            resolution failures (substrate id 404, local path missing
+            / unreadable / oversize / magic-byte reject);
+            ``schema-invalid`` covers an agent return that does not
+            parse as the findings schema.
         """
         pid = project_id or _get_project_id()
 

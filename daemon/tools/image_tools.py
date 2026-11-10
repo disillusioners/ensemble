@@ -43,10 +43,6 @@ images (URLs or local paths) and answers questions about them using a
 vision-capable LLM.
 """
 
-# Supported image formats for vision model ingestion. Anything outside
-# this set is rejected so we never produce a malformed data URI.
-SUPPORTED_IMAGE_FORMATS: tuple[str, ...] = ("png", "jpeg", "gif", "webp")
-
 # Default timeout (seconds) for fetching remote image URLs. Kept shorter
 # than the agent timeout (300s) so a stalled fetch fails fast and is
 # surfaced as a tool error rather than tying up the worker.
@@ -143,8 +139,12 @@ def _ensure_public_url(url: str) -> tuple[str | None, str | None]:
     return url, None
 
 
-async def _load_image_as_data_uri(image: str) -> str:
+async def _load_image_as_data_uri(image: str, base_dir: "str | None" = None) -> str:
     """Load an image from a URL or local path and return a base64 data URI.
+
+    This is the SINGLE live implementation of the URL-vs-path dispatch
+    rule — ``explain_image`` routes through it, so a change to the rule
+    lands here and nowhere else.
 
     Accepts ``http://`` / ``https://`` URLs and filesystem paths. Format is
     detected from magic bytes first (the authoritative signal), then
@@ -154,6 +154,11 @@ async def _load_image_as_data_uri(image: str) -> str:
 
     Args:
         image: URL or local filesystem path to an image (png/jpeg/gif/webp).
+        base_dir: Optional anchor used ONLY for RELATIVE local paths —
+            normally the calling project's ``main_directory``. Never a
+            boundary: absolute paths are read as-is, and a resolved target
+            outside the anchor is read normally. When ``None`` (or blank)
+            the process working directory anchors relative paths.
 
     Returns:
         A ``data:image/{format};base64,{base64_data}`` string ready to pass
@@ -177,7 +182,7 @@ async def _load_image_as_data_uri(image: str) -> str:
     lowered = image.lower()
     if lowered.startswith("http://") or lowered.startswith("https://"):
         return await _load_image_from_url(image)
-    return _load_image_from_path(image)
+    return _load_image_from_path(image, base_dir=base_dir)
 
 
 async def _load_image_from_url(url: str) -> str:
@@ -299,22 +304,26 @@ def _validate_local_path(
         ``(resolved_path, None)`` on success, or ``(None, error_msg)`` if the
         path does not exist, cannot be resolved, or is not a regular file.
     """
-    raw = Path(path_str).expanduser()
-    if not raw.is_absolute() and isinstance(base_dir, str) and base_dir.strip():
-        try:
-            anchor = Path(base_dir).expanduser().resolve()
-        except (OSError, RuntimeError, ValueError):
-            anchor = None
-        if anchor is not None:
-            raw = anchor / raw
-
     try:
+        raw = Path(path_str).expanduser()
+        if not raw.is_absolute() and isinstance(base_dir, str) and base_dir.strip():
+            try:
+                anchor = Path(base_dir).expanduser().resolve()
+            except (OSError, RuntimeError, ValueError):
+                anchor = None
+            if anchor is not None:
+                raw = anchor / raw
+
         resolved = raw.resolve(strict=True)
     except FileNotFoundError:
         return None, f"Image file does not exist: {path_str}"
-    except (OSError, RuntimeError) as exc:
-        # ``RuntimeError`` covers a symlink loop; ``OSError`` covers the rest
-        # (permission on a parent directory, I/O errors, path too long).
+    except (OSError, RuntimeError, ValueError) as exc:
+        # ``RuntimeError`` covers a symlink loop; ``OSError`` covers the
+        # rest (permission on a parent directory, I/O errors, path too
+        # long); ``ValueError`` covers strings the OS refuses outright
+        # (an embedded NUL byte raises from ``resolve`` with "embedded
+        # null character"). All surface the honest error envelope —
+        # never a raw raise.
         return None, f"Cannot resolve path {path_str!r}: {exc}"
 
     file_stat = resolved.stat()
@@ -546,13 +555,13 @@ def create_image_tools(manager: "InstanceManager", current_instance_id: str) -> 
         # Load + base64-encode the image so the vision model actually sees
         # the bytes (URLs alone never reach the multimodal pipeline). All
         # errors are caught and surfaced as tool result strings so callers
-        # can reason about them without exception handling.
+        # can reason about them without exception handling. The URL-vs-path
+        # dispatch lives in ``_load_image_as_data_uri`` (the single live
+        # implementation); ``base_dir`` anchors relative paths only.
         try:
-            lowered = (image or "").strip().lower()
-            if lowered.startswith("http://") or lowered.startswith("https://"):
-                image_data_uri = await _load_image_from_url(image)
-            else:
-                image_data_uri = _load_image_from_path(image, base_dir=base_dir)
+            image_data_uri = await _load_image_as_data_uri(
+                image, base_dir=base_dir
+            )
         except Exception as exc:
             logger.warning("Failed to load image for explain_image: %s", exc)
             return f"Error: Failed to load image {image!r}: {exc}"
@@ -658,9 +667,9 @@ Example:
     # ``explain_image`` reads bytes the agent already has a reference
     # to; ``image_*`` writes to + reads from the canonical image
     # substrate that ships with the daemon (the same store the HTTP
-    # router uses). Routing ``image_save`` through the project workdir
-    # would mean the wire-up for path→data-URI pixels-at-dispatch had
-    # to be re-invented inside the agent, defeating the WP10 bridge.
+    # router uses). Routing ``image_save`` through the project's main
+    # directory would mean the wire-up for path→data-URI pixels-at-dispatch
+    # had to be re-invented inside the agent, defeating the WP10 bridge.
     #
     # All three tools fail closed: a missing / unavailable store
     # surfaces a short ``"Error: ..."`` string so the agent can

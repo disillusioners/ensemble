@@ -37,9 +37,7 @@ Coverage lanes:
 
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -52,9 +50,9 @@ import daemon.tools.compare_tools as compare_tools_module
 
 # Two 32-hex substrate ids for tests that exercise the input
 # resolution path; the input-not-found path uses a third non-hex id
-# so the resolver routes it through the workdir branch (which then
-# 404s because the test has no workdir wired — the same expected
-# input-not-found surface).
+# so the resolver routes it through the local-path branch (which then
+# fails path resolution against the real filesystem — the same
+# expected input-not-found surface, surfaced as ``path_invalid``).
 _SUBSTRATE_ID_A = "0123456789abcdef0123456789abcdef"
 _SUBSTRATE_ID_B = "fedcba9876543210fedcba9876543210"
 
@@ -222,6 +220,26 @@ def _comparator_row(
         created_at=created_at,
         project_id=None,
     )
+
+
+def _project_manager(main_directory: str, related=()) -> MagicMock:
+    """A ``_make_manager()`` whose project repo returns the given dirs.
+
+    Dedupes the SimpleNamespace project-mock the unconfined-path tests
+    each built inline: ``_resolve_path_input`` / ``compare_images`` read
+    ``main_directory`` (the RELATIVE-path anchor, never a boundary) and
+    ``related_directories`` is carried only to prove declared scope plays
+    no part in path admission.
+    """
+    manager = _make_manager()
+    manager._project_repository = MagicMock()
+    manager._project_repository.get = MagicMock(
+        return_value=SimpleNamespace(
+            main_directory=main_directory,
+            related_directories=list(related),
+        )
+    )
+    return manager
 
 
 # ── Factory shape ────────────────────────────────────────────────────────────
@@ -1760,14 +1778,7 @@ class TestPathInputUnconfined:
         outside.parent.mkdir(parents=True)
         outside.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
 
-        manager = _make_manager()
-        manager._project_repository = MagicMock()
-        manager._project_repository.get = MagicMock(
-            return_value=SimpleNamespace(
-                main_directory=str(main),
-                related_directories=[str(video)],
-            )
-        )
+        manager = _project_manager(str(main), related=[str(video)])
 
         row = _resolve_path_input(str(outside), manager=manager, project_id="pid")
 
@@ -1796,14 +1807,7 @@ class TestPathInputUnconfined:
         main.mkdir()
         (main / "draft.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
 
-        manager = _make_manager()
-        manager._project_repository = MagicMock()
-        manager._project_repository.get = MagicMock(
-            return_value=SimpleNamespace(
-                main_directory=str(main),
-                related_directories=[],
-            )
-        )
+        manager = _project_manager(str(main))
 
         row = _resolve_path_input("draft.png", manager=manager, project_id="pid")
 
@@ -1816,14 +1820,7 @@ class TestPathInputUnconfined:
         main = tmp_path / "frontend-engine"
         main.mkdir()
 
-        manager = _make_manager()
-        manager._project_repository = MagicMock()
-        manager._project_repository.get = MagicMock(
-            return_value=SimpleNamespace(
-                main_directory=str(main),
-                related_directories=[],
-            )
-        )
+        manager = _project_manager(str(main))
 
         row = _resolve_path_input(
             str(tmp_path / "nothing-here.png"), manager=manager, project_id="pid"
@@ -1843,14 +1840,7 @@ class TestPathInputUnconfined:
         outside.parent.mkdir(parents=True)
         outside.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
 
-        manager = _make_manager(instance_get_return=None)
-        manager._project_repository = MagicMock()
-        manager._project_repository.get = MagicMock(
-            return_value=SimpleNamespace(
-                main_directory=str(main),
-                related_directories=[],
-            )
-        )
+        manager = _project_manager(str(main))
         findings = _valid_findings_json()
         mock_invoke = AsyncMock(return_value=(findings, "child-id"))
 
@@ -1874,6 +1864,7 @@ _CONFINEMENT_PHRASES = (
     "related director",
     "project workdir",
     "workdir boundary",
+    "outside the project",
 )
 
 

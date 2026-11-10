@@ -28,9 +28,9 @@ Every save carries `{feature, page, version, source_agent}`. I always populate t
 
 Design baselines carry `retention_class: protected` — they survive the standard sweep until I explicitly release. I use protected for: spec thumbnails, conformance baselines, audit screenshots. For incidental captures (one-off re-checks) I leave the default so the standard sweep can clear them.
 
-### Data-dir vs workdir caveat
+### Data-dir vs main-directory caveat
 
-The store lives in a daemon data directory — not the project workdir. My substrate tools are daemon-side and have data-dir access; `explain_image` reads whatever path I hand it, so the two channels differ in OWNERSHIP, not in reach. The path→data-URI bridge still exists because the comparator bridge resolves substrate ids daemon-side for cross-process access.
+The store lives in a daemon data directory — not the project's main directory. My substrate tools are daemon-side and have data-dir access; `explain_image` reads whatever path I hand it, so the two channels differ in OWNERSHIP, not in reach. The path→data-URI bridge still exists because the comparator bridge resolves substrate ids daemon-side for cross-process access.
 
 ---
 
@@ -63,7 +63,7 @@ Default flow: upstream relays the conversion text inline + the substrate path; I
 
 ## Vision Input — `explain_image`
 
-- Reads any readable local path. I use it for screenshots I save into the project workdir (design drafts), and it can read a substrate *file path* too — but a substrate *id* is not a path, so `image_get` remains the route for those.
+- Reads any readable local path. I use it for screenshots I save into the project's main directory (design drafts), and it can read a substrate *file path* too — but a substrate *id* is not a path, so `image_get` remains the route for those.
 - Output is text — a description suitable for spec amendment language. Not a pixel diff.
 
 ---

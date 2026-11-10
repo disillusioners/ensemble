@@ -316,7 +316,10 @@ class TestAgentMetaJsonUpdates:
 
 
 # ---------------------------------------------------------------------------
-# Section 4 — Security (SSRF / path traversal / memory cap / magic bytes)
+# Section 4 — Security (SSRF / local-path admission / memory cap / magic
+# bytes). There is no path-traversal fence to test: local-path admission is
+# deliberately unconfined (``TestLocalPathNoConfinement``), so the lane
+# names the honest guards instead.
 # ---------------------------------------------------------------------------
 
 
@@ -479,7 +482,7 @@ class TestLocalPathNoConfinement:
 
         outside = tmp_path / "elsewhere" / "evil.png"
         outside.parent.mkdir()
-        outside.write_bytes(b"\x89PNG\r\n\x1a\nrest")
+        outside.write_bytes(_png_bytes())
 
         base = tmp_path / "base"
         base.mkdir()
@@ -494,7 +497,7 @@ class TestLocalPathNoConfinement:
         from daemon.tools.image_tools import _validate_local_path
 
         image = tmp_path / "shot.png"
-        image.write_bytes(b"\x89PNG\r\n\x1a\nrest")
+        image.write_bytes(_png_bytes())
 
         for base_dir in (None, "", "   "):
             resolved, err = _validate_local_path(str(image), base_dir)
@@ -531,7 +534,7 @@ class TestLocalPathNoConfinement:
         base = tmp_path / "base"
         base.mkdir()
         outside = tmp_path / "outside.png"
-        outside.write_bytes(b"\x89PNG\r\n\x1a\nrest")
+        outside.write_bytes(_png_bytes())
 
         symlink = base / "sneaky.png"
         symlink.symlink_to(outside)
@@ -563,7 +566,7 @@ class TestLocalPathNoConfinement:
         base = tmp_path / "base"
         base.mkdir()
         inside = base / "good.png"
-        inside.write_bytes(b"\x89PNG\r\n\x1a\nrest")
+        inside.write_bytes(_png_bytes())
 
         resolved, err = _validate_local_path("good.png", str(base))
 
@@ -578,12 +581,34 @@ class TestLocalPathNoConfinement:
         base = tmp_path / "base"
         base.mkdir()
         outside = tmp_path / "secret.png"
-        outside.write_bytes(b"\x89PNG\r\n\x1a\nrest")
+        outside.write_bytes(_png_bytes())
 
         resolved, err = _validate_local_path("../secret.png", str(base))
 
         assert err is None, err
         assert resolved == outside.resolve()
+
+    def test_embedded_nul_byte_is_an_honest_error(self, tmp_path):
+        """A NUL byte in the path → the honest ``(None, msg)`` envelope.
+
+        ``Path`` accepts the string but ``resolve(strict=True)`` raises a
+        raw ``ValueError`` ("embedded null character") that used to escape
+        the validator's error envelope. Weird input must yield the same
+        honest error as any other unresolvable path — never a raise.
+        """
+        from daemon.tools.image_tools import _validate_local_path
+
+        base = tmp_path / "base"
+        base.mkdir()
+        nul_path = str(base / "evil\x00.png")
+
+        resolved, err = _validate_local_path(nul_path, str(base))
+
+        assert resolved is None
+        assert err is not None
+        assert "cannot resolve" in err.lower()
+        # The message quotes the raw path (``{path_str!r}``).
+        assert repr(nul_path) in err
 
 
 class TestMemoryCap:
@@ -598,7 +623,7 @@ class TestMemoryCap:
         big = workdir / "big.png"
         # Create the file empty; we'll mock ``stat`` to claim it's huge
         # to avoid actually writing 10MB to disk.
-        big.write_bytes(b"\x89PNG\r\n\x1a\nrest")
+        big.write_bytes(_png_bytes())
 
         real_stat = big.stat()
 
@@ -975,12 +1000,19 @@ class TestExplainImageUnconfinedPath:
             "format" in str(exc_info.value).lower()
         )
 
-    async def test_explain_image_reads_outside_path(self, tmp_path):
-        """END-TO-END: ``explain_image`` dispatches an outside-project path.
+    async def test_explain_image_reads_declared_related_directory_path(
+        self, tmp_path
+    ):
+        """END-TO-END: a path INSIDE a declared related directory dispatches.
 
-        Before this policy change the tool refused such a path as "outside
-        the project's allowed directories" and never spawned the
-        image-reader — the trap that cost the caller a wasted turn.
+        Reachability pin, not an outside-scope pin: ``video-lab`` is
+        declared as a related directory and the contact sheet lives under
+        it — this exact read path was the reachable-scope case the
+        be8ee6295 D1 confinement admitted, and it must STAY reachable now
+        that the confinement is gone (the unconfined policy is a superset
+        of the old in-scope set). Never delete this as redundant with the
+        outside-path tests — it proves the declared-scope lane survived
+        the policy change.
         """
         from daemon.tools.image_tools import create_image_tools
 
@@ -1068,6 +1100,7 @@ _CONFINEMENT_PHRASES = (
     "related director",
     "project workdir",
     "workdir boundary",
+    "outside the project",
 )
 
 
@@ -1078,7 +1111,10 @@ class TestExplainImageDocsDropConfinement:
         from daemon.tools.image_tools import create_image_tools
 
         tool = create_image_tools(_make_manager(), "iid")[0]
-        description = (tool.description or "").lower()
+        # Whitespace-collapsed, matching the ``_full_doc_`` pin below and
+        # the compare_tools description pin: the doc is hard-wrapped, so a
+        # phrase like ``allowed\ndirectories`` must not evade by newline.
+        description = " ".join((tool.description or "").lower().split())
 
         for phrase in _CONFINEMENT_PHRASES:
             assert phrase not in description, (
@@ -1141,7 +1177,11 @@ class TestExplainImageDelegation:
             try:
                 with os.fdopen(fd, "wb") as fh:
                     fh.write(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
-                # Anchor relative paths at the temp file's directory.
+                # The tool looks up ``main_directory`` as the RELATIVE-path
+                # anchor. The path below is absolute, so this anchor is
+                # never exercised — it is wired anyway so the repo lookups
+                # resolve deterministically instead of hitting a bare
+                # MagicMock.
                 manager._project_repository.get = MagicMock(
                     return_value=MagicMock(main_directory=os.path.dirname(path)),
                 )
