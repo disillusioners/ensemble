@@ -52,13 +52,22 @@
 #   `--timeout=` (which would clobber the marker).  Do not "fix" a
 #   timeout failure by disabling the marker.
 #
-# MEASURED WALL (this checkout, 10 derived class members): 78s wall
-# (73.21s pytest-reported) for the full pin file.  The class is DERIVED from
-# the tree, so a lane that adds sink-override managers makes it grow.
-# Internal budget = 240s (BELOW the house 300s outer cap on purpose: an
-# inner budget LARGER than the outer cap inverts the dual-layer timeout —
-# the outer kill fires first and the pack dies with a bare rc=124 and NO
-# `RESULT:` line).  Overrun prints RESULT: TIMEOUT and exits 124.
+#   The pack's OWN budget is a SECOND, independent layer:
+#     layer 1 (outer)  — the caller's `timeout 300 bash <pack>`;
+#     layer 2 (inner)  — `timeout ${INNER_TIMEOUT_S}` ON THE PYTEST
+#                        INVOCATION ITSELF, so a hang inside the pin is
+#                        killed by the PACK (rc=124 -> RESULT: TIMEOUT),
+#                        NOT by the outer kill.  Without the inner timeout
+#                        the outer kill fires first and the pack dies with
+#                        a bare rc=124 and NO `RESULT:` line — the
+#                        dual-layer inversion the house forbids.
+#     layer 3 (script) — the internal wall-clock budget (BUDGET_S), checked
+#                        after every phase.
+#   MEASURED WALL (this checkout, 10 derived class members): 78s wall
+#   (73.21s pytest-reported) for the pin file alone; 89s for the pack.
+#   The class is DERIVED from the tree, so a lane that adds sink-override
+#   managers makes it grow.  Internal budget = 240s (BELOW the house 300s
+#   outer cap on purpose); inner pytest timeout = BUDGET_S - 20 = 220s.
 #
 # FENCES (house).
 #   - Per-variable env scrub: the FULL ENSEMBLE_AUTH_* family (7 vars) and
@@ -67,6 +76,18 @@
 #     importers collection-ERROR (G6a 2026-11-09).  NEVER the
 #     `env -u POSTGRES_*` glob — bash does not glob env names, so it is a
 #     SILENT NO-OP.
+#   - ENSEMBLE_SELF_ENV is SET to `dev`, never unset: absent auto-derives
+#     from the frozen/install-dir heuristic, which can land on `live`.
+#   - The HOUSE CANONICAL scrub wrapper `scripts/run_tests_scrubbed.sh` is
+#     the LAST layer before pytest: it unsets the libpq/Plane families and
+#     runs a FAMILY-WIDE leak gate that fails LOUD on any connection-var
+#     spelling the enumeration missed.
+#   - The FENCE is evaluated in the SCRUBBED CHILD (never in the parent —
+#     the parent legitimately still carries the live coordinates), and the
+#     pack PROVES THE FENCE ARMS with a negative self-test.
+#   - IMPORT GUARD: proves `import daemon` resolves under THIS checkout.
+#     A run that silently imported the shared checkout or the live install
+#     would report a green result computed against FOREIGN code.
 #   - FAKE_HOME (mktemp) — no live-shaped path resolution; removed on exit
 #     behind an escape guard.
 #   - Interpreter: the checkout's own .venv.  cwd is the checkout root, so
@@ -80,11 +101,15 @@
 #   SKILL_SINK_CLASS_CONTAINMENT_BUDGET_S=240 bash test/packs/skill_sink_class_containment_unit_test.sh
 #     — override the internal wall-clock budget (seconds).
 #
-# Pack exit: 0 PASS / 1 FAIL / 124 TIMEOUT.  The RESULT label ALWAYS prints.
+# Pack exit: 0 PASS / 1 FAIL / 124 TIMEOUT.  The RESULT line is EXACTLY
+# `RESULT: PASS` | `RESULT: FAIL` | `RESULT: TIMEOUT`; every count/detail
+# goes on the PRECEDING line.
 set -euo pipefail
 
 PACK_START=${SECONDS:-0}
 BUDGET_S="${SKILL_SINK_CLASS_CONTAINMENT_BUDGET_S:-240}"
+INNER_TIMEOUT_S="${SKILL_SINK_CLASS_CONTAINMENT_INNER_TIMEOUT_S:-$(( BUDGET_S - 20 ))}"
+CENSUS_TIMEOUT_S="${SKILL_SINK_CLASS_CONTAINMENT_CENSUS_TIMEOUT_S:-120}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -92,6 +117,7 @@ cd "$PROJECT_DIR"
 
 PY="$PROJECT_DIR/.venv/bin/python"
 PIN_FILE="tests/unit/test_skill_sink_class_containment_pins.py"
+SCRUB_WRAPPER="$PROJECT_DIR/scripts/run_tests_scrubbed.sh"
 
 #: The LOWER BOUND of collected nodes.  The three legs N1/N2/N3 are the
 #: pin's contract; a pin that loses one is not the pin.
@@ -119,10 +145,17 @@ SCRUB=(
   -u ENSEMBLE_AUTH_ENABLED -u ENSEMBLE_AUTH_ISSUER -u ENSEMBLE_AUTH_CLIENT_ID
   -u ENSEMBLE_AUTH_CLIENT_SECRET -u ENSEMBLE_AUTH_DISCOVERY_URL
   -u ENSEMBLE_AUTH_ALLOWED_ORIGINS -u ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE
-  -u DATABASE_URL -u PORT -u ENSEMBLE_SELF_ENV -u ENSEMBLE_CONFIG
-  -u ENSEMBLE_DATA_DIR -u DATA_DIR
-  -u PGPASSWORD -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE
+  -u DATABASE_URL -u DATABASE_URL_POSTGRES -u POSTGRES_URL -u PORT
+  -u ENSEMBLE_CONFIG -u ENSEMBLE_DATA_DIR -u DATA_DIR
+  -u PGPASSWORD -u PGHOST -u PGPORT -u PGUSER -u PGDATABASE -u PGPASSFILE
+  -u PGSSLMODE -u PGSERVICE -u PGSERVICEFILE
+  -u PLANE_MCP_WORKSPACE_SLUG -u PLANE_BASE_URL
 )
+
+# The FENCE — evaluated in the SCRUBBED CHILD, never in the parent (the
+# parent legitimately still carries the live coordinates, so a parent-side
+# assertion would fire spuriously on every run).
+FENCE_SNIPPET='[ "${POSTGRES_DB:-}" != "ensemble_prod" ] || { echo "FENCE BREACH: POSTGRES_DB=ensemble_prod reached the child" >&2; exit 78; }; [ "${POSTGRES_HOST:-}" != "10.44.0.2" ] || { echo "FENCE BREACH: POSTGRES_HOST=10.44.0.2 reached the child" >&2; exit 78; }; exec "$@"'
 
 echo "=== Test Pack: skill_sink_class_containment_unit_test ==="
 echo "PROJECT_DIR=$PROJECT_DIR"
@@ -132,22 +165,31 @@ check_budget() {
   local elapsed
   elapsed="$(elapsed_s)"
   if [ "$elapsed" -gt "$BUDGET_S" ]; then
-    echo "RESULT: TIMEOUT (internal timer: wall ${elapsed}s > SKILL_SINK_CLASS_CONTAINMENT_BUDGET_S=${BUDGET_S}s ${1:-})"
+    echo "RESULT: TIMEOUT"
+    echo "[pack] internal timer: wall ${elapsed}s > budget ${BUDGET_S}s ${1:-}"
     exit 124
   fi
 }
 
 # --- preflight ------------------------------------------------------------
 if [ ! -x "$PY" ]; then
-  echo "RESULT: FAIL (MISSING-INTERPRETER — the worktree-local .venv/bin/python is absent)"
+  echo "RESULT: FAIL"
+  echo "[pack] MISSING-INTERPRETER — the worktree-local .venv/bin/python is absent"
   exit 1
 fi
 if [ ! -f "$PIN_FILE" ]; then
-  echo "RESULT: FAIL (MISSING-ARTIFACT — $PIN_FILE)"
+  echo "RESULT: FAIL"
+  echo "[pack] MISSING-ARTIFACT — $PIN_FILE"
+  exit 1
+fi
+if [ ! -x "$SCRUB_WRAPPER" ]; then
+  echo "RESULT: FAIL"
+  echo "[pack] MISSING-ARTIFACT — the house scrub wrapper is not executable: $SCRUB_WRAPPER"
   exit 1
 fi
 echo "[pack] interpreter: $PY"
 echo "[pack] pin file: $PIN_FILE (sha256 $(sha256sum "$PIN_FILE" | cut -d' ' -f1 | cut -c1-16))"
+echo "[pack] budgets: outer 300s (caller) / inner pytest ${INNER_TIMEOUT_S}s / script ${BUDGET_S}s"
 
 # --- fences: FAKE_HOME (no live-shaped path resolution) --------------------
 FAKE_HOME="$(mktemp -d /tmp/skill-sink-class-containment-home-XXXXXX)"
@@ -166,20 +208,84 @@ trap cleanup EXIT
 trap 'cleanup; exit 143' TERM
 trap 'cleanup; exit 130' INT
 
+# run_pytest <timeout_s> <log> <pytest-args...>
+#   scrub -> fence (in the child) -> house canonical scrub wrapper -> pytest.
+run_pytest() {
+  local tmo="$1"; shift
+  local log="$1"; shift
+  timeout "$tmo" "${SCRUB[@]}" \
+    ENSEMBLE_SELF_ENV=dev \
+    HOME="$FAKE_HOME" \
+    XDG_CACHE_HOME="$FAKE_HOME/cache" \
+    PYTHONPATH="$PROJECT_DIR" \
+    sh -c "$FENCE_SNIPPET" sh "$SCRUB_WRAPPER" "$@" > "$log" 2>&1
+}
+
+# --- phase 0: the import guard + the fence self-test ----------------------
+echo "--- phase 0: the import guard + the fence self-test ---"
+GUARD_LOG="$LOG_DIR/phase0.log"
+: > "$GUARD_LOG"
+
+GUARD_RC=0
+timeout "${CENSUS_TIMEOUT_S}" "${SCRUB[@]}" \
+  ENSEMBLE_SELF_ENV=dev \
+  HOME="$FAKE_HOME" \
+  XDG_CACHE_HOME="$FAKE_HOME/cache" \
+  PYTHONPATH="$PROJECT_DIR" \
+  "$PY" - "$PROJECT_DIR" >> "$GUARD_LOG" 2>&1 <<'GUARDEOF' || GUARD_RC=$?
+import os
+import sys
+
+project_dir = os.path.realpath(sys.argv[1])
+try:
+    import daemon
+except Exception as exc:  # pragma: no cover — the guard must speak up
+    sys.stderr.write(f"IMPORT GUARD: FAIL — 'import daemon' raised: {exc!r}\n")
+    sys.exit(1)
+
+pkg_dir = os.path.realpath(os.path.dirname(daemon.__file__))
+expected = os.path.join(project_dir, "daemon")
+sys.stderr.write(f"daemon.__file__={daemon.__file__}\n")
+if pkg_dir != expected:
+    sys.stderr.write(
+        "IMPORT GUARD: FAIL — 'import daemon' did NOT resolve under "
+        f"{project_dir}\n"
+        "  (the run would have tested the FOREIGN tree)\n"
+    )
+    sys.exit(1)
+sys.stderr.write("IMPORT GUARD: PASS — import daemon resolved under "
+                 f"{project_dir}\n")
+GUARDEOF
+sed 's/^/  /' "$GUARD_LOG"
+if [ "$GUARD_RC" -ne 0 ]; then
+  echo "RESULT: FAIL"
+  echo "[pack] phase 0: the import guard"
+  exit 1
+fi
+
+# Fence self-test: prove the fence ARMS (a poisoned child must be refused).
+FENCE_RC=0
+FENCE_OUT="$(POSTGRES_DB=ensemble_prod sh -c "$FENCE_SNIPPET" sh true 2>&1)" || FENCE_RC=$?
+if [ "$FENCE_RC" -eq 0 ] || ! printf '%s' "$FENCE_OUT" | grep -q "FENCE BREACH"; then
+  echo "RESULT: FAIL"
+  echo "[pack] phase 0: the fence did NOT arm (rc=${FENCE_RC}, out=[${FENCE_OUT}]) — refusing to run unprotected"
+  exit 1
+fi
+echo "[pack] fence self-test: armed (rc=${FENCE_RC})"
+echo "[timer] phase 0 done: $(elapsed_s)s elapsed / budget ${BUDGET_S}s"
+check_budget "after phase 0"
+
 # --- phase 1: the node census ---------------------------------------------
 echo "--- phase 1: the node census (collect-only) ---"
 COLLECT_LOG="$LOG_DIR/collect.log"
 COLLECT_RC=0
-"${SCRUB[@]}" \
-  HOME="$FAKE_HOME" \
-  XDG_CACHE_HOME="$FAKE_HOME/cache" \
-  PYTHONPATH="$PROJECT_DIR" \
-  "$PY" -m pytest "$PIN_FILE" --collect-only -q \
-  -p no:randomly --override-ini="addopts=" > "$COLLECT_LOG" 2>&1 || COLLECT_RC=$?
+run_pytest "$CENSUS_TIMEOUT_S" "$COLLECT_LOG" \
+  "$PIN_FILE" --collect-only -q -p no:randomly --override-ini="addopts=" || COLLECT_RC=$?
 
 if [ "$COLLECT_RC" -ne 0 ]; then
   tail -5 "$COLLECT_LOG" | sed 's/^/  /'
-  echo "RESULT: FAIL (phase 1: collect-only rc=${COLLECT_RC})"
+  echo "RESULT: FAIL"
+  echo "[pack] phase 1: collect-only rc=${COLLECT_RC}"
   exit 1
 fi
 
@@ -189,7 +295,8 @@ echo "[pack] collected nodes: $NODE_COUNT (measured baseline ${MEASURED_NODE_BAS
 
 if [ "$NODE_COUNT" -lt "$EXPECTED_NODE_FLOOR" ]; then
   tail -8 "$COLLECT_LOG" | sed 's/^/  /'
-  echo "RESULT: FAIL (phase 1: collected ${NODE_COUNT} node(s) < the floor ${EXPECTED_NODE_FLOOR} — a leg is missing)"
+  echo "RESULT: FAIL"
+  echo "[pack] phase 1: collected ${NODE_COUNT} node(s) < the floor ${EXPECTED_NODE_FLOOR} — a leg is missing"
   exit 1
 fi
 
@@ -199,7 +306,8 @@ fi
 
 for nid in "${REQUIRED_NODE_IDS[@]}"; do
   if ! grep -qF "$nid" "$COLLECT_LOG"; then
-    echo "RESULT: FAIL (phase 1: required node id absent from the collect output: $nid)"
+    echo "RESULT: FAIL"
+    echo "[pack] phase 1: required node id absent from the collect output: $nid"
     exit 1
   fi
 done
@@ -211,12 +319,8 @@ check_budget "after phase 1"
 echo "--- phase 2: the class-containment pins ---"
 PHASE2_LOG="$LOG_DIR/phase2.log"
 EXIT_CODE=0
-"${SCRUB[@]}" \
-  HOME="$FAKE_HOME" \
-  XDG_CACHE_HOME="$FAKE_HOME/cache" \
-  PYTHONPATH="$PROJECT_DIR" \
-  "$PY" -m pytest "$PIN_FILE" -q --tb=short \
-  -p no:randomly --override-ini="addopts=" > "$PHASE2_LOG" 2>&1 || EXIT_CODE=$?
+run_pytest "$INNER_TIMEOUT_S" "$PHASE2_LOG" \
+  "$PIN_FILE" -q --tb=short -p no:randomly --override-ini="addopts=" || EXIT_CODE=$?
 
 tail -5 "$PHASE2_LOG" | sed 's/^/  /'
 grep -E "^(FAILED|ERROR) " "$PHASE2_LOG" | sed 's/^/  /' || true
@@ -224,21 +328,24 @@ PASSED_COUNT="$(grep -oE '[0-9]+ passed' "$PHASE2_LOG" | tail -1 | cut -d' ' -f1
 PASSED_COUNT="${PASSED_COUNT:-0}"
 echo "[pack] passed nodes: ${PASSED_COUNT} / collected ${NODE_COUNT}"
 echo "[timer] phase 2 done: $(elapsed_s)s elapsed / budget ${BUDGET_S}s"
-check_budget "after phase 2"
 
 # --- verdict --------------------------------------------------------------
 echo "[timer] total wall: $(elapsed_s)s / budget ${BUDGET_S}s"
 if [ "$EXIT_CODE" -eq 124 ]; then
-  echo "RESULT: TIMEOUT (the pin run hit the outer 300s kill)"
+  echo "RESULT: TIMEOUT"
+  echo "[pack] the pin run hit the pack's inner timeout (${INNER_TIMEOUT_S}s)"
   exit 124
 fi
 if [ "$EXIT_CODE" -ne 0 ]; then
-  echo "RESULT: FAIL (phase 2: the class-containment pin is RED — rc=${EXIT_CODE})"
+  echo "RESULT: FAIL"
+  echo "[pack] phase 2: the class-containment pin is RED — rc=${EXIT_CODE}"
   exit 1
 fi
 if ! grep -qE "^[1-9][0-9]* passed" "$PHASE2_LOG"; then
-  echo "RESULT: FAIL (VACUOUS — the summary carries no 'N passed' with N >= 1)"
+  echo "RESULT: FAIL"
+  echo "[pack] VACUOUS — the summary carries no 'N passed' with N >= 1"
   exit 1
 fi
-echo "RESULT: PASS (${PASSED_COUNT} node(s) passed, ${NODE_COUNT} collected, $(elapsed_s)s)"
+echo "[pack] ${PASSED_COUNT} node(s) passed, ${NODE_COUNT} collected, $(elapsed_s)s wall"
+echo "RESULT: PASS"
 exit 0
