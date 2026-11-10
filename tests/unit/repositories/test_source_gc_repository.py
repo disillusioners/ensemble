@@ -652,6 +652,11 @@ class TestP11BootNoBehaviorChange:
     sync, so an absorbed hunk does not re-red spuriously (the file pin
     keeps its teeth). The hunk is pinned by exact line CONTENT, never by
     line numbers / hunk headers.
+    Condition 3 (scoped lane sanction): daemon/manager.py is NOT frozen
+    forever — it is frozen against the SOURCE-GC lane. Its drift in the
+    post-merge span is allowed ONLY per hunk and ONLY when that hunk
+    carries a sanctioned-lane marker; see
+    test_the_memoir_lane_manager_drift_is_confined_to_sanctioned_lane_hunks.
     """
 
     NOT_TOUCHED_PATHS = [
@@ -665,6 +670,31 @@ class TestP11BootNoBehaviorChange:
     ]
     PRE_MERGE_SPAN = "6b571771d..2c6b7ab94"
     SANCTIONED_PATH = "daemon/routers/sources.py"
+
+    # The MEMOIR lane's sanctioned change to daemon/manager.py. Mirrors
+    # the DECISION-lane precedent (commit c81dd0dea, "scoped source-gc
+    # sanction"), which sanctioned that same path under its own marker.
+    # The guard is about the SOURCE-GC lane's own diff: manager.py is not
+    # frozen forever, it is frozen against the SOURCE-GC lane. The
+    # sanction is SCOPED — every hunk of the manager.py drift in the span
+    # must carry a sanctioned-lane marker, so any OTHER manager.py drift
+    # (a source-gc change, an unrelated lane's edit) still REDs. The
+    # source-gc guard's intent is untouched: only a sanctioned lane's own
+    # manager.py wiring is sanctioned.
+    #
+    # Memoir commits touching daemon/manager.py over this span:
+    #   a2d90bb37 feat(memoir-v2): phase 1 — schema substrate,
+    #                               constellation tables & repositories
+    #   e691a6ec1 refactor(memoir-v2): tidier batch C1 — schema/dialect
+    #                                   group (seed literal, alias
+    #                                   filter, docstrings)
+    #
+    # Marker choice: the literal "memoir" is carried by EVERY manager.py
+    # hunk in the span (measured: hunk 1 = 11 lines, hunk 2 = 6 lines),
+    # so "memoir" is a per-hunk-complete marker. "decision" occurs 0
+    # times in the span, so the two lanes' markers are disjoint.
+    MEMOIR_LANE_SANCTIONED_PATH = "daemon/manager.py"
+    MEMOIR_LANE_MARKER = "memoir"
 
     # The EXACT added lines of the leader-sanctioned None guard (content
     # pin, indentation preserved; diff '+' prefixes stripped). The file
@@ -716,8 +746,12 @@ class TestP11BootNoBehaviorChange:
         ).strip()
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
+        # daemon/manager.py is excluded from the blanket no-drift check
+        # (the MEMOIR lane legitimately changed it); its drift is checked
+        # by the scoped memoir-lane sanction below.
         others = [p for p in self.NOT_TOUCHED_PATHS
-                  if p != self.SANCTIONED_PATH]
+                  if p not in (self.SANCTIONED_PATH,
+                               self.MEMOIR_LANE_SANCTIONED_PATH)]
         out_others = self._git("diff", "--stat", span, "--", *others)
         assert out_others.strip() == "", (
             f"unexpected post-merge drift in NOT-TOUCHED paths:\n{out_others}"
@@ -742,4 +776,50 @@ class TestP11BootNoBehaviorChange:
         assert added == self.SANCTIONED_HUNK_LINES, (
             "daemon/routers/sources.py diff is not EXACTLY the sanctioned "
             f"None-guard hunk.\nadded={added!r}"
+        )
+
+    def test_the_memoir_lane_manager_drift_is_confined_to_sanctioned_lane_hunks(self):
+        """The SANCTIONED memoir-lane manager.py drift.
+
+        Every hunk of the daemon/manager.py drift in the post-merge span
+        must carry a memoir-lane marker. A manager.py change from ANY
+        other lane (the source-gc lane included) lands in a hunk with no
+        memoir marker and REDs here — the guard's intent (the source-gc
+        lane must not drift manager.py) is preserved; only the memoir
+        lane's own wiring is sanctioned. Mirrors the decision-lane
+        precedent (c81dd0dea).
+        """
+        merge = self._git(
+            "rev-list", "--first-parent", "--merges", "-1", "HEAD"
+        ).strip()
+        assert merge, "no first-parent merge found"
+        span = f"{merge}..HEAD"
+        diff = self._git(
+            "diff", "--unified=0", span, "--", self.MEMOIR_LANE_SANCTIONED_PATH
+        )
+        if not diff.strip():
+            return  # nothing sanctioned in this span — vacuously clean
+        hunks: list[list[str]] = []
+        current: list[str] = []
+        for line in diff.splitlines():
+            if line.startswith("@@"):
+                if current:
+                    hunks.append(current)
+                current = []
+                continue
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
+                current.append(line)
+        if current:
+            hunks.append(current)
+        assert hunks, "the manager.py diff has no content lines"
+        offenders = [
+            hunk for hunk in hunks
+            if not any(
+                self.MEMOIR_LANE_MARKER in line.lower() for line in hunk
+            )
+        ]
+        assert offenders == [], (
+            "daemon/manager.py drifted OUTSIDE the memoir lane in the "
+            f"post-merge span — every hunk must carry a memoir marker.\n"
+            f"offending hunks={offenders!r}"
         )
