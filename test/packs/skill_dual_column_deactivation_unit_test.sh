@@ -1,25 +1,42 @@
 #!/usr/bin/env bash
-# Test Pack: skill_dual_column_deactivation_unit_test — I4 / E4 repository writer
+# Test Pack: skill_dual_column_deactivation_unit_test — the dual-column
+# contract on the LIVE writer + the REST PATCH arm
 #
 # THE PROPERTY.  `skills.is_active` and `skills.status` are TWO DESYNCABLE
 # COLUMNS (a real production row carries `(False, 'ab_testing')`).  A
-# single-column write leaves a half-dead row.  `SkillRepository.
-# deactivate_with_receipt()` writes BOTH in ONE assignment, surfaces the PRIOR
-# `(is_active, status)` pair for the caller's receipt (exact reversal), and
-# REFUSES (typed) a row guarded by an OPEN `skill_ab_tests` row — the guard
-# resolved by the repository itself, so an external caller passes only a
-# skill id.
+# single-column write leaves a half-dead row.  The LIVE writer is
+# `daemon/services/skill_deactivation.py::write_skill_pair` (the E4
+# mechanism's sanctioned writer: ONE repository call, BOTH columns, and the
+# PRIOR pair carried by the receipt so the write is exactly reversible).
+#
+# SCOPE CHANGE (tidier M1, 2026-11-10).  This pack used to carry a SECOND,
+# ORPHANED dual-column writer — `SkillRepository.deactivate_with_receipt`
+# plus its two value-object types (`DeactivationResult` /
+# `SkillDeactivationRefused`) — with ZERO production callers.  It was
+# DELETED (one writer only).  Its invariants were RE-POINTED:
+#   * the pair-moves-as-a-pair + the A/B refusal + the prior-pair/reversal
+#     invariants are covered by the E4 lane's own pins
+#     (`tests/unit/test_skill_stale_deactivation.py`: the sanctioned writer
+#     sets both columns / one repository call / no E4 write path writes one
+#     column without the other / a real attempted flip is REFUSED / the
+#     receipt enumerates the refusal with the blocking test id / the receipt
+#     entry carries the prior pair / reactivate restores the exact prior
+#     pair), mutation-proved by THAT lane's pack
+#     (`skill_stale_deactivation_unit_test`, M-E4h single-column, M-E4c
+#     canonical-pair reversal);
+#   * the TWO invariants E4 does NOT cover (no THIRD column moves; a missing
+#     row returns None) are pinned HERE, on the live writer, in
+#     `tests/unit/test_skill_dual_column_live_writer.py`.
 #
 # FILE SET
-#   tests/unit/test_skill_dual_column_deactivation.py   (the repository-side pin)
+#   tests/unit/test_skill_dual_column_live_writer.py   (the re-pointed pins)
 #   tests/unit/routers/test_skill_patch_dual_column.py   (I5 — the REST PATCH arm)
 #
-# MUTATION MATRIX (phase 2), planted on daemon/repositories/skill/repository.py
-# (the A3 gate region is NOT touched by any leg — the two regions stay separate):
-#   M-E4w-a — write only ONE column ⇒ the dual-column pins RED
-#   M-E4w-b — drop the A/B guard ⇒ the refusal pins RED
-#   M-E4w-c — stop surfacing the PRIOR pair (return the post-write pair) ⇒ the
-#             reversibility pins RED
+# MUTATION MATRIX (phase 2):
+#   M-E4w-d — drop the `status` write inside `SkillRepository.update`
+#             ⇒ the pair no longer moves as a pair ⇒ the live-writer pin REDs
+#   M-E4w-e — make a missing row return something other than None
+#             ⇒ the missing-row pin REDs
 #   M-I5-a  — restore the REST handler's pop-and-translate shape (drop the
 #             `is_active` write at `daemon/routers/skills.py`) ⇒ the REST
 #             both-columns pins RED (the status-only translation still passes,
@@ -45,7 +62,7 @@ SCRUB=(env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT
        -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT
        -u ENSEMBLE_SELF_ENV -u ENSEMBLE_CONFIG -u ENSEMBLE_DATA_DIR)
 
-PIN="tests/unit/test_skill_dual_column_deactivation.py"
+PIN="tests/unit/test_skill_dual_column_live_writer.py"
 REST_PIN="tests/unit/routers/test_skill_patch_dual_column.py"
 ROUTER_PY="daemon/routers/skills.py"
 REPO_PY="daemon/repositories/skill/repository.py"
@@ -69,6 +86,11 @@ check_budget() {
 
 run_pin() {
   timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$PIN" "$REST_PIN" -q --tb=line \
+    -p no:randomly --override-ini="addopts=" > "$1" 2>&1
+}
+
+run_writer_pin() {
+  timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$PIN" -q --tb=line \
     -p no:randomly --override-ini="addopts=" > "$1" 2>&1
 }
 
@@ -132,7 +154,12 @@ PYEOF
 }
 
 MUTATION_FAILURES=0
-leg() {
+# ── M-E4w-d / M-E4w-e — the LIVE writer's re-pointed invariants ────────────
+# Both plants land in `SkillRepository.update` — the primitive the live
+# writer calls — and are the ONLY production surface these two pins
+# observe.  The pair-moves-as-a-pair and the missing-row contracts are the
+# two invariants the E4 lane's own pin file does NOT cover.
+writer_leg() {
   local id="$1" old="$2" new="$3" log rc sha_before sha_after
   sha_before="$(sha256sum "$REPO_PY" | cut -d' ' -f1)"
   if [ "$sha_before" != "$WANT" ]; then
@@ -143,7 +170,7 @@ leg() {
     cp "$PRISTINE/content" "$REPO_PY"; return
   fi
   log="$LOG_DIR/${id}-red.log"
-  run_pin "$log"; rc=$?
+  run_writer_pin "$log"; rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "  ${id}: FAIL (NON-DISCRIMINATING — the pin stayed GREEN with the defect planted)"
     MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
@@ -157,7 +184,7 @@ leg() {
     echo "  ${id}: FAIL (restore NOT sha-identical)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1)); return
   fi
   log="$LOG_DIR/${id}-green.log"
-  run_pin "$log"; rc=$?
+  run_writer_pin "$log"; rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "  ${id}: FAIL (post-restore leg not GREEN, rc=${rc})"
     MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
@@ -167,37 +194,25 @@ leg() {
   check_budget "after ${id}"
 }
 
-# M-E4w-a — write only ONE column (the desync defect).
-leg "M-E4w-a" \
-  '            skill.is_active = False
-            skill.status = "inactive"' \
-  '            skill.is_active = False'
+# M-E4w-d — the `status` half of the pair never moves (the desync defect,
+# one layer below the writer: the writer asks for BOTH columns, the
+# primitive drops one).
+writer_leg "M-E4w-d" \
+  '                setattr(skill, key, value)' \
+  '                if key == "status":
+                    continue  # MUTATION: the pair'"'"'s status column never moves
+                setattr(skill, key, value)'
 
-# M-E4w-b — drop the A/B guard entirely.
-leg "M-E4w-b" \
-  '            blocking = self._open_ab_test_blocking(session, skill)
-            if blocking is not None:
-                raise SkillDeactivationRefused(
-                    skill_id=skill_id,
-                    ab_test_group=blocking,
+# M-E4w-e — a missing row returns something other than None.
+writer_leg "M-E4w-e" \
+  '                logger.warning(
+                    f"Skill not found for update: id={skill_id}"
                 )
-' \
-  ''
-
-# M-E4w-c — stop surfacing the PRIOR pair (report the POST-write state).
-leg "M-E4w-c" \
-  '            prior = DeactivationResult(
-                skill_id=skill_id,
-                row=skill,
-                prior_is_active=bool(skill.is_active),
-                prior_status=str(skill.status or ""),
-            )' \
-  '            prior = DeactivationResult(
-                skill_id=skill_id,
-                row=skill,
-                prior_is_active=False,
-                prior_status="inactive",
-            )'
+                return None' \
+  '                logger.warning(
+                    f"Skill not found for update: id={skill_id}"
+                )
+                return None or _now_iso()  # MUTATION: a missing row is not None'
 
 # ── M-I5-a — the REST PATCH desync leg ────────────────────────────────────
 # Restore the handler's ORIGINAL pop-and-translate shape: it writes only
@@ -261,5 +276,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (4 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (3 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0

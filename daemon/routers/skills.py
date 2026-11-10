@@ -942,12 +942,16 @@ async def update_skill(
     # ``is_active`` field is accepted, no new refusal can fire, and a caller
     # that does not send ``is_active`` is untouched.
     #
-    # Deliberately NOT reusing ``SkillRepository.deactivate_with_receipt``
-    # (the E4 dual-column writer, commit 5e7834dd4): that writer REFUSES on
-    # an OPEN A/B test, so wiring it here would introduce NEW refusals to an
-    # existing public REST path — a semantic change, not a desync fix.  The
-    # inlined both-columns translation fixes the desync without altering what
-    # the endpoint accepts OR refuses.
+    # Deliberately NOT reusing the E4 dual-column writer
+    # (`daemon/services/skill_deactivation.py::write_skill_pair`, the
+    # mechanism's sanctioned writer): that writer REFUSES on an OPEN A/B
+    # test, so wiring it here would introduce NEW refusals to an existing
+    # public REST path — a semantic change, not a desync fix.  The inlined
+    # both-columns translation fixes the desync without altering what the
+    # endpoint accepts OR refuses.  (The lane's earlier
+    # ``SkillRepository.deactivate_with_receipt`` was an ORPHANED second
+    # writer with no production caller; it was DELETED — tidier M1 — so
+    # there is exactly ONE writer of the pair in the codebase.)
     if "is_active" in fields:
         is_active_value = bool(fields["is_active"])
         # Keep the flag (the repository persists it) and derive the paired
