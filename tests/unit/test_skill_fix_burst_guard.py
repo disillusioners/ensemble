@@ -42,6 +42,7 @@ NAMED MUTATION LEGS (each must turn this file RED):
 from __future__ import annotations
 
 import ast
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,6 +66,28 @@ PROJECT = "proj-burst-guard"
 
 
 # ── Harness ───────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _observability_sandbox(tmp_path):
+    """Point the sink at a SCRATCH dir + reset the counters per test.
+
+    L7 — without this fixture the burst-guard admissions wrote their
+    observability rows into the CHECKOUT's real ``data/`` tree
+    (``data/skill-capture-observability/skill-capture-<date>.jsonl``).
+    The tree is gitignored, so the leak was invisible to ``git status``
+    and survived every run. The fixture is copied verbatim from
+    ``tests/services/test_skill_capture_observability.py``.
+    """
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    observability.set_anomaly_reporter(None)
+    try:
+        yield tmp_path
+    finally:
+        observability.configure_sink(None)
+        observability.reset_counters()
+        observability.set_anomaly_reporter(None)
 
 
 @pytest.fixture
@@ -620,3 +643,230 @@ def test_m19_a_directly_constructed_negative_cap_is_logged(caplog):
         "burst cap) must be logged at WARNING naming the raw value"
     )
     assert "-1" in warnings[0].getMessage()
+
+
+# ── L7 — the burst-guard suite writes NOTHING into the checkout's data/ ──
+
+
+@pytest.mark.asyncio
+async def test_l7_the_burst_guard_writes_nothing_under_the_real_data_dir(
+    engine, tmp_path
+):
+    """The observability sink must be redirected to a SCRATCH dir.
+
+    The burst-guard pins used to write their observability rows into the
+    CHECKOUT's real ``data/skill-capture-observability/`` tree. The tree
+    is gitignored, so the leak was invisible to ``git status`` and
+    survived every run.
+
+    Named mutation: delete the autouse ``_observability_sandbox``
+    fixture (the ``configure_sink(tmp_path)`` call) → this pin goes RED
+    (a test row lands in the real data dir).
+
+    The pin cleans up after itself: a stray file it created is removed
+    in the ``finally`` block, so even a RED run leaves the checkout
+    clean.
+    """
+    real_dir = (
+        Path(__file__).resolve().parents[2]
+        / "data"
+        / observability.SINK_DIR_NAME
+    )
+    before = set(real_dir.glob("*.jsonl")) if real_dir.exists() else set()
+    try:
+        # A lane-OFF admission is REFUSED, and a refusal always writes a
+        # sink record — so the scratch sink is guaranteed to receive a
+        # row (the ADMITTED path writes none).
+        repo = JobRepository(engine)
+        dispatcher = SkillJobDispatcher(
+            job_service=_FakeJobService(repo),
+            queue_repo=_StubQueueRepo(),
+            evolution_lane_enabled=False,
+            fix_cooldown_seconds=0,
+        )
+        await _admit(dispatcher, SKILL_A)
+
+        after = set(real_dir.glob("*.jsonl")) if real_dir.exists() else set()
+        stray = sorted(str(path) for path in (after - before))
+        assert not stray, (
+            "the burst-guard pins wrote into the checkout's REAL data dir "
+            f"({observability.SINK_DIR_NAME}/): {stray} — the autouse "
+            "_observability_sandbox fixture (configure_sink(tmp_path)) is "
+            "missing, so the sink resolved to ./data"
+        )
+
+        scratch = tmp_path / observability.SINK_DIR_NAME
+        scratch_files = list(scratch.glob("*.jsonl"))
+        assert scratch_files, (
+            "the admission must have written its observability rows into "
+            f"the SCRATCH sink dir ({scratch}) — the fixture did not run"
+        )
+        assert any(
+            SKILL_A in path.read_text(encoding="utf-8")
+            for path in scratch_files
+        ), "the scratch sink must carry the admission's row"
+    finally:
+        if real_dir.exists():
+            for stray_path in set(real_dir.glob("*.jsonl")) - before:
+                stray_path.unlink(missing_ok=True)
+
+
+# ── M18 — every DEGRADED burst-cap branch is ALWAYS RECORDED ────────────
+
+
+class _LedgerlessJobService:
+    """A job service that exposes NO ledger at all."""
+
+    async def enqueue(self, **kwargs):  # pragma: no cover — never reached
+        raise AssertionError("no job may be admitted in this pin")
+
+
+class _LedgerlessQueueRepo:
+    """A queue repo without the durable-count accessor."""
+
+    def get_by_name(self, project_id, queue_name):
+        return None
+
+
+def _sink_records(tmp_path):
+    """Every observability row written into the SCRATCH sink."""
+    sink_dir = tmp_path / observability.SINK_DIR_NAME
+    records = []
+    for path in sorted(sink_dir.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                records.append(json.loads(line))
+    return records
+
+
+@pytest.mark.asyncio
+async def test_m18_the_absent_ledger_degradation_is_always_recorded(tmp_path):
+    """The PERMANENT "no ledger" degradation must leave a RECORD.
+
+    The operator sees "the cap is enabled" at boot while it is inert; the
+    posture stays fail-open for AVAILABILITY, but it is ALWAYS recorded.
+
+    Named mutation: remove the ``append_run_record`` from the
+    "no FIX-admission ledger" branch → this pin goes RED.
+    """
+    dispatcher = SkillJobDispatcher(
+        job_service=_LedgerlessJobService(),
+        queue_repo=_LedgerlessQueueRepo(),
+        evolution_lane_enabled=True,
+        fix_cooldown_seconds=0,
+    )
+
+    refusal = await dispatcher._check_fix_burst_cap(
+        SKILL_A, run_id="run-degraded-ledger"
+    )
+    assert refusal is None, (
+        "the degraded posture stays FAIL-OPEN for availability — the "
+        "admission proceeds"
+    )
+
+    degraded = [
+        record
+        for record in _sink_records(tmp_path)
+        if record.get("outcome") == "cap_degraded"
+    ]
+    assert len(degraded) == 1, (
+        "the 'no FIX-admission ledger' degradation MUST write a "
+        f"'cap_degraded' run record — got {len(degraded)}"
+    )
+    assert degraded[0].get("degraded_reason") == "no_fix_admission_ledger"
+    assert degraded[0].get("run_id") == "run-degraded-ledger"
+
+
+@pytest.mark.asyncio
+async def test_m18_the_missing_counter_degradation_is_always_recorded(
+    tmp_path, monkeypatch
+):
+    """The PERMANENT "repository lacks the counter" degradation must record.
+
+    Named mutation: remove the ``append_run_record`` from the
+    "does not implement count_fix_admissions_since" branch → this pin goes
+    RED.
+    """
+    dispatcher = SkillJobDispatcher(
+        job_service=_LedgerlessJobService(),
+        queue_repo=_LedgerlessQueueRepo(),
+        evolution_lane_enabled=True,
+        fix_cooldown_seconds=0,
+    )
+    # The ledger resolves to an object WITHOUT the count accessor — the
+    # second (defensive) degradation branch.
+    monkeypatch.setattr(
+        dispatcher, "_fix_admission_ledger", lambda: object()
+    )
+
+    refusal = await dispatcher._check_fix_burst_cap(
+        SKILL_A, run_id="run-degraded-counter"
+    )
+    assert refusal is None, (
+        "the degraded posture stays FAIL-OPEN for availability — the "
+        "admission proceeds"
+    )
+
+    degraded = [
+        record
+        for record in _sink_records(tmp_path)
+        if record.get("outcome") == "cap_degraded"
+    ]
+    assert len(degraded) == 1, (
+        "the 'missing count_fix_admissions_since' degradation MUST write a "
+        f"'cap_degraded' run record — got {len(degraded)}"
+    )
+    assert (
+        degraded[0].get("degraded_reason")
+        == "missing_count_fix_admissions_since"
+    )
+    assert degraded[0].get("run_id") == "run-degraded-counter"
+
+
+@pytest.mark.asyncio
+async def test_m18_the_transient_degradation_keeps_its_own_outcome(tmp_path):
+    """The transient branch keeps its distinct outcome (M18 must not blur them).
+
+    Named mutation: rename the transient branch's outcome to
+    "cap_degraded" → this pin goes RED (the two postures become
+    indistinguishable).
+    """
+    repo = JobRepository(
+        create_engine(
+            f"sqlite:///{tmp_path / 'degraded.db'}",
+            connect_args={"check_same_thread": False},
+        )
+    )
+    SQLModel.metadata.create_all(repo.engine)
+
+    class _RaisingLedger:
+        def count_fix_admissions_since(self, skill_id, since_iso):
+            raise RuntimeError("the ledger is down")
+
+    dispatcher = SkillJobDispatcher(
+        job_service=_FakeJobService(repo),
+        queue_repo=_StubQueueRepo(),
+        evolution_lane_enabled=True,
+        fix_cooldown_seconds=0,
+    )
+    dispatcher._fix_admission_ledger = lambda: _RaisingLedger()  # type: ignore[method-assign]
+
+    refusal = await dispatcher._check_fix_burst_cap(
+        SKILL_A, run_id="run-cap-check-error"
+    )
+    assert refusal is None
+
+    records = _sink_records(tmp_path)
+    outcomes = [
+        record.get("outcome")
+        for record in records
+        if record.get("stage") == "admission"
+    ]
+    assert "cap_check_error" in outcomes, (
+        "the transient degradation must keep its own 'cap_check_error' "
+        f"outcome — got {outcomes}"
+    )
+    assert "cap_degraded" not in outcomes, (
+        "the transient degradation must NOT be blurred into 'cap_degraded' "
+        f"— got {outcomes}"
+    )

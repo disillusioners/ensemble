@@ -711,6 +711,24 @@ class SkillJobDispatcher:
                 "is DEGRADED (RAM cooldown only) for skill %s",
                 skill_id[:8] if isinstance(skill_id, str) else skill_id,
             )
+            # M18 — the DEGRADED posture is ALWAYS RECORDED. The posture
+            # itself stays fail-open for AVAILABILITY (a rate limiter must
+            # not block the lane on a wiring gap), but the operator must
+            # never see "the cap is enabled" while it is inert: the two
+            # PERMANENT degradations were quieter than the transient one
+            # (the count that raised), so they are now recorded on the
+            # SAME sink channel (see decisions.md DS-20's addendum).
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    run_id=run_id,
+                    outcome="cap_degraded",
+                    extra={
+                        "skill_id": skill_id,
+                        "degraded_reason": "no_fix_admission_ledger",
+                    },
+                )
+            )
             return None
         counter = getattr(ledger, "count_fix_admissions_since", None)
         if not callable(counter):
@@ -719,6 +737,17 @@ class SkillJobDispatcher:
                 "count_fix_admissions_since — the durable FIX burst cap is "
                 "DEGRADED (RAM cooldown only) for skill %s",
                 skill_id[:8] if isinstance(skill_id, str) else skill_id,
+            )
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="admission",
+                    run_id=run_id,
+                    outcome="cap_degraded",
+                    extra={
+                        "skill_id": skill_id,
+                        "degraded_reason": "missing_count_fix_admissions_since",
+                    },
+                )
             )
             return None
         try:
