@@ -1,6 +1,6 @@
 # Seam Registry — Typed Overlay Seams Over `POST /v1/decisions`
 
-> **Status:** **DESIGN — awaiting Emperor ratification.** Docs-only commission; every statement is design-for-a-future-commission.
+> **Status:** **RATIFIED P1 SHADOW-ONLY — Emperor ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
 > **Scope items:** 2 (registry) + 3 (catalog, incl. the re-validation table). **Normative source:** `scope-and-doctrine.md` — cited by §id, never re-quoted.
 > **Base:** `docs/decision-module` @ `5da1021f2`
 
@@ -48,7 +48,7 @@ Three rules, all enforceable in the type signature:
 
 1. **The heuristic outcome is always an argument.** There is no `apply(overlay)` overload, so an overlay answer can never *replace* the heuristic answer — it can only be combined with it. This is D1 made structural.
 2. **The overlay outcome is optional (`None` ⇒ use the heuristic unchanged).** Every failure path in `thin-client.md` §6 produces `None`, and `None` must yield the heuristic result. This is D2 made structural.
-3. **`apply` may not widen the outcome space.** It may not introduce a value that neither input contained. For S1 that means: **it may never introduce an id outside the candidate set, and it may never empty the result** (see §5.1).
+3. **`apply` may not widen the outcome space.** It may not introduce a value that neither input contained. For S1 that means: **it may never introduce an id outside the candidate set, and it may never empty the result** (see §5.1). **Per-direction, not global.** The superset-only constraint (result ⊇ heuristic outcome) applies **only to `TOWARD_COMPLETION` seams** (S4) — see §2.2 and `thin-client.md` §8.4. A `WITHIN_SET` seam (S1) may **replace or reorder** the heuristic's selection within the candidate set; it is bound by the universal no-widening rule (no value outside the inputs) and by "never empty the result", never by superset-of-picks. A **global** superset-only rule would break S1, the only P1 seam, which legitimately replaces the heuristic's selection.
 
 ### §2.2 The monotonicity contract — D4 translated
 
@@ -61,6 +61,15 @@ D4's rule is stated for the attestation lane; the registry generalises it so tha
 | `WITHIN_SET` | The overlay may select/reorder **within** an existing candidate set; it may not extend or empty it. | S1 |
 | `ADVISORY_ONLY` | The overlay may only annotate; the heuristic decision stands regardless. | S2 |
 | `NONE` | The seam is excluded from overlay consultation (EX-1…EX-5). | excluded seams |
+
+**Per-direction monotonicity — enforced at registration AND at apply time (FLAG5).** The universal rule above (no seam may loosen a gate) is the *floor*; the monotonicity contract is *per-direction*:
+
+- **`TOWARD_COMPLETION` (S4): MUST return a superset.** A **subset is refused at registration time** (the `monotonicity` field is validated) **and at apply time** (the registry checks the returned set is a superset of the candidate completions it was given). The contract carries no denial value, so the overlay cannot propose one.
+- **`WITHIN_SET` (S1): must stay within the candidate set and never empty it.** It may **replace or reorder** the heuristic's selection — a `WITHIN_SET` seam is **not** bound by superset-of-picks. Only the universal no-widening rule (no id outside the candidate set) and "never empty the result" bind it. A global superset-only constraint would break S1, the only P1 seam.
+- **`TOWARD_TIGHTENING` (S3): may only add a positive signal;** never remove one, never loosen the gate.
+- **`ADVISORY_ONLY` (S2): annotates only;** the heuristic decision stands regardless.
+
+The registry stores the declared direction and refuses a registration whose `apply` cannot be shown to honour it.
 
 **Generalisation.** Every direction above is a *monotone* restriction on the overlay's power, and **no seam may declare a direction that would let the overlay loosen a gate** — that is the general form of the source doctrine's "monotonically tighter-or-equal, never looser" (`scope-and-doctrine.md` §D4). A registration that omits a direction is refused.
 
@@ -102,7 +111,11 @@ The standing exclusion list (EX-1 … EX-5, defined verbatim in `scope-and-doctr
 | `decision_seam_<id>_enabled` | **OFF** | `DECISION_SEAM_<ID>` (unset ⇒ OFF) | **per-seam default is OFF** — a seam is never consulted unless its **own** key is explicitly ON |
 | `decision_seam_<id>_stage` | `shadow` | `DECISION_SEAM_<ID>_STAGE` (unset ⇒ `shadow`) | the stage: `shadow` logs but never acts — the **safe** default, and the only one compatible with D3 |
 
-**The admission rule, stated once.** *A seam is consulted only if **the global master is ON** AND **its own per-seam key is ON** AND **its stage is `deciding`** AND **the seam's existing gate switch is ON** (composition: `controls-and-phasing.md` §3.2.2).* Any of those being OFF — or unreadable — means the overlay is **not consulted** (no call). With a global provisioned but a seam unregistered, the seam's state is **OFF**: **registration is opt-out** — a seam's own key must be set ON explicitly. The S3 gate the overlay rides (`ENSEMBLE_SYMPTOM_REPAIR_LADDER`) is **DEFAULT ON** in source (`daemon/config.py:6356-6357`) — which is exactly why the **per-seam default must be OFF**: the existing gate's default cannot be relied on to keep the overlay off.  **Boot seeding.** At boot the daemon reads the env seeds once and writes them into the store **only where the store has no existing value** for that key (the DB tier wins the ladder), then re-verifies every existing kill (`decision_overlay_switch_reverify_total`). A kill is therefore **never** undone by a restart.
+**The admission rule, stated once — TWO GATES (FLAG12).**
+- **CONSULT gate** — a seam is CONSULTED only if **the global master is ON** AND **its own per-seam key is ON** AND **the seam's existing gate switch is ON** AND **the overlay is configured** (`DECISION_BASE_URL` + `DECISION_API_KEY` present). **Stage does NOT gate consultation** — a shadow-stage seam IS consulted (that is how the A/B record is produced). Any CONSULT-gate condition OFF or UNREADABLE ⇒ the overlay is **NOT consulted** (no call), plus a `switch_unreadable` suppressed row.
+- **APPLY gate** — a consulted answer is APPLIED only when the seam's stage is `deciding`; at stage `shadow` the answer is **logged** (the A/B record) and the **heuristic outcome is returned UNCHANGED**, byte-identical to today. The D3 transition refusal (shadow→deciding, absent review+ratification) is the registry's, not an operator's.
+
+Composition of the seam's existing gate switch follows `controls-and-phasing.md` §3.2.2. With a global provisioned but a seam unregistered, the seam's state is **OFF**: **registration is opt-out** — a seam's own key must be set ON explicitly. The S3 gate the overlay rides (`ENSEMBLE_SYMPTOM_REPAIR_LADDER`) is **DEFAULT ON** in source (`daemon/config.py:6356-6357`) — which is exactly why the **per-seam default must be OFF**: the existing gate's default cannot be relied on to keep the overlay off.  **Boot seeding.** At boot the daemon reads the env seeds once and writes them into the store **only where the store has no existing value** for that key (the DB tier wins the ladder), then re-verifies every existing kill (`ensemble_decision_overlay_switch_reverify_total`). A kill is therefore **never** undone by a restart.
 
 ---
 
@@ -191,7 +204,7 @@ Because **O3** is the kill target, the implementation **MUST retain the baseline
 - **Max added wall-clock per `snapshot_search`: ≈ 0 on the critical path.** The detached call is not awaited by the caller; it runs on its own 5 s budget (`thin-client.md` §4.2) and is **discarded** if it lands after the search has already shipped.
 - **Calls per search: exactly 1** overlay call. Never more — there is no retry and no failover (PX-6, IP-5).
 - **Cost: +1 billed call per search**, subject to the breaker's rate/concurrency budgets (§3.5). A suppressed consult (breaker open, rate-limited, concurrency-limited, switch off) makes **no call and incurs no cost**.
-- **Shadow-row-on-landing rule.** The detached call writes **exactly one row when it lands** — a success row, or a failure row including a **timeout** row (`timeout` label). A detached call that never lands (process shutdown, daemon restart) writes **no row**, but it is still counted in `decision_overlay_attempts_total` and in the cost counter, because the upstream attempt **bills** even when the client gives up (PX-6 — client disconnect does not cancel upstream).
+- **Shadow-row-on-landing rule.** The detached call writes **exactly one row when it lands** — a success row, or a failure row including a **timeout** row (`timeout` label). A detached call that never lands (process shutdown, daemon restart) writes **no row**, but it is still counted in `ensemble_decision_overlay_attempts_total` and in the cost counter, because the upstream attempt **bills** even when the client gives up (PX-6 — client disconnect does not cancel upstream).
 
 #### C2 baseline degradation — stated, not hidden
 
@@ -206,7 +219,7 @@ C2 **replaces** the chat call with the overlay call. The overlay's latency there
 
 **Scoped per configuration.** In **C0** and **C1** a kill ⇒ the decisions are **byte-identical** to the pre-overlay system. In **C2** a kill ⇒ the **baseline chat selection** is restored — byte-identical to pre-overlay **production** behaviour — **conditional on the retention build requirement** above. The conditionality is explicit, never implied: without the retained path, C2 offers only O1 and O2, and its kill can only *degrade* to O2.
 
-**Byte-identical DECISIONS; observability differs.** After any kill a suppressed row and `decision_overlay_suppressed_total` deltas are **expected** — they are the operator's **confirmation signal**, not a regression.
+**Byte-identical DECISIONS; observability differs.** After any kill a suppressed row and `ensemble_decision_overlay_suppressed_total` deltas are **expected** — they are the operator's **confirmation signal**, not a regression.
 
 This contract is **referenced, not restated**, by `thin-client.md` §6, `controls-and-phasing.md` §3, and `architecture-recommendation.md` §3.
 

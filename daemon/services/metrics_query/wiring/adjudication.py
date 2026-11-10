@@ -41,9 +41,16 @@ F20        OUT           the commission's OUT
 F21        PARTIAL       the three read gauges (the phases are OUT)
 F22        OUT           the commission's OUT (an out-of-process writer)
 F23        IN            the nest-anomaly family (the anomaly tables)
+decision_overlay
+           IN            the P1 decision overlay (daemon/services/decision/metrics.py)
 =========  ===========  =================================================
 
-**11 full + 6 partial = 17 of 27** — the plan's binding subset.
+**12 full + 6 partial = 18 of 28** — the plan's binding subset.
+
+The ``decision_overlay`` family joined the census on 2026-11-09 (the
+Decision Module P1 lane): it is registered through the WIRING registrar
+like every other family here, so its label vocabularies carry the
+AM-2 enforcement and its metadata carries the AM-3 kwargs.
 """
 
 from __future__ import annotations
@@ -81,6 +88,14 @@ CATALOG_FAMILY_VERDICTS: dict[str, tuple[str, str]] = {
         "the anomaly tables (anomaly_reports / anomaly_clusters) + "
         "daemon/services/metrics_query/wiring/w4.py::adapt_f23",
     ),
+    # The Decision Module P1 lane's own family (2026-11-09) — the
+    # shadow-only overlay's in-process counters, registered through the
+    # WIRING registrar (daemon/services/decision/metrics.py).
+    "decision_overlay": (
+        "IN",
+        "daemon/services/decision/metrics.py (the P1 decision overlay's "
+        "in-process families)",
+    ),
 }
 
 #: The verdicts the table may carry.
@@ -105,6 +120,8 @@ REGISTERED_FAMILIES: tuple[str, ...] = (
     "F18",
     "F21",
     "F23",
+    # The Decision Module P1 lane's own family (2026-11-09).
+    "decision_overlay",
 )
 
 #: The canonical names of every metric that must be ABSENT from the
@@ -183,6 +200,15 @@ FAMILY_SERIES_BANDS: dict[str, int] = {
     # the band assertion BY DESIGN.  A vocabulary extension MUST
     # re-declare this band in the SAME change as the vocab.py edit.
     "F23": 67,
+    # The Decision Module P1 lane's family (2026-11-09) — the same
+    # ZERO-HEADROOM convention as F23: this band equals the measured
+    # closed space EXACTLY (411 = 411).  The decision overlay's label
+    # vocabularies are BOUNDED (seam_id ∈ the design's four catalog
+    # seams, failure_class ∈ 19, reason ∈ 10, mode ∈ 2, verdict ∈ 3,
+    # outcome ∈ 3, state ∈ 3), and ANY extension (a new seam id, a new
+    # failure class) MUST re-declare this band in the SAME change as
+    # the vocabulary edit.
+    "decision_overlay": 411,
 }
 
 #: The registered baseline (the catalog convention, F7c-inclusive).
