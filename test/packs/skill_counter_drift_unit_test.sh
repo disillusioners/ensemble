@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 # Test Pack: skill_counter_drift_unit_test — A4 (skill-system-revival Phase 1)
 #
+# SPLIT (2026-11-10, wave 3).  This pack originally carried the WHOLE A4
+# mutation matrix (M-A4a..M-A4h) and a BUDGET_S=600 internal budget.  Both
+# were registration violations: every registered pack MUST fit the 300s
+# command-level cap, and an inner budget LARGER than the outer cap inverts
+# the dual-layer timeout — the outer kill fires first and the pack dies with
+# a bare rc=124 and NO `RESULT:` line.  The matrix is now split:
+#
+#   THIS PACK  (skill_counter_drift_unit_test)        — PIN arms + legs
+#                                                       M-A4a, M-A4b, M-A4c,
+#                                                       M-A4d
+#   SIBLING    (skill_counter_drift_mutation_unit_test) — legs M-A4e, M-A4f,
+#                                                       M-A4g, M-A4h
+#
+# MEASURED (not guessed): each leg = 2 pytest runs @ ~15.4s ~ 31s.  This
+# pack = phase-1 pins (15.6s) + 4 legs ~ 140s; the sibling = pins + 4 legs
+# ~ 140s.  Both sit far under the 240s target and the 300s outer cap.
+#
 # TWO ARMS, ONE JSON CONTRACT:
 #   * GAUGE arm     — the within-identity-key divergence gauge (plan §18 row 11b)
 #   * COUNTER arm   — the transition-based total_applied bump (row 11) and the
@@ -34,7 +51,7 @@
 #   tests/unit/test_skill_counter_drift_gauge.py                     (gauge arm)
 #   tests/unit/test_skill_counter_transition_and_reconcile.py        (counter arm)
 #
-# MUTATION MATRIX (phase 2), planted on PRODUCTION source:
+# MUTATION MATRIX — THIS PACK'S LEGS (phase 2), planted on PRODUCTION source:
 #   M-A4a — remove the transition guard (`applied_bool is True and not
 #           prev_applied` -> `applied_bool is True`) ⇒ repeat filing bumps
 #           again ⇒ the repeat-filing pin REDs
@@ -44,15 +61,8 @@
 #   M-A4c — restore the retired GLOBAL-name gauge (group by name only) ⇒ RED
 #   M-A4d — make the within-identity-key filter a no-op (drop the
 #           project_id grouping term) ⇒ RED
-#   M-A4e — make the reconcile dry-run-only (refuse to write even under
-#           --apply) ⇒ the apply/convergence pins RED
-#   M-A4f — make the reconcile write an OFF-BY-ONE value (ledger + 1) ⇒ the
-#           convergence pins RED
-#   M-A4g — skip the >= 24 h leg (the evaluator always reports "converged")
-#           ⇒ the close-readings pin REDs
-#   M-A4h — the operator script stops DELEGATING to the repository gauge
-#           (the M2 wiring regresses to a local constant) ⇒ the
-#           gauge-wiring pins RED
+#   M-A4e/M-A4f/M-A4g/M-A4h (the reconcile arm) live in the SIBLING pack
+#   `test/packs/skill_counter_drift_mutation_unit_test.sh`.
 #
 # THE GAUGE'S CONSUMER (M2 — the gauge is the live A4 deliverable and MUST
 # survive).  `SkillRepository.within_identity_key_divergence` is wired into
@@ -64,13 +74,14 @@
 # only the `--measure` path pays for it.
 #
 # FENCES: per-variable env scrub, worktree-local interpreter, dual-layer
-# timeout, sha-verified PRISTINE restore, VACUOUS-GREEN guard, no PG, no
-# live DB (the reconcile pins use a scratch SQLite under pytest's tmp_path).
+# timeout (inner budget <= 240s, outer cap 300s), sha-verified PRISTINE
+# restore, VACUOUS-GREEN guard, no PG, no live DB (the reconcile pins use a
+# scratch SQLite under pytest's tmp_path).
 # EXIT-CODE CONTRACT: 0 PASS / 1 FAIL / 124 TIMEOUT.
-set -uo pipefail
+set -euo pipefail
 
 PACK_START=${SECONDS:-0}
-BUDGET_S="${SKILL_COUNTER_DRIFT_BUDGET_S:-600}"
+BUDGET_S="${SKILL_COUNTER_DRIFT_BUDGET_S:-240}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -90,7 +101,7 @@ REPO_PY="daemon/repositories/skill/repository.py"
 SVC_PY="daemon/services/skill_metrics_service.py"
 SCRIPT_PY="scripts/audit/skill_counter_reconcile.py"
 
-echo "=== Test Pack: skill_counter_drift_unit_test (GAUGE + COUNTER arms) ==="
+echo "=== Test Pack: skill_counter_drift_unit_test (PIN arms + counter/gauge legs) ==="
 echo "REPO_ROOT=$REPO_ROOT"
 
 if [ ! -x "$PY" ]; then
@@ -119,11 +130,12 @@ run_pin() {
     -p no:randomly --override-ini="addopts=" > "$1" 2>&1
 }
 
+
 # ── phase 1: the pins ──────────────────────────────────────────────────────
 echo "--- phase 1: the gauge + counter pins ---"
 PHASE1_LOG="$LOG_DIR/phase1.log"
-run_pin "$PHASE1_LOG"
-PHASE1_RC=$?
+PHASE1_RC=0
+run_pin "$PHASE1_LOG" || PHASE1_RC=$?
 tail -3 "$PHASE1_LOG" | sed 's/^/  /'
 grep -E "^FAILED " "$PHASE1_LOG" | sed 's/^/  /' || true
 if ! grep -qE "^[1-9][0-9]* passed" "$PHASE1_LOG"; then
@@ -141,8 +153,9 @@ if [ "${SKILL_COUNTER_DRIFT_MUTATIONS:-1}" = "0" ]; then
   exit 0
 fi
 
-# ── phase 2: the mutation matrix ───────────────────────────────────────────
+# ── phase 2: the mutation matrix (plant → RED → sha-restore → GREEN) ───────
 echo "--- phase 2: the mutation matrix (plant → RED → sha-restore → GREEN) ---"
+echo "--- legs in THIS pack: M-A4a M-A4b M-A4c M-A4d (sibling carries e/f/g/h) ---"
 MUTABLE_FILES=("$REPO_PY" "$SVC_PY" "$SCRIPT_PY")
 PRISTINE="$(mktemp -d /tmp/skill-counter-drift-pristine-XXXXXX)"
 CLEANED=0
@@ -153,9 +166,10 @@ restore_all() {
   for f in "${MUTABLE_FILES[@]}"; do
     key="$(printf '%s' "$f" | sha256sum | cut -d' ' -f1 | cut -c1-16)"
     [ -f "$PRISTINE/$key.content" ] || continue
-    cp "$PRISTINE/$key.content" "$f"
+    cp "$PRISTINE/$key.content" "$f" || true
   done
-  rm -rf "$PRISTINE"
+  rm -rf "$PRISTINE" || true
+  return 0
 }
 trap restore_all EXIT
 trap 'restore_all; exit 143' TERM
@@ -195,16 +209,17 @@ leg() {
     echo "  ${id}: FAIL (leg did not start pristine)"
     MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
     restore_all; CLEANED=0; trap restore_all EXIT
-    return
+    return 0
   fi
   if ! plant "$path" "$old" "$new"; then
     echo "  ${id}: FAIL (plant error)"
     MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
     cp "$PRISTINE/$key.content" "$path"
-    return
+    return 0
   fi
   log="$LOG_DIR/${id}-red.log"
-  run_pin "$log"; rc=$?
+  rc=0
+  run_pin "$log" || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "  ${id}: FAIL (NON-DISCRIMINATING — the pins stayed GREEN with the defect planted)"
     MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
@@ -217,10 +232,11 @@ leg() {
   if [ "$sha_after" != "$want" ]; then
     echo "  ${id}: FAIL (restore NOT sha-identical: ${sha_after} != ${want})"
     MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
-    return
+    return 0
   fi
   log="$LOG_DIR/${id}-green.log"
-  run_pin "$log"; rc=$?
+  rc=0
+  run_pin "$log" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "  ${id}: FAIL (post-restore leg did not return to GREEN, rc=${rc})"
     MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
@@ -257,24 +273,6 @@ leg "M-A4c" "$REPO_PY" \
                 distinct_contents.label("distinct_contents"),
                 rows_in_key.label("rows_in_key"),
             )'
-# ── reconcile arm ──────────────────────────────────────────────────────────
-# M-A4e — the reconcile refuses to write even under --apply (dry-run only).
-leg "M-A4e" "$SCRIPT_PY" \
-  '    if not apply:' \
-  '    if True:  # MUTATION: dry-run only'
-# M-A4f — the reconcile writes an OFF-BY-ONE value.
-leg "M-A4f" "$SCRIPT_PY" \
-  '        {"after": int(row["after"]), "skill_id": row["skill_id"]},' \
-  '        {"after": int(row["after"]) + 1, "skill_id": row["skill_id"]},'
-# M-A4g — skip the >= 24 h leg (always claim convergence).
-leg "M-A4g" "$SCRIPT_PY" \
-  '    if elapsed < CONVERGENCE_MIN_ELAPSED:' \
-  '    if False:  # MUTATION: the elapsed gate is skipped'
-# M-A4h — the script stops DELEGATING to the repository gauge (the M2
-# wiring regresses to a local constant) ⇒ the gauge-wiring pins RED.
-leg "M-A4h" "$SCRIPT_PY" \
-  '    return SkillRepository(engine).within_identity_key_divergence()' \
-  '    return {"diverging_keys": 0, "rows_in_diverging_groups": 0, "total_skills": 0, "keys": [], "truncated": False}  # MUTATION: the gauge is not delegated to'
 
 # Final manifest check.
 for f in "${MUTABLE_FILES[@]}"; do
@@ -292,5 +290,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (8 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (4 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0
