@@ -579,10 +579,10 @@ def _wire_skills_router_services(manager: Any) -> None:
       CAPTURED lane reads (``skill_metrics_service.py:812``) — the only
       production call site of ``SkillJobDispatcher.enqueue_capture``.
 
-    The service binding ALSO happens manager-side (``daemon/manager.py:8196-8197``,
-    inside ``InstanceManager.set_job_queue_service``). Both seams bind the
-    SAME ``manager._skill_job_dispatcher`` instance, so the operation is
-    idempotent.
+    The service binding ALSO happens manager-side (``daemon/manager.py:8221-8222``
+    at this branch; ``:8196-8197`` in live v0.29.15 / base ``0efdf106f``), inside
+    ``InstanceManager.set_job_queue_service``. Both seams bind the SAME
+    ``manager._skill_job_dispatcher`` instance, so the operation is idempotent.
     """
     # Wire skills router services (Phase 6 Task 2 — REST API surface).
     # The skills router uses 4 service DI accessors (created via
