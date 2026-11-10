@@ -1159,6 +1159,20 @@ async def lifespan(app: FastAPI):
     from daemon.repositories.mcps_gateway.models import McpGatewayAudit
     McpGatewayAudit.metadata.create_all(manager.engine)
 
+    # prompt-assent (2026-11-10) — ``prompt_assent_tokens`` is the
+    # durable leg of the conversational approval lane (hash-only token
+    # store; the token table IS the mint ledger). Brand-new table — the
+    # same create_all precedent as the secrets / instance_ops /
+    # notify_audit / mcps_gateway tables above; the .sql migration
+    # (20261110_221500) handles SQLite and the model handles PG. NO
+    # ``_ensure_postgres_columns`` mirror — the ensure list is ONE
+    # transaction for the whole statement list (any entry's failure
+    # aborts boot) and a brand-new table rides this seam instead.
+    # (N1 REQUIRED seam — a missed import = no table on PG = every
+    # token INSERT fails.)
+    from daemon.repositories.prompt_assent.models import PromptAssentToken
+    PromptAssentToken.metadata.create_all(manager.engine)
+
     # wedge-capture (2026-10-22) — ``wedge_captures`` is the ADDITIVE
     # metadata table behind the wedge-capture instrument: ONE row per
     # capture, holding a PATH REFERENCE plus a small metrics snapshot
