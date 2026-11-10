@@ -64,6 +64,12 @@ cleanup() {
     rm -rf "$TMP"
 }
 trap cleanup EXIT INT TERM
+# Hermeticity (F2 sweep): this suite must be green even when an ambient
+# ENSEMBLE_LAUNCHER_STATE_FILE is exported by the caller (the Stage-2
+# override). Unset it here so every cell starts from a clean slate;
+# cells that TEST the inherited-env override set it inline for that one
+# watcher invocation (13a, 13c, 14.e, 14.f, 14.h, ...).
+unset ENSEMBLE_LAUNCHER_STATE_FILE
 
 # High port, unlikely to collide; verified free below.
 PORT=19139

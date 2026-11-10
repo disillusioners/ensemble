@@ -4,6 +4,8 @@
 
 A comprehensive installation and configuration guide for the agents-ensemble multi-agent orchestration system.
 
+> **Deploying beyond this machine?** This guide covers local installation. For the canonical deployment guide — the dev/demo/live environment topology across macOS and Linux, supervision under launchd/systemd, stop/upgrade/rollback, and the staged hardening plan — see the [Deployment Guide](deployment.md).
+
 ---
 
 ## Table of Contents
@@ -24,7 +26,7 @@ A comprehensive installation and configuration guide for the agents-ensemble mul
 
 | Prerequisite | Version | Required | Notes |
 |-------------|---------|----------|-------|
-| Python | 3.11+ | Yes | Core runtime for the backend |
+| Python | 3.13+ | Yes | Core runtime for the backend (`pyproject.toml: requires-python = ">=3.13"`) |
 | Node.js | 18+ | Yes | Required for frontend build |
 | uv | Latest | Recommended | Fast Python package manager |
 | pip | Latest | Optional | Alternative to uv |
@@ -162,7 +164,7 @@ Expected response:
 
 ### Method 2: Production Install (make install)
 
-Complete production installation to `~/agents-ensemble/`.
+Complete production installation to an explicit `INSTALL_DIR`. Since the install guard landed (2026-11), a bare `make install` **refuses with exit 78** — `INSTALL_DIR` is required — and an `INSTALL_DIR` resolving to a live dir (`~/agents-ensemble`, the demo dir, `/opt/ensemble`, plus `ENSEMBLE_LIVE_INSTALL_DIRS` entries) additionally requires the confirm var `ENSEMBLE_INSTALL_LIVE=1` (demo dir: `ENSEMBLE_INSTALL_DEMO=1`; under sudo: `sudo env ENSEMBLE_INSTALL_LIVE=1 make … INSTALL_DIR='<path>'`). See the [Deployment Guide §6.4](deployment.md) for the full guard contract.
 
 #### Step 1: Clone and Prepare
 
@@ -174,7 +176,11 @@ cd agents-ensemble
 #### Step 2: Run Production Install
 
 ```bash
-make install
+# fresh install dir (not live) — INSTALL_DIR is required (absolute, no '~', no spaces):
+make install INSTALL_DIR="$HOME/agents-ensemble-new"
+
+# installing OVER a live dir requires the explicit confirm var:
+ENSEMBLE_INSTALL_LIVE=1 make install INSTALL_DIR="$HOME/agents-ensemble"
 ```
 
 This command performs the following steps in order:
@@ -190,29 +196,32 @@ This command performs the following steps in order:
 
 #### Step 3: Configure for Production
 
+`make install` already staged `.env.prod` → `$INSTALL_DIR/.env` — a prod install never falls back to `.env.example` (staging a dev env into prod was a misconfiguration risk):
+
 ```bash
-cd ~/agents-ensemble
-cp .env.example .env
-nano .env
+nano "$INSTALL_DIR/.env"
 ```
 
 Set your production values:
 
 ```env
 OPENAI_API_KEY=sk-your-api-key
-PORT=8088
+PORT=9797
 ```
 
-#### Step 4: Run Production Server
+#### Step 4: Supervise the Daemon (macOS)
 
 ```bash
-cd ~/agents-ensemble
-./ensemble-prod
+make plist-install    INSTALL_DIR="$INSTALL_DIR"
+make watchdog-install INSTALL_DIR="$INSTALL_DIR"
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+curl -s http://127.0.0.1:9797/livez
 ```
 
-The production binary runs on port **8088** by default.
+The production daemon serves on **port 9797** (127.0.0.1 only) under launchd supervision. For the full procedure — install target, guard confirm vars, verification, day-2 commands, and the Linux/VM lane — see the [Deployment Guide §0](deployment.md#0-quick-start--macos-fresh-box).
 
-> **Note:** Ensure no other process is using port 8088 before starting.
+> **Note:** ensure no other process is using port 9797 before starting. A bare `make install` refuses (exit 78) — `INSTALL_DIR` is required, and a live-set target additionally needs `ENSEMBLE_INSTALL_LIVE=1` (§6.4 of the Deployment Guide).
 
 ---
 
@@ -281,7 +290,7 @@ Environment variables are loaded from `.env` file and override config.yaml value
 | `OPENAI_SELECTABLE_MODELS` | string (CSV or JSON array) | No | `agentic,coding,coding2,vision,img-gen,decision` | Models allowed as instance model overrides at spawn time (exact names, not prefix match). See [Selectable models](#selectable-models-openai_selectable_models) below |
 | `OPENAI_ALLOWED_MODELS` | string | No | — | Legacy alias for `OPENAI_SELECTABLE_MODELS`; honored only when the new name is unset, with a one-shot deprecation warning |
 | `HOST` | string | No | `0.0.0.0` | Server bind address |
-| `PORT` | integer | No | `8079` (dev) / `8088` (prod) | Server port |
+| `PORT` | integer | No | `8079` (dev) / `9797` (prod, from `.env.prod`) | Server port |
 | `LIGHTRAG_HOST` | string | No | `http://lightrag.lightrag.svc.cluster.local:9621` | LightRAG service host |
 | `LIGHTRAG_API_KEY` | string | No | — | LightRAG authentication key |
 | `LIGHTRAG_WORKSPACE` | string | No | — | LightRAG workspace identifier (optional, not in .env.example) |
@@ -421,7 +430,7 @@ daemon:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `daemon.host` | string | `0.0.0.0` | Network interface to bind to (`0.0.0.0` = all interfaces) |
-| `daemon.port` | integer | `8088` | Port for the API server |
+| `daemon.port` | integer | `8088` | Port for the API server (config.yaml default; production overrides via `.env` `PORT=9797`) |
 
 #### Limits Configuration
 
@@ -884,7 +893,7 @@ Expected response:
 | Environment | URL |
 |-------------|-----|
 | Development | `http://localhost:8079` |
-| Production | `http://localhost:8088` |
+| Production | `http://127.0.0.1:9797` |
 
 ### API Documentation
 
@@ -1013,7 +1022,8 @@ Once you have agents-ensemble running, explore these topics:
 uv sync                            # Install dependencies
 
 # Production
-make install                       # Full installation
+make install INSTALL_DIR=…         # Full installation (INSTALL_DIR required; live
+                                    # dirs need ENSEMBLE_INSTALL_LIVE=1 — exit 78 otherwise)
 ./ensemble-prod                    # Run production
 
 # Frontend
@@ -1042,7 +1052,7 @@ make clean                         # Clean build artifacts
 | Port | Purpose |
 |------|---------|
 | 8079 | Development server |
-| 8088 | Production server |
+| 9797 | Production server (live port, from `.env.prod`) |
 | 4199 | Frontend dev server |
 
 ---

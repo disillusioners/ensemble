@@ -959,9 +959,10 @@ assert_eq "8w dead owner → acquire succeeds via stale-break (0)" "0" "$?"
 # Two arms: (1) a regression pin that _journal_sweep at the current
 # branch DOES NOT use unbounded pipe reads or `wait` against subprocesses
 # — the brief premise was a "sweep pipe_read wedge" but HEAD code uses
-# pure bash JSON parsing; the live-install launcher is byte-identical to
-# the BASE (post-v0.16.8) commit — HEAD carries the bounded-subprocess pass
-# that converges at the next v0.16.9 promote. (2) correctness tests
+# pure bash JSON parsing; the repo now carries the O(n) journal-sweep
+# rewrite (_js_journal_read / _js_json_sub) while the LIVE install still
+# carries the PRE-rewrite launcher until the next promote, so the two
+# bodies legitimately differ right now. (2) correctness tests
 # for the bounded-run helper _js_run_bounded and the bounded pid-alive
 # wrapper _js_pid_alive_bounded (genuine D-state kill-0 / wedged-cmd
 # wedge defense; the kill -0 call IS a real blocking risk at HEAD).
@@ -995,12 +996,16 @@ else
     _pass "8b-r1 _journal_sweep has no pipe reads (regression pin)"
 fi
 
-# 8b-r2: live-install launcher state (informational). TF3 (2026-10-12):
-# the probe path is OPT-IN via ENS_TEST_LIVE_LAUNCHER — there is NO
-# default live-install path and NO default stat probe (zero-live-contact
-# bar for agent-driven test runs; the probe only ever fired when a live
-# install existed, but the hardcoded path made that unconditional).
-# Operators who want the live-copy comparison run:
+# 8b-r2: OPT-IN live-install comparison (informational). The probe path is
+# OPT-IN via ENS_TEST_LIVE_LAUNCHER — there is NO default live-install
+# path and NO default stat probe (zero-live-contact bar for agent-driven
+# test runs). The repo now carries the O(n) journal-sweep rewrite
+# (_js_journal_read / _js_json_sub); the LIVE install still carries the
+# PRE-rewrite launcher until the next promote, so the two bodies
+# legitimately differ right now. This row is NOT a convergence proof and
+# does NOT prove the repo and live copies are equivalent: the operator's
+# real convergence check is `cmp` against the LIVE launcher.sh, NOT this
+# suite row. Operators who want the live-copy comparison run:
 #   ENS_TEST_LIVE_LAUNCHER=/path/to/live/install/launcher.sh bash tests/test_launcher.sh
 LIVE_LAUNCHER="${ENS_TEST_LIVE_LAUNCHER:-}"
 if [ -n "$LIVE_LAUNCHER" ] && [ -f "$LIVE_LAUNCHER" ]; then
@@ -1012,21 +1017,21 @@ if [ -n "$LIVE_LAUNCHER" ] && [ -f "$LIVE_LAUNCHER" ]; then
     ' "$LIVE_LAUNCHER")"
     if [ "$SWEEP_BODY" = "$LIVE_SWEEP_BODY" ]; then
         _pass
-        printf 'INFO: 8b-r2 repo _journal_sweep body ≡ live-install copy (post-promote convergence)\n'
+        printf 'INFO: 8b-r2 repo _journal_sweep body == live-install copy (opt-in comparison only; NOT a convergence proof)\n'
     else
-        # informational pass — the promote train converges the copies
-        printf 'INFO: 8b-r2 live-install _journal_sweep \u2260 repo HEAD (next promote will close)\n'
+        # informational pass — the live install is pre-rewrite; this row is NOT a convergence proof
+        printf 'INFO: 8b-r2 live-install _journal_sweep \u2260 repo HEAD (expected: repo carries the O(n) rewrite, live is pre-rewrite until next promote)\n'
         LIVE_KILLS=$(printf '%s' "$LIVE_SWEEP_BODY" | sed -e 's/#.*$//' | grep -c '_js_pid_alive_bounded\|_js_run_bounded' || true)
         if [ "$LIVE_KILLS" -gt 0 ]; then
             _pass
-            printf 'INFO: 8b-r2 live-install _journal_sweep body has the bounded-subprocess pass\n'
+            printf 'INFO: 8b-r2 live-install _journal_sweep body still has the bounded-subprocess pass (pre-rewrite; informational)\n'
         else
             _pass
-            printf 'INFO: 8b-r2 live-install _journal_sweep body pre-promote (no bounded pass; will land at next promote)\n'
+            printf 'INFO: 8b-r2 live-install _journal_sweep body pre-rewrite (informational; real convergence check is cmp against the LIVE launcher.sh)\n'
         fi
     fi
 else
-    _skip "8b-r2 repo _journal_sweep body ≡ live-install copy — no live-install path configured (set ENS_TEST_LIVE_LAUNCHER to opt in)"
+    _skip "8b-r2 opt-in live-install comparison — no live-install path configured (set ENS_TEST_LIVE_LAUNCHER to opt in); this row is NOT a convergence proof"
 fi
 
 # 8b-c1: _js_run_bounded — fast command returns the inner rc (0 / nonzero)
@@ -1482,52 +1487,88 @@ done
 assert_contains "13.h dynamic nvm alias read present" '.nvm/alias/default' "$(cat "$LAUNCHER")"
 assert_contains "13.h ENSEMBLE_LAUNCHER_PATH override wired" 'ENSEMBLE_LAUNCHER_PATH' "$(cat "$LAUNCHER")"
 
-# 13.i END-TO-END VM NO-OP PROOF: a REAL main() boot (resolve_install_dir →
-# load_env_file → STATE_FILE default → MALLOC → _path_ensure →
-# _journal_sweep → resolve_binary → run_loop) under a VM-shaped PATH where
+# 13.i END-TO-END VM NO-OP PROOF: a REAL main() boot (resolve_install_dir ->
+# load_env_file -> STATE_FILE default -> MALLOC -> _path_ensure ->
+# _journal_sweep -> resolve_binary -> run_loop) under a VM-shaped PATH where
 # npx/uvx/node resolve (systemd's packaging luck, made guaranteed by the
 # sandbox vmbin). The stub "ensemble-prod" child dumps its inherited env:
 # the PATH must arrive BYTE-IDENTICAL (probe no-op, nothing synthesized)
-# and the launcher state must land at the CLASSIC path (override unset).
-(
-    INST="$LP_TEST_DIR/vmboot"
-    mkdir -p "$INST/data"
-    printf 'PORT=18971\nENSEMBLE_SELF_ENV=1\n' > "$INST/.env"
-    cat > "$INST/ensemble-prod" <<EOF
+# and the launcher state must land at the CLASSIC path.
+#
+# Hermeticity (F2): this cell's subject is the VM-shaped boot's state-file
+# resolution (classic path when the override is unset). An AMBIENT
+# ENSEMBLE_LAUNCHER_STATE_FILE (Stage-2 override) is POLLUTION that must be
+# excluded -- exactly like the sibling cells isolate their state (see :1663
+# `unset PATH`, :1781 `unset ENSEMBLE_LAUNCHER_STATE_FILE`). The boot
+# invocation below uses `env -u` so the child never inherits the ambient
+# var, regardless of the caller's environment. The body is factored into a
+# helper so both legs exercise the IDENTICAL assertions (no copy drift).
+_vmboot_13i() {
+    # args: $1 = leg label, $2 = err file, $3 = child-env dump
+    local inst="$LP_TEST_DIR/vmboot-$1"
+    rm -rf "$inst"
+    mkdir -p "$inst/data"
+    printf 'PORT=18971\nENSEMBLE_SELF_ENV=1\n' > "$inst/.env"
+    cat > "$inst/ensemble-prod" <<EOF
 #!/bin/sh
-env > "$LP_TEST_DIR/vmboot-child-env.txt"
+env > "$3"
 exit 0
 EOF
-    chmod +x "$INST/ensemble-prod"
+    chmod +x "$inst/ensemble-prod"
     mkdir -p "$LP_TEST_DIR/vmbin"
     for t in npx uvx node; do
         printf '#!/bin/sh\nexit 0\n' > "$LP_TEST_DIR/vmbin/$t"
         chmod +x "$LP_TEST_DIR/vmbin/$t"
     done
-    VM_PATH="/usr/bin:/bin:/usr/sbin:/sbin"   # launchd's true minimal default
-                                              # (rehearsal-a: "default
-                                              # environment = { PATH =>
-                                              # /usr/bin:/bin:/usr/sbin:/sbin }")
-    cd "$INST" || exit 68
-    # Absolute-interpreter invocation (the supervisor's exec path honors the
-    # launcher's #!/bin/bash shebang — PATH plays NO role in STARTING it;
-    # a bare `bash` here would itself do a PATH lookup under the sandbox).
+    VM_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+    cd "$inst" || return 68
+    # HERMETIC: unset the ambient override for THIS boot so the child resolves
+    # the CLASSIC state path. The override is the shipped Stage-2 contract
+    # (honoured when set); this cell tests state-file resolution, not it.
     PATH="$LP_TEST_DIR/vmbin:$VM_PATH" \
     HOME="$LP_TEST_DIR/emptyhome" \
-    ENSEMBLE_INSTALL_DIR="$INST" \
-        /bin/bash "$LAUNCHER" >/dev/null 2>"$LP_TEST_DIR/vmboot.err"
+    ENSEMBLE_INSTALL_DIR="$inst" \
+    env -u ENSEMBLE_LAUNCHER_STATE_FILE \
+        /bin/bash "$LAUNCHER" >/dev/null 2>"$2"
     rc=$?
-    [ "$rc" = "0" ] || exit 69
-    grep -q "^PATH=$LP_TEST_DIR/vmbin:$VM_PATH$" "$LP_TEST_DIR/vmboot-child-env.txt" || exit 70
-    [ -f "$INST/.launcher-state" ] || exit 71
-    exit 0
-)
-assert_eq "13.i VM-shaped boot: child PATH byte-identical, classic state path" "0" "$?"
-if grep -q "probe no-op, PATH unchanged" "$LP_TEST_DIR/vmboot.err" 2>/dev/null; then
+    [ "$rc" = "0" ] || return 69
+    grep -q "^PATH=$LP_TEST_DIR/vmbin:$VM_PATH$" "$3" || return 70
+    [ -f "$inst/.launcher-state" ] || return 71
+    return 0
+}
+
+# Leg (i): ambient var UNSET (the historical case).
+_vmboot_13i A "$LP_TEST_DIR/vmboot-a.err" "$LP_TEST_DIR/vmboot-a-child-env.txt"
+rc=$?
+assert_eq "13.i VM-shaped boot: child PATH byte-identical, classic state path (ambient unset)" "0" "$rc"
+if grep -q "probe no-op, PATH unchanged" "$LP_TEST_DIR/vmboot-a.err" 2>/dev/null; then
     _pass
 else
-    _fail "13.i VM-shaped boot logged the probe no-op" \
-        "probe no-op line in launcher stderr" "$(cat "$LP_TEST_DIR/vmboot.err" 2>/dev/null | head -3)"
+    _fail "13.i VM-shaped boot logged the probe no-op (ambient unset)" \
+        "probe no-op line in launcher stderr" "$(cat "$LP_TEST_DIR/vmboot-a.err" 2>/dev/null | head -3)"
+fi
+
+# Leg (ii): ambient var deliberately EXPORTED into this cell's env -- the
+# hermeticity proof. With the fix in place the boot still resolves the
+# CLASSIC path (it must NOT flip to the ambient path) and the SAME
+# assertions hold. (Non-vacuity: remove the `env -u` above and this leg
+# flips to the ambient path, proving the unset is what keeps it hermetic.)
+ENSEMBLE_LAUNCHER_STATE_FILE="/tmp/ambient-pollution-should-not-win/.launcher-state" \
+    _vmboot_13i B "$LP_TEST_DIR/vmboot-b.err" "$LP_TEST_DIR/vmboot-b-child-env.txt"
+rc=$?
+assert_eq "13.i VM-shaped boot: child PATH byte-identical, classic state path (ambient exported)" "0" "$rc"
+if grep -q "probe no-op, PATH unchanged" "$LP_TEST_DIR/vmboot-b.err" 2>/dev/null; then
+    _pass
+else
+    _fail "13.i VM-shaped boot logged the probe no-op (ambient exported)" \
+        "probe no-op line in launcher stderr" "$(cat "$LP_TEST_DIR/vmboot-b.err" 2>/dev/null | head -3)"
+fi
+# Hermeticity proof: the ambient path must NOT have been written.
+if [ -f "/tmp/ambient-pollution-should-not-win/.launcher-state" ]; then
+    _fail "13.i hermeticity: ambient ENSEMBLE_LAUNCHER_STATE_FILE must NOT be written" \
+        "absent" "present (ambient leak)"
+else
+    _pass
 fi
 
 # 13.j F-10: an nvm alias CODENAME ("lts/*", "lts/krypton") resolves to a
@@ -1654,6 +1695,45 @@ assert_contains "13.k override branch logs its source" \
     "source=ensemble_launcher_path_override" "$(cat "$LP_TEST_DIR/ovrfacts.err")"
 assert_contains "13.k override branch logs the full-replacement delta" \
     "delta=full-replacement" "$(cat "$LP_TEST_DIR/ovrfacts.err")"
+
+# 13.k2 .env-SOURCED ENSEMBLE_LAUNCHER_PATH (unpinned until now): the install
+# .env is staged by the launcher itself (ADR-014 -- load_env_file runs BEFORE
+# _path_ensure), so a staged ENSEMBLE_LAUNCHER_PATH must participate in the
+# Layer-2 precedence: it is exported VERBATIM (top precedence -- the inherited
+# PATH is NOT retained) and the log names source=ensemble_launcher_path_override
+# with delta=full-replacement. The inherited value is set to a DECOY inside the
+# subshell so the row proves the .env wins (ADR-014) rather than merely
+# arriving; the ambient var is unset first for hermeticity.
+(
+    . "$LAUNCHER"
+    unset ENSEMBLE_LAUNCHER_PATH
+    ENSEMBLE_LAUNCHER_PATH="/ambient/decoy/should/not/win"
+    export ENSEMBLE_LAUNCHER_PATH
+    # stage the .env with the real override value
+    mkdir -p "$LP_TEST_DIR/dotenvpath"
+    printf 'ENSEMBLE_LAUNCHER_PATH=/from/dotenv/verbatim:/also/here\n' > "$LP_TEST_DIR/dotenvpath/.env"
+    # resolve via the real load_env_file + _path_ensure (main()'s sequence)
+    INSTALL_DIR="$LP_TEST_DIR/dotenvpath"
+    cd "$INSTALL_DIR" || exit 72
+    load_env_file "$INSTALL_DIR/.env"
+    _path_ensure
+    printf 'PATH=%s\n' "$PATH"
+    exit 0
+) > /dev/null 2> "$LP_TEST_DIR/dotenvpath.err"
+# The .env value must win over the inherited decoy AND replace the PATH
+# verbatim (top precedence -- no inherited suffix retained).
+grep -q '^PATH=/from/dotenv/verbatim:/also/here$' "$LP_TEST_DIR/dotenvpath.err" 2>/dev/null
+# (PATH is logged via resolved_path=... on the override line, not on stdout;
+#  re-check against the captured stderr instead)
+if grep -q 'source=ensemble_launcher_path_override' "$LP_TEST_DIR/dotenvpath.err" && \
+   grep -q 'delta=full-replacement' "$LP_TEST_DIR/dotenvpath.err" && \
+   grep -q 'resolved_path=/from/dotenv/verbatim:/also/here' "$LP_TEST_DIR/dotenvpath.err"; then
+    _pass
+else
+    _fail "13.k2 .env-sourced ENSEMBLE_LAUNCHER_PATH: verbatim export + top precedence" \
+        "source=ensemble_launcher_path_override + delta=full-replacement + resolved_path=/from/dotenv/verbatim:/also/here" \
+        "$(cat "$LP_TEST_DIR/dotenvpath.err" 2>/dev/null | head -5)"
+fi
 
 # 13.l FIX 7(a): set -u / empty-PATH hardening. An UNSET PATH must not
 # abort the launcher (set -u) and no PATH may end up with an EMPTY
@@ -2438,6 +2518,47 @@ for _jsf_case in case_0124_trunc_torn_flat_077 case_0154_trunc_torn_hist_027 cas
     assert_contains "16k $_jsf_case: torn journal read refused (rc=1)" \
         "rc=1" "$(_jsf_read "$JSF_CASE_DIR/$_jsf_case")"
 done
+
+# ─── F4: _env_strip_value byte-parity (launcher.sh <-> watchdog-watcher.sh) ──
+# The two implementations MUST stay byte-identical (F-06: one value-resolution
+# rule, duplicated by design because the watchdog is standalone). The pin
+# compares the REAL file bytes (extracted function bodies), so it FAILS if
+# either side is edited -- it cannot be satisfied by a stub.
+section "env-strip-value byte-parity (F4)"
+
+_env_strip_value_body() {  # <file>
+    awk '/^_env_strip_value\(\) \{/,/^\}/' "$1"
+}
+
+# Positive pin: the two bodies are byte-identical today.
+if [ "$(_env_strip_value_body "$LAUNCHER")" = "$(_env_strip_value_body "$REPO_ROOT/scripts/watchdog-watcher.sh")" ]; then
+    _pass
+else
+    _fail "F4 _env_strip_value byte-identical (launcher.sh vs scripts/watchdog-watcher.sh)" \
+        "identical bodies" "bodies differ"
+fi
+assert_eq "F4 _env_strip_value byte-parity (launcher.sh vs scripts/watchdog-watcher.sh)" \
+    "$(_env_strip_value_body "$LAUNCHER")" \
+    "$(_env_strip_value_body "$REPO_ROOT/scripts/watchdog-watcher.sh")"
+
+# Non-vacuity (negative): perturb a /tmp COPY of one side -- the SAME
+# comparison must go RED. The real files are NEVER written.
+cp "$REPO_ROOT/scripts/watchdog-watcher.sh" "$LP_TEST_DIR/watchdog-perturbed.sh"
+python3 - "$LP_TEST_DIR/watchdog-perturbed.sh" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+needle = "printf '%s' \"$v\""
+assert needle in s, "perturbation target not found"
+s = s.replace(needle, "printf '%s' \"$v\" ", 1)
+open(p, "w").write(s)
+PYEOF
+if [ "$(_env_strip_value_body "$LAUNCHER")" = "$(_env_strip_value_body "$LP_TEST_DIR/watchdog-perturbed.sh")" ]; then
+    _fail "F4 parity pin is not vacuous (a perturbed side must be CAUGHT)" \
+        "bodies differ" "bodies still identical -- pin is vacuous"
+else
+    _pass
+fi
 
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \

@@ -756,6 +756,44 @@ class TestMakefileWiring:
         text = STOP_SCRIPT.read_text()  # read-only reference
         assert text.startswith("#!/bin/bash")
 
+    def test_port_sink_quoted_in_stop_recipes(self, fake_home):
+        """D1 pin (PROD_PORT_FALLBACK sink): the port must reach the stop
+        script as a QUOTED argument.
+
+        ``$(PROD_PORT_FALLBACK)`` is the raw text after ``PORT=`` in the
+        repo's .env.prod (Makefile:75) — a repo-controlled file. Unquoted at
+        the sink it is a word-splitting / command-separator surface: a
+        ``PORT=9797; echo x > f`` line would run as a command. The guard
+        refusal aborts the recipe BEFORE the sink, so this is
+        defence-in-depth (NOT a guard bypass); the threat model is an
+        operator-controlled repo file.
+
+        Behavioral pin: ``make -n`` PRINTS the recipe without executing it,
+        so the printed stop-script invocation must carry the port QUOTED,
+        with the argv order unchanged (install dir, then port — two
+        arguments). The port value is pinned deterministically by
+        overriding ENV_PROD_FILE (the file Makefile:75 reads), so the
+        assertion does not depend on whatever .env.prod exists."""
+        sandbox = fake_home / "sbx"
+        sandbox.mkdir()
+        port_file = fake_home / "port.env"
+        port_file.write_text("PORT=9797\n")
+        for target in ("stop", "stop-by-port", "install"):
+            r = run_make(
+                ["-n", target, f"INSTALL_DIR={sandbox}", f"ENV_PROD_FILE={port_file}"],
+                fake_home,
+            )
+            assert r.returncode == 0, (target, r.stdout, r.stderr)
+            calls = [
+                ln for ln in r.stdout.splitlines()
+                if "stop-ensemble.sh" in ln and "bash" in ln
+            ]
+            assert calls, f"{target}: no stop-ensemble.sh invocation printed"
+            for ln in calls:
+                assert f'"{sandbox}"' in ln, (target, ln)
+                assert '"9797"' in ln, f"{target}: port sink is NOT quoted: {ln}"
+                assert ln.index(f'"{sandbox}"') < ln.index('"9797"'), (target, ln)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # P0 SECURITY HOTFIX MATRIX — F-01 … F-05 refusal rows
@@ -820,6 +858,18 @@ STRUCTURAL_LINE = "This refusal is STRUCTURAL: no confirm var opens it"
 #: Live / demo classification wording (UNCHANGED by this hotfix).
 LIVE_ARM = "REFUSING — INSTALL_DIR resolves to a LIVE install dir"
 DEMO_ARM = "REFUSING — INSTALL_DIR resolves to the DEMO install"
+
+#: Absolute-path arm (F6) — a RELATIVE INSTALL_DIR is refused outright.
+#: The first line is "REFUSING — INSTALL_DIR '<spelling>' is not an absolute
+#: path."; the tail anchor below is the wording that distinguishes this arm
+#: from the raw-value arm ("cannot be verified safely.") and from the live /
+#: demo classification wording.
+ABSOLUTE_ARM_TAIL = "is not an absolute path."
+
+
+def absolute_first_line(spelling: str) -> str:
+    """The exact first line of the absolute-path refusal for a spelling."""
+    return f"REFUSING — INSTALL_DIR '{spelling}' is not an absolute path."
 
 #: F-01 case table: (case-id, value template, detail anchor, make template).
 #:
@@ -1269,11 +1319,15 @@ class TestCaseAndPathResolutionArm:
     resolution.
 
     An uppercase spelling of a live dir (Darwin/APFS is case-insensitive), a
-    spelling whose INTERMEDIATE does not exist (<home>/ghost/../live), a
-    RELATIVE spelling resolved against the cwd, and a symlink alias must all
-    still classify as live. The physical resolution uses /bin/pwd -P (BSD) —
-    bash's builtin `pwd -P` echoes the TYPED casing, which compares unequal
-    to the real tree.
+    spelling whose INTERMEDIATE does not exist (<home>/ghost/../live) and a
+    symlink alias must all still classify as live. The physical resolution
+    uses /bin/pwd -P (BSD) — bash's builtin `pwd -P` echoes the TYPED
+    casing, which compares unequal to the real tree.
+
+    A RELATIVE spelling is no longer part of this matrix: the absolute-path
+    arm (F6, TestAbsolutePathArm) refuses every relative spelling before
+    the classification can run, so the relative-live row below is now
+    refused one arm earlier.
     """
 
     @pytest.mark.skipif(
@@ -1317,8 +1371,18 @@ class TestCaseAndPathResolutionArm:
         assert sentinel_of(live).exists()
 
     def test_relative_live_spelling_refused(self, fake_home):
-        """A RELATIVE live spelling ("agents-ensemble") is resolved against
-        the CWD: with cwd=$HOME it is the live dir and must be refused.
+        """A RELATIVE live spelling ("agents-ensemble") is refused EARLIER —
+        as 'not an absolute path' — because the absolute-path arm (F6) runs
+        BEFORE the live/demo classification.
+
+        BEHAVIOUR CHANGE (F6, deliberate and contract-mandated): this row
+        used to assert the LIVE wording, because the guard resolved the
+        relative spelling against its cwd and matched the live dir. The
+        absolute-path arm is UNCONDITIONAL by design — no confirm var may
+        open a relative path — so the refusal now happens one arm earlier.
+        The live dir is still protected either way (it is never deleted), and
+        the '~/agents-ensemble' spelling still reaches the LIVE classification
+        (pinned by TestAbsolutePathArm.test_tilde_form_is_judged_on_its_expanded_form).
 
         Guard-level: the guard resolves a relative INSTALL_DIR against its
         own cwd, so the probe runs with cwd=$HOME. Make-level: make resolves
@@ -1331,7 +1395,9 @@ class TestCaseAndPathResolutionArm:
             "uninstall", fake_home, install_dir="agents-ensemble", cwd=fake_home,
         )
         assert r.returncode == GUARD_REFUSE_RC, r.stderr
-        assert LIVE_ARM in r.stderr, r.stderr
+        assert absolute_first_line("agents-ensemble") in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL in r.stderr, r.stderr
+        assert LIVE_ARM not in r.stderr, r.stderr
         assert sentinel_of(live).exists()
 
         m = run_make(
@@ -1340,7 +1406,8 @@ class TestCaseAndPathResolutionArm:
             fake_home, cwd=fake_home,
         )
         _assert_make_refused(m, "relative-live")
-        assert LIVE_ARM in m.stderr, m.stderr
+        assert absolute_first_line("agents-ensemble") in m.stderr, m.stderr
+        assert LIVE_ARM not in m.stderr, m.stderr
         assert sentinel_of(live).exists()
 
     def test_symlink_alias_of_live_refused(self, fake_home):
@@ -1360,3 +1427,172 @@ class TestCaseAndPathResolutionArm:
         assert LIVE_ARM in m.stderr, m.stderr
         assert sentinel_of(live).exists()
         assert alias.exists()  # the alias itself is not a protected dir
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F6 — ABSOLUTE-PATH ARM (the guard requires an absolute INSTALL_DIR)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAbsolutePathArm:
+    """F6 — INSTALL_DIR MUST BE AN ABSOLUTE PATH.
+
+    A relative path resolves against whatever directory the recipe happens
+    to run in, so the path the guard checks and the path a recipe would
+    delete can be two DIFFERENT paths: '..' run from a repo root is the
+    repo's parent, 'agents' run from a repo root is that repo's own
+    agents/ tree. The guard therefore refuses every relative spelling.
+
+    ORDERING (pinned by the rows below):
+      * the unverifiable-spelling arm runs FIRST — './x' keeps the
+        raw-value wording ("The path is not in normalized form") and '~' /
+        '~user/...' keep the tilde wording ("cannot be verified safely");
+      * the absolute-path arm runs NEXT, BEFORE the live/demo classification
+        and BEFORE the containment arm, so NO confirm var can ever open a
+        relative path;
+      * the arm judges the TILDE-EXPANDED form: '~/x' expands to $HOME/x
+        before the guard sees it, so it stays absolute and reaches the LIVE
+        classification exactly as before.
+
+    SAFETY: every make-level relative probe runs with the make cwd inside a
+    NESTED sandbox (tmp_path/"a"/"b"), so even a hypothetical
+    `rm -rf ".."` would stay inside the pytest tmp tree. The make-level
+    probes NEVER run with the cwd at the repo root.
+    """
+
+    #: Relative spellings refused at guard level. 'agents' is the repo's own
+    #: agents/ tree — the shape the tester reported.
+    RELATIVE_SPELLINGS = ("agents", "..", "foo/bar")
+
+    @pytest.mark.parametrize("spelling", RELATIVE_SPELLINGS)
+    def test_relative_path_refused_at_guard_level(self, fake_home, spelling):
+        """Every relative spelling refuses at rc 78 with the absolute-path
+        wording — and stays refused WITH the confirm var set (structural)."""
+        live = make_live_shaped(fake_home)
+        sbx = _safe_sandbox(fake_home)
+        # cwd = the fake home: a relative spelling COULD resolve to the live
+        # dir from here — the worst case the arm has to refuse.
+        r = run_guard(
+            "uninstall", fake_home, install_dir=spelling, cwd=fake_home,
+        )
+        assert r.returncode == GUARD_REFUSE_RC, (spelling, r.stderr)
+        assert absolute_first_line(spelling) in r.stderr, (spelling, r.stderr)
+        assert ABSOLUTE_ARM_TAIL in r.stderr, (spelling, r.stderr)
+        assert sentinel_of(live).exists(), spelling
+        assert sentinel_of(sbx).exists(), spelling
+
+        # STRUCTURAL: ENSEMBLE_INSTALL_LIVE=1 does NOT open a relative path
+        r_conf = run_guard(
+            "uninstall", fake_home, install_dir=spelling, cwd=fake_home,
+            extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
+        )
+        assert r_conf.returncode == GUARD_REFUSE_RC, (spelling, r_conf.stderr)
+        assert absolute_first_line(spelling) in r_conf.stderr, (spelling, r_conf.stderr)
+        assert sentinel_of(live).exists(), spelling
+        assert sentinel_of(sbx).exists(), spelling
+
+    def test_relative_path_refusal_precedes_the_confirm_gate(self, fake_home):
+        """The arm runs BEFORE the live/demo classification: a relative
+        spelling that WOULD have been live is refused as 'not an absolute
+        path', never as a live dir — so no confirm var can reach it."""
+        live = make_live_shaped(fake_home)
+        r = run_guard(
+            "uninstall", fake_home, install_dir="agents-ensemble", cwd=fake_home,
+        )
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert ABSOLUTE_ARM_TAIL in r.stderr, r.stderr
+        assert LIVE_ARM not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+    def test_dot_slash_spelling_refused_by_the_raw_value_arm(self, fake_home):
+        """'./x' is caught EARLIER, by the raw-value arm — its wording must
+        NOT change (the absolute-path arm never sees it)."""
+        sbx = _safe_sandbox(fake_home)
+        r = run_guard("uninstall", fake_home, install_dir="./x", cwd=fake_home)
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert RAW_VALUE_FIRST_LINE in r.stderr, r.stderr
+        assert DETAIL_NOT_NORMALIZED in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL not in r.stderr, r.stderr
+        assert sentinel_of(sbx).exists()
+
+    def test_empty_install_dir_keeps_the_inert_default_message(self, fake_home):
+        """The EMPTY spelling keeps arm 0's message — the inert-default
+        refusal must not silently become the absolute-path refusal."""
+        live = make_live_shaped(fake_home)
+        r = run_guard("uninstall", fake_home, install_dir="")
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert "INSTALL_DIR is not set" in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+    @pytest.mark.parametrize("spelling", ("..", "agents"))
+    def test_relative_path_refused_at_make_level_in_a_nested_sandbox(
+        self, fake_home, tmp_path, spelling,
+    ):
+        """MAKE-LEVEL: the recipe must NOT expand to a destructive rm -rf.
+
+        The make cwd is a NESTED sandbox (tmp_path/"a"/"b"), so a
+        hypothetical `rm -rf ".."` would delete tmp_path/"a" — contained
+        inside the pytest tmp tree. The cwd is NEVER the repo root.
+        """
+        nested = tmp_path / "a" / "b"
+        nested.mkdir(parents=True)
+        (tmp_path / "a" / "SENTINEL_A").write_text("do-not-delete")
+        (nested / "SENTINEL_B").write_text("do-not-delete")
+        live = make_live_shaped(fake_home)
+
+        r = run_make(
+            ["-f", str(MAKEFILE), f"GUARD_SCRIPT={GUARD}",
+             "uninstall", f"INSTALL_DIR={spelling}"],
+            fake_home, cwd=nested,
+        )
+        _assert_make_refused(r, spelling)
+        assert "Error 78" in r.stderr, (spelling, r.stderr)
+        assert absolute_first_line(spelling) in r.stderr, (spelling, r.stderr)
+        # the recipe never ran: the "Removing <dir>" banner is the recipe's
+        # first echo — it must NOT be there
+        assert "Removing" not in r.stdout, (spelling, r.stdout)
+        # and the nested sandbox tree is still intact
+        assert (tmp_path / "a" / "SENTINEL_A").exists(), spelling
+        assert (nested / "SENTINEL_B").exists(), spelling
+        assert sentinel_of(live).exists(), spelling
+
+    def test_absolute_path_is_allowed(self, fake_home):
+        """POSITIVE CONTROL: an absolute sandbox path is NOT refused."""
+        sbx = _safe_sandbox(fake_home)
+        r = run_guard("uninstall", fake_home, install_dir=str(sbx))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == "" and r.stderr == "", (r.stdout, r.stderr)
+        assert sentinel_of(sbx).exists()
+
+    def test_tilde_form_is_judged_on_its_expanded_form(self, fake_home):
+        """POSITIVE CONTROL: '~/…' is judged on the EXPANDED form, so it is
+        never refused as relative — '~/agents-ensemble' still reaches the
+        LIVE classification, and a safe '~/…' is allowed."""
+        live = make_live_shaped(fake_home)
+        safe_tilde = _safe_sandbox(fake_home, "sandbox-tilde")
+
+        r = run_guard("uninstall", fake_home, install_dir="~/agents-ensemble")
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+        r_safe = run_guard("uninstall", fake_home, install_dir=f"~/{safe_tilde.name}")
+        assert r_safe.returncode == 0, r_safe.stderr
+        assert r_safe.stdout == "" and r_safe.stderr == "", (
+            r_safe.stdout, r_safe.stderr,
+        )
+        assert sentinel_of(safe_tilde).exists()
+
+    def test_tilde_form_reaches_the_live_classification_at_make_level(self, fake_home):
+        """MAKE-LEVEL: the Makefile expands '~/' to $HOME/ before the guard
+        sees it, so the value is absolute and reaches the LIVE
+        classification — the absolute-path arm must not fire."""
+        live = make_live_shaped(fake_home)
+        r = run_make(["uninstall", "INSTALL_DIR=~/agents-ensemble"], fake_home)
+        _assert_make_refused(r, "tilde-live")
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert ABSOLUTE_ARM_TAIL not in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+

@@ -182,7 +182,7 @@ must therefore sign with the same stable identity:
 
 | Build path | Where it lives |
 |---|---|
-| (a) Integrated into this repo's `make install` | the ensemble build pipeline |
+| (a) Integrated into this repo's `make install` (guard-era form: `make install INSTALL_DIR=<path>`; live dirs additionally need `ENSEMBLE_INSTALL_LIVE=1`) | the ensemble build pipeline |
 | (b) A standalone build script | inside the `mcps_client` project |
 
 ### Ensemble side (2026-10-16 design notes — the mcps_client path has since shipped; see STATUS above)

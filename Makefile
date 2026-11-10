@@ -122,9 +122,9 @@ help:
 	@echo ""
 	@echo "Variables:"
 	@echo "  INSTALL_DIR=$(INSTALL_DIR)  (REQUIRED for install/uninstall/install-deps/stop/plist-install/watchdog-install)"
-	@echo "  ENSEMBLE_INSTALL_LIVE=1   confirm actions on a live dir (\$HOME/agents-ensemble, /opt/ensemble,"
+	@echo '  ENSEMBLE_INSTALL_LIVE=1   confirm actions on a live dir ($$HOME/agents-ensemble, /opt/ensemble,'
 	@echo "                            or ENSEMBLE_LIVE_INSTALL_DIRS entries)"
-	@echo "  ENSEMBLE_INSTALL_DEMO=1   confirm actions on \$HOME/agents-ensemble-demo"
+	@echo '  ENSEMBLE_INSTALL_DEMO=1   confirm actions on $$HOME/agents-ensemble-demo'
 	@echo "  ENSEMBLE_LIVE_INSTALL_DIRS  extra live dirs (colon-separated) added to the protected set"
 	@echo "  PROD_PORT_FALLBACK=$(PROD_PORT_FALLBACK) (read from $(ENV_PROD_FILE); real port source is .env.prod per ADR-014)"
 
@@ -154,14 +154,14 @@ sync:
 STOP_SCRIPT = scripts/stop-ensemble.sh
 stop:
 	@bash $(GUARD_SCRIPT) --target stop
-	@bash $(STOP_SCRIPT) "$(INSTALL_DIR)" $(PROD_PORT_FALLBACK)
+	@bash $(STOP_SCRIPT) "$(INSTALL_DIR)" "$(PROD_PORT_FALLBACK)"
 
 .PHONY: stop-by-port
 stop-by-port:
 	@bash $(GUARD_SCRIPT) --target stop-by-port
 	@echo "$(RED)STOP_BY_PORT: killing by port $(PROD_PORT_FALLBACK) can terminate UNRELATED listeners$(NC)"
 	@echo "$(RED)(dev+prod coexistence hosts share ports with clients — e.g. browsers). You opted in.$(NC)"
-	STOP_BY_PORT=1 bash $(STOP_SCRIPT) "$(INSTALL_DIR)" $(PROD_PORT_FALLBACK)
+	STOP_BY_PORT=1 bash $(STOP_SCRIPT) "$(INSTALL_DIR)" "$(PROD_PORT_FALLBACK)"
 
 # Start the daemon
 start: stop
@@ -222,11 +222,20 @@ install-deps:
 # note below). (The old "~10ms" figure was a scheduling argument, not a
 # measurement — measured guard cost is 20-40 ms; it bounds nothing, the
 # prereq/recipe ordering above does.)
-# `.NOTPARALLEL: install` (below) also serialises the prerequisite chain.
-# NOTE: on GNU Make 3.81 the target-scoped form is NOT inert — the legacy
-# 3.81 semantics serialise the WHOLE invocation (a superset of the intended
-# effect, so the bound still holds, at the cost of parallelism); it becomes
-# target-scoped on GNU Make >= 3.82.
+# `.NOTPARALLEL: install` (below) serialises the install prerequisite chain
+# — with an explicit VERSION SCOPE, because the two forms differ:
+#   * GNU Make 3.81 and OLDER: the directive is NOT target-scoped; the
+#     legacy semantics serialise the WHOLE invocation (measured 4.20s/4.35s
+#     against 2.23s for the same two-goal build). That is a superset of the
+#     intended effect, so the bound above still holds — at the cost of
+#     parallelism.
+#   * GNU Make 3.82 and NEWER: target-scoped to `install`.
+# RESIDUAL (disclosed in the help text, Makefile:119-121, and ACCEPTED):
+# the directive does NOT cover `make -j dev` (`dev: stop sync start`). On
+# make >= 3.82 its scope is `install` only, so dev's `sync` step (`uv sync`,
+# which mutates THIS repo's .venv — repo-scoped, never an install dir) can
+# still run before the refusal lands. On 3.81 the accidental global
+# serialisation happens to cover `dev` as well.
 .NOTPARALLEL: install
 install: ENS_GUARD_TARGET = install
 install: install-dir-guard pyinstaller
@@ -237,7 +246,7 @@ install: install-dir-guard pyinstaller
 	# (incident fix 2026-08-16; see scripts/stop-ensemble.sh). A foreign
 	# daemon on the same port (dev+prod coexistence) is reported, not killed.
 	@echo "$(YELLOW)Stopping processes owned by $(INSTALL_DIR) (ownership-scoped)...$(NC)"
-	@bash $(STOP_SCRIPT) "$(INSTALL_DIR)" $(PROD_PORT_FALLBACK) || true
+	@bash $(STOP_SCRIPT) "$(INSTALL_DIR)" "$(PROD_PORT_FALLBACK)" || true
 	
 	# Clean up old backups (keep only 2 most recent)
 	@echo "$(YELLOW)Cleaning up old backups...$(NC)"; \
