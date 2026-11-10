@@ -446,6 +446,59 @@ _now_epoch() { date +%s; }
 # _now_iso — UTC ISO-8601 timestamp (journal fields are ISO).
 _now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# _cooldown_until_iso — the `cooldown_until` stamp: NOW + COOLDOWN_S seconds,
+# in the journal's ISO-8601 Z form ("%Y-%m-%dT%H:%M:%SZ").
+#
+# PORTABLE (the same class as the launcher's `_ts_off` fix — its D4
+# defect: BSD `date` REJECTS an UNSIGNED positive adjustment (`-v300S`:
+# "Cannot apply date adjustment") and accepts the SIGNED form (`-v+300S`);
+# a negative offset already carries its own `-`). The two date families
+# are NOT interchangeable:
+#   BSD/macOS:  ``date -ju -v+${COOLDOWN_S}S -f '%Y-%m-%dT%H:%M:%SZ' <now>``
+#   GNU/Linux:  ``date -u -d "+${COOLDOWN_S} seconds"``
+# The GNU form FAILS on BSD (`-d` is not a BSD date flag) and the BSD form
+# FAILS on GNU (`-j` rejected, `-v` unknown, `-f` takes a different format
+# ordering) ⇒ the family MUST be SELECTED, never chained (the `_iso_to_epoch`
+# dispatch above is the same precedent). Chaining them with `||` is what
+# turns "the wrong family ran" into "the stamp silently became NOW" — a
+# DISARMED anti-flapping window (the incident shape).
+#
+# SELECTION IS OBSERVABLE (test-only): `_COOLDOWN_DATE_UNAME` overrides the
+# `uname -s` dispatch, so a stubbed `date` can exercise the GNU arm on a
+# BSD host and vice versa. Production behaviour is unchanged: the default
+# is `uname -s`.
+#
+# FAILURE: a date error on EITHER family (or an unrecognized platform)
+# falls back to "now" — the historical behaviour — and says so on stderr.
+# A silently disarmed anti-flapping window is the shape this fallback used
+# to hide; the stamp itself is unchanged by this refactor.
+_cooldown_until_iso() {
+    local until=""
+    case "${_COOLDOWN_DATE_UNAME:-$(uname -s)}" in
+        Darwin|*BSD*|*bsd*)
+            if [ "${COOLDOWN_S#-}" != "$COOLDOWN_S" ]; then
+                # a NEGATIVE offset keeps its own sign (BSD accepts
+                # `-v-300S`; the SIGNED positive form is `-v+300S`).
+                until="$(date -ju -v${COOLDOWN_S}S -f '%Y-%m-%dT%H:%M:%SZ' "$(_now_iso)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || until=""
+            else
+                until="$(date -ju -v+${COOLDOWN_S}S -f '%Y-%m-%dT%H:%M:%SZ' "$(_now_iso)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || until=""
+            fi
+            ;;
+        Linux|GNU*|*GNU*)
+            until="$(date -u -d "+${COOLDOWN_S} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || until=""
+            ;;
+        *)
+            echo "_cooldown_until_iso: unrecognized platform '$(uname -s)' — refusing (fail-closed; BSD or Linux required)" >&2
+            until=""
+            ;;
+    esac
+    if [ -z "$until" ]; then
+        echo "_cooldown_until_iso: the cooldown stamp is UNAVAILABLE on this host — falling back to NOW (the anti-flapping window is DISARMED)" >&2
+        until="$(_now_iso)"
+    fi
+    printf '%s' "$until"
+}
+
 # _enforce_deadline <deadline_epoch> <phase_name>
 # P3 / decision (d) — top-level wall-clock ceiling enforcement at
 # every phase boundary. On breach:
@@ -2347,20 +2400,20 @@ journal_count_rollback() {
         # ``|| until=$(_now_iso)`` fallback silently DISARMS the anti-flapping
         # window on Linux — a corrupt/disarmed cooldown on this host. Dispatch
         # on ``uname -s`` (mirror of atomic_flip lib.sh:2602-2611 +
-        # _iso_to_epoch lib.sh:188-204 precedent). The fallback-to-now
-        # branch is kept ONLY for genuine failure on either branch (real
-        # date error, malformed input) — never for the wrong-platform path.
-        case "$(uname -s)" in
-            Darwin|*BSD*|*bsd*)
-                until="$(date -ju -v+${COOLDOWN_S}S -f '%Y-%m-%dT%H:%M:%SZ' "$(_now_iso)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
-                    || until="$(_now_iso)" ;;
-            Linux|GNU*|*GNU*)
-                until="$(date -u -d "+${COOLDOWN_S} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
-                    || until="$(_now_iso)" ;;
-            *)
-                echo "journal_rollback_count: unrecognized platform '$(uname -s)' — refusing (fail-closed; BSD or Linux required)" >&2
-                until="$(_now_iso)" ;;
-        esac
+        # _iso_to_epoch lib.sh:188-204 precedent).
+        #
+        # The dispatch itself now lives in `_cooldown_until_iso` (the ONE
+        # implementation — a REPLICA here would drift from it and make a
+        # confirmed defect look refuted; POK probe-01). It keeps both
+        # literal date forms byte-identical (the C7 pin greps for them) and
+        # adds the `_COOLDOWN_DATE_UNAME` selection override, so either
+        # family can be exercised on either host.
+        #
+        # FAILURE (unchanged behaviour, now loud): a date error on either
+        # family — or an unrecognized platform — falls back to "now", i.e.
+        # the anti-flapping window is DISARMED. The fallback now says so on
+        # stderr instead of silently disarming.
+        until="$(_cooldown_until_iso)"
         journal_update "cooldown_until" "\"$until\"" || return 1
     fi
     printf '%s' "$new_cnt"
