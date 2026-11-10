@@ -250,10 +250,21 @@ _CURRENT_TRUSTED_WORKDIR: contextvars.ContextVar[str | None] = (
 #: boundary in the refusal message.
 READ_SCOPE_PROJECT = "project"
 
-#: agent_id → declared read scope (``None`` = undeclared = unbounded).
-#: The meta.json read is per-agent constant; the tool-call path must
-#: not re-read it on every call.
-_READ_SCOPE_CACHE: dict[str, str | None] = {}
+#: agent_id → ``(scope, meta_path, st_mtime_ns, st_size)``.
+#:
+#: The META IDENTITY is part of the key (code-review council F-5). This
+#: cache is process-global and was NEVER invalidated, so a stale ``None``
+#: silently **UNBOUND** a scoped agent — the fence failed **OPEN** until
+#: a daemon restart. The failure direction is what matters: an agent
+#: whose scope had JUST been declared still read unbounded.
+#:
+#: Keying on the meta.json's identity (``path`` + ``st_mtime_ns`` +
+#: ``st_size``) makes the stat() the invalidation trigger: any scope
+#: edit changes the mtime/size, the entry no longer matches, and the
+#: declaration is re-read on the NEXT call — no restart, no invalidation
+#: hook, no manual cache clearing. One cheap ``stat()`` per lookup,
+#: far cheaper than the JSON re-read it replaces.
+_READ_SCOPE_CACHE: dict[str, tuple[str | None, str, int, int]] = {}
 
 
 def set_caller_agent_id(agent_id: str | None):
@@ -302,18 +313,52 @@ def declared_read_scope(agent_id: str | None) -> str | None:
     The declaration lives in ``agents/<name>/meta.json`` as
     ``"read_scope"`` (top level) or ``tools.read_scope``. Absent ⇒
     ``None`` ⇒ unbounded ⇒ today's behavior.
+
+    The declaration is cached per agent, but the cache entry carries the
+    meta.json's IDENTITY (``path`` + ``st_mtime_ns`` + ``st_size``), so a
+    scope edit invalidates it on the next call (council F-5 — the fence
+    must never fail OPEN on a stale entry).
     """
     if not agent_id:
         return None
-    cached = _READ_SCOPE_CACHE.get(agent_id, ...)
-    if cached is not ...:
-        return cached
-    scope = _load_declared_read_scope(agent_id)
-    _READ_SCOPE_CACHE[agent_id] = scope
+    cached = _READ_SCOPE_CACHE.get(agent_id)
+    if cached is not None:
+        scope, path, mtime_ns, size = cached
+        if _meta_identity_matches(path, mtime_ns, size):
+            return scope
+    scope, path, mtime_ns, size = _load_declared_read_scope(agent_id)
+    if path:
+        _READ_SCOPE_CACHE[agent_id] = (scope, path, mtime_ns, size)
+    else:
+        # No meta.json at all — nothing stable to key on, so nothing is
+        # cached (an agent whose meta.json appears later must be seen).
+        _READ_SCOPE_CACHE.pop(agent_id, None)
     return scope
 
 
-def _load_declared_read_scope(agent_id: str) -> str | None:
+def _meta_identity_matches(path: str, mtime_ns: int, size: int) -> bool:
+    """True when the meta.json at *path* is still the one we cached.
+
+    One ``stat()`` — the invalidation trigger for the scope cache. A
+    missing file NEVER matches (the declaration must be re-read).
+    """
+    if not path:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_mtime_ns == mtime_ns and st.st_size == size
+
+
+def _load_declared_read_scope(
+    agent_id: str,
+) -> tuple[str | None, str, int, int]:
+    """Read the agent's declared scope AND the meta.json's identity.
+
+    Returns ``(scope, meta_path, st_mtime_ns, st_size)``. ``meta_path``
+    is ``""`` when no meta.json was found (nothing to key the cache on).
+    """
     from .prompt_artifacts import get_agents_roots
 
     for root in get_agents_roots():
@@ -321,20 +366,21 @@ def _load_declared_read_scope(agent_id: str) -> str | None:
         try:
             if not meta_path.is_file():
                 continue
+            st = meta_path.stat()
             raw = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         if not isinstance(raw, dict):
-            return None
+            return None, str(meta_path), st.st_mtime_ns, st.st_size
         scope = raw.get("read_scope")
         if scope is None:
             tools_cfg = raw.get("tools")
             if isinstance(tools_cfg, dict):
                 scope = tools_cfg.get("read_scope")
         if isinstance(scope, str) and scope.strip():
-            return scope.strip().lower()
-        return None
-    return None
+            return scope.strip().lower(), str(meta_path), st.st_mtime_ns, st.st_size
+        return None, str(meta_path), st.st_mtime_ns, st.st_size
+    return None, "", -1, -1
 
 
 #: Basenames a SCOPED agent may NEVER read, at ANY depth under the anchor
@@ -466,7 +512,8 @@ def _scope_filter_candidates(
     files: list[Path],
     scope: str | None,
 ) -> list[Path]:
-    """Drop credential-hazard basenames from a SCOPED agent's walk results.
+    """Drop credential-hazard basenames AND symlinks from a SCOPED agent's
+    walk results.
 
     The walk tools (``glob_files`` / ``grep_files``) enumerate files rather
     than resolving ONE target, so :func:`_resolve_within_scope`'s basename
@@ -474,12 +521,24 @@ def _scope_filter_candidates(
     ``glob`` the ``.env`` file's NAME or ``grep`` its CONTENT from inside
     its own anchor — the exact hazard the rule exists to deny.
 
-    Undeclared agents (``scope is None``) get the list UNCHANGED — base
-    behaviour, byte-identical.
+    **SYMLINKS (code-review council F-1).** A file symlink INSIDE the
+    anchor can point OUTSIDE it. The walker's ``followlinks=False`` stops
+    it descending into symlinked DIRECTORIES, but a symlinked FILE is
+    enumerated and then READ (``file_path.read_text()``) — so
+    ``grep_files(path=".")`` returned the outside file's CONTENT while
+    ``read_file`` on the same link was correctly REFUSED. The anchor
+    cannot be trusted to contain a symlink's TARGET, so a SCOPED agent
+    never sees a symlink candidate at all: neither its content (grep)
+    nor its name (glob). Undeclared agents keep base behaviour — symlinks
+    are still walked, exactly as before.
     """
     if not scope:
         return files
-    return [f for f in files if not _is_scope_denied_basename(f.name)]
+    return [
+        f
+        for f in files
+        if not _is_scope_denied_basename(f.name) and not f.is_symlink()
+    ]
 
 
 def _resolve_within_workdir(

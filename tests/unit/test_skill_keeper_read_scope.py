@@ -892,3 +892,201 @@ class TestCategoryDocStatesTheRealContract:
             "the legacy (undeclared) semantics must stay documented — the "
             "fleet default is unchanged"
         )
+
+
+# =============================================================================
+# F-1 — a FILE SYMLINK inside the anchor must not exfiltrate content
+# =============================================================================
+#
+# The code-review council's empirical probe (F-1): with a file symlink
+# INSIDE the anchor pointing OUTSIDE it, `read_file` was correctly
+# REFUSED but `grep_files(path=".")` RETURNED the outside file's content —
+# the walker's `followlinks=False` refuses to descend into symlinked
+# DIRECTORIES, but a symlinked FILE is enumerated and then READ
+# (`file_path.read_text()`). The anchor cannot be trusted to contain a
+# symlink's TARGET, so a SCOPED agent must never see a symlink
+# candidate: neither its content (grep) nor its name (glob).
+#
+# The fixture plants the symlink; the assertions are on SHAPE (a match
+# row / a listed name), never on the secret's bytes.
+
+
+class TestSymlinkExfiltrationIsClosed:
+    @pytest.fixture
+    def symlink_tree(self, tmp_path: Path) -> dict[str, str]:
+        """An anchor holding an ordinary file, a planted symlink and a secret."""
+        anchor = tmp_path / "anchor"
+        anchor.mkdir()
+        (anchor / "agents" / "skill-keeper").mkdir(parents=True)
+        (anchor / "agents" / "skill-keeper" / "meta.json").write_text(
+            json.dumps({"id": "skill-keeper"}), encoding="utf-8"
+        )
+        (anchor / "plain.txt").write_text("ordinary in-anchor line\n", encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "secret.txt"
+        secret.write_text(f"SENSITIVE_TOKEN {CANARY_TOKEN}\n", encoding="utf-8")
+        os.symlink(secret, anchor / "le.txt")
+        return {"anchor": str(anchor), "outside": str(outside)}
+
+    def test_grep_returns_nothing_from_an_outward_symlink(self, symlink_tree):
+        """(a) the content must NOT come back."""
+        tools = _build_tools("skill-keeper", symlink_tree["anchor"])
+        result = tools["grep_files"].invoke(
+            {"pattern": "SENSITIVE_TOKEN", "path": "."}
+        )
+        # Shape-based: the no-match notice ECHOES the pattern, so assert
+        # on MATCH ROWS, never on a bare substring.
+        rows = [ln for ln in result.splitlines() if ":1:" in ln]
+        assert not rows, (
+            f"a scoped grep must return NO match row from an outward symlink: {result!r}"
+        )
+
+    def test_glob_does_not_return_the_symlink(self, symlink_tree):
+        """(b) the NAME surface is dropped too."""
+        tools = _build_tools("skill-keeper", symlink_tree["anchor"])
+        result = tools["glob_files"].invoke({"pattern": "*.txt", "path": "."})
+        listed = {ln.strip() for ln in result.splitlines() if ln.strip()}
+        assert "le.txt" not in listed, (
+            f"a scoped glob must not list an outward symlink: {result!r}"
+        )
+
+    def test_an_ordinary_in_anchor_file_still_matches(self, symlink_tree):
+        """(c) non-vacuity — the ordinary file is still found."""
+        tools = _build_tools("skill-keeper", symlink_tree["anchor"])
+        result = tools["grep_files"].invoke({"pattern": "ordinary", "path": "."})
+        assert "plain.txt" in result, (
+            f"an ordinary in-anchor file must still match: {result!r}"
+        )
+
+    def test_an_ordinary_in_anchor_file_still_lists(self, symlink_tree):
+        tools = _build_tools("skill-keeper", symlink_tree["anchor"])
+        result = tools["glob_files"].invoke({"pattern": "*.txt", "path": "."})
+        assert "plain.txt" in result, (
+            f"an ordinary in-anchor file must still be listed: {result!r}"
+        )
+
+    def test_an_undeclared_agent_still_reads_the_symlink(self, symlink_tree):
+        """(d) the undeclared twin — base behaviour is UNCHANGED."""
+        tools = _build_tools("coder", symlink_tree["anchor"])
+        result = tools["grep_files"].invoke(
+            {"pattern": "SENSITIVE_TOKEN", "path": "."}
+        )
+        rows = [ln for ln in result.splitlines() if ":1:" in ln]
+        assert rows, (
+            "a non-declaring agent's grep must still follow the symlink "
+            f"(base behaviour unchanged): {result!r}"
+        )
+
+    def test_an_undeclared_agent_still_lists_the_symlink(self, symlink_tree):
+        tools = _build_tools("coder", symlink_tree["anchor"])
+        result = tools["glob_files"].invoke({"pattern": "*.txt", "path": "."})
+        listed = {ln.strip() for ln in result.splitlines() if ln.strip()}
+        assert "le.txt" in listed, (
+            f"a non-declaring agent's glob must still list the symlink: {result!r}"
+        )
+
+
+# =============================================================================
+# F-5 — the scope cache must NOT fail OPEN on a stale entry
+# =============================================================================
+#
+# The cache is process-global and was NEVER invalidated, so a stale
+# ``None`` silently UNBOUND a scoped agent — the fence failed OPEN
+# until a daemon restart. The fix keys the cache on the meta.json's
+# IDENTITY (path + mtime_ns + size), so a scope edit invalidates the
+# entry on the NEXT call.
+#
+# The fixture uses a THROWAWAY agent directory (NEVER
+# ``agents/skill-keeper/meta.json`` — no ``agents/**`` edit).
+
+
+class TestScopeCacheInvalidatesOnEdit:
+    def test_a_newly_declared_scope_is_honoured_without_a_restart(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """undeclared → scoped fences on the NEXT call."""
+        from daemon.tools import filesystem
+        from daemon.tools import prompt_artifacts
+
+        agent_dir = tmp_path / "agents" / "fixture-agent"
+        agent_dir.mkdir(parents=True)
+        meta = agent_dir / "meta.json"
+        meta.write_text(json.dumps({"id": "fixture-agent"}), encoding="utf-8")
+
+        monkeypatch.setattr(
+            prompt_artifacts,
+            "get_agents_roots",
+            lambda: [tmp_path / "agents"],
+        )
+        filesystem._READ_SCOPE_CACHE.clear()
+
+        tools = _build_tools("fixture-agent", str(tmp_path))
+        # Undeclared ⇒ the base behavior (an absolute path is still read).
+        before = tools["read_file"].invoke({"path": "/etc/hostname"})
+        assert before.startswith("File:"), (
+            f"an undeclared agent must keep the base behavior: {before!r}"
+        )
+
+        # Declare the scope IN PLACE — no restart, no manual cache clear.
+        meta.write_text(
+            json.dumps({"id": "fixture-agent", "read_scope": "project"}),
+            encoding="utf-8",
+        )
+        after = tools["read_file"].invoke({"path": "/etc/hostname"})
+        assert after.startswith("ERROR:"), (
+            "a freshly declared scope must be honoured on the NEXT call "
+            f"(the cache must not fail open): {after!r}"
+        )
+
+    def test_a_removed_scope_restores_the_base_behavior(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """scoped → undeclared restores the base behavior."""
+        from daemon.tools import filesystem
+        from daemon.tools import prompt_artifacts
+
+        agent_dir = tmp_path / "agents" / "fixture-agent"
+        agent_dir.mkdir(parents=True)
+        meta = agent_dir / "meta.json"
+        meta.write_text(
+            json.dumps({"id": "fixture-agent", "read_scope": "project"}),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            prompt_artifacts,
+            "get_agents_roots",
+            lambda: [tmp_path / "agents"],
+        )
+        filesystem._READ_SCOPE_CACHE.clear()
+
+        tools = _build_tools("fixture-agent", str(tmp_path))
+        fenced = tools["read_file"].invoke({"path": "/etc/hostname"})
+        assert fenced.startswith("ERROR:"), (
+            f"a declared scope must fence the read: {fenced!r}"
+        )
+
+        # Remove the declaration IN PLACE.
+        meta.write_text(json.dumps({"id": "fixture-agent"}), encoding="utf-8")
+        restored = tools["read_file"].invoke({"path": "/etc/hostname"})
+        assert restored.startswith("File:"), (
+            "a REMOVED scope must restore the base behavior on the next "
+            f"call: {restored!r}"
+        )
+
+    def test_the_cache_entry_carries_the_meta_identity(self):
+        """The cache is keyed on the meta.json's identity, not the value."""
+        from daemon.tools import filesystem
+
+        filesystem._READ_SCOPE_CACHE.clear()
+        scope = filesystem.declared_read_scope("skill-keeper")
+        entry = filesystem._READ_SCOPE_CACHE.get("skill-keeper")
+        assert entry is not None, "the declaration must be cached"
+        assert isinstance(entry, tuple) and len(entry) == 4, (
+            f"the cache entry must carry (scope, path, mtime_ns, size): {entry!r}"
+        )
+        assert entry[0] == scope
+        assert entry[1].endswith("meta.json"), (
+            f"the cache entry must name the meta.json it read: {entry!r}"
+        )

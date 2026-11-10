@@ -246,6 +246,26 @@ _OS_TARGET_FIRST = frozenset(
 #: ``os.<attr>(src, dst)`` — the mutating target is the SECOND arg.
 _OS_TARGET_SECOND = frozenset({"symlink", "link"})
 
+#: ``Path.<attr>(dst)`` — the pathlib METHOD forms of a move/rename.
+#:
+#: Council F-3: the classifier was blind to the pathlib spellings
+#: (``Path(x).rename(y)`` / ``Path(x).replace(y)``) — the natural future
+#: spelling of the module forms that ARE covered (``os.rename`` /
+#: ``os.replace`` / ``shutil.move``). The classifier's stated purpose is
+#: DRIFT-PROOFING, so a spelling change must not silently disarm it.
+#:
+#: WHY THE RECEIVER MUST BE PATH-LIKE: ``replace`` is also
+#: ``str.replace`` — an extremely common, entirely NON-filesystem call.
+#: A generic "any receiver named replace" rule would classify a text
+#: tool as a project-surface WRITER (a false positive that would redden
+#: the keeper's own confinement pin). These attrs therefore only count
+#: when the receiver is recognisably a ``Path``.
+_PATH_METHOD_ATTRS = frozenset({"rename", "replace"})
+
+#: ``Path.chmod(mode)`` — mutates the file's mode. Same path-like
+#: receiver requirement (council F-3: "consider ``chmod``").
+_PATH_CHMOD_ATTR = "chmod"
+
 #: A write mode MUTATES the target. ``open(path)`` with no mode is a
 #: READ; ``open(path, "rb")`` is a READ.
 _WRITE_MODE_CHARS = ("w", "a", "x", "+")
@@ -283,6 +303,40 @@ def _receiver_name(node: Any) -> str:
         base = _receiver_name(node.value)
         return f"{base}.{node.attr}" if base else node.attr
     return ""
+
+
+def _is_pathlike_receiver(node: Any, scope_nodes: list[Any]) -> bool:
+    """True when *node* is recognisably a ``pathlib.Path``.
+
+    Used to gate the pathlib METHOD forms (``rename`` / ``replace`` /
+    ``chmod``): ``str.replace`` is a text operation, not a filesystem
+    mutation, so a generic name rule would be a false positive. The
+    receiver counts as path-like when it is a ``Path(...)`` call
+    directly, or a NAME bound to a ``Path(...)`` call.
+    """
+    if node is None:
+        return False
+    if isinstance(node, ast.Call):
+        return _receiver_name(node.func).split(".")[-1] == "Path"
+    if isinstance(node, ast.Name):
+        for fnode in scope_nodes:
+            for sub in ast.walk(fnode):
+                if isinstance(sub, ast.Assign):
+                    for tgt in sub.targets:
+                        if isinstance(tgt, ast.Name) and tgt.id == node.id:
+                            if isinstance(sub.value, ast.Call) and (
+                                _receiver_name(sub.value.func).split(".")[-1] == "Path"
+                            ):
+                                return True
+                elif isinstance(sub, ast.AnnAssign):
+                    if (
+                        isinstance(sub.target, ast.Name)
+                        and sub.target.id == node.id
+                        and isinstance(sub.value, ast.Call)
+                        and _receiver_name(sub.value.func).split(".")[-1] == "Path"
+                    ):
+                        return True
+    return False
 
 
 def _kwarg(call: ast.Call, name: str):
@@ -367,7 +421,10 @@ def _reachable_module_helpers(
     return reachable
 
 
-def _write_calls(node: Any) -> list[tuple[Any, ast.Call]]:
+def _write_calls(
+    node: Any,
+    scope_nodes: list[Any] | None = None,
+) -> list[tuple[Any, ast.Call]]:
     """``(write-target-or-None, the Call node)`` for every write signal.
 
     The recognised signals (D2 + iteration 2 / D-N3 restoration):
@@ -389,7 +446,12 @@ def _write_calls(node: Any) -> list[tuple[Any, ast.Call]]:
 
     A ``None`` target means "a write we cannot attribute to a path" →
     treated as a PROJECT write (fail-closed).
+
+    ``scope_nodes`` is the enclosing function set — it is what lets the
+    pathlib METHOD forms (council F-3) recognise a path-like receiver
+    through a NAME bound to a ``Path(...)`` call.
     """
+    scope_nodes = scope_nodes or []
     out: list[tuple[Any, ast.Call]] = []
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Call):
@@ -419,6 +481,19 @@ def _write_calls(node: Any) -> list[tuple[Any, ast.Call]]:
                 out.append((sub.args[0] if sub.args else None, sub))
             elif recv_name == "os" and attr in _OS_TARGET_SECOND:
                 out.append((sub.args[1] if len(sub.args) > 1 else None, sub))
+            elif attr in _PATH_METHOD_ATTRS and _is_pathlike_receiver(
+                recv, scope_nodes
+            ):
+                # ``Path(x).rename(y)`` / ``Path(x).replace(y)`` — BOTH
+                # ends are project-surface: the receiver loses its name
+                # and the ARGUMENT is where the file lands. Both are
+                # emitted (argument-position-correct).
+                out.append((recv, sub))
+                out.append((sub.args[0] if sub.args else None, sub))
+            elif attr == _PATH_CHMOD_ATTR and _is_pathlike_receiver(
+                recv, scope_nodes
+            ):
+                out.append((recv, sub))
         elif isinstance(fn, ast.Name):
             if fn.id == "open":
                 mode = sub.args[1] if len(sub.args) > 1 else _kwarg(sub, "mode")
@@ -518,7 +593,7 @@ def _write_profile(scope_nodes: list[Any]) -> tuple[bool, bool]:
     project = False
     temp = False
     for fnode in scope_nodes:
-        for target, _call in _write_calls(fnode):
+        for target, _call in _write_calls(fnode, scope_nodes):
             if target is None:
                 project = True
                 continue
@@ -590,6 +665,15 @@ def tool_capabilities(tool: Any) -> set[str]:
             module_tree = ast.parse(module_text)
         except SyntaxError:
             module_tree = None
+        module_functions = (
+            [
+                n
+                for n in module_tree.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            if module_tree is not None
+            else []
+        )
         if module_tree is not None:
             for node in module_tree.body:
                 if isinstance(node, ast.Import):
@@ -599,7 +683,7 @@ def tool_capabilities(tool: Any) -> set[str]:
                     if node.module:
                         imported.add(node.module.split(".")[0])
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if _write_calls(node):
+                    if _write_calls(node, module_functions):
                         module_writes = True
 
     caps: set[str] = set()
@@ -991,6 +1075,74 @@ class TestResolverLeg:
         )
         assert "writes_file" not in caps, (
             f"a temp-confined write is not a project write: {sorted(caps)}"
+        )
+
+    def test_the_classifier_catches_the_pathlib_rename_and_replace_forms(self):
+        """F-3 — the pathlib METHOD spellings must classify as writers.
+
+        The classifier's stated purpose is DRIFT-PROOFING: the module
+        forms (``os.rename`` / ``os.replace`` / ``shutil.move``) are
+        covered, but the pathlib spellings (``Path(x).rename(y)`` /
+        ``Path(x).replace(y)``) are the natural future form of the same
+        operation and were classified ``[]`` — a spelling change would
+        have silently disarmed the oracle.
+        """
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def zzz_path_rename_probe(src: str, dst: str) -> str:
+            """Path(src).rename(dst)."""
+            from pathlib import Path
+
+            Path(src).rename(dst)
+            return "renamed"
+
+        @lc_tool
+        def zzz_path_replace_probe(src: str, dst: str) -> str:
+            """Path(src).replace(dst)."""
+            from pathlib import Path
+
+            Path(src).replace(dst)
+            return "replaced"
+
+        @lc_tool
+        def zzz_path_chmod_probe(target: str) -> str:
+            """Path(target).chmod(0o600)."""
+            from pathlib import Path
+
+            Path(target).chmod(0o600)
+            return "chmodded"
+
+        for probe in (
+            zzz_path_rename_probe,
+            zzz_path_replace_probe,
+            zzz_path_chmod_probe,
+        ):
+            caps = tool_capabilities(probe)
+            assert "writes_file" in caps, (
+                f"{probe.name} must classify as write-capable (F-3): "
+                f"{sorted(caps)}"
+            )
+
+    def test_a_string_replace_is_not_a_filesystem_write(self):
+        """F-3 — the path-like gate keeps ``str.replace`` out.
+
+        ``replace`` is also a TEXT operation. A generic "any receiver
+        named replace" rule would classify a text tool as a
+        project-surface WRITER — a false positive that would redden the
+        keeper's own confinement pin for the wrong reason.
+        """
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def zzz_string_replace_probe(text: str) -> str:
+            """A pure text replacement — not a filesystem write."""
+            return text.replace("a", "b")
+
+        caps = tool_capabilities(zzz_string_replace_probe)
+        assert "writes_file" not in caps, (
+            "a str.replace must NOT classify as a filesystem write: "
+            f"{sorted(caps)}"
         )
 
     def test_the_classifier_catches_a_renamed_write_tool(self):
