@@ -1162,7 +1162,7 @@ Every receipt below carries that parent-RED proof.
 
 | # | Recipe (SCRATCH-ONLY) | Node(s) that went RED | Observed RED marker |
 |---|---|---|---|
-| **(h) F1/F2/F4 — PARENT-RED** | the PARENT's production tree (`git archive 78bde0c0a`) + THIS commit's FIXED test file | `TestEnqueueBridge::test_a_pinned_episode_is_not_announced_by_the_bridge` + `TestProposalsZoneSelection::test_a_pinned_episode_is_not_rendered_in_the_zone` + `TestCandidateWindow::test_terse_head_of_line_does_not_starve_eligible_rows` | `AssertionError: assert 'Still proposable' in "[system:memoir-proposal] Ari has reflected and proposed 1 new keepsake: 'Superseded memory'. Review via briefing."` — the parent ANNOUNCED the superseded episode; `assert '630e64be…' not in {'3bcb4046…', '630e64be…'}` — the parent RENDERED it; `assert 0 == 2 … ProposalPassOutcome(staged=0, skipped_existing=0, skipped_ineligible=10, enqueued=False, enqueue_failure=None, proposal_ids=())` — the terse head-of-line starved the eligible rows (the permanent wedge). **3 failed / 41 passed.** |
+| **(h) F1/F2/F4 — PARENT-RED** | the PARENT's production tree (`git archive 78bde0c0a`) + THIS commit's FIXED test file | `TestEnqueueBridge::test_a_pinned_episode_is_not_announced_by_the_bridge` + `TestProposalsZoneSelection::test_a_pinned_episode_is_not_rendered_in_the_zone` + `TestCandidateWindow::test_terse_head_of_line_does_not_starve_eligible_rows` | `AssertionError: assert 'Still proposable' in "[system:memoir-proposal] Ari has reflected and proposed 1 new keepsake: 'Superseded memory'. Review via briefing."` — the parent ANNOUNCED the superseded episode; `assert '630e64be…' not in {'3bcb4046…', '630e64be…'}` — the parent RENDERED it; `assert 0 == 2 … ProposalPassOutcome(staged=0, skipped_existing=0, skipped_ineligible=10, enqueued=False, enqueue_failure=None, proposal_ids=())` — the terse head-of-line starved the eligible rows (the permanent wedge). **3 failed / 45 passed** (48 executed — the pass-count was CORRECTED on 2026-11-10: it had read "41 passed", which is recipe (m)'s genuine count; the RED SET and every marker were exact). |
 | **(i) F1 — the KEEPSAKE filter's bite** | THIS commit's tree, `is_keepsake.is_(False)` DROPPED from `select_zone_rows` | the same two W-3 legs | **2 failed** — with the filter removed the pinned episode is announced AND rendered |
 | **(j) F1 — the PRIOR leg was vacuous** | the SAME mutation as (i) + the PRE-FIX test file (`git show 78bde0c0a:tests/unit/test_memoir_keepsake_proposals.py`) | — | **1 failed, 1 passed** — the OLD BRIDGE leg stayed GREEN (both episodes tied at importance=9, so the ORDERING alone chose the survivor: the leg detected nothing); the OLD ZONE leg DID bite for the keepsake filter (the zone renders a SET, so the pinned row was visible) |
 | **(k) F4 — the SUPERSEDED filter's bite** | THIS commit's tree, `superseded_by.is_(None)` DROPPED from `select_zone_rows` | the same two W-3 legs | **2 failed** — without the filter the superseded episode is announced AND rendered |
@@ -1269,10 +1269,25 @@ commit).
     collecting ELIGIBLE rows until it holds `limit`. **THE BOUND IS
     HONEST AND THE DEFERRAL IS DISCLOSED:** a pathological corpus whose
     whole head-of-line is terse still defers the eligible rows behind it
-    to a LATER pass — the bound is 3 × the window, NOT an unbounded walk
-    (an unbounded walk would trade starvation for a full-corpus scan on
-    every tick). The deferral self-heals as soon as the terse head
-    leaves the window.
+    — the bound is 3 × the window, NOT an unbounded walk (an unbounded
+    walk would trade starvation for a full-corpus scan on every tick).
+    **THE DEFERRAL IS PERMANENT WHILE THE TERSE HEAD REMAINS (measured
+    2026-11-10):** a skipped row is NEVER LEDGERED, so it never leaves
+    the window — the over-fetch reaches the eligible rows behind a head
+    SMALLER than the fetch cap, but once that head FILLS the cap
+    (3 × the window) the eligible rows behind it are UNREACHABLE on
+    EVERY pass, and the deferral resolves ONLY if the head leaves by
+    another route (pinned / superseded / deleted). Scratch probe
+    (in-memory SQLite, 60 terse + 5 eligible rows): `staged=0` with
+    `skipped_ineligible=30` on pass 1, pass 2, pass 3 AND pass 4 — 30
+    rows examined over 3 pages, the 5 eligible rows never reached, the
+    corpus never walked; at 30 terse rows the head exactly fills the
+    cap and `staged=0` too (at 29 the first eligible row is still
+    reached, `staged=1` — a starved window, not a block). The earlier
+    wording here — "the deferral self-heals as soon as the terse head
+    leaves the window" — was WRONG and is corrected by this entry: while
+    the terse head is in the window, the deferral does NOT heal on its
+    own.
 11. **THE W-3 PREDICATE NOW COVERS SUPERSESSION (F4).** `is_keepsake =
     False` alone left a superseded episode's pending proposal eligible
     for BOTH the notify target and the zone — it was announced and

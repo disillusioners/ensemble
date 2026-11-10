@@ -354,11 +354,19 @@ class MemoirKeepsakeProposalService:
 
         THE BOUND IS HONEST AND DISCLOSED. A pathological corpus whose
         whole head-of-line is terse can still defer the eligible rows
-        behind it to a LATER pass — the bound is 3 × the window, NOT an
-        unbounded walk (an unbounded walk would trade starvation for a
-        full-corpus scan on every tick). The deferral self-heals as soon
-        as the terse head leaves the window. The disclosure lives in
-        ``docs/memoir-v2/implementation-notes.md`` §16.6.
+        behind it — the bound is 3 × the window, NOT an unbounded walk
+        (an unbounded walk would trade starvation for a full-corpus scan
+        on every tick). THE DEFERRAL IS PERMANENT WHILE THE TERSE HEAD
+        REMAINS: a skipped row is never ledgered, so it never leaves the
+        window, and once the head fills the fetch cap the eligible rows
+        behind it are unreachable on EVERY pass — the deferral resolves
+        only if that head leaves by another route (pinned / superseded /
+        deleted). Measured 2026-11-10 (in-memory SQLite, 60 terse + 5
+        eligible): ``staged=0`` with ``skipped_ineligible=30`` on pass 1,
+        pass 2, pass 3 AND pass 4 — 30 rows examined over 3 pages, the
+        eligible rows never reached, the corpus never walked. The
+        disclosure lives in ``docs/memoir-v2/implementation-notes.md``
+        §16.6.
         """
         owner = agent_id or self._agent_id
         target = max(0, int(limit))
