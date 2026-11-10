@@ -6,6 +6,8 @@
 #   1. the pre-existing unit suites (unchanged);
 #   2. the G flakiness pins (M-G1..M-G5);
 #   3. the E1 re-fix burst-guard pins (M-E1a..M-E1f);
+#   3c. the A/B-resolution E2E file (F-8 registration, 24 nodes, one
+#      §13.2 quarantine-candidate node DESELECTED — see the leg's comment);
 #   4. the G ACCEPTANCE — >= 3 consecutive FULL-FILE-SET green runs of
 #      the A/B-resolution file, classified with the pinned classifier
 #      (`grep '^FAILED'` only) and asserted through
@@ -63,6 +65,37 @@ fi
 if [ "$EXIT_CODE" -eq 0 ]; then
   timeout 120s .venv/bin/pytest \
     tests/unit/test_skill_revival_fix_wave1_pins.py \
+    --tb=short -q 2>&1 || EXIT_CODE=$?
+fi
+
+# ── Leg 3c — the A/B-resolution E2E file (F-8 registration) ─────────────
+#   tests/integration/test_skill_evolution_e2e.py — 24 nodes.  Its stubs were
+#   RETARGETED at the A3 predicate (`has_genuinely_evolved_for_instance`), which
+#   is what makes the "the gate never consults the retired predicate" assertion
+#   LIVE rather than vacuous — so the file belongs in a REGISTERED pack.
+#
+#   DESELECT (named, with the reason): the node
+#   `TestSkillABTesting::test_ab_test_resolves_when_threshold_met` is the
+#   §13.2 QUARANTINE-CANDIDATE flake (phase1-plan §13.2's named quarantine
+#   list): that file's OWN engine fixture (`:91-102`) is still the
+#   StaticPool + :memory: shape G fixed in `tests/services/conftest.py`, and
+#   the concurrent resolve fan-out makes the loser-deactivation racy.  Measured
+#   isolated: base 3-failed/10 runs vs head 1-failed/10 runs — PRE-EXISTING (the
+#   base rate is HIGHER), so it is classified, never counted as net-new.  The
+#   formal QUARANTINE.md row is the TESTER's call.  Deselecting it here keeps
+#   the REGISTERED pack deterministic.
+#
+#   `--override-ini="addopts="`: the repo default addopts is
+#   `-m 'not integration and not postgres ...'` and this file is
+#   `pytest.mark.integration`, so WITHOUT the override the leg would
+#   deselect ALL 24 nodes and run nothing (pytest exit 5 = no tests
+#   collected = pack FAIL).  The file carries ZERO postgres-marked tests
+#   (verified), so the override needs no PG guard.
+if [ "$EXIT_CODE" -eq 0 ]; then
+  timeout 120s .venv/bin/pytest \
+    tests/integration/test_skill_evolution_e2e.py \
+    --deselect "tests/integration/test_skill_evolution_e2e.py::TestSkillABTesting::test_ab_test_resolves_when_threshold_met" \
+    --override-ini="addopts=" \
     --tb=short -q 2>&1 || EXIT_CODE=$?
 fi
 

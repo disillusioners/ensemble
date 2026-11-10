@@ -25,6 +25,9 @@
 #   tests/unit/test_skill_capture_attribution_seam.py       (A3 seam — Phase 1)
 #   tests/unit/test_skill_gate4_attribution_consumer.py     (A3 GATE-4 CONSUMER — Phase 1)
 #   tests/unit/test_skill_capture_gate_twin_parity.py       (A3 TWIN PARITY — M-A3d, Phase 1)
+#   tests/unit/test_skill_capture_killswitch_verification.py (F-8 — the independent kill-switch
+#     verification suite; its stubs were RETARGETED at the A3 predicate, which is what makes
+#     its "the gate never consults the retired predicate" assertion LIVE instead of vacuous)
 #
 # NOTE on addopts: repo default addopts = `-m 'not integration and not postgres'`
 # would silently deselect the two integration-marked ON-pin files. This pack
@@ -55,7 +58,7 @@
 #           BLOCKED — both call sites live in files outside this lane's
 #           edit fence (reported, not pinned).
 #
-# Expected test count: 157 (49 + 12 + 12 + 22 + 23 + 18 + 8 + 13)
+# Expected test count: 206 (49 + 12 + 12 + 22 + 23 + 18 + 8 + 13 + 49)
 # Timeout: internal 240s per pytest leg; caller applies outer `timeout 900`.
 set -uo pipefail
 
@@ -89,6 +92,7 @@ FILES=(
   tests/unit/test_skill_capture_attribution_seam.py
   tests/unit/test_skill_gate4_attribution_consumer.py
   tests/unit/test_skill_capture_gate_twin_parity.py
+  tests/unit/test_skill_capture_killswitch_verification.py
 )
 
 SEAM="tests/unit/test_skill_capture_attribution_seam.py"
