@@ -110,9 +110,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -151,6 +152,12 @@ SINK_DIR_NAME = "skill-capture-observability"
 #: Retention window for the sink files. The plan asks for ">= 30 days,
 #: >= 90 days preferred" — 90 is the default here.
 SINK_RETENTION_DAYS = 90
+
+#: The sink file naming convention: ``skill-capture-<YYYYMMDD>.jsonl``.
+#: The DATE IN THE NAME is the file's identity — the day whose capture
+#: runs it holds.  The retention decision follows the NAME, never the
+#: mtime (see :func:`_prune_expired_sink_files` for why).
+_SINK_FILE_PATTERN = re.compile(r"^skill-capture-(\d{8})\.jsonl$")
 
 #: Prompt-length buckets (the "shape" of a prompt — never its content).
 PROMPT_BUCKET_SHORT = 200
@@ -406,24 +413,94 @@ def resolve_sink_dir(data_dir: str | Path | None = None) -> Path:
     return resolve_data_dir(data_dir) / SINK_DIR_NAME
 
 
-def _prune_expired_sink_files(sink_dir: Path, *, retention_days: int) -> None:
-    """Delete sink files older than the retention window (best effort)."""
+def _sink_file_day(name: str) -> date | None:
+    """Return the DAY a sink file belongs to — parsed from its NAME.
+
+    Args:
+        name: The file's basename.
+
+    Returns:
+        The date the file's name encodes, or ``None`` when the name does
+        NOT follow the convention (``skill-capture-<YYYYMMDD>.jsonl``).
+        A ``None`` means "this file is not one of ours" — the prune
+        must never touch it.
+    """
+    match = _SINK_FILE_PATTERN.match(str(name))
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _prune_expired_sink_files(
+    sink_dir: Path,
+    *,
+    retention_days: int,
+    current_path: Path | None = None,
+    today: datetime | None = None,
+) -> None:
+    """Delete the sink files whose NAME-ENCODED day fell out of the window.
+
+    THE RETENTION DECISION FOLLOWS THE DATE IN THE FILE NAME — NEVER
+    THE MTIME.  The name IS the file's identity (the day whose capture
+    runs the file holds); the mtime is mutable metadata that a restore
+    from a backup, a copy, an ``os.utime`` or a fixture can rewrite at
+    will.  The mtime-keyed prune could therefore unlink a file named
+    for TODAY (its mtime was old), and it excluded nothing that a
+    writer held open.
+
+    THREE HARD GUARDS — the shared-path safety of the sink dir (every
+    lane's rows land in the SAME daily file, so a wrong unlink destroys
+    another lane's evidence):
+
+    1. **THE CURRENT FILE IS NEVER UNLINKED.**  ``current_path`` is the
+       file the caller holds open; it is excluded BY PATH, so it
+       survives even when its name-date fell out of the window (a clock
+       rollback names the file with a past day).
+    2. **TODAY'S FILE IS NEVER UNLINKED.**  The window is a day-file
+       window; the file being appended to today is never pruned.
+    3. **A FILE THAT IS NOT OURS IS NEVER TOUCHED.**  A name that does
+       not match ``skill-capture-<YYYYMMDD>.jsonl`` is skipped
+       outright — a neighbour's file in the same directory survives.
+
+    Best-effort: an ``OSError`` is logged at debug and never raised —
+    the prune must not break the capture lane.
+    """
     if retention_days <= 0:
         return
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    now = today if today is not None else datetime.now(timezone.utc)
+    cutoff = now.date() - timedelta(days=retention_days)
     for path in sink_dir.glob("skill-capture-*.jsonl"):
-        try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-        except OSError:  # pragma: no cover — stat race
+        # Guard 1 — the file this writer holds open.
+        if current_path is not None and _same_sink_file(path, current_path):
             continue
-        if mtime < cutoff:
-            try:
-                path.unlink()
-            except OSError as err:  # pragma: no cover — best effort
-                logger.debug(
-                    "skill-capture-observability: could not prune %s (%s)",
-                    path, err,
-                )
+        file_day = _sink_file_day(path.name)
+        # Guard 3 — a name that is not ours is not ours to delete.
+        if file_day is None:
+            continue
+        # Guard 2 — today's file is live.
+        if file_day >= now.date():
+            continue
+        if file_day >= cutoff:
+            continue
+        try:
+            path.unlink()
+        except OSError as err:  # pragma: no cover — best effort
+            logger.debug(
+                "skill-capture-observability: could not prune %s (%s)",
+                path, err,
+            )
+
+
+def _same_sink_file(left: Path, right: Path) -> bool:
+    """True when two paths name the same file IN THE SAME DIRECTORY.
+
+    Compared by name + parent (never by ``resolve()``): the comparison
+    must not touch the filesystem, and it must not follow a symlink.
+    """
+    return left.name == right.name and left.parent == right.parent
 
 
 def append_run_record(
@@ -447,14 +524,23 @@ def append_run_record(
     try:
         sink_dir = resolve_sink_dir(data_dir)
         sink_dir.mkdir(parents=True, exist_ok=True)
-        day = datetime.now(timezone.utc).strftime("%Y%m%d")
+        now = datetime.now(timezone.utc)
+        day = now.strftime("%Y%m%d")
         path = sink_dir / f"skill-capture-{day}.jsonl"
         payload = dict(record)
-        payload.setdefault("ts", datetime.now(timezone.utc).isoformat())
+        payload.setdefault("ts", now.isoformat())
         line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(line + "\n")
-        _prune_expired_sink_files(sink_dir, retention_days=retention_days)
+        # The prune never unlinks THIS file (the one just written): it is
+        # passed as ``current_path`` so the exclusion holds by PATH even
+        # when its name-date fell out of the window (a clock rollback).
+        _prune_expired_sink_files(
+            sink_dir,
+            retention_days=retention_days,
+            current_path=path,
+            today=now,
+        )
         return path
     except Exception as err:  # noqa: BLE001 — observability NEVER breaks the lane
         logger.warning(

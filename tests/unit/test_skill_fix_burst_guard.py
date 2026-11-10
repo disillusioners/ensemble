@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,6 +59,14 @@ from daemon.services.skill_job_dispatcher import (
     JOB_TYPE_EVOLUTION,
     SkillFixBurstCapRefused,
     SkillJobDispatcher,
+)
+
+# The ROW-GRANULAR cleanup of the shared sink (one definition, shared with
+# the sink-retention house-guard pin file).  The house shape (F-G1): a
+# lane test removes ONLY the rows it planted and NEVER unlinks the
+# shared daily file.
+from tests.unit.test_skill_sink_retention_shared_path_pins import (
+    remove_rows_carrying,
 )
 
 SKILL_A = "skill-aaaa1111"
@@ -648,6 +657,34 @@ def test_m19_a_directly_constructed_negative_cap_is_logged(caplog):
 # ── L7 — the burst-guard suite writes NOTHING into the checkout's data/ ──
 
 
+def _sink_bytes(directory: Path) -> dict[str, bytes]:
+    """Snapshot the sink files' BYTES (the house's "shrink = incident")."""
+    if not directory.exists():
+        return {}
+    return {
+        path.name: path.read_bytes()
+        for path in sorted(directory.glob("*.jsonl"))
+    }
+
+
+def _shared_sink_dirs(real_dir: Path, tmp_path) -> list[Path]:
+    """The sink dirs that are NOT the test's own scratch dir.
+
+    The cleanup may only ever touch a dir that is shared (the checkout's
+    real data dir, or the dir the sink resolved to when the redirect was
+    missing) — never the scratch dir, whose rows are the pin's evidence.
+    """
+    candidates = [real_dir]
+    resolved = observability.resolve_sink_dir()
+    if not str(resolved).startswith(str(tmp_path)):
+        candidates.append(resolved)
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
 @pytest.mark.asyncio
 async def test_l7_the_burst_guard_writes_nothing_under_the_real_data_dir(
     engine, tmp_path
@@ -661,18 +698,30 @@ async def test_l7_the_burst_guard_writes_nothing_under_the_real_data_dir(
 
     Named mutation: delete the autouse ``_observability_sandbox``
     fixture (the ``configure_sink(tmp_path)`` call) → this pin goes RED
-    (a test row lands in the real data dir).
+    (the sink resolves somewhere that is not the test's scratch dir).
 
-    The pin cleans up after itself: a stray file it created is removed
-    in the ``finally`` block, so even a RED run leaves the checkout
-    clean.
+    THE CLEANUP IS ROW-GRANULAR (the F-G1 house lesson — see
+    ``.agents/tester/LESSONS/2026-11-10-pack-cleanup-row-granularity.md``).
+    This pin used to DELETE whole files in the checkout's real sink dir
+    whenever a stray appeared; every lane appends into the SAME daily
+    file, so that cleanup could have destroyed another lane's rows (a
+    sibling lane's pack did exactly that — 116 rows, gitignored,
+    unrecoverable).  The cleanup now removes ONLY the rows carrying
+    THIS RUN's marker and NEVER unlinks the file.
+
+    The marker is a per-run skill id, so the filter can never match a
+    concurrent lane's row (or an earlier run's row).
     """
     real_dir = (
         Path(__file__).resolve().parents[2]
         / "data"
         / observability.SINK_DIR_NAME
     )
-    before = set(real_dir.glob("*.jsonl")) if real_dir.exists() else set()
+    # A per-run skill id → a per-run marker.  The sink row carries the
+    # skill id (the refusal record's ``extra``), so the marker is
+    # greppable in the shared file.
+    skill_id = f"skill-l7-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+    before = _sink_bytes(real_dir)
     try:
         # A lane-OFF admission is REFUSED, and a refusal always writes a
         # sink record — so the scratch sink is guaranteed to receive a
@@ -684,15 +733,49 @@ async def test_l7_the_burst_guard_writes_nothing_under_the_real_data_dir(
             evolution_lane_enabled=False,
             fix_cooldown_seconds=0,
         )
-        await _admit(dispatcher, SKILL_A)
+        await _admit(dispatcher, skill_id)
 
-        after = set(real_dir.glob("*.jsonl")) if real_dir.exists() else set()
-        stray = sorted(str(path) for path in (after - before))
-        assert not stray, (
-            "the burst-guard pins wrote into the checkout's REAL data dir "
-            f"({observability.SINK_DIR_NAME}/): {stray} — the autouse "
+        # (1) THE REDIRECT IS ACTIVE — the resolved sink must be the
+        # test's own scratch dir.  This is the assertion that survives
+        # a pack-level ``ENSEMBLE_DATA_DIR`` sandbox (the sink would
+        # resolve to the sandbox, not to tmp_path, when the fixture is
+        # missing — so the pin still discriminates).
+        resolved = observability.resolve_sink_dir()
+        assert str(resolved).startswith(str(tmp_path)), (
+            f"the observability sink resolved to {resolved} — the autouse "
             "_observability_sandbox fixture (configure_sink(tmp_path)) is "
-            "missing, so the sink resolved to ./data"
+            "missing, so the sink resolved to a shared path"
+        )
+
+        # (2) THE SHARED SINK IS EVIDENCE — snapshot the bytes before
+        # the write, diff after, and treat any shrink or disappearance
+        # as an incident (a clean END state can be the residue of
+        # destruction, not cleanliness).
+        after = _sink_bytes(real_dir)
+        vanished = sorted(set(before) - set(after))
+        assert not vanished, (
+            f"a shared sink file VANISHED during the burst-guard pins: "
+            f"{vanished} — the checkout's real data dir "
+            f"({observability.SINK_DIR_NAME}/) must be untouched"
+        )
+        shrunk = sorted(
+            name for name in before
+            if name in after and len(after[name]) < len(before[name])
+        )
+        assert not shrunk, (
+            f"a shared sink file SHRANK during the burst-guard pins: "
+            f"{shrunk} — a shrink is an incident (rows were destroyed), "
+            "not a cleanup"
+        )
+        leaked = sorted(
+            name for name, blob in after.items()
+            if skill_id.encode("utf-8") in blob
+        )
+        assert not leaked, (
+            "the burst-guard pins wrote into the checkout's REAL data dir "
+            f"({observability.SINK_DIR_NAME}/): {leaked} — the autouse "
+            "_observability_sandbox fixture (configure_sink(tmp_path)) is "
+            "missing, so the sink resolved to a shared path"
         )
 
         scratch = tmp_path / observability.SINK_DIR_NAME
@@ -702,13 +785,16 @@ async def test_l7_the_burst_guard_writes_nothing_under_the_real_data_dir(
             f"the SCRATCH sink dir ({scratch}) — the fixture did not run"
         )
         assert any(
-            SKILL_A in path.read_text(encoding="utf-8")
+            skill_id in path.read_text(encoding="utf-8")
             for path in scratch_files
         ), "the scratch sink must carry the admission's row"
     finally:
-        if real_dir.exists():
-            for stray_path in set(real_dir.glob("*.jsonl")) - before:
-                stray_path.unlink(missing_ok=True)
+        # ROW-GRANULAR cleanup (never a file delete): remove ONLY the
+        # rows this run planted, and only from dirs that are NOT the
+        # test's own scratch dir.
+        for directory in _shared_sink_dirs(real_dir, tmp_path):
+            for path in sorted(directory.glob("*.jsonl")):
+                remove_rows_carrying(path, skill_id)
 
 
 # ── M18 — every DEGRADED burst-cap branch is ALWAYS RECORDED ────────────

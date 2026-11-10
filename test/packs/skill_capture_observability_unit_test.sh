@@ -30,6 +30,19 @@ echo "=== Test Pack: skill_capture_observability_unit_test ==="
 
 cd "$PROJECT_DIR"
 
+# THE DATA-DIR SANDBOX (the L7 finding, 2026-11-10).  The observability
+# sink resolves the data dir CWD-RELATIVELY (./data) when no env var is
+# set, so a test that drives a sink write without a sink destination
+# writes into the CHECKOUT's gitignored data/ tree.  Every pin in this
+# pack redirects the sink to its own scratch dir (configure_sink(
+# tmp_path)); the env sandbox is the DEFENCE-IN-DEPTH layer for a pin
+# that forgets to.  The sandbox is a mktemp dir OUTSIDE the checkout and
+# is removed on exit.
+SANDBOX="$(mktemp -d /tmp/skill-capture-observability-data-XXXXXX)"
+export ENSEMBLE_DATA_DIR="$SANDBOX"
+cleanup_sandbox() { rm -rf "$SANDBOX"; }
+trap cleanup_sandbox EXIT
+
 # RESULT-echo discipline: `|| EXIT_CODE=$?` puts the assignment in a
 # list-context, so `set -e` does not abort before the RESULT line.
 EXIT_CODE=0
@@ -37,6 +50,7 @@ EXIT_CODE=0
 timeout 120s .venv/bin/pytest \
   tests/services/test_skill_capture_observability.py \
   tests/unit/test_skill_revival_wave2_pins.py \
+  tests/unit/test_skill_sink_retention_shared_path_pins.py \
   --tb=short -q 2>&1 || EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 124 ]; then
