@@ -978,4 +978,48 @@ is amended (the historical finding, mechanism and original measurements are kept
 
 ---
 
+## DS-60 — Round-8: the capture-lane-off counter is COMPLETE (the enumeration decides), and the F-10 boundary fact
+
+**Context.** The E1/D lane claimed the ``capture_lane_off`` admission counter was *"live at BOTH production refusal sites
+(metrics :172 + tools :539)"*; the tester gate's §7 claimed *"the production `capture_lane_off` refusal site in the
+metrics lane returns before the dispatcher gate, so that ONE counter is partial today; the seam exists and is pinned
+(M-C2), Phase-2 wires it"* — the gate's #2 production risk. The dispatch required the CODE to decide.
+
+**Ruling.**
+
+1. **THE ENUMERATION (code-driven):** the capture kill-switch is read in exactly four places in `daemon/` — three
+   refusal sites and one read. `daemon/services/skill_metrics_service.py:659` (the METRICS seam: the recorder fires
+   BEFORE the `return None`), `daemon/tools/skill_evolution_tools.py:522` (the TOOLS seam: the recorder fires BEFORE
+   the skipped envelope) and `daemon/services/skill_job_dispatcher.py:1126` (the DISPATCHER gate:
+   `record_admission_refusal("capture_lane_off")` plus the sink record, BEFORE the no-op return) all COUNT; and
+   `daemon/services/skill_roster.py:382` merely REPORTS the switch (a read, not a refusal). All three move the SAME
+   counter key `admission_refusals['capture_lane_off']`.
+2. **⇒ THE COUNTER IS COMPLETE IN PRODUCTION TODAY.** The E1/D lane was RIGHT IN SUBSTANCE (and understated the count:
+   it is live at three sites, not two); the tester gate's §7 was RIGHT ABOUT THE MECHANISM ("the metrics lane returns
+   before the dispatcher gate") and WRONG ABOUT THE OUTCOME ("that ONE counter is partial today") and about the REMEDY
+   ("Phase-2 wires it" — it is already wired, commit `ae99a5be9`).
+3. **THE TWIN SEAM IS NOT A FOURTH SITE.** `SkillEvolutionService.check_and_capture` has no capture-enable check at
+   all, so it never refuses because the capture lane is off — the open question is disproved, and the fact is now
+   pinned so it cannot drift back.
+4. **THE ROOT CAUSE WAS STALE WORDING, NOT A MEASUREMENT.** The gate's §7 says "The lane's own disclosure stands" —
+   it inherited a disclosure instead of re-deriving the call site. This lane's own comment in
+   `daemon/services/skill_metrics_service.py` (present tense: the counter is PARTIAL) is CORRECTED in this round; the
+   observability module's recorder docstring (`daemon/services/skill_capture_observability.py` — the E1/D lane's file,
+   READ ONLY here) still carries the pre-C2 wording and the stale anchor `:595-596`, and is REPORTED to that lane
+   with the minimal change named.
+5. **NO production code change was required** — every site already counted. The work was the enumeration, the
+   disclosure correction and the PINS: `tests/unit/test_skill_capture_lane_off_cross_path.py` drives ALL THREE refusal
+   paths and asserts the counter moves on EACH (an AST census pins the site set; a vacuity control proves each
+   assertion depends on the counting). Mutation leg `M-C2e` removes the metrics seam's recorder call ⇒ ONLY the
+   metrics path's assertion REDs, the tools seam and the dispatcher gate stay GREEN (the path-sensitivity proof).
+6. **F-10 BOUNDARY FACT (recorded):** the both-columns guarantee lives at the ROUTER — `daemon/routers/skills.py`:
+   `SkillUpdateRequest` declares no `status` field, so a REST caller cannot move one column alone — while the
+   repository alone CAN write one column (its `update` sets any existing column it is handed). The tester's
+   `tests/unit/routers/test_skill_patch_dual_column_e2e.py` (commit `58c8cb655`) closes the gap; the invariant is
+   recorded here so the answer to "can the pair desync?" is precise: **not through the REST surface; yes, by a direct
+   repository call** — which is why the sanctioned writer is the pair's single writer.
+
+
+---
+
 *End of the decision log. Companion plan: `phase1-plan.md`.*
