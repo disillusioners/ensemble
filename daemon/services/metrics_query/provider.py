@@ -64,7 +64,7 @@ class RegistryMetricsQueryProvider:
         census: Any | None = None,
         ring: TrendRingStore | None = None,
         listener_enabled: bool = False,
-        capture_active: bool = False,
+        capture_active: bool | Callable[[], bool] = False,
         metrics_provider: Callable[[], list[Any]] | None = None,
         sampler_interval_s: float = 10.0,
         publisher_cadence: Callable[[], float] | None = None,
@@ -72,7 +72,17 @@ class RegistryMetricsQueryProvider:
         self._census = census
         self._ring = ring
         self._listener_enabled = bool(listener_enabled)
-        self._capture_active = bool(capture_active)
+        #: A RESOLVER, not a value: the wedge-capture process fact does
+        #: not exist when this provider is constructed (the watchdog is
+        #: created later in the same lifespan), so the fact must be read
+        #: per read — the house late-binding pattern the sibling
+        #: ``publisher_cadence`` kwarg already uses.  A plain ``bool``
+        #: stays supported so existing callers/tests are unaffected.
+        self._capture_active_resolver: Callable[[], bool] = (
+            capture_active
+            if callable(capture_active)
+            else (lambda: bool(capture_active))
+        )
         self._metrics_provider = metrics_provider or _default_metrics_provider
         self._sampler_interval_s = float(sampler_interval_s)
         self._publisher_cadence = publisher_cadence or cm.publisher_cadence
@@ -131,6 +141,35 @@ class RegistryMetricsQueryProvider:
         return max(self._sampler_interval_s, publisher)
 
     @property
+    def capture_active(self) -> bool:
+        """Whether the wedge capture process is LIVE right now (a PROCESS fact).
+
+        Sourced from the WEDGE-CAPTURE PROCESS FACT
+        (``app.state.wedge_capture_watchdog is not None``) — deliberately
+        NOT a switch value and NOT the skill-capture kill-switch:
+
+        * the field's own contract is *wedge capture*; the skill-capture
+          lane is a different subsystem with a different lifecycle, so
+          wiring this to ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` would be a
+          category error;
+        * ``ENSEMBLE_WEDGE_CAPTURE_ENABLED`` would be a SWITCH fact, and
+          the house already rejected switch-facts for this exact slot —
+          the sibling ``listener_enabled`` fact is documented as
+          switch-INVARIANT by construction.
+
+        The fact is resolved PER READ (never cached at construction):
+        the watchdog is created AFTER this provider is constructed in
+        the same lifespan, so a boot snapshot would be permanently
+        ``False``.  A resolver that raises degrades to ``False`` — the
+        refusal direction is preserved, and a broken resolver never
+        breaks the door.
+        """
+        try:
+            return bool(self._capture_active_resolver())
+        except Exception:  # pragma: no cover — a broken resolver never breaks the door
+            return False
+
+    @property
     def census_running(self) -> bool:
         if self._census is None:
             return False
@@ -144,7 +183,7 @@ class RegistryMetricsQueryProvider:
         return AvailabilityFacts(
             census_gated=not self.census_enabled,
             census_running=self.census_running,
-            capture_active=self._capture_active,
+            capture_active=self.capture_active,
         )
 
     # ── the read helpers ────────────────────────────────────────────────

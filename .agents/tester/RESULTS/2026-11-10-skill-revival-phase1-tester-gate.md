@@ -1,0 +1,311 @@
+# TESTER FUNCTIONAL GATE — agents-ensemble skill-system-revival Phase 1 (ENSEMBLE-27)
+
+Date: 2026-11-10 (gate ran 04:24–05:50 UTC)
+Worktree: `/home/nea/ensemble-src-wt-skill-revival-phase1`, branch `feature/skill-system-revival-phase1`
+**Gate pin: `74914c435f6c1dd50e28152b71f5083aba353960` — verified MATCH at start.**
+Base leg: `/home/nea/ensemble-src-wt-skill-revival-base1` @ `ae5bbafedde90c7af1065b9660196bbffbbbf9c1` — clean before AND after (porcelain empty, `--untracked-files=all`).
+Gate workers: 9 (state, head-red, base-red, regA, regB, regC, confinement, e1/h2/e3, e4/f10) + 2 follow-ups.
+
+---
+
+## VERDICT: **PASS-WITH-NOTES**
+
+**Net-new reds = 0 in BOTH scopes.** Every commissioned functional claim verified on real objects. The notes are (a) one MAJOR test-infrastructure defect found by the gate and fixed in-gate (pack cleanup destroyed shared sink evidence), (b) routed pre-existing minors (generic-fault wording, an un-runnable PG pack registration), (c) a false clean-slate premise on `data/` at gate START (disclosed, measured, receipt byte-identical START→END).
+
+| # | Question | Verdict | Evidence |
+|---|---|---|---|
+| 1 | Net-new reds, touched-file scope | **∅ EMPTY** | §1 below |
+| 2 | Net-new reds, registered-pack scope | **∅ EMPTY** (1 pack FAIL = pre-existing base family) | §2 below |
+| 3 | Metrics honesty (A1–A4) | PASS | §3 |
+| 4 | Confinement (B) — independent re-drive + attack | **PASS — 6/6 attacks REFUSED** | §4 |
+| 5 | Flakiness (G) | PASS — 3× full-file-set 0 reds (pack) + ×5 gate legs green | §5 |
+| 6 | Burst guard (E1) + H2 tool path | PASS — durable, identity-keyed, 429, truthful envelope | §6 |
+| 7 | Observability (D) | PASS (with one PARTIAL disclosed by the lane itself) — **the "PARTIAL" qualifier is SUPERSEDED, see the §7 correction note (the counter is COMPLETE at 3 refusal sites); verdict itself UNCHANGED** | §7 |
+| 8 | Deactivation mechanism + brake (E4) | PASS — 5/5 behavioral probes | §8 |
+| 9 | Injection dedupe (F) | PASS — mutation re-driven, 5 pins RED | §9 |
+| 10 | Display hygiene (E3) | PASS — incl. independent round-trip | §10 |
+| 11 | F-10 coverage gap | **CLOSED** — e2e test added, counter-mutation-proven, commit `58c8cb655` | §11 |
+| 12 | Migration census / prompt baseline / census population | 126 sql / 0 dups; 181 in-sync; population stated in §12 | §12 |
+| 13 | `data/` clean at START/END | **PREMISE FALSE at START** — measured, disclosed (§13) | §13 |
+
+---
+
+## 1. Red-set protocol — SCOPE 1: touched files (the 12-file skill blast radius)
+
+Command (both legs, identical): `.venv/bin/pytest <12 files> --tb=short -q --timeout=120 -p no:cacheprovider`, full 12-var env scrub, `PYTHONDONTWRITEBYTECODE=1`, `timeout 300` outer. Classifier: `grep '^FAILED'` ONLY.
+
+**BASE leg (×3):** 459 collected. run1 3F/456P · run2 3F/456P · run3 5F/454P (the 2 extra = the AB flake pair, 1-of-3 each). **TRUE base = intersection ×3 =** the `tests/manager/test_skill_service_init.py` trio (SQLite `20260714_000001` migration defect, `runner.py:677`).
+
+**HEAD leg (×5 — 3 protocol runs + a clean-tree confirm + an isolated-data-dir probe; all five byte-identical):** 459 collected. **3F/456P every leg.** FAILED list == the base trio, verbatim.
+
+**NET-NEW = (head ∩) − (base ∩ of 3) − (quarantine list) = ∅.**
+Quarantine classification: `test_ab_resolution_threshold_met` and `test_ab_resolution_force_resolve` were collected and GREEN in all 5 head legs (0 occurrences); the base leg flaked 1-of-3 on both — exactly the documented base instability, correctly classified, not counted.
+
+## 2. Red-set protocol — SCOPE 2: registered-pack registry (17 packs + 2 registered invocations)
+
+| Pack | RESULT | Counts | Wall | Note |
+|---|---|---|---|---|
+| metrics_capture_active_wiring_unit_test | PASS | 15P | 85s | A1 |
+| metrics_census_polarity_unit_test | PASS | 13P | 39s | A2 incl. honesty legs (gated ⇒ dark) |
+| metrics_capture_lane_read_unit_test | PASS | 15P | 63s | |
+| metrics_capture_lane_off_seam_unit_test | PASS | 11P | 91s | ⚠️ cleanup leg destroyed shared sink (§13, F-G1) |
+| skill_capture_observability_unit_test | PASS | 19P | 25s | D |
+| skill_counter_drift_unit_test | **TIMEOUT→PASS post-split** | 37P pins + legs | 300s kill → 189s (a–d) + 185s (e–h) | internal 600s budget violated the 300s cap; split landed `60972185f`; M-A4g/h proven RED→GREEN by manual driver first |
+| skill_evolution_unit_test | PASS | 112P across legs; **G acceptance 0/0/0 reds ×3** | 134s | |
+| skill_capture_killswitch_unit_test | PASS | mutation legs in-pack RED→GREEN, restores byte-identical | 69s | |
+| skill_id_verbatim_contract_unit_test | PASS | 135P | **288s** | ⚠️ 12s under the 300s cap under load — near-cap, split candidate |
+| skill_services_gzip_regression_unit_test | **FAIL (pre-existing)** | 3F/177P | 27s | the 3 F == the base migration trio byte-identical ⇒ pre-existing, NOT net-new |
+| context_skills_unit_test | PASS | 164P | 9s | |
+| skill_dual_column_deactivation_unit_test | PASS | 11P + 3 legs | 42s | |
+| skill_stale_deactivation_unit_test (MUTATIONS=0) | PASS | 56P | 25s | E4 pin arms |
+| skill_injection_budget_unit_test (MUTATIONS=0) | PASS | 33P | 6s | F pin arms |
+| skill_keeper_confinement_behavioral_unit_test (MUTATIONS=0) | PASS | 19P | 16s | import-guard proved the pinned checkout |
+| skill_keeper_read_scope_unit_test (MUTATIONS=0) | PASS | 68P | 43s | |
+| skill_tools_display_hygiene_unit_test (MUTATIONS=0) | PASS | 13P → **22P** | 20s → 44s | **RE-BASELINED at re-verification (§14.3): additive pin growth** — 13→17 (`1db90b488`) →21 (`4b9fc8ac4` D-G1) →22 (`d8417719a` M-E3d re-aim); all green. The 13P figure was STALE |
+| **F-2 census invocation 1** (`test_metrics_query_scope_cage.py`) | **PASS 7/7** | DECLARED_ROUTE_CENSUS 114 assert green | 11s | F-2 remediation PROVEN; 0 collection errors under full-family scrub |
+| **F-2 census invocation 2** (`test_router_scope_manifest.py` + integration class manifest) | **PASS 12/12** | `== 114` green; 38 mounts / 34 families unchanged | 12s | |
+| skill_evolution_pg_test | **NOT RUN** | — | — | structurally un-runnable (B2 below); pre-existing rot. **SUPERSEDED (2026-11-10 re-verification):** the lane RETIRED this pack (non-failing) and shipped the real live-PG leg `skill_revival_pg_dialect_unit_test` — **15 postgres-marked nodes, PASS, 24 s**, disposable native PG 16.15, teardown verified (§14.3). The PG surface is COVERED now, not merely deferred |
+
+**NET-NEW (pack scope) = ∅.** The single FAIL is the pre-existing base family, executed-attributed at base by §1.
+
+## 3. Workstream A — metrics honesty
+- **A1** capture_active wiring pack 15P (real watchdog presence drives the verdict; no unconditional `capture_off`).
+- **A2 polarity honesty verified BOTH directions**: enabled+running+publishing ⇒ `live`; the pack's dark-legs (`disabled ⇒ census_gated`, non-running wins order, enabled-but-no-series ⇒ series-absent) all assert `dark` and their mutation legs M-A2a/b/c proved RED→GREEN. If the fix had made everything green, these legs would have failed — they did not.
+- **A3** attribution predicate `has_genuinely_evolved_for_instance` (3-conjunct OUTCOME-FIELDS) landed at `daemon/repositories/skill/repository.py:1699`; retired `has_applied_for_instance` retained and labelled NOT-A-GATE; both consumers retargeted; the retargeted stub files make the "gate never consults the retired predicate" assertions LIVE.
+- **A4** counter-drift pack: pins + 8 mutation legs now ALL proven (g/h by gate driver, then in-pack post-split); transition-bump pin green.
+
+## 4. Workstream B — confinement (independent re-drive, production factory + resolver)
+Construction: `create_instance_tools(manager, …, agent_id="skill-keeper")` + real `resolve_tool_filter` on the real meta.json (deny-wins, 24 allowed names, 35 bound tools) + production read-scope wrapper chain + dispatch through a real compiled langgraph `ToolNode`. Fresh canaries (`GATECONF-24e7d3b0…`).
+1. **b7da3ed0 shape (24× edit_file + git commit): REFUSED 28/28** — the write tools never bind for the keeper; tree digest unchanged; porcelain clean. No warn-but-write path.
+2. **F-1 symlink: CLOSED** — grep_files returns NO canary content (symlink excluded by `filesystem.py:567` `not f.is_symlink()`); glob excludes the link; read_file refuses (outside-anchor + workdir-argument refusals); list_directory drops it entirely. Canary bytes never returned.
+3. **Traversal ×10: ALL REFUSED** (`../`, absolute, workdir=anchor, workdir outside, grep/glob path escapes).
+4. **Undeclared agent: BYTE-IDENTICAL** outputs (sha-matched) on legitimate reads; the scoped/unscoped delta is exactly the hazard exclusion. Confirmed the fence is opt-in-by-meta (defense lives in the declared-scope filter — as designed, DS-15).
+**F-dedupe mutation re-drive:** pass-through `dedupe_injected_entries` ⇒ **5 pins RED**; restore sha `6951f9e2…` == pre-mutation; green 14P re-confirmed. Non-vacuous.
+
+## 5. Workstream G — flakiness
+Pack acceptance leg: **3 consecutive full-file-set runs, 0 reds each**, pinned classifier, `assert_full_file_set_acceptance` OK. Gate's own HEAD legs: AB pair green ×5. Base leg still flakes 1-of-3 (expected — old fixture). QUARANTINE rows 45/56/90 removal re-confirmed on gate evidence; the integration-file sibling node formally quarantined by this gate (new row, deselect-registered).
+
+## 6. Workstream E1 + H2 — burst guard
+Real `SkillJobDispatcher` + real `JobRepository` + real `AnomalyService`: 4th admission REFUSED (`SkillFixBurstCapRefused`) with anomaly row + counter + WARNING log + sink record; **durable across a fresh dispatcher (RAM cooldown empty)**; **identity-keyed** (3 admissions with 3 distinct job keys trip the 4th; job-keyed counting proven dead — 1 row per key); per-skill independence proven. REST route: **429** with reason body (control skill → 202). Tool envelope: truthful refusal (`NOT dispatched … NO job was created and NOTHING will be picked up`); the false "still recorded" sentence ABSENT on the refusal path; 3 job rows persist (no phantom 4th).
+**Routed finding (pre-existing):** the GENERIC-fault branch still says "request is still recorded above for the next skill-keeper run" while empirically 0 rows persist when dispatch raises before insert — the same defect class H2 fixed for the cap branch. Owner: skill-tools lane; wording-only fix.
+
+## 7. Workstream D — observability
+Packs 19P + 11P + 15P green: every refusal site increments its own counter; deviation announced through the REAL production holder chain (M-C1, no injected reporter); prompt SHAPE never carries raw prompt; admission/execution signals never merged. Sink schema verified live: keys `stage/outcome/refusal_reason/prompt_source/run_id/deviation` (the dispatch's `kind`/`status` names do not exist — corrected here). The lane's own disclosure stands: the production `capture_lane_off` refusal site in the metrics lane returns before the dispatcher gate, so that ONE counter is partial today; the seam exists and is pinned (M-C2), Phase-2 wires it. **[that sentence is SUPERSEDED — see the correction note below; it is retained verbatim as the trail of what I believed at gate time]**
+
+### CORRECTION NOTE (2026-11-10 — annotation only; verdict, findings list, severities, remediations and every other measurement in this artifact are UNCHANGED)
+
+My §7 conclusion — that the `capture_lane_off` counter is **PARTIAL** in production because the metrics-lane refusal site returns before the dispatcher gate, and that the Oct-22-class deviation would therefore still be under-counted and need Phase-2 wiring — was **WRONG in its outcome**. The mechanism half was right (the metrics seam does return before the dispatcher gate) and irrelevant: a refusal is counted **at the site that refuses**, so the ordering across sites changes nothing about completeness.
+
+**Corrected conclusion: the counter is COMPLETE — three refusal sites, one counter key, each incrementing BEFORE it refuses.**
+- The capture switch is read in exactly **4** places: **3 refuse, 1 reports**. `SKILL_CAPTURE_KILL_SWITCH_ENV = "ENSEMBLE_SKILL_CAPTURE_ENABLED"` (`daemon/services/skill_job_dispatcher.py:75`), single resolver `_resolve_capture_enabled()` (`:153-176`); no other read spelling exists.
+- `daemon/services/skill_metrics_service.py` — guard `:663` (`:659` at the gate pin), recorder `_record_capture_lane_off_refusal(...)` `:682` → refusal `return None` `:687`.
+- `daemon/tools/skill_evolution_tools.py` — guard `:522` → `observability.record_capture_lane_disabled_refusal(...)` `:539` → refusal `:563`.
+- `daemon/services/skill_job_dispatcher.py` — guard `:1126` → `record_admission_refusal("capture_lane_off")` `:1136` → refusal `:1148`.
+- All three land on the **same** key `_COUNTERS.admission_refusals["capture_lane_off"]` (`daemon/services/skill_capture_observability.py:290-292`, `:355`); only the sink record's `prompt_source` differs. The 4th read site (`daemon/services/skill_roster.py:382`) only REPORTS `armed: false`.
+- The twin seam `check_and_capture` (`daemon/services/skill_evolution_service.py:1622`) has **no** capture-enable check (0 hits) — it cannot refuse because the lane is off.
+- Wiring provenance: `ae99a5be9` — `git merge-base --is-ancestor ae99a5be9 74914c435` ⇒ ANCESTOR_YES; all three call sites present AT THE GATE PIN.
+- Newly pinned by `tests/unit/test_skill_capture_lane_off_cross_path.py` (8 nodes): each of the three refusal paths driven SEPARATELY, an **AST census of the guard SITE SET** (`:249-286`, path-set equality + count), and a **path-sensitivity leg** (M-C2e) that neutralises the metrics recorder and shows the metrics assertion REDs.
+
+**Root cause of my error:** I inherited the metrics lane's own PRESENT-TENSE disclosure ("the counter is PARTIAL") from the lane's summary material instead of re-deriving the call sites at the pinned sha — a stale disclosure read as a current fact. The metrics lane has since corrected that disclosure; the corrected status is recorded in the plan's §17 item 44. The lesson generalises: *a lane's own narrative about its own partiality is a hypothesis, not evidence — re-derive the call sites before repeating it.*
+
+**Two nuances recorded for honesty (neither changes the conclusion):** (a) the metrics guard moved `:659`→`:663` after the pin — same site; the AST census compares PATHS only (line drift cannot red; the count assert catches a second guard inside one file); (b) the M-C2e leg machine-asserts "something went RED", while the sharper discrimination ("ONLY the metrics node REDs; tools/dispatcher stay GREEN") is observed-and-logged (`PACKS.md:4741`), not machine-asserted.
+
+**Boundary facts (they do not reopen the conclusion):** admission refusals are complete; at EXECUTION time there is **no** capture-off gate (`daemon/services/job_processor.py` gates `skill_evolution`, not `skill_capture` — a `skill_capture` row admitted while the lane was ON still executes after a flip-off), and `skill_roster.capture_lane_enabled()` has **no production caller** in Phase 1 (it feeds the staged payload only). Admission refusal and execution refusal stay two signals (DS-19).
+
+**Separately sharpened, NOT re-scored here:** the PG-execution gap — the PostgreSQL dialect branch of the identity-keyed burst-cap count (`daemon/repositories/job_queue/repository.py:68-79`, consumed by `count_fix_admissions_since` — **def at `:671`, docstring `:676-715`, body `:716-723`**; an earlier draft of this note cited `:659-711`, which is STALE by 12 and points at the preceding function's warning block) is **compiled-only**: its pin (M3, `tests/unit/test_skill_revival_fix_wave1_pins.py:290`) is STATIC by design (no DB contact — the ambient `POSTGRES_*` points at live `ensemble_prod`), and the PG pack that should exercise it is un-runnable AND would collect **0** postgres-marked tests even if repaired (no `pytest.mark.postgres` in the surviving files; the PG-marked skill files are referenced by **zero** packs). Tracked as F-G3; its severity is unchanged by this note. **CLOSE-OUT STATUS (2026-11-10, later the same day):** the owning lane retired the degenerate pack (non-failing) and landed a REAL live-PG leg — `skill_revival_pg_dialect_unit_test` (15 nodes, disposable native PG 16.15 cluster) — whose mutation leg **M-1 proves the point this note made**: swapping the two dialect branches leaves the SQLite-only suite **blind at runtime** (the count still returns 1 on SQLite; only the compile-time string pin catches it) ⇒ the gap was real and the live-PG leg is the correct closure. The lane also found and fixed a genuine NULL-unsafe PG stamp defect (`NULL::jsonb || jsonb_build_object(...)` silently loses the message_id; now `COALESCE(...)`, pinned on BOTH dialects).
+
+## 8. Workstream E4 — deactivation + brake (scratch SQLite + `ENSEMBLE_DATA_DIR` fence; real boot entry `daemon/manager.py:5768`)
+(a) brake INERT unset AND =0: 0 constructions, 0 receipt bytes, 0 row changes, only 2 DEBUG lines. (b) A/B refusal: rows stay `(True,'ab_testing')`, receipt enumerates `skipped_open_ab_test` + blocking test id. (c) H3: injected mid-apply failure leaves an on-disk receipt covering flipped AND intended-unflipped rows; reversal restores the EXACT prior pair. (d) no-winner: `PairResolutionRefused: skipped_no_winner_decision`; zero call sites supply a winner (static). (e) atomic `os.replace` same-dir; refusal list REPLACES across runs. Worktree receipt sha **`fcd7105c…` IDENTICAL START→END**.
+
+## 9. Workstream F — injection gate
+33 pin arms green (budget cap binds; low_match bounded; roster manifest re-derived, staged payload capture-gated); identity dedupe mutation-proven (§4). No agent flipped; no meta.json edit.
+
+## 10. Workstream E3 — display hygiene
+No bare 8-hex id echo in `skill_fix`/`skill_feedback` envelopes (full uuid rendered); `pf-` pseudo-id only on an additive line; emitted id ROUND-TRIPS through `skill_view` (bare 8-hex prefix correctly REFUSED by skill_view). Independent scratch scenario + 13P pack.
+
+## 11. F-10 — ADDED
+`tests/unit/routers/test_skill_patch_dual_column_e2e.py` (3 nodes, 299 lines): real store+repository through the real PATCH route; persistence read back on a FRESH engine; boundary fact recorded — the both-columns guarantee is enforced at the ROUTER (`SkillUpdateRequest` has no `status` field; Pydantic drops caller-supplied status; the repo layer alone CAN write one column — boundary, not defect). Counter-mutation (old pop-and-translate shape emulated at the real seam) ⇒ nodes 1+3 RED. 3P standalone; 12P with sibling; routers-dir baseline 72F identical with/without (pre-existing). **Commit `58c8cb655cfc67fd1e73ca72f6de53a8d88c14c7`.**
+
+## 12. Census / baseline / population
+- Migration census: **126** `.sql`, all `^[0-9]{8}_[0-9]{6}_`, **`uniq -d` EMPTY**; count unchanged by the gate's commits (re-verified at END). Date-only form not used.
+- Prompt baseline: `.venv/bin/python scripts/protection/generate_prompt_artifact_baseline.py --check --tree .` → **"PROMPT-BASELINE: OK — 181 versioned artifact(s) match" rc=0**.
+- **Census population (stated per dispatch) — DERIVED BY THIS GATE:** `agents/*/meta.json` glob = **46** (44 real + `_baby_template` + `_mother`; `_inner_soul` and `_prompt_system` have no meta.json); the **registry registers 45**. Diff = exactly one name: `_baby_template` is in the glob but skipped by `SKIP_DIRS`; **`_mother` is in the glob AND registered as a live (spawnable) agent** — the `SKIP_DIRS` comment ("…not standalone agents (no meta.json)") is stale, and a leading-underscore template is registered. **Flagged for a leader ruling** (anomaly `03f5379d`), not a lane defect. Registry composition: 40 untagged + 5 tagged (`approver`/`developer`/`planner`/`reviewer`/`tidier[v2]`).
+
+## 13. `data/` state — premise FALSE at START (disclosed)
+- **START (04:26Z):** `data/skill-capture-observability/` = **1 file / 8,201 B / 26 rows** (`skill-capture-20261110.jsonl`, written 04:18:21–04:18:44Z — BEFORE this gate session began 04:22:54Z; writer unattributed, rows = 21 refused/capture_lane_off + 5 admitted). `data/skill_stale_deactivation_receipt.json` PRESENT (152 B, run_id `c38cd9a3e788`, all lists empty, 2026-11-09T19:01Z — the implementation lane's own E4 run) + 5 rotations + candidate manifest.
+- **DURING:** the HEAD red-set legs appended +78 rows (3×26; per-file attribution closes exactly: killswitch 12 + job_dispatcher 4 + metrics_service 10 = 26/leg — the metrics_service 10/leg is the ROUTED, pre-existing leak the dispatch predicted).
+- **END: 0 files / 0 B.** The file was **DELETED** by `metrics_capture_lane_off_seam` leg M-C2d's `clean_marker_leaks()` (`rm -f` on the whole dated file when the planted marker is present) — **116 rows of observability evidence destroyed, gitignored, unrecoverable.** This is gate finding **F-G1 (MAJOR, test-infra)**: the pack's "a concurrent lane's residue is never touched" comment is false at file granularity; the sink appends all lanes into one daily file. Surgical-cleanup fix routed (row-rewrite, not file-delete) — landed in-gate as a test-code commit; see PACKS gate section.
+- Receipt sha IDENTICAL START→END (§8). Live install never touched.
+
+## Quarantine actions (this gate)
+- Confirmed removal of rows 45/56/90 on gate evidence (already moved to Resolved by the lane).
+- **Added** one Active row: `tests/integration/test_skill_evolution_e2e.py::TestSkillABTesting::test_ab_test_resolves_when_threshold_met` (own-fixture StaticPool flake, base-rate-higher, deselect-registered in `skill_evolution_unit_test` leg 3c; fix = port G's fixture shape to that file).
+
+## Findings register
+| id | severity | finding | owner / action |
+|---|---|---|---|
+| F-G1 | MAJOR (test-infra) | `clean_marker_leaks()` deletes the WHOLE shared daily sink file — destroyed 116 evidence rows; false "never touches residue" comment | **FIXED in-gate** `b7e0269e3` — row-granular surgical removal (salted per-run marker, atomic temp+rename, file never unlinked, mode preserved); pack re-run PASS 88s. The 116 lost rows are NOT restored (gitignored, unrecoverable) · **CLOSE-OUT (2026-11-10, post-gate):** the fix is intact and re-proved green (pack `RESULT: PASS (4 mutation legs RED→GREEN, 162s)`; the pack itself deleted nothing). **Class-level closure NOT achieved** — three residuals: (a) the same unlink-the-whole-shared-file class is LIVE at `daemon/services/skill_deactivation.py:641` (receipt rotation unlinks shared `skill_stale_deactivation_receipt.json.*.json` copies — mtime-keyed, keep=5, NOT lane-scoped; the dir already holds exactly 5 copies); (b) an **UNATTRIBUTED shared-sink unlink RECURRED at 08:29:28Z** — the daily sink file (4,115 B / 12 rows, recreated by my verification run) was deleted 12 s AFTER the pack exited cleanly; no repo code path can do it (pack never unlinks; the 90-day prune cannot touch today's file; `remove_rows_carrying` never unlinks); the concurrent lane was running pytest in the worktree; (c) the lane's new P6 static class-proof does NOT scan `test/packs/metrics_capture_lane_off_seam_unit_test.sh` — the pack that caused F-G1 |
+| F-G7 | info (leader ruling wanted) | `_mother` is registered as a live spawnable agent while `SKIP_DIRS`' comment claims underscore names have no meta.json; `_baby_template` is glob-only | leader ruling (anomaly `03f5379d`) — not a lane defect; registry/policy question |
+| F-G8 | MAJOR (evidence-integrity, lane-facing; found at close-out 2026-11-10) | The lane's PACKS.md mutation-matrix claims for H2/F-G2 are uncorroborated or contradicted on disk: the ONLY surviving matrix TSV (`/tmp/skill-tools-display-hygiene-pack-OaWmZH/mutation-matrix.tsv`, 02:40Z) records **M-E3d `YES NO`** with both logs containing `ERROR: file or directory not found:` (empty node id) — the leg's "RED" was a pytest usage error and it never went GREEN — contradicting the row's "H2 MICRO-PASS … 4/4 legs RED→GREEN"; the later "F-G2 … 6/6 legs" claim has NO surviving artifact (the pack `rm -rf`s its own `$FAKE_HOME` including the TSV) and was superseded in-place by "7/7" (`cfb53c03e`) without a new artifact. Separately, the re-aimed M-E3d pin IS discriminating but **only via its `"dispatcher raised during dispatch"` assertion** — the `"burst cap"` assertion is satisfied by BOTH branches because `SkillFixBurstCapRefused`'s own message carries the `refused: burst cap` prefix (`skill_job_dispatcher.py:336-343`) | owning lane: (1) stop deleting the mutation-matrix artifact (export it outside `$FAKE_HOME`), (2) re-run phase 2 with the matrix preserved, (3) correct the PACKS row. Gate limitation recorded: the M-E3 legs were NOT re-driven by the gate (production source owned by a live lane); the discrimination verdict is static. **STATUS (2026-11-10, later the same day):** the owning lane re-verified the four matrix rows against disk and corrected the M-E3d mechanism in `5837b62a3` ("docs(tester): re-verify the four lane matrix rows against disk (F-G8) and correct the M-E3d mechanism") — recorded here as the LANE's dated measurement (house fact, Disclosures §8), not as gate-re-verified evidence. **RESIDUALS still true at this writing:** the F-G2 **WARNING-log leg remains unpinned** (code-only), and the **M-E3e/M-E3f legs have no surviving on-disk execution artifact** (the pack deletes its own matrix) ⇒ those matrix rows stay **ROUTED** until a fresh artifact exists |
+| F-G9 | minor (in-flight WIP, lane-facing; snapshot at close-out 2026-11-10) | Two non-reproducibility defects in the lane's UNCOMMITTED WIP observed during close-out: (a) `test_p9_the_sentinel_catches_a_teardown_that_restores_none` poisons `tests/helpers/skill_sink_redirect.py::_LAST_LANE_STATE=(nodeid, safe=False)` and is not restored in `finally` → every later lane test in the session ERRORs (12 errors observed in one run); (b) the sink-retention pin file's full-invocation result flips between runs while the concurrent lane runs pytest in the same worktree (4F/17P then 12E/15P on identical commands; P1+P2 pass in isolation) | owning lane: restore the helper state in `finally`; re-verify the pin files on a quiet worktree before registering. Gate recorded the A4 close-out pytest leg as UNVERIFIABLE-UNDER-CONCURRENCY rather than PASS/FAIL |
+| F-G10 | MAJOR (test-infra / gate integrity; found at re-verification 2026-11-10) | **A pack could emit a FALSE FAIL with no defect behind it.** `test/packs/metrics_capture_lane_off_seam_unit_test.sh` recorded its post-run manifest as TWO separate commands (`cp "$PIN" "$copy"` … then `sha256sum "$PIN" > …want`). A concurrent writer between them makes the manifest compare a STALE sha against a correctly-restored file ⇒ false `post-run manifest: … is NOT byte-identical`. Reproduced end-to-end: the FULL pack FAILED on a moving tree and PASSED (159 s) on a quiescent one. **FIXED** `fee725105` — a `snapshot_copy` helper derives the digest FROM THE COPY across all 3 snapshot sites, and the EXIT trap prefers the per-target copy. Proven both ways: controlled old-vs-new experiment in `/tmp` copies (OLD ⇒ the false FAIL; NEW ⇒ PASS), plus a live 220 s byte-preserving `touch` writer hammering both targets against the real fixed pack ⇒ PASS, 4 legs RED→GREEN, manifest OK. **RESIDUAL (swept, NOT fixed): 14 further packs share the same two-command shape** — `metrics_capture_active_wiring`, `metrics_census_polarity`, `metrics_capture_lane_read`, `skill_counter_drift` (+ its mutation half), `skill_dual_column_deactivation`, `skill_id_verbatim_contract`, `skill_injection_budget`, `skill_keeper_confinement_behavioral`, `skill_keeper_read_scope`, `skill_stale_deactivation`, `skill_tools_display_hygiene`, `skill_capture_killswitch`, and `notify_user_mutation_legs` (the reverse-order variant: digest taken BEFORE the copy). Three packs are NOT at risk (memoir ×2, `skill_tools_surface`). The residual is a truthfulness defect in the GATE FURNITURE, not in the lane — it can redden a future gate for a concurrent-edit reason, and it scales with the multi-lane worktree | owning packs (next gate for those packs): adopt `snapshot_copy` (digest from the copy) in each. Full immunity also needs per-file locking in the packs — a separate change, deliberately NOT performed (residual restore-window race disclosed) |
+| F-G2 | minor (pre-existing) | `skill_fix` generic-fault branch emits empirically-false "still recorded … will be picked up" | skill-tools lane wording fix (cap-branch wording applied to generic branch) · **STATUS ANNOTATION (2026-11-10 — annotation only; the finding text above is retained VERBATIM as the trail of what was true at gate time, and the finding's severity is UNCHANGED): the defect was REAL at gate time and is now FIXED.** Carrier identified by the gate itself from the tree (NOT on anyone's report): **`1db90b4882686f0bc4c0a766c713aa76bf5acf4a` — "fix(skill): derive the skill_fix fault envelope from the real persistence outcome"** (2026-11-10T07:40:03Z, ancestor of HEAD); the token `fix_dispatch_fault` is BORN in that commit — `git log --all -S"fix_dispatch_fault" -- daemon/` returns it ALONE, and repo-wide the same search returns 5 commits of which the carrier is the **only one touching `daemon/` production source** (the other four touch only the pack script / the pin file / PACKS.md). Refinement `9c7649fdd` (F-G2.1) adds the exception's own carrier id ahead of the read-back; `4b9fc8ac4` (D-G1) is header wording only and carries none of it. Behaviour VERIFIED from the tree AT the carrier commit: the envelope reads the REAL persistence outcome (`manager.job_queue_service` → `.repository` → `JobRepository.find_by_idempotency_key`) and renders two distinct outcomes — pre-insert fault ⇒ "NOT recorded: NO skill-keeper job was persisted … NOTHING will be picked up"; post-insert fault ⇒ "Dispatched … `<persisted_job_id>` was persisted for this request"; plus the drop-visibility chain (anomaly row + `fix_dispatch_fault` counter + WARNING log carrying the token + sink record) and a metadata-identity guard that refuses to name a row belonging to a DIFFERENT request. Live proof at HEAD `dd1cb4f5e`: the pin file is **22 passed**, and the F-G2 class nodes PASS (pre-insert wording, post-insert naming, drop countable+announced, recorded-fault-not-counted, carrier-id-wins-over-read-back). **TWO RESIDUAL GAPS, stated so the row is not over-read:** (a) the **WARNING-log leg is NOT pinned** — it is code-only (caplog assertions = 0 in the pin file); the drop is pinned 3-of-4 (anomaly + counter + sink); (b) the **M-E3e/M-E3f matrix rows have NO surviving on-disk execution artifact** (the pack `rm -rf`s its own `$FAKE_HOME`; the only surviving TSV is 5 h stale, covers M-E3a-d only, and its M-E3d row is a FAILURE — `green=NO` with an empty-node-id error, the very mechanism defect the lane later corrected at `5837b62a3`) ⇒ per the house fact that a mutation matrix is a dated measurement, **those matrix rows stay ROUTED** until a fresh artifact is produced. The lane's own remediation commit `5837b62a3` ("re-verify the four lane matrix rows against disk (F-G8) and correct the M-E3d mechanism") is recorded here as the lane's claim; the gate did not re-run the lane's matrix (its source is owned by a live lane) |
+| F-G3 | minor (pre-existing, registration) | `skill_evolution_pg_test` invokes deleted `tests/unit/test_auto_load_skills.py`; `set -e` aborts rc=4 BEFORE any RESULT line | pack owner: repair file list or retire the pack |
+| F-G4 | minor | `skill_id_verbatim_contract_unit_test` ran 288s/300s under load (near-cap) | tester/lane: split candidate before next registration |
+| F-G5 | info | `data/` clean-slate premise false at START (26 rows + receipt pre-existed) | none — measured + disclosed; future gates must snapshot, not assume |
+| F-G6 | info | 2-var `ENSEMBLE_AUTH` scrub leaves 5 family vars — collection errors that mask census reds; full 7-var family scrub is REQUIRED (matches POK `auth-lane-scrub-ensemble-auth-env`) | none — encoded in this gate's recipes |
+
+## Disclosures (could not verify / did not run)
+1. **`skill_evolution_pg_test` NOT RUN** (F-G3) — the PG-leg surface of the lane is covered by the M3 dialect pins (in `skill_capture_killswitch`/fix-wave packs) but not by a live PG run at this gate. No PG DSN was provisioned (live contact forbidden by the envelope). **CLOSE-OUT ADDENDUM (2026-11-10):** the PG leg is **RUNNABLE on this host** — postgresql-16 binaries are already on disk (`/usr/lib/postgresql/16/bin/{initdb,pg_ctl,postgres,createdb}`; no install, no Docker needed); the owning lane provisioned a disposable native cluster during gate close-out (`/tmp/skillrev-pgdev`, port 54333) and is authoring a postgres-marked dialect test (`tests/postgres/test_skill_revival_pg_dialect.py`); `tests/postgres/conftest.py` forbids `ensemble_prod`/`ensemble_dev` unconditionally (`FORBIDDEN_DB_NAMES`), requires an allowlisted scratch DB, and serial execution. **The leg is therefore recorded as NOT COVERED AT GATE TIME — verifiable later on this host — NOT as host-unverifiable.** **SECOND CLOSE-OUT ADDENDUM (2026-11-10, re-verification): the leg NOW RUNS AND PASSES.** `skill_revival_pg_dialect_unit_test` executed **15 postgres-marked nodes** against a disposable native PG 16.15 cluster (`current_database() = ensemble_test`), **PASS, 24 s**, with **teardown verified** (0 listeners on the private port, no datadir residue). The disclosure is therefore **CLOSED**: the PG surface is covered by a live-PG leg, and the pathological `skill_evolution_pg_test` is retired (non-failing). This supersedes the "NOT COVERED" status — the only remaining PG caveat is that the leg's own mutation matrix (M-1's branch-swap proof) is a lane dated measurement (Disclosures 8), not re-run by this gate.
+2. **Whole-tree Tier-2 dual-side sweep NOT run** — the diff touches core seams (`daemon/manager.py`), which per ensure.md Gate Tiers would trigger Tier 2; the dispatch's explicit resource constraint (≈10G box, no swap, "never run a large test farm", bounded fan-out) and the commission's own two-scope protocol were honored instead. The lane's own review ran a scrubbed 26-file blast radius (2,019P/26F) with all 26 attributed. Residual risk: registered packs outside the lane-adjacent set were not re-run. This is the gate's largest deliberate scope reduction.
+3. **Agent-census population — RESOLVED at close-out (this line superseded its own earlier "not independently recounted" wording):** the gate DERIVED both populations — `agents/*/meta.json` glob = **46** (44 real + `_baby_template` + `_mother`; `_inner_soul`/`_prompt_system` have none); the **registry registers 45** (40 untagged + 5 tagged). The diff is exactly `_baby_template` (glob-only, `SKIP_DIRS`) and `_mother` (glob AND registered as a live spawnable agent — a leader ruling is open, F-G7). Non-blocking either way.
+4. **87 commits sit after the reviewed sha `cfe4480be`** — the review's F-1/F-2/H1/H2/H3 remediations were verified LANDED by this gate (static + behavioral), but the council's 11 minors were not individually re-audited.
+5. **HEAD moved during the gate by THIS gate's authorized commits**: `74914c435` (pin, all red-set + registry legs 1–4) → `58c8cb655` (F-10, additive test file only) → `60972185f` (pack split, test code only) → final docs+cleanup commit (see below). W8a re-verified its 8 exercised surfaces content-identical across the F-10 move; W4's packs 5–6 ran post-move (additive-only diff). All production source identical to the pin at every point (verified by porcelain + per-worker fingerprints).
+6. One foreign dirty tracked file throughout: `.agents/shared/planning/designer-agent/install-audit.jsonl` (+9 `kms_issue` rows, mtime 2026-11-09 22:29Z, predates the gate) — untouched, unstaged, attributed to the designer-agent lane.
+7. Concurrent foreign pytest lanes observed (pok worktrees) — never touched; timing variance disclosed (near-cap pack F-G4).
+8. **A mutation matrix's evidence is a HISTORICAL RECORD, not a reproducible artifact — HOUSE FACT** (recorded once project-wide by the leader, 2026-11-10; **not a lane finding**). The ledger's *execution* claims (the RED→GREEN transitions and the wall seconds) are the implementing coder's **dated measurements**; they are not re-derivable read-only from the committed tree, unless the harness re-runs the matrix. This gate observed the practical consequence in the lane's own display-hygiene pack: the only surviving matrix TSV **contradicted** its PACKS row, and the pack `rm -rf`s its own `$FAKE_HOME` (TSV included) on a clean run, so a later reader cannot re-derive the matrix at all (F-G8 — a specific row-level contradiction, distinct from the general property). **Labelling of this artifact's own numbers:** every count, wall time and pass/fail figure quoted in this document is the gate's OWN dated measurement (run logs under `/tmp/`, tree state named per leg); the lane's matrix rows are the lane's dated measurements, and where this gate quotes a lane row it says so. A future gate that leans on a mutation-matrix row must either re-run the matrix or treat the row as the lane's dated assertion — not as evidence a reader can check.
+9. **D-G2 — the suffixed-idempotency-key UNDER-claim (safe direction; no correctness fix required).** The under-claim stands as the lane's §17 disclosure + DS-61: the producer side attaches the persisted carrier id (`persisted_job_id` attached at `daemon/services/job_queue_service.py:1591` / `daemon/services/skill_job_dispatcher.py:1046`), and the tool already PREFERS the carrier when present. The claim under-states what is known — it does not over-claim — so no correctness change is needed; the disclosure stands as written.
+10. **A3 measurement gap (routed as a follow-up instrument — NOT a behaviour defect).** A3's false-eligible population currently has **no CLI**: `scripts/audit/skill_counter_reconcile.py` is the **A4** instrument only — it delegates to `within_identity_key_divergence` and has zero references to A3's predicate (`has_genuinely_evolved_for_instance` / the three-conjunct OUTCOME-FIELDS form `selected = TRUE AND task_succeeded = TRUE AND feedback_applied IS NOT NULL`). The Phase-2 runbook therefore carries a clearly-labelled **DERIVED read-only SELECT** for A3 instead. What this gate DID verify is the behaviour half: the predicate landed at `daemon/repositories/skill/repository.py:1699`, the retired `has_applied_for_instance` is retained but explicitly labelled NOT-A-GATE-PREDICATE, and both consumers are retargeted (§3) — the missing piece is a **measurement instrument**, not a defect. This gate did not build the instrument.
+11. **Cross-check counts are SCOPE-SENSITIVE — and this gate ran NO contract-cell cross-check.** With **contract-cell** token scope the plan measures FORM 1 = **45/45** and FORM 2 = **44/45**; a run that extracts tokens from *all* cells (including pointer cells like `§17 #31`) produces a **FALSE C-30 failure**. The plan now pins the scope to the contract cell. **Scope note for comparability:** this gate ran **no C-30/C-43-family contract-cell cross-check at all** (its scope was the §13.2 red-set protocol + the registered-pack registry + behavioral probes), so there is **no scope mismatch to reconcile** against the plan's 45/45 and 44/45 — and this gate's own verdicts neither confirm nor contradict them. **Three stale anchors are recorded (body and ledger AGREE on each — IDENTICAL?=Y stands — but they are anchor drift, and a future reader must not "fix" one side and desynchronise the pair):** (a) C-43's token `skill_metrics_service.py:659` — the guard actually sits at **`:663`** since `897c16931` (this gate's §7 correction note carries this drift explicitly); note the **in-tree docstring at `daemon/services/skill_capture_observability.py:330` still cites `:659`** — a real (minor) doc drift to route to the owning lane; (b) §19 item 42's `:1091` → **`:1126`** (the dispatcher guard — this gate cites `:1126`, verified still current at `dd1cb4f5e`); (c) C-30's `:931-933` → the translate block now at **`:955`+**. Two further citation corrections this gate applied to ITS OWN text after re-verification at `dd1cb4f5e`: the composite helper's **executable** `record_admission_refusal("capture_lane_off")` call is at **`:374`** (`:355` is docstring text only), and `count_fix_admissions_since` is **`:671-723`** (not `:659-711`).
+
+## 14. Quiet-tree RE-VERIFICATION (2026-11-10, post-gate — the leader's de-risking of this gate's OWN verdict)
+
+**Why this section exists.** The gate's verdict was measured against a tree that **three lanes shared and edited concurrently** (F-G9 recorded exactly that non-reproducibility). The leader required that the verdict not rest on a moving tree. This section is the re-measurement: what was re-run, at which sha, with the tree state **disclosed rather than assumed**.
+
+### 14.1 The tree was NOT quiet — and how the measurement was kept honest
+- At re-verification start the worktree carried **DOCS-ONLY** dirt (`.agents/shared/planning/{decisions.md,phase1-plan.md,phase2-runbook.md}` + the pre-existing foreign `install-audit.jsonl`) and, decisively, **a foreign lane running the `metrics_capture_lane_off_seam` pack INSIDE this worktree** — whose matrix plants a real mutation into `daemon/services/skill_metrics_service.py`, **a dependency of 3 of the 12 red-set files**. A 240 s quiescence watcher never returned clean (the lane re-mutates continuously). HEAD also moved mid-measurement (`ba01d9cbb` → `39d93ee7e`, one new `test/packs/` file only; `git diff ba01d9cbb 39d93ee7e -- daemon tests` empty).
+- **CONTROL (the honest way to measure on a moving tree):** the HEAD red set was re-measured on an **IMMUTABLE EXPORT** — `git archive HEAD | tar -x -C /tmp/rev2-clean`, venv symlinked, `.env` (mode 600) copied — with the export proven **HEAD-EQUIVALENT**: sha256 of `git show HEAD:<path>` matched for all 12 files + `manager.py`/`graph.py`/`conftest.py`/`skill_metrics_service.py`, and file-list equality **2855/2855**; `inspect.getfile()` confirmed the tests loaded the export's `daemon/`. The export has no `.git`, so **no lane can mutate it**. (anomaly `d42e2216`, major/environment-config.)
+
+### 14.2 HEAD red set — REPRODUCED EXACTLY (net-new 0 confirmed on a quiet tree)
+| leg | wall | summary | FAILED set |
+|---|---|---|---|
+| 1 | 43 s | **3 failed, 456 passed** | the 3 base-red nodes |
+| 2 | 42 s | **3 failed, 456 passed** | the 3 base-red nodes |
+| 3 | 44 s | **3 failed, 456 passed** | the 3 base-red nodes |
+
+Collected **459** (gate: 459) · **∪ = ∩ = 3** · census **x3/3** on all three · all three share ONE root cause (the SQLite `20260714_000001` migration defect) · the `ERROR` lines (3/run) correctly excluded by the `grep '^FAILED'`-only classifier.
+**NET-NEW = 0. Δ vs the gate's recorded result: ZERO.** The AB pair (`TestCheckABTestResolution::test_ab_resolution_threshold_met` + `::test_ab_resolution_force_resolve`) PASSED in all three legs — the 1-of-3 flake is a **BASE-leg** phenomenon (base measured 3F/456P · 3F/456P · 5F/454P), consistent with the gate's own base measurement.
+
+### 14.3 Registered-pack re-verification (19 pack invocations + 2 census invocations)
+| pack group | result | notes |
+|---|---|---|
+| metrics + observability + counter-drift (split halves) | **PASS ×6** | capture-active 15P · census-polarity 13P · capture-lane-read 15P · off-seam 19P (pin arms; **nodes 11→19** — pin-set growth) · observability 28P (**nodes 19→28**) · counter-drift 37P + 4 legs RED→GREEN (189 s) and its mutation half 37P + 4 legs (183 s) |
+| **live-PG dialect leg (NEW — first appearance)** | **PASS** | **15 postgres-marked nodes**, 24 s, disposable native PG 16.15 (`current_database() = ensemble_test`); **teardown verified** (0 listeners on 54333, no datadir residue, only the host's pre-existing system PG survives) |
+| F-2 census invocations | **PASS ×2** | scope-cage 7/7 · router scope+class manifests 12/12 (the integration file carries no `integration` marker, so it really ran — no override needed) |
+| skill-domain packs (12) | **11 PASS + 1 FAIL** | the FAIL is the gzip pack with the **SAME 3 pre-existing base reds** — no 4th node. G acceptance reproduced **0/0/0 reds ×3**; AB node + sibling green in all three (the gate's flakiness proof reproduced). Display-hygiene grew **13P→22P** (additive: 13→17 `1db90b488` →21 `4b9fc8ac4` →22 `d8417719a` M-E3d re-aim) — the gate's "13P" row was stale and is re-baselined below. New D-G6 pack `skill_tools_surface_unit_test`: 37/37 nodes, wall 11–12 s, and its env-poison fence **REFUSED** a planted `ensemble_prod` |
+
+### 14.4 What the re-verification changed — and what it did NOT
+- **CLOSED:** the PG leg this gate had to record as NOT COVERED (§ Disclosures 1) is now **covered and green** — a live-PG leg with a real disposable cluster and verified teardown.
+- **CONFIRMED in operation:** the shared sink was **never destroyed** in any re-verification run (1 file in every snapshot) and **0 planted `agent-c2` marker rows survived** — F-G1's row-granular cleanup holds; the old file-destroying `rm -f` is gone.
+- **DELTAS (all benign, all disclosed):** additive pin growth (display-hygiene 13→22, off-seam 11→19, observability 19→28) — pin-set growth, not regressions; the gzip pack's unchanged pre-existing trio; and **one false FAIL** traced to a manifest **TOCTOU** (F-G10) that reproduces only under a concurrent edit and passes on a quiescent tree.
+- **NOT re-run:** the mutation-matrix legs of 3 packs (killswitch, id-verbatim, dual-column) — skipped under the no-mutation contract because their source is owned by a live lane. Those legs remain covered only by the house fact that a matrix is a **dated measurement** (Disclosures 8) — they are **not** re-proven by this pass.
+- **VERDICT IMPACT: NONE.** PASS-WITH-NOTES stands; net-new = 0 in both scopes; every commissioned functional claim re-verified on a tree whose state is disclosed above.
+
+## 15. SINK-LEAK CLASS — CENSUS, CLOSURE, AND THE **TRUE COUNT** (2026-11-10, post-gate)
+
+**The number, first.** Over the union of the three greps (helper-importers / `configure_sink|sink_override` / the broader writer set), the class decomposes into **two different sets that were being reported as one number**:
+- **4 POISONERS** — files that restored the process-global sink override to **`None`** in teardown: `test_skill_capture_lane_off_cross_path.py` · `test_skill_capture_lane_off_leak.py` · `test_skill_metrics_capture_lane_off_seam.py` · `test_skill_tools_display_hygiene.py`. A `None` restore lets a *later* test write into the real dir AND makes the lane's own cross-test sentinel **structurally blind** (it only records state for the helper-importing files, so the next `lane_test_start` sees `previous is None` and returns without asserting).
+- **15 WRITERS** — files that reach a sink-writing production seam on a DIRECT run with no redirect at all (masked under packs, because the packs export `ENSEMBLE_DATA_DIR=$SANDBOX` and never unset it). Marker-driven adjudication confirmed **all 15 wrote** (2–14 rows each).
+- **6 helper-importers** — the runbook's "six": **all six were already SANDBOXED**. The two numbers were never in conflict; they measured different sets.
+⇒ **TRUE direct-run writer class = 4 poisoners + 15 writers = 19** (the 6 helper-importers are safe and disjoint from the 15). **Framing correction, stated once more: the 116 destroyed rows were destroyed by F-G1's file-level `rm -f`** (a pack cleanup that DESTROYS); **this class POLLUTES** by appending. Two distinct defects.
+
+**Closure (all committed):**
+1. **The 4 poisoners** (`ba01d9cbb`) — the house pattern: helper import, `lane_test_start` + `configure_sink(tmp_path)` + snapshot at setup, `restore_safe_sink_redirect()` (never `None`) + `lane_test_end` at teardown. Each file's own tests re-run green (8 / 3 / 8 / 22 passed).
+2. **A class-wide pin with DERIVED membership** (`ba01d9cbb`, extended by `29cfb9a1`) — `tests/unit/test_skill_sink_class_containment_pins.py`: **N1** derives the poison set by AST-walking `tests/**.py` (a text scan miscounts docstrings) and requires it to equal the ONE sanctioned simulation site; **N1b** requires every member of the maintained 15-file writer set to carry a safe redirect and **names the offending file** if one appears without it; **N2** drives all **25 members** in subprocesses with the data-dir env scrubbed and a **unique per-run marker**, asserting the resolved dir is not the real one and that no real-dir file carries the marker; **N3** the shared-file sentinel (no file VANISHED, none SHRANK). **25/25 marker-covered, 0 inconclusive, 0 leaks.**
+3. **The 15 writers** (`29cfb9a1`) — the same autouse sandbox pattern applied to **15/15** (0 skipped); every file's own tests green (8–84 passed each); post-fix marker verification: **0 marker hits in the real dir for all 15**, and the 4 previously-fixed files re-checked with no regression.
+4. **The pin now has a registered pack** (`39d93ee7e` + `9bf9434aa`) — `skill_sink_class_containment_unit_test.sh`, `RESULT: PASS` rc=0 94 s, exit paths 0/124/1 proven, node-count contract = floor + node-ID presence (the pin is growing). **Before that pack the pin had none — the F-2 blind-spot class.** Pack-coverage audit over the 20-file sink-writer set: **NOT-COVERED = EMPTY**.
+5. **Non-vacuity proven by PLANTING, twice** — N1 plant ⇒ RED naming the offending `file:line`; N2 plant ⇒ RED with both clauses; and after the extension, removing the redirect from `test_skill_gate4_attribution_consumer.py` ⇒ N1b RED naming that file, restored sha-verified (`727da7dc…`) ⇒ GREEN.
+
+**Residuals (not closed here, stated so the runbook does not read "closed" as "whole"):**
+- **N1b's writer set is a MAINTAINED list, not a derivation** — a direct-import scan has 47 false positives + 4 false negatives, so the 15 are pinned by name with a comment explaining why. A NEW writer that appears without a redirect is caught only if it is added to the list; N2's marker oracle would catch it if it is ever added. **The class is closed for the 25 known members, not proved closed against future files.**
+- **P9's global-state poison** (`_LAST_LANE_STATE` left as `(nodeid, safe=False)` when the sentinel itself is exercised) — **VERIFIED EXACTLY (read-only, 2026-11-10):** `test_p9_the_sentinel_catches_a_teardown_that_restores_none`'s two `finally` blocks call only `restore_safe_sink_redirect()` — which points the SINK at the session scratch dir — and **do NOT restore `_LAST_LANE_STATE`**; that bookkeeping is set only by `lane_test_start`/`lane_test_end` in the test body, none wrapped in a `finally`. Its FINAL statement is `lane_test_start(...)`, which leaves `_LAST_LANE_STATE = None` — a clean terminal state — so the residual is **benign today but not guaranteed by a `finally`**. Lane-owned fix; **not claimed as closed here**.
+- **`tests/unit/routers/test_skills.py` + `test_skills_pf_refusals.py` are covered ONLY by a general regression partition's directory sweep** (and that partition runs `uv run pytest`, not the worktree venv) — drop it and they go blind to every gate. Lane/routing decision.
+- The **restore-window race** in mutating packs is inherent without per-file locking (F-G10 residual).
+
+## Byte counts / digests / exit codes (of record)
+- Base leg: 459 collected; 3F/456P ×2, 5F/454P ×1; porcelain empty before/after.
+- Head leg: 459 collected; 3F/456P ×5 (incl. clean-tree + isolated-data-dir legs).
+- F-dedupe restore sha256 `6951f9e2b5b127027c7faa09f9cb57b57e6a24008e4a06616a03c2dfbc5c939c` (pre == post).
+- Receipt sha256 `fcd7105c547d0a1f8ad5f4e6687881893a73695b8641a7f1337944ea84782c9a` (START == END).
+- Sink: START 8,201 B/26 rows → +78 rows (gate legs) → 0 B (deleted by F-G1).
+- Migrations: 126 both at START and END.
+- Commits added by the gate (all pathspec-limited, no production source, no push): `58c8cb655` (F-10 e2e test, +299) · `60972185f` (counter-drift pack split, 2 files) · `b7e0269e3` (F-G1 surgical cleanup, 1 file) · `c6b64484a` (tester docs: PACKS/QUARANTINE/RESULTS/LESSONS). **Final HEAD `c6b64484ac8f4ada8e82c2a1d461079fd118082a`**; porcelain carries only the foreign `install-audit.jsonl`.
+
+## Action needed
+- [ ] F-G2: skill-tools lane — generic-fault envelope wording (small, agent-facing string).
+- [ ] F-G3: repair or retire `skill_evolution_pg_test` registration.
+- [ ] F-G4: split `skill_id_verbatim_contract_unit_test` before the next load-bearing gate.
+- [ ] Port G's fixture shape to `tests/integration/test_skill_evolution_e2e.py` (un-quarantine path for the new row).
+- [ ] POK store at 64-entry cap — two gate facts could NOT be recorded (dual-column guarantee boundary; auth-scrub family already recorded). Curator curation needed.
+
+### Overall
+- Red-set (both scopes): ✅ NET-NEW 0
+- Confinement / E1 / E3 / E4 / F / G / A / D: ✅ verified on real objects
+- F-10: ✅ closed
+- **Gate verdict: PASS-WITH-NOTES — cleared to proceed to staged verification (v0.29.10), with F-G1's fix verified and F-G2/F-G3 routed.**
+
+---
+
+# ARTIFACT RE-VERIFICATION (22d36a071) — 2026-11-10, last gate before staging
+
+**VERDICT: ARTIFACT-GREEN.** *This gate verifies artifact sha* **`22d36a0714cbfcee6e6b29244b5d457354e66d92`** *(branch `feature/skill-system-revival-phase1`).* This is a **bounded** re-verification of the lane's own surfaces — NOT a full re-gate. The council/tidier findings, the ledger re-derivation, the 19-pack full registry, the six-file leak-class closure and D-G6 were **not** re-audited (closed elsewhere, per the dispatch).
+
+## A. Pin, tree, and the foreign delta
+- **HEAD == pin `22d36a071` (MATCH).** All five foreign tags **v0.29.8 / .9 / .10 / .11 / .12 = ANCESTOR_YES** (verified locally).
+- `git status --short`: **only** ` M .agents/shared/planning/designer-agent/install-audit.jsonl` (foreign, mtime 2026-11-09 22:29, unchanged during the runs) → **no `daemon/**` or `tests/**` dirt, no live pytest against the worktree**. Tree verdict: **QUIET (docs-only)**. (The two `.agents/tester/` docs showed a touch-only mtime bump, content-identical to HEAD — not source-dirty.)
+- Foreign delta since the gate's previous pin: **50 commits, 66 files, +10,502/−483** (v0.29.10 macOS topology · v0.29.11 launcher-journal + make-install-guard · v0.29.12 · the planning-artifacts commit). `origin/latest` is now **0 behind / 142 ahead** — the earlier **17-behind** disclosure is **RESOLVED**.
+- Base worktree `ae5bbafed`: porcelain **empty before AND after** → the comparison reference is intact.
+
+## B. Red set — BOTH scopes, ≥3 runs, `grep '^FAILED'` ONLY
+| leg | BASE @ `ae5bbafed` | ARTIFACT @ `22d36a071` |
+|---|---|---|
+| 1 | **3F / 456P** (42 s) | **3F / 456P** (43.9 s) |
+| 2 | **3F / 456P** (40 s) | **3F / 456P** (47.8 s) |
+| 3 | **3F / 456P** (43 s) | **3F / 456P** (49.0 s) |
+
+- Collected: **459 both sides** — unchanged, i.e. the catch-up merge added **no nodes** to the lane's radius.
+- ∩ = ∪ = **the 3 `tests/manager/test_skill_service_init.py` nodes** (the SQLite `20260714_000001` family), **x3/3 on BOTH sides**, identical root cause. The `^ERROR` lines (3/run) are that same pre-existing migration cause — excluded by the classifier, per the pinned rule.
+- **NET-NEW (touched-file scope) = 0.**
+- **Registered-pack scope: 0 new failing nodes.** The 12 lane packs below are all rc=0; the only reds anywhere remain the pre-existing base trio (which appear in the gzip pack, not in this 12-pack subset).
+- Quarantine list: `TestCheckABTestResolution::test_ab_resolution_threshold_met` and `::test_ab_resolution_force_resolve` did **not** appear in ANY leg on either side.
+
+## C. The lane's pin packs (12) — ALL PASS
+| # | Pack | RESULT | rc | wall | counts | failing nodes | Δ vs earlier |
+|---|---|---|---|---|---|---|---|
+| 1 | skill_keeper_confinement_behavioral (MUT=0) | PASS | 0 | 22 s | 19P | none | same 19P |
+| 2 | skill_keeper_read_scope (MUT=0) | PASS | 0 | 44 s | 68P | none | same 68P |
+| 3 | skill_id_verbatim_contract (MUT=0) | PASS | 0 | 92 s | 135P | none | same 135P |
+| 4 | skill_tools_display_hygiene (MUT=0) | PASS | 0 | 30 s | 22P | none | same 22P |
+| 5 | skill_capture_killswitch (MUT=0) | PASS | 0 | 16 s | 206P | none | same 206P |
+| 6 | metrics_census_polarity (MUT=0) | PASS | 0 | 6 s | 13P | none | same 13P |
+| 7 | skill_evolution | PASS | 0 | 142 s | 112P (47+6+26+10+23, 1 deselected) | none | same 112P |
+| 8 | skill_stale_deactivation (MUT=0) | PASS | 0 | 22 s | 56P | none | same 56P |
+| 9 | skill_injection_budget (MUT=0) | PASS | 0 | 5 s | 33P | none | same 33P |
+| 10 | context_skills | PASS | 0 | 8 s | 164P | none | same 164P |
+| 11 | skill_sink_class_containment | PASS | 0 | 180 s | **4P** | none | **NOTICE: node count 3→4** (concurrent extension); floor+presence contract holds |
+| 12 | skill_tools_surface (D-G6) | PASS | 0 | 12 s | 37P | none | same 37P |
+
+**Pack 7's G acceptance:** 3 consecutive full-file-set runs → **0 reds / 0 reds / 0 reds**; the AB node and its sibling green in all three.
+**No source mutation:** every matrix-bearing pack ran with its `*_MUTATIONS=0` knob (8 of them); packs 7/10/11/12 declare no matrix.
+
+## D. PostgreSQL dialect leg — PASS (real PG, not compiled-only)
+`tests/postgres/test_skill_revival_pg_dialect.py` → **15 collected / 15 passed / 0 failed**, **17.3 s**.
+Provisioning: `initdb -A trust` (PG16) into a `mktemp -d` datadir → `pg_ctl` on **127.0.0.1:54333** (unix socket relocated into the datadir) → `createdb` over TCP → **`current_database() = ensemble_test` asserted BEFORE the run**. Ambient live DSN (`10.44.0.2` / `ensemble_prod` / `5432`) scrubbed **per-variable**; `PYTEST_XDIST_WORKER` absent (serial).
+**Teardown proven:** `pg_ctl stop -m fast`, datadir removed, `ss -ltnp | grep :54333` → **0 hits**.
+
+## E. Environment + artifact sanity
+- Scrub proof: ambient surface had **8** entries; after the full-family per-variable scrub → **`ENSEMBLE_AUTH` = 0, `POSTGRES` = 0**. (The real auth family is 7 names — `DISCOVERY_URL / ALLOWED_ORIGINS / EXTERNAL_REDIRECT_BASE` included; a 2-name scrub is insufficient and a glob is a no-op.)
+- All three skill switches (`ENSEMBLE_SKILL_CAPTURE_ENABLED` / `_EVOLUTION_ENABLED` / `_STALE_DEACTIVATION_ENABLED`) = **UNSET**.
+- Migrations: **126** `.sql`, **zero** duplicate full-timestamp prefixes. Prompt baseline: **`PROMPT-BASELINE: OK — 181 versioned artifact(s) match`** (rc=0). Interpreter **3.14.7**.
+
+## F. Sink hygiene — the requirement is **NOT MET at START** (pre-existing; **not** gate-introduced)
+`data/skill-capture-observability/` held **1 file / 205,082 B / 632 rows** *before* this re-verification (85 admitted / 547 refused: 343 `capture_lane_off` · 85 `evolution_lane_off` · 68 `lane_disabled` · 34 `fix_cooldown` · 17 `forced_resolve_below_sample_size`; ts 09:42–12:07Z), stable across a 20 s resample.
+**Delta from THIS re-verification's runs: 0 files / 0 B** — the red-set legs and all 12 packs added nothing (the leak-class closure holds in operation). The `0 files / 0 B` requirement is therefore **NOT MET**, and the residue is **pre-existing** (the plan's L7 already flags it for deletion before merge). **Not deleted by the gate** — it is gitignored lane residue and unilateral deletion of evidence is not the tester's call.
+
+## G. Not verified / limits (explicit)
+1. **Mutation matrices were NOT re-run** (MUTATIONS=0 on all eight matrix-bearing packs). Those legs remain **dated measurements** (house fact, §Disclosures 8) — they are not re-proven by this verification.
+2. **The 50-commit foreign delta was NOT re-audited** — explicitly out of the bounded scope. The red-set, pack and PG legs cover only the lane's surfaces.
+3. **Pack 11 reported 4 nodes, not 3** (concurrent extension of the containment pin) — its floor + node-presence contract holds; 180 s vs 94 s is load, not a regression.
+4. The foreign `install-audit.jsonl` dirty entry persists (docs/planning, +9 rows, predates the gate).
+
+**Bottom line for the handoff: the artifact at `22d36a0714cbfcee6e6b29244b5d457354e66d92` is ARTIFACT-GREEN — net-new reds 0 in both scopes, all 12 lane pin packs PASS, the PostgreSQL dialect leg PASS on a real disposable cluster with proven teardown, base clean, tree quiet. The one unmet requirement is sink 0/0, which is pre-existing residue with a zero delta from this verification.**

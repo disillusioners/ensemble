@@ -87,7 +87,10 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from daemon.services.skill_job_dispatcher import SkillJobDispatcher
+from daemon.services.skill_job_dispatcher import (
+    SkillFixBurstCapRefused,
+    SkillJobDispatcher,
+)
 from daemon.services.project_skill_source.model import ADDRESS_PREFIX
 from daemon.services.skill_store_service import SkillStoreService
 from daemon.services.skill_search_service import SkillSearchService
@@ -924,11 +927,41 @@ async def update_skill(
             ``ValueError``; 500 on unexpected failure.
     """
     fields = body.model_dump(exclude_none=True)
-    # Translate the public ``is_active`` flag to the SQLModel's
-    # ``status`` column. Keeping them aligned keeps the API
-    # intuitive without changing the on-disk layout.
+    # ── I5: write BOTH columns, never one without the other ───────────────
+    #
+    # ``skills.is_active`` and ``skills.status`` are TWO DESYNCABLE COLUMNS
+    # (a real production row carries ``(False, 'ab_testing')``).  This site
+    # used to POP ``is_active`` and write ONLY ``status`` — which never moved
+    # the row's ``is_active`` column and therefore MANUFACTURED the mirror
+    # desync ``(True, 'inactive')`` on every PATCH that set ``is_active``.
+    #
+    # The fix keeps the public ``is_active`` flag AND derives ``status`` from
+    # it, so ``store.update_skill`` persists BOTH in ONE repository call
+    # (``SkillRepository.update`` writes every field it is given in a single
+    # transaction).  The REST ACCEPTANCE SEMANTICS ARE UNCHANGED: the same
+    # ``is_active`` field is accepted, no new refusal can fire, and a caller
+    # that does not send ``is_active`` is untouched.
+    #
+    # Deliberately NOT reusing the E4 dual-column writer
+    # (`daemon/services/skill_deactivation.py::write_skill_pair`, the
+    # mechanism's sanctioned writer): that writer REFUSES on an OPEN A/B
+    # test, so wiring it here would introduce NEW refusals to an existing
+    # public REST path — a semantic change, not a desync fix.  The inlined
+    # both-columns translation fixes the desync without altering what the
+    # endpoint accepts OR refuses.  (The lane's earlier
+    # ``SkillRepository.deactivate_with_receipt`` was an ORPHANED second
+    # writer with no production caller; it was DELETED — tidier M1 — so
+    # there is exactly ONE writer of the pair in the codebase.)
     if "is_active" in fields:
-        fields["status"] = "active" if fields.pop("is_active") else "inactive"
+        is_active_value = bool(fields["is_active"])
+        # Keep the flag (the repository persists it) and derive the paired
+        # status.  ``fields["is_active"]`` is NOT popped any more.
+        fields["is_active"] = is_active_value
+        fields["status"] = "active" if is_active_value else "inactive"
+    # NOTE (the mirror guard): ``status`` is NOT an accepted field on this
+    # route (``SkillUpdateRequest`` declares description / content / category
+    # / is_active only), so the pair can only ever arrive through
+    # ``is_active`` — a caller cannot move ``status`` alone at this site.
     try:
         skill = await store.update_skill(skill_id, **fields)
         if skill is None:
@@ -1359,11 +1392,15 @@ async def post_fix(
         ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` off /
         ``SkillEvolutionConfig.evolution_lane_enabled=False`` — the
         default — or the per-skill FIX cooldown is active): no job
-        exists, so a 202 would be a lie.
+        exists, so a 202 would be a lie. **429 Too Many Requests**
+        when the DURABLE re-fix burst cap refused the admission
+        (M2 — the lane is ON, the cap refused; a 429 is the truthful
+        status for a cap refusal and is never a 5xx).
 
     Raises:
-        HTTPException: 400 on ``ValueError``; 503 when the lane is
-        gated off (``job_id is None``); 500 on unexpected failure.
+        HTTPException: 400 on ``ValueError``; 429 on a burst-cap
+            refusal; 503 when the lane is gated off (``job_id is
+            None``); 500 on unexpected failure.
     """
     # A14 (architect, MUST, 2026-10-31 — P7 hole): ``pf:`` addresses
     # are REFUSED before any dispatch. This endpoint dispatches with
@@ -1425,6 +1462,28 @@ async def post_fix(
         )
     except HTTPException:
         raise
+    except SkillFixBurstCapRefused as e:
+        # M2 (fix wave 1) — the DURABLE burst-cap refusal is a
+        # DESIGNED refusal, not an internal error: the evolution lane
+        # is ON and the CAP refused the admission. Before this branch
+        # the exception fell through to the generic ``except Exception``
+        # -> HTTP 500 + a traceback, which told the operator "the
+        # server broke" instead of "the cap refused you".
+        #
+        # 429 Too Many Requests: the truthful status for a rate/cap
+        # refusal (the request is retryable LATER, once the window
+        # rolls over) — and it does NOT lie about the lane state the
+        # way a 503 ("service unavailable") would.
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": str(e),
+                # M11 — the reason is READ from the refusal class, never
+                # hard-coded here: one token per concept, and the route
+                # cannot drift from the class.
+                "reason": e.reason,
+            },
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": str(e)})
     except Exception as e:

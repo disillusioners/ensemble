@@ -5,11 +5,15 @@ three-way form (a two-way form was the defect class the fold ledger
 recorded):
 
 * the **declared-route** census (the scope-decorated routes) reads
-  **116** — the three query routes joined the family, and the
+  **117** — the three query routes joined the family, the
   nest-anomaly-report lane's ``/api/nest-reports`` DOMAIN route added
-  TWO scope-decorated routes (the family + the cluster detail);
-* the **mount** census stays **39** — the domain route is ONE new
-  mount (``/api/nest-reports``);
+  TWO scope-decorated routes (the family + the cluster detail), and the
+  capture-lane read site added ONE (``GET /api/metrics/capture-lane``,
+  workstream A / I3 — a scope-decorated route on the SAME metrics
+  router, so the mount census is unchanged), and the memoir-v2
+  phase-5 mount added its family's routes;
+* the **mount** census reads **39** — the memoir-v2 phase-5 mount
+  (``/api/memoir``) is the one new mount over the 38 pin;
 * the **class-manifest** family count stays **35** — the new family is
   pinned as protected-default (the metrics-router precedent).
 
@@ -18,7 +22,7 @@ Plus the family's scope: the query routes carry the family's EXISTING
 
 This pack is D1 (HEAD-only): it asserts the three-way form at once, so
 a cage that drifted in ANY direction reds.
-(The counts moved 113 -> 116, 38 -> 39, 34 -> 35 for the memoir-v2 phase-5 mount.)
+(The counts moved 113 -> 117, 38 -> 39, 34 -> 35 across the memoir-v2 phase-5 mount and the capture-lane read site, on the merged tree.)
 """
 
 from __future__ import annotations
@@ -37,8 +41,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 API_PY = REPO_ROOT / "daemon" / "api.py"
 
 #: The three-way cage form (declared-route · mount · class manifest).
-#: Re-pinned for the memoir-v2 phase-5 mount (2128cf7d2); the sibling pins are test_router_scope_manifest.py (116/39) + test_router_class_manifest.py (35).
-DECLARED_ROUTE_CENSUS = 116
+#: Re-pinned for the memoir-v2 phase-5 mount (2128cf7d2, +3/+1/+1 over base 113/38/34, union the capture-lane read site +1 declared); the sibling pins are test_router_scope_manifest.py (117/39) + test_router_class_manifest.py (35).
+DECLARED_ROUTE_CENSUS = 117
 MOUNT_CENSUS = 39
 CLASS_MANIFEST_FAMILIES = 35
 
@@ -82,7 +86,7 @@ def app_routes():
 class TestThreeWayCage:
     """The three-way cage form — all three pins at once."""
 
-    def test_the_declared_route_census_reads_116(self, app_routes):
+    def test_the_declared_route_census_reads_117(self, app_routes):
         declared = [
             route
             for route in app_routes

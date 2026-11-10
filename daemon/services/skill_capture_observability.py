@@ -1,0 +1,863 @@
+"""Capture-lane observability — the D signal surface (phase1-plan §8).
+
+This module is the SINGLE home of the capture-lane observability signals
+that workstream D defines, and the shared anomaly mechanism that the
+re-fix burst guard (workstream E1) reuses — "one mechanism, two callers"
+(decisions.md DS-17/DS-20).
+
+WHAT IS OBSERVABLE TODAY vs WHAT PHASE 2 TURNS ON
+----------------------------------------------------
+The commission asks for this marking explicitly (phase1-plan §8 D3
+ruling 3). It is reproduced here because this module is where an
+operator looks first.
+
+======================================  =====================  =====================
+Signal                                  Observable today        Turns on in Phase 2
+======================================  =====================  =====================
+Capture ADMISSION counters               COMPLETE — all three    the counter's *non-zero*
+                                         production capture-     admission rate
+                                         lane-off refusal        
+                                         sites (the metrics      
+                                         seam, the tools seam    
+                                         and the dispatcher      
+                                         gate) count on the      
+                                         SAME key                
+                                         ("capture_lane_off")    
+                                         BEFORE refusing; the    
+                                         twin seam               
+                                         (check_and_capture) has 
+                                         no capture-enable       
+                                         check, so it never      
+                                         refuses because the     
+                                         lane is off (the        
+                                         metrics lane owns the   
+                                         cross-path + twin-seam  
+                                         pins)                   
+EXECUTION-refusal rows                  YES —                  the population size
+                                        terminal_reason=       the refused-execution
+                                        'lane_disabled' is     rate
+                                        written regardless
+Deviation detection + auto-anomaly      YES — the D3 forced-   the anomaly *rate*
+                                        resolve guard fires
+                                        the daemon-side trigger
+                                        and announces through
+                                        the production anomaly
+                                        holder chain (metrics
+                                        service -> job dispatcher
+                                        -> job service -> instance
+                                        manager -> anomaly
+                                        service); the SINK
+                                        record carries
+                                        deviation=true
+Re-fix rate                             YES — counts           the burst signature
+                                        admissions (zero while
+                                        the lane is OFF)
+Keeper transcript retention             NO — the 168 h TTL     Phase 2 must extend or
+                                        destroys it           harvest retention
+                                                                 BEFORE the first flip
+======================================  =====================  =====================
+
+HONESTY NOTE (C2 — the "observable today" column states WHICH SIGNALS
+move, not how loud they are): the "capture_lane_off" ADMISSION counter
+is COMPLETE in production today.  All three production capture-lane-off
+refusal sites count on the SAME key BEFORE refusing — the metrics seam
+(daemon/services/skill_metrics_service.py:659, counting through
+_record_capture_lane_off_refusal at :140, called at :682), the tools
+seam (daemon/tools/skill_evolution_tools.py:522 → :539) and the
+dispatcher gate (daemon/services/skill_job_dispatcher.py:1126 → :1136,
+which uses the generic record_admission_refusal entry point).  The twin
+seam (check_and_capture) has NO capture-enable check, so it never
+refuses because the capture lane is off.  The metrics lane owns the
+cross-path + twin-seam pins; this module does not duplicate them.
+
+D1 — THE REFUSAL SEMANTICS (do not conflate, decisions.md DS-19)
+------------------------------------------------------------------
+* A refused **ADMISSION** mints NO ROW AT ALL (the producer returns
+  before any enqueue). A row-counting monitor therefore CANNOT see it —
+  it needs a COUNTER.
+* A refused **EXECUTION** of an already-queued row DOES write a
+  terminal row (``terminal_reason='lane_disabled'``).
+
+⇒ the two are counted under TWO DISTINCT names and MUST never be
+merged into one "refusals" number: "3 refusals" could mean 3 attempts
+that never produced a row, or 3 rows killed mid-flight — completely
+different operational stories.
+
+D4 — RETENTION: THE STRUCTURED-LOG SINK (decisions.md DS-17)
+-------------------------------------------------------------
+Phase 1 ships a SCHEMA-FREE structured-log sink: one JSON record per
+capture run, appended to a daily file under the daemon's data dir.
+Retention is bounded by :data:`SINK_RETENTION_DAYS` (90 days — the
+plan asks for ">= 30 days, >= 90 preferred"), enforced by a cheap
+age-prune of the sink files. No new table, therefore no ``.sql``
+migration and no ``_ensure_postgres_columns`` statement (that ensure
+list is ONE transaction — a failure in any entry aborts boot).
+
+The durable-TABLE variant is a LATER release (it needs a retention
+sweep + a query surface) and is explicitly OUT of Phase 1 scope. The
+read side needs NO restart: the observer reads the sink file directly.
+
+CREDENTIAL HYGIENE (decisions.md DS-18 / the F7 lesson)
+--------------------------------------------------------
+The new observability fields carry a **SHAPE**, never the raw prompt
+text: a length bucket + presence flags + a sha256 prefix. The capture
+path already carries ``task_message`` (the P0 gate's subject) — D adds
+a shape, not a second copy of sensitive content.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+from daemon.services.anomaly_vocab import (
+    ANOMALY_CATEGORIES_FALLBACK as _SHARED_ANOMALY_CATEGORIES_FALLBACK,
+    RESERVED_FALLBACK as _SHARED_RESERVED_FALLBACK,
+    canonicalize_category,
+    resolve_anomaly_categories,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ── Constants ─────────────────────────────────────────────────────────────
+
+#: The agent whose lane is being observed (the skill-keeper).
+SKILL_KEEPER_AGENT_ID = "skill-keeper"
+
+#: Synthetic instance id for DAEMON-AUTHORED anomaly rows. The anomaly
+#: service requires a non-empty instance id; a daemon-side report has no
+#: instance of its own, so it names its own surface.
+DAEMON_REPORTER_INSTANCE_ID = "daemon:skill-capture-observability"
+
+#: Anomaly categories (closed vocabulary — ``ANOMALY_CATEGORIES`` at
+#: ``daemon/services/metrics_query/wiring/vocab.py``). A keeper that
+#: attempts an action outside its sanctioned surface is a TOOL failure;
+#: an admission refused by a rate/cap control is a QUEUE-scheduling
+#: event. ``other`` is the reserved fold target.
+CATEGORY_LANE_DEVIATION = "tool-failure"
+CATEGORY_BURST_CAP = "queue-scheduling"
+CATEGORY_FALLBACK = _SHARED_RESERVED_FALLBACK
+
+#: Directory (under the daemon data dir) holding the sink files.
+SINK_DIR_NAME = "skill-capture-observability"
+
+#: Retention window for the sink files. The plan asks for ">= 30 days,
+#: >= 90 days preferred" — 90 is the default here.
+SINK_RETENTION_DAYS = 90
+
+#: The sink file naming convention: ``skill-capture-<YYYYMMDD>.jsonl``.
+#: The DATE IN THE NAME is the file's identity — the day whose capture
+#: runs it holds.  The retention decision follows the NAME, never the
+#: mtime (see :func:`_prune_expired_sink_files` for why).
+_SINK_FILE_PATTERN = re.compile(r"^skill-capture-(\d{8})\.jsonl$")
+
+#: Prompt-length buckets (the "shape" of a prompt — never its content).
+PROMPT_BUCKET_SHORT = 200
+PROMPT_BUCKET_MEDIUM = 2000
+
+
+# ── Prompt shape (never the prompt) ───────────────────────────────────────
+
+
+def prompt_length_bucket(length: int) -> str:
+    """Bucket a prompt length: empty / short / medium / long."""
+    if length <= 0:
+        return "empty"
+    if length < PROMPT_BUCKET_SHORT:
+        return "short"
+    if length < PROMPT_BUCKET_MEDIUM:
+        return "medium"
+    return "long"
+
+
+def prompt_shape(task_message: Any, agent_id: Any = None) -> dict[str, Any]:
+    """Return the SHAPE of a prompt — NEVER the prompt itself (DS-18).
+
+    Args:
+        task_message: The raw prompt text (used ONLY to derive the
+            shape — it is never copied into the result).
+        agent_id: The originating agent id, when known.
+
+    Returns:
+        A dict with the length bucket, the length, whether an agent id
+        was present, and a sha256 PREFIX of the prompt (the F7
+        precedent: "name + value sha256 prefix, never the value").
+    """
+    text = task_message if isinstance(task_message, str) else ""
+    encoded = text.encode("utf-8", errors="replace")
+    return {
+        "length": len(text),
+        "length_bucket": prompt_length_bucket(len(text)),
+        "has_agent_id": bool(isinstance(agent_id, str) and agent_id.strip()),
+        "sha256_16": hashlib.sha256(encoded).hexdigest()[:16] if text else None,
+    }
+
+
+# ── Counters (two DISTINCT refusal signals — DS-19) ───────────────────────
+
+
+@dataclass
+class CaptureLaneCounters:
+    """In-process counters for the capture/evolution lane.
+
+    DS-19: the ADMISSION and EXECUTION refusal counters are separate
+    fields with separate names — they MUST never be merged.
+    """
+
+    #: Admission refusals, keyed by the refusal reason
+    #: (``capture_lane_off``, ``evolution_lane_off``, ``fix_cooldown``,
+    #: ``fix_burst_cap``).
+    admission_refusals: dict[str, int] = field(default_factory=dict)
+    #: Execution refusals, keyed by the terminal reason
+    #: (``lane_disabled``).
+    execution_refusals: dict[str, int] = field(default_factory=dict)
+    #: Admissions that produced a job row.
+    admissions: int = 0
+    #: Keeper deviations detected (daemon-side).
+    deviations: int = 0
+    #: Re-fix (FIX) admissions observed — the E1 re-fix-rate gauge.
+    fix_admissions: int = 0
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a JSON-safe snapshot of every counter."""
+        return {
+            "admission_refusals": dict(self.admission_refusals),
+            "execution_refusals": dict(self.execution_refusals),
+            "admissions": self.admissions,
+            "deviations": self.deviations,
+            "fix_admissions": self.fix_admissions,
+        }
+
+
+_COUNTERS = CaptureLaneCounters()
+
+
+def counters() -> CaptureLaneCounters:
+    """Return the process-wide capture-lane counters."""
+    return _COUNTERS
+
+
+def counters_snapshot() -> dict[str, Any]:
+    """THE public READ surface for the capture-lane counters.
+
+    This is the accessor the metrics registry read site calls when the
+    metrics lane publishes the capture-lane signals (phase1-plan §8 D2
+    names "a metrics gauge (the metrics registry is the house's counter
+    surface)" as the landing place — the registry itself lives in the
+    METRICS lane, so this module owns the VALUE and the metrics lane
+    owns the READ SITE).
+
+    Returns:
+        A JSON-safe dict snapshot (see
+        :meth:`CaptureLaneCounters.snapshot`) — never the live
+        counter object, so a caller cannot mutate the counters.
+    """
+    return _COUNTERS.snapshot()
+
+
+def new_run_id() -> str:
+    """Mint ONE run id — the correlation handle of a capture/evolution run.
+
+    The run id is minted BEFORE the admission gate so that a REFUSED
+    admission still carries one (a refusal is an ATTEMPT, and the
+    attempt must be correlatable with the refusal record). The id is
+    also stamped into the admitted job's metadata, so the sink record
+    and the job row can be joined.
+    """
+    return uuid.uuid4().hex
+
+
+def reset_counters() -> None:
+    """Reset every counter (test helper — never called in production)."""
+    _COUNTERS.admission_refusals.clear()
+    _COUNTERS.execution_refusals.clear()
+    _COUNTERS.admissions = 0
+    _COUNTERS.deviations = 0
+    _COUNTERS.fix_admissions = 0
+
+
+def record_admission_refusal(reason: str, *, count: int = 1) -> None:
+    """Count ONE refused ADMISSION (no row was minted — DS-19/D1)."""
+    key = str(reason or "unknown")
+    _COUNTERS.admission_refusals[key] = (
+        _COUNTERS.admission_refusals.get(key, 0) + count
+    )
+
+
+def record_execution_refusal(reason: str, *, count: int = 1) -> None:
+    """Count ONE refused EXECUTION (a terminal row WAS written)."""
+    key = str(reason or "unknown")
+    _COUNTERS.execution_refusals[key] = (
+        _COUNTERS.execution_refusals.get(key, 0) + count
+    )
+
+
+def record_admission(*, is_fix: bool = False) -> None:
+    """Count ONE admitted capture/evolution admission (a job row exists)."""
+    _COUNTERS.admissions += 1
+    if is_fix:
+        _COUNTERS.fix_admissions += 1
+
+
+def record_deviation() -> None:
+    """Count ONE detected keeper deviation."""
+    _COUNTERS.deviations += 1
+
+
+def record_capture_lane_disabled_refusal(
+    *,
+    agent_id: Any = None,
+    task_message: Any = None,
+    prompt_source: str | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Count AND record a capture-lane-OFF ADMISSION refusal.
+
+    THE ``capture_lane_off`` ADMISSION COUNTER IS **COMPLETE** IN
+    PRODUCTION TODAY.  All three production capture-lane-off refusal
+    sites count on the SAME counter key BEFORE refusing:
+
+    1. the METRICS seam — ``SkillMetricsService._check_capture_eligibility``
+       (``daemon/services/skill_metrics_service.py:659`` — the
+       ``if not _resolve_capture_enabled():`` guard).  It counts through
+       the metrics lane's wrapper ``_record_capture_lane_off_refusal``
+       (``:140``), which is called at ``:682`` and resolves THIS helper
+       at ``:176``.  That call site USED TO BE **PARTIAL** — the counter
+       moved for the tools-lane seam only — and would go UNCOUNTED
+       without this call;
+    2. the TOOLS seam — ``daemon/tools/skill_evolution_tools.py:522``
+       (the ``if not _resolve_capture_enabled():`` gate) calls THIS
+       helper at ``:539``;
+    3. the DISPATCHER gate — ``daemon/services/skill_job_dispatcher.py:1126``
+       counts the SAME key through the GENERIC entry point
+       ``observability.record_admission_refusal("capture_lane_off")``
+       (``:1136``) and writes its own sink record (``:1145``); it does
+       NOT call this helper.
+
+    The TWIN seam (``check_and_capture`` in
+    ``daemon/services/skill_metrics_service.py``) has NO capture-enable
+    check, so it never refuses because the capture lane is off.  The
+    metrics lane owns the cross-path + twin-seam pins; this module does
+    not duplicate them.
+
+    What this helper does (in order):
+
+    1. increments ``admission_refusals['capture_lane_off']`` — the
+       ADMISSION-refusal counter (DS-19: never merged with the
+       EXECUTION-refusal counter);
+    2. appends ONE sink record (``stage='admission'``,
+       ``outcome='refused'``, ``refusal_reason='capture_lane_off'``)
+       carrying the prompt SHAPE only — never the raw prompt
+       (DS-18 / the F7 credential lesson).
+
+    Args:
+        agent_id: The originating agent id, when known.
+        task_message: The raw prompt text — used ONLY to derive the
+            SHAPE (length bucket + sha256 prefix); it is never copied
+            into the record.
+        prompt_source: Which producer minted the attempt.
+        run_id: The attempt's run id (minted before the gate).
+
+    NEVER raises — an observability write must not break the capture
+    path (the same contract as :func:`append_run_record`).
+    """
+    try:
+        record_admission_refusal("capture_lane_off")
+        append_run_record(
+            build_run_record(
+                stage="admission",
+                run_id=run_id,
+                agent_id=agent_id,
+                prompt_source=prompt_source,
+                task_message=task_message,
+                outcome="refused",
+                refusal_reason="capture_lane_off",
+            )
+        )
+    except Exception as err:  # noqa: BLE001 — observability NEVER breaks the lane
+        logger.warning(
+            "skill-capture-observability: capture-lane-off refusal "
+            "record failed (%s: %s) — the capture lane is unaffected",
+            type(err).__name__, err,
+        )
+
+
+# ── The sink (D4 — structured log, schema-free, restart-free read side) ──
+
+
+def resolve_data_dir(data_dir: str | Path | None = None) -> Path:
+    """Resolve the daemon data dir (``ENSEMBLE_DATA_DIR`` > ``DATA_DIR`` > ``./data``).
+
+    Mirrors the project-wide precedence chain used by
+    ``daemon/api.py`` and ``daemon/services/install_audit.py``.
+    """
+    if data_dir is not None:
+        return Path(data_dir)
+    return Path(
+        os.environ.get("ENSEMBLE_DATA_DIR")
+        or os.environ.get("DATA_DIR")
+        or "./data"
+    )
+
+
+#: Explicit sink location override (tests / wiring). ``None`` → the
+#: resolved data dir (``ENSEMBLE_DATA_DIR`` > ``DATA_DIR`` > ``./data``).
+_SINK_DIR_OVERRIDE: str | Path | None = None
+
+
+def configure_sink(data_dir: str | Path | None = None) -> None:
+    """Point the sink at an explicit data dir (or reset it to the default).
+
+    The daemon resolves the data dir from the environment; TESTS point
+    the sink at a scratch dir so a test run never writes into the
+    checkout's ``data/`` tree.
+
+    ``None`` means "the resolved default" — the checkout's real data
+    tree when the daemon runs with no data-dir env var.  A TEST fixture
+    teardown must therefore NOT restore ``None``: that re-exposes the
+    shared data dir for every later write (the order-dependent sink
+    leak).  Restore a scratch dir instead.
+    """
+    global _SINK_DIR_OVERRIDE
+    _SINK_DIR_OVERRIDE = data_dir
+
+
+def sink_override() -> str | Path | None:
+    """Return the sink redirect in force (``None`` = the resolved default).
+
+    The test surface uses this to assert that the redirect is never
+    ``None`` — i.e. that the checkout's real data dir is never
+    re-exposed between tests.
+    """
+    return _SINK_DIR_OVERRIDE
+
+
+def resolve_sink_dir(data_dir: str | Path | None = None) -> Path:
+    """Resolve the sink directory (under the daemon data dir)."""
+    if data_dir is None and _SINK_DIR_OVERRIDE is not None:
+        data_dir = _SINK_DIR_OVERRIDE
+    return resolve_data_dir(data_dir) / SINK_DIR_NAME
+
+
+def _sink_file_day(name: str) -> date | None:
+    """Return the DAY a sink file belongs to — parsed from its NAME.
+
+    Args:
+        name: The file's basename.
+
+    Returns:
+        The date the file's name encodes, or ``None`` when the name does
+        NOT follow the convention (``skill-capture-<YYYYMMDD>.jsonl``).
+        A ``None`` means "this file is not one of ours" — the prune
+        must never touch it.
+    """
+    match = _SINK_FILE_PATTERN.match(str(name))
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _prune_expired_sink_files(
+    sink_dir: Path,
+    *,
+    retention_days: int,
+    current_path: Path | None = None,
+    today: datetime | None = None,
+) -> None:
+    """Delete the sink files whose NAME-ENCODED day fell out of the window.
+
+    THE RETENTION DECISION FOLLOWS THE DATE IN THE FILE NAME — NEVER
+    THE MTIME.  The name IS the file's identity (the day whose capture
+    runs the file holds); the mtime is mutable metadata that a restore
+    from a backup, a copy, an ``os.utime`` or a fixture can rewrite at
+    will.  The mtime-keyed prune could therefore unlink a file named
+    for TODAY (its mtime was old), and it excluded nothing that a
+    writer held open.
+
+    THREE HARD GUARDS — the shared-path safety of the sink dir (every
+    lane's rows land in the SAME daily file, so a wrong unlink destroys
+    another lane's evidence):
+
+    1. **THE CURRENT FILE IS NEVER UNLINKED.**  ``current_path`` is the
+       file the caller holds open; it is excluded BY PATH, so it
+       survives even when its name-date fell out of the window (a clock
+       rollback names the file with a past day).
+    2. **TODAY'S FILE IS NEVER UNLINKED.**  The window is a day-file
+       window; the file being appended to today is never pruned.
+    3. **A FILE THAT IS NOT OURS IS NEVER TOUCHED.**  A name that does
+       not match ``skill-capture-<YYYYMMDD>.jsonl`` is skipped
+       outright — a neighbour's file in the same directory survives.
+
+    Best-effort: an ``OSError`` is logged at debug and never raised —
+    the prune must not break the capture lane.
+    """
+    if retention_days <= 0:
+        return
+    now = today if today is not None else datetime.now(timezone.utc)
+    cutoff = now.date() - timedelta(days=retention_days)
+    for path in sink_dir.glob("skill-capture-*.jsonl"):
+        # Guard 1 — the file this writer holds open.
+        if current_path is not None and _same_sink_file(path, current_path):
+            continue
+        file_day = _sink_file_day(path.name)
+        # Guard 3 — a name that is not ours is not ours to delete.
+        if file_day is None:
+            continue
+        # Guard 2 — today's file is live.
+        if file_day >= now.date():
+            continue
+        if file_day >= cutoff:
+            continue
+        try:
+            path.unlink()
+        except OSError as err:  # pragma: no cover — best effort
+            logger.debug(
+                "skill-capture-observability: could not prune %s (%s)",
+                path, err,
+            )
+
+
+def _same_sink_file(left: Path, right: Path) -> bool:
+    """True when two paths name the same file IN THE SAME DIRECTORY.
+
+    Compared by name + parent (never by ``resolve()``): the comparison
+    must not touch the filesystem, and it must not follow a symlink.
+    """
+    return left.name == right.name and left.parent == right.parent
+
+
+def append_run_record(
+    record: dict[str, Any],
+    *,
+    data_dir: str | Path | None = None,
+    retention_days: int = SINK_RETENTION_DAYS,
+) -> Path | None:
+    """Append ONE structured record to the sink. NEVER raises.
+
+    Args:
+        record: The record to append (JSON-serializable).
+        data_dir: Override for the daemon data dir (tests).
+        retention_days: Sink retention window.
+
+    Returns:
+        The path of the file the record was appended to, or ``None`` when
+        the write failed (the caller MUST NOT fail the lane because of
+        an observability write).
+    """
+    try:
+        sink_dir = resolve_sink_dir(data_dir)
+        sink_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        day = now.strftime("%Y%m%d")
+        path = sink_dir / f"skill-capture-{day}.jsonl"
+        payload = dict(record)
+        payload.setdefault("ts", now.isoformat())
+        line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        # The prune never unlinks THIS file (the one just written): it is
+        # passed as ``current_path`` so the exclusion holds by PATH even
+        # when its name-date fell out of the window (a clock rollback).
+        _prune_expired_sink_files(
+            sink_dir,
+            retention_days=retention_days,
+            current_path=path,
+            today=now,
+        )
+        return path
+    except Exception as err:  # noqa: BLE001 — observability NEVER breaks the lane
+        logger.warning(
+            "skill-capture-observability: sink append failed (%s: %s) — "
+            "the capture lane is unaffected",
+            type(err).__name__, err,
+        )
+        return None
+
+
+# ── The anomaly hook (D3 ruling 1 — the DAEMON announces) ───────────────
+
+#: A reporter is any callable with the ``AnomalyService.accept_report``
+#: shape (keyword-only: agent_id, instance_id, category, description,
+#: severity, suspected_cause) returning an awaitable.
+AnomalyReporter = Callable[..., Awaitable[Any]]
+
+_ANOMALY_REPORTER: AnomalyReporter | None = None
+
+
+def set_anomaly_reporter(reporter: AnomalyReporter | None) -> None:
+    """Register the daemon-side anomaly reporter (process-wide).
+
+    Wiring is OPTIONAL: when no reporter is registered, the module
+    falls back to a late-bound resolution through the job service (see
+    :func:`resolve_anomaly_service`). Tests register a double.
+    """
+    global _ANOMALY_REPORTER
+    _ANOMALY_REPORTER = reporter
+
+
+def get_anomaly_reporter() -> AnomalyReporter | None:
+    """Return the registered anomaly reporter (or ``None``)."""
+    return _ANOMALY_REPORTER
+
+
+#: The holder paths that lead to the daemon's ``AnomalyService``.
+#: The anomaly service is mounted on the instance manager
+#: (``manager.anomaly_service`` — the public alias of
+#: ``manager._anomaly_service``); the job queue service holds the
+#: instance manager; the skill-metrics service holds the job
+#: dispatcher, which holds the job service. Walking those paths keeps
+#: the wiring inside this module — NO manager-side change is required
+#: for the daemon to announce a deviation.
+_ANOMALY_SEARCH_PATHS: tuple[tuple[str, ...], ...] = (
+    ("anomaly_service",),
+    ("_anomaly_service",),
+    ("_instance_manager", "anomaly_service"),
+    ("_instance_manager", "_anomaly_service"),
+    ("_job_service", "_instance_manager", "anomaly_service"),
+    ("_job_service", "_instance_manager", "_anomaly_service"),
+    (
+        "_skill_job_dispatcher",
+        "_job_service",
+        "_instance_manager",
+        "anomaly_service",
+    ),
+    (
+        "_skill_job_dispatcher",
+        "_job_service",
+        "_instance_manager",
+        "_anomaly_service",
+    ),
+)
+
+
+def resolve_anomaly_service(*holders: Any) -> Any | None:
+    """Late-bound resolution of the daemon's ``AnomalyService``.
+
+    Args:
+        *holders: Any service objects that (transitively) expose the
+            anomaly service — e.g. the job queue service or the skill
+            metrics service.
+
+    Returns:
+        The anomaly service (anything with an ``accept_report``
+        coroutine), or ``None`` when it cannot be resolved.
+    """
+    for holder in holders:
+        if holder is None:
+            continue
+        for path in _ANOMALY_SEARCH_PATHS:
+            current: Any = holder
+            for attr in path:
+                current = getattr(current, attr, None)
+                if current is None:
+                    break
+            if current is not None and callable(
+                getattr(current, "accept_report", None)
+            ):
+                return current
+    return None
+
+
+# ── The closed anomaly vocabulary (resolved LAZILY) ─────────────────────
+#
+# The canonical vocabulary lives in the METRICS lane
+# (``daemon/services/metrics_query/wiring/vocab.py``). Importing it — or
+# ANY module of the wiring package — REGISTERS the phase's metric
+# families in the process-wide registry (the package's ``__init__``
+# calls ``register_w1_adapters`` / ``register_w2_adapters`` /
+# ``register_w3_adapters``). That is an IMPORT-TIME side effect, and
+# this module sat ON the exposition capture's import path (the capture
+# runs in a FRESH interpreter that imports the metrics modules): the
+# registry measured 18 families at base and 70 with the eager import,
+# which broke the committed exposition artifact.
+#
+# The import is therefore DEFERRED to the point of use — the category
+# canonicalisation path — so a module that merely IMPORTS this surface
+# registers nothing. The fallback tuple keeps the module usable when
+# the metrics package is unavailable.
+
+#: The frozen fallback vocabulary (used when the metrics package cannot
+#: be imported). Mirrors ``ANOMALY_CATEGORIES`` at
+#: ``daemon/services/metrics_query/wiring/vocab.py``.
+#:
+#: M9 — the CATEGORY vocabulary + its canonicaliser now live ONCE, in
+#: ``daemon/services/anomaly_vocab.py`` (an IMPORT-PURE leaf). The
+#: fallback tuple below is a RE-EXPORT of that module's tuple, so the
+#: two copies can never drift; the local name is kept because the
+#: M-1b parity pins import it from HERE.
+_ANOMALY_CATEGORIES_FALLBACK: tuple[str, ...] = (
+    _SHARED_ANOMALY_CATEGORIES_FALLBACK
+)
+
+
+def _resolve_anomaly_categories() -> tuple[str, ...]:
+    """Resolve the closed anomaly vocabulary (at the point of use).
+
+    The canonical list lives in the METRICS lane; importing it (or any
+    module of the wiring package) registers the phase's metric families
+    in the process-wide registry — an import-time side effect. The
+    import is therefore made HERE, on the canonicalisation path only.
+
+    Returns:
+        The closed vocabulary tuple (the canonical list when the metrics
+        package is importable, the frozen fallback otherwise).
+    """
+    return resolve_anomaly_categories()
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 — expose ``ANOMALY_CATEGORIES`` WITHOUT an eager import.
+
+    The public attribute is kept (the pins read
+    ``observability.ANOMALY_CATEGORIES``), but it is resolved on FIRST
+    ACCESS — so importing this module registers nothing.
+    """
+    if name == "ANOMALY_CATEGORIES":
+        return _resolve_anomaly_categories()
+    raise AttributeError(
+        f"module {__name__!r} has no attribute {name!r}"
+    )
+
+
+def _canonical_category(category: str) -> str:
+    """Fold a category into the closed anomaly vocabulary.
+
+    The vocabulary is closed (``ANOMALY_CATEGORIES`` at
+    ``daemon/services/metrics_query/wiring/vocab.py``); ``other`` is the
+    reserved fold target. An unknown category is folded — never
+    invented.
+
+    M9 — this delegates to the ONE canonicaliser
+    (:func:`daemon.services.anomaly_vocab.canonicalize_category`), which
+    the anomaly service also uses. The lane's own copy did NEITHER
+    lowercase NOR apply the synonym map, so the same input string
+    canonicalised two ways ("PERF" → "performance" in the anomaly
+    service, → "other" here). The vocabulary is still resolved AT THE
+    POINT OF USE — see :func:`_resolve_anomaly_categories` for why the
+    import is not made at module level.
+    """
+    return canonicalize_category(category)[0]
+
+
+async def emit_lane_anomaly(
+    *,
+    category: str,
+    description: str,
+    severity: str = "major",
+    suspected_cause: str | None = None,
+    agent_id: str = SKILL_KEEPER_AGENT_ID,
+    instance_id: str = DAEMON_REPORTER_INSTANCE_ID,
+    job_service: Any = None,
+    holder: Any = None,
+    reporter: AnomalyReporter | None = None,
+) -> bool:
+    """Write ONE anomaly row through the daemon-side accept path.
+
+    The Oct-22 keeper did NOT announce itself — that is the whole
+    reason the deviation needed a forensic reconstruction. This is the
+    DAEMON-SIDE trigger: the detector calls it automatically, so a
+    misbehaving keeper is announced even when the agent stays silent.
+
+    Args:
+        category: Raw category (folded into the closed vocabulary).
+        description: What happened (never the raw prompt).
+        severity: The tier (``minor`` / ``major`` / ``critical``).
+        suspected_cause: The detector's hypothesis.
+        agent_id: The reporting agent TYPE id.
+        instance_id: The reporting instance id (synthetic for daemon rows).
+        job_service: Used for the late-bound anomaly-service resolution.
+        holder: An additional holder for the same resolution (e.g. the
+            metrics service, which reaches the anomaly service through
+            the job dispatcher).
+        reporter: Explicit reporter (overrides the registered one).
+
+    Returns:
+        ``True`` when an anomaly row was accepted, ``False`` otherwise.
+        NEVER raises — a failed announcement must not break the lane.
+    """
+    canonical = _canonical_category(category)
+    target = reporter or get_anomaly_reporter()
+    if target is None:
+        service = resolve_anomaly_service(job_service, holder)
+        if service is not None:
+            target = getattr(service, "accept_report", None)
+    if target is None:
+        logger.warning(
+            "skill-capture-observability: no anomaly reporter available — "
+            "deviation NOT announced (category=%s): %s",
+            canonical, description,
+        )
+        return False
+    try:
+        await target(
+            agent_id=agent_id,
+            instance_id=instance_id,
+            category=canonical,
+            description=description,
+            severity=severity,
+            suspected_cause=suspected_cause,
+        )
+        return True
+    except Exception as err:  # noqa: BLE001 — the lane must not break
+        logger.warning(
+            "skill-capture-observability: anomaly write failed (%s: %s) — "
+            "category=%s",
+            type(err).__name__, err, canonical,
+        )
+        return False
+
+
+# ── Run records (one structured record per capture run) ───────────────────
+
+
+def build_run_record(
+    *,
+    stage: str,
+    run_id: str | None = None,
+    agent_id: str | None = None,
+    prompt_source: str | None = None,
+    task_message: Any = None,
+    outcome: str = "",
+    refusal_reason: str | None = None,
+    deviation: bool = False,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the structured record for ONE capture run.
+
+    The record carries the run id → agent → prompt source → prompt
+    SHAPE → outcome → refusal → deviation flag chain. The raw prompt
+    text is NEVER included (DS-18).
+
+    ``run_id`` semantics (explicit, never a silent ``None``): the run
+    id is minted BEFORE the admission gate (see
+    :func:`new_run_id`), so an ADMISSION record — refused OR admitted
+    — always carries one. A record with ``run_id=None`` therefore
+    means "this record was minted OUTSIDE an admission attempt" (e.g.
+    a cap-check error, or a deviation announcement) — not "the run id
+    was forgotten".
+    """
+    record: dict[str, Any] = {
+        "stage": stage,
+        "run_id": run_id,
+        "agent_id": agent_id,
+        "prompt_source": prompt_source,
+        "prompt_shape": prompt_shape(task_message, agent_id),
+        "outcome": outcome,
+        "refusal_reason": refusal_reason,
+        "deviation": bool(deviation),
+    }
+    if extra:
+        record.update(extra)
+    return record

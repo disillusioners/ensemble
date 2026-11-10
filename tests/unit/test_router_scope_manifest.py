@@ -369,7 +369,9 @@ class TestScopeManifestCage:
         the family already declares) + the 2 /api/nest-reports routes
         (GET /clusters, GET /clusters/{cluster_id} — the nest-anomaly
         lane's DOMAIN route, each carrying the metrics door's any-of
-        scope set) = 113
+        scope set) + the capture-lane read route (GET
+        /api/metrics/capture-lane — the SAME metrics router, so NO new
+        mount and NO new scope) = 114
         declared routes. A drift is a decoration added/removed without
         a manifest row change.
 
@@ -426,6 +428,13 @@ class TestScopeManifestCage:
         protected-default) — the three-way cage form (declared-route
         113 · mount 38 · class manifest 34) is pinned by the P3
         scope-cage pack.
+
+        skill-system-revival Phase 1 (workstream A, I3) added the
+        capture-lane READ route (GET /api/metrics/capture-lane) on the
+        SAME metrics router — one scope-decorated route, NO new mount,
+        NO new scope, NO new manifest family — growing the cage count
+        113 → 114. The MOUNT census (38) and the CLASS-manifest family
+        count (34) are UNCHANGED; only the declared-route census moved.
         """
         declared = [
             r
@@ -434,8 +443,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 116, (
-            f"declared-route census drifted: {len(declared)} (pinned 116)"
+        assert len(declared) == 117, (
+            f"declared-route census drifted: {len(declared)} (pinned 117)"
         )
 
     def test_manifest_entries_valid(self):

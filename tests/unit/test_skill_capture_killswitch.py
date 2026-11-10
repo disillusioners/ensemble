@@ -448,8 +448,9 @@ class TestMetricsServiceCaptureKillSwitch:
 
         Spy on ``evolution_service.check_and_capture`` to prove the
         gate short-circuits BEFORE Gate 4/5 (which would otherwise
-        call this method). Also spy on ``usage_repo.has_applied_for_instance``
-        to prove the DB hit is avoided.
+        call this method). Also spy on
+        ``usage_repo.has_genuinely_evolved_for_instance`` to prove the DB hit is
+        avoided.
         """
         skill_id = self._seed_skill(ks_repos)
         inst = SimpleNamespace(
@@ -470,7 +471,7 @@ class TestMetricsServiceCaptureKillSwitch:
                 "task_succeeded": True,
             }
         )
-        ks_repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        ks_repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await ks_metrics_service._check_capture_eligibility(
             instance_id="inst-ks-off",
@@ -488,7 +489,7 @@ class TestMetricsServiceCaptureKillSwitch:
         # before Gate 4/5.
         ks_metrics_service.evolution_service.check_and_capture.assert_not_called()
         # The usage record DB read was NEVER made — same reason.
-        ks_repos.usage.has_applied_for_instance.assert_not_called()
+        ks_repos.usage.has_genuinely_evolved_for_instance.assert_not_called()
         # The dispatcher was NEVER invoked.
         ks_metrics_service._skill_job_dispatcher.enqueue_capture.assert_not_called()
 
@@ -505,7 +506,7 @@ class TestMetricsServiceCaptureKillSwitch:
             instance_metadata={INJECTED_SKILLS_METADATA_KEY: [skill_id]},
         )
         ks_instance_repo.get = MagicMock(return_value=inst)
-        ks_repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        ks_repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await ks_metrics_service.record_task_completion(
             instance_id="inst-ks-rtc",
@@ -535,7 +536,7 @@ class TestMetricsServiceCaptureKillSwitch:
             instance_metadata={INJECTED_SKILLS_METADATA_KEY: [skill_id]},
         )
         ks_instance_repo.get = MagicMock(return_value=inst)
-        ks_repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        ks_repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         os.environ[SKILL_CAPTURE_KILL_SWITCH_ENV] = "0"
 
@@ -563,7 +564,7 @@ class TestMetricsServiceCaptureKillSwitch:
             instance_metadata={INJECTED_SKILLS_METADATA_KEY: [skill_id]},
         )
         ks_instance_repo.get = MagicMock(return_value=inst)
-        ks_repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        ks_repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await ks_metrics_service._check_capture_eligibility(
             instance_id="inst-ks-on",
@@ -626,7 +627,7 @@ class TestMetricsServiceCaptureKillSwitch:
             instance_metadata={INJECTED_SKILLS_METADATA_KEY: [skill_id]},
         )
         ks_instance_repo.get = MagicMock(return_value=inst)
-        ks_repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        ks_repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         with caplog.at_level(
             "WARNING", logger="daemon.services.skill_metrics_service"
@@ -1037,7 +1038,7 @@ class TestAllThreeGatesFireSimultaneously:
             instance_metadata={INJECTED_SKILLS_METADATA_KEY: [skill_id]},
         )
         ks_instance_repo.get = MagicMock(return_value=inst)
-        ks_repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        ks_repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
         # Spy on the evolution service so we can prove Gate 0 fires
         # BEFORE it would have been consulted.
         ks_metrics_service.evolution_service.check_and_capture = AsyncMock(
@@ -1083,3 +1084,38 @@ class TestAllThreeGatesFireSimultaneously:
         assert decoded["skipped"] is True
         assert decoded["new_skill_id"] is None
         service.capture_skill.assert_not_called()
+
+
+# ---- sink sandbox (house safe redirect) ----
+# The capture-lane sink resolves its data dir from a PROCESS-GLOBAL
+# override.  A fixture that installs a redirect and then restores the
+# override to ``None`` re-exposes the checkout's REAL data dir for every
+# later write (the order-dependent sink leak).  This fixture NEVER
+# restores ``None``: it restores the SAFE session scratch dir and runs
+# the shared-path sentinel.  See tests/helpers/skill_sink_redirect.py.
+from daemon.services import skill_capture_observability as observability
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
+
+@pytest.fixture(autouse=True)
+def _sink_sandbox(tmp_path, request):
+    """Redirect the capture sink into ``tmp_path``; never restore None."""
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    observability.set_anomaly_reporter(None)
+    try:
+        yield tmp_path
+    finally:
+        # NEVER restore to None — that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink leak).
+        restore_safe_sink_redirect()
+        observability.reset_counters()
+        observability.set_anomaly_reporter(None)
+        lane_test_end(request.node.nodeid, before)

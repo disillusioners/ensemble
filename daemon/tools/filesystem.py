@@ -15,6 +15,8 @@ second category and a second allowlist seam, both of which have bitten
 this codebase before.
 """
 
+import contextvars
+import json
 import os
 import re
 import stat
@@ -92,11 +94,23 @@ CATEGORY_DOC = """\
 Read, write, edit, and search files and directories.
 
 **Rules**:
-- `workdir` is required when `path` is relative. If `path` is absolute (e.g. `/abs/path`
-  on Unix or `C:\\path\\to\\file` on Windows), `workdir` is REQUIRED for the WALK tools
-  (`glob_files`, `grep_files`) — they walk unbounded trees and need an explicit scope.
-  For the file tools (`read_file`, `write_file`, `edit_file`) and `list_directory`,
-  `workdir` may be omitted for absolute paths and the path is used as-is.
+- **Scoped agents** (an agent that declares a bounded `read_scope`, e.g. the
+  skill-keeper's `"project"`): the four READ tools (`read_file`, `list_directory`,
+  `glob_files`, `grep_files`) accept **relative paths only**. The base is the
+  **daemon-resolved trusted workdir** — the instance's project directory, bound by
+  the tool factory — and the `workdir` argument is **not accepted** for a scoped
+  agent (it is refused; an agent-supplied base could move its own boundary). An
+  ABSOLUTE path is refused, a relative path that escapes the anchor is refused,
+  and the `.env` family is refused at any depth (never readable, never listed,
+  never matched by a search) — this is the credential-hazard class the scope
+  exists to deny.
+- **Undeclared agents** (the default — every other agent): the legacy semantics
+  below are unchanged. `workdir` is required when `path` is relative. If `path` is
+  absolute (e.g. `/abs/path` on Unix or `C:\\path\\to\\file` on Windows), `workdir` is
+  REQUIRED for the WALK tools (`glob_files`, `grep_files`) — they walk unbounded
+  trees and need an explicit scope. For the file tools (`read_file`, `write_file`,
+  `edit_file`) and `list_directory`, `workdir` may be omitted for absolute paths
+  and the path is used as-is.
 - When `path` is relative, it is resolved against `workdir` and must stay within it.
 - WALK tools (`glob_files`, `grep_files`) further require the resolved root to be within
   the workdir OR an allowed temp dir. Absolute roots outside the workdir (e.g. bare
@@ -194,19 +208,394 @@ def _resolve_target_path(
     return guard._resolve_target(path)
 
 
+# ---------------------------------------------------------------------------
+# B3 — the per-agent READ SCOPE (Phase-1 plan §6 B3, DS-15)
+# ---------------------------------------------------------------------------
+#
+# Opt-in, default-OFF. An agent that does NOT declare a ``read_scope``
+# in its ``meta.json`` keeps TODAY's behavior byte-for-byte — the
+# fleet-wide default stays deferred (D8 res.9). The only declared
+# scope in Phase 1 is ``"project"`` (skill-keeper).
+#
+# WHY the identity and not the scope value: the ambient binding carries
+# the CALLING AGENT'S IDENTITY (bound by the scope-aware wrapper in
+# ``daemon/tools/instance.py``, row 17b). The declared scope is then
+# READABLE at the enforcement site. The agent can never widen its own
+# scope — the binding is made by the factory, not by tool arguments.
+
+#: The ambient calling agent identity for the CURRENT tool call.
+_CURRENT_CALLER_AGENT_ID: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("ensemble_caller_agent_id", default=None)
+)
+
+#: The TRUSTED, daemon-resolved workdir for the CURRENT tool call.
+#:
+#: WHY a SEPARATE binding (Phase-1 fix round 1, D1): the scope's base
+#: must NOT come from the tool-call ARGUMENTS. ``workdir`` is a
+#: FIRST-CLASS agent-supplied argument (``read_file``'s schema carries
+#: it), so anchoring the refusal to it let the agent move its own
+#: boundary — the reviewed bypass drove
+#: ``read_file("/etc/passwd", workdir="/")`` and GOT the file back.
+#:
+#: The anchor is bound by the tool FACTORY (``daemon/tools/instance.py``)
+#: from the instance's project ``main_directory`` — the SAME directory
+#: the read tool would default to. It travels beside the caller
+#: identity, and both are set/reset around EVERY tool call.
+_CURRENT_TRUSTED_WORKDIR: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("ensemble_trusted_workdir", default=None)
+)
+
+#: The only scope value Phase 1 defines. A DECLARED scope (any value)
+#: means "bounded" — the declaration is the opt-in, the value names the
+#: boundary in the refusal message.
+READ_SCOPE_PROJECT = "project"
+
+#: agent_id → ``(scope, meta_path, st_mtime_ns, st_size, st_ctime_ns)``.
+#:
+#: The META IDENTITY is part of the key (code-review council F-5). This
+#: cache is process-global and was NEVER invalidated, so a stale ``None``
+#: silently **UNBOUND** a scoped agent — the fence failed **OPEN** until
+#: a daemon restart. The failure direction is what matters: an agent
+#: whose scope had JUST been declared still read unbounded.
+#:
+#: Keying on the meta.json's identity (``path`` + ``st_mtime_ns`` +
+#: ``st_size`` + ``st_ctime_ns``) makes the stat() the invalidation
+#: trigger: any scope edit changes the identity, the entry no longer
+#: matches, and the declaration is re-read on the NEXT call — no
+#: restart, no invalidation hook, no manual cache clearing. One cheap
+#: ``stat()`` per lookup, far cheaper than the JSON re-read it replaces.
+#:
+#: **RESIDUAL (disclosed, D-N15).** An edit that preserves the byte
+#: length AND lands inside the filesystem's timestamp tick can still be
+#: served stale. ``st_ctime_ns`` closes the ``utime``-restore case (a
+#: restored mtime cannot restore ctime) and tightens the same-tick
+#: window, but it does NOT eliminate it: every REAL scope
+#: declaration/removal changes the length, so the practical fail-OPEN
+#: direction is closed. The claim is deliberately NOT stronger than that.
+_READ_SCOPE_CACHE: dict[str, tuple[str | None, str, int, int, int]] = {}
+
+
+def set_caller_agent_id(agent_id: str | None):
+    """Bind the calling agent's identity for the current tool call.
+
+    Returns a token to hand back to :func:`reset_caller_agent_id`.
+    """
+    return _CURRENT_CALLER_AGENT_ID.set(agent_id or None)
+
+
+def reset_caller_agent_id(token) -> None:
+    """Restore the previous caller identity binding."""
+    _CURRENT_CALLER_AGENT_ID.reset(token)
+
+
+def current_caller_agent_id() -> str | None:
+    """Return the calling agent's identity for the current tool call."""
+    return _CURRENT_CALLER_AGENT_ID.get()
+
+
+def set_trusted_workdir(workdir: str | None):
+    """Bind the TRUSTED, daemon-resolved workdir for the current tool call.
+
+    Returns a token to hand back to :func:`reset_trusted_workdir`.
+    """
+    return _CURRENT_TRUSTED_WORKDIR.set(workdir or None)
+
+
+def reset_trusted_workdir(token) -> None:
+    """Restore the previous trusted-workdir binding."""
+    _CURRENT_TRUSTED_WORKDIR.reset(token)
+
+
+def current_trusted_workdir() -> str | None:
+    """Return the TRUSTED, daemon-resolved workdir for the current tool call.
+
+    ``None`` means the daemon could not resolve an anchor — a scoped
+    agent then has NO legal read base and every read is refused.
+    """
+    return _CURRENT_TRUSTED_WORKDIR.get()
+
+
+def declared_read_scope(agent_id: str | None) -> str | None:
+    """Return the agent's declared read scope, or ``None`` when undeclared.
+
+    The declaration lives in ``agents/<name>/meta.json`` as
+    ``"read_scope"`` (top level) or ``tools.read_scope``. Absent ⇒
+    ``None`` ⇒ unbounded ⇒ today's behavior.
+
+    The declaration is cached per agent, but the cache entry carries the
+    meta.json's IDENTITY (``path`` + ``st_mtime_ns`` + ``st_size``), so a
+    scope edit invalidates it on the next call (council F-5 — the fence
+    must never fail OPEN on a stale entry).
+    """
+    if not agent_id:
+        return None
+    cached = _READ_SCOPE_CACHE.get(agent_id)
+    if cached is not None:
+        scope, path, mtime_ns, size, ctime_ns = cached
+        if _meta_identity_matches(path, mtime_ns, size, ctime_ns):
+            return scope
+    scope, path, mtime_ns, size, ctime_ns = _load_declared_read_scope(agent_id)
+    if path:
+        _READ_SCOPE_CACHE[agent_id] = (scope, path, mtime_ns, size, ctime_ns)
+    else:
+        # No meta.json at all — nothing stable to key on, so nothing is
+        # cached (an agent whose meta.json appears later must be seen).
+        _READ_SCOPE_CACHE.pop(agent_id, None)
+    return scope
+
+
+def _meta_identity_matches(
+    path: str,
+    mtime_ns: int,
+    size: int,
+    ctime_ns: int,
+) -> bool:
+    """True when the meta.json at *path* is still the one we cached.
+
+    One ``stat()`` — the invalidation trigger for the scope cache. A
+    missing file NEVER matches (the declaration must be re-read).
+
+    ``st_ctime_ns`` is compared too (D-N15): ctime cannot be restored
+    by ``utime``, so a hostile mtime-restore cannot pin a stale entry.
+    """
+    if not path:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return (
+        st.st_mtime_ns == mtime_ns
+        and st.st_size == size
+        and st.st_ctime_ns == ctime_ns
+    )
+
+
+def _load_declared_read_scope(
+    agent_id: str,
+) -> tuple[str | None, str, int, int, int]:
+    """Read the agent's declared scope AND the meta.json's identity.
+
+    Returns ``(scope, meta_path, st_mtime_ns, st_size, st_ctime_ns)``.
+    ``meta_path`` is ``""`` when no meta.json was found (nothing to key
+    the cache on).
+    """
+    from .prompt_artifacts import get_agents_roots
+
+    for root in get_agents_roots():
+        meta_path = root / agent_id / "meta.json"
+        try:
+            if not meta_path.is_file():
+                continue
+            st = meta_path.stat()
+            raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict):
+            return None, str(meta_path), st.st_mtime_ns, st.st_size, st.st_ctime_ns
+        scope = raw.get("read_scope")
+        if scope is None:
+            tools_cfg = raw.get("tools")
+            if isinstance(tools_cfg, dict):
+                scope = tools_cfg.get("read_scope")
+        if isinstance(scope, str) and scope.strip():
+            return (
+                scope.strip().lower(),
+                str(meta_path),
+                st.st_mtime_ns,
+                st.st_size,
+                st.st_ctime_ns,
+            )
+        return None, str(meta_path), st.st_mtime_ns, st.st_size, st.st_ctime_ns
+    return None, "", -1, -1, -1
+
+
+#: Basenames a SCOPED agent may NEVER read, at ANY depth under the anchor
+#: (iteration 2 — D-N2). The `.env` FAMILY is matched as a prefix
+#: (``.env``, ``.env.local``, ``.env.production``, …).
+#:
+#: WHY this exists even though the primary fence is relative-only + the
+#: trusted anchor: the anchor IS the project repo, so "relative only"
+#: permits exactly the file the scope exists to deny — ``read_file(".env")``
+#: RETURNED the live credential block (619 chars) in the re-adjudication.
+#: DS-15 names this class explicitly ("the repo ``.env``, ``~/.ssh/*``,
+#: ``/proc/self/environ``"); the latter two are outside the anchor and were
+#: already refused, ``.env`` was not. This is the NAMED EXCEPTION for the
+#: exact hazard class the commission enumerates — NOT a broad denylist.
+_SCOPE_DENIED_BASENAMES: frozenset[str] = frozenset({".env"})
+
+
+def _is_scope_denied_basename(name: str | None) -> bool:
+    """True when *name* is a credential-hazard basename (see the constant).
+
+    ``.env`` and the whole ``.env.*`` family are denied. The match is on
+    the BASENAME only, so the rule applies at ANY depth under the anchor
+    (``.env``, ``frontend/.env``, ``deploy/.env.production``).
+    """
+    if not name:
+        return False
+    lowered = str(name).strip().lower()
+    for denied in _SCOPE_DENIED_BASENAMES:
+        if lowered == denied or lowered.startswith(f"{denied}."):
+            return True
+    return False
+
+
+def _trusted_scope_anchor() -> Path | None:
+    """Return the TRUSTED read anchor for a scoped agent, or ``None``.
+
+    The anchor is the daemon-resolved project workdir, bound by the
+    tool FACTORY. It is NEVER derived from the tool-call's ``workdir``
+    ARGUMENT — that argument is agent-supplied and would let the agent
+    choose its own boundary (the reviewed D1 bypass: ``workdir="/"``
+    turned ``read_file("/etc/passwd")`` into a success).
+    """
+    trusted = current_trusted_workdir()
+    if not trusted or not str(trusted).strip():
+        return None
+    try:
+        return Path(trusted).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _resolve_within_scope(
+    path: str,
+    scope: str,
+) -> tuple[Path | None, str | None]:
+    """Resolve a read path for an agent that DECLARES a read scope.
+
+    The rules (iteration 2 — D1 / D-N1 / D-N2):
+
+    * **ABSOLUTE path argument ⇒ REFUSED**, unconditionally. The
+      acceptance list requires ``<repo>/.env`` to be refused even
+      though the repo IS the anchor, so "inside the anchor" is not the
+      rule — "relative only" is.
+    * **RELATIVE path ⇒ resolved against the TRUSTED anchor** (the
+      daemon-resolved project workdir), NEVER against the tool-call's
+      ``workdir`` argument. A relative path that escapes the anchor is
+      refused.
+    * **A CREDENTIAL-HAZARD BASENAME ⇒ REFUSED at any depth under the
+      anchor** (``.env`` / ``.env.*`` — see
+      :data:`_SCOPE_DENIED_BASENAMES`). The anchor IS the project repo,
+      so "relative-only" alone permits exactly the file the scope
+      exists to deny.
+    * **No anchor ⇒ every read is refused** (fail-closed).
+
+    A DECLARED scope therefore means *relative-only reads, anchored at
+    the daemon's own workdir, minus the named credential-hazard
+    basenames* — the class DS-15 enumerates (the repo ``.env``,
+    ``~/.ssh/*``, ``/proc/self/environ``, another agent's directory).
+
+    Shared by the file tools AND the walk tools (``glob_files`` /
+    ``grep_files``) so there is exactly ONE definition of what a scope
+    permits.
+    """
+    anchor = _trusted_scope_anchor()
+    if anchor is None:
+        return None, (
+            f"ERROR: read scope {scope!r} has no trusted workdir anchor — the "
+            "daemon could not resolve this instance's project directory. "
+            "Reads are refused (the scope permits relative reads anchored "
+            "at the trusted workdir only)."
+        )
+    if _is_absolute_path(path):
+        return None, (
+            f"ERROR: read scope {scope!r} permits RELATIVE reads only, "
+            f"anchored at {anchor}. The absolute path {path!r} is refused — "
+            "read it as a relative path from the anchor."
+        )
+    try:
+        guard = WorkspaceGuard(str(anchor))
+    except ValueError:
+        return None, (
+            f"ERROR: trusted workdir does not exist: {anchor} — the daemon "
+            "could not resolve this instance's project directory."
+        )
+    target, err = guard.resolve(path)
+    if err:
+        return None, err
+    # STRICT containment — ``WorkspaceGuard.resolve`` ALSO allows any target
+    # inside an allowed TEMP dir (the house's "trusted by design" allowance).
+    # For a SCOPED agent that allowance is a hole: an anchor that itself
+    # lives under a temp dir (a sandbox / test deploy) would let `../x`
+    # climb out and land back inside temp and be accepted. A scope means the
+    # anchor and nothing else.
+    if target is not None and not WorkspaceGuard._normed_contains(anchor, target):
+        return None, (
+            f"ERROR: read scope {scope!r} forbids reading outside the trusted "
+            f"workdir ({anchor}); {target} is outside it."
+        )
+    if target is not None and _is_scope_denied_basename(target.name):
+        return None, (
+            f"ERROR: read scope {scope!r} denies the credential-hazard "
+            f"basename {target.name!r} — the `.env` family is refused at ANY "
+            f"depth under the trusted workdir ({anchor})."
+        )
+    return target, None
+
+
+def _scope_filter_candidates(
+    files: list[Path],
+    scope: str | None,
+) -> list[Path]:
+    """Drop credential-hazard basenames AND symlinks from a SCOPED agent's
+    walk results.
+
+    The walk tools (``glob_files`` / ``grep_files``) enumerate files rather
+    than resolving ONE target, so :func:`_resolve_within_scope`'s basename
+    rule cannot reach them. Without this filter a scoped agent could still
+    ``glob`` the ``.env`` file's NAME or ``grep`` its CONTENT from inside
+    its own anchor — the exact hazard the rule exists to deny.
+
+    **SYMLINKS (code-review council F-1).** A file symlink INSIDE the
+    anchor can point OUTSIDE it. The walker's ``followlinks=False`` stops
+    it descending into symlinked DIRECTORIES, but a symlinked FILE is
+    enumerated and then READ (``file_path.read_text()``) — so
+    ``grep_files(path=".")`` returned the outside file's CONTENT while
+    ``read_file`` on the same link was correctly REFUSED. The anchor
+    cannot be trusted to contain a symlink's TARGET, so a SCOPED agent
+    never sees a symlink candidate at all: neither its content (grep)
+    nor its name (glob). Undeclared agents keep base behaviour — symlinks
+    are still walked, exactly as before.
+    """
+    if not scope:
+        return files
+    return [
+        f
+        for f in files
+        if not _is_scope_denied_basename(f.name) and not f.is_symlink()
+    ]
+
+
 def _resolve_within_workdir(
     path: str,
     workdir: str | None,
+    scope_agent_id: str | None = None,
 ) -> tuple[Path | None, str | None]:
     """Resolve *path* and verify it stays within *workdir* (when relative).
 
     Combines ``_resolve_target_path`` with the boundary check, so callers get
     a single (target, err) tuple and can't forget to apply the boundary check.
 
+    ``scope_agent_id`` is the OPT-IN read-scope hook (B3). When the agent
+    declares NO scope — the write/edit call paths and every agent that
+    declares none — the behavior is byte-identical to the pre-scope
+    resolver. Only the READ call sites pass it.
+
     Returns:
         (target_path, error). On error, target_path is None. For absolute
-        paths the boundary check is intentionally skipped.
+        paths the boundary check is intentionally skipped UNLESS the
+        caller opted into a declared read scope.
     """
+    scope = declared_read_scope(scope_agent_id)
+    if scope:
+        # A SCOPED agent reads RELATIVE paths against the TRUSTED
+        # daemon-resolved anchor only. The `workdir` ARGUMENT is never
+        # consulted here — it is agent-supplied and must not be able to
+        # move the boundary (D1).
+        return _resolve_within_scope(path, scope)
+
     if _is_absolute_path(path):
         try:
             return Path(path).expanduser(), None
@@ -252,6 +641,7 @@ def _is_within_workdir(workdir: Path, target: Path) -> bool:
 def _resolve_search_root(
     path: str,
     workdir: str | None,
+    scope_agent_id: str | None = None,
 ) -> tuple[Path | None, str | None]:
     """Resolve a search root for WALK tools (glob_files, grep_files) ONLY.
 
@@ -260,7 +650,17 @@ def _resolve_search_root(
     absolute path (e.g. ``/Users/...``) makes the walk unbounded — the
     2026-09-23 incident root cause (16 GB RAM walk → SIGKILL).
 
-    Semantics:
+    ``scope_agent_id`` is the OPT-IN read-scope hook (iteration 2 — D-N1).
+    The walk tools were the SECOND surface with the SAME anchor bug the file
+    tools had: the walk root was bounded against the AGENT-SUPPLIED
+    ``workdir``, so ``grep_files(path=<out-of-anchor>, workdir="/")`` returned
+    LIVE CONTENT to the keeper. When the agent DECLARES a scope the whole
+    resolution is delegated to :func:`_resolve_within_scope` — relative-only,
+    anchored at the daemon-resolved trusted workdir, credential-hazard
+    basenames denied. Undeclared agents fall through to the base rules below,
+    byte-identically.
+
+    Semantics (undeclared agents — unchanged):
       - Relative path: delegates to ``_resolve_within_workdir`` (same workdir
         requirement and behavior as the file tools — relative path stays
         inside the workdir or temp dir).
@@ -278,6 +678,12 @@ def _resolve_search_root(
     Returns:
         (target_path, error). On error, target_path is None.
     """
+    scope = declared_read_scope(scope_agent_id)
+    if scope:
+        # A SCOPED agent's walk root obeys the SAME rules as its file
+        # reads: relative-only, trusted anchor, no credential basenames.
+        return _resolve_within_scope(path, scope)
+
     if not _is_absolute_path(path):
         # Relative paths keep the existing _resolve_within_workdir semantics.
         return _resolve_within_workdir(path, workdir)
@@ -593,7 +999,16 @@ def list_directory(
     show_hidden: bool = False
 ) -> str:
     """List directory contents. Use tool_help("list_directory") for details."""
-    dir_path, err = _resolve_within_workdir(path, workdir)
+    # B3: the read call site opts into the declared read scope (the
+    # ambient caller identity is bound by the scope-aware wrapper in
+    # ``daemon/tools/instance.py``). Undeclared ⇒ no scope ⇒ unchanged.
+    # D-N7: the enumerating twin of the read surface. The listing must
+    # not leak credential-hazard NAMES either — the in-loop `_is_scope_denied_basename` check
+    # drops them for a SCOPED agent only (names, never content, but the
+    # name is itself the hazard: it tells the agent the file exists and
+    # where). Undeclared agents get the untouched entry list.
+    list_scope = declared_read_scope(current_caller_agent_id())
+    dir_path, err = _resolve_within_workdir(path, workdir, current_caller_agent_id())
     if err:
         return err
 
@@ -607,7 +1022,21 @@ def list_directory(
         entries = []
         for entry in sorted(dir_path.iterdir()):
             name = entry.name
-            
+
+            # D-N7: a SCOPED agent never sees a denied basename — not
+            # even as a NAME (and regardless of ``show_hidden``).
+            if list_scope and _is_scope_denied_basename(entry.name):
+                continue
+
+            # D-N14: a SCOPED agent never sees a SYMLINK either — the
+            # same principle the walk tools follow (F-1): the anchor
+            # cannot be trusted to contain a symlink's TARGET, and the
+            # NAME alone discloses that such a link exists (and where
+            # it might point). Undeclared agents keep base behaviour —
+            # the symlink is listed with the tool's own ``@`` marker.
+            if list_scope and entry.is_symlink():
+                continue
+
             # Skip hidden files unless requested
             if not show_hidden and name.startswith("."):
                 continue
@@ -667,7 +1096,10 @@ def read_file(
     limit: int = 2000,
 ) -> str:
     """Read file contents. Use tool_help("read_file") for details."""
-    file_path, err = _resolve_within_workdir(path, workdir)
+    # B3: the read call site opts into the declared read scope (the
+    # ambient caller identity is bound by the scope-aware wrapper in
+    # ``daemon/tools/instance.py``). Undeclared ⇒ no scope ⇒ unchanged.
+    file_path, err = _resolve_within_workdir(path, workdir, current_caller_agent_id())
     if err:
         return err
 
@@ -761,7 +1193,12 @@ def glob_files(
     """Find files matching a glob pattern. Use tool_help("glob_files") for details."""
     # Walk-tool absolute-path guard (2026-09-23 incident fix). Bare absolute
     # roots outside the workdir are REFUSED — see _resolve_search_root.
-    search_path, err = _resolve_search_root(path, workdir)
+    # D-N1: a SCOPED agent resolves its walk root through the SAME
+    # relative-only / trusted-anchor rules as its file reads.
+    glob_scope = declared_read_scope(current_caller_agent_id())
+    search_path, err = _resolve_search_root(
+        path, workdir, current_caller_agent_id()
+    )
     if err:
         return err
 
@@ -771,7 +1208,10 @@ def glob_files(
 
         # Bounded walk — applies exclusions / depth / count / timeout caps.
         walk = _bounded_walk(search_path)
-        candidate_files = walk.files
+        # D-N1: a scoped agent's walk never enumerates credential-hazard
+        # basenames — otherwise `glob '**/.env*'` would hand it the file
+        # NAME the read scope denies.
+        candidate_files = _scope_filter_candidates(walk.files, glob_scope)
 
         # Filter candidates by the user's pattern (uses _file_matches_pattern
         # internally; preserves Path.glob semantics including `**`).
@@ -1319,7 +1759,12 @@ def grep_files(
     """Search file contents using regex patterns. Use tool_help("grep_files") for details."""
     # Walk-tool absolute-path guard (2026-09-23 incident fix). Bare absolute
     # roots outside the workdir are REFUSED — see _resolve_search_root.
-    search_path, err = _resolve_search_root(path, workdir)
+    # D-N1: a SCOPED agent resolves its walk root through the SAME
+    # relative-only / trusted-anchor rules as its file reads.
+    grep_scope = declared_read_scope(current_caller_agent_id())
+    search_path, err = _resolve_search_root(
+        path, workdir, current_caller_agent_id()
+    )
     if err:
         return err
 
@@ -1342,7 +1787,13 @@ def grep_files(
 
         # Resolve include filter on top of the bounded walk's output
         # (recursive + single-level brace expansion).
-        candidate_files = _filter_candidates_by_include(search_path, include, walk.files)
+        # D-N1: a scoped agent's grep never READS credential-hazard
+        # basenames — otherwise `grep '<secret>'` inside its own anchor
+        # would return the `.env` CONTENT the read scope denies.
+        candidate_files = _scope_filter_candidates(
+            _filter_candidates_by_include(search_path, include, walk.files),
+            grep_scope,
+        )
 
         # Stamp ONE phase deadline (shared by stat + read phases below).
         # Reuses the walker's stamped deadline so a slow walk + slow post-walk

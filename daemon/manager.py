@@ -173,6 +173,8 @@ from .repositories.mcps_gateway.repository import McpGatewayAuditRepository
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import (
+    DEFAULT_FIX_BURST_CAP,
+    DEFAULT_FIX_BURST_WINDOW_SECONDS,
     EVOLUTION_TYPE_FIX,
     SKILL_EVOLUTION_KILL_SWITCH_ENV,
     SkillJobDispatcher,
@@ -2779,6 +2781,31 @@ class InstanceManager:
                 # when ANY lookup is missing (test fixtures,
                 # pre-Phase-3 deployments).
                 self._wire_skill_injection_capability_gate()
+                # E4.1 (skill-system-revival Phase 1, plan §9 E4 / open item
+                # E-7): the SHIPPED, idempotent boot-time reconciliation of
+                # the stale/shadow skill rows.
+                #
+                # WHY HERE (the ordering proof):
+                #   * it is the LAST call of the skill-services init block,
+                #     under the SAME "skill repos present" guard as the
+                #     injection wiring above;
+                #   * the block runs strictly AFTER ``run_pending_migrations()``
+                #     (manager.py:1019) and AFTER ``self._ensure_postgres_columns()``
+                #     (manager.py:1036) — so this call is NEVER inside the
+                #     one-transaction ensure list (critical note 48a7f77f:
+                #     any entry's failure there aborts the boot);
+                #   * it completes BEFORE the first injection can occur (the
+                #     service is only reachable after this block returns).
+                #     The guarantee is NOT timing-dependent anyway: E4.3's
+                #     injection-side filter excludes the stale rows even when
+                #     this reconciliation has not run yet (DS-24).
+                #
+                # It is idempotent by construction (a RULE, not a list), it
+                # never hard-deletes, never re-activates, and it REFUSES any
+                # row whose A/B test is unresolved (no winner is ever
+                # declared). Failures are contained: the reconciliation is a
+                # SEPARATE boot step, so a fault here logs and continues.
+                self._run_skill_stale_deactivation_reconciliation()
         else:
             self._skill_usage_repo = None
             self._skill_trigger_repo = None
@@ -5750,6 +5777,66 @@ class InstanceManager:
         )
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # E4.1 — the boot-time stale/shadow skill reconciliation
+    # ------------------------------------------------------------------
+    # Skill-system-revival Phase 1, plan §9 E4 (open item E-7). The call
+    # site is the LAST call of the skill-services init block (adjacent to
+    # ``_wire_skill_injection_capability_gate()``), under the same "skill
+    # repos present" guard — strictly AFTER ``run_pending_migrations()``
+    # and ``_ensure_postgres_columns()``, and therefore NEVER inside the
+    # one-transaction ensure list.
+
+    def _run_skill_stale_deactivation_reconciliation(self) -> None:
+        """Run E4.1's idempotent boot reconciliation (fail-soft).
+
+        The reconciliation applies the R1/R2/R3/R5 rules, refuses every row
+        whose A/B test is unresolved (no winner is ever declared), never
+        hard-deletes and never re-activates. Its receipt lives in the data
+        dir and doubles as the file-backed suppression store, so an
+        operator's reversal is not undone by the next boot.
+
+        Failure posture: this is a SEPARATE boot step (not inside the
+        ensure list), so a fault here is contained — it logs and the boot
+        continues. The safety property does not depend on this call: E4.3's
+        injection-side filter excludes the stale rows independently.
+        """
+        skill_repo = getattr(self, "_skill_repo", None)
+        ab_test_repo = getattr(self, "_skill_ab_test_repo", None)
+        if skill_repo is None or ab_test_repo is None:
+            return
+        try:
+            from daemon.services.skill_deactivation import (
+                SkillStaleDeactivator,
+                is_stale_deactivation_enabled,
+            )
+
+            if not is_stale_deactivation_enabled():
+                logger.debug(
+                    "[E4.1] skill stale-deactivation reconciliation skipped: "
+                    "brake ENSEMBLE_SKILL_STALE_DEACTIVATION_ENABLED is OFF (default)"
+                )
+                return
+
+            report = SkillStaleDeactivator(
+                skill_repo=skill_repo,
+                ab_test_repo=ab_test_repo,
+            ).reconcile(dry_run=False)
+        except Exception as e:  # noqa: BLE001 — a boot step must not abort boot
+            logger.warning(
+                f"[E4.1] skill stale-deactivation reconciliation failed "
+                f"({type(e).__name__}: {e}) — boot continues; the E4.3 "
+                f"injection-side filter still holds the safety property"
+            )
+            return
+        if report.touched_count or report.refused_count:
+            logger.info(
+                f"[E4.1] skill stale-deactivation reconciliation: "
+                f"touched={report.touched_count} "
+                f"refused={report.refused_count} "
+                f"receipt={report.receipt_path}"
+            )
+
     # Question pause-requested flag (Phase 1 / question tool)
     # ------------------------------------------------------------------
     # The ``question`` tool sets this flag before returning. The
@@ -8044,6 +8131,20 @@ class InstanceManager:
             _raw_cooldown = getattr(
                 _skill_evo_cfg, "fix_cooldown_seconds", None
             )
+            # M1 (fix wave 1): the DURABLE burst-cap knobs must REACH
+            # the dispatcher. They used to be read by nobody — the
+            # config field and its documented env alias were DEAD, and
+            # the dispatcher silently used its module defaults. The
+            # explicit-0-survives discipline of ``fix_cooldown_seconds``
+            # applies here too: an ABSENT/None value falls back to the
+            # dispatcher's default, while an EXPLICIT 0 SURVIVES (the
+            # config contract: "0 disables the cap").
+            _raw_burst_cap = getattr(
+                _skill_evo_cfg, "fix_burst_cap", None
+            )
+            _raw_burst_window = getattr(
+                _skill_evo_cfg, "fix_burst_window_seconds", None
+            )
             self._skill_job_dispatcher = SkillJobDispatcher(
                 job_service=service,
                 queue_repo=queue_repo,
@@ -8065,12 +8166,25 @@ class InstanceManager:
                 fix_cooldown_seconds=(
                     int(_raw_cooldown) if _raw_cooldown is not None else 1800
                 ),
+                fix_burst_cap=(
+                    int(_raw_burst_cap)
+                    if _raw_burst_cap is not None
+                    else DEFAULT_FIX_BURST_CAP
+                ),
+                fix_burst_window_seconds=(
+                    int(_raw_burst_window)
+                    if _raw_burst_window is not None
+                    else DEFAULT_FIX_BURST_WINDOW_SECONDS
+                ),
             )
             logger.info(
                 "SkillJobDispatcher wired to manager "
-                "(evolution_lane_enabled=%s, fix_cooldown_seconds=%s)",
+                "(evolution_lane_enabled=%s, fix_cooldown_seconds=%s, "
+                "fix_burst_cap=%s, fix_burst_window_seconds=%s)",
                 self._skill_job_dispatcher._evolution_lane_enabled,
                 self._skill_job_dispatcher._fix_cooldown_seconds,
+                self._skill_job_dispatcher._fix_burst_cap,
+                self._skill_job_dispatcher._fix_burst_window_seconds,
             )
 
         # Wire the metrics service's job dispatcher handle so the

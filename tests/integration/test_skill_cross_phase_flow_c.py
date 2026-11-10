@@ -18,8 +18,11 @@ own these services:
   task succeeded, agent ``skill_injection=True``, no skill applied,
   complexity threshold).
 * **Phase 4/5** — :class:`SkillEvolutionService.check_and_capture`
-  re-validates ``has_applied_for_instance`` to close the TOCTOU
-  window and returns a ``task_details`` dict.
+  re-validates ``has_genuinely_evolved_for_instance`` (the OUTCOME-FIELDS
+  predicate: ``selected = TRUE AND task_succeeded = TRUE AND
+  feedback_applied IS NOT NULL``) to close the TOCTOU window and returns a
+  ``task_details`` dict.  The retired feedback-only
+  ``has_applied_for_instance`` is NOT a capture-gate predicate.
 * **Phase 5** — :class:`SkillJobDispatcher.enqueue_capture` routes
   a ``skill_capture`` JobItem to ``system_parallel_queue`` (NOT
   ``system_fifo_queue``).
@@ -220,8 +223,9 @@ def instance_repo():
     By default returns an instance whose
     ``last_injected_skill_ids`` is empty — i.e. "no skill was
     injected on this instance". The capture gate's Gate 4 also
-    checks ``has_applied_for_instance``; that's stubbed per-test
-    on the usage repo (see helpers below).
+    checks ``has_genuinely_evolved_for_instance`` (the OUTCOME-FIELDS
+    predicate); that's stubbed per-test on the usage repo (see
+    helpers below).
     """
     inst = SimpleNamespace(instance_metadata={})
     repo = MagicMock()
@@ -338,7 +342,7 @@ class TestStep1TaskCompletionOpensCaptureGate:
         skill_id = _seed_skill(repos, "complex-target").id
         _set_injected(instance_repo, "inst-flow-c-1", [skill_id])
         # No skill was actually applied on this instance.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-flow-c-1",
@@ -367,7 +371,7 @@ class TestStep1TaskCompletionOpensCaptureGate:
         """
         skill_id = _seed_skill(repos, "trivial-target").id
         _set_injected(instance_repo, "inst-flow-c-triv", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-flow-c-triv",
@@ -393,7 +397,7 @@ class TestStep1TaskCompletionOpensCaptureGate:
         """Failed task → gate2 refuses; no capture enqueued."""
         skill_id = _seed_skill(repos, "failed-target").id
         _set_injected(instance_repo, "inst-flow-c-fail", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-flow-c-fail",
@@ -408,20 +412,27 @@ class TestStep1TaskCompletionOpensCaptureGate:
         assert result == 1
         assert dispatcher._job_service.enqueue.await_count == 0
 
-    async def test_skill_already_applied_skips_capture(
+    async def test_gate4_refuses_when_the_outcome_fields_predicate_is_true(
         self,
         metrics_service,
         repos,
         instance_repo,
         dispatcher,
     ):
-        """When ``has_applied_for_instance`` is True, the success
+        """When ``has_genuinely_evolved_for_instance`` is True, the success
         is attributed to the existing skill — gate4 refuses;
         no capture enqueued.
         """
         skill_id = _seed_skill(repos, "applied-target").id
         _set_injected(instance_repo, "inst-flow-c-app", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=True)
+        # A3: the capture gate asks the OUTCOME-FIELDS predicate
+        # (selected AND task_succeeded AND feedback_applied IS NOT
+        # NULL) — the feedback-only ``has_applied_for_instance`` is not
+        # a capture-gate predicate (its ``applied`` column is written by
+        # nobody).
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(
+            return_value=True
+        )
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-flow-c-app",
@@ -461,7 +472,7 @@ class TestStep2CaptureJobRoutedToParallelQueue:
         """The capture job's ``queue_id`` resolves to the parallel queue."""
         skill_id = _seed_skill(repos, "routing-target").id
         _set_injected(instance_repo, "inst-flow-c-rt", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         await metrics_service.record_task_completion(
             instance_id="inst-flow-c-rt",
@@ -507,7 +518,7 @@ class TestStep2CaptureJobRoutedToParallelQueue:
         """``queue_repo.get_by_name`` was queried with ``system_parallel_queue``."""
         skill_id = _seed_skill(repos, "queue-name-target").id
         _set_injected(instance_repo, "inst-flow-c-qn", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         await metrics_service.record_task_completion(
             instance_id="inst-flow-c-qn",
@@ -738,7 +749,7 @@ class TestStep4MetricsAndCaptureAgree:
         existing_skill_id = _seed_skill(repos, "pre-existing").id
         _set_injected(instance_repo, "inst-flow-c-e2e", [existing_skill_id])
         # No skill was actually applied on this instance.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         # ── Phase 4: Task completion triggers the capture gate ────
         result = await metrics_service.record_task_completion(
@@ -821,3 +832,38 @@ class TestStep4MetricsAndCaptureAgree:
         captured = [s for s in all_skills if s.lineage_origin == "captured"]
         assert len(captured) == 1
         assert captured[0].id == new_skill_id
+
+
+# ---- sink sandbox (house safe redirect) ----
+# The capture-lane sink resolves its data dir from a PROCESS-GLOBAL
+# override.  A fixture that installs a redirect and then restores the
+# override to ``None`` re-exposes the checkout's REAL data dir for every
+# later write (the order-dependent sink leak).  This fixture NEVER
+# restores ``None``: it restores the SAFE session scratch dir and runs
+# the shared-path sentinel.  See tests/helpers/skill_sink_redirect.py.
+from daemon.services import skill_capture_observability as observability
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
+
+@pytest.fixture(autouse=True)
+def _sink_sandbox(tmp_path, request):
+    """Redirect the capture sink into ``tmp_path``; never restore None."""
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    observability.set_anomaly_reporter(None)
+    try:
+        yield tmp_path
+    finally:
+        # NEVER restore to None — that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink leak).
+        restore_safe_sink_redirect()
+        observability.reset_counters()
+        observability.set_anomaly_reporter(None)
+        lane_test_end(request.node.nodeid, before)

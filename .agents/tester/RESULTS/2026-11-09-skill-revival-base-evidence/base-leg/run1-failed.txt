@@ -1,0 +1,7 @@
+ERROR    daemon.migrations.runner:runner.py:723 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:723 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:723 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_have_correct_dependencies
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_initialized_when_config_present
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_none_when_skill_evolution_disabled
+FAILED tests/services/test_skill_evolution_service.py::TestCheckABTestResolution::test_ab_resolution_threshold_met

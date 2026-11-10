@@ -243,8 +243,10 @@ class TestSkillCapture:
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-1", [skill_id])
 
-        # ``has_applied_for_instance`` must return False — no skill applied.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        # ``has_genuinely_evolved_for_instance`` must return False — the
+        # skill did NOT genuinely evolve (the outcome-fields predicate:
+        # selected AND task_succeeded AND feedback_applied IS NOT NULL).
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-1",
@@ -282,7 +284,7 @@ class TestSkillCapture:
         """Trivial success (low iterations AND short duration) skips capture."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-2", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-2",
@@ -300,18 +302,24 @@ class TestSkillCapture:
         assert dispatcher.enqueue_capture.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_no_capture_when_skill_applied(
+    async def test_no_capture_when_the_skill_genuinely_evolved(
         self,
         metrics_service,
         repos,
         instance_repo,
         dispatcher,
     ):
-        """When a usage record has feedback_applied=True, capture is suppressed."""
+        """When the outcome-fields predicate is True, capture is suppressed."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-3", [skill_id])
-        # Skill was applied — success is attributed to it.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=True)
+        # Skill was genuinely evolved — success is attributed to it.
+        # A3: the capture gate asks the OUTCOME-FIELDS predicate
+        # (selected AND task_succeeded AND feedback_applied IS NOT
+        # NULL), not the feedback-only ``has_applied_for_instance``
+        # (whose ``applied`` column is written by nobody).
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(
+            return_value=True
+        )
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-3",
@@ -338,7 +346,7 @@ class TestSkillCapture:
         """Failed tasks are never eligible for capture, even when complex."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-4", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-4",
@@ -369,7 +377,7 @@ class TestSkillCapture:
 
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-5", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
             instance_id="inst-cx-5",
@@ -419,7 +427,7 @@ class TestSkillCapture:
         """Capture gating is downstream of metrics — both fire on success."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-7", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         # Read the skill row before so we can compare counters after.
         before = repos.skill.get(skill_id)
@@ -454,7 +462,7 @@ class TestSkillCapture:
         """Failed task → consecutive_failures +1, no capture."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-8", [skill_id])
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         await metrics_service.record_task_completion(
             instance_id="inst-cx-8",
@@ -486,8 +494,9 @@ class TestCaptureServiceLevel:
     async def test_check_and_capture_returns_task_details_when_eligible(
         self, evolution_service, repos,
     ):
-        # No usage records for this instance → has_applied returns False.
-        repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+        # No usage records for this instance → the outcome-fields predicate
+        # (has_genuinely_evolved_for_instance) returns False.
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         details = await evolution_service.check_and_capture(
             instance_id="inst-1",
@@ -535,10 +544,16 @@ class TestCaptureServiceLevel:
         assert details is None
 
     @pytest.mark.asyncio
-    async def test_check_and_capture_returns_none_when_skill_already_applied(
+    async def test_check_and_capture_returns_none_when_the_skill_genuinely_evolved(
         self, evolution_service, repos,
     ):
-        repos.usage.has_applied_for_instance = MagicMock(return_value=True)
+        # A3: the capture gate asks the OUTCOME-FIELDS predicate
+        # (selected AND task_succeeded AND feedback_applied IS NOT NULL);
+        # the retired feedback-only ``has_applied_for_instance`` is NOT
+        # consulted by the gate.
+        repos.usage.has_genuinely_evolved_for_instance = MagicMock(
+            return_value=True
+        )
         details = await evolution_service.check_and_capture(
             instance_id="inst-1",
             agent_id="developer",
@@ -549,3 +564,38 @@ class TestCaptureServiceLevel:
             duration_seconds=120,
         )
         assert details is None
+
+
+# ---- sink sandbox (house safe redirect) ----
+# The capture-lane sink resolves its data dir from a PROCESS-GLOBAL
+# override.  A fixture that installs a redirect and then restores the
+# override to ``None`` re-exposes the checkout's REAL data dir for every
+# later write (the order-dependent sink leak).  This fixture NEVER
+# restores ``None``: it restores the SAFE session scratch dir and runs
+# the shared-path sentinel.  See tests/helpers/skill_sink_redirect.py.
+from daemon.services import skill_capture_observability as observability
+from tests.helpers.skill_sink_redirect import (
+    lane_test_end,
+    lane_test_start,
+    restore_safe_sink_redirect,
+    snapshot_real_sink_dir,
+)
+
+
+@pytest.fixture(autouse=True)
+def _sink_sandbox(tmp_path, request):
+    """Redirect the capture sink into ``tmp_path``; never restore None."""
+    lane_test_start(request.node.nodeid)
+    before = snapshot_real_sink_dir()
+    observability.configure_sink(tmp_path)
+    observability.reset_counters()
+    observability.set_anomaly_reporter(None)
+    try:
+        yield tmp_path
+    finally:
+        # NEVER restore to None — that re-exposes the checkout's REAL
+        # data dir for every later write (the order-dependent sink leak).
+        restore_safe_sink_redirect()
+        observability.reset_counters()
+        observability.set_anomaly_reporter(None)
+        lane_test_end(request.node.nodeid, before)

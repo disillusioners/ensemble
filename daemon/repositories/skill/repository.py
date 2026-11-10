@@ -796,6 +796,121 @@ class SkillRepository:
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [skill for _, skill in scored[:limit]]
 
+    # ------------------------------------------------------------------
+    # the within-identity-key divergence gauge (A4 — the REDEFINED gauge)
+    # ------------------------------------------------------------------
+
+    def within_identity_key_divergence(
+        self,
+        *,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Measure divergence WITHIN one identity key — never across names.
+
+        THE GAUGE AND WHY IT WAS REDEFINED.  ``skills.name`` is
+        INTENTIONALLY non-unique: every project gets its own
+        ``bank_clone`` generation-0 row, so one name spans many
+        ``project_id`` values BY DESIGN.  The retired gauge counted
+        *names with diverging content* over *all skills* — which makes
+        a NON-DEFECT (per-project clones) look like drift, and can never
+        be driven to zero without destroying the per-project clone model.
+        This gauge measures the thing that IS a defect: two or more rows
+        that share an identity key ``(name, project_id)`` but disagree on
+        ``content``.
+
+        The identity key is ``(name, project_id)``; the measure is
+        ``count(DISTINCT content) > 1`` per key — the reproduction recipe
+        of the Phase-1 census (plan §16.1 C-5).  Because the census runs
+        over ALL ``skills`` rows (no ``is_active`` filter), a key with one
+        ACTIVE row plus older INACTIVE generations of differing content
+        also counts.  That is deliberate: it is the same population the
+        baseline was measured on.
+
+        Dialect safety: pure ORM (``GROUP BY`` + ``func.count``), no raw
+        SQL — PostgreSQL is primary, SQLite stays supported, and the
+        grouping is identical on both (``NULL`` ``project_id`` forms its
+        own group).
+
+        Args:
+            limit: How many divergent keys to enumerate (the COUNTS are
+                always over every key; only the ``keys`` sample is
+                bounded so a broken registry cannot produce an unbounded
+                payload).
+
+        Returns:
+            Dict with keys:
+
+            * ``diverging_keys`` — the GAUGE: number of
+              ``(name, project_id)`` keys with more than one distinct
+              content.  This is the number the Phase-1 census reports as
+              **32** on production (630 rows) and **0** on dev (15 rows).
+
+              RECONCILIATION (32 vs the 27-pair backlog).  The 27
+              stranded A/B pairs are 27 multi-active
+              ``(name, project_id)`` families (54 active rows, 26
+              distinct names) — but **2 of them carry IDENTICAL
+              content**, so the multi-active backlog can explain at most
+              **25** of the 32 divergent keys.  The **residual 7** keys
+              are NOT produced by a multi-active family: this gauge's
+              population is ALL 630 rows, so a key whose SINGLE active
+              row coexists with a differing INACTIVE generation (the
+              loser of a RESOLVED A/B group — the census records 32
+              resolved groups — or an older superseded generation) also
+              diverges.  The plan's census does not enumerate those 7
+              keys; this method's ``keys`` field does, when it is run
+              against production.  The residual is therefore stated, not
+              invented.
+
+              The **0 target is BLOCKED-ON the A/B resolution decision**
+              (Ruling E) — do NOT read this gauge's non-zero value as a
+              Phase-1 regression, and do NOT plan name-level dedupe:
+              global-name divergence is a NON-DEFECT by construction
+              (per-project ``bank_clone`` clones make one name span many
+              projects).
+            * ``rows_in_diverging_groups`` — how many rows sit in those
+              keys (the census's second figure).
+            * ``total_skills`` — the population the gauge scanned.
+            * ``keys`` — up to ``limit`` divergent keys as
+              ``{"name", "project_id", "distinct_contents", "rows"}``,
+              widest divergence first.
+            * ``truncated`` — whether ``keys`` was cut by ``limit``.
+        """
+        distinct_contents = func.count(func.distinct(Skill.content))
+        rows_in_key = func.count()
+        stmt = (
+            select(
+                Skill.name,
+                Skill.project_id,
+                distinct_contents.label("distinct_contents"),
+                rows_in_key.label("rows_in_key"),
+            )
+            .group_by(Skill.name, Skill.project_id)
+            .order_by(distinct_contents.desc(), col(Skill.name))
+        )
+        with Session(self.engine) as session:
+            rows = list(session.exec(stmt))
+
+        total_skills = sum(int(row[3] or 0) for row in rows)
+        diverging = [row for row in rows if int(row[2] or 0) > 1]
+        enumerated = [
+            {
+                "name": str(row[0]),
+                "project_id": row[1],
+                "distinct_contents": int(row[2] or 0),
+                "rows": int(row[3] or 0),
+            }
+            for row in diverging[: max(0, int(limit))]
+        ]
+        return {
+            "diverging_keys": len(diverging),
+            "rows_in_diverging_groups": sum(
+                int(row[3] or 0) for row in diverging
+            ),
+            "total_skills": total_skills,
+            "keys": enumerated,
+            "truncated": len(diverging) > len(enumerated),
+        }
+
 
 # ============================================================
 # SkillLineageRepository
@@ -1554,6 +1669,15 @@ class SkillUsageRepository:
         :meth:`get_applied_for_instance` when the caller only
         needs a yes/no answer.
 
+        .. note::
+            **FEEDBACK-BASED; NOT A CAPTURE-GATE PREDICATE.**  This
+            answers *"did a human/agent file feedback for this
+            instance"* — it says nothing about whether the skill was
+            genuinely evolved.  Capture attribution uses
+            :meth:`has_genuinely_evolved_for_instance` (the
+            three-conjunct OUTCOME-FIELDS predicate).  Kept intact for
+            its existing feedback-rollup consumers.
+
         Args:
             instance_id: The instance ID.
 
@@ -1568,6 +1692,67 @@ class SkillUsageRepository:
                 .select_from(SkillUsageRecord)
                 .where(SkillUsageRecord.instance_id == instance_id)
                 .where(SkillUsageRecord.feedback_applied == True)  # noqa: E712
+                .limit(1)
+            )
+            return session.exec(stmt).first() is not None
+
+    def has_genuinely_evolved_for_instance(self, instance_id: str) -> bool:
+        """Whether a skill was GENUINELY EVOLVED on this instance.
+
+        THE CAPTURE-GATE PREDICATE (LEADER RULING Q1 — the
+        OUTCOME-FIELDS form).  A skill counts as genuinely evolved only
+        when at least one of its usage records for this instance
+        satisfies ALL THREE conjuncts::
+
+            selected = TRUE AND task_succeeded = TRUE
+            AND feedback_applied IS NOT NULL
+
+        Why each conjunct is there:
+
+        * ``selected`` — the record must be a real selection event;
+        * ``task_succeeded`` — attribution may only ride a successful
+          task (a failure teaches the opposite lesson);
+        * ``feedback_applied IS NOT NULL`` — feedback EVIDENCE must
+          exist (``NULL`` = never recorded).  Without this conjunct the
+          measured false-eligible population is 3,457 rows (the 2026-11-09
+          census window: ``selected AND task_succeeded AND
+          feedback_applied IS NULL``); with it, the delta is 0 by
+          construction.
+
+        ``applied`` is deliberately NOT a conjunct: its only writer is
+        the one-way latch in :meth:`update_feedback`, and
+        :meth:`update_completion` never sets it, so it is a projection
+        (and a stale one), not a signal.
+
+        NOTE (population caveat, load-bearing for any count derived
+        from this predicate): the population this predicate can ever
+        see is *"succeeded instances that had >=1 selected/injected
+        usage row"* — ``SkillMetricsService.record_task_completion``
+        early-returns before the capture gate when no skill was
+        injected.  A row count is therefore an UPPER BOUND on capture
+        candidates, never a capture forecast.
+
+        The separate ``feedback_applied = FALSE`` band (470 rows at the
+        same census) is an HONEST NEGATIVE — feedback was evaluated and
+        found not applicable.  It is ``IS NOT NULL``, so it counts as
+        feedback evidence here; it is never conflated with the 3,457-row
+        no-evidence window.
+
+        Args:
+            instance_id: The instance ID.
+
+        Returns:
+            ``True`` iff at least one usage record for this instance
+            carries all three conjuncts.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(1)
+                .select_from(SkillUsageRecord)
+                .where(SkillUsageRecord.instance_id == instance_id)
+                .where(SkillUsageRecord.selected == True)  # noqa: E712
+                .where(SkillUsageRecord.task_succeeded == True)  # noqa: E712
+                .where(SkillUsageRecord.feedback_applied.is_not(None))
                 .limit(1)
             )
             return session.exec(stmt).first() is not None

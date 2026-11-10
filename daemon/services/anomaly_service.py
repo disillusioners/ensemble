@@ -141,19 +141,105 @@ from daemon.repositories.anomaly.repository import (
     SEVERITY_RANK,
     cluster_key_hash,
 )
+from daemon.services.anomaly_vocab import (
+    ANOMALY_CATEGORIES_FALLBACK as _SHARED_ANOMALY_CATEGORIES_FALLBACK,
+    CATEGORY_SYNONYMS as _SHARED_CATEGORY_SYNONYMS,
+    RESERVED_FALLBACK as _SHARED_RESERVED_FALLBACK,
+    canonicalize_category,
+    resolve_anomaly_categories,
+    resolve_reserved,
+)
 from daemon.services.db_offload import offload as _db_offload
 from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY
-from daemon.services.metrics_query.wiring.vocab import (
-    ANOMALY_CATEGORIES,
-    ANOMALY_SEVERITIES,
-    RESERVED,
-)
 from daemon.services.secret_persistence_scrub import (
     get_process_scrubber,
     scrub_enqueued_body,
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Closed anomaly vocabulary (deferred import) ───────────────────────────
+#
+# Module-level imports of ``metrics_query.wiring.vocab`` pull in the wiring
+# package whose ``__init__`` registers ~52 metric families in the process-wide
+# registry at import time (an import-time side effect). That diverges the
+# committed exposition artifact if this module is imported during exposition
+# capture.
+#
+# The import is therefore DEFERRED to the point of use (the canonicalisation
+# and filter paths), and exposed via PEP 562 ``__getattr__`` for external
+# consumers — so a module that merely imports ``daemon.services.anomaly_service``
+# registers nothing. The fallback tuples keep the module usable when the
+# metrics package cannot be imported.
+
+#: The frozen fallback vocabularies (used when the metrics package cannot
+#: be imported). Mirror ``ANOMALY_CATEGORIES``, ``ANOMALY_SEVERITIES``,
+#: and ``RESERVED`` at ``daemon/services/metrics_query/wiring/vocab.py``.
+#:
+#: M9 — the CATEGORY vocabulary + its canonicaliser now live ONCE, in
+#: ``daemon/services/anomaly_vocab.py`` (an IMPORT-PURE leaf). The
+#: fallback tuple below is a RE-EXPORT of that module's tuple, so the
+#: two copies can never drift; the local name is kept because the
+#: M-1b parity pins import it from HERE.
+_ANOMALY_CATEGORIES_FALLBACK: tuple[str, ...] = (
+    _SHARED_ANOMALY_CATEGORIES_FALLBACK
+)
+_ANOMALY_SEVERITIES_FALLBACK: tuple[str, ...] = (
+    "minor",
+    "major",
+    "critical",
+)
+_RESERVED_FALLBACK: str = _SHARED_RESERVED_FALLBACK
+
+
+def _resolve_anomaly_categories() -> tuple[str, ...]:
+    """Resolve the closed anomaly categories vocabulary (at the point of use).
+
+    The canonical list lives in the METRICS lane; importing it (or any
+    module of the wiring package) registers the phase's metric families
+    in the process-wide registry — an import-time side effect. The
+    import is therefore made HERE, on the canonicalisation path only.
+
+    Returns:
+        The closed vocabulary tuple (the canonical list when the metrics
+        package is importable, the frozen fallback otherwise).
+    """
+    return resolve_anomaly_categories()
+
+
+def _resolve_anomaly_severities() -> tuple[str, ...]:
+    """Resolve the closed anomaly severities vocabulary (at the point of use)."""
+    try:  # the closed vocabulary (imported at the point of use)
+        from daemon.services.metrics_query.wiring.vocab import (
+            ANOMALY_SEVERITIES,
+        )
+        return tuple(ANOMALY_SEVERITIES)
+    except Exception:  # pragma: no cover — import guard
+        return _ANOMALY_SEVERITIES_FALLBACK
+
+
+def _resolve_reserved() -> str:
+    """Resolve the reserved fold target (at the point of use)."""
+    return resolve_reserved()
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 — expose ``ANOMALY_CATEGORIES``, ``ANOMALY_SEVERITIES``,
+    and ``RESERVED`` WITHOUT an eager import.
+
+    The public attributes are kept (the pins and external callers read
+    ``anomaly_service.ANOMALY_CATEGORIES``), but they are resolved on
+    FIRST ACCESS — so importing this module registers nothing.
+    """
+    if name == "ANOMALY_CATEGORIES":
+        return _resolve_anomaly_categories()
+    if name == "ANOMALY_SEVERITIES":
+        return _resolve_anomaly_severities()
+    if name == "RESERVED":
+        return _resolve_reserved()
+    raise AttributeError(
+        f"module {__name__!r} has no attribute {name!r}"
+    )
 
 #: The scrub actor recorded on the value-substitution audit rows.
 SCRUB_ACTOR = "nest_report"
@@ -198,49 +284,11 @@ _ERROR_MARKERS: tuple[str, ...] = ("ERROR:", "REFUSED —")
 #: The synonym map for the write-time category fold (R1). The raw
 #: input is lowercased and stripped; an EXACT canonical match wins;
 #: otherwise a synonym folds; otherwise the reserved ``other``.
-CATEGORY_SYNONYMS: dict[str, str] = {
-    "tool failure": "tool-failure",
-    "tool-failures": "tool-failure",
-    "tool-error": "tool-failure",
-    "tool_error": "tool-failure",
-    "toolerror": "tool-failure",
-    "perf": "performance",
-    "slow": "performance",
-    "latency": "performance",
-    "resource-exhausted": "resource-exhaustion",
-    "resource exhaustion": "resource-exhaustion",
-    "oom": "resource-exhaustion",
-    "out-of-memory": "resource-exhaustion",
-    "loop-stall": "loop-stall",
-    "loop": "loop-stall",
-    "stuck-loop": "loop-stall",
-    "wedge": "wedge-suspected",
-    "wedge-suspect": "wedge-suspected",
-    "wedged": "wedge-suspected",
-    "corruption": "data-corruption",
-    "data-corrupt": "data-corruption",
-    "corrupt-data": "data-corruption",
-    "auth": "auth-permission",
-    "permission": "auth-permission",
-    "auth-permissions": "auth-permission",
-    "unauthorized": "auth-permission",
-    "external": "external-dependency",
-    "external-dependencies": "external-dependency",
-    "dependency-failure": "external-dependency",
-    "mcp": "mcp-failure",
-    "mcp-failures": "mcp-failure",
-    "mcp-error": "mcp-failure",
-    "llm": "llm-provider",
-    "llm-failures": "llm-provider",
-    "provider-error": "llm-provider",
-    "queue": "queue-scheduling",
-    "scheduling": "queue-scheduling",
-    "queue-scheduling-delay": "queue-scheduling",
-    "config": "environment-config",
-    "environment": "environment-config",
-    "misconfiguration": "environment-config",
-    "env-config": "environment-config",
-}
+#:
+#: M9 — the map now lives ONCE, in ``daemon/services/anomaly_vocab.py``;
+#: this is a RE-EXPORT (the name stays in this module's ``__all__`` for
+#: its external consumers) so the two copies cannot drift.
+CATEGORY_SYNONYMS: dict[str, str] = _SHARED_CATEGORY_SYNONYMS
 
 
 class AnomalyInputError(ValueError):
@@ -658,16 +706,7 @@ class AnomalyService:
             ``(canonical, fold_notice)`` — the notice is ``None`` when
             the input was already canonical.
         """
-        text = (raw or "").strip().lower()
-        canonical = RESERVED
-        if text:
-            if text in ANOMALY_CATEGORIES:
-                canonical = text
-            else:
-                canonical = CATEGORY_SYNONYMS.get(text, RESERVED)
-        if canonical == text:
-            return canonical, None
-        return canonical, f'category "{text}" folded to "{canonical}"'
+        return canonicalize_category(raw)
 
     def normalize_severity(self, raw: object) -> str:
         """Normalize the severity tier (R3).
@@ -680,9 +719,10 @@ class AnomalyService:
                 "severity must be a string", detail="non-string severity"
             )
         text = raw.strip().lower()
-        if text not in ANOMALY_SEVERITIES:
+        severities = _resolve_anomaly_severities()
+        if text not in severities:
             raise AnomalyInputError(
-                f"severity must be one of {'|'.join(ANOMALY_SEVERITIES)}",
+                f"severity must be one of {'|'.join(severities)}",
                 detail=f"got {raw!r}",
             )
         return text
@@ -1347,13 +1387,15 @@ class AnomalyService:
             effective_window = int(window_s)
         effective_window = max(1, min(self.MAX_WINDOW_S, effective_window))
         if severity is not None:
-            if not isinstance(severity, str) or severity not in ANOMALY_SEVERITIES:
+            severities = _resolve_anomaly_severities()
+            if not isinstance(severity, str) or severity not in severities:
                 raise AnomalyInputError(
                     "severity must be one of minor | major | critical",
                     detail="out-of-set severity filter",
                 )
         if category is not None:
-            if not isinstance(category, str) or category not in ANOMALY_CATEGORIES:
+            categories = _resolve_anomaly_categories()
+            if not isinstance(category, str) or category not in categories:
                 raise AnomalyInputError(
                     "category must be one of the closed canonical vocabulary",
                     detail="out-of-set category filter",

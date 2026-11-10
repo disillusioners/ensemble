@@ -49,6 +49,7 @@ from typing import Any, Optional
 import openai
 
 from .skill_job_dispatcher import EVOLUTION_TYPE_FIX
+from . import skill_capture_observability as observability
 from .llm_failover import current_failover_url, invoke_raw_with_failover
 
 logger = logging.getLogger(__name__)
@@ -1379,6 +1380,58 @@ class SkillEvolutionService:
             # the out-of-extensions case). Raising ValueError maps
             # to HTTP 400 at the router.
             if comparisons < sample_size:
+                # ── D3: the DAEMON-SIDE DEVIATION TRIGGER ───────────
+                # A forced resolve below the sample size is an action
+                # OUTSIDE the keeper's sanctioned surface. The guard
+                # refuses it (this ValueError maps to HTTP 400) — but
+                # on 2026-10-22 the refusal left NO residue: the
+                # keeper force-resolved a LIVE experiment at
+                # comparisons=2/10 and the incident only became
+                # visible through a forensic reconstruction.
+                #
+                # The DAEMON announces the deviation now (an anomaly
+                # row through the same accept path the agent-side
+                # ``nest-report`` tool uses) — the agent is NOT
+                # trusted to report itself. The raw prompt is never
+                # included; only ids and counts.
+                observability.record_deviation()
+                # m2 — the SINK record carries the deviation flag (the
+                # flag was declared but never set by any producer, so
+                # the sink's deviation column was dead). The record
+                # carries ids + counts ONLY — never a prompt.
+                observability.append_run_record(
+                    observability.build_run_record(
+                        stage="deviation",
+                        run_id=observability.new_run_id(),
+                        agent_id=None,
+                        prompt_source="evolution",
+                        outcome="refused",
+                        refusal_reason="forced_resolve_below_sample_size",
+                        deviation=True,
+                        extra={
+                            "ab_test_group": ab_test_group,
+                            "comparisons": comparisons,
+                            "ab_sample_size": sample_size,
+                            "winner_id": winner_id,
+                        },
+                    )
+                )
+                await observability.emit_lane_anomaly(
+                    category=observability.CATEGORY_LANE_DEVIATION,
+                    description=(
+                        "Keeper deviation: forced A/B resolve refused "
+                        f"for ab_test_group={ab_test_group!r} "
+                        f"(comparisons={comparisons} < "
+                        f"ab_sample_size={sample_size}); no verdict was "
+                        "forced and no mutation was performed."
+                    ),
+                    severity="major",
+                    suspected_cause=(
+                        "forced A/B resolve attempted below the sample "
+                        "size (2026-10-21 incident shape)"
+                    ),
+                    holder=self._metrics_service,
+                )
                 raise ValueError(
                     f"Forced A/B resolve refused for "
                     f"ab_test_group={ab_test_group!r}: comparisons="
@@ -1592,9 +1645,13 @@ class SkillEvolutionService:
         * Either ``iterations > capture_min_iterations`` OR
           ``duration_seconds > capture_min_duration_seconds`` —
           we don't want to capture trivial / instant successes.
-        * ``has_applied_for_instance(instance_id)`` must be false —
-          if a skill was already applied to this instance the
-          success is attributed to that skill, not a new pattern.
+        * ``has_genuinely_evolved_for_instance(instance_id)`` must be
+          false — if a skill was genuinely evolved on this instance
+          (selected AND task_succeeded AND feedback_applied IS NOT
+          NULL) the success is attributed to that skill, not a new
+          pattern. (A3: the predicate used to be the feedback-only
+          ``has_applied_for_instance``, whose ``applied`` column is
+          written by NOBODY — the gate never fired.)
 
         The returned dict is the *input* to
         :meth:`capture_skill` — the caller (typically
@@ -1644,11 +1701,20 @@ class SkillEvolutionService:
         if iterations <= min_iter and duration_seconds <= min_dur:
             return None
 
-        applied = await asyncio.to_thread(
-            self._usage_repo.has_applied_for_instance, instance_id
+        # A3 (LEADER RULING Q1 — the OUTCOME-FIELDS form): the capture
+        # gate asks whether a skill was GENUINELY EVOLVED on this
+        # instance (selected AND task_succeeded AND feedback_applied IS
+        # NOT NULL) — NOT the feedback-only ``has_applied_for_instance``
+        # (whose ``applied`` column is a projection that
+        # ``update_completion`` never writes, so it gated on nothing).
+        # This is the service-seam twin of the metrics-service gate
+        # (``daemon/services/skill_metrics_service.py`` — the same
+        # predicate).
+        evolved = await asyncio.to_thread(
+            self._usage_repo.has_genuinely_evolved_for_instance, instance_id
         )
-        if applied:
-            # A skill was already applied — the success is
+        if evolved:
+            # A skill was already genuinely evolved — the success is
             # already attributed. Don't create a sibling.
             return None
 

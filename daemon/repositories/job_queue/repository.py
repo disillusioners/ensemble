@@ -20,6 +20,74 @@ from ._idle_predicate_sql import background_busy_binds, background_busy_statemen
 logger = logging.getLogger(__name__)
 
 
+# ── Re-fix burst ledger literals (E1) ────────────────────────────────────
+# The job type / evolution type the durable burst-cap count filters on.
+# Mirrors ``daemon/services/skill_job_dispatcher.py``
+# (``JOB_TYPE_EVOLUTION`` / ``EVOLUTION_TYPE_FIX``) — kept as literals
+# here because a REPOSITORY must not import a SERVICE module (layering
+# inversion); the drift between the two copies is pinned by
+# ``tests/unit/test_skill_fix_burst_guard.py``.
+_JOB_TYPE_EVOLUTION = "skill_evolution"
+_EVOLUTION_TYPE_FIX = "FIX"
+
+
+def build_fix_admission_count_statement(
+    *,
+    is_postgres: bool,
+    skill_id: str,
+    since_iso: str,
+) -> Any:
+    """Build the durable FIX-admission COUNT statement for ONE dialect.
+
+    The statement is built by a MODULE-LEVEL function (not inline in
+    the repository method) for exactly one reason: the PostgreSQL
+    branch of the dialect split had ZERO coverage, because every test
+    runs on SQLite — a mutation of the PG branch alone left the whole
+    pin set green while PostgreSQL is the PRODUCTION dialect. With the
+    builder extracted, a pin can compile the statement for BOTH
+    dialects WITHOUT touching a database (``sqlalchemy.dialect``
+    compilers are pure) and assert that the PostgreSQL branch really
+    uses the ``->>`` operator while the SQLite branch really uses
+    ``json_extract``.
+
+    Dialect split (the house convention — mirrors
+    ``daemon/repositories/task/repository.py:2410-2422``): ``metadata``
+    is ``JSONBType`` — ``JSONB`` on PostgreSQL (the ``->>`` operator
+    exists) and ``JSON``/TEXT on SQLite (where ``->>`` does NOT exist —
+    ``json_extract`` is the SQLite spelling).
+
+    Args:
+        is_postgres: Which dialect's branch to build.
+        skill_id: The skill identity (the metadata ``skill_id``).
+        since_iso: Inclusive lower bound on ``created_at`` (ISO-8601
+            string — the column is a text ISO timestamp).
+
+    Returns:
+        A ``SELECT count(*)`` statement over ``job_queue_items``.
+    """
+    if is_postgres:
+        skill_expr = JobItem.job_metadata["skill_id"].as_string()
+        evolution_expr = (
+            JobItem.job_metadata["evolution_type"].as_string()
+        )
+    else:
+        skill_expr = func.json_extract(
+            JobItem.job_metadata, "$.skill_id"
+        )
+        evolution_expr = func.json_extract(
+            JobItem.job_metadata, "$.evolution_type"
+        )
+    return (
+        select(func.count())
+        .select_from(JobItem)
+        .where(JobItem.job_type == _JOB_TYPE_EVOLUTION)
+        .where(skill_expr == skill_id)
+        .where(evolution_expr == _EVOLUTION_TYPE_FIX)
+        .where(JobItem.created_at >= since_iso)
+        .where(JobItem.deleted_at.is_(None))
+    )
+
+
 # ── Legacy status → AdmissionState read-path translation ───────────────────
 # Phase 7b: the ``JobStatus`` enum was removed. This map translates
 # legacy status filter values (still accepted by ``list()`` /
@@ -301,13 +369,21 @@ class JobRepository:
         The two supported backends use different syntax for in-place
         JSON mutation:
 
-        * PostgreSQL JSONB: ``column || jsonb_build_object('key', :param)``
-          — the ``||`` operator is atomic, treats NULL as empty, and
-          overwrites an existing key (matching the intended semantics
-          of ``stamp_message_id``).
+        * PostgreSQL: ``COALESCE(column, '{}'::jsonb) || jsonb_build_object(
+          'key', :param)`` — the ``||`` operator is atomic and overwrites
+          an existing key. The ``COALESCE`` is REQUIRED, not cosmetic:
+          on PostgreSQL ``NULL::jsonb || <anything>`` evaluates to NULL,
+          so without it a NULL column would make the whole assignment
+          NULL and the stamp would be silently lost (the SQLite branch
+          has always had the equivalent guard via ``json_set``'s
+          ``COALESCE``).
         * SQLite: ``json_set(COALESCE(column, '{}'), '$.key', :param)`` —
           ``COALESCE`` keeps the call safe when the column is NULL,
           and ``json_set`` overwrites an existing key.
+
+        The two branches are pinned to the SAME observable behaviour for
+        a NULL column: the key lands and the column is a JSON object
+        afterwards (see ``tests/postgres/test_skill_revival_pg_dialect.py``).
 
         The ``key`` is interpolated as a static constant and ``param``
         is interpolated as a bound-parameter reference. Callers MUST
@@ -326,9 +402,13 @@ class JobRepository:
         if self.engine.dialect.name == "postgresql":
             # ``jsonb_build_object`` accepts ``anyelement``, so an
             # untyped bound param raises ``IndeterminateDatatype``; the
-            # explicit ``CAST`` anchors it.
+            # explicit ``CAST`` anchors it. The ``COALESCE`` guards the
+            # NULL column: on PG ``NULL::jsonb || …`` yields NULL (the
+            # stamp would be silently lost), so mirror the SQLite
+            # branch's ``COALESCE`` contract.
             return (
-                f"{column} || jsonb_build_object('{key}', "
+                f"COALESCE({column}, '{{}}'::jsonb) || "
+                f"jsonb_build_object('{key}', "
                 f"CAST(:{param} AS text))"
             )
         # SQLite: ``{{}}`` escapes to the literal ``{}`` default JSON
@@ -583,6 +663,64 @@ class JobRepository:
                 )
 
             return job, inserted
+
+    # --------------------------------------------------------
+    # RE-FIX BURST LEDGER (E1 — durable windowed FIX cap)
+    # --------------------------------------------------------
+
+    def count_fix_admissions_since(
+        self,
+        skill_id: str,
+        since_iso: str,
+    ) -> int:
+        """Count committed ``skill_evolution`` FIX admissions for ONE skill.
+
+        The durable half of the re-fix burst guard (phase1-plan §9 E1;
+        decisions.md DS-20). The RAM cooldown in
+        ``SkillJobDispatcher`` drains on restart and a sliding window
+        still permits a slow trickle; this count is read from COMMITTED
+        job rows, so it survives a restart.
+
+        ⚠ THE COUNT IS **NOT** KEYED ON ``idempotency_key`` — that shape
+        is DEAD BY CONSTRUCTION: ``JobQueueService.enqueue`` gives a
+        re-admission a unique synthetic key
+        (``f"{idempotency_key}#{uuid.uuid4().hex[:8]}"``,
+        ``daemon/services/job_queue_service.py:1596-1608``) under a
+        partial UNIQUE index (``idx_job_idempotency``,
+        ``daemon/repositories/job_queue/models.py:300-306``), so a
+        job-keyed count matches AT MOST ONE row ever and the cap could
+        NEVER trip (council finding F-9). The count is keyed on the
+        SKILL IDENTITY read from the job metadata
+        (``metadata->>'skill_id'``) — the census confirmed every
+        evolution row carries ``skill_id``.
+
+        Dialect split: ``metadata`` is ``JSONBType`` — ``JSONB`` on
+        PostgreSQL (the ``->>`` operator exists) and ``JSON``/TEXT on
+        SQLite (where ``->>`` does NOT exist — ``json_extract`` is the
+        SQLite spelling).
+
+        ⚠ The filter is UNINDEXED: there is no ``created_at`` index on
+        ``job_queue_items`` and the JSON path has no index either. The
+        scan is bounded by the window + ``job_type`` at the
+        FIX-admission volume (116 lifetime evolution rows) and is
+        pinned as such.
+
+        Args:
+            skill_id: The skill identity (the metadata ``skill_id``).
+            since_iso: Inclusive lower bound on ``created_at`` (ISO-8601
+                string — the column is a text ISO timestamp).
+
+        Returns:
+            The number of matching committed rows (``0`` when none).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            is_postgres = db_session.bind.dialect.name == "postgresql"
+            stmt = build_fix_admission_count_statement(
+                is_postgres=is_postgres,
+                skill_id=skill_id,
+                since_iso=since_iso,
+            )
+            return int(db_session.exec(stmt).one())
 
     # --------------------------------------------------------
     # READ
@@ -3257,8 +3395,13 @@ SET admission_state = 'queued',
         (mirrors the gold-template pattern in
         ``InstanceRepository.set_metadata``):
 
-        * PostgreSQL: ``metadata || jsonb_build_object('message_id', :message_id)``
+        * PostgreSQL: ``COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('message_id', :message_id)``
         * SQLite:     ``json_set(COALESCE(metadata, '{}'), '$.message_id', :message_id)``
+
+        Both branches land the key even when the column is NULL (on PG
+        ``NULL::jsonb || …`` would otherwise yield NULL and silently
+        drop the stamp — the ``COALESCE`` is the guard, pinned in
+        ``tests/postgres/test_skill_revival_pg_dialect.py``).
 
         No-op when the row does not exist (``rowcount = 0`` is not an
         error; the caller will handle the missing row on the next read).

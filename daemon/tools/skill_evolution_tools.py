@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import tool
 
 from daemon.services.project_skill_source.model import is_pf_address
+import daemon.services.skill_capture_observability as observability
 from daemon.services.skill_job_dispatcher import (
     SKILL_CAPTURE_KILL_SWITCH_ENV,
     _resolve_capture_enabled,
@@ -87,6 +88,62 @@ PF_REFUSAL_TEMPLATE = (
 
 def _pf_refusal(action: str) -> str:
     return f"⛔ {PF_REFUSAL_TEMPLATE.format(action=action)}"
+
+
+#: B2 (Phase-1 plan §6 B2, DS-14) — the honest refusal envelope the
+#: inline Tier-3 path returns when the evolution lane is OFF. It has
+#: the SAME SHAPE as the ``skill_fix`` refusal
+#: (``daemon/tools/skill_tools.py``): it states that NO job was
+#: created and that this message is the only record of the request.
+#: It NEVER claims success — a fake success here would be a silent
+#: admission of the very mutation the gate exists to refuse.
+LANE_REFUSAL_TEMPLATE = (
+    "⛔ NOT executed: the skill-evolution lane is disabled ({reason}). "
+    "NO skill-keeper job was created and no skill was modified — "
+    "this message is the only record of the request."
+)
+
+
+def _lane_refusal(reason: str) -> str:
+    """Render the honest refusal envelope for a disabled evolution lane."""
+    return LANE_REFUSAL_TEMPLATE.format(reason=reason)
+
+
+def _evolution_lane_refusal_reason(manager) -> str | None:
+    """Return why the Tier-3 lane is closed, or ``None`` when it is open.
+
+    SINGLE RESOLUTION POINT (DS-14): the lane state is consulted
+    through ``InstanceManager.is_skill_evolution_lane_enabled`` — the
+    accessor the job dispatcher, the metric-scan fallback and the job
+    processor's execution-time check all use. This function does NOT
+    read the kill-switch itself: a second resolution path is how the
+    switch semantics drift.
+
+    FAIL-CLOSED (architecture-recommendation amendment #8, D1 F3
+    posture): an ABSENT accessor or a RAISING probe REFUSES. A
+    confinement control must fail in the refuse direction, never
+    silently admit.
+
+    Args:
+        manager: The :class:`InstanceManager` instance (or any object
+            exposing the accessor).
+
+    Returns:
+        ``None`` when the lane is enabled, else a human-readable
+        refusal reason.
+    """
+    lane_probe = getattr(manager, "is_skill_evolution_lane_enabled", None)
+    if not callable(lane_probe):
+        return "lane state accessor absent (fail-closed)"
+    try:
+        if bool(lane_probe()):
+            return None
+    except Exception as probe_err:  # noqa: BLE001 — fail-closed on purpose
+        return f"lane state probe failed ({probe_err}) (fail-closed)"
+    return (
+        "kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off / "
+        "evolution_lane_enabled=False"
+    )
 
 
 async def _invoke_service(manager, service_name, method_name, *args, **kwargs):
@@ -242,6 +299,17 @@ stub message instead of raising.
         # A14 (P7): file-backed skills never enter evolution machinery.
         if is_pf_address(skill_id or ""):
             return _pf_refusal("skill_evolve")
+
+        # B2 (Phase-1 plan §6 B2, DS-14): the inline Tier-3 path is
+        # gated on the SAME lane resolution point the job-level path
+        # uses. Before this gate the keeper's allow-list made
+        # ``skill-evolve`` a reachable inline mutation path while BOTH
+        # kill-switches were OFF. With the lane OFF the tool returns
+        # the honest refusal envelope and the service is never called.
+        lane_reason = _evolution_lane_refusal_reason(manager)
+        if lane_reason is not None:
+            return _lane_refusal(lane_reason)
+
         return await _invoke_service(
             manager,
             "_skill_evolution_service",
@@ -295,6 +363,18 @@ proposed diff.
         stats and decides whether to resolve, extend, or wait for more
         data.
         """
+        # B2 fix round 1 (D3): this path is a SECOND inline mutation
+        # path and it was UNGATED. The reviewer drove it with the lane
+        # OFF and it DEACTIVATED a live skill arm
+        # (``{"resolved": true, "reason": "threshold_met"}`` →
+        # ``_skill_repo.deactivate('a')``) — so the plan's §6 B2 premise
+        # ("the ONE reachable mutation path") was FALSE. It now carries
+        # the SAME gate, the SAME resolution point and the SAME truthful
+        # refusal envelope as ``skill_evolve``.
+        lane_reason = _evolution_lane_refusal_reason(manager)
+        if lane_reason is not None:
+            return _lane_refusal(lane_reason)
+
         return await _invoke_service(
             manager,
             "_skill_evolution_service",
@@ -440,6 +520,34 @@ the returned payload is a JSON metrics document.
         # service — the service records nothing, no job is enqueued,
         # no LLM is invoked.
         if not _resolve_capture_enabled():
+            # Resolve originating agent_id from the instance row if available
+            # (same instance-row read pattern as the post-gate block below).
+            agent_id = None
+            try:
+                inst_repo = getattr(manager, "_instance_repository", None)
+                if inst_repo is not None:
+                    origin_row = inst_repo.get(instance_id)
+                    if origin_row is not None:
+                        agent_id = getattr(origin_row, "agent_id", None)
+            except Exception:
+                agent_id = None
+
+            # C2 tools-lane seam (observability completion): count and record
+            # the capture-lane-off ADMISSION refusal before building the envelope.
+            # Never raises into the tool lane.
+            try:
+                observability.record_capture_lane_disabled_refusal(
+                    agent_id=agent_id,
+                    task_message=task_message,
+                    prompt_source="skill_execute_capture",
+                )
+            except Exception as exc:  # pragma: no cover — tool lane containment
+                logger.warning(
+                    "[SkillEvolution] capture-lane-off refusal record failed (%s: %s) — "
+                    "the tool refusal is unaffected",
+                    type(exc).__name__, exc,
+                )
+
             envelope = {
                 "skipped": True,
                 "reason": (

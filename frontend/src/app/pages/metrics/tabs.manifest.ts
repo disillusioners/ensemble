@@ -231,10 +231,14 @@ export type MetricsModuleEntry =
  * The 8 MODULE TABS (plan-overview §4.1 + the nest-anomaly lane's
  * phase 4), in tab order.
  *
- * The BRACKETED planned families are BOUND NOW and gated by
- * availability (ADJ-vi): when their producer lands (R-ii wires
- * `capture_active`, R-i fixes the census polarity) they appear with
- * ZERO FE change.
+ * The BRACKETED planned families are BOUND and gated by availability
+ * (ADJ-vi). Both blocking defects are now FIXED, so they appear with
+ * ZERO FE change: R-i (`capture_active`, the never-wired wedge-capture
+ * fact) and R-ii (the census `gated` polarity — the `census inverted`
+ * defect) both landed server-side. The F1/F3 families report live when
+ * the wedge-capture watchdog is live (else dark/capture_off); F6 reports
+ * live when the census is enabled AND running AND publishing (else
+ * dark/census_gated).
  */
 export const METRICS_TABS = [
   {
@@ -253,8 +257,10 @@ export const METRICS_TABS = [
     slot: 'central',
     id: 'runtime',
     label: 'Runtime',
-    // F9 (readiness composite) + [F1, F3] (the wedge-capture families —
-    // bound NOW, dark until R-ii lands).
+    // F9 (readiness composite) + [F1, F3] (the wedge-capture families).
+    // Both blockers are FIXED: R-i wires `capture_active` from the
+    // wedge-capture process fact, so F1/F3 report live whenever the
+    // watchdog is live (else dark/capture_off).
     familyIds: ['F9', 'F1', 'F3'],
     // F3 is stat-primary (it is not in the chart-primary roster).
     statFamilyIds: ['F3'],
@@ -269,7 +275,9 @@ export const METRICS_TABS = [
     slot: 'central',
     id: 'db-pool',
     label: 'DB Pool',
-    // F4, F5 (live) + [F6] (the PG census — bound NOW, dark until R-i).
+    // F4, F5 (live) + [F6] (the PG census). R-ii fixed the `census
+    // inverted` polarity, so F6 reports live whenever the census is
+    // enabled AND running AND publishing (else dark/census_gated).
     familyIds: ['F4', 'F5', 'F6'],
     allowedWindows: ['15m', '30m', '1h', '2h'],
     // The central ladder's default — the window the tab asked for before
