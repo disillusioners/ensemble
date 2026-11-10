@@ -34,6 +34,7 @@ pack does it) against a sanctioned scratch database.
 from __future__ import annotations
 
 import ast
+import re
 import pathlib
 from datetime import datetime, timezone
 
@@ -359,8 +360,13 @@ def test_the_shipped_seed_literal_is_space_separated(pg_engine):
         for value in _shared_ensure_statements()
         if "poignancy_status = 'legacy'" in value
     ][0]
-    assert f"'{CUTOVER_LITERAL}'" in seed
-    assert "2026-11-09T00:00:00" not in seed
+    # V2-33 / SF11 + docs/memoir-v2/implementation-notes.md §17.5.3: the
+    # PG cutover literal is space-separated (not ISO-8601 'T' form) and may
+    # carry an explicit +00 UTC offset (PG timestamptz); do not demand the
+    # exact no-offset string.
+    lit = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\+00(?::00)?)?", seed)
+    assert lit, f"seed is not space-separated: {seed!r}"
+    assert "T" not in lit.group(0), f"seed uses the ISO-8601 T form: {lit.group(0)!r}"
 
 
 def test_the_shipped_ddl_uses_timestamptz_for_reflected_at(pg_engine):
