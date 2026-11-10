@@ -27,7 +27,15 @@
 #      id ROUND-TRIPS back through `skill_view` (the verbatim contract,
 #      which is what a truncated id breaks). A vacuity control proves
 #      the "bare token absent" shape is detectable at all.
-#   2. The MUTATION MATRIX (M-E3a..c) — pack-level plants: plant the
+#      F-G2 (tester gate 2026-11-10): the GENERIC dispatch-fault
+#      envelope is DERIVED from the REAL persistence outcome — a
+#      pre-insert fault says "NOT recorded / NOTHING will be picked up",
+#      a post-insert fault says it WAS recorded AND names the job id,
+#      and a dropped request is VISIBLE (an anomaly row + a refusal
+#      counter under the `fix_dispatch_fault` token + a WARNING log + a
+#      sink record). The pins drive the REAL dispatcher over a faulty
+#      job store — only the persistence boundary is doubled.
+#   2. The MUTATION MATRIX (M-E3a..f) — pack-level plants: plant the
 #      defect → the discriminating leg must go RED → restore → the same
 #      leg must go GREEN. RESTORE SEMANTICS: every mutable file's
 #      PRISTINE content+sha256 is captured BEFORE phase 2 (with a
@@ -372,6 +380,34 @@ PYEOF
 ' \
 '' \
 "$PIN_FILE::TestH2BurstCapRefusalIsTruthful::test_the_false_durability_sentence_is_absent"
+
+  # M-E3e (F-G2) — the generic-fault envelope regresses to the CONSTANT
+  # "still recorded" wording (the empirically FALSE sentence the tester
+  # gate proved for a pre-insert dispatch fault). The pre-insert drop
+  # pin MUST go RED.
+  #
+  # CODE-ONLY plant text (no apostrophes — the round-5 lesson).
+  leg "M-E3e" "daemon/tools/skill_tools.py" \
+'            lines.append(
+                "\u26d4 NOT dispatched: the dispatcher raised during "
+                f"dispatch ({dispatch_error}). The request was NOT "
+                "recorded: NO skill-keeper job was persisted for it and "
+                "NOTHING will be picked up. This message is the only "
+                "record of the request."
+            )' \
+'            lines.append(
+                f"Note: dispatcher raised during dispatch ({dispatch_error}); "
+                "request is still recorded above for the next skill-keeper run."
+            )' \
+"$PIN_FILE::TestFG2GenericFaultIsDerivedFromTheOutcome::test_the_pre_insert_fault_never_claims_a_record"
+
+  # M-E3f (F-G2) — the outcome source ALWAYS reports "not recorded":
+  # the post-insert pin (which requires the persisted job id to be
+  # NAMED) MUST go RED.
+  leg "M-E3f" "daemon/tools/skill_tools.py" \
+'    return (FIX_OUTCOME_RECORDED, job_id)' \
+'    return (FIX_OUTCOME_NOT_RECORDED, None)' \
+"$PIN_FILE::TestFG2GenericFaultIsDerivedFromTheOutcome::test_the_post_insert_fault_names_the_persisted_job"
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"
   echo "mutation failures: $MUTATION_FAILURES"
