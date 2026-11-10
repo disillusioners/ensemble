@@ -71,6 +71,14 @@ PIN="tests/unit/test_skill_metrics_capture_lane_off_seam.py"
 LEAK_PIN="tests/unit/test_skill_capture_lane_off_leak.py"
 SVC="daemon/services/skill_metrics_service.py"
 
+# THE PLANTED MARKER — unique per RUN (F-G1).  The leaked row carries the
+# seam pin's lane-specific agent_id; the pack salts it with this run's
+# PID+epoch so the row-granular cleanup matches ONLY this run's row.  A
+# concurrent lane's row — or an earlier run of this same lane — carries a
+# different token and is left untouched.  Defined BEFORE any trap so the
+# EXIT trap's cleanup always has a token.
+C2_MARKER_TOKEN="agent-c2-p$$-$(date +%s)"
+
 echo "=== Test Pack: metrics_capture_lane_off_seam_unit_test ==="
 echo "REPO_ROOT=$REPO_ROOT"
 
@@ -134,35 +142,59 @@ cp "$SVC" "$PRISTINE/content"
 WANT="$(sha256sum "$SVC" | cut -d' ' -f1)"
 echo "[pack] pristine: $SVC sha=$WANT"
 
+# plant <path> <old> <new> [expected_count] — the count defaults to 1.
 plant() {
-  "$PY" - "$1" "$2" "$3" <<'PYEOF'
+  "$PY" - "$1" "$2" "$3" "${4:-1}" <<'PYEOF'
 import pathlib
 import sys
 
 path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+want_n = int(sys.argv[4]) if len(sys.argv) > 4 else 1
 p = pathlib.Path(path)
 s = p.read_text()
 n = s.count(old)
-if n != 1:
-    sys.stderr.write(f"PLANT-ERROR: {path}: expected 1 occurrence, found {n}\n")
+if n != want_n:
+    sys.stderr.write(f"PLANT-ERROR: {path}: expected {want_n} occurrence(s), found {n}\n")
     sys.exit(3)
 p.write_text(s.replace(old, new))
 PYEOF
 }
 
-# Remove ONLY the sink files that carry this lane's marker (the planted
-# run's leak).  A concurrent lane's residue is never touched.
+# Remove ONLY the ROWS this run planted (the leak) — ROW-GRANULAR (F-G1).
+# The sink appends EVERY lane into ONE daily file, so the file-level `rm -f`
+# this pack used to do destroyed every OTHER lane's rows in that file.  The
+# file is now rewritten WITHOUT the planted rows (atomic temp + rename), only
+# when at least one planted row was present, and it is NEVER unlinked (the
+# sink appends by path — an emptied file is deliberately left empty).  A
+# concurrent lane's row — or an earlier run of this same lane — carries a
+# different token and is left untouched.
+# C2_SINK_DIR overrides the sink dir (the scratch-proof hook).
 clean_marker_leaks() {
-  local dir="$REPO_ROOT/data/skill-capture-observability"
+  local dir="${C2_SINK_DIR:-$REPO_ROOT/data/skill-capture-observability}"
   [ -d "$dir" ] || return 0
-  local f
+  local f tmp before after mode
   for f in "$dir"/skill-capture-*.jsonl; do
     [ -f "$f" ] || continue
-    if grep -q 'agent-c2' "$f" 2>/dev/null; then
-      rm -f "$f"
-      echo "  [pack] cleaned the planted leak: $(basename "$f")"
+    # Nothing planted in this file → leave it byte-for-byte alone.
+    grep -qF "$C2_MARKER_TOKEN" "$f" 2>/dev/null || continue
+    before="$(grep -cF "$C2_MARKER_TOKEN" "$f" 2>/dev/null || true)"
+    [ -n "$before" ] || before=0
+    tmp="$(mktemp "${f}.f-g1-XXXXXX")" || continue
+    grep -vF "$C2_MARKER_TOKEN" "$f" > "$tmp" 2>/dev/null || true
+    after="$(grep -cF "$C2_MARKER_TOKEN" "$tmp" 2>/dev/null || true)"
+    [ -n "$after" ] || after=0
+    if [ "$after" -ne 0 ]; then
+      rm -f "$tmp"
+      continue
     fi
+    # Preserve the sink file's own mode (mktemp creates 0600; the sink's
+    # files carry the daemon's umask — a rewrite must not change it).
+    mode="$(stat -c %a "$f" 2>/dev/null || true)"
+    [ -n "$mode" ] && chmod "$mode" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$f"
+    echo "  [pack] cleaned ${before} planted row(s) from $(basename "$f") (row-granular; the file is KEPT)"
   done
+  return 0
 }
 
 MUTATION_FAILURES=0
@@ -206,25 +238,47 @@ leg() {
 # The autouse `configure_sink(tmp_path)` fixture is REMOVED ⇒ the refusal
 # record escapes into the CHECKOUT's `data/skill-capture-observability/`
 # tree ⇒ the leak pin REDs.  The planted run really writes the ~1,260 B
-# leak, so the leg cleans up exactly the files carrying this lane's marker
-# (never a concurrent lane's residue).
+# leak, so the leg cleans up the ROW THIS RUN planted.
+#
+# CLEANUP IS ROW-GRANULAR (F-G1).  The sink appends EVERY lane into ONE
+# daily file (`skill-capture-<day>.jsonl`, opened in append mode), so the
+# file-level `rm -f` this pack used to do destroyed every OTHER lane's rows
+# in that file — the old claim "a concurrent lane's residue is never
+# touched" was FALSE at file granularity (it was true only at FILE
+# granularity, and the file is shared).  The cleanup now rewrites the file
+# WITHOUT the planted rows (atomic temp + rename), only when at least one
+# planted row was present, and it NEVER unlinks the file (the sink appends
+# by path; an emptied file is left empty on purpose).
+#
+# THE MARKER IS UNIQUE PER RUN.  The leaked row carries the seam pin's
+# lane-specific agent_id; the pack salts it with this run's PID+epoch, so
+# the cleanup matches ONLY this run's row — a concurrent lane's row, or an
+# earlier run of this same lane, carries a different token and is left
+# alone.  The salt lives in the TRANSIENT plant (the pin file is restored
+# and sha-verified afterwards), so the pin's committed content is unchanged.
 file_leg() {
-  local id="$1" target="$2" old="$3" new="$4" log rc
+  local id="$1" target="$2"; shift 2
+  local log rc
   local sha_before sha_after want
+  local old new expected
   want="$(cat "$PRISTINE/$(basename "$target").want")"
   sha_before="$(sha256sum "$target" | cut -d' ' -f1)"
   if [ "$sha_before" != "$want" ]; then
     echo "  ${id}: FAIL (leg did not start pristine)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1)); return
   fi
-  if ! plant "$target" "$old" "$new"; then
-    echo "  ${id}: FAIL (plant error)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
-    cp "$PRISTINE/$(basename "$target")" "$target"; return
-  fi
+  # Apply EVERY (old,new,expected) triple as a transient plant.
+  while [ "$#" -gt 0 ]; do
+    old="$1"; new="$2"; expected="${3:-1}"; shift 3
+    if ! plant "$target" "$old" "$new" "$expected"; then
+      echo "  ${id}: FAIL (plant error)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+      cp "$PRISTINE/$(basename "$target")" "$target"; return
+    fi
+  done
   log="$LOG_DIR/${id}-red.log"
   run_pin "$log"; rc=$?
   # The planted run leaks into the checkout's data tree — remove EXACTLY the
-  # files carrying this lane's marker (a concurrent lane's residue is left
-  # alone).
+  # ROWS this run planted (row-granular; a concurrent lane's rows, which
+  # live in the SAME daily file, are left alone).
   clean_marker_leaks
   if [ "$rc" -eq 0 ]; then
     echo "  ${id}: FAIL (NON-DISCRIMINATING — the leak pin stayed GREEN with the leak planted)"
@@ -276,12 +330,20 @@ leg "M-C2b" \
             )'
 
 # M-C2d — remove the autouse sink redirect from the seam pin ⇒ the leak
-# returns (the L7 regression) ⇒ the leak pin REDs.
+# returns (the L7 regression) ⇒ the leak pin REDs.  TWO transient plants:
+#   (1) the fixture removal (the leak itself), and
+#   (2) the per-run marker salt — `agent-c2` → `agent-c2-p<pid>-<epoch>` in
+#       BOTH the drive and its assertion, so the seam pin stays internally
+#       consistent while the leaked row becomes uniquely this run's.
 cp "$PIN" "$PRISTINE/$(basename "$PIN")"
 sha256sum "$PIN" | cut -d' ' -f1 > "$PRISTINE/$(basename "$PIN").want"
 file_leg "M-C2d" "$PIN" \
   '    observability.configure_sink(tmp_path)' \
-  '    pass  # MUTATION: the sink is NOT redirected - the write escapes tmp_path'
+  '    pass  # MUTATION: the sink is NOT redirected - the write escapes tmp_path' \
+  1 \
+  'agent-c2' \
+  "$C2_MARKER_TOKEN" \
+  2
 
 sha="$(sha256sum "$SVC" | cut -d' ' -f1)"
 if [ "$sha" != "$WANT" ]; then
