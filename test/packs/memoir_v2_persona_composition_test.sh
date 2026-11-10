@@ -46,11 +46,12 @@ if [ ! -f "$TARGET" ]; then
   exit 1
 fi
 
-EXPECTED_PASSED_N=11
+EXPECTED_PASSED_N=13
 
 # The MEASURED node count at the pin (2026-11-10, this worktree):
 # TestPersonaComposition (1) + TestUnbuildableDiffParking (3)
-# + TestCompositionBudgetPerPass (3) + TestRaisePathParkSemantics (5).
+# + TestCompositionBudgetPerPass (2) + TestRaisePathParkSemantics (5)
+# + TestCompositionBudgetChargedAtCallSite (1) + TestParkLoopIsolation (1).
 #
 # THE DELTA'S OWN LEGS ARE SELECTOR-REGISTERED (the pack-orphan class):
 # the selector below names EVERY class in the module EXPLICITLY and the
@@ -80,7 +81,7 @@ TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-280}"
 LOG="${TMPDIR:-/tmp}/${PACK_NAME}.log"
 
 timeout "${TIMEOUT_S}" "${PY}" -m pytest "${TARGET}" \
-  -k "TestPersonaComposition or TestUnbuildableDiffParking or TestCompositionBudgetPerPass or TestRaisePathParkSemantics" \
+  -k "TestPersonaComposition or TestUnbuildableDiffParking or TestCompositionBudgetPerPass or TestRaisePathParkSemantics or TestCompositionBudgetChargedAtCallSite or TestParkLoopIsolation" \
   -q --tb=short -p no:randomly --override-ini="addopts=" 2>&1 | tee "${LOG}"
 EXIT_CODE=${PIPESTATUS[0]}
 if [ "$EXIT_CODE" -eq 124 ]; then
