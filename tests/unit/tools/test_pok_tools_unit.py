@@ -97,6 +97,26 @@ class TestRegistrationSurface:
             __import__("daemon.tools._tool_registry", fromlist=["PRIVILEGED_TOOL_CATEGORIES"]).PRIVILEGED_TOOL_CATEGORIES
         )
 
+    def test_upsert_description_renders_the_live_cap(self, tool_env) -> None:
+        """The LLM-facing admission prose names the LIVE cap.
+
+        The docstring carries a placeholder that the factory
+        substitutes from POK_ACTIVE_CAP_PER_PROJECT AFTER the @tool
+        decoration — so the prose can never go stale against the
+        constant, and no hardcoded limit survives in the description.
+        """
+        from daemon.services.pok_service import POK_ACTIVE_CAP_PER_PROJECT
+
+        tools = create_pok_tools(
+            _manager(tool_env, "p1", "developer"),
+            current_instance_id="inst-1",
+            agent_id="developer",
+        )
+        description = tools[0].description or ""
+        assert "<active_cap>" not in description
+        assert f"at {POK_ACTIVE_CAP_PER_PROJECT} active" in description
+        assert "64 active entries" not in description
+
 
 class TestServerSideScoping:
     def test_upsert_resolves_the_callers_project(self, tool_env) -> None:

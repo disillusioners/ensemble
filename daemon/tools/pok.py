@@ -12,7 +12,7 @@ IN-BODY role gates from the FACTORY-CAPTURED ``agent_id``
   trust tier (Phase 2, addendum T-1: ``source_tier`` default
   ``agent``; ``curated`` is leader/PM-only). Write-time fence +
   escape-aware budget + exact-dup echo + dispute-laundering guard +
-  supersede transaction + admission caps (64-active
+  supersede transaction + admission caps (active-entry
   refuse-never-evict; family >3). Supersede-of-PINNED or
   -of-CURATED is leader/PM-only (the guard predicate widened in
   Phase 2, addendum T-3; an omitted tier on supersede INHERITS the
@@ -55,6 +55,7 @@ from langchain_core.tools import tool
 
 from ..services.pok_service import (
     POKError,
+    POK_ACTIVE_CAP_PER_PROJECT,
     POKService,
     is_default_project,
     is_curator,
@@ -206,9 +207,9 @@ def create_pok_tools(
           its lineage wire; the successor starts unpinned).
           Superseding a PINNED or CURATED entry requires leader /
           project-manager.
-        - Admission is refuse-never-evict: at 64 active entries the
-          call refuses naming the archive cure; a family's 4th
-          active member refuses (pok_family_full).
+        - Admission is refuse-never-evict: at <active_cap> active
+          entries the call refuses naming the archive cure; a family's
+          4th active member refuses (pok_family_full).
         """
         svc = _service()
         if svc is None:
@@ -276,6 +277,15 @@ def create_pok_tools(
                 else {}
             ),
         }
+
+    # The admission cap is a LIVE constant — the ``@tool`` decorator
+    # baked the docstring into the tool description at decoration
+    # time, so the concrete limit is substituted AFTER decoration.
+    # Never hardcode the limit in the prose: a stale literal would
+    # silently disagree with POK_ACTIVE_CAP_PER_PROJECT.
+    pok_upsert.description = (pok_upsert.description or "").replace(
+        "<active_cap>", str(POK_ACTIVE_CAP_PER_PROJECT)
+    )
 
     @register_tool_category(CATEGORY_NAME)
     @tool

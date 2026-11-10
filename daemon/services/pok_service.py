@@ -17,7 +17,8 @@ Policy layer over :class:`daemon.repositories.pok.repository.POKRepository`
   (write and read; AC10), name-based fallback for unit-test contexts;
 * EXACT-DUP no-op echo; the NORMALIZED-HASH dispute-laundering guard
   (a disputed body cannot re-enter under a new slug); the SUPERSEDE
-  transaction; ADMISSION (64-active refuse-never-evict with the
+  transaction; ADMISSION (active-entry refuse-never-evict at
+  ``POK_ACTIVE_CAP_PER_PROJECT`` with the
   named cure; family >3 active → ``pok_family_full``);
 * ``pok_curate`` policy: pin cap 2 PER PROJECT (ER-1 consistency
   note — pins are project-level facts), archived forward-only,
@@ -99,7 +100,7 @@ POK_SLUG_MAX_CHARS = 44
 #: derived per-entry render ceiling (§4.5 bounded arithmetic).
 POK_ENTRY_RENDER_MAX_CHARS = 332
 #: refuse-never-evict active cap — PER PROJECT, not per audience.
-POK_ACTIVE_CAP_PER_PROJECT = 64
+POK_ACTIVE_CAP_PER_PROJECT = 256
 #: pin admission cap — PER PROJECT (pins render in every audience view
 #: that can see the entry).
 POK_PIN_CAP_PER_PROJECT = 2
@@ -445,7 +446,7 @@ class POKService:
                 "under a new slug",
                 disputed_slug=laundered.slug,
             )
-        # 7. admission — 64-active refuse-never-evict (per PROJECT).
+        # 7. admission — active-entry refuse-never-evict (per PROJECT).
         active_count = self._repo.count_active(project_id)
         if active_count >= POK_ACTIVE_CAP_PER_PROJECT:
             cure = self._repo.oldest_least_verified_active(project_id)
@@ -453,7 +454,8 @@ class POKService:
                 "pok_active_cap",
                 f"project holds {active_count} active POK entries — the "
                 f"{POK_ACTIVE_CAP_PER_PROJECT}-cap refuses rather than "
-                "evicts (terminal 64-cap lockout is CURABLE: archive a "
+                f"evicts (terminal {POK_ACTIVE_CAP_PER_PROJECT}-cap "
+                "lockout is CURABLE: archive a "
                 "superseded fact via pok_curate)",
                 oldest_least_verified=(
                     cure.slug if cure is not None else None

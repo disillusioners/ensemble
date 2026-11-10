@@ -136,7 +136,7 @@ declared/observed inline; `[DISPUTED]`; ranking = decay × observed × access; s
 | `POK_BODY_MAX_CHARS` | 240 | escaped body (`pok_body_oversize`) |
 | `POK_SLUG_MAX_CHARS` | 44 | slug bound |
 | `POK_ENTRY_RENDER_MAX_CHARS` | 332 | derived entry ceiling |
-| `POK_ACTIVE_CAP_PER_PROJECT` | 64 | refuse-never-evict (curable) — **per PROJECT (not per audience)** |
+| `POK_ACTIVE_CAP_PER_PROJECT` | 256 | refuse-never-evict (curable) — **per PROJECT (not per audience)** |
 | `POK_PIN_CAP_PER_PROJECT` | 2 | **pin admission per PROJECT — pins render in every audience view that can see the entry** |
 | `POK_FAMILY_MAX` | 3 | family admission bound |
 | `POK_BLOCK_MAX_CHARS` | 2,900 | FULL rendered block incl. wrapper — **PER-VIEW** (audience filter precedes admission) |
