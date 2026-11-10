@@ -656,7 +656,7 @@ Mechanism: the fixture derives `last_heartbeat` from an ISO stamp with a naive `
 25 200 s (7.0 h)** skew on `Asia/Ho_Chi_Minh` ⇒ heartbeat reads stale while the txn age is correctly ~30 s ⇒
 the comp3 fast path reclaims instead of refusing rc 78. The fixture's `strptime`
 (`test_release_journal.sh:928`) is **unchanged at the tip**.
-**Labelling: TZ-sensitive; producer-vs-fixture UNRESOLVED** (the launcher lane owns that determination).
+**Labelling: TZ-sensitive — SETTLED FIXTURE-SIDE** (launcher lane trace: every producer emits Z-suffixed UTC, every reader pins UTC, and `now_utc_naive()` appears nowhere in the JSON journal path). This agrees with the evidence gathered here — every other link in that chain (shell producer, shell consumer, daemon producer) was already TZ-safe, leaving the fixture's `strptime` as the only naive step.
 Evidence gathered for it: the shell producer (`date -u …Z`), the shell consumer (`date -ju -f`) and the daemon
 producer (`datetime.now(tz=utc)`, `replace(tzinfo=utc)`, `fromtimestamp(tz=utc)`) are **all TZ-safe** — the
 fixture's `strptime` is the only naive step in the chain.
@@ -699,7 +699,8 @@ itself (still refused by default, opened only by its own confirm var).
 |---|---|
 | 🟠 | `test_release_journal.sh` **cannot complete under the 300 s cap** (23 sections, ~128 s sleeps, two ~145 s boundaries; the O(N) journal fast path is unavailable **in-fixture** — `journal_read.py` is not copied) ⇒ the pack is structurally un-runnable in-cap. Its standing PACKS.md contract is `timeout 850` (historical 237 s) ⇒ the 300 s cap is *below* the standing contract |
 | 🟠 | the same pack's **25-red fixture cascade**: `FAKE_REPO` never creates `daemon/tools/` ⇒ `stage.sh`'s `FLOOR_SRC` absent ⇒ `PIPELINE_SCRIPTS_FLOOR_COMMIT` unset ⇒ stage refuses ⇒ 25 downstream reds. **A small fixture fix (also copy `daemon/tools/upgrade_tools.py` into `FAKE_REPO`) would make absolute counts meaningful — offered, not applied** (no authorisation) |
-| 🟠 | `8c` reds: TZ-sensitive, **producer-vs-fixture unresolved** (launcher lane) — evidence points fixture-side |
+| 🟠 | `8c` reds: TZ-sensitive — **SETTLED FIXTURE-SIDE** (launcher lane trace); see §7.8 |
+| 🟠 | **SINGLE DEFERRED FOLLOW-UP (ruled 2026-11-10 — bundle these, do not split):** **(a)** naive→aware epoch conversion — `.replace(tzinfo=datetime.timezone.utc)` at `tests/test_release_journal.sh:924`; **(b)** the fake-repo fixture must copy `daemon/tools/upgrade_tools.py` into `FAKE_REPO` (so the 25-red cascade becomes meaningful rather than ambient); **plus** note the standing `timeout 850` contract wherever the 300 s cap is asserted. Both defects are the same class (fixture fidelity in the adopter family) and both move pack counts ⇒ applying them requires a PACKS row refresh **and** a re-gate. **Not applied in this gate.** |
 | 🟡 | `test_deploy.sh` fixture omits `scripts/upgrade/lib.sh` ⇒ the deploy/stop phase is validated by nothing; 1 of its 3 reds is a separate **stale oracle** (generator appends 2 `=`-bearing lines ⇒ 11 vs 9) |
 | 🟡 | `test_promote_plugin_staleness.sh` writes **3 hardcoded global `/tmp` paths** outside its sandbox ⇒ two concurrent runs corrupt each other's section-7 assertions |
 | 🟡 | `test_rollback_target.sh`: C6 = **fixture gap** (no `releases/v-prev/manifest.json`; proven sole cause by a 2×2 counterfactual — `lib.sh` absence is provably non-causal); C7 = **stale window**; C7's paired negative assert passes **vacuously** |
@@ -708,7 +709,8 @@ itself (still refused by default, opened only by its own confirm var).
 | 🟢 | `test_stop_ownership.sh`, `stop_ownership_unit_test.sh`, `test_bounded_subprocess_waits.sh` call `stop-ensemble.sh` **only in the explicit-dir form with a resolvable fixture dir** ⇒ **guard-02 and GUARD-1 are unreachable from them** ⇒ their greens are no-regression results, **not** guard certification |
 | 🟢 | `test_bounded_subprocess_waits.sh` 2 reds are **host-conditioned** (no systemd ⇒ pid-scoped degradation); 2 skips are the matching host fences |
 | ⚙️ | **POK at its 64/64 cap** — project-wide knowledge writes are refused; curation is leader/PM authority |
-| ⚙️ | `PACKS.md` row `upgrade_tool_interlock_unit_test` records `(53)`; measured at this tip is **118** — stale ledger figure |
+| 🟢 | **`..` escapes that do not land on a protected tree are ALLOWED by design** — no dotdot arm at any tip; the containment arm covers escapes that do land on live/demo/protected. **Product decision (ruled 2026-11-10), not a gap.** |
+| ⚙️ | `PACKS.md` row `upgrade_tool_interlock_unit_test` records `(53)`; measured at this tip is **118** — stale ledger figure (passed to the giter lane) |
 
 ## 7.11 Not verified
 
@@ -722,8 +724,7 @@ itself (still refused by default, opened only by its own confirm var).
   tree's own `executor_env` + `demo_arm_extras`).
 - `test_release_journal.sh` absolute counts (28 vs 25 at the cap) — **cap-reach artifacts**, not a defect
   delta (equal-cap 330 s re-run + isolated cell replay used for attribution).
-- Whether `..`-escapes canonicalising to a non-protected absolute path *should* be refused (open owner
-  question; no such arm exists at any tip).
+- **RULED 2026-11-10:** whether a `..` escape canonicalising to a non-protected absolute path *should* be refused — **NO arm, by design** (see §7.10; a blanket dotdot refusal would reject legitimate paths for no protected-root benefit).
 
 ## 7.12 Tip movement during and after the gate — stated plainly
 
@@ -765,9 +766,15 @@ GATE_COVERAGE_OF_CURRENT_TIP:      PARTIAL
 
 **Verdict on coverage: `PARTIAL` — not `FULL`, and not `INVALIDATED`.** Every file this gate actually
 exercised is **byte-unchanged**, so **the make-guard verdict stands**; but the current tip carries a **POK
-surface the gate never ran**. If the release must certify the POK surface **together with** change set A,
-a re-gate at the sha that will actually ship is required. **The `FINAL VERDICT` block above/below refers to
-`GATED_COMMIT`, not to the moving tip.**
+surface the gate never ran**.
+
+**v0.29.11's POK cap surface is BASE content** — inherited from `9091f9208`, not produced by change set A
+(`daemon/**pok**` is **absent** from `e06464ee2..5861419dc`, `grep -i pok` → **rc=1**). It is covered by its
+own artifact: `.agents/tester/RESULTS/2026-11-10-pok-cap-256-verification.md` (303 lines, sha256
+`776f752e…`), verdict **PASS-with-disclosure** — *"TRUE NET-NEW FAILURE COUNT AT FINAL TIP `9a23a7eba` = 0.
+The branch is mergeable."* (it also caught and had fixed a real defect at `6d5d9f19b`), added by `b60f4e4a4`,
+an ancestor of both HEAD and `9091f9208`. **It is not within change set A's coverage and was not re-gated
+here.** **The `FINAL VERDICT` block below refers to `GATED_COMMIT`, not to the moving tip.**
 
 ## FINAL VERDICT: PASS
 GATED_COMMIT: 5861419dc8d47a05760f8a248d94e113d59da32e
