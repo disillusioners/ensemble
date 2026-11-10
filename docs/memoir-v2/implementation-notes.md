@@ -1033,10 +1033,10 @@ zone, the 1/day enqueue bridge) and the wake-refresh context seam
 | `daemon/tools/memoir_knob.py` | `MemoirWakeRefreshKnobState`, `resolve_memoir_wake_refresh_knob`, `memoir_wake_refresh_enabled`, `_emit_wake_refresh_once` |
 | `daemon/config.py` | `MEMOIR_WAKE_REFRESH_ENABLED_ENV_VAR`, `MemoirWakeRefreshConfig`, the `memoir_wake_refresh` section on `Config` |
 | `daemon/api.py` | the proposal service constructed against the shared engine and passed to the reflection service (advisory-failure wrapper) |
-| `tests/unit/test_memoir_keepsake_proposals.py` | NEW (30 nodes) |
+| `tests/unit/test_memoir_keepsake_proposals.py` | NEW (30 nodes → **43** in the phase-6 delta: the canonical-quote presence leg + the three cross-day legs) |
 | `tests/unit/test_memoir_wake_refresh.py` | NEW (40 nodes) |
-| `test/packs/memoir_v2_keepsake_proposals_test.sh` | NEW pack (pin 30) |
-| `test/packs/memoir_v2_proposal_notification_test.sh` | NEW pack (pin 9) |
+| `test/packs/memoir_v2_keepsake_proposals_test.sh` | NEW pack (pin 30 → **31** in the phase-6 delta: the canonical-quote presence leg) |
+| `test/packs/memoir_v2_proposal_notification_test.sh` | NEW pack (pin 9 → **12** in the phase-6 delta: the three cross-day legs) |
 | `test/packs/memoir_v2_wake_refresh_test.sh` | NEW pack (pin 40) |
 | `tests/integration/test_lcancheck_family_separation.py` | the `_STABLE_ID_SUPPORTED_KINDS` set grew by `memoir_refresh` (the closed list grew by exactly one) |
 
@@ -1067,8 +1067,19 @@ the verbatim V2-D 6.5 quote (cross-referenced, never paraphrased):
 
 > with explicit rung order **fit dynamic → trim dynamic → trim proposals (drop weakest first) → rung-2 withhold**
 
+**ONE LABEL CONVENTION (the phase-6 delta).** The tree previously carried
+FOUR spellings of the same ladder — the canonical quote, a docstring
+"rung 2's withhold", inline comments "rung 1 / rung 2 / rung 3", and a
+test named `..._rung_4_withhold_...` whose number contradicted every
+other label (the withhold is `rung-2 withhold` in the quote). Under the
+plan's "Zero interpretive restatement" ruling (V2-D 6.5) a future reader
+could invert the order from those labels, so the numeric prefixes are
+GONE: the code comments and the test names now use the CANONICAL names
+alone (`FIT DYNAMIC` / `TRIM DYNAMIC` / `TRIM PROPOSALS` / `WITHHOLD`).
+The quote itself is untouched and still carries V2-D 6.5's own words.
+
 The measured basis is `stable_chars` (the escaped STABLE zone alone) for
-the rung-2 withhold; the total-based trims measure the COMPOSED body.
+the withhold; the total-based trims measure the COMPOSED body.
 Both readings are the plan's own (§V2-D 6.5's measurement-basis bullet),
 and the reachability claim is pinned by
 `TestAdmissionLadder::test_the_total_based_trim_is_reachable_within_1000_chars_of_the_ceiling`:
@@ -1080,7 +1091,7 @@ The zone's own admission (`admit_proposal_lines`) measures the SHIPPED
 bytes — each line escaped first, the header wrapper INCLUDED — and stops
 at the first line that does not fit (the lines arrive strongest-first, so
 admitting a later, weaker line while dropping a stronger one would invert
-the drop-weakest-first order the trim rung owns).
+the drop-weakest-first order the proposals trim owns).
 
 ### 16.4 THE AC6 MUTATION RECEIPTS (production reverts, byte-identical restores)
 
@@ -1093,9 +1104,35 @@ ambient `ENSEMBLE_*` knob family was scrubbed per-variable; no
 | # | Recipe (the PRODUCTION revert) | Node(s) that went RED | Observed RED marker | Restore |
 |---|---|---|---|---|
 | **(a) AC6(a)** | `mark_enqueued(...)` moved ABOVE `self._enqueue(...)` in `notify_once` — the slot consumed BEFORE the enqueue is accepted | `TestEnqueueBridge::test_a_failed_enqueue_leaves_the_row_pending` | `AssertionError: assert 'enqueued' == 'pending'` (the row was consumed despite the failed bridge) | `sha256sum -c` OK |
-| **(b) AC6(b)** | the trim rungs SWAPPED in `render_briefing_body` — proposals trimmed before dynamic | `TestAdmissionLadder::test_rung_2_trim_dynamic_before_any_proposal_is_dropped` | `AssertionError: assert 5 == (5 - 1)` — zero dynamic lines trimmed because the proposals were eaten first | `sha256sum -c` OK |
+| **(b) AC6(b)** | the two trims SWAPPED in `render_briefing_body` — proposals trimmed before dynamic | `TestAdmissionLadder::test_trim_dynamic_before_any_proposal_is_dropped` | `AssertionError: assert 5 == (5 - 1)` — zero dynamic lines trimmed because the proposals were eaten first | `sha256sum -c` OK |
 | **(c) AC6(c)** | the alarm body line REPLACED with `[SYSTEM CONTEXT: Memoir Refresh] MUTANT(c) alarm body` in `self_alarm_service.compose_alarm_message` | `TestStampPurity::test_the_alarm_template_is_untouched_by_the_refresh` | `AssertionError: assert '[SYSTEM CONTEXT: Memoir' not in message` | `sha256sum -c` OK |
 | **(d) AC6(d)** | the once-ever PRE-CHECK deleted from `process_pass` (`if False:`) | `TestOnceEver::test_a_second_pass_never_re_proposes_the_same_episode` | `AssertionError: the ONCE-EVER skip must happen BEFORE any staging attempt — stage_candidate was called for ['8a50…']` | `sha256sum -c` OK |
+
+**THE PHASE-6 DELTA RECEIPTS (the 1/day gate's two halves).** Both were
+applied to `daemon/services/memoir_keepsake_proposal_service.py`, run,
+observed RED, and restored byte-identically (`sha256sum -c` OK, the
+restore sha256 `0e08912f9b3b6dab…` identical before and after BOTH
+recipes):
+
+| # | Recipe (the PRODUCTION revert) | Node(s) that went RED | Observed RED marker | Restore |
+|---|---|---|---|---|
+| **(e) DELTA(e)** | the notify TARGET widened back to `select_zone_rows(limit=1)` — `enqueued` rows re-enter the target (the pre-fix shape) | `TestEnqueueBridge::test_a_cross_day_enqueue_announces_the_episode_exactly_once` + `…::test_the_still_pending_proposal_eventually_lands` | `AssertionError: assert 4 == 1` — the SAME episode re-announced on D+2/D+3/D+4; and `assert 'The lantern walk' in "…: 'The serif decision'. …"` — the starved row never lands | `sha256sum -c` OK |
+| **(f) DELTA(f)** | the GATE re-keyed on the STAGING date — `proposal_date == :day AND notification_status = 'enqueued'` instead of the `notified_at` window | `TestEnqueueBridge::test_a_cross_day_enqueue_announces_the_episode_exactly_once` + `…::test_no_calendar_day_receives_two_notifications` | `AssertionError: assert 0 == 1` (`count_notified_today(day='2026-11-10')` returned 0 — the row carries `proposal_date = D`) and `assert True is False` (a SECOND notification on the same day) | `sha256sum -c` OK |
+
+MEASURED selections (scoped, `-p no:randomly`, `--override-ini=addopts=`):
+
+* recipe (e): the three cross-day legs ⇒ **1 passed / 2 failed** (the
+  third — "no day receives two" — is the gate's own pin, so it stays
+  green with the target restored); the sibling selection
+  (`TestAdmissionLadder`, `TestOnceEver`, `TestQualification`) ⇒
+  **18 passed / 0 failed**.
+* recipe (f): `TestEnqueueBridge` ⇒ **7 passed / 2 failed**; the sibling
+  selection (all classes but `TestEnqueueBridge`) ⇒ **34 passed / 0
+  failed**.
+
+Two DISTINCT leg pairs go RED — neither half is redundant, which is the
+point: the target restriction and the consumption-day gate each pin a
+failure the other does not.
 
 **WHY (d) IS NOT VACUOUS (the phase-5 lesson, applied).** The unique
 constraint would ALSO swallow the duplicate write as the same skip — a
@@ -1113,8 +1150,8 @@ Files touched by the recipes (sha256 before == after):
 
 | Pack | Nodes | Selector |
 |---|---|---|
-| `memoir_v2_keepsake_proposals_test` | **30** | `TestQualification`, `TestOnceEver`, `TestProposalsZoneSelection`, `TestProposalsZoneRender`, `TestAdmissionLadder`, `TestReflectionPassIntegration` |
-| `memoir_v2_proposal_notification_test` | **9** | `TestEnqueueBridge`, `TestNoPinAuthority` |
+| `memoir_v2_keepsake_proposals_test` | **31** | `TestQualification`, `TestOnceEver`, `TestProposalsZoneSelection`, `TestProposalsZoneRender`, `TestAdmissionLadder`, `TestReflectionPassIntegration` |
+| `memoir_v2_proposal_notification_test` | **12** | `TestEnqueueBridge`, `TestNoPinAuthority` |
 | `memoir_v2_wake_refresh_test` | **40** | `TestStableIdRegistration`, `TestRefreshSeam`, `TestWakeRefreshKnob`, `TestStampPurity`, `TestWakeSourceThreading`, `TestStructuralSupersede` |
 
 Every class in both new modules is selected by exactly one pack (the lane
@@ -1147,3 +1184,67 @@ rule: a leg no pack selects is a leg the gate cannot see).
 6. **The proposal zone is read through the CALLER'S engine** — the
    briefing builds it via `_guarded_read`, so a ledger failure degrades
    ONLY the zone (the persona / keepsakes / dynamic zones still ship).
+7. **RELEASE-NOTE ITEM — the proposal lane has NO independent enable
+   switch.** `daemon/api.py` constructs the proposal service INSIDE the
+   `if _reflection_boot_knob.enabled:` branch (the boot knob is
+   `ENSEMBLE_MEMOIR_REFLECTION_ENABLED`; the construction site is
+   `daemon/api.py:3034`), so with the reflection lane OFF the proposal
+   lane never runs at all. That is coherent — the proposals are a
+   consumer of the reflection pass (a pass that never runs cannot hand it
+   candidates) — but an operator reading `ENSEMBLE_MEMOIR_ENABLED` as
+   "proposals only" would be wrong. There is no second knob to add: the
+   dependency is structural.
+
+### 16.7 THE PLAN DEFECT — §3.1's 1/day gate SQL is not date-rollover safe
+
+The plan's §3.1 gate is stated verbatim as
+
+```sql
+SELECT COUNT(*) FROM memoir_proposal_ledger
+ WHERE agent_id = :ari AND proposal_date = :today
+   AND notification_status = 'enqueued'
+```
+
+and the phase-6 build implemented it faithfully. It is DEFECTIVE on one
+path — the ORDINARY cross-day path, not an exotic one:
+
+* `proposal_date` is stamped at STAGING (`stage_candidate`), and nothing
+  advances it. A row staged on D with no running ari instance stays
+  `pending` by design (the slot must not be burned by an undelivered
+  notification, V2-23 → V2-40) and is enqueued on D+1 — so it becomes
+  `enqueued` while still carrying `proposal_date = D`.
+* On D+1 the gate counts ZERO (no row carries D+1's date), so the
+  notification fires again. The notify TARGET was
+  `select_zone_rows(limit=1)`, which INCLUDES `enqueued` rows — so the
+  strongest already-announced proposal was re-selected. Nothing ever
+  leaves `pending|enqueued` (`sent` is reserved and never written), so
+  the loop never terminates.
+
+MEASURED (one reflection tick per day over 2026-11-09…14): every day
+reported `enqueued=True notifications=1`, the ledger never changed, and
+the SAME episode was announced as "1 **new** keepsake" six consecutive
+days. Worse, the proposal that was still `pending` — genuinely new — was
+NEVER announced, because the `enqueued` row outranked it in the
+`select_zone_rows` ordering forever (STARVATION).
+
+**THE CORRECTED READING (shipped in this delta).** The 1/day gate is a
+statement about the CONSUMPTION day, not the staging date:
+
+* the GATE counts `notified_at` inside `[today 00:00Z, tomorrow 00:00Z)`
+  (`count_notified_today`) — status-independent, because the consumption
+  event IS the accepted enqueue and a row keeps its slot after any later
+  status advance;
+* the NOTIFY TARGET is narrowed to `pending` rows
+  (`select_zone_rows(statuses=('pending',))`), while the BRIEFING ZONE
+  keeps `('pending', 'enqueued')` so an enqueued-but-unreviewed proposal
+  still SURFACES to the reader.
+
+BOTH parts are load-bearing. Target-restriction alone leaves the gate
+under-counting (a row enqueued on D+1 with `proposal_date = D` consumes
+no slot, so D+1 could notify twice); the gate alone leaves the starved
+proposal invisible forever. The three cross-day legs
+(`TestEnqueueBridge::test_a_cross_day_enqueue_announces_the_episode_exactly_once`,
+`…::test_the_still_pending_proposal_eventually_lands`,
+`…::test_no_calendar_day_receives_two_notifications`) pin (i) exactly-one
+announcement across a rollover, (ii) the starved row landing, and
+(iii) no calendar day receiving two.

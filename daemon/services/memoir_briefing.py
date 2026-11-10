@@ -417,7 +417,7 @@ def render_briefing_body(
 
     This function implements exactly those rungs in that order. The
     measurement basis is ``stable_chars`` (the escaped stable zone
-    ALONE): rung 2's withhold (> 48,000) is reachable ONLY by
+    ALONE): the withhold (> 48,000) is reachable ONLY by
     stable-zone overflow, and the total-based proposals trim is
     reachable only when ``stable_chars + dynamic_chars`` lands within
     the proposals zone's own bound (≤ 1,000 chars) of the 24,000-char
@@ -455,7 +455,7 @@ def render_briefing_body(
         ]
         return "\n\n".join(parts)
 
-    # ── rung 1: FIT DYNAMIC ──────────────────────────────────────────
+    # ── FIT DYNAMIC ──────────────────────────────────────────────────
     dynamic_lines = _fit_dynamic_lines(
         _render_dynamic_lines(episodes),
         MEMOIR_DYNAMIC_TOKEN_BUDGET,
@@ -470,7 +470,7 @@ def render_briefing_body(
         dynamic_lines=dynamic_lines,
         proposal_lines=admitted_proposals,
     )
-    # ── rung 2: TRIM DYNAMIC (oldest first) ──────────────────────────
+    # ── TRIM DYNAMIC (oldest first) ──────────────────────────────────
     while len(body) > MEMOIR_SECTION_CHAR_CEILING and dynamic_lines:
         dynamic_lines = dynamic_lines[:-1]  # the tail is the oldest
         body = _compose_briefing_body(
@@ -478,7 +478,7 @@ def render_briefing_body(
             dynamic_lines=dynamic_lines,
             proposal_lines=admitted_proposals,
         )
-    # ── rung 3: TRIM PROPOSALS (drop weakest first) ──────────────────
+    # ── TRIM PROPOSALS (drop weakest first) ──────────────────────────
     # The selection is strongest-first, so the tail IS the weakest.
     while len(body) > MEMOIR_SECTION_CHAR_CEILING and admitted_proposals:
         admitted_proposals = admitted_proposals[:-1]

@@ -75,15 +75,19 @@ if [ ! -f "$TARGET" ]; then
   exit 1
 fi
 
-# The MEASURED node count at the pin (2026-11-10, this worktree):
-# TestQualification (6) + TestOnceEver (6) + TestProposalsZoneSelection (4)
-# + TestProposalsZoneRender (6) + TestAdmissionLadder (5)
-# + TestReflectionPassIntegration (3) = 30.
+# The MEASURED node count at the pin (2026-11-10, this worktree,
+# ``--collect-only``): TestQualification (6) + TestOnceEver (6)
+# + TestProposalsZoneSelection (4) + TestProposalsZoneRender (6)
+# + TestAdmissionLadder (6) + TestReflectionPassIntegration (3) = 31.
+#
+# TestAdmissionLadder grew 5 -> 6 in the phase-6 DELTA: the canonical
+# §A6 quote's PRESENCE pin (the source copy soft-wraps, so that leg is
+# whitespace-normalized).
 #
 # LANE RULE (binding): this delta's own legs land selector-registered and
 # re-pinned IN THE SAME COMMIT — every class below is named EXPLICITLY, so
 # a leg no pack selects can never hide from the gate.
-EXPECTED_PASSED_N=30
+EXPECTED_PASSED_N=31
 
 SELECTOR=(
   "TestQualification or TestOnceEver or TestProposalsZoneSelection"

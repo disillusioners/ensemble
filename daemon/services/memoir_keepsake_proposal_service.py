@@ -38,9 +38,19 @@ WHAT THIS MODULE OWNS
    flipped ``pending → enqueued`` (+ ``notified_at``) ONLY after the
    bridge returns; an enqueue failure — or the absence of a running ari
    instance — leaves the row ``pending``, so the day's slot is NOT
-   consumed and a later pass may retry. ``'enqueued'`` IS the 1/day
-   marker: the gate is ``COUNT(*) WHERE proposal_date = today AND
-   notification_status = 'enqueued'``.
+   consumed and a later pass may retry.
+
+   THE 1/DAY GATE KEYS ON THE CONSUMPTION DAY, NEVER ON THE STAGING
+   DATE. ``proposal_date`` is stamped when the row is STAGED; it is not
+   the day the slot was SPENT, so a row staged on D and enqueued on D+1
+   (the ordinary "no active instance at staging" path) would leave D+1
+   uncounted and the same episode re-announced every following day. The
+   gate therefore counts the CONSUMPTION event:
+   ``COUNT(*) WHERE notified_at IN [today00:00Z, tomorrow00:00Z)``.
+   THE NOTIFY TARGET IS ``pending`` ROWS ONLY for the same reason — an
+   ``enqueued`` row has already been announced and is never the next
+   announcement (the briefing's zone keeps ``pending``/``enqueued``, so
+   an enqueued-but-unreviewed proposal still SURFACES there).
 
 5. **Restart-safety by construction.** Every piece of state above lives in
    the durable ledger; nothing here is memoized across passes.
@@ -70,7 +80,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable
 
 from sqlalchemy import func
@@ -83,7 +93,7 @@ from daemon.repositories.memoir.models import (
     MemoirProposalLedger,
     render_proposal_line,
 )
-from daemon.services.timestamps import now_utc
+from daemon.services.timestamps import coerce_to_aware_utc, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +388,7 @@ class MemoirKeepsakeProposalService:
         *,
         limit: int = 3,
         agent_id: str | None = None,
+        statuses: tuple[str, ...] | None = None,
     ) -> list[ProposalCandidateRow]:
         """The briefing proposals zone's selection — the EXPLICIT JOIN.
 
@@ -385,13 +396,24 @@ class MemoirKeepsakeProposalService:
         the effective poignancy nor ``title`` / ``event_at``. The JOIN onto
         ``memoir_episodes`` is therefore REQUIRED (plan §3.1 / N2).
 
-        WHERE ``notification_status IN ('pending', 'enqueued')`` — a
-        ``sent`` / ``failed`` row is history, not an open question — then
-        ``ORDER BY COALESCE(poignancy, importance) DESC, proposed_at DESC``
-        and the caller's cap (the zone renders at most
+        WHERE ``notification_status IN ('pending', 'enqueued')`` by
+        DEFAULT — a ``sent`` / ``failed`` row is history, not an open
+        question — then ``ORDER BY COALESCE(poignancy, importance) DESC,
+        proposed_at DESC`` and the caller's cap (the zone renders at most
         ``MEMOIR_PROPOSALS_ZONE_MAX`` lines).
+
+        ``statuses`` lets the BRIDGE narrow the same ordering to
+        ``('pending',)``: the zone SURFACES an enqueued-but-unreviewed
+        proposal, but an ``enqueued`` row has ALREADY been announced and
+        is never the next announcement (re-announcing it would starve
+        every later proposal — see :meth:`notify_once`).
         """
         owner = agent_id or self._agent_id
+        wanted = (
+            (PROPOSAL_STATUS_PENDING, PROPOSAL_STATUS_ENQUEUED)
+            if statuses is None
+            else tuple(statuses)
+        )
         effective = func.coalesce(MemoirEpisode.poignancy, MemoirEpisode.importance)
         statement = (
             select(
@@ -411,9 +433,7 @@ class MemoirKeepsakeProposalService:
             )
             .where(
                 MemoirProposalLedger.agent_id == owner,
-                MemoirProposalLedger.notification_status.in_(
-                    [PROPOSAL_STATUS_PENDING, PROPOSAL_STATUS_ENQUEUED]
-                ),
+                MemoirProposalLedger.notification_status.in_(list(wanted)),
             )
             .order_by(effective.desc(), MemoirProposalLedger.proposed_at.desc())
             .limit(max(0, int(limit)))
@@ -435,29 +455,40 @@ class MemoirKeepsakeProposalService:
             for row in rows
         ]
 
-    def count_enqueued_today(
+    def count_notified_today(
         self,
         *,
-        proposal_date: str | None = None,
+        day: str | None = None,
         agent_id: str | None = None,
     ) -> int:
-        """The 1/day gate: enqueued rows for THIS calendar date (V2-28).
+        """The 1/day gate: notifications CONSUMED on THIS calendar day (V2-28).
 
-        ``'enqueued'`` IS the marker — ``pending`` rows have not consumed
-        the slot, ``sent`` / ``failed`` are downstream states of a row
-        that already consumed it (and must not be double-counted).
+        KEYED ON THE CONSUMPTION DAY (``notified_at``), NEVER ON
+        ``proposal_date``. ``proposal_date`` is the STAGING stamp: a row
+        staged on D and enqueued on D+1 — the ordinary "no active
+        instance at staging" path, which deliberately leaves the row
+        ``pending`` — would leave D+1 uncounted under a staging-date gate,
+        so the same episode would be re-announced every following day.
+
+        The consumption event IS the enqueue (V2-40), so the count is
+        status-INDEPENDENT: a row that consumed a slot stays counted
+        after any downstream status advance (``sent`` / ``failed``); a
+        ``pending`` row has no ``notified_at`` and consumes nothing.
         """
         owner = agent_id or self._agent_id
-        day = proposal_date or self._clock().date().isoformat()
+        day_key = day or self._clock().date().isoformat()
+        day_start = datetime.combine(
+            date.fromisoformat(day_key), time.min, tzinfo=timezone.utc
+        )
+        day_end = day_start + timedelta(days=1)
         with Session(self._engine) as session:
             total = session.exec(
                 select(func.count())
                 .select_from(MemoirProposalLedger)
                 .where(
                     MemoirProposalLedger.agent_id == owner,
-                    MemoirProposalLedger.proposal_date == day,
-                    MemoirProposalLedger.notification_status
-                    == PROPOSAL_STATUS_ENQUEUED,
+                    MemoirProposalLedger.notified_at >= day_start,
+                    MemoirProposalLedger.notified_at < day_end,
                 )
             ).first()
         return int(total or 0)
@@ -467,10 +498,14 @@ class MemoirKeepsakeProposalService:
 
         Called ONLY after an ACCEPTED enqueue (V2-23 → V2-40's surviving
         invariant). Returns ``True`` when the row moved.
+
+        The stamp is COERCED TO AWARE UTC: ``notified_at`` IS the gate's
+        calendar-day key, so it must carry ONE unambiguous instant (the
+        house assume-UTC policy for a naive value).
         """
         if not ledger_id:
             return False
-        moment = now or self._clock()
+        moment = coerce_to_aware_utc(now or self._clock())
         with Session(self._engine) as session:
             row = session.get(MemoirProposalLedger, ledger_id)
             if row is None:
@@ -570,18 +605,28 @@ class MemoirKeepsakeProposalService:
         on success (:meth:`mark_enqueued`): every failure path leaves the
         row ``pending`` so the day's slot survives for a later retry.
 
-        The candidate is the STRONGEST open row
-        (``select_zone_rows(limit=1)`` — the same ordering the briefing
-        renders). A day that already has an ``enqueued`` row is silent
-        (V2-D 6.1 / R8).
+        The candidate is the STRONGEST row that has NOT been announced
+        — ``pending`` only, in the briefing's own ordering. An
+        ``enqueued`` row is excluded from the TARGET (it was already
+        announced; re-selecting it would re-send the same episode forever
+        and starve every weaker proposal) even though the ZONE still
+        renders it. A day that already consumed its slot is silent
+        (V2-D 6.1 / R8) — measured on the CONSUMPTION day
+        (:meth:`count_notified_today`), not on the staging date.
         """
         owner = agent_id or self._agent_id
-        moment = now or self._clock()
-        if self.count_enqueued_today(
-            proposal_date=moment.date().isoformat(), agent_id=owner
+        # The gate's day key and the row's stamp must name the SAME
+        # instant, so both are read in UTC (the house assume-UTC policy
+        # for a naive value) — a local-timezone ``now`` would otherwise
+        # count a UTC day the stamp does not belong to.
+        moment = coerce_to_aware_utc(now or self._clock())
+        if self.count_notified_today(
+            day=moment.date().isoformat(), agent_id=owner
         ) > 0:
             return False, "daily_slot_consumed"
-        open_rows = self.select_zone_rows(limit=1, agent_id=owner)
+        open_rows = self.select_zone_rows(
+            limit=1, agent_id=owner, statuses=(PROPOSAL_STATUS_PENDING,)
+        )
         if not open_rows:
             return False, "no_proposal"
         row = open_rows[0]
@@ -626,7 +671,9 @@ class MemoirKeepsakeProposalService:
         could not be staged — the §2-Q4 ordering doctrine).
         """
         owner = agent_id or self._agent_id
-        moment = now or self._clock()
+        # UTC (the house assume-UTC policy) so the STAGING stamp and the
+        # CONSUMPTION stamp below name the same calendar day.
+        moment = coerce_to_aware_utc(now or self._clock())
         staged = 0
         skipped_existing = 0
         skipped_ineligible = 0

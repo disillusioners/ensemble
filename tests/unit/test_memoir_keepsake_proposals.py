@@ -26,9 +26,10 @@ What this suite pins:
   rung-2 withhold``) and the V2-D 6.5 reachability analysis;
 * **AC3 — the durable bridge**: ``source="system:memoir-proposal"``, the
   slot consumed ONLY on an accepted enqueue, every failure path leaving
-  the row ``pending``, the 1/day gate keyed on ``'enqueued'``, and
-  restart survival (a brand-new service over the same engine stays
-  silent);
+  the row ``pending``, the 1/day gate counted on the CONSUMPTION day
+  (``notified_at``) with a ``pending``-only notify target — both parts
+  needed across a date rollover — and restart survival (a brand-new
+  service over the same engine stays silent);
 * **V2-D 6.3 / R2 — no pin authority**: the module holds no pin writer
   and never sets ``is_keepsake``.
 
@@ -81,12 +82,39 @@ from daemon.services.memoir_keepsake_proposal_service import (
 AGENT = "ari"
 FIXED_NOW = datetime(2026, 11, 9, 12, 0, 0, tzinfo=timezone.utc)
 
-SERVICE_PATH = (
-    pathlib.Path(__file__).resolve().parents[2]
-    / "daemon"
-    / "services"
-    / "memoir_keepsake_proposal_service.py"
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+#: The proposal service (the AST-census legs read it).
+SERVICE_PATH = _REPO_ROOT / "daemon" / "services" / "memoir_keepsake_proposal_service.py"
+
+#: The briefing module — the SHIPPED home of the §A6 quote (soft-wrapped).
+BRIEFING_PATH = _REPO_ROOT / "daemon" / "services" / "memoir_briefing.py"
+
+#: The lane's own notes — the single-line copy of the SAME quote.
+NOTES_PATH = _REPO_ROOT / "docs" / "memoir-v2" / "implementation-notes.md"
+
+#: V2-D 6.5's canonical ladder sentence (§A6). ONE spelling, THREE homes
+#: (the briefing docstring, these notes, and this constant) — the
+#: whitespace-normalized presence leg below is what keeps them together.
+_CANONICAL_LADDER_QUOTE = (
+    "fit dynamic → trim dynamic → trim proposals (drop weakest first) → "
+    "rung-2 withhold"
 )
+
+
+def _normalize_quote(text: str) -> str:
+    """Whitespace-normalized, blockquote-marker-free view of ``text``.
+
+    The shipped copy of the quote is soft-wrapped inside a ``>``
+    blockquote, so a line-anchored search would need to know the wrap
+    column; normalizing collapses the wrap AND the ``>`` prefixes, which
+    is exactly the comparison that survives a re-wrap while still going
+    RED on a deletion or a reword.
+    """
+    stripped = " ".join(
+        line.lstrip().lstrip(">").strip() for line in text.splitlines()
+    )
+    return " ".join(stripped.split())
 
 #: A body long enough to clear the enduring-significance substance floor.
 LONG_BODY = (
@@ -156,6 +184,20 @@ def _set_status(engine, ledger_id, status):
         row.notification_status = status
         session.add(row)
         session.commit()
+
+
+class _MutableClock:
+    """A clock the cross-day legs can ADVANCE (day rollover is the point)."""
+
+    def __init__(self, moment):
+        self.moment = moment
+
+    def __call__(self):
+        return self.moment
+
+    def advance(self, *, days=0, seconds=0):
+        self.moment = self.moment + timedelta(days=days, seconds=seconds)
+        return self.moment
 
 
 class FakeManager:
@@ -505,8 +547,9 @@ class TestAdmissionLadder:
     > fit dynamic → trim dynamic → trim proposals (drop weakest first) →
     > rung-2 withhold
 
-    Each leg below is a rung; the AC6 mutation leg (b) reorders rungs 2
-    and 3 and turns these RED.
+    Each leg below is one step of that ladder (the CANONICAL labels, no
+    invented numbering); the AC6 mutation leg (b) swaps the two trims and
+    turns these RED.
     """
 
     @staticmethod
@@ -533,7 +576,7 @@ class TestAdmissionLadder:
             for index in range(count)
         ]
 
-    def test_rung_1_fit_dynamic_then_dynamic_survives_with_proposals(self):
+    def test_fit_dynamic_keeps_every_proposal(self):
         body = render_briefing_body(
             persona_body="I am Ari.",
             keepsakes=[],
@@ -571,7 +614,7 @@ class TestAdmissionLadder:
     def _line_cost(cls, line):
         return len(line) + 1
 
-    def test_rung_2_trim_dynamic_before_any_proposal_is_dropped(self):
+    def test_trim_dynamic_before_any_proposal_is_dropped(self):
         """Under total pressure the DYNAMIC lines go FIRST — the proposals
         zone is the second loser, never the first (the ladder's order)."""
         episodes = self._dynamic(5)
@@ -596,15 +639,15 @@ class TestAdmissionLadder:
         # i.e. the LAST fixture entry: the fixture is newest-first) ...
         assert body.count("[2026-11-09] Episode") == len(episodes) - 1
         assert f"Episode {len(episodes) - 1}:" not in body
-        # ... and EVERY proposal still ships (rung 3 was never reached).
+        # ... and EVERY proposal still ships (the proposals trim never fired).
         assert body.count("[proposal]") == len(proposals)
 
-    def test_rung_3_trims_the_weakest_proposal_first(self):
+    def test_trim_proposals_drops_the_weakest_first(self):
         """When the dynamic zone is already empty, the WEAKEST proposal
         (the tail of the strongest-first list) is the next to go."""
         proposals = self._proposals(3)
         costs = [self._line_cost(line) for line in proposals]
-        # No episodes: the only movable rung left is proposals. Overflow
+        # No episodes: the only movable step left is the proposals trim. Overflow
         # exceeds the cost of the two WEAKEST lines but not all three, so
         # exactly the strongest one survives.
         overflow = costs[-1] + costs[-2] - 10
@@ -622,7 +665,7 @@ class TestAdmissionLadder:
         # The survivor is the STRONGEST (head), never the weakest (tail).
         assert shipped == proposals[:1]
 
-    def test_rung_4_withhold_is_reachable_only_by_stable_zone_overflow(self):
+    def test_withhold_is_reachable_only_by_stable_zone_overflow(self):
         """> 48,000 chars of STABLE text ⇒ the whole block is withheld; the
         SAME total reached via stable + dynamic + proposals does NOT
         withhold (it trims instead)."""
@@ -681,6 +724,19 @@ class TestAdmissionLadder:
         assert body2 is not None
         assert body2.count("[proposal]") == len(proposals)
 
+    def test_the_canonical_quote_is_present_verbatim_in_the_shipped_source(self):
+        """V2-D 6.5's quote must SURVIVE a refactor (the documentation pin).
+
+        The BEHAVIOR of the ladder is pinned by the legs above; this leg
+        pins the DOCUMENTATION CLAIM itself. The source copy soft-wraps
+        across two blockquote lines, so the comparison is
+        whitespace-normalized with the blockquote markers stripped — a
+        line-anchored pin would pass on a deleted quote's neighbours and
+        fail on the real one.
+        """
+        assert _CANONICAL_LADDER_QUOTE in _normalize_quote(BRIEFING_PATH.read_text())
+        assert _CANONICAL_LADDER_QUOTE in _normalize_quote(NOTES_PATH.read_text())
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # AC3 — the durable bridge (source, consumption, failures, 1/day, restart)
@@ -707,6 +763,128 @@ class TestEnqueueBridge:
         assert row.notification_status == PROPOSAL_STATUS_ENQUEUED
         assert row.notified_at is not None
 
+    # ── the DATE ROLLOVER (F1: the gate is keyed on the CONSUMPTION day) ──
+
+    @staticmethod
+    def _rollover_setup(engine, repo, sent):
+        """Stage TWO proposals on D with NO running ari instance.
+
+        This is the ORDINARY cross-day path (not a contrived one): the
+        reflection pass stages the row, the bridge finds no instance, and
+        the row stays ``pending`` for a later day. Staging stamps
+        ``proposal_date = D`` and the notification lands on D+1.
+        """
+        strong = _insert(repo, importance=10, title="The serif decision")
+        weak = _insert(repo, importance=9, title="The lantern walk")
+        clock = _MutableClock(FIXED_NOW)
+        service = MemoirKeepsakeProposalService(
+            engine, clock=clock,
+            enqueue_bridge=lambda iid, msg, src: sent.append(msg),
+        )
+        staged = service.process_pass()
+        assert staged.staged == 2
+        assert staged.enqueued is False
+        assert staged.enqueue_failure == "no_active_instance"
+        rows = {row.episode_id: row for row in _ledger_rows(engine)}
+        # BOTH rows are stamped with the STAGING day, and neither consumed
+        # a slot (V2-23 → V2-40: consumption requires an accepted enqueue).
+        assert rows[strong].proposal_date == FIXED_NOW.date().isoformat()
+        assert rows[weak].proposal_date == FIXED_NOW.date().isoformat()
+        assert rows[strong].notified_at is None
+        return strong, weak, clock, service, rows
+
+    def test_a_cross_day_enqueue_announces_the_episode_exactly_once(
+        self, engine, repo
+    ):
+        """(i) Staged D, notified D+1 ⇒ ONE announcement, silence on D+2+.
+
+        The gate must count the CONSUMPTION day: the row's
+        ``proposal_date`` is D while its notification happens on D+1, so a
+        staging-date gate would see zero on every following day and
+        re-announce the same episode forever (the measured 6-day loop).
+        """
+        sent: list[str] = []
+        strong, weak, clock, service, _ = self._rollover_setup(engine, repo, sent)
+        _running_ari_instance(engine)
+
+        clock.advance(days=1)  # D+1
+        first = service.process_pass()
+        assert first.enqueued is True, first.enqueue_failure
+        assert len(sent) == 1 and "The serif decision" in sent[0]
+        rows = {row.episode_id: row for row in _ledger_rows(engine)}
+        assert rows[strong].notification_status == PROPOSAL_STATUS_ENQUEUED
+        assert rows[weak].notification_status == PROPOSAL_STATUS_PENDING
+        # The CONSUMPTION day is D+1 — that is the day whose slot is spent.
+        assert service.count_notified_today(
+            day=clock.moment.date().isoformat()
+        ) == 1
+        assert service.count_notified_today(
+            day=FIXED_NOW.date().isoformat()
+        ) == 0
+
+        for _ in range(3):  # D+2, D+3, D+4
+            clock.advance(days=1)
+            service.process_pass()
+        assert sum("The serif decision" in message for message in sent) == 1, (
+            "the SAME episode must never be re-announced after a date "
+            f"rollover (messages: {sent!r})"
+        )
+
+    def test_the_still_pending_proposal_eventually_lands(self, engine, repo):
+        """(ii) The weaker row is NOT starved by the enqueued one.
+
+        ``select_zone_rows(limit=1)`` orders by poignancy, so an
+        ``enqueued`` row inside the NOTIFY target outranks every later
+        proposal FOREVER — the enqueued row must be excluded from the
+        TARGET (it stays in the briefing ZONE) and the next day's slot
+        must go to the strongest ``pending`` row.
+        """
+        sent: list[str] = []
+        strong, weak, clock, service, _ = self._rollover_setup(engine, repo, sent)
+        _running_ari_instance(engine)
+
+        clock.advance(days=1)   # D+1 — the strong row is announced
+        service.process_pass()
+        clock.advance(days=1)   # D+2 — the WEAK row must be the candidate
+        second = service.process_pass()
+        assert second.enqueued is True, second.enqueue_failure
+        assert len(sent) == 2
+        assert "The lantern walk" in sent[1]
+        rows = {row.episode_id: row for row in _ledger_rows(engine)}
+        assert rows[weak].notification_status == PROPOSAL_STATUS_ENQUEUED
+        # ... and the briefing ZONE still surfaces BOTH (the target
+        # narrowing is the bridge's only difference).
+        assert {row.episode_id for row in service.select_zone_rows()} == {
+            strong,
+            weak,
+        }
+        clock.advance(days=1)   # D+3 — nothing pending left
+        third = service.process_pass()
+        assert third.enqueued is False
+        assert third.enqueue_failure == "no_proposal"
+
+    def test_no_calendar_day_receives_two_notifications(self, engine, repo):
+        """(iii) The gate counts the day the slot was SPENT, so a
+        cross-day row consumes D+1's slot and a SECOND pass on D+1 is
+        silent — even though the row's ``proposal_date`` is D."""
+        sent: list[str] = []
+        _strong, weak, clock, service, _ = self._rollover_setup(engine, repo, sent)
+        _running_ari_instance(engine)
+
+        clock.advance(days=1)  # D+1
+        assert service.process_pass().enqueued is True
+        assert len(sent) == 1
+        # A second tick the SAME day: the slot is spent.
+        again = service.process_pass()
+        assert again.enqueued is False
+        assert again.enqueue_failure == "daily_slot_consumed"
+        assert len(sent) == 1, f"two notifications on one day: {sent!r}"
+        rows = {row.episode_id: row for row in _ledger_rows(engine)}
+        assert rows[weak].notification_status == PROPOSAL_STATUS_PENDING
+        assert service.count_notified_today(
+            day=clock.moment.date().isoformat()
+        ) == 1
+
     def test_a_failed_enqueue_leaves_the_row_pending(self, engine, repo):
         _insert(repo, importance=9, title="A memory")
         _running_ari_instance(engine)
@@ -721,7 +899,7 @@ class TestEnqueueBridge:
         # THE SLOT IS NOT CONSUMED (V2-23 → V2-40's surviving invariant).
         assert row.notification_status == PROPOSAL_STATUS_PENDING
         assert row.notified_at is None
-        assert service.count_enqueued_today() == 0
+        assert service.count_notified_today() == 0
 
     def test_no_active_instance_keeps_the_row_pending(self, engine, repo):
         _insert(repo, importance=9, title="A memory")
@@ -736,8 +914,10 @@ class TestEnqueueBridge:
         assert manager.calls == []
         assert _ledger_rows(engine)[0].notification_status == PROPOSAL_STATUS_PENDING
 
-    def test_the_daily_gate_is_keyed_on_enqueued_only(self, engine, repo):
-        """A ``pending`` row does not consume the day; ``enqueued`` does."""
+    def test_the_daily_gate_counts_the_consumption_not_the_pending_row(
+        self, engine, repo
+    ):
+        """A ``pending`` row consumes NOTHING; an accepted enqueue does."""
         first = _insert(repo, importance=9, title="First memory")
         _running_ari_instance(engine)
         sent: list[str] = []
@@ -746,7 +926,7 @@ class TestEnqueueBridge:
             enqueue_bridge=lambda iid, msg, src: sent.append(msg),
         )
         assert service.process_pass().enqueued is True
-        assert service.count_enqueued_today() == 1
+        assert service.count_notified_today() == 1
         # A SECOND pass the same day: staged rows keep accumulating in the
         # briefing, but the DAY's notification slot is spent.
         _insert(repo, importance=10, title="Second memory")
@@ -755,7 +935,7 @@ class TestEnqueueBridge:
         assert second.enqueued is False
         assert second.enqueue_failure == "daily_slot_consumed"
         assert len(sent) == 1
-        assert service.count_enqueued_today() == 1
+        assert service.count_notified_today() == 1
 
     def test_the_daily_gate_survives_a_restart(self, engine, repo):
         """A BRAND-NEW service over the same engine is still silent."""

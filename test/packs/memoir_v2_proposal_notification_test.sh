@@ -17,6 +17,10 @@
 #     not consume the day);
 #   * RESTART SURVIVAL — a brand-new service over the same engine is still
 #     silent on the same day;
+#   * THE DATE ROLLOVER — a row STAGED on D and ENQUEUED on D+1 is
+#     announced exactly ONCE (never re-announced on D+2+), the still-
+#     pending proposal is not starved, and no calendar day receives two
+#     notifications;
 #   * the PRODUCTION bridge shape (``asyncio.run_coroutine_threadsafe`` to
 #     the manager's loop) driven from a worker thread;
 #   * NO PIN AUTHORITY (V2-D 6.3 / R2) and NO LLM CALLS in the phase.
@@ -71,9 +75,13 @@ if [ ! -f "$TARGET" ]; then
   exit 1
 fi
 
-# The MEASURED node count at the pin (2026-11-10, this worktree):
-# TestEnqueueBridge (6) + TestNoPinAuthority (3) = 9.
-EXPECTED_PASSED_N=9
+# The MEASURED node count at the pin (2026-11-10, this worktree,
+# ``--collect-only``): TestEnqueueBridge (9) + TestNoPinAuthority (3) = 12.
+#
+# TestEnqueueBridge grew 6 -> 9 in the phase-6 DELTA: the three CROSS-DAY
+# legs (staged on D, notified on D+1) pin the 1/day gate's CONSUMPTION-day
+# keying and the pending-only notify target.
+EXPECTED_PASSED_N=12
 
 SELECTOR="TestEnqueueBridge or TestNoPinAuthority"
 

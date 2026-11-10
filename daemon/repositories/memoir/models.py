@@ -634,11 +634,16 @@ class MemoirProposalLedger(SQLModel, table=True):
 
     ``notification_status`` carries the CLOSED FOUR-TOKEN vocabulary
     (``pending`` / ``enqueued`` / ``sent`` / ``failed``). ``enqueued`` is
-    the stamp that enforces the 1/day rule (the row is claimed BEFORE
-    the notification is handed to the transport); ``sent`` is reserved
-    for the future delivery confirmation. The vocabulary is bound to the
-    MODEL (V2-D 1.5) and is TEST-ENFORCED — a fifth token is rejected
-    by the database, not merely absent from the source.
+    the stamp that enforces the 1/day rule: the row is claimed AFTER an
+    accepted enqueue (V2-23 → V2-40 — a FAILED bridge leaves the row
+    ``pending``, so the slot is never burned by an undelivered
+    notification); ``sent`` is reserved for the future delivery
+    confirmation. The 1/day gate itself counts the CONSUMPTION day
+    (``notified_at``), not ``proposal_date``: the latter is the STAGING
+    stamp, and a row staged on D and enqueued on D+1 must consume D+1's
+    slot. The vocabulary is bound to the MODEL (V2-D 1.5) and is
+    TEST-ENFORCED — a fifth token is rejected by the database, not
+    merely absent from the source.
     """
 
     __tablename__ = "memoir_proposal_ledger"
