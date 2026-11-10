@@ -851,4 +851,41 @@ non-shared pool — the flake then disappears and the entry is removed with it.
 
 ---
 
+## DS-57 — Round-5 additions: the F-4 import-trap verdict (INERT) and the red-accounting scope gap
+
+**Context.** The consolidated review of rounds 2+3 raised two items that needed a decision rather than a code
+change. (i) **F-4** — the council reported that `daemon/tools/nest_report.py:159` still pulls the metrics wiring
+(and therefore registers 52 metric families) at import time, completing a defect class the M-1b-era deferral in
+`anomaly_service.py` had only half closed. The dispatch required a MEASURED verdict (probe / isolation /
+co-residency) and an action conditioned on it. (ii) **F-2** — the lane's §13.2 red accounting was scoped to the
+files it TOUCHED, and a new scope-decorated route (the capture-lane read surface) broke pins in **two registered
+packs whose files the diff never touched** — 3 net-new reds the lane's own accounting could not see.
+
+**Ruling.** (i) **F-4 is INERT ⇒ NO code change; recorded as §17 item 35 (numbered list) with its three
+measurements.** The registration is real and in-process (a fresh interpreter goes 15 → 67 registered metrics on
+`import daemon.tools.nest_report`, via the ATTRIBUTE import that fires `anomaly_service`'s PEP-562 `__getattr__`), but
+the committed exposition artifact is rendered in a **SUBPROCESS** (`tests/helpers/metrics_exposition_baseline.py`
+spawns a fresh interpreter importing only `checkpoint_metrics` + `metrics_listener`), so an in-process registration
+cannot reach it; and the decisive **co-residency** experiment — a `daemon.tools`-importing test file FIRST, the
+exposition structural-identity node SECOND — is **GREEN** (58 passed), with the widened `tests/unit/metrics/` red set
+**IDENTICAL** with and without the co-resident file (2 reds, both base-identical). The dispatch's rule is explicit:
+INERT ⇒ record, do not change code. The durable hardening (a lazy/canonical import in `nest_report.py` + extending the
+import-purity pin to a `daemon.tools.*` module) is **ROUTED, not built** — and the residual risk is disclosed (an
+in-process render DOES diverge, 29 → 81 `# HELP` lines, so a FUTURE in-process-vs-artifact comparison would be the
+first live victim). (ii) **The red-accounting scope gap is a METHODOLOGY change, ROUTED TO THE TESTER'S BRIEF, not
+built in this lane** (§17 item 36). The lane's claim is restated in the two-scope form: **"NET-NEW=0 across touched
+files AND the registered-pack registry"** — the first half is self-measurable, the second half is the GATE's to
+measure, and only the gate can see a pin in a registered-pack file the diff never touched.
+
+**Why.** (i) A fix that is not needed for correctness still carries risk (an import-graph change in a file other lanes
+own, in a lane whose fence opened it only for a LIVE verdict), and the measured trap cannot fire today. (ii) A
+lane-local substitute for gate-time registry-wide accounting would be a false assurance — the blind spot IS the point;
+the only correct place to fix it is the gate's own accounting.
+
+**What would reverse it.** (i) Any test that compares an IN-PROCESS render against the committed artifact (the trap
+becomes live), or a change that makes the artifact capture in-process. (ii) A tester-brief decision to scope
+gate-time accounting differently.
+
+---
+
 *End of the decision log. Companion plan: `phase1-plan.md`.*
