@@ -18,8 +18,11 @@ own these services:
   task succeeded, agent ``skill_injection=True``, no skill applied,
   complexity threshold).
 * **Phase 4/5** — :class:`SkillEvolutionService.check_and_capture`
-  re-validates ``has_applied_for_instance`` to close the TOCTOU
-  window and returns a ``task_details`` dict.
+  re-validates ``has_genuinely_evolved_for_instance`` (the OUTCOME-FIELDS
+  predicate: ``selected = TRUE AND task_succeeded = TRUE AND
+  feedback_applied IS NOT NULL``) to close the TOCTOU window and returns a
+  ``task_details`` dict.  The retired feedback-only
+  ``has_applied_for_instance`` is NOT a capture-gate predicate.
 * **Phase 5** — :class:`SkillJobDispatcher.enqueue_capture` routes
   a ``skill_capture`` JobItem to ``system_parallel_queue`` (NOT
   ``system_fifo_queue``).
@@ -220,8 +223,9 @@ def instance_repo():
     By default returns an instance whose
     ``last_injected_skill_ids`` is empty — i.e. "no skill was
     injected on this instance". The capture gate's Gate 4 also
-    checks ``has_applied_for_instance``; that's stubbed per-test
-    on the usage repo (see helpers below).
+    checks ``has_genuinely_evolved_for_instance`` (the OUTCOME-FIELDS
+    predicate); that's stubbed per-test on the usage repo (see
+    helpers below).
     """
     inst = SimpleNamespace(instance_metadata={})
     repo = MagicMock()
@@ -408,14 +412,14 @@ class TestStep1TaskCompletionOpensCaptureGate:
         assert result == 1
         assert dispatcher._job_service.enqueue.await_count == 0
 
-    async def test_skill_already_applied_skips_capture(
+    async def test_gate4_refuses_when_the_outcome_fields_predicate_is_true(
         self,
         metrics_service,
         repos,
         instance_repo,
         dispatcher,
     ):
-        """When ``has_applied_for_instance`` is True, the success
+        """When ``has_genuinely_evolved_for_instance`` is True, the success
         is attributed to the existing skill — gate4 refuses;
         no capture enqueued.
         """

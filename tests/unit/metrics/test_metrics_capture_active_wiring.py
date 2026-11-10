@@ -44,8 +44,6 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-import pytest
-
 from daemon import api as daemon_api
 from daemon import checkpoint_metrics as cm
 from daemon.services.metrics_query.provider import RegistryMetricsQueryProvider

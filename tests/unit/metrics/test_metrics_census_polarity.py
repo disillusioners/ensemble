@@ -36,8 +36,6 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-import pytest
-
 from daemon import checkpoint_metrics as cm
 from daemon.services.metrics_census import CensusSampler
 from daemon.services.metrics_query.availability import (
@@ -192,10 +190,35 @@ class TestTheCheckSiteCensusStaysAtTwo:
 class TestTheLabelsAgreeWithTheDisclosure:
     """A2 acceptance 4 — R-i is the wiring, R-ii is the polarity.
 
-    ``M-A2c`` — swapping the labels back in ``availability.py`` reds
-    this pin.  The DISCLOSURE half is asserted read-only (the file is
-    outside this lane's edit fence): the pin only requires that the two
-    artefacts use the SAME R-id for the SAME defect.
+    RE-AIMED (tidier L10, 2026-11-10).  This class used to be a RAW-TEXT
+    anchor: it asserted that the string ``"R-ii"`` appeared on a comment
+    line and that the disclosure's ``"R-i:"`` line mentioned
+    ``capture_active``.  A pin like that is satisfiable by a PROSE EDIT
+    ALONE — it never proved that the CODE at either labelled site behaves
+    the way the label claims.
+
+    It now asserts WHICH DEFECT each label names BY BEHAVIOUR.  For each
+    label the pin resolves the site the label names and asserts that the
+    site's CORRECTED behaviour holds:
+
+    * **R-ii** names the CENSUS-POLARITY site — the pin asserts that the
+      label rides the ``census.gated`` fact's own source AND that the fact
+      reports the GATED-OFF sense (a closed gate ⇒ ``gated`` is True, an
+      open gate ⇒ False);
+    * **R-i** names the CAPTURE_ACTIVE WIRING site — the pin asserts that
+      the label rides the ``capture_active`` line AND that the wiring
+      reports the LIVE per-read process fact (a resolver that flips is
+      followed per read; an absent or raising resolver degrades to False).
+
+    The label attachment is asserted per SITE (the label must ride the
+    source of the site it names, on the same line), never as a whole-file
+    string search.  A prose edit can no longer make this class green on
+    its own: the behavioural half is independent of the prose.
+
+    ``M-A2c`` — swapping the labels back in ``availability.py`` still reds
+    this class (the attachment half flips), and the behavioural halves are
+    unaffected by the swap, which is exactly why the class is no longer a
+    prose-only anchor.
     """
 
     def test_availability_labels_the_polarity_r_ii(self) -> None:
@@ -219,16 +242,71 @@ class TestTheLabelsAgreeWithTheDisclosure:
             "R-i (the unwired capture_active) must not be attributed to the "
             "census polarity"
         )
+        # BEHAVIOUR: the site R-ii names must actually report the
+        # GATED-OFF sense — this is what the label claims, and it is
+        # independent of the prose above.
+        assert _sampler(gate=False, running=True).gated is True, (
+            "the census-polarity site (R-ii) must report the gated-OFF "
+            "sense: a closed gate means gated"
+        )
+        assert _sampler(gate=True, running=True).gated is False, (
+            "the census-polarity site (R-ii) must report the gated-OFF "
+            "sense: an open gate means NOT gated"
+        )
+
+    def test_the_capture_active_site_carries_the_r_i_label_and_behaves(
+        self,
+    ) -> None:
+        """R-i names the CAPTURE_ACTIVE WIRING site — attachment + behaviour."""
+        source = (
+            REPO_ROOT / "daemon" / "services" / "metrics_query" / "availability.py"
+        ).read_text(encoding="utf-8")
+        capture_lines = [
+            line for line in source.splitlines() if "capture_active" in line
+        ]
+        assert any("R-i" in line for line in capture_lines), (
+            "R-i must ride the capture_active line — the label names the "
+            "capture_active WIRING defect"
+        )
+        # BEHAVIOUR: the wiring site reports a LIVE per-read process fact.
+        provider = RegistryMetricsQueryProvider(capture_active=lambda: True)
+        assert provider.capture_active is True
+        provider = RegistryMetricsQueryProvider(capture_active=lambda: False)
+        assert provider.capture_active is False
+        # …and it is read PER READ, not snapshotted at construction.
+        flips = {"value": True}
+        provider = RegistryMetricsQueryProvider(
+            capture_active=lambda: flips["value"]
+        )
+        assert provider.capture_active is True
+        flips["value"] = False
+        assert provider.capture_active is False, (
+            "the capture_active fact is read PER READ — a snapshot would "
+            "keep reporting the construction-time value"
+        )
+        # …and it degrades to False when the resolver is absent or raises.
+        assert RegistryMetricsQueryProvider().capture_active is False
+
+        def _raising() -> bool:
+            raise RuntimeError("MUTATION-shaped broken resolver")
+
+        assert (
+            RegistryMetricsQueryProvider(capture_active=_raising).capture_active
+            is False
+        ), "a raising resolver must degrade to False (fail-closed)"
 
     def test_the_disclosure_assigns_the_same_r_ids(self) -> None:
         disclosure = (
             REPO_ROOT / "docs" / "architecture" / "metrics-promote-disclosure.md"
         ).read_text(encoding="utf-8")
-        assert "R-i" in disclosure and "R-ii" in disclosure
-        # The disclosure's own assignment: R-i = capture_active wiring.
+        # The disclosure's own assignment: R-i = capture_active wiring,
+        # R-ii = the census polarity — each label must ride the line that
+        # names ITS defect (a per-site attachment, not a whole-file search).
         r1_lines = [line for line in disclosure.splitlines() if "R-i:" in line]
         assert any("capture_active" in line for line in r1_lines), (
             "the disclosure assigns R-i to the capture_active wiring"
         )
-        # …and R-ii = the census polarity.
-        assert "R-ii" in disclosure and "polarity" in disclosure
+        r2_lines = [line for line in disclosure.splitlines() if "R-ii:" in line]
+        assert any("polarity" in line for line in r2_lines), (
+            "the disclosure assigns R-ii to the census's gated polarity"
+        )

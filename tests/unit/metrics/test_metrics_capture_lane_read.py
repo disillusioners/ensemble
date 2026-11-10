@@ -24,14 +24,12 @@ Mutation legs (pack ``metrics_capture_lane_read_unit_test``):
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from daemon.services import skill_capture_observability as observability
 from tests.helpers.metrics_query_fixtures import build_client

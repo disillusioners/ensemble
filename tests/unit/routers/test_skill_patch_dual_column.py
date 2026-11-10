@@ -15,10 +15,13 @@ the readers on the other, so a single-column write makes the two disagree.
 
 THE FIX (inlined, deliberately NOT the E4 writer).  The handler keeps the
 public flag AND derives the paired status, so ``store.update_skill`` persists
-BOTH in one repository call.  Reusing
-``SkillRepository.deactivate_with_receipt`` was REJECTED: it refuses on an
-open A/B test, which would add NEW refusals to an existing public REST path —
-a semantic change, not a desync fix.
+BOTH in one repository call.  Reusing the E4 mechanism's sanctioned writer
+(``daemon/services/skill_deactivation.py::write_skill_pair``) was REJECTED:
+it refuses on an open A/B test, which would add NEW refusals to an existing
+public REST path — a semantic change, not a desync fix.  (The lane's earlier
+``SkillRepository.deactivate_with_receipt`` was an ORPHANED second writer
+with no production caller; it was DELETED — tidier M1 — so the codebase has
+exactly ONE writer of the pair.)
 
 Mutation leg (pack ``skill_dual_column_deactivation_unit_test``):
 ``M-I5-a`` restore the old pop-and-translate shape (drop the ``is_active``
@@ -31,7 +34,7 @@ from __future__ import annotations
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 
 # ── a minimal app carrying ONLY the skills router, with a recording store ──

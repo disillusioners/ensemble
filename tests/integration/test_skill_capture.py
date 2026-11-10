@@ -243,7 +243,9 @@ class TestSkillCapture:
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-1", [skill_id])
 
-        # ``has_applied_for_instance`` must return False — no skill applied.
+        # ``has_genuinely_evolved_for_instance`` must return False — the
+        # skill did NOT genuinely evolve (the outcome-fields predicate:
+        # selected AND task_succeeded AND feedback_applied IS NOT NULL).
         repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         result = await metrics_service.record_task_completion(
@@ -300,14 +302,14 @@ class TestSkillCapture:
         assert dispatcher.enqueue_capture.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_no_capture_when_skill_applied(
+    async def test_no_capture_when_the_skill_genuinely_evolved(
         self,
         metrics_service,
         repos,
         instance_repo,
         dispatcher,
     ):
-        """When a usage record has feedback_applied=True, capture is suppressed."""
+        """When the outcome-fields predicate is True, capture is suppressed."""
         skill_id = _seed_skill(repos)
         _set_injected(instance_repo, "inst-cx-3", [skill_id])
         # Skill was genuinely evolved — success is attributed to it.
@@ -492,7 +494,8 @@ class TestCaptureServiceLevel:
     async def test_check_and_capture_returns_task_details_when_eligible(
         self, evolution_service, repos,
     ):
-        # No usage records for this instance → has_applied returns False.
+        # No usage records for this instance → the outcome-fields predicate
+        # (has_genuinely_evolved_for_instance) returns False.
         repos.usage.has_genuinely_evolved_for_instance = MagicMock(return_value=False)
 
         details = await evolution_service.check_and_capture(
@@ -541,10 +544,13 @@ class TestCaptureServiceLevel:
         assert details is None
 
     @pytest.mark.asyncio
-    async def test_check_and_capture_returns_none_when_skill_already_applied(
+    async def test_check_and_capture_returns_none_when_the_skill_genuinely_evolved(
         self, evolution_service, repos,
     ):
-        # A3: the capture gate asks the OUTCOME-FIELDS predicate.
+        # A3: the capture gate asks the OUTCOME-FIELDS predicate
+        # (selected AND task_succeeded AND feedback_applied IS NOT NULL);
+        # the retired feedback-only ``has_applied_for_instance`` is NOT
+        # consulted by the gate.
         repos.usage.has_genuinely_evolved_for_instance = MagicMock(
             return_value=True
         )
