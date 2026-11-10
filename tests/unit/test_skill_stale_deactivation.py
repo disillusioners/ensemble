@@ -1505,3 +1505,68 @@ class TestTheDocumentedInterfaceMatchesTheScript:
             "(a CLI escape would contradict the pinned 'no winner declared "
             "by any shipped call site' property)"
         )
+
+
+# ============================================================
+# M11 — one refusal envelope shape for the whole skill lane
+# ============================================================
+
+
+class TestTheRefusalEnvelopeShape:
+    """M11 — every skill-lane refusal shares ONE base class.
+
+    Before this the three refusals were shaped three different ways (the
+    repository class carried a class-level ``reason``, the pair resolver
+    an instance-level one, and the burst cap NO token at all — the REST
+    route hard-coded the literal). A caller had to know WHICH refusal it
+    held to read the reason.
+    """
+
+    def test_the_pair_refusal_shares_the_skill_lane_refusal_base(self):
+        """Named mutation: make ``PairResolutionRefused`` inherit ``Exception``
+        directly (drop the shared base) → this pin goes RED.
+        """
+        from daemon.services.skill_lane_refusal import SkillLaneRefused
+
+        assert issubclass(PairResolutionRefused, SkillLaneRefused), (
+            "PairResolutionRefused must share the SkillLaneRefused base — "
+            "the skill lane has ONE refusal envelope shape"
+        )
+
+    def test_the_base_carries_the_reason_and_the_detail(self):
+        """Named mutation: drop ``detail`` from the base → this pin goes RED."""
+        from daemon.services.skill_lane_refusal import SkillLaneRefused
+
+        assert isinstance(
+            getattr(SkillLaneRefused, "reason", None), str
+        ), "the base must declare a CLASS-level 'reason' token"
+        refusal = SkillLaneRefused("some_reason", "some detail")
+        assert refusal.reason == "some_reason"
+        assert refusal.detail == "some detail"
+        assert str(refusal) == "some detail"
+
+    def test_the_pair_refusal_declares_its_token_on_the_class(self):
+        """Named mutation: delete the class-level ``reason`` → this pin goes RED."""
+        class_reason = getattr(PairResolutionRefused, "reason", None)
+        assert isinstance(class_reason, str) and class_reason, (
+            "PairResolutionRefused must declare its stable token as a CLASS "
+            "attribute (readable off the class, not only off an instance)"
+        )
+
+    def test_the_pair_refusal_keeps_its_specific_reason_and_message(self):
+        """The specific reason and the message shape are UNCHANGED.
+
+        Named mutation: drop the specific token from the constructor
+        (``self.reason = reason`` → ``self.reason = type(self).reason``)
+        → this pin goes RED.
+        """
+        refusal = PairResolutionRefused(
+            REFUSAL_NO_WINNER_DECISION, "no winner decision was supplied"
+        )
+        assert refusal.reason == REFUSAL_NO_WINNER_DECISION
+        assert refusal.detail == "no winner decision was supplied"
+        assert str(refusal) == "no winner decision was supplied"
+
+        # The class token is the fallback when no specific reason is given.
+        generic = PairResolutionRefused()
+        assert generic.reason == PairResolutionRefused.reason

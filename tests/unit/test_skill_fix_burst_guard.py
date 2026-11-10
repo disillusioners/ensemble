@@ -41,8 +41,10 @@ NAMED MUTATION LEGS (each must turn this file RED):
 
 from __future__ import annotations
 
+import ast
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlmodel import SQLModel, create_engine
@@ -388,3 +390,138 @@ def test_e1_repository_literals_match_the_dispatcher_constants():
 
     assert repo_module._JOB_TYPE_EVOLUTION == JOB_TYPE_EVOLUTION
     assert repo_module._EVOLUTION_TYPE_FIX == EVOLUTION_TYPE_FIX
+
+
+# ── M11 — the refusal envelope has ONE shape (base + class token) ────────
+
+
+class _CapRefusingDispatcher:
+    """A dispatcher double whose ``dispatch_fix`` raises the REAL refusal."""
+
+    async def dispatch_fix(self, **kwargs):
+        raise SkillFixBurstCapRefused(
+            "refused: burst cap — 3 FIX admissions for skill abc12345 "
+            "within 86400s (cap 3). NO skill-keeper job was created."
+        )
+
+
+def _route_refusal_reason_node():
+    """The AST node the router uses for the refusal envelope's ``reason``.
+
+    Returns ``(handler_name, value_node)`` for the ``reason`` key inside
+    the ``SkillFixBurstCapRefused`` handler, or ``(None, None)``.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "daemon"
+        / "routers"
+        / "skills.py"
+    )
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        exc = node.type
+        names: list[str] = []
+        if isinstance(exc, ast.Name):
+            names = [exc.id]
+        elif isinstance(exc, ast.Tuple):
+            names = [
+                element.id for element in exc.elts if isinstance(element, ast.Name)
+            ]
+        if "SkillFixBurstCapRefused" not in names:
+            continue
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Dict):
+                continue
+            for key, value in zip(sub.keys, sub.values):
+                if isinstance(key, ast.Constant) and key.value == "reason":
+                    return node.name, value
+    return None, None
+
+
+def test_m11_the_burst_cap_refusal_shares_the_shared_base():
+    """Named mutation: make ``SkillFixBurstCapRefused`` inherit ``RuntimeError``
+    again (drop the shared base) → this pin goes RED.
+    """
+    from daemon.services.skill_lane_refusal import SkillLaneRefused
+
+    assert issubclass(SkillFixBurstCapRefused, SkillLaneRefused), (
+        "SkillFixBurstCapRefused must share the SkillLaneRefused base — "
+        "the skill lane has ONE refusal envelope shape"
+    )
+
+
+def test_m11_the_burst_cap_refusal_declares_its_token_on_the_class():
+    """Named mutation: delete the class-level ``reason`` → this pin goes RED."""
+    token = getattr(SkillFixBurstCapRefused, "reason", None)
+    assert isinstance(token, str) and token == "fix_burst_cap", (
+        "the burst-cap refusal must declare its stable token as a CLASS "
+        "attribute — the route reads it, so the two cannot drift"
+    )
+
+
+def test_m11_the_burst_cap_refusal_keeps_its_message_prefix():
+    """The agent-facing message prefix is EXACTLY preserved."""
+    refusal = SkillFixBurstCapRefused(
+        "refused: burst cap — 3 FIX admissions for skill abc12345 "
+        "within 86400s (cap 3). NO skill-keeper job was created."
+    )
+    assert str(refusal).startswith("refused: burst cap")
+    assert refusal.reason == "fix_burst_cap"
+    assert refusal.detail == str(refusal)
+
+
+def test_m11_the_route_reads_the_reason_from_the_refusal_class():
+    """Named mutation: hard-code ``"reason": "fix_burst_cap"`` back into the
+    router → this pin goes RED (the route would carry a literal, and a
+    token re-diverge would go unnoticed).
+    """
+    handler_name, value = _route_refusal_reason_node()
+    assert handler_name is not None, (
+        "the skills router no longer has a SkillFixBurstCapRefused handler"
+    )
+    assert not isinstance(value, ast.Constant), (
+        "the route HARD-CODES the refusal reason — it must READ e.reason "
+        "(one token per concept; the route cannot drift from the class)"
+    )
+    assert isinstance(value, ast.Attribute) and value.attr == "reason", (
+        "the route must read the 'reason' ATTRIBUTE off the refusal "
+        f"(got {type(value).__name__})"
+    )
+    assert isinstance(value.value, ast.Name) and value.value.id == handler_name, (
+        "the route must read the reason off the exception it caught"
+    )
+
+
+def test_m11_the_route_envelope_carries_the_class_token():
+    """The route's answer must carry the CLASS's token, not a look-alike."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from daemon.routers.skills import _require_skill_dispatcher
+    from daemon.routers.skills import router as skills_router
+
+    app = FastAPI()
+    app.include_router(skills_router, prefix="/api")
+    app.dependency_overrides[_require_skill_dispatcher] = (
+        lambda: _CapRefusingDispatcher()
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/skills/skill-abc12345/fix",
+            json={"issue_description": "the skill misleads the agent"},
+        )
+
+    assert response.status_code == 429, (
+        f"the burst-cap refusal must be a truthful 429 — got "
+        f"{response.status_code}: {response.text[:400]}"
+    )
+    detail = response.json().get("detail", {})
+    assert detail.get("reason") == SkillFixBurstCapRefused.reason, (
+        "the refusal envelope's reason must be the CLASS's token "
+        f"(got {detail.get('reason')!r}, expected "
+        f"{SkillFixBurstCapRefused.reason!r})"
+    )

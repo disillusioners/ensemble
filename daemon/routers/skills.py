@@ -1474,7 +1474,10 @@ async def post_fix(
             status_code=429,
             detail={
                 "error": str(e),
-                "reason": "fix_burst_cap",
+                # M11 — the reason is READ from the refusal class, never
+                # hard-coded here: one token per concept, and the route
+                # cannot drift from the class.
+                "reason": e.reason,
             },
         )
     except ValueError as e:

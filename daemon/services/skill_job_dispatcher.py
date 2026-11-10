@@ -51,6 +51,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.services.skill_lane_refusal import SkillLaneRefused
 from daemon.services import skill_capture_observability as observability
 
 logger = logging.getLogger(__name__)
@@ -312,7 +313,7 @@ def _task_detail(task_details: Any, key: str) -> Any:
     return None
 
 
-class SkillFixBurstCapRefused(RuntimeError):
+class SkillFixBurstCapRefused(SkillLaneRefused):
     """Raised when the durable re-fix burst cap refuses a FIX admission.
 
     The refusal MUST NOT be silent and MUST NOT masquerade as the
@@ -323,7 +324,23 @@ class SkillFixBurstCapRefused(RuntimeError):
     Callers that must not raise (e.g. the trigger engine's per-item
     scan) catch it and continue — the refusal is logged, counted and
     announced as an anomaly row before it is raised.
+
+    The stable token lives on the CLASS (``reason``) and the REST route
+    READS it (``e.reason``) — the route never hard-codes a literal, so
+    the two can never drift (M11: one token per concept).
     """
+
+    #: The stable token the REST route returns in the refusal envelope.
+    reason = "fix_burst_cap"
+
+    def __init__(self, message: str) -> None:
+        """Build the refusal.
+
+        Args:
+            message: The agent-facing refusal text. It MUST keep the
+                ``refused: burst cap`` prefix (the pins assert it).
+        """
+        super().__init__(type(self).reason, message)
 
 
 class SkillJobDispatcher:

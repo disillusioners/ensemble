@@ -102,6 +102,7 @@ from daemon.services.skill_job_dispatcher import (
     _SWITCH_ON_TOKENS,
     _resolve_switch,
 )
+from daemon.services.skill_lane_refusal import SkillLaneRefused
 
 logger = logging.getLogger(__name__)
 
@@ -770,13 +771,27 @@ def _r3_signature_match(row: Any) -> bool:
 # ============================================================
 
 
-class PairResolutionRefused(Exception):
-    """Raised when a pair resolution is attempted without a winner decision."""
+class PairResolutionRefused(SkillLaneRefused):
+    """Raised when a pair resolution is attempted without a winner decision.
 
-    def __init__(self, reason: str, detail: str = "") -> None:
-        super().__init__(detail or reason)
-        self.reason = reason
-        self.detail = detail
+    The stable token lives on the CLASS (``reason``); an instance
+    narrows it to the SPECIFIC reason (no winner decision / no such A/B
+    test / the winner is not a variant) so a caller can still match on
+    the concept and read the specifics (M11: one shape, one token per
+    concept).
+    """
+
+    #: The stable token for the "a pair was not resolved" concept.
+    reason = "pair_resolution_refused"
+
+    def __init__(self, reason: str = "", detail: str = "") -> None:
+        """Build the refusal.
+
+        Args:
+            reason: The specific reason token. Empty ⇒ the class token.
+            detail: The human-readable explanation.
+        """
+        super().__init__(reason, detail)
 
 
 class SkillStaleDeactivator:
