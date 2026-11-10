@@ -168,6 +168,14 @@ def _set_superseded(engine, episode_id, pointer="other-episode"):
         session.commit()
 
 
+def _set_keepsake(engine, episode_id, value=True):
+    with Session(engine) as session:
+        row = session.get(MemoirEpisode, episode_id)
+        row.is_keepsake = bool(value)
+        session.add(row)
+        session.commit()
+
+
 def _only_episode(engine):
     with Session(engine) as session:
         return list(session.exec(MemoirEpisode.__table__.select()).all())[0].id
@@ -340,7 +348,7 @@ class TestOnceEver:
         service.stage_candidate = _spy
         second = service.process_pass(notify=False)
         assert second.staged == 0
-        assert second.skipped_existing == 1
+        assert second.skipped_existing == 0
         assert attempts == [], (
             "the ONCE-EVER skip must happen BEFORE any staging attempt — "
             f"stage_candidate was called for {attempts!r}"
@@ -366,7 +374,7 @@ class TestOnceEver:
         assert service.has_proposal(episode_id) is True
         outcome = service.process_pass(notify=False)
         assert outcome.staged == 0
-        assert outcome.skipped_existing == 1
+        assert outcome.skipped_existing == 0
         assert len(_ledger_rows(engine)) == 1
 
     def test_the_unique_constraint_is_the_racing_guard_and_is_swallowed(
@@ -401,7 +409,65 @@ class TestOnceEver:
         assert len(_ledger_rows(engine)) == 1
         outcome = service.process_pass(notify=False)
         assert outcome.staged == 0
-        assert outcome.skipped_existing == 1
+        assert outcome.skipped_existing == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# AC1 — the staging WINDOW (W-1): ledgered/superseded rows must not eat
+# the window's slots and starve eligible rows below the LIMIT.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestCandidateWindow:
+    def test_ledgered_head_of_line_does_not_starve_eligible_rows(
+        self, engine, repo, service
+    ):
+        """W-1 (CRITICAL): 12 ledgered poignancy-9 rows + 2 eligible ⇒
+        the 2 stage.
+
+        Before the fix, the ledger exclusion ran READ-SIDE after the
+        LIMIT, so the window's top-10 slots were all occupied by
+        ledgered rows and the eligible rows below never entered the
+        window (pass 2 staged 0). With the exclusion IN THE QUERY,
+        the window only ever contains eligible candidates, so the 2
+        eligible rows enter and stage.
+        """
+        # 12 poignancy-9 episodes, ALL ledgered by a single pass.
+        for index in range(12):
+            _insert(repo, importance=9, title=f"Ledgered {index}")
+        first = service.process_pass(notify=False, limit=12)
+        assert first.staged == 12, first
+
+        # 2 further eligible episodes arrive AFTER the ledgered block.
+        eligible_ids = [
+            _insert(repo, importance=8, title=f"Eligible {index}")
+            for index in range(2)
+        ]
+
+        outcome = service.process_pass(notify=False)
+        assert outcome.staged == 2, outcome
+        ledger_episode_ids = {row.episode_id for row in _ledger_rows(engine)}
+        for episode_id in eligible_ids:
+            assert episode_id in ledger_episode_ids
+
+    def test_superseded_head_of_line_does_not_starve_eligible_rows(
+        self, engine, repo, service
+    ):
+        """W-1 same-class completion: superseded rows excluded IN THE
+        QUERY (no read-side-after-LIMIT starvation)."""
+        for index in range(10):
+            episode_id = _insert(repo, importance=10, title=f"Superseded {index}")
+            _set_superseded(engine, episode_id)
+        eligible_ids = [
+            _insert(repo, importance=9, title=f"Eligible {index}")
+            for index in range(2)
+        ]
+
+        outcome = service.process_pass(notify=False)
+        assert outcome.staged == 2, outcome
+        ledger_episode_ids = {row.episode_id for row in _ledger_rows(engine)}
+        for episode_id in eligible_ids:
+            assert episode_id in ledger_episode_ids
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -461,6 +527,21 @@ class TestProposalsZoneSelection:
             _insert(repo, importance=9, title=f"Episode {index}")
         service.process_pass(notify=False)
         assert len(service.select_zone_rows(limit=3)) == 3
+
+    def test_a_pinned_episode_is_not_rendered_in_the_zone(self, engine, repo, service):
+        """W-3: a pending proposal whose episode is later pinned is NOT
+        rendered; an unpinned pending proposal still is."""
+        pinned_episode = _insert(repo, importance=9, title="Pinned memory")
+        unpinned_episode = _insert(repo, importance=9, title="Still proposable")
+        service.process_pass(notify=False)
+
+        # Pin the first episode AFTER staging — the proposal row stays
+        # ``pending``, but the episode is no longer proposable.
+        _set_keepsake(engine, pinned_episode, True)
+
+        rendered = {row.episode_id for row in service.select_zone_rows()}
+        assert unpinned_episode in rendered
+        assert pinned_episode not in rendered
 
 
 class TestProposalsZoneRender:
@@ -975,6 +1056,39 @@ class TestEnqueueBridge:
         outcome = asyncio.run(_run())
         assert outcome.enqueued is True, outcome.enqueue_failure
         assert _ledger_rows(engine)[0].notification_status == PROPOSAL_STATUS_ENQUEUED
+
+
+    def test_a_pinned_episode_is_not_announced_by_the_bridge(self, engine, repo):
+        """W-3: a pending proposal whose episode is later pinned is NOT
+        announced; an unpinned pending proposal still is."""
+        pinned_episode = _insert(repo, importance=9, title="Pinned memory")
+        unpinned_episode = _insert(repo, importance=9, title="Still proposable")
+        # Stage with no running instance so both rows stay ``pending``.
+        service = MemoirKeepsakeProposalService(engine, clock=lambda: FIXED_NOW)
+        outcome = service.process_pass(notify=False)
+        assert outcome.staged == 2
+
+        # Pin one episode AFTER staging.
+        _set_keepsake(engine, pinned_episode, True)
+
+        # With a running ari instance, the bridge announces the strongest
+        # PENDING proposal that is still proposable — the unpinned one.
+        sent: list[str] = []
+        _running_ari_instance(engine)
+        bridge_service = MemoirKeepsakeProposalService(
+            engine, clock=lambda: FIXED_NOW,
+            enqueue_bridge=lambda iid, msg, src: sent.append(msg),
+        )
+        enqueued, failure = bridge_service.notify_once()
+        assert enqueued is True, failure
+        assert len(sent) == 1
+        assert "Still proposable" in sent[0]
+        assert "Pinned memory" not in sent[0]
+
+        # The pinned episode's row remains pending (never announced).
+        rows = {row.episode_id: row for row in _ledger_rows(engine)}
+        assert rows[pinned_episode].notification_status == PROPOSAL_STATUS_PENDING
+        assert rows[unpinned_episode].notification_status == PROPOSAL_STATUS_ENQUEUED
 
 
 # ─────────────────────────────────────────────────────────────────────────

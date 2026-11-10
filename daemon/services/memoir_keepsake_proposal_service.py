@@ -298,36 +298,45 @@ class MemoirKeepsakeProposalService:
     ) -> list[MemoirEpisode]:
         """The candidate episodes, STRONGEST first.
 
-        The SQL predicate is the plan's qualification rule
-        (``COALESCE(poignancy, importance) >= 8`` AND
-        ``is_keepsake = False``); the ledger exclusion is applied here
-        (an ``episodes LEFT JOIN ledger WHERE ledger.id IS NULL`` would
-        duplicate the JOIN the zone query already owns, and the once-ever
-        check must be the SAME predicate the staging write enforces).
+        The window ONLY EVER contains ELIGIBLE candidates: both
+        exclusions (keepsake, superseded, and the once-ever ledger) are
+        enforced IN THE QUERY so a ledgered / superseded / already-pinned
+        row cannot eat one of the ``limit`` slots and starve the
+        eligible rows below it (W-1 — the post-window read-side skip
+        left the slots occupied; the council's probe: 12 ledgered
+        poignancy-9 rows starved the remaining 2). The ledger exclusion
+        is an agent-scoped ``notin_`` subquery — the SAME predicate
+        the staging write enforces (``agent_id, episode_id``), so the
+        once-ever check is one SQL predicate, not a second JOIN.
 
-        ``ORDER BY COALESCE(poignancy, importance) DESC, created_at DESC``
-        — strongest first, newest as the tie-break, so a bounded pass
-        stages the rows most worth proposing.
+        The read-side ledger skip in the pass loop
+        (``has_proposal`` / ``is_enduring``) STAYS as the
+        belt-and-braces race guard: a row can gain a ledger entry (or
+        be pinned / superseded) between the window read and the
+        staging write.
         """
         owner = agent_id or self._agent_id
         effective = func.coalesce(MemoirEpisode.poignancy, MemoirEpisode.importance)
+        # W-1: exclude ineligible rows IN THE QUERY (same-class
+        # completion for both the ledger exclusion and the superseded
+        # filter).
+        ledgered = select(MemoirProposalLedger.episode_id).where(
+            MemoirProposalLedger.agent_id == owner,
+        )
         statement = (
             select(MemoirEpisode)
             .where(
                 MemoirEpisode.agent_id == owner,
                 effective >= MEMOIR_KEEPSAKE_POIGNANCY_THRESHOLD,
                 MemoirEpisode.is_keepsake.is_(False),
+                MemoirEpisode.superseded_by.is_(None),
+                MemoirEpisode.id.notin_(ledgered),
             )
             .order_by(effective.desc(), MemoirEpisode.created_at.desc())
             .limit(max(0, int(limit)))
         )
         with Session(self._engine) as session:
-            rows = list(session.exec(statement).all())
-        # A SUPERSEDED episode is a retracted belief — proposing it for
-        # forever-status would enshrine a correction, so it never qualifies
-        # (the heuristic's own rule, applied here because the SQL keeps the
-        # qualification predicate to the plan's two terms).
-        return [row for row in rows if row.superseded_by is None]
+            return list(session.exec(statement).all())
 
     def stage_candidate(
         self,
@@ -398,7 +407,10 @@ class MemoirKeepsakeProposalService:
 
         WHERE ``notification_status IN ('pending', 'enqueued')`` by
         DEFAULT — a ``sent`` / ``failed`` row is history, not an open
-        question — then ``ORDER BY COALESCE(poignancy, importance) DESC,
+        question — AND ``is_keepsake = False`` (W-3: an already-pinned
+        episode is no longer proposable, so its pending proposal is
+        neither announced nor rendered — the no-spam doctrine), then
+        ``ORDER BY COALESCE(poignancy, importance) DESC,
         proposed_at DESC`` and the caller's cap (the zone renders at most
         ``MEMOIR_PROPOSALS_ZONE_MAX`` lines).
 
@@ -434,6 +446,7 @@ class MemoirKeepsakeProposalService:
             .where(
                 MemoirProposalLedger.agent_id == owner,
                 MemoirProposalLedger.notification_status.in_(list(wanted)),
+                MemoirEpisode.is_keepsake.is_(False),
             )
             .order_by(effective.desc(), MemoirProposalLedger.proposed_at.desc())
             .limit(max(0, int(limit)))

@@ -77,22 +77,28 @@ fi
 
 # The MEASURED node count at the pin (2026-11-10, this worktree,
 # ``--collect-only``): TestQualification (6) + TestOnceEver (6)
-# + TestProposalsZoneSelection (4) + TestProposalsZoneRender (6)
-# + TestAdmissionLadder (6) + TestReflectionPassIntegration (3) = 31.
+# + TestCandidateWindow (2) + TestProposalsZoneSelection (5)
+# + TestProposalsZoneRender (6) + TestAdmissionLadder (6)
+# + TestReflectionPassIntegration (3) = 34.
 #
 # TestAdmissionLadder grew 5 -> 6 in the phase-6 DELTA: the canonical
 # §A6 quote's PRESENCE pin (the source copy soft-wraps, so that leg is
 # whitespace-normalized).
 #
+# TestCandidateWindow (phase-6 closure delta): W-1 probe (ledgered
+# head-of-line) + same-class superseded head-of-line — both pin the
+# query-side exclusion so a ledgered/superseded row can no longer eat
+# a window slot and starve eligible rows below the LIMIT.
+#
 # LANE RULE (binding): this delta's own legs land selector-registered and
 # re-pinned IN THE SAME COMMIT — every class below is named EXPLICITLY, so
 # a leg no pack selects can never hide from the gate.
-EXPECTED_PASSED_N=31
+EXPECTED_PASSED_N=34
 
 SELECTOR=(
-  "TestQualification or TestOnceEver or TestProposalsZoneSelection"
-  "or TestProposalsZoneRender or TestAdmissionLadder"
-  "or TestReflectionPassIntegration"
+  "TestQualification or TestOnceEver or TestCandidateWindow"
+  "or TestProposalsZoneSelection or TestProposalsZoneRender"
+  "or TestAdmissionLadder or TestReflectionPassIntegration"
 )
 
 TIMEOUT_S="${MEMOIR_PACK_TIMEOUT_S:-300}"

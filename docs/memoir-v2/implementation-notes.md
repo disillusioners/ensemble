@@ -1194,6 +1194,15 @@ rule: a leg no pack selects is a leg the gate cannot see).
    candidates) — but an operator reading `ENSEMBLE_MEMOIR_ENABLED` as
    "proposals only" would be wrong. There is no second knob to add: the
    dependency is structural.
+8. **THE CANDIDATE WINDOW EXCLUDES INELIGIBLE ROWS IN THE QUERY (W-1).**
+    `scan_candidates` now filters the ledger exclusion (an agent-scoped
+    `notin_` subquery) and `superseded_by IS NULL` IN the SQL, so a
+    ledgered / superseded / already-pinned row can no longer occupy one
+    of the `limit` slots and starve eligible rows below it. The
+    read-side ledger skip in the pass loop (`has_proposal` /
+    `is_enduring`) STAYS as the belt-and-braces race guard for a row
+    that gains a ledger entry between the window read and the staging
+    write.
 
 ### 16.7 THE PLAN DEFECT — §3.1's 1/day gate SQL is not date-rollover safe
 

@@ -76,12 +76,13 @@ if [ ! -f "$TARGET" ]; then
 fi
 
 # The MEASURED node count at the pin (2026-11-10, this worktree,
-# ``--collect-only``): TestEnqueueBridge (9) + TestNoPinAuthority (3) = 12.
+# ``--collect-only``): TestEnqueueBridge (10) + TestNoPinAuthority (3) = 13.
 #
-# TestEnqueueBridge grew 6 -> 9 in the phase-6 DELTA: the three CROSS-DAY
-# legs (staged on D, notified on D+1) pin the 1/day gate's CONSUMPTION-day
-# keying and the pending-only notify target.
-EXPECTED_PASSED_N=12
+# TestEnqueueBridge grew 9 -> 10 in the phase-6 closure delta: the W-3
+# leg pins that a pending proposal whose episode is later pinned is NOT
+# announced by the bridge (no-spam doctrine), while an unpinned pending
+# proposal still is.
+EXPECTED_PASSED_N=13
 
 SELECTOR="TestEnqueueBridge or TestNoPinAuthority"
 
