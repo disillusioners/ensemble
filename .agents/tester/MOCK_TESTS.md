@@ -810,3 +810,53 @@ the entry is no longer re-runnable. Historical run evidence:
 > gateway + the `mcp_rpc` tools) is exercised by the
 > `tests/integration/mcps_gateway/` family instead
 > (`docs/mcps-gateway.md`).
+
+
+## Mock Test: explain_image related-dirs confinement closing probe (ei-closing-probe)
+
+### Metadata
+- **Created**: 2026-11-10
+- **Script**: `/tmp/ei_gate/closing_probe.py` (throwaway verification probe — NOT a repo file; read-only gate on worktree `fix/explain-image-related-dirs` @ `0efd07f03`)
+- **Language**: Python (worktree venv)
+- **Status**: PLANNED (one-shot, pre-merge gate)
+
+### Configuration
+- **Timeout**: 240 s script-internal (signal.alarm) / 300 s outer `timeout` — dual-layer
+- **Service Port**: none (pure confinement-decision-layer probe; no daemon, no sockets)
+- **Mock Ports**: none
+- **Cleanup**: everything under `/tmp/ei_gate/` + `/tmp/ei_synth/`; worktree untouched
+
+### What It Tests
+- Acceptance criterion of the explain_image path-confinement fix: synthetic project with `main_directory` ∪ `related_directories`; image under a related dir → ACCEPT (wrongly refused pre-fix); image outside all roots → REFUSED with a message naming the roots + a remedy.
+- Edge shapes: empty related list, related==main dedup, non-existent related root, path IS a root (boundary), traversal `..`, symlink escape, unicode/space paths. No crash, no fail-open.
+
+### Mock Services Required
+- None. Project/dispatch mocked in-process per the REAL production resolution shape (derived from `daemon/tools/image_tools.py`, not from the suite's mocks).
+
+### Test Scenarios
+1. image deep under related root → ACCEPT
+2. image under main → ACCEPT
+3. image outside all roots → REFUSE + roots named + remedy present
+4. empty `related_directories` → main-only accept; former-related path refused
+5. related == main (dedup) → accept, no crash
+6. non-existent related root → fail-closed (no crash, no fail-open)
+7. path exactly == a related root → record boundary semantics
+8. traversal escape → REFUSE
+9. symlink escape → REFUSE
+10. unicode/space paths → behave per containment, no crash
+
+### Success Criteria
+- [ ] Scenario 1 ACCEPT + scenario 3 REFUSE-with-roots-and-remedy (the closing pair)
+- [ ] All edge scenarios: no crash, no fail-open
+- [ ] Refusal never dispatches (dispatch sink patched, assert not called)
+- [ ] Pre-fix refusal of scenario 1 documented from `git show 9969f0c9b:daemon/tools/image_tools.py`
+
+### Implementation Notes
+- Probe derives the project shape from production source, not from `tests/test_image_tools.py` mocks (mock fidelity audited separately).
+- Scrubbed env per `scripts/run_tests_scrubbed.sh` conventions (ambient PROD `POSTGRES_*`/`PLANE_*`).
+
+### Last Run
+- **Date**: 2026-11-10 (worker `c996ffcf`, mock-test skill)
+- **Result**: PASS — 14/14 cases, exit 0, 3 runs reproducible (3.0s); acceptance criterion proven both directions (HEAD ACCEPT + BASE-executed REFUSE with green control)
+- **Quick Fixes**: none (read-only gate)
+- **Report**: RESULTS/2026-11-10-explain-image-related-dirs-verification.md §2–3
