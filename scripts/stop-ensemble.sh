@@ -158,6 +158,80 @@ done
 INSTALL_DIR="${REMAINING[0]:-$(_default_install_dir)}"
 REPORT_PORT="${REMAINING[1]:-}"
 
+# ── guard-02 (2026-11-09): a BARE invocation must not stop the live/demo ──
+# install by accident. Without a positional INSTALL_DIR the target is
+# _default_install_dir() — and that default can ONLY ever be a live or a
+# demo install, never a sandbox:
+#   * normal HOME                          → $HOME/agents-ensemble   (LIVE)
+#   * Layer-1 HOME (basename agents-ensemble)      → $HOME   (LIVE)
+#   * Layer-1 HOME (basename agents-ensemble-demo)  → $HOME   (DEMO)
+# So the bare form is the ONE shape that always aims at a running install —
+# and it aims at it silently (pre-change: `bash scripts/stop-ensemble.sh`
+# with no args stopped $HOME/agents-ensemble with no confirmation at all).
+#
+# PLACEMENT: HERE — after the positional parse, before ANY side effect: the
+# lib.sh source, the Layer (i) settle-check, the Layer (ii) pipeline lock
+# acquire (which WRITES <dir>/releases/rollback.lock.d), and every lsof/pid
+# lookup that could lead to a signal. The gate exits 78 before all of them.
+#
+# PIN RELATIONSHIP: the live/demo classification below mirrors the
+# install-dir-guard's protected set (scripts/install-dir-guard.sh
+# _cand_class — $HOME/agents-ensemble is LIVE, $HOME/agents-ensemble-demo is
+# DEMO) and lib.sh's _install_dir_candidates mirror. stop-ensemble.sh is an
+# entry script that deliberately does NOT source lib.sh (:125-131) — and it
+# does not source install-dir-guard.sh either: the classification is
+# INLINED here, minimal, covering exactly the three shapes
+# _default_install_dir can produce.
+#
+# SCOPE: the EXPLICIT form (<dir> ...) is NOT touched — an explicit dir is
+# accepted exactly as before (the Makefile's guard fronts the live dir;
+# this script keeps that scope discipline — no double-gating here).
+BARE_DEFAULT=""
+BARE_CLASS=""
+if [ -z "${REMAINING[0]:-}" ]; then
+    BARE_DEFAULT="$(_default_install_dir)"
+    BARE_CLASS="live"
+    case "$(basename "${HOME%/}")" in
+        agents-ensemble-demo) BARE_CLASS="demo" ;;
+    esac
+    # resolved form for the message (logical pwd, like the script's own
+    # INSTALL_DIR resolution at :164; raw text when the dir does not exist)
+    BARE_RESOLVED="$(cd "$BARE_DEFAULT" 2>/dev/null && pwd)" || BARE_RESOLVED="$BARE_DEFAULT"
+    if [ "$BARE_CLASS" = "live" ] && [ "${ENSEMBLE_INSTALL_LIVE:-0}" != "1" ]; then
+        cat >&2 <<EOF
+stop-ensemble: REFUSING — a bare invocation resolves to the LIVE install dir (${BARE_RESOLVED}).
+  Without a positional INSTALL_DIR the target is the LIVE production install
+  (\$HOME/agents-ensemble — or \$HOME itself under the Layer-1 service-user
+  HOME). Stopping it by accident is the incident class this gate exists for
+  (2026-11-09).
+  To stop it deliberately:
+    bash scripts/stop-ensemble.sh '${BARE_RESOLVED}' --force
+    ENSEMBLE_INSTALL_LIVE=1 bash scripts/stop-ensemble.sh
+  --force is the operator-emergency flag (it bypasses the pipeline
+  settle-check and the pipeline lock) — it is NOT an intent confirm. The
+  canonical runbook form adds the install's own port as a reporting hint:
+    bash scripts/stop-ensemble.sh '${BARE_RESOLVED}' <port> --force
+EOF
+        exit 78
+    fi
+    if [ "$BARE_CLASS" = "demo" ] && [ "${ENSEMBLE_INSTALL_DEMO:-0}" != "1" ]; then
+        cat >&2 <<EOF
+stop-ensemble: REFUSING — a bare invocation resolves to the DEMO install dir (${BARE_RESOLVED}).
+  Without a positional INSTALL_DIR the target is the DEMO install
+  (\$HOME/agents-ensemble-demo — or \$HOME itself under the Layer-1 demo HOME).
+  A demo install runs a real demo daemon; the same explicit confirm applies.
+  To stop it deliberately:
+    bash scripts/stop-ensemble.sh '${BARE_RESOLVED}' --force
+    ENSEMBLE_INSTALL_DEMO=1 bash scripts/stop-ensemble.sh
+  --force is the operator-emergency flag (it bypasses the pipeline
+  settle-check and the pipeline lock) — it is NOT an intent confirm. The
+  canonical runbook form adds the install's own port as a reporting hint:
+    bash scripts/stop-ensemble.sh '${BARE_RESOLVED}' <port> --force
+EOF
+        exit 78
+    fi
+fi
+
 [ -n "$INSTALL_DIR" ] || _die "empty INSTALL_DIR"
 
 # Absolute, no trailing slash — cwd comparisons are exact.
