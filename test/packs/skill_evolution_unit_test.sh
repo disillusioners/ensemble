@@ -25,6 +25,17 @@ echo "=== Test Pack: skill_evolution_unit_test ==="
 
 cd "$PROJECT_DIR"
 
+# The DATA-DIR SANDBOX (E1/D lane's L7 finding, 2026-11-10).  The
+# observability sink resolves `./data` CWD-RELATIVELY, so a test that
+# drives a refusal seam without a sink destination writes into the
+# CHECKOUT's gitignored `data/skill-capture-observability/` tree.  The
+# integration file this pack runs (tests/integration/test_skill_evolution_e2e.py)
+# still has no per-test sink destination, so the pack points the resolved
+# data dir at a scratch dir OUTSIDE the checkout.  (The SANCTIONED env
+# knob — the first hop of the existing precedence chain.)
+SANDBOX="$(mktemp -d /tmp/skill-evolution-data-XXXXXX)"
+export ENSEMBLE_DATA_DIR="$SANDBOX"
+
 # NOTE: tests/unit/test_auto_load_skills.py was deleted in eeef8845
 # (legacy context injection removal). Removed from pack.
 #

@@ -10,7 +10,8 @@
 # metrics-lane seam.
 #
 # FILE SET
-#   tests/unit/test_skill_metrics_capture_lane_off_seam.py   (the pin)
+#   tests/unit/test_skill_metrics_capture_lane_off_seam.py   (the seam pin)
+#   tests/unit/test_skill_capture_lane_off_leak.py            (the LEAK pin)
 #
 # MUTATION MATRIX (phase 2) — planted on OUR OWN file only
 # (daemon/services/skill_metrics_service.py; never in another lane's file):
@@ -20,6 +21,18 @@
 #   (M-C2c — drop the counters increment inside the observability helper —
 #    is a plant in ANOTHER LANE'S file, so it is proven in-test by
 #    monkeypatch instead: see TestTheSeamIsDefensive / the real-counter pin.)
+#   M-C2d — remove the autouse `configure_sink(tmp_path)` fixture from the
+#           seam pin ⇒ the refusal record escapes into the CHECKOUT's
+#           `data/skill-capture-observability/` tree ⇒ the LEAK pin REDs
+#           (the planted run really leaks ~1,260 B — the L7 regression)
+#
+# THE LEAK (E1/D lane's L7 finding, 2026-11-10).  The observability sink
+# resolves `./data` CWD-RELATIVELY, so a test that drives the refusal seam
+# without a sink destination writes into the checkout's gitignored `data/`
+# tree — invisible to git status, to the residue gate and to the staging
+# gate.  The fix is the sanctioned `configure_sink(tmp_path)` API (per test
+# file) plus THIS pack's data-dir sandbox (for any file in the pack set
+# that has no fixture of its own).  The leak pin observes the WRITE TARGET.
 #
 # FENCES: per-variable env scrub, worktree-local interpreter, dual-layer
 # timeout, sha-verified PRISTINE restore, VACUOUS-GREEN guard; NO env-switch
@@ -38,12 +51,24 @@ PY="$REPO_ROOT/.venv/bin/python"
 LOG_DIR="${METRICS_CAPTURE_LANE_OFF_LOG_DIR:-/tmp/metrics-capture-lane-off-gate}"
 mkdir -p "$LOG_DIR"
 
+# The DATA-DIR SANDBOX (E1/D lane's L7 finding).  The observability sink
+# resolves `./data` CWD-RELATIVELY, so a test without a sink destination
+# writes into the CHECKOUT's gitignored `data/` tree.  The pack points the
+# resolved data dir at a scratch dir OUTSIDE the checkout, so NO file in
+# this pack's set can pollute the working tree — the per-file
+# `configure_sink(tmp_path)` fixture is the FIRST line of defence and this
+# sandbox is the second.  (It is the SANCTIONED env knob — the first hop of
+# the existing precedence chain — NOT a re-implementation of that chain.)
+SANDBOX="$(mktemp -d /tmp/metrics-capture-lane-off-data-XXXXXX)"
+export ENSEMBLE_DATA_DIR="$SANDBOX"
+
 SCRUB=(env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT
        -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT
-       -u ENSEMBLE_SELF_ENV -u ENSEMBLE_CONFIG -u ENSEMBLE_DATA_DIR
+       -u ENSEMBLE_SELF_ENV -u ENSEMBLE_CONFIG
        -u ENSEMBLE_SKILL_CAPTURE_ENABLED -u ENSEMBLE_SKILL_EVOLUTION_ENABLED)
 
 PIN="tests/unit/test_skill_metrics_capture_lane_off_seam.py"
+LEAK_PIN="tests/unit/test_skill_capture_lane_off_leak.py"
 SVC="daemon/services/skill_metrics_service.py"
 
 echo "=== Test Pack: metrics_capture_lane_off_seam_unit_test ==="
@@ -53,7 +78,7 @@ if [ ! -x "$PY" ]; then
   echo "RESULT: FAIL (MISSING-INTERPRETER — the worktree-local .venv/bin/python is absent)"
   exit 1
 fi
-for f in "$PIN" "$SVC"; do
+for f in "$PIN" "$LEAK_PIN" "$SVC"; do
   [ -f "$f" ] || { echo "RESULT: FAIL (MISSING-ARTIFACT — $f)"; exit 1; }
 done
 
@@ -67,8 +92,8 @@ check_budget() {
 }
 
 run_pin() {
-  timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$PIN" -q --tb=line -p no:randomly \
-    --override-ini="addopts=" > "$1" 2>&1
+  timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$PIN" "$LEAK_PIN" -q --tb=line \
+    -p no:randomly --override-ini="addopts=" > "$1" 2>&1
 }
 
 # ── phase 1: the pin ───────────────────────────────────────────────────────
@@ -97,7 +122,9 @@ restore_all() {
   [ "$CLEANED" = 1 ] && return 0
   CLEANED=1
   [ -f "$PRISTINE/content" ] && cp "$PRISTINE/content" "$SVC"
-  rm -rf "$PRISTINE"
+  [ -f "$PRISTINE/$(basename "$PIN")" ] && cp "$PRISTINE/$(basename "$PIN")" "$PIN"
+  clean_marker_leaks
+  rm -rf "$PRISTINE" "$SANDBOX"
 }
 trap restore_all EXIT
 trap 'restore_all; exit 143' TERM
@@ -121,6 +148,21 @@ if n != 1:
     sys.exit(3)
 p.write_text(s.replace(old, new))
 PYEOF
+}
+
+# Remove ONLY the sink files that carry this lane's marker (the planted
+# run's leak).  A concurrent lane's residue is never touched.
+clean_marker_leaks() {
+  local dir="$REPO_ROOT/data/skill-capture-observability"
+  [ -d "$dir" ] || return 0
+  local f
+  for f in "$dir"/skill-capture-*.jsonl; do
+    [ -f "$f" ] || continue
+    if grep -q 'agent-c2' "$f" 2>/dev/null; then
+      rm -f "$f"
+      echo "  [pack] cleaned the planted leak: $(basename "$f")"
+    fi
+  done
 }
 
 MUTATION_FAILURES=0
@@ -160,6 +202,53 @@ leg() {
   check_budget "after ${id}"
 }
 
+# ── M-C2d — the LEAK leg (plants in OUR OWN pin file) ──────────────────────
+# The autouse `configure_sink(tmp_path)` fixture is REMOVED ⇒ the refusal
+# record escapes into the CHECKOUT's `data/skill-capture-observability/`
+# tree ⇒ the leak pin REDs.  The planted run really writes the ~1,260 B
+# leak, so the leg cleans up exactly the files carrying this lane's marker
+# (never a concurrent lane's residue).
+file_leg() {
+  local id="$1" target="$2" old="$3" new="$4" log rc
+  local sha_before sha_after want
+  want="$(cat "$PRISTINE/$(basename "$target").want")"
+  sha_before="$(sha256sum "$target" | cut -d' ' -f1)"
+  if [ "$sha_before" != "$want" ]; then
+    echo "  ${id}: FAIL (leg did not start pristine)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1)); return
+  fi
+  if ! plant "$target" "$old" "$new"; then
+    echo "  ${id}: FAIL (plant error)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+    cp "$PRISTINE/$(basename "$target")" "$target"; return
+  fi
+  log="$LOG_DIR/${id}-red.log"
+  run_pin "$log"; rc=$?
+  # The planted run leaks into the checkout's data tree — remove EXACTLY the
+  # files carrying this lane's marker (a concurrent lane's residue is left
+  # alone).
+  clean_marker_leaks
+  if [ "$rc" -eq 0 ]; then
+    echo "  ${id}: FAIL (NON-DISCRIMINATING — the leak pin stayed GREEN with the leak planted)"
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+  else
+    echo "  ${id}: RED as intended (rc=${rc})"
+    grep -E "^FAILED " "$log" | head -3 | sed 's/^/    /' || true
+  fi
+  cp "$PRISTINE/$(basename "$target")" "$target"
+  sha_after="$(sha256sum "$target" | cut -d' ' -f1)"
+  if [ "$sha_after" != "$want" ]; then
+    echo "  ${id}: FAIL (restore NOT sha-identical)"; MUTATION_FAILURES=$((MUTATION_FAILURES + 1)); return
+  fi
+  log="$LOG_DIR/${id}-green.log"
+  run_pin "$log"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "  ${id}: FAIL (post-restore leg not GREEN, rc=${rc})"
+    MUTATION_FAILURES=$((MUTATION_FAILURES + 1))
+  else
+    echo "  ${id}: GREEN after sha-verified restore"
+  fi
+  check_budget "after ${id}"
+}
+
 # M-C2a — DELETE the recorder call entirely.
 leg "M-C2a" \
   '            _record_capture_lane_off_refusal(
@@ -186,9 +275,22 @@ leg "M-C2b" \
                 prompt_source="skill_metrics_service",
             )'
 
+# M-C2d — remove the autouse sink redirect from the seam pin ⇒ the leak
+# returns (the L7 regression) ⇒ the leak pin REDs.
+cp "$PIN" "$PRISTINE/$(basename "$PIN")"
+sha256sum "$PIN" | cut -d' ' -f1 > "$PRISTINE/$(basename "$PIN").want"
+file_leg "M-C2d" "$PIN" \
+  '    observability.configure_sink(tmp_path)' \
+  '    pass  # MUTATION: the sink is NOT redirected - the write escapes tmp_path'
+
 sha="$(sha256sum "$SVC" | cut -d' ' -f1)"
 if [ "$sha" != "$WANT" ]; then
   echo "RESULT: FAIL (post-run manifest: $SVC is NOT byte-identical)"
+  exit 1
+fi
+sha="$(sha256sum "$PIN" | cut -d' ' -f1)"
+if [ "$sha" != "$(cat "$PRISTINE/$(basename "$PIN").want")" ]; then
+  echo "RESULT: FAIL (post-run manifest: $PIN is NOT byte-identical)"
   exit 1
 fi
 echo "[pack] post-run manifest: every touched file is byte-identical"
@@ -197,5 +299,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (2 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (3 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0

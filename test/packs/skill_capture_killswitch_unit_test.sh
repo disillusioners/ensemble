@@ -72,6 +72,19 @@ echo "=== Test Pack: skill_capture_killswitch_unit_test ==="
 
 cd "$PROJECT_DIR" || exit 1
 
+# The DATA-DIR SANDBOX (E1/D lane's L7 finding, 2026-11-10).  The
+# observability sink resolves `./data` CWD-RELATIVELY, so a test that
+# drives a refusal seam without a sink destination writes into the
+# CHECKOUT's gitignored `data/skill-capture-observability/` tree — invisible
+# to git status, to the residue gate and to the staging gate.  Two of the
+# files in THIS pack's set still have no per-test sink destination (they
+# are not this lane's files), so the pack points the resolved data dir at a
+# scratch dir OUTSIDE the checkout: the pack can no longer pollute the
+# working tree, whoever owns the file.  (It is the SANCTIONED env knob —
+# the first hop of the existing precedence chain — not a re-implementation.)
+SANDBOX="$(mktemp -d /tmp/skill-capture-killswitch-data-XXXXXX)"
+export ENSEMBLE_DATA_DIR="$SANDBOX"
+
 if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
   PYTEST=("$PROJECT_DIR/.venv/bin/python" -m pytest)
   PY="$PROJECT_DIR/.venv/bin/python"
