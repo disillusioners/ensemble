@@ -488,3 +488,255 @@ that entry is its owning lane's to clear.
 worktree is mid-union-#2 (git refuses a partial commit during a merge, and the index there belongs to the
 author); it will be committed path-limited with the same protocol and the same `MERGE_HEAD` precondition
 re-checked at the moment of the commit.
+
+---
+
+# 7. FINAL GATE — RELEASE GATE AT `5861419dc` (union #2)
+
+> **This is the release gate.** 14 legs, base = `e06464ee2` (shipped **v0.29.10** — the release base for
+> change set A) ↔ tip = `5861419dc` (true merge of `10c01d741` [branch] + `e06464ee2` [shipped]).
+> **Base framing matters:** a `424494082` base would absorb the whole v0.29.10 upstream release into the
+> diff (45 files / +6918) and measure the wrong thing; anchoring on `e06464ee2` isolates change set A.
+
+## 7.1 Suites
+
+| Suite | Expected | Measured | Verdict |
+|---|---|---|---|
+| guard + stop + daemon-preflight **together** | 216 collected / 215 passed / 1 skipped | **216 / 215 / 1** (163 + 12 + 41), 3/3 deterministic (62.8 s / 71.0 s / 78.7 s) | ✅ **EXACT** |
+| journal (`tests/unit/tools/test_upgrade_journal.py`) | green | **118 collected → 117 passed / 1 skipped**, both legs, delta empty, 3/3 per leg | ✅ |
+| skip ids | — | trio: `TestSudoArm::test_sudo_form_refuses_without_confirm_and_proceeds_with_it` (`sudo -n` absent). journal: `TestExecutorSpawn::test_real_service_branch_end_to_end` (`ENSEMBLE_UPGRADE_E2E_SERVICE=1` gate) | ✅ both pre-existing, env-gated |
+
+## 7.2 Classification matrix — **55 rows, 54 MATCH / 1 MISMATCH**
+
+The guard blob **changed** at the union tip (791 → **859** lines, `509821db…` → `efec1d52…`, +132/−64): the
+**F6 absolute-path arm** added (26 code lines) + the dead `refuse()` helper removed — **98 % comment
+restructuring**. Empirically **all 33 prior rows are byte-identical** (same `rc=`, `bucket=`, and quoted
+classifier first line) ⇒ **zero prior refusal moved**; 22 new rows added. All four `$(INSTALL_DIR)` sinks
+remain **quoted** (`:328/:333/:383/:532`; the bare `rm -rf $(INSTALL_DIR)` at `:523` is a **comment**).
+
+**The single mismatch is the brief's own expectation, not a guard defect.** `c32` —
+`INSTALL_DIR=/tmp/mg-probe/fakehome-c32/../../etc-ish` ⇒ **rc 0 (ALLOWED)**, not 78. Mechanism: F-05
+canonicalisation resolves the longest-existing prefix physically and folds `..` lexically, landing on
+`/private/tmp/etc-ish` — a well-formed absolute path that is neither live, demo, nor protected, and neither
+an ancestor of nor inside a protected tree ⇒ no arm fires. **Only `..` spellings that LAND ON a protected
+tree refuse:** `…/fakehome-c32/../../..` → `/` → **STRUCTURAL-CONTAINS 78** (`c32a`); `…/ghost/../agents-ensemble`
+→ **LIVE 78** (`c32b`). **There is no dotdot-escape arm at any of the three tips** — not a union regression;
+a genuine gap between the brief's expectation and the guard's semantics. **Open owner question, not a gate
+blocker:** should such an arm exist? (Recorded as a deviation, not rewritten to match reality.)
+
+**New upstream arms, all confirmed present and behaving:**
+- **F6 absolute-path arm** (`install-dir-guard.sh:454-497`): a relative `INSTALL_DIR` ⇒ **78 STRUCTURAL-ABSOLUTE**
+  (`"INSTALL_DIR 'relative/path' is not an absolute path."`), and **still 78 with `ENSEMBLE_INSTALL_LIVE=1`**
+  (`c31`/`c31b`); the arm reads only the normalised path, consults **no confirm var**, and runs **before**
+  classification, the per-path gate and the containment arm. `…/./relative/path` hits the
+  unverifiable-spelling arm first (`c31c`).
+- **D1-D3 port-sink quoting, source-aware**: `stop`/`install` ⇒ repo-sourced `"9797"`; `stop-by-port` ⇒
+  dir-sourced `"12345"`; and the no-port-leak shape is now a **present-but-empty quoted slot** (`""`) — at
+  `c50204be8` an empty `STOP_PORT` **collapsed the port argument away entirely** (arg-count shift). The union
+  fixed that.
+- **Unchanged and still refused:** HOME-unset (`:286-309`), ancestor-of-HOME (`:714-747`), Darwin case-fold
+  (`:501-518`), raw-value/metachar (`:310-370`), glob-literal / never-expanded (`:568-586`),
+  nonexistent-intermediate (`:183-188`).
+- **Strengthened semantics preserved**: inside-live **+ `LIVE=1`** and demo-subpath **+ `DEMO=1`** ⇒ still
+  `STRUCTURAL-INSIDE`; malformed **+ confirm** ⇒ `STRUCTURAL-UNVERIFIABLE`.
+
+## 7.3 BLOCKER-1 — CLOSED at the final tip (differential, by execution)
+
+| Row | Tree | rc | Gate reached |
+|---|---|---|---|
+| A0 literal allowlist-only | tip | 78 | **demo-gate** (guard correctly still armed) |
+| A daemon-real **with** `--version` | tip | 78 | **not-staged** ← the closure |
+| A2 daemon-real **without** `--version` | tip | 78 | **version-gate** (past the demo gate) |
+| C1 live-guard | tip | 78 | **live-gate** |
+| C2 live-arm (`ENSEMBLE_UPGRADE_LIVE=1` + `--f2-verified-closed`) | tip | 78 | **version-gate**, **no demo var** |
+| C3 demo-var only | tip | 78 | **live-gate** (the demo var cannot open the live lane) |
+| **E2 discriminating control** | **`a3a6f99c5`** (pre-fix) | 78 | **demo-gate** ✅ |
+| SUP `env -i` + explicit var only | tip | 78 | not-staged |
+
+A-row env carries **8** keys incl. `ENSEMBLE_INSTALL_DEMO`; the E2 baseline carries **7** and does not.
+Same construction, different tree, different outcome ⇒ the differential *is* the closure proof.
+
+> **Brief correction (mine):** the named control tree `c50204be8` **carries** the fix (`8339e12f8` is its
+> parent) — a control with the fix goes green too ⇒ **false-green**. Both it (`E1`) and the true pre-fix
+> baseline `a3a6f99c5` (`E2`) were run; `E2` is the discriminating one.
+
+**Fail-closed 8/8** (so closed without widening): `demo`+demo-candidate ⇒ `{ENSEMBLE_INSTALL_DEMO}`;
+`live` / `sandbox` / `dev` / `''` / `None` / `demo`+**non-candidate** dir / `demo`+empty dir ⇒ `{}`.
+**Allowlist discipline**: the var occurs only in a docstring (`:1809`) and inside `demo_arm_extras` (`:1867`) —
+**0×** in `EXECUTOR_ENV_ALLOWLIST` (`:2593-2610`), unmatched by `EXECUTOR_ENV_PREFIXES=("PG",)`. Loop-closer:
+ambient var → `executor_env(None)` ⇒ **stripped**; explicit extra ⇒ **present**.
+
+```
+BLOCKER-1 CLOSED: YES · LIVE LANE INTACT: YES · FAIL-CLOSED HOLDS: YES · ALLOWLIST CLEAN: YES · NEGATIVE CONTROL DISCRIMINATES: YES
+```
+
+## 7.4 Branch wiring present at the tip
+
+| Item | Location | Verdict |
+|---|---|---|
+| `STOP_PORT` + **quoted** sinks | `Makefile:171, 179, 181` | ✅ |
+| `--require-live` positioned **after** the per-path gate + containment arm | guard order: absolute-path `:454` → classify `:591` → per-path gate `:674` → containment `:714` → **require-live `:831/842` LAST** | ✅ canonical refusals still fire first |
+| `demo_arm_extras` | `upgrade_journal.py:1804` (def), `manager.py:6386` (call) | ✅ |
+| `require_demo_guard` | `upgrade/lib.sh:1387`; called `stage.sh:135`, `promote.sh:130`, `rollback.sh:62` | ✅ |
+| bare-`stop-ensemble.sh` refusal (guard-02) | `stop-ensemble.sh:189-232` (LIVE `:202`, DEMO `:219`, both exit 78) | ✅ |
+| clean named refusal at the unbound-`$1` sites | `stop-ensemble.sh:235` (no `$1`) and `:242-254` (GUARD-1, exit 78, uses `${INSTALL_DIR}`) | ✅ **both** base `rc=1` failures fixed |
+| Layer-1 sibling in **both** `_cand_class` and `_protected_install_paths` | `:620-637` and `:768-775` | ✅ |
+
+**Name-prefix sibling still ALLOWED (rc 0)** — documented at `test_makefile_install_guard.py:1963-1968`
+(path-component aware; *"a NAME-PREFIX SIBLING … stays allowed BY DESIGN"*) and pinned by
+`test_name_prefix_siblings_are_not_live` (both spellings) + `test_plain_subdir_of_home_still_allowed` +
+`test_guard_level_pass_for_unclassified_dir`. **No decision change** for any well-formed absolute path that
+is neither live, demo, nor protected.
+
+## 7.5 Census at this tip — no weakening
+
+| Ref | fns | collected |
+|---|---|---|
+| `424494082` base | 45 | 51 |
+| `7b41bf686` branch | 82 | 92 |
+| `40e6a842` shipped v0.29.9 | 66 | 110 |
+| `e06464ee2` shipped v0.29.10 | 75 | 122 |
+| **`5861419dc`** | **112** | **163** ✔ (112 + 51 parametrisation extras, itemised) |
+
+Trio = 163 + 12 + 41 = **216** ✔. Partition: shared **66** · branch-only **37** class-scoped (**36** at name
+level — `TestStopByPortPortScoping::test_inert_refusal` shares its *name* with the shared
+`TestRemainingMutatingTargets::test_inert_refusal`; both counts are true at their stated granularity) ·
+base-only **9** · **DROPPED = 0** (37/37 and 9/9 present). The two same-name items are **genuinely distinct
+classes** (different targets / different bodies).
+
+**Weakening sweep**: 3 removed-assertion hits (1 a docstring line); the 2 real ones are a
+**strengthened-replacement** — the D1 adaptation now asserts `f'"{expected_port}"' in ln` over
+**3 legs × 2 distinct port sources** (`stop`/`install` → `"9797"`, `stop-by-port` → `"12345"`). Per-function
+assert counts: **0 functions dropped**, **0 became assertion-free** (75/75 nodes ≥1 assert, total 293 → 112/112,
+total **413**). **No `skip`/`xfail` added.** The strong no-port-leak pin is **token-shape**, not substring:
+`parts[:3] == ["STOP_BY_PORT=1","bash","scripts/stop-ensemble.sh"]`, `len(parts) == 5`, `parts[4] == ""`
+(the quoted slot **present-but-empty**).
+
+## 7.6 Delta shape vs the shipped base `e06464ee2`
+
+**17 files, +1739/−23** — exact. `daemon/manager.py` **+19/−0** · `daemon/tools/upgrade_journal.py`
+**+69/−0** · **`launcher.sh` ABSENT** (change sets A and B **disjoint** on the launcher surface — also
+byte-identical across legs, sha `1fba3f83…`). The artifact's own +251 now travels with the branch.
+Both bases reconcile: `40e6a842 → c50204be8` = 16 files +1465/−23 (the branch-vs-v0.29.9 delta at the
+branch's code tip); `40e6a842 → 5861419dc` = 45 files +6918/−278 (absorbs the whole v0.29.10 release);
+`e06464ee2 → 5861419dc` = 17 files +1739/−27 (**the pure change-set-A delta**).
+
+## 7.7 Regression sweep — every leg delta-free (12 legs)
+
+| Pack | Base | Tip | Δ |
+|---|---|---|---|
+| `test_makefile_install_guard.py` + stop + daemon-preflight (trio) | — | **216/215/1** | ✅ exact |
+| `test_upgrade_journal.py` | 117/1 | 117/1 | ✅ empty |
+| `test_install_root_layer1.sh` | 36/0 | 36/0 | ✅ empty (logs byte-identical `76c346e5…`) |
+| `test_stop_ownership.sh` | 43/0 | 43/0 | ✅ empty |
+| `stop_ownership_unit_test.sh` | 43/0 | 43/0 | ✅ empty |
+| `test_supervision_stop_handback.sh` | 18/0/4 | 18/0/4 | ✅ empty (skip lists byte-identical) |
+| `test_bounded_subprocess_waits.sh` | 36/2/2 | 36/2/2 | ✅ empty (4 runs/leg identical) |
+| `test_deploy.sh` | 50/3 | 50/3 | ✅ empty (same 3 ids) |
+| `test_rollback_target.sh` | 30/2 | 30/2 | ✅ empty (same 2 ids) |
+| `test_promote_plugin_staleness.sh` | 61/0 | 61/0 | ✅ empty (stdout byte-identical `fe6bbc31…`) |
+| `test_release_journal.sh` (d)-leg | rc 124 | rc 124 | ✅ tip-only ∅ ⇒ **NET-NEW: NO** |
+| (d)-leg negative control | — | demo-gate fires **only** without the confirm var | ✅ arm genuinely armed |
+
+**Not re-run (labels retained):** `177/43` — **unverifiable on Darwin** (both candidate packs measured; the
+literal `225/43` matches `QUARANTINE.md` row 118, a **Linux-host** run at old sha `ba295fec`).
+`survivorship 117/1` — **no such suite exists** (the signature maps uniquely to the journal suite).
+`adopt-unit 43/37` — **unverifiable as stated** (43+37 = 80 = the pack's canonical assert total; no
+registered receipt; the pack's product target is **not in the delta** ⇒ any red there is out-of-scope /
+environment-induced, **not branch-caused**). **No suites were manufactured to match any number.**
+
+## 7.8 The `8c` TZ leg
+
+| Tree | default TZ (+07) | `TZ=UTC` |
+|---|---|---|
+| BASE | 0 passed / **3 failed** | **3 passed / 0 failed** |
+| TIP | 0 passed / **3 failed** | **3 passed / 0 failed** |
+
+Mechanism: the fixture derives `last_heartbeat` from an ISO stamp with a naive `strptime` ⇒ **exactly
+25 200 s (7.0 h)** skew on `Asia/Ho_Chi_Minh` ⇒ heartbeat reads stale while the txn age is correctly ~30 s ⇒
+the comp3 fast path reclaims instead of refusing rc 78. The fixture's `strptime`
+(`test_release_journal.sh:928`) is **unchanged at the tip**.
+**Labelling: TZ-sensitive; producer-vs-fixture UNRESOLVED** (the launcher lane owns that determination).
+Evidence gathered for it: the shell producer (`date -u …Z`), the shell consumer (`date -ju -f`) and the daemon
+producer (`datetime.now(tz=utc)`, `replace(tzinfo=utc)`, `fromtimestamp(tz=utc)`) are **all TZ-safe** — the
+fixture's `strptime` is the only naive step in the chain.
+
+## 7.9 What change set A adds on top of the shipped guard
+
+Shipped = `0f60f1ab9` (v0.29.9) + `c788f2591` (v0.29.10). Change set A adds **five unique guard/script
+capabilities plus the daemon-side demo forwarding** — stated without inflation:
+
+1. **Guard wired as the first action of every mutating Make target** (`install`, `uninstall`, `install-deps`,
+   `stop`, `stop-by-port`, `plist-install`, `watchdog-install`), with the `INSTALL_DIR` default left
+   **inert** (no implicit live path) and the `rm -rf` install sinks **quoted**.
+2. **`--require-live`** for the two launchd targets, evaluated **after** the per-path gate and the
+   containment arm, so a canonical live refusal still fires first.
+3. **Demo-lane classing + confirm**: the demo install is a protected class requiring
+   `ENSEMBLE_INSTALL_DEMO=1`; `deploy.sh demo` and every `upgrade/*` demo lane refuse (78) without it.
+4. **Root-or-inside classification**: a path *inside* a protected root is refused **structurally** — no
+   confirm var opens it; an ancestor that *contains* a protected root likewise.
+5. **Bare-stop and unresolvable-dir refusals** in `stop-ensemble.sh`: a bare invocation resolving to the
+   live/demo install refuses (78) and names the explicit-dir form; an unresolvable install dir yields a
+   **named** refusal (78) instead of a `set -u` unbound-variable error (rc 1).
+
+Plus the **daemon-side demo forwarding**: `demo_arm_extras()` mints the demo confirm **only** for a demo
+target whose install dir provably resolves to the demo install, merged at the manager seam as an
+**explicit extra** (never the allowlist/prefix path), fail-closed on every other shape.
+
+> **Composition wording (ruled; use verbatim):** *"explicit-extra forwarding scoped to demo-target ∧
+> demo-candidate dir; not gated on the live verified-arm predicate (that predicate requires
+> `op.env=="live"`), so an unverified daemon-armed demo promote also receives it — live protection
+> unaffected."* **The mechanism mirrors live's explicit-extra discipline; the gate is demo's own
+> `require_demo_guard`.** Never write *"mirrors the live lane exactly"* — that is inaccurate for the gate.
+
+**It does not change** any guard decision for a well-formed absolute path that is neither live, demo, nor
+protected (the name-prefix sibling rule stays **allowed by design**), nor any decision for a live/demo root
+itself (still refused by default, opened only by its own confirm var).
+
+## 7.10 Residuals (all non-blocking; none branch-caused)
+
+| Sev | Residual |
+|---|---|
+| 🟠 | `test_release_journal.sh` **cannot complete under the 300 s cap** (23 sections, ~128 s sleeps, two ~145 s boundaries; the O(N) journal fast path is unavailable **in-fixture** — `journal_read.py` is not copied) ⇒ the pack is structurally un-runnable in-cap. Its standing PACKS.md contract is `timeout 850` (historical 237 s) ⇒ the 300 s cap is *below* the standing contract |
+| 🟠 | the same pack's **25-red fixture cascade**: `FAKE_REPO` never creates `daemon/tools/` ⇒ `stage.sh`'s `FLOOR_SRC` absent ⇒ `PIPELINE_SCRIPTS_FLOOR_COMMIT` unset ⇒ stage refuses ⇒ 25 downstream reds. **A small fixture fix (also copy `daemon/tools/upgrade_tools.py` into `FAKE_REPO`) would make absolute counts meaningful — offered, not applied** (no authorisation) |
+| 🟠 | `8c` reds: TZ-sensitive, **producer-vs-fixture unresolved** (launcher lane) — evidence points fixture-side |
+| 🟡 | `test_deploy.sh` fixture omits `scripts/upgrade/lib.sh` ⇒ the deploy/stop phase is validated by nothing; 1 of its 3 reds is a separate **stale oracle** (generator appends 2 `=`-bearing lines ⇒ 11 vs 9) |
+| 🟡 | `test_promote_plugin_staleness.sh` writes **3 hardcoded global `/tmp` paths** outside its sandbox ⇒ two concurrent runs corrupt each other's section-7 assertions |
+| 🟡 | `test_rollback_target.sh`: C6 = **fixture gap** (no `releases/v-prev/manifest.json`; proven sole cause by a 2×2 counterfactual — `lib.sh` absence is provably non-causal); C7 = **stale window**; C7's paired negative assert passes **vacuously** |
+| 🟡 | `test_supervision_stop_handback.sh`: 4 systemd arms (135 assertion sites) fenced out on macOS ⇒ the A/B covers the macOS-executable arms only (A′ 13 + D 5 = 18 = the reported PASS count exactly); the nested `P3-PIN-09-base` arm sits **inside** the D′ fence ⇒ it cannot produce red-at-base evidence on macOS at all |
+| 🟢 | `test_install_root_layer1.sh` is a **no-regression gate only** (its `eval`'d subjects are byte-identical base↔tip) — not guard coverage |
+| 🟢 | `test_stop_ownership.sh`, `stop_ownership_unit_test.sh`, `test_bounded_subprocess_waits.sh` call `stop-ensemble.sh` **only in the explicit-dir form with a resolvable fixture dir** ⇒ **guard-02 and GUARD-1 are unreachable from them** ⇒ their greens are no-regression results, **not** guard certification |
+| 🟢 | `test_bounded_subprocess_waits.sh` 2 reds are **host-conditioned** (no systemd ⇒ pid-scoped degradation); 2 skips are the matching host fences |
+| ⚙️ | **POK at its 64/64 cap** — project-wide knowledge writes are refused; curation is leader/PM authority |
+| ⚙️ | `PACKS.md` row `upgrade_tool_interlock_unit_test` records `(53)`; measured at this tip is **118** — stale ledger figure |
+
+## 7.11 Not verified
+
+- Make-level `--require-live` execution (`plist-install`/`watchdog-install`): the matrix measures the
+  **classifier** and the **Makefile sink shape**; `make install/uninstall` were never executed end-to-end
+  (forbidden), so it is not a substitute for a full-target gate.
+- Linux-only guard branches (`getent` SUDO_USER resolution; case-**sensitive** comparison).
+- `SUDO_USER` home-derivation; multi-entry / whitespace-padded `ENSEMBLE_LIVE_INSTALL_DIRS`; relative
+  `INSTALL_DIR`; symlink depth > 1.
+- The daemon-side path through the **real** manager promote loop (the A-row probe mirrors the seam from the
+  tree's own `executor_env` + `demo_arm_extras`).
+- `test_release_journal.sh` absolute counts (28 vs 25 at the cap) — **cap-reach artifacts**, not a defect
+  delta (equal-cap 330 s re-run + isolated cell replay used for attribution).
+- Whether `..`-escapes canonicalising to a non-protected absolute path *should* be refused (open owner
+  question; no such arm exists at any tip).
+
+## 7.12 Tip movement during and after the gate — stated plainly
+
+- During the gate, the branch moved `5861419dc → 5bd30f4da` (an external actor: merge `b2dce4279` of main
+  `9a54a836c`, plus docs commits). **`git diff 5861419dc..5bd30f4da` touches exactly 2 `.md` files** — the
+  artifact itself (+241/−2, i.e. this §6 block landed via that commit, not by me) and
+  `.agents/shared/planning/macos-deployment-topology/v0.29.10-operator-deploy-checklist.md`. **Zero**
+  `Makefile` / `scripts/` / `tests/` change ⇒ **the gate's product coverage still holds for the tip**, and
+  the gate is reported against the sha it actually ran on.
+- **This section (§6) was committed by the giter lane as `5bd30f4da`**, not by the gate — the §6 block was
+  uncommitted in the worktree when the gate left it, and another actor landed it. Recorded for provenance.
+- `5861419dc` remains a true ancestor of the branch tip (no rewrite, no force-push).
+
+## FINAL VERDICT: PASS
+GATED_COMMIT: 5861419dc8d47a05760f8a248d94e113d59da32e
+GATE_DATE: 2026-11-10T12:04:16Z
