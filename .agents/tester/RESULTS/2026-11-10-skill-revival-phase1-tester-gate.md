@@ -107,7 +107,7 @@ No bare 8-hex id echo in `skill_fix`/`skill_feedback` envelopes (full uuid rende
 ## 12. Census / baseline / population
 - Migration census: **126** `.sql`, all `^[0-9]{8}_[0-9]{6}_`, **`uniq -d` EMPTY**; count unchanged by the gate's commits (re-verified at END). Date-only form not used.
 - Prompt baseline: `.venv/bin/python scripts/protection/generate_prompt_artifact_baseline.py --check --tree .` → **"PROMPT-BASELINE: OK — 181 versioned artifact(s) match" rc=0**.
-- **Census population (stated per dispatch):** this gate did NOT re-derive the "46 agents" figure. Population relied upon = the pack-verified roster manifest (`skill_roster_manifest` arm, M-F4/M-F5 re-derivation pins). For reference, W1's independent tool-census observed the keeper's bound set = 35 tools / 10 modules, matching the council's F-3 trace — a tool census, not an agent census. If the leader needs the agent-population figure re-derived (44+2 vs registry 45), that is a 2-minute follow-up not blocking this verdict.
+- **Census population (stated per dispatch) — DERIVED BY THIS GATE:** `agents/*/meta.json` glob = **46** (44 real + `_baby_template` + `_mother`; `_inner_soul` and `_prompt_system` have no meta.json); the **registry registers 45**. Diff = exactly one name: `_baby_template` is in the glob but skipped by `SKIP_DIRS`; **`_mother` is in the glob AND registered as a live (spawnable) agent** — the `SKIP_DIRS` comment ("…not standalone agents (no meta.json)") is stale, and a leading-underscore template is registered. **Flagged for a leader ruling** (anomaly `03f5379d`), not a lane defect. Registry composition: 40 untagged + 5 tagged (`approver`/`developer`/`planner`/`reviewer`/`tidier[v2]`).
 
 ## 13. `data/` state — premise FALSE at START (disclosed)
 - **START (04:26Z):** `data/skill-capture-observability/` = **1 file / 8,201 B / 26 rows** (`skill-capture-20261110.jsonl`, written 04:18:21–04:18:44Z — BEFORE this gate session began 04:22:54Z; writer unattributed, rows = 21 refused/capture_lane_off + 5 admitted). `data/skill_stale_deactivation_receipt.json` PRESENT (152 B, run_id `c38cd9a3e788`, all lists empty, 2026-11-09T19:01Z — the implementation lane's own E4 run) + 5 rotations + candidate manifest.
@@ -122,7 +122,8 @@ No bare 8-hex id echo in `skill_fix`/`skill_feedback` envelopes (full uuid rende
 ## Findings register
 | id | severity | finding | owner / action |
 |---|---|---|---|
-| F-G1 | MAJOR (test-infra) | `clean_marker_leaks()` deletes the WHOLE shared daily sink file — destroyed 116 evidence rows; false "never touches residue" comment | fixed in-gate (surgical row removal + comment correction) — test-code commit, see PACKS |
+| F-G1 | MAJOR (test-infra) | `clean_marker_leaks()` deletes the WHOLE shared daily sink file — destroyed 116 evidence rows; false "never touches residue" comment | **FIXED in-gate** `b7e0269e3` — row-granular surgical removal (salted per-run marker, atomic temp+rename, file never unlinked, mode preserved); pack re-run PASS 88s. The 116 lost rows are NOT restored (gitignored, unrecoverable) |
+| F-G7 | info (leader ruling wanted) | `_mother` is registered as a live spawnable agent while `SKIP_DIRS`' comment claims underscore names have no meta.json; `_baby_template` is glob-only | leader ruling (anomaly `03f5379d`) — not a lane defect; registry/policy question |
 | F-G2 | minor (pre-existing) | `skill_fix` generic-fault branch emits empirically-false "still recorded … will be picked up" | skill-tools lane wording fix (cap-branch wording applied to generic branch) |
 | F-G3 | minor (pre-existing, registration) | `skill_evolution_pg_test` invokes deleted `tests/unit/test_auto_load_skills.py`; `set -e` aborts rc=4 BEFORE any RESULT line | pack owner: repair file list or retire the pack |
 | F-G4 | minor | `skill_id_verbatim_contract_unit_test` ran 288s/300s under load (near-cap) | tester/lane: split candidate before next registration |
@@ -145,7 +146,7 @@ No bare 8-hex id echo in `skill_fix`/`skill_feedback` envelopes (full uuid rende
 - Receipt sha256 `fcd7105c547d0a1f8ad5f4e6687881893a73695b8641a7f1337944ea84782c9a` (START == END).
 - Sink: START 8,201 B/26 rows → +78 rows (gate legs) → 0 B (deleted by F-G1).
 - Migrations: 126 both at START and END.
-- Commits added by the gate: `58c8cb655` (F-10 test), `60972185f` (counter-drift pack split), + the F-G1 cleanup fix and this RESULTS/PACKS/QUARANTINE/LESSONS doc commit (pathspec-limited; foreign jsonl never staged).
+- Commits added by the gate (all pathspec-limited, no production source, no push): `58c8cb655` (F-10 e2e test, +299) · `60972185f` (counter-drift pack split, 2 files) · `b7e0269e3` (F-G1 surgical cleanup, 1 file) · `c6b64484a` (tester docs: PACKS/QUARANTINE/RESULTS/LESSONS). **Final HEAD `c6b64484ac8f4ada8e82c2a1d461079fd118082a`**; porcelain carries only the foreign `install-audit.jsonl`.
 
 ## Action needed
 - [ ] F-G2: skill-tools lane — generic-fault envelope wording (small, agent-facing string).
