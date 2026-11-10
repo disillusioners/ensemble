@@ -145,12 +145,16 @@ def _record_capture_lane_off_refusal(
 ) -> None:
     """Count AND record one capture-lane-OFF admission refusal (C2 seam).
 
-    THE GAP THIS CLOSES.  Gate 0 of ``_check_capture_eligibility`` returns
-    ``None`` when ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` is off — BEFORE the
-    dispatcher's own gate is ever reached. The dispatcher counts its
-    refusals, so the ``capture_lane_off`` ADMISSION counter was
-    **PARTIAL**: it moved for the tools-lane seam only, never for the
-    production metrics-lane path. This helper is the metrics-lane's half.
+    THE GAP THIS CLOSED (historical — CLOSED, not open).  Gate 0 of
+    ``_check_capture_eligibility`` returns ``None`` when
+    ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` is off — BEFORE the dispatcher's own
+    gate is ever reached.  The dispatcher counts its refusals, so the
+    ``capture_lane_off`` ADMISSION counter USED TO BE **PARTIAL**: it moved
+    for the tools-lane seam only, never for the production metrics-lane
+    path.  This helper is the metrics-lane's half, and it is WIRED at that
+    gate — so the counter is COMPLETE today (the metrics seam, the tools
+    seam and the dispatcher's own gate all move the SAME counter key; the
+    cross-path pin drives all three).
 
     DEFENSIVE BY CONSTRUCTION (the observability module belongs to another
     lane): the import and the call are both inside one guard, so a missing
@@ -657,10 +661,22 @@ class SkillMetricsService:
         # over propagation here so the job-queue completion hook
         # (which calls this method) never blocks on metrics.
         if not _resolve_capture_enabled():
-            # C2 — the METRICS-LANE refusal seam. Gate 0 returns BEFORE the
-            # dispatcher's own gate is reached, so without this call the
-            # ``capture_lane_off`` ADMISSION counter is PARTIAL (it moved
-            # only for the tools lane). Count AND record, then refuse.
+            # C2 — the METRICS-LANE refusal seam.  Gate 0 returns BEFORE the
+            # dispatcher's own gate is reached, so this path would go
+            # UNCOUNTED without this call: the ``capture_lane_off``
+            # ADMISSION counter must move HERE too, not only for the
+            # tools lane.
+            #
+            # THE GAP THIS CLOSED (historical — CLOSED, not open): before
+            # this call the counter was PARTIAL — it moved only for the
+            # tools lane, because the metrics seam refused before any
+            # site counted it.  THE CURRENT TRUTH: the metrics seam
+            # COUNTS the refusal HERE, BEFORE the ``return None`` below —
+            # so the ``capture_lane_off`` ADMISSION counter is COMPLETE
+            # across every production capture-off refusal site (the
+            # metrics seam, the tools seam and the dispatcher's own
+            # gate — all three move the SAME counter key).
+            #
             # The recorder is defensive: a missing symbol or a raising sink
             # degrades to the previous behaviour and never breaks the gate.
             _record_capture_lane_off_refusal(

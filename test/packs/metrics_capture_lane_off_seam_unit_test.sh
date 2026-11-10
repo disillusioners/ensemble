@@ -12,6 +12,7 @@
 # FILE SET
 #   tests/unit/test_skill_metrics_capture_lane_off_seam.py   (the seam pin)
 #   tests/unit/test_skill_capture_lane_off_leak.py            (the LEAK pin)
+#   tests/unit/test_skill_capture_lane_off_cross_path.py     (the CROSS-PATH pin)
 #
 # MUTATION MATRIX (phase 2) — planted on OUR OWN file only
 # (daemon/services/skill_metrics_service.py; never in another lane's file):
@@ -25,6 +26,10 @@
 #           seam pin ⇒ the refusal record escapes into the CHECKOUT's
 #           `data/skill-capture-observability/` tree ⇒ the LEAK pin REDs
 #           (the planted run really leaks ~1,260 B — the L7 regression)
+#   M-C2e — remove the METRICS seam's recorder call ⇒ ONLY the metrics
+#           path's cross-path assertion REDs while the tools seam and the
+#           dispatcher gate stay GREEN (the PATH-SENSITIVITY proof — a
+#           single-path pin would have missed exactly this)
 #
 # THE LEAK (E1/D lane's L7 finding, 2026-11-10).  The observability sink
 # resolves `./data` CWD-RELATIVELY, so a test that drives the refusal seam
@@ -69,6 +74,7 @@ SCRUB=(env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT
 
 PIN="tests/unit/test_skill_metrics_capture_lane_off_seam.py"
 LEAK_PIN="tests/unit/test_skill_capture_lane_off_leak.py"
+CROSS_PIN="tests/unit/test_skill_capture_lane_off_cross_path.py"
 SVC="daemon/services/skill_metrics_service.py"
 
 # THE PLANTED MARKER — unique per RUN (F-G1).  The leaked row carries the
@@ -86,7 +92,7 @@ if [ ! -x "$PY" ]; then
   echo "RESULT: FAIL (MISSING-INTERPRETER — the worktree-local .venv/bin/python is absent)"
   exit 1
 fi
-for f in "$PIN" "$LEAK_PIN" "$SVC"; do
+for f in "$PIN" "$LEAK_PIN" "$CROSS_PIN" "$SVC"; do
   [ -f "$f" ] || { echo "RESULT: FAIL (MISSING-ARTIFACT — $f)"; exit 1; }
 done
 
@@ -100,8 +106,8 @@ check_budget() {
 }
 
 run_pin() {
-  timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$PIN" "$LEAK_PIN" -q --tb=line \
-    -p no:randomly --override-ini="addopts=" > "$1" 2>&1
+  timeout 240 "${SCRUB[@]}" "$PY" -m pytest "$PIN" "$LEAK_PIN" "$CROSS_PIN" \
+    -q --tb=line -p no:randomly --override-ini="addopts=" > "$1" 2>&1
 }
 
 # ── phase 1: the pin ───────────────────────────────────────────────────────
@@ -345,6 +351,19 @@ file_leg "M-C2d" "$PIN" \
   "$C2_MARKER_TOKEN" \
   2
 
+# M-C2e — remove the metrics seam's recorder call ⇒ that path's assertion
+# REDs, the other two stay GREEN (the path-sensitivity proof).
+cp "$SVC" "$PRISTINE/$(basename "$SVC")"
+sha256sum "$SVC" | cut -d' ' -f1 > "$PRISTINE/$(basename "$SVC").want"
+file_leg "M-C2e" "$SVC" \
+  '            _record_capture_lane_off_refusal(
+                agent_id=agent_id,
+                task_message=task_message,
+                prompt_source="skill_metrics_service",
+            )
+' \
+  '' 1
+
 sha="$(sha256sum "$SVC" | cut -d' ' -f1)"
 if [ "$sha" != "$WANT" ]; then
   echo "RESULT: FAIL (post-run manifest: $SVC is NOT byte-identical)"
@@ -361,5 +380,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (3 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (4 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0
