@@ -610,15 +610,13 @@ PYEOF
   #
   # CODE-ONLY plant text (no apostrophes — the round-5 lesson).
   leg "M-B3l" "daemon/tools/filesystem.py" \
-'    trusted = current_trusted_workdir()
-'    # M-B3l PLANT: the behavioural defect — the anchor no longer
-'    # consults the factory binding; the base is hardcoded. The literal
-'    # current_trusted_workdir() stays in this comment on purpose: the
-'    # OLD raw-text pin would still be GREEN here — that is the hole the
-'    # re-aimed AST pin closes.
-'    trusted = "/tmp/hardcoded-anchor"
-' \
-'' \
+'    trusted = current_trusted_workdir()' \
+'    # M-B3l PLANT: the behavioural defect - the anchor no longer
+    # consults the factory binding; the base is hardcoded. The literal
+    # current_trusted_workdir() stays in this comment on purpose: the
+    # OLD raw-text pin would still be GREEN here - that is the hole the
+    # re-aimed AST pin closes.
+    trusted = "/tmp/hardcoded-anchor"' \
 "$PIN_FILE::TestTrustedAnchor::test_the_trusted_anchor_never_comes_from_the_tool_arguments"
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
