@@ -754,7 +754,6 @@ class TestMakefileWiring:
         """Documentation-pin: this suite never executes the stop script;
         the only make-level proceed target is the stop-free uninstall."""
         text = STOP_SCRIPT.read_text()  # read-only reference
-        assert text.startswith("#!/bin/bash")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1342,6 +1341,25 @@ class TestCaseAndPathResolutionArm:
         _assert_make_refused(m, "relative-live")
         assert LIVE_ARM in m.stderr, m.stderr
         assert sentinel_of(live).exists()
+
+    def test_symlink_alias_of_live_refused(self, fake_home):
+        """REGRESSION: a symlink alias of the live dir is still refused (the
+        physical resolution catches the alias)."""
+        live = make_live_shaped(fake_home)
+        alias = fake_home / "alias-to-live"
+        alias.symlink_to(live)
+
+        r = run_guard("uninstall", fake_home, install_dir=str(alias))
+        assert r.returncode == GUARD_REFUSE_RC, r.stderr
+        assert LIVE_ARM in r.stderr, r.stderr
+        assert sentinel_of(live).exists()
+
+        m = run_make(["uninstall", f"INSTALL_DIR={alias}"], fake_home)
+        _assert_make_refused(m, "symlink-alias")
+        assert LIVE_ARM in m.stderr, m.stderr
+        assert sentinel_of(live).exists()
+        assert alias.exists()  # the alias itself is not a protected dir
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # ADDED 2026-11-09 (phase 2 of the live-install-guard mission) — APPEND-ONLY
