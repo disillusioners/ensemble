@@ -1019,6 +1019,110 @@ metrics lane returns before the dispatcher gate, so that ONE counter is partial 
    recorded here so the answer to "can the pair desync?" is precise: **not through the REST surface; yes, by a direct
    repository call** — which is why the sanctioned writer is the pair's single writer.
 
+## DS-61 — Round-9 (D-G2): the suffixed-idempotency-key UNDER-CLAIM is a DISCLOSED residual, and its owner is the PRODUCER lane
+
+**Context.** The tester gate's F-G2 (2026-11-10) found that the `skill_fix` generic-fault branch rendered the empirically
+false "request is still recorded above for the next skill-keeper run" while 0 rows persist when the dispatch raises before
+the insert. The skill-tools lane fixed it by DERIVING the envelope from the real persistence outcome: on a dispatch fault
+the tool reads the persisted job row back through the PUBLIC accessors (`manager.job_queue_service` →
+`JobQueueService.repository` → `JobRepository.find_by_idempotency_key`) and identifies it by the dispatcher's OWN
+idempotency key `skill_fix:<project>:<skill_id>` plus a metadata identity check (skill id + evolution type + the direction
+text composed from THAT request). A FRESH admission keeps the EXACT key; but when a TERMINAL job already held the key,
+`JobQueueService.enqueue` mints a SUFFIXED key (`skill_fix:<project>:<skill_id>#<uuid8>`;
+`daemon/services/job_queue_service.py:1596-1608`), so the row THIS dispatch persisted is not reachable by an exact-key
+read. The reviewer's D-G2 ruling required the residual to be recorded NON-IMPLICITLY, with its owner.
+
+**Ruling.**
+
+1. **THE RESIDUAL, AND ITS DIRECTION.** In that one case the envelope says "NOT recorded" while a row EXISTS. **IT ERRS IN
+   THE SAFE DIRECTION — it UNDER-CLAIMS, never over-claims: the agent is told LESS than the truth, never more.** A
+   conservative under-claim is the house-preferred failure mode for a truthfulness surface (the alternative — guessing
+   "recorded" without a row — is the Oct-22-class lie this workstream exists to kill).
+2. **THE OWNER AND THE EXACT ONE-LINE FIX (PRODUCER-SIDE).** The tool reads `getattr(exc, "persisted_job_id", None)`
+   BEFORE the DB read (`daemon/tools/skill_tools.py:1528`), so the fix is a PRODUCER-side one-liner: attach the committed
+   job id to the exception the producer raises — at `daemon/services/job_queue_service.py:1591` (the post-commit
+   `notify_new_job` call: the ONLY place a post-INSERT raise can originate) or at
+   `daemon/services/skill_job_dispatcher.py:1046` (the dispatcher-side insert boundary). **The tool already PREFERS that
+   carrier, so the one-liner is picked up automatically when it lands — no tool-side change is needed.**
+3. **WHAT IS ALREADY IN PLACE.** (i) the TOOL-SIDE CONTRACT: the carrier is preferred over the read-back, and the generic
+   envelope is DERIVED from the outcome (never a constant string); (ii) the PIN DOUBLE: the post-insert pin
+   (`test_the_post_insert_fault_names_the_persisted_job`) proves a persisted request is reported AS persisted AND NAMED,
+   and the carrier pin (`test_the_carrier_id_wins_over_the_read_back`) proves the producer-carried id is the id the agent is
+   told. The suffix case therefore needs NO new pin and NO new tool behaviour.
+
+**Consequence.** The residual is RECORDED, not fixed, in this lane: the producer files are other lanes' read-only surface
+here. The §17 disclosure item (numbered 46 — the numbers 38..45 are reserved by the round-6/round-8 §19.1 citations,
+whose §17 items are NOT present in the plan file: a PRE-EXISTING gap, reported and NOT repaired here) and the §19.1 row
+C-45 carry the contract; the tool's behaviour is unchanged by this ruling.
+
+---
+
+---
+
+## DS-62 — The Phase-2 switch-flip runbook EXISTS, and its SCOPE BOUNDARY is the switch flip ONLY
+
+**Context.** The Phase-1 plan made the Phase-2 switch-flip runbook a **required deliverable**, with §15 specifying its
+required CONTENT (preconditions, the exact order, the asymmetry, the go/no-go criteria, the monitoring reads, the
+rollback levers, the A/B backlog precondition, the first-live-CAPTURED-row proof, the abort criteria and the audit
+trail — `phase1-plan.md:938-957`). §15 also stated the content is written *"after implementation, when real behavior is
+known"* — so the plan could not be the document the operator reads at 3am; the runbook is. The gate that verified the
+implementation returned **PASS-WITH-NOTES**
+(`.agents/tester/RESULTS/2026-11-10-skill-revival-phase1-tester-gate.md:11`) with net-new reds = 0 in BOTH scopes, so the
+shipped behavior is the behavior the runbook must describe. The runbook is now written at
+`.agents/shared/planning/skill-system-revival/phase2-runbook.md`, derived from the SHIPPED code in this worktree: every
+command, knob, interval, path and threshold in it carries a `file:line` citation verified against the code, and every
+fact that could NOT be verified is marked an explicit **OPEN ITEM** rather than guessed.
+
+**ID NOTE (recorded for the Leader; the id was renumbered once).** This entry was authored as **DS-61** — the next free
+id when the commission was written (the file ended at DS-60). While it was being written, a **concurrent lane** landed
+its own **`## DS-61`** (Round-9 / D-G2, the suffixed-idempotency-key under-claim) in **this same worktree, uncommitted**,
+and added the §19.1 row **C-45** whose decisions-cell names **DS-61**. The decision log's ids are **dense** (01–61, no
+gaps), so a second `## DS-61` would have made the log ambiguous and would have broken C-45's cross-reference. ⇒ **This
+entry is therefore filed as DS-62**, the next free id, leaving the concurrent lane's DS-61 and its C-45 row intact. If
+the Leader prefers the original DS-61, the swap is one heading plus one §19.1 cell — but it must be done as a swap,
+never as a duplicate.
+
+**Ruling.**
+
+1. **THE DOCUMENT EXISTS** at `.agents/shared/planning/skill-system-revival/phase2-runbook.md`. It is the
+   **operator-facing executable form** of the approved plan's §15 content spec — the same content, expressed as numbered
+   steps, copy-paste commands, expected outputs and "STOP if…" lines. It **supersedes nothing** in the plan: the plan
+   remains the design of record; the runbook is its 3am form.
+2. **THE SCOPE BOUNDARY IS THE SWITCH FLIP ONLY.** The runbook **ASSUMES THE RELEASE IS ALREADY LIVE** and contains
+   **no promote command**, no nonce, no arm and no rollback-to-previous-release. The promote remains a **SEPARATE,
+   Emperor-owned 3-factor nonce ceremony** run from the **scripts-pin worktree** (`phase1-plan.md` §14.3; DS-28) — CWD
+   selects the executing script, so the promote must not be run from the feature worktree or from the canonical dir. The
+   runbook names the pre-promote lever (revert + re-promote) **only** to complete the rollback ladder, and says so.
+3. **THE RUNBOOK IS A MEASUREMENT DOCUMENT, NOT A NEW DECISION.** It states the switches and the brake that the code
+   already implements, and it derives the operator's go/no-go from what D, A3/A4 and E1/E4 actually shipped. It
+   **declares no winner** for the 27 stranded A/B pairs (that is the Emperor's E-6 decision, and the mechanism's refusal
+   is the feature — DS-44), **adds no CLI flag** to `scripts/audit/skill_stale_deactivate.py` (the override is a
+   Python-API keyword only; a CLI escape would contradict the pinned "no winner declared by any shipped call site"
+   property), and **flips no agent's `skill_injection`** (one bit serves both the capture and the injection gate, so
+   per-axis arming would need a second key or an explicit coupling ruling).
+4. **IT CLAIMS NO §19.1 CROSS-CHECK ROW.** The runbook introduces **no gated criterion** and **no code change** — it is
+   documentation of already-shipped behavior, so per the house convention it contributes **no §19.1 row** and the
+   `phase1-plan.md` §19.1 table is left **IDENTICAL=Y** (the plan was **not** touched by this work). A deferred or
+   documentation-only artifact has no implementation and no gated criterion, and the §19.1 table tracks gated criteria
+   only (the same reasoning that left the per-lane sink redesign without a row — §17 item 37).
+5. **THE RUNBOOK DOES NOT CLAIM THE PHASE-2 OUTCOME.** It defines "capture proves clean" as a **measurable** condition
+   (ten checks over a ≥ 24 h window, each with an exact read) and it states plainly that the **capture→evolution
+   diversity remains UNEXERCISED** — Phase 1 makes the path reachable, not exercised, and the first live CAPTURED row is
+   the Phase-2 proof. Two residual facts were **reported rather than silently absorbed**: (i) the shipped
+   `scripts/audit/skill_counter_reconcile.py` is the **A4** instrument (counter drift + the divergence gauge) and does
+   **not** measure A3's 3,457-row false-eligible population — there is **no shipped CLI instrument** for that figure, so
+   the runbook marks the derived read-only SELECT as such; (ii) the brief's "D-N10 scope edits need a restart" residual
+   has **no `D-N10` label in this worktree** and the shipped code says the opposite for `read_scope` (the cache's
+   `stat()` invalidation means a scope edit needs **no** restart) — the accurate residual is the same-tick +
+   same-length staleness, and the restart-requiring surface is the **roster** (`skill_injection` is a process-lifetime
+   snapshot).
+
+**What would reverse it.** A house ruling that the Phase-2 switch flip must be governed by a **different** document
+shape (e.g. a ceremony script rather than a prose runbook), or that the runbook's scope must be widened to include the
+promote, or a decision that §19.1 must carry a row for documentation deliverables — any of those would reopen this
+entry. Equivalently: if the shipped behavior changes (the brake's poll interval, the counter sites, the switch
+resolution, the reconcile script's CLI), the runbook's citations must be re-verified against the code and this entry's
+ruling that it "describes already-shipped behavior" no longer holds.
 
 ---
 
