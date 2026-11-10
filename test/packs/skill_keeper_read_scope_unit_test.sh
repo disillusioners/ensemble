@@ -415,9 +415,9 @@ PYEOF
   # M-B3c — the default scope becomes "project" for EVERY agent. The
   # no-other-agent-changes pin → RED.
   leg "M-B3c" "daemon/tools/filesystem.py" \
-'    scope, path, mtime_ns, size = _load_declared_read_scope(agent_id)
+'    scope, path, mtime_ns, size, ctime_ns = _load_declared_read_scope(agent_id)
 ' \
-'    scope, path, mtime_ns, size = _load_declared_read_scope(agent_id)
+'    scope, path, mtime_ns, size, ctime_ns = _load_declared_read_scope(agent_id)
     scope = scope or READ_SCOPE_PROJECT
 ' \
 "$PIN_FILE::TestOtherAgentsAreUnchanged::test_another_agent_reads_an_absolute_path_outside_the_workdir"
@@ -577,8 +577,8 @@ PYEOF
   leg "M-B3j" "daemon/tools/filesystem.py" \
 '    cached = _READ_SCOPE_CACHE.get(agent_id)
     if cached is not None:
-        scope, path, mtime_ns, size = cached
-        if _meta_identity_matches(path, mtime_ns, size):
+        scope, path, mtime_ns, size, ctime_ns = cached
+        if _meta_identity_matches(path, mtime_ns, size, ctime_ns):
             return scope
 ' \
 '    cached = _READ_SCOPE_CACHE.get(agent_id)
@@ -586,6 +586,19 @@ PYEOF
         return cached[0]
 ' \
 "$PIN_FILE::TestScopeCacheInvalidatesOnEdit::test_a_newly_declared_scope_is_honoured_without_a_restart"
+
+  # M-B3k (micro-pass — D-N14) — the `list_directory` SYMLINK skip is
+  # removed. The F-1 fix dropped symlinks from the WALK tools, but the
+  # LISTING surface still enumerated the symlink's NAME (`link.txt@`) for
+  # a scoped agent — the sibling surface violated the F-1 principle. The
+  # name-visibility pin MUST go RED.
+  leg "M-B3k" "daemon/tools/filesystem.py" \
+'            if list_scope and entry.is_symlink():
+                continue
+
+' \
+'' \
+"$PIN_FILE::TestListDirectoryDoesNotEnumerateSymlinks::test_a_scoped_agent_does_not_see_the_symlink_name"
 
   echo "leg	red	green	sha256(planted-file, PRISTINE)"
   cat "$TSV"

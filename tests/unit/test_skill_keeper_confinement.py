@@ -33,6 +33,29 @@ Two legs:
   ``print(file=...)``, ``shutil.copy*``, destructive ``os.remove`` /
   ``rename``), and decides temp-vs-project from the WRITE TARGET's
   derivation chain — never from "the body mentions gettempdir".
+
+  **F-3 TRACE (the drift-proofing trace, with VERIFIED anchors).** The
+  keeper's bound set is **35 tools across 10 modules** — access_memory 1,
+  filesystem 4, help 1, knowledge_tools 2, nest_report 1, pok 3,
+  shared_meta_kv 1, skill_evolution_tools 5, skill_tools 6, todo_tools 11.
+  Every one of those modules was searched for ``rename`` / ``replace`` /
+  ``move`` / ``renames`` / ``replace_dir`` / ``move_dir``: the ONLY hits
+  are in ``daemon/tools/filesystem.py`` — ``os.replace(tmp_path, target)``
+  at **:1527** (inside ``_atomic_write_text``, def **:1451**) and two
+  ``content.replace(old_string, new_string)`` STRING replaces at :2020 /
+  :2025 (text operations in ``edit_file``, not filesystem renames). (The
+  anchors are AS BUILT at this commit — they move with the file; at the
+  council's reviewed tip ``cfe4480be`` the same call was at :1432 and the
+  def at :1356.) A
+  reachability pass over every bound tool's reachable same-module set
+  finds **NO** rename/replace/move at all — ``os.replace`` is reachable
+  only from ``write_file`` / ``edit_file``, which the keeper's deny-list
+  excludes. ⇒ **There is no current call path by which a scoped agent
+  reaches a rename/replace on a project-surface path.** The pathlib
+  METHOD forms were added anyway, because the oracle's stated purpose is
+  DRIFT-PROOFING: ``Path(x).rename(y)`` is the natural future spelling
+  of the same operation, and a spelling change must not silently disarm
+  the check.
 * **B1b — the invocation leg.** The ``b7da3ed0`` sequence is actually
   ATTEMPTED through the production dispatch mechanism (LangGraph's
   ``ToolNode``, which is what ``daemon/graph.py`` binds). Every attempt
