@@ -1025,8 +1025,38 @@ _js_journal_write() {
 # _js_journal_update <path> <field> <raw-json-or-scalar> — read-modify-write
 # ONE top-level field atomically; <raw> spliced verbatim (strings arrive
 # pre-quoted, objects/numbers/bools/null raw).
+#
+# O(n) (launcher-journal-sweep-fix, R3): the replaced implementation
+# consumed the OLD VALUE ONE CHARACTER AT A TIME (`rest="${rest:1}"` in the
+# two value-scan loops) — O(n) per step under LC_ALL=C and O(n) per
+# CHARACTER under a UTF-8 locale ⇒ O(n²) overall. That scan was 100% of
+# `_js_history_append`'s cost (the append re-writes the WHOLE history
+# array): measured 16.9 s @ 32 KB and 106.2 s @ 32 KB under the daemon's
+# UTF-8 env (6.3×/locale), >300 s @ 220 KB — the boot wedge this lane
+# exists to close. ONE POSIX awk pass owns the scan now.
+#
+# BYTE-EQUIVALENCE (the contract this rewrite MUST hold — the output is
+# byte-identical to the replaced implementation for the same input):
+#   - the ANCHOR is unchanged: the FIRST occurrence of the field token
+#     wins (`head`/`rest` still use the same `"$field"` globs, and the
+#     quoted-token presence gate is still checked BEFORE the splice — a
+#     bare field NAME that never appears as `"field"` still refuses);
+#   - the WHITESPACE TRIM is still BASH's own `[![:space:]]` trim — it is
+#     ASCII-only in EVERY locale (probed on macOS: a U+00A0 is NOT
+#     stripped under either en_US.UTF-8 or C), so the trim is
+#     locale-invariant and stays in bash;
+#   - the VALUE SCAN is byte-equivalent to the replaced character loop:
+#     the same structural characters (`{ } [ ] ,`) are compared and the
+#     same escape-aware quote rule applies, and only ASCII characters are
+#     ever compared — a multibyte UTF-8 byte can never be mistaken for a
+#     structural one, so a character-wise scan and a byte-wise scan stop
+#     at the SAME place and yield the SAME tail;
+#   - the SPLICE is unchanged: `head + ": " + raw + tail`.
+# The awk pass runs under the launcher's single awk seam, which pins
+# LC_ALL=C (see `_js_awk_pass`) — byte-oriented, so the scan is
+# locale-invariant BY CONSTRUCTION.
 _js_journal_update() {
-    local jp="$1" field="$2" raw="$3" json rest head out="" c depth rc=0
+    local jp="$1" field="$2" raw="$3" json rest head out="" tail rc=0 arc=0
     _js_awk_rc_begin
     json="$(_js_journal_read "$jp")" || rc=$?
     _js_awk_rc_end
@@ -1039,52 +1069,94 @@ _js_journal_update() {
     fi
     [ "$rc" -eq 0 ] || return 1
     case "$json" in
-        *"\"$field\""*) ;;
+        *"$field"*) ;;
         *) return 1 ;;
     esac
-    # Walk the object; replace the value that follows "field":.
+    # Walk the object; replace the value that follows "field".
     rest="$json"
-    while [ -n "$rest" ]; do
-        case "$rest" in
-            *"\"$field\""*)
-                head="${rest%%\"$field\"*}\"$field\""
-                rest="${rest#*\"$field\"}"
-                rest="${rest#*:}"
-                # drop leading whitespace of the old value
-                rest="${rest#"${rest%%[![:space:]]*}"}"
-                # consume the old value by bracket/quote scanning
-                depth=0
-                if [ "${rest:0:1}" = "\"" ]; then
-                    # string value: skip to closing quote (escape-aware)
-                    rest="${rest:1}"
-                    while [ -n "$rest" ]; do
-                        c="${rest:0:1}"
-                        if [ "$c" = "\\" ]; then rest="${rest:2}"; continue; fi
-                        [ "$c" = "\"" ] && { rest="${rest:1}"; break; }
-                        rest="${rest:1}"
-                    done
-                else
-                    while [ -n "$rest" ]; do
-                        c="${rest:0:1}"
-                        case "$c" in
-                            '{'|'[') depth=$((depth + 1)) ;;
-                            '}'|']')
-                                if [ "$depth" -eq 0 ]; then break; fi
-                                depth=$((depth - 1)) ;;
-                            ',')
-                                [ "$depth" -eq 0 ] && break ;;
-                        esac
-                        rest="${rest:1}"
-                    done
-                fi
-                out="$head: $raw$rest"
-                break
-                ;;
-            *)
-                break
-                ;;
-        esac
-    done
+    case "$rest" in
+        *"\"$field\""*) ;;
+        # The field NAME occurs in the document but never as a quoted
+        # token (field=history against {"xhistory":…}) — the replaced
+        # loop matched nothing and left `out` empty ⇒ refuse (the same
+        # verdict, decided before the splice instead of after it).
+        *) return 1 ;;
+    esac
+    head="${rest%%\"$field\"*}\"$field\""
+    rest="${rest#*\"$field\"}"
+    rest="${rest#*:}"
+    # drop leading whitespace of the old value
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    # ONE awk pass returns the tail that follows the old value: the
+    # string case (a leading quote) skips to the escape-aware closing
+    # quote; the composite case walks the bracket depth to the first
+    # top-level `,` / `}` / `]`. Both are the replaced loops' rules,
+    # byte-for-byte.
+    _js_awk_rc_begin
+    tail="$(_js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            n = length(buf)
+            if (n >= 1 && substr(buf, 1, 1) == "\"") {
+                # STRING VALUE — VECTORIZED (the validator parity idiom,
+                # proven in the balance validator):: split ONCE on the quote boundaries and
+                # visit only the SEGMENTS; each boundary quote is escaped
+                # iff the backslash run before it has odd length, so the
+                # first unescaped quote closes the string. Only ASCII
+                # structural characters are compared — byte-equivalent to
+                # the replaced per-character loop.
+                s = substr(buf, 2)
+                m = split(s, q, "\"")
+                pos = 0
+                found = 0
+                for (j = 1; j < m; j++) {
+                    pos += length(q[j]) + 1   # the segment bytes + the quote byte
+                    t = q[j]
+                    if (match(t, /\\+$/) > 0 && RLENGTH % 2 == 1) continue
+                    found = 1
+                    break
+                }
+                if (found) start = pos + 2    # the closing quote is consumed
+                else start = n + 1            # unterminated: everything consumed
+            } else {
+                # COMPOSITE VALUE — VECTORIZED (the _js_json_sub idiom):
+                # split the value ONCE on the structural characters and
+                # visit only those (~3 per history entry, never a
+                # per-byte walk). The terminator is NOT consumed (the
+                # replaced loop broke on it); EOF ⇒ the tail is empty.
+                tn = split(buf, seg, "[],{}[]")
+                pos = length(seg[1])
+                depth = 0
+                start = n + 1
+                for (j = 1; j < tn; j++) {
+                    pos++
+                    c = substr(buf, pos, 1)
+                    if (c == "{" || c == "[") depth++
+                    else if (c == "}" || c == "]") {
+                        if (depth == 0) { start = pos; break }
+                        depth--
+                    } else if (c == ",") {
+                        if (depth == 0) { start = pos; break }
+                    }
+                    pos += length(seg[j + 1])
+                }
+            }
+            printf "%s", substr(buf, start)
+        }
+    ' <<<"$rest")" || arc=$?
+    _js_awk_rc_end
+    if [ "$arc" -ne 0 ]; then
+        # The SCANNER was UNAVAILABLE (awk missing / wedged): the extent
+        # of the old value is UNKNOWN, so the splice is REFUSED — a wrong
+        # extent would truncate or corrupt the journal.
+        _log "WARN: journal update refused — $jp: the value scanner is UNAVAILABLE (awk rc=$_JS_LAST_AWK_RC); the journal is left untouched"
+        return 1
+    fi
+    out="$head: $raw$tail"
     [ -n "$out" ] || return 1
     _js_journal_write "$jp" "$out"
 }
@@ -1457,42 +1529,62 @@ _js_history_has_event_for_target() {
     case "$hist" in
         ''|null|\[\]) return 1 ;;
     esac
-    t_space="target $target "
-    t_end="target $target\""
-    r_space="run_id $run_id "
-    r_end="run_id $run_id\""
-    rest="$hist"
-    while :; do
-        case "$rest" in
-            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
-            *) break ;;
-        esac
-        case "$rest" in
-            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
-            *) entry="$rest" ;;
-        esac
-        # the EVENT KIND must be in THIS entry
-        # the event-kind literal — the house writers emit the COMPACT form
-        # ("event":"x"); the spaced form ("event": "x") is tolerated too
-        # (a hand-edited journal must not silently change a verdict).
-        case "$entry" in
-            *"\"event\":\"$event\""*|*"\"event\": \"$event\""*) ;;
-            *) continue ;;
-        esac
-        # the TARGET must be in THIS entry, delimiter-anchored
-        case "$entry" in
-            *"$t_space"*|*"$t_end"*) ;;
-            *) continue ;;
-        esac
-        if [ -n "$run_id" ]; then
-            case "$entry" in
-                *"$r_space"*|*"$r_end"*) ;;
-                *) continue ;;
-            esac
-        fi
-        return 0
-    done
-    return 1
+    # O(n) SCAN (launcher-journal-sweep-fix, R4): the replaced loop walked
+    # the history ONE ENTRY AT A TIME and each step re-sliced the WHOLE
+    # remainder (`rest="${rest#*'{"ts":'}"` + `entry="${rest%%'{"ts":'*}"`)
+    # — O(n) per ENTRY ⇒ O(n·entries) = quadratic in BYTES (measured
+    # ×3.8–4.1 per doubling; 125 s @ 220 KB under the daemon's UTF-8 env).
+    # ONE POSIX awk pass answers the question for ALL entries: the document
+    # is split ONCE on the entry marker and each entry is matched with
+    # LITERAL substring searches (index()).
+    #
+    # SEMANTICS UNCHANGED (every quirk preserved):
+    #   - the entry boundary is still the LITERAL `{"ts":` marker matched
+    #     ANYWHERE (even inside a string value — a detail carrying that
+    #     byte sequence still splits an entry, exactly as before);
+    #   - the text BEFORE the first marker is still discarded (no marker
+    #     at all ⇒ no entries ⇒ "not found", rc 1);
+    #   - the event-kind literals keep BOTH forms (compact + spaced);
+    #   - the target/run_id checks keep BOTH delimiter anchors (the
+    #     space form and the closing-quote form);
+    #   - run_id is still skipped when empty;
+    #   - "first entry that matches all conjuncts wins" — same order.
+    # The literal index() searches are byte-exact equivalents of the
+    # replaced `case` globs: every needle in those globs was a quoted
+    # expansion (literal already — no glob metacharacters were active).
+    # The parameters travel via the ENVIRONMENT (never `awk -v` — no
+    # escape sequence can be mangled), under the launcher's single awk
+    # seam, which pins LC_ALL=C (see `_js_awk_pass`).
+    local _JS_HIST_EVENT="$event" _JS_HIST_TARGET="$target" _JS_HIST_RUN_ID="$run_id"
+    export _JS_HIST_EVENT _JS_HIST_TARGET _JS_HIST_RUN_ID
+    rc=0
+    _js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            ev = ENVIRON["_JS_HIST_EVENT"]
+            tg = ENVIRON["_JS_HIST_TARGET"]
+            rid = ENVIRON["_JS_HIST_RUN_ID"]
+            n = split(buf, seg, /\{"ts":/)
+            for (i = 2; i <= n; i++) {
+                e = seg[i]
+                if (index(e, "\"event\":\"" ev "\"") == 0 && \
+                    index(e, "\"event\": \"" ev "\"") == 0) continue
+                if (index(e, "target " tg " ") == 0 && \
+                    index(e, "target " tg "\"") == 0) continue
+                if (rid != "") {
+                    if (index(e, "run_id " rid " ") == 0 && \
+                        index(e, "run_id " rid "\"") == 0) continue
+                }
+                exit 0
+            }
+            exit 1
+        }
+    ' <<<"$hist" || rc=$?
+    return "$rc"
 }
 
 # _js_history_has_defer_reason <journal> <target> <run_id> <reason>
@@ -1517,7 +1609,17 @@ _js_history_has_defer_reason() {
     [ -n "$target" ] || return 1
     [ -n "$reason" ] || return 1
     json="$(_js_journal_read "$jp")" || rc=$?
-    [ "$rc" -eq 0 ] || return "$rc"
+    if [ "$rc" -ne 0 ]; then
+        # The journal could not be READ at all (rc 1 = the balance check
+        # says the document is NOT TRUSTWORTHY; rc 2 = the validator was
+        # UNAVAILABLE). That is NOT "no defer row": the write-once check
+        # is UNKNOWN. The rc contract above says the caller MUST NOT read
+        # rc 2 as "none" — so a READ failure is reported as rc 2 too (the
+        # conservative class), never as the rc-1 content verdict. Before
+        # this, a torn journal answered "no defer row yet" and the caller
+        # read that as a licence to write (Q1=C).
+        return 2
+    fi
     hist="$(_js_json_sub "$json" "history")" || rc=$?
     if [ "$rc" -eq 2 ]; then
         # The EXTRACTOR was UNAVAILABLE — the history could not be read, so
@@ -1528,43 +1630,46 @@ _js_history_has_defer_reason() {
     case "$hist" in
         ''|null|'[]') return 1 ;;
     esac
-    marker="DEFERRED ($reason)"
-    t_eq="target=$target,"
-    r_eq="run_id=$run_id,"
-    rest="$hist"
-    while :; do
-        case "$rest" in
-            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
-            *) break ;;
-        esac
-        case "$rest" in
-            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
-            *) entry="$rest" ;;
-        esac
-        # the EVENT KIND must be in THIS entry (compact or spaced form)
-        case "$entry" in
-            *"\"event\":\"sweep_deferred\""*|*"\"event\": \"sweep_deferred\""*) ;;
-            *) continue ;;
-        esac
-        # the REASON marker must be in THIS entry
-        case "$entry" in
-            *"$marker"*) ;;
-            *) continue ;;
-        esac
-        # the TXN identity must be in THIS entry, delimiter-anchored
-        if [ -n "$run_id" ]; then
-            case "$entry" in
-                *"$r_eq"*) ;;
-                *) continue ;;
-            esac
-        fi
-        case "$entry" in
-            *"$t_eq"*) ;;
-            *) continue ;;
-        esac
-        return 0
-    done
-    return 1
+    # O(n) SCAN (launcher-journal-sweep-fix, R4): the same single-pass
+    # mechanism as `_js_history_has_event_for_target` (see its block
+    # comment) — split ONCE on the `{"ts":` marker, match each entry with
+    # literal index() searches. SEMANTICS UNCHANGED: the entry boundary,
+    # the discarded pre-first-marker text, the compact+spaced event
+    # forms, the `,`-anchored `target=<ver>,` / `run_id=<id>,` txn
+    # anchors, the `DEFERRED (<reason>)` marker (stable across ticks) and
+    # the run_id-skipped-when-empty rule are all the replaced loop's.
+    # LC_ALL=C is pinned at the `_js_awk_pass` seam; the parameters travel
+    # via the ENVIRONMENT (never `awk -v`).
+    local _JS_HIST_REASON="$reason" _JS_HIST_TARGET="$target" _JS_HIST_RUN_ID="$run_id"
+    export _JS_HIST_REASON _JS_HIST_TARGET _JS_HIST_RUN_ID
+    rc=0
+    _js_awk_bounded '
+        BEGIN { buf = ""; first = 1 }
+        {
+            if (first == 1) { buf = $0; first = 0 }
+            else buf = buf "\n" $0
+        }
+        END {
+            rs = ENVIRON["_JS_HIST_REASON"]
+            tg = ENVIRON["_JS_HIST_TARGET"]
+            rid = ENVIRON["_JS_HIST_RUN_ID"]
+            marker = "DEFERRED (" rs ")"
+            t_eq = "target=" tg ","
+            r_eq = "run_id=" rid ","
+            n = split(buf, seg, /\{"ts":/)
+            for (i = 2; i <= n; i++) {
+                e = seg[i]
+                if (index(e, "\"event\":\"sweep_deferred\"") == 0 && \
+                    index(e, "\"event\": \"sweep_deferred\"") == 0) continue
+                if (index(e, marker) == 0) continue
+                if (rid != "" && index(e, r_eq) == 0) continue
+                if (index(e, t_eq) == 0) continue
+                exit 0
+            }
+            exit 1
+        }
+    ' <<<"$hist" || rc=$?
+    return "$rc"
 }
 
 # _js_sanitise_run_id <run_id> — filename-safe form (AM-P2-20). The
@@ -2020,6 +2125,18 @@ _js_run_bounded() {
     # are unaffected. Without this, every instant bounded call stalls ~N s
     # even though the wrapped command completed instantly (commit 961dfe59
     # regression — see LESSONS/2026-10-01-js-run-bounded-orphaned-sleep-stall).
+    #
+    # KNOWN ISSUE (recorded here; NO behaviour change): the watchdog's
+    # `sleep` child is NOT reaped together with the watcher — the watcher
+    # subshell dies, its `sleep` child does not ⇒ every bounded call leaves
+    # ONE orphaned `sleep` behind (POK `awk-01-watchdog-process-leak`: a
+    # burst of probes exhausts the process table and yields bogus verdict
+    # flips). The O(n) journal rewrite (commit 5f8528869) added THREE more
+    # bounded awk calls to the boot path (the journal update + the two
+    # per-entry history scanners), so the leak RATE per boot-path sweep is
+    # marginally higher than before that change. This is a pre-existing,
+    # SEPARATE defect (it is not what the size guard bounds); this note
+    # records the rate change only.
     (
         sleep "$timeout_s" 2>/dev/null
         kill -KILL "$pid" 2>/dev/null
@@ -2317,13 +2434,75 @@ _js_defer_counter_delete() {
     return 0
 }
 
-# _js_serving_defer <journal> <target> <run_id> <age> <reason> <detail>
+# _js_size_guard_defer_decision <journal> <target> <run_id> <reason>
+# The BOUNDED defer DECISION for the launcher-side size guard (Q1=C).
+#
+# RC CONTRACT — the SAME vocabulary as the reader it wraps
+# (`_js_history_has_defer_reason`), so the verdict can be handed to
+# `_js_serving_defer` unchanged (that helper consumes the reader's rc
+# directly):
+#   0 — the decision RAN and says "a defer row IS ALREADY journaled for
+#       this (txn, reason)" ⇒ the write-once rule applies (nothing to
+#       write);
+#   1 — the decision RAN and says "NO defer row is journaled yet" ⇒ the
+#       caller MAY write one;
+#   2 — the decision is UNKNOWN: the extractor was UNAVAILABLE (awk gone /
+#       broken), the watchdog fired (the pass wedged past its bound), or
+#       the WHOLE decision exceeded its HARD budget. The caller MUST
+#       REFUSE TO ACT (write NOTHING). A missing decision must NEVER read
+#       as "no defer row" (rc 1) — that is the silent-skip defect this
+#       helper exists to close.
+#
+# WHY A SEPARATE HELPER (and not a bare call at the call site): the
+# decision is a CHEAP DECIDE — ONE O(n) per-entry scan of the history (the
+# same reader the write-once check uses) — and it is BOUNDED twice:
+#   (1) the scan itself runs under the bounded awk seam (`_js_awk_bounded`
+#       → `_js_run_bounded $_JS_AWK_TIMEOUT_S`), so a wedged awk can never
+#       pin the boot path;
+#   (2) the WHOLE decision (journal read + history extraction + scan) is
+#       bounded by the SAME hard budget (`$_JS_AWK_TIMEOUT_S` — one knob
+#       for the operator and for the tests; it is read at CALL time, so a
+#       test that shortens it after sourcing shortens BOTH bounds).
+# The elapsed check below is what makes (2) a budget over the WHOLE
+# decision: the awk seam bounds each pass individually, but three passes
+# could add up to 3× the budget.
+#
+# The budget is reported in the caller's WARN (the operator must see the
+# size AND the budget that was exceeded).
+_js_size_guard_defer_decision() {
+    local jp="$1" target="$2" run_id="$3" reason="$4"
+    local budget="${_JS_AWK_TIMEOUT_S}" t0 t1 rc=0
+    t0="$(date +%s 2>/dev/null)" || t0=""
+    [ -n "$t0" ] || t0=0
+    _js_history_has_defer_reason "$jp" "$target" "$run_id" "$reason" || rc=$?
+    t1="$(date +%s 2>/dev/null)" || t1=""
+    [ -n "$t1" ] || t1=0
+    # rc 2 = the decision could not be made (UNAVAILABLE / wedged / the
+    # journal could not be read at all) ⇒ the verdict is UNKNOWN.
+    [ "$rc" -le 1 ] || return 2
+    # the HARD budget over the whole decision — an over-budget verdict is
+    # NOT trusted (the journal may have been rewritten under the scan).
+    if [ $(( t1 - t0 )) -ge "$budget" ]; then
+        return 2
+    fi
+    return "$rc"
+}
+
+# _js_serving_defer <journal> <target> <run_id> <age> <reason> <detail> [decision]
 # The DEFER disposition: a journaled `sweep_deferred` row (a HOLD — it
 # closes nothing; it is NOT a terminal event), the txn left OPEN, and NO
 # quarantine / counter / cooldown / rollback. The row carries an explicit,
 # GREPPABLE reason marker (which conjunct was missing) — matrix row 6.
+#
+# The OPTIONAL 7th argument carries a PRE-COMPUTED write-once verdict in
+# the READER's vocabulary ("0" = a defer row IS already journaled for this
+# (txn, reason) · "1" = no defer row is journaled yet). A caller that
+# already paid for the bounded decision (the launcher-side size guard —
+# Q1=C) passes it here so the O(n) history scan is not paid for twice.
+# When the argument is absent the decision is computed here (the
+# historical path, unchanged).
 _js_serving_defer() {
-    local journal="$1" target="$2" run_id="$3" age="$4" reason="$5" detail="$6"
+    local journal="$1" target="$2" run_id="$3" age="$4" reason="$5" detail="$6" decision="${7:-}"
     local drc=0
     # F6 (code-council W5) — WRITE-ONCE per (txn, reason). The defer row is
     # ~150-200B and the T15 hook fires per CHILD EXIT; in a crash loop the
@@ -2335,7 +2514,11 @@ _js_serving_defer() {
     # SILENTLY DISARMED. One row per (txn, reason) bounds the growth by
     # the distinct-reason count; the log line still fires every time so
     # the observation stays visible.
-    _js_history_has_defer_reason "$journal" "$target" "$run_id" "$reason" || drc=$?
+    if [ -n "$decision" ]; then
+        drc="$decision"
+    else
+        _js_history_has_defer_reason "$journal" "$target" "$run_id" "$reason" || drc=$?
+    fi
     if [ "$drc" -eq 2 ]; then
         # The history could not be read (extractor UNAVAILABLE) — the
         # write-once check is UNKNOWN. Take the SAFE branch (the txn is
@@ -2766,10 +2949,29 @@ _js_sweep_flipped_disposition() {
             ;;
     esac
     if [ "$jsize" -ge "$jguard" ]; then
+        # Q1=C — the over-threshold defer ACTION is BOUNDED. The DECISION
+        # (the write-once check: "is a defer row already journaled for
+        # this txn?") is a cheap decide — one O(n) history scan under the
+        # bounded awk seam — with a HARD budget over the whole decision.
+        #
+        # If the decision cannot be made (the extractor was UNAVAILABLE,
+        # the watchdog fired, or the budget was exceeded) the launcher
+        # REFUSES TO ACT: it writes NOTHING (the journal stays byte-
+        # identical), it leaves the txn OPEN, and it WARNs with the
+        # JOURNAL SIZE and the BUDGET. It NEVER treats a missing decision
+        # as "there is no defer row" (rc 1) and never skips silently.
+        local ddec=0
+        _js_size_guard_defer_decision "$journal" "$target" "$run_id" "journal-size-guard" || ddec=$?
+        if [ "$ddec" -eq 2 ]; then
+            _log "WARN: journal sweep: journal size=${jsize}B ≥ guard=${jguard}B — defer decision budget (${_JS_AWK_TIMEOUT_S}s) exceeded/unavailable (awk rc=${_JS_LAST_AWK_RC}): REFUSING to act (no journal write; the txn is left OPEN)"
+            _js_sweep_release "$install_dir" "$lock_held"
+            return 0
+        fi
         _log "WARN: journal sweep: journal is ${jsize}B ≥ ${jguard}B (the launcher-side size guard) — CONSERVATIVE DEFER (never a rollback in this regime; the daemon-side closer parses in-process and is the only automatic rollback path)"
         _js_serving_defer "$journal" "$target" "$run_id" "$age" \
             "journal-size-guard" \
-            "the journal exceeds the launcher-side size guard — the launcher never rolls back in this regime"
+            "the journal exceeds the launcher-side size guard — the launcher never rolls back in this regime" \
+            "$ddec"
         _js_sweep_release "$install_dir" "$lock_held"
         return 0
     fi
@@ -3218,6 +3420,38 @@ _journal_sweep() {
     # "txn left open" shape).
     if [ "$owner_dead" = "0" ] && [ "$hb_stale" = "0" ]; then
         _log "journal sweep: stale pre-flip $kind txn (age ${age}s, target=${target:-?}) — owner ALIVE (heartbeat fresh) — leaving the txn OPEN (AM-P2-18 owner-liveness conjunct)"
+        _js_lock_release "$install_dir"
+        return 0
+    fi
+    # ── the launcher-side size guard, applied to the PRE-FLIP branch (Q2) ──
+    # The FLIPPED branch has carried this guard since AM-P2-5 (a journal at
+    # or above the guard is a CONSERVATIVE DEFER: the launcher never rolls
+    # back in that regime — the daemon-side closer parses the journal
+    # in-process and is the only automatic rollback path). The PRE-FLIP
+    # branch had NO guard: it still appended a history row and rewrote
+    # `in_flight` on a journal of ANY size — two full-journal rewrites on
+    # exactly the shape (a big journal) the guard exists to keep the
+    # launcher's shell-side writers away from. The launcher-side writers
+    # are the O(n)-per-byte cost; the daemon-side closer is in-process.
+    #
+    # DISCLOSURE (release notes): at or above the launcher-side size guard
+    # (98304B by default) the launcher DECLINES TO ACT on a stale promote
+    # (flip) transaction — no launcher rollback, no commit-and-continue and
+    # no txn clear — so a stale flip transaction in such a journal is left
+    # to the daemon-side closer. The transaction stays OPEN; the next boot
+    # (or the daemon-side closer) disposes of it.
+    #
+    # Below the guard the behaviour is BYTE-IDENTICAL to the pre-fix
+    # behaviour (the clear still happens, with the same history row).
+    local pjsize="${#json}" pjguard="${SWEEP_JOURNAL_SIZE_GUARD_BYTES}"
+    case "$pjguard" in
+        ''|*[!0-9]*)
+            _log "WARN: journal sweep: SWEEP_JOURNAL_SIZE_GUARD_BYTES='${SWEEP_JOURNAL_SIZE_GUARD_BYTES}' is not a plain integer — substituting the documented default (98304); fix the .env"
+            pjguard=98304
+            ;;
+    esac
+    if [ "$pjsize" -ge "$pjguard" ]; then
+        _log "WARN: journal sweep: journal is ${pjsize}B ≥ ${pjguard}B (the launcher-side size guard) — DECLINING TO ACT on the stale pre-flip $kind txn (target=${target:-?}, age ${age}s): no launcher rollback and no commit-and-continue — a stale flip transaction in a ≥${pjguard}B journal is left to the daemon-side closer; the txn is left OPEN"
         _js_lock_release "$install_dir"
         return 0
     fi
