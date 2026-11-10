@@ -62,6 +62,14 @@ PostgreSQL, ``strftime`` on SQLite (the runner is SQLite-only for the
 migrations, but this script must be runnable against a scratch SQLite too,
 which is exactly how its own pack proves it).
 
+``--measure`` ALSO carries the A4 within-identity-key divergence gauge —
+DELEGATED, not re-implemented, to
+``SkillRepository.within_identity_key_divergence`` (one source of truth;
+see ``divergence_reading``).  That is the reading behind the A4 claim:
+"reports 32 divergent ``(name, project_id)`` keys on production (630
+rows), the 27 stranded A/B pairs named as the dominant cause, the 0
+target BLOCKED-ON the A/B resolution decision (Ruling E)".
+
 CONVERGENCE (plan §5 A4 acceptance 7) needs TWO measurements at least 24 h
 apart, so ``--measure`` can emit a machine-readable reading and
 ``--compare a.json b.json`` evaluates convergence only when the two readings
@@ -163,18 +171,45 @@ def drift_rows(engine: Engine) -> list[dict[str, Any]]:
     return out
 
 
+def divergence_reading(engine: Engine) -> dict[str, Any]:
+    """The A4 within-identity-key divergence reading — ONE source of truth.
+
+    Delegates to ``SkillRepository.within_identity_key_divergence``; the
+    gauge is deliberately NOT re-implemented here (a second copy of the
+    grouping SQL is exactly the duplication the gauge exists to end —
+    tidier M2).  The import is DEFERRED into this function so every other
+    path of this script (the dry run, ``--apply``, ``--revert``) never pays
+    the daemon-package import cost; only ``--measure``, the read-only
+    reporting path, does.  The import needs the ``ensemble`` package to be
+    importable from this interpreter — true for the worktree venv's
+    editable install and for any normal install of the project.
+
+    See the repository gauge's docstring for the measure itself, the
+    measured production baseline (32 divergent keys over 630 rows), the
+    27-pair A/B cause, and why the 0 target is BLOCKED-ON the A/B
+    resolution decision (Ruling E).
+    """
+    from daemon.repositories.skill.repository import SkillRepository
+
+    return SkillRepository(engine).within_identity_key_divergence()
+
+
 def measure_snapshot(engine: Engine) -> dict[str, Any]:
     """The canonical reading (the SAME instrument that reported +480).
 
     ``counter_total`` and ``ledger_total`` are the two global sums; the
     ``drift`` is their difference, and ``mismatched_skills`` is the per-skill
-    census behind it.
+    census behind it.  ``divergence`` is the A4 within-identity-key gauge
+    reading (``SkillRepository.within_identity_key_divergence``, delegated —
+    never re-implemented here), which is what makes the A4 claim ("reports
+    32 on production, the 27-pair cause named") operator-observable.
     """
     ledger = ledger_by_skill(engine)
     counters = counters_by_skill(engine)
     counter_total = sum(counters.values())
     ledger_total = sum(ledger.values())
     rows = drift_rows(engine)
+    divergence = divergence_reading(engine)
     return {
         "taken_at": _read_clock(engine),
         "dialect": engine.dialect.name,
@@ -185,6 +220,7 @@ def measure_snapshot(engine: Engine) -> dict[str, Any]:
         "skills_total": len(counters),
         "mismatched_skills": len(rows),
         "mismatch_rows": rows,
+        "divergence": divergence,
     }
 
 
@@ -358,7 +394,10 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--measure",
         action="store_true",
-        help="Print the canonical drift reading (no writes).",
+        help=(
+            "Print the canonical drift reading plus the A4 within-identity-key "
+            "divergence gauge (no writes)."
+        ),
     )
     mode.add_argument(
         "--revert",
@@ -416,6 +455,22 @@ def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
         ):
             print("  ... (truncated for display; the receipt carries every row)")
             break
+    divergence = payload.get("divergence")
+    if isinstance(divergence, dict):
+        print(
+            f"divergence: {divergence.get('diverging_keys')} divergent "
+            f"(name, project_id) keys over "
+            f"{divergence.get('rows_in_diverging_groups')} rows of "
+            f"{divergence.get('total_skills')} skills"
+        )
+        for key in divergence.get("keys") or []:
+            print(
+                f"  key {key['name']!r} @ project {key['project_id']!r}: "
+                f"{key['distinct_contents']} distinct contents over "
+                f"{key['rows']} rows"
+            )
+        if divergence.get("truncated"):
+            print("  ... (key sample truncated; the JSON reading carries it)")
 
 
 def main(argv: list[str] | None = None) -> int:

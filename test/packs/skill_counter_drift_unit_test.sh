@@ -50,6 +50,18 @@
 #           convergence pins RED
 #   M-A4g — skip the >= 24 h leg (the evaluator always reports "converged")
 #           ⇒ the close-readings pin REDs
+#   M-A4h — the operator script stops DELEGATING to the repository gauge
+#           (the M2 wiring regresses to a local constant) ⇒ the
+#           gauge-wiring pins RED
+#
+# THE GAUGE'S CONSUMER (M2 — the gauge is the live A4 deliverable and MUST
+# survive).  `SkillRepository.within_identity_key_divergence` is wired into
+# the operator instrument: `scripts/audit/skill_counter_reconcile.py
+# --measure` reports the gauge's reading (`divergence`), DELEGATED — never
+# re-implemented — so the A4 claim ("32 divergent keys on production, the
+# 27-pair cause named") is operator-observable and the gauge is no longer a
+# test-only artefact.  The import is deferred INTO the reading function, so
+# only the `--measure` path pays for it.
 #
 # FENCES: per-variable env scrub, worktree-local interpreter, dual-layer
 # timeout, sha-verified PRISTINE restore, VACUOUS-GREEN guard, no PG, no
@@ -258,6 +270,11 @@ leg "M-A4f" "$SCRIPT_PY" \
 leg "M-A4g" "$SCRIPT_PY" \
   '    if elapsed < CONVERGENCE_MIN_ELAPSED:' \
   '    if False:  # MUTATION: the elapsed gate is skipped'
+# M-A4h — the script stops DELEGATING to the repository gauge (the M2
+# wiring regresses to a local constant) ⇒ the gauge-wiring pins RED.
+leg "M-A4h" "$SCRIPT_PY" \
+  '    return SkillRepository(engine).within_identity_key_divergence()' \
+  '    return {"diverging_keys": 0, "rows_in_diverging_groups": 0, "total_skills": 0, "keys": [], "truncated": False}  # MUTATION: the gauge is not delegated to'
 
 # Final manifest check.
 for f in "${MUTABLE_FILES[@]}"; do
@@ -275,5 +292,5 @@ if [ "$MUTATION_FAILURES" -ne 0 ]; then
   echo "RESULT: FAIL (${MUTATION_FAILURES} mutation leg(s) failed)"
   exit 1
 fi
-echo "RESULT: PASS (7 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
+echo "RESULT: PASS (8 mutation legs RED→GREEN, sha-verified restores, $(elapsed_s)s)"
 exit 0

@@ -442,3 +442,110 @@ class TestTheReconcileWritesOnlyTheOneColumn:
         assert "update skills set total_applied" in source
         # The ONLY other write verb allowed is the same column in the revert.
         assert source.count("update skills set") == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M2 — the A4 divergence gauge is WIRED (tidier M2; leader ruling: the gauge
+# survives — it is the live A4 deliverable — and gets a REAL consumer).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _scratch_db_with_divergence(tmp_path: Path):
+    """A scratch DB with ONE divergent ``(name, project_id)`` key.
+
+    The key holds two rows of the SAME identity key with DIFFERENT content
+    (generation 0 and generation 1) — the exact shape the A4 gauge measures
+    (``count(DISTINCT content) > 1`` per key).  A second key with a single
+    row does NOT diverge, so a correct reading is exactly 1 divergent key
+    over 2 rows of 3 skills.
+    """
+    db_path = tmp_path / "divergence.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    SQLModel.metadata.create_all(engine)
+    skill_repo = SkillRepository(engine)
+    skill_repo.create(
+        name="cloned",
+        description="d",
+        content="content-v1",
+        project_id="p-div",
+    )
+    skill_repo.create(
+        name="cloned",
+        description="d",
+        content="content-v2",
+        project_id="p-div",
+        generation=1,
+    )
+    skill_repo.create(
+        name="solo",
+        description="d",
+        content="content-solo",
+        project_id="p-div",
+    )
+    engine.dispose()
+    return f"sqlite:///{db_path}"
+
+
+class TestTheDivergenceGaugeIsWiredIntoTheMeasureReading:
+    """M2 — the gauge has a REAL (non-test) consumer: the operator script."""
+
+    def test_the_measure_reading_carries_the_gauge_reading(self, tmp_path) -> None:
+        module = _load_reconcile()
+        url = _scratch_db_with_divergence(tmp_path)
+        engine = create_engine(url)
+        reading = module.measure_snapshot(engine)
+        engine.dispose()
+        divergence = reading["divergence"]
+        assert divergence["diverging_keys"] == 1, (
+            "the A4 gauge must report the ONE divergent (name, project_id) "
+            "key in the scratch DB"
+        )
+        assert divergence["rows_in_diverging_groups"] == 2
+        assert divergence["total_skills"] == 3
+        assert divergence["keys"][0]["name"] == "cloned"
+        assert divergence["keys"][0]["project_id"] == "p-div"
+        assert divergence["keys"][0]["distinct_contents"] == 2
+
+    def test_the_reading_is_the_repository_gauge_not_a_second_copy(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The script DELEGATES — it never re-implements the gauge's SQL."""
+        module = _load_reconcile()
+        sentinel = {
+            "diverging_keys": 4242,
+            "rows_in_diverging_groups": 99,
+            "total_skills": 7,
+            "keys": [],
+            "truncated": False,
+        }
+        monkeypatch.setattr(
+            SkillRepository,
+            "within_identity_key_divergence",
+            lambda self, **kwargs: sentinel,
+        )
+        url = _scratch_db_with_divergence(tmp_path)
+        engine = create_engine(url)
+        reading = module.measure_snapshot(engine)
+        engine.dispose()
+        assert reading["divergence"] == sentinel, (
+            "the measure reading must BE the repository gauge's reading — "
+            "a second implementation would drift from it"
+        )
+        source = RECONCILE_PATH.read_text(encoding="utf-8")
+        for forbidden in ("group_by", "func.count", "count(distinct"):
+            assert forbidden not in source, (
+                f"the script must not carry its own divergence SQL "
+                f"({forbidden!r}) — the repository gauge is the single "
+                f"source of truth"
+            )
+
+    def test_the_gauge_reading_is_the_repository_payload_verbatim(
+        self, tmp_path
+    ) -> None:
+        module = _load_reconcile()
+        url = _scratch_db_with_divergence(tmp_path)
+        engine = create_engine(url)
+        reading = module.divergence_reading(engine)
+        direct = SkillRepository(engine).within_identity_key_divergence()
+        engine.dispose()
+        assert reading == direct
