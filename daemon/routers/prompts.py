@@ -82,7 +82,6 @@ The router does NOT touch ``daemon/services/*``, ``daemon/repositories/*`,
 
 from __future__ import annotations
 
-import difflib
 import logging
 import re
 from typing import Any, Optional
@@ -427,13 +426,13 @@ def _audit_event_to_dict(row: Any) -> dict:
 # Diff helper
 # ────────────────────────────────────────────────────────────────────────────
 
-
-def _unified_diff(content_a: str, content_b: str, label_a: str, label_b: str) -> str:
-    """``difflib.unified_diff`` text join (D12 — stdlib, no new dep)."""
-    a_lines = content_a.splitlines(keepends=True)
-    b_lines = content_b.splitlines(keepends=True)
-    diff = difflib.unified_diff(a_lines, b_lines, fromfile=label_a, tofile=label_b, lineterm="")
-    return "\n".join(diff)
+# prompt-assent (J-3/K-7, task 1.10): the canonical-render helper is the
+# SINGLE render truth. This is a pure lift-and-shift — the router-local
+# ``_unified_diff`` moved to ``daemon/services/prompt_version_diff.py``
+# verbatim (stdlib ``difflib`` join), and the route imports it so the FE
+# diff output stays byte-identical (pinned by test). The TOOL layer must
+# import the helper module, never this router (pinned the other way).
+from daemon.services.prompt_version_diff import unified_diff as _unified_diff
 
 
 # ────────────────────────────────────────────────────────────────────────────
