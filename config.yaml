@@ -316,6 +316,39 @@ limits:
 #   RESOURCE_MONITOR_ANOMALY_ENABLED=false  # anomaly pass off (Phase 4)
 #   RESOURCE_MONITOR_ANOMALY_INTERVAL_S=900 # pass every 15 min
 
+# RAM Guard (RAM auto-termination Phase 5)
+# --------------------------------------------------------------------------
+# The ``ram_guard:`` block is intentionally COMMENT-ONLY — and there is
+# deliberately NO load_config pass-through for it either, so a hand-added
+# yaml literal would be silently IGNORED. The RAM_GUARD_* env tier is
+# always the live one (pydantic init-kwargs beat env vars, so a literal
+# would kill the tier — the same trap as resource_monitor above).
+#
+# The MASTER switch is a separate bare env var, NOT a knob in this
+# section: ENSEMBLE_RAM_GUARD uses the reaper parsing semantics —
+# absent/empty ⇒ ON (the guard defaults ON); 0/false/no/off
+# (case-insensitive) ⇒ OFF (a COMPLETE no-op: no thread, no
+# registration, no measurement). OFF also BEATS VALIDATION: with the
+# switch OFF, an out-of-range knob value boots fine (the guard is
+# inert); with the switch ON, an out-of-range explicit value ABORTS
+# boot (ValidationError — never clamped).
+#
+# All four defaults are pinned in daemon.config.RamGuardConfig
+# (INT-only knobs; a human-string size like "8G" is NOT accepted):
+#
+#   ceiling_mib              (int|unset, default UNSET ⇒ the DYNAMIC
+#                             70%-of-detected-RAM default, floored at
+#                             64 MiB, never upper-clamped; an explicit
+#                             value is validated [64, 65536])
+#   poll_interval_ms         (int, default 200, ge=50 le=2000)
+#   grace_ms                 (int, default 250, ge=0 le=2000)
+#   pss_confirm_deadline_ms  (int, default 250, ge=50 le=2000)
+#
+# Example (env-side; NOT yaml):
+#   ENSEMBLE_RAM_GUARD=0                    # master kill-switch (OFF)
+#   RAM_GUARD_CEILING_MIB=4096              # explicit 4 GiB ceiling
+#   RAM_GUARD_POLL_INTERVAL_MS=500          # looser cadence
+
 # Persistence Settings
 persistence:
   db_path: ./data/instances.db
