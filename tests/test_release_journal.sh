@@ -1298,9 +1298,20 @@ afield() { ( export INSTALL_DIR="$1"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; eva
 # (journal_count_rollback) with a python3 fallback (python3 is a hard
 # dependency of this suite).
 _stamped_iso() {  # _stamped_iso <-offset-seconds>
+    # F11 (review round 1): dual-idiom AND sign-correct. The old Darwin arm
+    # ran `date -ju -v+${1}S` — for a NEGATIVE offset that renders
+    # `-v+-700S`, which BSD date REJECTS ("Cannot apply date adjustment",
+    # rc 1) ⇒ the helper silently returned empty and every caller fell to
+    # its python fallback. Mirror lib.sh _cooldown_until_iso's sign
+    # handling: a negative offset carries its own sign (`-v-700S` is
+    # valid); only a positive offset needs the explicit `+`.
     case "$(uname -s)" in
         Darwin|*BSD*|*bsd*)
-            date -ju -v+${1}S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ;;
+            if [ "${1#-}" != "$1" ]; then
+                date -ju -v${1}S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+            else
+                date -ju -v+${1}S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+            fi ;;
         Linux|GNU*|*GNU*)
             date -u -d "${1} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ;;
         *) date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ;;
@@ -1616,7 +1627,10 @@ b4_seed_journal() {  # <current-ver-or-null>
 }
 b4_age_txn() {  # age in_flight started_at past the 600s sweep gate (drill pattern)
     ( export INSTALL_DIR="$SBX"; . "$FAKE_REPO/scripts/upgrade/lib.sh"
-      ts="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"
+      # F11: the dual-idiom helper (BSD-sign-correct) + the python fallback —
+      # was a bare BSD `date -ju -v-700S` (broken on GNU hosts).
+      ts="$(_stamped_iso -700)"
+      [ -n "$ts" ] || ts="$(python3 -c 'import datetime; print((datetime.datetime.utcnow()-datetime.timedelta(seconds=700)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
       inf="$(_json_sub "$(journal_read)" in_flight)"
       k="$(_json_field "$inf" kind)"; t="$(_json_field "$inf" target)"; o="$(_json_field "$inf" owner_pid)"
       journal_update in_flight "{\"kind\":\"$k\",\"target\":\"$t\",\"started_at\":\"$ts\",\"flipped\":false,\"owner_pid\":$o}"
@@ -1688,7 +1702,10 @@ assert_contains "11a reclaim is the orphaned pre-flip sweep (never flipped)" \
 # promote's now-gone pid).
 b4_inf "journal_open_txn promote '$SBX_V2'" > /dev/null 2>&1
 ( export INSTALL_DIR="$SBX"; . "$FAKE_REPO/scripts/upgrade/lib.sh"
-  ts="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"
+  # F11: the dual-idiom helper (BSD-sign-correct) + the python fallback —
+  # was a bare BSD `date -ju -v-700S`.
+  ts="$(_stamped_iso -700)"
+  [ -n "$ts" ] || ts="$(python3 -c 'import datetime; print((datetime.datetime.utcnow()-datetime.timedelta(seconds=700)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
   journal_update in_flight "{\"kind\":\"promote\",\"target\":\"$SBX_V2\",\"started_at\":\"$ts\",\"flipped\":false,\"owner_pid\":999999,\"last_heartbeat\":$(_now_epoch),\"displaced_version\":\"$SBX_V1\"}"
 ) > /dev/null 2>&1
 b4_sweep

@@ -5724,11 +5724,17 @@ restart_via_launcher() {
     # ── D2a launchd hand-back (THE supervised path; 2026-11-11) ────────────
     # Consume the PRE-STOP classification (never re-derive — the daemon is
     # DOWN here). LAUNCHD_MANAGED ⇒ M2 supervisor-owned start: `launchctl
-    # bootstrap gui/<uid> <verbatim-plist>`; RunAtLoad=true ⇒ bootstrap ==
-    # start, EXACTLY ONCE. The promote starts NOTHING else — no nohup on the
-    # supervised path (the 2026-11-11 dual-supervisor incident). bootstrap
-    # failure is fail-safe: retry 2x (2s→4s) then return 1 (caller halts);
-    # a bootstrap refusal NEVER degrades to a competing nohup launcher.
+    # bootstrap gui/<uid> <verbatim-plist>`. F10 (review round 1), wording
+    # precision: the JOB is started exactly once BY LAUNCHD (RunAtLoad=true
+    # ⇒ a successful bootstrap IS the start); the bootstrap COMMAND itself
+    # may be invoked MORE than once — the retry loop below re-issues it
+    # (2s→4s backoff) after a FAILED attempt, and a rc-2 "already loaded"
+    # answer means the start predates this call (benign ONLY because the
+    # forward path booted the job out first; the caller's gate revalidates).
+    # The promote starts NOTHING else — no nohup on the supervised path
+    # (the 2026-11-11 dual-supervisor incident). bootstrap failure is
+    # fail-safe: retry 2x then return 1 (caller halts); a bootstrap refusal
+    # NEVER degrades to a competing nohup launcher.
     if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ] \
        && _supervision_host_allows_launchd; then
         local lplist lrc lattempt=1
@@ -6584,6 +6590,8 @@ supervision_map_outcome() {
                     printf 'degraded|declaration mismatch: script declared but unit-managed reality — latent two-masters hazard (unreachable today: explicit script never verifies the cgroup)\n' ;;
                 SCOPE_SURVIVOR)
                     printf 'degraded|scope survivor under script declaration: WARN-once + self-heals at next promote with a unit configured\n' ;;
+                LAUNCHD_MANAGED)
+                    printf 'degraded|declaration mismatch: script declared but launchd reality — latent two-masters hazard (unreachable today: Darwin'"'"'s declared script mode refuses before verification)\n' ;;
                 *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
             esac
             ;;
@@ -6600,6 +6608,8 @@ supervision_map_outcome() {
                     printf 'fault|declaration mismatch: unit declared but script reality — never silent-degrade (unreachable today: explicit unit never verifies the cgroup)\n' ;;
                 SCOPE_SURVIVOR)
                     printf 'fault|declaration mismatch: unit declared but scope-survivor reality — never silent-degrade (unreachable today)\n' ;;
+                LAUNCHD_MANAGED)
+                    printf 'fault|declaration mismatch: unit declared but launchd reality — never silent-degrade (unreachable today: Darwin verification is launchd-only)\n' ;;
                 *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
             esac
             ;;
@@ -6611,7 +6621,28 @@ supervision_map_outcome() {
                     printf 'conforming|auto defers to verification: unit topology confirmed (P4 adoption signal)\n' ;;
                 SCOPE_SURVIVOR)
                     printf 'degraded|scope survivor under auto declaration: WARN-once + self-heals at next promote with a unit configured\n' ;;
+                LAUNCHD_MANAGED)
+                    printf 'conforming|auto defers to verification: launchd topology confirmed (D2a supervised lane)\n' ;;
                 *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;
+            esac
+            ;;
+        launchd)
+            # A2 (review round 1): the Darwin supervised lane resolves
+            # SUPERVISION_MODE=launchd — a HEALTHY verified launchd install
+            # had NO cell here and fell through to the fail-closed "unknown
+            # declared mode" arm ⇒ the boot advisory journalled
+            # outcome=fault for a HEALTHY supervisor. These cells report the
+            # conforming-equivalent state (advisory-only naming).
+            case "$verified" in
+                LAUNCHD_MANAGED)
+                    if [ -n "$unit" ]; then
+                        printf 'conforming|launchd topology declared and verified, job label resolved (LAUNCHD MODE — the supervisor owns the launcher)\n'
+                    else
+                        printf 'fault|launchd declared but no job label resolvable — refusing the whole-domain bootout, never silent-degrade\n'
+                    fi
+                    ;;
+                *)
+                    printf 'fault|declaration mismatch: launchd declared but non-launchd reality — never silent-degrade (unreachable today: Darwin verification is launchd-only)\n' ;;
             esac
             ;;
         *) printf 'fault|unknown declared mode or verified state — fail-closed\n' ;;

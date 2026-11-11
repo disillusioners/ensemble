@@ -2239,24 +2239,20 @@ class UpgradeJournalSweepService:
         """The txn identity used by the write-once key, the request detail
         and the launcher-side reader.
 
-        The RESTART lane stamps ``run_id`` into ``in_flight``; the
-        PROMOTE lane does NOT (``journal_open_txn`` in lib.sh writes
-        {kind,target,started_at,flipped,owner_pid,last_heartbeat,
-        displaced_version} — the promote run_id lives in the pipeline
-        LOCK, which is gone by the time a stale txn is swept). ⇒ the
-        identity falls back to ``<target>@<started_at>`` — stable across
-        ticks AND across launcher boots (the same txn keeps the same
-        started_at), and distinct per txn (a re-promote stamps a new
-        started_at ⇒ a fresh write-once key, per AM-P2-13's rule).
+        A3 (review round 1): the derivation now lives ONCE, in
+        ``daemon.tools.upgrade_journal.txn_identity`` — this shim DELEGATES
+        (exactly like ``_closer_owner_dead`` delegates to
+        ``txn_owner_dead``, D1 2026-11-11) so the closer and the reclaim
+        can never drift apart. The derivation reads ``target`` from the
+        SAME ``in_flight`` dict; the caller's ``target`` argument is
+        ``in_flight['target']`` by construction (the sweep reads it from
+        the same dict one screen above) and is kept only for the
+        call-site signature — behaviour-preserving.
 
         THE SHELL SIDE MUST DERIVE THE SAME STRING (launcher.sh's
         ``_js_serving_txn_identity``): the request reader matches on
         (target, run_id) inside ONE history entry."""
-        run_id = str(in_flight.get("run_id") or "").strip()
-        if run_id:
-            return run_id
-        started = str(in_flight.get("started_at") or "").strip()
-        return f"{target}@{started}" if started else target
+        return uj.txn_identity(in_flight)
 
     @staticmethod
     def _closer_owner_dead(in_flight: dict[str, Any]) -> bool:

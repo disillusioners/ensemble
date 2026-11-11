@@ -97,7 +97,7 @@ sh_outcome() { # <declared|verified|unit>
 }
 
 # ===========================================================================
-section "A — outcome map: 19 cells, outcome AND reason byte-identical"
+section "A — outcome map: 24 cells, outcome AND reason byte-identical"
 
 CELLS='
 script|SCRIPT_NOHUP|
@@ -119,6 +119,11 @@ unit|GARBAGE_STATE|
 auto|GARBAGE_STATE|
 SCRIPT|weird_state|
 Unit|UNIT_MANAGED|ensemble-tw4.service
+launchd|LAUNCHD_MANAGED|com.ensemble.prod
+launchd|LAUNCHD_MANAGED|
+script|LAUNCHD_MANAGED|
+unit|LAUNCHD_MANAGED|
+auto|LAUNCHD_MANAGED|
 '
 PY_LINES="$(printf '%s\n' "$CELLS" | grep -v '^$' | python3 "$PY_RUNNER" "$REPO_ROOT")"
 

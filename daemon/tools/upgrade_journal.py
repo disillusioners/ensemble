@@ -421,14 +421,21 @@ def txn_is_reclaimable(
     return True, "heartbeat-stale+owner-dead"
 
 
-def _txn_identity(in_flight: dict[str, Any]) -> str:
+def txn_identity(in_flight: dict[str, Any]) -> str:
     """A stable identity for the txn record — the race-close key.
+
+    THE shared derivation (A3, review round 1): it lived here as a private
+    helper AND was triplicated in the daemon closer
+    (``upgrade_journal_sweep._closer_txn_identity``) — the closer now
+    DELEGATES here, exactly like ``_closer_owner_dead`` delegates to
+    ``txn_owner_dead`` (D1, 2026-11-11), so the two can never drift.
 
     The RESTART lane stamps ``run_id`` into ``in_flight``; the PROMOTE lane
     does NOT (lib.sh ``journal_open_txn`` writes
     {kind,target,started_at,flipped,owner_pid,last_heartbeat,...}) ⇒ fall
-    back to ``<target>@<started_at>`` (the daemon closer's
-    ``_closer_txn_identity`` shape: stable across ticks, distinct per txn).
+    back to ``<target>@<started_at>`` (the same shape the shell twin
+    ``launcher.sh``'s ``_js_serving_txn_identity`` derives: stable across
+    ticks, distinct per txn).
     """
     run_id = str(in_flight.get("run_id") or "").strip()
     if run_id:
@@ -556,7 +563,7 @@ def reclaim_stale_txn(install_dir: Path, *, actor: str) -> str | None:
             in_flight.get("target", "?"),
         )
         return None
-    txn_key = _txn_identity(in_flight)
+    txn_key = txn_identity(in_flight)
     claim_run_id = f"reclaim-{mint_run_id()}"
     acquired, busy_run = lock_acquire(install_dir, claim_run_id)
     if not acquired:
@@ -580,7 +587,7 @@ def reclaim_stale_txn(install_dir: Path, *, actor: str) -> str | None:
         fresh_inf = fresh.get("in_flight")
         if not isinstance(fresh_inf, dict):
             return None  # already disposed by someone else
-        if _txn_identity(fresh_inf) != txn_key:
+        if txn_identity(fresh_inf) != txn_key:
             # A NEW txn replaced the one we judged — it is NOT ours to clear
             # (the concurrent armer's record wins; the arm's own lock
             # acquisition is the final arbiter).
@@ -589,7 +596,7 @@ def reclaim_stale_txn(install_dir: Path, *, actor: str) -> str | None:
                 "(%s → %s) — nothing cleared",
                 actor,
                 txn_key,
-                _txn_identity(fresh_inf),
+                txn_identity(fresh_inf),
             )
             return None
         still_ok, still_reason = txn_is_reclaimable(fresh_inf)
@@ -4435,6 +4442,13 @@ def supervision_outcome(
                 "scope survivor under script declaration: WARN-once + "
                 "self-heals at next promote with a unit configured",
             )
+        if ver == SUPERVISION_STATE_LAUNCHD:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_DEGRADED,
+                "declaration mismatch: script declared but launchd reality "
+                "— latent two-masters hazard (unreachable today: Darwin's "
+                "declared script mode refuses before verification)",
+            )
     elif dec == "unit":
         if ver == SUPERVISION_STATE_UNIT:
             if unit:
@@ -4461,6 +4475,13 @@ def supervision_outcome(
                 "declaration mismatch: unit declared but scope-survivor "
                 "reality — never silent-degrade (unreachable today)",
             )
+        if ver == SUPERVISION_STATE_LAUNCHD:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_FAULT,
+                "declaration mismatch: unit declared but launchd reality "
+                "— never silent-degrade (unreachable today: Darwin "
+                "verification is launchd-only)",
+            )
     elif dec == "auto":
         if ver == SUPERVISION_STATE_SCRIPT:
             return SupervisionOutcome(
@@ -4480,6 +4501,39 @@ def supervision_outcome(
                 "scope survivor under auto declaration: WARN-once + "
                 "self-heals at next promote with a unit configured",
             )
+        if ver == SUPERVISION_STATE_LAUNCHD:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_CONFORMING,
+                "auto defers to verification: launchd topology confirmed "
+                "(D2a supervised lane)",
+            )
+    elif dec == "launchd":
+        # A2 (review round 1): the Darwin supervised lane resolves
+        # SUPERVISION_MODE=launchd — a HEALTHY verified launchd install had
+        # NO cell in either twin and therefore fell through to the
+        # fail-closed "unknown declared mode" arm ⇒ the boot advisory
+        # journalled outcome=fault for a HEALTHY supervisor. The launchd
+        # cells below report the conforming-equivalent state (advisory-only
+        # naming — no gate, no refusal).
+        if ver == SUPERVISION_STATE_LAUNCHD:
+            if unit:
+                return SupervisionOutcome(
+                    SUPERVISION_OUTCOME_CONFORMING,
+                    "launchd topology declared and verified, job label "
+                    "resolved (LAUNCHD MODE — the supervisor owns the "
+                    "launcher)",
+                )
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_FAULT,
+                "launchd declared but no job label resolvable — refusing "
+                "the whole-domain bootout, never silent-degrade",
+            )
+        return SupervisionOutcome(
+            SUPERVISION_OUTCOME_FAULT,
+            "declaration mismatch: launchd declared but non-launchd "
+            "reality — never silent-degrade (unreachable today: Darwin "
+            "verification is launchd-only)",
+        )
     # Unknown declared mode or verified state — fail-closed.
     return SupervisionOutcome(
         SUPERVISION_OUTCOME_FAULT,

@@ -124,26 +124,23 @@ if ! _splice_python_floor_probe; then
     exit 78
 fi
 
-# ── Stop-script sibling probe (W2, 2026-11-11) ──────────────────────────────
+# ── Stop-script sibling probe (W2, 2026-11-11; A1 review round 1) ───────────
 # lib.sh's stop_via_stop_script resolves the stop script as the SIBLING one
 # level up of the CALLING script's dir (BASH_SOURCE[1] — restart.sh lives in
-# scripts/upgrade/, so the leg is scripts/upgrade/../stop-ensemble.sh) and
-# falls back to $(pwd)/scripts/stop-ensemble.sh. BOTH legs MISS in the
-# install layout (make install ships only watchdog-watcher.sh into
-# <install_dir>/scripts/ — Makefile:375-377 — and the executor's cwd is the
-# install dir) ⇒ bash: No such file or directory → rc=127 → the ceremony
-# aborts MID-STOP (the v0.29.16 2026-11-11 halt class). The probe is
-# SELF-CONTAINED (no lib.sh dependency — this script must work standalone)
+# scripts/upgrade/, so the leg is scripts/upgrade/../stop-ensemble.sh); W4
+# (D2a, 2026-11-11) DELETED the old $(pwd)/scripts fallback from the runtime
+# (dead in the install layout: make install ships only watchdog-watcher.sh
+# into <install_dir>/scripts/ — Makefile:375-377 — and the executor's cwd is
+# the install dir), and A1 deletes the same leg HERE so the probe can never
+# accept a path the runtime would refuse (a probe-only hit masked the
+# rc=127 mid-stop halt class — the v0.29.16 2026-11-11 incident). The probe
+# is SELF-CONTAINED (no lib.sh dependency — this script must work standalone)
 # and refuses BEFORE any mutation (no lock adopted, no txn opened, no stop).
 # The exec-bit requirement is conservative hardening (every consumer invokes
 # `bash stop-ensemble.sh`; lib.sh itself only tests -f).
 _stop_script=""
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
     _stop_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../stop-ensemble.sh"
-fi
-if [ ! -f "$_stop_script" ]; then
-    # Fallback leg — mirrors lib.sh stop_via_stop_script's second leg.
-    _stop_script="$(pwd)/scripts/stop-ensemble.sh"
 fi
 if [ ! -f "$_stop_script" ] || [ ! -x "$_stop_script" ]; then
     _warn "stop-script sibling not usable at $_stop_script (must exist AND carry the exec bit — conservative hardening: every consumer invokes 'bash stop-ensemble.sh') — refusing BEFORE any lock/txn/stop (the stop step would abort rc=127: bash: No such file or directory)"
