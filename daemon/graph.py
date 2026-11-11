@@ -4893,6 +4893,148 @@ def create_should_continue(language_check_enabled: bool):
 
 
 # ============================================================================
+# End-of-turn injection drain — turn-end routing (turn-end-injection-drain)
+# ============================================================================
+#
+# The RAM user-message injection FIFO (``InstanceManager._pending_injections``)
+# is drained by the agent_node at the START of every LLM pass. A user
+# message that arrives while the turn's FINAL LLM pass is in flight is
+# therefore NEVER consumed: the turn ends with the entry still queued.
+# The FIFO is RAM-only, so the entry is silently stranded — it survives
+# only until the next lifecycle cleanup pops it (``_cleanup_instance_state``)
+# or the TTL sweep drops it.
+#
+# The fix lives at the turn-END decision point — the agent's terminal
+# router. Before the router hands the turn over to END (or to the
+# language-check / attestation gates that lead to END) it PEEKS the
+# injection queue. When entries are pending the turn does NOT end: it
+# routes back to ``agent``, whose EXISTING drain site consumes the queue
+# (get + clear + the ``user_message`` / ``injection_consumed`` SSE pair +
+# the checkpoint persist). The model therefore sees the injected message
+# inside the SAME turn, with the mid-turn injection semantics preserved
+# byte-for-byte (same echo id, same ``injected_message`` marker, same
+# checkpoint shape).
+#
+# The check is a PEEK (``injection_slot.get``) — never a clear. The drain
+# stays owned by the agent_node so the SSE / echo-id / checkpoint contract
+# is unchanged; this wrapper only decides WHETHER the turn continues.
+#
+# COVERAGE: both instance-level finalization paths run AFTER the graph
+# run, so a turn that keeps looping on pending injections delays BOTH the
+# normal turn completion and the RUNNING -> WAITING_CHILDREN transition
+# until the injected messages have been consumed.
+
+INJECTION_CONTINUATION_MAX: int = 8
+"""Max consecutive turn continuations caused by pending user injections.
+
+Bounded so a pathological producer (a message arriving on every single
+agent pass) cannot spin the graph forever. The counter is per-graph
+(= per instance) and resets on the first terminal verdict that finds an
+EMPTY queue — i.e. at the end of every ordinary turn.
+"""
+
+# The terminal verdicts a turn-end router can produce:
+#   * ``END``                     — the plain ``should_continue`` router.
+#   * ``"end_candidate"``        — the language-check wrapper
+#                                   (``create_should_continue(True)``).
+#   * ``ATTESTATION_GATE_NODE_NAME`` — the leader-completion attestation
+#                                   wrapper (``create_attestation_should_continue``).
+# All three LEAD to END, so all three must be intercepted for the
+# continuation to fire on every wiring shape. The set is built INSIDE
+# the factory (the attestation node name is declared further down this
+# module, so a module-level literal here would raise a NameError at
+# import time).
+
+
+def create_injection_aware_router(
+    base_router: Callable,
+    injection_slot: Any | None,
+    *,
+    max_continuations: int = INJECTION_CONTINUATION_MAX,
+) -> Callable:
+    """Wrap a terminal router so a pending user injection CONTINUES the turn.
+
+    The wrapper is a no-op when ``injection_slot`` is ``None`` (tests /
+    legacy wiring without an injection queue) — the base router is
+    returned unchanged.
+
+    Args:
+        base_router: The agent's terminal router (plain ``should_continue``,
+            the language-check wrapper, or the attestation wrapper).
+        injection_slot: The :class:`InjectionSlot` handle (duck-typed:
+            ``get(instance_id) -> list | None``).
+        max_continuations: Bound on consecutive continuations (see
+            :data:`INJECTION_CONTINUATION_MAX`).
+
+    Returns:
+        A routing fn ``(state, config) -> str``. When the base router
+        produces a terminal verdict AND the injection queue holds entries
+        for this instance, the wrapper returns ``"agent"`` so the turn
+        continues and the agent_node drains the queue on its next pass.
+    """
+    if injection_slot is None:
+        return base_router
+
+    terminal_routes = frozenset(
+        {END, "end_candidate", ATTESTATION_GATE_NODE_NAME}
+    )
+
+    # Per-graph (= per-instance) consecutive-continuation counter.
+    _counter = {"consecutive": 0}
+
+    def should_continue_with_injection_drain(
+        state: MessagesState, config: Optional[RunnableConfig] = None
+    ) -> str:
+        result = base_router(state)
+        if result not in terminal_routes:
+            return result
+        instance_id = ""
+        try:
+            instance_id = (
+                ((config or {}).get("configurable") or {}).get("thread_id") or ""
+            )
+        except Exception:  # pragma: no cover — defensive
+            instance_id = ""
+        pending = None
+        if instance_id:
+            try:
+                pending = injection_slot.get(instance_id)
+            except Exception:  # pragma: no cover — defensive
+                logger.warning(
+                    "[Injection] turn-end drain probe failed for %s — "
+                    "continuing without the drain",
+                    instance_id[:8],
+                    exc_info=True,
+                )
+                pending = None
+        if not pending:
+            # Ordinary turn end — reset the continuation budget so the
+            # NEXT turn starts from zero.
+            _counter["consecutive"] = 0
+            return result
+        if _counter["consecutive"] >= max_continuations:
+            logger.warning(
+                "[Injection] turn-end drain: %d pending injection(s) for %s "
+                "but the continuation cap (%d) is reached — ending the turn "
+                "with the queue still populated",
+                len(pending),
+                instance_id[:8],
+                max_continuations,
+            )
+            return result
+        _counter["consecutive"] += 1
+        logger.info(
+            "[Injection] turn-end drain: %d pending injection(s) for %s — "
+            "continuing the turn so the model sees them",
+            len(pending),
+            instance_id[:8],
+        )
+        return "agent"
+
+    return should_continue_with_injection_drain
+
+
+# ============================================================================
 # Leader completion attestation — in-graph pre-END gate (Phase 2, D1=B)
 # ============================================================================
 #
@@ -13246,6 +13388,16 @@ def build_instance_graph(
         else:
             language_check_router = should_end_language_check
 
+        # End-of-turn injection drain (turn-end-injection-drain): the
+        # turn must not END while user injections are still queued in the
+        # RAM FIFO. The wrapper PEEKS the queue and routes back to
+        # ``agent`` when entries are pending — the agent_node's existing
+        # drain site then consumes them (same SSE / echo-id / checkpoint
+        # contract as a mid-turn injection).
+        routing_fn = create_injection_aware_router(
+            routing_fn, injection_slot
+        )
+
         graph.add_conditional_edges("agent", routing_fn, {
             "tools": tools_target,      # Watchover interception (or direct when no manager)
             "agent": "agent",          # Ghost promise: retry agent
@@ -13293,6 +13445,14 @@ def build_instance_graph(
             # Would-be END: attestation gate (would have been END)
             agent_paths[ATTESTATION_GATE_NODE_NAME] = ATTESTATION_GATE_NODE_NAME
         agent_paths[END] = END
+        # End-of-turn injection drain (turn-end-injection-drain) — see
+        # the language-check branch above for the rationale. The wrapper
+        # intercepts EVERY terminal verdict this branch can produce
+        # (END, or the attestation gate node name) and routes back to
+        # ``agent`` while user injections are still queued.
+        agent_router = create_injection_aware_router(
+            agent_router, injection_slot
+        )
         graph.add_conditional_edges("agent", agent_router, agent_paths)
 
     # Watchover interception nodes — sits between agent and tools.
