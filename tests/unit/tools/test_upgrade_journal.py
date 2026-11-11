@@ -2840,6 +2840,22 @@ class TestStaleTxnReclaim:
         assert ok is False
         assert reason == "no-in-flight"
 
+    def test_shell_heartbeat_stale_matches_python(self) -> None:
+        """WS9a (D2a pass-A follow-up, 2026-11-11): the shell's
+        HEARTBEAT_STALE_S (lib.sh:372, consumed by _txn_heartbeat_stale + the
+        launcher's comp3) and the python's TXN_HEARTBEAT_STALE_S (the single
+        reclaim mechanism) MUST be the SAME number — one mechanism, no drift."""
+        import re
+
+        src = LIB_SH.read_text(encoding="utf-8")
+        m = re.search(r"(?m)^HEARTBEAT_STALE_S=(\d+)\s*$", src)
+        assert m is not None, "HEARTBEAT_STALE_S literal not found in lib.sh"
+        assert int(m.group(1)) == uj.TXN_HEARTBEAT_STALE_S, (
+            f"shell HEARTBEAT_STALE_S={m.group(1)} != python "
+            f"TXN_HEARTBEAT_STALE_S={uj.TXN_HEARTBEAT_STALE_S} — the reclaim "
+            "mechanism must not drift across twins"
+        )
+
     # ── the disposal (claim-before-adopt) ────────────────────────────────
 
     def test_reclaim_clears_orphaned_txn_and_journals_sweep(
@@ -2907,6 +2923,19 @@ class TestStaleTxnReclaim:
         or the serving-green commit) belongs to the adopt ceremony and the
         serving-green closer lane — NOT to a bare clear."""
         txn = self._txn(owner_pid=_dead_pid(), hb_age_s=900, flipped=True)
+        uj.journal_update_field(install, "in_flight", txn)
+        assert uj.reclaim_stale_txn(install, actor="test") is None
+        assert journal_read(install).get("in_flight") == txn
+
+    def test_reclaim_leaves_a_dead_restart_txn_untouched(self, install: Path) -> None:
+        """WS9b (D2a, 2026-11-11): kind=restart is SELF-COMPLETING — the
+        restart.sh lane / daemon boot sweep owns it (D-FA4.3 / R-SR13). Even a
+        DEAD-owner restart txn (which would otherwise satisfy the reclaim
+        predicate) is left untouched; only a pre-flip PROMOTE txn is cleared
+        by this lane."""
+        txn = self._txn(owner_pid=_dead_pid(), hb_age_s=900, kind="restart")
+        # sanity: the predicate alone would call it reclaimable
+        assert uj.txn_is_reclaimable(txn)[0] is True
         uj.journal_update_field(install, "in_flight", txn)
         assert uj.reclaim_stale_txn(install, actor="test") is None
         assert journal_read(install).get("in_flight") == txn

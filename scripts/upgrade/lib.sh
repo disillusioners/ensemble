@@ -369,6 +369,14 @@ LOCK_WAIT_S_DEFAULT=15        # bounded wait for a busy lock, never forever
 # HEARTBEAT_STALE_S mirrors LOCK_STALE_S; the two are refreshed
 # together at every lock_heartbeat call site but kept as separate
 # constants so the lock vs journal paths age independently.
+#
+# D2a / pass-A follow-up (WS9a, 2026-11-11): HEARTBEAT_STALE_S is ALSO the
+# journal-txn liveness threshold consumed by the comp3 reclaim predicates
+# (`_txn_heartbeat_stale` + the launcher's `_journal_sweep`) and it MUST equal
+# the PYTHON side's `daemon.tools.upgrade_journal.TXN_HEARTBEAT_STALE_S` (the
+# single mechanism `txn_is_reclaimable` owns). The two literals are pinned to
+# agree by tests/unit/tools/test_upgrade_journal.py::test_shell_heartbeat_
+# stale_matches_python — do not change one without the other.
 HEARTBEAT_STALE_S=300
 
 # Retention (ADR-004): keep 3 releases; previous pinned.

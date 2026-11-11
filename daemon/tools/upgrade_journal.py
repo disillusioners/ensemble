@@ -510,6 +510,23 @@ def reclaim_stale_txn(install_dir: Path, *, actor: str) -> str | None:
     in_flight = data.get("in_flight")
     if not isinstance(in_flight, dict):
         return None
+    # WS9b (D2a pass-A follow-up, 2026-11-11) — the kind=restart CARVE-OUT,
+    # mirrored from the shell (lib.sh adopt_stale_txn :7557 + launcher sweep
+    # :3273). RESTART-kind txns are SELF-COMPLETING: the daemon boot sweep
+    # owns them (D-FA4.3 / R-SR13), and a promote/arm lane must never dispose
+    # of one out from under restart.sh. The reclaim here is the PRE-FLIP
+    # promote-txn clear only; a dead-owner restart txn is left to restart.sh /
+    # the boot sweep, exactly as the shell leaves it. (A live restart txn is
+    # already protected by the reclaim predicate; this carve-out protects a
+    # DEAD-owner one from a bare clear.)
+    if str(in_flight.get("kind") or "") == "restart":
+        logger.debug(
+            "upgrade_journal: reclaim_stale_txn(%s) — kind=restart is "
+            "self-completing (restart.sh / daemon boot sweep owns it) — "
+            "left untouched",
+            actor,
+        )
+        return None
     reclaimable, reason = txn_is_reclaimable(in_flight)
     if not reclaimable:
         logger.debug(
@@ -518,6 +535,17 @@ def reclaim_stale_txn(install_dir: Path, *, actor: str) -> str | None:
             reason,
         )
         return None
+    # FLIPPED carve-out (WS9c, D2a pass-A follow-up, 2026-11-11): a
+    # ``flipped: true`` txn is MID-CEREMONY — the flip already happened. Its
+    # recovery (rollback/quarantine or the serving-green commit-close) is
+    # owned by the SHELL adopt ceremony and the daemon's serving-green closer
+    # lane, NOT by a bare in-lane clear. Reclaiming it here would roll a
+    # live-ish ceremony's bookkeeping away and could let a later boot sweep
+    # distrust a landed flip — so the tool/sweep reclaim lane NEVER disposes a
+    # flipped txn (UNREACHABLE from this lane by construction, pinned by
+    # test_reclaim_leaves_a_flipped_txn_untouched). The shell's adopt_stale_txn
+    # flipped branch (lib.sh adopt_stale_txn) is the sole owner of that
+    # disposition.
     if in_flight.get("flipped") is True:
         logger.info(
             "upgrade_journal: reclaim_stale_txn(%s) — txn kind=%s target=%s is "
