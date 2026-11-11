@@ -65,6 +65,7 @@ from tests.helpers.prompt_assent_fixture import (  # noqa: F401 — fixtures
 )
 from tests.helpers.prompt_assent_tool_fixture import (
     CHANNEL_ID,
+    MESSAGE_ID,
     RELAY_INSTANCE_ID,
     SOURCE_ID,
     USER_ID,
@@ -747,3 +748,535 @@ class TestTheHourlyMismatchBudget:
         ) or True
         # The counter lives in the module's in-RAM map only.
         assert isinstance(_MISMATCH_BUDGET, dict)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Phase 3 — the acceptance path (tasks 3.1 / 3.2 / 3.6) + the provenance
+# extras. Everything below drives the WIRED surface: gate → attestation
+# assembly → svc.approve_assent/reject_assent → Phase-1 repo entrypoint →
+# D-4 hook → guarded transition.
+# ════════════════════════════════════════════════════════════════════════
+
+from types import SimpleNamespace  # noqa: E402
+
+from sqlmodel import Session, col, select  # noqa: E402
+
+from daemon.manager import InstanceManager as _RealManager  # noqa: E402
+from daemon.repositories.prompt_version.models import PromptAuditEvent
+from daemon.repositories.prompt_assent.models import PromptAssentToken
+from daemon.services.prompt_version_service import (
+    AssentRefusalError,
+    PromptVersionService,
+    is_acceptable_approver,
+)
+from tests.helpers.prompt_assent_flow import (
+    build_flow,
+    decide,
+    echo,
+    mint_for,
+)
+
+
+class _FlowHarness:
+    async def _approved_flow(self, monkeypatch):
+        """A wired flow with a minted token echoed by the human turn."""
+        monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+        flow = build_flow()
+        mint = await mint_for(flow)
+        assert "prompt_assent mint" in mint, mint
+        token = mint.split("token: ", 1)[1].splitlines()[0]
+        shown_sha = mint.split("render_sha256: ", 1)[1].splitlines()[0]
+        echo(flow, token)
+        return flow, mint, token, shown_sha
+
+    async def _decided_flow(self, monkeypatch, *, action="approve"):
+        flow, mint, token, shown_sha = await self._approved_flow(monkeypatch)
+        result = await decide(flow, action=action, token=token)
+        return flow, mint, token, shown_sha, result
+
+
+class TestTheApproveHappyPath(_FlowHarness):
+    """§4 cell 1 — the happy path with a REAL token echo."""
+
+    async def test_the_row_transitions_and_the_ledger_is_complete(
+        self, monkeypatch
+    ) -> None:
+        """pending_approval → approved; EXACTLY ONE new audit row; the
+        payload carries every provenance key; the token row is
+        ``consumed`` with ``consumed_by_message_id`` set."""
+        flow, mint, token, shown_sha, result = await self._decided_flow(monkeypatch)
+        assert "prompt_assent approve — OK" in result, result
+
+        row = flow.repo.get_version(flow.version_id)
+        assert row.state == "approved"
+
+        with Session(flow.engine) as session:
+            events = session.exec(
+                select(PromptAuditEvent).where(
+                    col(PromptAuditEvent.version_id) == flow.version_id,
+                    col(PromptAuditEvent.event_type) == "APPROVED",
+                )
+            ).all()
+        assert len(events) == 1, "exactly ONE new audit decision row"
+        payload = events[0].payload
+        for key in (
+            "approval_path",
+            "relay_agent",
+            "relay_instance_id",
+            "relay_source_id",
+            "relay_external_user_id",
+            "relay_user_id",
+            "relay_channel_id",
+            "relay_channel_type",
+            "relay_message_id",
+            "relay_source_message_id",
+            "relay_window_stamped_at",
+            "relay_window_expires_at",
+            "assented_at",
+            "token_id",
+            "token_fingerprint",
+            "render_sha256",
+            "approver_subject",
+        ):
+            assert key in payload, f"the provenance chain is missing {key!r}"
+        assert payload["approval_path"] == "chat-assent"
+        assert payload["approver_subject"] == f"{SOURCE_ID}:{USER_ID}"
+        assert payload["relay_agent"] == "ari"
+        assert payload["relay_message_id"] == MESSAGE_ID
+        assert payload["render_sha256"] == shown_sha, (
+            "the audited hash must be the hash of the EXACT shown bytes"
+        )
+
+        token_row = flow.token_repo.find_live(flow.version_id)
+        assert token_row is None, "no live token remains"
+        consumed = flow.token_repo.find_by_id(payload["token_id"])
+        assert consumed is not None and consumed.status == "consumed"
+        assert consumed.consumed_by_message_id == MESSAGE_ID
+
+    async def test_the_raw_token_appears_nowhere_in_durable_state(
+        self, monkeypatch
+    ) -> None:
+        """After a full mint → approve cycle the RAW token is absent
+        from the token table AND the audit ledger — only
+        ``sha256(token)[:12]`` fingerprints persist."""
+        flow, mint, token, _, result = await self._decided_flow(monkeypatch)
+        assert "prompt_assent approve — OK" in result, result
+        with Session(flow.engine) as session:
+            tokens = session.exec(select(PromptAssentToken)).all()
+            events = session.exec(select(PromptAuditEvent)).all()
+        blob = "".join(
+            str(getattr(row, name, ""))
+            for row in [*tokens, *events]
+            for name in vars(row)
+        ) + repr([getattr(e, "payload", None) for e in events])
+        assert token not in blob, "the RAW TOKEN leaked into durable state"
+        for row in tokens:
+            assert token.replace("-", "") not in blob.replace("-", ""), (
+                "the de-dashed token variant leaked too"
+            )
+            fingerprints = {row.token_hash[:12]}
+            assert any(
+                str(getattr(e, "payload", {}).get("token_fingerprint")) in fingerprints
+                for e in events
+            ), "the audit row must carry the fingerprint form"
+
+    async def test_the_attestation_render_hash_equals_the_mint_response_hash(
+        self, monkeypatch
+    ) -> None:
+        """Task 3.5 — the attestation's ``render_sha256`` is CARRIED from
+        the token row, which was computed at mint from the EXACT bytes
+        the mint response showed (shown == hashed == audited)."""
+        flow, mint, token, shown_sha, result = await self._decided_flow(monkeypatch)
+        assert "prompt_assent approve — OK" in result, result
+        with Session(flow.engine) as session:
+            events = session.exec(
+                select(PromptAuditEvent).where(
+                    col(PromptAuditEvent.event_type) == "APPROVED"
+                )
+            ).all()
+        assert events[0].payload["render_sha256"] == shown_sha
+        token_row = flow.token_repo.find_by_id(events[0].payload["token_id"])
+        assert token_row.render_sha256 == shown_sha
+        # NOT a prompt_versions.content_hash copy (K-7): the canonical
+        # render hashes the FULL both-sides render, which differs from
+        # the pending content's own sha.
+        import hashlib as _hl
+
+        assert token_row.render_sha256 != _hl.sha256(
+            flow.pending_row.content.encode("utf-8")
+        ).hexdigest()
+
+    async def test_reject_rides_the_same_path(self, monkeypatch) -> None:
+        """The reject verb mirrors approve: typed decision row, the
+        token consumed, ``reject_reason`` top-level (≤500 chars)."""
+        monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+        flow = build_flow()
+        mint = await mint_for(flow)
+        token = mint.split("token: ", 1)[1].splitlines()[0]
+        echo(flow, token)
+        result = await decide(flow, action="reject", token=token)
+        assert "prompt_assent reject — OK" in result, result
+        assert flow.repo.get_version(flow.version_id).state == "rejected"
+        with Session(flow.engine) as session:
+            events = session.exec(
+                select(PromptAuditEvent).where(
+                    col(PromptAuditEvent.event_type) == "REJECTED"
+                )
+            ).all()
+        assert len(events) == 1
+        assert events[0].payload["reject_reason"] == "not good enough"
+        assert flow.token_repo.find_live(flow.version_id) is None
+
+
+class TestTheFiveMandatedRefusals(_FlowHarness):
+    """§4 cells 2–6 — each asserts: typed code, NO state change, NO burn."""
+
+    async def test_wrong_token_is_refused_and_changes_nothing(
+        self, monkeypatch
+    ) -> None:
+        """Cell 2 — ``token-mismatch``; row unchanged; no burn (no row
+        exists to burn; the K-9 in-RAM budget is the counter for the
+        no-row shape)."""
+        monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+        flow = build_flow()
+        await mint_for(flow)
+        before = flow.repo.get_version(flow.version_id).state
+        live_before = flow.token_repo.find_live(flow.version_id)
+        echo(flow, UNKNOWN_TOKEN)
+        result = await decide(flow, token=UNKNOWN_TOKEN)
+        assert "reason=token-mismatch" in result, result
+        assert flow.repo.get_version(flow.version_id).state == before
+        assert flow.token_repo.find_live(flow.version_id) == live_before
+
+    async def test_expired_token_is_refused_and_not_burned(
+        self, monkeypatch
+    ) -> None:
+        """Cell 3 — ``token-expired`` (the token's own TTL — task 3.6);
+        row unchanged; the token SURVIVES (an expiry refusal never
+        burns)."""
+        result = await self._expired_via_fresh_mint(monkeypatch)
+        assert "reason=token-expired" in result, result
+
+    async def _expired_via_fresh_mint(self, monkeypatch) -> str:
+        monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+        flow = build_flow()
+        mint = await mint_for(flow)
+        token = mint.split("token: ", 1)[1].splitlines()[0]
+        live = flow.token_repo.find_live(flow.version_id)
+        with Session(flow.engine) as session:
+            stored = session.get(PromptAssentToken, live.token_id)
+            stored.ttl_expires_at = "2020-01-01T00:00:00Z"
+            session.add(stored)
+            session.commit()
+        echo(flow, token)
+        result = await decide(flow, token=token)
+        # No state change, no burn.
+        assert flow.repo.get_version(flow.version_id).state == "pending_approval"
+        assert flow.token_repo.find_by_id(live.token_id).status == "live"
+        return result
+
+    async def test_a_non_pending_row_is_refused_with_no_audit_row(
+        self, monkeypatch
+    ) -> None:
+        """Cell 4 — ``already-decided`` (carrying the current state);
+        the terminal row is untouched; NO decision audit event."""
+        monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+        flow = build_flow()
+        mint = await mint_for(flow)
+        token = mint.split("token: ", 1)[1].splitlines()[0]
+        echo(flow, token)
+        ok = await decide(flow, token=token)
+        assert "prompt_assent approve — OK" in ok, ok
+        decided_state = flow.repo.get_version(flow.version_id).state
+        with Session(flow.engine) as session:
+            before_events = session.exec(
+                select(PromptAuditEvent.event_id)
+            ).all()
+        # A SECOND approval attempt on the now-approved row.
+        flow.manager._queue_repository._row = FakeMessageRow(
+            content=f"again {token}",
+            discord_meta=build_discord_meta(),
+        )
+        again = await decide(flow, token=token)
+        assert "reason=already-decided" in again, again
+        assert flow.repo.get_version(flow.version_id).state == decided_state
+        with Session(flow.engine) as session:
+            after_events = session.exec(
+                select(PromptAuditEvent.event_id)
+            ).all()
+        assert len(after_events) == len(before_events), (
+            "the refused second decision must not write an audit row"
+        )
+
+    async def test_agent_self_approval_attempt_is_refused(
+        self, monkeypatch
+    ) -> None:
+        """Cell 5 — ``self-approval-attempt`` — belt-and-braces, NOT the
+        gate. The test asserts the CONSTRUCTION PROPERTIES, not just
+        the code:
+
+        (a) an agent-originated dispatch POPS the window
+            (``Manager.stamp_user_origin_window`` — manager.py:6132);
+        (b) the ari-EXACTLY layer-3 gate (a non-ari caller gets the
+            generic envelope);
+        (c) the daemon-derived user equality (AR-1/K-8 — pinned in
+            test_prompt_assent_user_binding.py).
+
+        The code itself is reachable at the SERVICE layer: an
+        attestation whose human source classifies as a
+        reserved-internal lane is an agent self-approval attempt by
+        construction.
+        """
+        # (a) the window lifecycle: a user-origin stamp arms; an
+        # agent-source dispatch CLEARS it (fail closed).
+        class _Win:
+            _user_origin_windows = {}
+            _user_origin_last_stamp = {}
+            source_registry = None
+
+        _Win.source_registry = _manager_fake_registry()
+        _RealManager.stamp_user_origin_window(
+            _Win, "inst-x", SOURCE_ID, "msg-1"
+        )
+        assert "inst-x" in _Win._user_origin_windows
+        _RealManager.stamp_user_origin_window(
+            _Win, "inst-x", "scheduler", "msg-2"
+        )
+        assert "inst-x" not in _Win._user_origin_windows, (
+            "an agent-originated dispatch MUST pop the window — the "
+            "agent self-approval construction property"
+        )
+        # (b) the layer-3 gate.
+        monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+        stranger = build_tools(build_flow().manager, agent_id="coder")
+        result = await stranger["prompt_assent"].ainvoke({"action": "approve"})
+        assert result.startswith(
+            "ERROR: prompt_assent is available to the ari agent only"
+        )
+        assert "reason=" not in result
+        # The code, at the service layer: a reserved-internal human
+        # source cannot ride the relay lane — refused BEFORE any
+        # token-state consultation, on a REAL minted token.
+        from dataclasses import replace
+
+        from daemon.repositories.prompt_version.assent_attestation import (
+            AssentHumanIdentity,
+        )
+        from daemon.repositories.prompt_version.repository import (
+            actor_from_assent_relay,
+        )
+        from tests.helpers.prompt_assent_fixture import build_attestation
+
+        svc_flow = build_flow()
+        await mint_for(svc_flow)
+        real = svc_flow.token_repo.find_live(svc_flow.version_id)
+        att = build_attestation(
+            version_id=svc_flow.version_id, token_id=real.token_id
+        )
+        forged = replace(
+            att,
+            human_identity=AssentHumanIdentity(
+                source_id="scheduler",
+                user_id=att.human_identity.user_id,
+                channel_id=att.human_identity.channel_id,
+                channel_type=att.human_identity.channel_type,
+                is_dm=True,
+                external_user_id=att.human_identity.external_user_id,
+            ),
+            approver_subject=f"scheduler:{att.human_identity.user_id}",
+        )
+        svc = PromptVersionService(repo=svc_flow.repo)
+        with pytest.raises(AssentRefusalError) as exc:
+            await svc.approve_assent(forged.item_binding.version_id, forged)
+        assert exc.value.code == "self-approval-attempt"
+        # The refusal preceded ANY token-state change: the token is
+        # still live and untouched.
+        still = svc_flow.token_repo.find_by_id(real.token_id)
+        assert still.status == "live" and still.attempts == 0
+
+    async def test_a_non_user_origin_turn_is_refused_and_names_the_source(
+        self, monkeypatch
+    ) -> None:
+        """Cell 6 — ``no-user-origin-turn`` naming the observed source;
+        row unchanged; no burn."""
+        monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+        flow = build_flow(window=build_window(source="scheduler"))
+        await mint_for(flow)
+        live = flow.token_repo.find_live(flow.version_id)
+        result = await decide(flow, token="CONFIRM-AAAAAAAA")
+        assert "reason=no-user-origin-turn" in result, result
+        assert "scheduler" in result, "the refusal must NAME the source"
+        assert flow.repo.get_version(flow.version_id).state == "pending_approval"
+        assert flow.token_repo.find_live(flow.version_id) == live
+
+
+def _manager_fake_registry():
+    from tests.helpers.prompt_assent_tool_fixture import FakeSourceRegistry
+
+    return FakeSourceRegistry()
+
+
+class TestTheSharedApproverPredicate:
+    """Task 3.1 — ONE rule: the session lane OR the assent-relay lane
+    with a COMPLETE attestation. The FE surface consults it; the repo
+    enforces the same semantics at its layer (two layers, one rule)."""
+
+    @staticmethod
+    def _actor(method):
+        """A lane actor carrying ONLY what the predicate reads."""
+        from types import SimpleNamespace as _NS
+
+        return _NS(auth_method=method)
+
+    def test_session_passes_without_an_attestation(self):
+        assert is_acceptable_approver(self._actor("session"), None) is True
+
+    def test_assent_relay_passes_only_with_a_complete_attestation(self):
+        from tests.helpers.prompt_assent_fixture import build_attestation
+
+        att = build_attestation()
+        assert is_acceptable_approver(self._actor("assent-relay"), att) is True
+        assert is_acceptable_approver(self._actor("assent-relay"), None) is False
+        assert is_acceptable_approver(self._actor("assent-relay"), {}) is False
+
+    def test_bearer_internal_and_unknown_are_refused(self):
+        for method in ("bearer", "internal", "forged-lane", None):
+            assert is_acceptable_approver(self._actor(method), None) is False, (
+                method
+            )
+
+    async def test_the_fe_surface_consults_the_same_rule(
+        self, sqlite_engine, pv_repo, pending_row
+    ):
+        """svc.approve/reject consult the predicate with
+        attestation=None: session passes; bearer/internal/assent-relay
+        refuse — byte-identical to the pre-lane FE behavior."""
+        svc = PromptVersionService(repo=pv_repo)
+        from daemon.repositories.prompt_version.repository import (
+            ActorContext,
+        )
+
+        session_actor = ActorContext(subject="operator", auth_method="session")
+        out = await svc.approve(pending_row.version_id, session_actor)
+        assert out.state == "approved"
+
+        flow = build_flow()
+        mint = await mint_for(flow)
+        relay_actor = None
+
+        from daemon.repositories.prompt_version.repository import (
+            actor_from_assent_relay,
+        )
+        from tests.helpers.prompt_assent_fixture import build_attestation
+
+        att = build_attestation(version_id=flow.version_id)
+        relay_actor = actor_from_assent_relay(att)
+        with pytest.raises(Exception) as exc:
+            await PromptVersionService(repo=flow.repo).approve(
+                flow.version_id, relay_actor
+            )
+        assert "HUMAN_LANE" in str(type(exc.value).__name__) or isinstance(
+            exc.value, ValueError
+        )
+
+    def test_the_repo_enforces_the_same_rule_at_its_layer(
+        self, sqlite_engine, pv_repo, pending_row
+    ):
+        """Two layers, ONE rule: repo.approve() refuses internal (F4)
+        AND refuses an assent-relay actor; repo.approve_assent() refuses
+        a session actor. The counter-mutation on either layer must
+        redden the same predicate test."""
+        from daemon.repositories.prompt_version.repository import (
+            ActorContext,
+            actor_from_assent_relay,
+        )
+        from tests.helpers.prompt_assent_fixture import build_attestation
+
+        internal = ActorContext(
+            subject="inst-1", auth_method="internal",
+            instance_id="inst-1", agent_id="ari",
+        )
+        with pytest.raises(ValueError, match="only HTTP actors"):
+            pv_repo.approve(pending_row.version_id, internal)
+
+        att = build_attestation(version_id=pending_row.version_id)
+        relay = actor_from_assent_relay(att)
+        # approve() refuses the relay actor (the attestation-bearing
+        # entrypoints are the ONLY lane) — the repo's clamp names it.
+        with pytest.raises(ValueError, match="assent-relay"):
+            pv_repo.approve(pending_row.version_id, relay)
+        session_actor = ActorContext(subject="op", auth_method="session")
+        with pytest.raises(ValueError, match="only assent-relay actors"):
+            pv_repo.approve_assent(pending_row.version_id, session_actor, att)
+
+
+class TestTheStructuralPins:
+    """Exit criteria 6/7 + O-L — executable structural pins."""
+
+    def _source(self, path: str) -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[2] / path).read_text(
+            encoding="utf-8"
+        )
+
+    def test_the_tool_module_never_calls_atomic_transition(self):
+        """Exit criterion 6 — the F2 bypass cannot exist in the tool:
+        no ``atomic_transition(`` CALL site anywhere in the module (the
+        docstring's F2-lesson PROSE is the warning, not a call)."""
+        source = self._source("daemon/tools/prompt_assent.py")
+        assert "atomic_transition(" not in source
+
+    def test_the_gate_has_exactly_one_implementation_site(self):
+        """Exit criterion 7 (O-E) — the factor-gate refusal codes are
+        EMITTED in exactly one tool module."""
+        import subprocess
+
+        out = subprocess.run(
+            [
+                "grep", "-rl", "user-origin-window-stale", "daemon/",
+                "--include=*.py",
+            ],
+            cwd=self._repo_root(), capture_output=True, text=True,
+        )
+        sites = [l for l in out.stdout.splitlines() if l.strip()]
+        assert sites == ["daemon/tools/prompt_assent.py"], sites
+
+    def test_the_render_hash_recheck_lives_only_in_the_hook(self):
+        """O-L — no second render-hash VERIFICATION site: the comparison
+        of a re-rendered hash against the token's value exists ONLY in
+        the D-4 hook module."""
+        import subprocess
+
+        out = subprocess.run(
+            [
+                "grep", "-rln", "rendered_hash", "daemon/",
+                "--include=*.py",
+            ],
+            cwd=self._repo_root(), capture_output=True, text=True,
+        )
+        sites = [l for l in out.stdout.splitlines() if l.strip()]
+        assert sites == [
+            "daemon/repositories/prompt_assent/consume_hook.py"
+        ], sites
+        service_source = self._source("daemon/services/prompt_version_service.py")
+        assert "hashlib" not in service_source.replace(
+            "# hashlib", ""
+        ), "the service must never hash — the hook is the only site"
+
+    def test_the_attestation_carries_the_token_row_hash_not_a_recompute(self):
+        """Task 3.5 — the accept seam CARRIES render_sha256 from the
+        token row; it never computes one."""
+        source = self._source("daemon/tools/prompt_assent.py")
+        seam = source.split("def _build_attestation", 1)[1].split(
+            "\ndef ", 1
+        )[0]
+        assert "render_sha256=render_sha" in seam
+        assert "hashlib" not in seam, (
+            "the attestation assembly must not compute any hash"
+        )
+
+    def _repo_root(self) -> str:
+        from pathlib import Path
+
+        return str(Path(__file__).resolve().parents[2])
