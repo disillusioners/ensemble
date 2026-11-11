@@ -321,6 +321,20 @@ UNARMED_DIR="$PF_SB/unarmed-scripts/upgrade"
 mkdir -p "$UNARMED_DIR"
 cp "$PROMOTE" "$UNARMED_DIR/promote.sh"
 cp "$LIB" "$UNARMED_DIR/lib.sh"
+# FIXTURE AMENDMENT (2026-11-11): the copied promote.sh's §1 preflight now
+# carries the D2a W1 stop-script sibling probe — it resolves
+# <scripts_dir>/../stop-ensemble.sh (BASH_SOURCE[0]'s dir, one level up) and
+# refuses rc 78 when that sibling is missing or not executable. The probe runs
+# BEFORE the watchdog token gate below, so without a sibling the copied script
+# dies at the probe and the token gate is UNREACHABLE — the E2 refusal leg then
+# measures the wrong gate and defers (the DEFERRED_RED I11 shape observed @
+# 0aae1d307). Give the fixture the sibling so the token-gate legs are
+# exercisable at all. The stub does NOT arm the watchdog: it is 2 lines and the
+# probe only STATS it (never executes it) — E2-fix below still proves the
+# L1/L2a machinery is genuinely stripped, and E2b still proves an ARMED tree
+# takes the honored branch.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$PF_SB/unarmed-scripts/stop-ensemble.sh"
+chmod +x "$PF_SB/unarmed-scripts/stop-ensemble.sh"
 # strip the phase-2 watchdog machinery: rename the L1/L2a function
 # definitions so `declare -F` cannot resolve them (the exact predicate
 # promote.sh's token check uses). Anchored at column 0 — only the
