@@ -69,6 +69,7 @@ from .tree_reader import (
 )
 from .verdict import (
     STATE_OVERCOUNTED,
+    STATE_RELEASED,
     STATE_WATCHING,
     TRIGGER_PSS_CONFIRM_UNAVAILABLE,
     TRIGGER_PSS_THRESHOLD,
@@ -324,6 +325,19 @@ class RamGuard:
             grace_ms=int(grace_ms if grace_ms is not None else int(self._grace_seconds * 1000)),
         )
         with self._lock:
+            existing = self._registry.get(tracking_id)
+            if existing is not None and existing.state != STATE_RELEASED:
+                # D-5 — a collision must not be SILENT: the overwrite
+                # loses the earlier watch with no diagnostic.  Content-free
+                # (the id + the outcome only — never argv, never an env
+                # value), and semantics-preserving for non-colliding keys
+                # (B5's counter set is frozen; no counter is bumped).
+                logger.warning(
+                    "ram-guard register: tracking id already live — "
+                    "overwriting the earlier watch (id=%s, prior_state=%s)",
+                    tracking_id,
+                    existing.state,
+                )
             self._registry[tracking_id] = record
         return record
 

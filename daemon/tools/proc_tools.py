@@ -42,23 +42,23 @@ meta.json filter via the ``proc`` category key registered by
 RAM auto-termination (arch §4.3, §8 item 3) — the proc lane's RAM
 arm.  Two disclosures ride this docstring.
 
-**§3.5 item 13 (the reaping posture):** the guard kills a GROUP. The
-daemon reaps only its DIRECT child (the pre-existing ``await
-proc.wait()``). Grandchildren are re-parented to init/PID 1, which
-reaps them; a transient ``Z`` member of a grandchild is init's
-business, not the guard's. The guard never forks and never races the
-direct-child reap. No subreaper is introduced.
+**§3.5 item 13 (the reaping posture):** The guard kills a GROUP. The
+daemon reaps only its DIRECT child (the pre-existing await proc.wait()).
+Grandchildren are re-parented to init/PID 1, which reaps them; a
+transient Z member of a grandchild is init's business, not the guard's.
+The guard never forks and never races the direct-child reap. No
+subreaper is introduced.
 
 **§3.5 item 12 (the QUERY-ONLY verdict):** ``proc_run`` returns a
 process handle before any breach can exist, so the typed
 ``ram_limit_exceeded`` envelope is delivered by the BASH lane's return
 string only. In the proc lane the verdict is surfaced by
 ``proc_status`` as a ``ram_breach:`` line plus a flat
-``ram_killed: true`` (added as lines, never replacing the block). An
-agent that never calls ``proc_status`` after a proc run will NOT see
-the RAM verdict in the ``proc_run`` result — it must poll
-``proc_status`` (the same obligation it already has for ``timed_out``
-and ``user_stopped``).
+``ram_killed: true`` (added as lines, never replacing the block).
+the verdict is QUERY-ONLY — an agent that never calls proc_status
+after a proc run will not see the RAM verdict in the proc_run result;
+it must poll proc_status, the same obligation it already has for
+timed_out and user_stopped.
 """
 
 from __future__ import annotations
@@ -219,6 +219,31 @@ _RAM_OWNERSHIP_ENV_VAR: str = _RAM_LADDER_OWNERSHIP_ENV_VAR
 # contract; the proc test pack asserts parity with the bash lane's parse.
 RAM_GUARD_ENV_SWITCH = "ENSEMBLE_RAM_GUARD"          # == bash.py's RAM_GUARD_ENV_SWITCH
 RAM_GUARD_SWITCH_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+
+# ── §3.5 honesty minimum — VERBATIM pins (D-6) ─────────────────────────────
+# The two disclosure sentences the lane's documentation must carry,
+# pinned as constants (phase4-plan.md T7/T12 — the arch's §3.5 items 12
+# and 13, markdown emphasis and backticks normalized away).  The
+# docstrings below carry them word-for-word; the test pack asserts the
+# normalized-whitespace equality so neither docstring can drift from the
+# contract text.  The RUNBOOK carry is Phase 7's.
+
+#: §3.5 item 13 — the reaping posture (verbatim).
+RAM_ITEM13_SENTENCE: str = (
+    "The guard kills a GROUP. The daemon reaps only its DIRECT child "
+    "(the pre-existing await proc.wait()). Grandchildren are re-parented "
+    "to init/PID 1, which reaps them; a transient Z member of a "
+    "grandchild is init's business, not the guard's. The guard never "
+    "forks and never races the direct-child reap."
+)
+
+#: §3.5 item 12 — the proc lane's QUERY-ONLY verdict (verbatim).
+RAM_ITEM12_SENTENCE: str = (
+    "the verdict is QUERY-ONLY — an agent that never calls proc_status "
+    "after a proc run will not see the RAM verdict in the proc_run "
+    "result; it must poll proc_status, the same obligation it already "
+    "has for timed_out and user_stopped"
+)
 
 #: The bounded wait's poll interval (arch §4.3.1 item 2) — 25 ms.
 RAM_GUARD_WAIT_POLL_SECONDS = 0.025
@@ -420,6 +445,33 @@ def _ram_lane_release(tracking_id: str | None) -> bool:
             type(exc).__name__, exc,
         )
         return False
+
+
+def _reconcile_late_ram_verdict(info: "ProcessInfo") -> None:
+    """D-2 — fold a POST-RETURN verdict into the rendered status.
+
+    The drain is the single writer that finalizes ``info.status``, and it
+    runs when the DIRECT child exits — in the leaderless shape (the shell
+    exits 0 while a grandchild balloons) the guard's kill lands LATER.
+    Without this reconciliation a ``proc_status`` block could render
+    ``status: exited`` directly above ``ram_killed: true`` —
+    self-contradicting.
+
+    The status query (and ``proc_list``) are the LATE ADOPTERS: they
+    re-run the T5 status ladder with the live verdict folded in.
+    Idempotent and direction-safe — a guard kill only ever upgrades
+    ``exited`` → ``killed``, never the reverse — and it never touches a
+    record whose kill the drain already accounted for.
+    """
+    if info.ram_killed or not getattr(info, "ram_tracking_id", ""):
+        return
+    record = _read_ram_verdict(info.ram_tracking_id)
+    if not _ram_is_kill(record):
+        return
+    info.ram_killed = True
+    # Re-run the SAME ladder the drain uses (T5): a guard kill makes
+    # ``status`` ``"killed"`` — the RAM-ness rides ``ram_killed``.
+    info.status = "killed"
 
 
 def _ram_proc_surface_lines(record, *, timed_out: bool = False) -> list[str]:
@@ -1974,6 +2026,11 @@ class BackgroundProcessManager:
                 f"{instance_id}. Use proc_list() to see active ids."
             )
 
+        # D-2 — a verdict that lands AFTER the drain (the leaderless
+        # shape) is folded in here, so the rendered block can never show
+        # ``status: exited`` above ``ram_killed: true``.
+        _reconcile_late_ram_verdict(info)
+
         parts: list[str] = [
             f"process_id: {info.process_id}",
             f"status: {info.status}",
@@ -2041,6 +2098,10 @@ class BackgroundProcessManager:
         # Stable order so repeated ``proc_list`` calls diff cleanly.
         for pid in sorted(bucket.keys()):
             info = bucket[pid]
+            # D-2 — the same late-verdict reconciliation as ``get_status``:
+            # ``proc_list`` renders ``info.status`` too, so the table must
+            # not contradict the ``proc_status`` block.
+            _reconcile_late_ram_verdict(info)
             cmd_repr = self._command_repr(info.command)
             elapsed = datetime.now(timezone.utc) - info.started_at
             secs = int(elapsed.total_seconds())
@@ -2661,12 +2722,10 @@ Returns:
     return string only. In the proc lane the verdict is surfaced by
     ``proc_status`` as a ``ram_breach:`` line plus a flat
     ``ram_killed: true`` (added as lines, never replacing the block).
-    An agent that never calls ``proc_status`` after a proc run will NOT
-    see the RAM verdict in the ``proc_run`` result — it must poll
-    ``proc_status`` (the same obligation it already has for
-    ``timed_out`` and ``user_stopped``). The guard kills a GROUP; the
-    daemon reaps only its DIRECT child; grandchildren are re-parented to
-    init/PID 1; no subreaper is introduced.
+    the verdict is QUERY-ONLY — an agent that never calls proc_status
+    after a proc run will not see the RAM verdict in the proc_run
+    result; it must poll proc_status, the same obligation it already
+    has for timed_out and user_stopped.
 """
 
     # -----------------------------------------------------------------
