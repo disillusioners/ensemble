@@ -1,11 +1,25 @@
 # bind_retry mutation matrix
 
 How to re-verify the "mutation-proven" claim for the bind-retry pins
-(`tests/test_bind_retry.py`). Every mutant below is a ONE-LINE edit to
-`daemon/services/bind_retry.py` (two touch `daemon/__main__.py`); each
-must RED the listed test(s), and `git restore <file>` must bring the
-file back byte-exact (sha256 of the file BEFORE the mutation == AFTER
-the restore).
+(`tests/test_bind_retry.py`). **13 mutants.** Twelve are ONE-LINE edits
+to `daemon/services/bind_retry.py` (three touch `daemon/__main__.py`);
+the thirteenth raises a frozen-path B component in
+`daemon/services/boot_subprocess_sweep.py`. Each must RED the listed
+test(s), and `git restore <file>` must bring the file back byte-exact.
+
+**Pre-mutation sha256 at the recorded tip** (verify your restore against
+these recorded values, not only against your own pre-edit state):
+
+```
+8a7c8e2b5559d25cf13cbca80a10cf40c5abad02e721eef8ddf9cf8560d105e3  daemon/services/bind_retry.py
+f236ada29d9468dcb801ae95379ca29a4b28ccb5e48102bf4bbbda25587b1de3  daemon/__main__.py
+ed242b053a3d5d71c425acda34c3dce9a385ace70ff0d7728379549f87ef83e0  daemon/services/boot_subprocess_sweep.py
+```
+
+(If the tip has moved since, re-record the three digests from the tree
+you are mutating — the values above belong to the tip that first landed
+this file; `git show <tip>:daemon/services/bind_retry.py | sha256sum`
+reproduces them.)
 
 ```bash
 # Venue: a scratch worktree at the branch tip, with its own venv.
@@ -14,16 +28,16 @@ cd /tmp/bindrace-mut && uv sync --frozen
 # Prove the scratch tree is what runs:
 .venv/bin/python -c "import daemon, tests; print(daemon.__file__, tests.__file__)"
 # Baseline must be GREEN:
-/tmp/scrub_env.sh .venv/bin/python -m pytest tests/test_bind_retry.py tests/test_main_entry.py -q
+.venv/bin/python -m pytest tests/test_bind_retry.py tests/test_main_entry.py -q
 # Apply the mutant (edit the named line), then:
 .venv/bin/python -m pytest tests/test_bind_retry.py tests/test_main_entry.py -q   # expect the listed REDs
 git restore daemon/services/bind_retry.py    # byte-exact restore from the object store
-sha256sum daemon/services/bind_retry.py      # == the pre-mutation digest
+sha256sum daemon/services/bind_retry.py      # == the recorded digest above
 ```
 
 | Mutant | Edit (the surviving behaviour it removes) | Must RED |
 |---|---|---|
-| M1 | In the retry loop, replace `if remaining <= 0 or attempt >= max_attempts:` with `if True:` — the bind then fails fast on the FIRST EADDRINUSE (the pre-fix uvicorn behaviour) | `test_bind_waits_out_contention_then_succeeds_once_port_is_released`, `test_backoff_ladder_is_exponential_and_capped`, `test_retry_log_line_carries_errno_host_port_attempt_and_wait` |
+| M1 | In the retry loop, replace `if remaining <= 0 or attempt >= max_attempts:` with `if True:` — the bind then fails fast on the FIRST EADDRINUSE (the pre-fix uvicorn behaviour) | `test_bind_waits_out_contention_then_succeeds_once_port_is_released`, `test_backoff_ladder_is_exponential_and_capped`, `test_serve_seam_end_to_end_binds_serves_and_stops_cleanly`, `test_retry_log_line_carries_errno_host_port_attempt_and_wait` |
 | M2 | `BIND_FAILURE_EXIT_CODE = 1` → `= 3` (a NEW exit code) | `test_bind_fails_fast_when_budget_is_zero`, `test_bind_budget_exhaustion_exits_1_not_a_new_code` |
 | M3 | In the success path, insert `sock.listen(128)` before `sock.set_inheritable(True)` — the pre-bind then queues connections instead of refusing them | `test_pre_bind_does_not_listen_so_probes_still_get_refused` |
 | M4 | In `daemon/__main__.py::_serve_with_bind_retry`, replace the `install_root_logging()` call with `pass` — the pre-bind diagnostics become unobservable | `test_serve_seam_installs_log_handlers_before_the_bind` |
@@ -35,6 +49,7 @@ sha256sum daemon/services/bind_retry.py      # == the pre-mutation digest
 | s-2 | Demote the exhaustion log from `logger.error("Bind retry budget exhausted …")` to `logger.debug(...)` — the terminal verdict becomes unobservable at ERROR level | `test_exhaustion_error_line_is_diagnosable` |
 | M-1 | In `daemon/__main__.py::_serve_with_bind_retry`, replace the `sys.exit(STARTUP_FAILURE)` on the KeyboardInterrupt-during-wait path with `return` — a SIGINT during the wait exits 0 ("clean") and the launcher does NOT restart | `test_sigint_during_the_bind_wait_exits_as_a_startup_failure` |
 | M-2 | `BIND_RETRY_MAX_WAIT_CEILING_S: float = 30.0` → `= 45.0` (the previously-shipped, unsafe ceiling) | `test_default_budget_is_within_the_hard_ceiling`, `test_ceiling_plus_frozen_boot_stays_within_the_burst_abort` |
+| B-1 | In `daemon/services/boot_subprocess_sweep.py`, `DEFAULT_TERM_GRACE_SECONDS = 5.0` → `= 12.0` — a frozen-path B component (the boot sweep's TERM grace) silently grows, shrinking the burst-abort margin | `test_frozen_path_b_components_are_pinned` (and at ≥ ~14.7s the invariant pin `test_ceiling_plus_frozen_boot_stays_within_the_burst_abort` reddens too, since B is a LIVE import) |
 
 Why each mutant discriminates: M1 reproduces the 2026-11-11
 crash-on-contention shape (`SystemExit: 1` at the bind site); M2 proves
@@ -44,4 +59,6 @@ observability contract (pre-import INFO is dropped, and the
 operator-visible boot line is preserved); M6/M7/M8/s-1 prove the
 budget-resolution semantics (clamp, fail-closed, ceiling, errno filter);
 s-2 proves the terminal verdict is observable at ERROR level; M-1/M-2
-prove the two verdict/coupling decisions the review cycle hardened.
+prove the two verdict/coupling decisions the review cycle hardened; B-1
+proves the B side of the burst-abort invariant is anchored in a live
+production import rather than a test literal.

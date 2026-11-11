@@ -252,18 +252,52 @@ def test_default_budget_is_bounded_and_not_wind_down_sized():
 
 
 # Measured frozen-path boot-to-prebind components (see the coupling note
-# above BIND_RETRY_MAX_WAIT_CEILING_S in daemon/services/bind_retry.py):
-FROZEN_B_IMPORT_LOAD_CONFIG_S = 3.2  # measured 3.11 / 3.20 / 3.31 over 3 runs
-FROZEN_B_SWEEP_GRACE_S = 5.0  # DEFAULT_TERM_GRACE_SECONDS, boot_subprocess_sweep.py:128
-FROZEN_B_DB_PREFLIGHT_S = 10.0  # BOOT_DB_TIMEOUT_S (worst case)
+# above BIND_RETRY_MAX_WAIT_CEILING_S in daemon/services/bind_retry.py).
+# LIVE by import: the boot-sweep TERM grace (its module is stdlib-only and
+# cheap to import — it must not drift silently; it is pinned NOWHERE else)
+# and the DB preflight timeout (also side-channel-pinned in
+# tests/test_main_entry.py::test_preflight_contract_constants_unchanged).
+# SNAPSHOT (measured, not re-derived): the import + load_config cost.
+from daemon.services.boot_subprocess_sweep import (  # noqa: E402
+    DEFAULT_TERM_GRACE_SECONDS,
+)
+
+FROZEN_B_IMPORT_LOAD_CONFIG_S = 3.3  # SNAPSHOT: worst of 3.11 / 3.20 / 3.31 over 3 runs
+FROZEN_B_SWEEP_GRACE_S = float(DEFAULT_TERM_GRACE_SECONDS)  # LIVE import
+FROZEN_B_DB_PREFLIGHT_S = 10.0  # BOOT_DB_TIMEOUT_S (worst case; side-channel pin)
 FROZEN_B_MAX_S = (
     FROZEN_B_IMPORT_LOAD_CONFIG_S
     + FROZEN_B_SWEEP_GRACE_S
     + FROZEN_B_DB_PREFLIGHT_S
-)  # ~18.3s
+)  # 18.3s worst case — the authoritative figure (the 18.2 median-import
+# variant was an inconsistency; worst case is what the invariant must use)
 LAUNCHER_BURST_WINDOW_S = 600.0  # launcher.sh:58 BUDGET_WINDOW_S
 LAUNCHER_BURST_WAITS_S = 310.0  # 10+20+40+80+160 — the 5 waits between 6 crashes
 LAUNCHER_U_LIMIT_S = (LAUNCHER_BURST_WINDOW_S - LAUNCHER_BURST_WAITS_S) / 5.0  # 58s
+
+
+def test_frozen_path_b_components_are_pinned():
+    """The frozen-path B components cannot drift silently.
+
+    ``DEFAULT_TERM_GRACE_SECONDS`` (5.0) is pinned NOWHERE else in the
+    suite, yet it is a direct term in the burst-abort margin — a silent
+    rise there would shrink the margin while the invariant pin stayed
+    green (its B side uses this module-level value). It is imported LIVE
+    from ``daemon/services/boot_subprocess_sweep.py`` above, so this pin
+    reddens the moment it moves. ``BOOT_DB_TIMEOUT_S`` is pinned by the
+    ``tests/test_main_entry.py`` side channel; asserted here too so the
+    B triple is anchored in one place.
+    """
+    from daemon.constants import BOOT_DB_TIMEOUT_S
+    from daemon.services.boot_subprocess_sweep import (
+        DEFAULT_TERM_GRACE_SECONDS as live_grace,
+    )
+
+    assert live_grace == FROZEN_B_SWEEP_GRACE_S == 5.0
+    assert BOOT_DB_TIMEOUT_S == FROZEN_B_DB_PREFLIGHT_S == 10
+    # Worst case (the authoritative figure used by the invariant pin):
+    # 3.3 (import snapshot, worst of 3.11/3.20/3.31) + 5.0 + 10.0 = 18.3.
+    assert FROZEN_B_MAX_S == pytest.approx(18.3, abs=0.05)
 
 
 def test_default_budget_is_within_the_hard_ceiling():
@@ -290,12 +324,25 @@ def test_default_budget_is_within_the_hard_ceiling():
 
 
 def test_ceiling_plus_frozen_boot_stays_within_the_burst_abort():
-    """INVARIANT: ceiling + measured frozen-path B must stay <= U_limit.
+    """INVARIANT: the ceiling + the frozen-path B stays <= U_limit (58s).
 
     ``U ~= B + budget`` and the launcher's burst abort is reachable only
-    while ``U <= 58s``. If ANY of these moves — the ceiling, the import
-    cost, the boot-sweep TERM grace, or the DB preflight timeout — this
-    pin REDS instead of silently disabling the burst abort.
+    while ``U <= 58s``.
+
+    WHAT IS LIVE HERE, EXACTLY (do not overclaim):
+    * the CEILING side is live — imported from production
+      (``BIND_RETRY_MAX_WAIT_CEILING_S``), so a raise reddens this pin;
+    * the B side is ``FROZEN_B_MAX_S``, whose TERM-grace component is a
+      LIVE import of ``DEFAULT_TERM_GRACE_SECONDS`` and whose DB-preflight
+      component is side-channel-pinned in ``tests/test_main_entry.py``
+      and re-asserted by ``test_frozen_path_b_components_are_pinned``;
+    * the import+load_config component is a MEASURED SNAPSHOT — it is
+      pinned by the companion test, not re-derived here.
+
+    So this pin reddens on a ceiling rise OR on a rise in any B component
+    that a pin tracks; it does NOT detect an arbitrary change to a B
+    component no pin covers (there is exactly one such component, the
+    import snapshot — that is why the companion pin exists).
     """
     from daemon.services.bind_retry import BIND_RETRY_MAX_WAIT_CEILING_S
 

@@ -150,10 +150,11 @@ logger = logging.getLogger(__name__)
 #   startup, no teardown) => U ~= boot-to-prebind + budget. THE CEILING IS
 #   SET EQUAL TO THE DEFAULT (30.0) so the invariant holds UNCONDITIONALLY:
 #   on a FROZEN install the measured boot-to-prebind B is ~18.3s worst-case
-#   (import + load_config ~3.2s + the boot sweep's TERM grace window 5.0s,
-#   daemon/services/boot_subprocess_sweep.py:128 DEFAULT_TERM_GRACE_SECONDS,
-#   once any candidate exists + the DB preflight <=10s, BOOT_DB_TIMEOUT_S),
-#   so U ~= 30 + 18.3 = 48.3s <= 58s — reachable with margin. A ceiling of
+#   (import + load_config ~3.3s worst of 3 runs + the boot sweep's TERM
+#   grace window 5.0s, daemon/services/boot_subprocess_sweep.py:128
+#   DEFAULT_TERM_GRACE_SECONDS, once any candidate exists + the DB
+#   preflight <=10s, BOOT_DB_TIMEOUT_S), so U ~= 30 + 18.3 = 48.3s <= 58s
+#   — reachable with margin. A ceiling of
 #   45s would give B_max = 58 - 45 = 13s < 18.3s => U ~= 63.3s => the abort
 #   becomes UNREACHABLE and the supervisor's safety net goes dark again.
 #   Raising the ceiling is therefore forbidden by the clamp, not by policy.
