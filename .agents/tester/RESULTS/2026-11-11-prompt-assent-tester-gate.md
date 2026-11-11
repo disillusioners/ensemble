@@ -341,5 +341,6 @@ Then re-run the 2 cells (plus the 2 lane packs for safety) — minutes, not anot
 | `.agents/tester/RESULTS/2026-11-11-prompt-assent-tester-gate.md` | this report (new) |
 | `.agents/tester/PACKS.md` | registered the two previously-unregistered lane packs (`prompt_assent_matrix_test`, `prompt_assent_phase3_unit_test`) with scope, timeout, last-run and status — PACKS.md integrity duty (a pack script that is not registered never enters the pack runner) |
 
-Docs-only commit SHA: **PENDING** (recorded below on commit).
-The 3 pre-existing dirty `.agents/` files (`.agents/approver/active.md`, `.agents/tidier/notes.md`, `.agents/approver/prompt-assent-tracking.md`) are approver/tidier-owned and were **not** staged, swept, or modified by this gate.
+**Docs-only commit:** `f2b0c2a1b16e2e1da4f65a601a3b68de1328b029` — subject *"docs(prompt-assent): tester gate report — NO-GO on 2 net-new cross-lane pin reds (seal re-pin classification + memoir migration-census pin), lane packs 249+107 green, PG seams + real-daemon E2E green, K-3 live probe outstanding"*; exactly **2 files / +348 lines** (`.agents/tester/PACKS.md` +3 registration rows, this report +345). Local only — **not pushed** (pushing is the leader's call).
+The 3 pre-existing dirty `.agents/` files (`.agents/approver/active.md`, `.agents/tidier/notes.md`, `.agents/approver/prompt-assent-tracking.md`) are approver/tidier-owned and were **not** staged, swept, or modified by this gate — sha256 byte-identity verified pre/post commit (`active.md` `3cbca39d…d75`, `tidier/notes.md` `3906506e…cf9`, `prompt-assent-tracking.md` `32da877e…535`).
+*(This line was added in a follow-up docs-only commit — a commit cannot contain its own SHA.)*
