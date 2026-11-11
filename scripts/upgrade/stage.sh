@@ -470,13 +470,13 @@ chmod +x "$STAGE_TMP/launcher.sh"
 # scripts/ trees were out-of-band copies — NO packaging lane shipped them:
 # the staged payload carried no scripts/ at all and `make install` shipped
 # only scripts/watchdog-watcher.sh into <install_dir>/scripts/
-# (Makefile:375-377). The promote stop step resolves its stop script via
-# TWO legs (lib.sh stop_via_stop_script): the SIBLING one level up of the
-# calling script's dir (lib.sh:4849 anchors BASH_SOURCE[1] — the leg is
-# <scripts_dir>/../stop-ensemble.sh) and the $(pwd)/scripts/stop-ensemble.sh
-# fallback (lib.sh:4852). BOTH miss in an install layout ⇒ bash: No such
-# file or directory ⇒ rc=127 ⇒ the promote aborts before the flip (the
-# v0.29.16 halt class). The family lands at PAYLOAD-RELATIVE paths
+# (Makefile:375-377). The promote stop step resolves its stop script as the
+# SIBLING one level up of the calling script's dir (lib.sh
+# stop_via_stop_script — the W4 single source of truth:
+# <scripts_dir>/../stop-ensemble.sh; the old $(pwd)/scripts fallback is
+# DELETED). A missing sibling aborts mid-stop ⇒ bash: No such file or
+# directory ⇒ rc=127 ⇒ the promote aborts before the flip (the v0.29.16
+# halt class). The family lands at PAYLOAD-RELATIVE paths
 # (scripts/upgrade/* + scripts/stop-ensemble.sh + scripts/install-dir-guard.sh)
 # so the sibling relation the stop step resolves holds INSIDE the payload
 # as well as inside a flat install (docs/deployment.md:800 anticipates

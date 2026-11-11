@@ -2992,21 +2992,19 @@ Returns:
                     f"per-env lock held (run_id={busy_run or held_run or '?'}) — "
                     "retry via upgrade_status",
                 )
-            # Check 1b (W2, 2026-11-11) — the stop-script SIBLING gate, the
-            # restart lane's mirror of PR1's promote-arm gate (the same
-            # exposure: the restart stop step resolves its stop script via
-            # lib.sh ``stop_via_stop_script`` → the SIBLING one level up of
-            # the CALLING script's dir — restart.sh lives in scripts/upgrade/,
-            # so the leg is ``<scripts_dir>/../stop-ensemble.sh`` — then the
-            # ``$(pwd)/scripts/stop-ensemble.sh`` fallback). BOTH legs miss
-            # in the install layout (make install ships only
-            # watchdog-watcher.sh into <install_dir>/scripts/ — Makefile:
-            # 375-377 — and the executor's cwd is the install dir) ⇒ bash:
-            # No such file or directory → rc=127 → the restart ceremony
-            # aborts MID-STOP. The gate refuses BEFORE any mutation. The
-            # EXECUTABLE requirement is CONSERVATIVE HARDENING (every
-            # consumer invokes ``bash stop-ensemble.sh``; lib.sh itself only
-            # tests -f) — the MISSING sibling is what kills the run.
+            # Check 1b (W2, 2026-11-11; H2 tidier round 3) — the stop-script
+            # SIBLING gate, the restart lane's mirror of PR1's promote-arm
+            # gate. lib.sh ``stop_via_stop_script`` resolves the stop script
+            # as the SIBLING one level up of the CALLING script's dir (W4:
+            # restart.sh lives in scripts/upgrade/, so the leg is
+            # ``<scripts_dir>/../stop-ensemble.sh``) — the single source of
+            # truth; the old ``$(pwd)/scripts/stop-ensemble.sh`` fallback is
+            # DELETED (it was dead in the install layout and masked a
+            # missing sibling with rc=127, the v0.29.16 2026-11-11 halt
+            # class). The gate refuses BEFORE any mutation. The EXECUTABLE
+            # requirement is CONSERVATIVE HARDENING (every consumer invokes
+            # ``bash stop-ensemble.sh``; lib.sh's own resolution needs only
+            # the file) — the MISSING sibling is what kills the run.
             stop_script = scripts_dir.parent / "stop-ensemble.sh"
             try:
                 stop_script_ready = stop_script.is_file() and os.access(
@@ -3024,19 +3022,16 @@ Returns:
                     "conservative hardening: every consumer invokes "
                     "`bash stop-ensemble.sh`, so exec is NOT a runtime "
                     "requirement; lib.sh itself only tests -f) — the "
-                    "restart stop step resolves TWO legs (lib.sh "
-                    "stop_via_stop_script: the sibling one level up of the "
-                    "CALLING script's dir, <scripts_dir>/../stop-ensemble.sh, "
-                    "then the $(pwd)/scripts/stop-ensemble.sh fallback) and "
-                    "BOTH must miss for the abort (bash: No such file or "
-                    "directory → rc=127, the v0.29.16 2026-11-11 halt "
-                    "class); the fallback ALSO misses in install layouts — "
-                    "make install ships only watchdog-watcher.sh into "
-                    "<install_dir>/scripts/ (Makefile:375-377), so the "
-                    "executor's cwd holds no stop-ensemble.sh; fix: copy the "
-                    f"repo scripts/stop-ensemble.sh to {stop_script} and "
-                    "chmod +x — the restart is NOT scheduled; zero pipeline "
-                    "mutation",
+                    "restart stop step resolves the SIBLING one level up "
+                    "of the CALLING script's dir (lib.sh "
+                    "stop_via_stop_script: <scripts_dir>/../stop-ensemble.sh "
+                    "— the W4 single source of truth; the old "
+                    "$(pwd)/scripts fallback is DELETED) and a missing "
+                    "sibling aborts rc=127 MID-STOP (bash: No such file or "
+                    "directory — the v0.29.16 2026-11-11 halt class); fix: "
+                    f"copy the repo scripts/stop-ensemble.sh to {stop_script} "
+                    "and chmod +x — the restart is NOT scheduled; zero "
+                    "pipeline mutation",
                 )
             restart_armed_ok = False
             try:
@@ -3315,8 +3310,9 @@ could not be resolved to an absolute path — a broken
 ENSEMBLE_UPGRADE_SCRIPTS_DIR pin; fail-closed, never a generic crash),
 preflight-stop-script-missing (the arm preflight's stop-script sibling is
 missing or not executable — the v0.29.16 2026-11-11 halt class: the restart
-stop step resolves TWO legs and BOTH must miss for the abort; fail-closed
-BEFORE any journal mutation — the restart is NOT scheduled),
+stop step resolves the SIBLING leg only (the old fallback is deleted); a
+missing sibling aborts the stop; fail-closed BEFORE any journal mutation —
+the restart is NOT scheduled),
 no-staged-install, journal-unavailable.
 Refused live attempts record a restart_audits row (outcome=refused +
 refusal_token) under the lock; the pipeline journal itself stays
@@ -3792,29 +3788,22 @@ never decides go/rollback).
                     "checkout)",
                 )
             # Check 1b — stop-script sibling present + executable (the
-            # v0.29.16 promote-halt class, 2026-11-11). The promote stop
-            # step resolves its stop script via TWO legs (lib.sh
-            # ``stop_via_stop_script``): (1) the SIBLING one level up of the
-            # CALLING script's dir — lib.sh:4849 anchors ``BASH_SOURCE[1]``
-            # (promote.sh's dir), so the leg is
-            # ``<scripts_dir>/../stop-ensemble.sh``; (2) the
-            # ``$(pwd)/scripts/stop-ensemble.sh`` fallback (lib.sh:4852) for
-            # a copied tree. BOTH legs must miss for the abort: the fallback
-            # ALSO misses in install layouts — ``make install`` ships only
-            # ``watchdog-watcher.sh`` into ``<install_dir>/scripts/``
-            # (Makefile:375-377), and ``$(pwd)`` at promote time is the
-            # executor's cwd (the install dir), so that leg holds no
-            # stop-ensemble.sh either → bash: No such file or directory →
-            # rc=127 → B4 abort, flip never reached. The exec-bit
-            # requirement is CONSERVATIVE HARDENING, not a runtime need:
-            # every consumer invokes ``bash "$stop_script"`` (lib.sh
-            # stop_via_stop_script, deploy.sh, Makefile stop/stop-by-port/
-            # uninstall) and lib.sh itself tests only ``-f`` — the gate
-            # simply holds the sibling to a launcher-grade contract. No
-            # packaging lane ships that file, so the canonical source is the
-            # repo checkout's ``scripts/stop-ensemble.sh`` — copy it to the
-            # expected path + chmod +x. Fail-closed: ANY probe error counts
-            # as missing (the refusal is the safe direction on both legs).
+            # v0.29.16 promote-halt class, 2026-11-11; H2 tidier round 3).
+            # lib.sh ``stop_via_stop_script`` resolves the stop script as the
+            # SIBLING one level up of the CALLING script's dir — W4's single
+            # source of truth (promote.sh lives in scripts/upgrade/, so the
+            # leg is ``<scripts_dir>/../stop-ensemble.sh``); the old
+            # ``$(pwd)/scripts/stop-ensemble.sh`` fallback is DELETED (dead
+            # in the install layout, and it masked a missing sibling with
+            # rc=127). A missing sibling aborts MID-STOP → B4 abort, flip
+            # never reached. The exec-bit requirement is CONSERVATIVE
+            # HARDENING, not a runtime need: every consumer invokes ``bash
+            # "$stop_script"`` and lib.sh's own resolution needs only the
+            # file — the gate holds the sibling to a launcher-grade
+            # contract. No packaging lane ships that file, so the canonical
+            # source is the repo checkout's ``scripts/stop-ensemble.sh`` —
+            # copy it to the expected path + chmod +x. Fail-closed: ANY
+            # probe error counts as missing.
             stop_script = scripts_dir.parent / "stop-ensemble.sh"
             try:
                 stop_script_ready = stop_script.is_file() and os.access(
@@ -3832,17 +3821,14 @@ never decides go/rollback).
                     "conservative hardening: every consumer invokes "
                     "`bash stop-ensemble.sh`, so exec is NOT a runtime "
                     "requirement; lib.sh itself only tests -f) — the "
-                    "promote stop step resolves TWO legs (lib.sh "
-                    "stop_via_stop_script: the sibling one level up of the "
-                    "CALLING script's dir, <scripts_dir>/../stop-ensemble.sh, "
-                    "then the $(pwd)/scripts/stop-ensemble.sh fallback) and "
-                    "BOTH must miss for the abort (bash: No such file or "
-                    "directory → rc=127, the v0.29.16 2026-11-11 halt "
-                    "class); the fallback ALSO misses in install layouts — "
-                    "make install ships only watchdog-watcher.sh into "
-                    "<install_dir>/scripts/ (Makefile:375-377), so the "
-                    "executor's cwd holds no stop-ensemble.sh; fix: copy the "
-                    f"repo scripts/stop-ensemble.sh to {stop_script} and "
+                    "promote stop step resolves the SIBLING one level up "
+                    "of the CALLING script's dir (lib.sh "
+                    "stop_via_stop_script: <scripts_dir>/../stop-ensemble.sh "
+                    "— the W4 single source of truth; the old "
+                    "$(pwd)/scripts fallback is DELETED) and a missing "
+                    "sibling aborts rc=127 MID-STOP (bash: No such file or "
+                    "directory — the v0.29.16 2026-11-11 halt class); fix: "
+                    f"copy the repo scripts/stop-ensemble.sh to {stop_script} "
                     "chmod +x — nonce NOT burned",
                 )
             # Check 2 — argv/env construction works. The shared verified-arm
@@ -4124,8 +4110,9 @@ scripts-dir-unresolvable (the scripts dir could not be resolved to an
 absolute path — a broken ENSEMBLE_UPGRADE_SCRIPTS_DIR pin; fail-closed,
 never a generic crash), preflight-stop-script-missing (the arm
 preflight's stop-script sibling is missing or not executable — the
-v0.29.16 2026-11-11 promote-halt class: the stop step resolves TWO legs
-and BOTH must miss for the abort; fail-closed BEFORE the nonce burn),
+v0.29.16 2026-11-11 promote-halt class: the stop step resolves the SIBLING
+leg only (the old fallback is deleted); a missing sibling aborts the stop;
+fail-closed BEFORE the nonce burn),
 preflight-argv-unconstructable, preflight-argv-malformed (the executor
 argv/env could not be constructed — fail-closed BEFORE the nonce burn),
 no-staged-install, journal-unavailable (install dir

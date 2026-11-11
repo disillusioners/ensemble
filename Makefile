@@ -381,10 +381,10 @@ install: install-dir-guard pyinstaller
 	# canonical payload-relative paths (scripts/upgrade/* +
 	# scripts/stop-ensemble.sh + scripts/install-dir-guard.sh). Until this,
 	# the install dir carried ONLY watchdog-watcher.sh under scripts/ — the
-	# promote stop step resolves its stop script via TWO legs (lib.sh
-	# stop_via_stop_script: the SIBLING one level up of the calling script's
-	# dir — <scripts_dir>/../stop-ensemble.sh — and the
-	# $(pwd)/scripts/stop-ensemble.sh fallback) and BOTH missed => rc=127 =>
+	# promote stop step resolves its stop script as the SIBLING one level up
+	# of the calling script's dir (lib.sh stop_via_stop_script:
+	# <scripts_dir>/../stop-ensemble.sh — the W4 single source of truth; the
+	# old $(pwd)/scripts fallback is deleted) and a missing sibling => rc=127 =>
 	# the promote aborted before the flip (the v0.29.16 halt class). The
 	# canonical list + the placement primitives live in
 	# scripts/upgrade/executor_family.sh — the SAME file the release payload

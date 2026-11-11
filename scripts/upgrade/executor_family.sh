@@ -11,12 +11,11 @@
 #   lane shipped them: the staged release payload had no scripts/ at all, and
 #   `make install` shipped only scripts/watchdog-watcher.sh into
 #   <install_dir>/scripts/ (Makefile:375-377). The promote stop step
-#   resolves its stop script through TWO legs (lib.sh stop_via_stop_script):
-#     (1) the SIBLING one level up of the CALLING script's dir —
-#         lib.sh:4849 anchors BASH_SOURCE[1] (promote.sh's dir), so the leg
-#         is <scripts_dir>/../stop-ensemble.sh;
-#     (2) the $(pwd)/scripts/stop-ensemble.sh fallback (lib.sh:4852).
-#   BOTH legs miss in an install layout ⇒ bash: No such file or directory ⇒
+#   resolves its stop script as the SIBLING one level up of the CALLING
+#   script's dir (lib.sh stop_via_stop_script — the W4 single source of
+#   truth: <scripts_dir>/../stop-ensemble.sh; the old $(pwd)/scripts
+#   fallback is DELETED). A missing sibling aborts mid-stop ⇒ bash: No such
+#   file or directory ⇒
 #   rc=127 ⇒ the promote aborts before the flip (B4). PR1 (edbf3c92f) closed
 #   the DAEMON side of that class with a fail-closed arm preflight; THIS file
 #   closes the SHIPPING side — the executor family now travels with the

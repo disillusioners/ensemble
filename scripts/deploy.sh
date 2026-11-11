@@ -353,10 +353,10 @@ run "chmod launcher.sh"         -- chmod +x "$INSTALL_DIR/launcher.sh"
 # paths (scripts/upgrade/* + scripts/stop-ensemble.sh +
 # scripts/install-dir-guard.sh). The install dir used to carry ONLY
 # watchdog-watcher.sh under scripts/, so the promote stop step resolved NO
-# stop script (both legs missed — lib.sh stop_via_stop_script: the sibling
-# one level up of the calling script's dir, then the
-# $(pwd)/scripts/stop-ensemble.sh fallback) ⇒ rc=127 ⇒ the promote aborted
-# before the flip (the v0.29.16 halt class). The canonical list + the
+# stop script (lib.sh stop_via_stop_script: the SIBLING one level up of the
+# calling script's dir — the W4 single source of truth; the old
+# $(pwd)/scripts fallback is deleted) ⇒ rc=127 ⇒ the promote aborted before
+# the flip (the v0.29.16 halt class). The canonical list + the
 # placement primitives live in scripts/upgrade/executor_family.sh — the
 # SAME file the release payload assembler uses.
 run "stage executor script family (scripts/upgrade + stop-ensemble + install-dir-guard)" -- \

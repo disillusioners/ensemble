@@ -3089,9 +3089,9 @@ class TestArmPreflightStopScriptSibling:
         assert "scripts/stop-ensemble.sh" in out, (
             f"the refusal must name the canonical repo source: {out}"
         )
-        assert "$(pwd)/scripts/stop-ensemble.sh" in out, (
-            "the refusal must name the FALLBACK resolution leg too (both "
-            f"legs must miss for the abort): {out}"
+        assert "sibling" in out and "stop-ensemble.sh" in out, (
+            "the refusal must name the SIBLING resolution leg (W4: the old "
+            f"$(pwd)/scripts fallback is deleted — sibling-only world): {out}"
         )
         assert "watchdog-watcher.sh" in out, (
             "the refusal must say why the fallback misses in install "

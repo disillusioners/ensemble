@@ -9,7 +9,9 @@
 #   stop script via TWO legs (lib.sh stop_via_stop_script):
 #     (1) the SIBLING one level up of the CALLING script's dir — lib.sh:4849
 #         anchors BASH_SOURCE[1] (promote.sh's dir) ⇒ <scripts_dir>/../stop-ensemble.sh
-#     (2) the $(pwd)/scripts/stop-ensemble.sh fallback — lib.sh:4852
+#     (2) [RETIRED by W4] the old $(pwd)/scripts fallback — the SIBLING leg
+#         is now the single source of truth; the fixtures below assert the
+#         sibling-only world
 #   BOTH legs miss in an install layout ⇒ bash: No such file or directory ⇒
 #   rc=127 ⇒ the promote aborts before the flip. PR1 (edbf3c92f) closed the
 #   DAEMON side (a fail-closed arm preflight); THIS suite pins the SHIPPING
@@ -168,9 +170,11 @@ STOP_LEG_SIBLING="$PAYLOAD/scripts/upgrade/../stop-ensemble.sh"
 [ -f "$STOP_LEG_SIBLING" ] && _pass || _fail "stop leg 1 (sibling): $STOP_LEG_SIBLING present"
 [ -x "$STOP_LEG_SIBLING" ] && _pass || _fail "stop leg 1 (sibling): executable (PR1 arm-gate predicate)"
 
-# 2c. the second stop leg: $(pwd)/scripts/stop-ensemble.sh — the layout that
-#     makes the fallback hold too, when the executor's cwd is the install root
-[ -f "$PAYLOAD/scripts/stop-ensemble.sh" ] && _pass || _fail "stop leg 2 (pwd fallback): scripts/stop-ensemble.sh present"
+# 2c. the sibling file at its PAYLOAD-ROOT path — scripts/stop-ensemble.sh is
+#     the SAME file 2b's sibling leg resolves to (…/upgrade/../stop-ensemble.sh);
+#     asserted at the root path too because the family list ships it there.
+#     (W4 deleted the old $(pwd)/scripts fallback — there is no second leg.)
+[ -f "$PAYLOAD/scripts/stop-ensemble.sh" ] && _pass || _fail "payload root: scripts/stop-ensemble.sh present (the sibling target)"
 
 # 2d. NO PLIST anywhere in the payload tree (the operator-side plists must
 #     never ride along with a release payload)
