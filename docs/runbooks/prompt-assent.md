@@ -35,7 +35,19 @@ One tool, four verbs (`action ∈ {list, mint, approve, reject}`):
 - **Unset** ⇒ the lane is off ⇒ every verb refuses `lane-disabled`.
 - **Invalid** (anything that is not a boolean spelling: `1/true/yes/on/
   enabled` or `0/false/no/off/disabled`, case-insensitive) ⇒ **fails
-  CLOSED** — off, never open, even if the boot config had armed the lane.
+  CLOSED at the TOOL layer** — off, never open, even if the boot config
+  had armed the lane (the call-time resolver falls back to the shared
+  `PROMPT_ASSENT_DEFAULT_ENABLED` = OFF and never raises). **But the BOOT
+  layer RAISES**: `PromptAssentConfig` is a pydantic settings model
+  (`daemon/config.py:3246`), so an invalid value is a `ValidationError`
+  when the config is constructed at boot — the daemon does NOT start
+  with a typo'd value (the `prompt_assent` section is built by
+  `default_factory` at `daemon/config.py:6913`; `load_config()` runs at
+  `daemon/api.py:614`). House parity: `NotifyUserConfig` behaves the
+  same way — an invalid `ENSEMBLE_NOTIFY_USER_ENABLED` also raises at
+  boot. So a typo is a LOUD boot failure, not a silent off-state:
+  fix the spelling and restart. (Unset is NOT invalid — it is the
+  default-OFF case above and boots cleanly.)
 - Arming is **ONE env var per environment — no code change**:
 
   ```
@@ -183,7 +195,9 @@ ONE typed envelope):
 | `no-user-origin-turn` (names the observed source) | the relay has no live factor-2 window — the "yes" did not come through a user-origin source, or the daemon restarted since (the window is in-memory) | ask again in a fresh message from the bound chat source; a restart between mint and reply always requires a fresh turn |
 | `user-origin-window-expired` | more than 60 min since the window was stamped | ask again in a fresh message |
 | `user-origin-window-stale` | the window was stamped > 10 min ago (the D-6 freshness bound; silent resume keeps an OLD stamp — this is the anti-replay bound doing its job) | ask again in a fresh message |
-| `token-content-mismatch` (factor 3g, in-message) | the token was not in the HUMAN's message content (only in the tool args), or the echoed spelling did not normalize | have the Emperor echo the token verbatim (grouped or raw both accepted) in his own reply |
+| `token-content-mismatch` — ECHO mismatch (factor 3g) | the token was not in the HUMAN's message content (only in the tool args), or the echoed spelling did not normalize — the envelope says "this turn's human message does not carry the token" | have the Emperor echo the token verbatim (grouped or raw both accepted) in his own reply |
+| `token-content-mismatch` — RENDER drift (D-4/O-L, in-transaction) | the canonical render moved since the mint — the pending or effective side changed underneath the outstanding token — the envelope says "the canonical render moved since mint (pending or effective side changed)" | re-mint against the CURRENT content (the mint re-shows the diff against the current render) and approve with the fresh token — the outstanding token does not match the moved render |
+| `token-content-mismatch` — budget asymmetry | this code consumes the IN-RAM hourly mismatch budget (K-9/D-3b — default 10/h per relay instance) but NOT the durable per-token `attempts` counter. The RENDER-drift cause raises INSIDE the guarded transaction, and the durable counter can never share that transaction (the D-4 blocking rule — a counter inside it would be reset by the rollback); the ECHO cause is refused at the factor-gate layer, before the token row is resolved | read the hourly budget as the ONLY bound this code moves — it cannot lock a token out durably (`token-locked` is unreachable from this code) |
 | `token-mismatch` / `token-item-mismatch` | the token does not match this item / any live row | re-mint (re-shows the diff); check the version_id |
 | `token-expired` | > 60 min since mint | re-mint |
 | `token-already-used` | this token already completed a decision | check the audit ledger — the decision already landed |
