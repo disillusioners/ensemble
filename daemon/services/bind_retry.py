@@ -320,7 +320,7 @@ def bind_socket_with_retry(
     ``BIND_FAILURE_EXIT_CODE`` — the same verdict uvicorn gave.
 
     The budget is the EFFECTIVE one: ``resolve_max_wait_s`` clamps a
-    request to ``BIND_RETRY_MAX_WAIT_CEILING_S`` (45s — the coupling that
+    request to ``BIND_RETRY_MAX_WAIT_CEILING_S`` (30s — the coupling that
     keeps the launcher's burst abort reachable) and fails a malformed or
     negative request closed to fail-fast. The wait ladder can never sleep
     past the remaining budget (``wait = min(backoff, remaining)``), and
