@@ -21,8 +21,7 @@ two new codes), **D-9** (threads).
 
 > **THE TYPED-OUTCOME CONTRACT (B2 — owned by Phase 1 T1.4; unit matrix by T1.5).**
 > `designation_outcome(map, discord_meta, user_id) -> DesignationResult` — a typed result with
-> the **seven neutral variants** (**D-18**: `PASS | NOT_DESIGNATED | GROUP_DM_SHAPE | APPROVER_NOT_PINNED | ABSENT_DISCRIMINATOR | ABSENT_IDENTITY | CONFIG_INVALID`) — NOT side-specific codes (`designation-config-invalid`, `mint-requires-private-channel`,
-> `extraction-incomplete`, `approver-not-pinned`) **plus a PASS variant**. The function owns the
+> the **seven neutral variants** (**D-18**: `PASS | NOT_DESIGNATED | GROUP_DM_SHAPE | APPROVER_NOT_PINNED | ABSENT_DISCRIMINATOR | ABSENT_IDENTITY | CONFIG_INVALID`) — **NOT side-specific codes**: the per-side mapping tables (**D-18**) apply `mint-requires-private-channel` / `approver-not-pinned` / `extraction-incomplete` / `designation-config-invalid` at the **gate boundary**; the function returns neutral legs only. The function owns the
 > leg ordering and returns the typed result; **the gates receive only the typed result** and never
 > re-implement the ordering. **T1.4 owns the contract; T1.5 owns its unit matrix.**
 >
@@ -41,17 +40,20 @@ two new codes), **D-9** (threads).
 ```
 proven_1to1   := (is_dm is True) and (is_group_dm is False)        # identity checks only
 
-if proven_1to1:                                    → MINT   (the map is NEVER read)
-if is_group_dm is True:                            → REFUSE mint-requires-private-channel
-if is_dm is not False:                             → REFUSE mint-requires-private-channel   # absent / non-bool → fail closed
+if proven_1to1:                                    → PASS   (the map is NEVER read)
+if is_group_dm is True:                            → GROUP_DM_SHAPE
+if is_dm is not False:                             → ABSENT_DISCRIMINATOR   # absent / non-bool → fail closed
 # is_dm is False ⇒ a GUILD channel — the only shape a designation can apply to
+if discord_meta.get("is_group_dm") is not False:   → ABSENT_DISCRIMINATOR   # the M-18 shape: absent key ⇒ REFUSE; the interaction path is never eligible
 map := the parsed map PASSED IN by the resolver (the function NEVER reads os.environ — B2(i))
-if map is INVALID:                                 → REFUSE designation-config-invalid
-if context.channel_id not in map:                  → REFUSE mint-requires-private-channel
-if not context.user_id:                            → REFUSE extraction-incomplete    # ← the ABSENT-IDENTITY LEG
-if context.user_id != map[context.channel_id]:     → REFUSE approver-not-pinned
-                                                    → MINT
+if map is INVALID:                                 → CONFIG_INVALID
+if context.channel_id not in map:                  → NOT_DESIGNATED
+if not context.user_id:                            → ABSENT_IDENTITY   # ← the ABSENT-IDENTITY LEG
+if context.user_id != map[context.channel_id]:     → APPROVER_NOT_PINNED
+                                                    → PASS
 ```
+
+**The per-side codes are applied by each gate's mapping table (D-18) — never inside the function.**
 
 **Ordering consequences (each one is load-bearing).**
 
@@ -85,8 +87,7 @@ if context.user_id != map[context.channel_id]:     → REFUSE approver-not-pinne
 > **⚠ D-18: the function returns NEUTRAL LEGS, NOT side-specific codes.** The per-side mapping
 > table (mint → its codes; approve → its codes) is defined once (T2.3), pinned by AC18
 > ("every neutral leg maps to exactly one code per side; the predicate itself NEVER returns a
-> side-specific code"). The pseudocode blocks above show the FUNCTION INTERNALS — the gate-level
-> codes are applied by each gate's per-side mapping. (gate leg **4f**, `daemon/tools/prompt_assent.py:2018-2026`; service
+> side-specific code"). The pseudocode blocks above show the FUNCTION INTERNALS — every `→` outcome is a **NEUTRAL variant**; the gate-level mapping (**D-18** tables) converts each variant to the side's code at the gate boundary. (gate leg **4f**, `daemon/tools/prompt_assent.py:2018-2026`; service
 predicate `daemon/services/prompt_version_service.py:460-476`)
 
 > **The approve leg DOES emit the two new codes** (the architect's §5.2 — the plan's earlier
@@ -100,16 +101,19 @@ predicate `daemon/services/prompt_version_service.py:460-476`)
 proven_1to1   := (is_dm is True) and (is_group_dm is False)
 
 if proven_1to1:                                    → PASS
-if is_group_dm is True:                            → REFUSE token-channel-mismatch
-if is_dm is not False:                             → REFUSE token-channel-mismatch
+if is_group_dm is True:                            → GROUP_DM_SHAPE
+if is_dm is not False:                             → ABSENT_DISCRIMINATOR
 # is_dm is False ⇒ a GUILD channel
+if discord_meta.get("is_group_dm") is not False:   → ABSENT_DISCRIMINATOR   # the M-18 shape: absent key ⇒ REFUSE
 map := the parsed map PASSED IN by the resolver (the function NEVER reads os.environ — B2(i))
-if map is INVALID:                                 → REFUSE designation-config-invalid
-if context.channel_id not in map:                  → REFUSE token-channel-mismatch
-if not context.user_id:                            → REFUSE extraction-incomplete    # ← the ABSENT-IDENTITY LEG
-if context.user_id != map[context.channel_id]:     → REFUSE approver-not-pinned
+if map is INVALID:                                 → CONFIG_INVALID
+if context.channel_id not in map:                  → NOT_DESIGNATED
+if not context.user_id:                            → ABSENT_IDENTITY   # ← the ABSENT-IDENTITY LEG
+if context.user_id != map[context.channel_id]:     → APPROVER_NOT_PINNED
                                                     → PASS
 ```
+
+**The per-side codes are applied by each gate's mapping table (D-18) — never inside the function.**
 
 **The approve-side extension (HISTORICAL, pre-D-18 — see the D-18 annotation) added a pass path to the *privacy* leg** — every existing
 refusal keeps its code **and** its budget behaviour. The two new codes are the **new** approve-side

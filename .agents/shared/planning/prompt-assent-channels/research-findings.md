@@ -225,7 +225,7 @@ CLOSED" (`daemon/tools/upgrade_journal.py`); an indeterminate knob fails closed
 ```
 $ git ls-remote --tags origin 'v0.29.20*'      → (empty)      ← v0.29.20 is FREE on origin
 $ git tag --list 'v0.29.20'                     → (empty)      ← v0.29.20 is FREE locally
-$ git ls-remote --tags origin 'v0.29.*' | tail → v0.29.18 = a4d7233f2 → df4a92732 (the max)
+$ git ls-remote --tags origin 'v0.29.*' | tail → v0.29.18 = a4d7233f2 → df4a92732 (the max at planning time — ⚠ SUPERSEDED 2026-11-11T19:30:42Z: v0.29.19 was staged by a concurrent lane — tag `649a509b1` → `1132fa4cb` = origin/latest tip; the max is now **v0.29.19**; see `decisions.md` **D-10**)
 $ git merge-base --is-ancestor v0.29.18^{commit} HEAD   → exit 0   ← v0.29.18 IS an ancestor
 $ git rev-parse HEAD → efa8aaae28153b8e9c49b86abe19e92be5458ebe
 ```
@@ -234,8 +234,7 @@ $ git rev-parse HEAD → efa8aaae28153b8e9c49b86abe19e92be5458ebe
 
 ### B-2 — Release dirs on this host (re-verified)
 
-`/home/nea/agents-ensemble/releases/` holds **5** dirs: `v0.29.7`, `v0.29.13`, `v0.29.15`,
-`v0.29.17`, `v0.29.18` (against a keep-3 policy — over-retention is pre-existing and
+`/home/nea/agents-ensemble/releases/` holds **6** dirs now (`v0.29.7`, `v0.29.13`, `v0.29.15`, `v0.29.17`, `v0.29.18`, `v0.29.19` — the concurrent lane's staging added the sixth; 5 at planning time) — staging v0.29.20 will make **7**; see **D-10**'s retention TRUTH (against a keep-3 policy — over-retention is pre-existing and
 machinery-owned). The live release, per the ceremony notes, is **v0.29.15**
 (`../prompt-assent/ceremony-notes.md:295-310`); **re-verify it at build time** (it is a build-lane pre-step, not a
 planning-lane fact).
