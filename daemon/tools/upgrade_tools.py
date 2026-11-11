@@ -1983,6 +1983,50 @@ def _in_flight_state(journal: dict[str, Any] | None) -> dict[str, Any] | None:
     return None
 
 
+def _reclaim_orphaned_txn(
+    install_dir: Path,
+    journal: dict[str, Any] | None,
+    actor: str,
+) -> dict[str, Any] | None:
+    """D1 (2026-11-11): dispose an ORPHANED txn before the busy-check
+    refuses — the tool lane's half of the ONE reclaim mechanism.
+
+    The busy-check used to refuse FOREVER on a dead pre-flip txn (the
+    2026-11-11 starvation): the tool lane refused, the daemon-side sweep
+    never disposed it, and only the shell preflight cleared it. The
+    predicate + the claim-before-adopt disposal live in
+    ``daemon.tools.upgrade_journal`` (``txn_is_reclaimable`` /
+    ``reclaim_stale_txn``) — the shell lane's comp3 FAST PATH rule, mirrored
+    exactly; the daemon sweep calls the SAME two helpers. There is no
+    third, divergent copy.
+
+    Returns the (possibly refreshed) journal. A LIVE txn — live owner or
+    fresh heartbeat — is never touched: the helper returns the journal
+    unchanged and the caller refuses as before (fail-closed, no silent
+    double-promote window).
+    """
+    if not isinstance(journal, dict):
+        return journal
+    if not isinstance(journal.get("in_flight"), dict):
+        return journal
+    try:
+        note = uj.reclaim_stale_txn(install_dir, actor=actor)
+    except Exception as exc:  # noqa: BLE001 — a janitor never gates the arm
+        logger.warning(
+            "%s: reclaim_stale_txn failed for %s: %s — continuing on journal "
+            "read status",
+            actor,
+            install_dir,
+            exc,
+        )
+        return journal
+    if not note:
+        return journal
+    logger.info("%s: %s", actor, note)
+    fresh, _status = _journal_read(install_dir)
+    return fresh if fresh is not None else journal
+
+
 def _resolve_scripts_dir(install_dir: Path | None) -> Path | None:
     """Locate the P2.1 pipeline scripts (``lib.sh`` + payloads). Order:
     (1) explicit ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` (drills/ops) —
@@ -2747,6 +2791,20 @@ Returns:
             held_run = journal_lock_run_id(install_dir)
             in_flight = _in_flight_state(journal)
             if in_flight is not None:
+                # D1 (2026-11-11): an ORPHANED txn (dead owner + stale
+                # heartbeat) must NOT starve the arm — dispose it under the
+                # SHARED predicate (the shell lane's comp3 FAST PATH rule,
+                # mirrored in upgrade_journal.txn_is_reclaimable) and
+                # re-read every busy leg. A LIVE txn (live owner or fresh
+                # heartbeat) is untouched → the refusal below still fires
+                # (fail-closed, no silent double-promote window).
+                journal = _reclaim_orphaned_txn(
+                    install_dir, journal, "system_restart"
+                )
+                pending = uj.read_pending_op(install_dir)
+                held_run = journal_lock_run_id(install_dir)
+                in_flight = _in_flight_state(journal)
+            if in_flight is not None:
                 kind = in_flight.get("kind", "?")
                 inf_run = in_flight.get("run_id")
                 run_frag = f" run_id={inf_run}" if inf_run else ""
@@ -2933,6 +2991,52 @@ Returns:
                     "pipeline-busy",
                     f"per-env lock held (run_id={busy_run or held_run or '?'}) — "
                     "retry via upgrade_status",
+                )
+            # Check 1b (W2, 2026-11-11) — the stop-script SIBLING gate, the
+            # restart lane's mirror of PR1's promote-arm gate (the same
+            # exposure: the restart stop step resolves its stop script via
+            # lib.sh ``stop_via_stop_script`` → the SIBLING one level up of
+            # the CALLING script's dir — restart.sh lives in scripts/upgrade/,
+            # so the leg is ``<scripts_dir>/../stop-ensemble.sh`` — then the
+            # ``$(pwd)/scripts/stop-ensemble.sh`` fallback). BOTH legs miss
+            # in the install layout (make install ships only
+            # watchdog-watcher.sh into <install_dir>/scripts/ — Makefile:
+            # 375-377 — and the executor's cwd is the install dir) ⇒ bash:
+            # No such file or directory → rc=127 → the restart ceremony
+            # aborts MID-STOP. The gate refuses BEFORE any mutation. The
+            # EXECUTABLE requirement is CONSERVATIVE HARDENING (every
+            # consumer invokes ``bash stop-ensemble.sh``; lib.sh itself only
+            # tests -f) — the MISSING sibling is what kills the run.
+            stop_script = scripts_dir.parent / "stop-ensemble.sh"
+            try:
+                stop_script_ready = stop_script.is_file() and os.access(
+                    stop_script, os.X_OK
+                )
+            except OSError:
+                stop_script_ready = False
+            if not stop_script_ready:
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    "preflight-stop-script-missing",
+                    f"arm preflight: stop-script sibling not usable at "
+                    f"{stop_script} (must exist AND carry the exec bit — "
+                    "conservative hardening: every consumer invokes "
+                    "`bash stop-ensemble.sh`, so exec is NOT a runtime "
+                    "requirement; lib.sh itself only tests -f) — the "
+                    "restart stop step resolves TWO legs (lib.sh "
+                    "stop_via_stop_script: the sibling one level up of the "
+                    "CALLING script's dir, <scripts_dir>/../stop-ensemble.sh, "
+                    "then the $(pwd)/scripts/stop-ensemble.sh fallback) and "
+                    "BOTH must miss for the abort (bash: No such file or "
+                    "directory → rc=127, the v0.29.16 2026-11-11 halt "
+                    "class); the fallback ALSO misses in install layouts — "
+                    "make install ships only watchdog-watcher.sh into "
+                    "<install_dir>/scripts/ (Makefile:375-377), so the "
+                    "executor's cwd holds no stop-ensemble.sh; fix: copy the "
+                    f"repo scripts/stop-ensemble.sh to {stop_script} and "
+                    "chmod +x — the restart is NOT scheduled; zero pipeline "
+                    "mutation",
                 )
             restart_armed_ok = False
             try:
@@ -3209,6 +3313,10 @@ restart-under-burst-abort (launcher exit-1 latch),
 executor-scripts-unavailable, scripts-dir-unresolvable (the scripts dir
 could not be resolved to an absolute path — a broken
 ENSEMBLE_UPGRADE_SCRIPTS_DIR pin; fail-closed, never a generic crash),
+preflight-stop-script-missing (the arm preflight's stop-script sibling is
+missing or not executable — the v0.29.16 2026-11-11 halt class: the restart
+stop step resolves TWO legs and BOTH must miss for the abort; fail-closed
+BEFORE any journal mutation — the restart is NOT scheduled),
 no-staged-install, journal-unavailable.
 Refused live attempts record a restart_audits row (outcome=refused +
 refusal_token) under the lock; the pipeline journal itself stays
@@ -3570,6 +3678,20 @@ never decides go/rollback).
                     return _live_gate_summary(label, factor_failures)
 
             # Armed preconditions (dynamic state — refusals, not notes).
+            if in_flight is not None:
+                # D1 (2026-11-11): an ORPHANED txn (dead owner + stale
+                # heartbeat) must NOT starve the arm — dispose it under the
+                # SHARED predicate (the shell lane's comp3 FAST PATH rule,
+                # mirrored in upgrade_journal.txn_is_reclaimable) and
+                # re-read every busy leg. A LIVE txn (live owner or fresh
+                # heartbeat) is untouched → the refusal below still fires
+                # (fail-closed, no silent double-promote window).
+                journal = _reclaim_orphaned_txn(
+                    install_dir, journal, "system_upgrade"
+                )
+                pending = uj.read_pending_op(install_dir)
+                held_run = journal_lock_run_id(install_dir)
+                in_flight = _in_flight_state(journal)
             if in_flight is not None:
                 return _refusal(
                     label,
@@ -4000,7 +4122,13 @@ the nonce is action-bound, §4.2(b)), nonce-already-used,
 nonce-verification-unavailable, executor-scripts-unavailable,
 scripts-dir-unresolvable (the scripts dir could not be resolved to an
 absolute path — a broken ENSEMBLE_UPGRADE_SCRIPTS_DIR pin; fail-closed,
-never a generic crash), no-staged-install, journal-unavailable (install dir
+never a generic crash), preflight-stop-script-missing (the arm
+preflight's stop-script sibling is missing or not executable — the
+v0.29.16 2026-11-11 promote-halt class: the stop step resolves TWO legs
+and BOTH must miss for the abort; fail-closed BEFORE the nonce burn),
+preflight-argv-unconstructable, preflight-argv-malformed (the executor
+argv/env could not be constructed — fail-closed BEFORE the nonce burn),
+no-staged-install, journal-unavailable (install dir
 resolves but the journal is torn/absent), layout-divergence.
 
 Never auto-retry a refusal — relay it verbatim (the LLM never decides
