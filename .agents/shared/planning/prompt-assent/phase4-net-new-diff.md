@@ -96,9 +96,25 @@ restore, prove `sha256 == PRE`.
 | M4 | fail-open coercion (`_coerce_switch` indeterminate → `True`) | `test_prompt_assent_kill_switch.py` → **2 failed** (the invalid-fail-closed cells) | RED → restore proven → 22 passed |
 | M5 | plant `UPDATE prompt_audit_events` (SP-2) | `test_prompt_assent_audit_payload.py::test_sp2_no_update_delete_against_audit_events` → **1 failed** | RED → restore proven → 6 passed |
 
-## (e) Full-unit base capture (supplementary)
+## (e) Bounded config-keyword sweep — SAME COMMAND, both trees
 
-A full `tests/unit -q` run at the detached base worktree was started
-(same command as the HEAD full-unit run) to produce the exhaustive
-diff; result recorded in the lane report if it completed within the
-lane's wall-clock budget.
+```
+pytest tests/unit -q -p no:timeout -k "config or Config"
+```
+
+| Tree | Result |
+|---|---|
+| base `0efdf106f` | **89 failed, 1074 passed** (23775 deselected) |
+| HEAD | **89 failed, 1092 passed** (24002 deselected — the delta is the lane's net-new tests, all green) |
+
+FAILED-list diff: **BYTE-IDENTICAL** (89 = 89, zero net-new). This is
+the widest bounded sweep: every unit node whose id mentions the config
+surface this lane touches.
+
+## (f) Full-unit base capture — CUT, superseded
+
+A full `tests/unit -q` run at the detached base worktree was started as
+a supplementary exhaustive sweep and CUT at ~30 % after ~35 min
+(wall-clock discipline: the bounded protocol above already covers the
+touched surfaces with same-command diffs; the commission orders no
+whole-suite runs). Not counted as evidence; recorded for honesty.

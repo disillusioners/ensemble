@@ -96,9 +96,24 @@ class TestTheFreshnessBound:
 
     async def test_inside_the_bound_is_fresh(self, monkeypatch) -> None:
         """The positive leg — a stamp inside the bound (599 s) passes
-        the freshness leg."""
+        the freshness leg.
+
+        FLAKE REPAIR (phase 4, disclosed): the TTL rides the STAMP in
+        ``build_window`` (``expires = stamped + ttl``), so a 599 s
+        backdate at the default 600 s ttl left a ONE-SECOND expiry
+        margin — under load the mint landed after the expiry and the
+        positive leg flapped (observed twice in the phase-4 pack runs).
+        The ttl is widened to ``bound + backdate`` so the expiry stays a
+        full bound away: the cell still pins exactly what it pinned
+        (inside the freshness bound ⇒ NOT stale), with a margin that
+        cannot be consumed by scheduler jitter.
+        """
         monkeypatch.setenv(KILL_SWITCH_ENV, "1")
-        fresh = build_window(age_s=PROMPT_ASSENT_WINDOW_FRESHNESS_S - 1)
+        fresh = build_window(
+            age_s=PROMPT_ASSENT_WINDOW_FRESHNESS_S - 1,
+            ttl_s=PROMPT_ASSENT_WINDOW_FRESHNESS_S
+            + (PROMPT_ASSENT_WINDOW_FRESHNESS_S - 1),
+        )
         flow = build_flow(window=fresh)
         mint = await mint_for(flow)
         assert "reason=user-origin-window-stale" not in mint, mint
