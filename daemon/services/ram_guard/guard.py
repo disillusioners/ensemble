@@ -680,6 +680,7 @@ class RamGuard:
             registered=True,
             guard_enabled=self._enabled,
             platform=self._platform,
+            lane=record.lane,
             on_ownership_unverified=lambda: self._bump("ownership_unverified"),
         )
 

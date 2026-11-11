@@ -77,7 +77,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from secrets import token_hex
 from typing import Any, List, Optional, Union
-from uuid import uuid4
 
 from langchain_core.tools import tool
 
@@ -518,10 +517,12 @@ class ProcessInfo:
     tracking_id: str = ""
     # RAM auto-termination (phase 4): ProcessInfo gains ``ram_killed``
     # (S10) plus the captured pgid/start_time (T9) and the guard's
-    # registry key for this spawn (a per-spawn uuid4 hex — the guard's
-    # registry is GLOBAL across instances; the proc id is 32-bit and
-    # could collide, so the guard key is a fresh uuid, mirroring the
-    # bash lane's "one id, one spawn").
+    # registry key for this spawn.  The key IS the ``process_id`` — the
+    # SAME value the lane stamps under its own ownership variable — so
+    # the lane-aware P6 verifies the stamp (the positive signal).  The
+    # bash lane keeps its uuid-per-spawn key; the proc id space is the
+    # lane's own (8 hex chars), whose collision blast radius is
+    # disclosed in the phase-4 report.
     ram_killed: bool = False
     ram_tracking_id: str = ""
     ram_pgid: int = 0
@@ -1649,17 +1650,17 @@ class BackgroundProcessManager:
         # ``_ram_register_spawn``).  The kill-switch OFF ⇒ no
         # registration (T2).
         #
-        # The tracking id is a FRESH uuid per spawn: the guard's
-        # registry is GLOBAL across instances and the proc id is 32-bit,
-        # so a pid-derived key could collide ("one id, one spawn" — the
-        # bash lane's rule).  The tracking id is kept ONLY when the
-        # registration actually landed (a record exists) — an
-        # unregistered id would dangle through the release paths.
+        # The tracking id IS the process_id — the SAME value the lane
+        # already stamped under the lane's own ownership variable
+        # (``_TRACKING_ENV_VAR``) at spawn.  That equality is the
+        # lane-aware P6's POSITIVE signal (leader ruling 2026-11-11):
+        # the guard's ladder reads the lane's own stamp and finds it
+        # present AND matching ⇒ ownership VERIFIED (never counted as
+        # unverified).  The bash lane does the same with its own id.
         info.ram_tracking_id = ""
         if _ram_guard_active():
-            tracking_id = str(uuid4().hex)
             record = _ram_register_spawn(
-                tracking_id=tracking_id,
+                tracking_id=process_id,
                 instance_id=instance_id,
                 pid=proc.pid,
                 pgid=pgid,
@@ -1667,7 +1668,7 @@ class BackgroundProcessManager:
                 ceiling_bytes=ram_ceiling_bytes,
             )
             if record is not None:
-                info.ram_tracking_id = tracking_id
+                info.ram_tracking_id = process_id
 
         # Start the output-capture and exit-watcher tasks. Both run
         # for the lifetime of the process. We hold references so we

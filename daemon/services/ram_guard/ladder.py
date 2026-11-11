@@ -42,7 +42,30 @@ RAM_GUARD_GRACE_POLL_SLICE_SECONDS = 0.025
 #: ``bash_spawn_reaper.BASH_TRACKING_ENV_VAR`` — duplicated (not
 #: imported) because the import freeze forbids importing the reaper;
 #: the coupling is pinned by a test instead.
+#:
+#: This is also the LEGACY default: a caller that does not pass
+#: ``lane`` gets the bash lane's variable, exactly as before the
+#: lane-aware P6 (leader ruling 2026-11-11).
 OWNERSHIP_ENV_VAR = "ENSEMBLE_BASH_TRACKING_ID"
+
+#: The proc lane's ownership-stamp variable — the SAME literal as
+#: ``proc_tools._TRACKING_ENV_VAR`` (duplicated, not imported: the
+#: import freeze forbids ``ram_guard → daemon/tools``; the coupling is
+#: pinned by a test).
+OWNERSHIP_ENV_VAR_PROC = "ENSEMBLE_PROC_TRACKING_ID"
+
+#: The per-lane ownership-stamp variables (leader ruling 2026-11-11).
+#: The stamp is set BY THE TOOL at its spawn boundary, under the LANE'S
+#: OWN variable, and inherited down the tree — so P6 reads the
+#: LANE-APPROPRIATE variable for the spawn it is about to signal:
+#: the lane's own stamp matching ⇒ VERIFIED (a positive signal, NOT
+#: counted as unverified); the stamp absent ⇒ unverifiable (PROCEED +
+#: ``ownership_unverified++``); the OTHER lane's stamp present ⇒
+#: MISMATCH ⇒ REFUSE (cross-presence does not occur legitimately).
+OWNERSHIP_ENV_VAR_BY_LANE = {
+    "bash": OWNERSHIP_ENV_VAR,
+    "proc": OWNERSHIP_ENV_VAR_PROC,
+}
 
 # ── The reason set (§15 B4 — ordered, exact, 16 codes) ─────────────────────
 
@@ -280,6 +303,8 @@ def read_ownership_stamp(
     proc_root: Path,
     pid: int,
     tracking_id: str,
+    *,
+    env_var: str = OWNERSHIP_ENV_VAR,
 ) -> Optional[bool]:
     """The ownership stamp of one member (TRI-STATE).
 
@@ -291,29 +316,23 @@ def read_ownership_stamp(
     (``refused:ownership-mismatch`` — deterministic; a retry cannot
     change it).
 
-    ``None``  — the stamp CANNOT be VERIFIED: the ownership variable is
+    ``None``  — the stamp CANNOT BE VERIFIED: the ownership variable is
     ABSENT from the environ, or the environ is unreadable (fail-open,
     with ``ownership_unverified++``).
 
     Contract (phase2-plan.md T11; test-plan.md S8(h); arch §4.2:226
     "for ``refused:ownership-mismatch`` the stamp check is
     DETERMINISTIC — retrying cannot change it"; dispatcher ruling
-    2026-11-11): P6 has TWO outcomes only — a stamp that EXISTS and
-    DIFFERS ⇒ refuse; a stamp that CANNOT BE VERIFIED (absent or
-    unreadable) ⇒ PROCEED with ``ownership_unverified++``.  ABSENT ≠
-    MISMATCH: the proc lane has no stamp by design (no durable row —
-    DQ5), so its stamp is always UNVERIFIABLE ⇒ P6 proceeds with
-    ``ownership_unverified++``.  This keeps the two lanes consistent
-    (arch §1.1 P4: the bash lane has no ownership gate either, so it
-    also lands in the unverifiable path when its stamp is absent) and
-    never lets a lane refuse its own kill over a missing marker.
+    2026-11-11; LEADER RULING 2026-11-11 — lane-aware): P6 has TWO
+    outcomes only — a stamp that EXISTS and DIFFERS ⇒ refuse; a stamp
+    that CANNOT BE VERIFIED (absent or unreadable) ⇒ PROCEED with
+    ``ownership_unverified++``.  ABSENT ≠ MISMATCH.  The variable that
+    is checked is the LANE'S OWN (``env_var``): stamps are set per-lane
+    by the tool at its spawn boundary and inherited down the tree.
 
     The house idiom (bash_spawn_reaper._verify_member_env_procfs) already
     makes this exact three-way split: exact match ⇒ True, marker present
-    with a different value ⇒ False, marker absent ⇒ None (fail-open).  The
-    ladder mirrored only the first two states; this adds the third so the
-    contract's "unverifiable" branch is reachable for a stamp that is
-    absent (not merely unreadable).
+    with a different value ⇒ False, marker absent ⇒ None (fail-open).
     """
     path = Path(proc_root) / str(pid) / "environ"
     try:
@@ -321,48 +340,101 @@ def read_ownership_stamp(
     except OSError:
         return None
     entries = data.split(b"\x00")
-    needle = f"{OWNERSHIP_ENV_VAR}={tracking_id}".encode("utf-8")
+    needle = f"{env_var}={tracking_id}".encode("utf-8")
     if needle in entries:
         return True
     # The ownership variable is PRESENT with a DIFFERENT value ⇒ a REAL
     # mismatch (PID recycled, or a foreign-lane stamp present).  The
     # marker being present at all is the signal; the exact value is what
     # we verify.
-    marker_prefix = f"{OWNERSHIP_ENV_VAR}=".encode("utf-8")
+    marker_prefix = f"{env_var}=".encode("utf-8")
     if any(e.startswith(marker_prefix) for e in entries):
         return False
     # The ownership variable is ABSENT ⇒ unverifiable (fail-open).
     return None
 
 
+def _foreign_stamp_present(
+    proc_root: Path,
+    members,
+    foreign_vars,
+) -> bool:
+    """Does any member carry ANOTHER lane's ownership stamp?
+
+    The CROSS-LANE tripwire (leader ruling 2026-11-11): stamps are set
+    per-lane at the tool's spawn boundary and inherited down the tree;
+    cross-presence does not occur legitimately, so it is defense-in-depth
+    for a process-killing subsystem.  An unreadable environ says nothing
+    and is skipped (the lane's own aggregate owns the unverifiable
+    outcome).
+    """
+    for pid in members:
+        path = Path(proc_root) / str(pid) / "environ"
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        entries = data.split(b"\x00")
+        for var in foreign_vars:
+            prefix = f"{var}=".encode("utf-8")
+            if any(e.startswith(prefix) for e in entries):
+                return True
+    return False
+
+
 def check_p6_ownership(
     proc_root: Path,
     members: tuple[int, ...],
     tracking_id: Optional[str],
+    *,
+    lane: Optional[str] = None,
 ) -> tuple[Optional[str], bool]:
-    """P6 — the ownership stamp.
+    """P6 — the ownership stamp (LANE-AWARE).
 
-    Returns ``(reason, unverifiable)``.  P6 has TWO outcomes only
-    (phase2-plan.md T11; test-plan.md S8(h); arch §4.2:226 "for
+    Returns ``(reason, unverifiable)``.  THREE outcomes (phase2-plan.md
+    T11; test-plan.md S8(h); arch §4.2:226 "for
     ``refused:ownership-mismatch`` the stamp check is DETERMINISTIC —
-    retrying cannot change it"; dispatcher ruling 2026-11-11):
+    retrying cannot change it"; dispatcher ruling 2026-11-11; LEADER
+    RULING 2026-11-11 — lane-aware):
 
-      - a stamp that EXISTS and DIFFERS ⇒ ``refused:ownership-mismatch``
-        (a REAL mismatch — the PID was recycled);
-      - a stamp that CANNOT BE VERIFIED (the marker is ABSENT, or the
-        environ is unreadable) ⇒ PROCEED with ``unverifiable=True``
-        (``ownership_unverified++``).
+      - the LANE'S OWN stamp present AND matching ⇒ VERIFIED (a positive
+        signal — NOT counted as unverified);
+      - the stamp ABSENT (or the environ unreadable) ⇒ PROCEED with
+        ``unverifiable=True`` (``ownership_unverified++``) — ABSENT ≠
+        MISMATCH;
+      - the OTHER lane's stamp present ⇒ ``refused:ownership-mismatch``
+        (the cross-lane tripwire, checked FIRST — cross-presence does
+        not occur legitimately, so it refuses even when the lane's own
+        stamp would otherwise match); the lane's own stamp present with
+        a DIFFERENT value ⇒ the same refusal (a REAL mismatch — the PID
+        was recycled).
 
-    ABSENT ≠ MISMATCH (the proc lane has no stamp by design — DQ5).  The
-    aggregate below preserves the existing precedence: an exact match
-    anywhere ⇒ verified (no refusal, no counter); else a REAL mismatch
-    anywhere ⇒ refuse; else (all absent/unreadable) ⇒ unverifiable.
+    ``lane=None`` (the legacy default — direct callers without a lane)
+    checks the bash lane's variable and runs NO cross-lane tripwire,
+    exactly as before the lane-aware P6.  The guard passes the record's
+    lane.
     """
     if not tracking_id or not members:
         return None, False
+    lane_var = (
+        OWNERSHIP_ENV_VAR
+        if lane is None
+        else OWNERSHIP_ENV_VAR_BY_LANE.get(lane, OWNERSHIP_ENV_VAR)
+    )
+    foreign_vars = (
+        tuple(
+            var
+            for key, var in OWNERSHIP_ENV_VAR_BY_LANE.items()
+            if key != lane and var != lane_var
+        )
+        if lane is not None
+        else ()
+    )
+    if foreign_vars and _foreign_stamp_present(proc_root, members, foreign_vars):
+        return REASON_OWNERSHIP_MISMATCH, False
     readable = False
     for pid in members:
-        matched = read_ownership_stamp(proc_root, pid, tracking_id)
+        matched = read_ownership_stamp(proc_root, pid, tracking_id, env_var=lane_var)
         if matched is None:
             continue
         readable = True
@@ -442,6 +514,7 @@ def ram_kill_ladder(
     registered: bool = True,
     guard_enabled: bool = True,
     platform: Optional[str] = None,
+    lane: Optional[str] = None,
     on_ownership_unverified: Optional[Callable[[], None]] = None,
 ) -> tuple[str, str]:
     """Kill one process group → ``(status, reason)``.
@@ -449,6 +522,11 @@ def ram_kill_ladder(
     The pre-kill gate is **P0–P7** (+ P5a); a kill fires iff ALL of them
     evaluate true.  Then: TERM → slice-probed grace → KILL, and finally
     the **P8 post-kill probe**.
+
+    ``lane`` — the SPAWN'S lane (``"bash"`` | ``"proc"``): P6 reads the
+    LANE-APPROPRIATE ownership stamp (leader ruling 2026-11-11).  The
+    guard passes the record's lane; ``None`` (direct callers) keeps the
+    legacy bash-variable behaviour with no cross-lane tripwire.
 
     ``status`` ∈ ``{killed, already-dead, refused}``; ``reason`` ∈ the
     16-code set (§15 B4).
@@ -497,8 +575,12 @@ def ram_kill_ladder(
     table = scan_proc(proc_root)
     members = table.by_pgrp.get(int(pgid), ()) if table.scan_complete else ()
 
-    # ── P6 — the ownership stamp ──
-    reason, unverifiable = check_p6_ownership(proc_root, members, tracking_id)
+    # ── P6 — the ownership stamp (lane-aware: the guard passes the
+    # record's lane; a direct caller without a lane gets the legacy
+    # bash-variable behaviour) ──
+    reason, unverifiable = check_p6_ownership(
+        proc_root, members, tracking_id, lane=lane
+    )
     if reason is not None:
         return (STATUS_REFUSED, reason)
     if unverifiable and on_ownership_unverified is not None:
@@ -553,6 +635,8 @@ def _finish_kill(status: str, reason: str, proc_root: Path, pgid: int) -> tuple[
 
 __all__ = [
     "OWNERSHIP_ENV_VAR",
+    "OWNERSHIP_ENV_VAR_BY_LANE",
+    "OWNERSHIP_ENV_VAR_PROC",
     "PERMANENT_REFUSALS",
     "RAM_GUARD_GRACE_POLL_SLICE_SECONDS",
     "REASON_SET",
