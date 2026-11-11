@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.17] — 2026-11-11
+
+### Fixed — skill-system-revival Phase 3: the production skill-capture binding is now production-owned and regression-tested (`feature/skill-capture-prod-wiring`; dc306b9d7, ce8334815; gate evidence 2134e1a83)
+
+- **The capture lane's dispatcher is now bound by the production boot, not by a test-side injection.** The skills-router wiring block was extracted out of `lifespan` into `_wire_skills_router_services` (`daemon/api.py`) — a pure move — and ONE production binding line was added: `SkillMetricsService.set_job_dispatcher(manager._skill_job_dispatcher)`, binding the CAPTURE lane's own handle (distinct from the ROUTER's REST-facing `set_skill_job_dispatcher`); `lifespan` now calls the extracted function, so the binding is pinned to the production boot seam rather than left to an incidental call path.
+- **The real hole — no regression test over the production binding — is closed.** `tests/unit/test_skill_capture_production_wiring.py` drives the REAL production seam (not a re-implemented copy), so deleting the api-seam binding now turns the suite red; the capture-lane log line additionally reports `capture_dispatcher=`, making the live binding observable.
+- **Phase-2 runbook corrections and citation repairs.** The runbook's §8.1 A3 gate is repointed onto the candidate band (`feedback_applied IS NULL`) with the blocker band demoted to monitor-only, plus the 900s pack timeout, the live port 9797, and the C10 lane scope; stale seam-line citations are repaired across the plan, the runbook, and the api-seam docstring anchors (the manager-side binding is labelled as the idempotent fallback for boot paths that never run the api `lifespan`).
+
 ## [0.29.16] — 2026-11-10
 
 ### Changed — ⚠ CALLER-VISIBLE: compare_images input-resolution vocabulary renamed `workdir_*` → `path_*` (image-tools unconfined local-path read; 32bd02a70, merge 85bd6a37b)

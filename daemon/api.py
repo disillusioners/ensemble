@@ -559,6 +559,127 @@ def _poignancy_llm_config(config: Any) -> dict[str, Any]:
     return _memoir_lane_llm_config(config)
 
 
+def _wire_skills_router_services(manager: Any) -> None:
+    """Wire the skills router's collaborators at BOOT — the production seam.
+
+    Extracted verbatim from the ``lifespan`` block (a PURE MOVE: same
+    statements, same order, same log call — one field added,
+    ``capture_dispatcher=``) so the production wiring is
+    callable — and therefore TESTABLE — as the real seam instead of a
+    test-side COPY of it. A copy goes green when production drops the
+    wiring; the real seam goes RED.
+
+    TWO dispatchers live in this story and they are NOT the same handle:
+
+    * the ROUTER's ``set_skill_job_dispatcher``
+      (``daemon/routers/skills.py:183``) binds the module-level global the
+      REST ``POST /api/skills/{id}/fix`` endpoint reads;
+    * the SERVICE's ``SkillMetricsService.set_job_dispatcher``
+      (``daemon/services/skill_metrics_service.py:327``) binds the handle the
+      CAPTURED lane reads (``skill_metrics_service.py:812``) — the only
+      production call site of ``SkillJobDispatcher.enqueue_capture``.
+
+    The service binding ALSO happens manager-side (``daemon/manager.py:8221-8222``
+    at this branch; ``:8196-8197`` in live v0.29.15 / base ``0efdf106f``), inside
+    ``InstanceManager.set_job_queue_service``. Both seams bind the SAME
+    ``manager._skill_job_dispatcher`` instance, so the operation is idempotent.
+    """
+    # Wire skills router services (Phase 6 Task 2 — REST API surface).
+    # The skills router uses 4 service DI accessors (created via
+    # ``create_service_dependency``) plus module-level globals
+    # (trigger repo, job dispatcher, usage repo, lineage repo).
+    # Both patterns are pulled from manager attributes that were
+    # initialized earlier in this lifespan block — see
+    # ``manager._skill_*`` wiring in daemon/manager.py.
+    from daemon.routers.skills import (
+        get_store,
+        get_search,
+        get_metrics,
+        get_evolution,
+        set_skill_trigger_repo,
+        set_skill_job_dispatcher,
+        set_skill_usage_repo,
+    )
+
+    # Phase 2 services — create_service_dependency accessors.
+    # Each one returns a closure whose .set_service() setter is what
+    # we call here. Defensive getattr on manager attributes in case
+    # a future refactor skips one of the service constructions —
+    # missing services will surface as 503s at request time rather
+    # than crashing the lifespan. EACH attribute is resolved ONCE via
+    # getattr below and the SAME resolved value feeds BOTH the guard
+    # and the boot log call at the end of this function, so a manager
+    # that lacks an attribute can never raise AttributeError out of
+    # the LOG line either (partial-boot parity between guard and log).
+    _skill_store_service = getattr(manager, "_skill_store_service", None)
+    _skill_search_service = getattr(manager, "_skill_search_service", None)
+    _skill_metrics_service = getattr(manager, "_skill_metrics_service", None)
+    _skill_evolution_service = getattr(
+        manager, "_skill_evolution_service", None
+    )
+    _skill_trigger_repo = getattr(manager, "_skill_trigger_repo", None)
+    _skill_job_dispatcher = getattr(manager, "_skill_job_dispatcher", None)
+    _skill_usage_repo = getattr(manager, "_skill_usage_repo", None)
+
+    if _skill_store_service is not None:
+        get_store.set_service(_skill_store_service)
+    if _skill_search_service is not None:
+        get_search.set_service(_skill_search_service)
+    if _skill_metrics_service is not None:
+        get_metrics.set_service(_skill_metrics_service)
+    if _skill_evolution_service is not None:
+        get_evolution.set_service(_skill_evolution_service)
+
+    # Trigger repository — module-level global + setter (no factory).
+    if _skill_trigger_repo is not None:
+        set_skill_trigger_repo(_skill_trigger_repo)
+
+    # Job dispatcher — module-level global + setter. This is the
+    # chokepoint the ``POST /api/skills/{id}/fix`` endpoint calls into
+    # to enqueue a ``skill_evolution`` JobItem on ``system_parallel_queue``.
+    if _skill_job_dispatcher is not None:
+        set_skill_job_dispatcher(_skill_job_dispatcher)
+
+    # Job dispatcher — ALSO into the SkillMetricsService (the CAPTURED lane).
+    # The ROUTER setter above binds the REST-facing dispatcher; the CAPTURE
+    # lane reads a DIFFERENT handle — the metrics service's OWN
+    # ``_skill_job_dispatcher`` (``daemon/services/skill_metrics_service.py:812``),
+    # set through the service's own setter (``set_job_dispatcher``, :327).
+    # Binding it HERE makes the PRODUCTION BOOT — not a test-side injection —
+    # the owner of the capture lane's dispatcher.
+    metrics_service = getattr(manager, "_skill_metrics_service", None)
+    if metrics_service is not None and _skill_job_dispatcher is not None:
+        metrics_service.set_job_dispatcher(_skill_job_dispatcher)
+
+    # Usage repository — module-level global + setter. The
+    # ``GET /api/skills/{id}/usage-records`` endpoint reads through
+    # this repo for per-event usage history (vs. the metrics
+    # service's aggregate view).
+    if _skill_usage_repo is not None:
+        set_skill_usage_repo(_skill_usage_repo)
+
+    logger.info(
+        "Skills router wired: store=%s search=%s metrics=%s evolution=%s "
+        "triggers=%s dispatcher=%s usage_repo=%s capture_dispatcher=%s",
+        _skill_store_service is not None,
+        _skill_search_service is not None,
+        _skill_metrics_service is not None,
+        _skill_evolution_service is not None,
+        _skill_trigger_repo is not None,
+        _skill_job_dispatcher is not None,
+        _skill_usage_repo is not None,
+        # The CAPTURED lane's dispatcher handle (the capture enqueue path
+        # reads the metrics service's own handle, not the router's) —
+        # the SAME getattr-resolved values as the guards above.
+        _skill_metrics_service is not None
+        and getattr(
+            _skill_metrics_service,
+            "_skill_job_dispatcher",
+            None,
+        ) is not None,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context manager.
@@ -3844,66 +3965,7 @@ async def lifespan(app: FastAPI):
     from daemon.routers.queues import set_defer_block_resolver
     set_defer_block_resolver(DeferBlockResolver(job_repo=job_repository))
 
-    # Wire skills router services (Phase 6 Task 2 — REST API surface).
-    # The skills router uses 4 service DI accessors (created via
-    # ``create_service_dependency``) plus module-level globals
-    # (trigger repo, job dispatcher, usage repo, lineage repo).
-    # Both patterns are pulled from manager attributes that were
-    # initialized earlier in this lifespan block — see
-    # ``manager._skill_*`` wiring in daemon/manager.py.
-    from daemon.routers.skills import (
-        get_store,
-        get_search,
-        get_metrics,
-        get_evolution,
-        set_skill_trigger_repo,
-        set_skill_job_dispatcher,
-        set_skill_usage_repo,
-    )
-
-    # Phase 2 services — create_service_dependency accessors.
-    # Each one returns a closure whose .set_service() setter is what
-    # we call here. Defensive getattr on manager attributes in case
-    # a future refactor skips one of the service constructions —
-    # missing services will surface as 503s at request time rather
-    # than crashing the lifespan.
-    if getattr(manager, "_skill_store_service", None) is not None:
-        get_store.set_service(manager._skill_store_service)
-    if getattr(manager, "_skill_search_service", None) is not None:
-        get_search.set_service(manager._skill_search_service)
-    if getattr(manager, "_skill_metrics_service", None) is not None:
-        get_metrics.set_service(manager._skill_metrics_service)
-    if getattr(manager, "_skill_evolution_service", None) is not None:
-        get_evolution.set_service(manager._skill_evolution_service)
-
-    # Trigger repository — module-level global + setter (no factory).
-    if getattr(manager, "_skill_trigger_repo", None) is not None:
-        set_skill_trigger_repo(manager._skill_trigger_repo)
-
-    # Job dispatcher — module-level global + setter. This is the
-    # chokepoint the ``POST /api/skills/{id}/fix`` endpoint calls into
-    # to enqueue a ``skill_evolution`` JobItem on ``system_parallel_queue``.
-    if getattr(manager, "_skill_job_dispatcher", None) is not None:
-        set_skill_job_dispatcher(manager._skill_job_dispatcher)
-
-    # Usage repository — module-level global + setter. The
-    # ``GET /api/skills/{id}/usage-records`` endpoint reads through
-    # this repo for per-event usage history (vs. the metrics
-    # service's aggregate view).
-    if getattr(manager, "_skill_usage_repo", None) is not None:
-        set_skill_usage_repo(manager._skill_usage_repo)
-
-    logger.info(
-        "Skills router wired: store=%s search=%s metrics=%s evolution=%s "
-        "triggers=%s dispatcher=%s usage_repo=%s",
-        manager._skill_store_service is not None,
-        manager._skill_search_service is not None,
-        manager._skill_metrics_service is not None,
-        manager._skill_evolution_service is not None,
-        manager._skill_trigger_repo is not None,
-        manager._skill_job_dispatcher is not None,
-        manager._skill_usage_repo is not None,
-    )
+    _wire_skills_router_services(manager)
 
     # Start StreamableHTTP session manager within lifespan
     session_mgr = get_kb_mcp_session_manager()
