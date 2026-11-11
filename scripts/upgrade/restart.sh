@@ -53,7 +53,8 @@
 #
 # EXIT CODES: 0 restarted + gated · 1 gate failed (markers still cleared —
 # the launcher's own burst protection owns a crash-looping daemon) ·
-# 78 refusal (env / journal / lock-adoption / live guard).
+# 78 refusal (env / journal / lock-adoption / live guard / stop-script
+# sibling probe).
 #
 # NO raw kills anywhere in this script: the stop is ALWAYS
 # stop-ensemble.sh (SINGLE-TERM ownership-scoped contract).
@@ -120,6 +121,32 @@ esac
 if ! _splice_python_floor_probe; then
     _warn "python3 ≥ 3.7 unavailable on PATH — refusing restart (journal splice helper requires it)"
     lock_release 2>/dev/null || true
+    exit 78
+fi
+
+# ── Stop-script sibling probe (W2, 2026-11-11) ──────────────────────────────
+# lib.sh's stop_via_stop_script resolves the stop script as the SIBLING one
+# level up of the CALLING script's dir (BASH_SOURCE[1] — restart.sh lives in
+# scripts/upgrade/, so the leg is scripts/upgrade/../stop-ensemble.sh) and
+# falls back to $(pwd)/scripts/stop-ensemble.sh. BOTH legs MISS in the
+# install layout (make install ships only watchdog-watcher.sh into
+# <install_dir>/scripts/ — Makefile:375-377 — and the executor's cwd is the
+# install dir) ⇒ bash: No such file or directory → rc=127 → the ceremony
+# aborts MID-STOP (the v0.29.16 2026-11-11 halt class). The probe is
+# SELF-CONTAINED (no lib.sh dependency — this script must work standalone)
+# and refuses BEFORE any mutation (no lock adopted, no txn opened, no stop).
+# The exec-bit requirement is conservative hardening (every consumer invokes
+# `bash stop-ensemble.sh`; lib.sh itself only tests -f).
+_stop_script=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    _stop_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../stop-ensemble.sh"
+fi
+if [ ! -f "$_stop_script" ]; then
+    # Fallback leg — mirrors lib.sh stop_via_stop_script's second leg.
+    _stop_script="$(pwd)/scripts/stop-ensemble.sh"
+fi
+if [ ! -f "$_stop_script" ] || [ ! -x "$_stop_script" ]; then
+    _warn "stop-script sibling not usable at $_stop_script (must exist AND carry the exec bit — conservative hardening: every consumer invokes 'bash stop-ensemble.sh') — refusing BEFORE any lock/txn/stop (the stop step would abort rc=127: bash: No such file or directory)"
     exit 78
 fi
 
