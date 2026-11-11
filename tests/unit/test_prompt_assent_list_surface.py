@@ -15,10 +15,7 @@ The read surface over the Phase-1 ``list_pending`` primitives:
 
 from __future__ import annotations
 
-from daemon.repositories.prompt_version.repository import (
-    PromptVersionRepository,
-    actor_from_instance,
-)
+from daemon.repositories.prompt_version.repository import actor_from_instance
 from tests.helpers.prompt_assent_fixture import (  # noqa: F401 — fixtures
     pending_row,
     pv_repo,

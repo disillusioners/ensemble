@@ -65,7 +65,6 @@ from tests.helpers.prompt_assent_fixture import (  # noqa: F401 — fixtures
 )
 from tests.helpers.prompt_assent_tool_fixture import (
     CHANNEL_ID,
-    MESSAGE_ID,
     RELAY_INSTANCE_ID,
     SOURCE_ID,
     USER_ID,

@@ -23,8 +23,6 @@ from __future__ import annotations
 
 import logging
 
-import pytest
-
 from daemon.tools.prompt_assent import (
     MISMATCH_CODES,
     PHASE2_PLACED_CODES,
