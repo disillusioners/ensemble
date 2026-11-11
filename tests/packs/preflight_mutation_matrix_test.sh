@@ -36,6 +36,21 @@
 #   bash tests/packs/preflight_mutation_matrix_test.sh                # all legs
 #   bash tests/packs/preflight_mutation_matrix_test.sh --legs M1,M6   # a subset
 #   bash tests/packs/preflight_mutation_matrix_test.sh --dry-run      # plan only
+#
+# CAP PARTITION (2026-11-11, pass A of promote-full-auto): the 11
+# ceremony-arm legs (M23–M28 + M34,M35,M39,M40,M41 — the legs that plant
+# into daemon/tools/upgrade_tools.py / the ceremony pack, the set the
+# D-branch gate needs) EXCEED the house 300 s outer cap as one invocation
+# (measured 294 s for the 6-leg M23–M28 slice alone at `5fce2dbdd`; this
+# pack's own per-leg budget is `timeout 400`). Run them as THREE ≤4-leg
+# invocations, all inside the cap with headroom:
+#   bash tests/packs/preflight_mutation_matrix_test.sh --legs M23,M24,M25,M26
+#   bash tests/packs/preflight_mutation_matrix_test.sh --legs M27,M28,M34,M35
+#   bash tests/packs/preflight_mutation_matrix_test.sh --legs M39,M40,M41
+# The split is INVOCATION-ONLY: leg definitions, order and semantics are
+# untouched, and the cumulative TSV (CUM, default
+# /tmp/preflight-mutation-matrix-all.tsv) keeps multi-batch runs together
+# so a 3-slice sweep still yields one digest per leg.
 
 set -u
 

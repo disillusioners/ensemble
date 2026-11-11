@@ -325,8 +325,15 @@ cp "$LIB" "$UNARMED_DIR/lib.sh"
 # definitions so `declare -F` cannot resolve them (the exact predicate
 # promote.sh's token check uses). Anchored at column 0 — only the
 # definitions move; nothing at source time calls them.
-sed -i -E 's/^(_enforce_deadline|_budget_breach|_run_bounded_step|_run_bounded)\(\) \{/\1_UNARMED_FIXTURE() {/' \
+# PORTABLE IN-PLACE (F-5, 2026-11-11): BSD sed consumes the token after -i
+# as the backup suffix, so `sed -i -E '…'` ate -E as the suffix, parsed the
+# script as BRE and died ("RE error: braces not balanced") — structurally
+# RED on macOS, leaving the fixture ARMED (the E2-fix false red). The
+# attached-suffix form is portable across BSD and GNU sed; the stray .bak
+# is removed so the fixture dir stays byte-clean.
+sed -i.bak -E 's/^(_enforce_deadline|_budget_breach|_run_bounded_step|_run_bounded)\(\) \{/\1_UNARMED_FIXTURE() {/' \
     "$UNARMED_DIR/lib.sh"
+rm -f "$UNARMED_DIR/lib.sh.bak"
 pf_assert_not_live_scripts "$UNARMED_DIR"
 if ( bash -c '. "$1/lib.sh"; declare -F _budget_breach >/dev/null' _ "$UNARMED_DIR" 2>/dev/null ); then
     pf_bad "E2-fix the unarmed fixture still resolves the watchdog machinery (sed strip failed)"
@@ -340,8 +347,16 @@ TOK_OUT="$PF_SB/token.out"
       timeout -k 5 120 bash "$UNARMED_DIR/promote.sh" sandbox --version v0.0.1-test \
       > "$TOK_OUT" 2>&1 )
 TOK_RC=$?
-if grep -qi 'watchdog' "$TOK_OUT" && [ "$TOK_RC" = "78" ]; then
-    pf_ok "E2 promote.sh refuses the unarmed watchdog token (rc=78, names the watchdog)"
+# F-6 (2026-11-11): the old discriminator (`grep -qi 'watchdog' && rc=78`)
+# was a latent FALSE PASS — promote.sh prints "watchdog" on the HONORED
+# branch too, so a fixture whose strip FAILED (still armed) passed for the
+# wrong reason. E2b's discriminator is the honest one, mirrored here for
+# the refusal arm: the honored marker must be ABSENT, the NOT-armed marker
+# PRESENT, and rc must be the refusal 78.
+if ! grep -q 'watchdog token honored' "$TOK_OUT" \
+   && grep -q 'NOT armed' "$TOK_OUT" \
+   && [ "$TOK_RC" = "78" ]; then
+    pf_ok "E2 promote.sh refuses the unarmed watchdog token (rc=78, watchdog NOT armed, honored branch NOT taken)"
 else
     deferred_red "I11" "the token is not refused (rc=$TOK_RC; stderr last: $(tail -1 "$TOK_OUT" | cut -c1-140)) — phase6 T6.6"
 fi
