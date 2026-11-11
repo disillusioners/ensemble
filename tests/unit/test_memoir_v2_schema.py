@@ -66,6 +66,18 @@ MEMOIR_V2_MIGRATION = MIGRATIONS_DIR / "20261109_021154_create_memoir_v2_tables.
 #: against it (never against a hardcoded absolute count).
 LANE_BASE_COMMIT = "f49006b922492f72ca032c56e26d20468f7a3afd"
 
+#: The lane's OWN commit — the commit that added the lane's migration
+#: file. The lane's census DELTA is measured over the CLOSED range
+#: ``LANE_BASE_COMMIT..LANE_COMMIT`` (this lane's own work), so a
+#: FOREIGN lane that adds a migration LATER can never enter this pin.
+LANE_COMMIT = "a2d90bb37644b174d7358be7480d692308ec6d9a"
+
+#: The lane's own migration file as a REPO-RELATIVE path — the form
+#: ``git ls-tree`` yields (the set-difference is done on that form).
+MEMOIR_V2_MIGRATION_REL = (
+    "daemon/migrations/versions/20261109_021154_create_memoir_v2_tables.sql"
+)
+
 #: The six NEW tables of this lane.
 V2_TABLE_NAMES = {
     "memoir_star",
@@ -227,8 +239,31 @@ def test_the_migration_census_delta_is_exactly_one_new_file():
     """The lane's DELTA against its base commit — re-derived, never a
     hardcoded absolute.
 
+    DURABLE, PER-LANE OWNERSHIP FORM (re-expressed 2026-11-11, fix-pass
+    N-2). The pin used to assert that the WORKING-TREE delta against
+    ``LANE_BASE_COMMIT`` contained EXACTLY ONE file — the lane's own.
+    That is a LANE-scoped property written in a GLOBAL-COUNT form: the
+    moment ANY later lane adds a migration (the prompt-assist lane
+    added ``20261110_221500_create_prompt_assent_tokens.sql``) the
+    working-tree delta grows and this lane's pin goes RED — a
+    cross-lane break with NO production defect behind it.
+
+    The census is now measured in the lane's OWN terms, and no leg of it
+    re-breaks when a FUTURE migration lane lands:
+
+    * OWNERSHIP (live) — the lane's OWN migration file IS present in the
+      working tree's delta against ``LANE_BASE_COMMIT``. A deleted,
+      renamed or reverted lane file still REDs here.
+    * GROWTH — the census delta is non-empty: the lane's migration is
+      accounted for relative to its base.
+    * EXACTNESS (lane-scoped) — over the lane's OWN closed commit range
+      ``LANE_BASE_COMMIT..LANE_COMMIT`` the delta is EXACTLY ONE file,
+      and it is the lane's own: the ORIGINAL intent, preserved without a
+      global count. The range is closed on a fixed historical commit, so
+      a foreign lane's later migrations cannot appear in it.
+
     The WORKING TREE is compared against the base commit (not ``HEAD``)
-    so the leg is meaningful both before and after the commit lands.
+    so the live legs are meaningful both before and after a commit lands.
     """
     def _at(ref: str) -> set[str]:
         out = subprocess.run(
@@ -246,7 +281,24 @@ def test_the_migration_census_delta_is_exactly_one_new_file():
         for path in MIGRATIONS_DIR.glob("*.sql")
     }
     delta = working - base
-    assert delta == {"daemon/migrations/versions/20261109_021154_create_memoir_v2_tables.sql"}, delta
+
+    # (1) per-lane OWNERSHIP — the lane's OWN migration file is IN the
+    #     delta (catches a deleted / renamed / reverted lane file).
+    assert MEMOIR_V2_MIGRATION_REL in delta, (
+        f"the lane's own migration file {MEMOIR_V2_MIGRATION_REL} is missing "
+        f"from the census delta against {LANE_BASE_COMMIT}: {sorted(delta)}"
+    )
+
+    # (2) GROWTH — the census delta is non-empty (the lane contributed).
+    assert len(delta) >= 1, (
+        f"the census delta against {LANE_BASE_COMMIT} is empty — the lane's "
+        "migration file is not accounted for"
+    )
+
+    # (3) EXACTNESS, lane-scoped — over the lane's OWN closed commit range
+    #     the delta is EXACTLY ONE file, and it is the lane's own.
+    lane_delta = _at(LANE_COMMIT) - base
+    assert lane_delta == {MEMOIR_V2_MIGRATION_REL}, lane_delta
 
 
 def test_every_create_table_carries_if_not_exists():

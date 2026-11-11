@@ -86,9 +86,9 @@ TOOL_NAMES: frozenset[str] = frozenset({
 #: SAME set as the tool bodies' runtime gate).
 EXPECTED_HOLDERS: list[str] = ["maintenancer", "devops", "wanderer"]
 
-#: The privileged universe — the sixteen base entries plus the
-#: nest-report-read category = eighteen members; the memoir merge added
-#: the nineteenth (2026-11-06).
+#: The privileged universe — exactly twenty-one members (the count pin
+#: below is the authority; the census prose is re-derived BY GREP at
+#: every lane ceremony, never a frozen literal to copy forward).
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
@@ -117,6 +117,9 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
     # (ari-exactly; see daemon/tools/_tool_registry.py).
     "prompt-reload",
+    # prompt-assent (2026-11-10, prompt-assent lane): privileged entry #21
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-assent",
 })
 
 
@@ -229,7 +232,7 @@ class TestPrivilegedCategory:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
     def test_the_set_has_twenty_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
 
 
 # ── A13: the attribute pin + the default-deny behavioral leg ───────────────

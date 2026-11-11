@@ -144,24 +144,25 @@ class TestTheCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_has_twenty_members(self) -> None:
-        # prompt-reload (2026-11-06) entered as #20 after memoir.
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
+    def test_the_set_has_twenty_one_members(self) -> None:
+        # prompt-assent (2026-11-10) entered as #21 after prompt-reload.
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
 
-    def test_the_derived_set_is_exactly_the_twenty_entries(self) -> None:
+    def test_the_derived_set_is_exactly_the_twenty_one_entries(self) -> None:
         """The expected set is DERIVED (the registry's own literal), never
         hardcoded from a prose census."""
         derived = _registry_literal_members()
-        assert len(derived) == 20, sorted(derived)
+        assert len(derived) == 21, sorted(derived)
         assert CATEGORY in derived
         assert PRIVILEGED_TOOL_CATEGORIES == derived
 
     def test_the_memoir_entry_is_followed_only_by_later_lanes(self) -> None:
         """The registry's literal appends the new entry at the END (the
         house convention — the set is a frozen literal, not a set). The
-        prompt-reload lane (2026-11-06) appended after memoir, so memoir
-        is now second-to-last — exactly as notify-user/nest-report-read
-        are for their successors."""
+        prompt-reload lane (2026-11-06) appended after memoir, and the
+        prompt-assent lane (2026-11-10) appended after prompt-reload, so
+        memoir is now third-to-last — exactly as notify-user/
+        nest-report-read are for their successors."""
         source = (REPO_ROOT / "daemon" / "tools" / "_tool_registry.py").read_text(
             encoding="utf-8"
         )
@@ -174,8 +175,9 @@ class TestTheCategory:
             for line in literal.splitlines()
             if line.strip().startswith('"')
         ]
-        assert entries[-2] == CATEGORY, entries[-4:]
-        assert entries[-1] == "prompt-reload", entries[-4:]
+        assert entries[-3] == CATEGORY, entries[-4:]
+        assert entries[-2] == "prompt-reload", entries[-4:]
+        assert entries[-1] == "prompt-assent", entries[-4:]
 
     def test_the_category_module_resolves_to_a_daemon_tools_path(self) -> None:
         assert CATEGORY_MODULES.get(CATEGORY) == MODULE
@@ -324,8 +326,8 @@ class TestTheAriOnlyAllowList:
         )
         allow = meta.get("tools", {}).get("allow", []) or []
         assert CATEGORY in allow
-        assert allow[-1] == "prompt-reload", (
-            "the prompt-reload entry (2026-11-06) must be the LAST entry "
+        assert allow[-1] == "prompt-assent", (
+            "the prompt-assent entry (2026-11-10) must be the LAST entry "
             "of ari's allow array (the trailing-entry discipline)"
         )
 
@@ -353,9 +355,10 @@ class TestTheAriOnlyAllowList:
         source = (REPO_ROOT / "tests/unit/test_board_registration.py").read_text(
             encoding="utf-8"
         )
-        assert '"memoir", "prompt-reload"]' in source, (
-            "the board trailing pin must end with prompt-reload "
-            "(the prompt-reload lane, 2026-11-06, appended after memoir)"
+        assert '"memoir", "prompt-reload", "prompt-assent"]' in source, (
+            "the board trailing pin must end with prompt-reload + "
+            "prompt-assent (the prompt-assent lane, 2026-11-10, appended "
+            "after prompt-reload)"
         )
         # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): the board
         # pin's ari literal gained "pok" between "notify-user" and
@@ -364,17 +367,17 @@ class TestTheAriOnlyAllowList:
 
 
 class TestTheCeremonySelfVerification:
-    """The pins outlive the ceremony: every count pin says 20, every
+    """The pins outlive the ceremony: every count pin says 21, every
     exact-set literal agrees with the registry's own, and the standing
     mutation instrument is lockstepped."""
 
-    def test_every_count_pin_says_twenty(self) -> None:
+    def test_every_count_pin_says_twenty_one(self) -> None:
         for rel in COUNT_PIN_FILES:
             source = (REPO_ROOT / rel).read_text(encoding="utf-8")
-            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 20" in source, rel
-            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 19" not in source, (
-                f"{rel}: a stale 19-flavored count pin survived the "
-                f"prompt-reload ceremony"
+            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 21" in source, rel
+            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 20" not in source, (
+                f"{rel}: a stale 20-flavored count pin survived the "
+                f"prompt-assent ceremony"
             )
 
     def test_every_expected_set_definition_agrees_with_the_registry(self) -> None:

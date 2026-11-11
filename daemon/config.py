@@ -3224,6 +3224,83 @@ class NotifyUserConfig(BaseSettings):
     )
 
 
+# ── The prompt-assent fail-closed defaults (D-2 / K-9 — ONE home) ─────────
+#
+# Declared BEFORE ``PromptAssentConfig`` (the M5 pattern: the
+# ``Field(default=...)`` references below need the names at
+# class-construction time). Consumed by:
+#   (a) the ``PromptAssentConfig`` field defaults (this module),
+#   (b) the tool layer's call-time resolver
+#       (``daemon/tools/prompt_assent.py`` IMPORTS both names from here —
+#       never a second literal).
+# The architect's D-2 ruling @ ``df8da01a6``: ONE fail-closed OFF default
+# constant consumed by BOTH the Phase-2 resolver and this class — the
+# prior "resolver off / class on" split is a defect under either default
+# and is reconciled here. The defaults LIVE here (this module), not in
+# the tool module: config is the bottom layer and the
+# ``notify_user``/M5 precedent already runs tool-layer ← config imports.
+PROMPT_ASSENT_DEFAULT_ENABLED: bool = False
+PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET: int = 10
+
+
+class PromptAssentConfig(BaseSettings):
+    """Configuration for the ``prompt_assent`` tool (prompt-assent lane,
+    2026-11-10).
+
+    Class name + env prefix per the architect's D-2 / H-11 ruling
+    (``architecture-recommendation.md`` @ ``df8da01a6``):
+    ``PromptAssentConfig`` with prefix ``ENSEMBLE_PROMPT_ASSENT_``. The
+    RETIRED planner-drift spellings (the ``PromptAssist`` stem, §7
+    defect 1) must never appear anywhere in the tree — a structural pin
+    greps for both retired literals. Auto-covered by the tests'
+    ``_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")`` prefix match in
+    ``tests/conftest.py`` (no conftest edits required).
+
+    THE DEFAULT IS OFF — fail-closed (D-2 OVERRULED the planner's
+    fail-open): ``ENSEMBLE_PROMPT_ASSENT_ENABLED`` unset OR invalid ⇒ the
+    lane is off ⇒ the tool refuses ``lane-disabled`` (the tool STAYS
+    registered; ``mint`` is refused too). This is the first lane in the
+    tree that can change a live agent's own guardrails through a chat
+    message; the house's most recent Emperor-ratified posture for a
+    novel authority surface (Decision Module P1, 2026-11-09: "dormant by
+    default, nothing decides anything") is exactly this shape. Arming is
+    ONE env var per environment — no code change.
+
+    BOTH consumers — this class and the tool's call-time resolver — read
+    the SAME ``PROMPT_ASSENT_DEFAULT_ENABLED`` constant (declared
+    above); a structural pin proves neither re-declares it.
+
+    ENV-ONLY (the ``nest_report`` precedent): this section has NO
+    ``config.yaml`` block and ``load_config`` has NO pass-through for
+    it, so a hand-added yaml block would be silently ignored — and would
+    ALSO shadow the env knob (explicit kwargs beat env at pydantic-init;
+    the defect class the ``memoir_reflection`` fold names). The tool
+    reads the knob AT CALL TIME (the ``notify_user`` ``_resolve_bounds``
+    shape), so an env flip needs no restart.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_PROMPT_ASSENT_")
+
+    enabled: bool = Field(
+        default=PROMPT_ASSENT_DEFAULT_ENABLED,
+        description="The lane kill-switch (D-2). Default OFF — fail-closed: "
+                    "unset or invalid ⇒ the prompt_assent tool refuses "
+                    "lane-disabled (the tool stays registered; mint is "
+                    "refused too). Arming is ONE env var per environment. "
+                    "Env: ENSEMBLE_PROMPT_ASSENT_ENABLED.",
+    )
+    hourly_mismatch_budget: int = Field(
+        default=PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET,
+        ge=1,
+        description="K-9 / D-3b — the per-relay-instance hourly "
+                    "token-mismatch bound. The MECHANISM is P2-owned "
+                    "(an in-RAM counter keyed by relay instance, cleared "
+                    "by the hour bucket and by a restart); exhaustion ⇒ "
+                    "the typed refusal mismatch-budget-exceeded. "
+                    "Env: ENSEMBLE_PROMPT_ASSENT_HOURLY_MISMATCH_BUDGET.",
+    )
+
+
 class NestReportConfig(BaseSettings):
     """Configuration for the ``report_anomaly`` tool (nest-anomaly-report).
 
@@ -6824,6 +6901,16 @@ class Config(BaseSettings):
     # NotifyUserConfig, env prefix ENSEMBLE_NOTIFY_USER_). Peers with
     # `scheduling:` — the yaml block mirrors the field names exactly.
     notify_user: NotifyUserConfig = Field(default_factory=NotifyUserConfig)
+    # prompt-assent (2026-11-10): the prompt_assent knob section
+    # (architect D-2/H-11 — class PromptAssentConfig, env prefix
+    # ENSEMBLE_PROMPT_ASSENT_): the DEFAULT-OFF fail-closed lane
+    # kill-switch + the K-9 hourly mismatch budget. Peers with
+    # `notify_user:`. ENV-ONLY (the nest_report precedent): this
+    # section has NO config.yaml block and load_config has NO
+    # pass-through for it, so a hand-added yaml block would be silently
+    # ignored — and would ALSO shadow the env knob (explicit kwargs
+    # beat env at pydantic-init). The tool reads the knob AT CALL TIME.
+    prompt_assent: PromptAssentConfig = Field(default_factory=PromptAssentConfig)
     # nest-anomaly-report (2026-11-05): the report_anomaly knob section
     # (R9 — class NestReportConfig, env prefix ENSEMBLE_NEST_REPORT_;
     # the OPERATIONAL surfaces take the nest- prefix while the DATA

@@ -1465,7 +1465,12 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # 799679a94).
     "daemon/sources/registry.py": "6eb223368e8f0f62470b31133e255b052a824d960c61348962175d6262be7628",
     "daemon/sources/dispatcher.py": "4282ddc0396f9103ff7e14af9077c721d29e5329fac702ad3dfbfafd7083e53a",
-    "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
+    # prompt-assent Phase 1 (2026-11-10, task 1.12): the K-3 / AR-1 leg-2
+    # 1:1-DM discriminator (is_group_dm) was ADDED to the adapter's nested
+    # discord_meta (additive metadata, no schema change) — the pinned
+    # content-sha256 moved with the real bytes.
+    # Prior value 87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43.
+    "daemon/sources/adapters/discord/adapter.py": "a9f3a711fc7928ece67472e2f313fa5ddfae173422a02d99c712d0e1ecee4b14",
     # Phase B — 7 daemon files + slack-setup.md (8).
     # slack/adapter.py re-pinned 2026-10-04: authorized remediation commit
     # (verification CRITICAL #1 — channel= kwarg fix); any FURTHER change

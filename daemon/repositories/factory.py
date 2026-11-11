@@ -94,6 +94,18 @@ from .instance_ops.models import InstanceOpsAudit
 # _ensure_postgres_columns needed (same instance_ops_audit precedent).
 from .notify_audit.models import NotifyAudit
 
+# Prompt-assent token store (2026-11-10). Imported here so
+# ``SQLModel.metadata.create_all()`` (called from daemon/manager.py)
+# registers the ``prompt_assent_tokens`` table on fresh PostgreSQL
+# databases — the N1 REQUIRED seam: the table is the durable leg of the
+# conversational approval lane, so a missed import means no table on PG,
+# which means every token INSERT fails. Fresh SQLite databases pick the
+# table up from the MigrationRunner via the 20261110_221500 migration.
+# Brand-new table — NO _ensure_postgres_columns entry (the ensure list
+# is one transaction; a failure there aborts boot — the create_all seam
+# in daemon/api.py is the PG path).
+from .prompt_assent.models import PromptAssentToken
+
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
 

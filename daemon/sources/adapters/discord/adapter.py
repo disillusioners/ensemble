@@ -122,6 +122,28 @@ def _is_valid_discord_token_format(token: str) -> bool:
     return bool(_DISCORD_TOKEN_RE.match(token))
 
 
+def _classify_dm_channel(channel: Any) -> bool | None:
+    """prompt-assent K-3 discriminator — 1:1 DM vs group DM (task 1.12).
+
+    Returns ``True`` for a Discord **group DM** (``GroupChannel`` — a
+    ``recipients`` collection), ``False`` for a **1:1 DM**
+    (``DMChannel`` — a singular ``recipient``), ``None`` when the
+    channel shape is unclassifiable. Duck-typed DELIBERATELY:
+    ``import discord`` stays lazy in this adapter, and the discriminator
+    must not turn it into a module-scope import (an unparseable shape ⇒
+    ``None``; the assent lane's fail-closed rule treats ``None`` — like
+    an absent key or a non-bool value — as NOT private, so a
+    classification miss is bounded to availability, never authority).
+    Only consulted for DM channels (``guild is None``); guild channels
+    are never group DMs.
+    """
+    if getattr(channel, "recipient", None) is not None:
+        return False
+    if getattr(channel, "recipients", None) is not None:
+        return True
+    return None
+
+
 class DiscordAdapter(MessageSourceAdapter):
     """Discord Gateway + REST adapter.
 
@@ -1040,6 +1062,18 @@ class DiscordAdapter(MessageSourceAdapter):
         attachments = getattr(message, "attachments", None) or []
 
         is_dm = guild is None
+        # prompt-assent AR-1 leg 2 (K-3, task 1.12) — the 1:1-DM
+        # discriminator. TODAY ``is_dm`` is guild-absence only, so a
+        # Discord GROUP DM (≤10 recipients) classifies ``is_dm=True`` —
+        # exactly the multi-occupant private channel the assent lane
+        # must exclude. Duck-typed on purpose: ``discord.py`` DMChannel
+        # (1:1) carries a singular ``recipient``; GroupChannel carries a
+        # ``recipients`` collection. ``None`` = unclassifiable channel
+        # shape — the assent lane's fail-closed rule treats an absent or
+        # unparseable discriminator as NOT private (mirrors D-6's
+        # absent-stamp rule). ADDITIVE metadata — no schema change, and
+        # every other consumer of ``discord_meta`` is unaffected.
+        is_group_dm = False if not is_dm else _classify_dm_channel(channel)
         thread_id = getattr(channel, "id", None) if getattr(channel, "parent_id", None) is not None else None
         parent_channel_id = getattr(channel, "parent_id", None)
 
@@ -1057,6 +1091,7 @@ class DiscordAdapter(MessageSourceAdapter):
             "user_display_name": getattr(author, "display_name", None) if author else None,
             "message_id": str(getattr(message, "id", "")) or None,
             "is_dm": is_dm,
+            "is_group_dm": is_group_dm,
         }
 
         # --- Content extraction ---

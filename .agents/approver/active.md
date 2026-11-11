@@ -1,13 +1,14 @@
 # Approver Active State
 
-Plan: skill-system-revival Phase 1 (ENSEMBLE-27 / board wi-4d1fa093; plan at .agents/shared/planning/skill-system-revival/phase1-plan.md — approved at worktree ae5bbafed, 1,141 lines, sha256 04bcbb04…; lane branch feature/skill-system-revival-phase1 now @ merge cfe4480be after the origin/latest catch-up)
-Slug: skill-system-revival-phase1
-Mode: Plan Approval (2 workers partitioned by axis: doc-consistency + executable-claims; fan-in via todo_graph)
+Plan: prompt-assent (conversational approval lane — privileged prompt-version APPROVE/REJECT by chat echo; trust-model change; plan at .agents/shared/planning/prompt-assent/ in this worktree, branch feature/prompt-assent, set committed through ee43f6a6)
+Slug: prompt-assent
+Mode: Plan Approval (2 workers partitioned by concern: fresh-eyes full-set evaluation + K-critical closure verification; fan-in via todo_graph)
 Status: APPROVED
-Iteration: 002 (FINAL — APPROVED 2026-11-09; 0 blocking, 11 non-blocking findings; iteration 001's 5 blockers verified CLOSED; the verdict file's §19.1 row-count figure is superseded 29→38 by dated annotation, verdict unchanged)
-Last Verdict: APPROVE-WITH-FINDINGS (iteration 002 FINAL, 2026-11-09) — verdict file .agents/shared/planning/skill-system-revival/approver-verdict-002.md
-Tracking: .agents/approver/skill-system-revival-phase1-tracking.md
-Note: pointer-resolution 2026-11-09T15:55Z (approver, owner of this file's semantics): merge cfe4480be conflicted the single-slot pointer (upstream carried decision-module ESCALATED-FINAL; this lane carried skill-revival APPROVED-FINAL — mutually exclusive rewrites). Resolved to skill-system-revival: it is the actively-executing commission (reviewer+tidier pass + SHA-pinned tester gate in flight; the APPROVED verdict is the artifact-of-record in consumption); decision-module is terminal and moves to the superseded chain below. Displaced bytes preserved byte-exact by side-car /home/nea/foreign-rescue/approver-active.md.rescue-skill-revival-phase1-20261109T1505Z (sha256 24599745395fc3565d12eb17838ca0466a56f8fd487ede10b3f3a55bf39bc58c) and stash 084aa8e3a0e20f5a0121ceda07ae6b8c2c77e8ca (same bytes; drop authorized by the owner — see report).
+Iteration: 001 (FINAL — APPROVED 2026-11-10; 0 blocking across 2 workers; all 9 council K-criticals verified CLOSED with evidence; 5 aggregated non-blocking notes)
+Last Verdict: APPROVE (iteration 001 FINAL, 2026-11-10) — tracking: .agents/approver/prompt-assent-tracking.md
+Tracking: .agents/approver/prompt-assent-tracking.md
+Note: caller = pre-developer-dispatch fresh-eyes double-check; REJECT verdict reasons (if any) to be written to the tracking file and committed on the branch per caller instruction; planning set itself is read-only for the approver lane.
+Note: superseded-from-active: skill-system-revival-phase1 APPROVED 002 FINAL 2026-11-09 (verdict file .agents/shared/planning/skill-system-revival/approver-verdict-002.md; pointer-resolution + rescue side-car history preserved in .agents/approver/skill-system-revival-phase1-tracking.md) — see .agents/approver/skill-system-revival-phase1-tracking.md.
 Note: superseded-from-active: decision-module ESCALATED 003 FINAL 2026-11-09 (4 blocking, escalated to the Emperor; K1 enforce-mode shadow CLOSED; design content anchor-verified and landed on latest @ 818411107; P1 wave runs on feature/decision-module-p1, no approver cycle) — see .agents/approver/decision-module-tracking.md.
 Note: superseded-from-active: source-gc APPROVED 001 FINAL 2026-11-07 (12 commission constraints code-verified at 6b571771d) — see .agents/approver/source-gc-tracking.md (historical record, preserved, do not delete).
 Note: superseded-from-active: project-operating-knowledge ESCALATED 003 FINAL 2026-11-06 (8 aggregated blockers; full history preserved) — see .agents/approver/project-operating-knowledge-tracking.md.

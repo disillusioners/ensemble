@@ -387,6 +387,18 @@ RESPONSE_BYTE_CEILING = 10**9""",
         TOOLS_PACK,
         "test_the_ring_empty_flag_is_the_ages_heuristic_not_a_fact",
     ),
+    # ── THE prompt-assent LANE (2026-11-10): the new PRIVILEGED category
+    #    needs a mutation target — "a category with no mutation target is
+    #    not covered by the matrix". Dropping the category from the
+    #    registry's literal must RED the registration pin.
+    (
+        "MT-28-prompt-assent-category-dropped",
+        "daemon/tools/_tool_registry.py",
+        '    "prompt-assent",\n',
+        "    # MUTATION: the prompt-assent category was dropped\n",
+        "tests/unit/tools/test_prompt_assent_registration.py",
+        "test_step4_the_category_is_privileged",
+    ),
 ]
 
 #: The FOLLOW legs — a mutation whose EXPECTED result is NOT a red but a

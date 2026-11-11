@@ -179,9 +179,30 @@ PRIOR_ALLOWLIST_ENTRIES = frozenset(
 #: EXPLICITLY so a NEW offender is distinguishable from the inherited
 #: set. The pin names the whole set in its failure message; it never
 #: silently absorbs an unknown path.
+#:
+#: **THE RECORD IS MAINTAINED BY THE CHANGING LANE.** A lane that
+#: changes daemon files records them here in its own change, so the
+#: offender stays NAMED and attributable instead of showing up as a
+#: new offender in a later lane's red. The prompt-assent lane
+#: (2026-11-10, Phase 1 + Phase 2) added the rows below.
 PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
     {
         "daemon/__init__.py",
+        # prompt-assent lane (2026-11-10, Phase 1 + Phase 2): the
+        # conversational approval lane's daemon surfaces.
+        "daemon/repositories/prompt_assent/__init__.py",
+        "daemon/repositories/prompt_assent/consume_hook.py",
+        "daemon/repositories/prompt_assent/mint_context.py",
+        "daemon/repositories/prompt_assent/models.py",
+        "daemon/repositories/prompt_assent/repository.py",
+        "daemon/repositories/prompt_version/assent_attestation.py",
+        "daemon/repositories/prompt_version/repository.py",
+        "daemon/repositories/factory.py",
+        "daemon/migrations/versions/20261110_221500_create_prompt_assent_tokens.sql",
+        "daemon/services/prompt_version_diff.py",
+        "daemon/services/prompt_version_service.py",
+        "daemon/sources/adapters/discord/adapter.py",
+        "daemon/tools/prompt_assent.py",
         "daemon/_redact.py",
         "daemon/auth/scopes.py",
         "daemon/checkpoint_metrics.py",
@@ -806,7 +827,10 @@ class TestTheBudget:
         # "pok" re-point 2026-11-08 (POK Phase 1 F-1 ceremony, commit
         # 16b4e70b2): the sanctioned 7 -> 8 bump; this file's op-enum
         # annex pins are untouched.
-        assert cm.VOCABULARY_VERSION == 8
+        # prompt-assent 2026-11-10 (Phase 2): the sanctioned 8 -> 9 bump
+        # (the ``prompt-assent`` PRIVILEGED category, #21, joined the
+        # tool-category label set — the SAME axis, a fifth time).
+        assert cm.VOCABULARY_VERSION == 9
 
     def test_each_family_stays_inside_its_declared_band(self) -> None:
         specs = registry.registered_families()

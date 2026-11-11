@@ -260,7 +260,16 @@ def _cardinality_cap() -> int:
 #: artifact = 61/7 before this lane). The F7 checkpoint ``op`` enum is
 #: UNCHANGED by this bump (its own vocabulary still reads
 #: ``{aget, other}``).
-VOCABULARY_VERSION: int = 8
+#: **9** (prompt-assent, 2026-11-10) — the tool-category vocabulary
+#: gained the ``prompt-assent`` PRIVILEGED category (entry #21, ari-
+#: exactly), so the frozen artifact label set grew 62 → 63 and the
+#: vocabulary version bumps with the regeneration (F-1 trap class: the
+#: artifact and this constant move in the SAME change). D-1 drift note:
+#: the design docs said "8→9 / 62→63" — the numbers were re-derived
+#: mechanically at this tree (checkpoint_metrics = 8, artifact = 62/8
+#: before this lane). The F7 checkpoint ``op`` enum is UNCHANGED by this
+#: bump (its own vocabulary still reads ``{aget, other}``).
+VOCABULARY_VERSION: int = 9
 
 
 # ─── Registration-time family metadata (AM-3) ───────────────────────────────

@@ -67,16 +67,16 @@ class TestTheCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_has_twenty_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
+    def test_the_set_has_twenty_one_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
 
-    def test_the_derived_set_is_exactly_the_twenty_entries(self) -> None:
+    def test_the_derived_set_is_exactly_the_twenty_one_entries(self) -> None:
         derived = _registry_literal_members()
-        assert len(derived) == 20, sorted(derived)
+        assert len(derived) == 21, sorted(derived)
         assert CATEGORY in derived
         assert PRIVILEGED_TOOL_CATEGORIES == derived
 
-    def test_the_prompt_reload_entry_is_last_in_the_literal(self) -> None:
+    def test_the_prompt_reload_entry_is_second_to_last_in_the_literal(self) -> None:
         source = (REPO_ROOT / "daemon" / "tools" / "_tool_registry.py").read_text(
             encoding="utf-8"
         )
@@ -89,7 +89,11 @@ class TestTheCategory:
             for line in literal.splitlines()
             if line.strip().startswith('"')
         ]
-        assert entries[-1] == CATEGORY, entries[-4:]
+        # prompt-assent (2026-11-10) appended after prompt-reload —
+        # prompt-reload is now second-to-last (the tail discipline is
+        # a RELATIVE one: a later lane may append after it).
+        assert entries[-2] == CATEGORY, entries[-4:]
+        assert entries[-1] == "prompt-assent", entries[-4:]
 
     def test_the_category_module_resolves_to_a_daemon_tools_path(self) -> None:
         value = CATEGORY_MODULES.get(CATEGORY)
@@ -175,21 +179,25 @@ class TestTheConstructionSeam:
 
 
 class TestTheAriOnlyAllowList:
-    def test_ari_meta_carries_the_category_last(self) -> None:
+    def test_ari_meta_carries_the_category_second_to_last(self) -> None:
         meta = json.loads(
             (REPO_ROOT / "agents" / "ari" / "meta.json").read_text(encoding="utf-8")
         )
         allow = meta.get("tools", {}).get("allow", []) or []
         assert CATEGORY in allow
         # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): prompt-reload
-        # REMAINS the LAST entry (the sweep inserts BEFORE nest-report,
+        # was the LAST entry (the sweep inserts BEFORE nest-report,
         # mid-array — the trailing discipline is untouched); the array
         # length grew 36 -> 37.
-        assert allow[-1] == CATEGORY, (
-            "the prompt-reload entry must be the LAST entry of ari's allow "
-            "array (the trailing-entry discipline)"
+        # prompt-assent (2026-11-10) appended AFTER it — prompt-reload is
+        # now second-to-last; the array length grew 37 -> 38.
+        assert allow[-2] == CATEGORY, (
+            "the prompt-reload entry must sit IMMEDIATELY BEFORE the "
+            "prompt-assent entry in ari's allow array (the trailing-entry "
+            "discipline — a later lane may append after it)"
         )
-        assert len(allow) == 37
+        assert allow[-1] == "prompt-assent"
+        assert len(allow) == 38
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []

@@ -97,13 +97,14 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, NamedTuple, Optional, Union
+from typing import Any, Callable, NamedTuple, Optional, Protocol, Union
 
 from sqlalchemy import func, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
+from .assent_attestation import AssentAttestation
 from .models import (
     PROMPT_AUDIT_EVENT_TYPES,
     PROMPT_ARTIFACT_CLASSES,
@@ -499,15 +500,24 @@ class VersionNotDeletableError(ValueError):
 # Actor auth-method vocabulary (A3). HTTP lanes are ``session`` /
 # ``bearer``; in-process submitters mint ``internal``. The HTTP
 # constructor REFUSES ``internal`` (anti-forgery per S16 — only
-# ``actor_from_instance()`` may mint internal).
+# ``actor_from_instance()`` may mint internal). ``assent-relay``
+# (prompt-assent commission, D-8) is the conversational approval lane:
+# minted ONLY by :func:`actor_from_assent_relay`, which REQUIRES the
+# typed :class:`~daemon.repositories.prompt_version.assent_attestation.AssentAttestation`
+# (constructed post-gate by the P3 assent service — never from tool
+# arguments). Python-side only: there is NO CHECK constraint on
+# ``approver_auth_method`` (``models.py`` — payload is JSONB), so no
+# schema change and no migration ride this widening.
 AUTH_METHOD_SESSION = "session"
 AUTH_METHOD_BEARER = "bearer"
 AUTH_METHOD_INTERNAL = "internal"
+AUTH_METHOD_ASSENT_RELAY = "assent-relay"
 
 _AUTH_METHODS: frozenset[str] = frozenset({
     AUTH_METHOD_SESSION,
     AUTH_METHOD_BEARER,
     AUTH_METHOD_INTERNAL,
+    AUTH_METHOD_ASSENT_RELAY,
 })
 
 
@@ -528,18 +538,29 @@ class ActorContext:
     Attributes:
         subject: Identity string. HTTP: ``AuthContext.subject``.
             Internal: ``instance_id`` (the agent instance that
-            submitted).
+            submitted). Assent-relay: the relay ``instance_id``
+            (the audit row's ``actor_subject`` carries the RELAY
+            identity; the payload/row ``approver_subject`` carries
+            the HUMAN — the §2.4 actor/authority split).
         auth_method: One of ``AUTH_METHOD_SESSION`` /
-            ``AUTH_METHOD_BEARER`` / ``AUTH_METHOD_INTERNAL``.
+            ``AUTH_METHOD_BEARER`` / ``AUTH_METHOD_INTERNAL`` /
+            ``AUTH_METHOD_ASSENT_RELAY``.
         instance_id: For ``auth_method == "internal"``: the
             submitter instance id. ``None`` for HTTP lanes (the
             approver side stamps ``AuthContext.subject``; the
-            instance id does not survive the HTTP boundary).
+            instance id does not survive the HTTP boundary). For
+            ``assent-relay``: the relay instance id (REQUIRED).
         agent_id: For ``auth_method == "internal"``: the submitter
             instance's resolved agent_id. ``None`` for HTTP lanes.
+            For ``assent-relay``: the relay agent (``"ari"``,
+            REQUIRED).
         version_tag: For ``auth_method == "internal"``: the
             submitter instance's version tag (``""`` for base).
             ``None`` for HTTP lanes.
+        attestation: For ``auth_method == "assent-relay"``: the
+            typed :class:`AssentAttestation` (REQUIRED, complete —
+            validated at construction). ``None`` for every other
+            lane.
     """
 
     subject: str
@@ -547,6 +568,7 @@ class ActorContext:
     instance_id: Optional[str] = None
     agent_id: Optional[str] = None
     version_tag: Optional[str] = None
+    attestation: Optional[AssentAttestation] = None
 
     def __post_init__(self) -> None:
         if self.auth_method not in _AUTH_METHODS:
@@ -563,6 +585,24 @@ class ActorContext:
             if not (self.instance_id and self.agent_id is not None):
                 raise ValueError(
                     "internal auth_method requires instance_id AND agent_id"
+                )
+        if self.auth_method == AUTH_METHOD_ASSENT_RELAY:
+            # D-8: the relay lane REQUIRES a complete typed
+            # attestation plus relay provenance — mirroring the
+            # internal branch's instance-identity requirement. An
+            # assent-relay actor without the attestation is a
+            # construction error, not a runtime refusal: the ONLY
+            # way to mint this lane is actor_from_assent_relay.
+            if not isinstance(self.attestation, AssentAttestation):
+                raise ValueError(
+                    "assent-relay auth_method requires a typed complete "
+                    "AssentAttestation (only actor_from_assent_relay "
+                    "mints this lane)"
+                )
+            if not (self.instance_id and self.agent_id):
+                raise ValueError(
+                    "assent-relay auth_method requires instance_id AND "
+                    "agent_id (relay provenance)"
                 )
 
     def is_internal(self) -> bool:
@@ -588,6 +628,74 @@ def actor_from_instance(
         agent_id=agent_id,
         version_tag=_normalize_version_tag(version_tag),
     )
+
+
+def actor_from_assent_relay(attestation: AssentAttestation) -> ActorContext:
+    """Build an ``ActorContext`` for the assent-relay lane (D-8).
+
+    The ONLY constructor that mints ``auth_method == "assent-relay"``
+    (mirroring ``actor_from_instance``'s internal-lane monopoly). The
+    attestation is the single source of truth: the relay provenance
+    (``relay_agent`` / ``relay_instance_id``) is derived FROM the
+    attestation, never passed separately, so the actor and its
+    attestation cannot diverge.
+
+    The attestation itself is minted ONLY by the P3 assent service,
+    post-gate — never from tool arguments (the anti-forgery analogue
+    of the repo's R3). ``subject`` = the relay instance id (the audit
+    row's ``actor_subject`` carries the RELAY identity; the payload +
+    row ``approver_subject`` carry the HUMAN — the §2.4 split).
+    """
+    if not isinstance(attestation, AssentAttestation):
+        raise ValueError(
+            "actor_from_assent_relay: attestation must be a typed "
+            "complete AssentAttestation"
+        )
+    return ActorContext(
+        subject=attestation.relay_instance_id,
+        auth_method=AUTH_METHOD_ASSENT_RELAY,
+        instance_id=attestation.relay_instance_id,
+        agent_id=attestation.relay_agent,
+        attestation=attestation,
+    )
+
+
+class AssentConsumeHook(Protocol):
+    """The D-4 hook protocol (prompt-assent commission, tasks 1.11 / O-L).
+
+    Executed INSIDE :meth:`atomic_transition`'s existing transaction —
+    ONE code path, no forked CAS+audit copy (the no-divergent-copies
+    doctrine) — BEFORE the state CAS, and performs IN ORDER:
+
+    (i) the **render-hash re-check** — re-render the canonical render
+        from the pending row AS READ IN THE TRANSACTION (plus the
+        effective side, also read in-txn, PRE-CAS: the row's own
+        approval later in the same transaction must not make it its
+        own baseline — the re-render must match the mint-time
+        semantics) and compare against the token's ``render_sha256``;
+        mismatch ⇒ raise ⇒ the whole transaction rolls back ⇒
+        ``token-content-mismatch``. O-L: this is the ONLY render-hash
+        site — the pre-transition layer does NOT duplicate it, so
+        shown/hashed/approved bytes cannot diverge;
+    (ii) the **consume-CAS** on the token row
+        (``UPDATE … SET status='consumed' … WHERE token_id=? AND
+        status='live'``); rowcount 0 ⇒ raise ⇒ rollback ⇒ the precise
+        typed refusal.
+
+    Ordering inside one transaction is all-or-nothing: a hook raise
+    rolls nothing out (nothing written yet); a downstream CAS failure
+    (already-decided race) rolls the consume flip back with it — the
+    losing path's token stays unconsumed (§5 FE/chat concurrency).
+
+    Built by
+    :func:`daemon.repositories.prompt_assent.consume_hook.build_assent_consume_hook`
+    (the P3 assent service wires it). The parameter on
+    ``atomic_transition`` is keyword-only, private (``_``-prefixed),
+    and default-``None``: with the hook absent the FE path is
+    byte-identical to the pre-prompt-assent behavior (pinned by test).
+    """
+
+    def __call__(self, conn: Connection, version_id: str) -> None: ...
 
 
 def actor_from_request(request: Any) -> ActorContext:
@@ -704,6 +812,21 @@ class EffectiveRow:
     # happens in the SQL.
     latest_version_id: Optional[str] = None
     latest_content: Optional[str] = None
+
+
+class EffectiveRenderSide(NamedTuple):
+    """The canonical-render's effective side (prompt-assent, J-3/K-7).
+
+    ``(content, version_id)`` for the baseline side of the render —
+    mint resolves it via
+    :meth:`PromptVersionRepository.effective_for_render` (public, over
+    the existing ONE-SELECT); the D-4 hook re-resolves it in-txn via
+    :meth:`PromptVersionRepository.effective_for_render_in_conn`. Same
+    precedence on both sides (parity pinned by test).
+    """
+
+    content: Optional[str]
+    version_id: Optional[str]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1362,6 +1485,8 @@ class PromptVersionRepository:
         *,
         approver_subject: Optional[str] = None,
         approver_auth_method: Optional[str] = None,
+        _assent_consume_hook: Optional["AssentConsumeHook"] = None,
+        _extra_audit_payload: Optional[dict] = None,
     ) -> PromptVersion:
         """Generic guarded state transition (A2 / A1).
 
@@ -1437,7 +1562,24 @@ class PromptVersionRepository:
                     f"AND approver_auth_method (HTTP AuthContext stamps; "
                     f"the repo refuses to invent approver identity)"
                 )
-            if approver_auth_method not in {AUTH_METHOD_SESSION, AUTH_METHOD_BEARER}:
+            # Approver-identity clamp (A3). ``assent-relay`` (D-8
+            # widening) is accepted ONLY when the D-4 consume hook
+            # rides the call — the attestation-bearing entrypoints
+            # (approve_assent / reject_assent) are the ONLY lane for
+            # this auth method, so the raw FE-facing transition path
+            # cannot admit a relay actor without the co-transactional
+            # consume (a relay approval whose token is never consumed
+            # would be a loose end; F4's spirit stays intact: the
+            # plain approve()/reject() callers never pass the hook).
+            if approver_auth_method == AUTH_METHOD_ASSENT_RELAY:
+                if _assent_consume_hook is None:
+                    raise ValueError(
+                        "approver_auth_method='assent-relay' requires the "
+                        "D-4 assent consume hook (approve_assent / "
+                        "reject_assent are the only entrypoints for this "
+                        "lane)"
+                    )
+            elif approver_auth_method not in {AUTH_METHOD_SESSION, AUTH_METHOD_BEARER}:
                 raise ValueError(
                     f"approver_auth_method must be session/bearer; got "
                     f"{approver_auth_method!r}"
@@ -1455,6 +1597,21 @@ class PromptVersionRepository:
 
         now = _now_iso()
         with self.engine.begin() as conn:
+            # D-4 hook (prompt-assent): runs INSIDE this transaction,
+            # BEFORE the state CAS — the render-hash re-check must read
+            # the pre-transition state (the pending row's own approval,
+            # executed later in this same transaction, would otherwise
+            # make the row its own latest-approved baseline and poison
+            # the effective-side read: the re-render must match the
+            # MINT-time semantics). Ordering inside one txn is
+            # all-or-nothing: a hook raise (token-content-mismatch /
+            # consume refusal) rolls NOTHING out (nothing has been
+            # written yet); a downstream CAS failure (already-decided
+            # race) rolls the consume flip back with it — the losing
+            # path's token stays live (§5 FE/chat concurrency).
+            # Default-absent ⇒ the FE path is byte-identical (pinned).
+            if _assent_consume_hook is not None:
+                _assent_consume_hook(conn, version_id)
             # CAS: only update if state still matches.
             upd = (
                 PromptVersion.__table__.update()
@@ -1508,6 +1665,7 @@ class PromptVersionRepository:
                 event_type=event_type,
                 actor=actor,
                 payload=payload,
+                extra_payload=_extra_audit_payload,
             )
 
         with Session(self.engine) as session:
@@ -1604,6 +1762,158 @@ class PromptVersionRepository:
             actor=actor,
             approver_subject=actor.subject,
             approver_auth_method=actor.auth_method,
+        )
+
+    # 5b. assent-relay entrypoints (prompt-assent, D-8 / task 1.6) ────────
+
+    def _require_assent_lane(
+        self,
+        version_id: str,
+        actor: ActorContext,
+        attestation: AssentAttestation,
+    ) -> None:
+        """The attestation-bearing lane's refusals (D-8 / task 1.6).
+
+        (a) refuse an actor that is not ``assent-relay``; (b) refuse an
+        absent/incomplete attestation (the type's ``__post_init__``
+        already enforces completeness — a non-instance or a mismatched
+        actor/attestation pair refuses here); (c) refuse an attestation
+        bound to a different item. ``approve()``/``reject()`` (the FE
+        path) are untouched — they never enter this helper.
+        """
+        if actor.auth_method != AUTH_METHOD_ASSENT_RELAY:
+            raise ValueError(
+                "approve_assent/reject_assent: only assent-relay actors "
+                f"may use the attestation-bearing entrypoints (got "
+                f"{actor.auth_method!r}); session/bearer lanes use "
+                "approve()/reject() and internal actors are refused (F4)"
+            )
+        if not isinstance(attestation, AssentAttestation):
+            raise ValueError(
+                "approve_assent/reject_assent: a typed complete "
+                "AssentAttestation is REQUIRED (refusing an absent or "
+                "incomplete attestation — D-8)"
+            )
+        if actor.attestation is not attestation:
+            raise ValueError(
+                "approve_assent/reject_assent: the actor's attestation "
+                "and the attestation argument must be the SAME instance "
+                "(a mismatched pair is an inconsistent provenance "
+                "presentation)"
+            )
+        if attestation.item_binding.version_id != version_id:
+            raise ValueError(
+                "approve_assent/reject_assent: attestation item_binding "
+                f"version_id {attestation.item_binding.version_id!r} does "
+                f"not match the target version_id {version_id!r} "
+                "(token-item binding)"
+            )
+
+    @staticmethod
+    def _assent_audit_provenance(
+        attestation: AssentAttestation,
+    ) -> dict:
+        """The §2.4 relay provenance dict (payload-only; D-9 shape).
+
+        Keys exactly as ruled; ``reject_reason`` is added by
+        ``reject_assent`` (top-level, ≤500 chars). The raw token appears
+        NOWHERE — ``token_fingerprint`` is ``sha256(token)[:12]``.
+        """
+        ident = attestation.human_identity
+        return {
+            "approval_path": "chat-assent",
+            "relay_agent": attestation.relay_agent,
+            "relay_instance_id": attestation.relay_instance_id,
+            "relay_source_id": ident.source_id,
+            "relay_external_user_id": ident.external_user_id,
+            "relay_user_id": ident.user_id,
+            "relay_guild_id": ident.guild_id,
+            "relay_channel_id": ident.channel_id,
+            "relay_channel_type": ident.channel_type,
+            "relay_message_id": attestation.human_message_id,
+            "relay_source_message_id": attestation.relay_source_message_id,
+            "relay_window_stamped_at": attestation.window_stamped_at,
+            "relay_window_expires_at": attestation.window_expires_at,
+            "assented_at": attestation.attested_at,
+            "token_id": attestation.token_id,
+            "token_fingerprint": attestation.token_fingerprint,
+            "render_sha256": attestation.render_sha256,
+        }
+
+    def approve_assent(
+        self,
+        version_id: str,
+        actor: ActorContext,
+        attestation: AssentAttestation,
+        *,
+        _consume_hook: Optional["AssentConsumeHook"] = None,
+    ) -> PromptVersion:
+        """The relay lane's approve (D-8; task 1.6).
+
+        Refuses a non-assent-relay actor and an absent/incomplete
+        attestation (see :meth:`_require_assent_lane`), then delegates
+        to :meth:`atomic_transition` EXACTLY as ``approve()`` does —
+        the same CAS, the same ``_refuse_if_memory`` pre-flight, the
+        same audit write. The event type stays ``APPROVED`` (D-9) and
+        the payload gains the §2.4 relay provenance; ``approval_path``
+        discriminates it from the FE lane. ``approver_subject`` (row +
+        payload) carries the HUMAN; ``actor_subject`` carries the relay
+        instance (§2.4 split).
+
+        ``_consume_hook`` is the D-4 hook (render re-check + consume-CAS
+        in-transaction); the clamp refuses an assent-relay transition
+        without it, so a relayed decision always consumes its token
+        co-transactionally (transition-then-consume).
+        """
+        self._require_assent_lane(version_id, actor, attestation)
+        return self.atomic_transition(
+            version_id=version_id,
+            from_state="pending_approval",
+            to_state="approved",
+            actor=actor,
+            approver_subject=attestation.approver_subject,
+            approver_auth_method=actor.auth_method,
+            _assent_consume_hook=_consume_hook,
+            _extra_audit_payload=self._assent_audit_provenance(attestation),
+        )
+
+    def reject_assent(
+        self,
+        version_id: str,
+        actor: ActorContext,
+        attestation: AssentAttestation,
+        reason: str,
+        *,
+        _consume_hook: Optional["AssentConsumeHook"] = None,
+    ) -> PromptVersion:
+        """The relay lane's reject — mirror of :meth:`approve_assent`.
+
+        ``reason`` is REQUIRED, ≤500 chars, and lands TOP-LEVEL in the
+        audit payload as ``reject_reason`` (DECIDED-1) — never
+        concatenated into other fields. Event type stays ``REJECTED``
+        (D-9).
+        """
+        self._require_assent_lane(version_id, actor, attestation)
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(
+                "reject_assent: reason is REQUIRED (a rejection without "
+                "a reason is not auditable)"
+            )
+        if len(reason) > 500:
+            raise ValueError(
+                "reject_assent: reason must be ≤500 chars (DECIDED-1)"
+            )
+        provenance = self._assent_audit_provenance(attestation)
+        provenance["reject_reason"] = reason
+        return self.atomic_transition(
+            version_id=version_id,
+            from_state="pending_approval",
+            to_state="rejected",
+            actor=actor,
+            approver_subject=attestation.approver_subject,
+            approver_auth_method=actor.auth_method,
+            _assent_consume_hook=_consume_hook,
+            _extra_audit_payload=provenance,
         )
 
     # 6. set_selection -------------------------------------------------------
@@ -3028,6 +3338,221 @@ class PromptVersionRepository:
             )
             return int(session.exec(stmt).one() or 0)
 
+    def list_pending(self, limit: int = 50) -> list[PromptVersion]:
+        """List the CORE rows in state ``pending_approval`` (task 1.9).
+
+        Clones :meth:`count_pending`'s CORE-only predicate
+        (``state='pending_approval' AND artifact_class='CORE'``) and
+        returns the ROWS, ordered by ``created_at`` ascending, bounded
+        by ``limit`` (default 50 — a bounded enumeration primitive; the
+        read SURFACE is Phase 2). **No agent filter** — the relay lane
+        must be able to approve any agent's row (DECIDED-2).
+
+        MEMORY-class rows are excluded by the same reasoning as
+        ``count_pending``: they are born-effective and never ride the
+        human-approval state machine.
+        """
+        bounded = max(1, min(int(limit), 200))
+        with Session(self.engine) as session:
+            stmt = (
+                select(PromptVersion)
+                .where(
+                    col(PromptVersion.state) == "pending_approval",
+                    col(PromptVersion.artifact_class) == ARTIFACT_CLASS_CORE,
+                )
+                .order_by(col(PromptVersion.created_at))
+                .limit(bounded)
+            )
+            return list(session.exec(stmt).all())
+
+    # ── assent-lane render material (D-4 hook / task 1.11, O-L) ─────────
+
+    def assent_render_material_in_conn(self, conn: Any, version_id: str) -> Any:
+        """The canonical-render material for a row, read IN-TXN (O-L).
+
+        Returns a frozen ``(version_id, agent_id, version_tag, artifact,
+        version, content)`` record read from the row AS IT EXISTS inside
+        the caller's transaction — the D-4 hook re-renders from THIS
+        read, so a pending-content mutation after mint diverges the
+        hash inside the guarded transition (``token-content-mismatch``).
+        Raises ``LookupError`` when the row is gone.
+        """
+        from dataclasses import dataclass as _dc
+
+        @_dc(frozen=True)
+        class _Material:
+            version_id: str
+            agent_id: str
+            version_tag: str
+            artifact: str
+            version: int
+            content: Optional[str]
+
+        result = conn.execute(
+            select(
+                col(PromptVersion.version_id),
+                col(PromptVersion.agent_id),
+                col(PromptVersion.version_tag),
+                col(PromptVersion.artifact),
+                col(PromptVersion.version),
+                col(PromptVersion.content),
+            )
+            .select_from(PromptVersion)
+            .where(col(PromptVersion.version_id) == version_id)
+        ).one_or_none()
+        if result is None:
+            raise LookupError(
+                f"prompt_version {version_id} not found (assent render "
+                f"material, in-txn read)"
+            )
+        return _Material(
+            version_id=result[0],
+            agent_id=result[1],
+            version_tag=result[2],
+            artifact=result[3],
+            version=result[4],
+            content=result[5],
+        )
+
+    def effective_for_render(
+        self,
+        agent_id: str,
+        version_tag: str,
+        artifact: str,
+    ) -> "EffectiveRenderSide":
+        """The canonical-render's effective side (mint path).
+
+        ``(content, version_id)`` resolved with the get_effective
+        precedence (selected > latest-approved > None for CORE) — the
+        single mint-side source for the render inputs. Implemented over
+        the existing ONE-SELECT :meth:`get_effective_rows` — no second
+        resolution path (the no-divergent-copies doctrine). The D-4
+        hook's in-txn mirror is :meth:`effective_for_render_in_conn`;
+        the parity between the two is pinned by the SP-1 tests.
+        """
+        rows = self.get_effective_rows(agent_id, version_tag)
+        for row in rows:
+            if row.artifact != artifact:
+                continue
+            if row.selected_version_id is not None:
+                return EffectiveRenderSide(
+                    content=row.selected_content,
+                    version_id=row.selected_version_id,
+                )
+            if row.artifact_class == ARTIFACT_CLASS_MEMORY:
+                return EffectiveRenderSide(
+                    content=row.latest_content,
+                    version_id=row.latest_version_id,
+                )
+            if row.latest_approved_version_id is not None:
+                return EffectiveRenderSide(
+                    content=row.latest_approved_content,
+                    version_id=row.latest_approved_version_id,
+                )
+            return EffectiveRenderSide(content=None, version_id=None)
+        return EffectiveRenderSide(content=None, version_id=None)
+
+    def effective_for_render_in_conn(
+        self,
+        conn: Any,
+        agent_id: str,
+        version_tag: str,
+        artifact: str,
+    ) -> "EffectiveRenderSide":
+        """The effective side for the render, read IN-TXN (the D-4 hook).
+
+        The transactional mirror of :meth:`effective_for_render` — same
+        class-aware precedence (selected > latest-approved for CORE;
+        selected > latest any-state for MEMORY), executed against the
+        CALLER's connection so baseline motion inside the guarded
+        transition invalidates the token (J-3 #3: the effective side IS
+        included, so a newer approved version ⇒ render divergence ⇒
+        ``token-content-mismatch``).
+        """
+        version_tag = _normalize_version_tag(version_tag)
+        sql = text(
+            """
+            SELECT
+              sel.version_id AS sel_version_id,
+              sel.content AS sel_content,
+              appr.version_id AS appr_version_id,
+              appr.content AS appr_content,
+              mem.version_id AS mem_version_id,
+              mem.content AS mem_content,
+              pv.artifact_class AS artifact_class
+            FROM (
+              SELECT DISTINCT artifact, artifact_class
+              FROM prompt_versions
+              WHERE agent_id = :agent_id AND version_tag = :version_tag
+                AND artifact = :artifact
+            ) pv
+            LEFT JOIN prompt_versions sel
+              ON sel.agent_id = :agent_id
+              AND sel.version_tag = :version_tag
+              AND sel.artifact = pv.artifact
+              AND sel.is_selected = 1
+            LEFT JOIN prompt_versions appr
+              ON appr.agent_id = :agent_id
+              AND appr.version_tag = :version_tag
+              AND appr.artifact = pv.artifact
+              AND appr.artifact_class = 'CORE'
+              AND appr.state = 'approved'
+              AND appr.version = (
+                SELECT MAX(appr2.version) FROM prompt_versions appr2
+                WHERE appr2.agent_id = :agent_id
+                  AND appr2.version_tag = :version_tag
+                  AND appr2.artifact = pv.artifact
+                  AND appr2.artifact_class = 'CORE'
+                  AND appr2.state = 'approved'
+              )
+            LEFT JOIN prompt_versions mem
+              ON mem.agent_id = :agent_id
+              AND mem.version_tag = :version_tag
+              AND mem.artifact = pv.artifact
+              AND mem.artifact_class = 'MEMORY'
+              AND mem.version = (
+                SELECT MAX(mem2.version) FROM prompt_versions mem2
+                WHERE mem2.agent_id = :agent_id
+                  AND mem2.version_tag = :version_tag
+                  AND mem2.artifact = pv.artifact
+                  AND mem2.artifact_class = 'MEMORY'
+              )
+            """
+        )
+        result = conn.execute(
+            sql,
+            {
+                "agent_id": agent_id,
+                "version_tag": version_tag,
+                "artifact": artifact,
+            },
+        ).first()
+        if result is None:
+            return EffectiveRenderSide(content=None, version_id=None)
+        (
+            sel_id,
+            sel_content,
+            appr_id,
+            appr_content,
+            mem_id,
+            mem_content,
+            artifact_class,
+        ) = result
+        if artifact_class == ARTIFACT_CLASS_MEMORY:
+            if sel_id is not None:
+                return EffectiveRenderSide(
+                    content=sel_content, version_id=sel_id
+                )
+            return EffectiveRenderSide(content=mem_content, version_id=mem_id)
+        if sel_id is not None:
+            return EffectiveRenderSide(content=sel_content, version_id=sel_id)
+        if appr_id is not None:
+            return EffectiveRenderSide(
+                content=appr_content, version_id=appr_id
+            )
+        return EffectiveRenderSide(content=None, version_id=None)
+
+
     # ─────────────────────────────────────────────────────────────────
     # Internal helpers — execute against a live ``Connection`` so the
     # audit row commits inside the caller's ``engine.begin()`` block.
@@ -3046,9 +3571,24 @@ class PromptVersionRepository:
         payload: dict,
         event_id: Optional[str] = None,
         created_at: Optional[str] = None,
+        extra_payload: Optional[dict] = None,
     ) -> None:
-        """Insert one :class:`PromptAuditEvent` row inside the caller's txn."""
+        """Insert one :class:`PromptAuditEvent` row inside the caller's txn.
+
+        ``extra_payload`` (task 1.8, D-9): the relay-lane provenance dict
+        (``approval_path``, ``relay_*``, ``token_id``,
+        ``token_fingerprint`` — sha256(token)[:12], NEVER the raw token,
+        ``render_sha256``, and the top-level ``reject_reason`` ≤500
+        chars for REJECTED). Merged into the payload — APPEND-ONLY: one
+        NEW event row per transition, never an UPDATE/DELETE of an
+        existing row (SP-2). When absent (every FE/HTTP path) the
+        payload is byte-identical to the pre-prompt-assent shape.
+        """
         self._validate_event_type(event_type)
+        if extra_payload:
+            merged = dict(payload)
+            merged.update(extra_payload)
+            payload = merged
         conn.execute(
             PromptAuditEvent.__table__.insert().values(
                 event_id=event_id or str(uuid.uuid4()),

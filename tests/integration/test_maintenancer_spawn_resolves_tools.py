@@ -498,6 +498,9 @@ class TestPrivilegedCategoryRegistryShape:
     # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
     # (ari-exactly; see daemon/tools/_tool_registry.py).
     "prompt-reload",
+    # prompt-assent (2026-11-10, prompt-assent lane): privileged entry #21
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-assent",
 })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

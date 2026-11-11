@@ -23,10 +23,11 @@ category:
 
 Plus the privileged-category pin (septet → octet → nonet → decet):
 
-* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly sixteen entries
-  (``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
-  ``view-views``, ``secrets``, ``settings``, ``board``,
-  ``self-alarm``) — NEVER default-granted
+* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly twenty-one entries
+  (the first nine: ``system_upgrade``, ``system-log``, ``ens-db``,
+  ``ens-env``, ``view-views``, ``secrets``, ``settings``, ``board``,
+  ``self-alarm``; the full set is the exact-set literal below) —
+  NEVER default-granted
   (R-SR16: opt-in-only via per-agent ``tools.allow``).
 * The default-deny seam applies: an EMPTY-allow agent
   (watcher-like) gets ZERO ``secrets`` tools (R-SR16).
@@ -204,19 +205,20 @@ class TestStaticRegistrationChecklist:
         default-granted (R-SR16: opt-in-only via
         per-agent ``tools.allow``).
 
-        The full set is exactly sixteen entries:
+        The full set is exactly twenty-one entries (the first nine:
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``,
         ``secrets``, ``settings`` (settings-worker-slots
         P2, 2026-10-18), ``board`` (ari-tools Phase 1,
         2026-10-20) and ``self-alarm`` (ari-tools Phase 2,
-        2026-10-20). Adding another category without
+        2026-10-20) — the full twenty-one are pinned by the
+        exact-set literal below). Adding another category without
         bumping this pin is a deliberate trust
         decision (the same-PR pin update rule per
         D18/A14).
         """
         assert SECRETS_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
-        # The full set is exactly sixteen entries — the
+        # The full set is exactly twenty-one entries — the
         # same-PR pin (the SEVEN-file rule; the fifth
         # exact-set pin was added by the iteration-002
         # council B2 correction, the sixth + seventh by
@@ -309,6 +311,9 @@ class TestStaticRegistrationChecklist:
     # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
     # (ari-exactly; see daemon/tools/_tool_registry.py).
     "prompt-reload",
+    # prompt-assent (2026-11-10, prompt-assent lane): privileged entry #21
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-assent",
 })
 
 

@@ -137,6 +137,9 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # prompt-reload (2026-11-06, prompt-reload lane): privileged entry #20
     # (ari-exactly; see daemon/tools/_tool_registry.py).
     "prompt-reload",
+    # prompt-assent (2026-11-10, prompt-assent lane): privileged entry #21
+    # (ari-exactly; see daemon/tools/_tool_registry.py).
+    "prompt-assent",
 })
 
 
@@ -216,7 +219,7 @@ class TestPrivilegedCategory:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
     def test_the_set_has_twenty_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 20
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
 
 
 class TestAllowLists:

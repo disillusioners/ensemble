@@ -309,6 +309,205 @@ class RetractAuthorityError(PermissionError):
 
 
 # ============================================================
+# The assent-relay acceptance path (prompt-assent Phase 3 — tasks
+# 3.1 / 3.2 / 3.4 / 3.6-service). Ruling of record:
+# .agents/shared/planning/prompt-assent/architecture-recommendation.md
+# @ df8da01a6 (§1 D-8, AR-1, D-4; §2.2 pipeline steps 5–7; §2.3).
+# ============================================================
+
+
+class AssentRefusalError(Exception):
+    """A typed assent-relay refusal (architect §3 taxonomy code).
+
+    Raised ONLY by the Phase-3 acceptance path (the service
+    entrypoints and the tool's attestation assembly) for a refusal
+    the ruling's taxonomy names. ``code`` is ALWAYS a member of the
+    ruling's refusal vocabulary — the ``prompt_assent`` tool maps
+    any exception carrying a taxonomy ``code`` onto the house
+    REFUSED envelope verbatim (a refusal is never auto-retried and
+    never re-typed). This is a refusal, not an internal error: the
+    pending row is untouched and the token is not burned.
+
+    Distinct from :class:`~daemon.repositories.prompt_assent.repository.AssentTokenError`
+    (the token STORE's refusal carrier, Phase 1) so a caller can
+    discriminate the acceptance-path refusals from the store's; both
+    carry a taxonomy ``code`` and both ride the same envelope.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(f"{code}: {message}")
+
+
+def is_acceptable_approver(actor: Any, attestation: Any = None) -> bool:
+    """THE shared approver predicate — task 3.1; the rule lives HERE once.
+
+    One rule, two lanes (D-8):
+
+    * the **session lane** — the existing human-operator HTTP lane
+      (``auth_method == "session"``); passes with no attestation (the
+      router has none to give);
+    * the **assent-relay lane** — ``auth_method == "assent-relay"``
+      carrying a COMPLETE typed
+      :class:`~daemon.repositories.prompt_version.assent_attestation.AssentAttestation`
+      (completeness is enforced by the type's own ``__post_init__`` —
+      a constructed instance is complete by construction, so the
+      check here is the type check).
+
+    Every other lane — ``bearer``, ``internal``, anything unknown —
+    is refused (F4: agents cannot self-approve; a bearer with
+    ``prompts:approve`` is still refused — lane discriminator beats
+    scope).
+
+    DEFENCE IN DEPTH, TWO LAYERS, ONE RULE: the repository
+    entrypoints enforce the same semantics at their layer (the FE
+    ``approve()``/``reject()`` refuse non-HTTP actors; the
+    attestation-bearing ``approve_assent()``/``reject_assent()``
+    refuse non-relay actors and incomplete attestations — task 1.6).
+    The router NEVER calls this predicate directly (it has no
+    attestation to pass); the classic FE surface consults it with
+    ``attestation=None`` and is behaviour-identical to the pre-lane
+    code (session passes; everything else refuses). A
+    counter-mutation on EITHER layer must redden the same test —
+    that is the one-rule property this function exists to hold.
+    """
+    from daemon.repositories.prompt_version.assent_attestation import (
+        AssentAttestation,
+    )
+    from daemon.repositories.prompt_version.repository import (
+        AUTH_METHOD_ASSENT_RELAY,
+        AUTH_METHOD_SESSION,
+    )
+
+    auth_method = getattr(actor, "auth_method", None)
+    if auth_method == AUTH_METHOD_SESSION:
+        return True
+    if auth_method == AUTH_METHOD_ASSENT_RELAY:
+        return isinstance(attestation, AssentAttestation)
+    return False
+
+
+def assent_channel_mismatch_code(
+    mint_source_id: Any,
+    mint_channel_id: Any,
+    source_id: Any,
+    channel_id: Any,
+) -> Optional[str]:
+    """AR-1 leg 1 (task 3.4) — the approving turn's channel must match.
+
+    BOTH sides are daemon-derived (the mint context from the minting
+    window's message row; the approving context from the approving
+    window's message row) — never a tool argument, so this is not a
+    forgery surface. Returns the taxonomy code on mismatch,
+    ``None`` when the channel matches:
+
+    * the channel ids must BOTH be present and EQUAL (an absent
+      mint channel cannot match anything — fail closed);
+    * the source ids must not DIVERGE when the mint recorded one
+      (a ``None`` mint source is tolerated — the channel is the
+      binding; the source is corroboration).
+
+    The refusal code is deliberately the SAME for a divergent
+    source and a divergent channel (``token-channel-mismatch``) —
+    a different-human mismatch is a DIFFERENT code
+    (:func:`assent_approver_mismatch_code`), never this one.
+    """
+    channel_ok = (
+        isinstance(channel_id, (str, int))
+        and str(channel_id).strip() != ""
+        and isinstance(mint_channel_id, (str, int))
+        and str(mint_channel_id).strip() != ""
+        and str(mint_channel_id) == str(channel_id)
+    )
+    if not channel_ok:
+        return "token-channel-mismatch"
+    if (
+        mint_source_id is not None
+        and str(mint_source_id) != str(source_id or "")
+    ):
+        return "token-channel-mismatch"
+    return None
+
+
+def assent_approver_mismatch_code(
+    mint_user_id: Any, user_id: Any
+) -> Optional[str]:
+    """AR-1 leg 3 / K-8 (task 3.4) — daemon-derived user equality.
+
+    The approving turn's daemon-derived ``user_id`` (extracted from
+    the approving window's nested ``metadata["discord"]``) must
+    equal the token row's ``mint_user_id`` — the mint-witnessed
+    human. Both sides are daemon-derived from the same
+    window-message evidence chain; NEITHER is ever tool-supplied.
+
+    Returns ``token-approver-mismatch`` on inequality or on an
+    absent side (an absent approving identity is the caller's
+    ``extraction-incomplete`` duty — this predicate additionally
+    fails closed on it), ``None`` on equality.
+    """
+    if (
+        not isinstance(user_id, str)
+        or not user_id.strip()
+        or not isinstance(mint_user_id, str)
+        or not mint_user_id.strip()
+        or mint_user_id != user_id
+    ):
+        return "token-approver-mismatch"
+    return None
+
+
+def assent_channel_not_private_code(discord_meta: Any) -> Optional[str]:
+    """AR-1 leg 2 / K-3 (task 3.4) — the approving context must be private.
+
+    Delegates to the ONE fail-closed classifier
+    (:func:`daemon.repositories.prompt_assent.mint_context.is_private_assent_channel`
+    — P1 task 1.12; an ABSENT or UNPARSEABLE ``is_group_dm``
+    discriminator is NOT private). Returns
+    ``token-channel-mismatch`` when the approving context is not a
+    proven 1:1 DM, ``None`` when it is.
+    """
+    from daemon.repositories.prompt_assent.mint_context import (
+        is_private_assent_channel,
+    )
+
+    if not is_private_assent_channel(discord_meta):
+        return "token-channel-mismatch"
+    return None
+
+
+def _assent_confirmation(
+    action: str, row: Any, attestation: Any
+) -> str:
+    """The relay decision's confirmation envelope — content-free.
+
+    Counts and flags only: item identity, the state motion, the
+    human ``approver_subject`` (the §2.4 actor/authority split —
+    ``actor_*`` carries the relay, this carries the human), the
+    token FINGERPRINT (never the raw token) and the render hash.
+    Never persona content, never diff content — the same doctrine
+    as the tool's frozen INFO line.
+    """
+    ident = attestation.human_identity
+    return "\n".join([
+        f"prompt_assent {action} — OK",
+        f"version_id: {getattr(row, 'version_id', attestation.item_binding.version_id)}",
+        "state: pending_approval -> "
+        f"{getattr(row, 'state', 'approved' if action == 'approve' else 'rejected')}",
+        f"item: {attestation.item_binding.agent_id}/"
+        f"{attestation.item_binding.version_tag or ''}/"
+        f"{attestation.item_binding.artifact} version "
+        f"{attestation.item_binding.version}",
+        f"approver: {attestation.approver_subject} ({ident.source_id})",
+        "approval_path: chat-assent",
+        f"relay: {attestation.relay_agent}@{attestation.relay_instance_id[:8]}",
+        f"token_fingerprint: {attestation.token_fingerprint}",
+        f"render_sha256: {attestation.render_sha256}",
+        f"attested_at: {attestation.attested_at}",
+    ])
+
+
+# ============================================================
 # PromptVersionService
 # ============================================================
 
@@ -502,6 +701,300 @@ class PromptVersionService:
             version_id,
             actor,
         )
+
+    # --------------------------------------------------------
+    # The assent-relay acceptance path (prompt-assent Phase 3 —
+    # tasks 3.2 / 3.6). The ONLY entrypoints the prompt_assent
+    # tool uses for a relayed decision. They NEVER call
+    # ``repo.atomic_transition`` directly — that bypass is the F2
+    # lesson (``daemon/routers/prompts.py:747-753``); the relay
+    # lane enters through the Phase-1 attestation-bearing repo
+    # entrypoints (``approve_assent`` / ``reject_assent``), which
+    # are the only lane for an ``assent-relay`` actor.
+    # --------------------------------------------------------
+
+    async def approve_assent(
+        self,
+        version_id: str,
+        attestation: Any,
+    ) -> str:
+        """Relay-lane approve (task 3.2) — validate, then transition.
+
+        Order (architect §2.2 steps 5–7; D-4 blocking rule):
+
+        1. attestation validation — a typed, COMPLETE
+           :class:`AssentAttestation` bound to THIS ``version_id``
+           (``invalid-arguments`` / ``token-item-mismatch``);
+        2. the belt-and-braces self-approval check (D-8 — NOT the
+           gate): the attestation's human source must not classify
+           as a reserved-internal lane, refused BEFORE any
+           token-state consultation (``self-approval-attempt``);
+        3. token verification — the row exists (``token-mismatch``),
+           is ``live`` (``token-already-used`` / ``token-superseded``
+           / ``token-locked``), is item-bound
+           (``token-item-mismatch``) and is inside its TTL
+           (``token-expired``);
+        4. the D-4 consume hook (render-hash re-check + consume-CAS
+           INSIDE the guarded transaction — O-L, the only render-hash
+           site) + the relay actor, then the Phase-1 repo
+           entrypoint.
+
+        The mismatch-class refusals detected BEFORE the guarded
+        transition increment the durable per-token counter in its
+        OWN transaction first (D-4 blocking rule: the counter must
+        never share the guarded transaction — a rollback inside it
+        would reset the counter and the lockout would never fire).
+        Refusals never burn the token: the consume is
+        co-transactional with the state change.
+
+        Returns a content-free confirmation envelope (counts and
+        flags only — never persona, never diff, never the raw
+        token).
+        """
+        return await self._assent_decide(
+            version_id,
+            attestation,
+            action="approve",
+            reason=None,
+        )
+
+    async def reject_assent(
+        self,
+        version_id: str,
+        attestation: Any,
+        reason: str,
+    ) -> str:
+        """Relay-lane reject — mirror of :meth:`approve_assent`.
+
+        ``reason`` is REQUIRED and ≤500 chars (DECIDED-1) and lands
+        TOP-LEVEL in the audit payload as ``reject_reason`` — never
+        concatenated into other fields.
+        """
+        return await self._assent_decide(
+            version_id,
+            attestation,
+            action="reject",
+            reason=reason,
+        )
+
+    async def _assent_decide(
+        self,
+        version_id: str,
+        attestation: Any,
+        *,
+        action: str,
+        reason: Optional[str],
+    ) -> str:
+        """The shared approve/reject relay body (task 3.6 ordering)."""
+        from daemon.repositories.prompt_assent.consume_hook import (
+            build_assent_consume_hook,
+        )
+        from daemon.repositories.prompt_assent.repository import (
+            REVOKE_THRESHOLD_DEFAULT,
+            AssentTokenError,
+            PromptAssentTokenRepository,
+        )
+        from daemon.repositories.prompt_version.assent_attestation import (
+            AssentAttestation,
+        )
+        from daemon.repositories.prompt_assent.models import (
+            STATUS_CONSUMED,
+            STATUS_LIVE,
+            STATUS_REVOKED,
+            STATUS_SUPERSEDED,
+        )
+        from daemon.repositories.prompt_version.repository import (
+            InvalidTransitionError,
+            MemoryClassError,
+            actor_from_assent_relay,
+        )
+        from daemon.tools.upgrade_journal import classify_user_origin
+
+        if not isinstance(version_id, str) or not version_id.strip():
+            raise AssentRefusalError(
+                "invalid-arguments",
+                "version_id is REQUIRED for the relay lane",
+            )
+        if action == "reject":
+            if not isinstance(reason, str) or not reason.strip():
+                raise AssentRefusalError(
+                    "invalid-arguments",
+                    "reject_assent: reason is REQUIRED (a rejection "
+                    "without a reason is not auditable)",
+                )
+            if len(reason) > 500:
+                raise AssentRefusalError(
+                    "invalid-arguments",
+                    "reject_assent: reason must be ≤500 chars (DECIDED-1)",
+                )
+
+        # ── 1. the attestation (typed, complete, item-bound) ─────────
+        if not isinstance(attestation, AssentAttestation):
+            raise AssentRefusalError(
+                "invalid-arguments",
+                "a typed COMPLETE AssentAttestation is REQUIRED — an "
+                "incomplete attestation is not an attestation (D-8)",
+            )
+        if attestation.item_binding.version_id != version_id:
+            raise AssentRefusalError(
+                "token-item-mismatch",
+                f"the attestation is bound to version_id="
+                f"{attestation.item_binding.version_id!r}, not "
+                f"{version_id!r}",
+            )
+
+        # ── 2. the belt-and-braces self-approval check (NOT the gate)
+        # Refused BEFORE any token-state consultation (an agent-lane
+        # origin is a forgery indication — leak nothing). The UNFORKED
+        # classifier is consulted WITHOUT the registry: chat sources
+        # read "registry-unavailable" here (the TOOL gate verified them
+        # WITH the registry) and pass; blank / reserved-internal sources
+        # are agent lanes — a relay decision carrying one is an agent
+        # self-approval attempt by construction (D-8: documented as
+        # belt-and-braces; the load-bearing defences are the window
+        # lifecycle, the ari-EXACTLY layer-3 gate and AR-1's
+        # daemon-derived user equality).
+        is_user, detail = classify_user_origin(
+            attestation.human_identity.source_id, None
+        )
+        if not is_user and detail in (
+            "no-source",
+            "empty-segment",
+            "reserved-internal",
+        ):
+            raise AssentRefusalError(
+                "self-approval-attempt",
+                "the attestation's human source "
+                f"{attestation.human_identity.source_id!r} classified "
+                f"{detail!r} — an agent-lane origin cannot ride the "
+                "relay lane (belt-and-braces; not the gate)",
+            )
+
+        # ── 3. the token row (status / binding / TTL) ────────────────
+        token_repo = PromptAssentTokenRepository(self._repo.engine)
+        row = await asyncio.to_thread(
+            token_repo.find_by_id, attestation.token_id
+        )
+        if row is None:
+            raise AssentRefusalError(
+                "token-mismatch",
+                "the attestation's token matches no issued token row",
+            )
+        if getattr(row, "version_id", None) != version_id:
+            # Mismatch-class refusal WITH a known row: the D-4 counter
+            # commits in its OWN transaction BEFORE the refusal (and
+            # before any guarded transition opens).
+            await self._record_assent_mismatch(token_repo, row.token_id)
+            raise AssentRefusalError(
+                "token-item-mismatch",
+                f"the token is bound to version_id="
+                f"{getattr(row, 'version_id', None)!r}, not "
+                f"{version_id!r}",
+            )
+        status = getattr(row, "status", None)
+        if status != STATUS_LIVE:
+            code = {
+                STATUS_CONSUMED: "token-already-used",
+                STATUS_SUPERSEDED: "token-superseded",
+                STATUS_REVOKED: "token-locked",
+            }.get(status, "token-mismatch")
+            raise AssentRefusalError(
+                code,
+                f"the token's status is {status!r} — only a live token "
+                "can be decided",
+            )
+        if await asyncio.to_thread(token_repo.is_expired, row):
+            raise AssentRefusalError(
+                "token-expired",
+                f"the token's TTL expired at "
+                f"{getattr(row, 'ttl_expires_at', None)!r} — mint again "
+                "(a fresh mint ⇒ a fresh human turn)",
+            )
+
+        # ── 4. the D-4 hook + the relay actor + the guarded transition
+        hook = build_assent_consume_hook(
+            token_repo=token_repo,
+            pv_repo=self._repo,
+            token_id=row.token_id,
+            consumed_by_message_id=attestation.human_message_id,
+        )
+        actor = actor_from_assent_relay(attestation)
+        repo_entrypoint = (
+            self._repo.approve_assent
+            if action == "approve"
+            else self._repo.reject_assent
+        )
+        try:
+            if action == "approve":
+                out = await asyncio.to_thread(
+                    repo_entrypoint,
+                    version_id,
+                    actor,
+                    attestation,
+                    _consume_hook=hook,
+                )
+            else:
+                out = await asyncio.to_thread(
+                    repo_entrypoint,
+                    version_id,
+                    actor,
+                    attestation,
+                    reason,
+                    _consume_hook=hook,
+                )
+        except AssentTokenError as exc:
+            # An IN-TRANSACTION refusal (render-hash divergence /
+            # consume-CAS miss): the guarded transaction already rolled
+            # back — no state change, no audit row, token unburned. The
+            # counter is NOT incremented here by construction: it can
+            # never share the guarded transaction (D-4 blocking rule).
+            # ``str(exc)`` is the store's ``f"{code}: {message}"`` form.
+            raise AssentRefusalError(exc.code, str(exc)) from exc
+        except InvalidTransitionError as exc:
+            current = getattr(exc, "from_state", "") or ""
+            if current in ("approved", "rejected"):
+                raise AssentRefusalError(
+                    "already-decided",
+                    f"the row's state is {current!r} — already decided "
+                    "(the CAS lost the race)",
+                ) from exc
+            raise AssentRefusalError(
+                "item-not-pending",
+                f"the row's state is {current!r} — only a "
+                "pending_approval row can be decided",
+            ) from exc
+        except MemoryClassError as exc:
+            raise AssentRefusalError(
+                "item-not-assentable",
+                f"{exc} — only CORE rows ride the approval lane",
+            ) from exc
+        except LookupError as exc:
+            raise AssentRefusalError(
+                "item-not-found", f"{exc}"
+            ) from exc
+        return _assent_confirmation(action, out, attestation)
+
+    @staticmethod
+    async def _record_assent_mismatch(token_repo: Any, token_id: str) -> None:
+        """The D-4 counter — OWN transaction, refusal path only.
+
+        Called BEFORE a mismatch-class refusal is raised and BEFORE
+        any guarded transition opens. At the configured threshold the
+        live token is revoked IN THE SAME OWN TRANSACTION (the
+        lockout). A counter fault NEVER blocks the refusal: the
+        refusal is the verdict; the counter is forensics.
+        """
+        try:
+            await asyncio.to_thread(
+                token_repo.record_failed_attempt, token_id
+            )
+        except Exception:  # noqa: BLE001 — never break the refusal
+            logger.warning(
+                "prompt_assent: the attempt-counter increment failed "
+                "for token %s (the refusal stands)",
+                str(token_id)[:8],
+                exc_info=True,
+            )
 
     async def retract(
         self,
@@ -708,12 +1201,23 @@ class PromptVersionService:
         The HTTP router maps this to ``403 HUMAN_LANE_REQUIRED``
         (D2 / phase-contract.md A3); the typed error is the
         testable refusal the F2 ride-along requires.
+
+        **prompt-assent (task 3.1).** The lane rule is consulted —
+        not re-implemented — here: the shared predicate
+        :func:`is_acceptable_approver` answers "may this actor
+        approve on THIS evidence?" and the FE surface consults it
+        with ``attestation=None``. With no attestation the
+        predicate passes ONLY a ``session`` actor — byte-identical
+        to this guard's pre-lane behavior (session passes; bearer /
+        internal / assent-relay-without-attestation refuse; the
+        relay lane enters through ``approve_assent`` /
+        ``reject_assent``, NEVER through the FE methods).
         """
-        auth_method = getattr(actor, "auth_method", None)
-        if auth_method != "session":
+        if not is_acceptable_approver(actor, None):
             raise HumanLaneRequiredError(
                 version_id=version_id,
-                actor_auth_method=auth_method or "<missing>",
+                actor_auth_method=getattr(actor, "auth_method", None)
+                or "<missing>",
             )
 
     async def atomic_transition(
@@ -1022,6 +1526,18 @@ class PromptVersionService:
         """
         return await asyncio.to_thread(self._repo.count_pending)
 
+    async def list_pending(self, limit: int = 50) -> list[Any]:
+        """List CORE rows in state ``pending_approval`` (task 1.9).
+
+        The enumeration PRIMITIVE behind the Phase-2 read surface: rows
+        ordered by ``created_at``, CORE-only (clones
+        :meth:`count_pending`'s predicate), bounded (default 50). No
+        agent filter — the relay lane must be able to approve any
+        agent's row (DECIDED-2). The FE's ``GET /api/prompts/versions``
+        and ``pending-count`` are untouched (separate repo methods).
+        """
+        return await asyncio.to_thread(self._repo.list_pending, limit)
+
     # --------------------------------------------------------
     # User Directive #3 (2026-10-14, RESOLUTION-CORE) — MEMORY-class
     # creator + class-aware create_draft forwarding
@@ -1083,6 +1599,11 @@ __all__ = [
     "VersionNotEditableError",
     "VersionNotDeletableError",
     "MemoryClassError",
+    "AssentRefusalError",
+    "is_acceptable_approver",
+    "assent_channel_mismatch_code",
+    "assent_approver_mismatch_code",
+    "assent_channel_not_private_code",
 ]
 
 
