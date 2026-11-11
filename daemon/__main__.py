@@ -448,7 +448,20 @@ def _serve_with_bind_retry(uvicorn_config, max_wait_s: float | None = None) -> N
     # Bind FIRST, serve second — the socket stays held across the
     # lifespan startup, so there is no window in which the port is free
     # for another process to take.
-    sock = bind_socket_with_retry(host, port, max_wait_s=max_wait_s)
+    #
+    # A SIGINT during the bind WAIT must exit as cleanly as uvicorn's own
+    # handling did (``uvicorn.run`` swallowed KeyboardInterrupt): no
+    # traceback, no crash exit. uvicorn installs its own SIGINT handler
+    # only INSIDE ``server.run()``'s ``capture_signals`` — i.e. AFTER
+    # this pre-bind phase — so the wait window is handled here. (SIGTERM
+    # keeps its default disposition: prompt death, as before the fix.)
+    try:
+        sock = bind_socket_with_retry(host, port, max_wait_s=max_wait_s)
+    except KeyboardInterrupt:
+        logger.info(
+            "Boot interrupted during the listener bind wait — exiting cleanly"
+        )
+        return
 
     server = _StartedLogServer(config=uvicorn_config, bound_socket=sock)
     try:
@@ -464,6 +477,14 @@ def _serve_with_bind_retry(uvicorn_config, max_wait_s: float | None = None) -> N
         and not uvicorn_config.should_reload
         and uvicorn_config.workers == 1
     ):
+        # uvicorn closes hand-held sockets only in ``shutdown()`` — which
+        # it never reaches when the lifespan failed (``started`` is
+        # False), so close the held socket here instead of relying on
+        # process exit to release the port.
+        try:
+            sock.close()
+        except OSError:  # pragma: no cover — already closed
+            pass
         sys.exit(STARTUP_FAILURE)
 
 

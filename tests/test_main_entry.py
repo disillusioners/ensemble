@@ -643,10 +643,16 @@ def test_bind_retry_budget_wired_to_serve_seam(uvicorn_serve_patch, tmp_path):
     """The bind budget comes from DaemonConfig and reaches the serve seam.
 
     The knob is ``DaemonConfig.bind_retry_max_wait_seconds`` (env
-    ``DAEMON_BIND_RETRY_MAX_WAIT_SECONDS``); its DEFAULT must exceed
-    the measured port-hold envelope (uvicorn drain <=60s, launcher
-    CHILD_STOP_WAIT_S=70, unit TimeoutStopSec=90, measured healthy
-    shutdown 108s) so a normal wind-down never trips the budget.
+    ``DAEMON_BIND_RETRY_MAX_WAIT_SECONDS``); its DEFAULT is a BOUNDED
+    wait sized for TRANSIENT holders — deliberately NOT sized to cover a
+    wind-down (that premise was falsified: uvicorn closes the LISTEN
+    socket first and the launcher is strictly sequential, so the daemon's
+    own teardown never holds the port). It must also stay under the HARD
+    45s ceiling, because the launcher's burst abort is reachable only
+    while the failed child's uptime ``U <= 58s`` (6 crashes in the 600s
+    window need ``310 + 5U <= 600``; ``U ~= boot-to-prebind + budget``).
+    Rationale: daemon/services/bind_retry.py (daemon/constants.py is
+    deliberately untouched — it is sealed by content-sha256 pins).
     """
     from daemon.config import load_config
 
@@ -661,11 +667,8 @@ def test_bind_retry_budget_wired_to_serve_seam(uvicorn_serve_patch, tmp_path):
     uvicorn_serve_patch.assert_called_once()
     budget = uvicorn_serve_patch.call_args.kwargs["max_wait_s"]
     assert budget == config.daemon.bind_retry_max_wait_seconds
-    # Bounded and finite — and deliberately NOT sized to cover a
-    # wind-down (that premise was falsified: uvicorn closes the LISTEN
-    # socket first, so the daemon's teardown never holds the port).
-    # See the budget rationale in daemon/constants.py.
-    assert 0 < budget <= 120.0
+    # Bounded, finite, and under the hard ceiling (burst-abort coupling).
+    assert 0 < budget <= 45.0
 
 
 def test_bind_retry_budget_env_override(uvicorn_serve_patch, tmp_path):

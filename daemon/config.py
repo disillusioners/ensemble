@@ -598,13 +598,15 @@ class DaemonConfig(BaseSettings):
             "constants and the rationale). Default ON. NOT sized to cover a "
             "wind-down: uvicorn closes the LISTEN socket FIRST in "
             "Server.shutdown() and the launcher is strictly sequential, so "
-            "the daemon's own teardown never holds the port (measured: the "
-            "previous child was already dead 36-191s before every bind "
-            "attempt). The budget absorbs a TRANSIENT holder — a dying "
-            "duplicate/rogue daemon releases the port within ~1s — while "
-            "staying bounded so a rogue holder still yields a clean exit 1 "
-            "instead of a hang. Set to 0 to fail fast on a busy port (the "
-            "pre-fix behaviour). Env: DAEMON_BIND_RETRY_MAX_WAIT_SECONDS."
+            "the daemon's own teardown never holds the port. HARD CEILING "
+            "45s: a request above it is CLAMPED (with a loud warning) "
+            "because the launcher's burst abort is reachable only while the "
+            "failed child's uptime U stays <= 58s (6 crashes in the 600s "
+            "window need 310 + 5U <= 600; U ~= boot-to-prebind + budget) — "
+            "a larger budget would switch the supervisor's safety net off. "
+            "Set to 0 to fail fast on a busy port (the pre-fix behaviour); "
+            "a negative or malformed value fails closed to fail-fast. "
+            "Env: DAEMON_BIND_RETRY_MAX_WAIT_SECONDS."
         ),
     )
 

@@ -84,6 +84,7 @@ What this module does NOT do
 
 import errno
 import logging
+import math
 import socket
 import sys
 from time import monotonic, sleep
@@ -122,7 +123,29 @@ logger = logging.getLogger(__name__)
 #   => 30s is ~30x the plausible release latency of a dying holder and 2x
 #      the 16s backoff cap, while staying bounded so a genuinely rogue
 #      holder still produces a clean exit-1 signal.
+#
+# COUPLING TO THE LAUNCHER'S BURST ABORT (the ceiling below is NOT a taste
+# choice — it keeps the supervisor's only safety net REACHABLE):
+#   launcher.sh:57-59 -> BUDGET_MAX_CRASHES=5 (abort at the 6th crash),
+#   BUDGET_WINDOW_S=600 (sliding window), BUDGET_UPTIME_RESET_S=600.
+#   launcher.sh:3624-3646 ``budget_tick()``: exit 75 is EXEMPT; a child
+#   that lived >=600s RESETS the counter; a window older than 600s RESETS
+#   it; the 6th crash in the window ABORTS (launcher.sh:3848-3851 → HALT,
+#   exit 1, staying down).
+#   The 5 waits between 6 crashes are 10+20+40+80+160 = 310s, and the
+#   window spans the 5 UPTIMES of crashes #2..#6 => the abort is reachable
+#   only while 310 + 5U <= 600, i.e. U <= 58s (U = the failed child's
+#   uptime). In the 2026-11-11 incident U was 87-95s (boot-to-bind ~29s +
+#   post-fatal teardown ~64s) => 310 + 5U > 600 => the counter reset 13
+#   times => the unbounded 2h38m churn.
+#   With the pre-bind, a blocked child exits after the BUDGET (no lifespan
+#   startup, no teardown) => U ~= boot-to-prebind + budget. A budget of 45s
+#   keeps U ~= 49s <= 58s (the default 30s keeps U ~= 34s). A budget above
+#   ~45s would push U back over 58s and turn the supervisor's safety net
+#   off again — so the effective budget is HARD-CLAMPED to the ceiling and
+#   an over-ceiling request is announced LOUDLY.
 BIND_RETRY_MAX_WAIT_S: float = 30.0  # Total budget ceiling (seconds)
+BIND_RETRY_MAX_WAIT_CEILING_S: float = 45.0  # HARD ceiling (see the coupling note)
 BIND_RETRY_INITIAL_BACKOFF_S: float = 1.0  # First wait between bind attempts
 BIND_RETRY_MAX_BACKOFF_S: float = 16.0  # Backoff cap (ladder: 1,2,4,8,16,16...)
 BIND_RETRY_MAX_ATTEMPTS: int = 20  # Hard attempt cap (backstop for a frozen clock)
@@ -136,11 +159,24 @@ BIND_FAILURE_EXIT_CODE = 1
 
 
 def resolve_max_wait_s(value: object) -> float:
-    """Coerce a configured budget ceiling into a usable float.
+    """Resolve the EFFECTIVE bind-retry budget from a requested value.
 
-    A missing / non-numeric value falls back to the module default (and
-    says so); a negative value is clamped to 0, which means "make ONE
-    attempt, do not wait" — the pre-fix fail-fast behaviour.
+    Every departure from the requested value is ANNOUNCED (the operator
+    must never be surprised by the effective budget):
+
+    * ``None`` (nothing requested) → the module default.
+    * a real number → clamped to ``[0, BIND_RETRY_MAX_WAIT_CEILING_S]``.
+      A request ABOVE the ceiling is CLAMPED with a WARNING naming the
+      requested vs the effective value and the reason: the ceiling keeps
+      the launcher's burst abort reachable (6 crashes in the 600s window
+      need ``310 + 5U <= 600``, i.e. the failed child's uptime
+      ``U <= 58s``; ``U ~= boot-to-prebind + budget``). A silently
+      accepted larger budget would push U back over 58s and switch the
+      supervisor's safety net off again.
+    * ``0`` → fail-fast (one attempt, no wait) — the pre-fix behaviour.
+    * a NEGATIVE or MALFORMED value (non-numeric, NaN, infinite, or not a
+      number at all) → fail CLOSED to fail-fast (0) with a WARNING. A
+      budget we cannot understand must never silently become a long wait.
     """
     if value is None:
         return BIND_RETRY_MAX_WAIT_S
@@ -150,27 +186,47 @@ def resolve_max_wait_s(value: object) -> float:
     # budget to one second. Reject anything that is not a real scalar.
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         logger.warning(
-            "Bind retry: non-numeric budget %r — falling back to %.1fs",
+            "Bind retry: non-numeric budget %r — failing fast (0s, the "
+            "pre-fix behaviour)",
             value,
-            BIND_RETRY_MAX_WAIT_S,
-        )
-        return BIND_RETRY_MAX_WAIT_S
-    try:
-        resolved = float(value)
-    except (TypeError, ValueError):
-        logger.warning(
-            "Bind retry: invalid budget %r — falling back to %.1fs",
-            value,
-            BIND_RETRY_MAX_WAIT_S,
-        )
-        return BIND_RETRY_MAX_WAIT_S
-    if resolved < 0:
-        logger.warning(
-            "Bind retry: negative budget %.1fs — clamped to 0 (fail fast)",
-            resolved,
         )
         return 0.0
-    return resolved
+    try:
+        requested = float(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Bind retry: malformed budget %r — failing fast (0s, the "
+            "pre-fix behaviour)",
+            value,
+        )
+        return 0.0
+    if not math.isfinite(requested):
+        logger.warning(
+            "Bind retry: non-finite budget %r — failing fast (0s, the "
+            "pre-fix behaviour)",
+            value,
+        )
+        return 0.0
+    if requested < 0:
+        logger.warning(
+            "Bind retry: negative budget %.1fs — failing fast (0s, the "
+            "pre-fix behaviour)",
+            requested,
+        )
+        return 0.0
+    if requested > BIND_RETRY_MAX_WAIT_CEILING_S:
+        logger.warning(
+            "Bind retry: BUDGET_CEILING_CLAMP — requested budget %.1fs "
+            "EXCEEDS the %.1fs ceiling (clamped to %.1fs). The ceiling "
+            "keeps the launcher's burst abort reachable: 6 crashes in the "
+            "600s window need 310 + 5U <= 600 (the failed child's uptime "
+            "U must stay <= 58s, and U ~= boot-to-prebind + budget).",
+            requested,
+            BIND_RETRY_MAX_WAIT_CEILING_S,
+            BIND_RETRY_MAX_WAIT_CEILING_S,
+        )
+        return BIND_RETRY_MAX_WAIT_CEILING_S
+    return requested
 
 
 def _listener_family(host: str) -> int:
@@ -240,6 +296,14 @@ def bind_socket_with_retry(
     (1→2→4→8→16s, capped) until the port frees or the budget is
     exhausted. On any OTHER OSError it logs and exits with
     ``BIND_FAILURE_EXIT_CODE`` — the same verdict uvicorn gave.
+
+    The budget is the EFFECTIVE one: ``resolve_max_wait_s`` clamps a
+    request to ``BIND_RETRY_MAX_WAIT_CEILING_S`` (45s — the coupling that
+    keeps the launcher's burst abort reachable) and fails a malformed or
+    negative request closed to fail-fast. The wait ladder can never sleep
+    past the remaining budget (``wait = min(backoff, remaining)``), and
+    the attempt cap can only end the loop EARLIER, so the total wait is
+    bounded by the effective budget.
 
     On budget exhaustion it exits with ``BIND_FAILURE_EXIT_CODE`` (1) —
     see the module docstring for why the code is unchanged.

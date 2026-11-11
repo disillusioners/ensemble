@@ -181,6 +181,109 @@ def test_default_budget_is_bounded_and_not_wind_down_sized():
     assert BIND_RETRY_MAX_ATTEMPTS >= 2  # no unbounded spin
 
 
+def test_default_budget_is_within_the_hard_ceiling():
+    """The DEFAULT must already sit under the 45s hard ceiling.
+
+    The ceiling is not a taste choice: the launcher's burst abort is
+    reachable only while the failed child's uptime ``U`` stays <= 58s
+    (6 crashes in the 600s window need ``310 + 5U <= 600``; with the
+    pre-bind ``U ~= boot-to-prebind + budget``). A default above the
+    ceiling would push U back over 58s and switch the supervisor's only
+    safety net off again.
+    """
+    from daemon.config import DaemonConfig
+    from daemon.services.bind_retry import (
+        BIND_RETRY_MAX_WAIT_CEILING_S,
+        BIND_RETRY_MAX_WAIT_S,
+    )
+
+    assert BIND_RETRY_MAX_WAIT_CEILING_S == 45.0
+    assert BIND_RETRY_MAX_WAIT_S <= BIND_RETRY_MAX_WAIT_CEILING_S
+    assert DaemonConfig().bind_retry_max_wait_seconds <= (
+        BIND_RETRY_MAX_WAIT_CEILING_S
+    )
+
+
+def test_effective_budget_is_clamped_to_the_ceiling(caplog):
+    """A request ABOVE the ceiling is CLAMPED, and the clamp is LOUD.
+
+    The env override must not be able to silently push a deployment
+    above the ceiling: the effective budget is clamped to 45s and a
+    WARNING names the requested vs the effective value plus the
+    burst-budget reason.
+    """
+    import logging
+
+    from daemon.services import bind_retry
+
+    caplog.set_level(logging.WARNING, logger="daemon.services.bind_retry")
+
+    effective = bind_retry.resolve_max_wait_s(600.0)
+
+    assert effective == bind_retry.BIND_RETRY_MAX_WAIT_CEILING_S == 45.0
+    clamps = [r for r in caplog.records if "BUDGET_CEILING_CLAMP" in r.getMessage()]
+    assert clamps, "the clamp was not announced"
+    message = clamps[0].getMessage()
+    assert "600.0" in message  # the requested value
+    assert "45.0" in message  # the effective value
+    assert "58s" in message  # the burst-budget reason
+    assert clamps[0].levelno >= logging.WARNING
+
+
+def test_a_shorter_explicit_budget_is_honoured_not_clamped(caplog):
+    """A legitimate SHORTER budget is never clamped (and not announced)."""
+    import logging
+
+    from daemon.services import bind_retry
+
+    caplog.set_level(logging.WARNING, logger="daemon.services.bind_retry")
+
+    assert bind_retry.resolve_max_wait_s(5.0) == 5.0
+    assert bind_retry.resolve_max_wait_s(0.0) == 0.0  # fail-fast
+    assert not [
+        r for r in caplog.records if "BUDGET_CEILING_CLAMP" in r.getMessage()
+    ], "a legitimate shorter budget was announced as clamped"
+
+
+def test_malformed_or_negative_budget_fails_closed_to_fail_fast(caplog):
+    """A NEGATIVE or MALFORMED budget fails CLOSED to fail-fast + WARNING."""
+    import logging
+
+    from daemon.services import bind_retry
+
+    caplog.set_level(logging.WARNING, logger="daemon.services.bind_retry")
+
+    for bad in (-5, -0.1, "abc", float("nan"), float("inf")):
+        caplog.clear()
+        assert bind_retry.resolve_max_wait_s(bad) == 0.0, bad
+        warnings = [
+            r for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert warnings, f"the malformed budget {bad!r} was not announced"
+
+
+def test_exhaustion_fires_at_the_budget_not_beyond_it():
+    """The wait ladder can never sleep PAST the effective budget.
+
+    The final sleep is clamped to the remaining budget, so the total
+    wait is bounded by the budget (the attempt cap can only end the loop
+    EARLIER). This is what keeps ``U ~= boot-to-prebind + budget``.
+    """
+    import time
+
+    from daemon.services import bind_retry
+
+    with _held_port() as (port, _holder):
+        started = time.monotonic()
+        with pytest.raises(SystemExit):
+            bind_retry.bind_socket_with_retry(
+                "127.0.0.1", port, max_wait_s=2.0
+            )
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0 + 1.0, f"the wait overran the budget: {elapsed:.2f}s"
+
+
 def test_config_default_agrees_with_the_module_default():
     """The DaemonConfig default and the module default must not drift.
 
@@ -451,6 +554,76 @@ def test_lifespan_startup_failure_exits_3_without_any_retry(monkeypatch):
 
     assert excinfo.value.code == 3  # uvicorn STARTUP_FAILURE, unchanged
     assert len(binds) == 1  # ONE bind attempt — no wait, no retry
+
+
+def test_sigint_during_the_bind_wait_exits_cleanly(monkeypatch):
+    """A SIGINT during the bind WAIT must exit cleanly — no traceback.
+
+    ``uvicorn.run`` swallowed KeyboardInterrupt, so before this fix a
+    Ctrl-C produced a clean exit. uvicorn installs its own SIGINT
+    handler only INSIDE ``server.run()``'s ``capture_signals`` — i.e.
+    AFTER the pre-bind phase — so the wait window is handled at the
+    seam. (SIGTERM keeps its default disposition: prompt death.)
+    """
+    import daemon.__main__ as entry
+
+    def _interrupting_bind(host, port, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "daemon.services.bind_retry.bind_socket_with_retry", _interrupting_bind
+    )
+    config = entry.uvicorn.Config("daemon.api:app", host="127.0.0.1", port=0)
+    # A clean return == a clean process exit. An escaped KeyboardInterrupt
+    # would surface here as a test error (traceback + exit 130).
+    entry._serve_with_bind_retry(config, max_wait_s=5.0)
+
+
+def test_exit3_path_closes_the_held_socket(monkeypatch):
+    """The exit-3 (lifespan-failure) path closes the held socket.
+
+    uvicorn closes hand-held sockets only in ``shutdown()`` — which it
+    never reaches when the lifespan failed (``started`` is False). The
+    seam closes it explicitly rather than relying on process exit to
+    release the port.
+    """
+    import daemon.__main__ as entry
+    from daemon.services import bind_retry
+
+    held: list = []
+    real_bind = bind_retry.bind_socket_with_retry
+
+    def _capturing_bind(host, port, **kwargs):
+        sock = real_bind(host, port, **kwargs)
+        held.append(sock)
+        return sock
+
+    monkeypatch.setattr(
+        "daemon.services.bind_retry.bind_socket_with_retry", _capturing_bind
+    )
+
+    async def _failing_app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send(
+                        {
+                            "type": "lifespan.startup.failed",
+                            "message": "simulated lifespan startup failure",
+                        }
+                    )
+                    return
+                if message["type"] == "lifespan.shutdown":
+                    return
+
+    config = entry.uvicorn.Config(_failing_app, host="127.0.0.1", port=0)
+    with pytest.raises(SystemExit) as excinfo:
+        entry._serve_with_bind_retry(config, max_wait_s=5.0)
+
+    assert excinfo.value.code == 3
+    assert held, "the bind never produced a socket"
+    assert held[0].fileno() == -1, "the held socket was left open on the exit-3 path"
 
 
 def test_serve_seam_hands_the_bound_socket_to_uvicorn(monkeypatch):
