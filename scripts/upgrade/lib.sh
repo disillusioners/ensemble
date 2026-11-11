@@ -5179,11 +5179,24 @@ _supervision_launchd_domain() {
 }
 
 # _supervision_launchd_detect — probe the gui domain and return 0 IFF EXACTLY
-# ONE job matches: a job whose printed definition references
-# <install>/launcher.sh (the /bin/bash-wrapped ProgramArguments from
-# ensemble-prod.plist), EXCLUDING the watchdog label. Sets SUPERVISION_UNIT to
-# the resolved label. On zero / multiple / unresolvable → returns 1 (the
-# caller refuses; NEVER a SCRIPT_NOHUP fallthrough on Darwin).
+# ONE job matches, EXCLUDING the watchdog label. Sets SUPERVISION_UNIT to the
+# resolved label. On zero / multiple / unresolvable → returns 1 (the caller
+# refuses; NEVER a SCRIPT_NOHUP fallthrough on Darwin).
+#
+# F9 (review round 1) — MATCHING SEMANTICS, PRECISE (the old wording claimed
+# an "argv[1] realpath" predicate; the code is a WHOLE-DUMP SUBSTRING test):
+# the dump of `launchctl print gui/<uid>/<label>` is matched with a shell
+# case glob — `*"${install_real}/launcher.sh"*` OR `*"${INSTALL_DIR}/
+# launcher.sh"*` — ANYWHERE in the dump (a "program arguments" line, a
+# "path =" line, a comment — position is irrelevant). Not hardened this
+# round BY DESIGN: (a) the property that bounds the blast radius is
+# UNIQUE-MATCH-OR-REFUSE — zero or ≥2 matching jobs refuse, so a stray
+# path mention can only turn a would-be `arm` into a refusal (fail-closed),
+# never arm on the wrong job unless EXACTLY ONE job mentions the path, in
+# which case it IS the install's job by inspection; (b) tightening to an
+# argv[1] realpath parse would change matching semantics the F4/F5 seam
+# cells depend on (they fabricate exactly the documented stub contract
+# below). Any future hardening must re-cut those cells in the same change.
 #
 # Stub contract (tests + comp7 style): point LAUNCHCTL_BIN at a script that
 # answers `list` (3-column PID STATUS LABEL rows) and
