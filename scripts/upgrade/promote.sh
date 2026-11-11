@@ -944,6 +944,15 @@ lock_heartbeat
 if ! stop_via_stop_script; then
     _warn "rollback: stop of the failed release FAILED — halting for human (txn left open — the next launcher start sweep-rolls-back to previous)"
     journal_history_append halt "rollback stop failed for $VERSION — halt-for-human; txn left open for sweep recovery"
+    # F2-arm1 (review round 1): this arm was the ONLY 8b exit with no disarm —
+    # on Darwin the stop IS the disarm mechanism, so a FAILED stop leaves the
+    # supervisor LOADED+ARMED on the broken $VERSION (KeepAlive re-arms it).
+    # ARM-LOCAL disarm with the named end state, mirroring the four manifest
+    # branches; deliberately NOT hoisted to the 8b entry (the success path's
+    # forward rollback RE-ARMS via restart_via_launcher :933 — a hoist would
+    # disarm that too). Best-effort: on a failed bootout the disarm journals
+    # its own DISARM FAILED halt row + prints the manual bootout command.
+    _promote_disarm_launchd "supervisor-disarmed-rollback-stop-failed" || true
     exit 1
 fi
 launcher_swap "$PREV"
