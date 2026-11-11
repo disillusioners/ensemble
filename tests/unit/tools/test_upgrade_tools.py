@@ -42,6 +42,9 @@ import json
 import os
 import re
 import subprocess
+import errno
+import pathlib
+import pwd
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -502,6 +505,21 @@ def _base_manager() -> MagicMock:
 def _refusal_reason(result: str) -> str | None:
     m = re.search(r"REFUSED — reason=([a-z0-9-]+)", result)
     return m.group(1) if m else None
+
+
+def _no_pwd_entry(_uid) -> None:
+    """A pwd lookup that finds NO entry — this is what makes
+    ``pathlib.Path.expanduser()`` raise RuntimeError (py3.13+: "Could not
+    determine home directory"), i.e. the REAL failure mode of an
+    unexpandable ``~`` (Tidier #2's resolution-error trigger)."""
+    raise KeyError("no such user")
+
+
+def _raising_resolver(_install_dir):
+    """A scripts-dir resolver that fails the way a broken pin does — the
+    Tidier #2 seam (a resolution error must become a CLEAN refusal at the
+    call site, never the generic tool-handler escape)."""
+    raise RuntimeError("Could not determine home directory.")
 
 
 async def _arm_restart(harness) -> str:
@@ -2883,12 +2901,17 @@ class TestArmPreflightBeforeBurn:
     """The preflight sits AFTER the lock acquire but BEFORE the nonce burn
     (the plan's recommended slot): a refused preflight releases the lock,
     journals its refusal (best-effort — the live read-only carve-out
-    applies), and returns cleanly with the nonce UNUSED. Four checks, four
-    tokens (the stop-script sibling Check 1b — ``preflight-stop-script-
-    missing`` — landed 2026-11-11, pinned by TestArmPreflightStopScriptSibling
-    below): ``executor-scripts-unavailable`` (reused), 
-    ``preflight-argv-unconstructable`` (new), ``preflight-argv-malformed``
-    (new). Sibling class — no existing live-gate test is modified."""
+    applies), and returns cleanly with the nonce UNUSED. Five checks, five
+    tokens:
+    Check 1 — ``executor-scripts-unavailable`` (reused).
+    Check 1b — ``preflight-stop-script-missing`` (the stop-script sibling,
+    2026-11-11).
+    Check 2 — ``preflight-argv-unconstructable``.
+    Check 3 — ``preflight-argv-malformed``.
+    Check 4 — ``stale-scripts-dir`` (the scripts-dir provenance verdict).
+    The Check-3 leg (the malformed-argv fixture) was UPDATED to lay out the
+    stop-script sibling so it still reaches its INTENDED refusal — the
+    preflight's other legs are untouched."""
 
     @staticmethod
     async def _armed_call(live) -> tuple[str, str]:
@@ -3052,6 +3075,14 @@ class TestArmPreflightStopScriptSibling:
         assert "scripts/stop-ensemble.sh" in out, (
             f"the refusal must name the canonical repo source: {out}"
         )
+        assert "$(pwd)/scripts/stop-ensemble.sh" in out, (
+            "the refusal must name the FALLBACK resolution leg too (both "
+            f"legs must miss for the abort): {out}"
+        )
+        assert "watchdog-watcher.sh" in out, (
+            "the refusal must say why the fallback misses in install "
+            f"layouts: {out}"
+        )
         TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
 
     async def test_passes_present_executable_sibling_arms(
@@ -3143,6 +3174,77 @@ class TestArmPreflightStopScriptSibling:
             f"the refusal must NOT carry the unexpanded tilde path: {out}"
         )
         TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_resolution_runtime_error_refuses_cleanly(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Tidier #2 — a RESOLUTION error is a CLEAN refusal, never the
+        generic "system_upgrade failed:" escape. The trigger is REAL (not a
+        monkeypatched resolver): an unexpandable ``~`` — HOME unset and the
+        pwd lookup failing — makes ``expanduser()`` raise RuntimeError
+        (py3.13+). The arm refuses with the dedicated token, the nonce is
+        NOT burned, and no pipeline lock is left behind."""
+        live = live_harness
+        monkeypatch.setenv(
+            "ENSEMBLE_UPGRADE_SCRIPTS_DIR", "~/unresolvable/upgrade"
+        )
+        monkeypatch.delenv("HOME", raising=False)
+        monkeypatch.setattr(pwd, "getpwuid", _no_pwd_entry)
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "scripts-dir-unresolvable", out
+        assert "Error: system_upgrade failed" not in out, (
+            f"the resolution error escaped to the generic handler: {out}"
+        )
+        assert "ENSEMBLE_UPGRADE_SCRIPTS_DIR" in out, out
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_resolution_oserror_refuses_cleanly(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Tidier #2 — the OSError class is handled at the SAME seam as
+        RuntimeError (one coherent catch, not two narrow ones). The trigger
+        is MONKEYPATCHED — DISCLOSED: on py3.13+ (the project floor) a
+        symlink loop no longer raises from ``resolve()`` and no other real
+        OSError trigger is available in-test — so the pin is the SEAM's
+        behavior, not the trigger's realism."""
+        live = live_harness
+        scripts = self._scripts_tree(tmp_path)
+        real_resolve = pathlib.Path.resolve
+
+        def _boom(self, *a, **k):
+            if str(self).startswith(str(tmp_path / "ops-scripts")):
+                raise OSError(errno.ELOOP, "simulated symlink loop")
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(pathlib.Path, "resolve", _boom)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(scripts))
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "scripts-dir-unresolvable", out
+        assert "Error: system_upgrade failed" not in out, (
+            f"the resolution error escaped to the generic handler: {out}"
+        )
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_resolution_failure_refuses_cleanly_restart_lane(
+        self, harness, monkeypatch
+    ) -> None:
+        """Tidier #2 — the RESTART lane shares the resolver seam (the
+        review's :2894 anchor is THIS lane, not the upgrade dry-run): a
+        resolution error refuses cleanly there too — the dedicated token,
+        never the generic "system_restart failed:" escape — and the restart
+        is NOT scheduled (zero pipeline mutation)."""
+        tools, markers, install = harness
+        monkeypatch.setattr(ut, "_resolve_scripts_dir", _raising_resolver)
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "resolver seam",
+             "mode": "graceful-now", "dry_run": False}
+        )
+        assert _refusal_reason(out) == "scripts-dir-unresolvable", out
+        assert "Error: system_restart failed" not in out, (
+            f"the resolution error escaped to the generic handler: {out}"
+        )
+        assert markers == []
+        assert uj.journal_read(install).get("pending_op") is None
 
 
 # ── P2.2 fix pass (2026-08-23) — gate hardening + the forged-source seam ────
