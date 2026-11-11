@@ -88,6 +88,21 @@ section() { printf '\n== %s ==\n' "$1"; }
 
 REAL_UNAME="$(command -v uname)"
 
+# D2a: the `linux` cells must exercise the LINUX ladder semantics regardless
+# of the host that runs the suite. On a Darwin host the real `uname -s` would
+# now take the Darwin fail-closed branch (correct code, wrong fixture for a
+# "linux" cell), so `linux`-mode run_classify calls PREFIX this Linux uname
+# stub. The Darwin cells keep their own Darwin stub.
+SUP_LINUX_PATH="$(mktemp -d -t supclass-linuxuname.XXXXXX)"
+cat > "$SUP_LINUX_PATH/uname" <<'STUB'
+#!/bin/bash
+case "$1" in
+    -s) echo "Linux" ;;
+    *) exec /usr/bin/uname "$@" ;;
+esac
+STUB
+chmod +x "$SUP_LINUX_PATH/uname"
+
 # Fixture INSTALL_DIR (throwaway — the classifier only needs the path for
 # WARN text + the .env rung; a real .env is planted per-case).
 FIXT="$(mktemp -d -t supclass.XXXXXX)"
@@ -106,14 +121,17 @@ export CALLLOG
 NOHEAL_DIR="$(mktemp -d -t supclass-noheal.XXXXXX)"
 export NOHEAL_DIR
 
-# run_classify <linux|darwin> <leaf|SPECIAL> <env-assignments ;-separated>
+# run_classify <linux|darwin> <leaf|SPECIAL> <env-assignments ;-separated> [launchd-fixture]
 #   SPECIAL leaf values:
 #     UNREADABLE — leaf helper returns nothing (cgroup unreadable)
 #     NONE       — owned-pid helper returns nothing (no owned pid)
+#   launchd-fixture (Darwin cells only; D2a): one | zero (default zero).
+#     Overrides _supervision_launchd_detect so the Darwin ladder is hermetic
+#     (never touches the host's real launchctl).
 # Prints classify stdout+stderr, then rc=/MODE=/STATE=/UNIT= lines, then a
 # final CALLS: line (comma-joined fault-injector hits; empty = zero reads).
 run_classify() {
-    local mode="$1" leaf="$2" envs="${3:-}"
+    local mode="$1" leaf="$2" envs="${3:-}" launchd_fixt="${4:-zero}"
     : > "$CALLLOG"
     local script
     script="$(mktemp -t supclass-run.XXXXXX)"
@@ -122,6 +140,7 @@ run_classify() {
         printf 'unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT\n'
         printf 'export SUPERVISION_UNIT_DIR="${SUPERVISION_UNIT_DIR:-%s}"\n' "$NOHEAL_DIR"
         printf 'export SUP_FIXT_LEAF="%s"\n' "$leaf"
+        printf 'export SUP_LAUNCHD="%s"\n' "$launchd_fixt"
         local a
         if [ -n "$envs" ]; then
             # shellcheck disable=SC2086
@@ -145,6 +164,14 @@ _supervision_pid_cgroup_leaf() {
         *) printf '%s\n' "$SUP_FIXT_LEAF" ;;
     esac
 }
+# D2a (Darwin cells): hermetic launchd probe stub — no real launchctl.
+_supervision_launchd_detect() {
+    printf 'launchd_detect\n' >> "$CALLLOG"
+    case "$SUP_LAUNCHD" in
+        one) SUPERVISION_UNIT="com.ensemble.prod"; return 0 ;;
+        *)   return 1 ;;
+    esac
+}
 STUBS
         printf 'supervision_classify\n'
         printf 'printf "rc=%%s\\n" "$?"\n'
@@ -154,7 +181,8 @@ STUBS
     if [ "$mode" = "darwin" ]; then
         out="$(PATH="$SUP_DARWIN_PATH:$PATH" bash "$script" 2>&1)"
     else
-        out="$(bash "$script" 2>&1)"
+        # D2a: force Linux semantics for the "linux" cells (see SUP_LINUX_PATH).
+        out="$(PATH="$SUP_LINUX_PATH:$PATH" bash "$script" 2>&1)"
     fi
     rm -f "$script"
     printf '%s\n' "$out"
@@ -203,6 +231,11 @@ while IFS='|' read -r cell envs want_state want_unit want_mode want_reads; do
     assert_eq "$cell: machine line" "ENSEMBLE_SUPERVISION_RESULT=$want_state${want_unit:+:$want_unit}" "$(machine_line "$out")"
     if [ "$want_reads" = "-" ]; then
         assert_eq "$cell: zero /proc reads" "" "$(calls_of "$out")"
+    elif [ "$HOST_HAS_SYSTEMD" != "1" ]; then
+        # The `R` cells exercise the explicit-unit cgroup rung, which needs a
+        # live systemd host (the unit arm's `[ uname = Linux ] && [ -d
+        # /run/systemd/system ]` guard). Fence on a non-systemd host.
+        _skip "$cell: cgroup rung ran — FENCE: needs /run/systemd/system"
     else
         assert_eq "$cell: cgroup rung ran" "owned_pids,cgroup_leaf" "$(calls_of "$out")"
     fi
@@ -437,6 +470,11 @@ section "4 — explicit-unit-no-name → exit 78 at preflight (never silent-degr
 # 4a was pinned at 1a (rc 1 + WARN). 4b: supervision_preflight converts
 # the rc into _refuse (exit 78) with the supervision-unit-unresolved
 # token; the journal carries the refusal record.
+# 4b/4c test the UNIT path (unresolved-name refusal + resolvable happy path)
+# — both require a systemd host where unit supervision is honorable (on a
+# non-systemd/Darwin host the unit arm takes the M3 incapable-host refusal
+# instead, a DIFFERENT declared behavior pinned by 4d). Fence like 1b/2/3.
+if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
 PF_FIXT="$(mktemp -d -t supclass-pf.XXXXXX)"
 mkdir -p "$PF_FIXT/releases"
 cat > "$PF_FIXT/releases/state.json" <<'JOURNAL'
@@ -450,7 +488,7 @@ PF_OUT="$(
         . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
         _supervision_owned_pids() { printf '%s\n' 424242; }
         _supervision_pid_cgroup_leaf() { printf '%s\n' 'session-9.scope'; }
-        # nested subshell so _refuse's exit 78 does not kill the harness
+        # nested subshell so the _refuse exit 78 does not kill the harness
         ( supervision_preflight )
         echo "pf-rc=$?"
     ) 2>&1
@@ -506,6 +544,9 @@ case "$PF2_OUT" in
     *) _fail "4c happy: rc 0" "pf-rc=0" "$(printf '%s' "$PF2_OUT" | grep -o 'pf-rc=[0-9]*' || echo none)" ;;
 esac
 rm -rf "$PF2_FIXT" "$SC_STUB"
+else
+    _skip "4b/4c unit preflight — FENCE: no /run/systemd/system on this host"
+fi
 
 # 4d. M3 (review cycle 1): EXPLICIT unit on a unit-INCAPABLE host (Darwin
 #     uname PATH-stub) with the name RESOLVED from env — the preflight
@@ -532,7 +573,7 @@ PF3_OUT="$(
         export ENSEMBLE_SUPERVISION=unit
         export ENSEMBLE_RESTART_UNIT=ensemble-m3pf.service
         unset SYSTEMCTL_BIN 2>/dev/null || true
-        # nested subshell so _refuse's exit 78 does not kill the harness;
+        # nested subshell so the _refuse exit 78 does not kill the harness;
         # lib.sh sourced INSIDE the PATH-stubbed shell so every uname call
         # the classifier makes (host guard + preflight) sees Darwin
         PATH="$PF3_DARWIN:$PATH" bash -c '
@@ -557,7 +598,7 @@ assert_not_contains "4d NOT the unresolved token (distinct class)" "reason=super
 rm -rf "$PF3_FIXT" "$PF3_DARWIN"
 
 # ===========================================================================
-section "5 — non-Linux arm (Darwin uname stub): zero /proc reads attempted"
+section "5 — Darwin arm: fail-closed launchd (D2a) + zero /proc reads attempted"
 
 STUBDIR="$(mktemp -d -t supclass-darwin.XXXXXX)"
 cat > "$STUBDIR/uname" <<STUB
@@ -575,10 +616,16 @@ unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT
 . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
 _supervision_owned_pids()      { echo 'owned_pids' >> "$CALLLOG"; printf '%s\n' 424242; }
 _supervision_pid_cgroup_leaf() { echo 'cgroup_leaf' >> "$CALLLOG"; printf '%s\n' 'ensemble-upgrade-x.scope'; }
+_supervision_launchd_detect()  { echo 'launchd_detect' >> "$CALLLOG"; case "\${SUP_LAUNCHD:-zero}" in one) SUPERVISION_UNIT="com.ensemble.prod"; return 0;; *) return 1;; esac; }
 : > "$CALLLOG"
-supervision_classify
+SUP_LAUNCHD=zero supervision_classify
 echo "rc-auto=\$?"
 echo "STATE-auto=\$SUPERVISION_STATE"
+echo "REASON-auto=\$SUPERVISION_REFUSE_REASON"
+SUP_LAUNCHD=one supervision_classify
+echo "rc-auto-hit=\$?"
+echo "STATE-auto-hit=\$SUPERVISION_STATE"
+echo "UNIT-auto-hit=\$SUPERVISION_UNIT"
 ENSEMBLE_SUPERVISION=unit supervision_classify >/dev/null
 echo "rc-unit=\$?"
 echo "STATE-unit=\$SUPERVISION_STATE"
@@ -587,10 +634,16 @@ DARWIN
 chmod +x "$DAR_SCRIPT"
 : > "$CALLLOG"
 DAR_OUT="$(PATH="$STUBDIR:$PATH" bash "$DAR_SCRIPT" 2>&1)"
-assert_contains "5 Darwin auto: SCRIPT_NOHUP" "STATE-auto=SCRIPT_NOHUP" "$DAR_OUT"
-assert_contains "5 Darwin auto rc 0" "rc-auto=0" "$DAR_OUT"
+# D2a: AUTO on Darwin probes launchd and REFUSES on zero match (never SCRIPT_NOHUP).
+assert_contains "5 Darwin auto (zero match): LAUNCHD_NOT_VERIFIED" "STATE-auto=LAUNCHD_NOT_VERIFIED" "$DAR_OUT"
+assert_contains "5 Darwin auto (zero match): rc 1 refusal" "rc-auto=1" "$DAR_OUT"
+assert_contains "5 Darwin auto (zero match): reason launchd-not-verified" "REASON-auto=launchd-not-verified" "$DAR_OUT"
+assert_not_contains "5 Darwin auto: NEVER SCRIPT_NOHUP" "STATE-auto=SCRIPT_NOHUP" "$DAR_OUT"
+# D2a: AUTO on Darwin with exactly one match → LAUNCHD_MANAGED:<label>, rc 0.
+assert_contains "5 Darwin auto (one match): LAUNCHD_MANAGED rc 0" "rc-auto-hit=0" "$DAR_OUT"
+assert_contains "5 Darwin auto (one match): STATE LAUNCHD_MANAGED" "STATE-auto-hit=LAUNCHD_MANAGED" "$DAR_OUT"
+assert_contains "5 Darwin auto (one match): label resolved" "UNIT-auto-hit=com.ensemble.prod" "$DAR_OUT"
 assert_contains "5 Darwin explicit-unit: no cgroup reads → unresolved rc 1" "rc-unit=1" "$DAR_OUT"
-assert_contains "5 Darwin: ZERO /proc reads attempted (auto + unit arms)" "CALLS-body:" "$DAR_OUT"
 assert_not_contains "5 Darwin: no owned_pids call" "owned_pids" "$DAR_OUT"
 assert_not_contains "5 Darwin: no cgroup_leaf call" "cgroup_leaf" "$DAR_OUT"
 rm -rf "$STUBDIR" "$DAR_SCRIPT"
@@ -673,8 +726,9 @@ STUB
     SUP_DARWIN_PATH="$R3_DARWIN"
     printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-a.service\n' > "$FIXT/.env"
     H4="$(run_classify darwin session-7.scope "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR")"
-    assert_eq "6d Darwin: SCRIPT_NOHUP unchanged" "SCRIPT_NOHUP" "$(globals_state "$H4")"
-    assert_eq "6d Darwin: zero /proc reads" "" "$(calls_of "$H4")"
+    assert_eq "6d Darwin: LAUNCHD_NOT_VERIFIED (fail-closed; never SCRIPT_NOHUP)" "LAUNCHD_NOT_VERIFIED" "$(globals_state "$H4")"
+    assert_not_contains "6d Darwin: no owned_pids call (zero cgroup reads)" "owned_pids" "$(calls_of "$H4")"
+    assert_not_contains "6d Darwin: no cgroup_leaf call" "cgroup_leaf" "$(calls_of "$H4")"
     case "$H4" in
         *"healing from nohup-survivor"*) _fail "6d Darwin: no heal log" "absent 'healing from nohup-survivor'" "$H4" ;;
         *) _pass "6d Darwin: no heal log" ;;
@@ -824,8 +878,9 @@ STUB
     touch "$HEAL_UNITDIR_D/ensemble-heal-a.service"
     printf 'ENSEMBLE_RESTART_UNIT=ensemble-heal-a.service\n' > "$FIXT/.env"
     H4="$(run_classify darwin session-7.scope "ENSEMBLE_SUPERVISION=auto SUPERVISION_UNIT_DIR=$HEAL_UNITDIR_D")"
-    assert_eq "6d Darwin (non-systemd host): SCRIPT_NOHUP unchanged" "SCRIPT_NOHUP" "$(globals_state "$H4")"
-    assert_eq "6d Darwin (non-systemd host): zero /proc reads" "" "$(calls_of "$H4")"
+    assert_eq "6d Darwin (non-systemd host): LAUNCHD_NOT_VERIFIED (fail-closed)" "LAUNCHD_NOT_VERIFIED" "$(globals_state "$H4")"
+    assert_not_contains "6d Darwin (non-systemd host): no owned_pids call" "owned_pids" "$(calls_of "$H4")"
+    assert_not_contains "6d Darwin (non-systemd host): no cgroup_leaf call" "cgroup_leaf" "$(calls_of "$H4")"
     rm -f "$FIXT/.env" && rm -rf "$HEAL_UNITDIR_D" "$R3_DARWIN_D"
 fi
 rm -rf "$HEAL_UNITDIR"

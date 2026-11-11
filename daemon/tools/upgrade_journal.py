@@ -3935,6 +3935,16 @@ SUPERVISION_STATE_SCOPE = "SCOPE_SURVIVOR"
 # state — but it is a first-class VERIFIED input to the outcome map below
 # (twins-pinned vocabulary, shell twin literal "DUAL_FIGHT").
 SUPERVISION_STATE_DUALFIGHT = "DUAL_FIGHT"
+# D2a (promote-full-auto 2026-11-11) — launchd states. The shell twin
+# (scripts/upgrade/lib.sh supervision_classify) resolves these on Darwin; the
+# outcome-map launchd cells are D2b (NOT added here — the map stays host-blind,
+# defaulting any launchd state to `fault`; the shell preflight deliberately
+# OMITS the OUTCOME line for launchd so a verified flip never names a false
+# fault). These states exist so the DETECTOR mirrors the shell's fail-closed
+# Darwin semantics (never SCRIPT_NOHUP here) — the twin is advisory-only and
+# carries the refusal-equivalent state + token in its note.
+SUPERVISION_STATE_LAUNCHD = "LAUNCHD_MANAGED"
+SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED = "LAUNCHD_NOT_VERIFIED"
 
 # Opt-out vocabulary — matches ``daemon.config._PROACTIVE_FALSE_BOOLS`` /
 # upgrade_tools ``_OPT_OUT_FALSES`` (same permissive bool parser the repo
@@ -3943,14 +3953,21 @@ SUPERVISION_STATE_DUALFIGHT = "DUAL_FIGHT"
 # vocabulary placement convention.
 _SUPERVISION_OPT_OUT_FALSES = frozenset({"0", "false", "no", "off"})
 
+# Bound on ONE launchctl invocation from the daemon-side Darwin probe
+# (mirrors lib.sh LAUNCHD_PROBE_BUDGET_S). Advisory-only; a wedged launchctl
+# degrades the detection to LAUNCHD_NOT_VERIFIED.
+_LAUNCHD_PROBE_BUDGET_S = 5
+
 
 @dataclass(frozen=True)
 class SupervisionDetection:
     """One supervision classification result.
 
-    ``state``  — SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR
-    ``unit``   — unit name when UNIT_MANAGED ("" when none resolved)
-    ``mode``   — resolved mode AFTER the ladder: "unit" | "script"
+    ``state``  — SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR |
+                 LAUNCHD_MANAGED | LAUNCHD_NOT_VERIFIED
+    ``unit``   — unit name when UNIT_MANAGED ("" when none resolved) /
+                 launchd label when LAUNCHD_MANAGED
+    ``mode``   — resolved mode AFTER the ladder: "unit" | "script" | "launchd"
     ``note``   — WARN-once diagnostic ("" when the ladder ran clean)
     """
 
@@ -3993,6 +4010,75 @@ def _supervision_classify_leaf(leaf: str) -> tuple[str, str]:
     # Unknown leaf shape (raw system.slice child, cgroupns oddity) —
     # fail toward script, no unit name.
     return SUPERVISION_STATE_SCRIPT, ""
+
+
+def _supervision_launchd_detect(
+    install_dir: str, env: dict[str, str] | None = None
+) -> tuple[str, str]:
+    """Darwin launchd probe — TWINS MIRROR of the shell
+    ``_supervision_launchd_detect`` (D2a, promote-full-auto 2026-11-11).
+
+    Returns ``(state, label)``: ``(LAUNCHD_MANAGED, <label>)`` IFF EXACTLY ONE
+    job in the gui domain has a printed definition referencing
+    ``<install>/launcher.sh`` (the /bin/bash-wrapped ProgramArguments),
+    excluding the watchdog label; otherwise ``(LAUNCHD_NOT_VERIFIED, "")``.
+
+    Advisory-only (the daemon cannot refuse), never raises — every failure
+    degrades to LAUNCHD_NOT_VERIFIED. ``LAUNCHCTL_BIN`` / ``ENSEMBLE_LAUNCHD_LABEL``
+    / ``LAUNCHD_WATCHDOG_LABEL`` are read from ``env`` (os.environ default);
+    the probe is bounded (``_LAUNCHD_PROBE_BUDGET_S``).
+    """
+    try:
+        e = os.environ if env is None else env
+        lc = (e.get("LAUNCHCTL_BIN") or "launchctl").strip() or "launchctl"
+        if not install_dir:
+            return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
+        if shutil.which(lc) is None:
+            return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
+        try:
+            install_real = str(Path(install_dir).resolve())
+        except OSError:
+            install_real = install_dir
+        want = (e.get("ENSEMBLE_LAUNCHD_LABEL") or "").strip()
+        watchdog = (e.get("LAUNCHD_WATCHDOG_LABEL") or "com.ensemble.watchdog").strip()
+        domain = f"gui/{os.getuid()}"
+        try:
+            r = subprocess.run(
+                [lc, "list"], capture_output=True, text=True,
+                timeout=_LAUNCHD_PROBE_BUDGET_S,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
+        if want:
+            labels = [want]
+        else:
+            labels = []
+            for line in (r.stdout or "").splitlines():
+                parts = line.split()
+                if len(parts) >= 3:
+                    labels.append(parts[2])
+        matches: list[str] = []
+        for lbl in labels:
+            if not lbl or lbl == watchdog:
+                continue
+            try:
+                rr = subprocess.run(
+                    [lc, "print", f"{domain}/{lbl}"], capture_output=True,
+                    text=True, timeout=_LAUNCHD_PROBE_BUDGET_S,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            dump = rr.stdout or ""
+            if (
+                f"{install_real}/launcher.sh" in dump
+                or f"{install_dir}/launcher.sh" in dump
+            ):
+                matches.append(lbl)
+        if len(matches) == 1:
+            return SUPERVISION_STATE_LAUNCHD, matches[0]
+        return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
+    except Exception:  # noqa: BLE001 — detection must never raise
+        return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
 
 
 def _supervision_detect_real(
@@ -4041,14 +4127,67 @@ def _supervision_detect_real(
     try:
         e = os.environ if env is None else env
         raw = (e.get("ENSEMBLE_SUPERVISION") or "").strip()
+        darwin = sys.platform == "darwin"
+        install_dir = (e.get("INSTALL_DIR") or "").strip()
 
         # ── explicit / opt-out / garbage parsing (ladder top) ─────────────
         if raw:
             low = raw.lower()
             if low in _SUPERVISION_OPT_OUT_FALSES:
+                # D2a: opt-out / `script` on Darwin is NOT a legitimate
+                # acknowledgement — the shell refuses; the twin carries the
+                # refusal-equivalent state + token (never SCRIPT_NOHUP/conforming).
+                if darwin:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                        mode="launchd",
+                        note=(
+                            "supervision-unsupervised-declaration-required: "
+                            "opt-out/script on Darwin is not a legitimate "
+                            "supervision acknowledgement — shell preflight "
+                            "refuses (78); never silent-degrade to script"
+                        ),
+                    )
                 return SupervisionDetection(SUPERVISION_STATE_SCRIPT)
             if low == "script":
+                if darwin:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                        mode="launchd",
+                        note=(
+                            "supervision-unsupervised-declaration-required: "
+                            "mode 'script' on Darwin is not a legitimate "
+                            "supervision acknowledgement — shell preflight "
+                            "refuses (78); never silent-degrade to script"
+                        ),
+                    )
                 return SupervisionDetection(SUPERVISION_STATE_SCRIPT, mode="script")
+            if low == "launchd":
+                # D2a: declared launchd — probe on Darwin; on a non-Darwin
+                # host the shell refuses (incapable) — carry the equivalent.
+                if not darwin:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                        mode="launchd",
+                        note=(
+                            "supervision-launchd-incapable-host: mode 'launchd' "
+                            "on a non-Darwin host — shell preflight refuses (78)"
+                        ),
+                    )
+                state, label = _supervision_launchd_detect(install_dir, e)
+                if state == SUPERVISION_STATE_LAUNCHD:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD, unit=label, mode="launchd"
+                    )
+                return SupervisionDetection(
+                    SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                    mode="launchd",
+                    note=(
+                        "supervision-not-verified: no single launchd job "
+                        "references the install's launcher.sh — shell "
+                        "preflight refuses (78)"
+                    ),
+                )
             if low == "unit":
                 # explicit unit: resolve the NAME (env > cgroup); the
                 # daemon cannot refuse (boot advisory) — carry the note.
@@ -4073,12 +4212,40 @@ def _supervision_detect_real(
                     ),
                 )
             if low != "auto":
+                if darwin:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                        mode="launchd",
+                        note=(
+                            f"supervision-declaration-invalid: garbage "
+                            f"ENSEMBLE_SUPERVISION='{raw}' on Darwin — shell "
+                            "preflight refuses (78); never silent-degrade"
+                        ),
+                    )
                 return SupervisionDetection(
                     SUPERVISION_STATE_SCRIPT,
                     note=f"garbage ENSEMBLE_SUPERVISION='{raw}' — WARN-once, failing toward script",
                 )
 
         # ── auto-derive chain ─────────────────────────────────────────────
+        # D2a: Darwin AUTO probes launchd (never SCRIPT_NOHUP — the incident
+        # mechanism). The twin cannot refuse; it reports the refusal-equivalent
+        # state + token.
+        if darwin:
+            state, label = _supervision_launchd_detect(install_dir, e)
+            if state == SUPERVISION_STATE_LAUNCHD:
+                return SupervisionDetection(
+                    SUPERVISION_STATE_LAUNCHD, unit=label, mode="launchd"
+                )
+            return SupervisionDetection(
+                SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                mode="launchd",
+                note=(
+                    "supervision-not-verified: auto on Darwin could not verify "
+                    "a single launchd job for the install's launcher.sh — shell "
+                    "preflight refuses (78); never falls through to nohup"
+                ),
+            )
         if sys.platform != "linux":
             return SupervisionDetection(SUPERVISION_STATE_SCRIPT)
         if not Path("/run/systemd/system").exists():

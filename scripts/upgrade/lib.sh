@@ -5067,6 +5067,144 @@ _supervision_host_allows_unit() {
     return 0
 }
 
+# ── launchd seam (D2a, promote-full-auto 2026-11-11) ───────────────────────
+# Twin of SYSTEMCTL_BIN (S4/R23): PATH-resolved default so a PATH-injected
+# stub drives scripted sequences (the mac-side test seam); env override
+# remains for absolute pinning. Every launchctl call rides _run_bounded so a
+# wedged launchctl can never wedge the ceremony.
+LAUNCHCTL_BIN="${LAUNCHCTL_BIN:-launchctl}"
+# Bound on ONE launchctl invocation (the gui-domain dump and each per-job
+# print). Generous vs a healthy ~sub-second call; a wedged launchctl → a
+# loud refusal, never a boot outage.
+LAUNCHD_PROBE_BUDGET_S="${LAUNCHD_PROBE_BUDGET_S:-5}"
+# The watchdog AGENT label is NOT the daemon job — excluded from the
+# program-ownership predicate (a watchdog-matching launcher would double-count).
+LAUNCHD_WATCHDOG_LABEL="${LAUNCHD_WATCHDOG_LABEL:-com.ensemble.watchdog}"
+
+# _supervision_host_allows_launchd — host guard for every launchd path:
+# Darwin ONLY. The uname check runs FIRST so non-Darwin hosts take ZERO
+# launchctl forks (mirrors _supervision_host_allows_unit's guard discipline).
+_supervision_host_allows_launchd() {
+    [ "$(uname -s)" = "Darwin" ]
+}
+
+# _supervision_launchd_domain — the operator lane domain (USER LaunchAgent by
+# design: never sudo; make plist-install targets gui/$(id -u)).
+_supervision_launchd_domain() {
+    printf 'gui/%s\n' "$(id -u)"
+}
+
+# _supervision_launchd_detect — probe the gui domain and return 0 IFF EXACTLY
+# ONE job matches: a job whose printed definition references
+# <install>/launcher.sh (the /bin/bash-wrapped ProgramArguments from
+# ensemble-prod.plist), EXCLUDING the watchdog label. Sets SUPERVISION_UNIT to
+# the resolved label. On zero / multiple / unresolvable → returns 1 (the
+# caller refuses; NEVER a SCRIPT_NOHUP fallthrough on Darwin).
+#
+# Stub contract (tests + comp7 style): point LAUNCHCTL_BIN at a script that
+# answers `list` (3-column PID STATUS LABEL rows) and
+# `print gui/<uid>/<label>` (a job dump containing the launcher path). Both
+# steps ride _run_bounded. ENSEMBLE_LAUNCHD_LABEL pins the ONLY label
+# considered (precedence over auto-detection); it still must match exactly.
+_supervision_launchd_detect() {
+    local want="${ENSEMBLE_LAUNCHD_LABEL:-}" domain labels lbl dump
+    local install_real count=0 match=""
+    [ -n "${INSTALL_DIR:-}" ] || return 1
+    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 1
+    install_real="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
+    [ -n "$install_real" ] || return 1
+    domain="$(_supervision_launchd_domain)"
+    # Step 1 — domain dump of labels (launchctl list: PID<TAB>STATUS<TAB>LABEL).
+    labels="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" list 2>/dev/null)" || return 1
+    [ -n "$labels" ] || return 1
+    if [ -n "$want" ]; then
+        set -- "$want"
+    else
+        # shellcheck disable=SC2046
+        set -- $(printf '%s\n' "$labels" | awk 'NF>=3 {print $3}')
+    fi
+    # Step 2 — per-job print; predicate on the launcher script path.
+    for lbl in "$@"; do
+        [ -n "$lbl" ] || continue
+        [ "$lbl" = "$LAUNCHD_WATCHDOG_LABEL" ] && continue
+        dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "${domain}/${lbl}" 2>/dev/null)" || continue
+        [ -n "$dump" ] || continue
+        case "$dump" in
+            *"${install_real}/launcher.sh"*|*"${INSTALL_DIR}/launcher.sh"*)
+                match="$lbl"; count=$((count + 1)) ;;
+        esac
+    done
+    if [ "$count" -eq 1 ]; then
+        SUPERVISION_UNIT="$match"
+        return 0
+    fi
+    return 1
+}
+
+# _supervision_launchd_bootout — the M1 STOP BARRIER (D2a supervised flip):
+# `launchctl bootout gui/<uid>/<label>` (or the bare domain for a whole-job
+# teardown). Bounded. "not found" is benign-idempotent (rc 0); any other
+# failure returns nonzero so the caller halts fail-safe. The bootstrap side
+# is _supervision_launchd_bootstrap.
+_supervision_launchd_bootout() {
+    local label="${1:-}" domain target
+    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 1
+    domain="$(_supervision_launchd_domain)"
+    if [ -n "$label" ]; then target="${domain}/${label}"; else target="$domain"; fi
+    local out rc
+    out="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" bootout "$target" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        return 0
+    fi
+    # benign-idempotent: "not found" / "Could not find specified service" when
+    # the job was already down. Everything else is a real failure.
+    case "$out" in
+        *"Could not find"*|*"not found"*|*"No such process"*|*"service not found"*)
+            return 0 ;;
+    esac
+    [ "$rc" -eq 124 ] && return 1
+    return 1
+}
+
+# _supervision_launchd_bootstrap — the M2 SUPERVISOR-OWNED START (D2a):
+# `launchctl bootstrap gui/<uid> <verbatim-plist-path>`. RunAtLoad=true ⇒
+# bootstrap == start. Bounded. "Already loaded" is benign ONLY after a
+# revalidation by the caller; here a nonzero rc is returned for the caller to
+# handle (no promote-started launcher ever on the supervised path).
+_supervision_launchd_bootstrap() {
+    local plist="${1:-}" domain
+    [ -n "$plist" ] || return 1
+    [ -f "$plist" ] || return 1
+    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 1
+    domain="$(_supervision_launchd_domain)"
+    local out rc
+    out="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" bootstrap "$domain" "$plist" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        return 0
+    fi
+    case "$out" in
+        *"already bootstrapped"*|*"already loaded"*|*"Input/output error"*)
+            # "already loaded" is NOT success on its own — return a distinct
+            # code (2) so the caller revalidates the LIVE job rather than
+            # trusting a no-op rc.
+            return 2 ;;
+    esac
+    [ "$rc" -eq 124 ] && return 1
+    return 1
+}
+
+# _supervision_launchd_plist_path — the VERBATIM `path =` plist path from a
+# job's `launchctl print` dump (label ≠ filename). Empty when unresolvable.
+_supervision_launchd_plist_path() {
+    local label="${1:-}" dump
+    [ -n "$label" ] || return 1
+    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 1
+    dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "$(_supervision_launchd_domain)/${label}" 2>/dev/null)" || return 1
+    printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*path = //p' | head -1
+}
+
 # _handback_serving_probe — the hand-back's SERVING conjunct
 # (D-P1-4/D-P1-5, promote-handback-halt Phase 1). Called ONLY when PORT
 # is set and curl is available; assumes the port-listener fast condition
@@ -5931,18 +6069,21 @@ _supervision_derive_unit_name() {
 
 # supervision_classify — THE classifier. Uncached per-run (state may change
 # across a run: the daemon stops mid-promote). Sets globals:
-#   SUPERVISION_MODE   resolved mode: 'unit' | 'script'
-#   SUPERVISION_STATE  SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR
-#   SUPERVISION_UNIT   unit name ('' when none)
+#   SUPERVISION_MODE   resolved mode: 'unit' | 'script' | 'launchd'
+#   SUPERVISION_STATE  SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR |
+#                      LAUNCHD_MANAGED | LAUNCHD_NOT_VERIFIED
+#   SUPERVISION_UNIT   unit name / launchd label ('' when none)
 #   SUPERVISION_EXPLICIT_UNIT   1 ONLY for a ladder-top EXPLICIT 'unit'
 #                       declaration (M3 discriminator — auto-derived
 #                       UNIT_MANAGED also resolves MODE=unit)
 #   SUPERVISION_REFUSE_REASON   '' | 'unit-unresolved' |
-#                       'unit-incapable-host' (M3; the preflight branches
-#                       its exit-78 _refuse token on this)
+#                       'unit-incapable-host' (M3) | 'launchd-incapable-host' |
+#                       'launchd-not-verified' | 'unsupervised-declaration-required' |
+#                       'declaration-invalid' (D2a — the preflight branches its
+#                       exit-78 _refuse token on this)
 # Prints EXACTLY ONE machine-readable line:
 #   ENSEMBLE_SUPERVISION_RESULT=<state>[:<unit>]
-# Returns 1 for the two EXPLICIT-unit fail-closed classes (the PREFLIGHT
+# Returns 1 for the EXPLICIT / Darwin fail-closed classes (the PREFLIGHT
 # caller refuses with exit 78; the stop site ignores rc — it never refuses
 # mid-pipeline). SUPERVISION_REFUSE_REASON discriminates them:
 #   "unit-unresolved"     — explicit unit, no name resolvable (env >
@@ -5955,6 +6096,15 @@ _supervision_derive_unit_name() {
 #                           rc 0 is the r-f82e surprise class; the name
 #                           (if one resolved from env/.env) is carried for
 #                           the refusal diagnosis, never acted on.
+#   D2a (2026-11-11, promote-full-auto) — Darwin is FAIL-CLOSED: a declared
+#   `launchd` on a non-Darwin host refuses (launchd-incapable-host); AUTO and
+#   declared `launchd` on Darwin PROBE launchd and refuse
+#   (launchd-not-verified) on zero/multiple/unresolvable — the AUTO path
+#   NEVER falls through to SCRIPT_NOHUP on Darwin (the 2026-11-11 incident
+#   mechanism); declared `script`/opt-out on Darwin refuses
+#   (unsupervised-declaration-required; the `unsupervised` VALUE is D2b);
+#   garbage on Darwin refuses (declaration-invalid). Non-Darwin non-Linux
+#   shapes (BSD) keep the byte-identical SCRIPT_NOHUP arm.
 # Sets one additional consumed global: SUPERVISION_EXPLICIT_UNIT (1 only
 # when the ladder top saw an EXPLICIT 'unit' declaration; 0 otherwise —
 # an auto-derived UNIT_MANAGED leaf also resolves MODE=unit, so MODE alone
@@ -5976,10 +6126,29 @@ supervision_classify() {
     if [ -n "$low" ]; then
         case "$low" in
             0|false|no|off)
+                # D2a: an opt-out / `script` declaration on Darwin is NOT a
+                # legitimate acknowledgement — it would silent-degrade the
+                # launchd host to the nohup lineage (the 2026-11-11 incident
+                # mechanism) at rc 0. Refuse; the `unsupervised` VALUE that
+                # acknowledges an intentionally unsupervised Darwin lane is D2b.
+                if _supervision_host_allows_launchd; then
+                    _supervision_warn_once "mode '$low' on Darwin is not a legitimate supervision acknowledgement — Darwin is fail-closed: declare 'launchd' (or 'auto'), or unset ENSEMBLE_SUPERVISION; an unsupervised Darwin lane needs a distinct declaration (not yet supported) — preflight must refuse (78)"
+                    SUPERVISION_MODE="script"
+                    SUPERVISION_REFUSE_REASON="unsupervised-declaration-required"
+                    printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                    return 1
+                fi
                 printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
                 return 0
                 ;;
             script)
+                if _supervision_host_allows_launchd; then
+                    _supervision_warn_once "mode 'script' on Darwin is not a legitimate supervision acknowledgement — Darwin is fail-closed: declare 'launchd' (or 'auto'), or unset ENSEMBLE_SUPERVISION; an unsupervised Darwin lane needs a distinct declaration (not yet supported) — preflight must refuse (78)"
+                    SUPERVISION_MODE="script"
+                    SUPERVISION_REFUSE_REASON="unsupervised-declaration-required"
+                    printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                    return 1
+                fi
                 printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
                 return 0
                 ;;
@@ -6032,9 +6201,48 @@ supervision_classify() {
                 printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
                 return 1
                 ;;
+            launchd)
+                # D2a: declared launchd (B4). Modelled on the unit arm incl.
+                # the host-capability rung. On a non-Darwin host this REFUSES
+                # (launchd-incapable-host) exactly like unit-on-incapable; on
+                # Darwin it PROBES (gui domain primary) and resolves the label
+                # (ENSEMBLE_LAUNCHD_LABEL > auto-detect) — zero/multiple/
+                # unresolvable → refuse (launchd-not-verified). NEVER a
+                # SCRIPT_NOHUP fallthrough on Darwin.
+                SUPERVISION_MODE="launchd"
+                SUPERVISION_STATE="LAUNCHD_MANAGED"
+                if ! _supervision_host_allows_launchd || ! command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1; then
+                    SUPERVISION_STATE="LAUNCHD_NOT_VERIFIED"
+                    _supervision_warn_once "mode 'launchd' explicit but this host cannot honor launchd supervision (non-Darwin / no resolvable launchctl) — preflight must refuse (78); never silent-degrade to nohup"
+                    printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                    SUPERVISION_REFUSE_REASON="launchd-incapable-host"
+                    return 1
+                fi
+                if _supervision_launchd_detect; then
+                    SUPERVISION_STATE="LAUNCHD_MANAGED"
+                    printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
+                    return 0
+                fi
+                SUPERVISION_STATE="LAUNCHD_NOT_VERIFIED"
+                _supervision_warn_once "mode 'launchd' explicit but no single launchd job could be verified for $INSTALL_DIR/launcher.sh (gui domain — zero or multiple matches, or unreadable) — preflight must refuse (78); never silent-degrade"
+                printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                SUPERVISION_REFUSE_REASON="launchd-not-verified"
+                return 1
+                ;;
             auto)
                 ;;
             *)
+                # D2a: garbage on Darwin ⇒ REFUSE (today: warn-once + rc 0 +
+                # mode=script was the incident mechanism). NON-Darwin keeps
+                # the byte-identical WARN-toward-script behavior.
+                if _supervision_host_allows_launchd; then
+                    SUPERVISION_MODE="launchd"
+                    SUPERVISION_STATE="LAUNCHD_NOT_VERIFIED"
+                    _supervision_warn_once "garbage ENSEMBLE_SUPERVISION='$raw' on Darwin — fail-closed: refusing (never silent-degrade to script at rc 0); unset it or declare 'auto'/'launchd' — preflight must refuse (78)"
+                    printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+                    SUPERVISION_REFUSE_REASON="declaration-invalid"
+                    return 1
+                fi
                 _supervision_warn_once "garbage ENSEMBLE_SUPERVISION='$raw' — WARN-once, failing toward script"
                 printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
                 return 0
@@ -6043,6 +6251,24 @@ supervision_classify() {
     fi
 
     # ── auto-derive chain (ZERO /proc + /run reads before the guards) ────
+    # D2a: AUTO on Darwin PROBES launchd FIRST and NEVER falls through to
+    # SCRIPT_NOHUP (the 2026-11-11 incident mechanism: any non-Linux host
+    # returned SCRIPT_NOHUP + rc 0 before any detection). Exactly one job ⇒
+    # LAUNCHD_MANAGED:<label>; zero / multiple / unresolvable ⇒ rc 1 refusal.
+    if _supervision_host_allows_launchd; then
+        SUPERVISION_MODE="launchd"
+        SUPERVISION_STATE="LAUNCHD_MANAGED"
+        if command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 && _supervision_launchd_detect; then
+            SUPERVISION_STATE="LAUNCHD_MANAGED"
+            printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
+            return 0
+        fi
+        SUPERVISION_STATE="LAUNCHD_NOT_VERIFIED"
+        _supervision_warn_once "auto on Darwin but no single launchd job could be verified for $INSTALL_DIR/launcher.sh (gui domain — zero or multiple matches, or unreadable) — preflight must refuse (78); never fall through to the nohup lineage"
+        printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
+        SUPERVISION_REFUSE_REASON="launchd-not-verified"
+        return 1
+    fi
     if [ "$(uname -s)" != "Linux" ]; then
         printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
         return 0
@@ -6439,18 +6665,45 @@ supervision_dualfight_check() {
 # deliberately NOT machine-surfaced.
 supervision_preflight() {
     if ! supervision_classify; then
-        if [ "${SUPERVISION_REFUSE_REASON:-}" = "unit-incapable-host" ]; then
-            # M3 (review cycle 1, leader-ruled FAIL-CLOSED): explicit unit
-            # on a unit-INCAPABLE host — same exit-78 preflight refusal
-            # semantics as supervision-unit-unresolved, its own greppable
-            # reason token. NEVER loud-degrade + nohup at rc 0.
-            _refuse supervision-unit-incapable-host "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but this host cannot honor unit supervision (non-Linux / no systemd / systemctl unresolvable) — never silent-degrade to the nohup lineage (the r-f82e surprise class); run under systemd or declare ENSEMBLE_SUPERVISION=script"
-        fi
-        _refuse supervision-unit-unresolved "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but no unit name is resolvable (env ENSEMBLE_RESTART_UNIT > cgroup-derived > INSTALL_DIR/.env all empty) — never silent-degrade (P1 §2); set ENSEMBLE_RESTART_UNIT or run under the unit"
+        case "${SUPERVISION_REFUSE_REASON:-}" in
+            unit-incapable-host)
+                # M3 (review cycle 1, leader-ruled FAIL-CLOSED): explicit unit
+                # on a unit-INCAPABLE host — same exit-78 preflight refusal
+                # semantics as supervision-unit-unresolved, its own greppable
+                # reason token. NEVER loud-degrade + nohup at rc 0.
+                _refuse supervision-unit-incapable-host "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but this host cannot honor unit supervision (non-Linux / no systemd / systemctl unresolvable) — never silent-degrade to the nohup lineage (the r-f82e surprise class); run under systemd or declare ENSEMBLE_SUPERVISION=script"
+                ;;
+            launchd-incapable-host)
+                # D2a: declared launchd on a non-Darwin host — the unit-arm
+                # mirror. Its own greppable token; never loud-degrade.
+                _refuse supervision-launchd-incapable-host "preflight refused: ENSEMBLE_SUPERVISION=launchd is explicit but this host cannot honor launchd supervision (non-Darwin / no resolvable launchctl) — never silent-degrade to the nohup lineage; run under launchd or declare the host's real supervisor"
+                ;;
+            launchd-not-verified)
+                # D2a: Darwin AUTO/declared-launchd probe found zero/multiple/
+                # unresolvable jobs — refuse (never fall through to nohup).
+                _refuse supervision-not-verified "preflight refused: launchd supervision could not be verified on Darwin — no single launchd job whose argv points at $INSTALL_DIR/launcher.sh (zero/multiple matches or unreadable gui domain). Install/repair the LaunchAgent (make plist-install) or fix ENSEMBLE_LAUNCHD_LABEL; never fall through to the nohup lineage (the 2026-11-11 incident mechanism)"
+                ;;
+            unsupervised-declaration-required)
+                # D2a: script/opt-out on Darwin is not an acknowledgement.
+                _refuse supervision-unsupervised-declaration-required "preflight refused: ENSEMBLE_SUPERVISION=script (or an opt-out/0) on Darwin is not a legitimate supervision acknowledgement — an unsupervised Darwin lane is not supported here; declare 'launchd' (or 'auto'), or unset ENSEMBLE_SUPERVISION"
+                ;;
+            declaration-invalid)
+                # D2a: garbage declared value on Darwin — fail-closed.
+                _refuse supervision-declaration-invalid "preflight refused: ENSEMBLE_SUPERVISION carries an unrecognized value on Darwin — fail-closed (never silent-degrade to script); unset it or declare 'auto'/'launchd'"
+                ;;
+            *)
+                _refuse supervision-unit-unresolved "preflight refused: ENSEMBLE_SUPERVISION=unit is explicit but no unit name is resolvable (env ENSEMBLE_RESTART_UNIT > cgroup-derived > INSTALL_DIR/.env all empty) — never silent-degrade (P1 §2); set ENSEMBLE_RESTART_UNIT or run under the unit"
+                ;;
+        esac
     fi
     supervision_dualfight_check
-    SUPERVISION_OUTCOME="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-}" "${SUPERVISION_UNIT:-}")"
-    printf 'ENSEMBLE_SUPERVISION_OUTCOME=%s\n' "${SUPERVISION_OUTCOME%%|*}"
+    # D2a: the declared×verified OUTCOME map stays host-blind (its launchd
+    # cells are D2b) — skip the OUTCOME line for a launchd host so a verified
+    # flip never emits a false `fault` from the unknown-declared default.
+    if [ "${SUPERVISION_MODE:-}" != "launchd" ]; then
+        SUPERVISION_OUTCOME="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-}" "${SUPERVISION_UNIT:-}")"
+        printf 'ENSEMBLE_SUPERVISION_OUTCOME=%s\n' "${SUPERVISION_OUTCOME%%|*}"
+    fi
 }
 
 # journal_mark_supervision — stamp supervision=<state> / unit=<name|null>
@@ -6484,10 +6737,17 @@ journal_mark_supervision() {
     else
         unit_json="null"
     fi
-    outcome="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-unknown}" "${SUPERVISION_UNIT:-}")"
-    outcome="${outcome%%|*}"
     new_inf="${inf%\}}"
-    new_inf="${new_inf},\"supervision\":\"$(_json_escape "${SUPERVISION_STATE:-unknown}")\",\"unit\":$unit_json,\"outcome\":\"$outcome\"}"
+    new_inf="${new_inf},\"supervision\":\"$(_json_escape "${SUPERVISION_STATE:-unknown}")\",\"unit\":$unit_json"
+    # D2a: the launchd outcome cells are D2b; the map is host-blind so a
+    # verified launchd would fall to its unknown-declared `fault` default.
+    # Stamp supervision+unit but OMIT outcome for launchd (no false fault).
+    if [ "${SUPERVISION_MODE:-}" != "launchd" ]; then
+        outcome="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-unknown}" "${SUPERVISION_UNIT:-}")"
+        outcome="${outcome%%|*}"
+        new_inf="${new_inf},\"outcome\":\"$outcome\""
+    fi
+    new_inf="${new_inf}}"
     journal_update "in_flight" "$new_inf"
 }
 
