@@ -107,6 +107,35 @@ because the blast radius is a **lost watch**, not a wrong kill.
 
 ---
 
+## 3b. Draft-time findings that changed the memo (evidence, not opinion)
+
+Recorded because they are **not** in the plan or the arch doc, and a reviewer will
+otherwise read them as drift.
+
+1. **A SECOND incident day.** Three more kernel `oom-kill` deaths on **2026-11-09**
+   (`09:26:27Z` pid 597787, `09:31:47Z` pid 598669, `09:42:57Z` pid 599644; unit
+   `Failed with result 'oom-kill'` at `09:27:38Z` / `09:32:58Z` / `09:44:07Z`), all
+   `task_memcg=.../ensemble-main.service`, all `anon-rss` ≈10.1–10.7 GiB. **Six kernel OOM
+   deaths in twelve days, the last two days before this memo.** The memo records them in (b) and
+   marks the death class as *current*. `MemoryMax` was still `infinity` on 2026-11-11.
+2. **`journalctl -k --since <date>` is a trap on this host.** For a window that crosses an
+   offline boot boundary it returned **0 entries** for both incident windows (it reported "no
+   OOM" until `-b all` was added). The memo's reproduction lines therefore carry `-b all`, and
+   the trap is named inline so a future operator does not repeat it.
+3. **The unit file is mode 600 root.** The plan's (a) verify step ("grep the unit file for
+   `Memory*`") silently fails for a non-root operator. The memo uses `systemctl show` as the
+   authoritative effective-value resolution and names the mode.
+4. **`MemoryCurrent` was 7.10 GiB / `memory.peak` 9.726 GiB at drafting** — i.e. the recommended
+   `MemoryHigh=7G` sits at or below today's steady state. The memo keeps the pair (the plan's
+   number) but adds a **re-measure-before-persisting** advisory: lift `MemoryHigh` toward, never
+   above, `MemoryMax=8700M`.
+5. **`EventKind` today lists 17 names** (the 16 the B22 pin counts + `ram_limit_exceeded`),
+   because the pin's "16 kinds / 17th member" is the escalation-pass frame and the feature
+   appended its member since. The B22 sentence is reproduced **verbatim** and the count is
+   explained immediately after it — the pin is not edited.
+
+---
+
 ## 4. T6 — the T4 hand-off (one-line pointer)
 
 The memo's **Appendix F** carries the operator mental model (safety net vs future policy layer),
