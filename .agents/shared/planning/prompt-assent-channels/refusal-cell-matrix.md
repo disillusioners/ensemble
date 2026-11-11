@@ -45,7 +45,7 @@ if proven_1to1:                                    → MINT   (the map is NEVER 
 if is_group_dm is True:                            → REFUSE mint-requires-private-channel
 if is_dm is not False:                             → REFUSE mint-requires-private-channel   # absent / non-bool → fail closed
 # is_dm is False ⇒ a GUILD channel — the only shape a designation can apply to
-map := resolve_designations()
+map := the parsed map PASSED IN by the resolver (the function NEVER reads os.environ — B2(i))
 if map is INVALID:                                 → REFUSE designation-config-invalid
 if context.channel_id not in map:                  → REFUSE mint-requires-private-channel
 if not context.user_id:                            → REFUSE extraction-incomplete    # ← the ABSENT-IDENTITY LEG
@@ -80,7 +80,13 @@ if context.user_id != map[context.channel_id]:     → REFUSE approver-not-pinne
   refusal **`mint-requires-private-channel`**. A matrix cell for the **absent-`is_group_dm`-key**
   guild turn ⇒ REFUSE `mint-requires-private-channel` is **added** (and a T1.5 test).
 
-### 1.2 — APPROVE side (gate leg **4f**, `daemon/tools/prompt_assent.py:2018-2026`; service
+### 1.2 — APPROVE side
+
+> **⚠ D-18: the function returns NEUTRAL LEGS, NOT side-specific codes.** The per-side mapping
+> table (mint → its codes; approve → its codes) is defined once (T2.3), pinned by AC18
+> ("every neutral leg maps to exactly one code per side; the predicate itself NEVER returns a
+> side-specific code"). The pseudocode blocks above show the FUNCTION INTERNALS — the gate-level
+> codes are applied by each gate's per-side mapping. (gate leg **4f**, `daemon/tools/prompt_assent.py:2018-2026`; service
 predicate `daemon/services/prompt_version_service.py:460-476`)
 
 > **The approve leg DOES emit the two new codes** (the architect's §5.2 — the plan's earlier
@@ -97,7 +103,7 @@ if proven_1to1:                                    → PASS
 if is_group_dm is True:                            → REFUSE token-channel-mismatch
 if is_dm is not False:                             → REFUSE token-channel-mismatch
 # is_dm is False ⇒ a GUILD channel
-map := resolve_designations()
+map := the parsed map PASSED IN by the resolver (the function NEVER reads os.environ — B2(i))
 if map is INVALID:                                 → REFUSE designation-config-invalid
 if context.channel_id not in map:                  → REFUSE token-channel-mismatch
 if not context.user_id:                            → REFUSE extraction-incomplete    # ← the ABSENT-IDENTITY LEG
@@ -105,7 +111,7 @@ if context.user_id != map[context.channel_id]:     → REFUSE approver-not-pinne
                                                     → PASS
 ```
 
-**The approve-side extension only ever ADDS a pass path to the *privacy* leg** — every existing
+**The approve-side extension (HISTORICAL, pre-D-18 — see the D-18 annotation) added a pass path to the *privacy* leg** — every existing
 refusal keeps its code **and** its budget behaviour. The two new codes are the **new** approve-side
 outcomes: the operator-fault case (an invalid map) and the **re-designation window** (the
 mint-witnessed human is no longer the room's current pinned approver ⇒ A-9).
@@ -168,7 +174,7 @@ not merely unused by the new codes.
 | **M-13** | **Thread designated by its OWN id** | `is_dm=False, channel_type="thread"`, `channel_id` in map | valid | **MINT** | — | **yes** | `mint_is_dm=0` | — | **NEW** — the operator may name a thread explicitly |
 | **M-14** | **Designated channel, but the human is the pinned approver of ANOTHER channel** | `channel_id` = C1 in map (pinned U1); `user_id` = U2 (pinned for C2) | valid | **REFUSE** | **`approver-not-pinned`** | **no** | none | **no** | **NEW** — the *cross-pin* cell: the map is **per channel**, not per human |
 | **M-15** | **Group DM whose channel id IS in a VALID map, by the PINNED APPROVER** | `is_dm=True, is_group_dm=True`, `channel_id` in map, `user_id` == the map value | valid | **REFUSE** | `mint-requires-private-channel` | **no** | none | **no** | **NEW (architect §4.3 — NT-3, the unpinned trust boundary)** — with an **in-file counter-mutation**: reorder the legs ⇒ M-15 reddens |
-| **M-16** | **A BOT id is pinned for the channel** | `is_dm=False`, `channel_id` in map, the map value is a bot's user id | valid | **REFUSE** | `approver-not-pinned` | **no** | none | **no** | **NEW (NT-8)** — the room is permanently mint-dead with the same code as a stranger; the side-specific detail text carries the distinction. **Dependency: this behaves as mint-dead only under the adapter's DEFAULT bot-message-skip posture** (`daemon/sources/adapters/discord/adapter.py:1041-1042`, `:1219`); if the operator changes the bot-skip config, the bot's turn may arm the window and the refusal still fires at the pinned-approver leg |
+| **M-16** | **A BOT id is pinned for the channel** | `is_dm=False`, `channel_id` in map, the map value is a bot's user id | valid | **REFUSE** | `approver-not-pinned` | **no** | none | **no** | **NEW (NT-8)** — the room is permanently mint-dead with the same code as a stranger; the side-specific detail text carries the distinction. **Dependency: this behaves as mint-dead only under the adapter's DEFAULT bot-message-skip posture** (`daemon/sources/adapters/discord/adapter.py:909-915` (the bot-skip gate), `:218-220` (the skip default)); if the operator changes the bot-skip config, the bot's turn may arm the window and the refusal still fires at the pinned-approver leg |
 | **M-17a** | **A 1:1 DM whose channel id is listed in a VALID map** | `is_dm=True, is_group_dm=False` (the map lists that channel id) | valid | **MINT** (`mint_is_dm=1` — the DM path never reads the map, so the entry is **inert**; **INVARIANT-DM**) | — | **yes** | none | — | **NEW (NT-8)** — the map entry is **silently ignored**; the map-parse log line is the only signal that a DM id was listed |
 | **M-17b** | **A group-DM channel id listed in a VALID map** | `is_dm=True, is_group_dm=True` (the map lists that channel id) | valid | **REFUSE** at leg 2 | `mint-requires-private-channel` | **no** | none | **no** | **NEW (NT-8)** — the group-DM leg precedes the map, so the entry is **silently ignored**; the map-parse log line is the only signal |
 | **M-18** | **A guild turn whose meta LACKS the `is_group_dm` key** (the interaction path) | `is_dm=False`, `is_group_dm` absent, `channel_id` in map, `user_id` == map value | valid | **REFUSE** (the designated branch is gated on `discord_meta.get("is_group_dm") is False`, which fails when the key is absent) | `mint-requires-private-channel` | **no** | none | **no** | **NEW (S7)** — the `text`-turn rule is retired in favour of this gate; the turn falls through to the existing refusal |

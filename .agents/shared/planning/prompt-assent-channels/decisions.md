@@ -37,10 +37,9 @@
 > `LEADER-RULED` (**5** entries: D-14, D-15, D-16, D-17, plus the council's withdrawn-designation
 > ruling). Entries below are a record of rulings, not proposals; the original reasoning is
 > preserved for the audit trail. The parent's `architecture-recommendation.md` wins for the
-> parent's own questions (D-1).
-> parent's `architecture-recommendation.md` wins on conflict; **this set's** architect artefact
-> will be `architecture-recommendation.md` **inside this directory** and wins over this file and
-> over every parent document for the Phase-1.5 questions.
+> parent's own questions (D-1); this set's own architect artefact —
+> `architecture-recommendation.md` **inside this directory** — wins over this file and over
+> every parent document for the Phase-1.5 questions.
 
 ---
 
@@ -123,7 +122,6 @@ separate post-promote decision).
 
 ### D-1 — The Phase-1.5 plan set is a SEPARATE set, and the parent's plan set stays frozen
 
-**Status:** `DECIDED`
 **Status:** `DECIDED` · **⚠ AMENDED @ the architect's §8.6 / §11 row 10** (the ownership split
 was two-owners-for-one-file)
 **Decision.** This lane writes to **`.agents/shared/planning/prompt-assent-channels/`** (new
@@ -136,7 +134,7 @@ directory) and **does not edit** the parent set's `plan-overview.md` / `phase1-4
 |---|---|---|
 | `docs/runbooks/prompt-assent.md` — the K-3 section, the taxonomy list, the troubleshooting rows, the map documentation | **THIS lane, Phase 4** (file **F-11**) | the repo tree |
 | `ceremony-notes.md` — the adapted probe, the staging record, the arming wording | **THIS lane** — a **NEW** file in **this** planning directory (file **F-13**) | this directory |
-| the **release-dir** ceremony notes for v0.29.19 (the staged artefact) | the **build lane** | the release dir |
+| the **release-dir** ceremony notes for v0.29.20 (the staged artefact) | the **build lane** | the release dir |
 | `CHANGELOG.md` | **THIS lane, Phase 4** (file **F-12**) | the repo tree |
 
 > **⚠ AMENDED @ the architect's §11 row 10.** As first written, this row assigned **both** the
@@ -534,7 +532,7 @@ channel** and having the Emperor type **in the channel** (not in a thread) for m
 
 ---
 
-### D-10 — Supersede decision for v0.29.18: **LEFT STANDING**; the new version is **v0.29.19**
+### D-10 — Supersede decision for v0.29.18: **LEFT STANDING**; the supersede target is **v0.29.20** (re-pointed from v0.29.20)
 
 **Status:** **`RULED`** @ the architect's §12 ("**RULED: LEFT STANDING** — with §9.3's protection
 statement and survival math") *(the staging execution is the build lane's; the plan records the
@@ -543,8 +541,8 @@ ruling so the build lane does not have to re-derive it)*
 
 | Field | Value |
 |---|---|
-| **New staged version** | **`v0.29.19`** |
-| Slot verification | `git ls-remote --tags origin 'v0.29.19*'` → **empty**; `git tag --list v0.29.19` → **empty**; the remote max is `v0.29.18` (`a4d7233f2 → df4a92732`). **v0.29.19 is free.** |
+| **New staged version** | **`v0.29.20`** (⚠ AMENDED @ 2026-11-11T19:30:42Z: v0.29.20 taken by a concurrent lane — tag `1132fa4cb`, tip of origin/latest, **not this branch**; verified: the tag exists locally AND on origin; v0.29.20 free locally AND on origin. **T4.1 executes the collision rule at build time**: on collision re-bump to the next free slot; NEVER re-cut a tag; push by name.) |
+| Slot verification | `git ls-remote --tags origin 'v0.29.20*'` → **1132fa4cb** (the concurrent lane took it 2026-11-11T19:30:42Z); `git ls-remote --tags origin 'v0.29.20*'` → **empty** (free at the time of this amendment). **T4.1 re-verifies v0.29.20 at build time.** |
 | Ancestry | `git merge-base --is-ancestor v0.29.18^{commit} HEAD` → **exit 0** — v0.29.18's content **already rides** this branch |
 | **v0.29.18 treatment** | **LEFT STANDING** (release dir kept, local tag kept, remote tag untouched) |
 | Promote | **NOT promoted** by this lane; `current` stays where it is |
@@ -562,6 +560,10 @@ properties, and the combination decides it:
 3. **The house combo-practice** — *content rides the next version; the release dir becomes an
    eviction candidate at the successor's promote; the tag stays as audit trail.*
 
+**⚠ One ceremony line (the moved-latest note):** latest has MOVED past our base during the pass
+(`efa8aaae2` → … → `1132fa4cb`); the final merge step (giter) reconciles the moved latest;
+**staging builds from the merged tip, not the stale base**. Nobody is surprised.
+
 **Eviction, recorded for the promote lane (not this lane's action) — amended @ the architect's
 §9.3.** The host currently holds **5** release dirs (`v0.29.7`, `v0.29.13`, `v0.29.15`,
 `v0.29.17`, `v0.29.18`) against a keep-3 policy; **staging takes the count 5→6 and queues
@@ -569,7 +571,7 @@ nothing** (`stage.sh` never calls `retention_evict` — verified: `grep -c reten
 scripts/upgrade/stage.sh` = **0**; the eviction runs only from `promote.sh:771` and `:927`, with
 `RETENTION_KEEP=3` at `scripts/upgrade/lib.sh:375` and the routine at `lib.sh:6857-6917`).
 
-**The corrected survival math.** At the **first** v0.29.19 promote: evict 3 (`v0.29.7`,
+**The corrected survival math.** At the **first** v0.29.20 promote: evict 3 (`v0.29.7`,
 `v0.29.13`, `v0.29.17` — the three oldest non-pinned) ⇒ **v0.29.18 survives**. It becomes the
 candidate at the **third** promote (after v0.29.20 and v0.29.21) — **it survives exactly two
 further promotes, protected by nothing** (`retention_evict` pins only `current`/`previous`; a
@@ -666,7 +668,7 @@ subject item each; the **single-occupant channel** for leg 3 (the mint response 
 consume or TTL-expire a token before reuse; **never** paste a live token into a second channel.
 
 **NT-5 — the last-speaker-wins rule.** A guild channel is **one instance for all humans**
-(`daemon/sources/adapters/discord/adapter.py:1041-1042`, `:1219`), and the window is re-armed on
+(`daemon/sources/adapters/discord/adapter.py:909-915` (the bot-skip gate), `:218-220` (the skip default)), and the window is re-armed on
 every non-silent dispatch (`daemon/manager.py:6126`, `:11530`) — so a **bystander's reply
 between the Emperor's turn and the tool call re-points the window**, and the Emperor's own
 attempt then refuses `approver-not-pinned`. Fail-closed, but a cheap continuous DoS on the lane.
@@ -710,7 +712,7 @@ recorded **here** (the parent set stays frozen — **D-1**).
 |---|---|---|---|
 | **1** | The **AR-1 mint-context binding** — *"Token bound to mint `(source_id, channel_id, 1:1-DM, user_id)`"* | `../prompt-assent/architecture-recommendation.md:63` | The **`1:1-DM`** element becomes **`1:1-DM` OR a designated channel whose pinned approver is the turning human**. The channel **and** user binding is **unchanged**; only the set of surfaces that can satisfy the privacy element grows — and only under an operator designation. The parent's AR-1 legs 1 and 3 (same source+channel, same daemon-derived `user_id`) are **untouched** and remain the approve-side binding |
 | **2** | The parent's **§3 refusal taxonomy** (27 codes, "verbatim") | `../prompt-assent/architecture-recommendation.md` §3 | **Amended by this lane: +2 codes** (`approver-not-pinned`, `designation-config-invalid`) → **29**. The census's `ARCHITECT_REFUSAL_TAXONOMY` docstring must be **re-worded** from *"the COMPLETE architect §3 refusal taxonomy (verbatim)"* to *"the architect §3 refusal taxonomy **as amended by the prompt-assent Phase-1.5 lane** (+2 codes)"* — **T2.6** owns the re-wording |
-| **3** | The parent's **§8.2 item 2** — *"Guild-channel approval. Phase 1 is 1:1-DM-only (AR-1). If the Emperor intends to approve from guild channels, the pinned-approver design must be commissioned BEFORE Phase 1 ships."* | `../prompt-assent/architecture-recommendation.md:546-548` | **The hook this lane satisfies.** The Emperor's 2026-11-11 ruling commissions the pinned-approver design; **this lane IS that design**, staged as **v0.29.19** on top of the parent's Phase-1 release (**v0.29.18**). The parent's Phase 1 shipped as v0.29.18; the guild-channel surface ships as its successor, **not** as a rewrite of it |
+| **3** | The parent's **§8.2 item 2** — *"Guild-channel approval. Phase 1 is 1:1-DM-only (AR-1). If the Emperor intends to approve from guild channels, the pinned-approver design must be commissioned BEFORE Phase 1 ships."* | `../prompt-assent/architecture-recommendation.md:546-548` | **The hook this lane satisfies.** The Emperor's 2026-11-11 ruling commissions the pinned-approver design; **this lane IS that design**, staged as **v0.29.20** on top of the parent's Phase-1 release (**v0.29.18**). The parent's Phase 1 shipped as v0.29.18; the guild-channel surface ships as its successor, **not** as a rewrite of it |
 
 **Why this row exists (architect §10 NT-10).** Without it, this lane would silently amend the
 parent's frozen rulings — the exact "ledger must follow the body" failure in its other form
@@ -802,7 +804,7 @@ ARCHITECT'S §3.5 — it is an owned plan requirement, not a nice-to-have.**
 
 **Control (c) — the S-1 residual is rewritten** per the architect's §3.4 (see **D-3** and
 `risks.md` S-1). The runbook **must not** lean on the file-tool deny list
-(`agents/ari/meta.json:49` denies `edit_file`/`write_file` — but `bash` is held at `:14`, and a
+(`agents/ari/meta.json:50` denies `edit_file`/`write_file` — but `bash` is held at `:14`, and a
 deny list is not a boundary).
 
 **Standing mitigation (recorded on the face of the ruling).** **Even a malicious designation
@@ -870,6 +872,75 @@ A-9, A-10 and A-11 stand.
 classifies an existing refusal path. `token-channel-mismatch` is **already** mismatch-class and
 **already** burns; A-12 simply names the scenario under which it fires. No new code, no new
 budget rule, no change to the mint path.
+
+---
+
+### D-18 — **LEADER RULING A** (blocker 1): `DesignationResult` is **SIDE-NEUTRAL**
+
+**Status:** **`LEADER-RULED`** (leader/dispatcher, 2026-11-11 — the approver iteration-002 blocking issue #1)
+**Decision.** `DesignationResult` becomes **side-neutral**: the variants are **neutral leg identities** —
+`PASS | NOT_DESIGNATED | GROUP_DM_SHAPE | APPROVER_NOT_PINNED | ABSENT_DISCRIMINATOR | CONFIG_INVALID |
+ABSENT_IDENTITY` — **not** side-specific refusal codes. Each gate maps the neutral leg to **its own
+side-specific code** via **ONE pinned per-side mapping table**:
+
+| Neutral leg | **Mint-side code** | **Approve-side code** |
+|---|---|---|
+| `PASS` | — (proceed) | — (proceed) |
+| `NOT_DESIGNATED` | `mint-requires-private-channel` | `token-channel-mismatch` |
+| `GROUP_DM_SHAPE` | `mint-requires-private-channel` | `token-channel-mismatch` |
+| `APPROVER_NOT_PINNED` | `approver-not-pinned` | `token-approver-mismatch` |
+| `ABSENT_DISCRIMINATOR` | `mint-requires-private-channel` | `token-channel-mismatch` |
+| `ABSENT_IDENTITY` | `extraction-incomplete` | `extraction-incomplete` |
+| `CONFIG_INVALID` | `designation-config-invalid` | `designation-config-invalid` |
+
+**The mapping table is defined once, owned by a NAMED task (T2.3), pinned by its OWN AC (AC18):
+"every neutral leg maps to exactly one code per side; the predicate itself NEVER returns a
+side-specific code."** The mint-side mapping table lives beside the mint gate (T2.2); the
+approve-side mapping table lives beside the service predicate (T2.3).
+
+**Rationale.** A single pure function cannot return both `mint-requires-private-channel` (the
+mint-side refusal for an undesignated surface) and `token-channel-mismatch` (the approve-side
+refusal for the same three input legs) — the two gates demand different codes for the same neutral
+leg. Making `DesignationResult` side-neutral decouples the ordering (one function, one owner) from
+the code vocabulary (two pinned per-side tables).
+
+---
+
+### D-19 — **LEADER RULING B** (blocker 5): `minted_external_user_id` for channel mints is the **full composite**, declared **AUDIT-ONLY**
+
+**Status:** **`LEADER-RULED`** (leader/dispatcher, 2026-11-11 — the approver iteration-002 blocking issue #5)
+**Decision.** `minted_external_user_id` for channel mints = the full composite
+**`channel:<guild_id>:<channel_id>:<user_id>`** string, declared **AUDIT-ONLY**:
+(i) a pinned **no-in-tree-consumer guarantee** — `_parse_external_user_id` is **NEVER** applied to
+`minted_external_user_id` (grep-pin + test pin, owned by **T2.15**); (ii) **operational identity
+remains `mint_user_id`** (daemon-side snowflake equality — the approve legs 4d/4e use it,
+**unchanged**); (iii) **M-19 behaviour UNCHANGED** (`extraction-incomplete` when the nested user id
+is absent); **AC17 additionally asserts** the audit-only contract + the no-consumer pin.
+
+**Why NOT the adapter's `{guild}:{channel}` mapping-key grammar.** The adapter's
+`KEY_ALLOWED_CHANNELS` mapping key is **lossy** (it omits the user id — the approving human is not
+identified in the value, which would make the audit provenance ambiguous across multiple humans in
+one channel). The composite form is **non-parseable by design** — declared AUDIT-ONLY so no
+downstream consumer can accidentally treat it as an identity.
+
+---
+
+### D-20 — **LEADER RULING C** (blocker 3): the effective-map log line moves to **FIRST-RESOLUTION + ON-DIGEST-CHANGE inside the cached-lazy resolver**
+
+**Status:** **`LEADER-RULED`** (leader/dispatcher, 2026-11-11 — the approver iteration-002 blocking issue #3)
+**Decision.** D-15 control (a) moves from "boot-time effective-map line" to **FIRST-RESOLUTION +
+ON-DIGEST-CHANGE logging inside the cached-lazy resolver** in `prompt_assent.py` (a file the lane
+already touches): log the effective map (or its digest) when first successfully resolved in a
+process AND whenever the effective digest changes between resolutions. **NO boot hook**,
+**NO `daemon/api.py` edit**; **PR-1 raise-on-invalid UNTOUCHED** (the log fires only on successful
+resolution; invalid maps keep their typed-invalid refusal path). Re-wrds **AC15** + **T2.10** to
+this contract; **D-15's control-(a) row** amended.
+
+**Rationale.** `prompt_assent.py` has **zero** lifespan/startup hooks (the approver verified:
+grep=0), and `daemon/api.py` is fenced out (**O-4**). An import-time side effect would **nullify
+PR-1/AC4** (every test import would parse the map). First-resolution logging fires at the same
+moment the map is actually read — and on-digest-change logging makes a mid-flight map change
+**visible** without a boot hook.
 
 ---
 

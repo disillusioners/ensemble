@@ -4,8 +4,8 @@
 2026-11-11 (UTC) · **Status:** **PLANNING-SIDE NOTES — not yet a staged release.**
 
 > **⚠ OWNERSHIP (architect §8.6 / §11 row 10).** This file is **this lane's** artefact: it is the
-> **planning-side** record of what the v0.29.19 ceremony notes must say. The **release-dir**
-> ceremony notes are produced by the **build lane** when it stages v0.29.19; the **runbook**
+> **planning-side** record of what the v0.29.20 ceremony notes must say. The **release-dir**
+> ceremony notes are produced by the **build lane** when it stages v0.29.20; the **runbook**
 > (`docs/runbooks/prompt-assent.md`) is **this lane's** file (F-11), written by Phase 4.
 >
 > **⚠ SUPERSESSION.** This file **supersedes the parent's DM-only K-3 text from the new side**
@@ -19,7 +19,7 @@
 |---|---|
 | Commission | `prompt-assent` Phase 1.5 — designated channels (pinned-approver model) |
 | Doctrine | *"this is channel, i often use channel to split tasks category in my mind, we consider channel is private/dm for now"* (carried verbatim — [`doctrine.md`](doctrine.md)) |
-| Target release | **`v0.29.19`** (**STAGED, NOT promoted, NOT armed, NOT restarted** by this lane) |
+| Target release | **`v0.29.20`** (**STAGED, NOT promoted, NOT armed, NOT restarted** by this lane) |
 | Supersedes | the parent's DM-only K-3 probe wording — from the new side |
 | Governing decisions | [`decisions.md`](decisions.md) **D-10** (the version), **D-11** (the probe), **D-14** (the delivery posture), **D-15** (the controls) |
 | Governing artefact | [`architecture-recommendation.md`](architecture-recommendation.md) §8 (the probe shape), §9 (the staging) — **wins over every file of this set** |
@@ -108,7 +108,7 @@ multi-occupant discriminator then stays **unit-proven only** — exactly the cla
   `invalid` / `N entries`) + the content-free fingerprint. It is the **only** discriminator
   between *"map says no"* and *"map is broken/empty"*.
 - **NT-5 — the last-speaker-wins rule.** A guild channel is **one instance for all humans**
-  (`daemon/sources/adapters/discord/adapter.py:1041-1042`, `:1219`) and the window is re-armed on
+  (`daemon/sources/adapters/discord/adapter.py:909-915` (the bot-skip gate), `:218-220` (the skip default)) and the window is re-armed on
   every non-silent dispatch (`daemon/manager.py:6126`, `:11530`) ⇒ a **bystander's reply between
   the Emperor's turn and the tool call re-points the window**, and the Emperor's own attempt then
   refuses `approver-not-pinned`. **Rule: the Emperor must be the LAST speaker.** A bystander's
@@ -145,12 +145,20 @@ That is why §1.7's hygiene rules bind.
 
 ## 3. The staging records the release-dir ceremony notes must carry
 
+### 3.0 — Two build-day disclosures (n9)
+
+- **`stage.sh` rewrites the live INSTALL_DIR/.env during staging** (a marker line + `chmod 600`) —
+  **benign and standard**; the ceremony note discloses it. The `.env` is a **mode-600 nea-owned**
+  file (the same posture the map's env knob uses).
+- **`_verify_tip_identity` WARNs + SKIPS** when the worktree's origin ref is stale (an unfetched
+  worktree). **T4.8 must `git fetch origin` before verify**, or accept the SKIP with disclosure.
+
 ### 3.1 — The version and the two build-day traps
 
 | Field | Value |
 |---|---|
-| `staged_version` | **`v0.29.19`** |
-| slot verification | `git ls-remote --tags origin 'v0.29.19*'` → empty; `git tag --list v0.29.19` → empty; the remote max is `v0.29.18` (`a4d7233f2 → df4a92732`) — **re-verified TWICE: at the start of the day and immediately before `git tag -a`** (three lanes are converging on adjacent slots) |
+| `staged_version` | **`v0.29.20`** |
+| slot verification | `git ls-remote --tags origin 'v0.29.20*'` → empty; `git tag --list v0.29.20` → empty; the remote max is `v0.29.18` (`a4d7233f2 → df4a92732`) — **re-verified TWICE: at the start of the day and immediately before `git tag -a`** (three lanes are converging on adjacent slots) |
 | **trap 1** | **`ENSEMBLE_ROLLBACK_SAFE=1` MUST be in the argv.** `scripts/upgrade/stage.sh:328-352` greps the **whole** migration history for `DROP TABLE\|DROP COLUMN` — it **matches** ⇒ the unset branch **exits 78**. Record `rollback_safe=true, source=explicit` |
 | **trap 2** | `scripts/bump_version.py` commits with the subject **`! New version X`** (`scripts/bump_version.py:150`) — use it as a **FILE EDITOR** and commit **`chore(release): bump version to 0.29.19`** (as v0.29.18 did: `d317043aa`) |
 | tag discipline | annotated tag at exact HEAD; **push by name, never `--tags`**; on a slot collision **re-bump to the next free patch slot and record it — never re-cut an existing tag**; **a remote tag is never deleted** |
@@ -170,7 +178,7 @@ That is why §1.7's hygiene rules bind.
   (`scripts/upgrade/lib.sh:6857-6917`, `RETENTION_KEEP=3` at `:375`) is called **only** from
   `promote.sh:771` and `:927` — **`stage.sh` never evicts** (verified: `grep -c retention_evict
   scripts/upgrade/stage.sh` = 0).
-- **Survival math:** at the **first** v0.29.19 promote, evict 3 (`v0.29.7`, `v0.29.13`,
+- **Survival math:** at the **first** v0.29.20 promote, evict 3 (`v0.29.7`, `v0.29.13`,
   `v0.29.17` — the three oldest non-pinned) ⇒ **v0.29.18 survives**. It becomes the candidate at
   the **third** promote (after v0.29.20 and v0.29.21) ⇒ **it survives exactly TWO further
   promotes, protected by NOTHING** (`retention_evict` pins only `current`/`previous`).

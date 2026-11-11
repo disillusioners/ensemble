@@ -223,14 +223,14 @@ CLOSED" (`daemon/tools/upgrade_journal.py`); an indeterminate knob fails closed
 ### B-1 — Version state — **re-verified by the plan writer with `git ls-remote`**
 
 ```
-$ git ls-remote --tags origin 'v0.29.19*'      → (empty)      ← v0.29.19 is FREE on origin
-$ git tag --list 'v0.29.19'                     → (empty)      ← v0.29.19 is FREE locally
+$ git ls-remote --tags origin 'v0.29.20*'      → (empty)      ← v0.29.20 is FREE on origin
+$ git tag --list 'v0.29.20'                     → (empty)      ← v0.29.20 is FREE locally
 $ git ls-remote --tags origin 'v0.29.*' | tail → v0.29.18 = a4d7233f2 → df4a92732 (the max)
 $ git merge-base --is-ancestor v0.29.18^{commit} HEAD   → exit 0   ← v0.29.18 IS an ancestor
 $ git rev-parse HEAD → efa8aaae28153b8e9c49b86abe19e92be5458ebe
 ```
 
-**⇒ the next free version slot is `v0.29.19`, and v0.29.18's content already rides this branch.**
+**⇒ the next free version slot is `v0.29.20`, and v0.29.18's content already rides this branch.**
 
 ### B-2 — Release dirs on this host (re-verified)
 

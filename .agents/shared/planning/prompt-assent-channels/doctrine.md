@@ -52,6 +52,7 @@ tracked record** of the ruling anywhere in the repository.
 | Date | 2026-11-11 (UTC) |
 | Worktree | `/home/nea/ensemble-src-wt-assent-p15-channels` (branch `feature/assent-designated-channels`, base `efa8aaae28153b8e9c49b86abe19e92be5458ebe` = `origin/latest`) |
 | Referenced by | `plan-overview.md`, `decisions.md`, `risks.md`, `refusal-cell-matrix.md`, `phase1-plan.md` … `phase4-plan.md` |
+| Moved-latest note | **latest moved past our base** (`efa8aaae2` → `1132fa4cb`) during the pass; the giter merge reconciles it — staging builds from the merged tip, not the stale base |
 | Supersedes | the DM-only reading of the K-3 probe in `../prompt-assent/ceremony-notes.md:236-244` and `docs/runbooks/prompt-assent.md:160-185` — **this set's** adapted K-3 wording governs once ratified |
 
 ---

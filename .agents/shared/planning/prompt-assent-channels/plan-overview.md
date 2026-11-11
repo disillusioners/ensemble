@@ -7,13 +7,16 @@
 | Worktree | `/home/nea/ensemble-src-wt-assent-p15-channels` |
 | Branch | `feature/assent-designated-channels` |
 | Base commit | `efa8aaae28153b8e9c49b86abe19e92be5458ebe` (VERIFIED — `git rev-parse HEAD`) |
-| Status | **Council-APPROVED — approver iteration 002 (final fold pass)** |
+| Status | **Council-APPROVED — approver iteration 002 (final fold pass)** *(external council event; the approver lane's verdict is tracked in `.agents/approver/assent-p15-tracking.md`)* |
 | Planning set | [`plan-overview.md`](plan-overview.md) · [`phase1-plan.md`](phase1-plan.md) · [`phase2-plan.md`](phase2-plan.md) · [`phase3-plan.md`](phase3-plan.md) · [`phase4-plan.md`](phase4-plan.md) · [`decisions.md`](decisions.md) · [`refusal-cell-matrix.md`](refusal-cell-matrix.md) · [`risks.md`](risks.md) · [`doctrine.md`](doctrine.md) · [`research-findings.md`](research-findings.md) · [`ceremony-notes.md`](ceremony-notes.md) **(NEW — this lane's own)** · [`architecture-recommendation.md`](architecture-recommendation.md) **(the architect's artefact — the 12th file; a DIFFERENT document from the parent's same-named file at `../prompt-assent/architecture-recommendation.md`, which still wins for the parent's own questions)** |
 | Parent lane | [`../prompt-assent/`](../prompt-assent/) — `architecture-recommendation.md` **wins on conflict** for the parent's questions; this set's own architect artefact will win for the Phase-1.5 questions |
 
 ---
 
 ## 1. Objective
+
+> **SCOPE FENCE: NO live promotion, NO arming, NO live-install mutation in this lane — staging
+> only; the ceremony is a separate, post-lane Emperor act.**
 
 **Extend the conversational assent lane from "only a 1:1 DM counts" to "a 1:1 DM **or** an
 operator-designated Discord channel pinned to one human counts" — without weakening a single
@@ -67,7 +70,7 @@ it adds **no** new way to approve without a human turn.
 | **I-6** | The **full cell matrix** re-proven for the new surface, with every DM cell proven unchanged | the commission's hard requirement | matrix §2-§4 |
 | **I-7** | The **adapted live probe** (6 legs) and the **adapted arming wording** | BLESSED-4 | D-11 |
 | **I-8** | The **operator surface** — the runbook's K-3 section, its taxonomy table and its troubleshooting rows | BLESSED-4 | phase4 |
-| **I-9** | A **STAGED RELEASE `v0.29.19`** (no live promote, no arming) | house rule | D-10 |
+| **I-9** | A **STAGED RELEASE `v0.29.20`** (no live promote, no arming) | house rule | D-10 |
 
 ### Out of scope
 
@@ -94,9 +97,9 @@ it adds **no** new way to approve without a human turn.
 | Phase | Name | Objective | Tasks | Coupling | Status |
 |---|---|---|---|---|---|
 | **1** | **The designation surface** | The map type, the strict all-or-nothing parser, the validation rules, the **mandatory map-parse log line** and the **ONE** classification function that owns the whole leg ordering — with **zero** touch to the tool or the service | **9** | tight with P2 (the gates consume the predicate) · independent of P3/P4 | pending |
-| **2** | **The gate binding + the taxonomy census** | The M-4c and 4f extensions, the **4f split**, the two new codes, the cached-lazy resolver, the **map-digest provenance** and the **census pin** that must land with them | **13** | tight with P1 (the predicate) · tight with P3 (the tests) · loose with P4 | pending |
+| **2** | **The gate binding + the taxonomy census** | The M-4c and 4f extensions, the **4f split**, the two new codes, the cached-lazy resolver, the **map-digest provenance** and the **census pin** that must land with them | **17** | tight with P1 (the predicate) · tight with P3 (the tests) · loose with P4 | pending |
 | **3** | **The proof surface** | The designated-channel test file (incl. **M-15** and its counter-mutation), the **runtime resolver-raises pin**, the extended fixture, the pack registration and the map-unset equivalence proof | **12** | tight with P2 (it exercises the gates) · tight with P4 (the pack ships in the release) | pending |
-| **4** | **The operator surface + the staged release** | This lane's **ceremony-notes.md** (the two-phase probe), the runbook's adapted K-3 + taxonomy + troubleshooting + map contract, the v0.29.19 staging records and the staged release | **8** | loose with P1-P3 | pending |
+| **4** | **The operator surface + the staged release** | This lane's **ceremony-notes.md** (the two-phase probe), the runbook's adapted K-3 + taxonomy + troubleshooting + map contract, the v0.29.20 staging records and the staged release | **8** | loose with P1-P3 | pending |
 
 ### 4.1 — Why this grouping (the phase-grouping rationale)
 
@@ -110,7 +113,7 @@ are disjoint by construction:
 | **C-1 — the designation surface + the privacy classification** | **P1** | `daemon/repositories/prompt_assent/designation.py` **(NEW)** · `daemon/repositories/prompt_assent/mint_context.py` · `tests/unit/test_prompt_assent_designation_parser.py` **(NEW)** |
 | **C-2 — the gate sites + the refusal vocabulary** | **P2** | `daemon/tools/prompt_assent.py` · `daemon/services/prompt_version_service.py` · `tests/unit/tools/test_prompt_assent_registration.py` (the taxonomy census) |
 | **C-3 — the proof surface** | **P3** | `tests/unit/test_prompt_assent_designated_channel.py` **(NEW)** · `tests/helpers/prompt_assent_tool_fixture.py` · `tests/helpers/prompt_assent_flow.py` · `test/packs/prompt_assent_phase3_unit_test.sh` · `.agents/tester/PACKS.md` |
-| **C-4 — the operator surface + the release** | **P4** | `docs/runbooks/prompt-assent.md` · the v0.29.19 ceremony notes (in the build lane's release dir) · `CHANGELOG.md` |
+| **C-4 — the operator surface + the release** | **P4** | `docs/runbooks/prompt-assent.md` · the v0.29.20 ceremony notes (in the build lane's release dir) · `CHANGELOG.md` |
 
 **Two grouping choices are deliberate and worth stating.**
 
@@ -160,8 +163,8 @@ are disjoint by construction:
                 ┌───────────────────────────────────────────────┐
                 │ P4  The operator surface + the staged release │
                 │  • the runbook (adapted K-3, taxonomy, triage)│
-                │  • the v0.29.19 ceremony notes                │
-                │  • STAGED RELEASE v0.29.19 — NO promote       │
+                │  • the v0.29.20 ceremony notes                │
+                │  • STAGED RELEASE v0.29.20 — NO promote       │
                 └───────────────────────────────────────────────┘
 ```
 
@@ -200,6 +203,17 @@ are disjoint by construction:
 
 ---
 
+## Namespace Legend (n5)
+
+| Prefix | Meaning | Disambiguation |
+|---|---|---|
+| **M-n** | matrix **mint cells** (M-1 … M-19) | **NOT** the gate-internal leg labels M-4a/b/c (which are implementation steps inside the mint gate, not matrix rows) |
+| **A-n** | matrix **approve cells** (A-1 … A-12) | distinct from research-findings' A-labelled pass IDs (which are prefixed with the researcher's own label) |
+| **PR-n** | proofs (INVARIANT-DM's four legs) | **NOT** the P-n namespace (which is the risk register's structural pins) |
+| **P-n** | risk-register **structural pins** | **NOT** PR-n |
+| **AC-n** | per-phase acceptance criteria | phase-qualified where needed: **P1-AC15** / **P2-AC15** etc. |
+| **B-n, N-n, S-n** | **fold-labels** (iteration provenance only) | these cite **which iteration** introduced a fix; they are **NEVER** authority — authority = the architect artefact / decisions rows |
+
 ## 6. Risk summary
 
 The full register is [`risks.md`](risks.md). The **top five** for this lane:
@@ -232,14 +246,16 @@ The full register is [`risks.md`](risks.md). The **top five** for this lane:
 | **F-9** | `test/packs/prompt_assent_phase3_unit_test.sh` | **MODIFIED** — the new file joins the pack | **P3** |
 | **F-10** | `.agents/tester/PACKS.md` | **MODIFIED** — the pack's row is refreshed (the file, the cell count, the pass record) | **P3** |
 | **F-11** | `docs/runbooks/prompt-assent.md` | **MODIFIED** — the K-3 section becomes the adapted 6-leg probe; the taxonomy table gains the two codes; the troubleshooting rows gain the designated-channel entries | **P4** |
-| **F-12** | `CHANGELOG.md` | **MODIFIED** — the v0.29.19 dated section | **P4** |
+| **F-12** | `CHANGELOG.md` | **MODIFIED** — the v0.29.20 dated section | **P4** |
 | **F-13** | `.agents/shared/planning/prompt-assent-channels/ceremony-notes.md` | **NEW** — **this lane's** adapted probe (the two-phase §8 shape), the staging records and the delivery-mode flag; it **supersedes the parent's DM-only K-3 text from the new side** (architect §8.6) | **P4** |
+| **F-14** | `daemon/tools/prompt_assent.py` — the **`_derive_external_user_id` non-DM branch** (an EDIT to an already-touched file) | **APPROVER-ORDERED (B3(i)/D-19)**: the non-DM branch derives `channel:<guild_id>:<channel_id>:<user_id>` — **AUDIT-ONLY** (no in-tree consumer; `_parse_external_user_id` never applied); the DM branch BYTE-BEHAVIOUR UNTOUCHED | **P2** |
+| **F-15** | `daemon/repositories/prompt_version/repository.py` (`_assent_audit_provenance`, `:1813-1841`) | **ADDITIVE-ONLY** (blocker #2): the approve/reject audit payload gains the `map_digest` JSON field; **the sole exception to the untouched fence** (D-5: no schema change — one additive JSON key) | **P2** |
 
-**Fourteen rows** (F-1, F-1b, F-2 … F-13, F-14). **F-8 is unconditional** — the flow rig's
+**Fifteen numbered rows** (F-1 … F-15, with **F-1b** as F-1's companion test file — **16 table rows** in total). **F-8 is unconditional** — the flow rig's
 map parameter is T3.1's work; `build_discord_meta` (F-7) does not carry it. **`tests/conftest.py` is
 deliberately NOT in this list** — no phase
 task implies it; the env scrub lives in the **rig**, and the rig's scrub is **pinned** instead
-(architect §11 row 28 / NT-7).
+(architect §11 row 28 / NT-7 — **marked RESOLVED-WITH-EVIDENCE**: that row said 14 files and F-8 conditional; this set carries **15 numbered F-rows (16 table rows)** and **F-8 unconditional**, as amended in the iteration-002/003 folds).
 
 ### Files that are explicitly **NOT** touched
 
@@ -279,7 +295,7 @@ Measurable and verifiable — each is checkable without a judgement call.
 | **SC-9** | The **adapter, the trust anchor and the window are unchanged** | `git diff` shows no change to `daemon/sources/adapters/discord/adapter.py`, `daemon/tools/upgrade_journal.py`, `daemon/manager.py` |
 | **SC-10** | The **FE lane's methods are byte-identical** (a **method-scoped** proof: the approve/reject def blocks) | `test_prompt_assent_fe_unchanged.py` green. **⚠ AMENDED @ the architect's §11 row 17:** `daemon/services/prompt_version_service.py` **IS** edited (F-4) — the old wording *"no FE file in the diff"* was **false as stated**; the FE **surface** (routes + repo) is unchanged, and the service module is an explicitly owned edit |
 | **SC-11** | The **pack is green** and registered with its cell count and pass record | the pack run + the `.agents/tester/PACKS.md` row |
-| **SC-12** | A **staged release `v0.29.19`** exists, is tagged **by name**, is **NOT promoted** and is **NOT armed** | the release dir + the tag + `current` unchanged |
+| **SC-12** | A **staged release `v0.29.20`** exists, is tagged **by name**, is **NOT promoted** and is **NOT armed** | the release dir + the tag + `current` unchanged |
 | **SC-13** | The **runbook** documents the 6-leg adapted probe, the two new codes and the designated-channel troubleshooting | the runbook diff |
 | **SC-14** | The **ruling** is recorded verbatim with its "carried verbatim" status row | [`doctrine.md`](doctrine.md) |
 
