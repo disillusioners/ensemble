@@ -209,7 +209,7 @@ M25|packi:preflight_ceremony_readiness_test.sh|I4 FAIL|
 M26|packi:preflight_ceremony_readiness_test.sh|I2 FAIL|
 M27|packi:preflight_ceremony_readiness_test.sh|I3 FAIL|
 M28|packi:preflight_ceremony_readiness_test.sh|I5 FAIL|
-M32|packi:preflight_ceremony_readiness_test.sh|DEFERRED_RED I11|
+M32|packi:preflight_ceremony_readiness_test.sh|DEFERRED_RED I11 the token is not refused|
 M33|packi:preflight_ceremony_readiness_test.sh|SCENARIO I13 FAIL raised|
 M34|packi:preflight_ceremony_readiness_test.sh|SCENARIO I13 FAIL expected=refuse got=arm|
 M35|packi:preflight_ceremony_readiness_test.sh|I15 FAIL|
