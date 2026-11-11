@@ -86,9 +86,9 @@ TOOL_NAMES: frozenset[str] = frozenset({
 #: SAME set as the tool bodies' runtime gate).
 EXPECTED_HOLDERS: list[str] = ["maintenancer", "devops", "wanderer"]
 
-#: The privileged universe — the sixteen base entries plus the
-#: nest-report-read category = eighteen members; the memoir merge added
-#: the nineteenth (2026-11-06).
+#: The privileged universe — exactly twenty-one members (the count pin
+#: below is the authority; the census prose is re-derived BY GREP at
+#: every lane ceremony, never a frozen literal to copy forward).
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",

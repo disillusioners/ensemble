@@ -140,7 +140,7 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly sixteen entries
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly twenty-one entries
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
         leader decision 2026-10-02, ``view-views`` per the
@@ -149,7 +149,10 @@ class TestStaticRegistrationChecklist:
         per the settings-worker-slots P2 commission 2026-10-18,
         ``board`` per the ari-tools Phase 1 commission
         2026-10-20, and ``self-alarm`` per the ari-tools Phase 2
-        commission 2026-10-20).
+        commission 2026-10-20 — the lineage of the FIRST NINE; the
+        full twenty-one live in the exact-set literal below, and the
+        census is re-derived BY GREP at every lane ceremony, never a
+        frozen literal to copy forward).
         The attestation category is opt-in-only by convention (fail-closed authz),
         NOT because it is privileged — D7 sub-question RESOLVED-
         by-leader: NOT privileged. Adding ``attestation`` to
