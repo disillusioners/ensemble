@@ -588,6 +588,25 @@ class DaemonConfig(BaseSettings):
             "checkpoint flushes finish, decrease to restart faster."
         ),
     )
+    bind_retry_max_wait_seconds: float = Field(
+        default=30.0,
+        description=(
+            "Total budget (seconds) for the daemon-side BOUND bind-retry on "
+            "the main listener port — how long the daemon waits out a "
+            "transient EADDRINUSE before giving up and exiting 1 "
+            "(daemon/services/bind_retry.py; the module owns the policy "
+            "constants and the rationale). Default ON. NOT sized to cover a "
+            "wind-down: uvicorn closes the LISTEN socket FIRST in "
+            "Server.shutdown() and the launcher is strictly sequential, so "
+            "the daemon's own teardown never holds the port (measured: the "
+            "previous child was already dead 36-191s before every bind "
+            "attempt). The budget absorbs a TRANSIENT holder — a dying "
+            "duplicate/rogue daemon releases the port within ~1s — while "
+            "staying bounded so a rogue holder still yields a clean exit 1 "
+            "instead of a hang. Set to 0 to fail fast on a busy port (the "
+            "pre-fix behaviour). Env: DAEMON_BIND_RETRY_MAX_WAIT_SECONDS."
+        ),
+    )
 
 
 class LimitsConfig(BaseSettings):

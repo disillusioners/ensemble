@@ -528,8 +528,11 @@ class TestV3ToolCallAggregation:
 V4_PATH1_LEVEL = (
     "full main() body executed (run_preflight=False) with load_config "
     "replaced by an in-memory Config(llm=LLMConfig()) built under "
-    "OPENAI_STREAMING=false (real pydantic env coercion), uvicorn.run "
-    "patched to a recorder (no server), DB preflight skipped"
+    "OPENAI_STREAMING=false (real pydantic env coercion), the "
+    "server-start seam patched to a recorder (no server, no bind; the "
+    "seam is daemon.__main__._serve_with_bind_retry since the bind-race "
+    "fix lane of 2026-11-11 — it replaced the bare uvicorn.run call), "
+    "DB preflight skipped"
 )
 V4_PATH2_LEVEL = (
     "real lifespan(app) executed from entry through the wiring block and the "
@@ -559,19 +562,33 @@ class TestV4StartupOptOutPaths:
         assert payload["stream"] is False
 
     def test_v4_path1_daemon_main_wiring(self, monkeypatch):
-        """daemon/__main__.py — the ``python -m daemon`` entry point wiring."""
+        """daemon/__main__.py — the ``python -m daemon`` entry point wiring.
+
+        HONEST RE-POINT (bind-race fix lane, 2026-11-11): the daemon no
+        longer starts the server through bare ``uvicorn.run(...)`` — it
+        pre-binds the listener socket (bounded EADDRINUSE retry) and
+        hands the BOUND socket to uvicorn. The seam is now
+        ``daemon.__main__._serve_with_bind_retry``; the pin's INTENT
+        ("main() reaches the server-start wiring") is unchanged, only
+        the seam it intercepts.
+        """
         from daemon import __main__ as du
         from daemon.config import Config, LLMConfig
 
         monkeypatch.setenv("OPENAI_STREAMING", "false")
         monkeypatch.setattr(du, "load_config", lambda: Config(llm=LLMConfig()))
-        uvicorn_calls: list = []
+        server_calls: list = []
         monkeypatch.setattr(
-            du.uvicorn, "run", lambda *a, **k: uvicorn_calls.append((a, k))
+            du,
+            "_serve_with_bind_retry",
+            lambda *a, **k: server_calls.append((a, k)),
         )
         assert V4_PATH1_LEVEL  # level recorded verbatim for the report
         du.main(run_preflight=False)
-        assert uvicorn_calls, "main() must reach the uvicorn.run call (patched)"
+        assert server_calls, (
+            "main() must reach the server-start wiring (the bind-retry "
+            "serve seam, patched)"
+        )
         self._assert_downstream()
 
     def test_v4_path2_daemon_api_lifespan_wiring(self, monkeypatch, tmp_path):
