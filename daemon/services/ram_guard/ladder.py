@@ -281,19 +281,58 @@ def read_ownership_stamp(
     pid: int,
     tracking_id: str,
 ) -> Optional[bool]:
-    """The ownership stamp of one member.
+    """The ownership stamp of one member (TRI-STATE).
 
-    ``True`` — the environ carries the exact stamp entry · ``False`` —
-    readable but no match · ``None`` — unreadable (fail-open, with
-    ``ownership_unverified++``).
+    ``True``  — the environ carries the EXACT stamp entry (verified).
+
+    ``False`` — the ownership stamp VARIABLE is PRESENT but carries a
+    DIFFERENT value: a REAL mismatch (the PID was recycled, or a
+    foreign-lane stamp is present).  This is the ONLY case that refuses
+    (``refused:ownership-mismatch`` — deterministic; a retry cannot
+    change it).
+
+    ``None``  — the stamp CANNOT be VERIFIED: the ownership variable is
+    ABSENT from the environ, or the environ is unreadable (fail-open,
+    with ``ownership_unverified++``).
+
+    Contract (phase2-plan.md T11; test-plan.md S8(h); arch §4.2:226
+    "for ``refused:ownership-mismatch`` the stamp check is
+    DETERMINISTIC — retrying cannot change it"; dispatcher ruling
+    2026-11-11): P6 has TWO outcomes only — a stamp that EXISTS and
+    DIFFERS ⇒ refuse; a stamp that CANNOT BE VERIFIED (absent or
+    unreadable) ⇒ PROCEED with ``ownership_unverified++``.  ABSENT ≠
+    MISMATCH: the proc lane has no stamp by design (no durable row —
+    DQ5), so its stamp is always UNVERIFIABLE ⇒ P6 proceeds with
+    ``ownership_unverified++``.  This keeps the two lanes consistent
+    (arch §1.1 P4: the bash lane has no ownership gate either, so it
+    also lands in the unverifiable path when its stamp is absent) and
+    never lets a lane refuse its own kill over a missing marker.
+
+    The house idiom (bash_spawn_reaper._verify_member_env_procfs) already
+    makes this exact three-way split: exact match ⇒ True, marker present
+    with a different value ⇒ False, marker absent ⇒ None (fail-open).  The
+    ladder mirrored only the first two states; this adds the third so the
+    contract's "unverifiable" branch is reachable for a stamp that is
+    absent (not merely unreadable).
     """
     path = Path(proc_root) / str(pid) / "environ"
     try:
         data = path.read_bytes()
     except OSError:
         return None
+    entries = data.split(b"\x00")
     needle = f"{OWNERSHIP_ENV_VAR}={tracking_id}".encode("utf-8")
-    return needle in data.split(b"\x00")
+    if needle in entries:
+        return True
+    # The ownership variable is PRESENT with a DIFFERENT value ⇒ a REAL
+    # mismatch (PID recycled, or a foreign-lane stamp present).  The
+    # marker being present at all is the signal; the exact value is what
+    # we verify.
+    marker_prefix = f"{OWNERSHIP_ENV_VAR}=".encode("utf-8")
+    if any(e.startswith(marker_prefix) for e in entries):
+        return False
+    # The ownership variable is ABSENT ⇒ unverifiable (fail-open).
+    return None
 
 
 def check_p6_ownership(
@@ -303,9 +342,21 @@ def check_p6_ownership(
 ) -> tuple[Optional[str], bool]:
     """P6 — the ownership stamp.
 
-    Returns ``(reason, unverifiable)``.  A readable member without the
-    stamp ⇒ ``refused:ownership-mismatch``.  An UNREADABLE stamp ⇒
-    PROCEED with ``unverifiable=True`` (``ownership_unverified++``).
+    Returns ``(reason, unverifiable)``.  P6 has TWO outcomes only
+    (phase2-plan.md T11; test-plan.md S8(h); arch §4.2:226 "for
+    ``refused:ownership-mismatch`` the stamp check is DETERMINISTIC —
+    retrying cannot change it"; dispatcher ruling 2026-11-11):
+
+      - a stamp that EXISTS and DIFFERS ⇒ ``refused:ownership-mismatch``
+        (a REAL mismatch — the PID was recycled);
+      - a stamp that CANNOT BE VERIFIED (the marker is ABSENT, or the
+        environ is unreadable) ⇒ PROCEED with ``unverifiable=True``
+        (``ownership_unverified++``).
+
+    ABSENT ≠ MISMATCH (the proc lane has no stamp by design — DQ5).  The
+    aggregate below preserves the existing precedence: an exact match
+    anywhere ⇒ verified (no refusal, no counter); else a REAL mismatch
+    anywhere ⇒ refuse; else (all absent/unreadable) ⇒ unverifiable.
     """
     if not tracking_id or not members:
         return None, False

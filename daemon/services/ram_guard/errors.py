@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from .verdict import LANE_BASH, LANE_PROC, SpawnRecord
+from .verdict import LANE_BASH, LANE_PROC, SpawnRecord, STATE_KILLED
 
 # ── The envelope key set (§15 B2 — ordered, exact) ─────────────────────────
 
@@ -232,6 +232,123 @@ def format_ram_event_payload(record: SpawnRecord) -> str:
     return json.dumps(build_ram_event_payload(record))
 
 
+
+
+# ── Proc-lane additive surface (arch §8.1, §15 B25) ────────────────────────
+# The SECOND surface of the SAME producer: the bash lane returns the
+# envelope; the proc lane renders these lines from the SAME payload
+# (build_ram_envelope_payload).  B25-verbatim line templates live here so
+# both lanes share ONE producer; the proc lane only calls this helper.
+# The proc lane has no typed error surface — proc_run returns before any
+# breach can exist (arch §4.3, §3.5 item 12).
+
+#: The proc lane's resolved-kill line prefix (its name is pinned by the
+#: plan as ``ram_breach:``).
+PROC_BREACH_LINE_PREFIX = "ram_breach: "
+
+#: The proc lane's flat kill-confirmed line.
+PROC_KILLED_LINE = "ram_killed: true"
+
+#: The B25-verbatim refusal lines (mirrored from the bash lane's
+#: RAM_REFUSAL_LINE / RAM_BREACH_LINE — the names are pinned by B25).
+PROC_REFUSAL_LINE = "ram_kill_refused: {reason}"
+PROC_BREACH_OBSERVED_LINE = "ram_breach_observed: true"
+
+#: The pending-surface peak line — name mirrors bash's RAM_PEAK_LINE
+#: (bash.py:850) verbatim (dispatcher ruling 2026-11-11: the pending-
+#: surface peak line must be named ``ram_observed_peak_bytes``).
+PROC_PEAK_LINE = "ram_observed_peak_bytes: {peak_bytes}"
+
+# The curated subset of envelope keys the proc ``ram_breach:`` line
+# carries (arch §4.3 negative space: no argv / env / stdout / secret
+# ids / host paths / per-member lists — the payload already enforces
+# this).  ``rearm_threshold_bytes`` sits immediately after ``limit_bytes``
+# ("beside" the configured ceiling), mirroring the envelope key order.
+# ``coincident_timeout`` rides the line so the coincidence ruling is
+# OBSERVABLE in this lane (its semantics are ``bool(timed_out)`` — the
+# dispatcher ruling 2026-11-11: the coincidence is reported when the
+# timeout arm ALSO fired, NOT when the guard "wins" the race).
+PROC_BREACH_KEYS: tuple[str, ...] = (
+    "limit_bytes",
+    "rearm_threshold_bytes",
+    "observed_peak_bytes",
+    "confirmed_pss_bytes",
+    "peak_is_lower_bound",
+    "under_report_bound_bytes",
+    "metric",
+    "trigger_metric",
+    "coincident_timeout",
+)
+
+
+def _fmt_proc_value(v: Any) -> str:
+    """Render a payload value as a compact, content-free token."""
+    if v is None:
+        return "none"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def format_ram_proc_lines(record, *, timed_out: bool = False) -> list[str]:
+    """The proc lane's additive surface lines for ``proc_status``.
+
+    Returns a **list of lines** (each a string) to be APPENDED to the
+    existing ``proc_status`` block — never replacing it.  Empty list when
+    the record is None or carries no breach.  The proc_status block stays
+    byte-identical to today for a non-RAM process (DQ6).
+
+    States (checked in this order):
+      - ``reason`` starts with ``refused:`` ⇒ the B25 refusal surface
+        (``ram_kill_refused: <reason>`` + ``ram_breach_observed: true``)
+        — a refusal is NEVER swallowed.
+      - terminal ``KILLED`` (or a ``killed:`` reason) ⇒ a ``ram_breach:``
+        line (projected from the SAME payload as the bash envelope) +
+        the flat ``ram_killed: true``.
+      - breach observed but the episode is NOT yet terminal (pending) ⇒
+        ``ram_breach_observed: true`` + ``ram_observed_peak_bytes: <n>``
+        (the pending-surface peak line mirrors bash verbatim).
+      - otherwise ⇒ no RAM lines (byte-identical block).
+
+    ``timed_out`` feeds the envelope's ``coincident_timeout`` flag, whose
+    semantics are ``bool(timed_out)`` (dispatcher ruling 2026-11-11):
+    the coincidence is reported when the timeout arm ALSO fired — NOT
+    when the guard "wins" the race.
+    """
+    if record is None:
+        return []
+    reason = getattr(record, "reason", None)
+    reason_str = reason if isinstance(reason, str) else ""
+    if reason_str.startswith("refused:"):
+        return [
+            PROC_REFUSAL_LINE.format(reason=reason_str),
+            PROC_BREACH_OBSERVED_LINE,
+        ]
+    state = getattr(record, "state", None)
+    if state == STATE_KILLED or reason_str.startswith("killed:"):
+        payload = build_ram_envelope_payload(
+            record, coincident_timeout=bool(timed_out)
+        )
+        parts = [
+            f"{k}={_fmt_proc_value(payload.get(k))}" for k in PROC_BREACH_KEYS
+        ]
+        return [
+            PROC_BREACH_LINE_PREFIX + " ".join(parts),
+            PROC_KILLED_LINE,
+        ]
+    # Pending: a breach was observed but the episode is not resolved yet —
+    # the decision is reported as PENDING, never fabricated (§4.3).
+    if (
+        getattr(record, "breach_at", None) is not None
+        and not getattr(record, "is_terminal", False)
+    ):
+        return [
+            PROC_BREACH_OBSERVED_LINE,
+            PROC_PEAK_LINE.format(peak_bytes=int(record.observed_peak_bytes)),
+        ]
+    return []
+
+
 __all__ = [
     "DEFAULT_SURFACE",
     "ENVELOPE_KEYS",
@@ -245,5 +362,12 @@ __all__ = [
     "build_ram_event_payload",
     "format_ram_envelope",
     "format_ram_event_payload",
+    "format_ram_proc_lines",
+    "PROC_BREACH_KEYS",
+    "PROC_BREACH_LINE_PREFIX",
+    "PROC_BREACH_OBSERVED_LINE",
+    "PROC_KILLED_LINE",
+    "PROC_PEAK_LINE",
+    "PROC_REFUSAL_LINE",
     "surface_for_lane",
 ]
