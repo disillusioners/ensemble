@@ -42,6 +42,9 @@ import json
 import os
 import re
 import subprocess
+import errno
+import pathlib
+import pwd
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -502,6 +505,21 @@ def _base_manager() -> MagicMock:
 def _refusal_reason(result: str) -> str | None:
     m = re.search(r"REFUSED — reason=([a-z0-9-]+)", result)
     return m.group(1) if m else None
+
+
+def _no_pwd_entry(_uid) -> None:
+    """A pwd lookup that finds NO entry — this is what makes
+    ``pathlib.Path.expanduser()`` raise RuntimeError (py3.13+: "Could not
+    determine home directory"), i.e. the REAL failure mode of an
+    unexpandable ``~`` (Tidier #2's resolution-error trigger)."""
+    raise KeyError("no such user")
+
+
+def _raising_resolver(_install_dir):
+    """A scripts-dir resolver that fails the way a broken pin does — the
+    Tidier #2 seam (a resolution error must become a CLEAN refusal at the
+    call site, never the generic tool-handler escape)."""
+    raise RuntimeError("Could not determine home directory.")
 
 
 async def _arm_restart(harness) -> str:
@@ -2883,10 +2901,17 @@ class TestArmPreflightBeforeBurn:
     """The preflight sits AFTER the lock acquire but BEFORE the nonce burn
     (the plan's recommended slot): a refused preflight releases the lock,
     journals its refusal (best-effort — the live read-only carve-out
-    applies), and returns cleanly with the nonce UNUSED. Three checks, three
-    tokens: ``executor-scripts-unavailable`` (reused), 
-    ``preflight-argv-unconstructable`` (new), ``preflight-argv-malformed``
-    (new). Sibling class — no existing live-gate test is modified."""
+    applies), and returns cleanly with the nonce UNUSED. Five checks, five
+    tokens:
+    Check 1 — ``executor-scripts-unavailable`` (reused).
+    Check 1b — ``preflight-stop-script-missing`` (the stop-script sibling,
+    2026-11-11).
+    Check 2 — ``preflight-argv-unconstructable``.
+    Check 3 — ``preflight-argv-malformed``.
+    Check 4 — ``stale-scripts-dir`` (the scripts-dir provenance verdict).
+    The Check-3 leg (the malformed-argv fixture) was UPDATED to lay out the
+    stop-script sibling so it still reaches its INTENDED refusal — the
+    preflight's other legs are untouched."""
 
     @staticmethod
     async def _armed_call(live) -> tuple[str, str]:
@@ -2958,6 +2983,12 @@ class TestArmPreflightBeforeBurn:
             'case "$arg" in\n    demo|live|sandbox) TARGET_ARG="$arg" ;;\nesac\n',
             encoding="utf-8",
         )
+        # Check 1b requires the stop-script sibling one level up — lay it
+        # out so this leg reaches its INTENDED refusal (Check 3), not the
+        # sibling gate.
+        stop_sh = stale_scripts.parent / "stop-ensemble.sh"
+        stop_sh.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        stop_sh.chmod(0o755)
         monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(stale_scripts))
         run_id, out = await self._armed_call(live)
         assert _refusal_reason(out) == "preflight-argv-malformed", out
@@ -2976,6 +3007,244 @@ class TestArmPreflightBeforeBurn:
         data = uj.journal_read(live["install"])
         assert data["pending_actions"][run_id]["consumed_at"] is not None
         assert data["pending_op"]["nonce_consumed"] is True
+
+
+# ── v0.29.16 promote-halt class (2026-11-11) — Check 1b, the stop-script
+# ── sibling: the layout gap that let the missing sibling sail through arming
+# ── and abort mid-promote rc=127 ────────────────────────────────────────────
+
+
+class TestArmPreflightStopScriptSibling:
+    """Check 1b — the stop-script sibling. The promote stop step resolves its
+    stop script as the SIBLING ONE LEVEL UP of the resolved scripts dir (lib.sh
+    ``stop_via_stop_script``: ``$(dirname ...)/../stop-ensemble.sh``); a
+    scripts tree whose parent lacks the sibling used to sail through arming
+    and abort MID-PROMOTE (bash: No such file or directory → rc=127 → B4
+    abort — the 2026-11-11 v0.29.16 live promote halt). The preflight refuses
+    BEFORE the nonce burn, naming the expected path + the canonical repo
+    source. The EXECUTABLE requirement is conservative hardening — every
+    consumer invokes ``bash stop-ensemble.sh`` and lib.sh itself tests only
+    ``-f``, so exec is not a runtime need (the MISSING sibling is what kills
+    the run). NON-VACUITY: disabling the CHECK turns the two refusal legs RED
+    (the no-check mutant); disabling the RESOLVE (raw override returned)
+    turns the two W5 override pins RED (relative/tilde spellings named
+    un-resolved); this class is the pin that kills both."""
+
+    @staticmethod
+    def _scripts_tree(tmp_path: Path, *, name: str = "ops-scripts") -> Path:
+        """A synthetic scripts dir that passes Checks 1-3 (lib.sh present;
+        promote.sh carrying the ``--f2-verified-closed`` case) — everything
+        EXCEPT the stop sibling, which each leg arranges itself. Non-git +
+        stamp-less → Check 4's provenance branch WARNS only (never refuses),
+        so the pass leg arms. ``name`` lets the W5 override pins spell
+        relative/tilde overrides against a distinctive dir."""
+        d = tmp_path / name / "upgrade"
+        d.mkdir(parents=True)
+        (d / "lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (d / "promote.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "# fixture: promote.sh WITH the verified-arm flag case\n"
+            'case "$arg" in\n'
+            "    --f2-verified-closed) ;;\n"
+            '    demo|live|sandbox) TARGET_ARG="$arg" ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        return d
+
+    @staticmethod
+    def _expected_sibling(scripts: Path) -> Path:
+        """The exact path the promote stop step resolves (and the gate
+        requires): the sibling one level up of the scripts dir."""
+        return scripts.parent / "stop-ensemble.sh"
+
+    async def test_refuses_missing_sibling_names_expected_path(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """(a) sibling ABSENT → refuse ``preflight-stop-script-missing``
+        naming the exact expected path AND the canonical repo source; the
+        nonce is NOT burned and the lock is released."""
+        live = live_harness
+        scripts = self._scripts_tree(tmp_path)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(scripts))
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "preflight-stop-script-missing", out
+        assert str(self._expected_sibling(scripts)) in out, (
+            f"the refusal must name the exact expected path: {out}"
+        )
+        assert "scripts/stop-ensemble.sh" in out, (
+            f"the refusal must name the canonical repo source: {out}"
+        )
+        assert "$(pwd)/scripts/stop-ensemble.sh" in out, (
+            "the refusal must name the FALLBACK resolution leg too (both "
+            f"legs must miss for the abort): {out}"
+        )
+        assert "watchdog-watcher.sh" in out, (
+            "the refusal must say why the fallback misses in install "
+            f"layouts: {out}"
+        )
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_passes_present_executable_sibling_arms(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """(b) sibling PRESENT + EXECUTABLE → the preflight passes and the
+        arm proceeds (nonce burned AFTER the checks — the full-pass behavior
+        is intact under the new gate)."""
+        live = live_harness
+        scripts = self._scripts_tree(tmp_path)
+        sibling = self._expected_sibling(scripts)
+        sibling.write_text(
+            "#!/usr/bin/env bash\n# fixture stop-ensemble.sh (never executed)\n",
+            encoding="utf-8",
+        )
+        sibling.chmod(0o755)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(scripts))
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert "UPGRADE ARMED" in out, out
+        data = uj.journal_read(live["install"])
+        assert data["pending_actions"][run_id]["consumed_at"] is not None
+        assert data["pending_op"]["nonce_consumed"] is True
+        assert live["markers"], (
+            "a passing preflight must reach the executor marker (the arm "
+            "really happened)"
+        )
+
+    async def test_refuses_unexecutable_sibling(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """(c) sibling PRESENT but NOT EXECUTABLE (chmod 644) → refuse —
+        conservative hardening, NOT a runtime requirement: every consumer
+        invokes ``bash stop-ensemble.sh`` (lib.sh stop_via_stop_script,
+        deploy.sh, Makefile) and lib.sh itself tests only ``-f``; the gate
+        holds the sibling to a launcher-grade contract."""
+        live = live_harness
+        scripts = self._scripts_tree(tmp_path)
+        sibling = self._expected_sibling(scripts)
+        sibling.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        sibling.chmod(0o644)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(scripts))
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "preflight-stop-script-missing", out
+        assert str(self._expected_sibling(scripts)) in out, (
+            f"the refusal must name the exact expected path: {out}"
+        )
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_refusal_resolves_relative_override_before_deciding(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """W5 — a RELATIVE ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` override is
+        resolved to ABSOLUTE before the gate decides: the refusal names the
+        daemon-CWD-independent absolute sibling path (the executor runs with
+        ``cwd=install_dir`` — upgrade_journal Popen — so a daemon-CWD-relative
+        scripts dir would diverge between the gate's decision, the arm
+        marker, and the payload's own resolution). Mutant-kill: a resolver
+        that returns the RAW override names a relative path here → RED."""
+        live = live_harness
+        scripts = self._scripts_tree(tmp_path, name="rel-scripts")
+        monkeypatch.chdir(tmp_path)  # the daemon CWD the relative pin reads against
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", "./rel-scripts/upgrade")
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "preflight-stop-script-missing", out
+        assert str(self._expected_sibling(scripts)) in out, (
+            f"the refusal must name the RESOLVED ABSOLUTE sibling path: {out}"
+        )
+        assert "rel-scripts/stop-ensemble.sh" not in out.replace(
+            str(self._expected_sibling(scripts)), ""
+        ), f"the refusal must NOT name a daemon-CWD-relative path: {out}"
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_refusal_resolves_tilde_override_before_deciding(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """W5 — an UNEXPANDED ``~/...`` override is expanduser().resolve()d
+        before the gate decides: the refusal names the absolute path under
+        the daemon's HOME, never the literal ``~/...`` spelling."""
+        live = live_harness
+        scripts = self._scripts_tree(tmp_path, name="home-scripts")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", "~/home-scripts/upgrade")
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "preflight-stop-script-missing", out
+        assert str(self._expected_sibling(scripts)) in out, (
+            f"the refusal must name the RESOLVED ABSOLUTE sibling path: {out}"
+        )
+        assert "~/home-scripts" not in out, (
+            f"the refusal must NOT carry the unexpanded tilde path: {out}"
+        )
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_resolution_runtime_error_refuses_cleanly(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Tidier #2 — a RESOLUTION error is a CLEAN refusal, never the
+        generic "system_upgrade failed:" escape. The trigger is REAL (not a
+        monkeypatched resolver): an unexpandable ``~`` — HOME unset and the
+        pwd lookup failing — makes ``expanduser()`` raise RuntimeError
+        (py3.13+). The arm refuses with the dedicated token, the nonce is
+        NOT burned, and no pipeline lock is left behind."""
+        live = live_harness
+        monkeypatch.setenv(
+            "ENSEMBLE_UPGRADE_SCRIPTS_DIR", "~/unresolvable/upgrade"
+        )
+        monkeypatch.delenv("HOME", raising=False)
+        monkeypatch.setattr(pwd, "getpwuid", _no_pwd_entry)
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "scripts-dir-unresolvable", out
+        assert "Error: system_upgrade failed" not in out, (
+            f"the resolution error escaped to the generic handler: {out}"
+        )
+        assert "ENSEMBLE_UPGRADE_SCRIPTS_DIR" in out, out
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_resolution_oserror_refuses_cleanly(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Tidier #2 — the OSError class is handled at the SAME seam as
+        RuntimeError (one coherent catch, not two narrow ones). The trigger
+        is MONKEYPATCHED — DISCLOSED: on py3.13+ (the project floor) a
+        symlink loop no longer raises from ``resolve()`` and no other real
+        OSError trigger is available in-test — so the pin is the SEAM's
+        behavior, not the trigger's realism."""
+        live = live_harness
+        scripts = self._scripts_tree(tmp_path)
+        real_resolve = pathlib.Path.resolve
+
+        def _boom(self, *a, **k):
+            if str(self).startswith(str(tmp_path / "ops-scripts")):
+                raise OSError(errno.ELOOP, "simulated symlink loop")
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(pathlib.Path, "resolve", _boom)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(scripts))
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "scripts-dir-unresolvable", out
+        assert "Error: system_upgrade failed" not in out, (
+            f"the resolution error escaped to the generic handler: {out}"
+        )
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_resolution_failure_refuses_cleanly_restart_lane(
+        self, harness, monkeypatch
+    ) -> None:
+        """Tidier #2 — the RESTART lane shares the resolver seam (the
+        review's :2894 anchor is THIS lane, not the upgrade dry-run): a
+        resolution error refuses cleanly there too — the dedicated token,
+        never the generic "system_restart failed:" escape — and the restart
+        is NOT scheduled (zero pipeline mutation)."""
+        tools, markers, install = harness
+        monkeypatch.setattr(ut, "_resolve_scripts_dir", _raising_resolver)
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "resolver seam",
+             "mode": "graceful-now", "dry_run": False}
+        )
+        assert _refusal_reason(out) == "scripts-dir-unresolvable", out
+        assert "Error: system_restart failed" not in out, (
+            f"the resolution error escaped to the generic handler: {out}"
+        )
+        assert markers == []
+        assert uj.journal_read(install).get("pending_op") is None
 
 
 # ── P2.2 fix pass (2026-08-23) — gate hardening + the forged-source seam ────
@@ -4203,7 +4472,11 @@ def _pinned_scripts(tmp_path: Path, *, stamp: str | None = "deadbeef",
                     git_shaped: bool = False) -> Path:
     """A scratch pinned scripts dir. ``git_shaped`` plants a bare ``.git``
     entry — enough for the guard's git-SHAPE classification without needing a
-    real repository (the probe itself is stubbed or raising in these legs)."""
+    real repository (the probe itself is stubbed or raising in these legs).
+    Also lays out the stop-script sibling one level up (present + executable)
+    — Check 1b of the arm preflight requires it, so provenance legs that mean
+    to reach Check 4 get the full layout (the sibling-gate legs build their
+    own trees)."""
     d = tmp_path / "pinned-scripts" / "upgrade"
     d.mkdir(parents=True, exist_ok=True)
     if lib:
@@ -4219,6 +4492,12 @@ def _pinned_scripts(tmp_path: Path, *, stamp: str | None = "deadbeef",
         )
     if git_shaped:
         (d / ".git").mkdir()
+    sibling = d.parent / "stop-ensemble.sh"
+    sibling.write_text(
+        "#!/usr/bin/env bash\n# fixture stop-ensemble.sh (never executed)\n",
+        encoding="utf-8",
+    )
+    sibling.chmod(0o755)
     return d
 
 

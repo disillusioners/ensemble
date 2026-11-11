@@ -269,6 +269,35 @@ Every arm journals an `arm-scripts-provenance` row carrying `scripts_dir`,
 the `lib.sh` sha256, the git rev and the dirty flag — plus a
 `stale-scripts-dir` refusal row when it refuses.
 
+### §F.1b Stop-script sibling (Check 1b, 2026-11-11)
+
+Separately from provenance, the arm preflight ALSO requires the stop-script
+sibling the promote stop step will resolve — `<scripts_dir>/../stop-ensemble.sh`
+(lib.sh `stop_via_stop_script`) — to exist AND be executable, BEFORE the
+ceremony nonce burns. A scripts dir whose parent lacks the sibling refuses
+`preflight-stop-script-missing` pre-nonce (fail-closed on any probe error):
+the mid-promote rc=127 abort at the daemon-stop step (the v0.29.16
+2026-11-11 halt class — bash: No such file or directory → B4 abort, flip
+never reached) becomes a loud upfront refusal naming the expected path.
+
+**BOTH resolution legs must miss.** lib.sh `stop_via_stop_script` resolves
+the stop script in two steps: (1) the sibling one level up of the **calling
+script's** dir — lib.sh:4849 anchors `BASH_SOURCE[1]` (promote.sh's dir), so
+the leg is `<scripts_dir>/../stop-ensemble.sh`; (2) the
+`$(pwd)/scripts/stop-ensemble.sh` fallback (lib.sh:4852) for a copied tree.
+The fallback ALSO misses in install layouts: `make install` ships only
+`watchdog-watcher.sh` into `<install_dir>/scripts/` (Makefile:375-377), and
+`$(pwd)` at promote time is the executor's cwd (the install dir) — so that
+leg holds no `stop-ensemble.sh` either, and the abort fires.
+
+No packaging lane ships that file (payloads carry no `scripts/` since v0.27.4;
+the Makefile ships only `watchdog-watcher.sh`): the canonical source is the
+repo checkout's `scripts/stop-ensemble.sh` — copy it to the named path +
+`chmod +x`. The executable requirement is conservative hardening — every
+consumer invokes `bash stop-ensemble.sh` and lib.sh itself tests only `-f`,
+so the exec bit is not a runtime need; what kills the run is the MISSING
+file.
+
 ### §F.2 USER-OWNED PRECONDITION (before the next ceremony)
 
 Either **(a) sync the pinned checkout** so its HEAD contains

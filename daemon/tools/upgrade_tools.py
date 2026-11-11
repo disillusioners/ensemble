@@ -1985,15 +1985,26 @@ def _in_flight_state(journal: dict[str, Any] | None) -> dict[str, Any] | None:
 
 def _resolve_scripts_dir(install_dir: Path | None) -> Path | None:
     """Locate the P2.1 pipeline scripts (``lib.sh`` + payloads). Order:
-    (1) explicit ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` (drills/ops); (2) the
+    (1) explicit ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` (drills/ops) —
+    ``expanduser().resolve()``d to an ABSOLUTE path (W5, 2026-11-11: the
+    executor runs with ``cwd=install_dir`` — upgrade_journal Popen — so a
+    daemon-CWD-relative override would diverge between the gate's decision,
+    the arm marker, and the payload's own resolution); (2) the
     repo checkout this module lives in (source-mode daemons — the frozen
     binary does not carry scripts/); (3) ``<install_dir>/scripts/upgrade``
     (if a future release stages them). Armed execution without a resolvable
-    scripts dir refuses ``executor-scripts-unavailable`` (fail-closed)."""
+    scripts dir refuses ``executor-scripts-unavailable`` (fail-closed).
+
+    A RESOLUTION ERROR (OSError/RuntimeError — e.g. an unexpandable ``~``
+    with no resolvable home) PROPAGATES to the caller, which turns it into
+    a clean ``scripts-dir-unresolvable`` refusal (fail-closed). There is
+    deliberately NO raw-override fallback: it would silently re-open the
+    daemon-CWD-vs-executor-CWD divergence this resolution closes, and a
+    daemon has no valid use for a relative override."""
     candidates: list[Path] = []
     override = os.environ.get("ENSEMBLE_UPGRADE_SCRIPTS_DIR", "").strip()
     if override:
-        candidates.append(Path(override))
+        candidates.append(Path(override).expanduser().resolve())
     try:
         candidates.append(Path(__file__).resolve().parents[2] / "scripts" / "upgrade")
     except (IndexError, OSError):
@@ -2891,7 +2902,22 @@ Returns:
 
             # ARM (§6.3: arm → return → poll; the tool returns BEFORE any
             # stop signal — the executor fires at exact turn-end).
-            scripts_dir = _resolve_scripts_dir(install_dir)
+            try:
+                scripts_dir = _resolve_scripts_dir(install_dir)
+            except (OSError, RuntimeError) as exc:
+                # Tidier #2 — the restart lane shares the resolver seam:
+                # a resolution error is a CLEAN refusal, never the generic
+                # "system_restart failed:" escape, and the restart is NOT
+                # scheduled (zero pipeline mutation).
+                return _refusal(
+                    label,
+                    "scripts-dir-unresolvable",
+                    f"scripts dir could not be resolved to an absolute path "
+                    f"({type(exc).__name__}: {exc}) — fix "
+                    "ENSEMBLE_UPGRADE_SCRIPTS_DIR (an absolute path is "
+                    "required) or unset it to use the source checkout — "
+                    "restart NOT scheduled; zero pipeline mutation",
+                )
             if scripts_dir is None or not (scripts_dir / "restart.sh").is_file():
                 return _refusal(
                     label,
@@ -3180,7 +3206,10 @@ armed pending-op / lock held — names the active run_id; the rail's
 sibling tokens adoption-in-progress and pipeline-not-settled share the
 same vocabulary),
 restart-under-burst-abort (launcher exit-1 latch),
-executor-scripts-unavailable, no-staged-install, journal-unavailable.
+executor-scripts-unavailable, scripts-dir-unresolvable (the scripts dir
+could not be resolved to an absolute path — a broken
+ENSEMBLE_UPGRADE_SCRIPTS_DIR pin; fail-closed, never a generic crash),
+no-staged-install, journal-unavailable.
 Refused live attempts record a restart_audits row (outcome=refused +
 refusal_token) under the lock; the pipeline journal itself stays
 untouched by refusals.
@@ -3576,7 +3605,22 @@ never decides go/rollback).
                     "pipeline-busy",
                     f"per-env lock held (run_id={held_run}) — retry via upgrade_status",
                 )
-            scripts_dir = _resolve_scripts_dir(install_dir)
+            try:
+                scripts_dir = _resolve_scripts_dir(install_dir)
+            except (OSError, RuntimeError) as exc:
+                # Tidier #2 — a resolution error is a CLEAN refusal, never
+                # the generic "system_upgrade failed:" escape: the pin is
+                # operator-actionable (an absolute path is required) and the
+                # nonce is NOT burned (the burn happens further down).
+                return _refusal(
+                    label,
+                    "scripts-dir-unresolvable",
+                    f"scripts dir could not be resolved to an absolute path "
+                    f"({type(exc).__name__}: {exc}) — fix "
+                    "ENSEMBLE_UPGRADE_SCRIPTS_DIR (an absolute path is "
+                    "required) or unset it to use the source checkout — "
+                    "nonce NOT burned",
+                )
             if scripts_dir is None or not (scripts_dir / "promote.sh").is_file():
                 return _refusal(
                     label,
@@ -3624,6 +3668,60 @@ never decides go/rollback).
                     "arm preflight: cannot resolve scripts/upgrade/promote.sh "
                     "(set ENSEMBLE_UPGRADE_SCRIPTS_DIR or run from a source "
                     "checkout)",
+                )
+            # Check 1b — stop-script sibling present + executable (the
+            # v0.29.16 promote-halt class, 2026-11-11). The promote stop
+            # step resolves its stop script via TWO legs (lib.sh
+            # ``stop_via_stop_script``): (1) the SIBLING one level up of the
+            # CALLING script's dir — lib.sh:4849 anchors ``BASH_SOURCE[1]``
+            # (promote.sh's dir), so the leg is
+            # ``<scripts_dir>/../stop-ensemble.sh``; (2) the
+            # ``$(pwd)/scripts/stop-ensemble.sh`` fallback (lib.sh:4852) for
+            # a copied tree. BOTH legs must miss for the abort: the fallback
+            # ALSO misses in install layouts — ``make install`` ships only
+            # ``watchdog-watcher.sh`` into ``<install_dir>/scripts/``
+            # (Makefile:375-377), and ``$(pwd)`` at promote time is the
+            # executor's cwd (the install dir), so that leg holds no
+            # stop-ensemble.sh either → bash: No such file or directory →
+            # rc=127 → B4 abort, flip never reached. The exec-bit
+            # requirement is CONSERVATIVE HARDENING, not a runtime need:
+            # every consumer invokes ``bash "$stop_script"`` (lib.sh
+            # stop_via_stop_script, deploy.sh, Makefile stop/stop-by-port/
+            # uninstall) and lib.sh itself tests only ``-f`` — the gate
+            # simply holds the sibling to a launcher-grade contract. No
+            # packaging lane ships that file, so the canonical source is the
+            # repo checkout's ``scripts/stop-ensemble.sh`` — copy it to the
+            # expected path + chmod +x. Fail-closed: ANY probe error counts
+            # as missing (the refusal is the safe direction on both legs).
+            stop_script = scripts_dir.parent / "stop-ensemble.sh"
+            try:
+                stop_script_ready = stop_script.is_file() and os.access(
+                    stop_script, os.X_OK
+                )
+            except OSError:
+                stop_script_ready = False
+            if not stop_script_ready:
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    "preflight-stop-script-missing",
+                    f"arm preflight: stop-script sibling not usable at "
+                    f"{stop_script} (must exist AND carry the exec bit — "
+                    "conservative hardening: every consumer invokes "
+                    "`bash stop-ensemble.sh`, so exec is NOT a runtime "
+                    "requirement; lib.sh itself only tests -f) — the "
+                    "promote stop step resolves TWO legs (lib.sh "
+                    "stop_via_stop_script: the sibling one level up of the "
+                    "CALLING script's dir, <scripts_dir>/../stop-ensemble.sh, "
+                    "then the $(pwd)/scripts/stop-ensemble.sh fallback) and "
+                    "BOTH must miss for the abort (bash: No such file or "
+                    "directory → rc=127, the v0.29.16 2026-11-11 halt "
+                    "class); the fallback ALSO misses in install layouts — "
+                    "make install ships only watchdog-watcher.sh into "
+                    "<install_dir>/scripts/ (Makefile:375-377), so the "
+                    "executor's cwd holds no stop-ensemble.sh; fix: copy the "
+                    f"repo scripts/stop-ensemble.sh to {stop_script} and "
+                    "chmod +x — nonce NOT burned",
                 )
             # Check 2 — argv/env construction works. The shared verified-arm
             # helpers from Item 1 run against a synthetic op built exactly
@@ -3900,8 +3998,10 @@ ttl_expires_at is unparseable — fail-closed), nonce-instance-mismatch
 (the nonce was minted for a different kind/env/target than this call —
 the nonce is action-bound, §4.2(b)), nonce-already-used,
 nonce-verification-unavailable, executor-scripts-unavailable,
-no-staged-install, journal-unavailable (install dir resolves but the
-journal is torn/absent), layout-divergence.
+scripts-dir-unresolvable (the scripts dir could not be resolved to an
+absolute path — a broken ENSEMBLE_UPGRADE_SCRIPTS_DIR pin; fail-closed,
+never a generic crash), no-staged-install, journal-unavailable (install dir
+resolves but the journal is torn/absent), layout-divergence.
 
 Never auto-retry a refusal — relay it verbatim (the LLM never decides
 go/rollback).
