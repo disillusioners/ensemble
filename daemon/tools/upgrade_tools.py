@@ -4148,7 +4148,7 @@ go/rollback).
 # match a definition instead of the call site and be vacuous. Relocate
 # only downwards.
 
-PIPELINE_SCRIPTS_FLOOR_COMMIT = "a468d9099b5fbedd7d90063f34fcb5c4bfc064f5"
+PIPELINE_SCRIPTS_FLOOR_COMMIT = "a7dfe599fe5364f3ead93d09fc8a2430e24de094"
 """The Q1 floor (D6-10, leader ruling FINAL): the commit that introduced
 the preflight-hang fix, compared against a pinned scripts dir's HEAD by
 git ancestry at arm time.
