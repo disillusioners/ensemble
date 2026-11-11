@@ -123,6 +123,11 @@ EXIT_KIND_TIMEOUT = "timeout"
 EXIT_KIND_CANCELLED = "cancelled"
 EXIT_KIND_EXIT = "exit"
 EXIT_KIND_UNKNOWN = "unknown"
+# RAM auto-termination (phase3-plan.md T13): the tree was killed by the
+# RAM guard's kill ladder — DISTINCT from ``timeout`` (which is the
+# lane's own deadline).  The name is a NAMED CONSTANT because
+# ``mark_exit`` RAISES on an unknown kind (``pid_registry.py:409-413``).
+EXIT_KIND_RAM_KILLED = "ram_killed"
 
 VALID_EXIT_KINDS = frozenset(
     {
@@ -131,6 +136,7 @@ VALID_EXIT_KINDS = frozenset(
         EXIT_KIND_CANCELLED,
         EXIT_KIND_EXIT,
         EXIT_KIND_UNKNOWN,
+        EXIT_KIND_RAM_KILLED,
     }
 )
 
@@ -629,6 +635,7 @@ __all__ = [
     "EXIT_KIND_CANCELLED",
     "EXIT_KIND_EXIT",
     "EXIT_KIND_UNKNOWN",
+    "EXIT_KIND_RAM_KILLED",
     "VALID_EXIT_KINDS",
     "PidRegistryEntry",
     "PidRegistry",

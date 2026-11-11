@@ -38,6 +38,7 @@ from daemon.services.secret_service import SecretMarkerResolutionError
 # pattern above (no daemon.tools → daemon.services import cycle).
 from daemon.services.resource_monitor.pid_registry import (
     EXIT_KIND_CANCELLED,
+    EXIT_KIND_RAM_KILLED,
     EXIT_KIND_SUCCESS,
     EXIT_KIND_TIMEOUT,
     KIND_BASH,
@@ -55,6 +56,30 @@ from daemon.services.bash_spawn_reaper import (
     sweep_instance as _bash_reaper_sweep_instance,
 )
 from daemon.services.timestamps import now_utc_iso as _now_utc_iso
+# RAM auto-termination (phase3-plan.md) — the bash lane's RAM arm.
+# The import direction is ``tools/* → ram_guard`` ONLY (arch §7's import
+# freeze): the ``ram_guard`` package imports NOTHING from ``daemon/``.
+from daemon.services.ram_guard import (
+    get_ram_guard as _get_ram_guard,
+    read_verdict as _read_ram_verdict,
+    register as _ram_register,
+    release as _ram_guard_release,
+)
+from daemon.services.ram_guard.errors import (
+    format_ram_envelope as _format_ram_envelope,
+)
+from daemon.services.ram_guard.guard import (
+    RAM_GUARD_PENDING_MAX as _RAM_GUARD_PENDING_MAX,
+)
+from daemon.services.ram_guard.verdict import (
+    LANE_BASH as _RAM_LANE_BASH,
+    STATE_KILLED as _RAM_STATE_KILLED,
+    STATE_OVERCOUNTED as _RAM_STATE_OVERCOUNTED,
+    STATE_REFUSED as _RAM_STATE_REFUSED,
+    STATE_RELEASED as _RAM_STATE_RELEASED,
+    STATE_WATCHING as _RAM_STATE_WATCHING,
+    SpawnRecord as _RamSpawnRecord,
+)
 
 if TYPE_CHECKING:
     # Writer-injection seam (lifespan wiring): typed here only — importing
@@ -756,6 +781,407 @@ def _read_file_bytes(path):
         return b""
 
 
+# ── RAM auto-termination — the bash lane's RAM arm (phase3-plan.md) ─────────
+#
+# The guard is installed at the composition root (the FastAPI lifespan —
+# PHASE 5 owns that wiring).  Until then ``get_ram_guard()`` returns
+# ``None`` and EVERY call below is a NO-OP: the lane behaves exactly as
+# it did before (arch §4.6 item 6 — the OFF posture).  The master switch
+# ``ENSEMBLE_RAM_GUARD`` (arch §15 B8) makes OFF a complete no-op even
+# once a guard IS installed: no registration, no ``/proc`` reads, no
+# thread, byte-identical output.
+
+#: The master switch (arch §15 B8).  Default ON when absent; explicit
+#: ``0/false/no/off`` (case-insensitive) = OFF everywhere.  The parsing
+#: semantics mirror ``daemon/services/bash_spawn_reaper.py``'s
+#: ``kill_switch_from_env`` (absent/empty ⇒ ON; else the value must not
+#: be one of the OFF values).
+RAM_GUARD_ENV_SWITCH = "ENSEMBLE_RAM_GUARD"
+
+#: The OFF values (case-insensitive) — arch §15 B8, verbatim.
+RAM_GUARD_SWITCH_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+
+#: The bounded wait's poll interval (arch §4.3.1 item 2) — 25 ms.
+RAM_GUARD_WAIT_POLL_SECONDS = 0.025
+
+#: The wait's slack (arch §15 B20, verbatim): one poll interval
+#: (200 ms — the tick could hand off just after a sample) + 50 ms
+#: scheduling/jitter margin.
+RAM_GUARD_WAIT_SLACK_MS = 250
+
+#: The service-worst-case components (arch §15 B20):
+#: ``T_service_worst_ms = PSS_CONFIRM_DEADLINE_MS + GRACE_MS + PROBE_MS``.
+#: These mirror the guard's DEFAULT config (``RamGuardConfig``); the
+#: installed guard's own values widen the deadline (see
+#: :func:`_ram_wait_deadline_ms`).
+RAM_GUARD_PSS_CONFIRM_DEADLINE_MS = 250
+RAM_GUARD_GRACE_MS = 250
+RAM_GUARD_PROBE_MS = 10
+
+#: The bounded wait's deadline (arch §15 B20, verbatim):
+#: ``wait_deadline_ms = RAM_GUARD_PENDING_MAX × T_service_worst_ms + WAIT_SLACK_MS``
+#: ``= 2 × 510 + 250 = 1270``.
+RAM_GUARD_WAIT_DEADLINE_MS = (
+    _RAM_GUARD_PENDING_MAX
+    * (
+        RAM_GUARD_PSS_CONFIRM_DEADLINE_MS
+        + RAM_GUARD_GRACE_MS
+        + RAM_GUARD_PROBE_MS
+    )
+    + RAM_GUARD_WAIT_SLACK_MS
+)
+
+#: The envelope's ``code`` for the TIMEOUT-wins coincidence (arch §17.5 /
+#: test-plan O7).  The code follows the claim token: the timeout that
+#: won the race reports ``timeout``, the guard reports
+#: ``ram_limit_exceeded`` (the substrate's ``RAM_LIMIT_EXCEEDED_CODE``).
+RAM_CODE_TIMEOUT = "timeout"
+
+#: The additive refusal line (arch §15 B25, verbatim) — the reason is
+#: interpolated; the line itself is pinned.
+RAM_REFUSAL_LINE = "ram_kill_refused: {reason}"
+
+#: The additive breach line (arch §15 B25, verbatim).
+RAM_BREACH_LINE = "ram_breach_observed: true"
+
+#: The additive peak line — the wait-expiry / breach surface carries the
+#: observed peak beside ``ram_breach_observed`` (arch §17.2).  The name
+#: mirrors the envelope's ``observed_peak_bytes`` key.
+RAM_PEAK_LINE = "ram_observed_peak_bytes: {peak_bytes}"
+
+
+def _ram_guard_switch(environ: dict | None = None) -> bool:
+    """Resolve the master switch — default ON, explicit OFF values off.
+
+    The semantics mirror ``bash_spawn_reaper.kill_switch_from_env``:
+    absent ⇒ ON; empty/whitespace ⇒ ON; ``0/false/no/off`` (case
+    insensitive) ⇒ OFF; anything else ⇒ ON.
+    """
+    env = os.environ if environ is None else environ
+    val = env.get(RAM_GUARD_ENV_SWITCH)
+    if val is None:
+        return True
+    raw = val.strip().lower()
+    if not raw:
+        return True
+    return raw not in RAM_GUARD_SWITCH_OFF_VALUES
+
+
+def _ram_guard_active() -> bool:
+    """Is the RAM arm live?  (the switch ON AND a guard installed)."""
+    if not _ram_guard_switch():
+        return False
+    return _get_ram_guard() is not None
+
+
+def _ram_wait_deadline_ms(guard) -> int:
+    """The bounded wait's deadline for the INSTALLED guard.
+
+    The derivation (arch §15 B20) is pinned against the documented
+    defaults (1270 ms).  The guard's OWN service-worst-case inputs are
+    read through its PUBLIC read-only accessors (``grace_seconds`` /
+    ``pss_confirm_deadline_ms``) — NEVER its private attributes, so a
+    substrate rename cannot silently re-derive the deadline.  When a
+    guard does not expose them, the documented defaults are the
+    fallback.
+    """
+    grace_ms = RAM_GUARD_GRACE_MS
+    confirm_ms = RAM_GUARD_PSS_CONFIRM_DEADLINE_MS
+    raw_grace = getattr(guard, "grace_seconds", None)
+    if isinstance(raw_grace, (int, float)):
+        grace_ms = int(round(float(raw_grace) * 1000))
+    raw_confirm = getattr(guard, "pss_confirm_deadline_ms", None)
+    if isinstance(raw_confirm, (int, float)):
+        confirm_ms = int(raw_confirm)
+    adaptive = (
+        _RAM_GUARD_PENDING_MAX
+        * (confirm_ms + grace_ms + RAM_GUARD_PROBE_MS)
+        + RAM_GUARD_WAIT_SLACK_MS
+    )
+    return max(RAM_GUARD_WAIT_DEADLINE_MS, adaptive)
+
+
+def _ram_register_spawn(
+    *,
+    tracking_id: str | None,
+    instance_id: str | None,
+    pid: int,
+    pgid: int,
+    start_time_jiffies: int | None,
+    ceiling_bytes: int | None,
+) -> "_RamSpawnRecord | None":
+    """S1 — register the spawn with the RAM guard.
+
+    The ALREADY-CAPTURED ``pgid`` is used — NEVER a second
+    ``os.getpgid`` (the TOCTOU the capture block already respects).  The
+    ceiling is the guard's RESOLVED ceiling unless an INTERNAL override
+    is passed (the per-call test seam — the LLM-facing schema has NO
+    ceiling parameter; the SECURITY RULING in phase3-plan.md T1).
+    """
+    if not _ram_guard_active():
+        return None
+    if not tracking_id or not instance_id:
+        return None
+    try:
+        return _ram_register(
+            tracking_id=tracking_id,
+            instance_id=instance_id,
+            lane=_RAM_LANE_BASH,
+            pid=pid,
+            pgid=pgid,
+            start_time_jiffies=start_time_jiffies,
+            ceiling_bytes=ceiling_bytes,
+        )
+    except Exception as exc:
+        # Fail-open: a registration failure must NOT break the bash lane.
+        logger.warning(
+            "bash: ram-guard registration failed (fail-open): %s: %s",
+            type(exc).__name__, exc,
+        )
+        return None
+
+
+def _ram_episode_resolved(record: "_RamSpawnRecord | None") -> bool:
+    """Is the record's episode RESOLVED (no further wait)?
+
+    ``KILLED`` / ``REFUSED`` / ``RELEASED`` are terminal.  An
+    ``OVERCOUNTED`` re-arm is resolved too — the re-armed threshold IS
+    the episode's recorded outcome and no verdict is published (arch
+    §17.5).  A ``WATCHING`` record that carries a reason is a TRANSIENT
+    refusal that re-armed (arch §17.2 / §15 B27).
+    """
+    if record is None:
+        return True
+    state = record.state
+    if state in (_RAM_STATE_KILLED, _RAM_STATE_REFUSED, _RAM_STATE_RELEASED):
+        return True
+    if state == _RAM_STATE_OVERCOUNTED:
+        return True
+    if state == _RAM_STATE_WATCHING and record.reason:
+        return True
+    return False
+
+
+async def _await_ram_verdict(tracking_id: str | None) -> "_RamSpawnRecord | None":
+    """S2 — read the guard's verdict, waiting BOUNDED for a terminal state.
+
+    arch §4.3.1 item 2 / §15 B20: a 25 ms ASYNC poll (the event loop is
+    never blocked), a deadline of ``RAM_GUARD_WAIT_DEADLINE_MS``
+    (1270 ms).  Only an IN-FLIGHT episode is waited on — a record with
+    no observed breach costs NOTHING (no deadline burn without an
+    outcome).  On expiry the record's ACTUAL state is returned: a
+    pending decision is reported as pending, never fabricated.
+    """
+    if not tracking_id:
+        return None
+    guard = _get_ram_guard()
+    if guard is None:
+        return None
+    record = _read_ram_verdict(tracking_id)
+    if record is None:
+        return None
+    if not record.breach_at:
+        # No breach observed — nothing to wait for.
+        return record
+    if _ram_episode_resolved(record):
+        return record
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + (_ram_wait_deadline_ms(guard) / 1000.0)
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return record
+        await asyncio.sleep(min(RAM_GUARD_WAIT_POLL_SECONDS, remaining))
+        record = _read_ram_verdict(tracking_id)
+        if record is None:
+            return None
+        if _ram_episode_resolved(record):
+            return record
+
+
+def _ram_claim_held(record: "_RamSpawnRecord | None") -> bool:
+    """Does the guard hold the episode's claim token right now?
+
+    The token is EPISODE-scoped (arch §17.5): the first claimant owns
+    the verdict and a loser SKIPS its signal — that is what keeps the
+    timeout arm and the guard's ladder from BOTH signalling.
+    """
+    return bool(record is not None and record.claim_token is not None)
+
+
+def _ram_is_kill(record: "_RamSpawnRecord | None") -> bool:
+    """Did the GUARD kill the tree?
+
+    The VERDICT RECORD is the only discriminator — the exit code is
+    ambiguous by construction (``-9`` is either cause, arch §5).
+    """
+    return bool(
+        record is not None
+        and record.reason
+        and record.reason.startswith("killed:")
+    )
+
+
+def _ram_is_refusal(record: "_RamSpawnRecord | None") -> bool:
+    """Did the episode resolve as a REFUSAL?  (arch §15 B25/B27)"""
+    return bool(
+        record is not None
+        and record.reason
+        and record.reason.startswith("refused:")
+    )
+
+
+def _ram_breach_observed(record: "_RamSpawnRecord | None") -> bool:
+    """Was a breach OBSERVED (independent of the outcome)?"""
+    return bool(record is not None and record.breach_at is not None)
+
+
+def _ram_lane_release(tracking_id: str | None) -> bool:
+    """The lane's finally-shaped release — CONDITIONAL on the watch.
+
+    arch §4.3.1 item 4 / §15 B21: a lane exit is a NOTIFICATION, not
+    the end of the watch.  The guard's own release API refuses a
+    CLAIMED record (its release is deferred to the lane) and refuses a
+    record whose GROUP is still live (the liveness sweep owns that
+    release) — the lane simply ASKS.  A record that was NEVER sampled
+    is left alone too: its group membership is UNKNOWN, and releasing
+    it could drop a live watch (the ``cmd &`` shape).
+    """
+    if not tracking_id:
+        return False
+    try:
+        record = _read_ram_verdict(tracking_id)
+        if (
+            record is not None
+            and not record.is_terminal
+            and record.samples <= 0
+        ):
+            return False
+        return _ram_guard_release(tracking_id)
+    except Exception as exc:
+        logger.warning(
+            "bash: ram-guard release failed (best-effort): %s: %s",
+            type(exc).__name__, exc,
+        )
+        return False
+
+
+def _ram_release_class(released: bool, record: "_RamSpawnRecord | None") -> str:
+    """The release-outcome CLASS — a CONTENT-FREE token.
+
+    The class only: never the argv, never an env value, never a secret,
+    never an exception repr.  The classes are ``released`` (the guard
+    dropped the entry) · ``already-terminal`` (the guard's own lane
+    released it) · ``claimed`` (the record's release is deferred to
+    the lane) · ``live-watch`` (a group member is still up) · ``absent``
+    (no record) · ``unknown``.
+    """
+    if released:
+        return "released"
+    if record is None:
+        return "absent"
+    if record.is_terminal:
+        return "already-terminal"
+    if record.claim_token is not None:
+        return "claimed"
+    if record.group_member_count > 0:
+        return "live-watch"
+    return "unknown"
+
+
+async def _ram_release_sequence(
+    *,
+    tracking_id: str | None,
+    instance_id: str | None,
+    pid: int,
+    start_time_jiffies: int | None,
+    exit_code: int | None,
+    peak_bytes: int,
+) -> None:
+    """T12 — the three-registry release, IN ORDER, each best-effort.
+
+    guard registry → ``BashProcessRegistry`` → ``pid_registry.mark_exit``.
+    The whole sequence runs AFTER the verdict publication (T5) and no
+    step can abort another: a raising step is logged and the sequence
+    CONTINUES.  The peak is converted bytes → KB EXACTLY ONCE, here
+    (T10) — the guard's peak is bytes, the registry's column is KB.
+    """
+    # 1. the guard registry (the guard's own bookkeeping).
+    if tracking_id:
+        try:
+            record = _read_ram_verdict(tracking_id)
+            released = bool(_ram_guard_release(tracking_id))
+            # The outcome is LOGGED — content-free (the tracking id +
+            # the reason class only; never argv, never an env value,
+            # never a secret).
+            logger.info(
+                "bash: ram-guard release: tracking=%s class=%s",
+                tracking_id, _ram_release_class(released, record),
+            )
+        except Exception as exc:
+            logger.warning(
+                "bash: ram-guard release failed on the RAM arm "
+                "(best-effort): %s: %s", type(exc).__name__, exc,
+            )
+    # 2. the BashProcessRegistry (the killpg-tracking map).
+    if instance_id is not None:
+        try:
+            await get_bash_process_registry().unregister(instance_id, pid)
+        except Exception as exc:
+            logger.warning(
+                "bash: BashProcessRegistry.unregister failed on the RAM arm "
+                "(best-effort): %s: %s", type(exc).__name__, exc,
+            )
+    # 3. the pid_registry — the exit kind + the ONE bytes→KB conversion.
+    try:
+        _pid_registry_mark_exit(
+            pid=pid,
+            start_time=start_time_jiffies,
+            exit_code=exit_code,
+            exit_kind=EXIT_KIND_RAM_KILLED,
+            peak_rss_kb=round(int(peak_bytes) / 1024),
+        )
+    except Exception as exc:
+        logger.warning(
+            "bash: pid_registry.mark_exit(ram_killed) failed "
+            "(best-effort): %s: %s", type(exc).__name__, exc,
+        )
+
+
+def _ram_additive_surface(
+    content: str,
+    record: "_RamSpawnRecord | None",
+) -> str:
+    """The additive RAM surfaces (arch §15 B25, verbatim).
+
+    A refusal ⇒ ``ram_kill_refused: <reason>`` + ``ram_breach_observed:
+    true``; an observed breach whose episode did not kill (the
+    wait-expiry / over-count surface) ⇒ ``ram_breach_observed: true`` +
+    the observed peak.  The lines are ADDITIVE — the command's output
+    is never swallowed — and the surface is distinct from
+    ``code="ram_limit_exceeded"`` by construction (it never uses it).
+    """
+    if _ram_is_refusal(record):
+        return (
+            content
+            + "\n\n"
+            + RAM_REFUSAL_LINE.format(reason=record.reason)
+            + "\n"
+            + RAM_BREACH_LINE
+        )
+    if _ram_breach_observed(record):
+        return (
+            content
+            + "\n\n"
+            + RAM_BREACH_LINE
+            + "\n"
+            + RAM_PEAK_LINE.format(
+                peak_bytes=int(record.observed_peak_bytes)
+            )
+        )
+    return content
+
+
 class BashInputSchema(BaseModel):
     """LLM-visible arguments for the bash tool.
 
@@ -791,8 +1217,15 @@ async def bash(
     input: str | None = None,
     env: Dict[str, str] | None = None,
     instance_id: str | None = None,
+    *,
+    # ── RAM auto-termination — the INTERNAL per-call ceiling seam ──
+    # SECURITY RULING (phase3-plan.md T1): this is an internal/test
+    # seam ONLY.  It is deliberately NOT in ``BashInputSchema`` — an
+    # agent-visible knob would let the agent raise its own ceiling.  The
+    # LLM-facing schema is asserted unchanged by the test pack.
+    ram_ceiling_bytes: int | None = None,
 ) -> str:
-    """Execute a bash command and return the output. Timeout is in seconds (0-1800, default 1800). Use tool_help("bash") for details."""
+    """Execute a bash command and return the output. Timeout is in seconds (0-1800, default 1800). Use tool_help("bash") for details. A RAM-guarded execution whose tree exceeds the memory ceiling is terminated tree-wide and returns a typed JSON envelope (code "ram_limit_exceeded") instead of the output."""
     # Validate timeout parameter
     if timeout is not None:
         if timeout < 0:
@@ -962,6 +1395,20 @@ async def bash(
             # registry lookup falls through to the pgid fallback.
             bash_start_time_jiffies = _read_proc_start_time(proc.pid)
             bash_peak_rss_kb_at_spawn = _read_proc_vm_hwm_kb(proc.pid)
+            # ── RAM auto-termination — S1: register the spawn ──
+            # The ALREADY-CAPTURED pgid (never a second ``os.getpgid``
+            # — the TOCTOU the capture block respects) and the already
+            # read start time.  The tracking id is the bash lane's own
+            # (it is ALSO the ownership stamp the ladder's P6 check
+            # matches against — one id, one spawn).
+            _ram_register_spawn(
+                tracking_id=tracking_id,
+                instance_id=instance_id,
+                pid=proc.pid,
+                pgid=pgid,
+                start_time_jiffies=bash_start_time_jiffies,
+                ceiling_bytes=ram_ceiling_bytes,
+            )
             await get_bash_process_registry().register(instance_id, proc.pid, pgid)
             # D14 alignment: sanitize the command string BEFORE
             # stamping it. We carry executable + argv-shape ONLY —
@@ -1065,10 +1512,66 @@ async def bash(
             await asyncio.wait_for(proc.wait(), timeout=actual_timeout)
             timed_out = False
         except asyncio.TimeoutError:
-            # M3: pass captured pgid to avoid a second ``os.getpgid(proc.pid)``
-            # call that could race against PID recycling if the process just
-            # exited between the SIGTERM and the SIGKILL window.
+            timed_out = True
+
+        # ── The timeout arm's SIGNAL — before the verdict wait ──
+        # The episode-scoped claim token (arch §17.5): the FIRST
+        # claimant owns the verdict and a loser SKIPS its signal, so
+        # the timeout arm and the guard's ladder never BOTH signal
+        # (test-plan O9).  The guard's claim is read WITHOUT waiting.
+        timeout_kill_deferred = False
+        if timed_out:
+            if _ram_claim_held(
+                _read_ram_verdict(tracking_id) if tracking_id else None
+            ):
+                timeout_kill_deferred = True
+            else:
+                # M3: pass captured pgid to avoid a second ``os.getpgid(proc.pid)``
+                # call that could race against PID recycling if the process just
+                # exited between the SIGTERM and the SIGKILL window.
+                await _kill_process(proc, pgid=pgid)
+
+        # ── S2 — the guard's verdict (the ONLY RAM discriminator) ──
+        # The await has returned: the guard's execution-lane thread may
+        # ALREADY have killed the tree (arch §4.3.1).  The verdict
+        # RECORD decides which arm runs — the exit code NEVER does
+        # (``-9`` is ambiguous by construction, arch §5).  The wait is
+        # bounded (1270 ms) and async (the event loop is never blocked).
+        ram_record = await _await_ram_verdict(tracking_id)
+        ram_kill = _ram_is_kill(ram_record)
+        ram_breach = _ram_breach_observed(ram_record)
+
+        if timed_out and timeout_kill_deferred and not ram_kill:
+            # The guard REFUSED the kill (it never signalled) — the
+            # timeout arm's own kill contract still stands.
             await _kill_process(proc, pgid=pgid)
+
+        if ram_kill:
+            # ── The RAM arm (S4/S6) — it PREEMPTS the success arm, the
+            # ``EXIT CODE:`` line, the 150 k truncation arm and the
+            # timeout arm (arch §4.3 precedence). ──
+            # T5 — the verdict is PUBLISHED (observed terminal) BEFORE
+            # any mark_exit / registry release: the release sequence
+            # below runs after it, and the success arm's mark_exit does
+            # NOT run (the one-shot mark_exit would erase the verdict).
+            await _ram_release_sequence(
+                tracking_id=tracking_id,
+                instance_id=instance_id,
+                pid=proc.pid,
+                start_time_jiffies=bash_start_time_jiffies,
+                exit_code=proc.returncode,
+                peak_bytes=int(ram_record.observed_peak_bytes),
+            )
+            return _format_ram_envelope(
+                ram_record,
+                ram_breach_observed=True,
+                coincident_timeout=bool(timed_out),
+                timeout_seconds=(
+                    float(timeout) if timed_out and timeout else None
+                ),
+            )
+
+        if timed_out:
             if instance_id is not None:
                 await get_bash_process_registry().unregister(instance_id, proc.pid)
                 # D5 — route the timeout arm through mark_exit so
@@ -1082,7 +1585,6 @@ async def bash(
                     exit_kind=EXIT_KIND_TIMEOUT,
                     peak_rss_kb=bash_peak_rss_kb_at_spawn,
                 )
-            timed_out = True
 
         # D5 — SUCCESS-PATH EXIT-MARK (the documented leak).
         # Before this fix, ``if not timed_out:`` fell through to
@@ -1157,6 +1659,20 @@ async def bash(
         content = "\n\n".join(output_parts)
 
         if timed_out:
+            if ram_breach:
+                # The COINCIDENCE — the timeout won the race against the
+                # guard (arch §17.5 / test-plan O7): the code follows the
+                # claim token and the observed breach is reported beside
+                # the peak.  Without a breach the legacy timeout string
+                # is returned BYTE-IDENTICALLY (it has zero test pins,
+                # so only the breach case may change it).
+                return _format_ram_envelope(
+                    ram_record,
+                    code=RAM_CODE_TIMEOUT,
+                    ram_breach_observed=True,
+                    coincident_timeout=True,
+                    timeout_seconds=(float(timeout) if timeout else None),
+                )
             return content + f"ERROR: Command timed out after {timeout} seconds"
 
         # Apply character limit only (no line limit)
@@ -1168,8 +1684,11 @@ async def bash(
 For full output, redirect to file:
   `command > /tmp/output.txt` then use `read_file`
 """
-            return truncated + hint
-        return content
+            content = truncated + hint
+        # ── The additive RAM surfaces (arch §15 B25) — they ride AFTER
+        # the truncation so they are never swallowed, and they are
+        # ADDITIVE: the command's output is never swallowed. ──
+        return _ram_additive_surface(content, ram_record)
 
     except asyncio.CancelledError:
         # Cancellation at EITHER await point (spawn or wait_for).
@@ -1221,8 +1740,26 @@ For full output, redirect to file:
         # before ``create_subprocess_*`` — never partial env).
         return _format_secret_envelope(secret_env_exc)
     except Exception as e:
+        # phase3-plan.md T8 — the generic-exception arm releases NEITHER
+        # registry today, and ``MemoryError`` lands exactly here during
+        # a RAM incident.  The guard release is added (the other two
+        # registries' pre-existing leak is DISCLOSED, not fixed here —
+        # it is routed to the Phase 7 follow-up list).  The release is
+        # CONDITIONAL: it never ends a live watch and a claimed
+        # record's release stays deferred to the lane (arch §15 B21).
+        # (The finally-shaped release below is the general backstop for
+        # all six exit paths; this is the arm's own bookkeeping.)
+        _ram_lane_release(tracking_id)
         return f"ERROR: {str(e)}"
     finally:
+        # ── The lane's finally-shaped guard release (T8) ──
+        # It covers ALL SIX bash exit paths (success, timeout, RAM,
+        # cancel, generic-exception, spawn-failure).  The release is
+        # CONDITIONAL on the watch being finished: a lane exit is a
+        # NOTIFICATION, never the end of a live watch, and a CLAIMED
+        # record's release is deferred to the lane (arch §4.3.1 item 4
+        # / §15 B21).  Best-effort: it can never break the return path.
+        _ram_lane_release(tracking_id)
         # Clean up temp files.
         for f in (stdout_file, stderr_file, stdin_file):
             if f is None:
@@ -1265,5 +1802,10 @@ Args:
 
 Returns:
     Command output including stdout, stderr, and exit code.
+    A RAM-guarded execution whose process tree exceeds the memory ceiling is
+    terminated tree-wide and returns a typed JSON envelope INSTEAD of the
+    output: {"ok": false, "code": "ram_limit_exceeded", "surface": "bash.exec",
+    "reason": ..., "limit_bytes": ..., "rearm_threshold_bytes": ...,
+    "observed_peak_bytes": ..., ...}. Parse it as JSON — it is the whole return.
     Output is truncated at 150,000 characters — redirect to file for full results.
 """

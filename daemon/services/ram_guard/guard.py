@@ -234,6 +234,24 @@ class RamGuard:
         return self._ceiling_source
 
     @property
+    def grace_seconds(self) -> float:
+        """The configured kill grace, in seconds (the PUBLIC read surface).
+
+        Additive and read-only: the guard's own service-worst-case
+        inputs (the confirm deadline + the grace) are what a CONSUMER's
+        bounded wait must be derived from (arch §15 B20), and they used
+        to be reachable only as private attributes — a private read is a
+        silent-revert seam (a rename would quietly re-derive the
+        deadline).  The accessors are the seam; the consumer pins them.
+        """
+        return self._grace_seconds
+
+    @property
+    def pss_confirm_deadline_ms(self) -> int:
+        """The configured PSS-confirm deadline, in ms (the PUBLIC read surface)."""
+        return self._pss_confirm_deadline_ms
+
+    @property
     def counters(self) -> GuardCounters:
         return self._counters
 
