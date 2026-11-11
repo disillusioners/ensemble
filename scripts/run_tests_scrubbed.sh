@@ -50,6 +50,15 @@ unset PGSSLMODE PGSERVICE PGSERVICEFILE
 # Sync on/off flags are left alone too — workspace selection is the
 # whole invariant. The leak gate below checks exactly these two names.
 unset PLANE_MCP_WORKSPACE_SLUG PLANE_BASE_URL
+# Bare PORT hygiene (H4, tidier round 3, 2026-11-11). Several SHELL packs
+# source scripts/upgrade/launcher.sh (tests/test_release_journal.sh:1641,
+# tests/test_launcher.sh:513 do `( . "$REPO_ROOT/launcher.sh"; INSTALL_DIR=…
+# _journal_sweep )`). launcher.sh reads ${PORT:-} for its livez/port probes,
+# so an AMBIENT PORT inherited from a daemon shell points those read-only
+# probes at the LIVE daemon — the pack then passes (or fails) for the wrong
+# reason. Unset it here so EVERY pack that runs through this wrapper gets the
+# hygiene at once (the class, not the instances). Children that need a port
+# must set their OWN fixture-scoped value.
 
 # 2. Echo-verify ZERO survivors — FAMILY-WIDE, not enumerated (W2,
 #    2026-09-28). The old loop re-listed the 7 known names, so any NEW

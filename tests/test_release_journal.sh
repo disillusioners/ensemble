@@ -283,6 +283,13 @@ _stamp_provenance_for_repo "$FAKE_REPO" \
 # other suite sources or sees it. The classify/twins/stop_handback suites
 # keep pinning refusals against the REAL predicate (no launchctl shim in
 # their env).
+# H5 (tidier round 3): the FIXTURE-OWNED port range — every port this suite
+# allocates lives in 18300-18599 (SBX_PORT 18377, SRV_PORT 18399, SRV_PORT2
+# 18411, HANG_PORT 18453, M5_PORT 18467). The launchctl emulator's bootout
+# refuses to TERM a holder OUTSIDE this range (ambient/foreign → never kill).
+RJ_LAUNCHD_OWNED_PORT_MIN=18300
+RJ_LAUNCHD_OWNED_PORT_MAX=18599
+export RJ_LAUNCHD_OWNED_PORT_MIN RJ_LAUNCHD_OWNED_PORT_MAX
 RJ_LAUNCHD_STATE="$FIXTURE/launchd-state"
 RJ_LAUNCHD_BIN_DIR="$FIXTURE/launchctl-bin"
 mkdir -p "$RJ_LAUNCHD_STATE" "$RJ_LAUNCHD_BIN_DIR"
@@ -406,6 +413,19 @@ cmd="${1:-}"; target="${2:-}"
 real=""
 [ -n "${INSTALL_DIR:-}" ] && real="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd)"
 port_free() { [ -z "${PORT:-}" ] && return 0; ! lsof -ti:"$PORT" >/dev/null 2>&1; }
+# H5 (tidier round 3, 2026-11-11): FIXTURE-OWNERSHIP GATE. The emulated
+# bootout TERMs whatever holds $PORT — correct ONLY when that holder is a
+# FIXTURE listener. The suite allocates its ports from a fixed fixture range
+# (RJ_LAUNCHD_OWNED_PORT_MIN..MAX, exported by the suite setup); a PORT
+# OUTSIDE that range (ambient live-daemon port, a foreign listener) is NEVER
+# killed — the emulator refuses the bootout instead. This is one supervision
+# leg away from TERMing the live daemon without it.
+port_is_fixture_owned() {
+    local p="${PORT:-}"
+    [ -n "$p" ] || return 1
+    [ -n "${RJ_LAUNCHD_OWNED_PORT_MIN:-}" ] && [ -n "${RJ_LAUNCHD_OWNED_PORT_MAX:-}" ] || return 1
+    [ "$p" -ge "$RJ_LAUNCHD_OWNED_PORT_MIN" ] 2>/dev/null && [ "$p" -le "$RJ_LAUNCHD_OWNED_PORT_MAX" ] 2>/dev/null
+}
 # Fixture knobs (review round 1, F4(ii) legs):
 #   RJ_LAUNCHD_BOOTOUT_RM       — rm -rf this path at the next SUCCESSFUL
 #                                 bootout (fabricates the mid-promote
@@ -465,7 +485,16 @@ case "$cmd" in
             fi
         fi
         holders=""
-        if [ -n "${PORT:-}" ]; then holders="$(lsof -ti:"$PORT" 2>/dev/null)"; fi
+        if [ -n "${PORT:-}" ]; then
+            # H5: NEVER TERM a listener this fixture does not own. An
+            # out-of-range (ambient/foreign) PORT refuses the bootout
+            # fail-safe instead of killing the holder.
+            if ! port_is_fixture_owned; then
+                echo "rj-launchctl: bootout REFUSED — PORT ${PORT} is outside the fixture-owned range (${RJ_LAUNCHD_OWNED_PORT_MIN:-?}..${RJ_LAUNCHD_OWNED_PORT_MAX:-?}); never TERM a foreign listener" >&2
+                exit 1
+            fi
+            holders="$(lsof -ti:"$PORT" 2>/dev/null)"
+        fi
         # A real bootout tears down the JOB — every process it owns, not
         # just the port listener. The seam's job-tree = the port holder +
         # every process an earlier bootstrap of THIS seam revived (recorded
@@ -2125,6 +2154,32 @@ assert_contains "12h-C bootout of the verified job label recorded" \
 mv "$FIXTURE/f4h-v1-snapshot" "$SBX/releases/$SBX_V1"
 ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" '[]'
+
+# 12i. H5 (tidier round 3) — FIXTURE-OWNERSHIP GATE: the emulator's bootout
+#      must NEVER TERM a listener the fixture does not own. Point PORT at an
+#      out-of-range listener (a foreign port the fixture did NOT allocate),
+#      run the bootout arm, and assert the holder SURVIVES + the bootout
+#      refused. Today this is defence-in-depth (all suite ports are owned);
+#      it exists so one future supervision leg cannot TERM the live daemon.
+FOREIGN_PORT=52999   # outside 18300-18599 (the fixture-owned range)
+python3 - "$FOREIGN_PORT" <<'PYF' &
+import http.server, sys
+port = int(sys.argv[1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
+    def log_message(self, *a): pass
+http.server.HTTPServer.allow_reuse_address = True
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+PYF
+FOREIGN_PID=$!
+sleep 1
+H5_RC=0
+PORT="$FOREIGN_PORT" INSTALL_DIR="$SBX" launchctl bootout "gui/$(id -u)/$RJ_LAUNCHD_LABEL" > /dev/null 2>&1 || H5_RC=$?
+assert_eq "12i H5: bootout REFUSES a foreign (non-fixture) PORT" "1" "$H5_RC"
+kill -0 "$FOREIGN_PID" 2>/dev/null && _pass || _fail "12i H5: the foreign listener SURVIVED the bootout (no kill)" "alive" "dead"
+kill "$FOREIGN_PID" 2>/dev/null; wait "$FOREIGN_PID" 2>/dev/null
+PORT="$SBX_PORT"   # restore the fixture port for §13+
 
 # ─── 13. P2.3 B4 leg 2: _refuse journals entry-refusals (best-effort) ──────
 section "_refuse: journaled entry refusals (upgrade_promote_refusal)"
