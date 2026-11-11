@@ -417,7 +417,11 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # pin — added 2026-11-06; count; it was MISSING from this prose until
 # the 2026-11-10 prompt-assent ceremony re-derived the census — the
 # prose is the artifact that gets copied forward, so a stale prose is a
-# real defect).  That is FIFTEEN pin files, PLUS the ONE
+# real defect) and
+# ``tests/unit/tools/test_prompt_assent_registration.py`` (the
+# prompt-assent pin — added 2026-11-10; exact-set AND count; appended
+# to this prose by the same lane's Phase 4 — the census it DERIVES is
+# SIXTEEN pin files).  That is SIXTEEN pin files, PLUS the ONE
 # mutation-pack find/replace STRING pair
 # (``test/packs/metrics_read_mutation_matrix_test.py`` MT-01 — derived
 # from the live constant at pack-import time so a count bump cannot
@@ -425,8 +429,8 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # — a category with no mutation target is not covered by the matrix).
 # The site/file census is re-derived BY GREP at every lane ceremony
 # (the three greps at the end of this block) — the numbers below are
-# the 2026-11-10 prompt-assent derivation, never a frozen literal to
-# copy forward.
+# the 2026-11-11 prompt-assent Phase-4 derivation, never a frozen
+# literal to copy forward.
 # SEPARATELY, ONE
 # allow-array TRAILING-ENTRY pin (the ari ``tools.allow``
 # ARRAY-ORDER discipline, ``tests/unit/test_board_registration.py``)
