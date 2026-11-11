@@ -587,7 +587,7 @@ The promote lane is now **launchd-aware** (D2a, 2026-11-11). On a launchd-manage
 
 **Fail-safe abort end states (never a silent degrade).** Every promote abort names its end state and halts for a human:
 - **Classifier refusal (exit 78, pre-mutation):** zero/multiple/unresolvable launchd job (`supervision-not-verified`), declared `launchd` on a non-Darwin host (`supervision-launchd-incapable-host`), declared `script`/opt-out on Darwin (`supervision-unsupervised-declaration-required`), garbage on Darwin (`supervision-declaration-invalid`). Nothing has been stopped or flipped.
-- **8b gate halt (exit 78, DISARMED):** all four PREV-manifest branches (`no-previous` / `prev-quarantined` / `prev-missing` / `prev-unsafe`) now **bootout** the launchd job ⇒ **DARK + DISARMED** (no KeepAlive self-revival on the broken binary) + a named journal state (`supervisor-disarmed-*`) + a loud operator message. The recovery command is printed (bootstrap a healthy version). An **empty resolved label** refuses the bootout fail-loud (never a whole-domain teardown).
+- **8b gate halt (exit 78, DISARMED):** all four PREV-manifest branches (`no-previous` / `prev-quarantined` / `prev-missing` / `prev-unsafe`) now **bootout** the launchd job ⇒ **DARK + DISARMED** (no KeepAlive self-revival on the broken binary) + a named journal state (`supervisor-disarmed-*`) + a loud operator message. The recovery command is printed (bootstrap a healthy version). An **empty resolved label** refuses the bootout fail-loud (never a whole-domain teardown). **The disarm is BEST-EFFORT** (one `launchctl bootout` attempt): if the bootout does not confirm, the promote journals DISARM FAILED and prints the manual command — it does not guarantee the supervisor is down; verify + bootout by hand (see the footnote under the availability table below).
 - **Verify failure (routes to 8b):** provenance (port holder not `<install>`-anchored), pid==pre-stop, or livez/readyz/version/soak failure ⇒ auto-rollback to `$OLD_CUR` (launcher_swap($PREV) **before** the flip, then bootstrap + re-gate). The launchd verify reason survives into the 8b journal rows.
 - **8b rollback-stop-failure arm (exit 1, `supervisor-disarmed-rollback-stop-failed`):** if the FORWARD ROLLBACK's own stop fails, the arm-local disarm attempts a bootout with that named end state — on Darwin the stop IS the disarm mechanism, so this arm is the one place a failed stop can leave the supervisor **LOADED+ARMED on the broken `$VERSION`** (KeepAlive re-arms it) when the disarm bootout also fails. The operator message prints the MANUAL disarm command for that case:
   ```bash
@@ -599,10 +599,18 @@ The promote lane is now **launchd-aware** (D2a, 2026-11-11). On a launchd-manage
 | Arm | Daemon | Supervisor |
 |---|---|---|
 | classifier refusal | still running (untouched) | LOADED + ARMED (healthy) |
-| 8b manifest-halt branches | DARK | **DISARMED** (bootout at the gate) |
+| 8b manifest-halt branches | DARK | **DISARMED** (bootout at the gate) — see the best-effort footnote¹ |
 | verify-fail → forward rollback, re-gate GREEN | SERVING the rollback target | re-ARMED by the rollback's bootstrap |
 | verify-fail → forward rollback, re-gate FAILED | degraded-or-dark on `$PREV` | re-ARMED by the rollback's bootstrap (no disarm by design, ADR-028) |
 | rollback-stop-failure (F2-arm1) | DARK | **DISARMED if the arm-local bootout confirmed; possibly LOADED+ARMED on the broken version if it did not** — the manual `launchctl bootout` above is the operator backstop |
+
+¹ **Every DISARMED above is BEST-EFFORT** — `_promote_disarm_launchd` is a single `launchctl bootout` attempt; if it fails, the promote prints a loud DISARM FAILED message with the manual command and journals the failure, but it cannot guarantee the supervisor is down. When in doubt after any manifest-halt, verify and disarm by hand:
+```bash
+launchctl print gui/$(id -u)/<job-label>               # still loaded?
+launchctl bootout gui/$(id -u)/<job-label>             # manual disarm (e.g. com.ensemble.prod)
+launchctl bootstrap gui/$(id -u) <healthy-plist>       # then start a healthy version
+```
+The same failure mode is why the rollback-stop-failure row carries the conditional wording inline — no row promises a guarantee the arm cannot always deliver.
 
 Recovery is operator-driven throughout (fail-closed by design).
 
