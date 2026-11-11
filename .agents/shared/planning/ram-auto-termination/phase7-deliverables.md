@@ -134,6 +134,21 @@ otherwise read them as drift.
    appended its member since. The B22 sentence is reproduced **verbatim** and the count is
    explained immediately after it — the pin is not edited.
 
+### 3c. One deliberate shape deviation — "one page"
+
+T4 asks for a **one-page** memo while also requiring (g) the §3.5 honesty set **and** (h) the §3.4
+truth statement *inside* it. The fifteen honesty items alone exceed three pages of prose, and (d)
+carries two seven-row tables. The delivered shape is therefore:
+
+* **(a)–(j) = the operator brief**, table-first, **1,982 words** (~2 rendered pages) — this is the
+  "one page" surface an operator reads at the terminal.
+* **Appendices A–H = the reference material** the required content lives in: the verbatim honesty
+  set, the truth statement, the operator documentation, the durability posture, the follow-ups,
+  the T4 hand-off, the persistence facts, the negative claims.
+
+Nothing was dropped to hit a page count; the split is disclosed rather than resolved by
+truncation, and every required item is reachable from the brief by a pointer.
+
 ---
 
 ## 4. T6 — the T4 hand-off (one-line pointer)
