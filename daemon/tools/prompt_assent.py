@@ -452,11 +452,13 @@ class _AssentContext:
         "is_dm",
         "is_group_dm",
         "user_id",
+        "user_name",
         "external_user_id",
         "guild_id",
         "channel_type",
         "platform_message_id",
         "message_id",
+        "instance_id",
         "content",
         "discord_meta",
     )
@@ -549,6 +551,7 @@ def _derive_context(manager: Any, row: Any, window: dict[str, Any]) -> _AssentCo
         is_dm=is_dm,
         is_group_dm=discord_meta.get("is_group_dm"),
         user_id=user_id,
+        user_name=discord_meta.get("user_name"),
         external_user_id=_derive_external_user_id(
             manager, row, discord_meta, user_id, is_dm
         ),
@@ -556,6 +559,7 @@ def _derive_context(manager: Any, row: Any, window: dict[str, Any]) -> _AssentCo
         channel_type=discord_meta.get("channel_type"),
         platform_message_id=discord_meta.get("message_id"),
         message_id=window.get("message_id"),
+        instance_id=getattr(row, "instance_id", None),
         content=getattr(row, "content", None),
         discord_meta=discord_meta,
     )
@@ -766,7 +770,7 @@ async def _run_factor_gates(
     return outcome
 
 
-# ── The accept seam (Phase-3 owned — the CALL SITE is wired here) ────────
+# ── The accept seam (Phase-3 owned — the attestation assembly) ──────────
 
 
 class _AcceptancePathUnavailable(RuntimeError):
@@ -792,8 +796,13 @@ async def _accept_via_service(
 ) -> str:
     """Call the Phase-3 acceptance service — the WIRED call site.
 
-    Raises :class:`_AcceptancePathUnavailable` when the service entrypoint
-    is absent (Phase 2's state) — the tool then returns the house
+    Assembles the attestation from DAEMON-OWNED evidence only
+    (:func:`_build_attestation`) and hands it to
+    ``svc.approve_assent(version_id, attestation)`` /
+    ``svc.reject_assent(version_id, attestation, reason)`` — the
+    service is the ONLY route to a relayed decision. Raises
+    :class:`_AcceptancePathUnavailable` when the service entrypoint
+    is absent (the mid-build state) — the tool then returns the house
     FAILED envelope. No bypass, no raw ``atomic_transition``.
     """
     service = getattr(manager, "_prompt_version_service", None)
@@ -820,6 +829,30 @@ async def _accept_via_service(
     return await method(version_id, attestation, reject_reason)
 
 
+def _attestation_refusal(what: str) -> Any:
+    """The fail-closed D-5 extraction refusal — a typed carrier.
+
+    ``extraction-incomplete`` rides the tool's taxonomy handler (any
+    exception carrying a taxonomy ``code`` is surfaced verbatim as a
+    REFUSED envelope — no state change, no token burn).
+    """
+    from ..services.prompt_version_service import AssentRefusalError
+
+    return AssentRefusalError(
+        "extraction-incomplete",
+        f"the daemon-derived attestation assembly is incomplete — {what} "
+        "(the nested metadata['discord'] extraction is REQUIRED and "
+        "fail-closed, D-5); NO decision is recorded",
+    )
+
+
+def _require_str(value: Any, what: str) -> str:
+    """A REQUIRED non-empty string from daemon-owned evidence."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    raise _attestation_refusal(what)
+
+
 def _build_attestation(
     manager: Any,
     *,
@@ -828,18 +861,215 @@ def _build_attestation(
     token_row: Any,
     window: dict[str, Any],
 ) -> Any:
-    """The attestation assembly — PHASE-3 OWNED (O-E).
+    """The attestation assembly — Phase-3 owned (tasks 3.3 / 3.5).
 
-    Phase 2 wires the CALL SITE only; the attestation is minted by the
-    assent service (Phase 3) — never from tool arguments (the
-    anti-forgery analogue of the repo's R3).
+    Assembles the typed ``AssentAttestation`` (architect §2.3 field
+    set) from DAEMON-OWNED evidence ONLY — **the tool arguments never
+    contribute** (the anti-forgery analogue of the repo's R3; this
+    function's signature accepts none):
+
+    * the window — ``source``, ``message_id`` (the daemon-minted id
+      of the approving turn), ``stamped_at``, ``expires_at``;
+    * the extracted human identity — the NESTED
+      ``metadata["discord"]`` of the window's message row (D-5:
+      ``user_id`` REQUIRED fail-closed → ``extraction-incomplete``;
+      ``guild_id`` / ``channel_id`` / ``channel_type`` / ``is_dm`` /
+      the PLATFORM-side message id from the same dict;
+      ``user_name`` cosmetic only, never authority;
+      ``external_user_id`` the destination identity, NEVER the
+      approving-user key);
+    * the token row — the item binding (the mint's denormalized
+      item key), ``token_id``, ``token_fingerprint`` and
+      **``render_sha256`` CARRIED from the row** (task 3.5/O-L: the
+      hash was computed at mint from the EXACT canonical-render
+      bytes; it is NEVER recomputed here — the only render-hash
+      re-check site is P1's D-4 hook — and NEVER copied from
+      ``prompt_versions.content_hash``);
+    * the relay identity — the authorized agent constant (the gate
+      proved the caller IS that agent) and the message row's
+      instance id (the relay instance).
+
+    ``approver_subject = f"{source_id}:{user_id}"`` (D-5); the type's
+    own ``__post_init__`` re-validates the composition and the
+    completeness of every field.
     """
-    raise _AcceptancePathUnavailable(
-        "the assent attestation assembly is Phase-3 owned"
+    from daemon.tools.upgrade_journal import now_iso
+    from ..repositories.prompt_version.assent_attestation import (
+        AssentAttestation,
+        AssentHumanIdentity,
+        AssentItemBinding,
+    )
+
+    if context is None or token_row is None:
+        raise _attestation_refusal(
+            "the daemon-derived context or the token row is missing"
+        )
+
+    # The item binding — from the TOKEN ROW (the mint's denormalized
+    # item key), never from a tool argument. The gate has already
+    # proven token_row.version_id == version_id (step 4c); the re-check
+    # here is fail-closed belt-and-braces.
+    row_version_id = getattr(token_row, "version_id", None)
+    if row_version_id != version_id:
+        from ..services.prompt_version_service import AssentRefusalError
+
+        raise AssentRefusalError(
+            "token-item-mismatch",
+            f"the token is bound to version_id={row_version_id!r}, not "
+            f"{version_id!r}",
+        )
+    item_binding = AssentItemBinding(
+        version_id=str(row_version_id),
+        agent_id=_require_str(
+            getattr(token_row, "agent_id", None), "the item's agent_id"
+        ),
+        version_tag=str(getattr(token_row, "version_tag", "") or ""),
+        artifact=_require_str(
+            getattr(token_row, "artifact", None), "the item's artifact"
+        ),
+        version=int(getattr(token_row, "version", 0) or 0),
+    )
+
+    # ── the D-5 extraction contract (fail closed) ─────────────────────
+    source_id = _require_str(context.source_id, "the window's source_id")
+    user_id = _require_str(
+        context.user_id,
+        "message_metadata['discord']['user_id'] (a top-level "
+        "metadata.get('user_id') returns None and is never used)",
+    )
+    channel_id = _require_str(
+        context.channel_id, "metadata['discord']['channel_id']"
+    )
+    channel_type = _require_str(
+        context.channel_type, "metadata['discord']['channel_type']"
+    )
+    if not isinstance(context.is_dm, bool):
+        # The attestation type demands a REAL boolean; anything else
+        # (absent / 1 / "yes") is unparseable under the ruling and
+        # fails closed — the same discipline as the private check.
+        raise _attestation_refusal(
+            "metadata['discord']['is_dm'] (a real boolean is required)"
+        )
+    external_user_id = _require_str(
+        context.external_user_id,
+        "the destination identity (external_user_id — daemon-derived; "
+        "NEVER the approving-user key)",
+    )
+    relay_source_message_id = _require_str(
+        context.platform_message_id,
+        "the PLATFORM-side message id (metadata['discord']['message_id'] "
+        "— the daemon queue id is ephemeral/wiped at boot; without the "
+        "platform id the forensic chain breaks)",
+    )
+    relay_instance_id = _require_str(
+        context.instance_id,
+        "the relay instance id (the message row's instance_id)",
+    )
+
+    # ── the window stamps (the gate evaluated them; carried verbatim) ─
+    stamped_at = _require_str(
+        window.get("stamped_at"), "the factor-2 window stamped_at"
+    )
+    expires_at = _require_str(
+        window.get("expires_at"), "the factor-2 window expires_at"
+    )
+    human_message_id = _require_str(
+        window.get("message_id"),
+        "the daemon-minted message id of the approving turn",
+    )
+
+    human_identity = AssentHumanIdentity(
+        source_id=source_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        channel_type=channel_type,
+        is_dm=context.is_dm,
+        external_user_id=external_user_id,
+        user_name=(
+            str(context.user_name).strip()
+            if isinstance(context.user_name, str) and context.user_name.strip()
+            else None
+        ),
+        guild_id=(
+            str(context.guild_id)
+            if context.guild_id is not None and str(context.guild_id).strip()
+            else None
+        ),
+    )
+
+    render_sha = getattr(token_row, "render_sha256", None)
+    if not isinstance(render_sha, str) or len(render_sha) != 64:
+        raise _attestation_refusal(
+            "the token row's render_sha256 (the canonical-render binding "
+            "is REQUIRED on the attestation — J-3/K-7)"
+        )
+    token_hash_value = getattr(token_row, "token_hash", None)
+    if not isinstance(token_hash_value, str) or len(token_hash_value) < 12:
+        raise _attestation_refusal("the token row's token_hash")
+
+    return AssentAttestation(
+        item_binding=item_binding,
+        # CARRIED (task 3.5 / O-L) — computed at mint from the EXACT
+        # canonical-render bytes; NEVER recomputed here (the only
+        # render-hash re-check site is P1's D-4 hook) and NEVER a
+        # prompt_versions.content_hash copy.
+        render_sha256=render_sha,
+        human_message_id=human_message_id,
+        relay_source_message_id=relay_source_message_id,
+        human_identity=human_identity,
+        approver_subject=f"{source_id}:{user_id}",
+        token_id=str(getattr(token_row, "token_id")),
+        token_fingerprint=token_hash_value[:12],
+        window_stamped_at=stamped_at,
+        window_expires_at=expires_at,
+        # The gate proved the caller IS the authorized agent; the relay
+        # instance is the message row's own instance_id — both
+        # daemon-derived.
+        relay_agent=PROMPT_ASSENT_AUTHORIZED_AGENT,
+        relay_instance_id=relay_instance_id,
+        attested_at=now_iso(),
     )
 
 
 # ── The action branches ───────────────────────────────────────────────────
+
+
+async def _record_mismatch(token_repo: Any, token_row: Any) -> None:
+    """The DURABLE per-token attempt counter — task 3.6 / D-4.
+
+    Called on the MISMATCH-class refusal paths that carry a known
+    token row (``token-item-mismatch`` / ``token-channel-mismatch``
+    / ``token-approver-mismatch``). ``record_failed_attempt`` commits
+    in its OWN transaction — BEFORE any refusal envelope and BEFORE
+    any guarded transition opens (the D-4 BLOCKING rule: a counter
+    sharing the guarded transaction would be reset by every refusal's
+    rollback and the lockout would silently never fire). At the
+    threshold the live token is revoked IN THAT SAME OWN TRANSACTION
+    (the lockout ⇒ a fresh mint ⇒ a fresh human turn is required to
+    clear it).
+
+    A counter fault NEVER blocks the refusal: the refusal is the
+    verdict; the counter is forensics. An UNKNOWN token (no row)
+    cannot be counted durably — the K-9 in-RAM hourly budget is the
+    counter for that shape (P2-owned, consumed by the envelope
+    helper below).
+    """
+    token_id = getattr(token_row, "token_id", None)
+    if not token_id:
+        return
+    try:
+        await asyncio.to_thread(
+            token_repo.record_failed_attempt,
+            token_id,
+            PROMPT_ASSENT_REVOKE_THRESHOLD,
+        )
+    except Exception:  # noqa: BLE001 — never break the refusal
+        logger.warning(
+            "prompt_assent: the attempt-counter increment failed for "
+            "token %s (the refusal stands)",
+            str(token_id)[:8],
+            exc_info=True,
+        )
 
 
 def _render_pending_list(rows: list[Any]) -> str:
@@ -1476,9 +1706,16 @@ async def _decide_branch(
     """The APPROVE / REJECT branch — the AR-1 equality legs + the service.
 
     The order (architect §2.2): 4a the item, 4b the state, 4c the token
-    row, 4d the channel match, 4e the user match, 4f the private check,
-    4g the lockout, 4h the hourly budget.
+    row (status → TTL → item binding), 4d the channel match, 4e the
+    user match, 4f the private check, 4g the lockout, then the service
+    acceptance path (counters / attestation / guarded transition).
     """
+    from ..services.prompt_version_service import (
+        assent_approver_mismatch_code,
+        assent_channel_mismatch_code,
+        assent_channel_not_private_code,
+    )
+
     pv_repo = getattr(manager, "_prompt_version_repo", None)
     token_repo = _token_repo(manager)
     if pv_repo is None or token_repo is None:
@@ -1546,12 +1783,6 @@ async def _decide_branch(
             "the supplied token matches no issued token — relay it verbatim "
             "from the mint response",
         )
-    if getattr(token_row, "version_id", None) != version_id:
-        return _refuse(
-            "token-item-mismatch",
-            f"the token is bound to version_id="
-            f"{getattr(token_row, 'version_id', None)!r}, not {version_id!r}",
-        )
     token_status = getattr(token_row, "status", None)
     if token_status == "consumed":
         return _refuse(
@@ -1577,32 +1808,55 @@ async def _decide_branch(
             "be decided",
         )
 
-    # ── 4d. the channel match (AR-1) ──────────────────────────────────
+    # ── 4c-ttl. the token's own TTL (task 3.6) ────────────────────────
+    # Distinct from the WINDOW clocks (3d/3e): a minted token lives
+    # NONCE_TTL_S (60 min); fail-closed on an unparseable stamp
+    # (is_expired). NOT a mismatch — an expired token is a lifecycle
+    # fact, so it never consumes the K-9 budget nor the durable
+    # counter.
+    try:
+        token_expired = await asyncio.to_thread(token_repo.is_expired, token_row)
+    except Exception as exc:  # noqa: BLE001
+        return _refuse(PROMPT_ASSENT_INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
+    if token_expired:
+        return _refuse(
+            "token-expired",
+            f"the token's TTL expired at "
+            f"{getattr(token_row, 'ttl_expires_at', None)!r} — mint again "
+            "(a fresh mint ⇒ a fresh human turn)",
+        )
+
+    # ── 4c-item. the item binding (with the D-4 counter) ─────────────
+    if getattr(token_row, "version_id", None) != version_id:
+        await _record_mismatch(token_repo, token_row)
+        return _refuse(
+            "token-item-mismatch",
+            f"the token is bound to version_id="
+            f"{getattr(token_row, 'version_id', None)!r}, not {version_id!r}",
+        )
+
+    # ── 4d. the channel match (AR-1 leg 1 — the service predicate) ────
     if context is None:
         return _refuse(
             "extraction-incomplete",
             "the approving turn's daemon-derived context is missing — "
             "fail closed (D-5)",
         )
-    mint_channel = getattr(token_row, "mint_channel_id", None)
-    mint_source = getattr(token_row, "mint_source_id", None)
-    channel_mismatch = (
-        not context.channel_id
-        or not mint_channel
-        or str(mint_channel) != str(context.channel_id)
+    channel_code = assent_channel_mismatch_code(
+        getattr(token_row, "mint_source_id", None),
+        getattr(token_row, "mint_channel_id", None),
+        context.source_id,
+        context.channel_id,
     )
-    source_mismatch = (
-        mint_source is not None
-        and str(mint_source) != str(context.source_id or "")
-    )
-    if channel_mismatch or source_mismatch:
+    if channel_code is not None:
+        await _record_mismatch(token_repo, token_row)
         return _refuse(
-            "token-channel-mismatch",
+            channel_code,
             "the approving turn's channel does not match the mint's channel "
             "(AR-1 leg 1) — a cross-channel approval is a re-mint",
         )
 
-    # ── 4e. the user match (AR-1 leg 3 / K-8) ─────────────────────────
+    # ── 4e. the user match (AR-1 leg 3 / K-8 — the service predicate) ─
     if not context.user_id:
         return _refuse(
             "extraction-incomplete",
@@ -1610,18 +1864,24 @@ async def _decide_branch(
             "(message_metadata['discord']['user_id']) is missing — fail "
             "closed (D-5)",
         )
-    mint_user = getattr(token_row, "mint_user_id", None)
-    if not mint_user or str(mint_user) != str(context.user_id):
+    user_code = assent_approver_mismatch_code(
+        getattr(token_row, "mint_user_id", None),
+        context.user_id,
+    )
+    if user_code is not None:
+        await _record_mismatch(token_repo, token_row)
         return _refuse(
-            "token-approver-mismatch",
+            user_code,
             "the approving human is not the minting human (AR-1 leg 3 / K-8) "
             "— both sides are daemon-derived, neither is tool-supplied",
         )
 
-    # ── 4f. the private check on the APPROVING context ────────────────
-    if not context.is_private:
+    # ── 4f. the private check on the APPROVING context (the predicate) ─
+    private_code = assent_channel_not_private_code(context.discord_meta)
+    if private_code is not None:
+        await _record_mismatch(token_repo, token_row)
         return _refuse(
-            "token-channel-mismatch",
+            private_code,
             "the approving turn is not a proven 1:1 DM (is_dm AND NOT "
             "is_group_dm; an absent discriminator is not private)",
         )
