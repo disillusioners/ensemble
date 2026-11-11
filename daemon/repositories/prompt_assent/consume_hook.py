@@ -31,12 +31,11 @@ existing transaction (the no-divergent-copies doctrine).
 
 from __future__ import annotations
 
-import hashlib
 from typing import TYPE_CHECKING, Any
 
 from sqlmodel import col, select
 
-from daemon.services.prompt_version_diff import canonical_render, render_sha256
+from daemon.services.prompt_version_diff import render_sha256
 
 from .repository import AssentTokenError, PromptAssentTokenRepository
 
@@ -90,7 +89,7 @@ def build_assent_consume_hook(
             material.version_tag,
             material.artifact,
         )
-        rendered = canonical_render(
+        rendered_hash = render_sha256(
             agent_id=material.agent_id,
             version_tag=material.version_tag,
             artifact=material.artifact,
@@ -100,7 +99,6 @@ def build_assent_consume_hook(
             effective_content=effective.content or "",
             effective_version_id=effective.version_id,
         )
-        rendered_hash = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
         if rendered_hash != token[1]:
             raise AssentTokenError(
                 "token-content-mismatch",

@@ -1748,7 +1748,7 @@ async def _mint_branch(
             PROMPT_ASSENT_INTERNAL_ERROR, f"{type(exc).__name__}: {exc}"
         )
 
-    from ..services.prompt_version_diff import canonical_render
+    from ..services.prompt_version_diff import canonical_render, render_sha256
 
     render_kwargs = {
         "agent_id": row.agent_id,
@@ -1762,10 +1762,12 @@ async def _mint_branch(
     }
     rendered = canonical_render(**render_kwargs)
     # The hash is over the EXACT bytes placed in the response below
-    # (shown == hashed — J-3/K-7). It is byte-identical to
-    # ``mint_render_sha256(**render_kwargs)`` (the helper re-renders the
-    # same deterministic bytes) — pinned by test.
-    render_sha = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+    # (shown == hashed — J-3/K-7). The ONE shared wrapper
+    # (``render_sha256`` — the same rule the D-4 hook re-checks with)
+    # re-renders the same deterministic bytes, so hashed == shown ==
+    # re-checked-at-approve BY CONSTRUCTION; it is byte-identical to
+    # hashing ``rendered`` directly (pinned by test).
+    render_sha = render_sha256(**render_kwargs)
 
     from daemon.tools.upgrade_journal import mint_nonce, nonce_grouped
 
