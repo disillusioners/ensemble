@@ -1843,6 +1843,49 @@ class TestUpgradeJournalSweepService:
         events = [e["event"] for e in journal_read(install)["history"]]
         assert "sweep" in events  # closure journaled by reconcile
 
+    async def test_sweep_tick_reclaims_orphaned_txn(self, install: Path) -> None:
+        """D1 (2026-11-11): the daemon-side sweep disposes an ORPHANED txn
+        (dead owner + stale heartbeat) — the sweep's half of the ONE reclaim
+        mechanism. Before D1 the sweep NEVER disposed a dead pre-flip txn
+        (``reconcile_pending_op`` returns None whenever ``in_flight`` is a
+        dict), so only the shell preflight could clear it — the
+        2026-11-11 starvation."""
+        uj.journal_update_field(
+            install,
+            "in_flight",
+            {
+                "kind": "promote",
+                "target": "1.2.3",
+                "started_at": uj.now_iso(),
+                "flipped": False,
+                "owner_pid": _dead_pid(),
+                "last_heartbeat": int(time.time()) - 900,
+            },
+        )
+        svc = self._svc(install)
+        result = await svc.sweep_once()
+        assert result["reclaim"], result
+        assert journal_read(install).get("in_flight") is None
+        events = [e["event"] for e in journal_read(install)["history"]]
+        assert "sweep" in events
+
+    async def test_sweep_tick_leaves_a_live_txn_alone(self, install: Path) -> None:
+        """The sweep's fail-closed half: a LIVE txn (live owner) is never
+        disposed by the reclaim tick (no silent double-promote window)."""
+        txn = {
+            "kind": "promote",
+            "target": "1.2.3",
+            "started_at": uj.now_iso(),
+            "flipped": False,
+            "owner_pid": os.getpid(),      # THIS process — verifiably alive
+            "last_heartbeat": int(time.time()) - 900,
+        }
+        uj.journal_update_field(install, "in_flight", txn)
+        svc = self._svc(install)
+        result = await svc.sweep_once()
+        assert not result["reclaim"], result
+        assert journal_read(install).get("in_flight") == txn
+
     async def test_periodic_sweep_skips_live_executor(self, install: Path, monkeypatch) -> None:
         """Executor owner with an ALIVE pid + fresh evidence → the tick
         skips clearing (os.kill(pid, 0) was issued) — the op tracks a real
@@ -2699,3 +2742,368 @@ class TestJsonEscapeControlChars:
         data = json.loads(uj.journal_path(install).read_bytes())
         detail = data["history"][-1]["detail"]
         assert detail == "reason: line1\nline2\x1bESC\x1fUS\x0bVT caf\u00e9 \u201cquotes\u201d \u4e2d end", repr(detail)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D1 (2026-11-11): the ONE stale-txn reclaim predicate + the claim-before-
+# adopt disposal. The 2026-11-11 starvation had THREE disagreeing
+# mechanisms (the tool busy-check refused forever, the daemon-side sweep
+# never disposed, only the shell preflight cleared). The shell lane's comp3
+# FAST PATH rule is the reference: heartbeat-stale AND owner-dead ⇒
+# reclaimable; a live owner OR a fresh heartbeat ⇒ refuse (fail-closed).
+# ══════════════════════════════════════════════════════════════════════════
+class TestStaleTxnReclaim:
+    """The shared predicate (``txn_is_reclaimable``) + the claim-before-
+    adopt disposal (``reclaim_stale_txn``).
+
+    MIRROR of scripts/upgrade/lib.sh: ``_txn_heartbeat_stale`` (:2354),
+    ``_txn_owner_dead`` (:2372) and the comp3 FAST PATH in
+    ``adopt_stale_txn`` (:7182). The shell lane stays the reference — these
+    pins freeze the python mirror of it, cell by cell.
+    """
+
+    @staticmethod
+    def _txn(
+        *,
+        owner_pid: int | None,
+        hb_age_s: int | None,
+        kind: str = "promote",
+        flipped: bool = False,
+        target: str = "1.2.3",
+        started_at: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """A synthetic ``in_flight`` txn in the SHELL's shape (lib.sh
+        ``journal_open_txn``: kind/target/started_at/flipped/owner_pid/
+        last_heartbeat). ``hb_age_s=None`` ⇒ NO heartbeat field at all."""
+        txn: dict[str, Any] = {
+            "kind": kind,
+            "target": target,
+            "started_at": started_at or uj.now_iso(),
+            "flipped": flipped,
+        }
+        if owner_pid is not None:
+            txn["owner_pid"] = owner_pid
+        if hb_age_s is not None:
+            txn["last_heartbeat"] = int(time.time()) - hb_age_s
+        if run_id is not None:
+            txn["run_id"] = run_id
+        return txn
+
+    # ── the predicate (cell-by-cell mirror of lib.sh) ──────────────────────
+
+    def test_dead_owner_and_stale_heartbeat_is_reclaimable(self) -> None:
+        """The FAST-PATH cell: owner dead + heartbeat stale ⇒ reclaimable."""
+        txn = self._txn(owner_pid=_dead_pid(), hb_age_s=900)
+        ok, reason = uj.txn_is_reclaimable(txn)
+        assert ok is True, reason
+        assert reason == "heartbeat-stale+owner-dead"
+
+    def test_live_owner_is_never_reclaimable(self) -> None:
+        """A LIVE owner blocks the reclaim even with a stale heartbeat — the
+        fail-closed direction (never trample a live owner)."""
+        txn = self._txn(owner_pid=os.getpid(), hb_age_s=900)
+        ok, reason = uj.txn_is_reclaimable(txn)
+        assert ok is False
+        assert reason == "owner-alive"
+
+    def test_fresh_heartbeat_is_never_reclaimable(self) -> None:
+        """A FRESH heartbeat blocks the reclaim regardless of the owner state
+        (the shell's conservative reading: a fresh txn may be about to write).
+        A dead owner + a fresh heartbeat is still NOT reclaimable."""
+        txn = self._txn(owner_pid=_dead_pid(), hb_age_s=5)
+        ok, reason = uj.txn_is_reclaimable(txn)
+        assert ok is False
+        assert reason == "heartbeat-fresh"
+
+    def test_missing_heartbeat_counts_as_stale(self) -> None:
+        """Shell-identical: an ABSENT heartbeat ⇒ stale (a live txn is always
+        heartbeat-written by journal_open_txn, so an absent value means a
+        hand-edited or legacy journal — the liveness dimension owns it)."""
+        txn = self._txn(owner_pid=_dead_pid(), hb_age_s=None)
+        ok, reason = uj.txn_is_reclaimable(txn)
+        assert ok is True, reason
+
+    def test_missing_owner_counts_as_dead(self) -> None:
+        """Shell-identical: an ABSENT/garbage owner_pid ⇒ dead (unverifiable)."""
+        txn = self._txn(owner_pid=None, hb_age_s=900)
+        ok, reason = uj.txn_is_reclaimable(txn)
+        assert ok is True, reason
+
+    def test_garbage_owner_counts_as_dead(self) -> None:
+        txn = self._txn(owner_pid=0, hb_age_s=900)
+        ok, _reason = uj.txn_is_reclaimable(txn)
+        assert ok is True
+
+    def test_no_in_flight_is_not_reclaimable(self) -> None:
+        ok, reason = uj.txn_is_reclaimable(None)
+        assert ok is False
+        assert reason == "no-in-flight"
+
+    # ── the disposal (claim-before-adopt) ────────────────────────────────
+
+    def test_reclaim_clears_orphaned_txn_and_journals_sweep(
+        self, install: Path
+    ) -> None:
+        """The orphaned pre-flip txn is DISPOSED: in_flight cleared, a 'sweep'
+        history row journaled (the shell's event name for this branch), the
+        pipeline lock released, and the pending_op of the SAME run closed."""
+        run_id = "r-d1-orphan"
+        uj.journal_update_field(
+            install,
+            "in_flight",
+            self._txn(
+                owner_pid=_dead_pid(),
+                hb_age_s=900,
+                target="1.2.3",
+                run_id=run_id,
+            ),
+        )
+        uj.write_pending_op(
+            install,
+            PendingOp(
+                run_id=run_id,
+                kind="promote",
+                env="demo",
+                target="1.2.3",
+                owner_pid=_dead_pid(),
+                owner_kind="executor",
+            ),
+        )
+        note = uj.reclaim_stale_txn(install, actor="test")
+        assert note is not None and "reclaimed" in note
+        data = journal_read(install)
+        assert data.get("in_flight") is None, "the orphaned txn must be cleared"
+        assert uj.read_pending_op(install) is None, (
+            "the pending_op of the SAME run must be closed with its txn"
+        )
+        assert uj.lock_run_id(install) is None, (
+            "the pipeline lock must be free again (the arm may proceed)"
+        )
+        events = [e["event"] for e in data["history"]]
+        assert "sweep" in events, "the disposal must be journaled as 'sweep'"
+
+    def test_reclaim_leaves_a_live_txn_untouched(self, install: Path) -> None:
+        """A LIVE txn is never disposed (no silent double-promote window)."""
+        txn = self._txn(owner_pid=os.getpid(), hb_age_s=900)
+        uj.journal_update_field(install, "in_flight", txn)
+        assert uj.reclaim_stale_txn(install, actor="test") is None
+        data = journal_read(install)
+        assert data.get("in_flight") == txn, "a live txn must be untouched"
+        assert [e["event"] for e in data["history"]] == []
+
+    def test_reclaim_leaves_a_fresh_heartbeat_txn_untouched(
+        self, install: Path
+    ) -> None:
+        """Fresh heartbeat (dead owner) ⇒ untouched — the conservative
+        reading, mirrored from the shell."""
+        txn = self._txn(owner_pid=_dead_pid(), hb_age_s=5)
+        uj.journal_update_field(install, "in_flight", txn)
+        assert uj.reclaim_stale_txn(install, actor="test") is None
+        assert journal_read(install).get("in_flight") == txn
+
+    def test_reclaim_leaves_a_flipped_txn_untouched(self, install: Path) -> None:
+        """A FLIPPED txn is mid-ceremony: its recovery (rollback/quarantine,
+        or the serving-green commit) belongs to the adopt ceremony and the
+        serving-green closer lane — NOT to a bare clear."""
+        txn = self._txn(owner_pid=_dead_pid(), hb_age_s=900, flipped=True)
+        uj.journal_update_field(install, "in_flight", txn)
+        assert uj.reclaim_stale_txn(install, actor="test") is None
+        assert journal_read(install).get("in_flight") == txn
+
+    def test_reclaim_refuses_when_a_live_owner_holds_the_lock(
+        self, install: Path
+    ) -> None:
+        """CLAIM-BEFORE-ADOPT: the claim is the pipeline lock. A LIVE owner
+        holding it ⇒ the claim fails ⇒ NOTHING is disposed (fail-closed) —
+        a second arm can never clear a txn under a live holder."""
+        acquired, _busy = uj.lock_acquire(install, "r-live-holder")
+        assert acquired
+        txn = self._txn(owner_pid=_dead_pid(), hb_age_s=900)
+        uj.journal_update_field(install, "in_flight", txn)
+        assert uj.reclaim_stale_txn(install, actor="test") is None
+        assert journal_read(install).get("in_flight") == txn
+        assert uj.lock_run_id(install) == "r-live-holder", (
+            "the live holder's lock must survive the refused reclaim"
+        )
+
+    def test_reclaim_does_not_clear_a_txn_replaced_under_the_claim(
+        self, install: Path, monkeypatch
+    ) -> None:
+        """THE RACE CLOSE: the reclaim re-reads the journal UNDER the claim
+        and requires the SAME txn identity. A concurrent armer that replaced
+        the txn wins — the reclaim clears NOTHING (the arm's own lock
+        acquisition is the final arbiter)."""
+        original = self._txn(
+            owner_pid=_dead_pid(), hb_age_s=900, target="1.2.3", run_id="r-old"
+        )
+        uj.journal_update_field(install, "in_flight", original)
+        real_read = uj.journal_read
+        calls = {"n": 0}
+
+        def _swapping_read(install_dir: Path) -> dict[str, Any]:
+            calls["n"] += 1
+            data = real_read(install_dir)
+            if calls["n"] >= 2:
+                # The second read (under the claim) sees a DIFFERENT txn —
+                # and a DIFFERENT-BUT-STILL-RECLAIMABLE one (dead owner +
+                # stale heartbeat): only the IDENTITY check can stop the
+                # clear. A merely-live txn would be stopped by the second
+                # predicate evaluation instead — that would make this pin
+                # pass for the wrong reason (a non-isolating pin).
+                data = dict(data)
+                data["in_flight"] = self._txn(
+                    owner_pid=_dead_pid(),
+                    hb_age_s=900,
+                    target="9.9.9",
+                    run_id="r-new",
+                )
+            return data
+
+        monkeypatch.setattr(uj, "journal_read", _swapping_read)
+        assert uj.reclaim_stale_txn(install, actor="test") is None
+        monkeypatch.undo()
+        assert journal_read(install).get("in_flight") == original, (
+            "the replaced txn must NOT be cleared by the stale judgement"
+        )
+
+    def test_reclaim_keeps_a_foreign_pending_op(self, install: Path) -> None:
+        """The pending_op tie-in rule: an op that cannot be PROVEN to be the
+        dead run's op is never cleared (the txn's clearance still unblocks
+        it via the existing expiry closure)."""
+        uj.journal_update_field(
+            install,
+            "in_flight",
+            self._txn(owner_pid=_dead_pid(), hb_age_s=900, target="1.2.3"),
+        )
+        uj.write_pending_op(
+            install,
+            PendingOp(
+                run_id="r-foreign",
+                kind="promote",
+                env="demo",
+                target="1.2.3",
+                owner_pid=os.getpid(),   # a LIVE owner — not the dead run
+                owner_kind="tool-arm",
+            ),
+        )
+        note = uj.reclaim_stale_txn(install, actor="test")
+        assert note is not None and "reclaimed" in note
+        assert journal_read(install).get("in_flight") is None
+        assert uj.read_pending_op(install) is not None, (
+            "a foreign pending_op must survive the reclaim"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# W2 (2026-11-11): the stop-script SIBLING probe in the restart/rollback
+# executors — self-contained bash, no lib.sh dependency (both files must
+# work standalone), refusing BEFORE any lock/txn/stop.
+# ══════════════════════════════════════════════════════════════════════════
+class TestStopScriptSiblingProbe:
+    """The shell probes (scripts/upgrade/restart.sh + rollback.sh) refuse
+    EARLY when the stop-script sibling the stop step would resolve is
+    missing or not executable — the v0.29.16 2026-11-11 rc=127 halt class.
+
+    HERMETIC: a tmp scripts tree (copied from the repo), a tmp install dir,
+    a fake HOME, the sandbox env — nothing live is touched. The control leg
+    (sibling present + executable) proves the probe is the DISCRIMINATOR,
+    not an incidental refusal.
+    """
+
+    @staticmethod
+    def _tree(tmp_path: Path) -> tuple[Path, Path]:
+        """A tmp scripts tree WITHOUT the stop-script sibling + a tmp
+        install dir. Returns (scripts_dir, install_dir)."""
+        scripts = tmp_path / "scripts"
+        (scripts / "upgrade").mkdir(parents=True)
+        for name in ("lib.sh", "restart.sh", "rollback.sh"):
+            src = REPO_ROOT / "scripts" / "upgrade" / name
+            (scripts / "upgrade" / name).write_text(
+                src.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        install = tmp_path / "install"
+        (install / "releases" / "1.2.3").mkdir(parents=True)
+        (install / "releases" / "1.2.3" / "manifest.json").write_text(
+            json.dumps({"version": "1.2.3", "rollback_safe": True}),
+            encoding="utf-8",
+        )
+        (tmp_path / "fake-home").mkdir()
+        return scripts, install
+
+    @staticmethod
+    def _run(scripts: Path, install: Path, home: Path, script: str, *args: str):
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(home),
+            "INSTALL_DIR": str(install),
+            "PORT": "8399",
+            "POSTGRES_DB": "test_db",
+            "ENSEMBLE_SELF_ENV": "sandbox",
+        }
+        return subprocess.run(
+            ["bash", str(scripts / "upgrade" / script), "sandbox", *args],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+            cwd=str(scripts.parent),
+        )
+
+    def test_restart_refuses_when_the_sibling_is_missing(self, tmp_path: Path) -> None:
+        scripts, install = self._tree(tmp_path)
+        home = tmp_path / "fake-home"
+        proc = self._run(scripts, install, home, "restart.sh", "--run-id", "r-probe")
+        assert proc.returncode == 78, (proc.returncode, proc.stdout, proc.stderr)
+        assert "stop-script sibling not usable" in (proc.stdout + proc.stderr), (
+            f"the probe must name the condition: {proc.stdout}{proc.stderr}"
+        )
+        assert "stop-ensemble.sh" in (proc.stdout + proc.stderr)
+        # BEFORE any lock/txn/stop: no lock, no journal txn.
+        assert not (install / "releases" / "rollback.lock.d").exists(), (
+            "the probe must refuse BEFORE the lock is taken"
+        )
+
+    def test_rollback_refuses_when_the_sibling_is_missing(self, tmp_path: Path) -> None:
+        scripts, install = self._tree(tmp_path)
+        home = tmp_path / "fake-home"
+        proc = self._run(scripts, install, home, "rollback.sh", "--to", "1.2.3")
+        assert proc.returncode == 78, (proc.returncode, proc.stdout, proc.stderr)
+        assert "stop-script sibling not usable" in (proc.stdout + proc.stderr), (
+            f"the probe must name the condition: {proc.stdout}{proc.stderr}"
+        )
+        assert not (install / "releases" / "rollback.lock.d").exists(), (
+            "the probe must refuse BEFORE the lock is taken"
+        )
+
+    def test_restart_refuses_when_the_sibling_is_not_executable(
+        self, tmp_path: Path
+    ) -> None:
+        """The exec-bit half (conservative hardening: every consumer invokes
+        `bash stop-ensemble.sh`; lib.sh itself only tests -f)."""
+        scripts, install = self._tree(tmp_path)
+        sibling = scripts / "stop-ensemble.sh"
+        sibling.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        sibling.chmod(0o644)
+        home = tmp_path / "fake-home"
+        proc = self._run(scripts, install, home, "restart.sh", "--run-id", "r-probe")
+        assert proc.returncode == 78, (proc.returncode, proc.stdout, proc.stderr)
+        assert "stop-script sibling not usable" in (proc.stdout + proc.stderr)
+
+    def test_control_leg_sibling_present_passes_the_probe(self, tmp_path: Path) -> None:
+        """NON-VACUITY: with the sibling present + executable the probe does
+        NOT fire — the script proceeds past it (its own preflight may still
+        refuse for an unrelated reason; the probe's message must be
+        ABSENT)."""
+        scripts, install = self._tree(tmp_path)
+        sibling = scripts / "stop-ensemble.sh"
+        sibling.write_text(
+            "#!/usr/bin/env bash\n# fixture (never executed)\n", encoding="utf-8"
+        )
+        sibling.chmod(0o755)
+        home = tmp_path / "fake-home"
+        proc = self._run(scripts, install, home, "restart.sh", "--run-id", "r-probe")
+        assert "stop-script sibling not usable" not in (proc.stdout + proc.stderr), (
+            f"the probe must NOT fire when the sibling is usable: "
+            f"{proc.stdout}{proc.stderr}"
+        )
