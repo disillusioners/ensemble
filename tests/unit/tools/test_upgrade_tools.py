@@ -2883,8 +2883,10 @@ class TestArmPreflightBeforeBurn:
     """The preflight sits AFTER the lock acquire but BEFORE the nonce burn
     (the plan's recommended slot): a refused preflight releases the lock,
     journals its refusal (best-effort — the live read-only carve-out
-    applies), and returns cleanly with the nonce UNUSED. Three checks, three
-    tokens: ``executor-scripts-unavailable`` (reused), 
+    applies), and returns cleanly with the nonce UNUSED. Four checks, four
+    tokens (the stop-script sibling Check 1b — ``preflight-stop-script-
+    missing`` — landed 2026-11-11, pinned by TestArmPreflightStopScriptSibling
+    below): ``executor-scripts-unavailable`` (reused), 
     ``preflight-argv-unconstructable`` (new), ``preflight-argv-malformed``
     (new). Sibling class — no existing live-gate test is modified."""
 
@@ -2993,21 +2995,27 @@ class TestArmPreflightStopScriptSibling:
     """Check 1b — the stop-script sibling. The promote stop step resolves its
     stop script as the SIBLING ONE LEVEL UP of the resolved scripts dir (lib.sh
     ``stop_via_stop_script``: ``$(dirname ...)/../stop-ensemble.sh``); a
-    scripts tree whose parent lacks the EXECUTABLE sibling used to sail through
-    arming and abort MID-PROMOTE (bash: No such file or directory → rc=127 →
-    B4 abort — the 2026-11-11 v0.29.16 live promote halt). The preflight now
-    refuses BEFORE the nonce burn, naming the expected path + the canonical
-    repo source. NON-VACUITY: disabling the check turns the two refusal legs
-    RED (the no-check mutant); this class is the pin that kills it."""
+    scripts tree whose parent lacks the sibling used to sail through arming
+    and abort MID-PROMOTE (bash: No such file or directory → rc=127 → B4
+    abort — the 2026-11-11 v0.29.16 live promote halt). The preflight refuses
+    BEFORE the nonce burn, naming the expected path + the canonical repo
+    source. The EXECUTABLE requirement is conservative hardening — every
+    consumer invokes ``bash stop-ensemble.sh`` and lib.sh itself tests only
+    ``-f``, so exec is not a runtime need (the MISSING sibling is what kills
+    the run). NON-VACUITY: disabling the CHECK turns the two refusal legs RED
+    (the no-check mutant); disabling the RESOLVE (raw override returned)
+    turns the two W5 override pins RED (relative/tilde spellings named
+    un-resolved); this class is the pin that kills both."""
 
     @staticmethod
-    def _scripts_tree(tmp_path: Path) -> Path:
+    def _scripts_tree(tmp_path: Path, *, name: str = "ops-scripts") -> Path:
         """A synthetic scripts dir that passes Checks 1-3 (lib.sh present;
         promote.sh carrying the ``--f2-verified-closed`` case) — everything
         EXCEPT the stop sibling, which each leg arranges itself. Non-git +
         stamp-less → Check 4's provenance branch WARNS only (never refuses),
-        so the pass leg arms."""
-        d = tmp_path / "ops-scripts" / "upgrade"
+        so the pass leg arms. ``name`` lets the W5 override pins spell
+        relative/tilde overrides against a distinctive dir."""
+        d = tmp_path / name / "upgrade"
         d.mkdir(parents=True)
         (d / "lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
         (d / "promote.sh").write_text(
@@ -3075,8 +3083,10 @@ class TestArmPreflightStopScriptSibling:
         self, live_harness, tmp_path: Path, monkeypatch
     ) -> None:
         """(c) sibling PRESENT but NOT EXECUTABLE (chmod 644) → refuse —
-        existence alone is not enough; promote would still die rc=127 at the
-        stop step."""
+        conservative hardening, NOT a runtime requirement: every consumer
+        invokes ``bash stop-ensemble.sh`` (lib.sh stop_via_stop_script,
+        deploy.sh, Makefile) and lib.sh itself tests only ``-f``; the gate
+        holds the sibling to a launcher-grade contract."""
         live = live_harness
         scripts = self._scripts_tree(tmp_path)
         sibling = self._expected_sibling(scripts)
@@ -3087,6 +3097,50 @@ class TestArmPreflightStopScriptSibling:
         assert _refusal_reason(out) == "preflight-stop-script-missing", out
         assert str(self._expected_sibling(scripts)) in out, (
             f"the refusal must name the exact expected path: {out}"
+        )
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_refusal_resolves_relative_override_before_deciding(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """W5 — a RELATIVE ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` override is
+        resolved to ABSOLUTE before the gate decides: the refusal names the
+        daemon-CWD-independent absolute sibling path (the executor runs with
+        ``cwd=install_dir`` — upgrade_journal Popen — so a daemon-CWD-relative
+        scripts dir would diverge between the gate's decision, the arm
+        marker, and the payload's own resolution). Mutant-kill: a resolver
+        that returns the RAW override names a relative path here → RED."""
+        live = live_harness
+        scripts = self._scripts_tree(tmp_path, name="rel-scripts")
+        monkeypatch.chdir(tmp_path)  # the daemon CWD the relative pin reads against
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", "./rel-scripts/upgrade")
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "preflight-stop-script-missing", out
+        assert str(self._expected_sibling(scripts)) in out, (
+            f"the refusal must name the RESOLVED ABSOLUTE sibling path: {out}"
+        )
+        assert "rel-scripts/stop-ensemble.sh" not in out.replace(
+            str(self._expected_sibling(scripts)), ""
+        ), f"the refusal must NOT name a daemon-CWD-relative path: {out}"
+        TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
+
+    async def test_refusal_resolves_tilde_override_before_deciding(
+        self, live_harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """W5 — an UNEXPANDED ``~/...`` override is expanduser().resolve()d
+        before the gate decides: the refusal names the absolute path under
+        the daemon's HOME, never the literal ``~/...`` spelling."""
+        live = live_harness
+        scripts = self._scripts_tree(tmp_path, name="home-scripts")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", "~/home-scripts/upgrade")
+        run_id, out = await TestArmPreflightBeforeBurn._armed_call(live)
+        assert _refusal_reason(out) == "preflight-stop-script-missing", out
+        assert str(self._expected_sibling(scripts)) in out, (
+            f"the refusal must name the RESOLVED ABSOLUTE sibling path: {out}"
+        )
+        assert "~/home-scripts" not in out, (
+            f"the refusal must NOT carry the unexpanded tilde path: {out}"
         )
         TestArmPreflightBeforeBurn._assert_nonce_intact(live, run_id)
 
@@ -4313,15 +4367,14 @@ class TestManagerDrainPendingExecution:
 
 def _pinned_scripts(tmp_path: Path, *, stamp: str | None = "deadbeef",
                     lib: bool = True, promote: bool = True,
-                    git_shaped: bool = False,
-                    stop: bool = True) -> Path:
+                    git_shaped: bool = False) -> Path:
     """A scratch pinned scripts dir. ``git_shaped`` plants a bare ``.git``
     entry — enough for the guard's git-SHAPE classification without needing a
     real repository (the probe itself is stubbed or raising in these legs).
-    ``stop`` lays out the stop-script sibling one level up (present +
-    executable) — Check 1b of the arm preflight requires it, so provenance
-    legs that mean to reach Check 4 need the full layout; pass ``stop=False``
-    to exercise the sibling gate itself."""
+    Also lays out the stop-script sibling one level up (present + executable)
+    — Check 1b of the arm preflight requires it, so provenance legs that mean
+    to reach Check 4 get the full layout (the sibling-gate legs build their
+    own trees)."""
     d = tmp_path / "pinned-scripts" / "upgrade"
     d.mkdir(parents=True, exist_ok=True)
     if lib:
@@ -4337,13 +4390,12 @@ def _pinned_scripts(tmp_path: Path, *, stamp: str | None = "deadbeef",
         )
     if git_shaped:
         (d / ".git").mkdir()
-    if stop:
-        sibling = d.parent / "stop-ensemble.sh"
-        sibling.write_text(
-            "#!/usr/bin/env bash\n# fixture stop-ensemble.sh (never executed)\n",
-            encoding="utf-8",
-        )
-        sibling.chmod(0o755)
+    sibling = d.parent / "stop-ensemble.sh"
+    sibling.write_text(
+        "#!/usr/bin/env bash\n# fixture stop-ensemble.sh (never executed)\n",
+        encoding="utf-8",
+    )
+    sibling.chmod(0o755)
     return d
 
 

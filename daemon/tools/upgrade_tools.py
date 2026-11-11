@@ -1985,7 +1985,11 @@ def _in_flight_state(journal: dict[str, Any] | None) -> dict[str, Any] | None:
 
 def _resolve_scripts_dir(install_dir: Path | None) -> Path | None:
     """Locate the P2.1 pipeline scripts (``lib.sh`` + payloads). Order:
-    (1) explicit ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` (drills/ops); (2) the
+    (1) explicit ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` (drills/ops) —
+    ``expanduser().resolve()``d to an ABSOLUTE path (W5, 2026-11-11: the
+    executor runs with ``cwd=install_dir`` — upgrade_journal Popen — so a
+    daemon-CWD-relative override would diverge between the gate's decision,
+    the arm marker, and the payload's own resolution); (2) the
     repo checkout this module lives in (source-mode daemons — the frozen
     binary does not carry scripts/); (3) ``<install_dir>/scripts/upgrade``
     (if a future release stages them). Armed execution without a resolvable
@@ -1993,7 +1997,10 @@ def _resolve_scripts_dir(install_dir: Path | None) -> Path | None:
     candidates: list[Path] = []
     override = os.environ.get("ENSEMBLE_UPGRADE_SCRIPTS_DIR", "").strip()
     if override:
-        candidates.append(Path(override))
+        try:
+            candidates.append(Path(override).expanduser().resolve())
+        except OSError:
+            candidates.append(Path(override))
     try:
         candidates.append(Path(__file__).resolve().parents[2] / "scripts" / "upgrade")
     except (IndexError, OSError):
@@ -3630,9 +3637,14 @@ never decides go/rollback).
             # step resolves its stop script as the SIBLING ONE LEVEL UP of
             # the resolved scripts dir (lib.sh ``stop_via_stop_script``:
             # ``$(dirname ...)/../stop-ensemble.sh``) — a scripts tree whose
-            # parent lacks the executable sibling sails through arming and
-            # aborts MID-PROMOTE at the daemon-stop step (bash: No such file
-            # or directory → rc=127 → B4 abort, flip never reached). No
+            # parent lacks the sibling sails through arming and aborts
+            # MID-PROMOTE at the daemon-stop step (bash: No such file or
+            # directory → rc=127 → B4 abort, flip never reached). The
+            # exec-bit requirement is CONSERVATIVE HARDENING, not a runtime
+            # need: every consumer invokes ``bash "$stop_script"``
+            # (lib.sh stop_via_stop_script, deploy.sh, Makefile stop/stop-by-
+            # port/uninstall) and lib.sh itself tests only ``-f`` — the gate
+            # simply holds the sibling to a launcher-grade contract. No
             # packaging lane ships that file, so the canonical source is the
             # repo checkout's ``scripts/stop-ensemble.sh`` — copy it to the
             # expected path + chmod +x. Fail-closed: ANY probe error counts
@@ -3650,14 +3662,17 @@ never decides go/rollback).
                     label,
                     "preflight-stop-script-missing",
                     f"arm preflight: stop-script sibling not usable at "
-                    f"{stop_script} (must exist AND be executable) — the "
-                    "promote stop step resolves the sibling one level up of "
-                    "the scripts dir (lib.sh stop_via_stop_script: "
-                    "<scripts_dir>/../stop-ensemble.sh) and would abort "
-                    "mid-promote (bash: No such file or directory → rc=127, "
-                    "the v0.29.16 2026-11-11 halt class); fix: copy the repo "
-                    f"scripts/stop-ensemble.sh to {stop_script} and chmod "
-                    "+x. nonce NOT burned",
+                    f"{stop_script} (must exist AND carry the exec bit — "
+                    "conservative hardening: every consumer invokes "
+                    "`bash stop-ensemble.sh`, so exec is NOT a runtime "
+                    "requirement; lib.sh itself only tests -f) — the "
+                    "promote stop step resolves the sibling one level up "
+                    "of the scripts dir (lib.sh stop_via_stop_script: "
+                    "<scripts_dir>/../stop-ensemble.sh) and a MISSING "
+                    "sibling aborts mid-promote (bash: No such file or "
+                    "directory → rc=127, the v0.29.16 2026-11-11 halt "
+                    "class); fix: copy the repo scripts/stop-ensemble.sh "
+                    f"to {stop_script} and chmod +x. nonce NOT burned",
                 )
             # Check 2 — argv/env construction works. The shared verified-arm
             # helpers from Item 1 run against a synthetic op built exactly
