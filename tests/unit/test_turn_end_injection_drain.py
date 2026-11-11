@@ -360,10 +360,73 @@ class TestTurnEndInjectionEndToEnd:
         assert slot.clear_calls == []
 
 
+class TestProductionGraphWiring:
+    """The PRODUCTION wiring must keep the turn alive too.
+
+    The router factory is only half the fix — ``build_instance_graph``
+    must actually wrap the agent's terminal router with it, in BOTH
+    wiring shapes (language check ON and OFF). These legs build the real
+    production graph and drive a real turn.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("user_language", ["Auto", "English"])
+    async def test_production_graph_consumes_a_mid_turn_injection(
+        self, real_graph_module, user_language
+    ):
+        """A message injected while the final LLM call is in flight must be
+        consumed by the PRODUCTION graph, not dropped."""
+        from langchain_core.messages import AIMessage
+
+        iid = "iid-production"
+
+        class _Slot(_StubInjectionSlot):
+            pass
+
+        slot = _Slot()
+
+        class _LLM:
+            def __init__(self):
+                self.calls: list[list[Any]] = []
+
+            def invoke(self, messages):
+                self.calls.append(list(messages))
+                if len(self.calls) == 1:
+                    # The user types while the final LLM call is in flight.
+                    slot.set(iid, "also do X")
+                return AIMessage(content="ok")
+
+        llm = _LLM()
+        real_graph_module.build_instance_llms = lambda **_: (llm, llm)
+        graph = real_graph_module.build_instance_graph(
+            tools=[],
+            checkpointer=None,
+            llm_config={"model": "test-model", "base_url": "http://example.invalid"},
+            system_prompt="you are a test assistant",
+            retry_config={"transient_attempts": 1, "timeout_attempts": 1},
+            injection_slot=slot,
+            user_language=user_language,
+        )
+
+        async for _ in graph.astream(
+            {"messages": [HumanMessage(content="original question")]},
+            {"configurable": {"thread_id": iid}},
+        ):
+            pass
+
+        assert len(llm.calls) == 2, user_language
+        assert slot.get(iid) is None, user_language
+        injected = [
+            m
+            for m in llm.calls[1]
+            if isinstance(m, HumanMessage) and m.content == "also do X"
+        ]
+        assert len(injected) == 1, user_language
+
+
 # ---------------------------------------------------------------------------
 # Seam 2 — the instance-level end-of-turn drain (pipeline)
 # ---------------------------------------------------------------------------
-
 
 def _make_manager(pending: list[dict] | None):
     manager = MagicMock(name="InstanceManager")
