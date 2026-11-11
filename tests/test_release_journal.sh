@@ -2079,13 +2079,15 @@ ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" '[]'
 b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
 f4h_patch_rbs() {  # f4h_patch_rbs <ver> <true|false>
-    python3 - "$SBX/releases/$1/manifest.json" "$2" <<'PYM'
-import json, sys
-p, val = sys.argv[1], sys.argv[2]
-d = json.load(open(p))
-d["rollback_safe"] = (val == "true")
-json.dump(d, open(p, "w"))
-PYM
+    # TEXTUAL patch ONLY. A json.load→json.dump round-trip collapses the
+    # pretty multi-line manifest to one line, which BREAKS integrity_verify's
+    # `_manifest_map_lines` sed extraction (the {path:sha} maps stop parsing,
+    # every agents/frontend line diffs, and the promote refuses at
+    # CURRENT-integrity pre-txn rc 78 — observed as the D/E/C pre-txn
+    # refusals). rollback_safe is a top-level identity field — NOT hashed.
+    sed -E "s/\"rollback_safe\": (true|false)/\"rollback_safe\": $2/" \
+        "$SBX/releases/$1/manifest.json" > "$SBX/releases/$1/manifest.json.tmp" \
+        && mv "$SBX/releases/$1/manifest.json.tmp" "$SBX/releases/$1/manifest.json"
 }
 f4h_patch_rbs "$SBX_V1" false
 f4h_arm D 78 "supervisor-disarmed-prev-unsafe"
