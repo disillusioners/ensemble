@@ -400,12 +400,14 @@ _file_kv() {
 read_alert_state() {
     ABORT_SEEN=0
     JOURNAL_SEEN=0
+    FLIPPED_ORPHAN_SEEN=0
     [ -f "$ALERT_STATE_FILE" ] || return 0
     local line
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             abort_seen=*)   [[ "${line#abort_seen=}" =~ ^[0-9]+$ ]] && ABORT_SEEN="${line#abort_seen=}" ;;
             journal_seen=*) [[ "${line#journal_seen=}" =~ ^[0-9]+$ ]] && JOURNAL_SEEN="${line#journal_seen=}" ;;
+            flipped_orphan_seen=*) [[ "${line#flipped_orphan_seen=}" =~ ^[0-9]+$ ]] && FLIPPED_ORPHAN_SEEN="${line#flipped_orphan_seen=}" ;;
         esac
     done < "$ALERT_STATE_FILE"
     return 0
@@ -414,7 +416,7 @@ read_alert_state() {
 write_alert_state() {
     [ -n "$ALERT_STATE_FILE" ] || return 0
     local tmp="${ALERT_STATE_FILE}.tmp.$$"
-    printf 'abort_seen=%s\njournal_seen=%s\n' "$ABORT_SEEN" "$JOURNAL_SEEN" \
+    printf 'abort_seen=%s\njournal_seen=%s\nflipped_orphan_seen=%s\n' "$ABORT_SEEN" "$JOURNAL_SEEN" "$FLIPPED_ORPHAN_SEEN" \
         > "$tmp" 2>/dev/null \
         && mv -f "$tmp" "$ALERT_STATE_FILE" 2>/dev/null \
         || { _log "WARN: could not persist watchdog alert state to $ALERT_STATE_FILE"; rm -f "$tmp" 2>/dev/null; }
@@ -513,6 +515,64 @@ check_journal_events() {
     return 0
 }
 
+# (c) D2a SIGKILL-in-window detector (2026-11-11). A promote SIGKILLed inside
+# the flip window journals NOTHING (no halt row — the shell never reached an
+# abort branch), leaving an OPEN in_flight txn with flipped:true whose
+# owner_pid is DEAD. The launcher's comp3-owner-dead reclaim now catches this
+# on the next boot, but the WATCHDOG is the belt for the residual window
+# (flipped-current-booted-silently / supervisor absent). Signature:
+#   * releases/state.json exists and has an OPEN `"in_flight":{` object
+#   * that object carries `"flipped":true`
+#   * its `"owner_pid":N` is present and NOT alive
+# One notify per orphan episode (latched by owner pid); a cleared txn or a
+# live owner resets the latch. Best-effort grep parse — never a JSON parser,
+# never fatal.
+check_flipped_orphan() {
+    local f="$INSTALL_DIR/releases/state.json" owner
+    if [ ! -f "$f" ]; then
+        if [ "${FLIPPED_ORPHAN_SEEN:-0}" -ne 0 ]; then
+            FLIPPED_ORPHAN_SEEN=0; write_alert_state
+        fi
+        return 0
+    fi
+    # Open txn object present?
+    grep -qE '"in_flight": *\{' "$f" 2>/dev/null || {
+        if [ "${FLIPPED_ORPHAN_SEEN:-0}" -ne 0 ]; then FLIPPED_ORPHAN_SEEN=0; write_alert_state; fi
+        return 0
+    }
+    # flipped:true ANCHORED inside the in_flight object (M7, tidier round 3):
+    # a bare \"flipped\": true grep is whole-file, so it could match a
+    # flipped-shaped key in a NON-txn object. The journal writer emits the
+    # in_flight object COMPACT (one line — lib.sh's splice shape), so the
+    # anchored form matches the production shape; on an unexpected
+    # pretty-printed journal it simply does not match (fail-safe: a missed
+    # alert, never a false one).
+    grep -qE '"in_flight": *\{[^}]*"flipped": *true' "$f" 2>/dev/null || {
+        if [ "${FLIPPED_ORPHAN_SEEN:-0}" -ne 0 ]; then FLIPPED_ORPHAN_SEEN=0; write_alert_state; fi
+        return 0
+    }
+    # owner_pid ANCHORED to the in_flight object (M7, tidier round 3). The old
+    # bare `grep ... | tail -1` took the LAST owner_pid anywhere in the file —
+    # and pending_op ALSO carries an owner_pid (the executor stamp,
+    # watchdog-watcher.sh:543-550 reads it for its own purposes), so a
+    # pending_op that follows in_flight made the watcher probe the WRONG pid.
+    # The in_flight anchor keeps the field match inside the txn object.
+    owner="$(grep -oE '"in_flight": *\{[^}]*"owner_pid": *[0-9]+' "$f" 2>/dev/null | grep -oE '[0-9]+$' | head -1)"
+    [ -n "$owner" ] || return 0
+    if kill -0 "$owner" 2>/dev/null; then
+        if [ "${FLIPPED_ORPHAN_SEEN:-0}" -ne 0 ]; then FLIPPED_ORPHAN_SEEN=0; write_alert_state; fi
+        return 0
+    fi
+    if [ "${FLIPPED_ORPHAN_SEEN:-0}" -ne "$owner" ]; then
+        FLIPPED_ORPHAN_SEEN="$owner"
+        write_alert_state
+        _notify "Ensemble promote SIGKILLED in-window (supervisor=absent / flipped-current-booted-silently)" \
+            "releases/state.json has an OPEN in_flight txn (flipped:true, target unclear) whose owner_pid=$owner is DEAD — the promote died mid-window, no halt row was journaled. Recovery: check the launcher's comp3-owner-dead sweep reclaimed the txn; if the flipped current looks broken, roll back to previous; if the daemon is not supervised, 'launchctl bootstrap gui/$(id -u) com.ensemble.prod' (or the install's plist)." \
+            "flipped-orphan"
+    fi
+    return 0
+}
+
 # ── Main ────────────────────────────────────────────────────────────────────
 read_state
 read_alert_state
@@ -522,7 +582,7 @@ read_alert_state
 # no marker files present both checks are silent and write nothing.
 check_burst_abort
 check_journal_events
-
+check_flipped_orphan
 if probe_livez; then
     if [ "$FIRST_MISS_AT" -gt 0 ]; then
         _log "RECOVERED: /livez answering again on :$PORT (was absent since epoch $FIRST_MISS_AT)"

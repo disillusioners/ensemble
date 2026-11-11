@@ -2886,8 +2886,12 @@ _js_sweep_flipped_disposition() {
         return 0
     fi
     # the freshness gate (the comp3 fast path above skipped it in
-    # _journal_sweep; mirror it here so the T15 hook path agrees)
-    if [ "$age" -le "$SWEEP_STALE_S" ] && ! { [ "$hb_stale" = "1" ] && [ "$owner_dead" = "1" ]; }; then
+    # _journal_sweep; mirror it here so the T15 hook path agrees). D2a
+    # SIGKILL mitigation: a FRESH heartbeat no longer protects a txn whose
+    # owner is provably DEAD (the promote refreshes the heartbeat ⇒ it is
+    # fresh at a SIGKILL) — owner_dead ALONE is reclaimable. A LIVE owner
+    # still defers (a fresh txn belongs to a running promote).
+    if [ "$age" -le "$SWEEP_STALE_S" ] && [ "$owner_dead" = "0" ]; then
         return 0
     fi
     # ── the lock ──
@@ -3311,12 +3315,41 @@ _journal_sweep() {
     fi
 
     # Fresh txn (≤ SWEEP_STALE_S) → the owner may still be alive. Leave it
-    # UNLESS the liveness fast path fires (hb_stale + owner_dead →
-    # reclaim now). The freshness check below is the conservative reading
-    # when the fast path doesn't apply.
+    # UNLESS a liveness fast path fires. TWO fast paths:
+    #   comp3 (original): hb_stale ∧ owner_dead → reclaim now.
+    #   comp3-owner-dead (D2a SIGKILL mitigation, 2026-11-11): the promote
+    #     refreshes the heartbeat every ~30s ⇒ at a SIGKILL inside the window
+    #     the heartbeat is < 300s old ⇒ hb_stale=0 ⇒ the ORIGINAL comp3 does
+    #     NOT fire ⇒ the sweep "leaves alone" ⇒ the launcher boots the FLIPPED
+    #     (possibly-broken) current SILENTLY. But the owner pid is DIRECTLY
+    #     checkable and provably DEAD ⇒ treat owner_dead ALONE as reclaimable,
+    #     after a short BOUNDED confirmation wait (re-check liveness so a
+    #     transient /proc hiccup cannot false-reclaim). The heartbeat-age bound
+    #     at kill is exactly "< 300 s" (HEARTBEAT_STALE_S=300); typical
+    #     heartbeat age at SIGKILL is ≤30s (the promote heartbeat cadence), but
+    #     a stalled promote can reach just-under 300s — the point is that
+    #     hb_stale stays 0 either way, so owner-dead must carry the decision.
     if [ "$age" -le "$SWEEP_STALE_S" ]; then
         if [ "$hb_stale" = "1" ] && [ "$owner_dead" = "1" ]; then
             _log "journal sweep: comp3 fast path triggered (hb_stale=1 owner_dead=1 age=${age}s ≤ SWEEP_STALE_S=${SWEEP_STALE_S}s) — reclaiming (flipped=${flipped:-—})"
+        elif [ "$owner_dead" = "1" ]; then
+            # Bounded confirmation: owner_dead is only trustworthy if it STAYS
+            # dead across a short re-check (a fork/exec hiccup could hide it
+            # briefly). ~3s; a live owner aborts the reclaim (DEFER).
+            _confirm=1
+            for _cw in 1 2 3; do
+                sleep 1
+                if [ -n "$owner" ] && printf '%s' "$owner" | grep -Eq '^[0-9]+$' \
+                   && _js_pid_alive_bounded "$owner" 2>/dev/null; then
+                    _confirm=0; break
+                fi
+            done
+            if [ "$_confirm" = "1" ]; then
+                _log "journal sweep: comp3-owner-dead fast path triggered (owner_dead=1 hb_stale=$hb_stale — heartbeat age ${age}s < HEARTBEAT_STALE_S=${HEARTBEAT_STALE_S}s, owner pid ${owner:-<none>} stayed dead across the bounded re-check) — reclaiming (SIGKILL-in-window mitigation)"
+            else
+                _log "journal sweep: in_flight $kind txn (target=${target:-?}) owner ${owner} re-appeared during the bounded re-check — leaving alone (DEFER)"
+                return 0
+            fi
         else
             _log "journal sweep: in_flight $kind txn (target=${target:-?}) is fresh (${age}s ≤ ${SWEEP_STALE_S}s, hb_stale=$hb_stale owner_dead=$owner_dead) — leaving alone"
             return 0

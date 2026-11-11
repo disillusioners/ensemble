@@ -554,6 +554,87 @@ The state-file relocation ships with v0.29.10 (implemented in leg-2), **default 
 - nvm `lts/*`-style aliases are **unsupported** in the PATH resolver (graceful warning arm) — numeric version aliases only (`22`, `v22`).
 - **F-07 aligned the two `.env` parsers** — both now read the file **last-wins** on duplicate keys (the old launcher-last-wins vs watchdog-head-first asymmetry is **gone**), and both resolve the override in the same order (`.env` → inherited → default). Verified by the tester.
 
+### 6.8 The executor script family — what actually ships (D3)
+
+Until now the install dir's `scripts/` trees were **out-of-band copies**: NO packaging lane shipped them. The staged release payload carried no `scripts/` at all, and `make install` shipped only `scripts/watchdog-watcher.sh`. That gap is what made the **v0.29.16 promote halt** possible — the promote stop step resolves its stop script through a **sibling leg only** (`lib.sh` `stop_via_stop_script`, W4 2026-11-11):
+
+1. the **sibling one level up** of the calling script's dir — `lib.sh` anchors `BASH_SOURCE[1]` (promote.sh's dir), so the leg is `<scripts_dir>/../stop-ensemble.sh`.
+
+**W4 (D2a) removed the old `$(pwd)/scripts/stop-ensemble.sh` fallback** — it was DEAD in the install layout (the executor's cwd IS the install dir, and `make install` ships no `stop-ensemble.sh` under `<install>/scripts/`) and it MASKED a missing sibling with an rc=127 mid-stop. The sibling is now the single source of truth; the shell-side preflight probes (promote.sh §1, restart.sh, rollback.sh — W1/W2) refuse **rc 78 BEFORE any lock/txn/stop** when the sibling is missing or non-executable. PR1 closed the **daemon** side (a fail-closed arm preflight); **this** closes the **shipping** side.
+
+**What ships now, and where** (payload-relative paths — ONE shape, two carriers):
+
+| Path (relative to the payload root / install dir) | What |
+|---|---|
+| `scripts/upgrade/promote.sh`, `lib.sh`, `stage.sh`, `restart.sh`, `rollback.sh`, `status.sh`, `adopt-unit.sh` | the pipeline's executor scripts |
+| `scripts/upgrade/ledger_check.py`, `journal_read.py`, `journal_splice.py`, `_build_frontend.sh` | the pipeline's helper scripts |
+| `scripts/upgrade/executor_family.sh` | the **canonical list + placement primitives** (one definition, shared by the payload assembler and the installers) |
+| `scripts/stop-ensemble.sh` | the stop step's **sibling** — must be present **AND executable** |
+| `scripts/install-dir-guard.sh` | the install-dir guard |
+
+- **Release payload** — `scripts/upgrade/stage.sh` copies the family into `releases/<ver>/` at exactly those relative paths, so `releases/<ver>/scripts/upgrade/promote.sh` (the path §8's promote allowlist already anticipated) and its sibling `releases/<ver>/scripts/stop-ensemble.sh` now EXIST.
+- **Flat install** — `make install` and `scripts/deploy.sh` install the same family into `<install_dir>/scripts/…`, so the daemon's resolver candidate `<install_dir>/scripts/upgrade` (frozen binaries carry no repo checkout) and PR1's arm gate (`<scripts_dir>/../stop-ensemble.sh`, executable) are satisfied on a **fresh install**.
+- **Integrity coverage (M12 scope note)** — the manifest gains `scripts_tree_sha256` + `scripts_manifest` (per-file sha256) + the stamp fields; the family IS integrity-checked **at STAGE time** (stage.sh refuses a temp assembly whose scripts tree mismatches the manifest). The RUNTIME `integrity_verify` walk covers `agents/` + `frontend/` only (lib.sh:4093 loops `for tree in agents frontend`) — the scripts tree is stage-time-only coverage, NOT a run-time per-file verify like the agents/frontend trees.
+- **NO plist ever** — the launchd plists are operator-side (`make plist-install` stages them into `<install_dir>/data/`); they are NOT part of any release payload. The family list is an explicit enumeration and the layout pin test scans the whole staged tree.
+
+**Release obligation (the operator step — NOT an agent step).** `PIPELINE_SCRIPTS_REV` lives in `scripts/upgrade/lib.sh` and `PIPELINE_SCRIPTS_FLOOR_COMMIT` in `daemon/tools/upgrade_tools.py`; the stamp is the commit the shipped scripts claim to contain, so **the first release that ships this family must RE-PIN both constants to a commit that contains the whole family** (D6-8: the two travel together). Until that re-pin, `stage.sh` **refuses** with `PIPELINE_SCRIPTS_REV=… does not COVER the shipped executor family` and names the paths that were absent at the stamped commit — fail-closed on purpose: on a non-git pinned scripts dir the stamp IS the whole provenance (Q2/D6-11), so a stamp that does not cover what ships is a lie. Remedy: re-pin the two constants to the merge commit that introduced the family, then re-stage. **ANCESTOR SEMANTICS (F7/A4, review round 1): the named commit need NOT be the literal last commit to touch `scripts/upgrade/`** — commits may legitimately follow the re-pin (the stamp is not invalidated by later work). The gates are RELATIONAL, not recency-based: the floor gate requires the named commit to be an **ancestor** of the executing tree (`git merge-base --is-ancestor`), the arm-time verdict requires ancestry + parses the stamp VALUE (the lib.sh digest it records is an audit artefact, never a gate input — a checkout carrying local edits still ARMS), and stamp/floor parity is a byte-equality of the two constants. A re-pin is therefore owed only when a *family member ships that the named commit lacks* (the coverage gate), not merely because the tree advanced. Details + the exact edit sites: `docs/runbooks/upgrade-drills.md` §A.8.
+
+### 6.9 D2a — deterministic supervised flip (launchd), fail-safe aborts
+
+The promote lane is now **launchd-aware** (D2a, 2026-11-11). On a launchd-managed Mac the flip is deterministic: **bootout (the barrier) → stop drains with NO second TERM → `launcher_swap($VERSION)` → atomic flip → `launchctl bootstrap` (the JOB starts exactly once via `RunAtLoad`; the bootstrap *command* itself may be re-issued by its 2× retry or answer "already loaded") → post-bootstrap verify (provenance → pid≠pre-stop) → health gate in the CODE order `livez → readyz → version → soak`** (F6: the previous text inverted the verify order — the probes run livez first, then readyz, then the version match, then the soak window). The promote NEVER starts a competing nohup launcher on the supervised path (that race is the 2026-11-11 incident).
+
+**The mode declaration cannot ride the executor env — so D2a runs in AUTO.** The supervision declaration (`ENSEMBLE_SUPERVISION` / `ENSEMBLE_LAUNCHD_LABEL`) is NOT forwarded to the promote executor: the executor env allowlist (`daemon/tools/upgrade_journal.py` `EXECUTOR_ENV_ALLOWLIST`) omits it, and `daemon/manager.py` sets only `INSTALL_DIR`/`PORT` on the executor. Therefore an operator **cannot** rely on `ENSEMBLE_SUPERVISION=launchd` reaching the classify step — on the operator's Mac the classifier **AUTO-probes launchd** (gui domain) and verifies exactly one job whose `launchctl print` dump CONTAINS the `<install>/launcher.sh` path (a whole-dump SUBSTRING match — NOT an argv[1]-realpath parse; F9 note in §6.9, lib.sh:_supervision_launchd_detect). That is why AUTO must be correct: it is the only mode that reliably runs. (Manual runs — `make upgrade-promote` from a shell — DO honor the env; `unsupervised` as a declaration value is D2b.)
+
+**Fail-safe abort end states (never a silent degrade).** Every promote abort names its end state and halts for a human:
+- **Classifier refusal (exit 78, pre-mutation):** zero/multiple/unresolvable launchd job (`supervision-not-verified`), declared `launchd` on a non-Darwin host (`supervision-launchd-incapable-host`), declared `script`/opt-out on Darwin (`supervision-unsupervised-declaration-required`), garbage on Darwin (`supervision-declaration-invalid`). Nothing has been stopped or flipped.
+- **8b gate halt (exit 78, DISARMED):** all four PREV-manifest branches (`no-previous` / `prev-quarantined` / `prev-missing` / `prev-unsafe`) now **bootout** the launchd job ⇒ **DARK + DISARMED** (no KeepAlive self-revival on the broken binary) + a named journal state (`supervisor-disarmed-*`) + a loud operator message. The recovery command is printed (bootstrap a healthy version). An **empty resolved label** refuses the bootout fail-loud (never a whole-domain teardown). **The disarm is BEST-EFFORT** (one `launchctl bootout` attempt): if the bootout does not confirm, the promote journals DISARM FAILED and prints the manual command — it does not guarantee the supervisor is down; verify + bootout by hand (see the footnote under the availability table below).
+- **Verify failure (routes to 8b):** provenance (port holder not `<install>`-anchored), pid==pre-stop, or livez/readyz/version/soak failure ⇒ auto-rollback to `$OLD_CUR` (launcher_swap($PREV) **before** the flip, then bootstrap + re-gate). The launchd verify reason survives into the 8b journal rows.
+- **8b rollback-stop-failure arm (exit 1, `supervisor-disarmed-rollback-stop-failed`):** if the FORWARD ROLLBACK's own stop fails, the arm-local disarm attempts a bootout with that named end state — on Darwin the stop IS the disarm mechanism, so this arm is the one place a failed stop can leave the supervisor **LOADED+ARMED on the broken `$VERSION`** (KeepAlive re-arms it) when the disarm bootout also fails. The operator message prints the MANUAL disarm command for that case:
+  ```bash
+  launchctl bootout gui/$(id -u)/<job-label>     # e.g. com.ensemble.prod — then bootstrap a healthy version
+  ```
+- **8b re-gate-failure arm (exit 78, halt-for-human per ADR-028):** the auto-rollback LANDED on `$PREV` but its own re-gate failed — **by design NO disarm here** (the rollback's stop already succeeded and its hand-back re-armed the supervisor via bootstrap; disarming would take a degraded-but-serving rollback fully DARK). The end state is `halt-for-human` with the release list; the human picks the next step.
+
+**Availability note (F3 — per arm, not a blanket claim).** What a supervised abort leaves behind depends on the arm:
+| Arm | Daemon | Supervisor |
+|---|---|---|
+| classifier refusal | still running (untouched) | LOADED + ARMED (healthy) |
+| 8b manifest-halt branches | DARK | **DISARMED** (bootout at the gate) — see the best-effort footnote¹ |
+| verify-fail → forward rollback, re-gate GREEN | SERVING the rollback target | re-ARMED by the rollback's bootstrap |
+| verify-fail → forward rollback, re-gate FAILED | degraded-or-dark on `$PREV` | re-ARMED by the rollback's bootstrap (no disarm by design, ADR-028) |
+| rollback-stop-failure (F2-arm1) | DARK | **DISARMED if the arm-local bootout confirmed; possibly LOADED+ARMED on the broken version if it did not** — the manual `launchctl bootout` above is the operator backstop |
+
+¹ **Every DISARMED above is BEST-EFFORT** — `_promote_disarm_launchd` is a single `launchctl bootout` attempt; if it fails, the promote prints a loud DISARM FAILED message with the manual command and journals the failure, but it cannot guarantee the supervisor is down. When in doubt after any manifest-halt, verify and disarm by hand:
+```bash
+launchctl print gui/$(id -u)/<job-label>               # still loaded?
+launchctl bootout gui/$(id -u)/<job-label>             # manual disarm (e.g. com.ensemble.prod)
+launchctl bootstrap gui/$(id -u) <healthy-plist>       # then start a healthy version
+```
+The same failure mode is why the rollback-stop-failure row carries the conditional wording inline — no row promises a guarantee the arm cannot always deliver.
+
+Recovery is operator-driven throughout (fail-closed by design).
+
+**SIGKILL-in-window recovery.** A promote SIGKILLed inside the flip window journals NOTHING. On the next launcher boot, the sweep's **comp3-owner-dead** fast path treats a dead owner as reclaimable even with a fresh heartbeat (the promote refreshes the heartbeat, so it is fresh at kill) and disposes the txn; the watchdog also alerts (`supervisor=absent / flipped-current-booted-silently`) on an OPEN `flipped:true` txn with a dead owner. Recovery:
+
+```bash
+# watchdog alerted? inspect the open txn + current, then:
+launchctl print gui/$(id -u)/com.ensemble.prod | head -20     # is the job loaded/running?
+curl -fsS http://127.0.0.1:9797/livez                          # what version is actually serving?
+# if the flipped current looks broken → roll back to previous via promote/rollback,
+#   or start the LKG manually:
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist
+```
+
+**plist `ExitTimeOut` — raise it to N ≥ 90 (operator, NOT shipped in this PR).** The template carries NO `ExitTimeOut` key today, so launchd's ~20 s default (and the live 5 s job value) TRUNCATES a healthy graceful drain. The launcher's stop budget is `CHILD_STOP_WAIT_S=70` (daemon graceful default 60 s + 10 s margin); set `ExitTimeOut` to **N ≥ 90** so launchd's SIGKILL backstop always sits OUTSIDE the launcher's own drain wait. Edit `scripts/ensemble-prod.plist` (add `<key>ExitTimeOut</key><integer>90</integer>`), re-stage the substituted plist into `$(INSTALL_DIR)/data/ensemble-prod.plist` (the install-time substitution — **never `make install` on a live dir**), then `make plist-install`, then reload (bootout + bootstrap).
+
+**`make plist-install` overwrites with NO `.bak` — snapshot first.** It rewrites `~/Library/LaunchAgents/ensemble-prod.plist` in place. If you have hand-edited that plist (PATH, ExitTimeOut), copy it first:
+
+```bash
+cp ~/Library/LaunchAgents/ensemble-prod.plist \
+   ~/Library/LaunchAgents/ensemble-prod.plist.bak-$(date -u +%Y%m%d-%H%M%S)
+make plist-install INSTALL_DIR="$INSTALL_DIR"
+```
+
 ### 6.7 Adopting an already-running manual daemon under launchd (from-zero handover)
 
 The **depth** behind §0's compressed handover — for the case where the daemon is **already running by hand** (no launchd job yet) and you are re-parenting it under launchd. Corrected to current forms (guard-era plist staging, the PATH block, the bootout-from-outside rule). **Expect up to ~70 s of downtime, once**; rollback is two `launchctl bootout` commands away.
@@ -797,7 +878,7 @@ The daemon **stays a gui LaunchAgent as the operator user — NEVER root** (a da
 | `agents/`, `frontend/` | root:wheel | 755 (files 644) | **Behavior change — see the loud callout below** |
 | `.env` | root:`<operator-primary-group>` | 640 | **Adjudication:** NOT root:wheel 600 — the launcher (operator uid) must read it to source env; same-uid lanes can read it regardless (VM parity, accepted). Edits via `sudo` or release payloads; group-readable, never world-readable |
 | `data/**` | operator:staff | 755 | Writable set — instances.db, `data/logs/`, `tmp_images/`, launcher/watchdog logs+state, vscode-user-data |
-| `releases/` | operator:staff | 755 | Writable set — journal, staging, payloads; promote allowlist anticipates `releases/<ver>/scripts/upgrade/promote.sh` |
+| `releases/` | operator:staff | 755 | Writable set — journal, staging, payloads; the promote allowlist's anticipated `releases/<ver>/scripts/upgrade/promote.sh` **now EXISTS** (D3: the staged payload ships the executor script family — `scripts/upgrade/*` + the sibling `scripts/stop-ensemble.sh` + `scripts/install-dir-guard.sh`; see §6.8) |
 | `.launcher-state`, `.sweep-defer-*` | (relocated into `data/`) | — | Via `ENSEMBLE_LAUNCHER_STATE_FILE=/opt/ensemble/data/.launcher-state` — resolves the top-dir seam (root-owned top dir ⇒ operator cannot create state files there). **Default stays `$INSTALL_DIR/.launcher-state` — VM untouched** (override implemented in leg-2, §6.6). Rejected: top-dir ACL (deploy plain-cp drops ACLs) |
 | `/private/var/ensemble/{snapshots,alerts}` | root:root (self-enforced) | 700 / alerts 755 | Above the no-sudo agent class; NOT under `$HOME`; NOT colocated with `/opt` (an `rm -rf /opt/ensemble*` glob must not take the store with it) |
 

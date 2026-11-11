@@ -81,7 +81,10 @@ module split (journal / lock / nonce / alert) is fenced to the post-P2.3
 refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
 grow it further without pulling that fence.
 
-Size rationale: ~2017 lines is the protocol twin of scripts/upgrade/lib.sh
+Size rationale: ~4720 lines MEASURED 2026-11-11 (M13 re-baseline; was ~2017 at
+this fence's mint — the D2a supervision surface, the reclaim/closer twins
+and the builtin/allowlist families landed INSIDE the fence; flagged, not
+quietly accepted) is the protocol twin of scripts/upgrade/lib.sh
 supervision section + the journal/lock/nonce/alert/spawn tool surface —
 the single journal protocol home. Splitting the protocol twin from the
 tool surface would force every contract change to touch two modules.
@@ -318,6 +321,354 @@ def journal_owner_heartbeat_fresh(install_dir: Path) -> bool:
         return False
     age_s = (datetime.now(tz=timezone.utc) - stamp).total_seconds()
     return 0 <= age_s <= OWNER_HEARTBEAT_FRESH_S
+
+
+# ── D1 (2026-11-11): the ONE stale-txn reclaim predicate ───────────────────
+#
+# THE STARVATION (observed 2026-11-11): THREE mechanisms disagreed on when a
+# stale promote/restart txn stops blocking a new arm —
+#   (1) the TOOL busy-check arms (upgrade_tools.py system_upgrade /
+#       system_restart) refused FOREVER on a dead pre-flip txn;
+#   (2) the DAEMON-side sweep never disposed it (reconcile_pending_op
+#       returns None whenever ``in_flight`` is a dict — "promote.sh's txn is
+#       live — the op tracks a real run");
+#   (3) only the SHELL preflight cleared it (lib.sh adopt_stale_txn comp3
+#       FAST PATH — "sweep — orphaned pre-flip promote txn cleared at
+#       promote preflight", 03:33:48Z).
+# The shell lane's rule is the REFERENCE (the brief: "match the shell lane's
+# existing rule exactly, do not invent a third"); this module now OWNS it
+# and BOTH python consumers call it — no divergent copies remain.
+#
+# MIRROR of scripts/upgrade/lib.sh (M14 tidier round 3: anchors re-measured
+# 2026-11-11 — the old :2354/:2372/:7182 triple had drifted):
+#   _txn_heartbeat_stale (lib.sh:2362) — ``in_flight.last_heartbeat`` (epoch
+#       int); missing/garbage ⇒ STALE (a live txn is ALWAYS heartbeat-written
+#       by journal_open_txn, so an absent value means a hand-edited or
+#       legacy journal); stale ⇔ ``now - hb > HEARTBEAT_STALE_S`` (300s).
+#   _txn_owner_dead (lib.sh:2380) — ``in_flight.owner_pid``; missing/garbage
+#       ⇒ DEAD; ``kill -0`` ESRCH ⇒ DEAD; EPERM ⇒ ALIVE (a foreign-owned
+#       owner is never presumed dead — breaking it would trample live work).
+#   adopt_stale_txn (lib.sh:7642) comp3 FAST PATH (lib.sh:7680-7685) —
+#       heartbeat-stale AND owner-dead ⇒ reclaim NOW (skip the SWEEP_STALE_S
+#       =600s age wait); otherwise fall through to the age gate.
+#
+# The predicate keeps the shell's TWO independent conjuncts: a live owner OR
+# a fresh heartbeat ⇒ NOT reclaimable ⇒ the arm is refused (fail-closed, no
+# silent double-promote window). ONLY the dead-owner AND stale-heartbeat cell
+# reclaims.
+TXN_HEARTBEAT_STALE_S: int = 300   # lib.sh HEARTBEAT_STALE_S
+
+
+def txn_heartbeat_stale(in_flight: Any, now_epoch: int | None = None) -> bool:
+    """Is the txn's journal heartbeat stale? (mirror of lib.sh
+    ``_txn_heartbeat_stale``)
+
+    ``in_flight.last_heartbeat`` is the SHELL-owned epoch-SECONDS int (the
+    same field ``journal_owner_heartbeat_fresh`` reads). Missing/garbage ⇒
+    STALE (shell-identical: the liveness dimension owns the decision).
+    """
+    if not isinstance(in_flight, dict):
+        return False
+    hb = in_flight.get("last_heartbeat")
+    if isinstance(hb, bool) or not isinstance(hb, int):
+        # Missing/garbage ⇒ stale (lib.sh: a non-digit heartbeat is stale).
+        return True
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+    return (now - int(hb)) > TXN_HEARTBEAT_STALE_S
+
+
+def txn_owner_dead(in_flight: Any) -> bool:
+    """Is the txn's owner process dead? (mirror of lib.sh
+    ``_txn_owner_dead``)
+
+    Missing/garbage owner_pid ⇒ DEAD (unverifiable); ``kill -0`` ESRCH ⇒
+    DEAD; EPERM ⇒ ALIVE (foreign-user owner — never presumed dead). A probe
+    error (any other OSError) ⇒ DEAD, mirroring both lib.sh's
+    ``kill -0``-failure branch and the daemon closer's
+    ``_closer_owner_dead``.
+    """
+    if not isinstance(in_flight, dict):
+        return False
+    owner = in_flight.get("owner_pid")
+    try:
+        pid = int(owner)
+    except (TypeError, ValueError):
+        return True  # missing/garbage owner pid = unverifiable ⇒ dead
+    if pid <= 0:
+        return True
+    try:
+        return not _pid_alive(pid)
+    except OSError:
+        # A probe error is NOT evidence of life (shell-identical).
+        return True
+
+
+def txn_is_reclaimable(
+    in_flight: Any, now_epoch: int | None = None
+) -> tuple[bool, str]:
+    """THE shared predicate — the single source of truth for "may this stale
+    txn be disposed so a new arm may proceed?".
+
+    Returns ``(reclaimable, reason)``. ``reason`` is a stable machine-ish
+    label (``no-in-flight`` / ``owner-alive`` / ``heartbeat-fresh`` /
+    ``heartbeat-stale+owner-dead``) for the refusal text and the history row.
+
+    RECLAIMABLE ⇔ heartbeat stale AND owner dead (the shell's comp3 FAST
+    PATH). A live owner OR a fresh heartbeat ⇒ NOT reclaimable (fail-closed).
+
+    PREDICATE-DIVERGENCE NOTE (tidier round 3, deliberate — do NOT "fix"):
+    the LAUNCHER'S BOOT RECLAIM (launcher.sh:2889 "owner_dead ALONE is
+    reclaimable" / :3345 the comp3-owner-dead bounded confirm) reclaims on
+    DEAD-ALONE; this tool/sweep predicate requires STALE AND DEAD. The
+    divergence is INTENTIONAL: at boot a dead owner is unambiguous (no
+    process can be refreshing a dead pid's heartbeat, and the boot has
+    already won the singleton race), while the TOOL/SWEEP lane competes
+    with live promotes — a DEAD-ALONE rule there would reopen the
+    double-promote window (a promote that just minted a txn and whose
+    executor pid lookup glitched would be reclaim-able mid-flight). Keep
+    both; "ONE mechanism" means one per lane, not byte-identical predicates.
+    """
+    if not isinstance(in_flight, dict):
+        return False, "no-in-flight"
+    if not txn_owner_dead(in_flight):
+        return False, "owner-alive"
+    if not txn_heartbeat_stale(in_flight, now_epoch):
+        return False, "heartbeat-fresh"
+    return True, "heartbeat-stale+owner-dead"
+
+
+def txn_identity(in_flight: dict[str, Any]) -> str:
+    """A stable identity for the txn record — the race-close key.
+
+    THE shared derivation (A3, review round 1): it lived here as a private
+    helper AND was triplicated in the daemon closer
+    (``upgrade_journal_sweep._closer_txn_identity``) — the closer now
+    DELEGATES here, exactly like ``_closer_owner_dead`` delegates to
+    ``txn_owner_dead`` (D1, 2026-11-11), so the two can never drift.
+
+    The RESTART lane stamps ``run_id`` into ``in_flight``; the PROMOTE lane
+    does NOT (lib.sh ``journal_open_txn`` writes
+    {kind,target,started_at,flipped,owner_pid,last_heartbeat,...}) ⇒ fall
+    back to ``<target>@<started_at>`` (the same shape the shell twin
+    ``launcher.sh``'s ``_js_serving_txn_identity`` derives: stable across
+    ticks, distinct per txn).
+    """
+    run_id = str(in_flight.get("run_id") or "").strip()
+    if run_id:
+        return run_id
+    started = str(in_flight.get("started_at") or "").strip()
+    target = str(in_flight.get("target") or "").strip()
+    if started:
+        return f"{target}@{started}"
+    return target
+
+
+def _pending_op_bound_to_txn(op: PendingOp, in_flight: dict[str, Any]) -> bool:
+    """Is this pending_op the SAME run as this txn? (the pending_op tie-in
+    rule — a reclaim NEVER clears an op it cannot prove is the dead one)
+
+    * the txn carries a run_id (the RESTART lane's shape) ⇒ the op's run_id
+      must equal it;
+    * the PROMOTE lane carries NO run_id (it lives in the pipeline lock) ⇒
+      tie the op to the txn by KIND plus a PROVABLY DEAD executor stamp
+      (``owner_kind == "executor"`` and its pid is dead — the same death the
+      txn evidences). An op still stamped ``tool-arm`` (the executor never
+      ran) is NOT cleared here: the txn's own clearance unblocks the
+      existing expiry closure for that op instead.
+    """
+    txn_run = str(in_flight.get("run_id") or "").strip()
+    if txn_run:
+        return op.run_id == txn_run
+    if op.kind != str(in_flight.get("kind") or ""):
+        return False
+    if op.owner_kind != "executor":
+        return False
+    try:
+        return not _pid_alive(op.owner_pid)
+    except OSError:
+        return True
+
+
+def reclaim_stale_txn(install_dir: Path, *, actor: str) -> str | None:
+    """Dispose an ORPHANED txn (dead owner + stale heartbeat) so a new arm
+    is not starved by it — the python twin of lib.sh ``adopt_stale_txn``'s
+    comp3 FAST PATH (the flipped:false ⇒ clear branch).
+
+    Claim-before-adopt (single winner), mirroring the shell's
+    "runs UNDER the caller's lock" discipline:
+
+      1. READ the journal; no ``in_flight`` ⇒ nothing to do;
+      2. the SHARED predicate (``txn_is_reclaimable``) ⇒ not reclaimable ⇒
+         leave it alone (the caller refuses — fail-closed);
+      3. PRE-FLIP scope: a ``flipped`` txn is mid-ceremony — its recovery
+         (rollback/quarantine, or the serving-green commit) belongs to the
+         shell adopt ceremony and to the daemon's serving-green closer lane,
+         NOT to a bare clear. Left untouched here (the reclaim implements the
+         shell's ``flipped:false → clear`` branch only);
+      4. CLAIM: acquire the pipeline lock (mkdir IS the claim). A dead
+         owner's lock is broken by the existing stale-break branches; a LIVE
+         owner's lock is NOT breakable ⇒ the claim fails ⇒ no reclaim (the
+         arm refuses — fail-closed);
+      5. RE-READ + RE-CHECK under the claim: the txn identity must be
+         unchanged AND still reclaimable. A concurrent armer that already
+         replaced the txn ⇒ its record differs ⇒ NOTHING is cleared (the
+         claim is released and the arm's own lock-acquire decides);
+      6. DISPOSE under the claim: clear ``in_flight``, clear the
+         ``pending_op`` ONLY when it is provably the same run, journal a
+         ``sweep`` history row (the shell's event name for this branch),
+         release the claim.
+
+    Returns a one-line note when a txn was reclaimed, ``None`` otherwise.
+
+    M5 (tidier round 3) — failure contract, precisely: a torn/absent journal
+    and every DISPOSAL write failure are caught and leave everything
+    untouched (``None``). The CLAIM-ACQUIRE call (``lock_acquire``) sits
+    OUTSIDE the disposal try-block by design — it is the pre-disposal claim,
+    not a journal write; a filesystem error inside it (mkdir under a
+    read-only ``releases/``) propagates to the caller rather than being
+    swallowed. Callers on the boot path wrap this call; the tool path
+    surfaces it as a tool error. "Never raises" therefore means "no journal
+    I/O error escapes", NOT "no error of any kind".
+    """
+    try:
+        data = journal_read(install_dir)
+    except (JournalTorn, OSError) as exc:
+        logger.warning(
+            "upgrade_journal: reclaim_stale_txn journal read FAILED "
+            "(txn left as-is): %s",
+            exc,
+        )
+        return None
+    in_flight = data.get("in_flight")
+    if not isinstance(in_flight, dict):
+        return None
+    # WS9b (D2a pass-A follow-up, 2026-11-11) — the kind=restart CARVE-OUT,
+    # mirrored from the shell (lib.sh adopt_stale_txn :7557 + launcher sweep
+    # :3273). RESTART-kind txns are SELF-COMPLETING: the daemon boot sweep
+    # owns them (D-FA4.3 / R-SR13), and a promote/arm lane must never dispose
+    # of one out from under restart.sh. The reclaim here is the PRE-FLIP
+    # promote-txn clear only; a dead-owner restart txn is left to restart.sh /
+    # the boot sweep, exactly as the shell leaves it. (A live restart txn is
+    # already protected by the reclaim predicate; this carve-out protects a
+    # DEAD-owner one from a bare clear.)
+    if str(in_flight.get("kind") or "") == "restart":
+        logger.debug(
+            "upgrade_journal: reclaim_stale_txn(%s) — kind=restart is "
+            "self-completing (restart.sh / daemon boot sweep owns it) — "
+            "left untouched",
+            actor,
+        )
+        return None
+    reclaimable, reason = txn_is_reclaimable(in_flight)
+    if not reclaimable:
+        logger.debug(
+            "upgrade_journal: reclaim_stale_txn(%s) — txn NOT reclaimable (%s)",
+            actor,
+            reason,
+        )
+        return None
+    # FLIPPED carve-out (WS9c, D2a pass-A follow-up, 2026-11-11): a
+    # ``flipped: true`` txn is MID-CEREMONY — the flip already happened. Its
+    # recovery (rollback/quarantine or the serving-green commit-close) is
+    # owned by the SHELL adopt ceremony and the daemon's serving-green closer
+    # lane, NOT by a bare in-lane clear. Reclaiming it here would roll a
+    # live-ish ceremony's bookkeeping away and could let a later boot sweep
+    # distrust a landed flip — so the tool/sweep reclaim lane NEVER disposes a
+    # flipped txn (UNREACHABLE from this lane by construction, pinned by
+    # test_reclaim_leaves_a_flipped_txn_untouched). The shell's adopt_stale_txn
+    # flipped branch (lib.sh adopt_stale_txn) is the sole owner of that
+    # disposition.
+    if in_flight.get("flipped") is True:
+        logger.info(
+            "upgrade_journal: reclaim_stale_txn(%s) — txn kind=%s target=%s is "
+            "FLIPPED (mid-ceremony) — left untouched (the adopt ceremony / "
+            "the serving-green closer own the flipped branch)",
+            actor,
+            in_flight.get("kind", "?"),
+            in_flight.get("target", "?"),
+        )
+        return None
+    txn_key = txn_identity(in_flight)
+    claim_run_id = f"reclaim-{mint_run_id()}"
+    acquired, busy_run = lock_acquire(install_dir, claim_run_id)
+    if not acquired:
+        logger.info(
+            "upgrade_journal: reclaim_stale_txn(%s) — pipeline lock held "
+            "(run_id=%s) — not reclaiming",
+            actor,
+            busy_run,
+        )
+        return None
+    try:
+        try:
+            fresh = journal_read(install_dir)
+        except (JournalTorn, OSError) as exc:
+            logger.warning(
+                "upgrade_journal: reclaim_stale_txn re-read FAILED (txn "
+                "left as-is): %s",
+                exc,
+            )
+            return None
+        fresh_inf = fresh.get("in_flight")
+        if not isinstance(fresh_inf, dict):
+            return None  # already disposed by someone else
+        if txn_identity(fresh_inf) != txn_key:
+            # A NEW txn replaced the one we judged — it is NOT ours to clear
+            # (the concurrent armer's record wins; the arm's own lock
+            # acquisition is the final arbiter).
+            logger.info(
+                "upgrade_journal: reclaim_stale_txn(%s) — txn identity changed "
+                "(%s → %s) — nothing cleared",
+                actor,
+                txn_key,
+                txn_identity(fresh_inf),
+            )
+            return None
+        still_ok, still_reason = txn_is_reclaimable(fresh_inf)
+        if not still_ok or fresh_inf.get("flipped") is True:
+            logger.info(
+                "upgrade_journal: reclaim_stale_txn(%s) — txn no longer "
+                "reclaimable under the claim (%s) — nothing cleared",
+                actor,
+                still_reason,
+            )
+            return None
+        op = PendingOp.from_json(fresh.get("pending_op"))
+        op_run_id = ""
+        try:
+            ensure_extensions(install_dir)
+            journal_update_field(install_dir, "in_flight", None)
+            if op is not None and _pending_op_bound_to_txn(op, fresh_inf):
+                op_run_id = op.run_id
+                clear_pending_op(install_dir)
+            journal_history_append(
+                install_dir,
+                "sweep",
+                f"orphaned txn reclaimed by {actor} (kind="
+                f"{fresh_inf.get('kind', '?')} target={fresh_inf.get('target', '?')} "
+                f"identity={txn_key} reason=heartbeat-stale+owner-dead; "
+                f"pending_op={op_run_id or 'none'})",
+            )
+        except (JournalTorn, OSError, KeyError) as exc:
+            logger.warning(
+                "upgrade_journal: reclaim_stale_txn disposal write FAILED "
+                "(txn left as-is — operator inspects %s): %s",
+                journal_path(install_dir),
+                exc,
+            )
+            return None
+        return (
+            f"orphaned txn reclaimed by {actor} (kind={fresh_inf.get('kind', '?')} "
+            f"target={fresh_inf.get('target', '?')} identity={txn_key})"
+        )
+    finally:
+        # The claim is ours — release it (the pipeline is free again).
+        try:
+            lock_release(install_dir)
+        except OSError as exc:  # pragma: no cover — file I/O only
+            logger.warning(
+                "upgrade_journal: reclaim_stale_txn lock release FAILED: %s", exc
+            )
 
 
 def journal_init(install_dir: Path) -> None:
@@ -3644,6 +3995,16 @@ SUPERVISION_STATE_SCOPE = "SCOPE_SURVIVOR"
 # state — but it is a first-class VERIFIED input to the outcome map below
 # (twins-pinned vocabulary, shell twin literal "DUAL_FIGHT").
 SUPERVISION_STATE_DUALFIGHT = "DUAL_FIGHT"
+# D2a (promote-full-auto 2026-11-11) — launchd states. The shell twin
+# (scripts/upgrade/lib.sh supervision_classify) resolves these on Darwin; the
+# outcome-map launchd cells are D2b (NOT added here — the map stays host-blind,
+# defaulting any launchd state to `fault`; the shell preflight deliberately
+# OMITS the OUTCOME line for launchd so a verified flip never names a false
+# fault). These states exist so the DETECTOR mirrors the shell's fail-closed
+# Darwin semantics (never SCRIPT_NOHUP here) — the twin is advisory-only and
+# carries the refusal-equivalent state + token in its note.
+SUPERVISION_STATE_LAUNCHD = "LAUNCHD_MANAGED"
+SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED = "LAUNCHD_NOT_VERIFIED"
 
 # Opt-out vocabulary — matches ``daemon.config._PROACTIVE_FALSE_BOOLS`` /
 # upgrade_tools ``_OPT_OUT_FALSES`` (same permissive bool parser the repo
@@ -3652,14 +4013,21 @@ SUPERVISION_STATE_DUALFIGHT = "DUAL_FIGHT"
 # vocabulary placement convention.
 _SUPERVISION_OPT_OUT_FALSES = frozenset({"0", "false", "no", "off"})
 
+# Bound on ONE launchctl invocation from the daemon-side Darwin probe
+# (mirrors lib.sh LAUNCHD_PROBE_BUDGET_S). Advisory-only; a wedged launchctl
+# degrades the detection to LAUNCHD_NOT_VERIFIED.
+_LAUNCHD_PROBE_BUDGET_S = 5
+
 
 @dataclass(frozen=True)
 class SupervisionDetection:
     """One supervision classification result.
 
-    ``state``  — SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR
-    ``unit``   — unit name when UNIT_MANAGED ("" when none resolved)
-    ``mode``   — resolved mode AFTER the ladder: "unit" | "script"
+    ``state``  — SCRIPT_NOHUP | UNIT_MANAGED | SCOPE_SURVIVOR |
+                 LAUNCHD_MANAGED | LAUNCHD_NOT_VERIFIED
+    ``unit``   — unit name when UNIT_MANAGED ("" when none resolved) /
+                 launchd label when LAUNCHD_MANAGED
+    ``mode``   — resolved mode AFTER the ladder: "unit" | "script" | "launchd"
     ``note``   — WARN-once diagnostic ("" when the ladder ran clean)
     """
 
@@ -3702,6 +4070,77 @@ def _supervision_classify_leaf(leaf: str) -> tuple[str, str]:
     # Unknown leaf shape (raw system.slice child, cgroupns oddity) —
     # fail toward script, no unit name.
     return SUPERVISION_STATE_SCRIPT, ""
+
+
+def _supervision_launchd_detect(
+    install_dir: str, env: dict[str, str] | None = None
+) -> tuple[str, str]:
+    """Darwin launchd probe — TWINS MIRROR of the shell
+    ``_supervision_launchd_detect`` (D2a, promote-full-auto 2026-11-11).
+
+    Returns ``(state, label)``: ``(LAUNCHD_MANAGED, <label>)`` IFF EXACTLY ONE
+    job in the gui domain has a ``launchctl print`` dump CONTAINING the
+    ``<install>/launcher.sh`` path — a WHOLE-DUMP SUBSTRING match, not an
+    argv[1]-realpath parse (F9, mirrored verbatim from the shell twin),
+    excluding the watchdog label; otherwise ``(LAUNCHD_NOT_VERIFIED, "")``.
+    Unique-match-or-refuse bounds the substring blast radius.
+
+    Advisory-only (the daemon cannot refuse), never raises — every failure
+    degrades to LAUNCHD_NOT_VERIFIED. ``LAUNCHCTL_BIN`` / ``ENSEMBLE_LAUNCHD_LABEL``
+    / ``LAUNCHD_WATCHDOG_LABEL`` are read from ``env`` (os.environ default);
+    the probe is bounded (``_LAUNCHD_PROBE_BUDGET_S``).
+    """
+    try:
+        e = os.environ if env is None else env
+        lc = (e.get("LAUNCHCTL_BIN") or "launchctl").strip() or "launchctl"
+        if not install_dir:
+            return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
+        if shutil.which(lc) is None:
+            return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
+        try:
+            install_real = str(Path(install_dir).resolve())
+        except OSError:
+            install_real = install_dir
+        want = (e.get("ENSEMBLE_LAUNCHD_LABEL") or "").strip()
+        watchdog = (e.get("LAUNCHD_WATCHDOG_LABEL") or "com.ensemble.watchdog").strip()
+        domain = f"gui/{os.getuid()}"
+        try:
+            r = subprocess.run(
+                [lc, "list"], capture_output=True, text=True,
+                timeout=_LAUNCHD_PROBE_BUDGET_S,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
+        if want:
+            labels = [want]
+        else:
+            labels = []
+            for line in (r.stdout or "").splitlines():
+                parts = line.split()
+                if len(parts) >= 3:
+                    labels.append(parts[2])
+        matches: list[str] = []
+        for lbl in labels:
+            if not lbl or lbl == watchdog:
+                continue
+            try:
+                rr = subprocess.run(
+                    [lc, "print", f"{domain}/{lbl}"], capture_output=True,
+                    text=True, timeout=_LAUNCHD_PROBE_BUDGET_S,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            dump = rr.stdout or ""
+            if (
+                f"{install_real}/launcher.sh" in dump
+                or f"{install_dir}/launcher.sh" in dump
+            ):
+                matches.append(lbl)
+        if len(matches) == 1:
+            return SUPERVISION_STATE_LAUNCHD, matches[0]
+        return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
+    except Exception:  # noqa: BLE001 — detection must never raise
+        return SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED, ""
 
 
 def _supervision_detect_real(
@@ -3750,14 +4189,67 @@ def _supervision_detect_real(
     try:
         e = os.environ if env is None else env
         raw = (e.get("ENSEMBLE_SUPERVISION") or "").strip()
+        darwin = sys.platform == "darwin"
+        install_dir = (e.get("INSTALL_DIR") or "").strip()
 
         # ── explicit / opt-out / garbage parsing (ladder top) ─────────────
         if raw:
             low = raw.lower()
             if low in _SUPERVISION_OPT_OUT_FALSES:
+                # D2a: opt-out / `script` on Darwin is NOT a legitimate
+                # acknowledgement — the shell refuses; the twin carries the
+                # refusal-equivalent state + token (never SCRIPT_NOHUP/conforming).
+                if darwin:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                        mode="launchd",
+                        note=(
+                            "supervision-unsupervised-declaration-required: "
+                            "opt-out/script on Darwin is not a legitimate "
+                            "supervision acknowledgement — shell preflight "
+                            "refuses (78); never silent-degrade to script"
+                        ),
+                    )
                 return SupervisionDetection(SUPERVISION_STATE_SCRIPT)
             if low == "script":
+                if darwin:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                        mode="launchd",
+                        note=(
+                            "supervision-unsupervised-declaration-required: "
+                            "mode 'script' on Darwin is not a legitimate "
+                            "supervision acknowledgement — shell preflight "
+                            "refuses (78); never silent-degrade to script"
+                        ),
+                    )
                 return SupervisionDetection(SUPERVISION_STATE_SCRIPT, mode="script")
+            if low == "launchd":
+                # D2a: declared launchd — probe on Darwin; on a non-Darwin
+                # host the shell refuses (incapable) — carry the equivalent.
+                if not darwin:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                        mode="launchd",
+                        note=(
+                            "supervision-launchd-incapable-host: mode 'launchd' "
+                            "on a non-Darwin host — shell preflight refuses (78)"
+                        ),
+                    )
+                state, label = _supervision_launchd_detect(install_dir, e)
+                if state == SUPERVISION_STATE_LAUNCHD:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD, unit=label, mode="launchd"
+                    )
+                return SupervisionDetection(
+                    SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                    mode="launchd",
+                    note=(
+                        "supervision-not-verified: no single launchd job "
+                        "references the install's launcher.sh — shell "
+                        "preflight refuses (78)"
+                    ),
+                )
             if low == "unit":
                 # explicit unit: resolve the NAME (env > cgroup); the
                 # daemon cannot refuse (boot advisory) — carry the note.
@@ -3782,12 +4274,40 @@ def _supervision_detect_real(
                     ),
                 )
             if low != "auto":
+                if darwin:
+                    return SupervisionDetection(
+                        SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                        mode="launchd",
+                        note=(
+                            f"supervision-declaration-invalid: garbage "
+                            f"ENSEMBLE_SUPERVISION='{raw}' on Darwin — shell "
+                            "preflight refuses (78); never silent-degrade"
+                        ),
+                    )
                 return SupervisionDetection(
                     SUPERVISION_STATE_SCRIPT,
                     note=f"garbage ENSEMBLE_SUPERVISION='{raw}' — WARN-once, failing toward script",
                 )
 
         # ── auto-derive chain ─────────────────────────────────────────────
+        # D2a: Darwin AUTO probes launchd (never SCRIPT_NOHUP — the incident
+        # mechanism). The twin cannot refuse; it reports the refusal-equivalent
+        # state + token.
+        if darwin:
+            state, label = _supervision_launchd_detect(install_dir, e)
+            if state == SUPERVISION_STATE_LAUNCHD:
+                return SupervisionDetection(
+                    SUPERVISION_STATE_LAUNCHD, unit=label, mode="launchd"
+                )
+            return SupervisionDetection(
+                SUPERVISION_STATE_LAUNCHD_NOT_VERIFIED,
+                mode="launchd",
+                note=(
+                    "supervision-not-verified: auto on Darwin could not verify "
+                    "a single launchd job for the install's launcher.sh — shell "
+                    "preflight refuses (78); never falls through to nohup"
+                ),
+            )
         if sys.platform != "linux":
             return SupervisionDetection(SUPERVISION_STATE_SCRIPT)
         if not Path("/run/systemd/system").exists():
@@ -3949,6 +4469,13 @@ def supervision_outcome(
                 "scope survivor under script declaration: WARN-once + "
                 "self-heals at next promote with a unit configured",
             )
+        if ver == SUPERVISION_STATE_LAUNCHD:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_DEGRADED,
+                "declaration mismatch: script declared but launchd reality "
+                "— latent two-masters hazard (unreachable today: Darwin's "
+                "declared script mode refuses before verification)",
+            )
     elif dec == "unit":
         if ver == SUPERVISION_STATE_UNIT:
             if unit:
@@ -3975,6 +4502,13 @@ def supervision_outcome(
                 "declaration mismatch: unit declared but scope-survivor "
                 "reality — never silent-degrade (unreachable today)",
             )
+        if ver == SUPERVISION_STATE_LAUNCHD:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_FAULT,
+                "declaration mismatch: unit declared but launchd reality "
+                "— never silent-degrade (unreachable today: Darwin "
+                "verification is launchd-only)",
+            )
     elif dec == "auto":
         if ver == SUPERVISION_STATE_SCRIPT:
             return SupervisionOutcome(
@@ -3994,6 +4528,39 @@ def supervision_outcome(
                 "scope survivor under auto declaration: WARN-once + "
                 "self-heals at next promote with a unit configured",
             )
+        if ver == SUPERVISION_STATE_LAUNCHD:
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_CONFORMING,
+                "auto defers to verification: launchd topology confirmed "
+                "(D2a supervised lane)",
+            )
+    elif dec == "launchd":
+        # A2 (review round 1): the Darwin supervised lane resolves
+        # SUPERVISION_MODE=launchd — a HEALTHY verified launchd install had
+        # NO cell in either twin and therefore fell through to the
+        # fail-closed "unknown declared mode" arm ⇒ the boot advisory
+        # journalled outcome=fault for a HEALTHY supervisor. The launchd
+        # cells below report the conforming-equivalent state (advisory-only
+        # naming — no gate, no refusal).
+        if ver == SUPERVISION_STATE_LAUNCHD:
+            if unit:
+                return SupervisionOutcome(
+                    SUPERVISION_OUTCOME_CONFORMING,
+                    "launchd topology declared and verified, job label "
+                    "resolved (LAUNCHD MODE — the supervisor owns the "
+                    "launcher)",
+                )
+            return SupervisionOutcome(
+                SUPERVISION_OUTCOME_FAULT,
+                "launchd declared but no job label resolvable — refusing "
+                "the whole-domain bootout, never silent-degrade",
+            )
+        return SupervisionOutcome(
+            SUPERVISION_OUTCOME_FAULT,
+            "declaration mismatch: launchd declared but non-launchd "
+            "reality — never silent-degrade (unreachable today: Darwin "
+            "verification is launchd-only)",
+        )
     # Unknown declared mode or verified state — fail-closed.
     return SupervisionOutcome(
         SUPERVISION_OUTCOME_FAULT,

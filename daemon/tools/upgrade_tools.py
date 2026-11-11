@@ -59,8 +59,9 @@ refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
 grow it further without pulling that fence.
 """
 
-# Size rationale (~4160 lines, refreshed 2026-10-30 — was ~3931): +230 for
-# the phase-6 scripts-dir provenance guard (arm-time floor/stamp ancestry,
+# Size rationale (~4383 lines MEASURED 2026-11-11 — M13 re-baseline; was
+# ~4160 at the 2026-10-30 refresh, ~3931 before it): the phase-6
+# scripts-dir provenance guard (arm-time floor/stamp ancestry,
 # the W-1/W-2/W-3 verdict branches, the M5 `ScriptsProvenanceVerdict`
 # Literal and the M7 delegating per-run-log resolver), appended at the END
 # with a load-bearing POSITION constraint (the guard must precede
@@ -1983,6 +1984,50 @@ def _in_flight_state(journal: dict[str, Any] | None) -> dict[str, Any] | None:
     return None
 
 
+def _reclaim_orphaned_txn(
+    install_dir: Path,
+    journal: dict[str, Any] | None,
+    actor: str,
+) -> dict[str, Any] | None:
+    """D1 (2026-11-11): dispose an ORPHANED txn before the busy-check
+    refuses — the tool lane's half of the ONE reclaim mechanism.
+
+    The busy-check used to refuse FOREVER on a dead pre-flip txn (the
+    2026-11-11 starvation): the tool lane refused, the daemon-side sweep
+    never disposed it, and only the shell preflight cleared it. The
+    predicate + the claim-before-adopt disposal live in
+    ``daemon.tools.upgrade_journal`` (``txn_is_reclaimable`` /
+    ``reclaim_stale_txn``) — the shell lane's comp3 FAST PATH rule, mirrored
+    exactly; the daemon sweep calls the SAME two helpers. There is no
+    third, divergent copy.
+
+    Returns the (possibly refreshed) journal. A LIVE txn — live owner or
+    fresh heartbeat — is never touched: the helper returns the journal
+    unchanged and the caller refuses as before (fail-closed, no silent
+    double-promote window).
+    """
+    if not isinstance(journal, dict):
+        return journal
+    if not isinstance(journal.get("in_flight"), dict):
+        return journal
+    try:
+        note = uj.reclaim_stale_txn(install_dir, actor=actor)
+    except Exception as exc:  # noqa: BLE001 — a janitor never gates the arm
+        logger.warning(
+            "%s: reclaim_stale_txn failed for %s: %s — continuing on journal "
+            "read status",
+            actor,
+            install_dir,
+            exc,
+        )
+        return journal
+    if not note:
+        return journal
+    logger.info("%s: %s", actor, note)
+    fresh, _status = _journal_read(install_dir)
+    return fresh if fresh is not None else journal
+
+
 def _resolve_scripts_dir(install_dir: Path | None) -> Path | None:
     """Locate the P2.1 pipeline scripts (``lib.sh`` + payloads). Order:
     (1) explicit ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` (drills/ops) —
@@ -2747,6 +2792,20 @@ Returns:
             held_run = journal_lock_run_id(install_dir)
             in_flight = _in_flight_state(journal)
             if in_flight is not None:
+                # D1 (2026-11-11): an ORPHANED txn (dead owner + stale
+                # heartbeat) must NOT starve the arm — dispose it under the
+                # SHARED predicate (the shell lane's comp3 FAST PATH rule,
+                # mirrored in upgrade_journal.txn_is_reclaimable) and
+                # re-read every busy leg. A LIVE txn (live owner or fresh
+                # heartbeat) is untouched → the refusal below still fires
+                # (fail-closed, no silent double-promote window).
+                journal = _reclaim_orphaned_txn(
+                    install_dir, journal, "system_restart"
+                )
+                pending = uj.read_pending_op(install_dir)
+                held_run = journal_lock_run_id(install_dir)
+                in_flight = _in_flight_state(journal)
+            if in_flight is not None:
                 kind = in_flight.get("kind", "?")
                 inf_run = in_flight.get("run_id")
                 run_frag = f" run_id={inf_run}" if inf_run else ""
@@ -2933,6 +2992,50 @@ Returns:
                     "pipeline-busy",
                     f"per-env lock held (run_id={busy_run or held_run or '?'}) — "
                     "retry via upgrade_status",
+                )
+            # Check 1b (W2, 2026-11-11; H2 tidier round 3) — the stop-script
+            # SIBLING gate, the restart lane's mirror of PR1's promote-arm
+            # gate. lib.sh ``stop_via_stop_script`` resolves the stop script
+            # as the SIBLING one level up of the CALLING script's dir (W4:
+            # restart.sh lives in scripts/upgrade/, so the leg is
+            # ``<scripts_dir>/../stop-ensemble.sh``) — the single source of
+            # truth; the old ``$(pwd)/scripts/stop-ensemble.sh`` fallback is
+            # DELETED (it was dead in the install layout and masked a
+            # missing sibling with rc=127, the v0.29.16 2026-11-11 halt
+            # class). The gate refuses BEFORE any mutation. The EXECUTABLE
+            # requirement is CONSERVATIVE HARDENING (every consumer invokes
+            # ``bash stop-ensemble.sh``; lib.sh's own resolution needs only
+            # the file) — the MISSING sibling is what kills the run.
+            stop_script = scripts_dir.parent / "stop-ensemble.sh"
+            try:
+                stop_script_ready = stop_script.is_file() and os.access(
+                    stop_script, os.X_OK
+                )
+            except OSError:
+                stop_script_ready = False
+            if not stop_script_ready:
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    "preflight-stop-script-missing",
+                    f"arm preflight: stop-script sibling not usable at "
+                    f"{stop_script} (must exist AND carry the exec bit — "
+                    "conservative hardening: every consumer invokes "
+                    "`bash stop-ensemble.sh`, so exec is NOT a runtime "
+                    "requirement; lib.sh itself only tests -f) — the "
+                    "restart stop step resolves the SIBLING one level up "
+                    "of the CALLING script's dir (lib.sh "
+                    "stop_via_stop_script: <scripts_dir>/../stop-ensemble.sh "
+                    "— the W4 single source of truth; the old "
+                    "$(pwd)/scripts fallback is DELETED) and a missing "
+                    "sibling aborts rc=127 MID-STOP (bash: No such file or "
+                    "directory — the v0.29.16 2026-11-11 halt class; a "
+                    "pre-D3 install layout carried ONLY watchdog-watcher.sh "
+                    "under scripts/, so a partially-installed tree lacks "
+                    "the sibling entirely); fix: "
+                    f"copy the repo scripts/stop-ensemble.sh to {stop_script} "
+                    "and chmod +x — the restart is NOT scheduled; zero "
+                    "pipeline mutation",
                 )
             restart_armed_ok = False
             try:
@@ -3209,6 +3312,11 @@ restart-under-burst-abort (launcher exit-1 latch),
 executor-scripts-unavailable, scripts-dir-unresolvable (the scripts dir
 could not be resolved to an absolute path — a broken
 ENSEMBLE_UPGRADE_SCRIPTS_DIR pin; fail-closed, never a generic crash),
+preflight-stop-script-missing (the arm preflight's stop-script sibling is
+missing or not executable — the v0.29.16 2026-11-11 halt class: the restart
+stop step resolves the SIBLING leg only (the old fallback is deleted); a
+missing sibling aborts the stop; fail-closed BEFORE any journal mutation —
+the restart is NOT scheduled),
 no-staged-install, journal-unavailable.
 Refused live attempts record a restart_audits row (outcome=refused +
 refusal_token) under the lock; the pipeline journal itself stays
@@ -3571,6 +3679,20 @@ never decides go/rollback).
 
             # Armed preconditions (dynamic state — refusals, not notes).
             if in_flight is not None:
+                # D1 (2026-11-11): an ORPHANED txn (dead owner + stale
+                # heartbeat) must NOT starve the arm — dispose it under the
+                # SHARED predicate (the shell lane's comp3 FAST PATH rule,
+                # mirrored in upgrade_journal.txn_is_reclaimable) and
+                # re-read every busy leg. A LIVE txn (live owner or fresh
+                # heartbeat) is untouched → the refusal below still fires
+                # (fail-closed, no silent double-promote window).
+                journal = _reclaim_orphaned_txn(
+                    install_dir, journal, "system_upgrade"
+                )
+                pending = uj.read_pending_op(install_dir)
+                held_run = journal_lock_run_id(install_dir)
+                in_flight = _in_flight_state(journal)
+            if in_flight is not None:
                 return _refusal(
                     label,
                     "pipeline-busy",
@@ -3670,29 +3792,22 @@ never decides go/rollback).
                     "checkout)",
                 )
             # Check 1b — stop-script sibling present + executable (the
-            # v0.29.16 promote-halt class, 2026-11-11). The promote stop
-            # step resolves its stop script via TWO legs (lib.sh
-            # ``stop_via_stop_script``): (1) the SIBLING one level up of the
-            # CALLING script's dir — lib.sh:4849 anchors ``BASH_SOURCE[1]``
-            # (promote.sh's dir), so the leg is
-            # ``<scripts_dir>/../stop-ensemble.sh``; (2) the
-            # ``$(pwd)/scripts/stop-ensemble.sh`` fallback (lib.sh:4852) for
-            # a copied tree. BOTH legs must miss for the abort: the fallback
-            # ALSO misses in install layouts — ``make install`` ships only
-            # ``watchdog-watcher.sh`` into ``<install_dir>/scripts/``
-            # (Makefile:375-377), and ``$(pwd)`` at promote time is the
-            # executor's cwd (the install dir), so that leg holds no
-            # stop-ensemble.sh either → bash: No such file or directory →
-            # rc=127 → B4 abort, flip never reached. The exec-bit
-            # requirement is CONSERVATIVE HARDENING, not a runtime need:
-            # every consumer invokes ``bash "$stop_script"`` (lib.sh
-            # stop_via_stop_script, deploy.sh, Makefile stop/stop-by-port/
-            # uninstall) and lib.sh itself tests only ``-f`` — the gate
-            # simply holds the sibling to a launcher-grade contract. No
-            # packaging lane ships that file, so the canonical source is the
-            # repo checkout's ``scripts/stop-ensemble.sh`` — copy it to the
-            # expected path + chmod +x. Fail-closed: ANY probe error counts
-            # as missing (the refusal is the safe direction on both legs).
+            # v0.29.16 promote-halt class, 2026-11-11; H2 tidier round 3).
+            # lib.sh ``stop_via_stop_script`` resolves the stop script as the
+            # SIBLING one level up of the CALLING script's dir — W4's single
+            # source of truth (promote.sh lives in scripts/upgrade/, so the
+            # leg is ``<scripts_dir>/../stop-ensemble.sh``); the old
+            # ``$(pwd)/scripts/stop-ensemble.sh`` fallback is DELETED (dead
+            # in the install layout, and it masked a missing sibling with
+            # rc=127). A missing sibling aborts MID-STOP → B4 abort, flip
+            # never reached. The exec-bit requirement is CONSERVATIVE
+            # HARDENING, not a runtime need: every consumer invokes ``bash
+            # "$stop_script"`` and lib.sh's own resolution needs only the
+            # file — the gate holds the sibling to a launcher-grade
+            # contract. No packaging lane ships that file, so the canonical
+            # source is the repo checkout's ``scripts/stop-ensemble.sh`` —
+            # copy it to the expected path + chmod +x. Fail-closed: ANY
+            # probe error counts as missing.
             stop_script = scripts_dir.parent / "stop-ensemble.sh"
             try:
                 stop_script_ready = stop_script.is_file() and os.access(
@@ -3710,17 +3825,17 @@ never decides go/rollback).
                     "conservative hardening: every consumer invokes "
                     "`bash stop-ensemble.sh`, so exec is NOT a runtime "
                     "requirement; lib.sh itself only tests -f) — the "
-                    "promote stop step resolves TWO legs (lib.sh "
-                    "stop_via_stop_script: the sibling one level up of the "
-                    "CALLING script's dir, <scripts_dir>/../stop-ensemble.sh, "
-                    "then the $(pwd)/scripts/stop-ensemble.sh fallback) and "
-                    "BOTH must miss for the abort (bash: No such file or "
-                    "directory → rc=127, the v0.29.16 2026-11-11 halt "
-                    "class); the fallback ALSO misses in install layouts — "
-                    "make install ships only watchdog-watcher.sh into "
-                    "<install_dir>/scripts/ (Makefile:375-377), so the "
-                    "executor's cwd holds no stop-ensemble.sh; fix: copy the "
-                    f"repo scripts/stop-ensemble.sh to {stop_script} and "
+                    "promote stop step resolves the SIBLING one level up "
+                    "of the CALLING script's dir (lib.sh "
+                    "stop_via_stop_script: <scripts_dir>/../stop-ensemble.sh "
+                    "— the W4 single source of truth; the old "
+                    "$(pwd)/scripts fallback is DELETED) and a missing "
+                    "sibling aborts rc=127 MID-STOP (bash: No such file or "
+                    "directory — the v0.29.16 2026-11-11 halt class; a "
+                    "pre-D3 install layout carried ONLY watchdog-watcher.sh "
+                    "under scripts/, so a partially-installed tree lacks "
+                    "the sibling entirely); fix: "
+                    f"copy the repo scripts/stop-ensemble.sh to {stop_script} "
                     "chmod +x — nonce NOT burned",
                 )
             # Check 2 — argv/env construction works. The shared verified-arm
@@ -4000,7 +4115,14 @@ the nonce is action-bound, §4.2(b)), nonce-already-used,
 nonce-verification-unavailable, executor-scripts-unavailable,
 scripts-dir-unresolvable (the scripts dir could not be resolved to an
 absolute path — a broken ENSEMBLE_UPGRADE_SCRIPTS_DIR pin; fail-closed,
-never a generic crash), no-staged-install, journal-unavailable (install dir
+never a generic crash), preflight-stop-script-missing (the arm
+preflight's stop-script sibling is missing or not executable — the
+v0.29.16 2026-11-11 promote-halt class: the stop step resolves the SIBLING
+leg only (the old fallback is deleted); a missing sibling aborts the stop;
+fail-closed BEFORE the nonce burn),
+preflight-argv-unconstructable, preflight-argv-malformed (the executor
+argv/env could not be constructed — fail-closed BEFORE the nonce burn),
+no-staged-install, journal-unavailable (install dir
 resolves but the journal is torn/absent), layout-divergence.
 
 Never auto-retry a refusal — relay it verbatim (the LLM never decides
@@ -4020,7 +4142,7 @@ go/rollback).
 # match a definition instead of the call site and be vacuous. Relocate
 # only downwards.
 
-PIPELINE_SCRIPTS_FLOOR_COMMIT = "2147c0298a09a5d7c5a0caeea04cdc51ed1ebcaa"
+PIPELINE_SCRIPTS_FLOOR_COMMIT = "087f782afbf1957dd0bf6acea5198314093d2a89"
 """The Q1 floor (D6-10, leader ruling FINAL): the commit that introduced
 the preflight-hang fix, compared against a pinned scripts dir's HEAD by
 git ancestry at arm time.

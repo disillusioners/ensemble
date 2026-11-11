@@ -45,6 +45,7 @@ import subprocess
 import errno
 import pathlib
 import pwd
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -2110,12 +2111,25 @@ class TestSystemRestartMatrix:
         )
 
     async def test_pipeline_busy_in_flight_txn_names_run_id(self, harness) -> None:
+        """A LIVE in-flight txn blocks the arm and names its run_id.
+
+        D1 (2026-11-11) RE-BASELINE (the oracle, not the intent, changed):
+        the fixture txn used to be ``owner_pid: 999`` with NO heartbeat —
+        i.e. an ORPHANED txn under the shared reclaim predicate (dead owner
+        + stale heartbeat), which the arm now DISPOSES instead of refusing
+        on (the 2026-11-11 starvation: three disagreeing mechanisms, only
+        the shell preflight could clear it). The refusal's INTENT — a live
+        txn blocks the arm and names the run_id — is unchanged; the txn is
+        now live (a live owner pid + a FRESH heartbeat), and the orphan
+        cell has its own companion pins in
+        ``TestStaleTxnReclaimArmLane``."""
         tools, _, install = harness
         uj.journal_update_field(
             install,
             "in_flight",
             {"kind": "promote", "target": "1.2.3", "started_at": uj.now_iso(),
-             "flipped": False, "owner_pid": 999, "run_id": "r-busy-1"},
+             "flipped": False, "owner_pid": os.getpid(),
+             "last_heartbeat": int(time.time()), "run_id": "r-busy-1"},
         )
         out = await tools["system_restart"].ainvoke(
             {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
@@ -3075,9 +3089,9 @@ class TestArmPreflightStopScriptSibling:
         assert "scripts/stop-ensemble.sh" in out, (
             f"the refusal must name the canonical repo source: {out}"
         )
-        assert "$(pwd)/scripts/stop-ensemble.sh" in out, (
-            "the refusal must name the FALLBACK resolution leg too (both "
-            f"legs must miss for the abort): {out}"
+        assert "sibling" in out and "stop-ensemble.sh" in out, (
+            "the refusal must name the SIBLING resolution leg (W4: the old "
+            f"$(pwd)/scripts fallback is deleted — sibling-only world): {out}"
         )
         assert "watchdog-watcher.sh" in out, (
             "the refusal must say why the fallback misses in install "
@@ -3248,6 +3262,101 @@ class TestArmPreflightStopScriptSibling:
 
 
 # ── P2.2 fix pass (2026-08-23) — gate hardening + the forged-source seam ────
+
+
+class TestRestartArmPreflightStopScriptSibling:
+    """W2 (2026-11-11): the RESTART arm's stop-script sibling gate — the
+    restart lane's mirror of PR1's promote-arm gate (the same exposure).
+
+    The restart stop step resolves its stop script through lib.sh
+    ``stop_via_stop_script`` → the SIBLING one level up of the CALLING
+    script's dir (restart.sh lives in scripts/upgrade/, so the leg is
+    ``<scripts_dir>/../stop-ensemble.sh``) and the ``$(pwd)/scripts/
+    stop-ensemble.sh`` fallback. BOTH legs miss in the install layout
+    (make install ships only watchdog-watcher.sh into
+    <install_dir>/scripts/ — Makefile:375-377) ⇒ bash: No such file or
+    directory → rc=127 → the ceremony aborts MID-STOP (the v0.29.16
+    2026-11-11 halt class). The gate refuses BEFORE any journal mutation.
+    """
+
+    @staticmethod
+    def _scripts_tree(tmp_path: Path, *, name: str = "restart-scripts") -> Path:
+        """A synthetic scripts dir that passes the earlier checks (lib.sh +
+        restart.sh present) — everything EXCEPT the stop sibling."""
+        d = tmp_path / name / "upgrade"
+        d.mkdir(parents=True)
+        (d / "lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (d / "restart.sh").write_text(
+            "#!/usr/bin/env bash\n# fixture: restart.sh (never executed)\n",
+            encoding="utf-8",
+        )
+        return d
+
+    @staticmethod
+    def _expected_sibling(scripts: Path) -> Path:
+        return scripts.parent / "stop-ensemble.sh"
+
+    async def test_refuses_missing_sibling_names_expected_path(
+        self, harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """(a) sibling ABSENT → refuse ``preflight-stop-script-missing``
+        naming the exact expected path; the restart is NOT scheduled (zero
+        pipeline mutation) and the lock is released."""
+        tools, markers, install = harness
+        scripts = self._scripts_tree(tmp_path)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(scripts))
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "sibling probe", "dry_run": False}
+        )
+        assert _refusal_reason(out) == "preflight-stop-script-missing", out
+        assert str(self._expected_sibling(scripts)) in out, (
+            f"the refusal must name the exact expected path: {out}"
+        )
+        assert "restart NOT scheduled" in out or "NOT scheduled" in out, out
+        assert markers == [], "the arm must not have fired"
+        data = uj.journal_read(install)
+        assert data.get("pending_op") is None, "zero pipeline mutation"
+        assert data.get("in_flight") is None, "zero pipeline mutation"
+        assert uj.lock_run_id(install) is None, "the lock must be released"
+
+    async def test_refuses_unexecutable_sibling(
+        self, harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """(b) sibling PRESENT but NOT EXECUTABLE → refuse (conservative
+        hardening: every consumer invokes ``bash stop-ensemble.sh`` and
+        lib.sh itself only tests -f)."""
+        tools, _markers, _install = harness
+        scripts = self._scripts_tree(tmp_path)
+        sibling = self._expected_sibling(scripts)
+        sibling.write_text(
+            "#!/usr/bin/env bash\n# fixture stop-ensemble.sh\n", encoding="utf-8"
+        )
+        sibling.chmod(0o644)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(scripts))
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "sibling probe", "dry_run": False}
+        )
+        assert _refusal_reason(out) == "preflight-stop-script-missing", out
+
+    async def test_passes_present_executable_sibling_arms(
+        self, harness, tmp_path: Path, monkeypatch
+    ) -> None:
+        """(c) sibling PRESENT + EXECUTABLE → the gate passes and the arm
+        proceeds (the restart is scheduled)."""
+        tools, markers, _install = harness
+        scripts = self._scripts_tree(tmp_path)
+        sibling = self._expected_sibling(scripts)
+        sibling.write_text(
+            "#!/usr/bin/env bash\n# fixture stop-ensemble.sh (never executed)\n",
+            encoding="utf-8",
+        )
+        sibling.chmod(0o755)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(scripts))
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "sibling probe", "dry_run": False}
+        )
+        assert "RESTART SCHEDULED" in out, out
+        assert markers, "the arm must really have fired"
 
 
 class TestGateHardeningFixPass:
@@ -3794,6 +3903,15 @@ class TestRefusalTaxonomy:
         "nonce-already-used",
         "nonce-verification-unavailable",
         "executor-scripts-unavailable",
+        # D1/W6 (2026-11-11): the scripts-dir resolution became fail-closed
+        # (PR1) and the arm preflight grew three refusal tokens — all three
+        # are DOCUMENTED in system_upgrade._full_doc_ and emitted by the
+        # arm. The taxonomy is the doc (D-FA2.2): a token that the code
+        # emits but the doc does not name is an unnamed contract.
+        "scripts-dir-unresolvable",
+        "preflight-stop-script-missing",
+        "preflight-argv-unconstructable",
+        "preflight-argv-malformed",
         "no-staged-install",
         "journal-unavailable",
         "layout-divergence",
@@ -3817,6 +3935,12 @@ class TestRefusalTaxonomy:
         "restart-budget-exceeded",
         "restart-under-burst-abort",
         "executor-scripts-unavailable",
+        # W2/W6 (2026-11-11): the restart lane gained the stop-script
+        # sibling gate (PR1's promote-arm gate, mirrored) and PR1 made the
+        # scripts-dir resolution fail-closed on the restart arm too — both
+        # tokens are DOCUMENTED in system_restart._full_doc_.
+        "scripts-dir-unresolvable",
+        "preflight-stop-script-missing",
         "no-staged-install",
         "journal-unavailable",
     }
@@ -4645,3 +4769,125 @@ class TestScriptsDirProvenanceArmPath:
         rows = _prov_rows(install)
         assert rows and "verdict=refuse" in rows[-1]["detail"], rows
         assert "scripts-dir-unusable" in rows[-1]["detail"], rows[-1]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D1 (2026-11-11): the ARM lane's half of the ONE stale-txn reclaim
+# mechanism. The tool busy-check used to refuse FOREVER on a dead pre-flip
+# txn (the 2026-11-11 starvation) — now an ORPHANED txn (dead owner +
+# stale heartbeat) is disposed under the shared predicate, while a LIVE
+# txn still refuses (fail-closed: no silent double-promote window).
+# ══════════════════════════════════════════════════════════════════════════
+class TestStaleTxnReclaimArmLane:
+    """The busy-check arms consult the SHARED predicate (the shell lane's
+    comp3 FAST PATH rule, mirrored in ``upgrade_journal.txn_is_reclaimable``)
+    — the same predicate the daemon-side sweep uses."""
+
+    @staticmethod
+    def _txn(
+        *,
+        owner_pid: int | None,
+        hb_age_s: int | None,
+        kind: str = "promote",
+        flipped: bool = False,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        txn: dict[str, Any] = {
+            "kind": kind,
+            "target": "1.2.3",
+            "started_at": uj.now_iso(),
+            "flipped": flipped,
+        }
+        if owner_pid is not None:
+            txn["owner_pid"] = owner_pid
+        if hb_age_s is not None:
+            txn["last_heartbeat"] = int(time.time()) - hb_age_s
+        if run_id is not None:
+            txn["run_id"] = run_id
+        return txn
+
+    @staticmethod
+    def _dead_pid() -> int:
+        """A pid that is verifiably dead right now (spawn + reap)."""
+        proc = subprocess.Popen(["sleep", "0"])
+        proc.wait(timeout=10)
+        return proc.pid
+
+    async def test_orphaned_txn_does_not_block_the_restart_arm(
+        self, harness
+    ) -> None:
+        """The starvation cell: a dead-owner + stale-heartbeat txn must NOT
+        wedge the arm — the txn is reclaimed and the arm proceeds."""
+        tools, _, install = harness
+        uj.journal_update_field(
+            install,
+            "in_flight",
+            self._txn(owner_pid=self._dead_pid(), hb_age_s=900),
+        )
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
+        )
+        assert _refusal_reason(out) != "pipeline-busy", out
+        assert "RESTART SCHEDULED" in out, out
+        data = uj.journal_read(install)
+        assert (data.get("in_flight") or {}).get("kind") == "restart", (
+            "the ORPHANED promote txn must be gone — the arm's OWN restart "
+            f"txn is what the journal holds now: {data.get('in_flight')}"
+        )
+
+    async def test_live_owner_with_stale_heartbeat_still_blocks(
+        self, harness
+    ) -> None:
+        """A LIVE owner blocks the arm even with a stale heartbeat — the
+        fail-closed direction (never trample a live owner's txn)."""
+        tools, _, install = harness
+        txn = self._txn(owner_pid=os.getpid(), hb_age_s=900)
+        uj.journal_update_field(install, "in_flight", txn)
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
+        )
+        assert _refusal_reason(out) == "pipeline-busy", out
+        assert uj.journal_read(install).get("in_flight") == txn, (
+            "a live txn must be untouched by the arm's reclaim"
+        )
+
+    async def test_dead_owner_with_fresh_heartbeat_still_blocks(
+        self, harness
+    ) -> None:
+        """A FRESH heartbeat blocks the arm regardless of the owner state."""
+        tools, _, install = harness
+        txn = self._txn(owner_pid=self._dead_pid(), hb_age_s=5)
+        uj.journal_update_field(install, "in_flight", txn)
+        out = await tools["system_restart"].ainvoke(
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
+        )
+        assert _refusal_reason(out) == "pipeline-busy", out
+        assert uj.journal_read(install).get("in_flight") == txn
+
+    async def test_orphaned_txn_does_not_block_the_upgrade_arm(
+        self, harness
+    ) -> None:
+        """The same orphan cell on the PROMOTE arm — the incident class
+        (the 2026-11-11 orphaned PRE-FLIP promote txn)."""
+        tools, _, install = harness
+        uj.journal_update_field(
+            install,
+            "in_flight",
+            self._txn(owner_pid=self._dead_pid(), hb_age_s=900),
+        )
+        out = await tools["system_upgrade"].ainvoke(
+            {"target_env": "demo", "version": "1.2.3", "dry_run": False}
+        )
+        assert _refusal_reason(out) != "pipeline-busy", out
+        assert "UPGRADE ARMED" in out, out
+
+    async def test_live_txn_still_blocks_the_upgrade_arm(self, harness) -> None:
+        """A LIVE txn still refuses the promote arm (fail-closed)."""
+        tools, _, install = harness
+        txn = self._txn(owner_pid=os.getpid(), hb_age_s=5)
+        uj.journal_update_field(install, "in_flight", txn)
+        out = await tools["system_upgrade"].ainvoke(
+            {"target_env": "demo", "version": "1.2.3", "dry_run": False}
+        )
+        assert _refusal_reason(out) == "pipeline-busy", out
+        assert uj.journal_read(install).get("in_flight") == txn

@@ -377,6 +377,23 @@ install: install-dir-guard pyinstaller
 	chmod +x "$(INSTALL_DIR)/scripts/watchdog-watcher.sh"
 	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/ensemble-watchdog-watcher.plist \
 		> "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist"
+	# D3: ship the EXECUTOR SCRIPT FAMILY into the install dir at the
+	# canonical payload-relative paths (scripts/upgrade/* +
+	# scripts/stop-ensemble.sh + scripts/install-dir-guard.sh). Until this,
+	# the install dir carried ONLY watchdog-watcher.sh under scripts/ — the
+	# promote stop step resolves its stop script as the SIBLING one level up
+	# of the calling script's dir (lib.sh stop_via_stop_script:
+	# <scripts_dir>/../stop-ensemble.sh — the W4 single source of truth; the
+	# old $(pwd)/scripts fallback is deleted) and a missing sibling => rc=127 =>
+	# the promote aborted before the flip (the v0.29.16 halt class). The
+	# canonical list + the placement primitives live in
+	# scripts/upgrade/executor_family.sh — the SAME file the release payload
+	# assembler uses, so the payload and the flat install cannot drift.
+	@echo "$(YELLOW)Installing executor script family (scripts/upgrade + stop-ensemble + install-dir-guard)...$(NC)"
+	@bash $(CURDIR)/scripts/upgrade/executor_family.sh --install "$(CURDIR)" "$(INSTALL_DIR)" || { \
+		echo "$(RED)Error: executor script family install FAILED — refusing an install that carries no executor scripts (the promote stop step would resolve no stop script).$(NC)"; \
+		exit 1; \
+	}
 	
 	# Copy frontend build (preserve frontend/dist/frontend/browser structure)
 	@echo "$(YELLOW)Copying frontend...$(NC)"

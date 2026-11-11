@@ -43,9 +43,9 @@ Lifecycle mirrors :class:`~daemon.services.job_lock_sweep.JobLockSweepService`:
 (CancelledError is the normal shutdown path — FM-11: never swallow it).
 """
 
-# Size rationale (~3286 lines, refreshed 2026-11-02 — grew with the
-# promote-handback-halt rows: the serving-green stale-txn closer): the
-# sweep service
+# Size rationale (~3406 lines MEASURED 2026-11-11 — M13 re-baseline; was
+# ~3286 at the 2026-11-02 refresh, grown with the promote-handback-halt
+# serving-green stale-txn closer): the sweep service
 # owns SIX janitor lanes in one loop by design — periodic reconcile/GC
 # tick, the two-signal (W4) liveness predicate, the wake-record sweep,
 # the bounded reaper (waitpid + signal attribution), the
@@ -2239,48 +2239,35 @@ class UpgradeJournalSweepService:
         """The txn identity used by the write-once key, the request detail
         and the launcher-side reader.
 
-        The RESTART lane stamps ``run_id`` into ``in_flight``; the
-        PROMOTE lane does NOT (``journal_open_txn`` in lib.sh writes
-        {kind,target,started_at,flipped,owner_pid,last_heartbeat,
-        displaced_version} — the promote run_id lives in the pipeline
-        LOCK, which is gone by the time a stale txn is swept). ⇒ the
-        identity falls back to ``<target>@<started_at>`` — stable across
-        ticks AND across launcher boots (the same txn keeps the same
-        started_at), and distinct per txn (a re-promote stamps a new
-        started_at ⇒ a fresh write-once key, per AM-P2-13's rule).
+        A3 (review round 1): the derivation now lives ONCE, in
+        ``daemon.tools.upgrade_journal.txn_identity`` — this shim DELEGATES
+        (exactly like ``_closer_owner_dead`` delegates to
+        ``txn_owner_dead``, D1 2026-11-11) so the closer and the reclaim
+        can never drift apart. The derivation reads ``target`` from the
+        SAME ``in_flight`` dict; the caller's ``target`` argument is
+        ``in_flight['target']`` by construction (the sweep reads it from
+        the same dict one screen above) and is kept only for the
+        call-site signature — behaviour-preserving.
 
         THE SHELL SIDE MUST DERIVE THE SAME STRING (launcher.sh's
         ``_js_serving_txn_identity``): the request reader matches on
         (target, run_id) inside ONE history entry."""
-        run_id = str(in_flight.get("run_id") or "").strip()
-        if run_id:
-            return run_id
-        started = str(in_flight.get("started_at") or "").strip()
-        return f"{target}@{started}" if started else target
+        return uj.txn_identity(in_flight)
 
     @staticmethod
     def _closer_owner_dead(in_flight: dict[str, Any]) -> bool:
         """Owner liveness (P7) — the daemon's own os.kill-based shape.
 
+        D1 (2026-11-11): the predicate now lives ONCE, in
+        ``daemon.tools.upgrade_journal.txn_owner_dead`` (the mirror of
+        lib.sh's ``_txn_owner_dead``) — this shim delegates so the closer
+        and the reclaim can never drift apart.
+
         EPERM ⇒ ALIVE (the process exists under another user — the same
         contract as ``upgrade_journal._pid_alive`` and lib.sh's
-        ``_pid_alive``): a foreign-owned owner is never presumed dead."""
-        owner = in_flight.get("owner_pid")
-        try:
-            pid = int(owner)
-        except (TypeError, ValueError):
-            return True  # missing/garbage owner pid = unverifiable ⇒ dead
-        if pid <= 0:
-            return True
-        try:
-            os.kill(pid, 0)
-            return False
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        except OSError:
-            return True
+        ``_pid_alive``): a foreign-owned owner is never presumed dead.
+        """
+        return uj.txn_owner_dead(in_flight)
 
     def _closer_symlink_flipped(self, data: dict[str, Any], target: str) -> bool:
         """P5's symlink-heal arm — the launcher twin (the kill-window
@@ -2872,6 +2859,7 @@ class UpgradeJournalSweepService:
         retries by simply happening."""
         result: dict[str, int | str | None | dict[str, Any]] = {
             "reconcile": None,
+            "reclaim": None,
             "gc_pruned": 0,
             "skipped": 0,
             "wake": self.WakeSweepResult(),
@@ -2897,6 +2885,34 @@ class UpgradeJournalSweepService:
                 "UpgradeJournalSweepService: liveness guard failed: "
                 f"{type(guard_err).__name__}: {guard_err} — running "
                 "reconcile anyway"
+            )
+        try:
+            # D1 (2026-11-11): the ORPHANED-txn reclaim tick — the daemon
+            # side of the ONE reclaim mechanism. Before this, the sweep
+            # NEVER disposed a dead pre-flip txn (reconcile_pending_op
+            # returns None whenever ``in_flight`` is a dict), so only the
+            # shell preflight could clear it — the 2026-11-11 starvation.
+            # The predicate + the claim-before-adopt disposal live in
+            # ``daemon.tools.upgrade_journal`` (the shell lane's comp3 FAST
+            # PATH rule, mirrored) and the TOOL busy-check arms call the very
+            # same two helpers — no divergent copies. ORDER MATTERS: the
+            # reclaim runs BEFORE the reconcile so the reconcile's
+            # pending-op closure (expiry / terminal event) can fire on the
+            # now-unblocked op.
+            reclaim_note = uj.reclaim_stale_txn(
+                self._install_dir, actor="daemon-sweep"
+            )
+            if reclaim_note:
+                logger.info(
+                    "UpgradeJournalSweepService: reclaim — %s", reclaim_note
+                )
+            result["reclaim"] = reclaim_note
+        except Exception as reclaim_err:  # noqa: BLE001 — a janitor never gates
+            logger.warning(
+                "UpgradeJournalSweepService: reclaim tick failed: %s: %s — "
+                "next tick will retry",
+                type(reclaim_err).__name__,
+                reclaim_err,
             )
         try:
             note = uj.reconcile_pending_op(self._install_dir)

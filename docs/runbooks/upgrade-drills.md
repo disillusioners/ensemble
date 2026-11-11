@@ -683,6 +683,54 @@ If any of these is stale (e.g. a developer ran `make build` on `latest` then swi
 - `scripts/upgrade/_build_frontend.sh` — the FE build wrapper that writes the FE provenance sidecar (sibling of `frontend/dist/frontend/browser/index.html`).
 - `tests/test_stage_freshness_guard.sh` — the freshness-guard test pack (10 scenario groups: syntax/argv, stale, fresh×both-L1-modes, FE-stale, missing, non-tip, override+override-journaling, REAL dirty round-trip + legacy vocabulary, malformed×6, tag-trap, virgin-journal durability).
 - `tests/test_release_journal.sh` — the existing journal/integrity pack; its stub sidecars are stamped via the PRODUCTION writer (`_stamp_provenance_for_repo` → `_provenance_write`) so the fixture shape cannot drift from real sidecars.
+- `scripts/upgrade/executor_family.sh` — the canonical executor-family list + the placement/stamp-coverage primitives (D3); `§A.8` — the family payload + the stamp-coverage release obligation.
+- `tests/test_executor_family_payload.sh` — the D3 layout pin (hermetic: the payload fixture, the manifest/sha coverage, the no-plist property, the stamp-coverage positive/negative legs).
+
+### A.8 The executor script family payload + the stamp-coverage release obligation (D3)
+
+**What changed.** The staged release payload now ships the **executor script family** at payload-relative paths — `scripts/upgrade/*` (promote.sh, lib.sh, stage.sh, restart.sh, rollback.sh, status.sh, adopt-unit.sh, ledger_check.py, journal_read.py, journal_splice.py, _build_frontend.sh + the canonical list `executor_family.sh`) plus the two siblings `scripts/stop-ensemble.sh` and `scripts/install-dir-guard.sh`. Before this, NO packaging lane shipped those trees (the payload had no `scripts/`; `make install` shipped only `watchdog-watcher.sh`), so the promote stop step resolved **no** stop script — both legs missed (`lib.sh` `stop_via_stop_script`: the sibling one level up of the calling script's dir, then the `$(pwd)/scripts/…` fallback) ⇒ **rc=127** ⇒ the v0.29.16 promote halt. The canonical list + the placement primitives live in `scripts/upgrade/executor_family.sh` — ONE definition shared by the payload assembler (`stage.sh`) and the flat installers (`make install`, `scripts/deploy.sh`).
+
+**The release obligation (operator/release step — NOT an agent step, and NOT part of this lane).** `PIPELINE_SCRIPTS_REV` (in `scripts/upgrade/lib.sh`) and `PIPELINE_SCRIPTS_FLOOR_COMMIT` (in `daemon/tools/upgrade_tools.py`) are the two halves of the D6-8 provenance pair — they must name the **same** commit, and that commit must **contain the whole shipped family**. The stamp is what the arm-time guard reads out of `<scripts_dir>/lib.sh`; on a non-git pinned scripts dir it IS the entire provenance (Q2/D6-11). So a stamp that predates a shipped family member misdescribes what ships.
+
+**The first release that ships the family MUST re-pin both constants AFTER the family is merged:**
+
+```bash
+# 1. the family must be IN the tree you are about to name:
+git log --oneline -1 -- scripts/upgrade/executor_family.sh scripts/stop-ensemble.sh scripts/install-dir-guard.sh
+# 2. pick the merge commit that CONTAINS the whole family (it must be an
+#    ANCESTOR of the tree you stage — the floor rule, T6.15):
+FAMILY_COMMIT="$(git merge-base --is-ancestor <family-merge-sha> HEAD && git rev-parse <family-merge-sha>)"
+# 3. re-pin BOTH constants to that commit (the two travel together — D6-8):
+#    scripts/upgrade/lib.sh:            PIPELINE_SCRIPTS_REV=<FAMILY_COMMIT>
+#    daemon/tools/upgrade_tools.py:      PIPELINE_SCRIPTS_FLOOR_COMMIT = "<FAMILY_COMMIT>"
+# 4. re-stage; the coverage gate then passes:
+VERSION=<v> bash scripts/upgrade/stage.sh <target>
+```
+
+**ANCESTOR SEMANTICS (F7/A4, review round 1).** The named commit does **not** have to be the literal last commit before the release — later commits may follow it (the actual D2a WS10 re-pin was followed by further `scripts/upgrade/` work, and that is legitimate). The obligation is RELATIONAL: (a) the named commit **contains the whole shipped family** (the coverage gate — the only trigger for a NEW re-pin); (b) the named commit is an **ancestor** of every tree the floor gate judges (`git merge-base --is-ancestor <floor> HEAD`); (c) `PIPELINE_SCRIPTS_REV` and `PIPELINE_SCRIPTS_FLOOR_COMMIT` are **byte-equal** (the W-2 parity gate). The arm-time guard records the executing lib.sh's sha256 as an AUDIT artefact only — it never gates on it ("a checkout carrying local edits still ARMS"). Nothing about a tree advancing past the named commit invalidates the stamp.
+
+**Until that re-pin, `stage.sh` REFUSES (exit 78)** with:
+
+```
+REFUSING TO STAGE: PIPELINE_SCRIPTS_REV=<stamp> does not COVER the shipped executor family.
+Not present at the stamped commit:
+  scripts/install-dir-guard.sh
+  ...
+```
+
+That refusal is **fail-closed by design** — the same class as the W-2 stamp/floor gates above it. It names every path that was absent at the stamped commit, so the remedy is mechanical. Do **NOT** "fix" it by hand-editing the stamp to a non-commit value: the arm-time guard parses it as a commit sha, the W-2 gate requires it to equal the floor, and the coverage gate requires the named commit to actually contain the shipped paths.
+
+**Drill note.** Sandbox/fixture trees are exempt by construction: the fixture repo pins **both** constants to its own commit (which contains the whole family) — see `tests/test_release_journal.sh` (the fixture's `FIXTURE_STAMP`) and `tests/test_executor_family_payload.sh` (the synthetic-repo positive/negative legs of the coverage gate).
+
+### A.9 D2a supervised-flip drill leg + operator reference (2026-11-11)
+
+D2a makes the promote **launchd-aware** on the operator's Mac. For drills, the sandbox lane is unchanged (no real launchd) — but the LIVE lane's flip now follows a deterministic order and the aborts are fail-safe. Two operator facts the drill/runbook must carry:
+
+- **The mode declaration cannot ride the executor env.** `ENSEMBLE_SUPERVISION` / `ENSEMBLE_LAUNCHD_LABEL` are NOT in the executor env allowlist (`daemon/tools/upgrade_journal.py` `EXECUTOR_ENV_ALLOWLIST`) and `daemon/manager.py` sets only `INSTALL_DIR`/`PORT` on the executor — so an agent-armed promote runs the classifier in **AUTO**, which probes the gui launchd domain and verifies exactly one job whose `launchctl print` dump CONTAINS the `<install>/launcher.sh` path (whole-dump SUBSTRING match, NOT an argv[1]-realpath parse — F9 semantics, lib.sh:_supervision_launchd_detect). Manual `make upgrade-promote` runs from a shell DO honor the env. (An `unsupervised` declaration value is D2b — do not expect it here.)
+- **The forward order (pinned):** `bootout` (M1 barrier) → TERM-idempotent drain (NO second TERM; SIGKILL only if still alive) → `launcher_swap($VERSION)` → atomic flip → `launchctl bootstrap` (the JOB starts exactly once via `RunAtLoad`; the *command* may be re-issued by its 2× retry or answer "already loaded") → post-bootstrap verify (provenance: pid `<install>`-anchored → pid≠pre-stop) → health gate in the CODE order **livez → readyz → version → soak** (F6). Never a promote-started nohup launcher on the supervised path.
+- **Fail-safe abort end states** (the PER-ARM table in `docs/deployment.md` §6.9 is canonical; F3 corrected the old blanket claim): classifier refusal (exit 78, pre-mutation — the daemon keeps running, supervisor LOADED+ARMED healthy); 8b manifest-halt ⇒ **DARK + DISARMED** (`supervisor-disarmed-*`, recovery command printed — **the disarm is BEST-EFFORT**: a failed bootout journals DISARM FAILED + prints the manual command, so verify and `launchctl bootout gui/$(id -u)/<job-label>` by hand when in doubt); verify failure ⇒ auto-rollback to `$OLD_CUR` (re-armed by the rollback's bootstrap; a failed re-gate halts-for-human per ADR-028 with **no disarm by design** — the rollback is degraded-but-serving); the 8b **rollback-stop-failure** arm (exit 1, `supervisor-disarmed-rollback-stop-failed`) attempts the arm-local disarm and, if that bootout also fails, leaves the supervisor **possibly LOADED+ARMED on the broken version** — the printed manual `launchctl bootout gui/$(id -u)/<job-label>` is the operator backstop. Recovery is operator-driven.
+- **SIGKILL-in-window:** the launcher's comp3-owner-dead reclaim + the watchdog `flipped-orphan` alert cover a promote SIGKILLed mid-window; recovery command in `docs/deployment.md` §6.9.
+- **plist `ExitTimeOut` N ≥ 90** (operator step; template carries no key today) + **`make plist-install` has no `.bak`** — snapshot the live plist before re-running it. Both in `docs/deployment.md` §6.9.
 
 ---
 

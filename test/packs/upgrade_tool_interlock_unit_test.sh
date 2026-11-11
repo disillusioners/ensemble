@@ -49,6 +49,30 @@
 #     live-executor liveness guard skips clearing; pending_actions GC
 #   - terminal-outcome filter (P1 Item 5): nonce_consumed no longer
 #     masquerades as TERMINAL; label demoted to awaiting-executor (pending)
+# D1 + W2 + W6 (promote-full-auto lane 1, 2026-11-11) — extends the SAME
+# two unit files; no pack-structure change:
+#   - D1 (ONE stale-txn reclaim mechanism): the shared predicate
+#     (upgrade_journal.txn_is_reclaimable — the shell lane's comp3 FAST
+#     PATH rule: heartbeat-stale AND owner-dead ⇒ reclaimable; a live owner
+#     OR a fresh heartbeat ⇒ refuse, fail-closed) + the claim-before-adopt
+#     disposal (upgrade_journal.reclaim_stale_txn) — consumed by the TOOL
+#     busy-check arms (system_upgrade / system_restart) AND the daemon-side
+#     sweep (the 2026-11-11 starvation: three disagreeing mechanisms); the
+#     pins cover the live-owner+fresh-hb refusal, the dead-owner+stale-hb
+#     reclaim (tool lane AND sweep), the fresh-hb refusal regardless of
+#     owner state, and the single-winner claim
+#   - W2 (sibling checks for the restart/rollback lanes): the system_restart
+#     arm's stop-script sibling gate — token preflight-stop-script-missing
+#     — the restart lane's mirror of PR1's promote-arm gate (the restart
+#     stop step resolves the SAME two legs)
+#   - W6 (taxonomy sweep): the refusal tokens preflight-stop-script-missing,
+#     preflight-argv-unconstructable, preflight-argv-malformed and
+#     scripts-dir-unresolvable are registered in the upgrade-target
+#     _full_doc_ list AND in the UPGRADE_TOKENS / RESTART_TOKENS registries;
+#     preflight-stop-script-missing ALSO lives in the restart-target
+#     _full_doc_ list (MT-3 tidier round 3: the two argv tokens are
+#     upgrade-lane only — the restart lane cannot construct a promote argv,
+#     so claiming BOTH lists for them was false)
 # All fixtures /tmp-only; live/production NEVER touched.
 set -euo pipefail
 

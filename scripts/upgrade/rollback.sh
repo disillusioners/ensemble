@@ -26,7 +26,7 @@
 #
 # EXIT CODES: 0 rolled back · 1 failure (rollback did not complete) ·
 # 78 refusal (no target / manifest gate / quarantined without --force /
-# unknown target / unconfirmed live / busy).
+# unknown target / unconfirmed live / busy / stop-script sibling probe).
 # ============================================================================
 
 set -u
@@ -134,6 +134,19 @@ _log "target: caller-supplied $TO_VERSION"
 
 if [ ! -d "$REL/$TO_VERSION" ]; then
     _warn "target release $REL/$TO_VERSION does not exist"
+    exit 78
+fi
+
+# ── Stop-script sibling probe (W2, 2026-11-11; H1 tidier round 3) ───────────
+# The ONE implementation lives in lib.sh (_upgrade_stop_script_sibling_usable,
+# sourced above): the SIBLING one level up of the CALLING script's dir — the
+# W4 single source of truth (the old $(pwd)/scripts fallback is DELETED; it
+# was dead in the install layout and masked a missing sibling with rc=127).
+# Refuses BEFORE the lock is taken and the txn opened (no lock, no txn, no
+# stop). The exec-bit requirement is conservative hardening (every consumer
+# invokes `bash stop-ensemble.sh`).
+if ! _upgrade_stop_script_sibling_usable "${BASH_SOURCE[0]}"; then
+    _warn "stop-script sibling not usable at ${_UPGRADE_STOP_SCRIPT_SIBLING:-<unresolved>} (must exist AND carry the exec bit — conservative hardening: every consumer invokes 'bash stop-ensemble.sh') — refusing BEFORE any lock/txn/stop (the stop step would abort rc=127: bash: No such file or directory)"
     exit 78
 fi
 

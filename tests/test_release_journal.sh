@@ -134,6 +134,18 @@ cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"
 cp "$UPGRADE_DIR/rollback.sh"   "$FAKE_REPO/scripts/upgrade/rollback.sh"
 cp "$UPGRADE_DIR/status.sh"     "$FAKE_REPO/scripts/upgrade/status.sh"
 cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$FAKE_REPO/scripts/stop-ensemble.sh"
+# D3: the fake repo must carry the whole EXECUTOR SCRIPT FAMILY — the
+# staged payload now ships it (scripts/upgrade/* + scripts/stop-ensemble.sh
+# + scripts/install-dir-guard.sh), so stage.sh SOURCES
+# scripts/upgrade/executor_family.sh and COPIES the family into the payload.
+# Without the family in the fixture, stage.sh dies at the source line and
+# the whole stage section measures nothing.
+for _fam in _build_frontend.sh adopt-unit.sh executor_family.sh journal_read.py \
+            journal_splice.py ledger_check.py lib.sh promote.sh restart.sh \
+            rollback.sh stage.sh status.sh; do
+    cp "$UPGRADE_DIR/$_fam" "$FAKE_REPO/scripts/upgrade/$_fam"
+done
+cp "$REPO_ROOT/scripts/install-dir-guard.sh" "$FAKE_REPO/scripts/install-dir-guard.sh"
 chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh
 
 printf '#!/bin/bash\n# stub launcher (unit fixture)\n' > "$FAKE_REPO/launcher.sh"
@@ -157,6 +169,27 @@ chmod +x "$FIXTURE/stub-prod"
 git -C "$FAKE_REPO" init -q
 git -C "$FAKE_REPO" add -A 2>/dev/null
 git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm fixture
+# The PROVENANCE STAMP must resolve INSIDE the tree that is being staged:
+# the W-2 release gate requires PIPELINE_SCRIPTS_REV to be a 40-hex commit
+# that this tree CONTAINS, to equal PIPELINE_SCRIPTS_FLOOR_COMMIT (D6-8:
+# the two travel together), and — since D3 — to COVER the whole shipped
+# executor family (every family path must EXIST at the stamped commit).
+# The fixture repo is SYNTHETIC (one commit), so the release stamp cannot
+# resolve in it: the fixture pins BOTH constants to the fixture's own
+# commit — the same shape the real release bump produces (the stamp names
+# the merge commit that introduced the shipped scripts). The stamp commit
+# is the fixture's FIRST commit, which already contains the whole family.
+FIXTURE_STAMP="$(git -C "$FAKE_REPO" rev-parse HEAD)"
+sed -i.bak "s/^PIPELINE_SCRIPTS_REV=.*/PIPELINE_SCRIPTS_REV=$FIXTURE_STAMP/" \
+    "$FAKE_REPO/scripts/upgrade/lib.sh"
+rm -f "$FAKE_REPO/scripts/upgrade/lib.sh.bak"
+mkdir -p "$FAKE_REPO/daemon/tools"
+cat > "$FAKE_REPO/daemon/tools/upgrade_tools.py" <<EOFUP
+# fixture stub — only the D3 release-time floor constant is read by stage.sh
+PIPELINE_SCRIPTS_FLOOR_COMMIT = "$FIXTURE_STAMP"
+EOFUP
+git -C "$FAKE_REPO" add -A 2>/dev/null
+git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm "pin fixture stamp/floor"
 SBX_V1="v1.0.0-sbx"
 git -C "$FAKE_REPO" tag "$SBX_V1"
 
@@ -229,6 +262,322 @@ _stamp_provenance_for_repo() {
 _stamp_provenance_for_repo "$FAKE_REPO" \
     "$FIXTURE/stub-prod" \
     "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
+
+# ─── fixture launchd seam (D2a follow-up 2026-11-11, remedy (a)) ────────────
+# WHY: the D2a Darwin fail-closed supervision gate (e90239fcb promote.sh:430
+# preflight; lib.sh:6391 AUTO probe) refuses every fixture promote/rollback
+# with supervision-not-verified — sandbox installs have no real launchd job
+# by construction — stranding 42 nodes that pin journal MECHANICS (B4
+# leave-txn-open, 8b auto-rollback, M4/M5 gates), none of which are about
+# launchd. Remedy (a) per the leader decision (2026-11-11): fabricate the
+# minimal PRECONDITION the REAL predicate checks — a gui-domain job whose
+# printed definition references <install>/launcher.sh — via a hermetic
+# launchctl emulator on this suite's PATH, and let the REAL lib.sh code
+# (detector, stop ladder, hand-back, provenance verify) run and decide.
+# The ceremony-pack precedent is the same shape (37251a4f1: fabricate the
+# precondition the gate checks, never stub the checker).
+#   NOT stubbed: _supervision_launchd_detect, SUPERVISION_STATE, the gate.
+#   LAUNCHCTL_BIN is PATH-resolved BY DESIGN (lib.sh:5154 — "the mac-side
+#   test seam"), so a PATH-injected shim is the sanctioned surface.
+# SCOPE: exported ONLY inside this suite's process (children inherit); no
+# other suite sources or sees it. The classify/twins/stop_handback suites
+# keep pinning refusals against the REAL predicate (no launchctl shim in
+# their env).
+# H5 (tidier round 3): the FIXTURE-OWNED port range — every port this suite
+# allocates lives in 18300-18599 (SBX_PORT 18377, SRV_PORT 18399, SRV_PORT2
+# 18411, HANG_PORT 18453, M5_PORT 18467). The launchctl emulator's bootout
+# refuses to TERM a holder OUTSIDE this range (ambient/foreign → never kill).
+RJ_LAUNCHD_OWNED_PORT_MIN=18300
+RJ_LAUNCHD_OWNED_PORT_MAX=18599
+export RJ_LAUNCHD_OWNED_PORT_MIN RJ_LAUNCHD_OWNED_PORT_MAX
+RJ_LAUNCHD_STATE="$FIXTURE/launchd-state"
+RJ_LAUNCHD_BIN_DIR="$FIXTURE/launchctl-bin"
+mkdir -p "$RJ_LAUNCHD_STATE" "$RJ_LAUNCHD_BIN_DIR"
+RJ_LAUNCHD_LABEL="com.ensemble.sbx.fixture"   # ≠ com.ensemble.watchdog (the
+                                             # detector's exclusion label)
+RJ_LAUNCHD_PLIST="$FIXTURE/ensemble-sbx-fixture.plist"
+printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key><string>%s</string><key>ProgramArguments</key><array><string>/bin/bash</string><string>%s/launcher.sh</string></array><key>RunAtLoad</key><true/></dict></plist>\n' \
+    "$RJ_LAUNCHD_LABEL" "$SBX" > "$RJ_LAUNCHD_PLIST"
+
+# rj-stub.py — the emulated job's "daemon": a health endpoint serving the
+# CURRENT release's manifest version (v-stripped — the same literal shape
+# the §10/§12d hand-rolled stubs serve). argv carries <install>/launcher.sh
+# so the REAL ownership ladder (_supervision_owned_pids tier 1a, pgrep -f
+# anchored) classifies the revived stub as the job's OWN process — exactly
+# what a launchd-started daemon looks like to the provenance verify
+# (promote.sh:667). Self-terminates when the fixture state dir vanishes or
+# after a hard cap, so a timeout-killed run cannot leak stubs.
+RJ_LAUNCHD_STUB="$RJ_LAUNCHD_BIN_DIR/rj-stub.py"
+cat > "$RJ_LAUNCHD_STUB" <<'PYSTUB'
+#!/usr/bin/env python3
+"""Fixture launchd-job daemon emulator (release_journal suite ONLY)."""
+import http.server, json, os, sys, threading, time
+
+port = int(sys.argv[1]); install = sys.argv[2]; state = sys.argv[3]
+# argv[4] is the anchored <install>/launcher.sh marker (ownership tier 1a).
+
+def _version():
+    try:
+        cur = os.path.basename(os.readlink(os.path.join(install, "current")))
+        with open(os.path.join(install, "releases", cur, "manifest.json")) as fh:
+            m = json.load(fh)
+        v = m.get("binary_version") or m.get("version") or "unknown"
+        return v[1:] if v.startswith("v") else v
+    except Exception:
+        return "unknown"
+
+VER = _version()
+
+# Optional fixture instrumentation (12d M5): RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ
+# = "<nth-livez>:<octal-mode>:<path>" — chmod <path> to <mode> on the Nth
+# /livez hit. This is how the scenario's ORIGINAL instrumented daemon (the
+# hand-rolled M5 stub that chmod'd releases/ at the version-verify probe)
+# keeps its behavior through a seam revive: a real launchd restart gives a
+# FRESH daemon, and the revived stub replays the same probe-count trigger.
+CHMOD = None
+try:
+    _raw = os.environ.get("RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ", "")
+    if _raw:
+        _n, _mode, _p = _raw.split(":", 2)
+        CHMOD = (int(_n), int(_mode, 8), _p)
+except Exception:
+    CHMOD = None
+livez_hits = [0]
+
+class H(http.server.BaseHTTPRequestHandler):
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path == "/livez":
+            livez_hits[0] += 1
+            if CHMOD and livez_hits[0] == CHMOD[0]:
+                try:
+                    os.chmod(CHMOD[2], CHMOD[1])
+                except Exception:
+                    pass
+            self._send(200, {"status": "alive", "uptime_seconds": 1, "version": VER})
+        elif self.path == "/readyz":
+            self._send(200, {"status": "ready", "reasons": []})
+        else:
+            self._send(404, {})
+    def log_message(self, *a):
+        pass
+
+http.server.HTTPServer.allow_reuse_address = True
+srv = http.server.HTTPServer(("127.0.0.1", port), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+deadline = time.monotonic() + 900
+while time.monotonic() < deadline:
+    if not os.path.isdir(state):
+        break
+    time.sleep(2)
+srv.shutdown()
+PYSTUB
+
+# launchctl — the hermetic emulator. Surfaces used by lib.sh:
+#   list                        → one PID<TAB>STATUS<TAB>LABEL row (the
+#                                 detector's awk NF>=3 → $3 label parse)
+#   print gui/<uid>/<label>     → job dump whose program arguments name
+#                                 <install-real>/launcher.sh + a
+#                                 `path = <plist>` line (the detector's
+#                                 case-pattern match and
+#                                 _supervision_launchd_plist_path's sed)
+#   bootout [gui/<uid>[/<label>]]
+#                               → the emulated M1 stop barrier: TERM the
+#                                 $PORT holder, bounded-wait for the port
+#                                 to drain (what bootout+drain means for
+#                                 this job); RJ_LAUNCHD_BOOTOUT_FAIL=1
+#                                 fabricates the STOP-FAILURE precondition
+#                                 (the supervised-lane analogue of the
+#                                 historical chmod-000 stop script — the
+#                                 11b/11d/12e stop-fail nodes)
+#   bootstrap gui/<uid> <plist> → the emulated M2 RunAtLoad start: if this
+#                                 scenario HAD a live daemon at bootout
+#                                 (the was-live marker), revive the health
+#                                 stub on $PORT; a scenario that was dark
+#                                 stays dark (its gate must fail — the
+#                                 8b halt nodes)
+cat > "$RJ_LAUNCHD_BIN_DIR/launchctl" <<'RJLAUNCHCTL'
+#!/usr/bin/env bash
+# HERMETIC fixture launchctl emulator — tests/test_release_journal.sh only.
+set -u
+LABEL="${RJ_LAUNCHD_LABEL:-com.ensemble.sbx.fixture}"
+STATE="${RJ_LAUNCHD_STATE:?}"
+PLIST="${RJ_LAUNCHD_PLIST:?}"
+cmd="${1:-}"; target="${2:-}"
+real=""
+[ -n "${INSTALL_DIR:-}" ] && real="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd)"
+port_free() { [ -z "${PORT:-}" ] && return 0; ! lsof -ti:"$PORT" >/dev/null 2>&1; }
+# H5 (tidier round 3, 2026-11-11): FIXTURE-OWNERSHIP GATE. The emulated
+# bootout TERMs whatever holds $PORT — correct ONLY when that holder is a
+# FIXTURE listener. The suite allocates its ports from a fixed fixture range
+# (RJ_LAUNCHD_OWNED_PORT_MIN..MAX, exported by the suite setup); a PORT
+# OUTSIDE that range (ambient live-daemon port, a foreign listener) is NEVER
+# killed — the emulator refuses the bootout instead. This is one supervision
+# leg away from TERMing the live daemon without it.
+port_is_fixture_owned() {
+    local p="${PORT:-}"
+    [ -n "$p" ] || return 1
+    [ -n "${RJ_LAUNCHD_OWNED_PORT_MIN:-}" ] && [ -n "${RJ_LAUNCHD_OWNED_PORT_MAX:-}" ] || return 1
+    [ "$p" -ge "$RJ_LAUNCHD_OWNED_PORT_MIN" ] 2>/dev/null && [ "$p" -le "$RJ_LAUNCHD_OWNED_PORT_MAX" ] 2>/dev/null
+}
+# Fixture knobs (review round 1, F4(ii) legs):
+#   RJ_LAUNCHD_BOOTOUT_RM       — rm -rf this path at the next SUCCESSFUL
+#                                 bootout (fabricates the mid-promote
+#                                 eviction/deletion that reaches the 8b
+#                                 missing-previous arm AFTER the preflight
+#                                 integrity already verified the release);
+#                                 consumed once.
+#   RJ_LAUNCHD_BOOTOUT_FAIL_NTH — fail ONLY the Nth bootout call (counted
+#                                 in $STATE/bootout-count; 2 = the 8b
+#                                 forward-rollback's stop fails while the
+#                                 pre-flip stop succeeded — the F2-arm1
+#                                 shape). The disarm's own bootout (N+1)
+#                                 still succeeds.
+case "$cmd" in
+    list)
+        pid="-"
+        if [ -n "${PORT:-}" ]; then pid="$(lsof -ti:"$PORT" 2>/dev/null | head -1)"; [ -n "$pid" ] || pid="-"; fi
+        printf '%s\t%s\t%s\n' "$pid" "0" "$LABEL"
+        exit 0
+        ;;
+    print)
+        case "$target" in
+            */"$LABEL"|"$LABEL")
+                [ -n "$real" ] || { echo "rj-launchctl: INSTALL_DIR unresolvable" >&2; exit 1; }
+                printf 'program = /bin/bash\n'
+                printf 'program arguments = {\n    /bin/bash\n    %s/launcher.sh\n}\n' "$real"
+                printf 'path = %s\n' "$PLIST"
+                exit 0
+                ;;
+            *)
+                echo "rj-launchctl: print: no such job '$target'" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    bootout)
+        if [ "${RJ_LAUNCHD_BOOTOUT_FAIL:-0}" = "1" ]; then
+            # Fabricated stop-failure precondition (fixture knob): a real
+            # bootout failure is the supervised lane's stop failure.
+            echo "rj-launchctl: bootout REFUSED (fixture: RJ_LAUNCHD_BOOTOUT_FAIL=1 — the stop-failure precondition)" >&2
+            exit 1
+        fi
+        if [ -n "${RJ_LAUNCHD_BOOTOUT_FAIL_NTH:-}" ]; then
+            # A NEW knob value starts a FRESH counting window (the counter
+            # otherwise persists across the whole suite run — earlier arms'
+            # bootouts would have consumed the Nth already).
+            if [ "$(cat "$STATE/nth-knob" 2>/dev/null)" != "$RJ_LAUNCHD_BOOTOUT_FAIL_NTH" ]; then
+                printf '%s' "$RJ_LAUNCHD_BOOTOUT_FAIL_NTH" > "$STATE/nth-knob"
+                printf '0' > "$STATE/bootout-count"
+            fi
+            n=0; [ -f "$STATE/bootout-count" ] && n="$(cat "$STATE/bootout-count" 2>/dev/null)"
+            case "$n" in ''|*[!0-9]*) n=0 ;; esac
+            n=$((n + 1)); printf '%s' "$n" > "$STATE/bootout-count"
+            if [ "$n" -eq "${RJ_LAUNCHD_BOOTOUT_FAIL_NTH}" ]; then
+                echo "rj-launchctl: bootout call #$n REFUSED (fixture: RJ_LAUNCHD_BOOTOUT_FAIL_NTH=$RJ_LAUNCHD_BOOTOUT_FAIL_NTH)" >&2
+                exit 1
+            fi
+        fi
+        holders=""
+        if [ -n "${PORT:-}" ]; then
+            # H5: NEVER TERM a listener this fixture does not own. An
+            # out-of-range (ambient/foreign) PORT refuses the bootout
+            # fail-safe instead of killing the holder.
+            if ! port_is_fixture_owned; then
+                echo "rj-launchctl: bootout REFUSED — PORT ${PORT} is outside the fixture-owned range (${RJ_LAUNCHD_OWNED_PORT_MIN:-?}..${RJ_LAUNCHD_OWNED_PORT_MAX:-?}); never TERM a foreign listener" >&2
+                exit 1
+            fi
+            holders="$(lsof -ti:"$PORT" 2>/dev/null)"
+        fi
+        # A real bootout tears down the JOB — every process it owns, not
+        # just the port listener. The seam's job-tree = the port holder +
+        # every process an earlier bootstrap of THIS seam revived (recorded
+        # in $STATE/pids); TERM them all so a later scenario's drain never
+        # sees an owned straggler (the 70s-drain + SIGKILL escalation is
+        # REAL lib.sh behavior for stragglers — the seam just never leaves
+        # any).
+        if [ -f "$STATE/pids" ]; then
+            while read -r p; do
+                [ -n "$p" ] && kill -TERM "$p" 2>/dev/null
+            done < "$STATE/pids"
+            : > "$STATE/pids"
+        fi
+        if [ -n "$holders" ]; then
+            for p in $holders; do kill -TERM "$p" 2>/dev/null || true; done
+            i=0
+            while [ "$i" -lt 30 ] && ! port_free; do sleep 0.1; i=$((i + 1)); done
+            if ! port_free; then
+                echo "rj-launchctl: bootout: port ${PORT} still occupied after TERM+3s" >&2
+                exit 1
+            fi
+            : > "$STATE/was-live"
+        fi
+        # F4(ii) arm-C knob: fabricate the mid-promote eviction/deletion.
+        # Scoped to the caller's export lifetime (the node exports it
+        # around ONE promote and unsets it); the [ -e ] guard makes repeat
+        # bootouts within that window no-ops.
+        if [ -n "${RJ_LAUNCHD_BOOTOUT_RM:-}" ] && [ -e "${RJ_LAUNCHD_BOOTOUT_RM}" ]; then
+            rm -rf -- "${RJ_LAUNCHD_BOOTOUT_RM}"
+        fi
+        exit 0
+        ;;
+    bootstrap)
+        # real signature: bootstrap <domain-target> <service-path> — the
+        # plist is argv[3] (argv[2] is the gui/<uid> domain target).
+        plist="${3:-}"
+        [ -n "$plist" ] && [ -f "$plist" ] || { echo "rj-launchctl: bootstrap: no plist '$plist'" >&2; exit 1; }
+        if [ -f "$STATE/was-live" ]; then
+            rm -f "$STATE/was-live"
+            if [ -n "${PORT:-}" ] && [ -n "$real" ] && [ -n "${RJ_LAUNCHD_STUB:-}" ]; then
+                nohup python3 "$RJ_LAUNCHD_STUB" "$PORT" "$INSTALL_DIR" "$STATE" "$real/launcher.sh" \
+                    >> "$STATE/stub.log" 2>&1 &
+                echo $! >> "$STATE/pids"
+                # Wait for the listener BEFORE answering: a real launchd
+                # job with RunAtLoad is "started" when the process is
+                # spawned, but the gate's first /livez must CONNECT (a
+                # refused first probe would retry and shift any
+                # probe-count instrumentation by one).
+                i=0
+                while [ "$i" -lt 30 ] && ! lsof -ti:"$PORT" >/dev/null 2>&1; do
+                    sleep 0.1; i=$((i + 1))
+                done
+            fi
+        fi
+        # A scenario that was DARK at bootout stays dark: bootstrap "loads
+        # the job" (rc 0) but RunAtLoad starts nothing the fixture never
+        # had — those nodes pin gate-FAILURE halts.
+        exit 0
+        ;;
+    *)
+        echo "rj-launchctl: unsupported invocation: $*" >&2
+        exit 1
+        ;;
+esac
+RJLAUNCHCTL
+chmod +x "$RJ_LAUNCHD_BIN_DIR/launchctl"
+
+# Suite-scoped export: every child of THIS suite (promote/rollback/status/
+# stage fixtures) resolves the bare-name LAUNCHCTL_BIN to the emulator.
+# Nothing outside this process tree can see it.
+export PATH="$RJ_LAUNCHD_BIN_DIR:$PATH"
+export RJ_LAUNCHD_STATE RJ_LAUNCHD_PLIST RJ_LAUNCHD_LABEL RJ_LAUNCHD_STUB
+
+# _rj_launchd_cleanup — reap revived stubs (they also self-terminate on
+# state-dir disappearance; this is the prompt path at suite exit).
+_rj_launchd_cleanup() {
+    if [ -f "${RJ_LAUNCHD_STATE:-}/pids" ]; then
+        while read -r p; do
+            [ -n "$p" ] && kill "$p" 2>/dev/null
+        done < "$RJ_LAUNCHD_STATE/pids"
+    fi
+    return 0
+}
 
 # ─── 1. syntax gates ────────────────────────────────────────────────────────
 section "syntax gates"
@@ -432,9 +781,28 @@ MANIFEST="$SBX/releases/$SBX_V1/manifest.json"
 [ -f "$MANIFEST" ] && _pass || _fail "manifest exists"
 for f in binary_version known_schema_gen contains_contract_phase rollback_safe \
          launcher_sha256 binary_sha256 config_sha256 agents_tree_sha256 \
-         frontend_tree_sha256 agents_manifest frontend_manifest; do
+         frontend_tree_sha256 agents_manifest frontend_manifest \
+         scripts_tree_sha256 scripts_manifest pipeline_scripts_rev; do
     grep -q "\"$f\"" "$MANIFEST" 2>/dev/null && _pass || _fail "manifest has $f"
 done
+# D3: the staged PAYLOAD must carry the executor script family at the
+# canonical payload-relative paths — and the stop-script SIBLING the promote
+# stop step resolves (<scripts_dir>/../stop-ensemble.sh, lib.sh:4849) must be
+# present AND EXECUTABLE (PR1's arm-gate predicate). A payload without it
+# cannot promote (the v0.29.16 halt class: rc=127, no stop script).
+REL_DIR="$SBX/releases/$SBX_V1"
+[ -f "$REL_DIR/scripts/upgrade/promote.sh" ] && _pass || _fail "payload: scripts/upgrade/promote.sh shipped"
+[ -f "$REL_DIR/scripts/upgrade/lib.sh" ] && _pass || _fail "payload: scripts/upgrade/lib.sh shipped"
+[ -x "$REL_DIR/scripts/stop-ensemble.sh" ] && _pass || _fail "payload: scripts/stop-ensemble.sh shipped AND executable"
+[ -f "$REL_DIR/scripts/install-dir-guard.sh" ] && _pass || _fail "payload: scripts/install-dir-guard.sh shipped"
+[ -x "$REL_DIR/scripts/upgrade/../stop-ensemble.sh" ] && _pass \
+    || _fail "payload: the stop-script sibling resolves AND is executable"
+# the plists are OPERATOR-side (make plist-install) — never in a payload
+if find "$REL_DIR" -name '*.plist' 2>/dev/null | grep -q .; then
+    _fail "payload carries NO *.plist"
+else
+    _pass
+fi
 # no .env inside the release dir
 if [ -z "$(find "$SBX/releases/$SBX_V1" -name '.env' -print -quit 2>/dev/null)" ]; then
     _pass
@@ -959,9 +1327,20 @@ afield() { ( export INSTALL_DIR="$1"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; eva
 # (journal_count_rollback) with a python3 fallback (python3 is a hard
 # dependency of this suite).
 _stamped_iso() {  # _stamped_iso <-offset-seconds>
+    # F11 (review round 1): dual-idiom AND sign-correct. The old Darwin arm
+    # ran `date -ju -v+${1}S` — for a NEGATIVE offset that renders
+    # `-v+-700S`, which BSD date REJECTS ("Cannot apply date adjustment",
+    # rc 1) ⇒ the helper silently returned empty and every caller fell to
+    # its python fallback. Mirror lib.sh _cooldown_until_iso's sign
+    # handling: a negative offset carries its own sign (`-v-700S` is
+    # valid); only a positive offset needs the explicit `+`.
     case "$(uname -s)" in
         Darwin|*BSD*|*bsd*)
-            date -ju -v+${1}S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ;;
+            if [ "${1#-}" != "$1" ]; then
+                date -ju -v${1}S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+            else
+                date -ju -v+${1}S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+            fi ;;
         Linux|GNU*|*GNU*)
             date -u -d "${1} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ;;
         *) date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ;;
@@ -1277,7 +1656,10 @@ b4_seed_journal() {  # <current-ver-or-null>
 }
 b4_age_txn() {  # age in_flight started_at past the 600s sweep gate (drill pattern)
     ( export INSTALL_DIR="$SBX"; . "$FAKE_REPO/scripts/upgrade/lib.sh"
-      ts="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"
+      # F11: the dual-idiom helper (BSD-sign-correct) + the python fallback —
+      # was a bare BSD `date -ju -v-700S` (broken on GNU hosts).
+      ts="$(_stamped_iso -700)"
+      [ -n "$ts" ] || ts="$(python3 -c 'import datetime; print((datetime.datetime.utcnow()-datetime.timedelta(seconds=700)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
       inf="$(_json_sub "$(journal_read)" in_flight)"
       k="$(_json_field "$inf" kind)"; t="$(_json_field "$inf" target)"; o="$(_json_field "$inf" owner_pid)"
       journal_update in_flight "{\"kind\":\"$k\",\"target\":\"$t\",\"started_at\":\"$ts\",\"flipped\":false,\"owner_pid\":$o}"
@@ -1316,21 +1698,66 @@ assert_eq "11a txn flipped:false (pre-flip)" "false" "$(b4_inf_flip)"
 assert_contains "11a halt event recorded" '"event":"halt"' "$(cat "$JB")"
 assert_eq "11a current untouched at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
 [ -d "$SBX/releases/rollback.lock.d" ] && _fail "11a lock released on abort" "absent" "present" || _pass
-JB_11A_FRESH="$(cat "$JB")"
+# ── 11a sweep legs — AMENDED to the WS4 contract (D2a SIGKILL mitigation,
+#    launcher.sh:2892-2894: "a FRESH heartbeat no longer protects a txn
+#    whose owner is provably DEAD — owner_dead ALONE is reclaimable"), the
+#    same amendment the D2a lane landed for the cgroup twin (3b-i,
+#    b0b71d807: fresh hb + dead owner ⇒ RECLAIM, was HELD). The aborted
+#    promote's owner pid is gone at sweep time, so the immediate sweep
+#    RECLAIMS the fresh txn. The old pin (byte-identical DEFER) encoded the
+#    pre-WS4 contract — and at the 42-red supervision baseline it passed
+#    only VACUOUSLY (the refused promote never opened a txn to defer);
+#    the amended pins are TWO-SIDED (real open txn asserted pre-sweep,
+#    reclaim asserted post-sweep) so that vacuity cannot return.
+assert_eq "11a pre-sweep: the abort left a REAL open promote txn" "promote" "$(b4_inf_kind)"
+assert_eq "11a pre-sweep: open txn target is the aborted promote's" "$SBX_V2" \
+    "$(b4_inf '_json_field "$(_json_sub "$(journal_read)" in_flight)" target')"
 b4_sweep
-assert_eq "11a fresh txn: immediate launcher start defers (byte-identical)" "$JB_11A_FRESH" "$(cat "$JB")"
-b4_age_txn
+assert_eq "11a fresh txn + dead owner: sweep RECLAIMS (WS4, 3b-i twin)" "null" \
+    "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+assert_contains "11a reclaim is the orphaned pre-flip sweep (never flipped)" \
+    "orphaned pre-flip promote txn" "$(cat "$JB")"
+# Aged leg — a CASCADE, not a second defect: the immediate WS4 reclaim
+# above already cleared the abort's txn, so the old leg's splice ran
+# against a CLEARED journal and minted a kindless garbage txn (that red
+# was the cascade). Seed the aged txn EXPLICITLY so this leg keeps
+# pinning what it always did: an AGED pre-flip txn is sweep-cleared, the
+# boot stays on LKG. The seed opens via the REAL journal_open_txn (the
+# production writer), then ages started_at past the 600s gate and sets
+# owner_pid=999999 (the §8 fixture pattern: journal_open_txn writes
+# owner=$$ — the SUITE's pid, alive at sweep time — and the sweep's
+# first gate DEFERS a fresh-hb + live-owner txn; a dead owner is part of
+# the precondition this leg has always exercised via the aborted
+# promote's now-gone pid).
+b4_inf "journal_open_txn promote '$SBX_V2'" > /dev/null 2>&1
+( export INSTALL_DIR="$SBX"; . "$FAKE_REPO/scripts/upgrade/lib.sh"
+  # F11: the dual-idiom helper (BSD-sign-correct) + the python fallback —
+  # was a bare BSD `date -ju -v-700S`.
+  ts="$(_stamped_iso -700)"
+  [ -n "$ts" ] || ts="$(python3 -c 'import datetime; print((datetime.datetime.utcnow()-datetime.timedelta(seconds=700)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+  journal_update in_flight "{\"kind\":\"promote\",\"target\":\"$SBX_V2\",\"started_at\":\"$ts\",\"flipped\":false,\"owner_pid\":999999,\"last_heartbeat\":$(_now_epoch),\"displaced_version\":\"$SBX_V1\"}"
+) > /dev/null 2>&1
 b4_sweep
 assert_eq "11a aged txn: sweep clears (journal recovered)" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
 assert_eq "11a recovery keeps current at LKG — env boots v1" "releases/$SBX_V1" "$(readlink "$SBX/current")"
 assert_contains "11a clear event is sweep (not sweep_rollback)" '"event":"sweep"' "$(cat "$JB")"
 assert_eq "11a no phantom rollback count" "0" "$(b4_inf 'journal_rollback_count_24h')"
 
-# 11b. promote abort at STOP (stop script fails — daemon liveness unknown;
+# 11b. promote abort at STOP (stop fails — daemon liveness unknown;
 #      the wrong-comment regression: "environment untouched" was a lie).
+#      D2a supervised lane (2026-11-11): the stop mechanism for a verified
+#      launchd install is the BOOTOUT, so the stop-failure precondition is
+#      fabricated on the fixture seam (RJ_LAUNCHD_BOOTOUT_FAIL=1 — the
+#      supervised-lane analogue of the old chmod-000 stop script) and the
+#      REAL stop ladder decides. chmod 111 keeps the sibling degraded but
+#      EXECUTABLE (the W1 sibling probe requires the exec bit; under
+#      supervision the script is not the stop path — and were it ever, an
+#      111 script is unreadable by bash → the same stop-failure class).
 b4_seed_journal "$SBX_V1"
-chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 111 "$FAKE_REPO/scripts/stop-ensemble.sh"
+export RJ_LAUNCHD_BOOTOUT_FAIL=1
 B4B_OUT="$(b4_run_promote "$SBX_V2")"; B4B_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_FAIL
 chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "11b stop-fail abort exits 1" "1" "$B4B_RC"
 assert_contains "11b abort admits daemon state UNKNOWN" "UNKNOWN" "$B4B_OUT"
@@ -1364,10 +1791,14 @@ b4_sweep
 assert_eq "11c aged txn: sweep clears" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
 assert_eq "11c recovery keeps current at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
 
-# 11d. manual rollback abort at STOP.
+# 11d. manual rollback abort at STOP. Same D2a supervised-lane treatment
+#      as 11b: the stop-failure precondition rides the seam
+#      (RJ_LAUNCHD_BOOTOUT_FAIL=1); sibling degraded-but-executable (111).
 b4_seed_journal "$SBX_V1"
-chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 111 "$FAKE_REPO/scripts/stop-ensemble.sh"
+export RJ_LAUNCHD_BOOTOUT_FAIL=1
 B4D_OUT="$(b4_run_rollback "$SBX_V2")"; B4D_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_FAIL
 chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "11d rollback stop-fail abort exits 1" "1" "$B4D_RC"
 assert_contains "11d abort says txn left open" "txn left open" "$B4D_OUT"
@@ -1514,9 +1945,18 @@ sleep 1
 ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" null '[]'
 b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+# D2a supervised lane: the seam's bootout KILLS the instrumented M5 stub
+# (it holds the port — a real bootout stops the job's daemon) and the
+# revived stub replaces it. The instrumentation (chmod releases/ read-only
+# at the version-verify probe = the stub's 2nd /livez) rides the seam's
+# RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ hook so the REVIVED daemon replays the
+# exact trigger the hand-rolled stub had (fresh-daemon probe counting:
+# livez #1 = gate, livez #2 = version-verify = the original's trigger).
+export RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ="2:0o555:$SBX/releases"
 M5_OUT="$(HOME="$FAKE_HOME" VERSION="$SBX_V2" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$M5_PORT" \
     LIVEZ_BUDGET_S=6 READYZ_BUDGET_S=6 ENSEMBLE_PROMOTE_SOAK_S=0 \
     bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1)"; M5_RC=$?
+unset RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ
 kill "$M5_PID" 2>/dev/null; wait "$M5_PID" 2>/dev/null
 chmod 755 "$SBX/releases" 2>/dev/null
 rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
@@ -1570,8 +2010,13 @@ ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" '[]'
 b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
 W2_COUNT_BEFORE="$(b4_inf 'journal_rollback_count_24h')"
-chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
+# D2a supervised lane (as 11b/11d): the stop-failure precondition rides the
+# seam (RJ_LAUNCHD_BOOTOUT_FAIL=1); the sibling stays degraded-but-
+# executable (111) for the W1 preflight probe.
+chmod 111 "$FAKE_REPO/scripts/stop-ensemble.sh"
+export RJ_LAUNCHD_BOOTOUT_FAIL=1
 W2E_OUT="$(b4_run_promote "$SBX_V1")"; W2E_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_FAIL
 chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "12e same-version stop-fail abort exits 1" "1" "$W2E_RC"
 assert_eq "12e txn OPEN with target == journal current (same-version)" "$SBX_V1" \
@@ -1590,6 +2035,167 @@ fi
 assert_eq "12e NO rollback count" "$W2_COUNT_BEFORE" "$(b4_inf 'journal_rollback_count_24h')"
 assert_eq "12e NO cooldown armed" "null" "$(m4_field cooldown_until)"
 assert_eq "12e healthy version NOT quarantined" "[]" "$(b4_inf '_json_sub "$(journal_read)" quarantined')"
+
+# 12g. F1/F4(i) (review round 1): a LAUNCHD verify failure must ROUTE to 8b
+#      with the reason INTACT. Pre-F1 the stale unconditional
+#      gate_fail_reason="" at the HEALTH-GATE banner wiped the verify verdict
+#      three lines after it was set (insert-above-stale-initializer from
+#      base 83cd98a11) and the unguarded livez arm could overwrite it — the
+#      verify block was LOG-ONLY, and the reachable false-success was
+#      bootstrap rc 2 "already loaded" (lib.sh:5733-5756 names THIS verify as
+#      its designated revalidation) + a port-squatting daemon gating green
+#      against the WRONG daemon. Seam leg (the sanctioned LAUNCHCTL_BIN
+#      surface): supervision VERIFIES, stop/flip/bootstrap run, the env is
+#      DARK (no owned pid) ⇒ the provenance verify fails ⇒ 8b, and the
+#      launchd reason must SURVIVE into the journal (it rides the 8b
+#      auto-rollback event's "gate fail: …" detail).
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+F4G_OUT="$(b4_run_promote "$SBX_V3")"; F4G_RC=$?
+rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+assert_eq "12g verify-fail promote halts (78)" "78" "$F4G_RC"
+assert_contains "12g the LAUNCHD verify reason SURVIVES into the journal (F1)" \
+    "launchd verify: no INSTALL_DIR-anchored daemon pid after bootstrap" "$(cat "$JB")"
+assert_eq "12g 8b auto-rollback repointed to OLD_CUR" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+assert_eq "12g txn closed by the halt" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+
+# 12h. F4(ii) (review round 1): every 8b exit that does NOT run the forward
+#      rollback must DISARM with a NAMED end state + a recorded bootout — on
+#      Darwin a supervisor left LOADED+ARMED re-arms the broken $VERSION via
+#      KeepAlive. Arms (each via the seam, each asserting the named state AND
+#      the bootout of the verified job label):
+#        A no-previous (current:null ⇒ OLD_CUR empty ⇒ PREV empty)
+#        B quarantined-previous (the DISPLACED v1 is quarantined — PREV is
+#          OLD_CUR, not journal.previous, per C3)
+#        D unsafe-previous (v1 manifest rollback_safe=false — not an
+#          integrity field, so the preflight still passes)
+#        E F2-arm1: the 8b FORWARD-ROLLBACK stop fails (the SECOND bootout;
+#          RJ_LAUNCHD_BOOTOUT_FAIL_NTH=2) ⇒ the arm-local disarm
+#        C missing-previous — LAST (destructive): the seam's
+#          RJ_LAUNCHD_BOOTOUT_RM deletes releases/v1 AT the pre-flip bootout,
+#          i.e. AFTER the preflight integrity verified it — the production
+#          contingency (eviction/manual deletion mid-run); a run_stage
+#          restore follows so §13+ see a healthy fixture.
+f4h_arm() {  # <arm-letter> <expected-rc> <named-state>
+    local letter="$1" wantrc="$2" state="$3"
+    rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+    local out rc
+    out="$(b4_run_promote "$SBX_V3")"; rc=$?
+    assert_eq "12h-$letter arm halts ($wantrc)" "$wantrc" "$rc"
+    assert_contains "12h-$letter named end state journaled ($state)" "$state" "$(cat "$JB")"
+    assert_contains "12h-$letter bootout of the verified job label recorded" \
+        "bootout com.ensemble.sbx.fixture" "$(cat "$JB")"
+}
+# A — no-previous
+b4_seed_journal null
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+f4h_arm A 78 "supervisor-disarmed-no-previous"
+# B — quarantined-previous (PREV = the DISPLACED v1)
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" "[\"$SBX_V1\"]"
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+f4h_arm B 78 "supervisor-disarmed-prev-quarantined"
+# D — unsafe-previous (rollback_safe=false on the displaced v1). NOTE: the
+# repair is a DIRECT manifest patch back to true after the arm — a mid-suite
+# run_stage re-stage is NOT usable here (empirically it leaves the CURRENT
+# release integrity-broken: the fixture's agents tree legitimately drifted
+# via the §11/§12 fixture commits, and the re-stage's manifest/file pairing
+# mismatches on the drifted members ⇒ every later promote refuses at
+# CURRENT-integrity pre-txn). rollback_safe is not an integrity-hashed
+# field, so the patch itself is invisible to the preflight.
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+f4h_patch_rbs() {  # f4h_patch_rbs <ver> <true|false>
+    # TEXTUAL patch ONLY. A json.load→json.dump round-trip collapses the
+    # pretty multi-line manifest to one line, which BREAKS integrity_verify's
+    # `_manifest_map_lines` sed extraction (the {path:sha} maps stop parsing,
+    # every agents/frontend line diffs, and the promote refuses at
+    # CURRENT-integrity pre-txn rc 78 — observed as the D/E/C pre-txn
+    # refusals). rollback_safe is a top-level identity field — NOT hashed.
+    sed -E "s/\"rollback_safe\": (true|false)/\"rollback_safe\": $2/" \
+        "$SBX/releases/$1/manifest.json" > "$SBX/releases/$1/manifest.json.tmp" \
+        && mv "$SBX/releases/$1/manifest.json.tmp" "$SBX/releases/$1/manifest.json"
+}
+f4h_patch_rbs "$SBX_V1" false
+f4h_arm D 78 "supervisor-disarmed-prev-unsafe"
+f4h_patch_rbs "$SBX_V1" true
+# E — F2-arm1: the 8b forward-rollback stop fails (bootout call #2), the
+# arm-local disarm (bootout call #3) still succeeds
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+export RJ_LAUNCHD_BOOTOUT_FAIL_NTH=2
+F4H_E_OUT="$(b4_run_promote "$SBX_V3")"; F4H_E_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_FAIL_NTH
+rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+assert_eq "12h-E rollback-stop-failure arm exits 1" "1" "$F4H_E_RC"
+assert_contains "12h-E F2-arm1 named end state journaled" \
+    "supervisor-disarmed-rollback-stop-failed" "$(cat "$JB")"
+assert_contains "12h-E bootout of the verified job label recorded" \
+    "bootout com.ensemble.sbx.fixture" "$(cat "$JB")"
+# C — missing-previous, LAST (deletes releases/v1 mid-promote). v1 is
+# SNAPSHOTTED first and restored directly after (no re-stage — see the D
+# note above).
+cp -R "$SBX/releases/$SBX_V1" "$FIXTURE/f4h-v1-snapshot"
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+export RJ_LAUNCHD_BOOTOUT_RM="$SBX/releases/$SBX_V1"
+F4H_C_OUT="$(b4_run_promote "$SBX_V3")"; F4H_C_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_RM
+rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+assert_eq "12h-C missing-previous arm halts (78)" "78" "$F4H_C_RC"
+assert_contains "12h-C named end state journaled" "supervisor-disarmed-prev-missing" "$(cat "$JB")"
+assert_contains "12h-C bootout of the verified job label recorded" \
+    "bootout com.ensemble.sbx.fixture" "$(cat "$JB")"
+# direct restore for §13+ (snapshot back + neutral journal)
+mv "$FIXTURE/f4h-v1-snapshot" "$SBX/releases/$SBX_V1"
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+
+# 12i. H5 (tidier round 3) — FIXTURE-OWNERSHIP GATE: the emulator's bootout
+#      must NEVER TERM a listener the fixture does not own. Point PORT at an
+#      out-of-range listener (a foreign port the fixture did NOT allocate),
+#      run the bootout arm, and assert the holder SURVIVES + the bootout
+#      refused. Today this is defence-in-depth (all suite ports are owned);
+#      it exists so one future supervision leg cannot TERM the live daemon.
+# A FOREIGN listener = one the fixture does NOT own. Let the OS pick the port
+# (bind :0) so the cell can never collide with whatever else the host runs —
+# the foreign-ness is then defined by the RANGE, and the cell skips (with a
+# named fence) in the unlikely case the OS hands out an in-range port.
+FOREIGN_PORT_FILE="$FIXTURE/h5-foreign-port"
+python3 - "$FOREIGN_PORT_FILE" <<'PYF' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
+    def log_message(self, *a): pass
+http.server.HTTPServer.allow_reuse_address = True
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_address[1]))
+srv.serve_forever()
+PYF
+FOREIGN_PID=$!
+i=0; while [ ! -s "$FOREIGN_PORT_FILE" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+FOREIGN_PORT="$(cat "$FOREIGN_PORT_FILE" 2>/dev/null || echo "")"
+if [ -z "$FOREIGN_PORT" ]; then
+    # NAMED FENCE (the suite's convention: the fence's own text is the
+    # assertion — emit the honest SKIP line, then PASS the fence cell).
+    printf 'SKIP(os-port-alloc-failed): 12i H5 foreign-listener fixture could not bind\n'
+    _pass
+elif [ "$FOREIGN_PORT" -ge "$RJ_LAUNCHD_OWNED_PORT_MIN" ] && [ "$FOREIGN_PORT" -le "$RJ_LAUNCHD_OWNED_PORT_MAX" ]; then
+    printf 'SKIP(in-range-port %s): 12i H5 foreign-ness undefined — cell fenced\n' "$FOREIGN_PORT"
+    _pass
+else
+    H5_RC=0
+    PORT="$FOREIGN_PORT" INSTALL_DIR="$SBX" launchctl bootout "gui/$(id -u)/$RJ_LAUNCHD_LABEL" > /dev/null 2>&1 || H5_RC=$?
+    assert_eq "12i H5: bootout REFUSES a foreign (non-fixture) PORT" "1" "$H5_RC"
+    kill -0 "$FOREIGN_PID" 2>/dev/null && _pass || _fail "12i H5: the foreign listener SURVIVED the bootout (no kill)" "alive" "dead"
+fi
+kill "$FOREIGN_PID" 2>/dev/null; wait "$FOREIGN_PID" 2>/dev/null
+PORT="$SBX_PORT"   # restore the fixture port for §13+
 
 # ─── 13. P2.3 B4 leg 2: _refuse journals entry-refusals (best-effort) ──────
 section "_refuse: journaled entry refusals (upgrade_promote_refusal)"
@@ -2528,8 +3134,10 @@ _pass
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
     printf 'failed:%s\n' "$FAILED_TESTS"
+    _rj_launchd_cleanup
     rm -rf "$FIXTURE"
     exit 1
 fi
+_rj_launchd_cleanup
 rm -rf "$FIXTURE"
 exit 0

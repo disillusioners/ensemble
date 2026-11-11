@@ -938,8 +938,11 @@ STUB
     assert_contains "C10 refusal journaled" '"event":"refusal"' "$C10_J"
     assert_contains "C10 refusal carries the supervision-unit-incapable-host token" "reason=supervision-unit-incapable-host" "$C10_J"
 
-    # C10b NON-explicit (auto-resolved) UNIT_MANAGED on the same incapable
-    # host: legacy loud-degrade to the nohup path stays AS-IS.
+    # C10b D2a CHANGE: NON-explicit (auto-resolved) UNIT_MANAGED on Darwin.
+    # Darwin is now FAIL-CLOSED — restart_via_launcher refuses (exit 78) rather
+    # than degrade to the nohup lineage (a promote-started launcher against a
+    # launchd job IS the 2026-11-11 dual-supervisor incident). The legacy
+    # loud-degrade survives NON-Darwin only.
     reset_stub_state "$CFIX/sc4.log"
     C10B_OUT="$(PATH="$LSOF_OK:$DARWIN_BIN:$PATH" bash -c '
         export INSTALL_DIR="'"$CFIX"'"
@@ -953,9 +956,9 @@ STUB
         ( restart_via_launcher )
         echo "rvl-rc=$?"
     ' 2>&1)"
-    assert_eq "C10b auto-resolved unit + incapable host: rc 0 (legacy degrade)" "rvl-rc=0" "$(rvl_rc "$C10B_OUT")"
-    assert_contains "C10b degrade LOUD" "degrading LOUD to the nohup path" "$C10B_OUT"
-    assert_contains "C10b byte-identical nohup line" "launcher started (nohup)" "$C10B_OUT"
+    assert_eq "C10b auto-resolved unit + Darwin: rc 78 (fail-closed, no nohup degrade)" "rvl-rc=78" "$(rvl_rc "$C10B_OUT")"
+    assert_contains "C10b Darwin refusal names the nohup fallback hazard" "reached the nohup fallback with NO verified launchd job" "$C10B_OUT"
+    assert_not_contains "C10b NEVER nohup'd on Darwin" "launcher started (nohup)" "$C10B_OUT"
     assert_eq "C10b zero systemctl calls (host guard first)" "" "$(cat "$CFIX/sc4.log")"
     rm -rf "$DARWIN_BIN"
 

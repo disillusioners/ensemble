@@ -274,7 +274,11 @@ PLANTS: dict[str, dict] = {
         "file": LIB, "mode": "executable",
         "why": "a stale tree predates the stamp: the PIPELINE_SCRIPTS_REV line is absent from lib.sh (the arm-time guard's B3 input)",
         "pairs": [(
-            "PIPELINE_SCRIPTS_REV=unreleased-fix-promote-preflight-hang",
+            # re-pin coupling: when PIPELINE_SCRIPTS_REV is re-pinned, refresh this
+            # literal in the SAME change — plant literals pin exact bytes and
+            # ERROR-plant loudly on drift (see .agents/tester/PACKS.md matrix row;
+            # precedent dec3a82c2/M8).
+            "PIPELINE_SCRIPTS_REV=087f782afbf1957dd0bf6acea5198314093d2a89",
             "# PLANT M22: stamp line removed (a stale tree predates the stamp)",
         )],
     },

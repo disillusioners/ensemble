@@ -13,7 +13,40 @@
 #                                        manifest gains launcher_sha256; promote
 #                                        swaps it in the stopped window]
 #   releases/<ver>/config.yaml
-#   releases/<ver>/manifest.json        (ADR-004 M5 fields + D-FA4.4 checksums)
+#   releases/<ver>/scripts/upgrade/*    [D3 — the EXECUTOR SCRIPT FAMILY
+#                                        (promote.sh, lib.sh, stage.sh,
+#                                        restart.sh, rollback.sh, status.sh,
+#                                        adopt-unit.sh, ledger_check.py,
+#                                        journal_read.py, journal_splice.py,
+#                                        _build_frontend.sh) plus
+#                                        scripts/stop-ensemble.sh and
+#                                        scripts/install-dir-guard.sh. The
+#                                        canonical list + the placement
+#                                        primitives live in
+#                                        scripts/upgrade/executor_family.sh
+#                                        (ONE definition for the payload and
+#                                        the flat install). PAYLOAD-RELATIVE
+#                                        paths, so the promote stop step's
+#                                        sibling leg (<scripts_dir>/../stop-
+#                                        ensemble.sh) resolves INSIDE the
+#                                        payload — the v0.29.16 halt class
+#                                        (rc=127, no stop script) was
+#                                        possible only because NO packaging
+#                                        lane shipped these trees.]
+#   releases/<ver>/manifest.json        (ADR-004 M5 fields + D-FA4.4 checksums
+#                                        + scripts_tree_sha256 /
+#                                        scripts_manifest — the shipped
+#                                        family is under the release's
+#                                        integrity contract, like the other
+#                                        trees)
+#
+# NO PLIST EVER (property, not accident): the launchd plists
+# (scripts/ensemble-prod.plist, scripts/ensemble-watchdog-watcher.plist) are
+# OPERATOR-side (make plist-install stages them into <install>/data/) and are
+# NOT part of any release payload. The family list is an explicit
+# enumeration, so a plist cannot ride along; the layout pin test
+# (tests/test_executor_family_payload.sh) enforces the property over the
+# whole staged tree.
 #
 # NO `.env` EVER inside the release dir (ADR-014/m6) — the env marker
 # ENSEMBLE_SELF_ENV=<dev|demo|live|sandbox> is staged into INSTALL_DIR/.env
@@ -129,6 +162,15 @@ done
 
 # shellcheck source=scripts/upgrade/lib.sh
 . "$SCRIPT_DIR/lib.sh"
+
+# D3: the executor script family (canonical list + the install/manifest/
+# stamp-coverage primitives). Sourced so the payload copy, the manifest
+# map/aggregate and the stamp-coverage gate all use the SAME family
+# definition the installer CLI (--install) uses — one definition of "what
+# ships and where it lands", no drift between the payload, the flat
+# install and the layout pin test.
+# shellcheck source=scripts/upgrade/executor_family.sh
+. "$SCRIPT_DIR/executor_family.sh"
 
 resolve_env "${TARGET_ARG:-${TARGET:-demo}}"
 require_live_guard "$UP_TARGET"
@@ -424,6 +466,26 @@ rm -f "$STAGE_TMP/frontend/dist/frontend/browser/index.html.build-provenance.jso
 cp "$REPO_ROOT/config.yaml" "$STAGE_TMP/config.yaml" || { rm -rf "$STAGE_TMP"; exit 1; }
 cp "$REPO_ROOT/launcher.sh" "$STAGE_TMP/launcher.sh" || { rm -rf "$STAGE_TMP"; exit 1; }
 chmod +x "$STAGE_TMP/launcher.sh"
+# D3: the EXECUTOR SCRIPT FAMILY joins the payload. The install dir's
+# scripts/ trees were out-of-band copies — NO packaging lane shipped them:
+# the staged payload carried no scripts/ at all and `make install` shipped
+# only scripts/watchdog-watcher.sh into <install_dir>/scripts/
+# (Makefile:375-377). The promote stop step resolves its stop script as the
+# SIBLING one level up of the calling script's dir (lib.sh
+# stop_via_stop_script — the W4 single source of truth:
+# <scripts_dir>/../stop-ensemble.sh; the old $(pwd)/scripts fallback is
+# DELETED). A missing sibling aborts mid-stop ⇒ bash: No such file or
+# directory ⇒ rc=127 ⇒ the promote aborts before the flip (the v0.29.16
+# halt class). The family lands at PAYLOAD-RELATIVE paths
+# (scripts/upgrade/* + scripts/stop-ensemble.sh + scripts/install-dir-guard.sh)
+# so the sibling relation the stop step resolves holds INSIDE the payload
+# as well as inside a flat install (docs/deployment.md:800 anticipates
+# exactly releases/<ver>/scripts/upgrade/promote.sh).
+executor_family_install "$REPO_ROOT" "$STAGE_TMP" || {
+    _warn "executor script family staging FAILED — refusing to stage a payload that carries no executor scripts (the v0.29.16 promote-halt class: the stop step would resolve no stop script)"
+    rm -rf "$STAGE_TMP"
+    exit 1
+}
 lock_heartbeat   # payload copies done; checksum walks start (long phase)
 
 # ADR-014/m6 invariant — NO .env of any kind inside a release dir (catches a
@@ -448,6 +510,16 @@ PLUGINS_LINES="$(_stage_tree_walk plugins "$STAGE_TMP/plugins")" || { rm -rf "$S
 AGENTS_TREE="$(_tree_hash_of_lines "$AGENTS_LINES")"
 FRONTEND_TREE="$(_tree_hash_of_lines "$FRONTEND_LINES")"
 PLUGINS_TREE="$(_tree_hash_of_lines "$PLUGINS_LINES")"
+# D3: the shipped executor family gets the SAME coverage as the other
+# trees — a per-file sha256 map (manifest.scripts_manifest) + a tree
+# aggregate (manifest.scripts_tree_sha256). The lines are BYTE-COMPATIBLE
+# with lib.sh's _tree_manifest (same find|sort order, same shasum -a 256
+# output, same two-space separator), so a lib.sh-side verifier computes the
+# identical aggregate for the identical tree — the layout pin test pins that
+# byte-compat. The family tree is small and fixed-size (the canonical list),
+# so it does not need the unbounded-walk budget of the plugins tree.
+SCRIPTS_LINES="$(executor_family_manifest_lines "$STAGE_TMP/scripts")" || { rm -rf "$STAGE_TMP"; exit 1; }
+SCRIPTS_TREE="$(executor_family_tree_hash "$SCRIPTS_LINES")"
 
 # ── per-file maps (linear streaming — 2026-10-07 O(n²) fix) ─────────────────
 # The previous construct appended each entry to a growing bash string
@@ -513,6 +585,22 @@ $PLUGINS_LINES
 EOF
 plugins_map="$(_stage_join_map "$_plugins_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
 rm -f "$_plugins_frag"
+# scripts/ per-file map — the shipped executor family, same shape as the
+# agents/frontend/plugins blocks above (flat {path:sha256,…}; the keys are
+# TREE-relative, i.e. "upgrade/promote.sh" + "stop-ensemble.sh", so the
+# map composes with lib.sh's _manifest_map_lines verifier exactly like the
+# other trees).
+_scripts_frag="$STAGE_TMP/.map_frag.scripts"
+: > "$_scripts_frag"
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    sha="${line%%  *}"; rel="${line#*  }"
+    printf '"%s":"%s"\n' "$(_json_escape "$rel")" "$sha" >> "$_scripts_frag"
+done <<EOF
+$SCRIPTS_LINES
+EOF
+scripts_map="$(_stage_join_map "$_scripts_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
+rm -f "$_scripts_frag"
 
 # staged_at: REFRESHED on every stage (M6, commission v0.16.6 component 2).
 # Pre-rider behavior preserved the original timestamp across idempotent
@@ -583,12 +671,40 @@ if ! STAMP_REFUSAL="$(_pipeline_scripts_stamp_verdict "$STAMP_REV" "$FLOOR_COMMI
 fi
 _log "stamp validated: PIPELINE_SCRIPTS_REV=$STAMP_REV is a resolvable commit sha == the floor (W-2/T6.4/D6-8)"
 
+# ── D3: the stamp must COVER the SHIPPED set (truthfulness) ─────────────────
+# PIPELINE_SCRIPTS_REV is the commit the shipped scripts claim to contain
+# (D6-8/D6-10/D6-11 — on a NON-GIT pinned dir the stamp IS the whole
+# provenance: the arm-time guard reads it out of <scripts_dir>/lib.sh and
+# arms on it). The payload now ships MORE than the scripts/upgrade subtree
+# — the stop-script sibling and the install-dir guard travel with it — so
+# the stamp's scope must cover the WHOLE shipped set: a family member that
+# did not exist at the stamped commit makes the stamp a LIE about what it
+# vouches for (the operator would read "commit X" for a set X never
+# contained). Fail-closed, same class as the floor/stamp gates above.
+# REMEDY: the release obligation that already exists — re-pin
+# PIPELINE_SCRIPTS_REV (scripts/upgrade/lib.sh) AND
+# PIPELINE_SCRIPTS_FLOOR_COMMIT (daemon/tools/upgrade_tools.py) to a merge
+# commit that contains the shipped family (D6-8: the two travel together).
+_scripts_coverage_missing="$(executor_family_verify_stamp_coverage "$REPO_ROOT" "$STAMP_REV")"
+if [ -n "$_scripts_coverage_missing" ]; then
+    _warn "REFUSING TO STAGE: PIPELINE_SCRIPTS_REV=$STAMP_REV does not COVER the shipped executor family. Not present at the stamped commit:"
+    printf '%s\n' "$_scripts_coverage_missing" | while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        _warn "  $p"
+    done
+    _warn "  the stamp is the commit the shipped scripts claim to contain — re-pin PIPELINE_SCRIPTS_REV (scripts/upgrade/lib.sh) AND PIPELINE_SCRIPTS_FLOOR_COMMIT (daemon/tools/upgrade_tools.py) to a merge commit that contains the WHOLE shipped family (D6-8: the two travel together), then re-stage. The stamp is NOT hand-editable to a non-commit value: the arm-time guard parses it as a commit sha and the W-2 gate above requires it to equal the floor."
+    rm -rf "$STAGE_TMP"
+    exit 78
+fi
+_log "stamp coverage validated: PIPELINE_SCRIPTS_REV=$STAMP_REV contains every shipped executor-family path"
+
 cat > "$STAGE_TMP/manifest.json" <<EOF
 {
   "version": "$VERSION",
   "binary_version": "$BINARY_VERSION",
   "staged_at": "$STAGED_AT",
   "pipeline_scripts_floor_commit": "$FLOOR_COMMIT",
+  "pipeline_scripts_rev": "$STAMP_REV",
   "known_schema_gen": "$KNOWN_SCHEMA_GEN",
   "contains_contract_phase": $CONTAINS_CONTRACT_PHASE,
   "rollback_safe": $ROLLBACK_SAFE,
@@ -598,9 +714,11 @@ cat > "$STAGE_TMP/manifest.json" <<EOF
   "agents_tree_sha256": "$AGENTS_TREE",
   "frontend_tree_sha256": "$FRONTEND_TREE",
   "plugins_tree_sha256": "$PLUGINS_TREE",
+  "scripts_tree_sha256": "$SCRIPTS_TREE",
   "agents_manifest": {$agents_map},
   "frontend_manifest": {$frontend_map},
-  "plugins_manifest": {$plugins_map}
+  "plugins_manifest": {$plugins_map},
+  "scripts_manifest": {$scripts_map}
 }
 EOF
 
@@ -630,6 +748,20 @@ got_plugins_lines="$(_tree_manifest "$STAGE_TMP/plugins" "")"
 got_plugins_tree="$(_tree_hash_of_lines "$got_plugins_lines")"
 if [ "$got_plugins_tree" != "$PLUGINS_TREE" ]; then
     _warn "post-stage plugins/ tree hash MISMATCH (want ${PLUGINS_TREE:0:12}… got ${got_plugins_tree:0:12}…) — refusing to swap in a payload whose plugins/ tree cannot be re-hashed to the manifest stamp (likely a copy glitch; the integrity check is local because lib.sh's integrity_verify doesn't yet cover plugins/ — that extension is an open escalation item)"
+    rm -rf "$STAGE_TMP"
+    exit 1
+fi
+
+# D3: local fail-closed re-hash for the shipped executor family — same
+# shape as the plugins/ leg above (the aggregate is the tree's identity; a
+# mismatch means the copy glitched — rsync truncation, ENOSPC mid-write —
+# and must abort BEFORE the rename-aside swap). The per-file diff names
+# the offending member instead of only the aggregate.
+got_scripts_lines="$(executor_family_manifest_lines "$STAGE_TMP/scripts")"
+got_scripts_tree="$(executor_family_tree_hash "$got_scripts_lines")"
+if [ "$got_scripts_tree" != "$SCRIPTS_TREE" ]; then
+    _warn "post-stage executor-family tree hash MISMATCH (want ${SCRIPTS_TREE:0:12}… got ${got_scripts_tree:0:12}…) — refusing to swap in a payload whose executor scripts cannot be re-hashed to the manifest stamp (likely a copy glitch)"
+    diff <(printf '%s\n' "$SCRIPTS_LINES") <(printf '%s\n' "$got_scripts_lines") 2>/dev/null | head -20 >&2
     rm -rf "$STAGE_TMP"
     exit 1
 fi

@@ -53,7 +53,8 @@
 #
 # EXIT CODES: 0 restarted + gated · 1 gate failed (markers still cleared —
 # the launcher's own burst protection owns a crash-looping daemon) ·
-# 78 refusal (env / journal / lock-adoption / live guard).
+# 78 refusal (env / journal / lock-adoption / live guard / stop-script
+# sibling probe).
 #
 # NO raw kills anywhere in this script: the stop is ALWAYS
 # stop-ensemble.sh (SINGLE-TERM ownership-scoped contract).
@@ -120,6 +121,19 @@ esac
 if ! _splice_python_floor_probe; then
     _warn "python3 ≥ 3.7 unavailable on PATH — refusing restart (journal splice helper requires it)"
     lock_release 2>/dev/null || true
+    exit 78
+fi
+
+# ── Stop-script sibling probe (W2, 2026-11-11; H1 tidier round 3) ───────────
+# The ONE implementation lives in lib.sh (_upgrade_stop_script_sibling_usable,
+# sourced above): the SIBLING one level up of the CALLING script's dir — the
+# W4 single source of truth (the old $(pwd)/scripts fallback is DELETED; it
+# was dead in the install layout and masked a missing sibling with rc=127).
+# Refuses BEFORE any mutation (no lock adopted, no txn opened, no stop). The
+# exec-bit requirement is conservative hardening (every consumer invokes
+# `bash stop-ensemble.sh`).
+if ! _upgrade_stop_script_sibling_usable "${BASH_SOURCE[0]}"; then
+    _warn "stop-script sibling not usable at ${_UPGRADE_STOP_SCRIPT_SIBLING:-<unresolved>} (must exist AND carry the exec bit — conservative hardening: every consumer invokes 'bash stop-ensemble.sh') — refusing BEFORE any lock/txn/stop (the stop step would abort rc=127: bash: No such file or directory)"
     exit 78
 fi
 

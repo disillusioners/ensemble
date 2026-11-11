@@ -274,7 +274,9 @@ make_mut() {
     local mdir="$MUTROOT/$mname"
     mkdir -p "$mdir"
     cp "$LIBSH" "$mdir/lib.sh"
-    sed -i "$mexpr" "$mdir/lib.sh"
+    # BSD-port: bare `sed -i` (GNU-only) is a BSD error; the portable in-place
+    # form is `sed -i.bak …` + remove the .bak (never BSD `sed -i ''`).
+    sed -i.bak "$mexpr" "$mdir/lib.sh" && rm -f "$mdir/lib.sh.bak"
     if cmp -s "$LIBSH" "$mdir/lib.sh"; then
         printf 'make_mut[%s]: sed planted NOTHING (pattern mismatch) — refusing a vacuous mutation\n' "$mname" >&2
         return 78

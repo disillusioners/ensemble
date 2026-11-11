@@ -97,7 +97,7 @@ sh_outcome() { # <declared|verified|unit>
 }
 
 # ===========================================================================
-section "A — outcome map: 19 cells, outcome AND reason byte-identical"
+section "A — outcome map: 24 cells, outcome AND reason byte-identical"
 
 CELLS='
 script|SCRIPT_NOHUP|
@@ -119,6 +119,11 @@ unit|GARBAGE_STATE|
 auto|GARBAGE_STATE|
 SCRIPT|weird_state|
 Unit|UNIT_MANAGED|ensemble-tw4.service
+launchd|LAUNCHD_MANAGED|com.ensemble.prod
+launchd|LAUNCHD_MANAGED|
+script|LAUNCHD_MANAGED|
+unit|LAUNCHD_MANAGED|
+auto|LAUNCHD_MANAGED|
 '
 PY_LINES="$(printf '%s\n' "$CELLS" | grep -v '^$' | python3 "$PY_RUNNER" "$REPO_ROOT")"
 
@@ -302,6 +307,7 @@ sh_leaf_of_pid() { # <pid> — the shell twin's parse, verbatim from lib.sh
 }
 
 AGREE=0; DISAGREE=0; UNREADABLE=0; VANISHED=0
+if [ -d /proc ] && [ -r /proc/self/cgroup ]; then
 for pid in $(pgrep -u "$(id -u)" | head -60); do
     snap_before="$(cat "/proc/$pid/cgroup" 2>/dev/null || true)"
     if [ -z "$snap_before" ]; then
@@ -327,8 +333,16 @@ for pid in $(pgrep -u "$(id -u)" | head -60); do
 done
 [ "$DISAGREE" -eq 0 ] && _pass "C1 real-pid parse agreement ($AGREE pids agree, $UNREADABLE unreadable, $VANISHED vanished-mid-leg skipped)" \
     || _fail "C1 real-pid parse agreement" "0 drifts" "$DISAGREE drifts"
-[ "$AGREE" -gt 0 ] && _pass "C1 at least one real pid exercised" \
-    || _fail "C1 at least one real pid exercised" ">0" "0"
+if [ "$AGREE" -gt 0 ]; then
+    _pass "C1 at least one real pid exercised"
+else
+    # No /proc on this host (macOS/BSD): the real-shape leg is fenced, not a
+    # failure — agreement is still proven by the C2 synthetic matrix.
+    _skip "C1 real-pid parse — FENCE: no readable /proc/<pid>/cgroup on this host (C2 synthetic matrix covers the grammar)"
+fi
+else
+    _skip "C1 real-pid parse — FENCE: no /proc on this host (macOS/BSD); C2 synthetic matrix covers the grammar"
+fi
 
 # C2. synthetic line-shape matrix: the shell twin's parse grammar (tail -n1,
 #     ${line##*:}, ${path##*/}) vs the python parse (last line, split(":",2)

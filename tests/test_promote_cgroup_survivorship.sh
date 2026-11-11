@@ -350,9 +350,13 @@ section "comp3b — launcher.sh _journal_sweep heartbeat fast path (HEARTBEAT_ST
 #
 # Cases (age=100s ≤ SWEEP_STALE_S=600, so the freshness gate does NOT
 # short-circuit — the comp3 fast path is the only reclaim trigger):
-#   3b-i  fresh-hb (now) + dead-owner → HELD (hb_stale=0 holds)
+#   3b-i  fresh-hb (now) + dead-owner → RECLAIM (D2a WS4: owner-dead ALONE is
+#         reclaimable even with a fresh heartbeat — the SIGKILL-in-window
+#         mitigation; the promote refreshes the heartbeat so it is fresh at a
+#         SIGKILL. Was HELD pre-D2a — that was the silent flipped-boot class.)
 #   3b-ii stale-hb (NOW-1000) + dead-owner → RECLAIM (fast path fires)
-#   3b-iii fresh-hb (now) + live-owner (this $$) → HELD
+#   3b-iii fresh-hb (now) + live-owner (this $$) → HELD (a live owner still
+#         defers; only owner-DEAD with a fresh heartbeat reclaims)
 
 # Helper: source launcher.sh, run _journal_sweep on $1, capture all
 # output (stderr where _log writes + stdout).
@@ -365,7 +369,8 @@ _js_run_sweep() {
     "
 }
 
-# 3b-i. fresh-hb + dead-owner → HELD
+# 3b-i. D2a (WS4): fresh-hb + dead-owner → RECLAIM (owner-dead ALONE is
+# reclaimable even with a fresh heartbeat — the SIGKILL-in-window mitigation).
 JS_HELD_FIXT="$(mktemp -d -t comp3b-held.XXXXXX)"
 make_fixture "$JS_HELD_FIXT" vNEW vOLD
 mkdir -p "$JS_HELD_FIXT/releases"
@@ -375,11 +380,11 @@ cat > "$JS_HELD_FIXT/releases/state.json" <<JOURNAL
 JOURNAL
 JS_HELD_LOG="$(_js_run_sweep "$JS_HELD_FIXT")"
 JS_HELD_JOURNAL="$(cat "$JS_HELD_FIXT/releases/state.json")"
-assert_contains "3b-i fresh-hb + dead-owner → 'leaving alone' (hb_stale=0 holds)" "leaving alone" "$JS_HELD_LOG"
-assert_not_contains "3b-i fresh-hb + dead-owner → no fast-path fired" "comp3 fast path triggered" "$JS_HELD_LOG"
+assert_not_contains "3b-i fresh-hb + dead-owner → NOT 'leaving alone' (D2a WS4 owner-dead reclaim)" "leaving alone" "$JS_HELD_LOG"
+assert_contains "3b-i fresh-hb + dead-owner → comp3-owner-dead fast path fires" "comp3-owner-dead fast path" "$JS_HELD_LOG"
 case "$JS_HELD_JOURNAL" in
-    *'"in_flight":{"kind":"promote"'*) _pass "3b-i in_flight preserved (txn held)" ;;
-    *) _fail "3b-i in_flight preserved" "object" "$(printf '%s' "$JS_HELD_JOURNAL" | head -c 200)" ;;
+    *'"in_flight": null'*|'"in_flight":null'*) _pass "3b-i in_flight cleared (owner-dead reclaimed)" ;;
+    *) _fail "3b-i in_flight cleared" "null" "$(printf '%s' "$JS_HELD_JOURNAL" | head -c 200)" ;;
 esac
 
 # 3b-ii. stale-hb + dead-owner → RECLAIM

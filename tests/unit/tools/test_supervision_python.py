@@ -116,18 +116,37 @@ def main() -> None:
     ok("8c seam restore + memo reset hygiene (finally block)")
 
     # ── 8d. real detector ladder via the env seam (deterministic cells) ──
+    # D2a: on Darwin the ladder is FAIL-CLOSED (launchd) — script/opt-out/
+    # garbage refuse-equivalent (LAUNCHD_NOT_VERIFIED + the shell's token),
+    # NEVER SCRIPT_NOHUP/conforming. Non-Darwin keeps the SCRIPT tolerance.
+    DARWIN = sys.platform == "darwin"
     uj._supervision_reset_memo()
     try:
         det = uj._supervision_detect_real({"ENSEMBLE_SUPERVISION": "script"})
-        expect(det.state == "SCRIPT_NOHUP" and det.mode == "script",
-               "8d-i explicit script → SCRIPT_NOHUP/mode=script")
+        if DARWIN:
+            expect(det.state == "LAUNCHD_NOT_VERIFIED" and det.mode == "launchd"
+                   and "supervision-unsupervised-declaration-required" in det.note,
+                   "8d-i(Darwin) explicit script → LAUNCHD_NOT_VERIFIED + refusal token")
+        else:
+            expect(det.state == "SCRIPT_NOHUP" and det.mode == "script",
+                   "8d-i explicit script → SCRIPT_NOHUP/mode=script")
         for falsey in ("0", "false", "no", "off", "FALSE", "Off"):
             det = uj._supervision_detect_real({"ENSEMBLE_SUPERVISION": falsey})
-            expect(det.state == "SCRIPT_NOHUP" and not det.note,
-                   f"8d-ii opt-out '{falsey}' → silent SCRIPT_NOHUP")
+            if DARWIN:
+                expect(det.state == "LAUNCHD_NOT_VERIFIED"
+                       and "supervision-unsupervised-declaration-required" in det.note,
+                       f"8d-ii(Darwin) opt-out '{falsey}' → LAUNCHD_NOT_VERIFIED + token")
+            else:
+                expect(det.state == "SCRIPT_NOHUP" and not det.note,
+                       f"8d-ii opt-out '{falsey}' → silent SCRIPT_NOHUP")
         det = uj._supervision_detect_real({"ENSEMBLE_SUPERVISION": "banana"})
-        expect(det.state == "SCRIPT_NOHUP" and "garbage" in det.note,
-               "8d-iii garbage → SCRIPT_NOHUP + WARN-note (fail-toward-script)")
+        if DARWIN:
+            expect(det.state == "LAUNCHD_NOT_VERIFIED"
+                   and "supervision-declaration-invalid" in det.note,
+                   "8d-iii(Darwin) garbage → LAUNCHD_NOT_VERIFIED + invalid-declaration token")
+        else:
+            expect(det.state == "SCRIPT_NOHUP" and "garbage" in det.note,
+                   "8d-iii garbage → SCRIPT_NOHUP + WARN-note (fail-toward-script)")
         det = uj._supervision_detect_real({
             "ENSEMBLE_SUPERVISION": "unit",
             "ENSEMBLE_RESTART_UNIT": "ensemble-py.service",
