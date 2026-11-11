@@ -105,6 +105,23 @@ from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
 
+
+# FIX-BACK Y3 (turn-end-injection-drain): the statuses the Stage-7
+# end-of-turn injection drain must NEVER revive. ``_prepare_enqueued_message``
+# flips these back to RUNNING (the ``is_terminal_revival`` branch), which
+# would override the watcher's explicit termination decision. ``COMPLETED``
+# is deliberately NOT in the set: reviving a completed root to answer a
+# queued user message is the established new-message lane, and PAUSED is
+# excluded because the enqueue lane must not flip it (the cooperative
+# pause gate + resume cascade own that transition).
+_HARD_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        InstanceStatus.TERMINATED.value,
+        InstanceStatus.ERROR.value,
+        InstanceStatus.FAILED.value,
+    }
+)
+
 if TYPE_CHECKING:
     from daemon.cancellation import CancellationToken
     from daemon.manager import MessageResult
@@ -1112,6 +1129,18 @@ class MessageProcessingPipeline:
         cleared here: clearing it would drop the server-minted ``echo_id``
         and break the emit-twice-same-id SSE/checkpoint contract.
 
+        Hard-terminal guard (FIX-BACK Y3): a TERMINATED / ERROR / FAILED
+        instance is NEVER revived by this enqueue — the fresh status is
+        read from the repository first and the enqueue is skipped
+        (log-only) on a hard-terminal status. The queued messages stay in
+        the FIFO for the next revival turn's dispatch-time D2 seam drain.
+
+        Coverage caveat (Y1): this seam only runs on the pipeline's
+        SUCCESS path. An ERROR / CANCELLED finalization never reaches it —
+        those rely on the pre-existing next-turn D2 seam drain (the same
+        class the pause/crash stranding race belongs to), which is out of
+        scope for this lane.
+
         Best-effort by design: any failure here is logged at WARNING and
         swallowed — the message itself already succeeded.
 
@@ -1143,6 +1172,49 @@ class MessageProcessingPipeline:
                 f"enqueue_message"
             )
             return False
+        # ── FIX-BACK Y3: never let the follow-up enqueue REVIVE a
+        # hard-terminal instance ─────────────────────────────────────────
+        # Stage 7 runs after EVERY normal completion — including the
+        # ``watchover_terminate_node → END`` shape. A non-empty FIFO at
+        # that point would otherwise make the "continue" enqueue flip a
+        # TERMINATED / ERROR / FAILED instance back to RUNNING
+        # (``_prepare_enqueued_message``'s ``is_terminal_revival``
+        # branch), overriding the watcher's explicit termination
+        # decision. Read the FRESH status from the repository — never a
+        # stale in-hand object. On a hard-terminal status SKIP the
+        # enqueue and log only: the FIFO stays queued and the next
+        # revival turn's dispatch-time D2 seam drain consumes it, so the
+        # no-drop guarantee is preserved.
+        repo = getattr(self._manager, "_instance_repository", None)
+        if repo is not None:
+            try:
+                instance = await asyncio.to_thread(repo.get, instance_id)
+            except Exception as status_exc:
+                # Fail OPEN, deliberately: the enqueue below is itself a
+                # DB write that fails on its own under the same
+                # conditions (and is already caught + logged), so a
+                # failed probe cannot silently revive anything — while
+                # failing closed here would degrade the delivery
+                # guarantee on a transient blip. Mirrors the pipeline's
+                # ``_is_instance_paused`` polarity (probe error → do not
+                # skip).
+                logger.warning(
+                    f"MessageProcessingPipeline: end-of-turn injection "
+                    f"drain for {instance_id[:8]}... could not read the "
+                    f"fresh instance status (non-fatal, proceeding): "
+                    f"{status_exc}"
+                )
+                instance = None
+            status = getattr(instance, "status", None)
+            if status in _HARD_TERMINAL_STATUSES:
+                logger.warning(
+                    f"MessageProcessingPipeline: end-of-turn injection "
+                    f"drain for {instance_id[:8]}... skipped — instance "
+                    f"is {status}; NOT reviving it. {len(pending)} queued "
+                    f"message(s) stay in the RAM FIFO for the next "
+                    f"revival turn's dispatch-time D2 seam drain"
+                )
+                return False
         try:
             await enqueue_message(
                 instance_id,

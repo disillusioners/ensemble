@@ -4923,6 +4923,12 @@ def create_should_continue(language_check_enabled: bool):
 # run, so a turn that keeps looping on pending injections delays BOTH the
 # normal turn completion and the RUNNING -> WAITING_CHILDREN transition
 # until the injected messages have been consumed.
+#
+# COVERAGE CAVEAT (Y1, fix-back): this guard only covers a turn that ends
+# through THIS router. An ERROR / CANCELLED finalization (a raised
+# exception, a cancellation mid-turn) never reaches it — those rely on
+# the pre-existing next-turn D2 seam drain, the same pre-existing class
+# the pause/crash stranding race belongs to. Out of scope for this lane.
 
 INJECTION_CONTINUATION_MAX: int = 8
 """Max consecutive turn continuations caused by pending user injections.
@@ -13394,6 +13400,16 @@ def build_instance_graph(
         # ``agent`` when entries are pending — the agent_node's existing
         # drain site then consumes them (same SSE / echo-id / checkpoint
         # contract as a mid-turn injection).
+        #
+        # NOT wrapped (Y2, fix-back): the ``language_check`` node's
+        # OUT-EDGE router (``language_check_router``) still owns a final
+        # END window this wrapper cannot reach — the injection may land
+        # between the agent verdict above and that decision. Those
+        # windows are HELPER-COVERED by the pipeline's Stage-7
+        # end-of-turn injection drain (the durable follow-up turn), not
+        # by the in-graph loop-continue. Do not wrap them here: the
+        # language-check path map has no ``"agent"`` key, so a verdict
+        # injected at that router would be an invalid branch target.
         routing_fn = create_injection_aware_router(
             routing_fn, injection_slot
         )
@@ -13450,6 +13466,12 @@ def build_instance_graph(
         # intercepts EVERY terminal verdict this branch can produce
         # (END, or the attestation gate node name) and routes back to
         # ``agent`` while user injections are still queued.
+        #
+        # NOT wrapped (Y2, fix-back): the ``attestation_gate`` node's
+        # OUT-EDGE router (``should_end_attestation``) owns its own END
+        # window (the gate's allow path) that this wrapper cannot reach —
+        # HELPER-COVERED by the pipeline's Stage-7 end-of-turn injection
+        # drain, not by the in-graph loop-continue.
         agent_router = create_injection_aware_router(
             agent_router, injection_slot
         )
