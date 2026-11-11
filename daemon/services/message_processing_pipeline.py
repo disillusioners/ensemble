@@ -105,6 +105,23 @@ from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
 
+
+# FIX-BACK Y3 (turn-end-injection-drain): the statuses the Stage-7
+# end-of-turn injection drain must NEVER revive. ``_prepare_enqueued_message``
+# flips these back to RUNNING (the ``is_terminal_revival`` branch), which
+# would override the watcher's explicit termination decision. ``COMPLETED``
+# is deliberately NOT in the set: reviving a completed root to answer a
+# queued user message is the established new-message lane, and PAUSED is
+# excluded because the enqueue lane must not flip it (the cooperative
+# pause gate + resume cascade own that transition).
+_HARD_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        InstanceStatus.TERMINATED.value,
+        InstanceStatus.ERROR.value,
+        InstanceStatus.FAILED.value,
+    }
+)
+
 if TYPE_CHECKING:
     from daemon.cancellation import CancellationToken
     from daemon.manager import MessageResult
@@ -541,8 +558,15 @@ class MessageProcessingPipeline:
             # path) wins. Best-effort on DB/SSE failures — the message
             # itself already succeeded, and the next bus event or
             # child completion will resync the status.
-            await self._maybe_transition_to_waiting_children(
-                context.instance_id
+            #
+            # Returns True when the instance was parked in
+            # WAITING_CHILDREN — the end-of-turn injection drain then
+            # runs INSIDE that transition (the parked parent is exactly
+            # the instance that may never run another turn on its own).
+            transitioned_to_waiting_children = (
+                await self._maybe_transition_to_waiting_children(
+                    context.instance_id
+                )
             )
 
             # Stage 6: child completion check. Best-effort: a
@@ -573,6 +597,22 @@ class MessageProcessingPipeline:
                 await self._check_child_completion(
                     context.instance_id, context.message_id
                 )
+
+            # Stage 7: end-of-turn injection drain — NORMAL turn
+            # completion path (turn-end-injection-drain).
+            #
+            # A user message injected while the turn's FINAL LLM pass was
+            # in flight is not consumed by that turn. The in-graph guard
+            # (``daemon/graph.py::create_injection_aware_router``) keeps
+            # the turn alive for the deterministic case; this seam closes
+            # the residual window between that router's verdict and this
+            # finalization. When the instance was parked in
+            # WAITING_CHILDREN the drain already ran inside that
+            # transition (Stage 5.5) — a parked parent may never run
+            # another turn on its own, so it is the case that matters
+            # most there.
+            if not transitioned_to_waiting_children:
+                await self._drain_end_of_turn_injections(context.instance_id)
 
         except OperationCancelledError as e:
             return await self._handle_cancel(e, callbacks)
@@ -1056,6 +1096,150 @@ class MessageProcessingPipeline:
                 f"DEFERRED marker (no event loop): {e}"
             )
 
+    # ------------------------------------------------------------------
+    # End-of-turn injection drain (turn-end-injection-drain)
+    # ------------------------------------------------------------------
+
+    async def _drain_end_of_turn_injections(self, instance_id: str) -> bool:
+        """Ensure a turn-ending instance does not strand queued user messages.
+
+        The RAM user-message injection FIFO
+        (``InstanceManager._pending_injections``) is drained by the
+        agent_node at the START of every LLM pass. A message that arrives
+        while the turn's FINAL LLM pass is in flight is therefore not
+        consumed by that turn.
+
+        The PRIMARY guard is in-graph: the agent's terminal router peeks
+        the queue and routes back to ``agent`` while entries are pending
+        (``daemon/graph.py::create_injection_aware_router``), so the turn
+        continues and the model sees the message. This helper is the
+        belt-and-braces seam for the narrow residual window between that
+        router's verdict and the instance-level finalization below: a
+        message that lands there would sit in the RAM queue until the next
+        turn (the dispatch-time D2 seam drain picks it up) — or, if no
+        further turn ever happens (a parked WAITING_CHILDREN parent whose
+        children never report, a completed root), until the lifecycle
+        cleanup pops the queue and the message is lost.
+
+        The remedy is the codebase's established wake pattern: enqueue a
+        durable follow-up turn. The follow-up turn's dispatch-time D2 seam
+        drain (``daemon/services/instance_messaging.py``) consumes the
+        FIFO and threads the queued messages into the graph input, so the
+        model sees them on the next turn. The FIFO is deliberately NOT
+        cleared here: clearing it would drop the server-minted ``echo_id``
+        and break the emit-twice-same-id SSE/checkpoint contract.
+
+        Hard-terminal guard (FIX-BACK Y3): a TERMINATED / ERROR / FAILED
+        instance is NEVER revived by this enqueue — the fresh status is
+        read from the repository first and the enqueue is skipped
+        (log-only) on a hard-terminal status. The queued messages stay in
+        the FIFO for the next revival turn's dispatch-time D2 seam drain.
+
+        Coverage caveat (Y1): this seam only runs on the pipeline's
+        SUCCESS path. An ERROR / CANCELLED finalization never reaches it —
+        those rely on the pre-existing next-turn D2 seam drain (the same
+        class the pause/crash stranding race belongs to), which is out of
+        scope for this lane.
+
+        Best-effort by design: any failure here is logged at WARNING and
+        swallowed — the message itself already succeeded.
+
+        Args:
+            instance_id: The instance whose turn just ended.
+
+        Returns:
+            ``True`` when a follow-up turn was enqueued, ``False``
+            otherwise (no pending injections, or the enqueue failed).
+        """
+        get_injection = getattr(self._manager, "get_injection", None)
+        if get_injection is None:
+            return False
+        try:
+            pending = get_injection(instance_id)
+        except Exception as probe_exc:
+            logger.warning(
+                f"MessageProcessingPipeline: end-of-turn injection probe "
+                f"failed for {instance_id[:8]}... (non-fatal): {probe_exc}"
+            )
+            return False
+        if not pending:
+            return False
+        enqueue_message = getattr(self._manager, "enqueue_message", None)
+        if enqueue_message is None:
+            logger.warning(
+                f"MessageProcessingPipeline: end-of-turn injection drain "
+                f"for {instance_id[:8]}... skipped — manager exposes no "
+                f"enqueue_message"
+            )
+            return False
+        # ── FIX-BACK Y3: never let the follow-up enqueue REVIVE a
+        # hard-terminal instance ─────────────────────────────────────────
+        # Stage 7 runs after EVERY normal completion — including the
+        # ``watchover_terminate_node → END`` shape. A non-empty FIFO at
+        # that point would otherwise make the "continue" enqueue flip a
+        # TERMINATED / ERROR / FAILED instance back to RUNNING
+        # (``_prepare_enqueued_message``'s ``is_terminal_revival``
+        # branch), overriding the watcher's explicit termination
+        # decision. Read the FRESH status from the repository — never a
+        # stale in-hand object. On a hard-terminal status SKIP the
+        # enqueue and log only: the FIFO stays queued and the next
+        # revival turn's dispatch-time D2 seam drain consumes it, so the
+        # no-drop guarantee is preserved.
+        repo = getattr(self._manager, "_instance_repository", None)
+        if repo is not None:
+            try:
+                instance = await asyncio.to_thread(repo.get, instance_id)
+            except Exception as status_exc:
+                # Fail OPEN, deliberately: the enqueue below is itself a
+                # DB write that fails on its own under the same
+                # conditions (and is already caught + logged), so a
+                # failed probe cannot silently revive anything — while
+                # failing closed here would degrade the delivery
+                # guarantee on a transient blip. Mirrors the pipeline's
+                # ``_is_instance_paused`` polarity (probe error → do not
+                # skip).
+                logger.warning(
+                    f"MessageProcessingPipeline: end-of-turn injection "
+                    f"drain for {instance_id[:8]}... could not read the "
+                    f"fresh instance status (non-fatal, proceeding): "
+                    f"{status_exc}"
+                )
+                instance = None
+            status = getattr(instance, "status", None)
+            if status in _HARD_TERMINAL_STATUSES:
+                logger.warning(
+                    f"MessageProcessingPipeline: end-of-turn injection "
+                    f"drain for {instance_id[:8]}... skipped — instance "
+                    f"is {status}; NOT reviving it. {len(pending)} queued "
+                    f"message(s) stay in the RAM FIFO for the next "
+                    f"revival turn's dispatch-time D2 seam drain"
+                )
+                return False
+        try:
+            await enqueue_message(
+                instance_id,
+                message="continue",
+                source="system:injection_drain",
+                # priority=0 (preempt): a SYSTEM-class wake, deliberately
+                # below the HUMAN urgency rung so a queued user message
+                # always outranks it (convention: instance_messaging
+                # _prepare_enqueued_message, priority==1 == user).
+                priority=0,
+            )
+        except Exception as enqueue_exc:
+            logger.warning(
+                f"MessageProcessingPipeline: end-of-turn injection drain "
+                f"for {instance_id[:8]}... failed to enqueue the follow-up "
+                f"turn (non-fatal): {enqueue_exc}"
+            )
+            return False
+        logger.info(
+            f"MessageProcessingPipeline: end-of-turn injection drain for "
+            f"{instance_id[:8]}... — {len(pending)} queued message(s) "
+            f"survived the turn; enqueued a follow-up turn"
+        )
+        return True
+
     async def _is_instance_paused(self, instance_id: str) -> bool:
         """Defensive PAUSED re-check: query fresh instance status from DB.
 
@@ -1095,7 +1279,7 @@ class MessageProcessingPipeline:
     async def _maybe_transition_to_waiting_children(
         self,
         instance_id: str,
-    ) -> None:
+    ) -> bool:
         """Stage 5.5: transition RUNNING → WAITING_CHILDREN after a turn.
 
         Bug fix: previously, when an instance finished a graph turn
@@ -1125,17 +1309,29 @@ class MessageProcessingPipeline:
           * No-op when the bus is uninitialised (matches the rest
             of the codebase, which treats ``get_dependency_bus() is
             None`` as a configuration bug rather than degrading).
+
+        Returns:
+            ``True`` when the instance was transitioned to
+            ``WAITING_CHILDREN`` by THIS call, ``False`` otherwise (no
+            bus watchers, no transition, or a failure).
+
+        Side effect (turn-end-injection-drain): when the transition
+        fires, the end-of-turn injection drain runs HERE — a parked
+        ``WAITING_CHILDREN`` parent may never run another turn on its
+        own, so a user message that is still queued in the RAM injection
+        FIFO at this point would otherwise be stranded until the
+        lifecycle cleanup pops the queue.
         """
         try:
             bus = get_dependency_bus()
             if bus is None:
-                return
+                return False
             pending = await bus.count_pending_for_target(instance_id)
             if pending <= 0:
-                return
+                return False
             repo = getattr(self._manager, "_instance_repository", None)
             if repo is None:
-                return
+                return False
             updated = await asyncio.to_thread(
                 repo.transition_status_if,
                 instance_id,
@@ -1151,7 +1347,7 @@ class MessageProcessingPipeline:
                     f"MessageProcessingPipeline: skip WAITING_CHILDREN "
                     f"transition for {instance_id[:8]}... (status no longer RUNNING)"
                 )
-                return
+                return False
             live_hub = getattr(self._manager, "_live_hub", None)
             if live_hub is not None:
                 try:
@@ -1187,12 +1383,25 @@ class MessageProcessingPipeline:
                         f"failed for {instance_id[:8]}... (non-fatal): "
                         f"{ip_err}"
                     )
+            # End-of-turn injection drain (turn-end-injection-drain) —
+            # WAITING_CHILDREN transition path. The instance is now
+            # parked: it will only run another turn when a child report
+            # (or a user message) arrives. A user message still queued
+            # in the RAM injection FIFO at this point would be stranded
+            # until the lifecycle cleanup pops the queue, so make sure a
+            # follow-up turn is scheduled to pick it up.
+            transitioned = True
         except Exception as e:
             logger.warning(
                 f"MessageProcessingPipeline: WAITING_CHILDREN transition "
                 f"failed for {instance_id[:8]}... (non-fatal): {e}",
                 exc_info=True,
             )
+            return False
+        # Outside the try: a drain failure must never be reported as a
+        # failed transition (the transition itself already committed).
+        await self._drain_end_of_turn_injections(instance_id)
+        return transitioned
 
     # ------------------------------------------------------------------
     # Boundary handlers (contention / cancel)

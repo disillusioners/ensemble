@@ -323,8 +323,17 @@ class TestNsTrapCLETargeting:
     # they pin the line as of the review-cycle-1 re-pin commit.
     _GUARD_ANCHOR = "[Compaction][CLE] empty snapshot read"
     _REPLACEMENT_ANCHOR = "[Compaction][CLE] empty replacement"
-    _CLE_GUARD_LINE = 9426
-    _CLE_REPLACEMENT_LINE = 9588
+    # Re-pinned 2026-11-11 (turn-end-injection-drain): daemon/graph.py
+    # grew above the CLE nodes — the injection-drain router FACTORY
+    # block (+142 lines) then the fix-back Y1 caveat comment (+6) — so
+    # both guards shifted. The lane's two WIRING SITES landed BELOW the
+    # pins (~13.4k) and contributed NOTHING to either shift
+    # (``git show 4db7758ee`` proves it: +7 above, +9 below). Re-computed
+    # with the ast.If walk above (NOT a blind bump): the innermost
+    # ``ast.If`` carrying each anchor string is now at 9574 / 9736
+    # (9426 / 9588 pre-lane; 9568 / 9730 before the fix-back).
+    _CLE_GUARD_LINE = 9574
+    _CLE_REPLACEMENT_LINE = 9736
 
     @staticmethod
     def _if_node_with_body_constant(substring: str):
