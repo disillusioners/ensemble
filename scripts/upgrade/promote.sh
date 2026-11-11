@@ -704,11 +704,16 @@ _enforce_deadline "$promote_deadline" livez
 # F1: the livez arm is empty-guarded exactly like its readyz/version/soak
 # siblings — it was the only unguarded writer, so a verify-set reason could
 # be overwritten by a green livez probe (and the wipe above made the whole
-# verify block log-only).
-if [ -z "$gate_fail_reason" ] && LIVEZ_JSON="$(gate_livez)"; then
-    _log "livez OK:"; _logv "$LIVEZ_JSON"
-else
-    gate_fail_reason="/livez unreachable >${LIVEZ_BUDGET_S}s"
+# verify block log-only). The OUTER [ -z ] wrap skips the whole arm — probe
+# AND failure branch — when a reason is already set (a bare
+# `[ -z ] && probe` guard would still fall into the else and OVERWRITE the
+# preserved verify reason with '/livez unreachable').
+if [ -z "$gate_fail_reason" ]; then
+    if LIVEZ_JSON="$(gate_livez)"; then
+        _log "livez OK:"; _logv "$LIVEZ_JSON"
+    else
+        gate_fail_reason="/livez unreachable >${LIVEZ_BUDGET_S}s"
+    fi
 fi
 
 # P3 / decision (d) — phase boundary (pre-readyz)
