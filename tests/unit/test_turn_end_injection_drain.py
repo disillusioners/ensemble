@@ -38,7 +38,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from daemon.graph import (
     INJECTION_CONTINUATION_MAX,
-    create_agent_node,
     create_injection_aware_router,
     should_continue,
 )
@@ -105,23 +104,6 @@ class _ScriptedLLM:
         if hook is not None:
             hook(messages)
         return AIMessage(content=f"answer-{index}")
-
-
-def _make_agent(injection_slot: Any, llm: Any):
-    """Build an ``agent_node`` closure wired to the stub injection slot."""
-    return create_agent_node(
-        llm_with_tools=llm,
-        system_prompt="you are a test assistant",
-        compactor=None,
-        graph_ref=[None],
-        config=None,
-        llm_config={"model": "test-model", "model_vision": None},
-        retry_config={"transient_attempts": 1, "timeout_attempts": 1},
-        llm_standard=None,
-        injection_slot=injection_slot,
-        report_injection_slot=None,
-        live_hub=None,
-    )
 
 
 # ---------------------------------------------------------------------------
