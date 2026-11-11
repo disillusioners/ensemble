@@ -17,8 +17,17 @@ Auto-Restart Phase 1:
   tests patch ``sqlalchemy.create_engine`` accordingly (the implementation
   imports it inside the preflight function — the mock must own the
   ``sqlalchemy`` module symbol, not ``daemon.__main__``'s local).
-* ``timeout_graceful_shutdown`` is forwarded to ``uvicorn.run`` (fixes
-  C1 — bounded SIGTERM shutdown).
+* ``timeout_graceful_shutdown`` is forwarded to the uvicorn config
+  (fixes C1 — bounded SIGTERM shutdown).
+* Bind-race fix lane (2026-11-11): the daemon no longer starts the
+  server through bare ``uvicorn.run(...)``. It pre-binds the listener
+  socket with a bounded EADDRINUSE retry
+  (``daemon/services/bind_retry.py``) and hands the BOUND socket to
+  uvicorn via ``Server.run(sockets=[sock])``. The serve seam is
+  ``daemon.__main__._serve_with_bind_retry``, and the fixture below
+  patches THAT (the ``uvicorn.run`` kwargs assertions were re-pointed
+  at the ``uvicorn.Config`` object the daemon builds — same contract,
+  not a weaker one).
 * P2.3 B5.6 (F-DR1-1): the frozen entry ``run_app.py`` (the
   ``ensemble.spec`` PyInstaller entry) runs the SAME
   ``_boot_db_preflight`` explicitly BEFORE delegating to ``main()`` and
@@ -71,16 +80,31 @@ def _auth_refused_operational_error(sqlstate: str | None):
 
 
 @pytest.fixture
-def uvicorn_run_patch():
-    """Patch uvicorn.run to a no-op recording kwargs; also skips real boot."""
-    with patch("daemon.__main__.uvicorn.run") as run_mock:
-        yield run_mock
+def uvicorn_serve_patch():
+    """Patch the daemon's serve seam to a no-op recording the uvicorn.Config.
+
+    HONEST RE-POINT (bind-race fix lane, 2026-11-11). The daemon no
+    longer starts the server through bare ``uvicorn.run(...)``: it
+    pre-binds the listener socket (bounded EADDRINUSE retry — see
+    ``daemon/services/bind_retry.py``) and hands the BOUND socket to
+    uvicorn via ``Server.run(sockets=[sock])``. The seam is therefore
+    now ``daemon.__main__._serve_with_bind_retry``, which receives the
+    fully-built ``uvicorn.Config``.
+
+    The assertions in this file were re-pointed at that object. They
+    assert the SAME wiring contract as before — app string, host, port,
+    access_log, reload, timeout_graceful_shutdown — NOT a weaker one;
+    the re-pointed wiring pin additionally asserts the app string and
+    the timeout, which the old kwargs-only pin could not see.
+    """
+    with patch("daemon.__main__._serve_with_bind_retry") as serve_mock:
+        yield serve_mock
 
 
 # ── Exit-75 boot preflight ─────────────────────────────────────────────────
 
 
-def test_boot_preflight_pg_unreachable_exits_75(uvicorn_run_patch, tmp_path):
+def test_boot_preflight_pg_unreachable_exits_75(uvicorn_serve_patch, tmp_path):
     """PG selected + engine connect fails → SystemExit 75, uvicorn never runs."""
     from sqlalchemy.exc import OperationalError
 
@@ -108,7 +132,7 @@ def test_boot_preflight_pg_unreachable_exits_75(uvicorn_run_patch, tmp_path):
             _run_main()
 
     assert excinfo.value.code == 75
-    uvicorn_run_patch.assert_not_called()
+    uvicorn_serve_patch.assert_not_called()
     load_mock.assert_called_once()
     engine_mock.assert_called_once()
     # M1 pin: the probe engine is built LOCALLY (not via the shared factory)
@@ -122,7 +146,7 @@ def test_boot_preflight_pg_unreachable_exits_75(uvicorn_run_patch, tmp_path):
 
 
 def test_boot_preflight_uses_local_engine_not_shared_factory(
-    uvicorn_run_patch, tmp_path, monkeypatch
+    uvicorn_serve_patch, tmp_path, monkeypatch
 ):
     """M1: the preflight must NOT call create_postgres_engine.
 
@@ -158,7 +182,7 @@ def test_boot_preflight_uses_local_engine_not_shared_factory(
     conn.execute.assert_called_once()
 
 
-def test_boot_preflight_pg_reachable_proceeds(uvicorn_run_patch, tmp_path):
+def test_boot_preflight_pg_reachable_proceeds(uvicorn_serve_patch, tmp_path):
     """PG selected + SELECT 1 succeeds → no exit; uvicorn.run is reached."""
     conn = MagicMock()
     engine = MagicMock()
@@ -182,10 +206,10 @@ def test_boot_preflight_pg_reachable_proceeds(uvicorn_run_patch, tmp_path):
     conn.execute.assert_called_once()
     # The probe engine was disposed (no leaked pool)
     engine.dispose.assert_called_once()
-    uvicorn_run_patch.assert_called_once()
+    uvicorn_serve_patch.assert_called_once()
 
 
-def test_boot_preflight_sqlite_skips_check(uvicorn_run_patch, tmp_path):
+def test_boot_preflight_sqlite_skips_check(uvicorn_serve_patch, tmp_path):
     """SQLite backend → no engine attempt at all; boot proceeds."""
     with (
         patch(
@@ -202,10 +226,10 @@ def test_boot_preflight_sqlite_skips_check(uvicorn_run_patch, tmp_path):
         _run_main()
 
     engine_mock.assert_not_called()
-    uvicorn_run_patch.assert_called_once()
+    uvicorn_serve_patch.assert_called_once()
 
 
-def test_boot_preflight_unexpected_error_fails_open(uvicorn_run_patch, tmp_path):
+def test_boot_preflight_unexpected_error_fails_open(uvicorn_serve_patch, tmp_path):
     """An unexpected check error (not connectivity) must NOT block boot."""
     with (
         patch(
@@ -220,7 +244,7 @@ def test_boot_preflight_unexpected_error_fails_open(uvicorn_run_patch, tmp_path)
     ):
         _run_main()  # fail-open: proceeds to uvicorn
 
-    uvicorn_run_patch.assert_called_once()
+    uvicorn_serve_patch.assert_called_once()
 
 
 # ── Exit-78 auth refusal (review m2) ───────────────────────────────────────
@@ -228,7 +252,7 @@ def test_boot_preflight_unexpected_error_fails_open(uvicorn_run_patch, tmp_path)
 
 @pytest.mark.parametrize("sqlstate", ["28P01", "28000", "28P02"])
 def test_boot_preflight_pg_auth_refused_exits_78(
-    uvicorn_run_patch, tmp_path, sqlstate
+    uvicorn_serve_patch, tmp_path, sqlstate
 ):
     """SQLSTATE 28P01/28000/28P02 → SystemExit 78 — credentials cannot be
     fixed by retrying, so the supervisor must stop, not loop on 75."""
@@ -251,10 +275,10 @@ def test_boot_preflight_pg_auth_refused_exits_78(
             _run_main()
 
     assert excinfo.value.code == 78
-    uvicorn_run_patch.assert_not_called()
+    uvicorn_serve_patch.assert_not_called()
 
 
-def test_boot_preflight_auth_sqlstate_via_diag_layout(uvicorn_run_patch, tmp_path):
+def test_boot_preflight_auth_sqlstate_via_diag_layout(uvicorn_serve_patch, tmp_path):
     """The diag.sqlstate alternate layout is also honored (defensive getattr)."""
     from sqlalchemy.exc import OperationalError
 
@@ -281,7 +305,7 @@ def test_boot_preflight_auth_sqlstate_via_diag_layout(uvicorn_run_patch, tmp_pat
     assert excinfo.value.code == 78
 
 
-def test_boot_preflight_unknown_sqlstate_stays_75(uvicorn_run_patch, tmp_path):
+def test_boot_preflight_unknown_sqlstate_stays_75(uvicorn_serve_patch, tmp_path):
     """Unknown SQLSTATE (e.g. 57P03 cannot_connect_now) → transient track.
 
     A PG restart reports 57P03 — not an auth failure — so the daemon must
@@ -308,7 +332,7 @@ def test_boot_preflight_unknown_sqlstate_stays_75(uvicorn_run_patch, tmp_path):
     assert excinfo.value.code == 75
 
 
-def test_boot_preflight_missing_sqlstate_stays_75(uvicorn_run_patch, tmp_path):
+def test_boot_preflight_missing_sqlstate_stays_75(uvicorn_serve_patch, tmp_path):
     """No SQLSTATE attribute at all (non-psycopg wrapper) → 75, never 78.
 
     A driver that does not expose sqlstate must not be misread as an auth
@@ -335,7 +359,7 @@ def test_boot_preflight_missing_sqlstate_stays_75(uvicorn_run_patch, tmp_path):
     assert excinfo.value.code == 75
 
 
-def test_boot_preflight_diag_sqlstate_non_string_ignored(uvicorn_run_patch, tmp_path):
+def test_boot_preflight_diag_sqlstate_non_string_ignored(uvicorn_serve_patch, tmp_path):
     """A non-string diag.sqlstate (broken wrapper) is ignored → 75."""
     from sqlalchemy.exc import OperationalError
 
@@ -365,8 +389,13 @@ def test_boot_preflight_diag_sqlstate_non_string_ignored(uvicorn_run_patch, tmp_
 # ── Bounded graceful shutdown (fixes C1) ──────────────────────────────────
 
 
-def test_uvicorn_run_receives_timeout_graceful_shutdown(uvicorn_run_patch, tmp_path):
-    """uvicorn.run must be passed timeout_graceful_shutdown from DaemonConfig."""
+def test_uvicorn_run_receives_timeout_graceful_shutdown(uvicorn_serve_patch, tmp_path):
+    """The uvicorn config must carry timeout_graceful_shutdown from DaemonConfig.
+
+    Re-pointed (bind-race fix lane): the daemon now builds the
+    ``uvicorn.Config`` itself and hands it to the serve seam, so the
+    value is read off that object instead of off ``uvicorn.run`` kwargs.
+    """
     with patch.dict(
         "os.environ",
         {"ENSEMBLE_DATA_DIR": str(tmp_path), "DATA_DIR": ""},
@@ -374,14 +403,13 @@ def test_uvicorn_run_receives_timeout_graceful_shutdown(uvicorn_run_patch, tmp_p
     ):
         _run_main()
 
-    uvicorn_run_patch.assert_called_once()
-    kwargs = uvicorn_run_patch.call_args.kwargs
-    assert "timeout_graceful_shutdown" in kwargs
-    assert isinstance(kwargs["timeout_graceful_shutdown"], int)
-    assert kwargs["timeout_graceful_shutdown"] > 0
+    uvicorn_serve_patch.assert_called_once()
+    uvicorn_config = uvicorn_serve_patch.call_args.args[0]
+    assert isinstance(uvicorn_config.timeout_graceful_shutdown, int)
+    assert uvicorn_config.timeout_graceful_shutdown > 0
 
 
-def test_uvicorn_timeout_graceful_shutdown_env_override(uvicorn_run_patch, tmp_path):
+def test_uvicorn_timeout_graceful_shutdown_env_override(uvicorn_serve_patch, tmp_path):
     """DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS overrides the default."""
     with patch.dict(
         "os.environ",
@@ -394,12 +422,20 @@ def test_uvicorn_timeout_graceful_shutdown_env_override(uvicorn_run_patch, tmp_p
     ):
         _run_main()
 
-    kwargs = uvicorn_run_patch.call_args.kwargs
-    assert kwargs["timeout_graceful_shutdown"] == 123
+    uvicorn_config = uvicorn_serve_patch.call_args.args[0]
+    assert uvicorn_config.timeout_graceful_shutdown == 123
 
 
-def test_uvicorn_wiring_unchanged(uvicorn_run_patch, tmp_path):
-    """Sanity: host/port/access_log wiring follows config, unchanged by Phase 1."""
+def test_uvicorn_wiring_unchanged(uvicorn_serve_patch, tmp_path):
+    """Sanity: host/port/access_log wiring follows config, unchanged by Phase 1.
+
+    Re-pointed (bind-race fix lane): the assertions now read the
+    ``uvicorn.Config`` the daemon builds and hands to the serve seam
+    (``daemon.__main__._serve_with_bind_retry``) instead of the kwargs
+    of a bare ``uvicorn.run(...)`` call. The contract is UNCHANGED and
+    slightly STRONGER — the app string is asserted too (the old
+    kwargs-only pin could not see it).
+    """
     from daemon.config import load_config
 
     with patch.dict(
@@ -410,11 +446,12 @@ def test_uvicorn_wiring_unchanged(uvicorn_run_patch, tmp_path):
         _run_main()
         config = load_config()
 
-    kwargs = uvicorn_run_patch.call_args.kwargs
-    assert kwargs["host"] == config.daemon.host
-    assert kwargs["port"] == config.daemon.port
-    assert kwargs["access_log"] is False
-    assert kwargs["reload"] is False
+    uvicorn_config = uvicorn_serve_patch.call_args.args[0]
+    assert uvicorn_config.host == config.daemon.host
+    assert uvicorn_config.port == config.daemon.port
+    assert uvicorn_config.access_log is False
+    assert uvicorn_config.reload is False
+    assert uvicorn_config.app == "daemon.api:app"
 
 
 # ── Frozen entry (run_app.py) pre-uvicorn preflight (F-DR1-1, P2.3 B5.6) ────
@@ -433,7 +470,7 @@ def _run_run_app():
     )
 
 
-def test_run_app_runs_preflight_before_main(uvicorn_run_patch, tmp_path):
+def test_run_app_runs_preflight_before_main(uvicorn_serve_patch, tmp_path):
     """Wiring + order + exactly-once: run_app calls _boot_db_preflight
     BEFORE main(), passes run_preflight=False, one probe per boot."""
     import daemon.__main__ as entry
@@ -457,11 +494,11 @@ def test_run_app_runs_preflight_before_main(uvicorn_run_patch, tmp_path):
     pf_mock.assert_called_once()
     main_mock.assert_called_once_with(run_preflight=False)
     assert order == ["preflight", "main"]
-    uvicorn_run_patch.assert_not_called()  # main() was the mock
+    uvicorn_serve_patch.assert_not_called()  # main() was the mock
 
 
 def test_run_app_preflight_pg_unreachable_exits_75_before_main(
-    uvicorn_run_patch, tmp_path
+    uvicorn_serve_patch, tmp_path
 ):
     """F-DR1-1 core: PG unreachable on the frozen path → SystemExit 75
     from run_app's OWN preflight call — BEFORE main() runs, so uvicorn
@@ -493,11 +530,11 @@ def test_run_app_preflight_pg_unreachable_exits_75_before_main(
 
     assert excinfo.value.code == 75
     main_mock.assert_not_called()
-    uvicorn_run_patch.assert_not_called()
+    uvicorn_serve_patch.assert_not_called()
 
 
 def test_run_app_preflight_pg_auth_refused_exits_78_before_main(
-    uvicorn_run_patch, tmp_path
+    uvicorn_serve_patch, tmp_path
 ):
     """Auth refusal on the frozen path → SystemExit 78 before main()."""
     import daemon.__main__ as entry
@@ -523,10 +560,10 @@ def test_run_app_preflight_pg_auth_refused_exits_78_before_main(
 
     assert excinfo.value.code == 78
     main_mock.assert_not_called()
-    uvicorn_run_patch.assert_not_called()
+    uvicorn_serve_patch.assert_not_called()
 
 
-def test_run_app_success_boots_uvicorn_with_single_probe(uvicorn_run_patch, tmp_path):
+def test_run_app_success_boots_uvicorn_with_single_probe(uvicorn_serve_patch, tmp_path):
     """Happy path end-to-end through REAL run_app + REAL main(): the
     probe engine is built EXACTLY ONCE across both call sites and
     uvicorn.run is reached — no double probe, no new boot steps."""
@@ -551,10 +588,10 @@ def test_run_app_success_boots_uvicorn_with_single_probe(uvicorn_run_patch, tmp_
     engine_mock.assert_called_once()  # single probe across run_app + main
     conn.execute.assert_called_once()
     engine.dispose.assert_called_once()
-    uvicorn_run_patch.assert_called_once()
+    uvicorn_serve_patch.assert_called_once()
 
 
-def test_main_default_runs_preflight_once(uvicorn_run_patch, tmp_path):
+def test_main_default_runs_preflight_once(uvicorn_serve_patch, tmp_path):
     """Dev entry (`python -m daemon`) unchanged: main() still probes
     exactly once, in its original position."""
     import daemon.__main__ as entry
@@ -570,12 +607,19 @@ def test_main_default_runs_preflight_once(uvicorn_run_patch, tmp_path):
         entry.main()
 
     pf_mock.assert_called_once()
-    uvicorn_run_patch.assert_called_once()
+    uvicorn_serve_patch.assert_called_once()
 
 
-def test_main_run_preflight_false_skips_probe(uvicorn_run_patch, tmp_path):
+def test_main_run_preflight_false_skips_probe(uvicorn_serve_patch, tmp_path):
     """The skip flag (frozen-entry only) suppresses main()'s internal
-    probe without touching any other boot step."""
+    probe without touching any other boot step.
+
+    Also the FROZEN-PATH pin for the bind-race fix: the serve seam
+    (which owns the pre-bind) is reached with run_preflight=False —
+    i.e. the pre-bind lives INSIDE main() but OUTSIDE the
+    ``if run_preflight:`` block, so run_app.py's frozen entry gets the
+    same bind-retry protection.
+    """
     import daemon.__main__ as entry
 
     with (
@@ -589,7 +633,59 @@ def test_main_run_preflight_false_skips_probe(uvicorn_run_patch, tmp_path):
         entry.main(run_preflight=False)
 
     pf_mock.assert_not_called()
-    uvicorn_run_patch.assert_called_once()
+    uvicorn_serve_patch.assert_called_once()
+
+
+# ── Bind-race fix lane (2026-11-11): budget wiring + exit-code contract ──────
+
+
+def test_bind_retry_budget_wired_to_serve_seam(uvicorn_serve_patch, tmp_path):
+    """The bind budget comes from DaemonConfig and reaches the serve seam.
+
+    The knob is ``DaemonConfig.bind_retry_max_wait_seconds`` (env
+    ``DAEMON_BIND_RETRY_MAX_WAIT_SECONDS``); its DEFAULT is a BOUNDED
+    wait sized for TRANSIENT holders — deliberately NOT sized to cover a
+    wind-down (that premise was falsified: uvicorn closes the LISTEN
+    socket first and the launcher is strictly sequential, so the daemon's
+    own teardown never holds the port). It must also stay under the HARD
+    45s ceiling, because the launcher's burst abort is reachable only
+    while the failed child's uptime ``U <= 58s`` (6 crashes in the 600s
+    window need ``310 + 5U <= 600``; ``U ~= boot-to-prebind + budget``).
+    Rationale: daemon/services/bind_retry.py (daemon/constants.py is
+    deliberately untouched — it is sealed by content-sha256 pins).
+    """
+    from daemon.config import load_config
+
+    with patch.dict(
+        "os.environ",
+        {"ENSEMBLE_DATA_DIR": str(tmp_path), "DATA_DIR": ""},
+        clear=False,
+    ):
+        _run_main()
+        config = load_config()
+
+    uvicorn_serve_patch.assert_called_once()
+    budget = uvicorn_serve_patch.call_args.kwargs["max_wait_s"]
+    assert budget == config.daemon.bind_retry_max_wait_seconds
+    # Bounded, finite, and under the hard ceiling (burst-abort coupling).
+    assert 0 < budget <= 45.0
+
+
+def test_bind_retry_budget_env_override(uvicorn_serve_patch, tmp_path):
+    """DAEMON_BIND_RETRY_MAX_WAIT_SECONDS overrides the default budget."""
+    with patch.dict(
+        "os.environ",
+        {
+            "ENSEMBLE_DATA_DIR": str(tmp_path),
+            "DATA_DIR": "",
+            "DAEMON_BIND_RETRY_MAX_WAIT_SECONDS": "42",
+        },
+        clear=False,
+    ):
+        _run_main()
+
+    budget = uvicorn_serve_patch.call_args.kwargs["max_wait_s"]
+    assert budget == 42.0
 
 
 def test_preflight_contract_constants_unchanged():

@@ -1,6 +1,5 @@
 import logging
 import os
-import signal
 import sys
 import warnings
 
@@ -342,6 +341,168 @@ def _boot_auth_config_preflight() -> None:
     sys.exit(_EXIT_BOOT_AUTH_CONFIG_REFUSED)
 
 
+class _StartedLogServer(uvicorn.Server):
+    """``uvicorn.Server`` that emits the 'Uvicorn running on ...' line.
+
+    uvicorn logs that line from ``Server.startup()`` — but ONLY when it
+    bound the socket itself. With a socket handed in, it SKIPS the line
+    (uvicorn/server.py:188-193: "a message has already been logged by
+    ``config.bind_socket()``"). We bind the socket ourselves, so we own
+    the line.
+
+    It is emitted at the END of ``startup()`` — i.e. AFTER the app
+    import (which installs the root log handlers) and after the
+    lifespan startup — so it lands in the same place, in the same
+    format, as uvicorn's own line does today. Only the PUBLIC
+    ``Server.startup`` / ``Server.started`` / ``Server.config`` surface
+    is used; nothing private.
+
+    (A line logged BEFORE the app import is silently DROPPED: the root
+    logger has no handler until ``daemon.api`` is imported, and
+    ``logging.lastResort`` only emits WARNING+. The pre-bind path
+    therefore installs the handlers itself — see
+    ``_serve_with_bind_retry``.)
+    """
+
+    def __init__(self, config, bound_socket=None):
+        super().__init__(config)
+        self._bound_socket = bound_socket
+
+    async def startup(self, sockets=None):
+        await super().startup(sockets=sockets)
+        if not self.started:
+            return
+        host = self.config.host or "0.0.0.0"
+        port = self.config.port
+        if self._bound_socket is not None:
+            try:
+                port = self._bound_socket.getsockname()[1]
+            except OSError:  # pragma: no cover — socket already closed
+                pass
+        logger.info(
+            "Uvicorn running on http://%s:%s (Press CTRL+C to quit)",
+            host,
+            port,
+        )
+
+
+def _serve_with_bind_retry(uvicorn_config, max_wait_s: float | None = None) -> None:
+    """Bind the listener socket (bounded retry) and serve.
+
+    Mirrors ``uvicorn.run()`` for the kwargs the daemon uses, with ONE
+    deliberate difference: the socket is bound HERE — through the
+    bounded EADDRINUSE retry in :mod:`daemon.services.bind_retry` — and
+    HANDED to uvicorn, so uvicorn never re-binds and the port is never
+    unprotected between the bind and the serve.
+
+    uvicorn's own socket path (``Server.startup`` →
+    ``loop.create_server(host=..., port=...)``) runs AFTER the lifespan
+    startup and, on OSError, does ``logger.error(exc)`` →
+    ``await self.lifespan.shutdown()`` → ``sys.exit(1)``
+    (uvicorn/server.py:169-186) — the crash exit that produced the
+    2026-11-11 restart loop. We never take that path: uvicorn receives
+    the socket (``Server.startup`` → ``loop.create_server(...,
+    sock=sock)``, uvicorn/server.py:140-146), which listens on the
+    socket we already hold.
+
+    Because uvicorn SKIPS its own "Uvicorn running on ..." line when
+    sockets are supplied (uvicorn/server.py:188-193), that line is
+    emitted by :class:`_StartedLogServer` instead — at the same point
+    in the boot sequence as uvicorn's own.
+
+    LOGGING: the root log handlers are installed by the ``daemon.api``
+    import — which happens INSIDE uvicorn's startup, i.e. AFTER this
+    function's pre-bind phase. Until then the root logger has no
+    handler and ``logging.lastResort`` only emits WARNING+, so an
+    INFO line emitted by the pre-bind path would be silently DROPPED.
+    ``install_root_logging()`` (the app's OWN idempotent installer) is
+    therefore called here, BEFORE the bind, so the bind-retry
+    diagnostics land in the same sinks as every other daemon log line
+    (stderr + ensemble.log) instead of only in the bare lastResort
+    stream. The app's own install at import time replaces the tagged
+    handler pair, so the final handler set is exactly the same as
+    before this change.
+
+    The tail mirrors ``uvicorn.run()`` exactly (uvicorn/main.py:598-614):
+    the KeyboardInterrupt swallow, the uds cleanup, and the
+    STARTUP_FAILURE (exit 3) verdict when the server never started. The
+    exit-3 tail is load-bearing: without it a lifespan-startup failure
+    would exit 0 ("clean stop") and the launcher would NOT restart the
+    daemon.
+    """
+    from uvicorn.main import STARTUP_FAILURE
+
+    from .logging_setup import install_root_logging
+    from .services.bind_retry import bind_socket_with_retry
+
+    host = uvicorn_config.host
+    port = uvicorn_config.port
+
+    # Install the root log handlers BEFORE the pre-bind phase so the
+    # bind-retry diagnostics are observable in the normal sinks (see
+    # the docstring). Idempotent — the app's own install at import time
+    # replaces this tagged handler pair.
+    install_root_logging()
+
+    # Bind FIRST, serve second — the socket stays held across the
+    # lifespan startup, so there is no window in which the port can be
+    # SERVED by another process (only one process can ``listen()``; a
+    # second ``bind()`` is still possible under SO_REUSEADDR and loses at
+    # ``create_server`` → exit 1 → crash track → retry).
+    #
+    # SIGINT during the bind WAIT: exit 3 (STARTUP_FAILURE), i.e. the
+    # CRASH track — deliberately NOT a clean exit. uvicorn.run swallowed
+    # KeyboardInterrupt and its tail then classified a never-started
+    # server as STARTUP_FAILURE (uvicorn/main.py:611-614), so the
+    # launcher restarted the daemon. A bare ``return`` here would exit 0
+    # ("clean"), classify_exit would log "exit 0, not looping", and
+    # systemd Restart=on-failure would not fire — a daemon silently down
+    # while every supervisor layer believes it stopped cleanly. The wait
+    # window is the whole bind wait (up to the budget), so the shape
+    # matters. (uvicorn installs its own SIGINT handler only INSIDE
+    # ``server.run()``'s ``capture_signals`` — i.e. AFTER this pre-bind
+    # phase.)
+    #
+    # SIGTERM during that window is NOT handler-graceful: pre-fix,
+    # uvicorn's ``capture_signals`` was installed before its own bind, so
+    # a TERM during the bind was handled; now the window is handler-free
+    # and has GROWN from ~0 to <= the budget. Operationally equivalent
+    # (TERM → default disposition → prompt death → 143 → crash track →
+    # retry); stated here because it is a real change, not a parity.
+    try:
+        sock = bind_socket_with_retry(host, port, max_wait_s=max_wait_s)
+    except KeyboardInterrupt:
+        logger.info(
+            "Boot interrupted during the listener bind wait — exiting as a "
+            "startup failure so the supervisor restarts the daemon"
+        )
+        sys.exit(STARTUP_FAILURE)
+
+    server = _StartedLogServer(config=uvicorn_config, bound_socket=sock)
+    try:
+        server.run(sockets=[sock])
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if uvicorn_config.uds and os.path.exists(uvicorn_config.uds):
+            os.remove(uvicorn_config.uds)
+
+    if (
+        not server.started
+        and not uvicorn_config.should_reload
+        and uvicorn_config.workers == 1
+    ):
+        # uvicorn closes hand-held sockets only in ``shutdown()`` — which
+        # it never reaches when the lifespan failed (``started`` is
+        # False), so close the held socket here instead of relying on
+        # process exit to release the port.
+        try:
+            sock.close()
+        except OSError:  # pragma: no cover — already closed
+            pass
+        sys.exit(STARTUP_FAILURE)
+
+
 def main(run_preflight: bool = True):
     """Main entry point.
 
@@ -523,13 +684,76 @@ def main(run_preflight: bool = True):
     # asyncio.wait_for budgets inside manager.shutdown() are deferred
     # hardening (pre-Phase-3). Raising the value trades task-drain
     # latency for drain completeness.
-    uvicorn.run(
+    #
+    # ── Bind-race fix (2026-11-11) ──────────────────────────────────────
+    # The server is no longer started through bare ``uvicorn.run(...)``:
+    # the listener socket is pre-bound HERE (bounded EADDRINUSE retry,
+    # see daemon/services/bind_retry.py) and handed to uvicorn via
+    # ``Server.run(sockets=[sock])``. uvicorn's own bind happens INSIDE
+    # ``Server.startup`` — AFTER the lifespan startup — and its OSError
+    # handler is ``sys.exit(1)`` (uvicorn/server.py:179-182); that
+    # crash-exit-on-contention is what produced the 2026-11-11 restart
+    # loop (35 respawns). The pre-bind also CLOSES the TOCTOU window:
+    # the port is held from before the lifespan startup until serving.
+    #
+    # ADR-STYLE NOTE — why THIS lane retries and the preflights above do
+    # NOT: the preflights (exit 75 PG-unreachable / exit 78 auth
+    # refusal) are CONFIG refusals — deterministic; waiting cannot fix a
+    # wrong password or an unreachable host, so ADR-011 keeps them "one
+    # check, one verdict". The bind is TRANSIENT RESOURCE CONTENTION —
+    # the holder is a LIVE process that is on its way out (a dying
+    # duplicate/rogue daemon releases the listener in ~1s, because
+    # uvicorn closes it FIRST), so waiting is right. The two lanes are
+    # deliberately different; do NOT harmonise them.
+    #
+    # Placement: AFTER both preflights (a config refusal must NEVER bind
+    # the port) and IMMEDIATELY BEFORE the server start. The pre-bind
+    # lives INSIDE ``main()`` but OUTSIDE the ``if run_preflight:``
+    # block, so the FROZEN entry (run_app.py → main(run_preflight=False))
+    # is covered by the same fix.
+    #
+    # ORDERING (verified, not assumed): the pre-bind happens BEFORE
+    # uvicorn's lifespan startup, so the daemon now HOLDS the listener
+    # during the ~29s lifespan startup. The socket is bound but NOT
+    # listening — asyncio's ``loop.create_server(..., sock=sock)``
+    # performs the ``listen()`` (uvicorn/server.py:144). A probe during
+    # that window therefore still sees ECONNREFUSED, exactly as it does
+    # today when the port is not bound at all (verified: SO_ACCEPTCONN
+    # == 0 on the bound socket; a connect raised ConnectionRefusedError
+    # errno 111, identical to the unbound case). Nothing in the boot
+    # path probes 9797/9798 expecting a refusal — the boot
+    # stale-subprocess sweep has no socket logic at all, and the
+    # launcher's serving probe is an HTTP-level promote-ceremony probe,
+    # not a boot-path "is the port free" check.
+    #
+    # The alternative shape (bind AFTER the lifespan startup, preserving
+    # today's ordering exactly) was weighed and REJECTED: it would
+    # require re-implementing uvicorn's ``Server._serve`` ordering
+    # (lifespan.startup → create_server → main_loop → shutdown) or
+    # patching uvicorn internals — deep coupling to a third-party
+    # private API — for ZERO observable gain (both shapes answer a
+    # startup-time probe with ECONNREFUSED), while LOSING the material
+    # win below.
+    #
+    # BLAST RADIUS (independent of the wait's outcome): today every
+    # failed cycle pays a FULL lifespan startup (migrations, MCP
+    # warm-up, pool setup — all against the live DB; measured spawn→
+    # fatal median 28.67s / min 26.13s / max 32.78s over 63 cycles)
+    # followed by a FULL ~11-step teardown (median 64.31s) — and then
+    # throws all of it away because the port was already gone. With the
+    # pre-bind BEFORE the startup, a daemon that cannot get the port
+    # performs ZERO lifespan startup steps and ZERO teardown steps.
+    uvicorn_config = uvicorn.Config(
         "daemon.api:app",
         host=config.daemon.host,
         port=config.daemon.port,
         reload=False,
         access_log=False,
         timeout_graceful_shutdown=config.daemon.graceful_shutdown_timeout_seconds,
+    )
+    _serve_with_bind_retry(
+        uvicorn_config,
+        max_wait_s=config.daemon.bind_retry_max_wait_seconds,
     )
 
 
