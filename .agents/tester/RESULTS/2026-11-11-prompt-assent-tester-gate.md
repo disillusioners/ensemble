@@ -4,7 +4,7 @@
 |---|---|
 | Date | 2026-11-11 (UTC) |
 | Commission | prompt-assent — conversational approval lane (trust-model change) |
-| Verdict | **NO-GO** for the stage cut **as it stands** — 2 net-new deterministic reds (both test-pin staleness, zero production defects). Distance to GO = 2 mechanical test-side edits + a 2-cell re-verify. |
+| Verdict | **Gate at the graded tip `029416f2e`: NO-GO** — 2 net-new deterministic reds (both test-pin staleness, zero production defects); distance to GO = 2 mechanical test-side edits + a 2-cell re-verify. → **Re-verified 2026-11-11 at tip `e7742ce0b` after the developer's 2 authorized pin fixes: stage-cut verdict GO-WITH-DISCLOSURES** — both reds repaired and deterministically re-proven, `missing-at-base` EMPTY, all 3 packs green, production + FE byte-identical (see §15). |
 | Branch / worktree | `feature/prompt-assist` @ `/home/nea/ensemble-src-wt-prompt-assent` (the "assist" spelling is the project's own convention — POK `prompt-assist-03-paths-use-assent-not-assist`) |
 | Tip tested | `029416f2e7961ce5e9d951015c571d91d420ed1b` (HEAD identity verified; 23 commits over base — the commission's "16" was a stale phase-4 expectation captured at `e5b3cc2d1`; tip identity is the invariant) |
 | Base | `0efdf106f3f66ccb400405f4137694592b72097d` (verified ancestor, `merge-base --is-ancestor` rc=0) |
@@ -67,7 +67,7 @@ Sweep-level BARE-ID partition: **base-only 28 · head-only 11 · in-both 491** �
 > `daemon/sources/adapters/discord/adapter.py was re-stamped even though its file did NOT change`
 
 The branch added the DM/group-DM discriminator to `daemon/sources/adapters/discord/adapter.py` (the K-3 mint-context binding) and re-stamped that file's seal sha in place (`87351d95d354…` → `a9f3a711fc79…` in `tests/test_chart_image_delivery_e2e.py`) **without moving the row out of `SEAL_UNTOUCHED_BASE_VALUES`** → the anti-blanket-re-stamp invariant fires.
-*Remedy (1–2 lines, test-side):* move the row into `SEAL_REPINNED_BASE_VALUES` with the new sha — **but only if the re-pin is authorized** (see Open question 1; the seal ceremony owns that classification, not this gate).
+*Remedy (1–2 lines, test-side) — **READ THIS CAREFULLY, THE TWO PLACES CARRY DIFFERENT SHAS:* the row moves from `SEAL_UNTOUCHED_BASE_VALUES` into `SEAL_REPINNED_BASE_VALUES`, but the **re-pinned row records the BASE sha** (`87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43` — the value the file held at the seal baseline, i.e. the value the re-pin moved *FROM*), while the baseline map `SEALED_SHA_BASELINES` in `tests/test_chart_image_delivery_e2e.py` keeps the **CURRENT sha** (`a9f3a711fc7928ece67472e2f313fa5ddfae173422a02d99c712d0e1ecee4b14` — the file as it stands now). ⚠️ Writing the *current* sha into the re-pinned row — as this report originally stated — **REDs the pin**: the consuming assertion is `assert seal[rel] != base_value`, so the re-pinned dict must hold the value the row moved *FROM*, never the value it moved *to*. (Also conditional on the seal owner authorizing that re-pin — see Open question 1; the seal ceremony owns that classification, not this gate.)
 
 **N-2 · `tests/unit/test_memoir_v2_schema.py::test_the_migration_census_delta_is_exactly_one_new_file`** — head `FFF` / base `PPP`
 > `assert {…20261109_021154_create_memoir_v2_tables.sql, …20261110_221500_create_prompt_assent_tokens.sql} == {…20261109_021154_create_memoir_v2_tables.sql}`
@@ -289,7 +289,7 @@ Worker `0539d04f`, skill `e2e-test`. Wall-clock 41m47s (05:39:59Z → 06:21:46Z)
 **Why:** Lane A found **2 net-new deterministic reds** (3× isolated on both arms, head `FFF` / base `PPP`) that the branch causes. ensure.md Core treats "no regressions in the change set" as **Critical**, and a deterministic head-only red is exactly what a pre-stage-cut gate exists to catch. Both are **test-pin staleness, not production defects**: the feature's behaviour is proven green end-to-end (Lane B 249 + 107 nodes; Lane C PG seams; Lane E real-daemon flow with full provenance and zero token leakage). The gate verdict is nonetheless NO-GO because a red is a red — it is not laundered into a disclosure.
 
 **Distance to GO — two mechanical edits, both test-side, no production code:**
-1. **N-1** — move the `discord/adapter.py` row from `SEAL_UNTOUCHED_BASE_VALUES` into `SEAL_REPINNED_BASE_VALUES` with the new sha `a9f3a711fc79…` — **conditional on the seal owner authorizing that re-pin** (Open question 1).
+1. **N-1** — re-classify the `discord/adapter.py` row: it moves from `SEAL_UNTOUCHED_BASE_VALUES` into `SEAL_REPINNED_BASE_VALUES`, and **the two locations carry different shas** — the **re-pinned row records the BASE sha** `87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43` (the value the file held at the seal baseline, i.e. the value the re-pin moved **FROM**), while the baseline map `SEALED_SHA_BASELINES` in `tests/test_chart_image_delivery_e2e.py` keeps the **CURRENT sha** `a9f3a711fc7928ece67472e2f313fa5ddfae173422a02d99c712d0e1ecee4b14` (the file as it stands now). ⚠️ **This report originally said "with the new sha `a9f3a711…`" — that literal reading REDS the pin.** The consuming assertion is `assert seal[rel] != base_value`: the re-pinned dict must hold the value the row moved *FROM*, not the value it moved *to*. Corrected 2026-11-11 (re-verify) — a later lane must not copy the original wording. The move remains **conditional on the seal owner authorizing that re-pin** (Open question 1).
 2. **N-2** — re-express the memoir lane's migration-census pin so a second lane's migration does not invalidate it (Open question 2).
 Then re-run the 2 cells (plus the 2 lane packs for safety) — minutes, not another whole-tree leg.
 
@@ -344,3 +344,96 @@ Then re-run the 2 cells (plus the 2 lane packs for safety) — minutes, not anot
 **Docs-only commit:** `f2b0c2a1b16e2e1da4f65a601a3b68de1328b029` — subject *"docs(prompt-assent): tester gate report — NO-GO on 2 net-new cross-lane pin reds (seal re-pin classification + memoir migration-census pin), lane packs 249+107 green, PG seams + real-daemon E2E green, K-3 live probe outstanding"*; exactly **2 files / +348 lines** (`.agents/tester/PACKS.md` +3 registration rows, this report +345). Local only — **not pushed** (pushing is the leader's call).
 The 3 pre-existing dirty `.agents/` files (`.agents/approver/active.md`, `.agents/tidier/notes.md`, `.agents/approver/prompt-assent-tracking.md`) are approver/tidier-owned and were **not** staged, swept, or modified by this gate — sha256 byte-identity verified pre/post commit (`active.md` `3cbca39d…d75`, `tidier/notes.md` `3906506e…cf9`, `prompt-assent-tracking.md` `32da877e…535`).
 *(This line was added in a follow-up docs-only commit — a commit cannot contain its own SHA.)*
+
+Re-verify (2026-11-11) additions — **docs only**: this report's §15 re-verification appendix (the 2 repaired reds re-proven, the mutation spot-verification, the parity partition, the stage-cut verdict + carry-forward list), plus the **correction of §3.3/§10's N-1 remedy wording** (the re-pinned row records the **BASE** sha; the baseline map keeps the **CURRENT** sha — the original wording would RED the pin). No production code, no test code, no live surfaces.
+
+---
+
+## 15. Re-verification (2026-11-11) — after the developer's 2 authorized pin fixes
+
+**Commissioned as:** re-verify the stage cut after `f5b51cf99` (N-1) + `e7742ce0b` (N-2) landed on top of this gate's two docs commits — re-graded **from the tree, not from the developer's receipts**; correct this report's own N-1 remedy wording; deliver the stage-cut verdict.
+
+**Re-verify workers:** recon `0777b43f` (tree read) · surface `85ed6e9e` (dual-leg parity + packs, skill `base-head-failing-set-parity`) · mutations `80bdb781` (mutation spot-verify, skill: mutation-cycle evidence harness).
+
+### 15.1 What the tree confirms
+
+- Tip `e7742ce0b24075e314fe2d458a523d902db1b5b5`; chain `bbda3d957 → f5b51cf99 → e7742ce0b`. **This gate's two docs commits are ancestors (rc=0) with their content intact** — the §14 stamp is present verbatim at HEAD.
+- Change set = **exactly 2 files, both `tests/`**: `tests/unit/test_anomaly_report_duty_prompts.py` (+18/−4) and `tests/unit/test_memoir_v2_schema.py` (+54/−2) ⇒ **+72/−6, ZERO production, ZERO frontend** (`git diff --name-only bbda3d957..HEAD -- daemon/ agents/ frontend/ config.yaml pyproject.toml` → EMPTY).
+
+### 15.2 Affected-surface dual-leg parity (TRUE pre-fix base `bbda3d957` ↔ head `e7742ce0b`)
+
+Base leg built by `git archive` into a **project-controlled scratch parent (NOT `/tmp`)** — a `/tmp` base tree manufactures false differences here (temp-dir path exemptions). `PYTHONPATH` pin + the **mandatory import-resolution assertion** passed on every base invocation (`daemon.__file__` resolved under `$BASE`). Env fence verified before every leg (per-variable scrub incl. the full `ENSEMBLE_AUTH_*` family; dead-port LLM fence; `SCRUB-OK` probe or the leg aborted).
+
+| leg | collected | passed | failed | runtime |
+|---|---|---|---|---|
+| **HEAD** `e7742ce0b` | 221 | 212 | **9** | 72.3 s |
+| **BASE** `bbda3d957` | 221 | 210 | **11** | 77.3 s |
+
+**Partition (canonical node ids): stable 9 · extra-at-base 2 (= exactly the two repaired cells) · missing-at-base 0 — EMPTY ⇒ the commissioned claim HOLDS.** Classifier: `grep '^FAILED'` only (`grep -c '^ERROR'` = 0 on both legs — no phantom red). No node flipped across identical executions ⇒ no flake caveat.
+
+### 15.3 The 2 repaired cells — 3× fresh runs, fresh process each, both legs
+
+| cell | HEAD | BASE |
+|---|---|---|
+| `TestTheSealRePin::test_the_untouched_rows_keep_their_base_values` | **GREEN 3/3** | RED 3/3 (deterministic) |
+| `test_the_migration_census_delta_is_exactly_one_new_file` | **GREEN 3/3** | RED 3/3 (deterministic) |
+
+### 15.4 Packs at the new tip
+
+| pack | HEAD | BASE |
+|---|---|---|
+| `memoir_v2_schema_unit_test.sh` | **PASS 28** — `EXPECTED_PASSED_N=28` **HOLDS** (observed 28 == expected 28, pack's own assertion at `:58/:80`) | **FAIL** (27 passed, rc=1) — the census pin red at base = the proof the fix landed |
+| `prompt_assent_matrix_test.sh` | **PASS 249** (33 s) | — |
+| `prompt_assent_phase3_unit_test.sh` | **PASS 107** (23 s) | — |
+
+The freshness flake **did not red** in either pack — no retry budget consumed.
+
+### 15.5 Mutation spot-verification — 4 teeth proofs + 1 inverted spec
+
+Baselines at tip: `TestTheSealRePin` 5 passed · `test_memoir_v2_schema` 28 passed · the 2 repaired cells 2 passed. Venue: isolated detached worktree (`/tmp/assent-reverify-mut`) with import isolation proved (`daemon.__file__` + `sys.prefix` inside the scratch tree; the feature tree ABSENT from `sys.path`); every restore byte-identical (sha256 before == after); both scratch worktrees removed; the shared worktree untouched.
+
+| proof | plant | result |
+|---|---|---|
+| (a) blanket re-stamp | re-stamp another untouched row's sha (`slack/adapter.py`) | **RED** rc=1 — `AssertionError: daemon/sources/adapters/slack/adapter.py was re-stamped even though its file did NOT change` → restore (sha identical) → **GREEN 5 passed** |
+| (b) adapter row left at base | drop the discord row from the re-pinned set; re-insert it in the untouched set with the **BASE** sha | **RED** rc=1 — sole failure `TestTheSealRePin::…`, quoting both shas (`87351d95…ab43` vs `a9f3a711…4b14`) → restore (sha identical) → **GREEN 5 passed** |
+| (c-own) memoir lane's OWN file missing from the delta | delete the memoir migration from the working tree | **RED** rc=1 — the OWNERSHIP assertion fires (18 collateral failures: the deleted file is a shared fixture) → restore (sha identical) → **GREEN 28 passed** |
+| (e) lane range re-pointed | `LANE_COMMIT` → the commit that added the prompt-assent migration | **RED** rc=1 — sole failure the census cell (delta = 2 files) → restore (sha `55e45fb4…e9fd` identical) → **GREEN 28 passed** |
+| (c) **as literally commissioned** | remove the prompt-assent lane's file from the working-tree delta | **DID NOT BITE — GREEN by design.** The repaired pin is deliberately immune to a foreign lane's file entering/leaving the working-tree delta; **that immunity IS the N-2 fix**. Under the OLD form the foreign file's *presence* caused the false red — its *absence* cannot. The commissioned plant is an inverse of the defect; re-specify it if the proof list is re-issued. |
+
+Differential vs the previously-graded tip `029416f2e`: `test_anomaly_report_duty_prompts.py` 8F/11P → **7F/12P** (N-1 fixed) · `test_memoir_v2_schema.py` 1F/27P → **28P/0F** (N-2 fixed) · `comm -13` (newly broken) **EMPTY** for both files.
+
+### 15.6 Disposition verified from the CODE, not the receipts
+
+- **N-1** — `tests/unit/test_anomaly_report_duty_prompts.py:163`: the discord row sits in `SEAL_REPINNED_BASE_VALUES` carrying the **BASE** sha `87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43`; `SEAL_UNTOUCHED_BASE_VALUES` (L176) no longer contains it (`grep -c` = 1 ⇒ the partition invariant holds); the baseline map `tests/test_chart_image_delivery_e2e.py:1473` keeps the **CURRENT** sha `a9f3a711fc7928ece67472e2f313fa5ddfae173422a02d99c712d0e1ecee4b14` (= the live file's own sha256). The consuming assertion `assert seal[rel] != base_value` is satisfied. Partition arithmetic closes: 20 re-pinned + 14 untouched + 1 charter row = **35** = |`SEALED_SHA_BASELINES`|.
+- **N-2** — `tests/unit/test_memoir_v2_schema.py`: the 3-leg lane-scoped form (`LANE_COMMIT = a2d90bb3…`, `MEMOIR_V2_MIGRATION_REL`): (1) OWNERSHIP — the lane's own file is in the working-tree delta; (2) GROWTH — the delta is non-empty; (3) EXACTNESS over the **closed** range `LANE_BASE_COMMIT..LANE_COMMIT` — exactly one file, the lane's own. No absolute/global count survives; a foreign lane's later migrations are structurally outside the closed range.
+- **Production + FE byte-identity:** `daemon/`, `agents/`, `frontend/`, `config.yaml`, `pyproject.toml` — byte-identical across `bbda3d957..HEAD`.
+
+### 15.7 Pre-existing reds — attributed, NOT fixed (out of lane scope)
+
+Red at **both** legs with identical failure text ⇒ pre-existing, not branch-introduced:
+- `tests/test_prompt_version_resolution_core.py:1094` — `assert len(files) == 96` vs 128 actual.
+- `tests/unit/test_anomaly_report_models.py:271` — `assert len(files) == 121` vs 128 actual.
+- Also stable at both legs: the 6 duty-walk / duty-block / cardinal-count nodes in `test_anomaly_report_duty_prompts.py`, and `TestThePromptArtifactBaseline::test_the_baseline_matches_the_real_bytes` (baseline carries 181 entries, expected 177).
+
+**Left untouched** — re-baselining them here would launder a red into a green; they belong to their own lane.
+
+**Correction to the commission's premise:** `tests/test_resource_control_seam.py:473-479` (the name-scoped census) is **GREEN at both legs** (explicit single-node runs: HEAD 1 passed, BASE 1 passed; absent from both FAILED lists). It filters `"resource" in p.name`, so census growth never touched it — same defect *class*, but **not a red**.
+
+### 15.8 Stage-cut verdict
+
+**GO-WITH-DISCLOSURES** for the staged release of `feature/prompt-assist` at tip `e7742ce0b`.
+
+Both net-new reds are **repaired**: deterministically GREEN 3/3 at HEAD, deterministically RED 3/3 at the pre-fix base (so the fix is load-bearing, not coincidental), with the pins' teeth independently re-proven by 4 mutation cycles. **No net-new red exists on the affected surface** (`missing-at-base` EMPTY); all three packs are green at the new tip with `EXPECTED_PASSED_N=28` holding; production + FE are byte-identical. The disclosures in §15.9 are non-blocking for staging.
+
+### 15.9 Carry-forward residual list for the ceremony lane
+
+1. **K-3 live probe — OUTSTANDING, and it is the ARMING gate.** The lane is default-OFF, so **staging is not blocked**; **do not arm any environment** until the live Discord 1:1 (mint succeeds) vs group-DM (refuses `mint-requires-private-channel`) probe runs per `docs/runbooks/prompt-assent.md:160`.
+2. **Invalid `ENSEMBLE_PROMPT_ASSENT_ENABLED` fails closed AT BOOT** (loud pydantic error, port never bound) — not at call time. The runbook already states this; the arming procedure should repeat it.
+3. **`prompt_assent_tokens` has NO server-side defaults** — `version_tag` / `mint_is_dm` / `attempts` / `status` are client-side SQLAlchemy defaults; a **raw-SQL** INSERT omitting them hits NOT NULL (ORM paths unaffected).
+4. **The freshness positive leg remains wall-clock flaky (~13–20%, `now_iso()` truncation)** — the durable backdate-widening fix is deferred; it is the likeliest source of future spurious reds in this lane.
+5. **Deterministic debt inside a file this lane edited** — the 6 duty-walk / duty-block / cardinal-count reds + the 181-vs-177 prompt-artifact baseline in `test_anomaly_report_duty_prompts.py` are stable at both legs (pre-existing). They deserve their own lane; they were deliberately NOT re-baselined here.
+6. **Two stale census baselines** (`==96`, `==121` vs 128 files) — same class, both pre-existing, untouched.
+7. **N-2's growth leg is subsumed** by its ownership leg (`MEMOIR_V2_MIGRATION_REL in delta` ⇒ `delta` non-empty) — the pin carries **2 teeth-bearing legs, not 3**.
+8. **The N-1 seal-owner authorization has no in-tree artifact** — it is asserted by the fix commit's message ("Per the seal owner's classification") and by the commissioning authority; the classification itself is not recorded in the repo. A ceremony record would help the next auditor.
+9. **Recommended follow-up (DEFERRED by the lane owner — NOT built here):** a dev-only Discord-shaped source stub (emits adapter-shaped `metadata["discord"]` without a gateway) so the T3.5/K-3 E2E becomes repeatable in CI. Deferred because it touches the sources-adapter contract and the live operator probe already covers the gate.
+10. **Gate-cost note:** this scoped re-verify took ≈14 min (the `/tmp` base-tree trap was avoided deliberately). A full-tree Tier-2 dual-side on this corpus remains ≈129 min — parallelize the 3× ladder by node in future gates.
