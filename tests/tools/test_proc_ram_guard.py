@@ -471,6 +471,7 @@ class TestUnderLimitByteIdentical:
 
 class TestBallooningTree:
     @pytest.mark.asyncio
+    @pytest.mark.timeout(90)
     async def test_ballooning_tree_via_proc_run_is_killed(self, proc_tools, real_guard):
         if _mem_available_bytes() < PLANNED_BYTES + 256 * 1024 * 1024:
             pytest.skip("insufficient memory")
@@ -559,6 +560,7 @@ class TestBallooningTree:
 
 class TestLeaderlessTree:
     @pytest.mark.asyncio
+    @pytest.mark.timeout(90)
     async def test_leaderless_tree_shape(self, proc_tools, real_guard):
         if _mem_available_bytes() < PLANNED_BYTES + 256 * 1024 * 1024:
             pytest.skip("insufficient memory")
@@ -865,6 +867,7 @@ class TestLaneShape:
             await manager.cleanup_instance(unique_instance_id)
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(90)
     async def test_the_ram_kill_is_not_delivered_by_the_proc_lane(
         self, proc_tools, real_guard, monkeypatch
     ):

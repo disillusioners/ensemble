@@ -57,6 +57,16 @@ FORK_COUNT = 9
 #: RSS (~160 MiB).  This is the fairness discriminator.
 CEILING_BYTES = 48 * MIB
 
+#: How long the fair tree HOLDS after forking.  Kept SHORT so the leg is
+#: genuinely fast: the tree lives long enough for the guard to fire the RSS
+#: trigger and run the PSS confirm (several 100 ms polls), then exits
+#: NORMALLY.  The bash-lane timeout (:data:`BASH_TIMEOUT_S`) is a safety net
+#: far above this — the command completes by itself, making the
+#: "not killed" assertion stronger (a real success return, not a timeout).
+FORK_HOLD_S = 6
+#: The bash-lane timeout — a bounded safety net above :data:`FORK_HOLD_S`.
+BASH_TIMEOUT_S = 20
+
 
 @pytest.fixture(autouse=True)
 def _fence(monkeypatch, tmp_path):
@@ -107,8 +117,12 @@ def _spawn_fair_tree(tmp_path: Path) -> tuple[list[int], object, str]:
     except HostMemoryShortage as exc:
         pytest.skip(str(exc))
     tree = prepare_balloon(tmp_path, fair=True)
-    # The command: the fair script allocates PARENT_BYTES then forks.
-    cmd = f"{sys.executable} -u {tree.script} {PARENT_BYTES} {FORK_COUNT} {tree.pidfile}"
+    # The command: the fair script allocates PARENT_BYTES, forks, then HOLDS
+    # for FORK_HOLD_S before exiting normally.
+    cmd = (
+        f"{sys.executable} -u {tree.script} {PARENT_BYTES} "
+        f"{FORK_COUNT} {tree.pidfile} {FORK_HOLD_S}"
+    )
     return ([], tree, cmd)
 
 
@@ -126,6 +140,7 @@ def _teardown_fair_tree(tree) -> None:
 
 class TestForkTreeFairness:
     @pytest.mark.asyncio
+    @pytest.mark.timeout(90)
     async def test_a_fork_tree_over_counted_by_rss_is_not_killed(
         self, real_guard, tmp_path
     ):
@@ -140,7 +155,7 @@ class TestForkTreeFairness:
         _pids, tree, cmd = _spawn_fair_tree(tmp_path)
         try:
             out = await bash_module.bash.coroutine(
-                command=cmd, instance_id=INSTANCE, timeout=30
+                command=cmd, instance_id=INSTANCE, timeout=BASH_TIMEOUT_S
             )
         finally:
             _teardown_fair_tree(tree)
@@ -156,6 +171,7 @@ class TestForkTreeFairness:
         assert counters["ram_overcounted"] >= 1
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(90)
     async def test_the_broken_confirm_counter_mutation_kills_the_fair_tree(
         self, real_guard, tmp_path, monkeypatch
     ):
@@ -178,7 +194,7 @@ class TestForkTreeFairness:
         _pids, tree, cmd = _spawn_fair_tree(tmp_path)
         try:
             out = await bash_module.bash.coroutine(
-                command=cmd, instance_id=INSTANCE, timeout=30
+                command=cmd, instance_id=INSTANCE, timeout=BASH_TIMEOUT_S
             )
         finally:
             _teardown_fair_tree(tree)

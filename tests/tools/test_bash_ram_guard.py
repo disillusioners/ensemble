@@ -1357,6 +1357,7 @@ class TestOrderingObligation:
                 offenders.append(f"{py.relative_to(repo_root)}: signal.SIGCHLD")
         assert offenders == []
 
+    @pytest.mark.timeout(90)
     async def test_the_direct_child_is_reaped_by_the_existing_await(
         self, real_guard, tmp_path
     ):
@@ -1591,6 +1592,7 @@ class TestReleaseLogging:
 
 
 class TestRealBallooningTree:
+    @pytest.mark.timeout(90)
     async def test_the_whole_tree_is_killed_and_the_envelope_is_returned(
         self, real_guard, tmp_path
     ):
@@ -1650,6 +1652,7 @@ class TestRealBallooningTree:
         assert ram_rows[0].peak_rss_kb == round(payload["observed_peak_bytes"] / 1024)
         assert EXIT_KIND_TIMEOUT not in {row.exit_kind for row in history}
 
+    @pytest.mark.timeout(90)
     async def test_the_leaderless_tree_is_still_watched_and_killed(
         self, real_guard, tmp_path
     ):
