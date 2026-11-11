@@ -556,12 +556,11 @@ The state-file relocation ships with v0.29.10 (implemented in leg-2), **default 
 
 ### 6.8 The executor script family — what actually ships (D3)
 
-Until now the install dir's `scripts/` trees were **out-of-band copies**: NO packaging lane shipped them. The staged release payload carried no `scripts/` at all, and `make install` shipped only `scripts/watchdog-watcher.sh`. That gap is what made the **v0.29.16 promote halt** possible — the promote stop step resolves its stop script through TWO legs (`lib.sh` `stop_via_stop_script`):
+Until now the install dir's `scripts/` trees were **out-of-band copies**: NO packaging lane shipped them. The staged release payload carried no `scripts/` at all, and `make install` shipped only `scripts/watchdog-watcher.sh`. That gap is what made the **v0.29.16 promote halt** possible — the promote stop step resolves its stop script through a **sibling leg only** (`lib.sh` `stop_via_stop_script`, W4 2026-11-11):
 
-1. the **sibling one level up** of the calling script's dir — `lib.sh:4849` anchors `BASH_SOURCE[1]` (promote.sh's dir), so the leg is `<scripts_dir>/../stop-ensemble.sh`;
-2. the `$(pwd)/scripts/stop-ensemble.sh` fallback — `lib.sh:4852`.
+1. the **sibling one level up** of the calling script's dir — `lib.sh` anchors `BASH_SOURCE[1]` (promote.sh's dir), so the leg is `<scripts_dir>/../stop-ensemble.sh`.
 
-Both legs miss in an install layout ⇒ `bash: No such file or directory` ⇒ **rc=127** ⇒ the promote aborts before the flip. PR1 closed the **daemon** side (a fail-closed arm preflight); **this** closes the **shipping** side.
+**W4 (D2a) removed the old `$(pwd)/scripts/stop-ensemble.sh` fallback** — it was DEAD in the install layout (the executor's cwd IS the install dir, and `make install` ships no `stop-ensemble.sh` under `<install>/scripts/`) and it MASKED a missing sibling with an rc=127 mid-stop. The sibling is now the single source of truth; the shell-side preflight probes (promote.sh §1, restart.sh, rollback.sh — W1/W2) refuse **rc 78 BEFORE any lock/txn/stop** when the sibling is missing or non-executable. PR1 closed the **daemon** side (a fail-closed arm preflight); **this** closes the **shipping** side.
 
 **What ships now, and where** (payload-relative paths — ONE shape, two carriers):
 
@@ -579,6 +578,39 @@ Both legs miss in an install layout ⇒ `bash: No such file or directory` ⇒ **
 - **NO plist ever** — the launchd plists are operator-side (`make plist-install` stages them into `<install_dir>/data/`); they are NOT part of any release payload. The family list is an explicit enumeration and the layout pin test scans the whole staged tree.
 
 **Release obligation (the operator step — NOT an agent step).** `PIPELINE_SCRIPTS_REV` lives in `scripts/upgrade/lib.sh` and `PIPELINE_SCRIPTS_FLOOR_COMMIT` in `daemon/tools/upgrade_tools.py`; the stamp is the commit the shipped scripts claim to contain, so **the first release that ships this family must RE-PIN both constants to a commit that contains the whole family** (D6-8: the two travel together). Until that re-pin, `stage.sh` **refuses** with `PIPELINE_SCRIPTS_REV=… does not COVER the shipped executor family` and names the paths that were absent at the stamped commit — fail-closed on purpose: on a non-git pinned scripts dir the stamp IS the whole provenance (Q2/D6-11), so a stamp that does not cover what ships is a lie. Remedy: re-pin the two constants to the merge commit that introduced the family, then re-stage. Details + the exact edit sites: `docs/runbooks/upgrade-drills.md` §A.8.
+
+### 6.9 D2a — deterministic supervised flip (launchd), fail-safe aborts
+
+The promote lane is now **launchd-aware** (D2a, 2026-11-11). On a launchd-managed Mac the flip is deterministic: **bootout (the barrier) → stop drains with NO second TERM → `launcher_swap($VERSION)` → atomic flip → `launchctl bootstrap` exactly once → verify (provenance → pid≠pre → version → livez)**. The promote NEVER starts a competing nohup launcher on the supervised path (that race is the 2026-11-11 incident).
+
+**The mode declaration cannot ride the executor env — so D2a runs in AUTO.** The supervision declaration (`ENSEMBLE_SUPERVISION` / `ENSEMBLE_LAUNCHD_LABEL`) is NOT forwarded to the promote executor: the executor env allowlist (`daemon/tools/upgrade_journal.py` `EXECUTOR_ENV_ALLOWLIST`) omits it, and `daemon/manager.py` sets only `INSTALL_DIR`/`PORT` on the executor. Therefore an operator **cannot** rely on `ENSEMBLE_SUPERVISION=launchd` reaching the classify step — on the operator's Mac the classifier **AUTO-probes launchd** (gui domain) and verifies exactly one job whose argv points at `<install>/launcher.sh`. That is why AUTO must be correct: it is the only mode that reliably runs. (Manual runs — `make upgrade-promote` from a shell — DO honor the env; `unsupervised` as a declaration value is D2b.)
+
+**Fail-safe abort end states (never a silent degrade).** Every promote abort names its end state and halts for a human:
+- **Classifier refusal (exit 78, pre-mutation):** zero/multiple/unresolvable launchd job (`supervision-not-verified`), declared `launchd` on a non-Darwin host (`supervision-launchd-incapable-host`), declared `script`/opt-out on Darwin (`supervision-unsupervised-declaration-required`), garbage on Darwin (`supervision-declaration-invalid`). Nothing has been stopped or flipped.
+- **8b gate halt (exit 78, DISARMED):** all four PREV-manifest branches (`no-previous` / `prev-quarantined` / `prev-missing` / `prev-unsafe`) now **bootout** the launchd job ⇒ **DARK + DISARMED** (no KeepAlive self-revival on the broken binary) + a named journal state (`supervisor-disarmed-*`) + a loud operator message. The recovery command is printed (bootstrap a healthy version).
+- **Verify failure (routes to 8b):** provenance (port holder not `<install>`-anchored), pid==pre-stop, or version/livez mismatch ⇒ auto-rollback to `$OLD_CUR` (launcher_swap($PREV) **before** the flip, then bootstrap + re-gate).
+- **Availability note:** a supervised abort leaves the daemon **DARK and the supervisor DISARMED** — recovery is operator-driven (fail-closed by design).
+
+**SIGKILL-in-window recovery.** A promote SIGKILLed inside the flip window journals NOTHING. On the next launcher boot, the sweep's **comp3-owner-dead** fast path treats a dead owner as reclaimable even with a fresh heartbeat (the promote refreshes the heartbeat, so it is fresh at kill) and disposes the txn; the watchdog also alerts (`supervisor=absent / flipped-current-booted-silently`) on an OPEN `flipped:true` txn with a dead owner. Recovery:
+
+```bash
+# watchdog alerted? inspect the open txn + current, then:
+launchctl print gui/$(id -u)/com.ensemble.prod | head -20     # is the job loaded/running?
+curl -fsS http://127.0.0.1:9797/livez                          # what version is actually serving?
+# if the flipped current looks broken → roll back to previous via promote/rollback,
+#   or start the LKG manually:
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist
+```
+
+**plist `ExitTimeOut` — raise it to N ≥ 90 (operator, NOT shipped in this PR).** The template carries NO `ExitTimeOut` key today, so launchd's ~20 s default (and the live 5 s job value) TRUNCATES a healthy graceful drain. The launcher's stop budget is `CHILD_STOP_WAIT_S=70` (daemon graceful default 60 s + 10 s margin); set `ExitTimeOut` to **N ≥ 90** so launchd's SIGKILL backstop always sits OUTSIDE the launcher's own drain wait. Edit `scripts/ensemble-prod.plist` (add `<key>ExitTimeOut</key><integer>90</integer>`), re-stage the substituted plist into `$(INSTALL_DIR)/data/ensemble-prod.plist` (the install-time substitution — **never `make install` on a live dir**), then `make plist-install`, then reload (bootout + bootstrap).
+
+**`make plist-install` overwrites with NO `.bak` — snapshot first.** It rewrites `~/Library/LaunchAgents/ensemble-prod.plist` in place. If you have hand-edited that plist (PATH, ExitTimeOut), copy it first:
+
+```bash
+cp ~/Library/LaunchAgents/ensemble-prod.plist \
+   ~/Library/LaunchAgents/ensemble-prod.plist.bak-$(date -u +%Y%m%d-%H%M%S)
+make plist-install INSTALL_DIR="$INSTALL_DIR"
+```
 
 ### 6.7 Adopting an already-running manual daemon under launchd (from-zero handover)
 

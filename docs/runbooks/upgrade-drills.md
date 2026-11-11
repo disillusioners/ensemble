@@ -720,6 +720,16 @@ That refusal is **fail-closed by design** — the same class as the W-2 stamp/fl
 
 **Drill note.** Sandbox/fixture trees are exempt by construction: the fixture repo pins **both** constants to its own commit (which contains the whole family) — see `tests/test_release_journal.sh` (the fixture's `FIXTURE_STAMP`) and `tests/test_executor_family_payload.sh` (the synthetic-repo positive/negative legs of the coverage gate).
 
+### A.9 D2a supervised-flip drill leg + operator reference (2026-11-11)
+
+D2a makes the promote **launchd-aware** on the operator's Mac. For drills, the sandbox lane is unchanged (no real launchd) — but the LIVE lane's flip now follows a deterministic order and the aborts are fail-safe. Two operator facts the drill/runbook must carry:
+
+- **The mode declaration cannot ride the executor env.** `ENSEMBLE_SUPERVISION` / `ENSEMBLE_LAUNCHD_LABEL` are NOT in the executor env allowlist (`daemon/tools/upgrade_journal.py` `EXECUTOR_ENV_ALLOWLIST`) and `daemon/manager.py` sets only `INSTALL_DIR`/`PORT` on the executor — so an agent-armed promote runs the classifier in **AUTO**, which probes the gui launchd domain and verifies exactly one job whose argv points at `<install>/launcher.sh`. Manual `make upgrade-promote` runs from a shell DO honor the env. (An `unsupervised` declaration value is D2b — do not expect it here.)
+- **The forward order (pinned):** `bootout` (M1 barrier) → TERM-idempotent drain (NO second TERM; SIGKILL only if still alive) → `launcher_swap($VERSION)` → atomic flip → `launchctl bootstrap` exactly ONCE → verify provenance (pid `<install>`-anchored) → pid≠pre-stop → version → livez. Never a promote-started nohup launcher on the supervised path.
+- **Fail-safe abort end states** (runbook §6.9 of `docs/deployment.md` has the full table): classifier refusal (exit 78, pre-mutation); 8b manifest-halt ⇒ **DARK + DISARMED** (`supervisor-disarmed-*`, recovery command printed); verify failure ⇒ auto-rollback to `$OLD_CUR`. A supervised abort leaves the daemon dark and the supervisor disarmed — recovery is operator-driven.
+- **SIGKILL-in-window:** the launcher's comp3-owner-dead reclaim + the watchdog `flipped-orphan` alert cover a promote SIGKILLed mid-window; recovery command in `docs/deployment.md` §6.9.
+- **plist `ExitTimeOut` N ≥ 90** (operator step; template carries no key today) + **`make plist-install` has no `.bak`** — snapshot the live plist before re-running it. Both in `docs/deployment.md` §6.9.
+
 ---
 
 *Runbook maintenance (R3.5): this file is versioned in-repo and references scripts by name + the commit at its header; every drill execution records a script-version checkpoint line in its evidence. When `scripts/upgrade/` changes, re-verify §2–§5 command shapes against the scripts' own usage headers before the next drill.*
