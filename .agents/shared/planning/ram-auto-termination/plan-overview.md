@@ -2,9 +2,9 @@
 
 Date: 2026-11-10 (planned from worktree base `0efdf106f3f66ccb400405f4137694592b72097d`, branch `feature/ram-auto-termination`, worktree `/home/nea/ensemble-src-wt-ram-auto-termination`)
 Author: plan-creation worker (research by three partitioned explorers; all anchors re-verified against the worktree by this worker)
-Status: **Phase 1 gate CLOSED** — architect adjudication COMPLETE (10/10 DQ rulings + R1 + sequencing verdict), **AMENDED by approver-iter-001** (7 blockers + sweep ruled in `architecture-recommendation.md` §14–§15). Binding rulings live in the "Phase 1 Rulings" block below and in `architecture-recommendation.md`; the phase docs are rev 3 and reconcile against them.
+Status: **Phase 1 gate CLOSED** — architect adjudication COMPLETE (10/10 DQ rulings + R1 + sequencing verdict), **AMENDED by approver-iter-001** (7 blockers + sweep ruled in `architecture-recommendation.md` §14–§15). Binding rulings live in the "Phase 1 Rulings" block below and in `architecture-recommendation.md`; the phase docs are rev 4 and reconcile against them.
 
-> **rev 3 — supersedes rev 2 (commit 34046bdc5) per the approver-iter-001 amendment
+> **rev 4 — supersedes rev 3 (commit e25804554) per the approver-iter-002 amendment
 > pass.** Vehicle: **binding per-file edit list** (binding-order headers below).
 > Where this document and `architecture-recommendation.md` disagree, **that document
 > wins**. The architect's "Phase 1 Rulings" block is preserved **verbatim**.
@@ -14,9 +14,9 @@ Status: **Phase 1 gate CLOSED** — architect adjudication COMPLETE (10/10 DQ ru
 | Order | Edit | Blocker / source |
 |---|---|---|
 | 1 | Header: the phase docs are **rev 3**; the amendment is named | approver-iter-001 |
-| 2 | **The §6 consumer-count claim is WITHDRAWN from the plan set** (5 sites) → the **§6 enumerated census** (33 pinned sites / 10 files / 1 inapplicable pack / 0 daemon parsers) | DQ6 sweep |
+| 2 | **The §6 consumer-count claim is WITHDRAWN from the plan set** (5 sites) → the **§6 enumerated census** (the enumerated census — counts derived at fold time, never pinned; the table is the artifact) | DQ6 sweep |
 | 3 | **DQ1 one-liner**: the re-arm clause → the **bounded** formula (§4.1a) | Blocker 2 |
-| 4 | **DQ4 one-liner**: + the Q2=(i) semantics + the **18-code** vocabulary + the five canonical predicate strings | Blockers 1 & 6 |
+| 4 | **DQ4 one-liner**: + the Q2=(i) semantics + the **16-code** vocabulary + the five canonical predicate strings | Blockers 1 & 6 |
 | 5 | **DQ6 one-liner**: the census replaces the "22" claim; the artifact is owned by **Phase 2** | DQ6 sweep |
 | 6 | **DQ8 one-liner**: the payload wording, the **exact counter set**, the `instance_id=None` rule | Blocker 6 |
 | 7 | **DQ10 one-liner**: + the **event ownership** (§4.5) + the SQLite-CHECK qualifier | Blocker 3 |
@@ -28,6 +28,19 @@ Status: **Phase 1 gate CLOSED** — architect adjudication COMPLETE (10/10 DQ ru
 | 13 | **Configuration Surface**: + the **root-`Config` wiring** (§4.6) + the re-arm constants as **module constants** | Blocker 5 |
 | 14 | **Assumptions**: updated for the bounded frame, the query-only proc verdict, and the event-drop posture | §14.2 |
 | 15 | The **B10/B11 honesty + truth-statement pointers** and the **B14 coupling strings** land verbatim | §15 |
+
+## Applied edit list — rev 4 (binding order, approver iteration 002)
+
+| Order | Edit | Blocker / source |
+|---|---|---|
+| 1 | Header: the phase docs are **rev 4**; the amendment is named | iter-002 |
+| 2 | **Vocabulary count 16 everywhere** — the superseded count was an arithmetic slip (9 kept/renamed + 7 added); the **B4 count-line** lands; **zero** survivors of the superseded count anywhere in the plan set | Blocker 1 |
+| 3 | **DQ2 → the two-thread ruling** (B16 verbatim) in the scope item, the one-liner and the closure ledger | Blocker 3 |
+| 4 | **Both coupling-map P2↔P5 cells** → B14's **renumber-proofed** string (the surviving `independent` cell replaced) | Blocker 5 |
+| 5 | **§3.4 N = 2 contended row** + the contended overshoot frame + the amended truth statement (with the ≈0.28 GiB/s contended clause) | Blocker 3 |
+| 6 | **Risks**: + the wedged execution-lane thread (🔴), + the N = 2 contended window (🔴) | §9 |
+| 7 | **SC19** re-aimed at 16 codes (+ the count-line) · **SC21** (lane heartbeat) | Blockers 1 & 3 |
+| 8 | **Assumption 14** — the `instance_id=None` narrowing (§16.3) | Notes sweep |
 
 ## Applied edit list (binding order)
 
@@ -103,8 +116,8 @@ Systemd OOM restarts of the live daemon on 2026-10-30 at 10:43Z and 11:13Z, with
    **kill-switch default-ON** (`ENSEMBLE_RAM_GUARD`) and documented env-off
    (commission requirement; see DQ7/DQ9 and Dispatcher Ruling (c)).
 3. **Fast-breach detection** — a poll interval chosen as an explicit
-   latency/overhead trade-off (DQ2); **RULED: one dedicated daemon thread**, poll
-   **200 ms** [50, 2000].
+   latency/overhead trade-off (DQ2); **RULED: TWO dedicated daemon threads** (the
+   tick thread and the execution-lane thread), poll **200 ms** [50, 2000].
 4. **Breach handling**: terminate the process tree (escalation policy is DQ4), reap
    children so no zombies survive, and return a **typed error to the agent**
    carrying the **deciding** value and the honest-peak bound (contract shape is
@@ -199,10 +212,10 @@ and **P7 shrank and re-weighted** to the operator memo (no migration lands in v1
 | | P1 | P2 | P3 | P4 | P5 | P6 | P7 |
 |---|---|---|---|---|---|---|---|
 | **P1** Design Gate | — | tight (P2 implements DQ1+DQ3) | tight (P3 implements DQ2+DQ4) | tight (P4 implements DQ2+DQ4) | loose (DQ6's consumer-gate artifact now lives in P2; P5 implements DQ7 — the config surface) | loose | loose |
-| **P2** Measurement | tight | — | tight (shared reader) | tight (shared reader) | tight (P5 consumes the envelope producer, counters and heartbeat from P2 — phase5 T1/T10 depend on Phase 2 Tasks 16/14) | tight | independent |
+| **P2** Measurement | tight | — | tight (shared reader) | tight (shared reader) | tight (P5 consumes the envelope producer, the counters and the guard heartbeat from P2 — Phase 5's envelope-event and counter tasks depend on Phase 2's envelope-producer and guard-thread tasks) | tight | independent |
 | **P3** Bash Lane | tight | tight | — | independent (separate lanes) | tight (error + knobs) | tight | loose |
 | **P4** Proc Lane | tight | tight | independent | — | tight (error + knobs) | tight | loose |
-| **P5** Contract/Config | tight | independent | tight | tight | — | tight | independent |
+| **P5** Contract/Config | tight | tight (P5 consumes the envelope producer, the counters and the guard heartbeat from P2 — Phase 5's envelope-event and counter tasks depend on Phase 2's envelope-producer and guard-thread tasks) | tight | tight | — | tight | independent |
 | **P6** Tests | independent | tight | tight | tight | tight | — | independent |
 | **P7** Durability | loose | independent | loose | loose | independent | independent | — |
 
@@ -233,7 +246,7 @@ wants that; the skill's default sequential ordering is preserved here for review
 | 4 | **Poll overhead** — a /proc tree scan per tick per live spawn is O(host pids) for pgid enumeration; a 200 ms poll across N live spawns could be measurable | Medium | Medium | DQ3 framing (pgid scan is O(host), not O(tree)); P2 must MEASURE the per-tick cost and P7/runbook must record the budget. Consider a shared-per-tick scan (one /proc walk serves all live spawns) rather than per-spawn walks. |
 | 5 | **Killing the wrong tree** — PID recycling, or a `setsid` escapee that re-parents outside the group, could redirect the kill | **High** | Low | The guard supplies its **own** identity gate — the DQ4 ladder's **P0–P7** pre-kill predicates (captured pgid + leader `starttime` re-verification, **fail-closed** — with the three-way absent-vs-unreadable leader split; **P5a** refusing a recycled pgid; the environ check is **P6, secondary only**). **FALSIFIED (arch doc §1.1 P3/P4):** the previous text conflated two different mechanisms — the reaper's real gate is `verify_and_kill` (`bash_spawn_reaper.py:735-900`, 5-rule, DB-row-backed, fail-closed, starttime gate `:851-857`), whereas `proc_tools.py:1037-1053` is a **different, fail-open** 1-signal environ check; and the **bash lane has NO ownership gate at all** (`_kill_process`, `bash.py:697-745`, sends `killpg` with no environ/starttime check). This plan does **not** claim the bash lane's pre-existing path is gated |
 | 6 | **Grace window defeats the purpose** — the existing bash ladder is SIGTERM → **5 s** → SIGKILL; a ballooning process keeps allocating for those 5 s and can push the unit past `MemoryMax` before the KILL lands | **High** | Medium | DQ4 framing: a RAM emergency needs a SHORT grace (the reaper's slice-probe ladder is the sync-friendly precedent). Make the grace a separate, shorter knob than the timeout grace. |
-| 7 | **Tool contract break** — the agent-visible error string changes shape; a downstream consumer may assume the current form | Medium | Low | **The gate is SATISFIED by evidence, not by ritual:** `architecture-recommendation.md` §6 carries the **enumerated census** — **33 machine-pinned assertion sites across 10 test files; 1 inapplicable legacy pack; 0 daemon-side parsers** (the count is a derived convenience; **the table is the artifact**), owned by **Phase 2**. **AMENDED — the §6 consumer-count figure is WITHDRAWN** (no such list existed). **FALSIFIED (arch doc §1.1 P6):** `tests/test_chart_tools_legacy_error_contract.py` pins **chart tools only** (58 lines; imports neither bash nor proc) — it was the **wrong file**. The real pin surface is the `proc_status` substring assertions (`tests/tools/test_proc_tools.py:240, 257, 382, 1163, 1166-1167, 1233, 1831`) and the `ProcessInfo.status == "killed"` attribute pins (`:1614, 1655, 1692, 1944, 1992, 2038`) — satisfied by *adding* lines and keeping `status="killed"`. Four strings must never change (bash success, bash timeout, the `proc_status` block, the `proc_list` header) and are pinned by the Phase 6 suite — the bash **timeout string has ZERO test pins** and is therefore guaranteed byte-identical only when no breach was observed |
+| 7 | **Tool contract break** — the agent-visible error string changes shape; a downstream consumer may assume the current form | Medium | Low | **The gate is SATISFIED by evidence, not by ritual:** `architecture-recommendation.md` §6 carries the **enumerated census** — **the enumerated census** (the counts are **derived at fold time, never pinned** — the table is the artifact) (the count is a derived convenience; **the table is the artifact**), owned by **Phase 2**. **AMENDED — the §6 consumer-count figure is WITHDRAWN** (no such list existed). **FALSIFIED (arch doc §1.1 P6):** `tests/test_chart_tools_legacy_error_contract.py` pins **chart tools only** (58 lines; imports neither bash nor proc) — it was the **wrong file**. The real pin surface is the `proc_status` substring assertions (`tests/tools/test_proc_tools.py:240, 257, 382, 1163, 1166-1167, 1233, 1831`) and the `ProcessInfo.status == "killed"` attribute pins (`:1614, 1655, 1692, 1944, 1992, 2038`) — satisfied by *adding* lines and keeping `status="killed"`. Four strings must never change (bash success, bash timeout, the `proc_status` block, the `proc_list` header) and are pinned by the Phase 6 suite — the bash **timeout string has ZERO test pins** and is therefore guaranteed byte-identical only when no breach was observed |
 | 8 | **Test host OOM** — the harness genuinely allocates RAM; a mis-sized test could OOM the CI/dev box | **High** | Medium | P6 mandate: ceilings are **small and injected** (MiB-scale), the allocator sizes are **explicitly bounded in the test code**, and the harness asserts the host's free memory before spawning. Never use the production **3 GiB** default in a test |
 | 9 | **Fenced-off substrate** — reaching for `resource_pid_map`'s dormant columns (the obvious "enforcement audit" landing zone) breaks `tests/test_resource_control_seam.py` | Medium | Medium | The Fence section above states the constraint; DQ5 frames a RAM-only registry as the substrate; P7 records the unfencing as a user-gated follow-up, not an inline change. |
 | 10 | **Coverage hole: `setsid` escapees** — a command that calls `setsid` leaves its process group, so neither the tree measurement nor the group kill reaches it (documented gap in BOTH lanes: `proc_tools.py:1677-1683`, `bash.py:590-600`) | Medium | Medium | DQ3 framing states the gap explicitly; note the orphan-reaper's Phase-4 env-stamp sweep already reaps such escapees at cleanup points, so the RAM guard is not the only net. Frame "setsid-aware tree discovery" as an explicit DQ3 sub-option. |
@@ -244,6 +257,8 @@ wants that; the skill's default sequential ordering is preserved here for review
 | 15 | 🟡 **NEW — the bounded re-arm trades containment for confirm frequency** (§4.1a): a smaller `CAP` means the trigger fires earlier, so the confirm runs more often (up to the tick rate ⇒ ≈17.5 % duty at a 250-pid host) and the tree's real footprint can reach `F_max` ≈ 3.86 GiB at R = 1 GiB/s | Medium | Medium | Both are **disclosed** in the §3.5 honesty items 10–11 (verbatim, in the memo and the envelope); the re-arm threshold is **reported** in the envelope as `rearm_threshold_bytes` beside the configured `limit_bytes`; the growth governor bounds the confirm rate |
 | 16 | 🟡 **NEW — the durable event can be DROPPED** (§4.5): no live loop / loop closed / daemon shutdown ⇒ the event is dropped, and across a restart the event is the **only** durable artifact ⇒ a dropped event is a permanent loss of the forensic record | Medium | Low | The drop is **visible**: `ram_events_dropped++` on the endpoint plus the `WATCHING→KILLED` transition log line; the bridge is **non-blocking** (never `.result(timeout=…)`); the guard never imports the bus |
 | 17 | 🟡 **NEW — `RamGuardConfig` declared but never wired** would make the whole env tier and the boot-abort rung dead code (approver blocker 5's root cause) | Medium | Low | The root field is declared in §4.6 and asserted by the §15 B9 shapes, which are unreachable without the wiring; the boot-abort rung is asserted, not disclosed |
+| 18 | 🔴 **NEW — a WEDGED execution-lane thread stops the kills while the measurement continues** (iteration 002). A never-returning `smaps_rollup` read (the house reader is a plain blocking `read_text()` with no timeout, `proc_readers.py:127-133`) wedges the lane ⇒ **kills stop; measurement continues**. `lane_alive` stays **True** — the signal is the **progress heartbeat `last_lane_progress_at` frozen** plus `lane_pending` climbing, **NOT `Thread.is_alive()`** | **High** | Low | The **two-thread** shape (DQ2/B16) confines the wedge to the kill path — the tick thread keeps sampling, `last_tick_at` keeps advancing and the liveness sweep still runs (the §5 property, §15 B17). The residual (a wedged read holds the kill path until the daemon restarts) is **disclosed** in the §3.5 honesty set (item 11) and the unit cap is the backstop |
+| 19 | 🔴 **NEW — the N = 2 contended case empties the unit-cap window** (iteration 002): two simultaneous full-ceiling breaches ⇒ the unit-cap floor is 9.36625 GiB > the 8.88 GiB box ceiling ⇒ the window is **EMPTY above R ≈ 0.598 GiB/s**, and the guard wins at `8700M` only below R ≈ **0.28 GiB/s** | **High** | Medium | The N = 2 row is a **DISCLOSURE, not a design target**; the memo states that the published `7G / 8700M` pair is a **single-tree claim**; the contended overshoot `Ω_contended(2) = R × 1.21 s` appears in the honesty set and the memo |
 
 ### Critical-Path Risks (would invalidate the plan if realized)
 
@@ -275,8 +290,9 @@ wants that; the skill's default sequential ordering is preserved here for review
 | 16 | **The verdict is PUBLISHED before `mark_exit`** | A recording fake observes the call order: publication → `mark_exit` → guard-registry release; the success arm's `mark_exit` did **not** run | The observed order matches; the RAM verdict survives |
 | 17 | **The config is wired into the root `Config`** | `load_config()` yields `config.ram_guard.ceiling_mib == 3072` by default; `RAM_GUARD_CEILING_MIB=64` ⇒ `== 64`; out-of-range ⇒ `pytest.raises(ValidationError)` | All three hold; the env tier is live, not dead code |
 | 18 | **A dropped event is visible** | No live loop ⇒ the event is dropped, `ram_events_dropped++`, and the transition log line is present; the tick does not block | Drop counted + logged; no tick stall |
-| 19 | **The reason vocabulary is exact** | The ladder's reason set is asserted as an exact ordered list of 18 codes; the status set is `{killed, already-dead, refused}` | Exact set match; no drift |
+| 19 | **The reason vocabulary is exact** | The ladder's reason set is asserted as an exact ordered list of **16 codes** (9 kept/renamed + 7 added); the status set is `{killed, already-dead, refused}`. **The enumeration above IS the authoritative exact set: 16 codes = 9 kept/renamed + 7 added. Any count other than 16 anywhere in the plan set is a defect.** | Exact set match; no drift; **zero** count sites other than 16 |
 | 20 | **No plan-side text contradicts the amended contract** | A §15 char-for-char grep over the plan set returns the pinned strings; the withdrawn §6 consumer-count claim appears **nowhere** (and the withdrawn "guard always completes before a unit kill" claim appears only inside the verbatim truth statement that prohibits it) | Zero survivors for the withdrawn claims; every B-string present |
+| 21 | **The lane heartbeat is a PROGRESS heartbeat** | A wedged execution-lane thread leaves `lane_alive` True but `last_lane_progress_at` frozen, with `lane_pending` climbing — **not** `Thread.is_alive()` | The endpoint reports the frozen progress heartbeat and the pending depth |
 
 ---
 
@@ -479,7 +495,7 @@ inject small values without a restart. The YAML block stays comment-only.
 - **Sanitization**: the persisted command must be the sanitized form —
   executable + argv-shape only, never the `env` overlay (which carries
   `__ENS_SECRET__`/`__KMS_REF__` markers). Reuse `_sanitize_command_for_registry`
-  (`bash.py:966-979`) — **that helper sanitizes for the REGISTRY row only**; the
+  (defined `bash.py:251`; called at `bash.py:966-979`) — **that helper sanitizes for the REGISTRY row only**; the
   event and envelope payloads carry **usage numbers only** (§4.3 negative space), and
   the helper's presence here grants **no** permission to include argv anywhere.
 
@@ -530,15 +546,15 @@ lane writes **none** — so durable verdicts for the proc lane need a new write 
 | DQ | Ruling (one line) |
 |---|---|
 | DQ1 | **(e) hybrid, confirm MANDATORY**: `summed_rss_bytes` trigger per tick + one-shot `summed_pss_bytes` confirm at breach (250 ms deadline, fail-open ⇒ kill); overcounted trees re-arm at **`ceiling + min(shared_extra_bytes, RAM_GUARD_REARM_MAX_EXTRA_BYTES)`** with a **growth governor** (128 MiB) — **AMENDED** (approver blocker 2: the previous unbounded `ceiling + (rss − pss)` rule is **withdrawn**). Measured over-count factor ≈ N (8.9× on a 9-member fork tree) — pure summed RSS false-kills fork-heavy legit jobs |
-| DQ2 | **(b) ONE dedicated daemon thread**, FastAPI-lifespan started/stopped; tick path never logs; no lock across /proc/signal/sleep; no PSS on the tick path; poll 200 ms [50, 2000] |
+| DQ2 | **AMENDED (approver iteration 002, blocker B3) — the DQ2 ruling sentence (§15 B16), verbatim:** (b) TWO dedicated daemon threads — ONE TICK THREAD and ONE EXECUTION-LANE THREAD — started/stopped together on the FastAPI lifespan (app.state.ram_guard owns both; OFF ⇒ neither thread exists). The tick thread owns registration, the ONE shared /proc scan, the RSS trigger, the peak/counter updates and the breach handoff; it never reads PSS, never signals, never sleeps beyond the poll. The execution-lane thread is the only executor of the kill path: the one-shot PSS confirm (250 ms deadline, fail-open ⇒ kill), then ram_kill_ladder (TERM → slice-probed grace → KILL → the P8 probe), then the verdict publication and the emitter call. The lane never samples and the tick never kills, so a stalled confirm can never delay a tick. **The constants (§15 B16), verbatim:** RAM_GUARD_PENDING_MAX = 2 · RAM_GUARD_GRACE_POLL_SLICE_SECONDS = 0.025 The tick path never logs; no lock across /proc/signal/sleep; the pending set is bounded and an overflow is **re-offered**, never skipped |
 | DQ3 | **(c) hybrid from ONE shared `/proc` scan per tick**: group ∪ bounded descendant-closure (per-spawn scans cost 9.49 ms each and overrun the tick); enumeration failure ⇒ drop the sample, never kill |
-| DQ4 | **(d) NEW sync short-grace ladder** (TERM → slice-probe → KILL), grace 250 ms [0, 2000] as a SEPARATE knob; identity = captured pgid + leader `starttime` re-verify (fail-closed). **AMENDED (leader ruling Q2=(i) + approver blockers 1 & 6):** the watch **stays alive until the group member count reaches 0**; identity **re-anchors on the surviving group members** when the leader is gone; the leader `starttime` gate applies to the leader **only while it is alive**; `already-dead:group-empty` fires **ONLY at group member count 0**; the pre-kill gate is **P0–P7** (P8 is the post-kill probe ⇒ `killed:tree-incomplete`) and the vocabulary is **18 codes**. **Canonical predicate strings (verbatim):** `the watch stays alive until the group member count reaches 0` · `identity = captured pgid ∧ surviving-member group membership` · `starttime gate applies to the leader only while alive` · `the watch is released only at group member count 0` · `group_member_count == 0`. Vocabulary: `exit_kind="ram_killed"` (constant; the real closed set is `daemon/services/resource_monitor/pid_registry.py:120-138`, NOT the path cited in this plan); proc gets `ram_killed: bool`, status stays `"killed"` |
+| DQ4 | **(d) NEW sync short-grace ladder** (TERM → slice-probe → KILL), grace 250 ms [0, 2000] as a SEPARATE knob; identity = captured pgid + leader `starttime` re-verify (fail-closed). **AMENDED (leader ruling Q2=(i) + approver blockers 1 & 6):** the watch **stays alive until the group member count reaches 0**; identity **re-anchors on the surviving group members** when the leader is gone; the leader `starttime` gate applies to the leader **only while it is alive**; `already-dead:group-empty` fires **ONLY at group member count 0**; the pre-kill gate is **P0–P7** (P8 is the post-kill probe ⇒ `killed:tree-incomplete`) and the vocabulary is **16 codes**. **Canonical predicate strings (verbatim):** `the watch stays alive until the group member count reaches 0` · `identity = captured pgid ∧ surviving-member group membership` · `starttime gate applies to the leader only while alive` · `the watch is released only at group member count 0` · `group_member_count == 0`. Vocabulary: `exit_kind="ram_killed"` (constant; the real closed set is `daemon/services/resource_monitor/pid_registry.py:120-138`, NOT the path cited in this plan); proc gets `ram_killed: bool`, status stays `"killed"` |
 | DQ5 | **(a) RAM-only map**, both lanes; the proc lane registers with the guard ONLY (no new durable write path); the bash `bash_spawn_registry` row stays **OPEN** on a RAM kill so the reaper's escapee net stays armed; (c) stays fenced, no lift routed |
-| DQ6 | Envelope mirrors `_format_secret_envelope`, numerics as siblings before `message`, **the envelope IS the entire bash return**; proc rides `proc_status` as a `ram_breach:` line + `ram_killed: true`. **AMENDED — the §6 consumer-count figure is WITHDRAWN** (no such list existed); the gate artifact is the **§6 enumerated census** (33 pinned sites / 10 files + 1 inapplicable legacy pack + 0 daemon-side parsers) and it is **owned by Phase 2** (Phase 5's duplicate claim collapses to a cross-reference). The chart-tools legacy test remains **inapplicable**. Additive-key evolution rule; no version field |
+| DQ6 | Envelope mirrors `_format_secret_envelope`, numerics as siblings before `message`, **the envelope IS the entire bash return**; proc rides `proc_status` as a `ram_breach:` line + `ram_killed: true`. **AMENDED — the §6 consumer-count figure is WITHDRAWN** (no such list existed); the gate artifact is the **§6 enumerated census** (the enumerated census — counts derived at fold time, never pinned; the table is the artifact) and it is **owned by Phase 2** (Phase 5's duplicate claim collapses to a cross-reference). The chart-tools legacy test remains **inapplicable**. Additive-key evolution rule; no version field |
 | DQ7 | Bare `ENSEMBLE_RAM_GUARD` master switch (reaper semantics, default-ON, complete no-op OFF) + `RamGuardConfig(env_prefix="RAM_GUARD_")`: CEILING_MIB **3072** [64, 65536] · POLL_INTERVAL_MS 200 · GRACE_MS 250 · PSS_CONFIRM_DEADLINE_MS 250; YAML comment-only; out-of-range aborts boot; per-call ceiling is an **internal/test seam — NEVER an LLM-visible tool parameter**. **AMENDED (approver blocker 5):** the class **and** the bare switch are wired into the **root `Config`** (`ram_guard: RamGuardConfig = Field(default_factory=RamGuardConfig)`); the depth/node caps **and the two re-arm constants** are **module constants, not knobs** |
-| DQ8 | `EventKind.RAM_LIMIT_EXCEEDED` (= the envelope `code`); payload = **the envelope key set + exactly four event-only keys** (`trigger`, `state`, `tracking_id`, `breach_at`), producer-side allow-list, **no argv/env/stdout anywhere**; one event per breach; `instance_id=None` spawns ⇒ **counter + log only, no event**; counters (exact ordered set): `ram_kills, ram_breaches_detected, ram_kill_refusals_p0 … ram_kill_refusals_p7, ram_overcounted, ram_rearms, ram_confirm_failures, ram_events_emitted, ram_events_dropped, ownership_unverified, tree_incomplete` (**no** `ram_kill_refusals_p8` — P8 never refuses); log prefix `ram-guard:`; NEW additive `GET /api/resources/ram-guard` carries counters + the guard health heartbeat (NOT in livez/readyz) |
+| DQ8 | `EventKind.RAM_LIMIT_EXCEEDED` (= the envelope `code`); payload = **the envelope key set + exactly four event-only keys** (`trigger`, `state`, `tracking_id`, `breach_at`), producer-side allow-list, **no argv/env/stdout anywhere**; one event per breach; `instance_id=None` spawns ⇒ **counter + log only, no event**; counters (exact ordered set): `ram_kills, ram_breaches_detected, ram_kill_refusals_p0 … ram_kill_refusals_p7, ram_overcounted, ram_rearms, ram_confirm_failures, ram_events_emitted, ram_events_dropped, ownership_unverified, tree_incomplete` (**no** `ram_kill_refusals_p8` — P8 never refuses); log prefix `ram-guard:`; NEW additive `GET /api/resources/ram-guard` carries counters + the guard health heartbeat (NOT in livez/readyz)  — **defensive behavior only** (§16.3): in v1 an instance-less spawn is **not registered with the guard at all** (the bash seam's registration block is inside `if instance_id is not None and proc is not None:`, `bash.py:952-1005`), so such a tree is invisible to the guard and only the unit cap covers it|
 | DQ9 | Confirmed: entirely outside the T4 seam; `/control-capabilities` byte-identical; both fence tests green unmodified; env-off is the v1 disable |
-| DQ10 | **(a) in-process + the event as the durable forensic record; NO migration lands in v1 at all** (`reap_reason` is plain TEXT — the "migration-backed extension" premise was stale). **AMENDED (approver blocker 3):** the event now has an **owner, an emitter and a bridge** (§4.5) — **Phase 2 owns the HOOK, Phase 5 owns the EMITTER + the wiring**; the bridge is **non-blocking** (`run_coroutine_threadsafe` + a done-callback) on the **hardened** `manager._get_event_loop()` — **not** `MainLoopBridge`, whose loop is `None` on a no-worker-pool boot. **Qualifying sentence (house debt, out of scope):** the SQLite `event.kind` CHECK lists only 8 kinds while `EventKind` has 14 — already stale for 10 pre-existing kinds; production is PostgreSQL (no CHECK), so `ram_limit_exceeded` is unaffected |
+| DQ10 | **(a) in-process + the event as the durable forensic record; NO migration lands in v1 at all** (`reap_reason` is plain TEXT — the "migration-backed extension" premise was stale). **AMENDED (approver blocker 3):** the event now has an **owner, an emitter and a bridge** (§4.5) — **Phase 2 owns the HOOK, Phase 5 owns the EMITTER + the wiring**; the bridge is **non-blocking** (`run_coroutine_threadsafe` + a done-callback) on the **hardened** `manager._get_event_loop()` — **not** `MainLoopBridge`, whose loop is `None` on a no-worker-pool boot. **Qualifying sentence (house debt, out of scope; §15 B22, verbatim):** the SQLite `event.kind` CHECK constraint lists only 8 kinds while `EventKind` has 16 — it is already stale for 8 pre-existing kinds; the production deployment is PostgreSQL (`create_all`; the SQLModel column carries no CHECK — `models.py:74`), so `ram_limit_exceeded` (the 17th member) is unaffected|
 
 **R1 — resolved, and the premise corrected:** the live unit has **NO memory cap** (`MemoryMax=infinity` — the 7G/8G figures were a never-applied runbook recommendation), and the Oct-30 deaths were **kernel OOM kills** (`oom-kill`), not cgroup-cap kills. Ceiling is **ABSOLUTE per-command bytes**; the guard is the INNER preventive layer, the unit cap the OUTER layer covering the orphan class (the Oct-30 killing memory was largely orphaned children of a dead incarnation — invisible to any per-command guard); **the unit cap adapts to the ceiling, never the reverse**. **Shipped default AMENDED: 3 GiB (3072 MiB), not 8 GiB** — 8 GiB fires at-or-after daemon death on this 11.9 GiB host in both measured incidents; raise-path is arithmetic (see §3.3 of the recommendation). Operator routing: drop-in `30-memory-bounds.conf`, recommended `MemoryHigh=7G / MemoryMax=8700M`, canary via `systemctl set-property --runtime` — user action, NOT this lane's.
 
@@ -671,11 +687,30 @@ box      = MemTotal 11.67 − others 1.79 − M_k 1.0   = 8.88 GiB  ⇒  X ≤ 8
 |---|---|---|---|---|---|
 | Unbounded (**WITHDRAWN**) | 1.825 GiB | 4.825 GiB | **9.825 GiB** | **NO** — floor > 8.88 at every R | never |
 | **BOUNDED (binding)** | **0.15625 GiB (160 MiB)** | 3.85625 GiB | **8.85625 GiB** | **YES** — R ≤ **1.034 GiB/s** (worst frame) / R ≤ 1.608 GiB/s (typical frame) | only for R ≤ **0.485 GiB/s** at `8700M` (worst frame) / R ≤ 0.755 GiB/s (typical frame) |
+| **BOUNDED, contended N=2 (disclosed, iteration 002)** | 0.15625 GiB | 4.36625 GiB | **9.36625 GiB** | **ONLY for R ≤ 0.598 GiB/s** — the window is **EMPTY above that** | only for R ≤ **0.28 GiB/s** at `8700M` |
+
+**The contended companion (N simultaneous breaches, iteration 002):** with the execution
+lane servicing one breach at a time, the Nth tree's confirm waits behind N−1 services:
+
+```
+Ω_contended(N) = R × (poll 0.200 + (N−1)·T_service_worst + confirm 0.250 + grace 0.250)
+T_service_worst = confirm_deadline 0.250 + grace 0.250 + probe ≈ 0.510 s
+Ω_contended(2) = R × 1.21 s
+```
+
+Both the single-tree and the contended forms appear in the §3.5 honesty set and the
+operator memo. At R = 1 GiB/s: Ω_worst ≈ 0.70 GiB; Ω_contended(2) ≈ 1.21 GiB.
+
+**The N=2 row is a DISCLOSURE, not a design target** (iteration 002): two
+simultaneous full-ceiling breaches ≈ 6 GiB of trees + a 3.5 GiB daemon ≈ 9.5 GiB of
+unit demand on an 11.67 GiB box — that scenario is already past what per-tree
+arithmetic rescues; the kernel OOM is the residual layer. **The published pair is a
+single-tree claim and the memo must say so.**
 
 **The §3.4 truth statement (replacing the withdrawn "the guard always completes
 before a unit kill" claim) — verbatim (arch doc §3.4):**
 
-> "The guard completes before the unit cap fires **only while the tree's allocation rate R stays at or below ≈0.49 GiB/s** at the published pair `8700M` (worst frame; ≈0.76 GiB/s in the typical TERM-honouring frame). The measured band is **1–3 GiB/s** — so **above ≈0.5 GiB/s the cgroup cap fires first and the daemon, not the command, is the casualty** (the cap is then the containment layer, not the guard's backstop). For fork-heavy trees the same holds a fortiori: the kill decision waits on a PSS confirm whose cost scales with the tree's RSS. **'The guard always completes before a unit kill' must not appear in the memo, the runbook, or any acceptance criterion.** Restoring the layering requires a host of ≥ ~14.5 GiB, not a different ceiling."
+> "The guard completes before the unit cap fires **only while the tree's allocation rate R stays at or below ≈0.49 GiB/s** at the published pair `8700M` (worst frame; ≈0.76 GiB/s in the typical TERM-honouring frame; **≈0.28 GiB/s if a second tree is simultaneously breaching**). The measured band is **1–3 GiB/s** — so **above ≈0.5 GiB/s the cgroup cap fires first and the daemon, not the command, is the casualty** (the cap is then the containment layer, not the guard's backstop). For fork-heavy trees the same holds a fortiori: the kill decision waits on a PSS confirm whose cost scales with the tree's RSS. **'The guard always completes before a unit kill' must not appear in the memo, the runbook, or any acceptance criterion.** Restoring the layering requires a host of ≥ ~14.5 GiB, not a different ceiling."
 
 **AMENDED (§3.3) — the 4 GiB raise-path is VOID on this host:** at C = 4 GiB the
 unit floor is `D_max 3.5 + 4.0 + O 1.0 + M_c 0.5 = 9.0 GiB > 8.88 GiB` ⇒ the
@@ -843,6 +878,13 @@ All anchors below were re-verified in the worktree by this worker.
 13. **AMENDED — the daemon is not the reaper of a killed tree's grandchildren.**
     There is **no** subreaper in `daemon/`; the guard kills a GROUP and init/PID 1
     reaps the re-parented grandchildren (§3.5 item 13).
+14. **AMENDED (iteration 002, §16.3) — an instance-less spawn (`instance_id is None`)
+    is NOT registered with the guard in v1.** The bash seam's registration block is
+    inside `if instance_id is not None and proc is not None:` (`bash.py:952-1005`);
+    widening that gate is a restructure this commission does not name. Such a tree is
+    **invisible to the guard** and only the unit cap covers it (§3.5 item 9b);
+    widening the gate is a **routed follow-up**. DQ8's `instance_id=None ⇒ counter +
+    log only` sentence is **defensive behavior only**, not a v1 bash behavior.
 
 ---
 
@@ -856,9 +898,9 @@ what was decided and where.
 | # | Question | Resolution | Where |
 |---|---|---|---|
 | DQ1 | summed RSS vs PSS vs cgroup, and the trigger/confirm hybrid | **(e) hybrid; the PSS confirm is MANDATORY** (the deciding metric) | arch doc §2 |
-| DQ2 | dedicated thread vs in-execution task, and the poll interval | **(b) ONE dedicated daemon thread**, poll 200 ms [50, 2000] | arch doc §2 |
+| DQ2 | dedicated thread(s) vs in-execution task, and the poll interval | **AMENDED — (b) TWO dedicated daemon threads** (tick + execution lane; §15 B16 verbatim), poll 200 ms [50, 2000], `RAM_GUARD_PENDING_MAX = 2` | arch doc §2, §16.1 |
 | DQ3 | pgid enumeration vs a tree walk; setsid coverage | **(c) hybrid from ONE shared `/proc` scan per tick** (group ∪ bounded descendant closure) | arch doc §2 |
-| DQ4 | the ladder shape, the grace length, the new vocabulary | **(d) NEW sync short-grace ladder**; grace 250 ms [0, 2000]; `exit_kind="ram_killed"`; **AMENDED** — Q2=(i) leaderless semantics, the **18-code** vocabulary, the pre-kill gate is **P0–P7** (P8 = post-kill `killed:tree-incomplete`) | arch doc §2, §4.2 |
+| DQ4 | the ladder shape, the grace length, the new vocabulary | **(d) NEW sync short-grace ladder**; grace 250 ms [0, 2000]; `exit_kind="ram_killed"`; **AMENDED** — Q2=(i) leaderless semantics, the **16-code** vocabulary, the pre-kill gate is **P0–P7** (P8 = post-kill `killed:tree-incomplete`) | arch doc §2, §4.2 |
 | DQ5 | the substrate, and the proc lane's missing registry write path | **(a) RAM-only**; the proc lane registers with the guard only — **no durable write path** | arch doc §2 |
 | DQ6 | the exact envelope shape | Envelope **is** the bash return; the proc verdict rides `proc_status`; **AMENDED — the §6 consumer-count figure is withdrawn**; the gate artifact is the **§6 enumerated census**, owned by **Phase 2** | arch doc §2, §6 |
 | DQ7 | the knob family, and how the ceiling is threaded | `ENSEMBLE_RAM_GUARD` + `RamGuardConfig(env_prefix="RAM_GUARD_")`; the per-call override is an **internal/test seam only**; **AMENDED** — wired into the **root `Config`** (§4.6); the re-arm constants are **module constants** | arch doc §2, §4.6 |

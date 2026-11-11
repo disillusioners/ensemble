@@ -1,22 +1,24 @@
-# Phase 4: Proc Lane Enforcement — rev 3
+# Phase 4: Proc Lane Enforcement — rev 4
 
-> **rev 3 — supersedes rev 2 (commit 34046bdc5) per the approver-iter-001 amendment
+> **rev 4 — supersedes rev 3 (commit e25804554) per the approver-iter-002 amendment
 > pass.** Binding source of truth: `architecture-recommendation.md` §4.2 (kill ladder
-> + the 18-code vocabulary), §4.3 (typed-error contract — **the proc placement is
+> + the 16-code vocabulary), §4.3 (typed-error contract — **the proc placement is
 > QUERY-ONLY**), §4.3.1 item 5 (the proc lane consults the verdict **before**
 > finalizing `info.status`), §4.4 (verdict record), §5 (failure paths), §7 (seams),
 > §8 item 3 (the Phase-4 mandate), §14 (the amendment ledger), §15 (the strings to
-> pin char-for-char). Where this file and that document disagree, **that document
-> wins**, except where a **leader ruling** supersedes it (leader ruling **Q1** below).
-> Rev-2 content that survives is carried forward with task numbers continuous
-> (T1…T11 preserved; new work appended from T12).
+> pin char-for-char), §16 (the iteration-002 ledger). Where this file and that
+> document disagree, **that document wins**, except where a **leader ruling**
+> supersedes it (leader ruling **Q1** below). Rev-3 content that survives is carried
+> forward with task numbers continuous (T1…T12 preserved; new work appended from
+> T13).
 
 > ⚠️ **LEADER RULING Q1 (council cycle 1) — supersedes the arch doc §7 parenthetical
 > "(4th task)".** Reading (a) is chosen: **NO 4th asyncio task.** The proc lane's
-> shape is: **register with the guard thread → status mapping → release.** The guard
-> thread (Phase 2, DQ2) owns the measurement, the breach decision, the kill, and the
-> verdict record; the proc lane only **registers**, **maps** the verdict to status,
-> and **releases**.
+> shape is: **register with the guard thread → status mapping → release.** The
+> guard's **two threads** (Phase 2, DQ2) own the measurement, the breach decision,
+> the kill, and the verdict record — the **tick thread** measures and hands off; the
+> **execution-lane thread** confirms, kills and publishes; the proc lane only
+> **registers**, **maps** the verdict to status, and **releases**.
 
 ## Objective
 
@@ -59,7 +61,7 @@ neither the `bash_spawn_registry` nor the `pid_registry`. Per arch DQ5, the proc
 | 5 | **AMENDED (§4.3.1 item 5) — consult the verdict BEFORE finalizing `info.status`.** `_drain_exit_code` (`proc_tools.py:786-875`) consults the verdict **before** finalizing `info.status`; `ram_killed` joins `timed_out`/`user_stopped` as the **third authoritative input** — the existing ladder at `:861-875` is **preserved** and the RAM verdict is consulted **first**, because it is the only signal that says *who* killed the tree. `info.status` stays `"killed"`; `ram_killed` is `True` whenever the guard's record says `KILLED` (independently of the timeout claim — the envelope's `code` follows the claim-token rule, so a coincidence shows `code="timeout"` + `coincident_timeout:true` + `ram_killed:true`) | Phase 1 Task 4 | A RAM-killed process reports `status == "killed"` **and** `ram_killed is True`; a user-stopped process reports `status == "killed"` and `ram_killed is False` — the two are distinguishable; the **ordering** (verdict consulted before `status` is finalized) is observable, not assumed |
 | 6 | **Deliver the kill through the DQ4 `ram_kill_ladder` (P0–P7 + P8)** — the guard thread calls it; the proc lane's `_attempt_kill_signal` is **not** the RAM delivery path. Rationale (arch DQ4): `_attempt_kill_signal` **re-derives** the pgid at kill time (`proc_tools.py:1058`) — exactly the TOCTOU the bash lane already fixed — and its environ gate is **fail-open**, and the bash lane has **no tracking id** so its gate would silently fail-open there. In the ladder, the **environ check is P6 and secondary only**; the identity gate is the **captured pgid + leader `starttime`** re-verification (fail-closed), with **P5a** refusing a recycled pgid | Phase 2 Task 11 | The kill path calls `ram_kill_ladder`; the ladder's P0–P7 and P8 are individually exercised (Phase 2 T22); a recycled-pid scenario yields `refused:pgid-recycled` (the existing `aborted_recycled` path is **not** the RAM path) |
 | 7 | **AMENDED (approver sweep — the query-only asymmetry) — surface the verdict in `proc_status`** per DQ6: a **`ram_breach:` line** plus a **flat `ram_killed: true`** — **added as lines, never replacing the block**. The `ram_breach:` line carries the **deciding value** (`confirmed_pss_bytes`, or `observed_peak_bytes` on a fail-open trigger) and the honest-peak fields (`peak_is_lower_bound`, `under_report_bound_bytes`, `metric`, `trigger_metric`), plus **`rearm_threshold_bytes`** beside `limit_bytes` — with **no argv / env / stdout anywhere** (§4.3 negative space). **THREE MANDATORY DISCLOSURES** accompany this lane: (a) the **§3.5 item-12 sentence** in the runbook and the envelope honesty set (the verdict is QUERY-ONLY — an agent that never calls `proc_status` after a proc run **will not** see the RAM verdict in the `proc_run` result; it must poll `proc_status`, the same obligation it already has for `timed_out` and `user_stopped`); (b) the **matching line in the `proc_status` LLM-facing docstring**; (c) Phase 4's `ram_breach:` / `ram_killed: true` pins kept (they are part of the DQ6 census). The existing `proc_status` block is byte-identical to today for a non-RAM process, and the four strings that must never change (the `proc_status` block, the `proc_list` header, the bash success string, the bash timeout string) are pinned | Phase 2 Task 16 | `proc_status` output contains the `ram_breach:` line and `ram_killed: true`; the **existing** `proc_status` block is byte-identical to today for a non-RAM process; the §3.5 item-12 sentence is carried to Phase 7; the `proc_status` docstring carries the matching line |
-| 8 | **Release the guard registration** on every exit path — process exit, instance cleanup (`cleanup_instance`), daemon shutdown (`cleanup_all`), and the spawn-window orphan path | Task 3 | After each path, the guard registry has **no** entry for that pid; the release is idempotent |
+| 8 | **AMENDED (approver iteration 002, blocker B2) — the lane exit is a NOTIFICATION, not the END of the watch.** The guard registration is released on every exit path — process exit, instance cleanup (`cleanup_instance`), daemon shutdown (`cleanup_all`), and the spawn-window orphan path — **only when the watch is finished** (`group_member_count == 0`); a **claimed** record's release is **deferred to the lane** (§15 B21: *A release of a CLAIMED record is deferred to the lane (the lane releases after publishing). A live watch is never ended by a lane exit; the liveness sweep owns the release at group_member_count == 0.*) | Task 3 | After each path, the guard registry has **no** entry for that pid **when the watch is finished**; a live watch survives the lane's exit; the release is idempotent |
 | 9 | **NEW (arch §8 item 3) — capture the pgid AND start_time at spawn.** Today the proc lane captures **neither**: the pgid is **re-derived at kill time** (`os.killpg(os.getpgid(proc.pid), sig)`, `proc_tools.py:1058`, `:1280`) — exactly the TOCTOU the bash lane already fixed. Capture both at spawn (the proc lane uses `start_new_session=True`, `:1179-1181`, so PGID == PID), and **stop re-deriving**. This is a **field capture inside the existing spawn path** — **not** a fourth task and **not** a new asyncio task | Phase 2 Task 6 | The spawn block captures the pgid once; **no** post-hoc `getpgid` remains in the RAM path; the captured value is what the ladder receives |
 | 10 | **Add `user_stopped: true` to `proc_status`** while we are there (arch §8 item 3 — 🟢 one line). `user_stopped` is an authoritative status input today but is **never surfaced** to the agent — a real observability gap, and the same class of gap that `ram_killed` closes | Task 7 | `proc_status` surfaces `user_stopped: true` for a user-stopped process; a process that was not user-stopped does **not** show the line |
 | 11 | **Write the proc-lane tests**: (a) a real ballooning tree via `proc_run` — the tree is dead and `proc_status` carries the verdict; (b) an under-limit command unaffected; (c) the kill-switch OFF ⇒ **no extra task** and no registration; (d) the negative paths — a non-Linux platform guard, an unreadable `/proc`, the `MAX_PROCESSES_PER_INSTANCE = 10` cap (`proc_tools.py:98`, enforced `:1130-1142`) unaffected, the spawn-window orphan path unaffected; (e) the **leaderless-tree** shape | Tasks 1–10 | The ballooning test kills the whole tree and `proc_status` carries `ram_breach:` + `ram_killed: true`; the cap and orphan paths are unchanged |

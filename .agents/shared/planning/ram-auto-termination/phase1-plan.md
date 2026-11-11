@@ -1,6 +1,15 @@
 # Phase 1: Design Decision Gate (DQ1–DQ10 Adjudication)
 
-> **rev 2 — closure note (council cycle 1).** This phase is **CLOSED**: the
+> **rev 3 — closure note (council cycle 1) + explicit self-disclaimer.**
+> **SELF-DISCLAIMER (approver iteration 002):** this file is the **historical record
+> of the Phase-1 gate's asks**, not a build contract. It is CLOSED and its rulings
+> live in `architecture-recommendation.md` §2 and §3 (as amended by iterations 001
+> and 002). **Nothing in this file is binding** — where it states a premise that a
+> later pass falsified (the `MemoryMax=8G` premise in Task 11, the withdrawn
+> consumer-count claim, the superseded verdict-wait deadline, the single-thread DQ2
+> wording, the superseded vocabulary count), the **contract wins**; this file is
+> retained only as the audit trail of what was asked. **The build contract is the
+> phase docs' rev 4.** This phase is **CLOSED**: the
 > architect returned **10/10 binding rulings + R1 + the sequencing verdict**
 > (`architecture-recommendation.md`, §2 and §3). The task list below is retained
 > as the **record of what was asked**; it is **not** the live contract. The live

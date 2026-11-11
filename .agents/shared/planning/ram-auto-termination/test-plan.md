@@ -1,14 +1,15 @@
-# Test Plan: RAM-Based Auto-Termination — rev 3
+# Test Plan: RAM-Based Auto-Termination — rev 4
 
-> **rev 3 — supersedes rev 2 (commit 34046bdc5) per the approver-iter-001 amendment
+> **rev 4 — supersedes rev 3 (commit e25804554) per the approver-iter-002 amendment
 > pass.** Binding source of truth: `architecture-recommendation.md` §4.1a (the
-> BOUNDED re-arm), §4.2 (the 18-code vocabulary + **P0–P7 + P5a** + the canonical
+> BOUNDED re-arm), §4.2 (the 16-code vocabulary + **P0–P7 + P5a** + the canonical
 > Q2 strings), §4.3 (the key sets), §4.3.1 (the verdict-publication ordering),
 > §4.4 (the verdict record), §4.5 (the event drop path), §4.6 (the config wiring
 > + the assertable boot-abort rung), §5 (failure-path rulings — **every row is
 > tested**), §6 (the consumer-gate census — **owned by Phase 2**), §14 (the
-> amendment ledger), §15 (the strings to pin char-for-char). Where this file and
-> that document disagree, **that document wins**.
+> amendment ledger), §15 (the strings to pin char-for-char — **B18**), §16 (the
+> iteration-002 ledger). Where this file and that document disagree, **that document
+> wins**.
 
 Companion to `plan-overview.md` and `phase6-plan.md`. This file is the **outline** —
 cases, harness shape, and the fencing rules. Phase 6 carries the execution order
@@ -111,7 +112,7 @@ the FAKE_HOME sentinel is present in the child's environment), not merely invoke
 | S5 | Member-state semantics | READABLE / **ZERO** (status OK, no `VmRSS:` line) / **GONE** (ENOENT) / **UNREADABLE** | ZERO → 0, still complete; GONE → 0, still complete; UNREADABLE → 0, `complete=False` |
 | S6 | Enumeration failure | A scan that aborts (`scan_complete=False`) | The sample is **dropped** — the peak keeps its value, **no breach is evaluated**, `enumeration_failures++`. **Never** kill on no-evidence |
 | S7 | Peak monotonicity | Sample a shrinking tree | The recorded peak **does not decrease** |
-| **S8** | **ALL of P0–P7 + P5a — the Q2 SEMANTICS (RE-PINNED; supersedes the stale P5 framing).** The canonical Q2 strings (§15 B6) that this case pins: `the watch stays alive until the group member count reaches 0` · `identity = captured pgid ∧ surviving-member group membership` · `starttime gate applies to the leader only while alive` · `the watch is released only at group member count 0` · `group_member_count == 0`. **Legs:** (a) **P0** switch OFF ⇒ `refused:guard-disabled`; not registered ⇒ `refused:not-registered`; non-Linux ⇒ `refused:platform-unsupported`. (b) **P1** a pgid not from this guard's registry ⇒ `refused:pgid-not-registered`. (c) **P2** `pgid <= 1` ⇒ `refused:pgid-invalid`. (d) **P3** the daemon's own group ⇒ `refused:daemon-group`. (e) **P4** self ⇒ `refused:pgid-self`. (f) **P5** leader **alive** + starttime **matches** ⇒ TRUE (the kill proceeds); leader **alive** + starttime **mismatch** ⇒ `refused:pgid-recycled`; leader **absent (ENOENT)** ⇒ **NOT APPLICABLE** — the identity re-anchors on the surviving group members and the kill **may proceed** on group membership, and **the watch stays alive**; leader stat **unreadable** (read error / unparseable — *not* ENOENT) ⇒ `refused:leader-unreadable` (**fail-closed**) and **the watch stays alive** while only the kill is refused. (g) **P5a** a live process holding the captured pgid with a **different** starttime ⇒ `refused:pgid-recycled` (fail-closed). (h) **P6** ownership stamp mismatch ⇒ `refused:ownership-mismatch`; unreadable ⇒ **PROCEED** + `ownership_unverified++`. (i) **P7** `group_member_count == 0` ⇒ `already-dead:group-empty` — **release, no signal** — and **only** at member count 0 (**not** produced merely because the leader is gone); unreadable ⇒ `refused:group-unknown`. (j) the **leaderless case produces NO reason code**. **P8** is NOT a pre-kill predicate — it is the **post-kill probe**: `tree_complete` true ⇒ the `killed:*` code stands; incomplete/unknown ⇒ `killed:tree-incomplete` (status stays `killed`, `tree_incomplete` incremented) — and **there is no `ram_kill_refusals_p8`** | One case per leg, named `test_p<n>_<case>_<expected_status>`. (a)–(i) run under **`kill_fence`** (no signal may fire); the ladder and P8 run under **`kill_census`**. "unevaluable" ≠ true; the absent-vs-unreadable leader split is distinguished; a recycled pgid is refused; the leaderless case yields no reason code |
+| **S8** | **ALL of P0–P7 + P5a — the Q2 SEMANTICS (RE-PINNED; supersedes the stale P5 framing).** The canonical Q2 strings (§15 B6) that this case pins: `the watch stays alive until the group member count reaches 0` · `identity = captured pgid ∧ surviving-member group membership` · `starttime gate applies to the leader only while alive` · `the watch is released only at group member count 0` · `group_member_count == 0`. **Legs:** (a) **P0** switch OFF ⇒ `refused:guard-disabled`; not registered ⇒ `refused:not-registered`; non-Linux ⇒ `refused:platform-unsupported`. (b) **P1** a pgid not from this guard's registry ⇒ `refused:pgid-not-registered`. (c) **P2** `pgid <= 1` ⇒ `refused:pgid-invalid`. (d) **P3** the daemon's own group ⇒ `refused:daemon-group`. (e) **P4** self ⇒ `refused:pgid-self`. (f) **P5** leader **alive** + starttime **matches** ⇒ TRUE (the kill proceeds); leader **alive** + starttime **mismatch** ⇒ `refused:pgid-recycled`; leader **absent (ENOENT)** ⇒ **NOT APPLICABLE** — the identity re-anchors on the surviving group members and the kill **may proceed** on group membership, and the watch stays alive; leader stat **unreadable** (read error / unparseable — *not* ENOENT) ⇒ `refused:leader-unreadable` (**fail-closed**) and the watch stays alive while only the kill is refused. (g) **P5a** a live process holding the captured pgid with a **different** starttime ⇒ `refused:pgid-recycled` (fail-closed). (h) **P6** ownership stamp mismatch ⇒ `refused:ownership-mismatch`; unreadable ⇒ **PROCEED** + `ownership_unverified++`. (i) **P7** `group_member_count == 0` ⇒ `already-dead:group-empty` — **release, no signal** — and **only** at member count 0 (**not** produced merely because the leader is gone); unreadable ⇒ `refused:group-unknown`. (j) the **leaderless case produces NO reason code**. **P8** is NOT a pre-kill predicate — it is the **post-kill probe**: `tree_complete` true ⇒ the `killed:*` code stands; incomplete/unknown ⇒ `killed:tree-incomplete` (status stays `killed`, `tree_incomplete` incremented) — and **there is no `ram_kill_refusals_p8`** | One case per leg, named `test_p<n>_<case>_<expected_status>`. (a)–(i) run under **`kill_fence`** (no signal may fire); the ladder and P8 run under **`kill_census`**. "unevaluable" ≠ true; the absent-vs-unreadable leader split is distinguished; a recycled pgid is refused; the leaderless case yields no reason code |
 | S9 | Breach boundary | Totals of `ceiling − 1`, `ceiling`, `ceiling + 1` | Breach iff `total >= ceiling` (**inclusive**) |
 | S10 | Breach fires on the **CURRENT sample**, not the peak | A tree that spikes above the ceiling then falls before the next sample | The peak is **reported**; the tree is **NOT killed** |
 | S11 | Incomplete-but-above-ceiling | A reading with `complete=False` whose lower bound still `>= ceiling` | The breach **proves** — the tree IS killed |
@@ -139,7 +140,7 @@ the FAKE_HOME sentinel is present in the child's environment), not merely invoke
 | B10 | **Output truncation does not swallow the envelope** | A breach that also produces >150 000 chars of output | The typed envelope is returned, not a truncation-shaped string |
 | B11 | **Exit-kind recorded** | Same | `pid_registry` shows the new exit-kind (`ram_killed`), **distinct from `timeout`**; `mark_exit` did not raise on the new kind |
 | B12 | **Bytes→KB conversion** | Same | The persisted `peak_rss_kb` == `round(observed_peak_bytes / 1024)` — the two do not disagree by 1024× |
-| B13 | **Leaderless tree (leader ruling Q2)** — the canonical strings: `the watch stays alive until the group member count reaches 0` · `identity = captured pgid ∧ surviving-member group membership` · `starttime gate applies to the leader only while alive` · `the watch is released only at group member count 0` · `group_member_count == 0` | A shell that backgrounds a ballooning grandchild and exits | The grandchild is **still watched** and killed; the watch is released **only** at member count 0; the identity re-anchors on the surviving group members; **the leaderless case produces NO reason code** |
+| B13 | **Leaderless tree (leader ruling Q2) + the lane-release rule (approver iteration 002, blocker B2)** — the canonical strings: `the watch stays alive until the group member count reaches 0` · `identity = captured pgid ∧ surviving-member group membership` · `starttime gate applies to the leader only while alive` · `the watch is released only at group member count 0` · `group_member_count == 0`. **The conditional-release clauses (§15 B21), verbatim:** A release of a CLAIMED record is deferred to the lane (the lane releases after publishing). A live watch is never ended by a lane exit; the liveness sweep owns the release at group_member_count == 0. | A shell that backgrounds a ballooning grandchild and exits; **plus the success-path sub-leg**: an ordinary backgrounded command whose shell exits **successfully** while a group member is live | The grandchild is **still watched** and killed; **the guard entry SURVIVES the shell's exit — including the SUCCESS path — while a group member is live**, and is released only when the group empties; the identity re-anchors on the surviving group members; **the leaderless case produces NO reason code** |
 
 ### 3.3 Breach — proc lane
 
@@ -199,7 +200,7 @@ the FAKE_HOME sentinel is present in the child's environment), not merely invoke
 | N5 | The tree shrinks | The recorded peak stays monotonic |
 | N6 | A `setsid` escapee | **Measured** but counted in `members_unreachable`, not `members_killable`; the documented gap is **asserted as a known limitation**, not silently ignored (the bash lane has the reaper's stamp sweep as a backstop; **the proc lane has no such net**) |
 | N7 | The daemon's own process group | Never a kill target (asserted by the S8 predicate cases) |
-| N8 | A **stalled `smaps_rollup` read** | The confirm's 250 ms deadline fires ⇒ **fail-open ⇒ kill**; the **tick path is never blocked** (the confirm is off the tick path). The residual (a stalled confirm holds the kill path until the deadline) is **disclosed**, not silently accepted |
+| N8 | A stalled smaps_rollup read on the execution-lane thread | The confirm's 250 ms deadline fires ⇒ fail-open ⇒ kill; the tick path is never blocked — the tick keeps sampling on schedule, last_tick_at keeps advancing and the liveness sweep still runs while the lane is stalled; a breach detected during the stall is detected on schedule (its detection is not deferred by the stall). The residual (a stalled confirm holds the kill path until the deadline; a read that never returns holds it until the daemon restarts) is disclosed, not silently accepted |
 | N9 | **The event cannot be delivered** | No live loop / loop closed / daemon shutdown ⇒ the event is **DROPPED** (never raised, never retried); `ram_events_dropped++`; the `WATCHING→KILLED` **transition log line** is present and carries the allow-listed key set. The tick **never** blocks on the bridge |
 
 ### 3.8 Observability, coincidence, and secrecy
@@ -221,9 +222,9 @@ the FAKE_HOME sentinel is present in the child's environment), not merely invoke
 
 ### 3.9 Consumer-gate census (owned by Phase 2 — referenced here)
 
-The DQ6 artifact is **Phase 2's** (pins-only). The census records **33
-machine-pinned assertion sites across 10 test files; 1 inapplicable legacy pack; 0
-daemon-side parsers** — including the previously-uncited pins
+The DQ6 artifact is **Phase 2's** (pins-only). The census is the **enumerated
+table** in arch doc §6 — **the counts are derived at fold time, never pinned; the
+table is the artifact** — and it records the previously-uncited pins
 `tests/tools/test_proc_tools.py:1233` and the six `info.status == "killed"`
 attribute pins (`:1614, 1655, 1692, 1944, 1992, 2038`) — and the **zero-pin** fact
 for the bash **timeout string** (`grep -rn "Command timed out" tests/` ⇒ nothing;
@@ -278,6 +279,10 @@ COUNTER-mutation reddens it"*:
 | Drop the OVERCOUNTED re-arm | S13 |
 | **Drop the event on a no-loop boot instead of counting it** | **N9**, **O1** |
 | **Assert the leader stat is unreadable ⇒ the leader is gone** (the absent/unreadable conflation) | **S8(f)** |
+| **Let the substrate read the host's real `/proc`** (drop the `proc_root` injection in one reader) | **S17** (the substrate's no-host-`/proc`-reads rule) |
+| **Log from the tick path** (add a log call to the tick body) | **O11** (the tick-path silence) |
+| **Query the repository on the OFF path** (let the guard's OFF branch touch the DB) | **K5** (zero DB queries) |
+| **Run the blocked-tick case as a normal tick** (make the tick path look blocked instead of asserting the wedge mode) | **phase6 T11(b)** (the blocked-tick / death-mode case) |
 
 **Every acceptance criterion in the plan set that asserts an ABSENCE must have a row
 above** (the contract's rule — absence-only and raw-text pins are prose-satisfiable).
