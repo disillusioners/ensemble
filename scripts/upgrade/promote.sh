@@ -173,22 +173,15 @@ TARGET_REL="$REL/$VERSION"
 _log "pipeline-scripts rev=${PIPELINE_SCRIPTS_REV:-<unstamped>} (executor-start echo; the arm-time guard reads the lib.sh stamp file)"
 _log "preflight: lock · integrity · journal txn · entry checks"
 
-# ── Stop-script sibling probe (W1, D2a 2026-11-11) ──────────────────────────
-# lib.sh's stop_via_stop_script resolves the stop script as the SIBLING one
-# level up of the CALLING script's dir (BASH_SOURCE[1] — promote.sh lives in
-# scripts/upgrade/, so the leg is scripts/upgrade/../stop-ensemble.sh). A
-# missing sibling aborts rc=127 MID-STOP (the v0.29.16 2026-11-11 halt class —
-# bash: No such file or directory). W2 already added this self-contained probe
-# to restart.sh/rollback.sh; W1 adds it HERE so make upgrade-promote and every
-# promote lane are covered. SELF-CONTAINED (no lib.sh dependency) and refuses
-# BEFORE any lock/txn/stop mutation. The exec-bit requirement matches W2's
-# conservative hardening (every consumer invokes `bash stop-ensemble.sh`).
-_promote_stop_script=""
-if [ -n "${BASH_SOURCE[0]:-}" ]; then
-    _promote_stop_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../stop-ensemble.sh"
-fi
-if [ ! -f "$_promote_stop_script" ] || [ ! -x "$_promote_stop_script" ]; then
-    _warn "stop-script sibling not usable at $_promote_stop_script (must exist AND carry the exec bit — every consumer invokes 'bash stop-ensemble.sh') — refusing BEFORE any lock/txn/stop (the stop step would abort rc=127: bash: No such file or directory)"
+# ── Stop-script sibling probe (W1/W2, D2a 2026-11-11; H1 tidier round 3) ────
+# The ONE implementation lives in lib.sh (_upgrade_stop_script_sibling_usable,
+# sourced above). It resolves the SIBLING one level up of the CALLING script's
+# dir — the W4 single source of truth; the old $(pwd)/scripts fallback is
+# DELETED. A missing/non-executable sibling refused rc 78 BEFORE any
+# lock/txn/stop mutation (else the stop step aborts rc=127 mid-run — the
+# v0.29.16 2026-11-11 halt class).
+if ! _upgrade_stop_script_sibling_usable "${BASH_SOURCE[0]}"; then
+    _warn "stop-script sibling not usable at ${_UPGRADE_STOP_SCRIPT_SIBLING:-<unresolved>} (must exist AND carry the exec bit — every consumer invokes 'bash stop-ensemble.sh') — refusing BEFORE any lock/txn/stop (the stop step would abort rc=127: bash: No such file or directory)"
     exit 78
 fi
 

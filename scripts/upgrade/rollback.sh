@@ -137,26 +137,16 @@ if [ ! -d "$REL/$TO_VERSION" ]; then
     exit 78
 fi
 
-# ── Stop-script sibling probe (W2, 2026-11-11; A1 review round 1) ───────────
-# lib.sh's stop_via_stop_script resolves the stop script as the SIBLING one
-# level up of the CALLING script's dir (BASH_SOURCE[1] — rollback.sh lives in
-# scripts/upgrade/, so the leg is scripts/upgrade/../stop-ensemble.sh); W4
-# (D2a, 2026-11-11) DELETED the old $(pwd)/scripts fallback from the runtime
-# (dead in the install layout: make install ships only watchdog-watcher.sh
-# into <install_dir>/scripts/ — Makefile:375-377 — and the executor's cwd is
-# the install dir), and A1 deletes the same leg HERE so the probe can never
-# accept a path the runtime would refuse (a probe-only hit masked the
-# rc=127 mid-stop halt class — the v0.29.16 2026-11-11 incident). The probe
-# is SELF-CONTAINED (no lib.sh dependency — this script must work standalone)
-# and refuses BEFORE the lock is taken and the txn is opened (no lock, no
-# txn, no stop). The exec-bit requirement is conservative hardening (every
-# consumer invokes `bash stop-ensemble.sh`; lib.sh itself only tests -f).
-_stop_script=""
-if [ -n "${BASH_SOURCE[0]:-}" ]; then
-    _stop_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../stop-ensemble.sh"
-fi
-if [ ! -f "$_stop_script" ] || [ ! -x "$_stop_script" ]; then
-    _warn "stop-script sibling not usable at $_stop_script (must exist AND carry the exec bit — conservative hardening: every consumer invokes 'bash stop-ensemble.sh') — refusing BEFORE any lock/txn/stop (the stop step would abort rc=127: bash: No such file or directory)"
+# ── Stop-script sibling probe (W2, 2026-11-11; H1 tidier round 3) ───────────
+# The ONE implementation lives in lib.sh (_upgrade_stop_script_sibling_usable,
+# sourced above): the SIBLING one level up of the CALLING script's dir — the
+# W4 single source of truth (the old $(pwd)/scripts fallback is DELETED; it
+# was dead in the install layout and masked a missing sibling with rc=127).
+# Refuses BEFORE the lock is taken and the txn opened (no lock, no txn, no
+# stop). The exec-bit requirement is conservative hardening (every consumer
+# invokes `bash stop-ensemble.sh`).
+if ! _upgrade_stop_script_sibling_usable "${BASH_SOURCE[0]}"; then
+    _warn "stop-script sibling not usable at ${_UPGRADE_STOP_SCRIPT_SIBLING:-<unresolved>} (must exist AND carry the exec bit — conservative hardening: every consumer invokes 'bash stop-ensemble.sh') — refusing BEFORE any lock/txn/stop (the stop step would abort rc=127: bash: No such file or directory)"
     exit 78
 fi
 

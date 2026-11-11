@@ -4910,6 +4910,37 @@ _supervision_stop_launchd() {
     return 1
 }
 
+# _upgrade_stop_script_sibling <calling-script-path> — resolve the sibling
+# stop script ONE level up of the calling script's dir (the W4 SINGLE source
+# of truth: promote/rollback/restart live in scripts/upgrade/, so the leg is
+# <scripts_dir>/../stop-ensemble.sh). Echoes the path (never fails).
+#
+# H1 (tidier round 3): the THREE preflight probes (promote/rollback/restart)
+# were copy-pasted and each claimed "self-contained (no lib.sh dependency)" —
+# FALSE (lib.sh is sourced above every one of them, the probe's own _warn is
+# lib.sh-only, and the claim "lib.sh itself only tests -f" described no code
+# at all). This ONE helper is the single implementation.
+_upgrade_stop_script_sibling() {
+    local calling="${1:-${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}}"
+    cd "$(dirname "$calling")" 2>/dev/null && pwd
+} 2>/dev/null || true
+
+# _upgrade_stop_script_sibling_usable <calling-script-path> — 0 when the
+# sibling exists AND is executable. Prints the resolved path to stderr-free
+# stdout ONLY via the caller's variable; callers refuse rc 78 on nonzero
+# (identical behaviour at all three sites: promote §1, rollback preflight,
+# restart preflight). The exec-bit requirement is conservative hardening —
+# every consumer invokes `bash stop-ensemble.sh`, so the bit is not a runtime
+# requirement; lib.sh's own stop_via_stop_script only needs the FILE.
+_upgrade_stop_script_sibling_usable() {
+    local dir script
+    dir="$(_upgrade_stop_script_sibling "${1:-}")" || return 1
+    [ -n "$dir" ] || return 1
+    script="${dir}/../stop-ensemble.sh"
+    _UPGRADE_STOP_SCRIPT_SIBLING="$script"
+    [ -f "$script" ] && [ -x "$script" ]
+}
+
 stop_via_stop_script() {
     local stop_script
     # W4 (D2a, 2026-11-11): the SINGLE source of truth is the SIBLING one level
@@ -4919,8 +4950,9 @@ stop_via_stop_script() {
     # layout (make install ships only watchdog-watcher.sh into <install>/scripts/
     # and the executor's cwd is the install dir) and was a trap that masked a
     # MISSING sibling with an rc=127 mid-stop — deleted. The shell-side
-    # preflight probes (promote/rollback/restart) refuse rc 78 BEFORE any stop.
-    stop_script="$(cd "$(dirname "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")" && pwd)/../stop-ensemble.sh"
+    # preflight probes (promote/rollback/restart) refuse rc 78 BEFORE any stop
+    # via _upgrade_stop_script_sibling_usable (the ONE implementation).
+    stop_script="$(_upgrade_stop_script_sibling "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")/../stop-ensemble.sh"
     # P1 §5(b) — the STOP SITE: emit exactly ONE machine-readable
     # ENSEMBLE_SUPERVISION_RESULT line (the pre-flight already emitted its
     # own; enforcement stayed there — the stop site NEVER refuses
