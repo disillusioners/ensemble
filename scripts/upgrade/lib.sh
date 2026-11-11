@@ -374,6 +374,15 @@ LOCK_WAIT_S_DEFAULT=15        # bounded wait for a busy lock, never forever
 # journal-txn liveness threshold consumed by the comp3 reclaim predicates
 # (`_txn_heartbeat_stale` + the launcher's `_journal_sweep`) and it MUST equal
 # the PYTHON side's `daemon.tools.upgrade_journal.TXN_HEARTBEAT_STALE_S` (the
+# PREDICATE-DIVERGENCE NOTE (tidier round 3; deliberate — do NOT "fix"):
+# the LAUNCHER'S BOOT RECLAIM (launcher.sh:2889 owner-dead ALONE, :3345 the
+# bounded comp3-owner-dead confirm) reclaims on DEAD-ALONE; the TOOL/SWEEP
+# mechanism below requires STALE AND DEAD. At boot a dead owner is
+# unambiguous (no process can refresh a dead pid's heartbeat; the boot won
+# the singleton race); in the tool/sweep lane a DEAD-ALONE rule would reopen
+# the double-promote window (an in-flight executor whose pid lookup glitched
+# would become reclaim-able mid-promote). One mechanism PER LANE — not
+# byte-identical predicates.
 # single mechanism `txn_is_reclaimable` owns). The two literals are pinned to
 # agree by tests/unit/tools/test_upgrade_journal.py::test_shell_heartbeat_
 # stale_matches_python — do not change one without the other.
@@ -5277,22 +5286,44 @@ _supervision_launchd_detect() {
 # is _supervision_launchd_bootstrap.
 _supervision_launchd_bootout() {
     local label="${1:-}" domain target
+    # M4 (tidier round 3): the EMPTY-LABEL guard lives HERE, not only at the
+    # promote disarm call site. An empty label used to fall through to the
+    # BARE gui/<uid> DOMAIN target — a whole-domain teardown of EVERY user
+    # LaunchAgent. No caller legitimately needs the whole-domain form (both
+    # callers pass a resolved label; the stop branch requires -n
+    # SUPERVISION_UNIT), so an empty label is refused fail-loud here.
+    if [ -z "$label" ]; then
+        _warn "launchd bootout REFUSED: empty job label — the bare gui/<uid> domain target (a whole-domain teardown) is never legitimate from this helper; refusing fail-closed"
+        return 1
+    fi
     command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 1
     domain="$(_supervision_launchd_domain)"
-    if [ -n "$label" ]; then target="${domain}/${label}"; else target="$domain"; fi
+    target="${domain}/${label}"
     local out rc
     out="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" bootout "$target" 2>&1)"
     rc=$?
     if [ "$rc" -eq 0 ]; then
         return 0
     fi
-    # benign-idempotent: "not found" / "Could not find specified service" when
-    # the job was already down. Everything else is a real failure.
-    case "$out" in
-        *"Could not find"*|*"not found"*|*"No such process"*|*"service not found"*)
-            return 0 ;;
-    esac
+    # M8 (tidier round 3, SAFETY-RELEVANT): the benign-idempotent match is
+    # rc-AGNOSTIC + SUBSTRING-based in the old shape — a FAILED bootout whose
+    # stderr merely CONTAINED "not found" (e.g. "No such process: …
+    # permission denied", or any unrelated diagnostic carrying the phrase)
+    # was read as success ⇒ the DISARM reported success while the supervisor
+    # stayed LOADED+ARMED. Fail-closed now:
+    #   (a) rc 124 (bounded-probe timeout) is ALWAYS a failure;
+    #   (b) the benign class is rc 3 ONLY — launchctl's documented
+    #       "service not found / No such process" band — AND the output must
+    #       match one of the anchored benign phrases;
+    #   (c) ANY other rc or output ⇒ NOT disarmed (unknown ⇒ failure).
     [ "$rc" -eq 124 ] && return 1
+    if [ "$rc" -eq 3 ]; then
+        case "$out" in
+            *"Could not find specified service"*|*"No such process"*|*"service not found"*)
+                return 0 ;;
+        esac
+    fi
+    # rc-unknown or a non-benign diagnostic ⇒ the failure stands.
     return 1
 }
 
