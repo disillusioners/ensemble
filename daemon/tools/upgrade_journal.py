@@ -81,7 +81,10 @@ module split (journal / lock / nonce / alert) is fenced to the post-P2.3
 refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
 grow it further without pulling that fence.
 
-Size rationale: ~2017 lines is the protocol twin of scripts/upgrade/lib.sh
+Size rationale: ~4720 lines MEASURED 2026-11-11 (M13 re-baseline; was ~2017 at
+this fence's mint — the D2a supervision surface, the reclaim/closer twins
+and the builtin/allowlist families landed INSIDE the fence; flagged, not
+quietly accepted) is the protocol twin of scripts/upgrade/lib.sh
 supervision section + the journal/lock/nonce/alert/spawn tool surface —
 the single journal protocol home. Splitting the protocol twin from the
 tool surface would force every contract change to touch two modules.
@@ -336,17 +339,18 @@ def journal_owner_heartbeat_fresh(install_dir: Path) -> bool:
 # existing rule exactly, do not invent a third"); this module now OWNS it
 # and BOTH python consumers call it — no divergent copies remain.
 #
-# MIRROR of scripts/upgrade/lib.sh:
-#   _txn_heartbeat_stale (:2354) — ``in_flight.last_heartbeat`` (epoch int);
-#       missing/garbage ⇒ STALE (a live txn is ALWAYS heartbeat-written by
-#       journal_open_txn, so an absent value means a hand-edited or legacy
-#       journal); stale ⇔ ``now - hb > HEARTBEAT_STALE_S`` (300s).
-#   _txn_owner_dead (:2372) — ``in_flight.owner_pid``; missing/garbage ⇒
-#       DEAD; ``kill -0`` ESRCH ⇒ DEAD; EPERM ⇒ ALIVE (a foreign-owned owner
-#       is never presumed dead — breaking it would trample live work).
-#   adopt_stale_txn comp3 FAST PATH (:7182) — heartbeat-stale AND owner-dead
-#       ⇒ reclaim NOW (skip the SWEEP_STALE_S=600s age wait); otherwise fall
-#       through to the age gate (a fresh txn stays pipeline-busy).
+# MIRROR of scripts/upgrade/lib.sh (M14 tidier round 3: anchors re-measured
+# 2026-11-11 — the old :2354/:2372/:7182 triple had drifted):
+#   _txn_heartbeat_stale (lib.sh:2362) — ``in_flight.last_heartbeat`` (epoch
+#       int); missing/garbage ⇒ STALE (a live txn is ALWAYS heartbeat-written
+#       by journal_open_txn, so an absent value means a hand-edited or
+#       legacy journal); stale ⇔ ``now - hb > HEARTBEAT_STALE_S`` (300s).
+#   _txn_owner_dead (lib.sh:2380) — ``in_flight.owner_pid``; missing/garbage
+#       ⇒ DEAD; ``kill -0`` ESRCH ⇒ DEAD; EPERM ⇒ ALIVE (a foreign-owned
+#       owner is never presumed dead — breaking it would trample live work).
+#   adopt_stale_txn (lib.sh:7642) comp3 FAST PATH (lib.sh:7680-7685) —
+#       heartbeat-stale AND owner-dead ⇒ reclaim NOW (skip the SWEEP_STALE_S
+#       =600s age wait); otherwise fall through to the age gate.
 #
 # The predicate keeps the shell's TWO independent conjuncts: a live owner OR
 # a fresh heartbeat ⇒ NOT reclaimable ⇒ the arm is refused (fail-closed, no
@@ -411,6 +415,18 @@ def txn_is_reclaimable(
 
     RECLAIMABLE ⇔ heartbeat stale AND owner dead (the shell's comp3 FAST
     PATH). A live owner OR a fresh heartbeat ⇒ NOT reclaimable (fail-closed).
+
+    PREDICATE-DIVERGENCE NOTE (tidier round 3, deliberate — do NOT "fix"):
+    the LAUNCHER'S BOOT RECLAIM (launcher.sh:2889 "owner_dead ALONE is
+    reclaimable" / :3345 the comp3-owner-dead bounded confirm) reclaims on
+    DEAD-ALONE; this tool/sweep predicate requires STALE AND DEAD. The
+    divergence is INTENTIONAL: at boot a dead owner is unambiguous (no
+    process can be refreshing a dead pid's heartbeat, and the boot has
+    already won the singleton race), while the TOOL/SWEEP lane competes
+    with live promotes — a DEAD-ALONE rule there would reopen the
+    double-promote window (a promote that just minted a txn and whose
+    executor pid lookup glitched would be reclaim-able mid-flight). Keep
+    both; "ONE mechanism" means one per lane, not byte-identical predicates.
     """
     if not isinstance(in_flight, dict):
         return False, "no-in-flight"
@@ -503,7 +519,16 @@ def reclaim_stale_txn(install_dir: Path, *, actor: str) -> str | None:
          release the claim.
 
     Returns a one-line note when a txn was reclaimed, ``None`` otherwise.
-    Never raises — a torn journal leaves everything untouched.
+
+    M5 (tidier round 3) — failure contract, precisely: a torn/absent journal
+    and every DISPOSAL write failure are caught and leave everything
+    untouched (``None``). The CLAIM-ACQUIRE call (``lock_acquire``) sits
+    OUTSIDE the disposal try-block by design — it is the pre-disposal claim,
+    not a journal write; a filesystem error inside it (mkdir under a
+    read-only ``releases/``) propagates to the caller rather than being
+    swallowed. Callers on the boot path wrap this call; the tool path
+    surfaces it as a tool error. "Never raises" therefore means "no journal
+    I/O error escapes", NOT "no error of any kind".
     """
     try:
         data = journal_read(install_dir)
@@ -4054,9 +4079,11 @@ def _supervision_launchd_detect(
     ``_supervision_launchd_detect`` (D2a, promote-full-auto 2026-11-11).
 
     Returns ``(state, label)``: ``(LAUNCHD_MANAGED, <label>)`` IFF EXACTLY ONE
-    job in the gui domain has a printed definition referencing
-    ``<install>/launcher.sh`` (the /bin/bash-wrapped ProgramArguments),
+    job in the gui domain has a ``launchctl print`` dump CONTAINING the
+    ``<install>/launcher.sh`` path — a WHOLE-DUMP SUBSTRING match, not an
+    argv[1]-realpath parse (F9, mirrored verbatim from the shell twin),
     excluding the watchdog label; otherwise ``(LAUNCHD_NOT_VERIFIED, "")``.
+    Unique-match-or-refuse bounds the substring blast radius.
 
     Advisory-only (the daemon cannot refuse), never raises — every failure
     degrades to LAUNCHD_NOT_VERIFIED. ``LAUNCHCTL_BIN`` / ``ENSEMBLE_LAUNCHD_LABEL``

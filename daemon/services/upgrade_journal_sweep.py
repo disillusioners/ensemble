@@ -43,9 +43,9 @@ Lifecycle mirrors :class:`~daemon.services.job_lock_sweep.JobLockSweepService`:
 (CancelledError is the normal shutdown path — FM-11: never swallow it).
 """
 
-# Size rationale (~3286 lines, refreshed 2026-11-02 — grew with the
-# promote-handback-halt rows: the serving-green stale-txn closer): the
-# sweep service
+# Size rationale (~3406 lines MEASURED 2026-11-11 — M13 re-baseline; was
+# ~3286 at the 2026-11-02 refresh, grown with the promote-handback-halt
+# serving-green stale-txn closer): the sweep service
 # owns SIX janitor lanes in one loop by design — periodic reconcile/GC
 # tick, the two-signal (W4) liveness predicate, the wake-record sweep,
 # the bounded reaper (waitpid + signal attribution), the

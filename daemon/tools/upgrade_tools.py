@@ -59,8 +59,9 @@ refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
 grow it further without pulling that fence.
 """
 
-# Size rationale (~4160 lines, refreshed 2026-10-30 — was ~3931): +230 for
-# the phase-6 scripts-dir provenance guard (arm-time floor/stamp ancestry,
+# Size rationale (~4383 lines MEASURED 2026-11-11 — M13 re-baseline; was
+# ~4160 at the 2026-10-30 refresh, ~3931 before it): the phase-6
+# scripts-dir provenance guard (arm-time floor/stamp ancestry,
 # the W-1/W-2/W-3 verdict branches, the M5 `ScriptsProvenanceVerdict`
 # Literal and the M7 delegating per-run-log resolver), appended at the END
 # with a load-bearing POSITION constraint (the guard must precede

@@ -540,14 +540,24 @@ check_flipped_orphan() {
         if [ "${FLIPPED_ORPHAN_SEEN:-0}" -ne 0 ]; then FLIPPED_ORPHAN_SEEN=0; write_alert_state; fi
         return 0
     }
-    # flipped:true inside the (single) in_flight object — the key only ever
-    # appears there (journal_mark_flipped writes it); history events do not
-    # carry a `flipped` key.
-    grep -qE '"flipped": *true' "$f" 2>/dev/null || {
+    # flipped:true ANCHORED inside the in_flight object (M7, tidier round 3):
+    # a bare \"flipped\": true grep is whole-file, so it could match a
+    # flipped-shaped key in a NON-txn object. The journal writer emits the
+    # in_flight object COMPACT (one line — lib.sh's splice shape), so the
+    # anchored form matches the production shape; on an unexpected
+    # pretty-printed journal it simply does not match (fail-safe: a missed
+    # alert, never a false one).
+    grep -qE '"in_flight": *\{[^}]*"flipped": *true' "$f" 2>/dev/null || {
         if [ "${FLIPPED_ORPHAN_SEEN:-0}" -ne 0 ]; then FLIPPED_ORPHAN_SEEN=0; write_alert_state; fi
         return 0
     }
-    owner="$(grep -oE '"owner_pid": *[0-9]+' "$f" 2>/dev/null | tail -1 | grep -oE '[0-9]+')"
+    # owner_pid ANCHORED to the in_flight object (M7, tidier round 3). The old
+    # bare `grep ... | tail -1` took the LAST owner_pid anywhere in the file —
+    # and pending_op ALSO carries an owner_pid (the executor stamp,
+    # watchdog-watcher.sh:543-550 reads it for its own purposes), so a
+    # pending_op that follows in_flight made the watcher probe the WRONG pid.
+    # The in_flight anchor keeps the field match inside the txn object.
+    owner="$(grep -oE '"in_flight": *\{[^}]*"owner_pid": *[0-9]+' "$f" 2>/dev/null | grep -oE '[0-9]+$' | head -1)"
     [ -n "$owner" ] || return 0
     if kill -0 "$owner" 2>/dev/null; then
         if [ "${FLIPPED_ORPHAN_SEEN:-0}" -ne 0 ]; then FLIPPED_ORPHAN_SEEN=0; write_alert_state; fi
