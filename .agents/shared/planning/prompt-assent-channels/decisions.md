@@ -346,16 +346,20 @@ designated channel. The order of evaluation (the canonical form lives in
 [`refusal-cell-matrix.md`](refusal-cell-matrix.md) §1.1):
 
 ```
-1. context is a proven 1:1 DM?              → MINT (the map is never read)
-2. is_group_dm is True (a proven group DM)?  → REFUSE mint-requires-private-channel  (the map is never read)
-3. is_dm is not False (absent / non-bool)?   → REFUSE mint-requires-private-channel  (the map is never read)
-4. else (is_dm is False ⇒ a GUILD channel):
-   4a. map INVALID                          → REFUSE designation-config-invalid   (no token row)
-   4b. channel not designated               → REFUSE mint-requires-private-channel (no token row)
-   4c. designated, but the identity is ABSENT → REFUSE extraction-incomplete         (no token row)
-   4d. designated, user ≠ pinned approver   → REFUSE approver-not-pinned           (no token row)
-   4e. designated, user == pinned approver  → MINT
+1. proven 1:1 DM (is_dm is True AND is_group_dm is False)?          → PASS   (the map is NEVER read)
+2. is_group_dm is True (a proven group DM)?                          → GROUP_DM_SHAPE
+3. is_dm is not False (absent / non-bool discriminator)?             → ABSENT_DISCRIMINATOR   (fail closed; the map is never read)
+4. is_dm is False (a GUILD channel) AND discord_meta.get("is_group_dm") is not False (absent key)? → ABSENT_DISCRIMINATOR
+   # ← the M-18 shape: an absent `is_group_dm` must REFUSE; the interaction path is never designation-eligible
+5. then, in order:
+   5a. map INVALID                          → CONFIG_INVALID
+   5b. channel not designated               → NOT_DESIGNATED
+   5c. the identity is ABSENT               → ABSENT_IDENTITY
+   5d. user ≠ pinned approver                → APPROVER_NOT_PINNED
+   5e. user == pinned approver               → PASS
 ```
+
+These are **NEUTRAL variants**; each gate applies its per-side code via the **D-18** mapping tables (mint: `mint-requires-private-channel` / `approver-not-pinned` / `extraction-incomplete` / `designation-config-invalid`; approve: `token-channel-mismatch` / the same three non-mismatch codes as §1.2 assigns). **The canonical pseudocode remains [`refusal-cell-matrix.md`](refusal-cell-matrix.md) §1.1.**
 
 **The ordering is load-bearing** — legs 2 and 3 sit **before** the map so that the existing
 group-DM pin and the existing absent-discriminator pin stay green **whatever the map contains**,
