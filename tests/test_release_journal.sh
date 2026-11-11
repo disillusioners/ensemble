@@ -2067,22 +2067,31 @@ ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" "[\"$SBX_V1\"]"
 b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
 f4h_arm B 78 "supervisor-disarmed-prev-quarantined"
-# D — unsafe-previous (rollback_safe=false on the displaced v1)
-run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1   # fresh v1 (B quarantined it)
+# D — unsafe-previous (rollback_safe=false on the displaced v1). NOTE: the
+# repair is a DIRECT manifest patch back to true after the arm — a mid-suite
+# run_stage re-stage is NOT usable here (empirically it leaves the CURRENT
+# release integrity-broken: the fixture's agents tree legitimately drifted
+# via the §11/§12 fixture commits, and the re-stage's manifest/file pairing
+# mismatches on the drifted members ⇒ every later promote refuses at
+# CURRENT-integrity pre-txn). rollback_safe is not an integrity-hashed
+# field, so the patch itself is invisible to the preflight.
 ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" '[]'
-python3 - "$SBX/releases/$SBX_V1/manifest.json" <<'PYM'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+f4h_patch_rbs() {  # f4h_patch_rbs <ver> <true|false>
+    python3 - "$SBX/releases/$1/manifest.json" "$2" <<'PYM'
 import json, sys
-p = sys.argv[1]
+p, val = sys.argv[1], sys.argv[2]
 d = json.load(open(p))
-d["rollback_safe"] = False
+d["rollback_safe"] = (val == "true")
 json.dump(d, open(p, "w"))
 PYM
-b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+}
+f4h_patch_rbs "$SBX_V1" false
 f4h_arm D 78 "supervisor-disarmed-prev-unsafe"
+f4h_patch_rbs "$SBX_V1" true
 # E — F2-arm1: the 8b forward-rollback stop fails (bootout call #2), the
 # arm-local disarm (bootout call #3) still succeeds
-run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1   # restore rollback_safe
 ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" '[]'
 b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
@@ -2095,8 +2104,10 @@ assert_contains "12h-E F2-arm1 named end state journaled" \
     "supervisor-disarmed-rollback-stop-failed" "$(cat "$JB")"
 assert_contains "12h-E bootout of the verified job label recorded" \
     "bootout com.ensemble.sbx.fixture" "$(cat "$JB")"
-# C — missing-previous, LAST (deletes releases/v1 mid-promote)
-run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1
+# C — missing-previous, LAST (deletes releases/v1 mid-promote). v1 is
+# SNAPSHOTTED first and restored directly after (no re-stage — see the D
+# note above).
+cp -R "$SBX/releases/$SBX_V1" "$FIXTURE/f4h-v1-snapshot"
 ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" '[]'
 b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
@@ -2108,7 +2119,8 @@ assert_eq "12h-C missing-previous arm halts (78)" "78" "$F4H_C_RC"
 assert_contains "12h-C named end state journaled" "supervisor-disarmed-prev-missing" "$(cat "$JB")"
 assert_contains "12h-C bootout of the verified job label recorded" \
     "bootout com.ensemble.sbx.fixture" "$(cat "$JB")"
-run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1   # restore v1 for §13+
+# direct restore for §13+ (snapshot back + neutral journal)
+mv "$FIXTURE/f4h-v1-snapshot" "$SBX/releases/$SBX_V1"
 ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" '[]'
 
