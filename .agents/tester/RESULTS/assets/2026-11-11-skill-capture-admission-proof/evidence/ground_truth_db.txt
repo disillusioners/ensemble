@@ -1,0 +1,19 @@
+=== ts_utc ===
+2026-11-11T15:14:02Z
+=== jobs ===
+psql: error: connection to server at "127.0.0.1", port 18912 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+=== instances (metadata) ===
+psql: error: connection to server at "127.0.0.1", port 18912 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+=== skills ===
+psql: error: connection to server at "127.0.0.1", port 18912 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+=== skill_usage_records ===
+psql: error: connection to server at "127.0.0.1", port 18912 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+=== skill_capture jobs ===
+psql: error: connection to server at "127.0.0.1", port 18912 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+=== sink dir ===
+ls: cannot access '/tmp/ens-e2e-CGZYkzmr/data/skill-capture-observability/': No such file or directory

@@ -1,0 +1,14 @@
+=== 4-WAY SHA RECOMPUTE — 2026-11-11T15:10:42Z ===
+--- (i) live release-dir binary ---
+b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8  /home/nea/agents-ensemble/releases/v0.29.17/ensemble-prod
+--- (ii) stage-worktree dist binary ---
+b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8  /home/nea/ensemble-src-wt-stage-v02917/dist/ensemble-prod
+--- (iii) release manifest.json .binary_sha256 ---
+b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8
+--- (iv) dist/ensemble-prod.build-provenance.json .artifact_sha256 ---
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '/home/nea/agents-ensemble/releases/v0.29.17/dist/ensemble-prod.build-provenance.json'
+--- EXPECTED (all four): b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8 ---
+artifact_sha256 = b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8
+other keys: ['artifact_path', 'build_at', 'build_tool', 'git_dirty', 'git_head', 'git_head_short']

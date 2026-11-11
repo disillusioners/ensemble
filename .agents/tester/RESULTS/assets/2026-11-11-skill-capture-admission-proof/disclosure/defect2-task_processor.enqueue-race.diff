@@ -1,0 +1,26 @@
+diff --git a/daemon/services/task_processor.py b/daemon/services/task_processor.py
+index e904ed1c0..200cb6090 100644
+--- a/daemon/services/task_processor.py
++++ b/daemon/services/task_processor.py
+@@ -1005,7 +1005,20 @@ class ProcessMessageProcessor(BaseProcessor):
+                             break
+                         if parsed.tzinfo is None:
+                             parsed = parsed.replace(tzinfo=timezone.utc)
+-                        if parsed >= task_created_at:
++                        # The task's OWN triggering message is always
++                        # in-scope. The Task row is created ~1ms AFTER
++                        # the message row is enqueued, so a strict
++                        # ``parsed >= task_created_at`` comparison can
++                        # drop the very message the task exists for by
++                        # a sub-millisecond race — blanking
++                        # ``task_message`` for the CAPTURED flow (the
++                        # evolution service's non-blank gate then
++                        # refuses the admission silently).
++                        if (
++                            parsed >= task_created_at
++                            or getattr(message, "message_id", None)
++                            == getattr(task, "message_id", None)
++                        ):
+                             filtered.append(message)
+                     if parse_failed:
+                         # Mirror the JQ path's "count all" fallback

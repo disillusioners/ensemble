@@ -1,0 +1,17 @@
+=== ts_utc ===
+2026-11-11T15:03:53Z
+=== fence: static path derivation (release copy) ===
+exe                    = /tmp/ens-e2e-CGZYkzmr/releases/v0.29.17/ensemble-prod
+derived install_dir    = /tmp/ens-e2e-CGZYkzmr
+install_dir/releases is dir = True
+install_dir == TMPROOT = True
+install_dir == LIVE    = False
+install_dir == DEMO    = False
+under /home/nea        = False
+=== fence: FAKE_HOME escape guard ===
+FAKE_HOME = /tmp/ens-e2e-CGZYkzmr/fakehome
+problems  = NONE — PASS
+=== staged artifact sha256 (release copy vs dispatcher-pinned b5b54b01...43d) ===
+b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8  /tmp/ens-e2e-CGZYkzmr/releases/v0.29.17/ensemble-prod
+b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8  /home/nea/agents-ensemble/releases/v0.29.17/ensemble-prod
+3995919daf6b75f7f933fb3d1ea43b1513f0a30576cc148f50f12ae9ccdaaa72  /tmp/e

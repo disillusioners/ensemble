@@ -1,0 +1,59 @@
+diff --git a/daemon/services/instance_messaging.py b/daemon/services/instance_messaging.py
+index 28d06ad27..817a7914a 100644
+--- a/daemon/services/instance_messaging.py
++++ b/daemon/services/instance_messaging.py
+@@ -4463,23 +4463,37 @@ class InstanceMessagingService:
+                                                 instance_id,
+                                                 (None, list(injected_skill_ids)),
+                                             )
+-                                        # Persist injected skill IDs to instance
+-                                        # metadata so SkillMetricsService can
+-                                        # read them at task-completion time.
+-                                        if injected_skill_ids:
+-                                            try:
+-                                                await asyncio.to_thread(
+-                                                    _dedup_merge_skill_ids,
+-                                                    self._manager._instance_repository,
+-                                                    instance_id,
+-                                                    injected_skill_ids,
+-                                                )
+-                                            except Exception as e:
+-                                                logger.warning(
+-                                                    f"Failed to persist "
+-                                                    f"{INJECTED_SKILLS_METADATA_KEY} "
+-                                                    f"for {instance_id[:8]}...: {e}"
+-                                                )
++                                    # Persist injected skill IDs to instance
++                                    # metadata so SkillMetricsService can read
++                                    # them at task-completion time.
++                                    #
++                                    # Runs on BOTH branches — the branch
++                                    # that actually INJECTS skills (the
++                                    # ``injection_text`` truthy arm) is the
++                                    # one that matters: gating this persist
++                                    # on the "search yielded nothing" arm
++                                    # left the CAPTURED lane with no input
++                                    # on every normal turn, so
++                                    # ``record_task_completion`` early-returned
++                                    # on an empty injected-id list and the
++                                    # capture admission check never ran.
++                                    # The enclosing docstring already lists
++                                    # "track_injection + dedup-persist" as a
++                                    # step of this routine.
++                                    if injected_skill_ids:
++                                        try:
++                                            await asyncio.to_thread(
++                                                _dedup_merge_skill_ids,
++                                                self._manager._instance_repository,
++                                                instance_id,
++                                                injected_skill_ids,
++                                            )
++                                        except Exception as e:
++                                            logger.warning(
++                                                f"Failed to persist "
++                                                f"{INJECTED_SKILLS_METADATA_KEY} "
++                                                f"for {instance_id[:8]}...: {e}"
++                                            )
+                                 # Reset the counter so the next
+                                 # ``interval`` messages can reuse the
+                                 # freshly-cached result. Called UNCONDITIONALLY

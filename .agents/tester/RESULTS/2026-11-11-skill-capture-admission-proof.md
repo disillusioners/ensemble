@@ -158,3 +158,86 @@ Prior-run DB (read-only restart, then STOPPED again): 2 message jobs done/comple
 - Ambient env scrubbed per-variable before every boot/capture (`env -u POSTGRES_*` never used). No live credential ever captured to evidence (F7 rule); the bearer token lived only in `/tmp/ens-e2e-evidence/v2/.token_secret` (mode 600) and appears in NO evidence file.
 - Teardown: isolated ports 18790/18791/18912 all free; no stray processes; isolated PG STOPPED; prior-run PG STOPPED (was restarted read-only for forensics, then stopped).
 - The diagnostics source-boot process tree was killed before the RESULTS commit; no `.venv` daemon is running.
+
+---
+
+# GAP CLOSURE — commission §1–§4 (second commit, test-infra only)
+
+## 8. 4-way sha recompute (commission §1) — ALL FOUR verified
+
+| # | Source | Value | Location |
+|---|---|---|---|
+| (i) | `sha256sum /home/nea/agents-ensemble/releases/v0.29.17/ensemble-prod` | `b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8` | live release dir (read-only) |
+| (ii) | `sha256sum /home/nea/ensemble-src-wt-stage-v02917/dist/ensemble-prod` | `b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8` | stage-worktree dist (read-only) |
+| (iii) | `manifest.json` field `.binary_sha256` | `b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8` | `/home/nea/agents-ensemble/releases/v0.29.17/manifest.json` |
+| (iv) | `ensemble-prod.build-provenance.json` field `.artifact_sha256` | `b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8` | `/home/nea/ensemble-src-wt-stage-v02917/dist/ensemble-prod.build-provenance.json` (the release dir ships WITHOUT a `dist/` subdir — the provenance sidecar lives in the stage worktree's dist, recorded here verbatim) |
+
+All four equal the dispatcher-pinned `b5b54b01d9424410c35a83cde9593d0c0b97dd234ae7dfa95e2cd6b6b68243d8`. The temp copy booted in this lane (`/tmp/ens-e2e-CGZYkzmr/releases/v0.29.17/ensemble-prod`) is byte-identical to (i) by `sha256sum`. Full output: `assets/…/evidence/sha_4way.txt`.
+
+---
+
+## 9. Live capture-lane counter baselines (commission §2) — READ-ONLY
+
+### 9.1 Live capture-lane door
+- `GET http://127.0.0.1:9797/api/metrics/capture-lane` with the isolated-lane bearer token (the only token this lane held, at `/tmp/ens-e2e-evidence/v2/.token_secret`, mode 600 — it is NOT in the live auth DB):
+  - **HTTP 401** `{"error":"AUTH_REQUIRED","message":"Authentication required"}`.
+  - Unauthenticated reference read: HTTP 302 (redirect to login).
+  - **Gap (named):** this lane holds NO valid live bearer token; the door is closed to it. The live counter body was NOT captured. The most recent available live reading is the prior session's, recorded in `/tmp/ens-e2e-evidence/live-before/snapshot.txt` (17:55Z, 2026-11-11): `{"counters":{"admission_refusals":{},"execution_refusals":{},"admissions":0,"deviations":0,"fix_admissions":0},…,"exposition_neutral":true}`. Auth was NOT changed (out of scope per the commission). Reading the live door requires a valid live bearer token (operator / project-manager lane).
+- Live sink rows (read-only, `wc -l` + grep, never rm/mv):
+  - `skill-capture-20261110.jsonl`: **11 lines**, `outcome=admitted` **0**, `capture_lane_off` **11**.
+  - `skill-capture-20261111.jsonl`: **2 lines**, `outcome=admitted` **0**, `capture_lane_off` **0**.
+- Live `.env` flag lines 133/134 (verbatim): `ENSEMBLE_SKILL_CAPTURE_ENABLED=1` / `ENSEMBLE_SKILL_EVOLUTION_ENABLED=1` (both ON in live).
+- **A4 gauge** (`scripts/audit/skill_counter_reconcile.py --measure`, dry-run, read-only, against the live DB): `drift=503`, `mismatched_skills=50`, `diverging_keys=34` (baseline 32), `skills_total=668`, `taken_at=2026-11-11 15:13:05`. Baseline for the C7 gate = 34 (record this as the window-start value, not the runbook's 32).
+
+### 9.2 Fresh live fence snapshot (after the reads)
+- `/tmp/ens-e2e-evidence/live-after-v3/snapshot.txt` taken 15:03Z. Drift vs `live-after-v2` (14:05Z): `current → releases/v0.29.15` unchanged, `livez 0.29.15` alive, uptime 11328→11905 s (≈577 s elapsed — continuous, expected), `MainPID=3612228`, `NRestarts=1` (unchanged). No drift. Live install untouched by this lane.
+
+---
+
+## 10. Post-promote observation plan (commission §3)
+
+Scope: a v0.29.17 promote (the staged artifact, sha pinned above) in the live environment, with the capture lane **already ON** (live `.env` 133/134 = 1). Window: 24 h (the plan's stated Phase-2 observation window, `phase1-plan.md` §15 step 2 / §8 D4; sink retention ≥ 30 days covers it). Instruments per C-row are §6.1–6.7 of `phase2-runbook.md` (routes + auth: `maintenance:read` OR `metrics:read`).
+
+| # | Condition (must ALL hold) | Threshold | Instrument (§6.x) |
+|---|---|---|---|
+| **C1** | The capture lane **actually admitted work** | `counters.admissions` increases by ≥ 1 over the window | §6.1 `/api/metrics/capture-lane` |
+| **C2** | The capture switch **never flapped off** | `counters.admission_refusals["capture_lane_off"]` does not increase | §6.1 |
+| **C3** | No keeper deviation | `counters.deviations` unchanged | §6.1 |
+| **C4** | No Tier-3 mutation happened (evolution lane still OFF) | `counters.fix_admissions` unchanged | §6.1 |
+| **C5** | No queued evolution row refused at execution | `counters.execution_refusals["lane_disabled"]` unchanged | §6.3 |
+| **C6** | No burst-cap trip | `counters.admission_refusals["fix_burst_cap"]` unchanged | §6.6 |
+| **C7** | A4 within-identity-key divergence did not grow | `diverging_keys` ≤ window-start value (baseline 34) | `scripts/audit/skill_counter_reconcile.py --measure` (§6.5) |
+| **C8** | A4 counter drift did not grow | `drift` ≤ value at window start (baseline 503) | same |
+| **C9** | The sink recorded admitted runs | ≥ 1 row with `"outcome":"admitted"` | `<data_dir>/skill-capture-observability/skill-capture-<YYYYMMDD>.jsonl` (§6.7) |
+| **C10** | No new lane anomaly row | 0 new rows with `category` in (`tool-failure`, `queue-scheduling`) **AND `instance_id = 'daemon:skill-capture-observability'`** | `anomaly_reports` (§6.4, lane-scoped) |
+
+**C1's depth:** C1 requires a real CAPTURED `skills` row (`lineage_origin='captured'`), not just a `skill_capture` job row — a job row alone proves the admission, not the distillation. The first live CAPTURED row is the Phase-2 proof (`phase1-plan.md` §15 step 8, §9 E2). Note the capture→evolution diversity gap remains UNEXERCISED by design (CAPTURED-origin `evolve_skill` raises `ValueError` — pinned, protected).
+
+**Process-local counters (§6.5 caveat):** C2–C6 counters reset on daemon restart — take the reading immediately AFTER the restart as the window baseline, and compare every later reading against that baseline, never against zero.
+
+### THE LOAD-BEARING AMENDMENT (forced by DEFECT-1)
+
+**Post-promote of v0.29.17 AS-IS, C1 (admissions ≥ +1) CANNOT MOVE.** DEFECT-1 blocks every BM25-injection capture candidate at the `if not injected_ids: return 0` early-return in `SkillMetricsService.record_task_completion` — the `last_injected_skill_ids` metadata key is never written on the normal injection path, so the CAPTURED eligibility check never runs, and no amount of eligible traffic post-promote will change `admissions` from 0. **The operator watching C1 after the ceremony would otherwise misread a flat 0 as "lane healthy, no eligible tasks."** That reading is WRONG — a flat 0 post-promote proves only that DEFECT-1 is still present, not that no eligible tasks occurred.
+
+**Effective health signals until DEFECT-1 lands:** C2 (capture switch never flapped off), C5 (no execution refusal), C6 (no burst-cap trip), plus C7/C8 (A4 drift did not grow) and C9 (sink recorded admitted runs — will be 0 until the fix lands, which itself is a DEFECT-1 signal). C1 and C9 are expected to stay flat and must NOT be read as regressions. The admission leg is a **NAMED GAP** until the implementation lane lands the two diffs in §1 and re-stages.
+
+---
+
+## 11. Durable evidence assets (commission §4)
+
+Preserved under `.agents/tester/RESULTS/assets/2026-11-11-skill-capture-admission-proof/` (108 KB; NO binary, NO pgdata, NO token file):
+
+| Subdir | Contents |
+|---|---|
+| `scripts/` | `boot_v2.sh`, `setup_pg.sh`, `mock_llm.py`, `live_snapshot.sh` (the v2 fixture method) |
+| `evidence/` | `fence_proof.txt`, `boot_log_excerpt.txt`, `evidence_v2.txt` (capture-lane JSON + completion facts), `ground_truth_db.txt`, `sha_4way.txt` |
+| `live/` | `live-before.txt`, `live-after-v2.txt`, `live-after-v3.txt` |
+| `disclosure/` | `defect1-instance_messaging.persist-in-wrong-branch.diff`, `defect2-task_processor.enqueue-race.diff`, `regression-tests.diff` (the leader's decision material) |
+
+The disclosure diffs are the implementation lane's starting point; the asset paths are referenced above in §1, §5, §8, §9.
+
+---
+
+## 12. Pre-existing red (unrelated to this lane)
+
+`TestRecordMetricsWiring` (10 failures) on this worktree's HEAD — the harness's task stub lacks `priority`, which `task_processor.py:577` reads in the claim path (`is_fresh_episode_user_message = message.priority == 1 and message.type == MessageType.HUMAN.value`). Re-verified as pre-existing via `git stash` (10 failed / 6 passed on the untouched tree). Recommend a small test-infra follow-up; not in this lane's blast radius.
