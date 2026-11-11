@@ -67,8 +67,12 @@
 #     stop step resolves the SAME two legs)
 #   - W6 (taxonomy sweep): the refusal tokens preflight-stop-script-missing,
 #     preflight-argv-unconstructable, preflight-argv-malformed and
-#     scripts-dir-unresolvable are registered in BOTH _full_doc_ refusal
-#     lists AND in the UPGRADE_TOKENS / RESTART_TOKENS registries
+#     scripts-dir-unresolvable are registered in the upgrade-target
+#     _full_doc_ list AND in the UPGRADE_TOKENS / RESTART_TOKENS registries;
+#     preflight-stop-script-missing ALSO lives in the restart-target
+#     _full_doc_ list (MT-3 tidier round 3: the two argv tokens are
+#     upgrade-lane only — the restart lane cannot construct a promote argv,
+#     so claiming BOTH lists for them was false)
 # All fixtures /tmp-only; live/production NEVER touched.
 set -euo pipefail
 
