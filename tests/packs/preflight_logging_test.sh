@@ -442,7 +442,9 @@ BEFORE="$(find "$LOGDIR" -name '*.log' -type f | wc -l | tr -d ' ')"
 ( sleep 20 ) & FOREIGN=$!
 mkdir -p "$INSTALL_DIR/releases/rollback.lock.d"
 printf '%s\n' "$FOREIGN" > "$INSTALL_DIR/releases/rollback.lock.d/owner"
-sed -i "s|lock_acquire || exit 78||" "$PF_SB/ret.sh" 2>/dev/null || true
+# BSD-port: bare `sed -i` (GNU-only) is a BSD error; the portable in-place
+# form is `sed -i.bak …` + remove the .bak (never BSD `sed -i ''`).
+sed -i.bak "s|lock_acquire || exit 78||" "$PF_SB/ret.sh" 2>/dev/null && rm -f "$PF_SB/ret.sh.bak" || true
 R_INSTALL="$INSTALL_DIR" R_DIR="$LOGDIR" REPO_ROOT="$PF_REPO_ROOT" bash "$PF_SB/ret.sh" >/dev/null 2>&1
 AFTER="$(find "$LOGDIR" -name '*.log' -type f | wc -l | tr -d ' ')"
 [ "$BEFORE" = "$AFTER" ] && pf_ok "foreign LIVE owner => retention hands off (no deletion)" \
