@@ -4,7 +4,7 @@
 |---|---|
 | Date | 2026-11-11 (UTC) |
 | Commission | prompt-assent — conversational approval lane (trust-model change) |
-| Verdict | **Gate at the graded tip `029416f2e`: NO-GO** — 2 net-new deterministic reds (both test-pin staleness, zero production defects); distance to GO = 2 mechanical test-side edits + a 2-cell re-verify. → **Re-verified 2026-11-11 at tip `e7742ce0b` after the developer's 2 authorized pin fixes: stage-cut verdict GO-WITH-DISCLOSURES** — both reds repaired and deterministically re-proven, `missing-at-base` EMPTY, all 3 packs green, production + FE byte-identical (see §15). |
+| Verdict | **Gate at the graded tip `029416f2e`: NO-GO** — 2 net-new deterministic reds (both test-pin staleness, zero production defects); distance to GO = 2 mechanical test-side edits + a 2-cell re-verify. → **Re-verified 2026-11-11 at tip `e7742ce0b` after the developer's 2 authorized pin fixes: stage-cut verdict GO-WITH-DISCLOSURES** — both reds repaired and deterministically re-proven, `missing-at-base` EMPTY, all 3 packs green, production + FE byte-identical (see §15). → **Post-merge re-verify at the SHIPPED tree `6aa567153`: GO-WITH-DISCLOSURES** — affected surface `missing-at-base` EMPTY against TRUE base, packs 28/249/107 green, seal/memoir pins intact, 3/3 mutation proofs still bite; the foreign +22 did not disturb our seam (see §16). |
 | Branch / worktree | `feature/prompt-assist` @ `/home/nea/ensemble-src-wt-prompt-assent` (the "assist" spelling is the project's own convention — POK `prompt-assist-03-paths-use-assent-not-assist`) |
 | Tip tested | `029416f2e7961ce5e9d951015c571d91d420ed1b` (HEAD identity verified; 23 commits over base — the commission's "16" was a stale phase-4 expectation captured at `e5b3cc2d1`; tip identity is the invariant) |
 | Base | `0efdf106f3f66ccb400405f4137694592b72097d` (verified ancestor, `merge-base --is-ancestor` rc=0) |
@@ -437,3 +437,86 @@ Both net-new reds are **repaired**: deterministically GREEN 3/3 at HEAD, determi
 8. **The N-1 seal-owner authorization has no in-tree artifact** — it is asserted by the fix commit's message ("Per the seal owner's classification") and by the commissioning authority; the classification itself is not recorded in the repo. A ceremony record would help the next auditor.
 9. **Recommended follow-up (DEFERRED by the lane owner — NOT built here):** a dev-only Discord-shaped source stub (emits adapter-shaped `metadata["discord"]` without a gateway) so the T3.5/K-3 E2E becomes repeatable in CI. Deferred because it touches the sources-adapter contract and the live operator probe already covers the gate.
 10. **Gate-cost note:** this scoped re-verify took ≈14 min (the `/tmp` base-tree trap was avoided deliberately). A full-tree Tier-2 dual-side on this corpus remains ≈129 min — parallelize the 3× ladder by node in future gates.
+
+---
+
+## 16. Post-merge re-verify (2026-11-11) — the SHIPPED tree
+
+**Why:** the branch was gated green; the **shipped tree is the merged tree**, which carries another lane's +22 commits — "the branch was green" is not "the merged tree is green".
+
+**Test tree:** `/home/nea/ensemble-src-wt-merge-prompt-assent` (clean, **detached HEAD @ `6aa56715389e3dcc796760d1b12654caa0b3e91b`**) — read-only; no checkout/branch/commit; the canonical checkout, the feature worktree and the foreign `wt-merge-v02917` were never touched.
+**Workers:** recon `765a8bbc` · surface `5a2a7efd` (skill `base-head-failing-set-parity`) · mutations `36e122c3` (mutation-cycle harness).
+
+### 16.1 Merged identity
+
+- `HEAD = 6aa56715389e3dcc796760d1b12654caa0b3e91b` · **tree `57f2c75c51389562b1d5b6c105f9271f1649f527`** · **parents `dd57cc7d9` + `b435cb86d`** · `--no-ff` merge shape confirmed · `git status --porcelain` **empty**.
+- **Measurement note (two different diffs, both correct):** the commission's *"95 files, +19041/−113"* is **our lane's contribution** (`dd57cc7d9..HEAD`); the **foreign** lane's contribution is **30 files, +2669/−687** (`b435cb86d..HEAD`). Recon reproduced the latter exactly.
+
+### 16.2 The foreign +22 (enumerated)
+
+`git rev-list --count 0efdf106f..dd57cc7d9` = **22** — image-tools unconfined local-path read (2), skill-revival Phase 3 prod-wiring + runbook corrections (9), upgrade arm-preflight stop-script chain (5), release bumps v0.29.16 / v0.29.17 (2), and the lane's own gate-evidence commits (4).
+**Foreign delta paths:** `daemon/__init__.py`, `daemon/api.py`, `daemon/manager.py`, `daemon/tools/{compare_tools,image_tools,upgrade_tools}.py`, `tests/test_api.py`, `tests/test_compare_tools.py`, `tests/test_image_tools.py`, `tests/unit/test_skill_capture_production_wiring.py`, `tests/unit/tools/test_upgrade_tools.py`.
+**NOT touched by the foreign lane:** `daemon/routers/` (nothing), `frontend/` (nothing), `daemon/migrations/versions/*` (nothing — no foreign migration), and **none of our affected-surface files**.
+
+### 16.3 Wiring, seal, memoir, presence — all survive the merge
+
+- **`daemon/api.py` auto-merge:** the foreign lane extracted the inline lifespan skills-router wiring into `_wire_skills_router_services(manager)`. The **prompt-assent `create_all` seam is intact at `api.py:1283/1294`**, quoted verbatim (`:1294 from daemon.repositories.prompt_assent.models import PromptAssentToken`, `:1295 PromptAssentToken.metadata.create_all(manager.engine)`), no line shift.
+- **Our wiring untouched:** `git diff --name-only b435cb86d..HEAD -- daemon/services/prompt_version_service.py daemon/services/prompt_version_diff.py daemon/repositories/prompt_version/ daemon/repositories/prompt_assent/ daemon/tools/prompt_assent.py daemon/routers/prompts.py daemon/sources/adapters/discord/adapter.py daemon/tools/_tool_registry.py agents/ari/meta.json` → **EMPTY**. Also `-- frontend/ daemon/routers/` → **EMPTY**.
+- **Migration present:** `daemon/migrations/versions/20261110_221500_create_prompt_assent_tokens.sql` (7257 bytes) · **tool present:** `daemon/tools/prompt_assent.py` (82916 bytes, sha256 `a597e20d…927c` — **identical to the branch tip**, independently proving the merge did not touch it).
+- **Seal:** the `discord/adapter.py` row sits in `SEAL_REPINNED_BASE_VALUES` carrying the **BASE** sha `87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43`; it is **absent** from `SEAL_UNTOUCHED_BASE_VALUES` (the row appears exactly once as a dict entry — line 163; the second grep hit is the explanatory comment at line 154); the baseline map keeps the **CURRENT** sha `a9f3a711fc7928ece67472e2f313fa5ddfae173422a02d99c712d0e1ecee4b14`. **Partition orientation survives the merge.** The seal's `test_every_sealed_row_matches_the_real_bytes` **passed** at the merged tree — the foreign `api.py` change did not disturb the seal.
+- **Memoir pin intact:** `LANE_COMMIT = a2d90bb3…`, `MEMOIR_V2_MIGRATION_REL = …20261109_021154_create_memoir_v2_tables.sql`, the 3 legs at `:285-301` (ownership / growth / closed-range exactness); the prompt-assent migration is named in the **rationale/docstring only**, never in the expected exact set.
+- **This gate's docs rode the merge:** the report is in the merged tree (439 lines) and `PACKS.md` carries both lane-pack rows (`:3480`, `:3481`); `ab5962d0b`, `f5b51cf99`, `e7742ce0b` are all ancestors (rc=0).
+- **Census:** 128 migrations, unchanged; the foreign lane added **none**.
+
+### 16.4 Affected-surface parity at the MERGED tree (vs TRUE base `0efdf106f`)
+
+| leg | collected | passed | failed | deselected | runtime |
+|---|---|---|---|---|---|
+| **MERGED** `6aa567153` | 90 | 79 | **7** | 4 | 3.46 s |
+| **BASE** `0efdf106f` | 90 | 78 | **8** | 4 | 2.80 s |
+
+**Partition: stable 7 · extra-at-base 1 · `missing-at-base` 0 — EMPTY ⇒ NOTHING SHIPS RED from the affected surface.**
+
+- The **7 stable reds** are the known pre-existing duty/anomaly debt in `tests/unit/test_anomaly_report_duty_prompts.py` (duty-walk totals `41` / `39+2`, duty-block byte-identity ×2, forbidden-token closure, cardinal-count, prompt-artifact baseline `181 vs 177`) — **red at BOTH legs, identical in kind**, attributable neither to our lane nor to the foreign one.
+- The **single extra-at-base** is the memoir census cell — **an environment artifact, not a code regression**: the `git archive` base tree carries no `.git`, so the pin's internal `git ls-tree` exits 128. Diagnostic re-run with `GIT_DIR=<merge>/.git` → **1 passed**. (Disclosure for the earlier re-verify too: its archive-base memoir red had the same git-less environment; the load-bearing evidence for that fix is Lane A's **real-worktree** dual-side — memoir cell green at base `0efdf106f`, red at head `029416f2e` — plus the mutation re-point at both tips. §15's conclusion stands.)
+- **Attribution:** no node required foreign attribution; the one `extra-at-base` node is OUR-LANE-edited (`e7742ce0b`) but fails only as an environment artifact.
+
+### 16.5 Packs at the MERGED tree
+
+| pack | RESULT | passed / expected | runtime |
+|---|---|---|---|
+| `memoir_v2_schema_unit_test.sh` | **PASS** | **28 / `EXPECTED_PASSED_N=28`** ✅ | 0.71 s |
+| `prompt_assent_matrix_test.sh` | **PASS** | **249 / 249** ✅ | 26.02 s |
+| `prompt_assent_phase3_unit_test.sh` | **PASS** | **107 / 107** ✅ | 15.71 s |
+
+### 16.6 Mutation teeth at the MERGED tree — 3/3 still bite
+
+Baselines unplanted: lane file **50 passed**, `TestTheTokenMustBeInTheHumanMessage` **2 passed**, `TestTheSealRePin` **5 passed**, memoir **28 passed**. Venue: isolated detached worktree `/tmp/assent-merged-mut` @ `6aa567153`, import isolation proved (`daemon.__file__` + `sys.prefix` inside the scratch tree; merge worktree absent from `sys.path`).
+
+| proof | plant | RED (named assertion) | restore | GREEN |
+|---|---|---|---|---|
+| (i) token-in-tool-args | deleted the factor-3g block in `daemon/tools/prompt_assent.py` | `reason=token-mismatch` instead of `token-content-mismatch` — the **pre-merge signature** | sha `a597e20d…927c` — **identical** (and identical to the branch tip) | 1 passed |
+| (ii-A) blanket re-stamp | `slack/adapter.py` sha, one char | `slack/adapter.py was re-stamped even though its file did NOT change` | sha `a26abbcd…5aae1` — identical | 1 passed |
+| (ii-B) census re-point | `LANE_COMMIT` → `00a92b25a` | delta = 2 files (the prompt-assent migration appears) | sha `55e45fb4…e9cf` — identical | 1 passed |
+
+Teardown: scratch worktree removed; merge worktree HEAD unchanged and `status --porcelain` **empty** (`e3b0c442…` before == after).
+
+### 16.7 Reds that WILL SHIP (attributed — disclosure)
+
+1. **7 pre-existing deterministic reds** in `tests/unit/test_anomaly_report_duty_prompts.py` (duty-walk / duty-block byte-identity / forbidden-token closure / cardinal count / prompt-artifact baseline 181-vs-177) — **pre-existing at both legs**, shipping red in the merged tree. Not our lane, not the foreign lane; standing debt that deserves its own lane (unchanged recommendation from §15.9).
+2. **2 pre-existing census reds outside this surface** (not re-run in this pass, per scope): `tests/test_prompt_version_resolution_core.py` (`==96` vs 128) and `tests/unit/test_anomaly_report_models.py` (`==121` vs 128). Shipping red, pre-existing, untouched.
+3. **No red attributable to the foreign +22 was found on the affected surface** — the foreign `api.py` change did not disturb the prompt-assent seam or the seal.
+
+### 16.8 Merged-tree stage-cut verdict
+
+**GO-WITH-DISCLOSURES** for the merged tree `6aa567153`.
+
+Evidence: merged identity/tree/parents exact and clean; our wiring byte-untouched by the merge; the `create_all` seam intact at `api.py:1283/1294`; seal partition + memoir pin intact; affected-surface parity `missing-at-base` **EMPTY**; all three packs green with `EXPECTED_PASSED_N=28` holding; and all three mutation proofs still bite at the merged tree.
+
+### 16.9 Disclosures / scope limits
+
+- **K-3 live group-DM probe remains OUTSTANDING and is the ARMING gate** — staging is not blocked because the lane is default-OFF; **do not arm any environment** before the live Discord 1:1 vs group-DM probe (`docs/runbooks/prompt-assent.md:160`).
+- **Whole-tree state of the merged tree was NOT re-derived by this gate** — scope was the affected surface (the 73-min Tier-2 was deliberately not re-run). The foreign lane carries its own gate evidence (`2134e1a83` phase-3 functional gate GO-WITH-DISCLOSURES, `6ca643ad7` v0.29.16 release-cut evidence, `2397c458a` PR1 arm-preflight evidence); that evidence is **theirs, not independently re-derived here**.
+- **Stale prose still shipping (doc nit, not code):** `daemon/api.py:1290-1292` and the prompt-assent migration header still say *"the ensure list is ONE transaction for the whole statement list (any entry's failure aborts boot)"* — superseded by the 2026-11-10 per-statement-isolation change. Functional impact: none (this lane adds no `_ensure_postgres_columns` entry); risk: a future reader cites it. Worth a one-line correction in a later docs pass.
+- **The measurement-basis note** (§16.1): 95 files/+19041 (our lane vs latest-parent) vs 30 files/+2669/−687 (foreign vs branch tip) — two valid diffs, not a discrepancy.
+- Everything else from §15.9 still carries: invalid kill-switch value fails closed **at boot**; `prompt_assent_tokens` has **no server-side defaults** (raw-SQL INSERT omitting `version_tag`/`mint_is_dm`/`attempts`/`status` hits NOT NULL, ORM unaffected); the freshness positive leg remains ~13–20 % wall-clock flaky with the deferred backdate-widening fix; the dev-only Discord-shaped source stub is a **deferred recommended follow-up** (not built).
