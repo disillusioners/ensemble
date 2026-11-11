@@ -13,27 +13,31 @@ Date: 2026-11-11 · Scope: the per-command RAM guard (bash + proc lanes) and the
 provenance `phase2-measurements.md` §2 — supersedes the earlier `1177.9 MiB/s / 1.1503 GiB/s`
 transcription, ~0.8 % low). A number from another rate says so.
 
-*Sections (a)–(j) are the one-page operator brief. Appendices A–H carry the verbatim honesty
-set, the truth statement, the operator documentation, the durability posture, the routed
-follow-ups, the T4 hand-off note, the persistence facts, and the negative claim.*
+*Sections (a)–(j) are the operator brief (~2 pages, table-first). Appendices A–H carry the
+verbatim honesty set, the truth statement, the operator documentation, the durability posture, the
+routed follow-ups, the T4 hand-off note, the persistence facts, and the negative claim.*
 
 ---
 
 ## (a) Measured state — no memory cap exists today
 
 `MemoryMax=infinity` · `MemoryHigh=infinity` · `MemorySwapMax=infinity` · `MemoryAccounting=yes`
-— **no `Memory*` directive exists in the unit file or either drop-in** (`10-zero-env-reset.conf`,
-`20-core-capture.conf`). Observed 2026-11-11: `MemoryCurrent` 7.10 GiB, `memory.peak` 9.726 GiB,
-`memory.events` all-zero (`low 0 · high 0 · max 0 · oom 0 · oom_kill 0`).
-Verify: `systemctl show ensemble-main.service -p MemoryMax -p MemoryHigh` and
-`grep -ri '^Memory' /etc/systemd/system/ensemble-main.service*`.
+— **no cap exists** (still true on 2026-11-11, *after* the six OOM deaths of (b)). `systemctl show` prints the *effective* values systemd resolved, so
+`infinity` on both is the authoritative proof that nothing upstream sets a bound; the only
+drop-ins are `10-zero-env-reset.conf` (a lone `Environment=` reset) and `20-core-capture.conf`
+(`LimitCORE=`), neither carrying `Memory*`. Observed 2026-11-11: `MemoryCurrent` 7.10 GiB,
+`memory.peak` 9.726 GiB, `memory.events` all-zero (`low 0 · high 0 · max 0 · oom 0 · oom_kill 0`).
+Verify: `systemctl show ensemble-main.service -p MemoryMax -p MemoryHigh -p MemorySwapMax` ·
+`ls /etc/systemd/system/ensemble-main.service.d/` (the unit file itself is mode 600 root — read it
+as root if you need the raw text; `systemctl show` is the authoritative resolution).
 ⇒ **Next free drop-in slot is `30-memory-bounds.conf`.** The unit file is a **generated
 artifact** (`scripts/upgrade/adopt-unit.sh`) — a drop-in survives regeneration, a hand-edit does not.
 
-## (b) The Oct-30 kernel OOM deaths
+## (b) The kernel OOM deaths — Oct-30 and Nov-09
 
-Both are **kernel `oom-kill`** (`global_oom`, `task_memcg=…/ensemble-main.service`), *not*
-cgroup-cap kills — no cap existed. Arch `E3` records a **unit peak of 7.3 GiB**.
+Every one is a **kernel `oom-kill`** (`global_oom`, `task_memcg=…/ensemble-main.service`), *not* a
+cgroup-cap kill — no cap existed to fire. Arch `E3` records a **unit peak of 7.3 GiB** for the
+Oct-30 pair it studied.
 
 | # | Kernel kill | Unit failure | Killed task (`anon-rss`) |
 |---|---|---|---|
@@ -41,10 +45,33 @@ cgroup-cap kills — no cap existed. Arch `E3` records a **unit peak of 7.3 GiB*
 | 2 | `2026-10-30 11:13:24Z` | `11:13:59Z` `oom-kill` | `python3` 1178590 — 11,161,472 kB ≈ 10.64 GiB |
 | 3 *(extra — see note)* | `2026-10-30 19:16:12Z` | `19:16:32Z` `oom-kill` | `python` 1677256 — 10,281,088 kB ≈ 9.80 GiB |
 
-Reproduce: `journalctl --since "2026-10-30 10:40" --until "2026-10-30 11:16" | grep -i 'oom-kill:\|Out of memory'`.
-**Draft-time disclosure:** the plan names **two** deaths; the retained journal shows a **third** on
-the same day — added so this memo does not under-report. `anon-rss` is the kernel's figure for the
-task it killed (a different quantity from `E3`'s 7.3 GiB unit peak); **neither is a cap**.
+**A SECOND incident day (draft-time finding — not in the plan or the arch):** the same class
+recurred on **2026-11-09**, **three more** kernel kills (unit `Failed with result 'oom-kill'` at
+`09:27:38Z`, `09:32:58Z`, `09:44:07Z`):
+
+| # | Kernel kill | Killed task (`anon-rss`) |
+|---|---|---|
+| 4 | `2026-11-09 09:26:27Z` | `python` 597787 — 10,631,672 kB ≈ 10.13 GiB |
+| 5 | `2026-11-09 09:31:47Z` | `python` 598669 — 11,191,760 kB ≈ 10.67 GiB |
+| 6 | `2026-11-09 09:42:57Z` | `python` 599644 — 11,142,700 kB ≈ 10.63 GiB |
+
+That is **six** kernel OOM deaths in twelve days, the last **two days before this memo**, all in
+`task_memcg=…/ensemble-main.service`, all at ≈10–11 GiB `anon-rss`. Treat the death class as
+**current**, not historical.
+
+Reproduce (note `-b all` — `journalctl -k --since <date>` silently returns nothing for windows
+that cross an offline boot boundary on this host, which is a **tooling trap, not an absence**):
+
+```bash
+journalctl -k -b all --since "2026-10-29" --until "2026-11-01" --no-pager | grep 'Out of memory'
+journalctl -k -b all --since "2026-11-09" --until "2026-11-10" --no-pager | grep 'Out of memory'
+journalctl -u ensemble-main.service -b all --since "2026-10-29" --no-pager | grep 'oom-kill'
+```
+
+**Draft-time disclosure:** the plan names **two** Oct-30 deaths; the retained journal shows a
+**third** on the same day plus the three Nov-09 deaths — recorded so this memo does not
+under-report the observed count. `anon-rss` is the kernel's figure for the task it killed (a
+different quantity from `E3`'s 7.3 GiB unit peak); **neither is a cap**.
 
 ## (c) The orphan finding (E8)
 
@@ -219,8 +246,9 @@ labels are the only addition — the sentences are unmodified.
 
 > **Actualised here:** *"the unit has no memory cap today"* — see (a): `MemoryMax=infinity`,
 > `MemoryHigh=infinity`, no `Memory*` directive in the unit or its drop-ins. Verify with
-> `systemctl show ensemble-main.service -p MemoryMax -p MemoryHigh` and
-> `grep -ri '^Memory' /etc/systemd/system/ensemble-main.service*`. **The unit file is
+> `systemctl show ensemble-main.service -p MemoryMax -p MemoryHigh` (effective values — the
+> authoritative resolution; the unit file is mode 600 root) and
+> `ls /etc/systemd/system/ensemble-main.service.d/`. **The unit file is
 > REGENERATED** by `scripts/upgrade/adopt-unit.sh`, so a hand-edited unit reverts — put a
 > **drop-in** at `30-memory-bounds.conf` instead.
 
