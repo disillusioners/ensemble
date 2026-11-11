@@ -406,6 +406,19 @@ cmd="${1:-}"; target="${2:-}"
 real=""
 [ -n "${INSTALL_DIR:-}" ] && real="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd)"
 port_free() { [ -z "${PORT:-}" ] && return 0; ! lsof -ti:"$PORT" >/dev/null 2>&1; }
+# Fixture knobs (review round 1, F4(ii) legs):
+#   RJ_LAUNCHD_BOOTOUT_RM       — rm -rf this path at the next SUCCESSFUL
+#                                 bootout (fabricates the mid-promote
+#                                 eviction/deletion that reaches the 8b
+#                                 missing-previous arm AFTER the preflight
+#                                 integrity already verified the release);
+#                                 consumed once.
+#   RJ_LAUNCHD_BOOTOUT_FAIL_NTH — fail ONLY the Nth bootout call (counted
+#                                 in $STATE/bootout-count; 2 = the 8b
+#                                 forward-rollback's stop fails while the
+#                                 pre-flip stop succeeded — the F2-arm1
+#                                 shape). The disarm's own bootout (N+1)
+#                                 still succeeds.
 case "$cmd" in
     list)
         pid="-"
@@ -435,6 +448,22 @@ case "$cmd" in
             echo "rj-launchctl: bootout REFUSED (fixture: RJ_LAUNCHD_BOOTOUT_FAIL=1 — the stop-failure precondition)" >&2
             exit 1
         fi
+        if [ -n "${RJ_LAUNCHD_BOOTOUT_FAIL_NTH:-}" ]; then
+            # A NEW knob value starts a FRESH counting window (the counter
+            # otherwise persists across the whole suite run — earlier arms'
+            # bootouts would have consumed the Nth already).
+            if [ "$(cat "$STATE/nth-knob" 2>/dev/null)" != "$RJ_LAUNCHD_BOOTOUT_FAIL_NTH" ]; then
+                printf '%s' "$RJ_LAUNCHD_BOOTOUT_FAIL_NTH" > "$STATE/nth-knob"
+                printf '0' > "$STATE/bootout-count"
+            fi
+            n=0; [ -f "$STATE/bootout-count" ] && n="$(cat "$STATE/bootout-count" 2>/dev/null)"
+            case "$n" in ''|*[!0-9]*) n=0 ;; esac
+            n=$((n + 1)); printf '%s' "$n" > "$STATE/bootout-count"
+            if [ "$n" -eq "${RJ_LAUNCHD_BOOTOUT_FAIL_NTH}" ]; then
+                echo "rj-launchctl: bootout call #$n REFUSED (fixture: RJ_LAUNCHD_BOOTOUT_FAIL_NTH=$RJ_LAUNCHD_BOOTOUT_FAIL_NTH)" >&2
+                exit 1
+            fi
+        fi
         holders=""
         if [ -n "${PORT:-}" ]; then holders="$(lsof -ti:"$PORT" 2>/dev/null)"; fi
         # A real bootout tears down the JOB — every process it owns, not
@@ -459,6 +488,13 @@ case "$cmd" in
                 exit 1
             fi
             : > "$STATE/was-live"
+        fi
+        # F4(ii) arm-C knob: fabricate the mid-promote eviction/deletion.
+        # Scoped to the caller's export lifetime (the node exports it
+        # around ONE promote and unsets it); the [ -e ] guard makes repeat
+        # bootouts within that window no-ops.
+        if [ -n "${RJ_LAUNCHD_BOOTOUT_RM:-}" ] && [ -e "${RJ_LAUNCHD_BOOTOUT_RM}" ]; then
+            rm -rf -- "${RJ_LAUNCHD_BOOTOUT_RM}"
         fi
         exit 0
         ;;
@@ -1953,6 +1989,111 @@ fi
 assert_eq "12e NO rollback count" "$W2_COUNT_BEFORE" "$(b4_inf 'journal_rollback_count_24h')"
 assert_eq "12e NO cooldown armed" "null" "$(m4_field cooldown_until)"
 assert_eq "12e healthy version NOT quarantined" "[]" "$(b4_inf '_json_sub "$(journal_read)" quarantined')"
+
+# 12g. F1/F4(i) (review round 1): a LAUNCHD verify failure must ROUTE to 8b
+#      with the reason INTACT. Pre-F1 the stale unconditional
+#      gate_fail_reason="" at the HEALTH-GATE banner wiped the verify verdict
+#      three lines after it was set (insert-above-stale-initializer from
+#      base 83cd98a11) and the unguarded livez arm could overwrite it — the
+#      verify block was LOG-ONLY, and the reachable false-success was
+#      bootstrap rc 2 "already loaded" (lib.sh:5733-5756 names THIS verify as
+#      its designated revalidation) + a port-squatting daemon gating green
+#      against the WRONG daemon. Seam leg (the sanctioned LAUNCHCTL_BIN
+#      surface): supervision VERIFIES, stop/flip/bootstrap run, the env is
+#      DARK (no owned pid) ⇒ the provenance verify fails ⇒ 8b, and the
+#      launchd reason must SURVIVE into the journal (it rides the 8b
+#      auto-rollback event's "gate fail: …" detail).
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+F4G_OUT="$(b4_run_promote "$SBX_V3")"; F4G_RC=$?
+rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+assert_eq "12g verify-fail promote halts (78)" "78" "$F4G_RC"
+assert_contains "12g the LAUNCHD verify reason SURVIVES into the journal (F1)" \
+    "launchd verify: no INSTALL_DIR-anchored daemon pid after bootstrap" "$(cat "$JB")"
+assert_eq "12g 8b auto-rollback repointed to OLD_CUR" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+assert_eq "12g txn closed by the halt" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+
+# 12h. F4(ii) (review round 1): every 8b exit that does NOT run the forward
+#      rollback must DISARM with a NAMED end state + a recorded bootout — on
+#      Darwin a supervisor left LOADED+ARMED re-arms the broken $VERSION via
+#      KeepAlive. Arms (each via the seam, each asserting the named state AND
+#      the bootout of the verified job label):
+#        A no-previous (current:null ⇒ OLD_CUR empty ⇒ PREV empty)
+#        B quarantined-previous (the DISPLACED v1 is quarantined — PREV is
+#          OLD_CUR, not journal.previous, per C3)
+#        D unsafe-previous (v1 manifest rollback_safe=false — not an
+#          integrity field, so the preflight still passes)
+#        E F2-arm1: the 8b FORWARD-ROLLBACK stop fails (the SECOND bootout;
+#          RJ_LAUNCHD_BOOTOUT_FAIL_NTH=2) ⇒ the arm-local disarm
+#        C missing-previous — LAST (destructive): the seam's
+#          RJ_LAUNCHD_BOOTOUT_RM deletes releases/v1 AT the pre-flip bootout,
+#          i.e. AFTER the preflight integrity verified it — the production
+#          contingency (eviction/manual deletion mid-run); a run_stage
+#          restore follows so §13+ see a healthy fixture.
+f4h_arm() {  # <arm-letter> <expected-rc> <named-state>
+    local letter="$1" wantrc="$2" state="$3"
+    rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+    local out rc
+    out="$(b4_run_promote "$SBX_V3")"; rc=$?
+    assert_eq "12h-$letter arm halts ($wantrc)" "$wantrc" "$rc"
+    assert_contains "12h-$letter named end state journaled ($state)" "$state" "$(cat "$JB")"
+    assert_contains "12h-$letter bootout of the verified job label recorded" \
+        "bootout com.ensemble.sbx.fixture" "$(cat "$JB")"
+}
+# A — no-previous
+b4_seed_journal null
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+f4h_arm A 78 "supervisor-disarmed-no-previous"
+# B — quarantined-previous (PREV = the DISPLACED v1)
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" "[\"$SBX_V1\"]"
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+f4h_arm B 78 "supervisor-disarmed-prev-quarantined"
+# D — unsafe-previous (rollback_safe=false on the displaced v1)
+run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1   # fresh v1 (B quarantined it)
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+python3 - "$SBX/releases/$SBX_V1/manifest.json" <<'PYM'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["rollback_safe"] = False
+json.dump(d, open(p, "w"))
+PYM
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+f4h_arm D 78 "supervisor-disarmed-prev-unsafe"
+# E — F2-arm1: the 8b forward-rollback stop fails (bootout call #2), the
+# arm-local disarm (bootout call #3) still succeeds
+run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1   # restore rollback_safe
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+export RJ_LAUNCHD_BOOTOUT_FAIL_NTH=2
+F4H_E_OUT="$(b4_run_promote "$SBX_V3")"; F4H_E_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_FAIL_NTH
+rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+assert_eq "12h-E rollback-stop-failure arm exits 1" "1" "$F4H_E_RC"
+assert_contains "12h-E F2-arm1 named end state journaled" \
+    "supervisor-disarmed-rollback-stop-failed" "$(cat "$JB")"
+assert_contains "12h-E bootout of the verified job label recorded" \
+    "bootout com.ensemble.sbx.fixture" "$(cat "$JB")"
+# C — missing-previous, LAST (deletes releases/v1 mid-promote)
+run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+export RJ_LAUNCHD_BOOTOUT_RM="$SBX/releases/$SBX_V1"
+F4H_C_OUT="$(b4_run_promote "$SBX_V3")"; F4H_C_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_RM
+rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+assert_eq "12h-C missing-previous arm halts (78)" "78" "$F4H_C_RC"
+assert_contains "12h-C named end state journaled" "supervisor-disarmed-prev-missing" "$(cat "$JB")"
+assert_contains "12h-C bootout of the verified job label recorded" \
+    "bootout com.ensemble.sbx.fixture" "$(cat "$JB")"
+run_stage --skip-build "$FIXTURE/stub-prod" > /dev/null 2>&1   # restore v1 for §13+
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
 
 # ─── 13. P2.3 B4 leg 2: _refuse journals entry-refusals (best-effort) ──────
 section "_refuse: journaled entry refusals (upgrade_promote_refusal)"
