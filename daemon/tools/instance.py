@@ -291,6 +291,7 @@ from .wedge_capture import create_wedge_capture_tools
 from .notify_user import create_notify_user_tools
 from .metrics_read import create_metrics_read_tools
 from .prompt_reload import create_prompt_reload_tools
+from .prompt_assent import create_prompt_assent_tools
 from .nest_report import create_nest_report_tools
 from .nest_report_read import create_nest_report_read_tools
 from .memoir import create_memoir_tools
@@ -2920,6 +2921,39 @@ def create_notify_user_tools_if_available(manager, current_instance_id: str, age
     entry + construction).
     """
     return create_notify_user_tools(
+        manager,
+        current_instance_id=current_instance_id,
+        agent_id=agent_id,
+        agent_tag=agent_tag,
+    )
+
+
+def create_prompt_assent_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
+    """Create the conversational-approval tool for one instance/agent.
+
+    prompt-assent (2026-11-10) — the tool resolves the factor-2
+    user-origin window + the triggering message row through the
+    manager, the pending-item row through the manager's
+    ``_prompt_version_repo`` and the token store through the manager's
+    engine. The factory itself ALWAYS constructs (the tool refuses
+    cleanly when a handle is missing) — there is no service-presence
+    wiring check here, unlike the sibling ``*_if_available`` factories.
+
+    Per-agent visibility is scoped afterwards by ``_apply_tool_filter``
+    via the ``prompt-assent`` PRIVILEGED category (entry #21) — granted
+    via the explicit ``tools.allow: ["prompt-assent"]`` entry in
+    ``agents/ari/meta.json`` and NOWHERE else (ari-exactly). The
+    privileged category is NOT sufficient on its own — a literal tool
+    name in an allow list bypasses the category gate — so the tool body
+    ALSO carries its own ``agent_id == "ari"`` gate. Both gates are
+    required.
+
+    Decorator-only registration is SILENTLY INVISIBLE — the extend of
+    this factory's return list inside ``create_instance_tools`` is the
+    third step of the three-step registration seam (decorator + registry
+    entry + construction).
+    """
+    return create_prompt_assent_tools(
         manager,
         current_instance_id=current_instance_id,
         agent_id=agent_id,
@@ -7014,6 +7048,37 @@ Returns:
             manager,
             current_instance_id=current_instance_id,
             agent_id=agent_id,
+        )
+    )
+
+    # ── Prompt-assent tools (prompt-assent lane, 2026-11-10) ───────────
+    # Same critical list-append pattern as board_tool_list /
+    # self_alarm_tool_list / the wedge-capture extend above:
+    # decorator-only registration is SILENTLY INVISIBLE — this extend is
+    # the third step of the three-step registration seam (decorator +
+    # registry entries + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # The category is PRIVILEGED (entry #21): the conversational
+    # approval lane mints and consumes ASSENT TOKENS on the Emperor's
+    # behalf — the empty-allow inherit universe must never hold that
+    # authority. The ari-only audience is spelled by the
+    # ``tools.allow: ["prompt-assent"]`` entry (agents/ari/meta.json)
+    # AND the tool body's SECOND, independent factory-captured agent_id
+    # gate — a LITERAL tool name in an allow list bypasses the category
+    # gate, so the category alone cannot spell the audience. The
+    # kill-switch is per-call and defaults OFF (D-2, fail-closed): the
+    # tool is constructed unconditionally and refuses typed
+    # ``lane-disabled`` when switched off — registration is
+    # SWITCH-STATE-INDEPENDENT.
+    tools.extend(
+        create_prompt_assent_tools_if_available(
+            manager, current_instance_id, agent_id, agent_tag=version_tag
         )
     )
 

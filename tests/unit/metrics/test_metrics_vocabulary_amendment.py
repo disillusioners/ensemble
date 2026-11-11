@@ -32,10 +32,13 @@ class TestVocabularyVersion:
         7 → 8 with the project-operating-knowledge Phase 1 lane (the
         ``pok`` NON-privileged category joined; artifact 61 → 62 —
         both numbers re-derived mechanically at the tree, the design's
-        6→7 / 60→61 were stale).  The P2-M8 mutation (the marker left
-        at 1) still REDS this pin.
+        6→7 / 60→61 were stale) and 8 → 9 with the prompt-assent lane
+        (the ``prompt-assent`` PRIVILEGED category (#21, ari-exactly)
+        joined the tool-category label set; artifact 62 → 63 — both
+        numbers re-derived mechanically at the tree).  The P2-M8 mutation
+        (the marker left at 1) still REDS this pin.
         """
-        assert cm.VOCABULARY_VERSION == 8
+        assert cm.VOCABULARY_VERSION == 9
 
     def test_the_version_is_an_integer(self) -> None:
         assert isinstance(cm.VOCABULARY_VERSION, int)

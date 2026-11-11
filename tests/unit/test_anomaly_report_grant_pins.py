@@ -300,18 +300,19 @@ class TestTheRepinnedAllowArrayConstants:
         constant. History: 6 entries (pre-grant) → 7 (nest-report
         appended) → 9 (memoir + prompt-reload joined, 2026-11-06) →
         10 (``pok`` inserted BEFORE ``nest-report`` — the sweep's
-        insert-before rule, the memoir/prompt-reload tail preserved)."""
+        insert-before rule, the memoir/prompt-reload tail preserved)
+        → 11 (prompt-assent appended at the END, 2026-11-10)."""
         source = (REPO_ROOT / "tests/unit/test_board_registration.py").read_text(
             encoding="utf-8"
         )
         assert (
             '"ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", '
             '"wedge-capture", "notify-user", "pok", "nest-report", '
-            '"memoir", "prompt-reload"],' in source
+            '"memoir", "prompt-reload", "prompt-assent"],' in source
         ), (
             "the ari trailing set must carry pok inserted BEFORE "
-            "nest-report with the memoir/prompt-reload tail intact "
-            "(the 10-entry re-derived value)"
+            "nest-report with the memoir/prompt-reload/prompt-assent tail "
+            "intact (the 11-entry re-derived value)"
         )
 
     def test_the_gaia_constant_is_exactly_the_seven(self) -> None:

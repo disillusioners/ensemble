@@ -14,10 +14,10 @@ Mirrors ``tests/unit/test_anomaly_report_grant_pins.py`` for the
     nest-report) carries it APPENDED AT END; ``ari`` carries it
     mid-array with the memoir/prompt-reload tail intact;
 (c) **once-per-agent** — the grant appears exactly once;
-(d) **the vocab/artifact pair** — ``VOCABULARY_VERSION == 8`` and
-    the committed artifact carries 62 categories with ``pok``
+(d) **the vocab/artifact pair** — ``VOCABULARY_VERSION == 9`` and
+    the committed artifact carries 63 categories with ``pok``
     (F-1 pair — the constant and the artifact move in the SAME
-    change).
+    change; the 8 → 9 bump is the prompt-assent lane's).
 
 Mutation legs (the pack's own mutation-verification duty):
 
@@ -161,25 +161,25 @@ class TestThePokGrantOrdering:
         assert ANCHOR_CATEGORY in allow
         assert allow.index(CATEGORY) == allow.index(ANCHOR_CATEGORY) - 1
         tail = allow[allow.index(CATEGORY) + 2 :]
-        assert tail == ["memoir", "prompt-reload"], (
-            f"ari's memoir/prompt-reload tail must survive the insert "
-            f"UNREORDERED — tail is {tail}"
+        assert tail == ["memoir", "prompt-reload", "prompt-assent"], (
+            f"ari's memoir/prompt-reload/prompt-assent tail must survive "
+            f"the insert UNREORDERED — tail is {tail}"
         )
 
 
 class TestTheVocabularyArtifactPair:
-    def test_vocabulary_version_is_eight(self) -> None:
-        assert VOCABULARY_VERSION == 8
+    def test_vocabulary_version_is_nine(self) -> None:
+        assert VOCABULARY_VERSION == 9
 
-    def test_artifact_carries_62_categories_with_pok(self) -> None:
+    def test_artifact_carries_63_categories_with_pok(self) -> None:
         artifact_path = (
             REPO_ROOT / ".agents" / "shared" / "metrics" / "tool-categories.json"
         )
         data = json.loads(artifact_path.read_text(encoding="utf-8"))
-        assert data["count"] == 62, (
-            f"artifact count is {data['count']} — the POK bump is 61 → 62 "
-            "(F-1: regenerate via ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT, "
-            "never hand-edit)"
+        assert data["count"] == 63, (
+            f"artifact count is {data['count']} — the prompt-assent bump is "
+            "62 → 63 (F-1: regenerate via "
+            "ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT, never hand-edit)"
         )
         assert data["vocabulary_version"] == VOCABULARY_VERSION
         assert CATEGORY in data["categories"]

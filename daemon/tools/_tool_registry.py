@@ -322,6 +322,15 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # opt-in only, never default-granted; the ari-only runtime gate
     # lives in the tool body (factory-captured agent_id).
     "prompt_reload",
+    # prompt-assent (2026-11-10, prompt-assent lane): the conversational
+    # approval lane — ONE tool, FOUR verbs (list / mint / approve /
+    # reject). Created by the create_prompt_assent_tools() factory
+    # (daemon/tools/prompt_assent.py). Factory-built (not import-time
+    # registered), so it belongs in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #21) —
+    # opt-in only, never default-granted; the ari-only runtime gate
+    # lives in the tool body (factory-captured agent_id).
+    "prompt_assent",
 })
 
 
@@ -403,7 +412,22 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # ``tests/unit/tools/test_nest_report_read_registration.py`` (the
 # nest-report-read pin — added 2026-11-05; exact-set AND count) and
 # ``tests/unit/test_memoir_registration.py`` (the memoir pin —
-# added 2026-11-06; exact-set AND count).  SEPARATELY, ONE
+# added 2026-11-06; exact-set AND count) and
+# ``tests/unit/tools/test_prompt_reload_pins.py`` (the prompt-reload
+# pin — added 2026-11-06; count; it was MISSING from this prose until
+# the 2026-11-10 prompt-assent ceremony re-derived the census — the
+# prose is the artifact that gets copied forward, so a stale prose is a
+# real defect).  That is FIFTEEN pin files, PLUS the ONE
+# mutation-pack find/replace STRING pair
+# (``test/packs/metrics_read_mutation_matrix_test.py`` MT-01 — derived
+# from the live constant at pack-import time so a count bump cannot
+# stale it; the pack also needs the new category as a MUTATION TARGET
+# — a category with no mutation target is not covered by the matrix).
+# The site/file census is re-derived BY GREP at every lane ceremony
+# (the three greps at the end of this block) — the numbers below are
+# the 2026-11-10 prompt-assent derivation, never a frozen literal to
+# copy forward.
+# SEPARATELY, ONE
 # allow-array TRAILING-ENTRY pin (the ari ``tools.allow``
 # ARRAY-ORDER discipline, ``tests/unit/test_board_registration.py``)
 # keeps the per-agent grant arrays ordered; it pins ARRAY ORDER,
@@ -770,6 +794,28 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # count assertion sites (re-derive the census BY GREP at the
     # ceremony — see the SAME-PR RULE block above) are mandatory.
     "prompt-reload",
+    # prompt-assent (2026-11-10, prompt-assent lane): the conversational
+    # approval lane ("The Emperor's Word / Assent") — ONE tool, FOUR
+    # verbs (AR-2: list / mint / approve / reject), created by the
+    # create_prompt_assent_tools() factory
+    # (daemon/tools/prompt_assent.py). PRIVILEGED entry #21 of
+    # PRIVILEGED_TOOL_CATEGORIES (20 -> 21 after the prompt-reload
+    # entry): the lane mints and consumes ASSENT TOKENS on the
+    # Emperor's behalf, so the empty-allow inherit universe must NOT
+    # auto-grant that authority. Explicit
+    # ``tools.allow: ["prompt-assent"]`` on ari is the only access
+    # path — ARI-EXACTLY — and the tool body ALSO carries its own
+    # factory-captured agent_id gate (the notify-user precedent — a
+    # LITERAL tool name in an allow list bypasses the category gate
+    # outright). The kill-switch (``ENSEMBLE_PROMPT_ASSENT_ENABLED``)
+    # is read AT CALL TIME, defaults OFF (D-2, fail-closed), and the
+    # tool STAYS REGISTERED under any switch state (refusal-at-call,
+    # never construction-absence). The three-factor gate has exactly
+    # ONE implementation owner: daemon/tools/prompt_assent.py (O-E).
+    # SAME-PR pin updates at every file carrying the privileged-set /
+    # count assertion sites (re-derive the census BY GREP at the
+    # ceremony — see the SAME-PR RULE block above) are mandatory.
+    "prompt-assent",
 })
 
 
@@ -1320,6 +1366,16 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # name is snake_case (``prompt_reload``) — the house pattern
     # (``notify-user`` → ``notify_user``).
     "prompt-reload": "daemon.tools.prompt_reload",
+    # prompt-assent (2026-11-10, prompt-assent lane): the conversational
+    # approval lane — ari's four-verb assent surface (AR-2: list /
+    # mint / approve / reject). PRIVILEGED category (entry #21 of
+    # PRIVILEGED_TOOL_CATEGORIES): see the set's comment block. The
+    # value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; the
+    # category key is KEBAB-case (``prompt-assent``) while the tool
+    # name is snake_case (``prompt_assent``) — the house pattern
+    # (``prompt-reload`` → ``prompt_reload``).
+    "prompt-assent": "daemon.tools.prompt_assent",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1886,6 +1942,9 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # Factory-built (prompt-reload lane, 2026-11-06) — see
     # DYNAMIC_TOOL_NAMES for the registration note.
     "prompt_reload",
+    # Factory-built (prompt-assent lane, 2026-11-10) — see
+    # DYNAMIC_TOOL_NAMES for the registration note.
+    "prompt_assent",
 })
 
 
