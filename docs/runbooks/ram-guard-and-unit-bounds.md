@@ -22,45 +22,39 @@ routed follow-ups, the T4 hand-off note, the persistence facts, and the negative
 ## (a) Measured state — no memory cap exists today
 
 `MemoryMax=infinity` · `MemoryHigh=infinity` · `MemorySwapMax=infinity` · `MemoryAccounting=yes`
-— **no cap exists** (still true on 2026-11-11, *after* the six OOM deaths of (b)). `systemctl show` prints the *effective* values systemd resolved, so
-`infinity` on both is the authoritative proof that nothing upstream sets a bound; the only
-drop-ins are `10-zero-env-reset.conf` (a lone `Environment=` reset) and `20-core-capture.conf`
-(`LimitCORE=`), neither carrying `Memory*`. Observed 2026-11-11: `MemoryCurrent` 7.10 GiB,
-`memory.peak` 9.726 GiB, `memory.events` all-zero (`low 0 · high 0 · max 0 · oom 0 · oom_kill 0`).
-Verify: `systemctl show ensemble-main.service -p MemoryMax -p MemoryHigh -p MemorySwapMax` ·
-`ls /etc/systemd/system/ensemble-main.service.d/` (the unit file itself is mode 600 root — read it
-as root if you need the raw text; `systemctl show` is the authoritative resolution).
-⇒ **Next free drop-in slot is `30-memory-bounds.conf`.** The unit file is a **generated
-artifact** (`scripts/upgrade/adopt-unit.sh`) — a drop-in survives regeneration, a hand-edit does not.
+— **no cap**, still true on 2026-11-11 *after* the deaths in (b). `systemctl show` prints the
+**effective** resolved values, so `infinity` on both is the authoritative proof; the only drop-ins
+are `10-zero-env-reset.conf` (lone `Environment=`) and `20-core-capture.conf` (`LimitCORE=`),
+neither carrying `Memory*`. Observed: `MemoryCurrent` 7.10 GiB, `memory.peak` 9.726 GiB,
+`memory.events` all-zero (`low 0 · high 0 · max 0 · oom 0 · oom_kill 0`).
+**Verify:** `systemctl show ensemble-main.service -p MemoryMax -p MemoryHigh -p MemorySwapMax` ·
+`ls /etc/systemd/system/ensemble-main.service.d/` — the unit file itself is mode 600 root, so
+`systemctl show` (not a grep of the unit) is what an unprivileged operator can rely on.
+⇒ **Next free drop-in slot is `30-memory-bounds.conf`.** The unit is a **generated artifact**
+(`scripts/upgrade/adopt-unit.sh`): a drop-in survives regeneration, a hand-edit does not.
 
 ## (b) The kernel OOM deaths — Oct-30 and Nov-09
 
 Every one is a **kernel `oom-kill`** (`global_oom`, `task_memcg=…/ensemble-main.service`), *not* a
 cgroup-cap kill — no cap existed to fire. Arch `E3` records a **unit peak of 7.3 GiB** for the
-Oct-30 pair it studied.
+Oct-30 pair it studied. `anon-rss` below is the kernel's `Killed process` line.
 
-| # | Kernel kill | Unit failure | Killed task (`anon-rss`) |
+| # | Kernel kill | Unit `Failed with result` | Killed task |
 |---|---|---|---|
 | 1 | `2026-10-30 10:42:41Z` | `10:43:06Z` `oom-kill` | `python3` 1167115 — 10,333,184 kB ≈ 9.85 GiB |
 | 2 | `2026-10-30 11:13:24Z` | `11:13:59Z` `oom-kill` | `python3` 1178590 — 11,161,472 kB ≈ 10.64 GiB |
-| 3 *(extra — see note)* | `2026-10-30 19:16:12Z` | `19:16:32Z` `oom-kill` | `python` 1677256 — 10,281,088 kB ≈ 9.80 GiB |
+| 3 | `2026-10-30 19:16:12Z` | `19:16:32Z` `oom-kill` | `python` 1677256 — 10,281,088 kB ≈ 9.80 GiB |
+| 4 | `2026-11-09 09:26:27Z` | `09:27:38Z` `oom-kill` | `python` 597787 — 10,631,672 kB ≈ 10.13 GiB |
+| 5 | `2026-11-09 09:31:47Z` | `09:32:58Z` `oom-kill` | `python` 598669 — 11,191,760 kB ≈ 10.67 GiB |
+| 6 | `2026-11-09 09:42:57Z` | `09:44:07Z` `oom-kill` | `python` 599644 — 11,142,700 kB ≈ 10.63 GiB |
 
-**A SECOND incident day (draft-time finding — not in the plan or the arch):** the same class
-recurred on **2026-11-09**, **three more** kernel kills (unit `Failed with result 'oom-kill'` at
-`09:27:38Z`, `09:32:58Z`, `09:44:07Z`):
+**Six deaths in twelve days, the last two days before this memo** — the death class is **current**,
+not historical. **Draft-time disclosure:** the plan and arch carry only #1 and #2; #3 was found on
+the same Oct-30 day and #4–#6 on a **second incident day (2026-11-09)** that neither document
+mentions. Recorded so the memo does not under-report.
 
-| # | Kernel kill | Killed task (`anon-rss`) |
-|---|---|---|
-| 4 | `2026-11-09 09:26:27Z` | `python` 597787 — 10,631,672 kB ≈ 10.13 GiB |
-| 5 | `2026-11-09 09:31:47Z` | `python` 598669 — 11,191,760 kB ≈ 10.67 GiB |
-| 6 | `2026-11-09 09:42:57Z` | `python` 599644 — 11,142,700 kB ≈ 10.63 GiB |
-
-That is **six** kernel OOM deaths in twelve days, the last **two days before this memo**, all in
-`task_memcg=…/ensemble-main.service`, all at ≈10–11 GiB `anon-rss`. Treat the death class as
-**current**, not historical.
-
-Reproduce (note `-b all` — `journalctl -k --since <date>` silently returns nothing for windows
-that cross an offline boot boundary on this host, which is a **tooling trap, not an absence**):
+**Reproduce with `-b all`:** `journalctl -k --since <date>` returned **zero** entries for both
+windows on this host (a boot-boundary trap that reads as "no OOM happened"):
 
 ```bash
 journalctl -k -b all --since "2026-10-29" --until "2026-11-01" --no-pager | grep 'Out of memory'
@@ -68,25 +62,19 @@ journalctl -k -b all --since "2026-11-09" --until "2026-11-10" --no-pager | grep
 journalctl -u ensemble-main.service -b all --since "2026-10-29" --no-pager | grep 'oom-kill'
 ```
 
-**Draft-time disclosure:** the plan names **two** Oct-30 deaths; the retained journal shows a
-**third** on the same day plus the three Nov-09 deaths — recorded so this memo does not
-under-report the observed count. `anon-rss` is the kernel's figure for the task it killed (a
-different quantity from `E3`'s 7.3 GiB unit peak); **neither is a cap**.
-
 ## (c) The orphan finding (E8)
 
-**The Oct-30 killing memory was untracked/orphaned — largely children of a dead daemon
-incarnation — so no per-command guard could have seen it.** Hence the layering: the guard is the
-**inner, preventive** layer over live in-flight trees · the **unit cap is the outer layer**
-covering the orphan-across-restarts class · the kernel global OOM is last.
+**The killing memory was untracked/orphaned — largely children of a dead daemon incarnation — so
+no per-command guard could have seen it.** Hence the layering: the guard is the **inner,
+preventive** layer over live in-flight trees · the **unit cap is the outer layer** covering the
+orphan-across-restarts class · the kernel global OOM is last.
 
-> **Re-check status (draft-time disclosure).** T20 could not re-derive the historical attribution
-> (no retained OOM record for the incident windows; `memory.stat` is a snapshot, not a
-> time-series). At the sampled instant: **no orphans** (no unit process with ppid 1), unit memory
-> **anon-dominated** (78 % — page-cache hypothesis refuted), largest live consumers were
-> **foreign concurrent workloads sharing the unit's cgroup**. E8 therefore stands as the arch's
-> finding *for the incident windows* and is **not** re-verified today; what today shows is the
-> same class — unit memory no per-command guard owns.
+> **Re-check status (draft-time).** T20 could not re-derive the historical attribution (no retained
+> record for the incident windows; `memory.stat` is a snapshot, not a time-series). At the sampled
+> instant: **no orphans** (no unit process with ppid 1), memory **anon-dominated** (78 % —
+> page-cache hypothesis refuted), largest consumers **foreign concurrent workloads sharing the
+> unit's cgroup**. So E8 stands as the arch's finding *for the incident windows*, **not**
+> re-verified today; what today shows is the same class — unit memory no per-command guard owns.
 
 ## (d) The interaction table — re-published with the measured R
 
@@ -98,19 +86,19 @@ covering the orphan-across-restarts class · the kernel global OOM is last.
 |---|---|---|---|
 | **Derived default, this host** | 8.171 | **14.139 GiB** | **NO — at any R** (gap 5.259 GiB here; **4.447 at R = 0**) |
 | Knob **3072 MiB** | 3.0 | **8.968 GiB** | **NO at the measured R** — iff `R ≤ 1.034`; measured **1.1599 exceeds** |
-| **N = 2 contended** | 8.171 (or 3.0) | **14.73** (3072-frame: 9.56) | **NO — window EMPTY** at every `C`; 3072-frame closes above `R ≈ 0.598` |
+| **N = 2 contended** | 8.171 *or* 3.0 | **14.73** *(3072-frame: 9.56)* | **NO — window EMPTY** at every `C`; 3072-frame closes above `R ≈ 0.598` |
 | **General bound at the default** | 0.7T | 0.7T + 5.968 | iff **`T ≥ 26.5 + 2.33·R`** ⇒ **29.19 GiB** here (28.82 at R = 1) |
 
 *Provenance:* the arch's first-row floor prints `13.44`, but its own frozen frame yields `14.027`
 at R = 1 (its `≈4.45` R = 0 gap reproduces exactly) — **the frame is the contract**, so floors
-here are frame-derived then evaluated at the measured R. The earlier `14.717` N = 2 figure used
-the superseded `R = 1.1503`; at the measured R it is `14.73`, verdict identical.
+here are frame-derived then evaluated at the measured R. The earlier `14.717` N = 2 figure used the
+superseded `R = 1.1503`; at the measured R it is `14.73`, verdict identical.
 **Conservative variant (`D_max` 4.5, the T20 fallback):** derived-default floor **15.139 GiB**,
 3072-MiB floor **9.968 GiB** ⇒ under that frame **no cap is feasible here at any `C`, any `R`**.
 
 | Option | `MemoryHigh` / `MemoryMax` | Verdict |
 |---|---|---|
-| **RECOMMENDED** — lever (b), knob at 3072 MiB | **`7G` / `8700M`** (8.496 GiB) | Frame-feasible; guard wins the race only **below `R ≈ 0.486`** (0.755 typical; **0.281** contended). Box margin 0.384 GiB. Its real job is the **orphan class** |
+| **RECOMMENDED** — lever (b), knob at 3072 MiB | **`7G` / `8700M`** (8.496 GiB) | Frame-feasible; the guard wins the race only **below `R ≈ 0.486`** (0.755 typical; **0.281** contended). Box margin 0.384 GiB. Its real job is the **orphan class** |
 | 7G / `8G` | 8.00 GiB | **REJECTED as primary** — under the frame floor 8.156 ⇒ the cap fires before the kill even at R = 0 |
 | 7G / `9G` | 9.00 GiB | Rejected — 9 + 1.79 + 1.0 = 11.79 > 11.672 ⇒ kernel OOM first |
 | Throttle-only | `8G` / unset | Rejected as primary — does **not** bound the orphan class |
@@ -136,29 +124,28 @@ MemoryMax=8700M
 1. **Canary — live, self-reverting, writes no file:**
    `systemctl set-property --runtime ensemble-main.service MemoryHigh=7G MemoryMax=8700M`, then
    `systemctl show ensemble-main.service -p MemoryHigh -p MemoryMax`. Watch one steady-state
-   window: `memory.events` `high` (throttle episodes — a *rising* `high` means the band is tight),
-   `max` / `oom_kill` (**must stay 0**), and `/livez` + `/readyz`.
+   window: `memory.events` `high` (throttle episodes — *rising* means the band is tight),
+   `max` / `oom_kill` (**must stay 0**), `/livez` + `/readyz`.
 2. **Persist** at a maintenance window: write the drop-in → `sudo systemctl daemon-reload` →
    restart the unit (or the project's restart wrapper).
 
 > **⚠ Re-measure before persisting.** At drafting `MemoryCurrent` was **7.10 GiB** (peak 9.726
-> GiB) — **`7G` sits at or below today's steady state**, so the throttle band would bind
-> continuously rather than give headroom (`7G` was sized against a 5.3–6.0 GiB band, 2026-10-18).
-> If a fresh reading is above ~6 GiB, lift `MemoryHigh` toward — never above — `MemoryMax=8700M`:
-> `MemoryMax` contains, `MemoryHigh` only buys reclaim time.
+> GiB) — **`7G` sits at or below today's steady state**, so the band would bind continuously
+> (`7G` was sized against a 5.3–6.0 GiB band, 2026-10-18). If a fresh reading is above ~6 GiB, lift
+> `MemoryHigh` toward — never above — `MemoryMax=8700M`: `MemoryMax` contains, `MemoryHigh` only
+> buys reclaim time.
 
 ## (f) Verify / rollback
 
 ```bash
 systemctl show ensemble-main.service -p MemoryMax -p MemoryHigh -p NRestarts
 cat /sys/fs/cgroup/system.slice/ensemble-main.service/memory.events
-journalctl -u ensemble-main.service --since '-1 h' | grep -Ei 'memory-limit|oom-kill'
-journalctl -u ensemble-main.service --since '-1 h' | grep -Ei 'ram-guard:'
+journalctl -u ensemble-main.service -b all --since '-1 h' | grep -Ei 'memory-limit|oom-kill|ram-guard:'
 ```
 
 `MemoryMax`/`MemoryHigh` read back exactly what you set · **`NRestarts` must not increment**
 (record the pre-change value — **1 on this host at drafting**; the plan's "stays 0" predates that
-restart) · **`max` / `oom` / `oom_kill` must stay 0** (`high` is *expected* to count throttle
+restart) · **`max` / `oom` / `oom_kill` must stay 0** (`high` *is expected* to count throttle
 episodes; `max` > 0 means the cap fired — a unit kill, not a box death) · the
 `memory-limit|oom-kill` grep stays empty for the window you care about.
 **Rollback is symmetric** — remove the drop-in → `daemon-reload` → restart. No residue, no schema,
@@ -167,8 +154,8 @@ evaporate at the next start).
 
 ## (g) Honesty set + truth statement
 
-Both reproduced **verbatim** — all fifteen honesty items in **Appendix A**, the truth statement
-and the standing prohibition in **Appendix B**. Carry one sentence away: **the cgroup cap is the
+Both reproduced **verbatim** — all fifteen honesty items in **Appendix A**, the truth statement and
+the standing prohibition in **Appendix B**. Carry one sentence away: **the cgroup cap is the
 containment layer, and above ~0.5 GiB/s it — not the guard — is the layer that fires.**
 
 ## (h) Supersession note — `resource-cost-control` §8.1
@@ -181,11 +168,11 @@ containment layer, and above ~0.5 GiB/s it — not the guard — is the layer th
 
 ## (i) The default is dynamic — the fixed 8 GB figure is superseded
 
-USER RULING #2 supersedes the commissioned fixed ceiling: with `RAM_GUARD_CEILING_MIB` **unset**
-the per-command ceiling is **70 % of the detected effective total RAM** (the daemon's cgroup limit
-when finite, else host `MemTotal`), resolved **once at boot**, floored at 64 MiB, **never
-upper-capped** (USER RULING #1's intent — disaster prevention, not a constraint on legitimate heavy
-work — carried by the no-upper-clamp rule). Here: **8,367 MiB = 8.171 GiB**, `ceiling_source = meminfo`.
+USER RULING #2 supersedes the commissioned fixed ceiling: with `RAM_GUARD_CEILING_MIB` **unset** the
+per-command ceiling is **70 % of the detected effective total RAM** (the daemon's cgroup limit when
+finite, else host `MemTotal`), resolved **once at boot**, floored at 64 MiB, **never upper-capped**
+(USER RULING #1's intent — disaster prevention, not a constraint on legitimate heavy work — carried
+by the no-upper-clamp rule). Here: **8,367 MiB = 8.171 GiB**, `ceiling_source = meminfo`.
 
 * **General feasibility bound:** a unit cap coexists with the default iff
   **`T ≥ 26.5 + 2.33·R GiB`** (29.19 GiB here at measured R; 28.82 at R = 1).
@@ -202,17 +189,17 @@ work — carried by the no-upper-clamp rule). Here: **8,367 MiB = 8.171 GiB**, `
 ## (j) Three host-reality items
 
 1. **The cap covers the ORPHAN class, not the guard's backup** — at the measured rates the
-   guard-vs-cap race is **lost above ≈0.5 GiB/s** (0.486 worst frame at `8700M`, knob at 3072
-   MiB). The cap's value is containing what no per-command guard sees: orphans from a previous
+   guard-vs-cap race is **lost above ≈0.5 GiB/s** (0.486 worst frame at `8700M`, knob at 3072 MiB).
+   The cap's value is containing what no per-command guard sees: orphans from a previous
    incarnation, foreign workloads in the unit's cgroup, the daemon's own growth.
 2. **At the 70 % default, no feasible unit cap exists on this host** — the bound is
    `T ≥ 26.5 + 2.33·R GiB`, the derived default is 8,367 MiB, and the guard **fires at-or-after
    daemon death** (demand ≈ 4.79 + 8.17 = 12.96 GiB > 11.67 physical). **Retained, disclosed and
    user-accepted.** Do not paper over it: at the default the guard is a **disaster line and
    witness**, and the kernel OOM is a peer layer.
-3. **The levers are no-cap / lower-the-knob / resize** (see (i)); 3 GiB is guidance under lever
-   (b) only. **"Raise to 4 GiB by the same formula" is void here** — floor 9.0 GiB already exceeds
-   the 8.88 GiB box bound.
+3. **The levers are no-cap / lower-the-knob / resize** (see (i)); 3 GiB is guidance under lever (b)
+   only. **"Raise to 4 GiB by the same formula" is void here** — floor 9.0 GiB already exceeds the
+   8.88 GiB box bound.
 
 ### The single-tree qualifier (T13)
 
