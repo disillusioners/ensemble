@@ -664,6 +664,15 @@ _enforce_deadline "$promote_deadline" restart
 # must have produced a NEW daemon, never the pre-stop one. Bounded wait (the
 # supervisor-boot path has no _boot_grace_start window — that helper runs only
 # on the nohup hand-back). Any failure sets gate_fail_reason (routes to 8b).
+# F1 (review round 1): the initializer lives HERE, ABOVE the verify writers —
+# the verify verdict (provenance / pid==pre-stop) must SURVIVE into the health
+# gate and the 8b readers. The old unconditional `gate_fail_reason=""` sat at
+# the HEALTH-GATE banner three lines below the writers (an
+# insert-above-stale-initializer inherited from base 83cd98a11) and silently
+# made this verify block LOG-ONLY; the livez arm is now empty-guarded like its
+# readyz/version/soak siblings, so a verify failure is never overwritten by a
+# later green probe either.
+gate_fail_reason=""
 if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ]; then
     _post_pid="" _post_deadline=$(( $(_now_epoch) + LIVEZ_BUDGET_S ))
     while [ "$(_now_epoch)" -lt "$_post_deadline" ]; do
@@ -683,14 +692,20 @@ if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ]; then
 fi
 
 # ═══════════════════════════ 7. HEALTH GATE (D2) ═══════════════════════════
-gate_fail_reason=""
+# (F1: the gate_fail_reason initializer moved ABOVE the launchd verify block
+# — a verify failure now flows into these probes as a pre-set reason and the
+# empty guards below skip every subsequent probe for it.)
 
 # P3 / decision (d) — phase boundary (pre-livez). The boot-grace
 # window is ACTIVE; the livez probe rides it. The deadline check
 # here is the per-phase-decomposition entry to the gate section.
 _enforce_deadline "$promote_deadline" livez
 
-if LIVEZ_JSON="$(gate_livez)"; then
+# F1: the livez arm is empty-guarded exactly like its readyz/version/soak
+# siblings — it was the only unguarded writer, so a verify-set reason could
+# be overwritten by a green livez probe (and the wipe above made the whole
+# verify block log-only).
+if [ -z "$gate_fail_reason" ] && LIVEZ_JSON="$(gate_livez)"; then
     _log "livez OK:"; _logv "$LIVEZ_JSON"
 else
     gate_fail_reason="/livez unreachable >${LIVEZ_BUDGET_S}s"
@@ -851,6 +866,17 @@ _promote_disarm_launchd() {
     local state="$1"
     [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ] || return 0
     _supervision_host_allows_launchd || return 0
+    # F8 (review round 1): an EMPTY label would make
+    # _supervision_launchd_bootout target the BARE gui/<uid> DOMAIN — a
+    # whole-domain teardown of every user LaunchAgent. Refuse fail-loud
+    # instead: the supervisor stays (possibly) LOADED+ARMED on the broken
+    # $VERSION, which is the honest degradation, never collateral.
+    if [ -z "${SUPERVISION_UNIT:-}" ]; then
+        journal_history_append halt "8b gate halt: launchd disarm REFUSED ($state) — SUPERVISION_UNIT is empty; WHOLE-DOMAIN bootout refused (supervisor possibly LOADED+ARMED on the broken $VERSION; operator MUST identify the job label and 'launchctl bootout gui/$(id -u)/<label>' manually)" \
+                                  || true
+        _warn "DISARM REFUSED ($state): SUPERVISION_UNIT is empty — refusing the whole-domain bootout; identify the job label and 'launchctl bootout gui/$(id -u)/<label>' manually"
+        return 1
+    fi
     if _supervision_launchd_bootout "$SUPERVISION_UNIT"; then
         journal_history_append halt "8b gate halt: launchd supervisor DISARMED ($state) — bootout $SUPERVISION_UNIT ⇒ DARK+DISARMED on the broken $VERSION (no self-revival; operator-driven recovery: launchctl bootstrap gui/\$(id -u) <plist> or promote a healthy version)" \
                                   || true
