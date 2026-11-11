@@ -49,6 +49,41 @@ def _held_port():
         holder.close()
 
 
+async def _ok_app(scope, receive, send):
+    """Minimal ASGI app: 200 / "ok" for every HTTP request."""
+    if scope["type"] == "http":
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"ok"})
+
+
+async def _failing_app(scope, receive, send):
+    """ASGI app whose lifespan startup FAILS the way Starlette reports it.
+
+    Sends ``lifespan.startup.failed`` (starlette/routing.py:702-708) so
+    uvicorn sets ``startup_failed`` → ``should_exit`` → the server never
+    starts → STARTUP_FAILURE (exit 3).
+    """
+    if scope["type"] == "lifespan":
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send(
+                    {
+                        "type": "lifespan.startup.failed",
+                        "message": "simulated lifespan startup failure",
+                    }
+                )
+                return
+            if message["type"] == "lifespan.shutdown":
+                return
+
+
 # ── The race shape: WAIT, then bind ──────────────────────────────────────────
 
 
@@ -126,6 +161,41 @@ def test_bind_budget_exhaustion_exits_1_not_a_new_code():
     assert excinfo.value.code not in (0, 3, 75, 78)
 
 
+def test_exhaustion_error_line_is_diagnosable(caplog):
+    """s-2: the TERMINAL exhaustion ERROR line is pinned, not just the
+    per-attempt WARNING.
+
+    The module's contract is "diagnosable from the log alone", and the
+    terminal line is the one an operator greps: it must be ERROR level
+    and carry the "budget exhausted" verdict, the port, the attempt
+    count, the elapsed time, the total budget and the exit code.
+    """
+    import logging
+
+    from daemon.services import bind_retry
+
+    caplog.set_level(logging.ERROR, logger="daemon.services.bind_retry")
+
+    with _held_port() as (port, _holder):
+        with pytest.raises(SystemExit) as excinfo:
+            bind_retry.bind_socket_with_retry("127.0.0.1", port, max_wait_s=0.25)
+
+    assert excinfo.value.code == 1
+
+    exhausted = [
+        r for r in caplog.records if "budget exhausted" in r.getMessage()
+    ]
+    assert exhausted, "the terminal exhaustion ERROR line is missing"
+    terminal = exhausted[-1]
+    assert terminal.levelno >= logging.ERROR
+    message = terminal.getMessage()
+    assert str(port) in message  # port
+    assert "127.0.0.1" in message  # host
+    assert "attempt(s)" in message  # attempt count
+    assert "total budget 0.2s" in message  # the total budget
+    assert "exiting 1" in message  # the exit code
+
+
 # ── Backoff ladder ───────────────────────────────────────────────────────────
 
 
@@ -181,8 +251,23 @@ def test_default_budget_is_bounded_and_not_wind_down_sized():
     assert BIND_RETRY_MAX_ATTEMPTS >= 2  # no unbounded spin
 
 
+# Measured frozen-path boot-to-prebind components (see the coupling note
+# above BIND_RETRY_MAX_WAIT_CEILING_S in daemon/services/bind_retry.py):
+FROZEN_B_IMPORT_LOAD_CONFIG_S = 3.2  # measured 3.11 / 3.20 / 3.31 over 3 runs
+FROZEN_B_SWEEP_GRACE_S = 5.0  # DEFAULT_TERM_GRACE_SECONDS, boot_subprocess_sweep.py:128
+FROZEN_B_DB_PREFLIGHT_S = 10.0  # BOOT_DB_TIMEOUT_S (worst case)
+FROZEN_B_MAX_S = (
+    FROZEN_B_IMPORT_LOAD_CONFIG_S
+    + FROZEN_B_SWEEP_GRACE_S
+    + FROZEN_B_DB_PREFLIGHT_S
+)  # ~18.3s
+LAUNCHER_BURST_WINDOW_S = 600.0  # launcher.sh:58 BUDGET_WINDOW_S
+LAUNCHER_BURST_WAITS_S = 310.0  # 10+20+40+80+160 — the 5 waits between 6 crashes
+LAUNCHER_U_LIMIT_S = (LAUNCHER_BURST_WINDOW_S - LAUNCHER_BURST_WAITS_S) / 5.0  # 58s
+
+
 def test_default_budget_is_within_the_hard_ceiling():
-    """The DEFAULT must already sit under the 45s hard ceiling.
+    """The DEFAULT must already sit AT the hard ceiling (30s), not above it.
 
     The ceiling is not a taste choice: the launcher's burst abort is
     reachable only while the failed child's uptime ``U`` stays <= 58s
@@ -197,10 +282,31 @@ def test_default_budget_is_within_the_hard_ceiling():
         BIND_RETRY_MAX_WAIT_S,
     )
 
-    assert BIND_RETRY_MAX_WAIT_CEILING_S == 45.0
+    assert BIND_RETRY_MAX_WAIT_CEILING_S == 30.0
     assert BIND_RETRY_MAX_WAIT_S <= BIND_RETRY_MAX_WAIT_CEILING_S
     assert DaemonConfig().bind_retry_max_wait_seconds <= (
         BIND_RETRY_MAX_WAIT_CEILING_S
+    )
+
+
+def test_ceiling_plus_frozen_boot_stays_within_the_burst_abort():
+    """INVARIANT: ceiling + measured frozen-path B must stay <= U_limit.
+
+    ``U ~= B + budget`` and the launcher's burst abort is reachable only
+    while ``U <= 58s``. If ANY of these moves — the ceiling, the import
+    cost, the boot-sweep TERM grace, or the DB preflight timeout — this
+    pin REDS instead of silently disabling the burst abort.
+    """
+    from daemon.services.bind_retry import BIND_RETRY_MAX_WAIT_CEILING_S
+
+    projected_u = FROZEN_B_MAX_S + BIND_RETRY_MAX_WAIT_CEILING_S
+    assert projected_u <= LAUNCHER_U_LIMIT_S, (
+        f"the burst abort would become UNREACHABLE: projected U "
+        f"({projected_u:.1f}s) > the launcher's limit "
+        f"({LAUNCHER_U_LIMIT_S:.1f}s). Either the ceiling rose above "
+        f"{LAUNCHER_U_LIMIT_S - FROZEN_B_MAX_S:.1f}s or a frozen-path "
+        f"boot-to-prebind component grew — see the coupling note above "
+        f"BIND_RETRY_MAX_WAIT_CEILING_S in daemon/services/bind_retry.py"
     )
 
 
@@ -220,12 +326,12 @@ def test_effective_budget_is_clamped_to_the_ceiling(caplog):
 
     effective = bind_retry.resolve_max_wait_s(600.0)
 
-    assert effective == bind_retry.BIND_RETRY_MAX_WAIT_CEILING_S == 45.0
+    assert effective == bind_retry.BIND_RETRY_MAX_WAIT_CEILING_S == 30.0
     clamps = [r for r in caplog.records if "BUDGET_CEILING_CLAMP" in r.getMessage()]
     assert clamps, "the clamp was not announced"
     message = clamps[0].getMessage()
     assert "600.0" in message  # the requested value
-    assert "45.0" in message  # the effective value
+    assert "30.0" in message  # the effective value
     assert "58s" in message  # the burst-budget reason
     assert clamps[0].levelno >= logging.WARNING
 
@@ -380,22 +486,11 @@ def test_bound_socket_is_handed_to_uvicorn_which_serves_on_it(caplog):
     import daemon.__main__ as entry
     from daemon.services import bind_retry
 
-    async def _app(scope, receive, send):
-        if scope["type"] == "http":
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 200,
-                    "headers": [(b"content-type", b"text/plain")],
-                }
-            )
-            await send({"type": "http.response.body", "body": b"ok"})
-
     caplog.set_level(logging.INFO, logger="daemon.__main__")
 
     sock = bind_retry.bind_socket_with_retry("127.0.0.1", 0)
     port = sock.getsockname()[1]
-    config = uvicorn.Config(_app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(_ok_app, host="127.0.0.1", port=port, log_level="warning")
     server = entry._StartedLogServer(config=config, bound_socket=sock)
 
     thread = threading.Thread(
@@ -433,24 +528,19 @@ def test_serve_seam_end_to_end_binds_serves_and_stops_cleanly(monkeypatch):
     Exercises the production path (the real bind retry, the real
     ``uvicorn.Server`` subclass, the real socket hand-off and the real
     shutdown tail) on an ephemeral port — never 9797/9798/8079.
+
+    NO TOCTOU: the port is picked by an OS-assigned ephemeral bind and
+    the probe socket is HELD until the seam has taken it (the seam's own
+    retry absorbs the release), so there is no bind→re-bind gap in the
+    test that product code does not have.
     """
     import daemon.__main__ as entry
 
-    async def _app(scope, receive, send):
-        if scope["type"] == "http":
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 200,
-                    "headers": [(b"content-type", b"text/plain")],
-                }
-            )
-            await send({"type": "http.response.body", "body": b"ok"})
-
     probe = socket.socket(socket.AF_INET)
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     probe.bind(("127.0.0.1", 0))
+    probe.listen(1)
     port = probe.getsockname()[1]
-    probe.close()
 
     created: list = []
 
@@ -461,7 +551,7 @@ def test_serve_seam_end_to_end_binds_serves_and_stops_cleanly(monkeypatch):
 
     monkeypatch.setattr(entry, "_StartedLogServer", _RecordingServer)
 
-    config = entry.uvicorn.Config(_app, host="127.0.0.1", port=port, log_level="warning")
+    config = entry.uvicorn.Config(_ok_app, host="127.0.0.1", port=port, log_level="warning")
 
     outcome: dict = {}
 
@@ -475,6 +565,10 @@ def test_serve_seam_end_to_end_binds_serves_and_stops_cleanly(monkeypatch):
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
     try:
+        # Let the seam attempt its first bind (it will hit our holder and
+        # enter the wait), THEN release the port so the retry takes it.
+        time.sleep(0.2)
+        probe.close()
         body = None
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
@@ -493,6 +587,7 @@ def test_serve_seam_end_to_end_binds_serves_and_stops_cleanly(monkeypatch):
                 time.sleep(0.05)
         assert body == b"ok", f"the seam did not serve on the bound port: {body!r}"
     finally:
+        probe.close()  # idempotent — released above if the loop got that far
         if created:
             created[0].should_exit = True
         thread.join(timeout=20)
@@ -528,26 +623,6 @@ def test_lifespan_startup_failure_exits_3_without_any_retry(monkeypatch):
         "daemon.services.bind_retry.bind_socket_with_retry", _counting_bind
     )
 
-    async def _failing_app(scope, receive, send):
-        if scope["type"] == "lifespan":
-            while True:
-                message = await receive()
-                if message["type"] == "lifespan.startup":
-                    # Exactly what Starlette does when the app's startup
-                    # raises (starlette/routing.py:702-708): report the
-                    # failure to the server. uvicorn then sets
-                    # startup_failed → should_exit → the server never
-                    # starts → STARTUP_FAILURE (exit 3).
-                    await send(
-                        {
-                            "type": "lifespan.startup.failed",
-                            "message": "simulated lifespan startup failure",
-                        }
-                    )
-                    return
-                if message["type"] == "lifespan.shutdown":
-                    return
-
     config = entry.uvicorn.Config(_failing_app, host="127.0.0.1", port=0)
     with pytest.raises(SystemExit) as excinfo:
         entry._serve_with_bind_retry(config, max_wait_s=5.0)
@@ -556,14 +631,23 @@ def test_lifespan_startup_failure_exits_3_without_any_retry(monkeypatch):
     assert len(binds) == 1  # ONE bind attempt — no wait, no retry
 
 
-def test_sigint_during_the_bind_wait_exits_cleanly(monkeypatch):
-    """A SIGINT during the bind WAIT must exit cleanly — no traceback.
+def test_sigint_during_the_bind_wait_exits_as_a_startup_failure(monkeypatch):
+    """A SIGINT during the bind WAIT exits 3 (STARTUP_FAILURE) — NOT clean.
 
-    ``uvicorn.run`` swallowed KeyboardInterrupt, so before this fix a
-    Ctrl-C produced a clean exit. uvicorn installs its own SIGINT
-    handler only INSIDE ``server.run()``'s ``capture_signals`` — i.e.
-    AFTER the pre-bind phase — so the wait window is handled at the
-    seam. (SIGTERM keeps its default disposition: prompt death.)
+    HONEST RE-POINT (M-1): this pin first asserted a clean exit, which
+    was WRONG — a bare ``return`` would exit 0, ``classify_exit`` would
+    read "clean", the launcher would log "exit 0, not looping" and
+    systemd ``Restart=on-failure`` would not fire: a daemon silently
+    down while every supervisor layer believes it stopped cleanly.
+    ``uvicorn.run`` swallowed KeyboardInterrupt AND its tail then
+    classified a never-started server as STARTUP_FAILURE
+    (uvicorn/main.py:611-614) -> exit 3 -> crash track -> the launcher
+    restarts. This pin restores that verdict family.
+
+    uvicorn installs its own SIGINT handler only INSIDE
+    ``server.run()``'s ``capture_signals`` — i.e. AFTER the pre-bind
+    phase — so the wait window is handled at the seam. (SIGTERM keeps
+    its default disposition: prompt death -> 143 -> crash track.)
     """
     import daemon.__main__ as entry
 
@@ -574,9 +658,14 @@ def test_sigint_during_the_bind_wait_exits_cleanly(monkeypatch):
         "daemon.services.bind_retry.bind_socket_with_retry", _interrupting_bind
     )
     config = entry.uvicorn.Config("daemon.api:app", host="127.0.0.1", port=0)
-    # A clean return == a clean process exit. An escaped KeyboardInterrupt
-    # would surface here as a test error (traceback + exit 130).
-    entry._serve_with_bind_retry(config, max_wait_s=5.0)
+    with pytest.raises(SystemExit) as excinfo:
+        entry._serve_with_bind_retry(config, max_wait_s=5.0)
+
+    from uvicorn.main import STARTUP_FAILURE  # uvicorn 0.41.0 == 3
+    assert excinfo.value.code == STARTUP_FAILURE == 3, (
+        "a SIGINT during the bind wait must land on the CRASH track "
+        "(exit 3), never on a clean exit 0"
+    )
 
 
 def test_exit3_path_closes_the_held_socket(monkeypatch):
@@ -601,21 +690,6 @@ def test_exit3_path_closes_the_held_socket(monkeypatch):
     monkeypatch.setattr(
         "daemon.services.bind_retry.bind_socket_with_retry", _capturing_bind
     )
-
-    async def _failing_app(scope, receive, send):
-        if scope["type"] == "lifespan":
-            while True:
-                message = await receive()
-                if message["type"] == "lifespan.startup":
-                    await send(
-                        {
-                            "type": "lifespan.startup.failed",
-                            "message": "simulated lifespan startup failure",
-                        }
-                    )
-                    return
-                if message["type"] == "lifespan.shutdown":
-                    return
 
     config = entry.uvicorn.Config(_failing_app, host="127.0.0.1", port=0)
     with pytest.raises(SystemExit) as excinfo:
@@ -699,9 +773,6 @@ def test_serve_seam_installs_log_handlers_before_the_bind(monkeypatch):
 
     monkeypatch.setattr(logging_setup, "install_root_logging", _fake_install)
     monkeypatch.setattr(entry, "_StartedLogServer", _FakeServer)
-    monkeypatch.setattr(
-        entry, "_serve_with_bind_retry", entry._serve_with_bind_retry
-    )
     # Patch the retry function INSIDE the module the seam imports it
     # from (the seam does a local import at call time).
     monkeypatch.setattr(
@@ -747,21 +818,69 @@ def test_retry_log_line_carries_errno_host_port_attempt_and_wait(caplog):
     assert first.levelno >= logging.WARNING
 
 
-# ── The exit-code contract must survive the fix ──────────────────────────────
+def test_non_eaddrinuse_failure_fails_fast_on_the_first_attempt(caplog, monkeypatch):
+    """s-1: a NON-EADDRINUSE errno is NOT transient — fail fast on attempt 1.
 
-
-def test_preflight_exit_codes_are_untouched_by_the_bind_retry():
-    """Exit 75 / 78 stay decided BEFORE the bind (and before the port).
-
-    The bind-retry must not swallow, delay or reclassify the preflight
-    refusals: a config refusal must NEVER bind the port.
+    EACCES is not contention; retrying it cannot fix it. The errno filter
+    must route it straight to the terminal verdict: exactly ONE bind
+    attempt, exit 1, and a diagnosable ERROR line (the module's contract
+    is "diagnosable from the log alone").
     """
-    import daemon.__main__ as entry
-    from daemon.constants import BOOT_DB_TIMEOUT_S
+    import logging
 
-    assert entry._EXIT_BOOT_DB_TEMPFAIL == 75
-    assert entry._EXIT_BOOT_DB_AUTH_REFUSED == 78
-    assert BOOT_DB_TIMEOUT_S == 10
+    from daemon.services import bind_retry
+
+    attempts: list = []
+
+    class _RaisingSocket:
+        def __init__(self):
+            self.closed = False
+
+        def bind(self, address):
+            attempts.append(address)
+            raise PermissionError(errno.EACCES, "Permission denied")
+
+        def close(self):
+            self.closed = True
+
+    def _raising_factory(host):
+        return _RaisingSocket()
+
+    monkeypatch.setattr(bind_retry, "_new_listener_socket", _raising_factory)
+    caplog.set_level(logging.ERROR, logger="daemon.services.bind_retry")
+
+    with _held_port() as (port, _holder):
+        with pytest.raises(SystemExit) as excinfo:
+            bind_retry.bind_socket_with_retry(
+                "127.0.0.1",
+                port,
+                max_wait_s=30.0,
+                initial_backoff_s=0.05,
+                max_backoff_s=0.05,
+            )
+
+    assert excinfo.value.code == 1  # the same verdict uvicorn gave
+    assert len(attempts) == 1, (
+        f"a non-EADDRINUSE errno was retried {len(attempts)} times — it is "
+        f"not transient and must fail fast"
+    )
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "the non-EADDRINUSE failure was not logged as an ERROR"
+    verdict = [r for r in errors if "not EADDRINUSE" in r.getMessage()]
+    assert verdict, "the terminal ERROR line is missing the verdict text"
+    message = verdict[0].getMessage()
+    assert str(port) in message  # port
+    assert "127.0.0.1" in message  # host
+    assert str(errno.EACCES) in message  # errno
+    assert "1 attempt" in message  # attempt count
+    assert "exiting 1" in message  # the exit code
+
+
+# ── The exit-code contract must survive the fix ──────────────────────────────
+# The exit-75/78 preflight contract is pinned in tests/test_main_entry.py
+# (test_preflight_contract_constants_unchanged) — NOT duplicated here: two
+# pins moving in lockstep add no coverage.
 
 
 def test_errno_is_not_leaked_into_the_constants_leaf():

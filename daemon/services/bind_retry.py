@@ -51,6 +51,14 @@ startup plus the full ~11-step teardown that the old shape paid on
 EVERY failed cycle. The wait's outcome is secondary; not thrashing
 the live database 63 times is the material reduction.
 
+CANONICAL ARITHMETIC (single source of truth)
+----------------------------------------------
+The burst-abort coupling (``6 crashes / 600 s ⇒ 310 + 5U ≤ 600 ⇒
+U ≤ 58 s``, the measured frozen-path B ≈ 18.3 s breakdown, and the
+ceiling) is documented ONCE, above ``BIND_RETRY_MAX_WAIT_CEILING_S``
+in this module. ``daemon/config.py``'s field description and the test
+pins reference it; they do not re-derive it.
+
 ADR-STYLE NOTE — WHY THE PREFLIGHT AND THE BIND DIFFER
 -------------------------------------------------------
 ``daemon/__main__.py`` deliberately does NOT retry the boot preflights
@@ -139,13 +147,18 @@ logger = logging.getLogger(__name__)
 #   post-fatal teardown ~64s) => 310 + 5U > 600 => the counter reset 13
 #   times => the unbounded 2h38m churn.
 #   With the pre-bind, a blocked child exits after the BUDGET (no lifespan
-#   startup, no teardown) => U ~= boot-to-prebind + budget. A budget of 45s
-#   keeps U ~= 49s <= 58s (the default 30s keeps U ~= 34s). A budget above
-#   ~45s would push U back over 58s and turn the supervisor's safety net
-#   off again — so the effective budget is HARD-CLAMPED to the ceiling and
-#   an over-ceiling request is announced LOUDLY.
-BIND_RETRY_MAX_WAIT_S: float = 30.0  # Total budget ceiling (seconds)
-BIND_RETRY_MAX_WAIT_CEILING_S: float = 45.0  # HARD ceiling (see the coupling note)
+#   startup, no teardown) => U ~= boot-to-prebind + budget. THE CEILING IS
+#   SET EQUAL TO THE DEFAULT (30.0) so the invariant holds UNCONDITIONALLY:
+#   on a FROZEN install the measured boot-to-prebind B is ~18.3s worst-case
+#   (import + load_config ~3.2s + the boot sweep's TERM grace window 5.0s,
+#   daemon/services/boot_subprocess_sweep.py:128 DEFAULT_TERM_GRACE_SECONDS,
+#   once any candidate exists + the DB preflight <=10s, BOOT_DB_TIMEOUT_S),
+#   so U ~= 30 + 18.3 = 48.3s <= 58s — reachable with margin. A ceiling of
+#   45s would give B_max = 58 - 45 = 13s < 18.3s => U ~= 63.3s => the abort
+#   becomes UNREACHABLE and the supervisor's safety net goes dark again.
+#   Raising the ceiling is therefore forbidden by the clamp, not by policy.
+BIND_RETRY_MAX_WAIT_S: float = 30.0  # DEFAULT effective budget (seconds) — see the coupling note
+BIND_RETRY_MAX_WAIT_CEILING_S: float = 30.0  # HARD ceiling; equal to the default on purpose — see the coupling note
 BIND_RETRY_INITIAL_BACKOFF_S: float = 1.0  # First wait between bind attempts
 BIND_RETRY_MAX_BACKOFF_S: float = 16.0  # Backoff cap (ladder: 1,2,4,8,16,16...)
 BIND_RETRY_MAX_ATTEMPTS: int = 20  # Hard attempt cap (backstop for a frozen clock)
@@ -253,11 +266,17 @@ def _new_listener_socket(host: str) -> socket.socket:
         sock = socket.socket(family=family)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    SO_REUSEADDR does NOT allow two LIVE listeners on one port — it only
+    SO_REUSEADDR does NOT allow two LIVE LISTENERS on one port — it only
     relaxes the TIME_WAIT reuse rule. It is set here because uvicorn
     sets it, NOT because it would mask a conflict; the fact that the
     2026-11-11 bind still failed with EADDRINUSE while this option was
     in force is itself the proof that the holder was a LIVE process.
+    (Measured caveat: SO_REUSEADDR DOES permit a second ``bind()`` while
+    this socket is bound-but-not-listening — so a second process can
+    bind the port, but only one of the two can ``listen()``; the loser
+    fails at ``create_server`` → exit 1 → crash track → retry. The
+    LISTEN-state contention — the actual incident shape — is handled
+    correctly.)
 
     NO ``listen()`` HERE — deliberately. asyncio's
     ``loop.create_server(..., sock=sock)`` performs the ``listen()``
@@ -290,7 +309,10 @@ def bind_socket_with_retry(
     Returns the BOUND socket — the caller owns it (and must hand it to
     uvicorn, or close it). The socket is bound but NOT yet listening:
     uvicorn's ``loop.create_server(..., sock=sock)`` performs the
-    ``listen()``.
+    ``listen()``. The hold closes the window in which the port can be
+    SERVED by another process (only one process can ``listen()``; a
+    second ``bind()`` is still possible under SO_REUSEADDR and loses at
+    ``create_server`` — see ``_new_listener_socket``).
 
     On EADDRINUSE the call waits with an exponential backoff
     (1→2→4→8→16s, capped) until the port frees or the budget is
@@ -331,14 +353,17 @@ def bind_socket_with_retry(
             sock.close()
             if exc.errno != errno.EADDRINUSE:
                 # Not contention — the same verdict uvicorn gave
-                # (logger.error(exc) → sys.exit(1)).
+                # (logger.error(exc) → sys.exit(1)). It is also NOT a
+                # transient: retrying an EACCES/EADDRNOTAVAIL cannot fix
+                # it, so this fails fast on the FIRST attempt.
                 logger.error(exc)
                 logger.error(
-                    "Bind failed on %s:%s (errno %s) — not EADDRINUSE; "
-                    "exiting %d",
+                    "Bind failed on %s:%s (errno %s) after %d attempt(s) — "
+                    "not EADDRINUSE (not transient); exiting %d",
                     host,
                     port,
                     exc.errno,
+                    attempt,
                     BIND_FAILURE_EXIT_CODE,
                 )
                 sys.exit(BIND_FAILURE_EXIT_CODE)

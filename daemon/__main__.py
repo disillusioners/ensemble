@@ -1,6 +1,5 @@
 import logging
 import os
-import signal
 import sys
 import warnings
 
@@ -446,22 +445,38 @@ def _serve_with_bind_retry(uvicorn_config, max_wait_s: float | None = None) -> N
     install_root_logging()
 
     # Bind FIRST, serve second — the socket stays held across the
-    # lifespan startup, so there is no window in which the port is free
-    # for another process to take.
+    # lifespan startup, so there is no window in which the port can be
+    # SERVED by another process (only one process can ``listen()``; a
+    # second ``bind()`` is still possible under SO_REUSEADDR and loses at
+    # ``create_server`` → exit 1 → crash track → retry).
     #
-    # A SIGINT during the bind WAIT must exit as cleanly as uvicorn's own
-    # handling did (``uvicorn.run`` swallowed KeyboardInterrupt): no
-    # traceback, no crash exit. uvicorn installs its own SIGINT handler
-    # only INSIDE ``server.run()``'s ``capture_signals`` — i.e. AFTER
-    # this pre-bind phase — so the wait window is handled here. (SIGTERM
-    # keeps its default disposition: prompt death, as before the fix.)
+    # SIGINT during the bind WAIT: exit 3 (STARTUP_FAILURE), i.e. the
+    # CRASH track — deliberately NOT a clean exit. uvicorn.run swallowed
+    # KeyboardInterrupt and its tail then classified a never-started
+    # server as STARTUP_FAILURE (uvicorn/main.py:611-614), so the
+    # launcher restarted the daemon. A bare ``return`` here would exit 0
+    # ("clean"), classify_exit would log "exit 0, not looping", and
+    # systemd Restart=on-failure would not fire — a daemon silently down
+    # while every supervisor layer believes it stopped cleanly. The wait
+    # window is the whole bind wait (up to the budget), so the shape
+    # matters. (uvicorn installs its own SIGINT handler only INSIDE
+    # ``server.run()``'s ``capture_signals`` — i.e. AFTER this pre-bind
+    # phase.)
+    #
+    # SIGTERM during that window is NOT handler-graceful: pre-fix,
+    # uvicorn's ``capture_signals`` was installed before its own bind, so
+    # a TERM during the bind was handled; now the window is handler-free
+    # and has GROWN from ~0 to <= the budget. Operationally equivalent
+    # (TERM → default disposition → prompt death → 143 → crash track →
+    # retry); stated here because it is a real change, not a parity.
     try:
         sock = bind_socket_with_retry(host, port, max_wait_s=max_wait_s)
     except KeyboardInterrupt:
         logger.info(
-            "Boot interrupted during the listener bind wait — exiting cleanly"
+            "Boot interrupted during the listener bind wait — exiting as a "
+            "startup failure so the supervisor restarts the daemon"
         )
-        return
+        sys.exit(STARTUP_FAILURE)
 
     server = _StartedLogServer(config=uvicorn_config, bound_socket=sock)
     try:
