@@ -161,6 +161,32 @@ LEGS: list[Leg] = [
         note="a forbidden p8 counter is added (O12)",
     ),
     Leg(
+        id="M14-erase-verdict-inverted-ordering",
+        path="daemon/tools/bash.py",
+        old="""        if ram_kill:
+            # ── The RAM arm (S4/S6) — it PREEMPTS the success arm, the""",
+        new="""        if not timed_out and ram_kill:
+            _pid_registry_mark_exit(
+                pid=proc.pid,
+                start_time=bash_start_time_jiffies,
+                exit_code=proc.returncode,
+                exit_kind=EXIT_KIND_SUCCESS,
+                peak_rss_kb=bash_peak_rss_kb_at_spawn,
+            )
+        if ram_kill:
+            # ── The RAM arm (S4/S6) — it PREEMPTS the success arm, the""",
+        node=(
+            "tests/tools/test_bash_ram_guard.py::TestPublicationOrdering::"
+            "test_the_success_arm_mark_exit_does_not_run_on_a_ram_kill"
+        ),
+        note=(
+            "D-1 ERASE DEMO: the success arm's mark_exit runs BEFORE the RAM "
+            "arm — the one-shot live-row delete fires first and PERMANENTLY "
+            "erases the RAM verdict (the exit_kind lands 'success', not "
+            "'ram_killed').  RED against the correct ordering."
+        ),
+    ),
+    Leg(
         id="M13-off-still-registers",
         path="daemon/tools/bash.py",
         old="""def _ram_guard_active() -> bool:
@@ -182,8 +208,6 @@ LEGS: list[Leg] = [
 DEFERRED_ROWS: list[tuple[str, str]] = [
     ("Remove the kill delivery", "the ladder census (test_ram_guard_ladder.py::test_p5_leader_alive_matching_starttime_kills)"),
     ("Return the spawn-time floor as the peak", "B3 honest-peak (test_bash_ram_guard.py::TestEnvelope)"),
-    ("Move the success arm's mark_exit before the RAM arm", "B8 ordering (test_bash_ram_guard.py::TestPublicationOrdering)"),
-    ("Publish the verdict AFTER mark_exit", "B8 ordering (TestPublicationOrdering)"),
     ("Close the durable row on a RAM kill", "B7 (test_bash_ram_guard.py::TestDurableRowStaysOpen)"),
     ("Make the leaderless case drop the watch", "B13 / S8(f) (test_bash_ram_guard.py::TestRealBallooningTree::test_the_leaderless_tree_is_still_watched_and_killed)"),
     ("Remove the P5a pgid-recycle check", "S8(g) (test_ram_guard_ladder.py::test_p5a_pgid_recycled_refused)"),

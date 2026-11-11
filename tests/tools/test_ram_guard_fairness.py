@@ -100,7 +100,7 @@ def _spec() -> BalloonSpec:
     )
 
 
-def _spawn_fair_tree(tmp_path: Path) -> tuple[list[int], object]:
+def _spawn_fair_tree(tmp_path: Path) -> tuple[list[int], object, str]:
     spec = _spec()
     try:
         require_allocation_fits(spec)
@@ -110,6 +110,18 @@ def _spawn_fair_tree(tmp_path: Path) -> tuple[list[int], object]:
     # The command: the fair script allocates PARENT_BYTES then forks.
     cmd = f"{sys.executable} -u {tree.script} {PARENT_BYTES} {FORK_COUNT} {tree.pidfile}"
     return ([], tree, cmd)
+
+
+def _teardown_fair_tree(tree) -> None:
+    """D-4 — register every recorded pid, then ALWAYS SIGKILL the tree.
+
+    Mirrors the mutation leg's correct shape: without this, an assertion
+    failure relies on the bash lane's timeout group-kill and the harness
+    backstop never runs (T1: teardown ALWAYS runs).
+    """
+    for pid in tree.read_pids():
+        tree.register(pid)
+    tree.kill_all()
 
 
 class TestForkTreeFairness:
@@ -131,7 +143,7 @@ class TestForkTreeFairness:
                 command=cmd, instance_id=INSTANCE, timeout=30
             )
         finally:
-            pass
+            _teardown_fair_tree(tree)
         # The command ran to completion (the tree was never killed).
         assert "ram_limit_exceeded" not in out, out
         # The breach WAS detected (the RSS trigger fired) — the fairness
@@ -142,7 +154,6 @@ class TestForkTreeFairness:
         # At least one OVERCOUNTED re-arm proves the PSS confirm ran and
         # found the tree fair.
         assert counters["ram_overcounted"] >= 1
-        tree.kill_all()
 
     @pytest.mark.asyncio
     async def test_the_broken_confirm_counter_mutation_kills_the_fair_tree(
@@ -170,7 +181,7 @@ class TestForkTreeFairness:
                 command=cmd, instance_id=INSTANCE, timeout=30
             )
         finally:
-            tree.kill_all()
+            _teardown_fair_tree(tree)
         # The broken confirm kills the fair tree — the RSS shortcut.
         assert "ram_limit_exceeded" in out, out
         assert real_guard.counters_snapshot()["ram_kills"] >= 1
@@ -191,3 +202,27 @@ class TestHarnessBounds:
         """T1 / test-plan §1.1 — the documented stat-line shape agrees with
         the reader's own private offsets."""
         assert_stat_line_shape()
+
+    def test_an_unreadable_meminfo_refuses_the_spawn_fail_closed(self, monkeypatch):
+        """D-6 — an UNREADABLE ``/proc/meminfo`` REFUSES the spawn.
+
+        A silent pass on an unreadable meminfo would let a balloon run
+        blind — the exact OOM hazard the harness exists to prevent.
+        """
+        import tests.helpers.ram_guard_harness as harness
+
+        def _boom(*_a, **_k):
+            raise OSError("meminfo unreadable")
+
+        monkeypatch.setattr(harness.Path, "read_text", _boom)
+        assert harness.mem_available_bytes() == -1
+        with pytest.raises(HostMemoryShortage):
+            require_allocation_fits(_spec())
+
+    def test_a_zero_meminfo_refuses_the_spawn_fail_closed(self, monkeypatch):
+        """D-6 — a genuine ZERO MemAvailable also refuses (never a silent pass)."""
+        import tests.helpers.ram_guard_harness as harness
+
+        monkeypatch.setattr(harness, "mem_available_bytes", lambda: 0)
+        with pytest.raises(HostMemoryShortage):
+            require_allocation_fits(_spec())

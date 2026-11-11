@@ -67,17 +67,25 @@ injection, never a repro attempt on the live unit.
 | 2 | 256.0 MiB | 0.2263 s | 1131.0 MiB/s |
 | 3 | 256.0 MiB | 0.2057 s | 1244.4 MiB/s |
 | 4 | 256.0 MiB | 0.1994 s | 1283.7 MiB/s |
-| **median** | | | **1177.9 MiB/s = 1.1503 GiB/s** |
+| **median** | | | **1187.7 MiB/s = 1.1599 GiB/s** |
 
-**The measured R = 1.1503 GiB/s sits INSIDE the assumed band** (arch §3.4:
+**Provenance (D-5 correction, phase-6 pin review):** the table above prints
+FOUR runs; their true arithmetic median is `(1131.0 + 1244.4) / 2 =
+1187.7 MiB/s = 1.1599 GiB/s`.  The earlier `1177.9 MiB/s = 1.1503 GiB/s`
+figure was a transcription slip (~0.8 % low) and is CORRECTED here.  Every
+downstream verdict below is unchanged at either value (the 1.034 GiB/s
+threshold is exceeded by both; the derived-default/GEN-feasibility "NO"
+holds at any R ≥ 0).
+
+**The measured R = 1.1599 GiB/s sits INSIDE the assumed band** (arch §3.4:
 R ∈ [1, 3] GiB/s) — near its lower edge.
 
 **The overshoot law (§3.3, unchanged), at the measured R:**
 
 ```
-Omega_typ        = R x 0.45 s = 0.518 GiB
-Omega_worst      = R x 0.70 s = 0.805 GiB
-Omega_contended(2) = R x 1.21 s = 1.392 GiB
+Omega_typ        = R x 0.45 s = 0.522 GiB
+Omega_worst      = R x 0.70 s = 0.812 GiB
+Omega_contended(2) = R x 1.21 s = 1.403 GiB
 ```
 
 ---
@@ -99,12 +107,12 @@ derived default ceiling `C = 0.7 x T = 8.171 GiB` (8 367 MiB).
 
 | Scenario | C | floor @ measured R (Omega_worst = 0.805) | A feasible unit cap? |
 |---|---|---|---|
-| **Derived default on THIS host (T = 11.67 GiB)** | 8.171 GiB | **14.132 GiB** | **NO — at any R** (gap **5.252 GiB** at the measured R; **4.447 GiB even at R = 0**) |
-| Knob lowered to 3072 MiB (the demoted guidance) | 3.0 GiB | **8.961 GiB** | **NO at the measured R** — feasible iff `R <= 1.034 GiB/s`; the measured **1.1503 GiB/s is ABOVE that** ⇒ the 7G/8700M pair does **not** restore the window at the measured rate |
-| **General feasibility at the default** (C = 0.7 T) | 0.7 T | 0.7 T + 5.961 | iff `T >= 26.49 + 2.333 R` GiB ⇒ **T >= 29.17 GiB** at the measured R (≈28.9 GiB at R = 1 GiB/s) |
+| **Derived default on THIS host (T = 11.67 GiB)** | 8.171 GiB | **14.139 GiB** | **NO — at any R** (gap **5.259 GiB** at the measured R; **4.447 GiB even at R = 0**) |
+| Knob lowered to 3072 MiB (the demoted guidance) | 3.0 GiB | **8.968 GiB** | **NO at the measured R** — feasible iff `R <= 1.034 GiB/s`; the measured **1.1599 GiB/s is ABOVE that** ⇒ the 7G/8700M pair does **not** restore the window at the measured rate |
+| **General feasibility at the default** (C = 0.7 T) | 0.7 T | 0.7 T + 5.968 | iff `T >= 26.49 + 2.333 R` GiB ⇒ **T >= 29.19 GiB** at the measured R (≈28.9 GiB at R = 1 GiB/s) |
 
 **The N = 2 contended disclosure row travels with it:** at the measured R,
-`Omega_contended(2) = 1.392 GiB` ⇒ the N=2 floor is **14.717 GiB > 8.88 GiB**
+`Omega_contended(2) = 1.403 GiB` ⇒ the N=2 floor is **14.731 GiB > 8.88 GiB**
 ⇒ **the N = 2 unit-cap window is EMPTY** (as the arch states, it closes above
 R ≈ 0.598 GiB/s; the measured R is well above it).  The recommended pair is
 explicitly a **single-tree claim**.
@@ -116,9 +124,9 @@ operative one for the memo:
 
 | Scenario | C | floor @ measured R | A feasible unit cap? |
 |---|---|---|---|
-| **Derived default on THIS host** | 8.171 GiB | **15.132 GiB** | **NO — at any R** (gap 6.252 GiB; 5.447 GiB even at R = 0) |
-| Knob lowered to 3072 MiB | 3.0 GiB | **9.961 GiB** | **NO — at ANY R** (the floor exceeds the 8.88 GiB box bound even at R = 0) |
-| **General feasibility at the default** | 0.7 T | 0.7 T + 6.961 | iff `T >= 29.82 + 2.333 R` GiB ⇒ **T >= 32.50 GiB** at the measured R |
+| **Derived default on THIS host** | 8.171 GiB | **15.139 GiB** | **NO — at any R** (gap 6.259 GiB; 5.447 GiB even at R = 0) |
+| Knob lowered to 3072 MiB | 3.0 GiB | **9.968 GiB** | **NO — at ANY R** (the floor exceeds the 8.88 GiB box bound even at R = 0) |
+| **General feasibility at the default** | 0.7 T | 0.7 T + 6.968 | iff `T >= 29.82 + 2.333 R` GiB ⇒ **T >= 32.53 GiB** at the measured R |
 
 ### 3c. One arithmetic observation on the arch's own table (disclosed, not a re-design)
 
@@ -210,7 +218,7 @@ conservative value (§3b above).  **The freeze is NOT blocked.**
   intent).
 * **The operator levers** (Phase 7's memo): (a) ship **without** a unit cap —
   the kernel global OOM is the outer layer (today's state); (b) **lower the
-  knob** to 3072 MiB — but at the MEASURED R = 1.15 GiB/s the 7G/8700M pair is
+  knob** to 3072 MiB — but at the MEASURED R = 1.16 GiB/s the 7G/8700M pair is
   **NOT feasible** (it needs R ≤ 1.034 GiB/s) unless the conservative D_max is
   wrong in the daemon's favour; (c) **resize the host** to ≥ 29.2 GiB (the
   arch's D_max) / ≥ 32.5 GiB (the conservative D_max).

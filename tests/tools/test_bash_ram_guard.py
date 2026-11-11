@@ -542,6 +542,87 @@ class TestPublicationOrdering:
         assert exit_kinds == [EXIT_KIND_RAM_KILLED]
 
 
+class TestInvertedOrderingErasesTheVerdict:
+    """D-1 (phase6 T13 acceptance) — the ERASE DEMO.
+
+    ``PidRegistry.mark_exit`` is ONE-SHOT: it deletes the live row on the
+    FIRST exit_kind (``pid_registry.py:423``).  A second ``mark_exit`` for
+    the same ``(pid, start_time)`` is a NO-OP (the row is gone).  So if the
+    success arm's ``mark_exit(EXIT_KIND_SUCCESS)`` ran BEFORE the RAM arm,
+    the RAM ``mark_exit(EXIT_KIND_RAM_KILLED)`` would find nothing and
+    PERMANENTLY erase the RAM verdict.
+
+    This test DRIVES that outcome directly against the real registry — the
+    counter-mutation (matrix leg M14) plants the inverted ordering in
+    ``bash.py`` and reddens the positive-ordering pin.
+    """
+
+    def test_an_inverted_ordering_permanently_erases_the_ram_verdict(self):
+        reset_pid_registry_for_tests()
+        registry = get_pid_registry()
+        pid, start_time = 700001, 12345
+        registry.register(
+            pid=pid,
+            start_time=start_time,
+            kind="bash",
+            instance_id=INSTANCE,
+            pgid=pid,
+            command="echo hi",
+            detail="erase-demo",
+            parent_pid=os.getpid(),
+        )
+        # INVERTED ordering: the success arm's mark_exit runs FIRST.
+        registry.mark_exit(
+            pid=pid,
+            start_time=start_time,
+            exit_code=0,
+            exit_kind=EXIT_KIND_SUCCESS,
+            peak_rss_kb=1,
+        )
+        # …then the RAM arm's mark_exit runs — and finds NOTHING (the live
+        # row was already deleted): the verdict is ERASED.
+        erased = registry.mark_exit(
+            pid=pid,
+            start_time=start_time,
+            exit_code=None,
+            exit_kind=EXIT_KIND_RAM_KILLED,
+            peak_rss_kb=96 * 1024,
+        )
+        assert erased is None  # the one-shot delete already consumed the row
+        history = registry.drain_history()
+        exit_kinds = [row.exit_kind for row in history]
+        # The RAM verdict is ABSENT from the record — permanently erased.
+        assert EXIT_KIND_RAM_KILLED not in exit_kinds
+        assert exit_kinds == [EXIT_KIND_SUCCESS]
+
+    def test_the_correct_ordering_preserves_the_ram_verdict(self):
+        reset_pid_registry_for_tests()
+        registry = get_pid_registry()
+        pid, start_time = 700002, 22222
+        registry.register(
+            pid=pid,
+            start_time=start_time,
+            kind="bash",
+            instance_id=INSTANCE,
+            pgid=pid,
+            command="echo hi",
+            detail="preserve-demo",
+            parent_pid=os.getpid(),
+        )
+        # CORRECT ordering: the RAM arm's mark_exit runs (only) — the verdict
+        # SURVIVES unambiguously.
+        kept = registry.mark_exit(
+            pid=pid,
+            start_time=start_time,
+            exit_code=None,
+            exit_kind=EXIT_KIND_RAM_KILLED,
+            peak_rss_kb=96 * 1024,
+        )
+        assert kept is not None
+        history = registry.drain_history()
+        assert [row.exit_kind for row in history] == [EXIT_KIND_RAM_KILLED]
+
+
 # ── T12 — the three-registry release ORDER ─────────────────────────────────
 
 

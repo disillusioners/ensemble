@@ -24,6 +24,7 @@ rather than a race.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 
@@ -130,9 +131,13 @@ def test_t17b_a_guard_claim_means_the_timeout_arm_defers(tmp_path, kill_census):
     assert record.state == STATE_BREACHED
     assert record.claim_token is not None
 
-    # The timeout arm's gate: a claimed record ⇒ DEFER (no signal).
-    timeout_would_signal = record.claim_token is None
-    assert timeout_would_signal is False
+    # The timeout arm's PRODUCTION deferral predicate (bash.py
+    # ``_ram_claim_held``) — not a re-derivation of the gate.  A held
+    # claim ⇒ the timeout arm DEFERS.
+    import importlib
+
+    bash_module = importlib.import_module("daemon.tools.bash")
+    assert bash_module._ram_claim_held(record) is True
 
     # The guard's own kill delivers exactly one signal set.
     guard._lane_once()
@@ -145,14 +150,91 @@ def test_t17b_a_guard_claim_means_the_timeout_arm_defers(tmp_path, kill_census):
 
 
 def test_t17b_an_unclaimed_record_leaves_the_timeout_arm_free(tmp_path, kill_census):
-    """The NEGATIVE direction: with NO claim, the timeout arm is the owner."""
+    """The NEGATIVE direction: with NO claim, the timeout arm is the owner.
+
+    Uses the PRODUCTION predicate (``_ram_claim_held``) and the DELIVERED
+    outcome: the unclaimed record makes ``_ram_claim_held`` False (the
+    timeout arm would NOT defer), and the guard's own lane delivers NO
+    signal (it owns no episode — there is nothing to service).
+    """
+    import importlib
+
+    bash_module = importlib.import_module("daemon.tools.bash")
     guard, _root = _make_guard(tmp_path)
     record = _register(guard)
     # No tick ⇒ no claim.
-    assert record.claim_token is None
     assert record.state == STATE_WATCHING
-    # The timeout arm would signal (it is the sole owner).
-    assert (record.claim_token is None) is True
+    # The production predicate says the guard does NOT hold the episode.
+    assert bash_module._ram_claim_held(record) is False
+    # Delivered outcome: the timeout arm is free to signal (it would;
+    # the guard has no claim) — assert via the real kill ledger that the
+    # census stays EMPTY while the guard owns nothing (the guard never
+    # signalled because there was no breach to service).
+    guard._lane_once()
+    assert kill_census == []
+
+
+def test_t17b_the_reaper_dedups_a_pgid_the_ram_tier_already_killed(
+    tmp_path, monkeypatch
+):
+    """T17(b) — the REAPER arm does not re-signal a group the guard killed.
+
+    DRIVEN, not prose: ``sweep_rows(ram_pgids={pgid})`` routes a row whose
+    pgid the RAM tier just SIGKILLed through the DEDUP path — the reaper
+    never calls ``verify_and_kill`` (so it never signals).  The
+    discriminating control: with a NON-matching ``ram_pgids`` the SAME
+    row DOES go through ``verify_and_kill``.
+    """
+    from types import SimpleNamespace
+
+    from daemon.services import bash_spawn_reaper as reaper_mod
+
+    def _make_row():
+        return SimpleNamespace(
+            id=1,
+            pid=4444,
+            pgid=SYNTHETIC_PGID,
+            start_time=1,
+            tracking_id="t-1",
+            instance_id="i-1",
+            command_sanitized="sleep 30",
+            daemon_pid=999,
+            created_at=time.time() - 60,
+            reaped_at=None,
+        )
+
+    calls: list[int] = []
+
+    def _spy_verify(row, **_kwargs):  # noqa: ANN001
+        calls.append(row.pgid)
+        return ("refused", "refused:test-control")
+
+    monkeypatch.setattr(reaper_mod, "verify_and_kill", _spy_verify)
+
+    # RAM tier killed this pgid ⇒ DEDUP: verify_and_kill is NEVER called.
+    actions = asyncio.run(
+        reaper_mod.sweep_rows(
+            [_make_row()],
+            repo=None,
+            reaped_by="shutdown",
+            ram_pgids={SYNTHETIC_PGID},
+        )
+    )
+    assert actions == 1  # the row was closed by the dedup path
+    assert calls == []  # verify_and_kill (the signalling path) was NOT reached
+
+    # CONTROL: a DIFFERENT ram_pgids set ⇒ the SAME row flows through
+    # verify_and_kill (the non-dedup path IS reachable — the test discriminates).
+    actions2 = asyncio.run(
+        reaper_mod.sweep_rows(
+            [_make_row()],
+            repo=None,
+            reaped_by="shutdown",
+            ram_pgids={SYNTHETIC_PGID + 999},
+        )
+    )
+    assert calls == [SYNTHETIC_PGID]  # the control reached verify_and_kill
+    assert actions2 == 1  # the refused row is still closed by the sweep
 
 
 # ── T20 — a stalled smaps_rollup read on the lane never blocks the tick ─────

@@ -100,14 +100,20 @@ class BalloonTree:
 
 
 def mem_available_bytes() -> int:
-    """The host's MemAvailable (0 when unreadable)."""
+    """The host's MemAvailable, or ``-1`` when it CANNOT be read.
+
+    A ``-1`` (unreadable / unparseable / absent ``MemAvailable:`` line) is
+    a DISTINCT value from a genuine ``0`` — the caller treats it as a
+    fail-closed condition (:func:`require_allocation_fits`), never as
+    "plenty of memory".
+    """
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
             if line.startswith("MemAvailable:"):
                 return int(line.split()[1]) * 1024
     except (OSError, ValueError, IndexError):
-        return 0
-    return 0
+        return -1
+    return -1
 
 
 def require_allocation_fits(spec: BalloonSpec) -> None:
@@ -115,6 +121,11 @@ def require_allocation_fits(spec: BalloonSpec) -> None:
 
     The planned allocation must (a) be under the per-tree cap and (b) leave
     :data:`HEADROOM_FACTOR`× free memory on the host.
+
+    **FAIL-CLOSED (D-6):** an UNREADABLE / ZERO ``MemAvailable`` refuses the
+    spawn.  A silent pass on an unreadable ``/proc/meminfo`` would let a
+    balloon run blind on an unknown-memory host — the exact OOM hazard this
+    harness exists to prevent.
     """
     if spec.planned_bytes > MAX_ALLOCATION_BYTES:
         raise HostMemoryShortage(
@@ -123,7 +134,12 @@ def require_allocation_fits(spec: BalloonSpec) -> None:
         )
     needed = spec.planned_bytes * HEADROOM_FACTOR
     available = mem_available_bytes()
-    if available and available < needed:
+    if available <= 0:
+        raise HostMemoryShortage(
+            "MemAvailable is unreadable or non-positive "
+            f"({available} bytes); refusing to spawn blind (fail-closed)"
+        )
+    if available < needed:
         raise HostMemoryShortage(
             f"host memory short: {available} bytes available, {needed} required "
             f"({HEADROOM_FACTOR}x the {spec.planned_bytes}-byte plan)"

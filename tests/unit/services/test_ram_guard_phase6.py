@@ -534,24 +534,47 @@ def test_t23_the_predicate_test_names_follow_the_b12_shape():
 
 
 def test_t23_no_ladder_leg_runs_under_the_signal_fence():
-    """The fixture-split rule: a leg that DELIVERS a signal (the ladder’s own
-    TERM) must not be under ``kill_fence`` (which hard-raises on any signal).
+    """The fixture-split rule, ENUMERATED over every leg in the packs.
 
-    ``kill_fence`` is only valid for legs where NO signal may fire (the
-    P0–P7 REFUSAL branches); the ladder/P8 legs use ``kill_census``.
-    A lint over the ladder pack asserts the pairing.
+    ``kill_fence`` hard-raises on ANY signal ⇒ a leg that DELIVERS a
+    signal (``status == "killed"`` or a bare-thread ladder) must be
+    ``kill_census``-backed, never ``kill_fence``.  A leg that can only
+    REFUSE (P0–P7 refusal branches) is ``kill_fence``-backed.  Pure
+    predicate legs (no ``ram_kill_ladder`` call) are exempt.  This mirrors
+    the manual audit, for ALL legs — not a two-leg spot-check.
     """
+    import ast
     from pathlib import Path
 
     text = (
         Path(__file__).resolve().parent / "test_ram_guard_ladder.py"
     ).read_text(encoding="utf-8")
-    # The opening-signal legs (kill proceeds) are kill_census-backed.
-    for killing_leg in (
-        "def test_p5_leader_alive_matching_starttime_kills(tmp_path, kill_census):",
-        "def test_p5_leader_absent_is_not_applicable(tmp_path, kill_census):",
-    ):
-        assert killing_leg in text, killing_leg
+    tree = ast.parse(text)
+    killing_legs: list[str] = []
+    refusal_legs: list[str] = []
+    for node in tree.body:
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+            continue
+        params = {a.arg for a in node.args.args}
+        uses_fence = "kill_fence" in params
+        uses_census = "kill_census" in params
+        seg = ast.get_source_segment(text, node) or ""
+        calls_ladder = "ram_kill_ladder(" in seg
+        if not calls_ladder:
+            continue  # a pure predicate leg — no signal can fire
+        asserts_killed = '"killed"' in seg  # the leg expects the ladder to SIGNAL
+        if asserts_killed:
+            killing_legs.append(node.name)
+            assert uses_census, f"{node.name}: a KILL leg must be kill_census-backed"
+            assert not uses_fence, f"{node.name}: a KILL leg must NOT be kill_fence-backed"
+        else:
+            # A ladder leg that asserts only refusal / already-dead outcomes.
+            refusal_legs.append(node.name)
+            assert uses_fence, f"{node.name}: a refusal leg must be kill_fence-backed"
+            assert not uses_census or True  # a refusal leg may also census (tolerated)
+    # The enumeration is non-vacuous: BOTH classes exist and were classified.
+    assert len(killing_legs) >= 8, killing_legs
+    assert len(refusal_legs) >= 8, refusal_legs
 
 
 # ── The DRIVEN lifespan test (phase-5 review recommendation) ───────────────
@@ -572,6 +595,41 @@ def test_the_off_guard_starts_zero_threads_and_owns_neither():
     assert guard._lane_thread is None
     assert guard.health()["thread_alive"] is False
     assert guard.health()["lane_alive"] is False
+
+
+def test_t11c_a_live_then_dead_guard_flips_thread_alive_false(tmp_path):
+    """T11(c) — a LIVE started guard, once its tick thread is DEAD, reports
+    ``thread_alive`` False.
+
+    The other OFF/lifecycle legs only assert ``thread_alive`` False for
+    NEVER-STARTED / absent shapes.  A mutant that dropped the
+    ``is_alive()`` check (keeping only the ``not-None`` test) would stay
+    green against those.  This leg starts a LIVE guard, proves
+    ``thread_alive`` True, then stops + joins the real tick thread so the
+    object is DEAD but NON-None, and asserts ``thread_alive`` flips False
+    — the death is visible on the read surface (§8 T11(c)).
+    """
+    guard, _root = _make_guard(tmp_path)
+    guard.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while not guard.health()["thread_alive"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # A LIVE started guard ⇒ thread_alive True.
+        assert guard.health()["thread_alive"] is True
+        assert guard._tick_thread is not None  # the object EXISTS
+        guard.stop()
+        guard.join(timeout=3.0)
+        # The thread is now DEAD but the object is still non-None ⇒ the
+        # is_alive() check (not merely the not-None check) drives the
+        # surface, and it flips False.
+        assert guard._tick_thread is not None
+        assert guard._tick_thread.is_alive() is False
+        assert guard.health()["thread_alive"] is False
+        assert guard.health()["lane_alive"] is False
+    finally:
+        guard.stop()
+        guard.join(timeout=3.0)
 
 
 def test_the_detached_join_does_not_block_the_caller(tmp_path):
