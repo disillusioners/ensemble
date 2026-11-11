@@ -29,7 +29,7 @@
 > **2.69 → 3.31 GiB**.
 >
 > **Two items remain genuinely open** and are carried forward, not closed here:
-> the unit-cap drop-in is a **user action**, and the **3-vs-8 GiB confirmation**
+> the unit-cap drop-in is a **user action**, and the **3-vs-8 GiB confirmation** (DISCHARGED at the escalation pass — USER RULINGS #1 + #2: the default is now dynamic)
 > must be surfaced in the final report and the Phase 7 operator memo.
 
 ## Objective

@@ -2,10 +2,10 @@
 
 Date: 2026-11-10 (planned from worktree base `0efdf106f3f66ccb400405f4137694592b72097d`, branch `feature/ram-auto-termination`, worktree `/home/nea/ensemble-src-wt-ram-auto-termination`)
 Author: plan-creation worker (research by three partitioned explorers; all anchors re-verified against the worktree by this worker)
-Status: **Phase 1 gate CLOSED** — architect adjudication COMPLETE (10/10 DQ rulings + R1 + sequencing verdict), **AMENDED by approver-iter-001** (7 blockers + sweep ruled in `architecture-recommendation.md` §14–§15). Binding rulings live in the "Phase 1 Rulings" block below and in `architecture-recommendation.md`; the phase docs are rev 4 and reconcile against them.
+Status: **Phase 1 gate CLOSED** — architect adjudication COMPLETE (10/10 DQ rulings + R1 + sequencing verdict), **AMENDED by approver-iter-001** (7 blockers + sweep ruled in §14–§15) and by the **escalation pass** (iter-003 blockers + the two **USER RULINGS**; the default ceiling is now **DYNAMIC** — 70 % of detected effective total RAM, §4.7). Binding rulings live in the "Phase 1 Rulings" block below and in `architecture-recommendation.md`; the phase docs are rev 5 and reconcile against them. **The default ceiling is now DYNAMIC** (70 % of detected effective total RAM, USER RULING #2 — §4.7); the fixed 3 GiB figure is **demoted to operator guidance**.
 
-> **rev 4 — supersedes rev 3 (commit e25804554) per the approver-iter-002 amendment
-> pass.** Vehicle: **binding per-file edit list** (binding-order headers below).
+> **rev 5 — supersedes rev 4 (commit 0ce1bc8c8) per the escalation-pass (iter-003
+> rulings + the two USER RULINGS).** Vehicle: **binding per-file edit list** (binding-order headers below).
 > Where this document and `architecture-recommendation.md` disagree, **that document
 > wins**. The architect's "Phase 1 Rulings" block is preserved **verbatim**.
 
@@ -42,48 +42,76 @@ Status: **Phase 1 gate CLOSED** — architect adjudication COMPLETE (10/10 DQ ru
 | 7 | **SC19** re-aimed at 16 codes (+ the count-line) · **SC21** (lane heartbeat) | Blockers 1 & 3 |
 | 8 | **Assumption 14** — the `instance_id=None` narrowing (§16.3) | Notes sweep |
 
+## Applied edit list — rev 5 (binding order, escalation pass: iter-003 + the USER RULINGS)
+
+| Order | Edit | Blocker / source |
+|---|---|---|
+| 1 | Header: the phase docs are **rev 5**; the default is **DYNAMIC** | USER RULING #2 |
+| 2 | **Objective + Scope**: the dynamic default; the **in-flight** scope of the typed error (A3, §17.3) | USER RULING #2, A3 |
+| 3 | **Config surface**: `ceiling_mib: Optional[int]` (B8), the escalation-pass assertion set (B9), the message clause "resolved" (B10), the **eleven-field** heartbeat (B23), the dynamic-default contract (B24) | USER RULING #2 |
+| 4 | **Critical Interaction** re-derived: the dynamic default, the general bound `T ≥ 26.5 + 2.33·R GiB`, the memo guidance (no-cap / lower-the-knob / resize), the retained user-accepted disclosure | §3.3a, §3.4 |
+| 5 | **Risks**: + the derived-default risk (🔴, user-accepted); the stale default claims re-aimed | §9, §10 |
+| 6 | **SCs**: SC3 (in-flight), SC7 (dynamic + OFF-no-abort), SC8 (C3 zombie re-aim), SC13 (**fifteen** items) | A3, C3, C4 |
+| 7 | **Assumption 3** → the dynamic default; + the detection-failure fallback | USER RULING #2 |
+| 8 | **Key sets**: `reason` added after `surface` in the envelope (B2) and the event payload (B3) | A1 |
+| 9 | **E11 anchor sweep** — `bash.py:1156/:1160`, `proc_tools.py:1310`, `bash_spawn_reaper.py:859-866`, `bash.py:952-1006` | E11 |
+| 10 | **C3** — the mid-string bold removed from predicate #1 (SC20-grep-safe) | C3 |
+| 11 | The falsified EventKind variant (the earlier member-count / CHECK-count / column-line figures) is **withdrawn** — it appears in **no** pin cell | C13 |
+
 ## Applied edit list (binding order)
 
 | Order | Edit | Class |
 |---|---|---|
 | 1 | Header: **gate closed** (was "blocked at Phase 1") | Class 3 |
-| 2 | Objective + Scope: the shipped default is **3 GiB / 3 072 MiB**, not the commissioned 8 GiB (leader-accepted amendment) | Leader ruling |
+| 2 | Objective + Scope: the shipped default is **3 GiB / 3 072 MiB**, not the commissioned 8 GiB (leader-accepted amendment) — **SUPERSEDED at the escalation pass**: the default is now **DYNAMIC** (USER RULING #2) | Leader ruling → superseded |
 | 3 | Routed follow-up 1: the unit-cap premise is **falsified** — **no cap exists today**; the recommendation is **7G / 8700M** (§3.4) | Class 3 |
 | 4 | Phases table: P2 **absorbs the envelope helper + the consumer gate**; P5 **shrinks**; P7 **shrinks and re-weights** to the operator memo | Class 3 |
 | 5 | Risk 1: rewritten against the **falsified** unit-cap premise | Class 3 |
 | 6 | Risk 5: the **ownership-gate claim is falsified** (P3/P4) — the reaper's fail-closed 5-rule gate is not `proc_tools`' fail-open 1-signal check, and the bash lane has **no** ownership gate | Class 3 |
 | 7 | Risk 7: the DQ6 gate is **arch doc §6's enumerated census** (the §6 consumer-count figure is **withdrawn**), not the chart-tools pack | Class 3 |
-| 8 | Risk 8 + SC7: the 3 GiB default | Leader ruling |
+| 8 | Risk 8 + SC7: the 3 GiB default — **SUPERSEDED at the escalation pass** (the default is now dynamic) | Leader ruling → superseded |
 | 9 | **SC3 re-aimed** at the **deciding value** | Class 2 |
 | 10 | SC13 re-aimed at the §3.4 reality | Class 3 |
 | 11 | Critical Interaction: rewritten as **RESOLVED** (absolute bytes / guard-inner / unit-cap-outer / 3 GiB) | Class 3 |
 | 12 | Assumptions 3 + 7 re-aimed | Leader ruling |
 | 13 | Open Questions → **Resolved in Phase 1**, with the two items that remain genuinely open | Class 3 |
-| 14 | Knob names named in the plan body: `ENSEMBLE_RAM_GUARD` + `RAM_GUARD_*` (`CEILING_MIB` 3072, `POLL_INTERVAL_MS` 200, `GRACE_MS` 250, `PSS_CONFIRM_DEADLINE_MS` 250) | Class 3 |
+| 14 | Knob names named in the plan body: `ENSEMBLE_RAM_GUARD` + `RAM_GUARD_*` (`CEILING_MIB` 3072, `POLL_INTERVAL_MS` 200, `GRACE_MS` 250, `PSS_CONFIRM_DEADLINE_MS` 250) — **SUPERSEDED at the escalation pass** (`CEILING_MIB` is now `Optional[int]` ⇒ dynamic) | Class 3 → superseded |
 
 ---
 
 ## Objective
 
 When a bash-tool or proc-tool execution's process tree exceeds a configurable RAM
-ceiling (**default 3 GiB / 3 072 MiB = 3 221 225 472 bytes**), the daemon kills the
-offending process tree promptly and returns a clear, honest, typed error to the
-calling agent naming the **deciding** observed usage — preventing runaway agent
-commands from ballooning the host and OOM-killing the daemon unit.
+ceiling — **default: DYNAMIC, 70 % of the detected effective total RAM** (USER
+RULING #2, §4.7) — the daemon kills the offending process tree promptly and returns a
+clear, honest, typed error to the calling agent naming the **deciding** observed
+usage — preventing runaway agent commands from ballooning the host and OOM-killing
+the daemon unit.
 
-> **The default is AMENDED from the commissioned 8 GB** (leader-accepted). The
-> commissioned number is **unshippable on this host**: at fire time box demand
-> ≈ 4.79 residents + 8.0 = 12.79 GiB > 11.67 physical, and it fires
-> **at-or-after daemon death** in both measured Oct-30 incidents. 8 GiB becomes
-> correct on a ≥ ~14.5 GiB host. See the "Phase 1 Rulings" block and
-> `architecture-recommendation.md` §3.3.
+> **The default is now DYNAMIC (USER RULING #2).** `RAM_GUARD_CEILING_MIB` unset ⇒
+> the ceiling is **70 % of the detected effective total RAM** (the daemon's cgroup
+> limit when finite, else host `MemTotal`), **resolved once at boot**; an explicit
+> value overrides and is validated `[64, 65536]` — **the clamp never applies to the
+> derived value** (§4.7c). The previously-shipped fixed figure (3 GiB) is **demoted
+> to operator guidance**; USER RULING #1's *intent* (disaster prevention, not a
+> constraint on legitimate heavy work) is binding and is carried by the no-upper-clamp
+> rule. On this host the derived default is **8,367 MiB (8.171 GiB)** (E11).
+>
+> **SCOPE (A3, leader-framed):** the typed `ram_limit_exceeded` error is guaranteed
+> **only while the tool call is IN FLIGHT**. A breach that fires **after** the call
+> has returned (the ordinary `cmd &` shape — the shell exits with `EXIT CODE: 0`
+> while a surviving grandchild balloons) reaches **no caller**: the tool has already
+> returned. Such post-return kills surface via the **durable event** and the **guard
+> endpoint**, which the agent does not automatically see. There is **NO new
+> agent-injection channel in v1** — adding one is a **routed follow-up** (Phase 7's
+> queue). Disclosed as §3.5 item 14.
 
 Testable completion sentence: an agent command whose process tree allocates past the
-configured ceiling is terminated (tree-wide, not just the direct child), the agent
+**resolved** ceiling is terminated (tree-wide, not just the direct child), the agent
 receives a typed `ram_limit_exceeded` error whose **deciding value** clears the
-ceiling, and the daemon survives with no orphaned descendants — while every command
-under the ceiling, and every lane with the kill-switch OFF, behaves byte-identically
-to today.
+ceiling **while the call is in flight**, and the daemon survives with no orphaned
+descendants — while every command under the ceiling, and every lane with the
+kill-switch OFF, behaves byte-identically to today.
 
 **Enforcement scope is PER-COMMAND (process-tree scoped), NOT host-wide OOM management.**
 
@@ -111,10 +139,12 @@ Systemd OOM restarts of the live daemon on 2026-10-30 at 10:43Z and 11:13Z, with
    confirm** at breach (250 ms deadline, **fail-open ⇒ kill**). The confirm is the
    **deciding** value; pure RSS is falsified as a kill metric (measured **8.9×**
    over-count on a 9-member fork tree).
-2. **A configurable ceiling**, default **3 GiB / 3 072 MiB** (leader-accepted
-   amendment of the commissioned 8 GB), in house-style knobs, with a
-   **kill-switch default-ON** (`ENSEMBLE_RAM_GUARD`) and documented env-off
-   (commission requirement; see DQ7/DQ9 and Dispatcher Ruling (c)).
+2. **A configurable ceiling** — **default DYNAMIC: 70 % of the detected effective
+   total RAM** (USER RULING #2, §4.7); an explicit `RAM_GUARD_CEILING_MIB` overrides
+   and is validated `[64, 65536]` (**the clamp applies to explicit values ONLY**;
+   the derived value is floored at 64 MiB and **never upper-capped**). House-style
+   knobs, with a **kill-switch default-ON** (`ENSEMBLE_RAM_GUARD`) and documented
+   env-off (commission requirement; see DQ7/DQ9 and Dispatcher Ruling (c)).
 3. **Fast-breach detection** — a poll interval chosen as an explicit
    latency/overhead trade-off (DQ2); **RULED: TWO dedicated daemon threads** (the
    tick thread and the execution-lane thread), poll **200 ms** [50, 2000].
@@ -199,6 +229,13 @@ this commission). This is a hard constraint on DQ5, not a preference.
 | 6 | Bounded Test Suite | Real ballooning trees under small injected ceilings; kill-switch byte-identical; the §8 mandated additions; the S8-matching Q2 predicate task; the fixture split; mutation-proof | 24 | tight with 2, 3, 4, 5 | pending |
 | 7 | Durability + Operator Memo + Follow-up Routing | The **operator memo** `docs/runbooks/ram-guard-and-unit-bounds.md` (PRIMARY) + the **operator docs** (knobs / env-off / counters / endpoint) + the §3.5 honesty set (items 10–13) + the §3.4 truth statement + the follow-up queue + the T4 hand-off note — **no migration** | 12 | loose with 3, 4 (parallel; self-contained criterion) | pending |
 
+**Phase ownership (§15 B15, verbatim — supersedes the earlier arch §7 ownership sentence):**
+```
+Phase 2 owns the event HOOK, the DQ6 consumer-gate artifact (pins-only), the execution-lane thread, and the ceiling detector (ceiling.py).
+Phase 5 owns the event EMITTER, the loop bridge, the lifespan wiring AND the lifespan construction (app.state.ram_guard), and the root-Config wiring of RamGuardConfig.
+Phase 7 owns the operator documentation and the honesty set (fifteen items).
+```
+
 **Phase 1 is an explicit gate — and it is now CLOSED.** No code was written before
 the architect returned the DQ rulings. The gate's outcome reshaped three phases:
 **P2 grew** (it absorbs the envelope producer, the consumer gate, the PSS confirm
@@ -247,17 +284,18 @@ wants that; the skill's default sequential ordering is preserved here for review
 | 5 | **Killing the wrong tree** — PID recycling, or a `setsid` escapee that re-parents outside the group, could redirect the kill | **High** | Low | The guard supplies its **own** identity gate — the DQ4 ladder's **P0–P7** pre-kill predicates (captured pgid + leader `starttime` re-verification, **fail-closed** — with the three-way absent-vs-unreadable leader split; **P5a** refusing a recycled pgid; the environ check is **P6, secondary only**). **FALSIFIED (arch doc §1.1 P3/P4):** the previous text conflated two different mechanisms — the reaper's real gate is `verify_and_kill` (`bash_spawn_reaper.py:735-900`, 5-rule, DB-row-backed, fail-closed, starttime gate `:851-857`), whereas `proc_tools.py:1037-1053` is a **different, fail-open** 1-signal environ check; and the **bash lane has NO ownership gate at all** (`_kill_process`, `bash.py:697-745`, sends `killpg` with no environ/starttime check). This plan does **not** claim the bash lane's pre-existing path is gated |
 | 6 | **Grace window defeats the purpose** — the existing bash ladder is SIGTERM → **5 s** → SIGKILL; a ballooning process keeps allocating for those 5 s and can push the unit past `MemoryMax` before the KILL lands | **High** | Medium | DQ4 framing: a RAM emergency needs a SHORT grace (the reaper's slice-probe ladder is the sync-friendly precedent). Make the grace a separate, shorter knob than the timeout grace. |
 | 7 | **Tool contract break** — the agent-visible error string changes shape; a downstream consumer may assume the current form | Medium | Low | **The gate is SATISFIED by evidence, not by ritual:** `architecture-recommendation.md` §6 carries the **enumerated census** — **the enumerated census** (the counts are **derived at fold time, never pinned** — the table is the artifact) (the count is a derived convenience; **the table is the artifact**), owned by **Phase 2**. **AMENDED — the §6 consumer-count figure is WITHDRAWN** (no such list existed). **FALSIFIED (arch doc §1.1 P6):** `tests/test_chart_tools_legacy_error_contract.py` pins **chart tools only** (58 lines; imports neither bash nor proc) — it was the **wrong file**. The real pin surface is the `proc_status` substring assertions (`tests/tools/test_proc_tools.py:240, 257, 382, 1163, 1166-1167, 1233, 1831`) and the `ProcessInfo.status == "killed"` attribute pins (`:1614, 1655, 1692, 1944, 1992, 2038`) — satisfied by *adding* lines and keeping `status="killed"`. Four strings must never change (bash success, bash timeout, the `proc_status` block, the `proc_list` header) and are pinned by the Phase 6 suite — the bash **timeout string has ZERO test pins** and is therefore guaranteed byte-identical only when no breach was observed |
-| 8 | **Test host OOM** — the harness genuinely allocates RAM; a mis-sized test could OOM the CI/dev box | **High** | Medium | P6 mandate: ceilings are **small and injected** (MiB-scale), the allocator sizes are **explicitly bounded in the test code**, and the harness asserts the host's free memory before spawning. Never use the production **3 GiB** default in a test |
+| 8 | **Test host OOM** — the harness genuinely allocates RAM; a mis-sized test could OOM the CI/dev box | **High** | Medium | P6 mandate: ceilings are **small and injected** (MiB-scale), the allocator sizes are **explicitly bounded in the test code**, and the harness asserts the host's free memory before spawning. Never use the **resolved production default** in a test — the derived default is host-sized (8,367 MiB on this host) and the explicit knob is the only test-safe path |
 | 9 | **Fenced-off substrate** — reaching for `resource_pid_map`'s dormant columns (the obvious "enforcement audit" landing zone) breaks `tests/test_resource_control_seam.py` | Medium | Medium | The Fence section above states the constraint; DQ5 frames a RAM-only registry as the substrate; P7 records the unfencing as a user-gated follow-up, not an inline change. |
 | 10 | **Coverage hole: `setsid` escapees** — a command that calls `setsid` leaves its process group, so neither the tree measurement nor the group kill reaches it (documented gap in BOTH lanes: `proc_tools.py:1677-1683`, `bash.py:590-600`) | Medium | Medium | DQ3 framing states the gap explicitly; note the orphan-reaper's Phase-4 env-stamp sweep already reaps such escapees at cleanup points, so the RAM guard is not the only net. Frame "setsid-aware tree discovery" as an explicit DQ3 sub-option. |
 | 11 | **Boot-abort on a bad env value** — house rule: out-of-range env validated OUTSIDE the try/except at `load_config()` ABORTS BOOT (`config.py:911-916`, `api.py:2266-2278`) | Medium | Low | Clamp bounds generously (the ruled ceiling clamp is `ge=64, le=65536`), and P6 includes the config ladder case "out-of-range env aborts boot" as an explicit, asserted test. |
 | 12 | **Two enforcement ports competing** — the RAM guard (default-ON, non-user-gated) lands beside the T4 seam (`enabled=false`, `user_gated=true`) and the observe-only fence test | Medium | Low | P1/DQ9 makes the separation structural: P1 lives OUTSIDE the T4 seam and does not read or write `resource_limit_policy`; the fence test must still pass unchanged. |
 | 13 | **Overlap with the resource monitor's own child accounting** — `resource_pid_map` already tracks peak RSS at exit for registered children; two sources of truth could disagree | Low | Medium | Document the relationship: `resource_pid_map.peak_rss_kb` is the **exit-time floor** (a documented under-report — `bash.py:1096-1109`), the RAM guard's peak is the **watchdog's own sampled peak**. Different semantics; do not merge them. |
-| 14 | 🔴 **NEW — the guard LOSES the race against the cgroup cap above ≈0.5 GiB/s on this host** (§3.4). The published pair's role is the **orphan class**; the guard-vs-cap race is winnable only below the measured-bottom rate, and the measured band is 1–3 GiB/s. Above it, **the daemon is the casualty**. Restoring the layering requires a ≥ ~14.5 GiB host, **not** a different ceiling | **High** | High | The §3.4 truth statement is reproduced **verbatim** in the memo, the runbook and the honest-peak envelope — **never papered over**. The operator drop-in is the mitigation (the cap becomes the containment layer). The 3 GiB ceiling ships either way; this decides the **layering**, not the ceiling (arch doc §10 item 4) |
+| 14 | 🔴 **NEW — the guard LOSES the race against the cgroup cap above ≈0.5 GiB/s on this host** (§3.4). The published pair's role is the **orphan class**; the guard-vs-cap race is winnable only below the measured-bottom rate, and the measured band is 1–3 GiB/s. Above it, **the daemon is the casualty**. Restoring the layering requires a ≥ ~14.5 GiB host, **not** a different ceiling | **High** | High | The §3.4 truth statement is reproduced **verbatim** in the memo, the runbook and the honest-peak envelope — **never papered over**. The operator drop-in is the mitigation (the cap becomes the containment layer). The **dynamic** default ships either way; this decides the **layering**, not the ceiling (arch doc §10 item 4) |
 | 15 | 🟡 **NEW — the bounded re-arm trades containment for confirm frequency** (§4.1a): a smaller `CAP` means the trigger fires earlier, so the confirm runs more often (up to the tick rate ⇒ ≈17.5 % duty at a 250-pid host) and the tree's real footprint can reach `F_max` ≈ 3.86 GiB at R = 1 GiB/s | Medium | Medium | Both are **disclosed** in the §3.5 honesty items 10–11 (verbatim, in the memo and the envelope); the re-arm threshold is **reported** in the envelope as `rearm_threshold_bytes` beside the configured `limit_bytes`; the growth governor bounds the confirm rate |
 | 16 | 🟡 **NEW — the durable event can be DROPPED** (§4.5): no live loop / loop closed / daemon shutdown ⇒ the event is dropped, and across a restart the event is the **only** durable artifact ⇒ a dropped event is a permanent loss of the forensic record | Medium | Low | The drop is **visible**: `ram_events_dropped++` on the endpoint plus the `WATCHING→KILLED` transition log line; the bridge is **non-blocking** (never `.result(timeout=…)`); the guard never imports the bus |
 | 17 | 🟡 **NEW — `RamGuardConfig` declared but never wired** would make the whole env tier and the boot-abort rung dead code (approver blocker 5's root cause) | Medium | Low | The root field is declared in §4.6 and asserted by the §15 B9 shapes, which are unreachable without the wiring; the boot-abort rung is asserted, not disclosed |
 | 18 | 🔴 **NEW — a WEDGED execution-lane thread stops the kills while the measurement continues** (iteration 002). A never-returning `smaps_rollup` read (the house reader is a plain blocking `read_text()` with no timeout, `proc_readers.py:127-133`) wedges the lane ⇒ **kills stop; measurement continues**. `lane_alive` stays **True** — the signal is the **progress heartbeat `last_lane_progress_at` frozen** plus `lane_pending` climbing, **NOT `Thread.is_alive()`** | **High** | Low | The **two-thread** shape (DQ2/B16) confines the wedge to the kill path — the tick thread keeps sampling, `last_tick_at` keeps advancing and the liveness sweep still runs (the §5 property, §15 B17). The residual (a wedged read holds the kill path until the daemon restarts) is **disclosed** in the §3.5 honesty set (item 11) and the unit cap is the backstop |
+| 20 | 🔴 **NEW — at the 70 % dynamic default the guard fires at-or-after daemon death on this host** (§3.3) — **user-accepted by stated intent** (disaster prevention, not constraint). The operator levers are the knob and the host resize; no feasible unit cap exists at the default below a ~26.5 GiB host | **High** | High | The disclosure is **retained and user-accepted** (arch doc §10 item 4); the memo presents **no-cap / lower-the-knob / resize**; the derived default is never upper-capped (USER RULING #1's intent) |
 | 19 | 🔴 **NEW — the N = 2 contended case empties the unit-cap window** (iteration 002): two simultaneous full-ceiling breaches ⇒ the unit-cap floor is 9.36625 GiB > the 8.88 GiB box ceiling ⇒ the window is **EMPTY above R ≈ 0.598 GiB/s**, and the guard wins at `8700M` only below R ≈ **0.28 GiB/s** | **High** | Medium | The N = 2 row is a **DISCLOSURE, not a design target**; the memo states that the published `7G / 8700M` pair is a **single-tree claim**; the contended overshoot `Ω_contended(2) = R × 1.21 s` appears in the honesty set and the memo |
 
 ### Critical-Path Risks (would invalidate the plan if realized)
@@ -274,21 +312,21 @@ wants that; the skill's default sequential ordering is preserved here for review
 |---|-----------|----------------|-----------|
 | 1 | A bash command whose tree exceeds the injected ceiling is **terminated tree-wide** | P6 test: spawn `python3 -c` that forks children allocating past a 64 MiB ceiling; assert the direct child AND every grandchild are dead within the grace + poll window | All descendants of the spawned pgid dead; ≤ 5 s wall from breach detection to all-dead |
 | 2 | The same holds for the proc tool | P6 test: same tree via `proc_run`; assert status is the RAM-kill status and the tree is dead | Same as #1 |
-| 3 | The agent receives a **typed** error naming the **deciding** value | Assert the returned string parses as the `{ok:false, code, surface, …}` envelope with `code="ram_limit_exceeded"`, the correct `surface`, a `limit_bytes`, and that the **DECIDING VALUE** — `confirmed_pss_bytes`, or `observed_peak_bytes` on a fail-open trigger — is **≥ the ceiling**. **Not** `observed_peak_bytes >= limit_bytes`: under the ruled hybrid the RSS peak and the deciding PSS value are deliberately **distinct** quantities | Envelope parses; the **deciding value** `>= limit_bytes` |
+| 3 | The agent receives a **typed** error naming the **deciding** value — **guaranteed only while the tool call is IN FLIGHT** (A3, §17.3) | Assert the returned string parses as the `{ok:false, code, surface, reason, …}` envelope with `code="ram_limit_exceeded"`, the correct `surface`, a `limit_bytes` (= the **resolved** ceiling), a `reason`, and that the **DECIDING VALUE** — `confirmed_pss_bytes`, or `observed_peak_bytes` on a fail-open trigger — is **≥ the ceiling**. **Not** `observed_peak_bytes >= limit_bytes`: under the ruled hybrid the RSS peak and the deciding PSS value are deliberately **distinct** quantities. **Post-return kills are NOT claimed here** — they surface via the durable event + the guard endpoint (§3.5 item 14) | Envelope parses; the **deciding value** `>= limit_bytes`; the assertion is scoped to the **in-flight** call |
 | 4 | The reported peak is **honest** — it is the watchdog's sampled peak, not the spawn-time floor | Assert the reported peak for a command that allocates a KNOWN amount exceeds that amount by a margin, and that it is > the spawn-time VmHWM floor | Reported peak ≥ 90 % of the known allocation |
 | 5 | Under-limit commands are **unaffected** | P6 test: a command allocating 8 MiB under a 64 MiB ceiling → normal exit, normal output, `exit_kind=success`, no event, no counter increment | Exit code 0; output byte-identical to the pre-feature baseline |
 | 6 | Kill-switch OFF is **byte-identical** | P6 test (mirroring the existing `test_bash_spawn_stamp.py` idiom `explicit_off_byte_identical_env_no_row`): with the switch OFF, the child env carries no stamp, no row/record is written, and the returned output is byte-identical to the ON-path output for an under-limit command | Byte-identical output; zero writes; zero extra syscalls observable in the env capture |
-| 7 | The config ladder behaves per house rules | P6: default = **3 072 MiB (3 GiB)**; env override applies; out-of-range env aborts boot — **asserted** (`pytest.raises(ValidationError)` around `load_config`; the "untestable disclosure" escape is **deleted**, the rung is assertable today); YAML literal does NOT silently beat the env tier (the yaml-literal trap) | Each rung behaves as specified |
-| 8 | **No zombies** | After a RAM kill, assert the daemon reaped the direct child; assert no zombie remains in the group (the reaper's zombie-aware skip precedent) | `ps`/procfs shows no `Z`-state member of the killed group |
+| 7 | The config ladder behaves per house rules | P6: **unset ⇒ dynamic** (`config.ram_guard.ceiling_mib is None`); an explicit env override applies; an out-of-range **explicit** value aborts boot — **asserted** (`pytest.raises(ValidationError)` around `load_config`); **OFF ⇒ NO ABORT** even with an out-of-range value set (B26); YAML literal does NOT silently beat the env tier (the yaml-literal trap) | Each rung behaves as specified |
+| 8 | **No LIVE member remains** after a RAM kill (C3, §3.5 item 13) | Assert the direct child was reaped (the pre-existing `await proc.wait()`) and that **no LIVE member** remains in the group; a transient `Z` grandchild is **init's business**, not the guard's — the daemon is **not** the reaper of a killed tree's grandchildren (there is **no** subreaper in `daemon/`) | No live member in the killed group; the direct child is reaped; **no** grandchild-reaping claim is made |
 | 9 | No secrets in any new log/event/record | P6: run a command whose env overlay carries a secret marker; assert the marker appears in NO log line, event payload, or persisted record | Zero occurrences of the marker value in logs/events/records |
 | 10 | The feature is **inert** where it must be | P6: on a non-Linux platform (or when the platform guard says so), the guard performs NO measurement and NO kill; a command that would exceed the ceiling completes normally | Zero kills; zero measurement calls |
 | 11 | The **existing fence tests still pass unmodified** | Run `tests/test_resource_control_seam.py` unchanged; run `tests/tools/test_bash.py`, `tests/tools/test_proc_tools.py`, `tests/unit/services/test_bash_spawn_reaper.py` | All pass, unmodified |
 | 12 | The existing suites are **net-new-red free** | Full `tests/` run compared to the base commit | Net-new reds = 0 |
-| 13 | The unit-cap interaction is **documented and actionable** | The Phase 7 operator memo `docs/runbooks/ram-guard-and-unit-bounds.md` states the **measured** state (`MemoryMax=infinity` — **no cap exists today**), the §3.4 interaction table (recommended `7G / 8700M` **and** the rejected rows), the drop-in vehicle + canary-first procedure + verify/rollback, and the §3.5 honesty set (all nine items) | The memo contains the formula, the interaction table, and the worked example; the honesty set is reproduced verbatim |
+| 13 | The unit-cap interaction is **documented and actionable** | The Phase 7 operator memo `docs/runbooks/ram-guard-and-unit-bounds.md` states the **measured** state (`MemoryMax=infinity` — **no cap exists today**), the §3.4 interaction table (the dynamic-default regime, the general bound `T ≥ 26.5 + 2.33·R GiB`, the recommended/rejected rows), the drop-in vehicle + canary-first procedure + verify/rollback, and the §3.5 honesty set — **all fifteen items** (1–9, 9b, 10–15) | The memo contains the formula, the interaction table, and the worked example; the honesty set is reproduced verbatim — exactly the fifteen items |
 | 14 | The DQ rulings are **recorded** | Phase 1 artifact names, for each of DQ1–DQ10, the chosen option, the rejected options, and the data it depends on | 10/10 rulings recorded with a rejected-option list |
 | 15 | **The over-count re-arm is BOUNDED** | A fork tree whose summed RSS crosses the ceiling but whose summed PSS does not ⇒ NOT killed; the re-armed threshold is ≤ `ceiling + 32 MiB` and **ratchets** (never decreases); the confirm does not run on every tick (128 MiB growth governor) | Threshold ≤ `ceiling + RAM_GUARD_REARM_MAX_EXTRA_BYTES`; monotonic; confirm count ≤ growth/128 MiB |
 | 16 | **The verdict is PUBLISHED before `mark_exit`** | A recording fake observes the call order: publication → `mark_exit` → guard-registry release; the success arm's `mark_exit` did **not** run | The observed order matches; the RAM verdict survives |
-| 17 | **The config is wired into the root `Config`** | `load_config()` yields `config.ram_guard.ceiling_mib == 3072` by default; `RAM_GUARD_CEILING_MIB=64` ⇒ `== 64`; out-of-range ⇒ `pytest.raises(ValidationError)` | All three hold; the env tier is live, not dead code |
+| 17 | **The config is wired into the root `Config`** | `load_config()` yields `config.ram_guard.ceiling_mib is None` by default (unset ⇒ dynamic) and `== 64` with `RAM_GUARD_CEILING_MIB=64`; out-of-range ⇒ `pytest.raises(ValidationError)`; **OFF ⇒ NO ABORT** even with an out-of-range value set (B26) | All three hold; the env tier is live, not dead code; the OFF branch does not abort |
 | 18 | **A dropped event is visible** | No live loop ⇒ the event is dropped, `ram_events_dropped++`, and the transition log line is present; the tick does not block | Drop counted + logged; no tick stall |
 | 19 | **The reason vocabulary is exact** | The ladder's reason set is asserted as an exact ordered list of **16 codes** (9 kept/renamed + 7 added); the status set is `{killed, already-dead, refused}`. **The enumeration above IS the authoritative exact set: 16 codes = 9 kept/renamed + 7 added. Any count other than 16 anywhere in the plan set is a defect.** | Exact set match; no drift; **zero** count sites other than 16 |
 | 20 | **No plan-side text contradicts the amended contract** | A §15 char-for-char grep over the plan set returns the pinned strings; the withdrawn §6 consumer-count claim appears **nowhere** (and the withdrawn "guard always completes before a unit kill" claim appears only inside the verbatim truth statement that prohibits it) | Zero survivors for the withdrawn claims; every B-string present |
@@ -548,11 +586,11 @@ lane writes **none** — so durable verdicts for the proc lane need a new write 
 | DQ1 | **(e) hybrid, confirm MANDATORY**: `summed_rss_bytes` trigger per tick + one-shot `summed_pss_bytes` confirm at breach (250 ms deadline, fail-open ⇒ kill); overcounted trees re-arm at **`ceiling + min(shared_extra_bytes, RAM_GUARD_REARM_MAX_EXTRA_BYTES)`** with a **growth governor** (128 MiB) — **AMENDED** (approver blocker 2: the previous unbounded `ceiling + (rss − pss)` rule is **withdrawn**). Measured over-count factor ≈ N (8.9× on a 9-member fork tree) — pure summed RSS false-kills fork-heavy legit jobs |
 | DQ2 | **AMENDED (approver iteration 002, blocker B3) — the DQ2 ruling sentence (§15 B16), verbatim:** (b) TWO dedicated daemon threads — ONE TICK THREAD and ONE EXECUTION-LANE THREAD — started/stopped together on the FastAPI lifespan (app.state.ram_guard owns both; OFF ⇒ neither thread exists). The tick thread owns registration, the ONE shared /proc scan, the RSS trigger, the peak/counter updates and the breach handoff; it never reads PSS, never signals, never sleeps beyond the poll. The execution-lane thread is the only executor of the kill path: the one-shot PSS confirm (250 ms deadline, fail-open ⇒ kill), then ram_kill_ladder (TERM → slice-probed grace → KILL → the P8 probe), then the verdict publication and the emitter call. The lane never samples and the tick never kills, so a stalled confirm can never delay a tick. **The constants (§15 B16), verbatim:** RAM_GUARD_PENDING_MAX = 2 · RAM_GUARD_GRACE_POLL_SLICE_SECONDS = 0.025 The tick path never logs; no lock across /proc/signal/sleep; the pending set is bounded and an overflow is **re-offered**, never skipped |
 | DQ3 | **(c) hybrid from ONE shared `/proc` scan per tick**: group ∪ bounded descendant-closure (per-spawn scans cost 9.49 ms each and overrun the tick); enumeration failure ⇒ drop the sample, never kill |
-| DQ4 | **(d) NEW sync short-grace ladder** (TERM → slice-probe → KILL), grace 250 ms [0, 2000] as a SEPARATE knob; identity = captured pgid + leader `starttime` re-verify (fail-closed). **AMENDED (leader ruling Q2=(i) + approver blockers 1 & 6):** the watch **stays alive until the group member count reaches 0**; identity **re-anchors on the surviving group members** when the leader is gone; the leader `starttime` gate applies to the leader **only while it is alive**; `already-dead:group-empty` fires **ONLY at group member count 0**; the pre-kill gate is **P0–P7** (P8 is the post-kill probe ⇒ `killed:tree-incomplete`) and the vocabulary is **16 codes**. **Canonical predicate strings (verbatim):** `the watch stays alive until the group member count reaches 0` · `identity = captured pgid ∧ surviving-member group membership` · `starttime gate applies to the leader only while alive` · `the watch is released only at group member count 0` · `group_member_count == 0`. Vocabulary: `exit_kind="ram_killed"` (constant; the real closed set is `daemon/services/resource_monitor/pid_registry.py:120-138`, NOT the path cited in this plan); proc gets `ram_killed: bool`, status stays `"killed"` |
+| DQ4 | **(d) NEW sync short-grace ladder** (TERM → slice-probe → KILL), grace 250 ms [0, 2000] as a SEPARATE knob; identity = captured pgid + leader `starttime` re-verify (fail-closed). **AMENDED (leader ruling Q2=(i) + approver blockers 1 & 6):** the watch stays alive until the group member count reaches 0; identity **re-anchors on the surviving group members** when the leader is gone; the leader `starttime` gate applies to the leader **only while it is alive**; `already-dead:group-empty` fires **ONLY at group member count 0**; the pre-kill gate is **P0–P7** (P8 is the post-kill probe ⇒ `killed:tree-incomplete`) and the vocabulary is **16 codes**. **Canonical predicate strings (verbatim):** `the watch stays alive until the group member count reaches 0` · `identity = captured pgid ∧ surviving-member group membership` · `starttime gate applies to the leader only while alive` · `the watch is released only at group member count 0` · `group_member_count == 0`. Vocabulary: `exit_kind="ram_killed"` (constant; the real closed set is `daemon/services/resource_monitor/pid_registry.py:120-138`, NOT the path cited in this plan); proc gets `ram_killed: bool`, status stays `"killed"` |
 | DQ5 | **(a) RAM-only map**, both lanes; the proc lane registers with the guard ONLY (no new durable write path); the bash `bash_spawn_registry` row stays **OPEN** on a RAM kill so the reaper's escapee net stays armed; (c) stays fenced, no lift routed |
 | DQ6 | Envelope mirrors `_format_secret_envelope`, numerics as siblings before `message`, **the envelope IS the entire bash return**; proc rides `proc_status` as a `ram_breach:` line + `ram_killed: true`. **AMENDED — the §6 consumer-count figure is WITHDRAWN** (no such list existed); the gate artifact is the **§6 enumerated census** (the enumerated census — counts derived at fold time, never pinned; the table is the artifact) and it is **owned by Phase 2** (Phase 5's duplicate claim collapses to a cross-reference). The chart-tools legacy test remains **inapplicable**. Additive-key evolution rule; no version field |
-| DQ7 | Bare `ENSEMBLE_RAM_GUARD` master switch (reaper semantics, default-ON, complete no-op OFF) + `RamGuardConfig(env_prefix="RAM_GUARD_")`: CEILING_MIB **3072** [64, 65536] · POLL_INTERVAL_MS 200 · GRACE_MS 250 · PSS_CONFIRM_DEADLINE_MS 250; YAML comment-only; out-of-range aborts boot; per-call ceiling is an **internal/test seam — NEVER an LLM-visible tool parameter**. **AMENDED (approver blocker 5):** the class **and** the bare switch are wired into the **root `Config`** (`ram_guard: RamGuardConfig = Field(default_factory=RamGuardConfig)`); the depth/node caps **and the two re-arm constants** are **module constants, not knobs** |
-| DQ8 | `EventKind.RAM_LIMIT_EXCEEDED` (= the envelope `code`); payload = **the envelope key set + exactly four event-only keys** (`trigger`, `state`, `tracking_id`, `breach_at`), producer-side allow-list, **no argv/env/stdout anywhere**; one event per breach; `instance_id=None` spawns ⇒ **counter + log only, no event**; counters (exact ordered set): `ram_kills, ram_breaches_detected, ram_kill_refusals_p0 … ram_kill_refusals_p7, ram_overcounted, ram_rearms, ram_confirm_failures, ram_events_emitted, ram_events_dropped, ownership_unverified, tree_incomplete` (**no** `ram_kill_refusals_p8` — P8 never refuses); log prefix `ram-guard:`; NEW additive `GET /api/resources/ram-guard` carries counters + the guard health heartbeat (NOT in livez/readyz)  — **defensive behavior only** (§16.3): in v1 an instance-less spawn is **not registered with the guard at all** (the bash seam's registration block is inside `if instance_id is not None and proc is not None:`, `bash.py:952-1005`), so such a tree is invisible to the guard and only the unit cap covers it|
+| DQ7 | Bare `ENSEMBLE_RAM_GUARD` master switch (reaper semantics, default-ON, complete no-op OFF, **OFF honored BEFORE numeric validation** — §17.4) + `RamGuardConfig(env_prefix="RAM_GUARD_")`: `CEILING_MIB` is **`Optional[int]`, default `None` ⇒ the DYNAMIC 70 % default** (USER RULING #2, §4.7); explicit values validated [64, 65536] — **the clamp applies to explicit values ONLY** · POLL_INTERVAL_MS 200 · GRACE_MS 250 · PSS_CONFIRM_DEADLINE_MS 250; YAML comment-only; out-of-range aborts boot **while ON**; per-call ceiling is an **internal/test seam — NEVER an LLM-visible tool parameter**. **AMENDED:** the class **and** the bare switch are wired into the **root `Config`**; the depth/node caps, the re-arm constants, `RAM_GUARD_PENDING_MAX`, `RAM_GUARD_GRACE_POLL_SLICE_SECONDS` and `WAIT_SLACK_MS` are **module constants, not knobs** |
+| DQ8 | `EventKind.RAM_LIMIT_EXCEEDED` (= the envelope `code`); payload = **the envelope key set + exactly four event-only keys** (`trigger`, `state`, `tracking_id`, `breach_at`), producer-side allow-list, **no argv/env/stdout anywhere**; one event per breach — **refusals emit NO event** (counters + the transition log line, §17.2); the endpoint heartbeat is the **eleven-field B23 set** (`lane_alive`, `lane_pending`, `last_lane_progress_at`, `resolved_ceiling_bytes`, `ceiling_source` included); `instance_id=None` spawns ⇒ **counter + log only, no event**; counters (exact ordered set): `ram_kills, ram_breaches_detected, ram_kill_refusals_p0 … ram_kill_refusals_p7, ram_overcounted, ram_rearms, ram_confirm_failures, ram_events_emitted, ram_events_dropped, ownership_unverified, tree_incomplete` (**no** `ram_kill_refusals_p8` — P8 never refuses); log prefix `ram-guard:`; NEW additive `GET /api/resources/ram-guard` carries counters + the guard health heartbeat (NOT in livez/readyz)  — **defensive behavior only** (§16.3): in v1 an instance-less spawn is **not registered with the guard at all** (the bash seam's registration block is inside `if instance_id is not None and proc is not None:`, `bash.py:952-1006`), so such a tree is invisible to the guard and only the unit cap covers it|
 | DQ9 | Confirmed: entirely outside the T4 seam; `/control-capabilities` byte-identical; both fence tests green unmodified; env-off is the v1 disable |
 | DQ10 | **(a) in-process + the event as the durable forensic record; NO migration lands in v1 at all** (`reap_reason` is plain TEXT — the "migration-backed extension" premise was stale). **AMENDED (approver blocker 3):** the event now has an **owner, an emitter and a bridge** (§4.5) — **Phase 2 owns the HOOK, Phase 5 owns the EMITTER + the wiring**; the bridge is **non-blocking** (`run_coroutine_threadsafe` + a done-callback) on the **hardened** `manager._get_event_loop()` — **not** `MainLoopBridge`, whose loop is `None` on a no-worker-pool boot. **Qualifying sentence (house debt, out of scope; §15 B22, verbatim):** the SQLite `event.kind` CHECK constraint lists only 8 kinds while `EventKind` has 16 — it is already stale for 8 pre-existing kinds; the production deployment is PostgreSQL (`create_all`; the SQLModel column carries no CHECK — `models.py:74`), so `ram_limit_exceeded` (the 17th member) is unaffected|
 
@@ -569,16 +607,19 @@ The knob names are fixed here so every phase doc refers to the same identifiers.
 | Knob | Default | Bounds | Notes |
 |---|---|---|---|
 | `ENSEMBLE_RAM_GUARD` | **ON** | — | Bare `ENSEMBLE_*` master switch; reaper semantics (`0/false/no/off` case-insensitive = OFF). OFF = a **complete no-op**: no thread, no registration, no measurement, zero DB queries, one INFO line at lifespan start |
-| `RAM_GUARD_CEILING_MIB` | **3072** (3 GiB) | **[64, 65536]** | INT-only (house rule: no human-string parsing). `× 1 048 576` once at config → `SpawnRecord` ⇒ **3 221 225 472 bytes** |
+| `RAM_GUARD_CEILING_MIB` | **unset ⇒ DYNAMIC** (70 % of detected effective total RAM) | **[64, 65536]** — **explicit values ONLY** | INT-only (house rule: no human-string parsing). `Optional[int]`, default `None`. The derived value is `max(67108864, int(0.7 × effective_total_bytes))` — floored at 64 MiB, **never upper-capped**. **Detection failure ⇒ the fixed fallback `3221225472` (3072 MiB) + one WARN — never aborts boot** (B24) |
 | `RAM_GUARD_POLL_INTERVAL_MS` | **200** | [50, 2000] | The guard thread's tick |
 | `RAM_GUARD_GRACE_MS` | **250** | [0, 2000] | The **short** TERM→KILL grace — a **separate knob** from the 5 s timeout grace, and a **precondition of the 3 GiB ceiling** |
 | `RAM_GUARD_PSS_CONFIRM_DEADLINE_MS` | **250** | [50, 2000] | The one-shot PSS confirm's deadline; expiry ⇒ **fail-open ⇒ kill** |
 
 **Class:** `RamGuardConfig(BaseSettings)`, `env_prefix="RAM_GUARD_"`. The YAML block
 is **comment-only** (pydantic init-kwargs beat env — `config.py:911-916`). Bounds are
-validated **outside** the try/except at `load_config()` ⇒ an out-of-range env value
-**aborts boot** (house-approved). **Depth/node caps — and the two §4.1a re-arm
-constants — are module constants, not knobs.**
+validated **outside** the try/except at `load_config()` ⇒ an out-of-range **explicit**
+env value **aborts boot** (house-approved) — **but only while the guard is ON**: the
+bare switch is parsed **FIRST** and OFF short-circuits validation (B26, below).
+**Depth/node caps — the two §4.1a re-arm constants — `RAM_GUARD_PENDING_MAX`,
+`RAM_GUARD_GRACE_POLL_SLICE_SECONDS` and `WAIT_SLACK_MS` are module constants, not
+knobs.**
 
 **AMENDED (approver blocker 5) — the ROOT-`Config` wiring** (§4.6). The hole this
 closes: `daemon/config.py` had **zero** `ram_guard` references, the root `Config`
@@ -594,15 +635,41 @@ raise on `""`/unknown values and abort boot, violating the reaper's "explicit
 anything else ⇒ ON") — it is parsed by a dedicated function and carried on the root
 `Config` as a **derived** value.
 
+**OFF BEATS VALIDATION (B26, verbatim):** `load_config parses ENSEMBLE_RAM_GUARD FIRST; when OFF it passes config_dict["ram_guard"] = RamGuardConfig.model_construct(ceiling_mib=None, poll_interval_ms=200, grace_ms=250, pss_confirm_deadline_ms=250)`
+— `model_construct` bypasses both validation and the settings sources, so **no
+`ge`/`le` check runs while OFF** (env or yaml). When ON, construction is normal
+(env tier + validation + abort on out-of-range). Enabling later with the bad value
+still set aborts at that boot — a misconfigured guard cannot be enabled silently.
+
 **The module constants (NOT knobs — §4.1a), verbatim:**
 `RAM_GUARD_REARM_MAX_EXTRA_BYTES = 33554432` · `RAM_GUARD_REARM_MIN_GROWTH_BYTES = 134217728`.
+
+**The message clause (§15 B10, verbatim):**
+```
+The enforced trigger threshold was {threshold_mib} MiB (the resolved ceiling is {limit_mib} MiB); when the summed-RSS metric over-counts shared pages the threshold is re-armed above the ceiling and the kill decision is always made on the shared-page total.
+```
+
+**The endpoint heartbeat (§15 B23, verbatim — the SINGLE eleven-field pin, superseding every six- or nine-field variant):**
+```
+enabled, thread_alive, last_tick_at, missed_samples, ticks, registry_depth, lane_alive, lane_pending, last_lane_progress_at, resolved_ceiling_bytes, ceiling_source
+```
+
+**The dynamic-default contract (§15 B24, verbatim):**
+```
+detect_effective_total_bytes(proc_root: Path, cgroup_root: Path) -> tuple[int, str]
+resolved_ceiling_bytes = max(67108864, int(0.7 * effective_total_bytes))
+effective_total_bytes = min(MemTotal_bytes, cgroup_limit_bytes) when the cgroup limit is finite, else MemTotal_bytes
+ceiling_mib unset ⇒ derived; explicit ⇒ validated [64, 65536] — the clamp NEVER applies to the derived value
+detection failure ⇒ resolved_ceiling_bytes = 3221225472 (3072 MiB) + one WARN; never aborts boot
+limit_bytes = the RESOLVED ceiling (derived or explicit)
+```
 
 **The config wiring (§15 B8), verbatim:**
 
 ```
 ram_guard: RamGuardConfig = Field(default_factory=RamGuardConfig)
 model_config = SettingsConfigDict(env_prefix="RAM_GUARD_")
-ceiling_mib: int = Field(default=3072, ge=64, le=65536)
+ceiling_mib: Optional[int] = Field(default=None, ge=64, le=65536)
 poll_interval_ms: int = Field(default=200, ge=50, le=2000)
 grace_ms: int = Field(default=250, ge=0, le=2000)
 pss_confirm_deadline_ms: int = Field(default=250, ge=50, le=2000)
@@ -613,12 +680,15 @@ ENSEMBLE_RAM_GUARD
 **The assertion forms (§15 B9), verbatim:**
 
 ```
-with pytest.raises(ValidationError): load_config(str(yaml_file))
-assert config.ram_guard.ceiling_mib == 3072
-assert config.ram_guard.poll_interval_ms == 200
-assert config.ram_guard.grace_ms == 250
+config = load_config(str(yaml_file)); assert config.ram_guard.ceiling_mib is None      # unset => dynamic
+assert config.ram_guard.poll_interval_ms == 200; assert config.ram_guard.grace_ms == 250
 assert config.ram_guard.pss_confirm_deadline_ms == 250
-assert config.ram_guard.ceiling_mib * 1_048_576 == 3_221_225_472
+monkeypatch.setenv("RAM_GUARD_CEILING_MIB", "64"); config = load_config(str(yaml_file))
+assert config.ram_guard.ceiling_mib == 64
+with pytest.raises(ValidationError): load_config(str(yaml_file))                       # explicit out-of-range => ABORTS (ON)
+monkeypatch.setenv("ENSEMBLE_RAM_GUARD", "0"); monkeypatch.setenv("RAM_GUARD_CEILING_MIB", "99999")
+config = load_config(str(yaml_file))                                                    # OFF => NO ABORT
+assert config.ram_guard_derived_switch is False
 ```
 
 **Runtime injection:** `ceiling_bytes` is a parameter of the guard's `register()`;
@@ -640,7 +710,7 @@ architect resolved this (arch doc §3); the premise underneath it was also
 | Daemon cgroup band (measured) | **2.69 → 3.31 GiB** across the analysis window | E1 |
 | Host RAM / swap | **11 952 MiB RAM (~11.67 GiB)** / 8 191 MiB swap | E4 |
 | Co-residents (PG 0.28 + demo 0.4 + OD 0.17 + OS ≈ 0.94) | ≈ **1.79 GiB** | E4 |
-| **Shipped per-command ceiling** | **3 GiB / 3 072 MiB = 3 221 225 472 bytes** | arch doc §3.3 (leader-accepted amendment) |
+| **Shipped per-command ceiling** | **DYNAMIC — 70 % of the detected effective total RAM** (USER RULING #2, §4.7); on this host **8,367 MiB = 8.171 GiB** | arch doc §3.3a, §4.7, E11 |
 | Recommended unit cap (operator-gated) | **`MemoryHigh=7G` / `MemoryMax=8700M` (8.50 GiB)** | arch doc §3.4 |
 | Oct-30 incidents | **kernel `oom-kill`** (not cgroup-cap kills), unit peak 7.3 GiB | E3 |
 
@@ -657,10 +727,17 @@ architect resolved this (arch doc §3); the premise underneath it was also
    aggregate children, and **orphans across restarts**); the kernel global OOM is
    the **LAST** layer and is today the only one actually enforcing anything. **The
    unit cap adapts to the ceiling, never the reverse.**
-3. **Shipped default AMENDED to 3 GiB** — the commissioned 8 GiB is **unshippable
-   on this host**: it fires **at-or-after daemon death** in both measured incidents
-   (fast case: tree ≈ 4.0–4.3 GiB at death). It becomes correct on a ≥ ~14.5 GiB
-   host. **Raise-path is arithmetic, never taste** (arch doc §3.3).
+3. **The default is DYNAMIC (USER RULING #2) — the 3 GiB figure is DEMOTED to
+   operator guidance.** With `RAM_GUARD_CEILING_MIB` **unset**, the ceiling is
+   **70 % of the detected effective total RAM** (the daemon's cgroup limit when
+   finite, else host `MemTotal`), **resolved once at boot**; an explicit value
+   overrides and is validated `[64, 65536]` — **the clamp never applies to the
+   derived value** (§4.7c). On this host the derived default is **8,367 MiB
+   (8.171 GiB)** (E11). USER RULING #1's *intent* (disaster prevention, not a
+   constraint on legitimate heavy work) is binding and is carried by the
+   no-upper-clamp rule. **The on-this-host disclosure is RETAINED and user-accepted:**
+   at the derived default the guard fires **at-or-after daemon death** on this
+   11.9 GiB host, and the operator levers are the knob and the host resize.
 
 **Coupling to DQ4 (hard precondition):** every second of (poll + grace) at 1 GiB/s
 costs 1 GiB of ceiling. With the inherited 5 s grace, `C_max` collapses to
@@ -707,17 +784,30 @@ unit demand on an 11.67 GiB box — that scenario is already past what per-tree
 arithmetic rescues; the kernel OOM is the residual layer. **The published pair is a
 single-tree claim and the memo must say so.**
 
+**The general feasibility bound at the DYNAMIC default (C = 0.7·T), escalation pass:**
+
+| Rule | `A` | `F_max` | floor | A feasible unit cap? |
+|---|---|---|---|---|
+| **General feasibility at the default** (C = 0.7·T) | 0.7·T | 0.7·T + 5.856 | **iff 0.7T + 5.156 + 0.70R ≤ T − 2.79 ⇔ T ≥ 26.5 + 2.33·R GiB** (≥ ~28.8 GiB at R = 1 GiB/s) |
+
+**The memo's unit-cap guidance (re-derived):** at the 70 % default a feasible unit
+cap exists only on hosts ≥ ~26.5 GiB (R = 0) / ~28.8 GiB (R = 1). On smaller hosts
+the operator picks: **(a) ship without a unit cap** — the kernel global OOM is the
+outer layer (today's state; disclosed, not hidden); **(b) lower the knob** — an
+explicit `RAM_GUARD_CEILING_MIB` below the derived default; **(c) resize the host**.
+**The 3 GiB evidence is demoted to operator guidance**, not to a default.
+
 **The §3.4 truth statement (replacing the withdrawn "the guard always completes
 before a unit kill" claim) — verbatim (arch doc §3.4):**
 
 > "The guard completes before the unit cap fires **only while the tree's allocation rate R stays at or below ≈0.49 GiB/s** at the published pair `8700M` (worst frame; ≈0.76 GiB/s in the typical TERM-honouring frame; **≈0.28 GiB/s if a second tree is simultaneously breaching**). The measured band is **1–3 GiB/s** — so **above ≈0.5 GiB/s the cgroup cap fires first and the daemon, not the command, is the casualty** (the cap is then the containment layer, not the guard's backstop). For fork-heavy trees the same holds a fortiori: the kill decision waits on a PSS confirm whose cost scales with the tree's RSS. **'The guard always completes before a unit kill' must not appear in the memo, the runbook, or any acceptance criterion.** Restoring the layering requires a host of ≥ ~14.5 GiB, not a different ceiling."
 
-**AMENDED (§3.3) — the 4 GiB raise-path is VOID on this host:** at C = 4 GiB the
+**AMENDED (§3.3) — the raise-path is VOID on this host:** at C = 4 GiB the
 unit floor is `D_max 3.5 + 4.0 + O 1.0 + M_c 0.5 = 9.0 GiB > 8.88 GiB` ⇒ the
-X-window is **empty** and no unit cap can exist. The raise-path becomes: **raise to
-4 GiB only after the host reaches ≥ ~14.5 GiB** (or after Phase 2 T19 measures a
-materially lower R). **`7G / 8700M` stands** as the recommended pair; `7G / 8G` is
-**rejected as primary** (8.00 GiB < the bounded floor 8.15625 GiB).
+X-window is **empty** and no unit cap can exist. Under the **dynamic** default the
+generalized form applies instead: the preventive layering needs
+**T ≥ ~26.5 + 2.33·R GiB** (§3.4's general bound), so the **knob** and the **host
+resize** are the levers — there is no single shipped figure to raise.
 
 **The interaction table** lives in arch doc §3.4 and is **re-published in the Phase 7
 operator memo with the MEASURED R** (Phase 2 T19's obligation) — the arch doc's
@@ -837,13 +927,16 @@ All anchors below were re-verified in the worktree by this worker.
    reverse. The plan must not assume macOS parity.
 2. **The daemon's own consumption is NOT targetable by this feature.** The guard
    never signals the daemon, its own process group, `pgid == 1`, or `pgid == self`.
-3. **The shipped default is 3 GiB / 3 072 MiB (3 221 225 472 bytes)** — an
-   **AMENDMENT of the commissioned 8 GB**, leader-accepted on measured grounds (the
-   commissioned number is unshippable on this host; arch doc §3.3). The amendment,
-   the raise-path arithmetic, and the host-resize consequence are carried into the
-   final report and the Phase 7 operator memo. **AMENDED (§3.3):** the 4 GiB raise-path
-   is **VOID on this host** — it becomes reachable only after the host reaches
-   ≥ ~14.5 GiB (or after Phase 2 T19 measures a materially lower R).
+3. **The default ceiling is DYNAMIC — 70 % of the detected effective total RAM**
+   (USER RULING #2, §4.7), resolved once at boot; an explicit
+   `RAM_GUARD_CEILING_MIB` overrides and is validated `[64, 65536]` — **the clamp
+   applies to explicit values ONLY**, and the derived value is **never
+   upper-capped** (USER RULING #1's binding intent: disaster prevention, not a
+   constraint on legitimate heavy work). The previously-shipped fixed figure
+   (3 GiB) is **demoted to operator guidance**; the commissioned 8 GB is
+   **superseded in its fixed figure** with its intent retained. On this host the
+   derived default is **8,367 MiB (8.171 GiB)** (E11). **Detection failure ⇒ the
+   fixed fallback `3221225472` (3072 MiB) + one WARN — never aborts boot.**
 4. **The RAM guard is a NEW port**, not a T4 policy row, and does not read or write
    `resource_limit_policy` or the `resource_pid_map` dormant columns.
 5. **`bash` and `proc` are separate lanes** with no shared process-management code;
@@ -880,7 +973,7 @@ All anchors below were re-verified in the worktree by this worker.
     reaps the re-parented grandchildren (§3.5 item 13).
 14. **AMENDED (iteration 002, §16.3) — an instance-less spawn (`instance_id is None`)
     is NOT registered with the guard in v1.** The bash seam's registration block is
-    inside `if instance_id is not None and proc is not None:` (`bash.py:952-1005`);
+    inside `if instance_id is not None and proc is not None:` (`bash.py:952-1006`);
     widening that gate is a restructure this commission does not name. Such a tree is
     **invisible to the guard** and only the unit cap covers it (§3.5 item 9b);
     widening the gate is a **routed follow-up**. DQ8's `instance_id=None ⇒ counter +
@@ -907,7 +1000,7 @@ what was decided and where.
 | DQ8 | the event kind, the counters, the log prefix | `EventKind.RAM_LIMIT_EXCEEDED`; the payload = the envelope key set + four event-only keys; the **exact counter set** (`ram_kill_refusals_p0 … p7`, **no p8**); prefix **`ram-guard:`**; **NEW** `GET /api/resources/ram-guard`; **AMENDED** — the event has an owner/emitter/bridge (§4.5) | arch doc §2, §4.5 |
 | DQ9 | P1 vs the T4 seam | **Confirmed: entirely outside** it; `/control-capabilities` byte-identical | arch doc §2 |
 | DQ10 | in-process vs durable verdicts | **(a) in-process + the event as the durable forensic record; NO migration in v1** | arch doc §2 |
-| R1 | the unit-cap/ceiling relationship | **ABSOLUTE per-command bytes**; guard-inner / unit-cap-outer; **ship 3 GiB** | arch doc §3 |
+| R1 | the unit-cap/ceiling relationship | **ABSOLUTE per-command bytes**; guard-inner / unit-cap-outer; **the default is DYNAMIC** (70 % of the detected effective total RAM — USER RULING #2, §4.7; the 3 GiB figure is demoted to operator guidance) | arch doc §3, §3.3a, §4.7 |
 
 **Two items remain genuinely open — both are operator/user calls, not architect
 calls:**
@@ -915,7 +1008,10 @@ calls:**
 1. **The unit-cap drop-in is a user action** (`7G / 8700M` recommended; arch doc
    §3.4). This lane does not execute it. Without it, the guard is the **only**
    enforcement on the box and the **orphan class is uncovered** (proven Oct-30).
-2. **The 3-vs-8 GiB user confirmation** — the shipped default **amends the
-   commissioned 8 GB**. The amendment, the raise-path arithmetic, and the
-   host-resize consequence must be carried into the final report and the Phase 7
-   operator memo (pre-freeze gate (b)).
+2. ~~**The 3-vs-8 GiB user confirmation** — the shipped default **amends the
+   commissioned 8 GB**.~~ **DISCHARGED (USER RULINGS #1 + #2, escalation pass):** the
+   default is now **DYNAMIC** (70 % of the detected effective total RAM, §4.7);
+   USER RULING #1's *intent* is carried by the no-upper-clamp rule; the derived-default
+   regime, the general feasibility bound (`T ≥ 26.5 + 2.33·R GiB`) and the three
+   operator levers (no-cap / lower-the-knob / resize) are carried into the final report
+   and the Phase 7 operator memo (pre-freeze gate (b), phase2 T21 / phase7 T12).

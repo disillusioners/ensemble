@@ -1,7 +1,7 @@
-# Test Plan: RAM-Based Auto-Termination — rev 4
+# Test Plan: RAM-Based Auto-Termination — rev 5
 
-> **rev 4 — supersedes rev 3 (commit e25804554) per the approver-iter-002 amendment
-> pass.** Binding source of truth: `architecture-recommendation.md` §4.1a (the
+> **rev 5 — supersedes rev 4 (commit 0ce1bc8c8) per the escalation pass (iter-003
+> rulings + the two USER RULINGS).** Binding source of truth: `architecture-recommendation.md` §4.1a (the
 > BOUNDED re-arm), §4.2 (the 16-code vocabulary + **P0–P7 + P5a** + the canonical
 > Q2 strings), §4.3 (the key sets), §4.3.1 (the verdict-publication ordering),
 > §4.4 (the verdict record), §4.5 (the event drop path), §4.6 (the config wiring
@@ -21,8 +21,9 @@ and the mutation-proof gates.
 
 1. **Real process trees, tiny ceilings.** The tests must use REAL processes that
    genuinely allocate (a mocked `/proc` proves the arithmetic, not the behavior).
-   But the ceilings are **injected and small** — MiB-scale, never the shipped
-   **3 GiB / 3 072 MiB** default. The production default is never used in a test.
+   But the ceilings are **injected and small** — MiB-scale, never the **resolved
+   production default** (which is dynamic and host-sized — 8,367 MiB on this host).
+   The production default is never used in a test.
 2. **The allocator size is explicit in the test source.** A test that computes its
    allocation from an ambient default can OOM the host when the default changes.
 3. **The harness checks the host before it allocates.** Assert available memory
@@ -129,7 +130,7 @@ the FAKE_HOME sentinel is present in the child's environment), not merely invoke
 | # | Case | Method | Expected |
 |---|---|---|---|
 | B1 | **Whole tree killed** | Spawn `python3 -c` that forks N children, each allocating past an injected 64 MiB ceiling | The direct child **and every grandchild** are dead within grace + poll window |
-| B2 | **Typed envelope** | Same | The return **is** the envelope: `ok=false`, `code="ram_limit_exceeded"`, `surface="bash.exec"`, and the ruled key set. It **parses** as JSON. The key set is asserted as an exact ordered list: `ok, code, surface, limit_bytes, rearm_threshold_bytes, observed_peak_bytes, peak_is_lower_bound, poll_interval_ms, metric, trigger_metric, confirmed_pss_bytes, under_report_bound_bytes, pid, pgid, tree_complete, members_total, members_killable, members_unreachable, grace_ms, killed_at, ram_breach_observed, coincident_timeout, timeout_seconds, message` — **`rearm_threshold_bytes` immediately after `limit_bytes`** |
+| B2 | **Typed envelope** | Same | The return **is** the envelope: `ok=false`, `code="ram_limit_exceeded"`, `surface="bash.exec"`, and the ruled key set. It **parses** as JSON. The key set is asserted as an exact ordered list: `ok, code, surface, reason, limit_bytes, rearm_threshold_bytes, observed_peak_bytes, peak_is_lower_bound, poll_interval_ms, metric, trigger_metric, confirmed_pss_bytes, under_report_bound_bytes, pid, pgid, tree_complete, members_total, members_killable, members_unreachable, grace_ms, killed_at, ram_breach_observed, coincident_timeout, timeout_seconds, message` — **`rearm_threshold_bytes` immediately after `limit_bytes`** |
 | B3 | **DECIDING VALUE** | Same, with a known allocation | The **deciding value** — `confirmed_pss_bytes`, or `observed_peak_bytes` on a **fail-open** trigger — is **`>= limit_bytes`**, AND `>= 90 %` of the known allocation. **NOT** `observed_peak_bytes >= limit_bytes`: under the ruled hybrid the RSS peak and the deciding PSS value are deliberately **distinct** quantities |
 | B4 | **Honesty fields present** | Same | `peak_is_lower_bound` is true; `under_report_bound_bytes` is populated; `metric` names the metric; `tree_complete` and the member counts are present; **both** `limit_bytes` (configured) and `rearm_threshold_bytes` (enforced) are present; the message carries the enforced-threshold clause verbatim (see §15 B10) |
 | B5 | **REWRITTEN — the daemon is not the reaper of a killed tree's grandchildren.** Verified: **no** `PR_SET_CHILD_SUBREAPER` / subreaper / `SIGCHLD` handler anywhere in `daemon/`; the only `waitpid` use is the dedicated upgrade-journal reaper (`upgrade_journal_sweep.py:3170-3176`); the bash lane's direct child is reaped by the pre-existing `await proc.wait()` (`bash.py:1065`). **The guard kills a GROUP; grandchildren are re-parented to init/PID 1, which reaps them.** The assertion is therefore: the guard **never forks** and never races the direct-child reap; the direct child **is** reaped (by the pre-existing `proc.wait()`); **after** the kill the group has no **LIVE** member (a transient `Z` grandchild is init's business, not the guard's) | A group scan after the kill finds **no live** member; the direct child's exit is observed (the `proc.wait()` completed); **no** assertion about reaping grandchildren — that is init's, and asserting it would be vacuous |
@@ -179,14 +180,15 @@ the FAKE_HOME sentinel is present in the child's environment), not merely invoke
 
 | # | Case | Expected |
 |---|---|---|
-| C1 | Default | The configured ceiling is **3 072 MiB (3 GiB)** — the ruled default |
+| C1 | Default | **Unset ⇒ dynamic**: `config.ram_guard.ceiling_mib is None`; the resolved ceiling is derived from the **mocked detector** (70 % of the detected effective total RAM). The **detector fixtures** (§4.7f): a plain host; a constrained cgroup (70 % of the LIMIT, not the host); an unlimited cgroup (70 % of `MemTotal`); a >91 GiB host (the derived value exceeds 65536 with **NO abort** — proving the no-upper-clamp ruling); a sub-64 MiB effective total (the floor). **Detection failure ⇒ the fixed fallback `3221225472` (3072 MiB) + one WARN — never aborts boot** |
 | C2 | Env override | The env value applies (the env tier wins over the yaml tier) |
-| C3 | **Out-of-range env ⇒ BOOT ABORTS — assertable; the "untestable disclosure" escape is DELETED.** `load_config()` itself raises (`Config(**config_dict)` at `config.py:8795` is outside the try/except), so **no daemon-boot harness is needed** (§4.6). Assertion shape (§15 B9), verbatim: `with pytest.raises(ValidationError): load_config(str(yaml_file))` | The rung is **asserted**; the boot-abort path is exercised, not disclosed away |
+| C3 | **Out-of-range EXPLICIT env ⇒ BOOT ABORTS — assertable; the "untestable disclosure" escape is DELETED.** `load_config()` itself raises (`Config(**config_dict)` at `config.py:8795` is outside the try/except), so **no daemon-boot harness is needed** (§4.6). Assertion shape (§15 B9), verbatim: `with pytest.raises(ValidationError): load_config(str(yaml_file))` | The rung is **asserted**; the boot-abort path is exercised, not disclosed away |
 | C4 | YAML literal trap | A literal in the yaml block does **not** beat the env tier (pydantic init-kwargs outrank env) |
 | C5 | Per-call override | An explicit internal ceiling overrides the config default — the mechanism the whole harness depends on. **The LLM-facing tool schema gains no ceiling parameter** (asserted) |
 | C6 | Units are INT-only | A human-string value (e.g. `"8G"`) is **not** accepted — house rule: sizes are ints, no human-string parsing |
 | C7 | Poll-interval + grace + PSS-deadline bounds | Out-of-range values abort boot; in-range values apply; the ceiling clamp is **[64, 65536]** |
-| C8 | **The §15 B9 assertion shapes** (house idiom, `tests/unit/test_auth_config.py:371-377`), verbatim | `assert config.ram_guard.ceiling_mib == 3072` · `assert config.ram_guard.poll_interval_ms == 200` · `assert config.ram_guard.grace_ms == 250` · `assert config.ram_guard.pss_confirm_deadline_ms == 250` · `assert config.ram_guard.ceiling_mib * 1_048_576 == 3_221_225_472` — each asserted as written |
+| C8 | **The §15 B9 assertion forms** (escalation-pass set, house idiom `tests/unit/test_auth_config.py:371-377`), verbatim | `assert config.ram_guard.ceiling_mib is None` (unset ⇒ dynamic) · `assert config.ram_guard.poll_interval_ms == 200` · `assert config.ram_guard.grace_ms == 250` · `assert config.ram_guard.pss_confirm_deadline_ms == 250` · the explicit override `assert config.ram_guard.ceiling_mib == 64` · the OFF no-abort leg · `assert config.ram_guard_derived_switch is False` — each asserted as written |
+| C10 | **OFF BEATS VALIDATION (B26)** | `ENSEMBLE_RAM_GUARD=0` + `RAM_GUARD_CEILING_MIB=99999` ⇒ **NO ABORT**; `load_config` yields the `model_construct` defaults and `config.ram_guard_derived_switch is False` (§15 B9) |
 | C9 | **Root-`Config` wiring** | `config.ram_guard.*` is reachable from `load_config()`; `RAM_GUARD_CEILING_MIB=64` ⇒ `config.ram_guard.ceiling_mib == 64` — the env tier is **live**, not dead code |
 
 ### 3.7 Negative paths & platform
@@ -208,17 +210,21 @@ the FAKE_HOME sentinel is present in the child's environment), not merely invoke
 | # | Case | Expected |
 |---|---|---|
 | O1 | One breach | Exactly **one** event, the counter increments, a `ram-guard:`-prefixed log line present |
-| O2 | Event payload | Carries the **event payload key set** (§15 B3), verbatim, ordered: `ok, code, surface, limit_bytes, rearm_threshold_bytes, observed_peak_bytes, peak_is_lower_bound, poll_interval_ms, metric, trigger_metric, confirmed_pss_bytes, under_report_bound_bytes, pid, pgid, tree_complete, members_total, members_killable, members_unreachable, grace_ms, killed_at, ram_breach_observed, coincident_timeout, timeout_seconds, message, trigger, state, tracking_id, breach_at` — = the envelope key set + exactly four event-only keys (`trigger`, `state`, `tracking_id`, `breach_at`) |
+| O2 | Event payload | Carries the **event payload key set** (§15 B3), verbatim, ordered: `ok, code, surface, reason, limit_bytes, rearm_threshold_bytes, observed_peak_bytes, peak_is_lower_bound, poll_interval_ms, metric, trigger_metric, confirmed_pss_bytes, under_report_bound_bytes, pid, pgid, tree_complete, members_total, members_killable, members_unreachable, grace_ms, killed_at, ram_breach_observed, coincident_timeout, timeout_seconds, message, trigger, state, tracking_id, breach_at` — = the envelope key set + exactly four event-only keys (`trigger`, `state`, `tracking_id`, `breach_at`) |
 | O3 | Secret-marker command | A command whose env overlay carries a secret marker ⇒ the marker value appears in **NO** log line, event payload, or persisted record |
 | O4 | **NO ARGV ANYWHERE** | The envelope, the event payload, the log line, and the endpoint response are each scanned for the command's argv shape ⇒ **zero** occurrences in all four. **The sanitized argv form is also forbidden** (it still leaks the `--flag value` residual), and an argv **hash** is forbidden (a brute-force oracle) |
 | O5 | `/control-capabilities` | **Unchanged** — the fence test passes unmodified |
-| O6 | New endpoint | `GET /api/resources/ram-guard` returns the counters + the heartbeat (`enabled`, `thread_alive`, `last_tick_at`, `missed_samples`, `ticks`, `registry_depth`) and is **not** referenced by `livez`/`readyz` |
+| O6 | New endpoint | `GET /api/resources/ram-guard` returns the counters + the health heartbeat — **the single eleven-field pin (§15 B23), verbatim:** `enabled, thread_alive, last_tick_at, missed_samples, ticks, registry_depth, lane_alive, lane_pending, last_lane_progress_at, resolved_ceiling_bytes, ceiling_source` — and is **not** referenced by `livez`/`readyz` |
 | O7 | **Coincidence — timeout wins** | A timeout races the guard ⇒ `code="timeout"` **plus** `ram_breach_observed: true` + the peak |
 | O8 | **Coincidence — guard wins** | The guard races the timeout ⇒ `code="ram_limit_exceeded"` plus `coincident_timeout: true` |
 | O9 | **Three-kill-path interaction** | The timeout arm, the guard arm, and the reaper are driven against one tree ⇒ exactly **one** claimant owns the verdict, the losers are recorded `coincident`, and **only one** signal set is delivered |
 | O10 | **Liveness sweep** | A dead pid's entry is **dropped**; a **live-but-unreleased** entry is **kept watching**; the sweep is **bounded** and **never signals** |
 | O11 | **Dead guard** | The tick body raises ⇒ the outer restart loop resumes it, the heartbeat advances, `missed_samples` climbs, and the dead-guard state is visible on the endpoint — while the tick path stays **silent** |
 | O12 | **Counter set** | The counters are asserted as an **exact ordered set** (§15 B5), verbatim: `ram_kills, ram_breaches_detected, ram_kill_refusals_p0, ram_kill_refusals_p1, ram_kill_refusals_p2, ram_kill_refusals_p3, ram_kill_refusals_p4, ram_kill_refusals_p5, ram_kill_refusals_p6, ram_kill_refusals_p7, ram_overcounted, ram_rearms, ram_confirm_failures, ram_events_emitted, ram_events_dropped, ownership_unverified, tree_incomplete` — and there is **NO** `ram_kill_refusals_p8` |
+| O13 | **The in-flight refusal surface (§15 B25)** | A command whose tree breaches but whose kill is **refused** ⇒ the bash return is the command's **ordinary output** plus the additive lines `ram_kill_refused: <reason>` and `ram_breach_observed: true` — the output is **never swallowed**, and the surface is **distinct** from `code="ram_limit_exceeded"` by construction; the proc lane mirrors the line in `proc_status` |
+| O14 | **A transient refusal re-arms; a permanent refusal terminates** | `refused:leader-unreadable` / `refused:group-unknown` ⇒ the episode re-arms to WATCHING and is **re-claimable** on a later tick; the other nine ⇒ terminal `REFUSED` + release. **Refusals emit NO event** — counters + the transition log line only |
+| O15 | **The wait-expiry surface** | The 1270 ms wait expiring on a non-terminal record ⇒ the **ORDINARY return + `ram_breach_observed: true` + the peak**; pending is reported as pending, **never fabricated**; because `REFUSED` is terminal the wait exits the moment the ladder refuses — **no 1270 ms burn without an outcome** |
+
 
 ### 3.9 Consumer-gate census (owned by Phase 2 — referenced here)
 
@@ -279,8 +285,8 @@ COUNTER-mutation reddens it"*:
 | Drop the OVERCOUNTED re-arm | S13 |
 | **Drop the event on a no-loop boot instead of counting it** | **N9**, **O1** |
 | **Assert the leader stat is unreadable ⇒ the leader is gone** (the absent/unreadable conflation) | **S8(f)** |
-| **Let the substrate read the host's real `/proc`** (drop the `proc_root` injection in one reader) | **S17** (the substrate's no-host-`/proc`-reads rule) |
-| **Log from the tick path** (add a log call to the tick body) | **O11** (the tick-path silence) |
+| **Log from the tick path** (add a log call to the tick body) | **S17** (the substrate's tick-path silence) |
+| **Report the dead-guard state as healthy** (make the dead-guard case report `thread_alive` True) | **O11** (the dead-guard case) |
 | **Query the repository on the OFF path** (let the guard's OFF branch touch the DB) | **K5** (zero DB queries) |
 | **Run the blocked-tick case as a normal tick** (make the tick path look blocked instead of asserting the wedge mode) | **phase6 T11(b)** (the blocked-tick / death-mode case) |
 
