@@ -32,7 +32,7 @@ artifact** (`scripts/upgrade/adopt-unit.sh`) — a drop-in survives regeneration
 
 ## (b) The Oct-30 kernel OOM deaths
 
-Degenerate: **kernel `oom-kill`** (`global_oom`, `task_memcg=…/ensemble-main.service`), *not*
+Both are **kernel `oom-kill`** (`global_oom`, `task_memcg=…/ensemble-main.service`), *not*
 cgroup-cap kills — no cap existed. Arch `E3` records a **unit peak of 7.3 GiB**.
 
 | # | Kernel kill | Unit failure | Killed task (`anon-rss`) |
@@ -41,13 +41,10 @@ cgroup-cap kills — no cap existed. Arch `E3` records a **unit peak of 7.3 GiB*
 | 2 | `2026-10-30 11:13:24Z` | `11:13:59Z` `oom-kill` | `python3` 1178590 — 11,161,472 kB ≈ 10.64 GiB |
 | 3 *(extra — see note)* | `2026-10-30 19:16:12Z` | `19:16:32Z` `oom-kill` | `python` 1677256 — 10,281,088 kB ≈ 9.80 GiB |
 
-`journalctl --since "2026-10-30 10:40" --until "2026-10-30 11:16" | grep -i 'oom-kill:\|Out of memory'`
-
-> **Draft-time disclosure.** The plan names **two** deaths; re-reading the retained journal shows a
-> **third** on the same day. Both commissioned deaths are present and unchanged; the third is
-> added so this memo does not under-report the observed count. The per-process `anon-rss` is the
-> kernel's figure for the task it killed — a different quantity from `E3`'s 7.3 GiB unit peak,
-> and **neither is a cap**.
+Reproduce: `journalctl --since "2026-10-30 10:40" --until "2026-10-30 11:16" | grep -i 'oom-kill:\|Out of memory'`.
+**Draft-time disclosure:** the plan names **two** deaths; the retained journal shows a **third** on
+the same day — added so this memo does not under-report. `anon-rss` is the kernel's figure for the
+task it killed (a different quantity from `E3`'s 7.3 GiB unit peak); **neither is a cap**.
 
 ## (c) The orphan finding (E8)
 
@@ -66,10 +63,9 @@ covering the orphan-across-restarts class · the kernel global OOM is last.
 
 ## (d) The interaction table — re-published with the measured R
 
-`F_max(R) = C + A + Ω(R)` (`A` 0.15625 GiB) · `floor(R) = D_max 3.5 + F_max + O 1.0 + M_c 0.5` ·
-`box = T − 2.79 ⇒ X ≤ T − 2.79` · `Ω_typ = R·0.45 s`, `Ω_worst = R·0.70 s`, `Ω_contended(2) = R·1.21 s`.
-Here `T = 11.67 GiB` ⇒ **`X ≤ 8.88 GiB`**; `C = 0.7·T = 8.171 GiB` (8,367 MiB); at measured R
-`Ω_typ 0.522` · `Ω_worst 0.812` · `Ω_contended(2) 1.403 GiB`.
+`F_max = C + A + Ω` (`A` 0.15625 GiB) · `floor = D_max 3.5 + F_max + O 1.0 + M_c 0.5` ·
+`X ≤ T − 2.79` · `Ω_typ/worst/contended(2) = R·0.45 / 0.70 / 1.21 s`. Here `T = 11.67 GiB` ⇒
+**`X ≤ 8.88 GiB`**; `C = 0.7·T = 8.171 GiB` (8,367 MiB); at measured R `Ω = 0.522 / 0.812 / 1.403 GiB`.
 
 | Scenario (`D_max` 3.5) | `C` | floor @ measured R | Feasible unit cap? |
 |---|---|---|---|
@@ -78,13 +74,12 @@ Here `T = 11.67 GiB` ⇒ **`X ≤ 8.88 GiB`**; `C = 0.7·T = 8.171 GiB` (8,367 M
 | **N = 2 contended** | 8.171 (or 3.0) | **14.73** (3072-frame: 9.56) | **NO — window EMPTY** at every `C`; 3072-frame closes above `R ≈ 0.598` |
 | **General bound at the default** | 0.7T | 0.7T + 5.968 | iff **`T ≥ 26.5 + 2.33·R`** ⇒ **29.19 GiB** here (28.82 at R = 1) |
 
-*Provenance:* the arch's first-row floor prints `13.44` but its own frozen frame yields `14.027` at
-R = 1 (and its `≈4.45` R = 0 gap reproduces exactly). **The frame is the contract** — floors here
-are frame-derived, then evaluated at the measured R. The earlier `14.717` N = 2 figure used the
-superseded `R = 1.1503`; at the measured R it is `14.73` and the verdict is identical.
-**Conservative variant (`D_max` 4.5 — the T20 bounded fallback):** derived-default floor
-**15.139 GiB**, 3072-MiB floor **9.968 GiB** ⇒ under that frame **no cap is feasible here at any
-`C`, any `R`**.
+*Provenance:* the arch's first-row floor prints `13.44`, but its own frozen frame yields `14.027`
+at R = 1 (its `≈4.45` R = 0 gap reproduces exactly) — **the frame is the contract**, so floors
+here are frame-derived then evaluated at the measured R. The earlier `14.717` N = 2 figure used
+the superseded `R = 1.1503`; at the measured R it is `14.73`, verdict identical.
+**Conservative variant (`D_max` 4.5, the T20 fallback):** derived-default floor **15.139 GiB**,
+3072-MiB floor **9.968 GiB** ⇒ under that frame **no cap is feasible here at any `C`, any `R`**.
 
 | Option | `MemoryHigh` / `MemoryMax` | Verdict |
 |---|---|---|
@@ -167,12 +162,11 @@ work — carried by the no-upper-clamp rule). Here: **8,367 MiB = 8.171 GiB**, `
 
 * **General feasibility bound:** a unit cap coexists with the default iff
   **`T ≥ 26.5 + 2.33·R GiB`** (29.19 GiB here at measured R; 28.82 at R = 1).
-* **The three operator levers — there is no fourth:** **(a) no cap** (the kernel global OOM is the
-  outer layer — today's state, disclosed) · **(b) lower the knob**
-  (`RAM_GUARD_CEILING_MIB=3072` restores the preventive arithmetic and makes `7G`/`8700M` the
-  recommended pair) · **(c) resize the host** (≥ ~29.2 GiB frame / ~32.5 GiB conservative).
-* **3 GiB is operator guidance only, never a default** — it is the value an operator sets under
-  lever (b).
+* **The three levers — there is no fourth:** **(a) no cap** (kernel OOM is the outer layer —
+  today's state, disclosed) · **(b) lower the knob** (`RAM_GUARD_CEILING_MIB=3072` restores the
+  preventive arithmetic and makes `7G`/`8700M` the recommended pair) · **(c) resize the host**
+  (≥ ~29.2 GiB frame / ~32.5 GiB conservative). **3 GiB is guidance under lever (b) only, never a
+  default.**
 * **The pre-freeze gate (b)** — the "3-vs-8 GiB user confirmation" — is **DISCHARGED** by USER
   RULING #1 (intent) + #2 (mechanism).
 * **Raising the fixed figure is VOID, not a lever** — subsumed by the dynamic default: the ceiling
@@ -180,10 +174,10 @@ work — carried by the no-upper-clamp rule). Here: **8,367 MiB = 8.171 GiB**, `
 
 ## (j) Three host-reality items
 
-1. **The cap covers the ORPHAN class, not the guard's backup.** At the measured rates the
-   guard-vs-cap race is **lost above ≈0.5 GiB/s** (0.486 worst frame at `8700M` with the knob at
-   3072 MiB). The cap's value is containing what no per-command guard can see: orphans from a
-   previous incarnation, foreign workloads in the unit's cgroup, the daemon's own growth.
+1. **The cap covers the ORPHAN class, not the guard's backup** — at the measured rates the
+   guard-vs-cap race is **lost above ≈0.5 GiB/s** (0.486 worst frame at `8700M`, knob at 3072
+   MiB). The cap's value is containing what no per-command guard sees: orphans from a previous
+   incarnation, foreign workloads in the unit's cgroup, the daemon's own growth.
 2. **At the 70 % default, no feasible unit cap exists on this host** — the bound is
    `T ≥ 26.5 + 2.33·R GiB`, the derived default is 8,367 MiB, and the guard **fires at-or-after
    daemon death** (demand ≈ 4.79 + 8.17 = 12.96 GiB > 11.67 physical). **Retained, disclosed and
