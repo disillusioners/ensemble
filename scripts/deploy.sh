@@ -349,6 +349,18 @@ run "stage agents/ (clean)"     -- sh -c "rm -rf '$INSTALL_DIR/agents' && cp -R 
 run "stage config.yaml"         -- cp "$REPO_ROOT/config.yaml" "$INSTALL_DIR/config.yaml"
 run "stage launcher.sh"         -- cp "$REPO_ROOT/launcher.sh" "$INSTALL_DIR/launcher.sh"
 run "chmod launcher.sh"         -- chmod +x "$INSTALL_DIR/launcher.sh"
+# D3: stage the EXECUTOR SCRIPT FAMILY at the canonical payload-relative
+# paths (scripts/upgrade/* + scripts/stop-ensemble.sh +
+# scripts/install-dir-guard.sh). The install dir used to carry ONLY
+# watchdog-watcher.sh under scripts/, so the promote stop step resolved NO
+# stop script (both legs missed — lib.sh stop_via_stop_script: the sibling
+# one level up of the calling script's dir, then the
+# $(pwd)/scripts/stop-ensemble.sh fallback) ⇒ rc=127 ⇒ the promote aborted
+# before the flip (the v0.29.16 halt class). The canonical list + the
+# placement primitives live in scripts/upgrade/executor_family.sh — the
+# SAME file the release payload assembler uses.
+run "stage executor script family (scripts/upgrade + stop-ensemble + install-dir-guard)" -- \
+    bash "$REPO_ROOT/scripts/upgrade/executor_family.sh" --install "$REPO_ROOT" "$INSTALL_DIR"
 if [ -d "$REPO_ROOT/frontend/dist/frontend/browser" ]; then
     run "stage frontend/dist (clean)" -- sh -c \
         "rm -rf '$INSTALL_DIR/frontend/dist' && mkdir -p '$INSTALL_DIR/frontend/dist/frontend/browser' && cp -R '$REPO_ROOT/frontend/dist/frontend/browser/.' '$INSTALL_DIR/frontend/dist/frontend/browser/'"

@@ -90,6 +90,21 @@ printf 'STUB_BINARY\n' > "$FAKE_REPO/dist/ensemble-prod"
 chmod +x "$FAKE_REPO/dist/ensemble-prod"
 cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$FAKE_REPO/scripts/stop-ensemble.sh"
 
+# D3: the EXECUTOR SCRIPT FAMILY ships with the install (the v0.29.16
+# promote-halt class: the install dir used to carry ONLY watchdog-watcher.sh
+# under scripts/, so the promote stop step resolved NO stop script — both
+# legs missed => rc=127 => the promote aborted before the flip). The fixture
+# carries the family so the REAL staging run below exercises the same copy
+# the installer performs (scripts/upgrade/executor_family.sh is the ONE
+# definition of the family, shared with the release payload assembler).
+mkdir -p "$FAKE_REPO/scripts/upgrade"
+for _fam in _build_frontend.sh adopt-unit.sh executor_family.sh journal_read.py \
+            journal_splice.py ledger_check.py lib.sh promote.sh restart.sh \
+            rollback.sh stage.sh status.sh; do
+    cp "$REPO_ROOT/scripts/upgrade/$_fam" "$FAKE_REPO/scripts/upgrade/$_fam"
+done
+cp "$REPO_ROOT/scripts/install-dir-guard.sh" "$FAKE_REPO/scripts/install-dir-guard.sh"
+
 # .env.prod for the generator tests: two override keys + preserved keys
 # (secret-shaped values are FAKE — but redacted in output regardless).
 cat > "$FAKE_REPO/.env.prod" <<'EOF'
@@ -197,8 +212,27 @@ GEN_KEY_COUNT="$(grep -c '^OPENAI_API_KEY=' "$FAKE_REPO/.env.prod.demo")"
 assert_eq "generated keeps OPENAI_API_KEY line" "1" "$GEN_KEY_COUNT"
 GEN_HOST="$(sed -n 's/^HOST=//p' "$FAKE_REPO/.env.prod.demo" | head -1)"
 assert_eq "generated keeps HOST" "127.0.0.1" "$GEN_HOST"
+# The generator APPENDS the e2e Plane slug pin (deploy.sh:277-294 — a
+# security control: a non-prod env must pin PLANE_MCP_WORKSPACE_SLUG=e2e,
+# never nea/unset), so the raw line count is NOT preserved any more. The
+# PIN's intent is "no key is dropped" — assert that instead (key-set
+# superset + no line loss), which holds for the documented append and still
+# fails if the generator ever drops a key. (The stale line-count equality
+# was a pre-existing red on latest — the assertion, not the generator, was
+# wrong.)
+GEN_KEYS="$(sed -n 's/^\([A-Z_][A-Z0-9_]*\)=.*/\1/p' "$FAKE_REPO/.env.prod.demo" | sort)"
+SRC_KEYS="$(sed -n 's/^\([A-Z_][A-Z0-9_]*\)=.*/\1/p' "$FAKE_REPO/.env.prod" | sort)"
+_missing_keys=""
+while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    printf '%s\n' "$GEN_KEYS" | grep -qx "$k" || _missing_keys="$_missing_keys $k"
+done <<EOF
+$SRC_KEYS
+EOF
+assert_eq "generated keeps every source key (the e2e slug pin may APPEND)" "" "$_missing_keys"
 GEN_LINE_COUNT="$(grep -c '=' "$FAKE_REPO/.env.prod.demo")"
-assert_eq "generated preserves line count" "$(grep -c '=' "$FAKE_REPO/.env.prod")" "$GEN_LINE_COUNT"
+SRC_LINE_COUNT="$(grep -c '=' "$FAKE_REPO/.env.prod")"
+assert_eq "generated drops no source line" "yes" "$([ "$GEN_LINE_COUNT" -ge "$SRC_LINE_COUNT" ] && echo yes || echo no)"
 
 # 6c. staged into the install dir as .env
 if [ -f "$FAKE_HOME/agents-ensemble-demo/.env" ]; then _pass; else _fail ".env staged into demo install dir"; fi
@@ -212,6 +246,24 @@ assert_eq "staged .env has demo PORT" "7979" "$STAGED_PORT"
 [ -f "$FAKE_HOME/agents-ensemble-demo/launcher.sh" ] && _pass || _fail "launcher.sh staged"
 [ -f "$FAKE_HOME/agents-ensemble-demo/frontend/dist/frontend/browser/index.html" ] && _pass \
     || _fail "frontend staged"
+
+# 6d-bis (D3): the executor script family lands in the install dir at the
+# canonical payload-relative paths — and the stop-script SIBLING the promote
+# stop step resolves (<scripts_dir>/../stop-ensemble.sh, lib.sh:4849) is
+# present AND EXECUTABLE (PR1's arm-gate predicate: os.access(X_OK)).
+DEMO_DIR="$FAKE_HOME/agents-ensemble-demo"
+[ -f "$DEMO_DIR/scripts/upgrade/promote.sh" ] && _pass || _fail "executor family: promote.sh staged"
+[ -f "$DEMO_DIR/scripts/upgrade/lib.sh" ] && _pass || _fail "executor family: lib.sh staged"
+[ -x "$DEMO_DIR/scripts/stop-ensemble.sh" ] && _pass || _fail "executor family: stop-ensemble.sh staged AND executable"
+[ -x "$DEMO_DIR/scripts/install-dir-guard.sh" ] && _pass || _fail "executor family: install-dir-guard.sh staged AND executable"
+[ -x "$DEMO_DIR/scripts/upgrade/../stop-ensemble.sh" ] && _pass \
+    || _fail "executor family: the stop-script sibling resolves AND is executable"
+# the plists are OPERATOR-side (make plist-install) — never in a scripts tree
+if find "$DEMO_DIR/scripts" -name '*.plist' 2>/dev/null | grep -q .; then
+    _fail "no *.plist under the install's scripts/ tree"
+else
+    _pass
+fi
 
 # 6e. idempotency: re-run stages cleanly, does not duplicate or drift
 GEN_OUT2="$(HOME="$FAKE_HOME" ENSEMBLE_INSTALL_DEMO=1 bash "$FAKE_REPO/scripts/deploy.sh" demo --no-start --skip-build 2>&1)"

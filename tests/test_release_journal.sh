@@ -134,6 +134,18 @@ cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"
 cp "$UPGRADE_DIR/rollback.sh"   "$FAKE_REPO/scripts/upgrade/rollback.sh"
 cp "$UPGRADE_DIR/status.sh"     "$FAKE_REPO/scripts/upgrade/status.sh"
 cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$FAKE_REPO/scripts/stop-ensemble.sh"
+# D3: the fake repo must carry the whole EXECUTOR SCRIPT FAMILY — the
+# staged payload now ships it (scripts/upgrade/* + scripts/stop-ensemble.sh
+# + scripts/install-dir-guard.sh), so stage.sh SOURCES
+# scripts/upgrade/executor_family.sh and COPIES the family into the payload.
+# Without the family in the fixture, stage.sh dies at the source line and
+# the whole stage section measures nothing.
+for _fam in _build_frontend.sh adopt-unit.sh executor_family.sh journal_read.py \
+            journal_splice.py ledger_check.py lib.sh promote.sh restart.sh \
+            rollback.sh stage.sh status.sh; do
+    cp "$UPGRADE_DIR/$_fam" "$FAKE_REPO/scripts/upgrade/$_fam"
+done
+cp "$REPO_ROOT/scripts/install-dir-guard.sh" "$FAKE_REPO/scripts/install-dir-guard.sh"
 chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh
 
 printf '#!/bin/bash\n# stub launcher (unit fixture)\n' > "$FAKE_REPO/launcher.sh"
@@ -157,6 +169,27 @@ chmod +x "$FIXTURE/stub-prod"
 git -C "$FAKE_REPO" init -q
 git -C "$FAKE_REPO" add -A 2>/dev/null
 git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm fixture
+# The PROVENANCE STAMP must resolve INSIDE the tree that is being staged:
+# the W-2 release gate requires PIPELINE_SCRIPTS_REV to be a 40-hex commit
+# that this tree CONTAINS, to equal PIPELINE_SCRIPTS_FLOOR_COMMIT (D6-8:
+# the two travel together), and — since D3 — to COVER the whole shipped
+# executor family (every family path must EXIST at the stamped commit).
+# The fixture repo is SYNTHETIC (one commit), so the release stamp cannot
+# resolve in it: the fixture pins BOTH constants to the fixture's own
+# commit — the same shape the real release bump produces (the stamp names
+# the merge commit that introduced the shipped scripts). The stamp commit
+# is the fixture's FIRST commit, which already contains the whole family.
+FIXTURE_STAMP="$(git -C "$FAKE_REPO" rev-parse HEAD)"
+sed -i.bak "s/^PIPELINE_SCRIPTS_REV=.*/PIPELINE_SCRIPTS_REV=$FIXTURE_STAMP/" \
+    "$FAKE_REPO/scripts/upgrade/lib.sh"
+rm -f "$FAKE_REPO/scripts/upgrade/lib.sh.bak"
+mkdir -p "$FAKE_REPO/daemon/tools"
+cat > "$FAKE_REPO/daemon/tools/upgrade_tools.py" <<EOFUP
+# fixture stub — only the D3 release-time floor constant is read by stage.sh
+PIPELINE_SCRIPTS_FLOOR_COMMIT = "$FIXTURE_STAMP"
+EOFUP
+git -C "$FAKE_REPO" add -A 2>/dev/null
+git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm "pin fixture stamp/floor"
 SBX_V1="v1.0.0-sbx"
 git -C "$FAKE_REPO" tag "$SBX_V1"
 
@@ -432,9 +465,28 @@ MANIFEST="$SBX/releases/$SBX_V1/manifest.json"
 [ -f "$MANIFEST" ] && _pass || _fail "manifest exists"
 for f in binary_version known_schema_gen contains_contract_phase rollback_safe \
          launcher_sha256 binary_sha256 config_sha256 agents_tree_sha256 \
-         frontend_tree_sha256 agents_manifest frontend_manifest; do
+         frontend_tree_sha256 agents_manifest frontend_manifest \
+         scripts_tree_sha256 scripts_manifest pipeline_scripts_rev; do
     grep -q "\"$f\"" "$MANIFEST" 2>/dev/null && _pass || _fail "manifest has $f"
 done
+# D3: the staged PAYLOAD must carry the executor script family at the
+# canonical payload-relative paths — and the stop-script SIBLING the promote
+# stop step resolves (<scripts_dir>/../stop-ensemble.sh, lib.sh:4849) must be
+# present AND EXECUTABLE (PR1's arm-gate predicate). A payload without it
+# cannot promote (the v0.29.16 halt class: rc=127, no stop script).
+REL_DIR="$SBX/releases/$SBX_V1"
+[ -f "$REL_DIR/scripts/upgrade/promote.sh" ] && _pass || _fail "payload: scripts/upgrade/promote.sh shipped"
+[ -f "$REL_DIR/scripts/upgrade/lib.sh" ] && _pass || _fail "payload: scripts/upgrade/lib.sh shipped"
+[ -x "$REL_DIR/scripts/stop-ensemble.sh" ] && _pass || _fail "payload: scripts/stop-ensemble.sh shipped AND executable"
+[ -f "$REL_DIR/scripts/install-dir-guard.sh" ] && _pass || _fail "payload: scripts/install-dir-guard.sh shipped"
+[ -x "$REL_DIR/scripts/upgrade/../stop-ensemble.sh" ] && _pass \
+    || _fail "payload: the stop-script sibling resolves AND is executable"
+# the plists are OPERATOR-side (make plist-install) — never in a payload
+if find "$REL_DIR" -name '*.plist' 2>/dev/null | grep -q .; then
+    _fail "payload carries NO *.plist"
+else
+    _pass
+fi
 # no .env inside the release dir
 if [ -z "$(find "$SBX/releases/$SBX_V1" -name '.env' -print -quit 2>/dev/null)" ]; then
     _pass

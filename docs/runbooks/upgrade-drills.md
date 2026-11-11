@@ -683,6 +683,42 @@ If any of these is stale (e.g. a developer ran `make build` on `latest` then swi
 - `scripts/upgrade/_build_frontend.sh` — the FE build wrapper that writes the FE provenance sidecar (sibling of `frontend/dist/frontend/browser/index.html`).
 - `tests/test_stage_freshness_guard.sh` — the freshness-guard test pack (10 scenario groups: syntax/argv, stale, fresh×both-L1-modes, FE-stale, missing, non-tip, override+override-journaling, REAL dirty round-trip + legacy vocabulary, malformed×6, tag-trap, virgin-journal durability).
 - `tests/test_release_journal.sh` — the existing journal/integrity pack; its stub sidecars are stamped via the PRODUCTION writer (`_stamp_provenance_for_repo` → `_provenance_write`) so the fixture shape cannot drift from real sidecars.
+- `scripts/upgrade/executor_family.sh` — the canonical executor-family list + the placement/stamp-coverage primitives (D3); `§A.8` — the family payload + the stamp-coverage release obligation.
+- `tests/test_executor_family_payload.sh` — the D3 layout pin (hermetic: the payload fixture, the manifest/sha coverage, the no-plist property, the stamp-coverage positive/negative legs).
+
+### A.8 The executor script family payload + the stamp-coverage release obligation (D3)
+
+**What changed.** The staged release payload now ships the **executor script family** at payload-relative paths — `scripts/upgrade/*` (promote.sh, lib.sh, stage.sh, restart.sh, rollback.sh, status.sh, adopt-unit.sh, ledger_check.py, journal_read.py, journal_splice.py, _build_frontend.sh + the canonical list `executor_family.sh`) plus the two siblings `scripts/stop-ensemble.sh` and `scripts/install-dir-guard.sh`. Before this, NO packaging lane shipped those trees (the payload had no `scripts/`; `make install` shipped only `watchdog-watcher.sh`), so the promote stop step resolved **no** stop script — both legs missed (`lib.sh` `stop_via_stop_script`: the sibling one level up of the calling script's dir, then the `$(pwd)/scripts/…` fallback) ⇒ **rc=127** ⇒ the v0.29.16 promote halt. The canonical list + the placement primitives live in `scripts/upgrade/executor_family.sh` — ONE definition shared by the payload assembler (`stage.sh`) and the flat installers (`make install`, `scripts/deploy.sh`).
+
+**The release obligation (operator/release step — NOT an agent step, and NOT part of this lane).** `PIPELINE_SCRIPTS_REV` (in `scripts/upgrade/lib.sh`) and `PIPELINE_SCRIPTS_FLOOR_COMMIT` (in `daemon/tools/upgrade_tools.py`) are the two halves of the D6-8 provenance pair — they must name the **same** commit, and that commit must **contain the whole shipped family**. The stamp is what the arm-time guard reads out of `<scripts_dir>/lib.sh`; on a non-git pinned scripts dir it IS the entire provenance (Q2/D6-11). So a stamp that predates a shipped family member misdescribes what ships.
+
+**The first release that ships the family MUST re-pin both constants AFTER the family is merged:**
+
+```bash
+# 1. the family must be IN the tree you are about to name:
+git log --oneline -1 -- scripts/upgrade/executor_family.sh scripts/stop-ensemble.sh scripts/install-dir-guard.sh
+# 2. pick the merge commit that CONTAINS the whole family (it must be an
+#    ANCESTOR of the tree you stage — the floor rule, T6.15):
+FAMILY_COMMIT="$(git merge-base --is-ancestor <family-merge-sha> HEAD && git rev-parse <family-merge-sha>)"
+# 3. re-pin BOTH constants to that commit (the two travel together — D6-8):
+#    scripts/upgrade/lib.sh:            PIPELINE_SCRIPTS_REV=<FAMILY_COMMIT>
+#    daemon/tools/upgrade_tools.py:      PIPELINE_SCRIPTS_FLOOR_COMMIT = "<FAMILY_COMMIT>"
+# 4. re-stage; the coverage gate then passes:
+VERSION=<v> bash scripts/upgrade/stage.sh <target>
+```
+
+**Until that re-pin, `stage.sh` REFUSES (exit 78)** with:
+
+```
+REFUSING TO STAGE: PIPELINE_SCRIPTS_REV=<stamp> does not COVER the shipped executor family.
+Not present at the stamped commit:
+  scripts/install-dir-guard.sh
+  ...
+```
+
+That refusal is **fail-closed by design** — the same class as the W-2 stamp/floor gates above it. It names every path that was absent at the stamped commit, so the remedy is mechanical. Do **NOT** "fix" it by hand-editing the stamp to a non-commit value: the arm-time guard parses it as a commit sha, the W-2 gate requires it to equal the floor, and the coverage gate requires the named commit to actually contain the shipped paths.
+
+**Drill note.** Sandbox/fixture trees are exempt by construction: the fixture repo pins **both** constants to its own commit (which contains the whole family) — see `tests/test_release_journal.sh` (the fixture's `FIXTURE_STAMP`) and `tests/test_executor_family_payload.sh` (the synthetic-repo positive/negative legs of the coverage gate).
 
 ---
 

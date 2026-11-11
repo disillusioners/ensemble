@@ -554,6 +554,32 @@ The state-file relocation ships with v0.29.10 (implemented in leg-2), **default 
 - nvm `lts/*`-style aliases are **unsupported** in the PATH resolver (graceful warning arm) — numeric version aliases only (`22`, `v22`).
 - **F-07 aligned the two `.env` parsers** — both now read the file **last-wins** on duplicate keys (the old launcher-last-wins vs watchdog-head-first asymmetry is **gone**), and both resolve the override in the same order (`.env` → inherited → default). Verified by the tester.
 
+### 6.8 The executor script family — what actually ships (D3)
+
+Until now the install dir's `scripts/` trees were **out-of-band copies**: NO packaging lane shipped them. The staged release payload carried no `scripts/` at all, and `make install` shipped only `scripts/watchdog-watcher.sh`. That gap is what made the **v0.29.16 promote halt** possible — the promote stop step resolves its stop script through TWO legs (`lib.sh` `stop_via_stop_script`):
+
+1. the **sibling one level up** of the calling script's dir — `lib.sh:4849` anchors `BASH_SOURCE[1]` (promote.sh's dir), so the leg is `<scripts_dir>/../stop-ensemble.sh`;
+2. the `$(pwd)/scripts/stop-ensemble.sh` fallback — `lib.sh:4852`.
+
+Both legs miss in an install layout ⇒ `bash: No such file or directory` ⇒ **rc=127** ⇒ the promote aborts before the flip. PR1 closed the **daemon** side (a fail-closed arm preflight); **this** closes the **shipping** side.
+
+**What ships now, and where** (payload-relative paths — ONE shape, two carriers):
+
+| Path (relative to the payload root / install dir) | What |
+|---|---|
+| `scripts/upgrade/promote.sh`, `lib.sh`, `stage.sh`, `restart.sh`, `rollback.sh`, `status.sh`, `adopt-unit.sh` | the pipeline's executor scripts |
+| `scripts/upgrade/ledger_check.py`, `journal_read.py`, `journal_splice.py`, `_build_frontend.sh` | the pipeline's helper scripts |
+| `scripts/upgrade/executor_family.sh` | the **canonical list + placement primitives** (one definition, shared by the payload assembler and the installers) |
+| `scripts/stop-ensemble.sh` | the stop step's **sibling** — must be present **AND executable** |
+| `scripts/install-dir-guard.sh` | the install-dir guard |
+
+- **Release payload** — `scripts/upgrade/stage.sh` copies the family into `releases/<ver>/` at exactly those relative paths, so `releases/<ver>/scripts/upgrade/promote.sh` (the path §8's promote allowlist already anticipated) and its sibling `releases/<ver>/scripts/stop-ensemble.sh` now EXIST.
+- **Flat install** — `make install` and `scripts/deploy.sh` install the same family into `<install_dir>/scripts/…`, so the daemon's resolver candidate `<install_dir>/scripts/upgrade` (frozen binaries carry no repo checkout) and PR1's arm gate (`<scripts_dir>/../stop-ensemble.sh`, executable) are satisfied on a **fresh install**.
+- **Integrity coverage** — the manifest gains `scripts_tree_sha256` + `scripts_manifest` (per-file sha256) + `pipeline_scripts_rev`; the family is under the release's integrity contract like the `agents/`/`frontend/`/`plugins/` trees.
+- **NO plist ever** — the launchd plists are operator-side (`make plist-install` stages them into `<install_dir>/data/`); they are NOT part of any release payload. The family list is an explicit enumeration and the layout pin test scans the whole staged tree.
+
+**Release obligation (the operator step — NOT an agent step).** `PIPELINE_SCRIPTS_REV` lives in `scripts/upgrade/lib.sh` and `PIPELINE_SCRIPTS_FLOOR_COMMIT` in `daemon/tools/upgrade_tools.py`; the stamp is the commit the shipped scripts claim to contain, so **the first release that ships this family must RE-PIN both constants to a commit that contains the whole family** (D6-8: the two travel together). Until that re-pin, `stage.sh` **refuses** with `PIPELINE_SCRIPTS_REV=… does not COVER the shipped executor family` and names the paths that were absent at the stamped commit — fail-closed on purpose: on a non-git pinned scripts dir the stamp IS the whole provenance (Q2/D6-11), so a stamp that does not cover what ships is a lie. Remedy: re-pin the two constants to the merge commit that introduced the family, then re-stage. Details + the exact edit sites: `docs/runbooks/upgrade-drills.md` §A.8.
+
 ### 6.7 Adopting an already-running manual daemon under launchd (from-zero handover)
 
 The **depth** behind §0's compressed handover — for the case where the daemon is **already running by hand** (no launchd job yet) and you are re-parenting it under launchd. Corrected to current forms (guard-era plist staging, the PATH block, the bootout-from-outside rule). **Expect up to ~70 s of downtime, once**; rollback is two `launchctl bootout` commands away.
@@ -797,7 +823,7 @@ The daemon **stays a gui LaunchAgent as the operator user — NEVER root** (a da
 | `agents/`, `frontend/` | root:wheel | 755 (files 644) | **Behavior change — see the loud callout below** |
 | `.env` | root:`<operator-primary-group>` | 640 | **Adjudication:** NOT root:wheel 600 — the launcher (operator uid) must read it to source env; same-uid lanes can read it regardless (VM parity, accepted). Edits via `sudo` or release payloads; group-readable, never world-readable |
 | `data/**` | operator:staff | 755 | Writable set — instances.db, `data/logs/`, `tmp_images/`, launcher/watchdog logs+state, vscode-user-data |
-| `releases/` | operator:staff | 755 | Writable set — journal, staging, payloads; promote allowlist anticipates `releases/<ver>/scripts/upgrade/promote.sh` |
+| `releases/` | operator:staff | 755 | Writable set — journal, staging, payloads; the promote allowlist's anticipated `releases/<ver>/scripts/upgrade/promote.sh` **now EXISTS** (D3: the staged payload ships the executor script family — `scripts/upgrade/*` + the sibling `scripts/stop-ensemble.sh` + `scripts/install-dir-guard.sh`; see §6.8) |
 | `.launcher-state`, `.sweep-defer-*` | (relocated into `data/`) | — | Via `ENSEMBLE_LAUNCHER_STATE_FILE=/opt/ensemble/data/.launcher-state` — resolves the top-dir seam (root-owned top dir ⇒ operator cannot create state files there). **Default stays `$INSTALL_DIR/.launcher-state` — VM untouched** (override implemented in leg-2, §6.6). Rejected: top-dir ACL (deploy plain-cp drops ACLs) |
 | `/private/var/ensemble/{snapshots,alerts}` | root:root (self-enforced) | 700 / alerts 755 | Above the no-sudo agent class; NOT under `$HOME`; NOT colocated with `/opt` (an `rm -rf /opt/ensemble*` glob must not take the store with it) |
 
