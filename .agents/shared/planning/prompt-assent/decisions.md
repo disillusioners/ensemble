@@ -20,13 +20,25 @@
 | `OPEN-JUDGEMENT` | The analysis explicitly flagged its own proposal as a judgement call to be overruled if the architect disagrees. |
 | `RULED` | **Decided by the architect** in `architecture-recommendation.md`. Binding on implementation. Supersedes the prior `RECOMMENDED-PENDING-ARCHITECT` / `OPEN-JUDGEMENT` status of the same entry. |
 
-> **⚠ STATUS UPDATE — reconciliation pass 1 (`df8da01a6`).** The architect has **RULED** on
+> **Post-ruling state.** No row in this ledger carries `RECOMMENDED-PENDING-ARCHITECT` or
+> `OPEN-JUDGEMENT` any more — every D/J entry below is `RULED` @ `df8da01a6` (or `DECIDED`). The
+> two pre-ruling statuses are retained in this legend for **audit only**.
+
+> **⚠ STATUS UPDATE — reconciliation pass 2 (`df8da01a6`).** The architect has **RULED** on
 > **D-1…D-9** and **J-1…J-3** and added the rulings **AR-1** (mint-context binding: channel
 > **and** user) and **AR-2** (the 4-verb action set). **This ledger is now a record of rulings,
 > not of proposals.** Entries below marked `RULED` carry the architect's verdict, its amendments,
-> and the overrule cost the architect accepted. **D-2 / D-4 / D-5 / DECIDED-3 are SUPERSEDED-BY
-> @ `df8da01a6`** — the original reasoning is preserved for the audit trail, but the ruling is
-> what the developer builds against. `architecture-recommendation.md` **wins on conflict**.
+> and the overrule cost the architect accepted. **All nine D-rows and all three J-rows are now
+> SUPERSEDED-BY @ `df8da01a6`** (D-1…D-9 · J-1…J-3 · DECIDED-3 → AR-2) — the original reasoning
+> is preserved for the audit trail, but the ruling is what the developer builds against.
+> `architecture-recommendation.md` **wins on conflict**.
+>
+> **Pass 2 scope (this file, docs-only).** Every status row the ruling decided now reads `RULED`
+> with its decision id and the ruling commit; **D-8's inline attestation field set is replaced by
+> the architect §2.3 set** (the pre-ruling set — missing `render_sha256`,
+> `relay_source_message_id` and `approver_subject` — is retired, with the delta named below).
+> **Ground truth for the field set** is the shipped
+> `daemon/repositories/prompt_version/assent_attestation.py`, which implements §2.3 exactly.
 
 ---
 
@@ -222,17 +234,24 @@ D-8 below.
 
 ---
 
-## Part B — Technical-analysis decisions D-1 … D-9 (for architect ratification)
+## Part B — Technical-analysis decisions D-1 … D-9 (RULED @ `df8da01a6`)
 
-> All nine are `RECOMMENDED-PENDING-ARCHITECT`. The technical analysis closed each question with a
-> recommendation; the architect ratifies or overrules **before** the developer lane lands them.
-> Two of the three "flagged judgement calls" named by the commission are already embodied here —
-> **D-3** (token length) and **D-6** (window freshness). The third (content-hash binding) is
-> **Part D / J-3**, because the analysis raised it as Risk 10 rather than as a numbered decision.
+> **All nine are now `RULED` @ `df8da01a6`** — D-1 AGREE+AMEND · D-2 OVERRULE · D-3 AGREE+AMEND ·
+> D-4 AGREE+AMEND · D-5 AGREE+CORRECTION · D-6 AGREE+AMEND · D-7 CONFIRM · D-8 AGREE+AMEND ·
+> D-9 AGREE. The technical-analysis recommendations are preserved below as the **historical**
+> record of what was asked; **the architect's ruling is what the developer builds against.** Two of
+> the three "flagged judgement calls" named by the commission are embodied here — **D-3** (token
+> length) and **D-6** (window freshness) — and both are ruled **AGREE**; the third (content-hash
+> binding) is **Part D / J-3**, because the analysis raised it as Risk 10 rather than as a numbered
+> decision — ruled **AGREE + AMEND** (K-7: bind to the **named canonical render**, never a copy of
+> `prompt_versions.content_hash`).
 
 ### D-1 — Token store persistence
 
-**Status:** `RECOMMENDED-PENDING-ARCHITECT`
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE + AMEND: new PG table
+`prompt_assent_tokens` via the `create_all` seam + its own `*.sql`; the row shape is amended — no
+`token_display`, `render_sha256` (not `content_hash`), `mint_user_id`, no hard FK).** The
+recommendation below is **historical**; the **RULED row shape** below it is binding.
 **Question.** Where does the per-item confirmation token live?
 
 | Option | Shape | Verdict |
@@ -336,7 +355,10 @@ If the Emperor wants the lane dormant until he has used it once, option (b) cost
 
 ### D-3 — Token length: 8 chars / 40 bits (house) vs 6 chars / 30 bits (commission)
 
-**Status:** `RECOMMENDED-PENDING-ARCHITECT` · **FLAGGED JUDGEMENT CALL #1**
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE + AMEND: 8 base32 chars / 40 bits via
+the house `mint_nonce`; the commission's ~6-char value is **rejected**; echo matching reuses
+`nonce_in_content` with `nonce_normalize` semantics — no new regex is minted).** The recommendation
+below is **historical**; the ruling is binding.
 **Question.** How long is the token?
 
 House value: 8 base32 chars = **40 bits** (`daemon/tools/upgrade_journal.py:205-208`, alphabet
@@ -347,6 +369,21 @@ House value: 8 base32 chars = **40 bits** (`daemon/tools/upgrade_journal.py:205-
 a code block, the Emperor copies it; the promote nonce is also 8 chars and is grouped as
 `CONFIRM-XXXX-XXXX` (`nonce_grouped` `:211-215`) — and it removes the brute-force conversation
 from the review entirely.
+
+**⚖ THE RULING (architect @ `df8da01a6`, D-3 / J-1 — AGREE + AMEND).** **8 base32 chars / 40
+bits**, minted via the house `mint_nonce` (`daemon/tools/upgrade_journal.py:205-208`); the
+commission's ~6-char example is **REJECTED**. Echo matching reuses **`nonce_in_content`**
+(`:231-246`) verbatim with `nonce_normalize` semantics (dash/case-tolerant) — **no new regex is
+minted**. Entropy is not the security boundary (factors 2+3 are), but 8 is free and closes the
+brute-force conversation.
+**D-3b — the mismatch-budget mechanism (K-9 micro-ruling).** The per-relay-instance hourly bound
+is an **in-RAM hourly counter keyed by relay `instance_id`**, owned by the **tool layer (P2)**,
+read/incremented on every token-mismatch refusal, configurable via
+`PromptAssentConfig.hourly_mismatch_budget` (default **10**), exhaustion → typed refusal
+**`mismatch-budget-exceeded`**. In-RAM is the ruled medium deliberately: per-process
+defense-in-depth, not a trust decision — the durable leg is the PG per-token `attempts` +
+lockout (D-4). Disclosed limitation: multi-daemon deployments do not share the RAM budget
+(per-instance by design).
 
 **The analysis's load-bearing observation (this is why the token is not the security boundary).**
 The three factors are conjunctive, so an attacker who guesses the token still must (i) cause the
@@ -360,6 +397,12 @@ to one specific item).
 
 **If the Emperor insists on the short code:** 6 chars is acceptable **only** with the per-item
 attempt counter + lockout + a global per-instance bound (see `risks.md` → Risk 5 / guessing loop).
+> **⚠ RESOLVED @ `df8da01a6` (D-3 / J-1 — AGREE).** The 6-char branch is **closed** — the
+> commission's ~6-char value is **rejected**. The per-item attempt counter + lockout are
+> **mandatory regardless**, and the hourly per-relay-instance bound is ruled as **D-3b / K-9**
+> (in-RAM counter keyed by relay `instance_id`, `PromptAssentConfig.hourly_mismatch_budget`
+> default 10, refusal `mismatch-budget-exceeded`) — see the ruling above. The paragraph above is
+> the **historical** proposal, not build guidance.
 
 ---
 
@@ -446,11 +489,26 @@ commission says "e.g. my-discord-bot", so the extraction cannot be left implicit
 
 ### D-6 — Extra window-freshness bound beyond the three factors
 
-**Status:** `RECOMMENDED-PENDING-ARCHITECT` · **FLAGGED JUDGEMENT CALL #2**
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE + AMEND: ≤ 10 min on `stamped_at`
+(configurable, default 600 s) **in addition to** `expires_at`; refusal
+`user-origin-window-stale`; absent/unparseable = **stale, never valid**; the requirement applies
+to BOTH `mint` and `approve` — K-2).** The recommendation below is **historical**; the ruling is
+binding.
 **Question.** Beyond "the window exists and has not expired", must the window also be **fresh**?
 
 **Recommendation: yes — bound `stamped_at` to ≤ 10 minutes before the tool call**, in addition to
 `expires_at`. Refusal code: `user-origin-window-stale`.
+
+**⚖ THE RULING (architect @ `df8da01a6`, D-6 / J-2 — AGREE + AMEND).** `window["stamped_at"]`
+within **≤ 10 minutes** (configurable, default **600 s**) of the tool call, **in addition to**
+`expires_at`; refusal **`user-origin-window-stale`**; absent/unparseable = **stale, never valid**;
+UTC via the house `parse_iso_utc`; evaluated **inside factor 2**.
+**Amendment (K-2): the freshness requirement applies to BOTH `mint` and `approve`** — the mint
+gate runs the same factor-2 checks (window present, user-origin, unexpired, fresh). The seam is
+verified: a silent resume skips the stamp (`daemon/manager.py:11503`), so a paused→resumed ari
+could otherwise carry an earlier turn's authorization for the full `NONCE_TTL=3600`.
+*Overrule cost:* promote parity accepts a 60-minute-old window — too loose for a lane that changes
+live personas in one chat turn.
 
 **Why.** The window is **in-memory** (`daemon/manager.py:2001`) and the dispatch funnel **skips the
 stamp on a silent resume** (`daemon/manager.py:11503`: `if not silent:` — *"Silent resume is the
@@ -461,12 +519,17 @@ is a **cheap fourth check** on top of the commission's three factors — it cost
 it fails closed.
 
 **This is the analysis's own proposal, not a house value** — flagged for overrule.
+> **⚠ AGREED @ `df8da01a6` (D-6 / J-2 — AGREE + AMEND).** The proposal is **ratified** (with the
+> K-2 amendment: the freshness bound applies to **mint and approve**); see the ruling above. The
+> paragraph is the **historical** proposal, not build guidance.
 
 ---
 
 ### D-7 — Surface scope: classic `prompt_versions` only, or both?
 
-**Status:** `RECOMMENDED-PENDING-ARCHITECT`
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (CONFIRM: classic `prompt_versions` ONLY in
+Phase 1; the persona surface is DEFERRED as a recorded known gap).** The recommendation below is
+**historical**; the ruling is binding.
 **Question.** The commission's TOOL requirement names *"PENDING `prompt_versions` rows"*, but its
 ROUTING requirement names *"the v2 persona-approval `HUMAN_LANE_REQUIRED` path"* — which is the
 **MEMOIR PERSONA table**, a **different stack**.
@@ -483,12 +546,21 @@ table, a different repository, a **different audit shape** (persona rows carry `
 change for no functional gain — the commission's goal is served by (i) alone.
 
 **Explicitly deferred, pending an architect ruling** — see `plan-overview.md` → Scope OUT.
+> **⚠ RULED @ `df8da01a6` (D-7 — CONFIRM).** The deferral is **confirmed**: Phase 1 is classic
+> `prompt_versions` only. The persona surface is a **recorded known gap** — the deferral must be
+> recorded as an explicit gap in the runbook, and the commission's persona-stack mis-naming is
+> surfaced in the ruling §8. Extension is a **separate commission** (own ledger — persona rows
+> write no `prompt_audit_events`). The paragraph above is the **historical** proposal, not build
+> guidance.
 
 ---
 
 ### D-8 — Approver-identity vocabulary
 
-**Status:** `RECOMMENDED-PENDING-ARCHITECT`
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE + AMEND: new lane `assent-relay` +
+`actor_from_assent_relay` + a typed `AssentAttestation` whose field set is the architect's
+**§2.3**; `approve()`/`reject()` unchanged; the FE path byte-identical; the relay path in-process
+only).** The recommendation below is **historical**; the ruling is binding.
 **Question.** Today the vocabulary is exactly three values — `session` / `bearer` / `internal`
 (`daemon/repositories/prompt_version/repository.py:503-511`, `_AUTH_METHODS`) — and `internal` is
 banned for approvals by name. A relayed approval is an `internal` actor. What lane does it use?
@@ -503,6 +575,23 @@ banned for approvals by name. A relayed approval is an `internal` actor. What la
 **Recommendation: (a) + (c) combined — a new lane value `assent-relay`, a dedicated constructor,
 and a NEW repo/service entrypoint that requires a typed `AssentAttestation`.**
 
+**⚖ THE RULING (architect @ `df8da01a6`, D-8 — AGREE + AMEND).** New lane value
+**`assent-relay`** (`AUTH_METHOD_ASSENT_RELAY` + `_AUTH_METHODS` widening, **Python-side; no
+CHECK constraint — no migration**); the **only** constructor is `actor_from_assent_relay(...)`;
+`ActorContext.__post_init__` requires the attestation fields on this lane; the
+`atomic_transition` approver clamp widens to include it; **`approve()` / `reject()` are
+unchanged** (F4 intact); the FE path is **byte-identical**; the relay path is **in-process only**
+(the `inner_soul` pattern), **never HTTP** (R-1 upheld). Tool args carry **no approver identity,
+source, message id or user id** (anti-forgery analogue of the repo's R3). The **attestation field
+set is the architect's §2.3** (below) — it **supersedes** the pre-ruling inline set.
+**Action set.** AR-2 @ `df8da01a6`: ONE tool `prompt_assent`, `action ∈ {list, mint, approve,
+reject}`.
+**Honest limitation of record.** The belt-and-braces `self-approval-attempt` assertion is kept
+but is **near-vacuous as written** (an assertion, not the gate); the load-bearing defences are
+the agent-originated dispatch popping the window (`daemon/manager.py:6132-6133`), the ari-EXACTLY
+layer-3 gate, and — since amendment pass 1 — the **daemon-derived user equality** (AR-1 / K-8).
+Tests pin the construction properties; the runbook carries the "not the gate" language.
+
 **How F4's spirit survives — four properties:**
 
 1. **The tool args can never carry the approver identity.** The tool signature accepts only
@@ -511,11 +600,35 @@ and a NEW repo/service entrypoint that requires a typed `AssentAttestation`.**
    source registry. Ari physically cannot assert "the Emperor is X" — it can only forward a token
    that only the Emperor's turn could have produced.
 2. **The attestation is not constructible from arguments.** `AssentAttestation` is produced by the
-   assent service **only after** the three-factor gate passes; it carries `{item_binding,
-   human_message_id, human_identity, source_id, external_user_id, token_id, window_stamped_at,
-   window_expires_at, relay_instance_id, attested_at}`. The repo entrypoint **refuses** an
-   assent-relay actor whose attestation is absent or incomplete → a lane that cannot be driven
-   without the full triple.
+   assent service **only after** the three-factor gate passes; it carries the **architect §2.3
+   field set** (`architecture-recommendation.md` §2.3 @ `df8da01a6`):
+
+   ```
+   item_binding             {version_id, agent_id, version_tag, artifact, version}
+   render_sha256                                   [J-3/K-7 — sha256 of the canonical render]
+   human_message_id         daemon-minted message id of the approving turn
+   relay_source_message_id  PLATFORM-side (Discord) message id — the daemon queue id is
+                            ephemeral/wiped at boot; without it the forensic chain breaks
+   human_identity           {source_id, user_id, user_name, guild_id, channel_id, channel_type,
+                             is_dm, external_user_id}   [nested metadata["discord"], D-5]
+   approver_subject         f"{source_id}:{user_id}"   [the HUMAN — AR-1 leg 3 / K-8]
+   token_id, token_fingerprint (sha256[:12] — never the raw token)
+   window_stamped_at, window_expires_at
+   relay_agent ("ari"), relay_instance_id
+   attested_at
+   ```
+
+   > **⚠ SUPERSEDED-BY @ `df8da01a6` (D-8).** The pre-ruling inline set is **retired**. It was
+   > missing **`render_sha256`** (J-3/K-7 — the canonical-render binding), **`relay_source_message_id`**
+   > (the platform-side forensic id) and **`approver_subject`** (D-5 / AR-1 leg 3); it also lifted
+   > `source_id` / `external_user_id` to the **top level**, where the ruling nests them inside
+   > `human_identity`. **Ground truth:** the shipped
+   > `daemon/repositories/prompt_version/assent_attestation.py` (`AssentAttestation`,
+   > `AssentItemBinding`, `AssentHumanIdentity`) implements exactly the §2.3 set above — that
+   > implementation, not this ledger, is the field set the developer builds against.
+
+   The repo entrypoint **refuses** an assent-relay actor whose attestation is absent or
+   incomplete → a lane that cannot be driven without the full triple.
 3. **`approve()` and `reject()` are unchanged.** The FE path keeps its exact semantics: session
    only, `internal` refused, `bearer` refused. No existing test or consumer changes meaning.
 4. **The lane value is distinguishable in the ledger.** `approver_auth_method = "assent-relay"`
@@ -553,7 +666,10 @@ failure mode (Ari hallucinating an approval).
 
 ### D-9 — Audit event type: keep `APPROVED`/`REJECTED`, or mint new types?
 
-**Status:** `RECOMMENDED-PENDING-ARCHITECT`
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE: keep `APPROVED`/`REJECTED` + the
+`approval_path` discriminator; payload-only JSONB extend; **`mint` writes NO
+`prompt_audit_events` row — the token table IS the mint ledger**).** The recommendation below is
+**historical**; the ruling is binding.
 **Question.** `PROMPT_AUDIT_EVENT_TYPES` is a **code-level frozenset**
 (`daemon/repositories/prompt_version/models.py:134-147`) — adding a type is additive with **no
 migration** (`models.py:120-133` records that precedent twice).
@@ -565,6 +681,15 @@ migration** (`models.py:120-133` records that precedent twice).
 
 **Recommendation: keep the existing event types, discriminate on a payload key**
 (`approval_path: "chat-assent"` vs `"fe-session"`).
+
+**⚖ THE RULING (architect @ `df8da01a6`, D-9 — AGREE).** Keep `APPROVED`/`REJECTED` +
+`approval_path: "chat-assent" | "fe-session"`; new types would make every
+`event_type == "APPROVED"` consumer **silently drop** relayed approvals — the forgetting bug.
+Payload-only JSONB extend (no migration); `token_fingerprint = sha256(token)[:12]`, never the raw
+token; `reject_reason` **top-level, ≤500 chars**, never concatenated into other fields.
+**Mint writes NO `prompt_audit_events` row — the token table IS the mint ledger.** The payload key
+set of record is the ruling's **§2.4**, including the actor/authority split: `actor_*` carries
+`assent-relay` + the relay subject; payload `approver_subject` carries the **human**.
 
 **The failure mode that decides it.** A new type is queryable via the existing
 `(event_type, created_at)` index (`daemon/repositories/prompt_version/models.py:478-500`) — "how
@@ -599,6 +724,14 @@ handful of decisions per week.
   "reject_reason": "…"
 }
 ```
+
+> **⚠ SUPERSEDED-BY @ `df8da01a6` (D-9 + ruling §2.4).** The payload key set of record is the
+> ruling's **§2.4** — it **adds `relay_source_message_id`** (the PLATFORM-side id, beside the
+> daemon-side `relay_message_id`) and **`render_sha256`** (J-3/K-7), and splits the
+> **actor/authority** roles: `actor_*` carries `assent-relay` + the relay subject, while payload
+> **`approver_subject`** carries the **human**. `reject_reason` is **top-level, ≤500 chars**,
+> never concatenated into other fields. The JSON above is the **historical** proposal, not build
+> guidance.
 
 ---
 
@@ -732,11 +865,19 @@ directly.
 
 > The commission names three judgement calls the analysis made. Two are embodied in Part B
 > (D-3, D-6); the third is a **Part D** item because the analysis raised it as Risk 10 rather than
-> as a numbered decision. All three are presented here so the architect sees them together.
+> as a numbered decision. All three were presented to the architect together, and **all three are
+> now `RULED` @ `df8da01a6`** — J-1 **AGREE** (8 chars), J-2 **AGREE** (≤10 min), J-3
+> **AGREE + AMEND** (K-7: bind to the **named canonical render**, not to a content re-read).
 
 ### J-1 — Token length: 8 chars (recommended) vs the commission's "~6-char"
 
-**Status:** `OPEN-JUDGEMENT` (embodied in **D-3**)
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE — embodied in D-3): 8 base32 chars /
+40 bits via the house `mint_nonce`; the commission's ~6-char value is **rejected**.** The analysis
+position below is **historical**; the ruling is binding.
+**RULED.** **8 chars (AGREE).** See D-3 — the 6-char branch is closed; the per-item attempt
+counter + lockout are **mandatory regardless**, and the hourly per-relay-instance bound is ruled
+as **D-3b / K-9** (in-RAM counter keyed by relay `instance_id`,
+`PromptAssentConfig.hourly_mismatch_budget` default 10, refusal `mismatch-budget-exceeded`).
 **Analysis position.** 8 base32 chars / 40 bits — the house `mint_nonce` value
 (`daemon/tools/upgrade_journal.py:205-208`). Costs nothing operationally; removes the
 brute-force argument.
@@ -748,7 +889,13 @@ agent-originated messages cannot arm factor 2 (`daemon/manager.py:6132-6133`).
 
 ### J-2 — Window freshness bound: ≤10 minutes (recommended) vs promote parity (60-min `expires_at` only)
 
-**Status:** `OPEN-JUDGEMENT` (embodied in **D-6**)
+**Status:** `RULED` — **SUPERSEDED-BY @ `df8da01a6` (AGREE — embodied in D-6): ≤ 10 min on
+`stamped_at` (configurable, default 600 s) **in addition to** `expires_at`; refusal
+`user-origin-window-stale`; absent/unparseable = **stale, never valid**; the bound applies to
+**mint and approve** (K-2).** The analysis position below is **historical**; the ruling is
+binding.
+**RULED.** **≤ 10 minutes (AGREE + AMEND).** See D-6 — the bound is adopted; the K-2 amendment
+extends it to the **mint** branch as well as approve.
 **Analysis position.** Require `window["stamped_at"]` to be within **10 minutes** of the tool call,
 in addition to `expires_at`. Refusal: `user-origin-window-stale`.
 **Why.** The dispatch funnel **skips the stamp on a silent resume**
