@@ -649,6 +649,111 @@ assert_not_contains "5 Darwin: no cgroup_leaf call" "cgroup_leaf" "$DAR_OUT"
 rm -rf "$STUBDIR" "$DAR_SCRIPT"
 
 # ===========================================================================
+section "5b — detector-level cells: the REAL detector through the launchctl seam"
+
+# F5 (review round 1): sections 5 / M3 stub _supervision_launchd_detect
+# WHOLESALE, so the detector's own negative branches had no coverage. These
+# cells drive the REAL detector (lib.sh:5193) with a PATH-scoped `launchctl`
+# stub — the SAME sanctioned seam LAUNCHCTL_BIN is designed for
+# (lib.sh:5154: PATH-resolved by design, "the mac-side test seam"). Nothing
+# in lib.sh is stubbed: the detector parses the stub's list/print output
+# with its own awk/case logic and decides.
+#   0 matches   → refuse (rc 1)
+#   2 matches   → refuse (rc 1) — unique-match-or-refuse
+#   watchdog-only → refuse (rc 1) — com.ensemble.watchdog is EXCLUDED
+#   exactly 1   → rc 0 + SUPERVISION_UNIT=<label>
+#   garbage dump → SKIPPED (informational), not a refuse trigger: a second
+#                 label that matches normally still resolves
+#   substring   → pins the DOCUMENTED whole-dump SUBSTRING match (F9: the
+#                 path may appear anywhere in the dump, not only as argv[1];
+#                 the predicate is deliberately NOT hardened this round)
+SEAM_DIR="$(mktemp -d -t supclass-seam.XXXXXX)"
+cat > "$SEAM_DIR/uname" <<'SEAMSTUB'
+#!/bin/bash
+case "$1" in
+    -s) echo "Darwin" ;;
+    *) /usr/bin/uname "$@" ;;
+esac
+SEAMSTUB
+chmod +x "$SEAM_DIR/uname"
+cat > "$SEAM_DIR/launchctl" <<'SEAMSTUB'
+#!/bin/bash
+# Per-cell launchctl stub for the detector-level cells. The install path is
+# resolved with `cd -P` exactly like the detector does, so the dump matches
+# the realpath the detector compares against.
+cmd="${1:-}"; target="${2:-}"; label="${target##*/}"
+inst=""
+[ -n "${INSTALL_DIR:-}" ] && inst="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd)"
+emit_match() { printf 'program = /bin/bash\nprogram arguments = {\n    /bin/bash\n    %s/launcher.sh\n}\n' "$inst"; }
+case "${SUP_CELL:-}" in
+    zero)
+        case "$cmd" in
+            list)  printf -- '-\t0\tcom.ensemble.other\n' ;;
+            print) printf 'program = /usr/bin/python3\nprogram arguments = {\n    /usr/bin/python3\n    /somewhere/else/daemon.py\n}\n' ;;
+        esac ;;
+    two)
+        case "$cmd" in
+            list)  printf -- '-\t0\tcom.ensemble.a\n-\t0\tcom.ensemble.b\n' ;;
+            print) emit_match ;;
+        esac ;;
+    watchdog)
+        case "$cmd" in
+            list)  printf -- '-\t0\tcom.ensemble.watchdog\n' ;;
+            print) emit_match ;;
+        esac ;;
+    one)
+        case "$cmd" in
+            list)  printf -- '-\t0\tcom.ensemble.prod\n' ;;
+            print) emit_match ;;
+        esac ;;
+    garbage)
+        case "$cmd" in
+            list)  printf -- '-\t0\tcom.ensemble.garbage\n-\t0\tcom.ensemble.prod\n' ;;
+            print)
+                if [ "$label" = "com.ensemble.prod" ]; then emit_match
+                else printf 'garbage: this is not a launchd dump\n'; fi ;;
+        esac ;;
+    substring)
+        case "$cmd" in
+            list)  printf -- '-\t0\tcom.ensemble.prod\n' ;;
+            print) printf 'notes = supervised by %s/launcher.sh (not argv[1])\n' "$inst" ;;
+        esac ;;
+esac
+exit 0
+SEAMSTUB
+chmod +x "$SEAM_DIR/launchctl"
+: > "$FIXT/launcher.sh"
+SEAM_SCRIPT="$(mktemp -t supclass-seamscript.XXXXXX)"
+cat > "$SEAM_SCRIPT" <<SEAMSCRIPT
+export INSTALL_DIR="$FIXT"
+export LAUNCHCTL_BIN=launchctl
+. "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+_supervision_launchd_detect
+rc=\$?
+printf 'rc=%s\nunit=%s\n' "\$rc" "\${SUPERVISION_UNIT:-}"
+SEAMSCRIPT
+seam_cell() { SUP_CELL="$1" PATH="$SEAM_DIR:$PATH" bash "$SEAM_SCRIPT" 2>&1; }
+SEAM_ZERO="$(seam_cell zero)"
+SEAM_TWO="$(seam_cell two)"
+SEAM_WD="$(seam_cell watchdog)"
+SEAM_ONE="$(seam_cell one)"
+SEAM_GARB="$(seam_cell garbage)"
+SEAM_SUB="$(seam_cell substring)"
+assert_contains "5b 0 matches: detector refuses (rc 1)" "rc=1" "$SEAM_ZERO"
+assert_not_contains "5b 0 matches: no label resolved" "com.ensemble" "$SEAM_ZERO"
+assert_contains "5b 2 matches: detector refuses (rc 1, unique-match-or-refuse)" "rc=1" "$SEAM_TWO"
+assert_not_contains "5b 2 matches: no label resolved" "com.ensemble" "$SEAM_TWO"
+assert_contains "5b watchdog-only: refuses (rc 1 — the watchdog label is excluded)" "rc=1" "$SEAM_WD"
+assert_not_contains "5b watchdog-only: no label resolved" "com.ensemble" "$SEAM_WD"
+assert_contains "5b exactly 1 match: rc 0" "rc=0" "$SEAM_ONE"
+assert_contains "5b exactly 1 match: label resolved" "unit=com.ensemble.prod" "$SEAM_ONE"
+assert_contains "5b garbage dump: SKIPPED, not a refuse trigger (the other label resolves)" "rc=0" "$SEAM_GARB"
+assert_contains "5b garbage dump: the matching label still resolves" "unit=com.ensemble.prod" "$SEAM_GARB"
+assert_contains "5b whole-dump substring match (F9 documented semantics): rc 0" "rc=0" "$SEAM_SUB"
+assert_contains "5b whole-dump substring match: label resolved" "unit=com.ensemble.prod" "$SEAM_SUB"
+rm -rf "$SEAM_DIR" "$SEAM_SCRIPT"
+
+# ===========================================================================
 section "6 — nohup-survivor heal (supervisor war r3, 2026-09-30)"
 
 # HEAL CONTRACT (investigation-note-supervisor-war-r3 §3 + commission
