@@ -263,6 +263,257 @@ _stamp_provenance_for_repo "$FAKE_REPO" \
     "$FIXTURE/stub-prod" \
     "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 
+# ─── fixture launchd seam (D2a follow-up 2026-11-11, remedy (a)) ────────────
+# WHY: the D2a Darwin fail-closed supervision gate (e90239fcb promote.sh:430
+# preflight; lib.sh:6391 AUTO probe) refuses every fixture promote/rollback
+# with supervision-not-verified — sandbox installs have no real launchd job
+# by construction — stranding 42 nodes that pin journal MECHANICS (B4
+# leave-txn-open, 8b auto-rollback, M4/M5 gates), none of which are about
+# launchd. Remedy (a) per the leader decision (2026-11-11): fabricate the
+# minimal PRECONDITION the REAL predicate checks — a gui-domain job whose
+# printed definition references <install>/launcher.sh — via a hermetic
+# launchctl emulator on this suite's PATH, and let the REAL lib.sh code
+# (detector, stop ladder, hand-back, provenance verify) run and decide.
+# The ceremony-pack precedent is the same shape (37251a4f1: fabricate the
+# precondition the gate checks, never stub the checker).
+#   NOT stubbed: _supervision_launchd_detect, SUPERVISION_STATE, the gate.
+#   LAUNCHCTL_BIN is PATH-resolved BY DESIGN (lib.sh:5154 — "the mac-side
+#   test seam"), so a PATH-injected shim is the sanctioned surface.
+# SCOPE: exported ONLY inside this suite's process (children inherit); no
+# other suite sources or sees it. The classify/twins/stop_handback suites
+# keep pinning refusals against the REAL predicate (no launchctl shim in
+# their env).
+RJ_LAUNCHD_STATE="$FIXTURE/launchd-state"
+RJ_LAUNCHD_BIN_DIR="$FIXTURE/launchctl-bin"
+mkdir -p "$RJ_LAUNCHD_STATE" "$RJ_LAUNCHD_BIN_DIR"
+RJ_LAUNCHD_LABEL="com.ensemble.sbx.fixture"   # ≠ com.ensemble.watchdog (the
+                                             # detector's exclusion label)
+RJ_LAUNCHD_PLIST="$FIXTURE/ensemble-sbx-fixture.plist"
+printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key><string>%s</string><key>ProgramArguments</key><array><string>/bin/bash</string><string>%s/launcher.sh</string></array><key>RunAtLoad</key><true/></dict></plist>\n' \
+    "$RJ_LAUNCHD_LABEL" "$SBX" > "$RJ_LAUNCHD_PLIST"
+
+# rj-stub.py — the emulated job's "daemon": a health endpoint serving the
+# CURRENT release's manifest version (v-stripped — the same literal shape
+# the §10/§12d hand-rolled stubs serve). argv carries <install>/launcher.sh
+# so the REAL ownership ladder (_supervision_owned_pids tier 1a, pgrep -f
+# anchored) classifies the revived stub as the job's OWN process — exactly
+# what a launchd-started daemon looks like to the provenance verify
+# (promote.sh:667). Self-terminates when the fixture state dir vanishes or
+# after a hard cap, so a timeout-killed run cannot leak stubs.
+RJ_LAUNCHD_STUB="$RJ_LAUNCHD_BIN_DIR/rj-stub.py"
+cat > "$RJ_LAUNCHD_STUB" <<'PYSTUB'
+#!/usr/bin/env python3
+"""Fixture launchd-job daemon emulator (release_journal suite ONLY)."""
+import http.server, json, os, sys, threading, time
+
+port = int(sys.argv[1]); install = sys.argv[2]; state = sys.argv[3]
+# argv[4] is the anchored <install>/launcher.sh marker (ownership tier 1a).
+
+def _version():
+    try:
+        cur = os.path.basename(os.readlink(os.path.join(install, "current")))
+        with open(os.path.join(install, "releases", cur, "manifest.json")) as fh:
+            m = json.load(fh)
+        v = m.get("binary_version") or m.get("version") or "unknown"
+        return v[1:] if v.startswith("v") else v
+    except Exception:
+        return "unknown"
+
+VER = _version()
+
+# Optional fixture instrumentation (12d M5): RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ
+# = "<nth-livez>:<octal-mode>:<path>" — chmod <path> to <mode> on the Nth
+# /livez hit. This is how the scenario's ORIGINAL instrumented daemon (the
+# hand-rolled M5 stub that chmod'd releases/ at the version-verify probe)
+# keeps its behavior through a seam revive: a real launchd restart gives a
+# FRESH daemon, and the revived stub replays the same probe-count trigger.
+CHMOD = None
+try:
+    _raw = os.environ.get("RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ", "")
+    if _raw:
+        _n, _mode, _p = _raw.split(":", 2)
+        CHMOD = (int(_n), int(_mode, 8), _p)
+except Exception:
+    CHMOD = None
+livez_hits = [0]
+
+class H(http.server.BaseHTTPRequestHandler):
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path == "/livez":
+            livez_hits[0] += 1
+            if CHMOD and livez_hits[0] == CHMOD[0]:
+                try:
+                    os.chmod(CHMOD[2], CHMOD[1])
+                except Exception:
+                    pass
+            self._send(200, {"status": "alive", "uptime_seconds": 1, "version": VER})
+        elif self.path == "/readyz":
+            self._send(200, {"status": "ready", "reasons": []})
+        else:
+            self._send(404, {})
+    def log_message(self, *a):
+        pass
+
+http.server.HTTPServer.allow_reuse_address = True
+srv = http.server.HTTPServer(("127.0.0.1", port), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+deadline = time.monotonic() + 900
+while time.monotonic() < deadline:
+    if not os.path.isdir(state):
+        break
+    time.sleep(2)
+srv.shutdown()
+PYSTUB
+
+# launchctl — the hermetic emulator. Surfaces used by lib.sh:
+#   list                        → one PID<TAB>STATUS<TAB>LABEL row (the
+#                                 detector's awk NF>=3 → $3 label parse)
+#   print gui/<uid>/<label>     → job dump whose program arguments name
+#                                 <install-real>/launcher.sh + a
+#                                 `path = <plist>` line (the detector's
+#                                 case-pattern match and
+#                                 _supervision_launchd_plist_path's sed)
+#   bootout [gui/<uid>[/<label>]]
+#                               → the emulated M1 stop barrier: TERM the
+#                                 $PORT holder, bounded-wait for the port
+#                                 to drain (what bootout+drain means for
+#                                 this job); RJ_LAUNCHD_BOOTOUT_FAIL=1
+#                                 fabricates the STOP-FAILURE precondition
+#                                 (the supervised-lane analogue of the
+#                                 historical chmod-000 stop script — the
+#                                 11b/11d/12e stop-fail nodes)
+#   bootstrap gui/<uid> <plist> → the emulated M2 RunAtLoad start: if this
+#                                 scenario HAD a live daemon at bootout
+#                                 (the was-live marker), revive the health
+#                                 stub on $PORT; a scenario that was dark
+#                                 stays dark (its gate must fail — the
+#                                 8b halt nodes)
+cat > "$RJ_LAUNCHD_BIN_DIR/launchctl" <<'RJLAUNCHCTL'
+#!/usr/bin/env bash
+# HERMETIC fixture launchctl emulator — tests/test_release_journal.sh only.
+set -u
+LABEL="${RJ_LAUNCHD_LABEL:-com.ensemble.sbx.fixture}"
+STATE="${RJ_LAUNCHD_STATE:?}"
+PLIST="${RJ_LAUNCHD_PLIST:?}"
+cmd="${1:-}"; target="${2:-}"
+real=""
+[ -n "${INSTALL_DIR:-}" ] && real="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd)"
+port_free() { [ -z "${PORT:-}" ] && return 0; ! lsof -ti:"$PORT" >/dev/null 2>&1; }
+case "$cmd" in
+    list)
+        pid="-"
+        if [ -n "${PORT:-}" ]; then pid="$(lsof -ti:"$PORT" 2>/dev/null | head -1)"; [ -n "$pid" ] || pid="-"; fi
+        printf '%s\t%s\t%s\n' "$pid" "0" "$LABEL"
+        exit 0
+        ;;
+    print)
+        case "$target" in
+            */"$LABEL"|"$LABEL")
+                [ -n "$real" ] || { echo "rj-launchctl: INSTALL_DIR unresolvable" >&2; exit 1; }
+                printf 'program = /bin/bash\n'
+                printf 'program arguments = {\n    /bin/bash\n    %s/launcher.sh\n}\n' "$real"
+                printf 'path = %s\n' "$PLIST"
+                exit 0
+                ;;
+            *)
+                echo "rj-launchctl: print: no such job '$target'" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    bootout)
+        if [ "${RJ_LAUNCHD_BOOTOUT_FAIL:-0}" = "1" ]; then
+            # Fabricated stop-failure precondition (fixture knob): a real
+            # bootout failure is the supervised lane's stop failure.
+            echo "rj-launchctl: bootout REFUSED (fixture: RJ_LAUNCHD_BOOTOUT_FAIL=1 — the stop-failure precondition)" >&2
+            exit 1
+        fi
+        holders=""
+        if [ -n "${PORT:-}" ]; then holders="$(lsof -ti:"$PORT" 2>/dev/null)"; fi
+        # A real bootout tears down the JOB — every process it owns, not
+        # just the port listener. The seam's job-tree = the port holder +
+        # every process an earlier bootstrap of THIS seam revived (recorded
+        # in $STATE/pids); TERM them all so a later scenario's drain never
+        # sees an owned straggler (the 70s-drain + SIGKILL escalation is
+        # REAL lib.sh behavior for stragglers — the seam just never leaves
+        # any).
+        if [ -f "$STATE/pids" ]; then
+            while read -r p; do
+                [ -n "$p" ] && kill -TERM "$p" 2>/dev/null
+            done < "$STATE/pids"
+            : > "$STATE/pids"
+        fi
+        if [ -n "$holders" ]; then
+            for p in $holders; do kill -TERM "$p" 2>/dev/null || true; done
+            i=0
+            while [ "$i" -lt 30 ] && ! port_free; do sleep 0.1; i=$((i + 1)); done
+            if ! port_free; then
+                echo "rj-launchctl: bootout: port ${PORT} still occupied after TERM+3s" >&2
+                exit 1
+            fi
+            : > "$STATE/was-live"
+        fi
+        exit 0
+        ;;
+    bootstrap)
+        # real signature: bootstrap <domain-target> <service-path> — the
+        # plist is argv[3] (argv[2] is the gui/<uid> domain target).
+        plist="${3:-}"
+        [ -n "$plist" ] && [ -f "$plist" ] || { echo "rj-launchctl: bootstrap: no plist '$plist'" >&2; exit 1; }
+        if [ -f "$STATE/was-live" ]; then
+            rm -f "$STATE/was-live"
+            if [ -n "${PORT:-}" ] && [ -n "$real" ] && [ -n "${RJ_LAUNCHD_STUB:-}" ]; then
+                nohup python3 "$RJ_LAUNCHD_STUB" "$PORT" "$INSTALL_DIR" "$STATE" "$real/launcher.sh" \
+                    >> "$STATE/stub.log" 2>&1 &
+                echo $! >> "$STATE/pids"
+                # Wait for the listener BEFORE answering: a real launchd
+                # job with RunAtLoad is "started" when the process is
+                # spawned, but the gate's first /livez must CONNECT (a
+                # refused first probe would retry and shift any
+                # probe-count instrumentation by one).
+                i=0
+                while [ "$i" -lt 30 ] && ! lsof -ti:"$PORT" >/dev/null 2>&1; do
+                    sleep 0.1; i=$((i + 1))
+                done
+            fi
+        fi
+        # A scenario that was DARK at bootout stays dark: bootstrap "loads
+        # the job" (rc 0) but RunAtLoad starts nothing the fixture never
+        # had — those nodes pin gate-FAILURE halts.
+        exit 0
+        ;;
+    *)
+        echo "rj-launchctl: unsupported invocation: $*" >&2
+        exit 1
+        ;;
+esac
+RJLAUNCHCTL
+chmod +x "$RJ_LAUNCHD_BIN_DIR/launchctl"
+
+# Suite-scoped export: every child of THIS suite (promote/rollback/status/
+# stage fixtures) resolves the bare-name LAUNCHCTL_BIN to the emulator.
+# Nothing outside this process tree can see it.
+export PATH="$RJ_LAUNCHD_BIN_DIR:$PATH"
+export RJ_LAUNCHD_STATE RJ_LAUNCHD_PLIST RJ_LAUNCHD_LABEL RJ_LAUNCHD_STUB
+
+# _rj_launchd_cleanup — reap revived stubs (they also self-terminate on
+# state-dir disappearance; this is the prompt path at suite exit).
+_rj_launchd_cleanup() {
+    if [ -f "${RJ_LAUNCHD_STATE:-}/pids" ]; then
+        while read -r p; do
+            [ -n "$p" ] && kill "$p" 2>/dev/null
+        done < "$RJ_LAUNCHD_STATE/pids"
+    fi
+    return 0
+}
+
 # ─── 1. syntax gates ────────────────────────────────────────────────────────
 section "syntax gates"
 # Batch C doc fix: this used to read `bash -n … || [ "$s" = lib ]` — the
@@ -1378,11 +1629,21 @@ assert_eq "11a recovery keeps current at LKG — env boots v1" "releases/$SBX_V1
 assert_contains "11a clear event is sweep (not sweep_rollback)" '"event":"sweep"' "$(cat "$JB")"
 assert_eq "11a no phantom rollback count" "0" "$(b4_inf 'journal_rollback_count_24h')"
 
-# 11b. promote abort at STOP (stop script fails — daemon liveness unknown;
+# 11b. promote abort at STOP (stop fails — daemon liveness unknown;
 #      the wrong-comment regression: "environment untouched" was a lie).
+#      D2a supervised lane (2026-11-11): the stop mechanism for a verified
+#      launchd install is the BOOTOUT, so the stop-failure precondition is
+#      fabricated on the fixture seam (RJ_LAUNCHD_BOOTOUT_FAIL=1 — the
+#      supervised-lane analogue of the old chmod-000 stop script) and the
+#      REAL stop ladder decides. chmod 111 keeps the sibling degraded but
+#      EXECUTABLE (the W1 sibling probe requires the exec bit; under
+#      supervision the script is not the stop path — and were it ever, an
+#      111 script is unreadable by bash → the same stop-failure class).
 b4_seed_journal "$SBX_V1"
-chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 111 "$FAKE_REPO/scripts/stop-ensemble.sh"
+export RJ_LAUNCHD_BOOTOUT_FAIL=1
 B4B_OUT="$(b4_run_promote "$SBX_V2")"; B4B_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_FAIL
 chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "11b stop-fail abort exits 1" "1" "$B4B_RC"
 assert_contains "11b abort admits daemon state UNKNOWN" "UNKNOWN" "$B4B_OUT"
@@ -1416,10 +1677,14 @@ b4_sweep
 assert_eq "11c aged txn: sweep clears" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
 assert_eq "11c recovery keeps current at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
 
-# 11d. manual rollback abort at STOP.
+# 11d. manual rollback abort at STOP. Same D2a supervised-lane treatment
+#      as 11b: the stop-failure precondition rides the seam
+#      (RJ_LAUNCHD_BOOTOUT_FAIL=1); sibling degraded-but-executable (111).
 b4_seed_journal "$SBX_V1"
-chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
+chmod 111 "$FAKE_REPO/scripts/stop-ensemble.sh"
+export RJ_LAUNCHD_BOOTOUT_FAIL=1
 B4D_OUT="$(b4_run_rollback "$SBX_V2")"; B4D_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_FAIL
 chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "11d rollback stop-fail abort exits 1" "1" "$B4D_RC"
 assert_contains "11d abort says txn left open" "txn left open" "$B4D_OUT"
@@ -1566,9 +1831,18 @@ sleep 1
 ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" null '[]'
 b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+# D2a supervised lane: the seam's bootout KILLS the instrumented M5 stub
+# (it holds the port — a real bootout stops the job's daemon) and the
+# revived stub replaces it. The instrumentation (chmod releases/ read-only
+# at the version-verify probe = the stub's 2nd /livez) rides the seam's
+# RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ hook so the REVIVED daemon replays the
+# exact trigger the hand-rolled stub had (fresh-daemon probe counting:
+# livez #1 = gate, livez #2 = version-verify = the original's trigger).
+export RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ="2:0o555:$SBX/releases"
 M5_OUT="$(HOME="$FAKE_HOME" VERSION="$SBX_V2" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$M5_PORT" \
     LIVEZ_BUDGET_S=6 READYZ_BUDGET_S=6 ENSEMBLE_PROMOTE_SOAK_S=0 \
     bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1)"; M5_RC=$?
+unset RJ_LAUNCHD_STUB_CHMOD_ON_LIVEZ
 kill "$M5_PID" 2>/dev/null; wait "$M5_PID" 2>/dev/null
 chmod 755 "$SBX/releases" 2>/dev/null
 rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
@@ -1622,8 +1896,13 @@ ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" '[]'
 b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
 W2_COUNT_BEFORE="$(b4_inf 'journal_rollback_count_24h')"
-chmod 000 "$FAKE_REPO/scripts/stop-ensemble.sh"
+# D2a supervised lane (as 11b/11d): the stop-failure precondition rides the
+# seam (RJ_LAUNCHD_BOOTOUT_FAIL=1); the sibling stays degraded-but-
+# executable (111) for the W1 preflight probe.
+chmod 111 "$FAKE_REPO/scripts/stop-ensemble.sh"
+export RJ_LAUNCHD_BOOTOUT_FAIL=1
 W2E_OUT="$(b4_run_promote "$SBX_V1")"; W2E_RC=$?
+unset RJ_LAUNCHD_BOOTOUT_FAIL
 chmod 755 "$FAKE_REPO/scripts/stop-ensemble.sh"  # was 755 via cp; a 644 leftover is porcelain-visible dirt (provenance probe)
 assert_eq "12e same-version stop-fail abort exits 1" "1" "$W2E_RC"
 assert_eq "12e txn OPEN with target == journal current (same-version)" "$SBX_V1" \
@@ -2580,8 +2859,10 @@ _pass
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
     printf 'failed:%s\n' "$FAILED_TESTS"
+    _rj_launchd_cleanup
     rm -rf "$FIXTURE"
     exit 1
 fi
+_rj_launchd_cleanup
 rm -rf "$FIXTURE"
 exit 0
