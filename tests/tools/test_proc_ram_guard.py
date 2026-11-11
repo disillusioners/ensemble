@@ -53,6 +53,16 @@ INSTANCE = "inst-proc-ram-guard-tests"
 import os as _os
 
 
+@pytest.fixture(autouse=True)
+def _ram_fence(monkeypatch, tmp_path):
+    """T2 — every spawning test runs under the house fence; ASSERTED to hold."""
+    from tests.helpers.ram_guard_fence import apply_fence, assert_fence_applied
+
+    fake_home, auth_names = apply_fence(monkeypatch, tmp_path)
+    yield
+    assert_fence_applied(fake_home, auth_names)
+
+
 @pytest.fixture
 def unique_instance_id():
     return f"test-proc-{_os.urandom(4).hex()}"

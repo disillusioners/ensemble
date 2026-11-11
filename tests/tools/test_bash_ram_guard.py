@@ -286,6 +286,16 @@ def _switches_on(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _ram_fence(monkeypatch, tmp_path):
+    """T2 — every spawning test runs under the house fence; ASSERTED to hold."""
+    from tests.helpers.ram_guard_fence import apply_fence, assert_fence_applied
+
+    fake_home, auth_names = apply_fence(monkeypatch, tmp_path)
+    yield
+    assert_fence_applied(fake_home, auth_names)
+
+
+@pytest.fixture(autouse=True)
 def _clean_pid_registry():
     reset_pid_registry_for_tests()
     yield
