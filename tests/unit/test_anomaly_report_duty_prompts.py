@@ -129,8 +129,9 @@ FORBIDDEN_TOKENS: tuple[str, ...] = (
 SEAL_FILE = REPO_ROOT / "tests" / "test_chart_image_delivery_e2e.py"
 
 #: The rows the C8 re-pin MOVED (their base value → the value the re-pin
-#: replaced).  The anti-blanket pin asserts these MOVED — a re-pin that
-#: did not move them would be cosmetic.
+#: replaced), PLUS the prompt-assent P1 K-3 row — a DELIBERATE, single-file
+#: re-pin (see that row's own comment).  The anti-blanket pin asserts these
+#: MOVED — a re-pin that did not move them would be cosmetic.
 SEAL_REPINNED_BASE_VALUES: dict[str, str] = {
     "agents/approver/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
     "agents/approver[v2]/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
@@ -150,6 +151,16 @@ SEAL_REPINNED_BASE_VALUES: dict[str, str] = {
     "agents/tidier/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",
     "agents/tidier[v2]/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",
     "daemon/constants.py": "464a2459fb4c91c6a1add2bc6bafc3b1242415996597f4e16bef44b3387c8e92",
+    # daemon/sources/adapters/discord/adapter.py re-pinned 2026-11-10
+    # (prompt-assent P1, task 1.12 / commit 512519d93): the K-3 / AR-1
+    # leg-2 1:1-DM discriminator (``is_group_dm``) was ADDED to the
+    # adapter's nested ``discord_meta`` (additive metadata, no schema
+    # change) — the sealed content-sha256 MOVED with the real bytes
+    # (base 87351d95… → a9f3a711…).  P2's commit 23c9db503 re-stamped
+    # the map row in place; this row is classified as a DELIBERATE RE-PIN,
+    # NOT a blanket re-stamp — so the anti-blanket invariant keeps its
+    # teeth on every row that did NOT move.
+    "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
     "daemon/sources/registry.py": "f90c57f73bffd28e4a1992049d617d7bb791b8d792807308b40d2720d9edf624",
 }
 
@@ -157,7 +168,11 @@ SEAL_REPINNED_BASE_VALUES: dict[str, str] = {
 #: VERBATIM (a blanket re-stamp that silently legalised a change to a
 #: sealed segment fails here).  ``agents/charter/meta.json`` is NOT here:
 #: the C9 grant ceremony re-pins it (the grant touches that file), and
-#: the grant pack owns that row.
+#: the grant pack owns that row.  ``daemon/sources/adapters/discord/
+#: adapter.py`` is NOT here either: its bytes MOVED by the prompt-assent
+#: P1 K-3 re-pin, so it is a DELIBERATE RE-PIN and lives in
+#: ``SEAL_REPINNED_BASE_VALUES`` above (a row must appear in EXACTLY ONE
+#: of the two sets — the partition invariant).
 SEAL_UNTOUCHED_BASE_VALUES: dict[str, str] = {
     "agents/_prompt_system/innate-skills/chart/skill.md": "fa29084d7dc0f86c87d667ef46dcfc060fa11e20e0b647295cdd75ff43353515",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "fcd6f4612d6077a81fe521341e6e2332d1f5da31880d3fc710decbc0579fedbf",
@@ -169,7 +184,6 @@ SEAL_UNTOUCHED_BASE_VALUES: dict[str, str] = {
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
     "agents/project-manager/workflow.md": "357263bd9ce19f2cd264717e9e8054293f89335c8c0ca5ea1ed264bbb951b0d2",
     "agents/wanderer/soul.md": "98a1f4b4de7657d37c3367fffcfbd3d08b3b66aacafcfa3a362a25a5be126dc2",
-    "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
     "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
