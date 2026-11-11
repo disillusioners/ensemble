@@ -161,13 +161,15 @@ section "Site 1 — lib.sh stop_via_stop_script UNIT fork-exec (budget enforced)
 STUBBIN="$(mktemp -d -t bswaits-s1.XXXXXX)"
 make_systemctl_stub "$STUBBIN"
 SC="$STUBBIN/systemctl"
-# Build a fake tree that has a hanging stop-ensemble.sh at the
-# expected fallback location: `pwd/scripts/stop-ensemble.sh`. The
-# test cd's into $FAKETREE so stop_via_stop_script's
-# `stop_script="$(pwd)/scripts/stop-ensemble.sh"` fallback resolves
-# to our hang.
+# Build a fake tree that stages the hang at the SIBLING-ONLY world's
+# resolution point: lib.sh stop_via_stop_script resolves the sibling one
+# level up of the CALLING script's dir (W4 — the old $(pwd)/scripts
+# fallback is DELETED). The caller below lives at
+# $FAKETREE/scripts/upgrade/caller.sh, so the sibling leg resolves to
+# $FAKETREE/scripts/stop-ensemble.sh — where this fixture already
+# stages the hang (H3 tidier round 3: fixture moved off the deleted leg).
 FAKETREE="$(mktemp -d -t bswaits-faketree.XXXXXX)"
-mkdir -p "$FAKETREE/scripts"
+mkdir -p "$FAKETREE/scripts/upgrade"
 cat > "$FAKETREE/scripts/stop-ensemble.sh" <<'HANG'
 #!/bin/bash
 # Hang forever — exercises lib.sh's _run_bounded on the fork-exec.
@@ -182,22 +184,27 @@ reset_stub_state "$SC_LOG"
 SC_IS_ACTIVE=inactive SC_MAINPID=0 SC_STOP_RC=0
 export SC_IS_ACTIVE SC_MAINPID SC_STOP_RC
 
+# The caller script makes the SIBLING leg resolve inside the fixture:
+# BASH_SOURCE[1] of the lib.sh source line is caller.sh, so the stop
+# script is caller.sh/../stop-ensemble.sh = $FAKETREE/scripts/stop-ensemble.sh.
+cat > "$FAKETREE/scripts/upgrade/caller.sh" <<'CALLER'
+#!/bin/bash
+export INSTALL_DIR="$FIX"
+export SYSTEMCTL_BIN="$SC"
+export PORT=19990
+export STOP_SCRIPT_BUDGET_S=2
+# ENSEMBLE_SUPERVISION_RESULT env bypasses preflight's
+# supervision_classify downgrade and preserves the UNIT shape
+# through to stop_via_stop_script's UNIT branch.
+export ENSEMBLE_SUPERVISION_RESULT="UNIT_MANAGED:ensemble-s1.service"
+unset SUPERVISION_STATE SUPERVISION_UNIT SUPERVISION_PRESTOP_MAINPID ENSEMBLE_SUPERVISION 2>/dev/null || true
+. "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+stop_via_stop_script
+echo "s1-rc=$?"
+CALLER
+chmod +x "$FAKETREE/scripts/upgrade/caller.sh"
 START=$(date +%s)
-(
-    cd "$FAKETREE"
-        export INSTALL_DIR="$FIX"
-        export SYSTEMCTL_BIN="$SC"
-        export PORT=19990
-        export STOP_SCRIPT_BUDGET_S=2
-        # ENSEMBLE_SUPERVISION_RESULT env bypasses preflight's
-        # supervision_classify downgrade and preserves the UNIT shape
-        # through to stop_via_stop_script's UNIT branch.
-        export ENSEMBLE_SUPERVISION_RESULT="UNIT_MANAGED:ensemble-s1.service"
-        unset SUPERVISION_STATE SUPERVISION_UNIT SUPERVISION_PRESTOP_MAINPID ENSEMBLE_SUPERVISION 2>/dev/null || true
-        . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
-        stop_via_stop_script
-        echo "s1-rc=$?"
-    ) 2>&1 | tee "$FIX/s1.out"
+FIX="$FIX" SC="$SC" UPGRADE_DIR="$UPGRADE_DIR" bash "$FAKETREE/scripts/upgrade/caller.sh" 2>&1 | tee "$FIX/s1.out"
 RC=$(grep -oE 's1-rc=[0-9]+' "$FIX/s1.out" | head -1 | sed 's/s1-rc=//')
 END=$(date +%s)
 ELAPSED=$((END - START))
