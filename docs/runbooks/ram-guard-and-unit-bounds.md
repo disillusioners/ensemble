@@ -235,9 +235,9 @@ labels are the only addition — the sentences are unmodified.
 > `MemoryHigh=infinity`, no `Memory*` directive in the unit or its drop-ins. Verify with
 > `systemctl show ensemble-main.service -p MemoryMax -p MemoryHigh` (effective values — the
 > authoritative resolution; the unit file is mode 600 root) and
-> `ls /etc/systemd/system/ensemble-main.service.d/`. **The unit file is
-> REGENERATED** by `scripts/upgrade/adopt-unit.sh`, so a hand-edited unit reverts — put a
-> **drop-in** at `30-memory-bounds.conf` instead.
+> `ls /etc/systemd/system/ensemble-main.service.d/`. **The unit file is REGENERATED** by
+> `scripts/upgrade/adopt-unit.sh`, so a hand-edited unit reverts — put a **drop-in** at
+> `30-memory-bounds.conf` instead.
 
 **8.** **swap is not a safety net** — the daemon died with 203 MiB swap used *and* with 7.4 GiB used; swapped-out pages are invisible to an RSS metric (state the scope)
 
