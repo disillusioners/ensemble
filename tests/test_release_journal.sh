@@ -1619,10 +1619,42 @@ assert_eq "11a txn flipped:false (pre-flip)" "false" "$(b4_inf_flip)"
 assert_contains "11a halt event recorded" '"event":"halt"' "$(cat "$JB")"
 assert_eq "11a current untouched at LKG" "releases/$SBX_V1" "$(readlink "$SBX/current")"
 [ -d "$SBX/releases/rollback.lock.d" ] && _fail "11a lock released on abort" "absent" "present" || _pass
-JB_11A_FRESH="$(cat "$JB")"
+# ── 11a sweep legs — AMENDED to the WS4 contract (D2a SIGKILL mitigation,
+#    launcher.sh:2892-2894: "a FRESH heartbeat no longer protects a txn
+#    whose owner is provably DEAD — owner_dead ALONE is reclaimable"), the
+#    same amendment the D2a lane landed for the cgroup twin (3b-i,
+#    b0b71d807: fresh hb + dead owner ⇒ RECLAIM, was HELD). The aborted
+#    promote's owner pid is gone at sweep time, so the immediate sweep
+#    RECLAIMS the fresh txn. The old pin (byte-identical DEFER) encoded the
+#    pre-WS4 contract — and at the 42-red supervision baseline it passed
+#    only VACUOUSLY (the refused promote never opened a txn to defer);
+#    the amended pins are TWO-SIDED (real open txn asserted pre-sweep,
+#    reclaim asserted post-sweep) so that vacuity cannot return.
+assert_eq "11a pre-sweep: the abort left a REAL open promote txn" "promote" "$(b4_inf_kind)"
+assert_eq "11a pre-sweep: open txn target is the aborted promote's" "$SBX_V2" \
+    "$(b4_inf '_json_field "$(_json_sub "$(journal_read)" in_flight)" target')"
 b4_sweep
-assert_eq "11a fresh txn: immediate launcher start defers (byte-identical)" "$JB_11A_FRESH" "$(cat "$JB")"
-b4_age_txn
+assert_eq "11a fresh txn + dead owner: sweep RECLAIMS (WS4, 3b-i twin)" "null" \
+    "$(b4_inf '_json_field "$(journal_read)" in_flight')"
+assert_contains "11a reclaim is the orphaned pre-flip sweep (never flipped)" \
+    "orphaned pre-flip promote txn" "$(cat "$JB")"
+# Aged leg — a CASCADE, not a second defect: the immediate WS4 reclaim
+# above already cleared the abort's txn, so the old leg's splice ran
+# against a CLEARED journal and minted a kindless garbage txn (that red
+# was the cascade). Seed the aged txn EXPLICITLY so this leg keeps
+# pinning what it always did: an AGED pre-flip txn is sweep-cleared, the
+# boot stays on LKG. The seed opens via the REAL journal_open_txn (the
+# production writer), then ages started_at past the 600s gate and sets
+# owner_pid=999999 (the §8 fixture pattern: journal_open_txn writes
+# owner=$$ — the SUITE's pid, alive at sweep time — and the sweep's
+# first gate DEFERS a fresh-hb + live-owner txn; a dead owner is part of
+# the precondition this leg has always exercised via the aborted
+# promote's now-gone pid).
+b4_inf "journal_open_txn promote '$SBX_V2'" > /dev/null 2>&1
+( export INSTALL_DIR="$SBX"; . "$FAKE_REPO/scripts/upgrade/lib.sh"
+  ts="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"
+  journal_update in_flight "{\"kind\":\"promote\",\"target\":\"$SBX_V2\",\"started_at\":\"$ts\",\"flipped\":false,\"owner_pid\":999999,\"last_heartbeat\":$(_now_epoch),\"displaced_version\":\"$SBX_V1\"}"
+) > /dev/null 2>&1
 b4_sweep
 assert_eq "11a aged txn: sweep clears (journal recovered)" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
 assert_eq "11a recovery keeps current at LKG — env boots v1" "releases/$SBX_V1" "$(readlink "$SBX/current")"
