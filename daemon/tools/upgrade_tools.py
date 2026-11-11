@@ -3625,6 +3625,40 @@ never decides go/rollback).
                     "(set ENSEMBLE_UPGRADE_SCRIPTS_DIR or run from a source "
                     "checkout)",
                 )
+            # Check 1b — stop-script sibling present + executable (the
+            # v0.29.16 promote-halt class, 2026-11-11). The promote stop
+            # step resolves its stop script as the SIBLING ONE LEVEL UP of
+            # the resolved scripts dir (lib.sh ``stop_via_stop_script``:
+            # ``$(dirname ...)/../stop-ensemble.sh``) — a scripts tree whose
+            # parent lacks the executable sibling sails through arming and
+            # aborts MID-PROMOTE at the daemon-stop step (bash: No such file
+            # or directory → rc=127 → B4 abort, flip never reached). No
+            # packaging lane ships that file, so the canonical source is the
+            # repo checkout's ``scripts/stop-ensemble.sh`` — copy it to the
+            # expected path + chmod +x. Fail-closed: ANY probe error counts
+            # as missing (the refusal is the safe direction on both legs).
+            stop_script = scripts_dir.parent / "stop-ensemble.sh"
+            try:
+                stop_script_ready = stop_script.is_file() and os.access(
+                    stop_script, os.X_OK
+                )
+            except OSError:
+                stop_script_ready = False
+            if not stop_script_ready:
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    "preflight-stop-script-missing",
+                    f"arm preflight: stop-script sibling not usable at "
+                    f"{stop_script} (must exist AND be executable) — the "
+                    "promote stop step resolves the sibling one level up of "
+                    "the scripts dir (lib.sh stop_via_stop_script: "
+                    "<scripts_dir>/../stop-ensemble.sh) and would abort "
+                    "mid-promote (bash: No such file or directory → rc=127, "
+                    "the v0.29.16 2026-11-11 halt class); fix: copy the repo "
+                    f"scripts/stop-ensemble.sh to {stop_script} and chmod "
+                    "+x. nonce NOT burned",
+                )
             # Check 2 — argv/env construction works. The shared verified-arm
             # helpers from Item 1 run against a synthetic op built exactly
             # like the durable one below — the construction must not raise

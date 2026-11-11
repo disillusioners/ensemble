@@ -269,6 +269,22 @@ Every arm journals an `arm-scripts-provenance` row carrying `scripts_dir`,
 the `lib.sh` sha256, the git rev and the dirty flag — plus a
 `stale-scripts-dir` refusal row when it refuses.
 
+### §F.1b Stop-script sibling (Check 1b, 2026-11-11)
+
+Separately from provenance, the arm preflight ALSO requires the stop-script
+sibling the promote stop step will resolve —
+`<scripts_dir>/../stop-ensemble.sh` (lib.sh `stop_via_stop_script`) — to
+exist AND be executable, BEFORE the ceremony nonce burns. A scripts dir
+whose parent lacks the executable sibling refuses
+`preflight-stop-script-missing` pre-nonce (fail-closed on any probe error):
+the mid-promote rc=127 abort at the daemon-stop step (the v0.29.16
+2026-11-11 halt class — bash: No such file or directory → B4 abort, flip
+never reached) becomes a loud upfront refusal naming the expected path. No
+packaging lane ships that file (payloads carry no `scripts/` since v0.27.4;
+the Makefile ships only `watchdog-watcher.sh`): the canonical source is the
+repo checkout's `scripts/stop-ensemble.sh` — copy it to the named path +
+`chmod +x`.
+
 ### §F.2 USER-OWNED PRECONDITION (before the next ceremony)
 
 Either **(a) sync the pinned checkout** so its HEAD contains
