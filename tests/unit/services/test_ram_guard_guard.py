@@ -844,3 +844,47 @@ def test_the_registry_reports_its_depth(tmp_path):
     register(guard)
     register(guard, tracking_id="t-2", pid=SYNTHETIC_PGID + 101)
     assert guard.health()["registry_depth"] == 2
+
+
+# ── D-5 — a tracking-id collision must not be SILENT ───────────────────────
+
+
+def test_duplicate_tracking_id_collision_warns_and_overwrites(tmp_path, caplog):
+    """D-5 — ``register`` on a LIVE key warns (content-free) and keeps the
+    prior semantics (the overwrite; no counter moves — B5 is frozen).
+
+    The warning names the id and the prior state ONLY — never argv, never
+    an env value, never a secret.
+    """
+    import logging
+
+    guard, _root = make_guard(tmp_path)
+    first = register(guard)
+    assert first is not None
+    with caplog.at_level(logging.WARNING, logger="daemon.services.ram_guard.guard"):
+        second = register(guard, pid=SYNTHETIC_PGID + 7, pgid=SYNTHETIC_PGID + 7)
+    assert second is not None
+    # The overwrite semantics are unchanged: the key now maps to the
+    # second record.
+    assert guard.read_verdict(TRACKING_ID) is second
+    # The collision produced exactly one content-free warning.
+    warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "already live" in r.getMessage()
+    ]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    msg = warnings[0].getMessage()
+    assert TRACKING_ID in msg
+    assert "prior_state=WATCHING" in msg
+    # No counter moved (B5 frozen).
+    assert all(v == 0 for v in guard.counters_snapshot().values())
+
+
+def test_non_colliding_register_stays_silent(tmp_path, caplog):
+    """D-5 — a fresh key logs nothing (semantics unchanged)."""
+    import logging
+
+    guard, _root = make_guard(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="daemon.services.ram_guard.guard"):
+        assert register(guard) is not None
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []

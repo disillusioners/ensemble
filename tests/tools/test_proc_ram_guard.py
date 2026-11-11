@@ -38,6 +38,7 @@ import pytest_asyncio
 
 proc_tools_module = importlib.import_module("daemon.tools.proc_tools")
 bash_module = importlib.import_module("daemon.tools.bash")
+from daemon.tools.proc_tools import create_proc_tools
 
 from daemon.services.ram_guard import set_ram_guard
 from daemon.services.ram_guard.guard import RamGuard
@@ -229,6 +230,13 @@ def _mem_available_bytes() -> int:
     return 0
 
 
+def _norm_ws(text: str) -> str:
+    """Normalized-whitespace equality (D-6) — the pin comparator for the
+    verbatim §3.5 sentences (markdown emphasis/backticks are already
+    normalized away in the constants themselves)."""
+    return " ".join((text or "").split())
+
+
 def _make_guard(ceiling_bytes: int) -> RamGuard:
     """A guard with an injected ceiling — NOT started.
 
@@ -395,7 +403,18 @@ class TestP6AbsentStamp:
 
 class TestUnderLimitByteIdentical:
     @pytest.mark.asyncio
-    async def test_under_limit_proc_status_has_no_ram_lines(self, proc_tools):
+    async def test_the_proc_status_block_matches_the_base_commit_golden(
+        self, proc_tools, recording_guard
+    ):
+        """D-3(ii) — the under-limit block is a STORED BASE-COMMIT GOLDEN.
+
+        The golden is the base commit's (``829903f1b``) ``get_status``
+        output shape for a cleanly-exited process, captured live on that
+        renderer; the two run-varying fields (``process_id``, ``pid``)
+        are interpolated and nothing else is.  A RAM line inserted
+        anywhere — middle or tail — breaks the equality, so this is a
+        byte-identity assertion, NOT a key-set proxy.
+        """
         tools, _ = proc_tools
         proc_run = tools["proc_run"]
         proc_status = tools["proc_status"]
@@ -420,6 +439,21 @@ class TestUnderLimitByteIdentical:
         assert "ram_killed: true" not in status
         assert "ram_kill_refused:" not in status
         assert "ram_breach_observed:" not in status
+
+        # THE GOLDEN — byte-for-byte (the two varying fields
+        # interpolated; everything else is the base commit's renderer).
+        pid = re.search(r"^pid: (\d+)$", status, flags=re.M).group(1)
+        expected = "\n".join([
+            f"process_id: {process_id}",
+            "status: exited",
+            f"pid: {pid}",
+            "exit_code: 0",
+            f"buffer_bytes: 3 (limit={proc_tools_module._MEMORY_BUFFER_LIMIT_BYTES})",
+        ])
+        assert status == expected, (
+            "proc_status block drifted from the base-commit golden:\n"
+            f"--- expected ---\n{expected}\n--- actual ---\n{status}"
+        )
 
 
 # ── Real ballooning tree via proc_run (a) ───────────────────────────────────
@@ -470,6 +504,26 @@ class TestBallooningTree:
         assert real_guard.counters_snapshot()["ownership_unverified"] == 0, (
             "a proc-lane kill must VERIFY the lane's own stamp, not fall "
             "back to the unverifiable-proceed path"
+        )
+        # D-3(i) — the plan's T11 acceptance says the WHOLE TREE is
+        # killed; probe it for real instead of trusting the verdict
+        # line: a liveness probe on the captured pgid must report the
+        # group GONE (signal 0 is a liveness probe, not a signal).
+        from daemon.tools.proc_tools import get_background_process_manager
+
+        manager = get_background_process_manager()
+        info = manager._processes[_][process_id]
+        assert info.ram_pgid > 0
+        try:
+            os.killpg(info.ram_pgid, 0)
+            group_alive = True
+        except ProcessLookupError:
+            group_alive = False
+        except PermissionError:  # pragma: no cover — a live member we may not probe
+            group_alive = True
+        assert not group_alive, (
+            f"the process group {info.ram_pgid} still has a live member "
+            "after the RAM kill"
         )
         # The verdict's content-free fields ride the ``ram_breach:``
         # line: the resolved ceiling, the re-arm threshold beside it,
@@ -525,8 +579,17 @@ class TestLeaderlessTree:
             await asyncio.sleep(0.3)
         # The POSITIVE shape: the guard killed the tree (the grandchild
         # included) and the verdict rides proc_status.
+        # The POSITIVE shape: the guard killed the tree (the grandchild
+        # included) and the verdict rides proc_status.
         assert saw_ram, f"Never saw RAM verdict in proc_status: {st}"
         assert "ram_killed: true" in st
+        # D-2 — the rendered block must be INTERNALLY CONSISTENT in the
+        # post-return shape: the direct child exited 0 (so the drain
+        # finalized ``exited`` long before the kill landed), yet the
+        # rendered status must read ``killed`` — never ``exited`` above
+        # ``ram_killed: true``.
+        assert "status: killed" in st, f"stale post-return status: {st}"
+        assert "status: exited" not in st, f"self-contradicting block: {st}"
         # The guard's own counters prove the KILL was delivered by the
         # guard's execution-lane thread (not by the proc lane).
         assert real_guard.counters_snapshot()["ram_kills"] >= 1
@@ -1078,6 +1141,67 @@ class TestUntouchedPaths:
         assert "ram_killed: true" not in st
 
 
+# ── D-4 — the spawn-window orphan path releases the registration ────────────
+
+
+class TestSpawnWindowOrphanRelease:
+    @pytest.mark.asyncio
+    async def test_the_orphan_path_releases_the_registration(
+        self, unique_instance_id, recording_guard
+    ):
+        """phase4-plan.md:67 — the spawn-window orphan path releases.
+
+        The pre-existing C2 test (``test_proc_tools.py``) predates the
+        release hook, so the plan's orphan leg had NO coverage.  This leg
+        races ``cleanup_instance`` into the spawn window exactly as the
+        C2 test does and asserts the T8 release hook FIRES on that path
+        (``release_calls`` non-empty) — the registration never leaks when
+        the spawn is orphaned mid-window.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from daemon.tools.proc_tools import get_background_process_manager
+
+        manager = get_background_process_manager()
+
+        async def slow_spawn(command, **kwargs):
+            """The spawn window: sleep, clean up INSIDE it, then return
+            a mock proc (the C2 shape, verbatim)."""
+            await asyncio.sleep(0.1)
+            await manager.cleanup_instance(unique_instance_id)
+            mock_proc = MagicMock()
+            mock_proc.pid = 99999  # non-existent pid
+            mock_proc.returncode = None
+            mock_proc.stdout = None  # reader exits immediately
+            mock_proc.kill = MagicMock()
+            mock_proc.wait = AsyncMock(return_value=-9)
+            return mock_proc
+
+        with patch(
+            "daemon.tools.proc_tools.asyncio.create_subprocess_shell",
+            new=slow_spawn,
+        ):
+            process_id, err = await manager.start_process(
+                instance_id=unique_instance_id,
+                command="sleep 100",
+                workdir=None,
+                timeout_seconds=0,
+            )
+
+        # The C2 contract: the spawn is reported as cleaned up.
+        assert process_id is None
+        assert err is not None and "Error" in err
+        # THE PHASE-4 LEG: the release hook fired on the orphan path.
+        assert recording_guard.registered, (
+            "the spawn must have registered with the guard before the "
+            "orphan path can release it"
+        )
+        assert recording_guard.release_calls, (
+            "the spawn-window orphan path must release the guard "
+            "registration (phase4-plan.md:67)"
+        )
+
+
 # ── P6 — the ownership-stamp isolation (the crux) ───────────────────────────
 
 
@@ -1139,23 +1263,32 @@ class TestOwnershipStampIsolation:
 
 
 class TestDisclosures:
-    def test_the_item12_sentence_is_in_the_proc_status_docstring(self):
-        """T7 (b) — the §3.5 item-12 sentence in the LLM-facing docstring."""
-        from daemon.tools.proc_tools import create_proc_tools
+    def test_the_item13_statement_is_verbatim_in_the_lane_docstring(self):
+        """T12/D-6 — the §3.5 item-13 statement is VERBATIM in the lane's
+        module docstring (normalized whitespace; the markdown emphasis
+        and backticks of the plan text normalized away).  The runbook
+        carry is Phase 7's.
+        """
+        assert _norm_ws(proc_tools_module.RAM_ITEM13_SENTENCE) in _norm_ws(
+            proc_tools_module.__doc__ or ""
+        )
+        assert _norm_ws("No subreaper is introduced") in _norm_ws(
+            proc_tools_module.__doc__ or ""
+        )
 
+    def test_the_item12_sentence_is_verbatim_in_the_status_docstring(self):
+        """T7(b)/D-6 — the §3.5 item-12 sentence is VERBATIM in the
+        ``proc_status`` LLM-facing docstring AND the module docstring
+        (normalized whitespace)."""
         tools = {t.name: t for t in create_proc_tools(current_instance_id="inst-doc")}
         doc = tools["proc_status"]._full_doc_
+        assert _norm_ws(proc_tools_module.RAM_ITEM12_SENTENCE) in _norm_ws(doc)
         assert "QUERY-ONLY" in doc
-        assert "will NOT" in doc and "proc_status" in doc
         assert "ram_breach:" in doc
         assert "ram_killed: true" in doc
-
-    def test_the_item13_sentence_is_in_the_lane_documentation(self):
-        """T12 — the §3.5 item-13 statement is reproducible from the lane."""
-        src = Path("daemon/tools/proc_tools.py").read_text()
-        assert "direct-child reap." in src
-        assert "re-parented to init/PID 1" in src
-        assert "No subreaper is introduced" in src
+        assert _norm_ws(proc_tools_module.RAM_ITEM12_SENTENCE) in _norm_ws(
+            proc_tools_module.__doc__ or ""
+        )
 
     def test_the_surface_line_names_are_pinned(self):
         """T7 (c) — the pinned line names (the DQ6 census)."""
