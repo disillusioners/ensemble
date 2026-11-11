@@ -356,6 +356,36 @@ def test_p6_ownership_unreadable_proceeds_and_counts(tmp_path, kill_census):
     assert calls
 
 
+def test_p6_ownership_absent_stamp_is_unverifiable(tmp_path, kill_census):
+    """P6 — a readable environ that carries NO ownership stamp at all
+    (the proc lane's case: it stamps ``ENSEMBLE_PROC_TRACKING_ID``, not
+    the ladder's ``ENSEMBLE_BASH_TRACKING_ID``) ⇒ the stamp is
+    UNVERIFIABLE ⇒ PROCEED + ``ownership_unverified++``.
+
+    Contract (phase2-plan.md T11; test-plan.md S8(h); arch §4.2:226;
+    dispatcher ruling 2026-11-11): P6 has TWO outcomes — a stamp that
+    EXISTS and DIFFERS ⇒ refuse; a stamp that CANNOT BE VERIFIED (absent
+    or unreadable) ⇒ PROCEED + ``ownership_unverified++``.  ABSENT ≠
+    MISMATCH.  The proc lane has no stamp by design (DQ5), so its stamp
+    is always unverifiable ⇒ P6 proceeds with ``ownership_unverified++``.
+    """
+    root = build_tree(tmp_path / "proc", environ=b"PATH=/bin\x00OTHER=1\x00")
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        on_ownership_unverified=lambda: unverified.append(1),
+    )
+    assert status == "killed", (status, reason)
+    assert unverified == [1], "absent stamp must bump ownership_unverified"
+    assert calls
+
+
 def test_p6_ownership_match_proceeds(tmp_path, kill_census):
     """P6 — the exact stamp entry ⇒ the predicate holds."""
     root = build_tree(
