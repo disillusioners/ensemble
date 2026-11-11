@@ -1,0 +1,117 @@
+=== ts_utc ===
+2026-11-11T15:13:42Z
+=== current_symlink ===
+/home/nea/agents-ensemble/releases/v0.29.15
+releases/v0.29.15
+=== state_json_stat ===
+/home/nea/agents-ensemble/releases/state.json mtime=1794407060(2026-11-11 14:24:20.362694393 +0000) size=49456 mode=644
+=== state_json_sha ===
+302d2511c5654e00d3fa27fd3f5c9cb629c3515c6ce4dd3dd82a59f227ff0eca  /home/nea/agents-ensemble/releases/state.json
+=== state_json_upgrade_fields ===
+current = 'v0.29.15'
+previous = 'v0.29.7'
+pending_op = None
+history_len = 287
+top_keys = ['cooldown_until', 'current', 'history', 'in_flight', 'pending_actions', 'pending_op', 'pending_restart', 'pending_wakes', 'previous', 'quarantined', 'restart_audits', 'restart_window', 'rollback_window_count']
+=== upgrade_dir ===
+/home/nea/agents-ensemble/data/upgrade/live/r-20261105-112729-b386.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261105-112729-b386.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-021230-1106.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-021230-1106.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-021230-1106.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-074119-f74d.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-074119-f74d.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-074119-f74d.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-103958-1ce5.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-103958-1ce5.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-103958-1ce5.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261107-084219-a46b.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261107-084219-a46b.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261107-084219-a46b.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261108-093157-6356.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261108-093157-6356.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261108-093157-6356.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261109-043005-71b2.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261109-043005-71b2.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261109-043005-71b2.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261110-180959-08d7.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261110-180959-08d7.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261110-180959-08d7.payload.log
+=== upgrade_dir_files_stat_sha ===
+/home/nea/agents-ensemble/data/upgrade/live/r-20261105-112729-b386.log mtime=1793878450 size=6431
+af61abe8d2e3d4a9ac8b42f48a57198f7630af521326b93c5bc837278fc08e92  /home/nea/agents-ensemble/data/upgrade/live/r-20261105-112729-b386.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261105-112729-b386.payload.log mtime=1793878256 size=1303
+a980512028246f3cd5f3d77fcd6cbd9b1465d4738f81085e24b587fee8504153  /home/nea/agents-ensemble/data/upgrade/live/r-20261105-112729-b386.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-021230-1106.client.log mtime=1793931461 size=114
+9b0e6a80468de50f4d1ad427e5c7c39a350d9b027c1380babd92236d161cef1b  /home/nea/agents-ensemble/data/upgrade/live/r-20261106-021230-1106.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-021230-1106.log mtime=1793931795 size=5939
+b6eed9785fa1fe3d5c1dddc3821e5f0602e09cc5539f6fbe123ab8d840f7f4ea  /home/nea/agents-ensemble/data/upgrade/live/r-20261106-021230-1106.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-021230-1106.payload.log mtime=1793931553 size=1302
+b858d2362c03eb6ba8f0834a3af6b34265d5c2892b154b9604e6803bb550512c  /home/nea/agents-ensemble/data/upgrade/live/r-20261106-021230-1106.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-074119-f74d.client.log mtime=1793950923 size=114
+b7b4cebd400365902c803812b373009312b4977a86a20102e9232392624d74c0  /home/nea/agents-ensemble/data/upgrade/live/r-20261106-074119-f74d.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-074119-f74d.log mtime=1793951340 size=6237
+7a740fa29b83d5f67169be92a90d3923358f165404bb8a5a034bd6759fcbb993  /home/nea/agents-ensemble/data/upgrade/live/r-20261106-074119-f74d.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-074119-f74d.payload.log mtime=1793951014 size=1303
+0b07f2d6ed6cbeafe0bef800cf97b14df092ec84825461f355df0155b99522f3  /home/nea/agents-ensemble/data/upgrade/live/r-20261106-074119-f74d.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-103958-1ce5.client.log mtime=1793964533 size=114
+b6570225a0d6c8bd53a5dd29322d10669641458ceafedaa69327f54b57fc28d2  /home/nea/agents-ensemble/data/upgrade/live/r-20261106-103958-1ce5.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-103958-1ce5.log mtime=1793964925 size=3318
+7b7494b594874434d524ece795499fbe1f8e7eb945daf1aa71ba4ecc87f7b008  /home/nea/agents-ensemble/data/upgrade/live/r-20261106-103958-1ce5.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261106-103958-1ce5.payload.log mtime=1793964624 size=1303
+e82cdfb5baaf02082aff2b529eb566ae42b08ea9e6e12821793f0a571fbdac17  /home/nea/agents-ensemble/data/upgrade/live/r-20261106-103958-1ce5.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261107-084219-a46b.client.log mtime=1794040992 size=114
+bdfb8baaed795889c32e3528fe033816bc179b9d6d15cc44e0348de6bae2c572  /home/nea/agents-ensemble/data/upgrade/live/r-20261107-084219-a46b.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261107-084219-a46b.log mtime=1794041384 size=3317
+68f1693561425f13c10a019e0059073eb5aadbf4cc3e2e2cd00da1a7b4bb1068  /home/nea/agents-ensemble/data/upgrade/live/r-20261107-084219-a46b.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261107-084219-a46b.payload.log mtime=1794041084 size=1303
+83ea88bea4f8a728026b122d1f8a2a5ad7dee8fc496d2200886255e0736089d5  /home/nea/agents-ensemble/data/upgrade/live/r-20261107-084219-a46b.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261108-093157-6356.client.log mtime=1794130487 size=114
+3cb7aadffc49d110e68c2cfc279e8a65e29bf2636115bedd6ecd788b037dce44  /home/nea/agents-ensemble/data/upgrade/live/r-20261108-093157-6356.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261108-093157-6356.log mtime=1794130690 size=6985
+90eb5387b6593e11afc5da4caf88e5bedd8966e453b577246599d2af36d4f2f0  /home/nea/agents-ensemble/data/upgrade/live/r-20261108-093157-6356.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261108-093157-6356.payload.log mtime=1794130569 size=1302
+50dfa39ee2d3dfcf76fc9f9e37ccb4e9a009e25daa548f654f2001fa9a93ef68  /home/nea/agents-ensemble/data/upgrade/live/r-20261108-093157-6356.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261109-043005-71b2.client.log mtime=1794198675 size=114
+4a84de8696ac7b8d1e461c4e9507a14a6d859227fb20f88a4ec9c1e67210622b  /home/nea/agents-ensemble/data/upgrade/live/r-20261109-043005-71b2.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261109-043005-71b2.log mtime=1794198888 size=6630
+b2ea524e76a7a14f5f4c85d425df789be78ec06c464473a1c1d995b451e1731b  /home/nea/agents-ensemble/data/upgrade/live/r-20261109-043005-71b2.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261109-043005-71b2.payload.log mtime=1794198763 size=1302
+c8fcbef84d304f06d5df539922871bc28f362e848c5871497b8910dd6bcbd823  /home/nea/agents-ensemble/data/upgrade/live/r-20261109-043005-71b2.payload.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261110-180959-08d7.client.log mtime=1794334245 size=114
+f10ee9e00b936934f95c73aa1c221c08b38dbac1692b0308df040debc8a6eba4  /home/nea/agents-ensemble/data/upgrade/live/r-20261110-180959-08d7.client.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261110-180959-08d7.log mtime=1794334437 size=6917
+8418c0cfd3ce076e8430eac5c9595e1797eca1b0871a4537bcf2582924d03fa0  /home/nea/agents-ensemble/data/upgrade/live/r-20261110-180959-08d7.log
+/home/nea/agents-ensemble/data/upgrade/live/r-20261110-180959-08d7.payload.log mtime=1794334334 size=1302
+1e6638615430a5ea52c19fe0c4ee6753bd848def4e231e8bc2228050988a8f58  /home/nea/agents-ensemble/data/upgrade/live/r-20261110-180959-08d7.payload.log
+=== releases_dir_stat ===
+/home/nea/agents-ensemble/releases mtime=1794407060 size=4096
+=== systemd ===
+MainPID=3612228
+NRestarts=1
+ExecMainStartTimestamp=Wed 2026-11-11 11:55:03 UTC
+ActiveState=active
+SubState=running
+ActiveEnterTimestamp=Wed 2026-11-11 11:55:03 UTC
+=== systemd_uptime ===
+ExecMainStartTimestampMonotonic=295217320224
+ActiveEnterTimestampMonotonic=295217320571
+=== livez ===
+{"status":"alive","uptime_seconds":11905.89108657837,"version":"0.29.15"}
+=== readyz ===
+{"status":"ready","components":{"database":true,"queue_freshness":true,"services":true,"checkpoint_saver":true},"detail":{"reasons":[],"queue_max_age_seconds":4.661521,"queue_max_age_seconds_reason":"measured","checked_at":"2026-11-11T15:13:42.341807+00:00","inflight_turns":5,"auth_dependency_status":"ok","grace":{"grace_active":false},"leak_signal":{"detected":false,"checkedout_rising":false,"streak":0},"pool_state":{"sqlalchemy":{"checkedout":1,"size":15,"overflow":-1},"psycopg":{"pool_size":1,"pool_max":15,"pool_available":0,"requests_waiting":0}},"component_classes":{"database":"ok","services":"ok","checkpoint_saver":"ok","queue_freshness":"ok"},"resume_hold":{"deferred":0,"per_seam":{},"counters":{},"reason":"pipeline-busy","driver_running":false,"false_reads":0},"burst_signals":{"warmup_pending":false,"resume_deferred":0},"mcp":{"context7":{"state":"ok","reason":null,"since":"2026-11-11T11:55:15.367464+00:00","init_attempts":0,"last_error_class":null,"breaker_state":"closed","recoverable":true},"webfetch":{"state":"ok","reason":null,"since":null,"init_attempts":0,"last_error_class":null,"breaker_state":null,"recoverable":true},"plane":{"state":"ok","reason":null,"since":null,"init_attempts":0,"last_error_class":null,"breaker_state":null,"recoverable":true}},"mcp_buffered_transitions":0,"skill_sources":{"enabled":true,"db_stack_present":true,"roots":[{"root_path":"/home/nea/ensemble-src","project_id":"83da04de-a410-4fb5-9e92-251a99d28a52","namespaces":0,"skills_indexed":0,"invalid_skills":0,"last_scan_ms":15.672,"last_scan_at":"2026-11-11T15:09:38.326586+00:00","last_error":null}],"shadowed_db_skills":[],"overflow_dropped":[],"embeddings_pending":0},"memoir":{"enabled":true,"resolution":"default","source":"config","worker":{"phase":"running","parked":false,"latched":false,"consecutive_all_fail_ticks":0,"last_tick_at":"2026-11-11T15:13:14.143405+00:00","last_tick_ms":28,"last_pending":0,"last_embedded":0,"last_errors":0,"last_terminal":0,"embedding_model":"text-embedding-3-small"}}},"draining":false,"auth_dependency_status":"ok"}
+=== live_capture_lane ===
+
+=== live_skill_capture_sink_files ===
+total 16
+drwxr-xr-x  2 nea nea 4096 Nov 11 07:19 .
+drwxrwxr-x 10 nea nea 4096 Nov 11 11:55 ..
+-rw-r--r--  1 nea nea 3294 Nov 10 19:36 skill-capture-20261110.jsonl
+-rw-r--r--  1 nea nea  841 Nov 11 07:21 skill-capture-20261111.jsonl
+=== live_procs ===
+   1016       1 Sun Nov  8 01:56:43 2026 /bin/bash /home/nea/agents-ensemble-demo/launcher.sh
+3547178    1016 Wed Nov 11 09:15:16 2026 /home/nea/agents-ensemble-demo/current/ensemble-prod
+3547188 3547178 Wed Nov 11 09:15:18 2026 /home/nea/agents-ensemble-demo/current/ensemble-prod
+3612228       1 Wed Nov 11 11:55:02 2026 /bin/bash /home/nea/agents-ensemble/launcher.sh
+3612318 3612228 Wed Nov 11 11:55:02 2026 /home/nea/agents-ensemble/current/ensemble-prod
+3612324 3612318 Wed Nov 11 11:55:03 2026 /home/nea/agents-ensemble/current/ensemble-prod

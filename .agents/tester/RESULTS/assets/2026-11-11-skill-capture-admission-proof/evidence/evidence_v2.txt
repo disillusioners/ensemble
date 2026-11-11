@@ -1,0 +1,7 @@
+=== ts_utc ===
+2026-11-11T14:41:04Z
+=== capture_lane_json ===
+{"counters":{"admission_refusals":{},"execution_refusals":{},"admissions":0,"deviations":0,"fix_admissions":0},"source":"daemon.services.skill_capture_observability","exposition_neutral":true}
+=== sink_dir ===
+ls: cannot access '/tmp/ens-e2e-CGZYkzmr/data/skill-capture-observability/': No such file or directory
+=== sink_files_content ===

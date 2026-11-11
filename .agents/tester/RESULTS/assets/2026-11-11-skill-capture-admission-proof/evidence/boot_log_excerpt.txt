@@ -1,0 +1,20 @@
+=== excerpt: wiring canaries ===
+9:14:28:36 - daemon.api - INFO - Starting Ensemble v0.29.17
+19:14:28:38 - daemon.api - INFO - Starting Ensemble v0.29.17
+223:14:28:49 - daemon.manager - INFO - SkillJobDispatcher wired to manager (evolution_lane_resolved=True [env-resolved-or-default], evolution_lane_config_default=False, fix_cooldown_seconds=1800, fix_burst_cap=3, fix_burst_window_seconds=86400)
+313:14:28:49 - daemon.api - INFO - Skills router wired: store=True search=True metrics=True evolution=True triggers=True dispatcher=True usage_repo=True capture_dispatcher=True
+
+=== excerpt: task completion (Observer finalize) ===
+458:14:38:59 - daemon.services.job_feedback_observer - INFO - Observer: finalized job 7f55f8c1... status=completed for instance eafef7ab... (released 1 lock(s), instance_was_terminal=True)
+460:14:38:59 - daemon.services.job_feedback_observer - INFO - Observer: finalized job 7f55f8c1... status=completed for instance eafef7ab... (released 1 lock(s))
+
+=== excerpt: canary greps (counts) ===
+  '_get_task_details': 0
+  'skill row not found': 0
+  'SkillMetricsService': 0
+  'record_task_completion': 0
+  'enqueue_capture': 0
+  'skill-keeper': 0
+
+=== excerpt: Prepended line ===
+430:14:37:38 - daemon.services.instance_messaging - INFO - [Hybrid] Prepended 2 persistent context message(s) (incl. skills since 2026-07-29 refactor) to graph_input for eafef7ab... (project_injected=False)

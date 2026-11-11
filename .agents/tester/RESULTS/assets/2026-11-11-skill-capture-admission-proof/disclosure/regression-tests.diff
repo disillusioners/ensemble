@@ -1,0 +1,157 @@
+diff --git a/tests/services/test_instance_messaging_skill_injection.py b/tests/services/test_instance_messaging_skill_injection.py
+index 0cf97c68e..2bdfbf831 100644
+--- a/tests/services/test_instance_messaging_skill_injection.py
++++ b/tests/services/test_instance_messaging_skill_injection.py
+@@ -988,4 +988,55 @@ class TestMetaTagParentDispatchGate:
+         assert msgs[0].id == "msg-1"
+         assert msgs[0].content == message
+         assert "<meta>" in msgs[0].content
+-        assert "skill-x" in msgs[0].content
+\ No newline at end of file
++        assert "skill-x" in msgs[0].content
++
++# ============================================================
++# BM25-injected id persistence (the CAPTURED lane's input)
++# ============================================================
++
++
++class TestInjectedIdPersistence:
++    """The injected skill ids must reach the instance metadata.
++
++    ``SkillMetricsService.record_task_completion`` reads
++    ``last_injected_skill_ids`` from the instance metadata. When the
++    list is empty it early-returns, so the CAPTURED admission check
++    never runs and the capture lane can never admit a job.
++
++    The persist therefore has to happen on the path that actually
++    INJECTS skills (``injection_text`` truthy) — gating it on the
++    "search yielded nothing" arm left the normal turn with no
++    metadata and the admission check dark.
++    """
++
++    async def test_bm25_ids_persisted_when_skills_are_injected(self) -> None:
++        injection_service = _make_injection_service(
++            injection_text="[System Inject] skill context",
++            skill_ids=["skill-A", "skill-B"],
++        )
++        captured_input, manager = await _invoke_hook(
++            is_retry=False,
++            message_source=None,
++            agent_meta=SimpleNamespace(agent_id="leader", skill_injection=True),
++            injection_service=injection_service,
++        )
++
++        assert captured_input is not None
++        manager._instance_repository.set_metadata.assert_called_once_with(
++            "inst-1", "last_injected_skill_ids", ["skill-A", "skill-B"]
++        )
++
++    async def test_no_persist_when_search_yields_nothing(self) -> None:
++        injection_service = _make_injection_service(
++            injection_text=None,
++            skill_ids=[],
++        )
++        captured_input, manager = await _invoke_hook(
++            is_retry=False,
++            message_source=None,
++            agent_meta=SimpleNamespace(agent_id="leader", skill_injection=True),
++            injection_service=injection_service,
++        )
++
++        assert captured_input is not None
++        manager._instance_repository.set_metadata.assert_not_called()
+diff --git a/tests/services/test_process_message_metrics.py b/tests/services/test_process_message_metrics.py
+index 7dab836a8..a0ccf189a 100644
+--- a/tests/services/test_process_message_metrics.py
++++ b/tests/services/test_process_message_metrics.py
+@@ -1470,3 +1470,90 @@ class TestRecordMetricsWiring:
+             f"task_message must be empty string (not None) when no "
+             f"type='human' message exists. Got {calls[0]['task_message']!r}"
+         )
++
++    async def test_trigger_message_survives_submillisecond_enqueue_race(
++        self, metrics_service, project_id
++    ):
++        """The task's OWN triggering message must survive the timestamp filter.
++
++        Production race (observed 2026-11-11 in the isolated e2e): the
++        ``Task`` row is created ~0.7 ms AFTER the triggering message row
++        is enqueued, so the strict ``enqueued_at >= task.created_at``
++        comparison drops the very message the task exists for. The
++        extracted ``task_message`` arrives BLANK at the CAPTURED gate,
++        whose non-blank requirement then refuses the admission
++        silently — the capture lane never fires for a succeeded task.
++
++        The filter must therefore always include the message whose id
++        matches ``task.message_id``, timestamp notwithstanding.
++        """
++        from datetime import datetime, timedelta, timezone
++        from types import SimpleNamespace
++        from unittest.mock import AsyncMock, MagicMock
++
++        from daemon.services.skill_metrics_service import (
++            INJECTED_SKILLS_METADATA_KEY,
++        )
++
++        skill = _make_skill(
++            metrics_service.skill_repo, project_id, "wire-race"
++        )
++        instance_id = "inst-wiring"
++        wire_inst = FakeInstance(
++            instance_id,
++            metadata={INJECTED_SKILLS_METADATA_KEY: [skill.id]},
++        )
++        wire_inst.agent_id = "agent-wiring"  # type: ignore[attr-defined]
++        wire_inst.project_id = project_id  # type: ignore[attr-defined]
++        metrics_service.instance_repo._instances[instance_id] = wire_inst
++
++        original = metrics_service.record_task_completion
++        calls: list[dict] = []
++
++        async def _spy(**kwargs):
++            calls.append(kwargs)
++            return await original(**kwargs)
++
++        metrics_service.record_task_completion = _spy  # type: ignore[assignment]
++
++        try:
++            processor, manager, _message_repo, task = (
++                await self._build_processor(metrics_service)
++            )
++            manager._instance_repository._instances[instance_id] = (
++                wire_inst
++            )
++
++            # The RACE: the triggering human message was enqueued
++            # BEFORE the task row was created (sub-millisecond delta).
++            task_created_at = task.created_at
++            assert isinstance(task_created_at, datetime)
++            race_message = SimpleNamespace(
++                message_id=task.message_id,
++                instance_id=instance_id,
++                content="Run the e2e capture test task. Please complete it.",
++                type="human",
++                source="api",
++                # No ``created_at`` attr — the production MessageQueue
++                # model carries ``enqueued_at`` instead; the filter
++                # falls back to it.
++                enqueued_at=task_created_at - timedelta(milliseconds=1),
++                status="ready",
++            )
++            manager._queue_repository.get_by_instance = MagicMock(
++                return_value=[race_message]
++            )
++
++            result = await processor.process(task)  # type: ignore[arg-type]
++        finally:
++            metrics_service.record_task_completion = original  # type: ignore[assignment]
++
++        assert result["success"] is True
++        assert len(calls) == 1, f"Expected one hook call, got {calls}"
++        assert calls[0]["task_message"] == (
++            "Run the e2e capture test task. Please complete it."
++        ), (
++            "The task's own triggering message must survive the "
++            "sub-millisecond enqueue race — a blank task_message "
++            "silently refuses the CAPTURED admission."
++        )
