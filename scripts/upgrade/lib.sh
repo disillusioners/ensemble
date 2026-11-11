@@ -7292,7 +7292,26 @@ retention_evict() {
         if [ -n "$st" ]; then
             st="$(_iso_to_epoch "$st" 2>/dev/null)"
         fi
-        [ -n "$st" ] || st="$(stat -f '%m' "$d" 2>/dev/null)"
+        # P2.1 BSD-port closure (D2a WS8 lib.sh clause): `stat -f '%m'` is
+        # BSD-only — the "eviction site" member of the quarantined GNU-debt
+        # trio (QUARANTINE.md 2026-09-30: date -j :86, sed -i :709, this
+        # seat; the first went dual in 31cd4fb59, the second is retired).
+        # GNU stat reads `-f` as FILESYSTEM status and emits MEASURED
+        # silent garbage for this invocation (the reason _run_log_retention
+        # pins the primitive out entirely — this site is the acknowledged
+        # residual named there). Same uname-dispatch shape as _iso_to_epoch
+        # / _cooldown_until_iso / _atomic_flip: the families are SELECTED,
+        # never ||-chained (a chain would launder wrong-family output into
+        # an epoch sort key and corrupt the oldest-first eviction order).
+        # Degrade is unchanged: stat error or unrecognized platform leaves
+        # st empty → 0 (the pre-port failure semantics; 2>/dev/null kept).
+        if [ -z "$st" ]; then
+            case "$(uname -s)" in
+                Darwin|*BSD*|*bsd*) st="$(stat -f '%m' "$d" 2>/dev/null)" ;;
+                Linux|GNU*|*GNU*)   st="$(stat -c '%Y' "$d" 2>/dev/null)" ;;
+                *)                  st="" ;;
+            esac
+        fi
         [ -n "$st" ] || st=0
         entries="$entries$st $name\n"
     done
