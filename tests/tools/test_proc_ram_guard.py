@@ -463,6 +463,14 @@ class TestBallooningTree:
         status = await proc_status.ainvoke({"process_id": process_id})
         assert "ram_breach:" in status
         assert "ram_killed: true" in status
+        # The lane-aware P6's POSITIVE signal (leader ruling 2026-11-11),
+        # proven END-TO-END: the guard's ladder read the proc lane's OWN
+        # stamp (present AND matching) ⇒ ownership VERIFIED — the
+        # ``ownership_unverified`` counter must NOT have moved.
+        assert real_guard.counters_snapshot()["ownership_unverified"] == 0, (
+            "a proc-lane kill must VERIFY the lane's own stamp, not fall "
+            "back to the unverifiable-proceed path"
+        )
         # The verdict's content-free fields ride the ``ram_breach:``
         # line: the resolved ceiling, the re-arm threshold beside it,
         # the honest-peak fields and the metric (arch §4.3).
@@ -523,6 +531,9 @@ class TestLeaderlessTree:
         # guard's execution-lane thread (not by the proc lane).
         assert real_guard.counters_snapshot()["ram_kills"] >= 1
         assert real_guard.counters_snapshot()["ram_breaches_detected"] >= 1
+        # The lane-aware P6 verified the proc lane's OWN stamp (present
+        # AND matching) — the unverifiable counter did not move.
+        assert real_guard.counters_snapshot()["ownership_unverified"] == 0
 
 
 # ── Switch OFF (c) ──────────────────────────────────────────────────────────
@@ -746,6 +757,13 @@ class TestLaneShape:
             info = manager._processes[unique_instance_id][process_id]
             assert info.ram_pgid == reg["pgid"]
             assert info.ram_start_time_jiffies == reg["start_time_jiffies"]
+            # The lane-aware P6's POSITIVE signal (leader ruling
+            # 2026-11-11): the guard's tracking id IS the value the lane
+            # stamped under the lane's OWN variable, so P6 finds it
+            # present AND matching ⇒ VERIFIED.
+            assert reg["tracking_id"] == process_id
+            assert info.ram_tracking_id == process_id
+            assert info.tracking_id == process_id
         finally:
             await manager.cleanup_instance(unique_instance_id)
 
@@ -1064,18 +1082,21 @@ class TestUntouchedPaths:
 
 
 class TestOwnershipStampIsolation:
-    """The proc child's env must carry NO FOREIGN ownership stamp.
+    """The proc child's env carries its OWN stamp and no FOREIGN one.
 
-    The ladder's P6 reads ``OWNERSHIP_ENV_VAR`` to decide whether the pid
-    it is about to signal is still the one it started.  A proc child is
-    not stamped by that lane — the proc lane stamps its own
-    ``ENSEMBLE_PROC_TRACKING_ID``.  An INHERITED ambient value would
-    read as "the stamp EXISTS and DIFFERS" (a REAL mismatch by the P6
-    contract) and would refuse the proc lane's kill permanently.
+    The ladder's P6 is LANE-AWARE (leader ruling 2026-11-11): for a
+    proc-lane spawn it reads the PROC lane's own variable
+    (``ENSEMBLE_PROC_TRACKING_ID``), whose value IS the guard's tracking
+    id ⇒ present AND matching ⇒ ownership VERIFIED (a positive signal,
+    never counted as unverified).  A FOREIGN lane's stamp present would
+    be a MISMATCH ⇒ refuse — so the proc lane strips the bash lane's
+    variable from the child env: the daemon's own ambient environment
+    carries an ``ENSEMBLE_BASH_TRACKING_ID``, and an inherited value
+    would read as a REAL mismatch and refuse this lane's kill
+    permanently.
 
-    ABSENT is UNVERIFIABLE ⇒ P6 PROCEEDS with ``ownership_unverified++``
-    (dispatcher ruling 2026-11-11) — the proc lane has no ownership
-    gate of its own (arch §1.1 P4).
+    The stamp ABSENT (e.g. a legacy child) stays UNVERIFIABLE ⇒ P6
+    PROCEEDS with ``ownership_unverified++`` (ABSENT ≠ MISMATCH).
     """
 
     def test_the_child_env_carries_no_foreign_ownership_stamp(self, monkeypatch):
@@ -1097,6 +1118,21 @@ class TestOwnershipStampIsolation:
         env = proc_tools_module._build_child_env("proc-abc12345")
         assert OWNERSHIP_ENV_VAR not in env
         assert env[proc_tools_module._TRACKING_ENV_VAR] == "proc-abc12345"
+
+    def test_the_lane_var_names_agree_across_the_boundary(self):
+        """The substrate's per-lane stamp names match the lanes' own.
+
+        The substrate duplicates the literals (the import freeze forbids
+        ``ram_guard → daemon/tools``); the coupling is pinned HERE so a
+        rename on either side cannot silently blind the P6 check.
+        """
+        from daemon.services.bash_spawn_reaper import BASH_TRACKING_ENV_VAR
+        from daemon.services.ram_guard.ladder import OWNERSHIP_ENV_VAR_BY_LANE
+
+        assert OWNERSHIP_ENV_VAR_BY_LANE["proc"] == (
+            proc_tools_module._TRACKING_ENV_VAR
+        )
+        assert OWNERSHIP_ENV_VAR_BY_LANE["bash"] == BASH_TRACKING_ENV_VAR
 
 
 # ── T7 — the three mandatory disclosures + the pinned lines ────────────────

@@ -408,6 +408,179 @@ def test_p6_ownership_match_proceeds(tmp_path, kill_census):
     assert calls
 
 
+# ── P6 — the LANE-AWARE ownership stamp (leader ruling 2026-11-11) ─────────
+#
+# Three outcomes PER LANE, plus the cross-lane tripwire both ways:
+#   * the lane's OWN stamp present AND matching ⇒ VERIFIED (a positive
+#     signal — never counted as unverified);
+#   * the stamp ABSENT (or unreadable) ⇒ PROCEED + ownership_unverified++;
+#   * the OTHER lane's stamp present ⇒ refused:ownership-mismatch.
+# ``lane=None`` (a direct caller without a lane) keeps the legacy
+# bash-variable behaviour with no cross-lane tripwire — the pre-existing
+# P6 tests above pin that.
+
+
+def test_p6_lane_bash_own_stamp_matching_verifies(tmp_path, kill_census):
+    root = build_tree(
+        tmp_path / "proc",
+        environ=b"OTHER=1\x00ENSEMBLE_BASH_TRACKING_ID=t-1\x00",
+    )
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        lane="bash",
+        on_ownership_unverified=lambda: unverified.append(1),
+    )
+    assert status == "killed", (status, reason)
+    assert unverified == [], "a matching own stamp is VERIFIED — never counted"
+    assert calls
+
+
+def test_p6_lane_bash_stamp_absent_proceeds_and_counts(tmp_path, kill_census):
+    root = build_tree(tmp_path / "proc", environ=b"PATH=/bin\x00OTHER=1\x00")
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        lane="bash",
+        on_ownership_unverified=lambda: unverified.append(1),
+    )
+    assert status == "killed", (status, reason)
+    assert unverified == [1], "an absent stamp must bump ownership_unverified"
+    assert calls
+
+
+def test_p6_lane_bash_foreign_proc_stamp_refuses(tmp_path, kill_fence):
+    """The CROSS-LANE tripwire, bash side: a proc stamp on a bash spawn."""
+    root = build_tree(
+        tmp_path / "proc",
+        environ=b"ENSEMBLE_PROC_TRACKING_ID=t-1\x00",
+    )
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        lane="bash",
+    )
+    assert (status, reason) == ("refused", REASON_OWNERSHIP_MISMATCH)
+
+
+def test_p6_lane_proc_own_stamp_matching_verifies(tmp_path, kill_census):
+    root = build_tree(
+        tmp_path / "proc",
+        environ=b"OTHER=1\x00ENSEMBLE_PROC_TRACKING_ID=t-1\x00",
+    )
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        lane="proc",
+        on_ownership_unverified=lambda: unverified.append(1),
+    )
+    assert status == "killed", (status, reason)
+    assert unverified == [], "a matching own stamp is VERIFIED — never counted"
+    assert calls
+
+
+def test_p6_lane_proc_stamp_absent_proceeds_and_counts(tmp_path, kill_census):
+    """The proc lane's own stamp ABSENT ⇒ unverifiable ⇒ PROCEED."""
+    root = build_tree(tmp_path / "proc", environ=b"PATH=/bin\x00OTHER=1\x00")
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        lane="proc",
+        on_ownership_unverified=lambda: unverified.append(1),
+    )
+    assert status == "killed", (status, reason)
+    assert unverified == [1], "an absent stamp must bump ownership_unverified"
+    assert calls
+
+
+def test_p6_lane_proc_own_stamp_mismatch_refuses(tmp_path, kill_fence):
+    """The proc lane's own stamp present with a DIFFERENT value ⇒ refuse."""
+    root = build_tree(
+        tmp_path / "proc",
+        environ=b"ENSEMBLE_PROC_TRACKING_ID=other-id\x00",
+    )
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        lane="proc",
+    )
+    assert (status, reason) == ("refused", REASON_OWNERSHIP_MISMATCH)
+
+
+def test_p6_lane_proc_foreign_bash_stamp_refuses(tmp_path, kill_fence):
+    """The CROSS-LANE tripwire, proc side: a bash stamp on a proc spawn."""
+    root = build_tree(
+        tmp_path / "proc",
+        environ=b"ENSEMBLE_BASH_TRACKING_ID=t-1\x00",
+    )
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        lane="proc",
+    )
+    assert (status, reason) == ("refused", REASON_OWNERSHIP_MISMATCH)
+
+
+def test_p6_lane_foreign_stamp_outranks_own_match(tmp_path, kill_fence):
+    """Precedence: the foreign stamp REFUSES even when the lane's own
+    stamp is present and matching (cross-presence does not occur
+    legitimately — defense-in-depth for a process-killing subsystem).
+    """
+    root = build_tree(
+        tmp_path / "proc",
+        environ=(
+            b"ENSEMBLE_PROC_TRACKING_ID=t-1\x00"
+            b"ENSEMBLE_BASH_TRACKING_ID=t-1\x00"
+        ),
+    )
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        lane="proc",
+    )
+    assert (status, reason) == ("refused", REASON_OWNERSHIP_MISMATCH)
+
+
 # ── P7 — the group is still alive ──────────────────────────────────────────
 
 
