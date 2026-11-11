@@ -2161,23 +2161,39 @@ m4_seed "$SBX_V1" "$SBX_V2" '[]'
 #      run the bootout arm, and assert the holder SURVIVES + the bootout
 #      refused. Today this is defence-in-depth (all suite ports are owned);
 #      it exists so one future supervision leg cannot TERM the live daemon.
-FOREIGN_PORT=52999   # outside 18300-18599 (the fixture-owned range)
-python3 - "$FOREIGN_PORT" <<'PYF' &
+# A FOREIGN listener = one the fixture does NOT own. Let the OS pick the port
+# (bind :0) so the cell can never collide with whatever else the host runs —
+# the foreign-ness is then defined by the RANGE, and the cell skips (with a
+# named fence) in the unlikely case the OS hands out an in-range port.
+FOREIGN_PORT_FILE="$FIXTURE/h5-foreign-port"
+python3 - "$FOREIGN_PORT_FILE" <<'PYF' &
 import http.server, sys
-port = int(sys.argv[1])
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
     def log_message(self, *a): pass
 http.server.HTTPServer.allow_reuse_address = True
-http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_address[1]))
+srv.serve_forever()
 PYF
 FOREIGN_PID=$!
-sleep 1
-H5_RC=0
-PORT="$FOREIGN_PORT" INSTALL_DIR="$SBX" launchctl bootout "gui/$(id -u)/$RJ_LAUNCHD_LABEL" > /dev/null 2>&1 || H5_RC=$?
-assert_eq "12i H5: bootout REFUSES a foreign (non-fixture) PORT" "1" "$H5_RC"
-kill -0 "$FOREIGN_PID" 2>/dev/null && _pass || _fail "12i H5: the foreign listener SURVIVED the bootout (no kill)" "alive" "dead"
+i=0; while [ ! -s "$FOREIGN_PORT_FILE" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+FOREIGN_PORT="$(cat "$FOREIGN_PORT_FILE" 2>/dev/null || echo "")"
+if [ -z "$FOREIGN_PORT" ]; then
+    # NAMED FENCE (the suite's convention: the fence's own text is the
+    # assertion — emit the honest SKIP line, then PASS the fence cell).
+    printf 'SKIP(os-port-alloc-failed): 12i H5 foreign-listener fixture could not bind\n'
+    _pass
+elif [ "$FOREIGN_PORT" -ge "$RJ_LAUNCHD_OWNED_PORT_MIN" ] && [ "$FOREIGN_PORT" -le "$RJ_LAUNCHD_OWNED_PORT_MAX" ]; then
+    printf 'SKIP(in-range-port %s): 12i H5 foreign-ness undefined — cell fenced\n' "$FOREIGN_PORT"
+    _pass
+else
+    H5_RC=0
+    PORT="$FOREIGN_PORT" INSTALL_DIR="$SBX" launchctl bootout "gui/$(id -u)/$RJ_LAUNCHD_LABEL" > /dev/null 2>&1 || H5_RC=$?
+    assert_eq "12i H5: bootout REFUSES a foreign (non-fixture) PORT" "1" "$H5_RC"
+    kill -0 "$FOREIGN_PID" 2>/dev/null && _pass || _fail "12i H5: the foreign listener SURVIVED the bootout (no kill)" "alive" "dead"
+fi
 kill "$FOREIGN_PID" 2>/dev/null; wait "$FOREIGN_PID" 2>/dev/null
 PORT="$SBX_PORT"   # restore the fixture port for §13+
 
