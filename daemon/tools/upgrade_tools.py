@@ -3029,7 +3029,10 @@ Returns:
                     "— the W4 single source of truth; the old "
                     "$(pwd)/scripts fallback is DELETED) and a missing "
                     "sibling aborts rc=127 MID-STOP (bash: No such file or "
-                    "directory — the v0.29.16 2026-11-11 halt class); fix: "
+                    "directory — the v0.29.16 2026-11-11 halt class; a "
+                    "pre-D3 install layout carried ONLY watchdog-watcher.sh "
+                    "under scripts/, so a partially-installed tree lacks "
+                    "the sibling entirely); fix: "
                     f"copy the repo scripts/stop-ensemble.sh to {stop_script} "
                     "and chmod +x — the restart is NOT scheduled; zero "
                     "pipeline mutation",
@@ -3828,7 +3831,10 @@ never decides go/rollback).
                     "— the W4 single source of truth; the old "
                     "$(pwd)/scripts fallback is DELETED) and a missing "
                     "sibling aborts rc=127 MID-STOP (bash: No such file or "
-                    "directory — the v0.29.16 2026-11-11 halt class); fix: "
+                    "directory — the v0.29.16 2026-11-11 halt class; a "
+                    "pre-D3 install layout carried ONLY watchdog-watcher.sh "
+                    "under scripts/, so a partially-installed tree lacks "
+                    "the sibling entirely); fix: "
                     f"copy the repo scripts/stop-ensemble.sh to {stop_script} "
                     "chmod +x — nonce NOT burned",
                 )
