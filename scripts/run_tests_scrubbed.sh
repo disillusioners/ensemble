@@ -59,6 +59,7 @@ unset PLANE_MCP_WORKSPACE_SLUG PLANE_BASE_URL
 # reason. Unset it here so EVERY pack that runs through this wrapper gets the
 # hygiene at once (the class, not the instances). Children that need a port
 # must set their OWN fixture-scoped value.
+unset PORT
 
 # 2. Echo-verify ZERO survivors — FAMILY-WIDE, not enumerated (W2,
 #    2026-09-28). The old loop re-listed the 7 known names, so any NEW
@@ -85,6 +86,7 @@ while IFS= read -r v; do
         PGHOST|PGPORT|PGDATABASE|PGUSER|PGPASSWORD|PGPASSFILE)   LEAKED+="$v"$'\n' ;;
         PGSSLMODE|PGSERVICE|PGSERVICEFILE)                       LEAKED+="$v"$'\n' ;;
         PLANE_MCP_WORKSPACE_SLUG|PLANE_BASE_URL)                 LEAKED+="$v"$'\n' ;;
+        PORT)                                                    LEAKED+="$v"$'\n' ;;
     esac
 done < <(compgen -v)
 # Drop any candidate that became unset between compgen -v enumeration
