@@ -4844,13 +4844,75 @@ _effective_stop_script_budget() {
 # stop-ensemble.sh skips its own lock acquire (otherwise it would busy-wait
 # 15s on the lock the parent already holds — every promote would deadlock
 # 15s on its stop span).
+# _supervision_launchd_drained — true when no owned pid remains AND the port
+# (when PORT is known and lsof is available) is free.
+_supervision_launchd_drained() {
+    local pids
+    pids="$(_supervision_owned_pids 2>/dev/null)"
+    [ -z "$pids" ] || return 1
+    if [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
+        lsof -ti:"$PORT" >/dev/null 2>&1 && return 1
+    fi
+    return 0
+}
+
+# _supervision_stop_launchd <label> — D2a supervised STOP: bootout (the M1
+# barrier) then a TERM-IDEMPOTENT straggler drain. bootout TERMs the job
+# (launchd escalates to SIGKILL after the job's ExitTimeOut); the launcher
+# forwards that TERM to the daemon (launcher.sh forwards EVERY signal, no
+# once-guard) ⇒ after bootout we NEVER send a second TERM (a second TERM
+# would force_exit a draining uvicorn = voided checkpoint). Only if an owned
+# pid is STILL alive after the bounded drain do we SIGKILL — the launchd-native
+# last resort, and NOT a second TERM. Returns 0 drained (or escalated-and-gone),
+# 1 on bootout failure or still-alive-after-kill (caller halts fail-safe).
+_supervision_stop_launchd() {
+    local label="${1:-}" deadline pid
+    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 1
+    # Capture the pre-stop owned pid (for the post-bootstrap pid≠pre verify).
+    SUPERVISION_PRESTOP_MAINPID="$(_supervision_owned_pids 2>/dev/null | head -1)"
+    [ -n "$SUPERVISION_PRESTOP_MAINPID" ] || SUPERVISION_PRESTOP_MAINPID=""
+    if ! _supervision_launchd_bootout "$label"; then
+        _warn "launchd stop: bootout ${label:-<domain>} FAILED (still loaded) — failing the stop (caller halts fail-safe)"
+        return 1
+    fi
+    _log "launchd stop: bootout ${label} issued (M1 barrier) — draining (NO second TERM; launcher forwarded launchd's TERM)"
+    deadline=$(( $(_now_epoch) + LAUNCHD_DRAIN_BUDGET_S ))
+    while [ "$(_now_epoch)" -lt "$deadline" ]; do
+        if _supervision_launchd_drained; then
+            _log "launchd stop: drained (owned pids gone, port free) — done"
+            return 0
+        fi
+        sleep 1
+    done
+    # Still alive after the drain budget ⇒ the daemon ignored TERM. Escalate
+    # with SIGKILL ONLY (never a second TERM — the checkpoint-void regression).
+    for pid in $(_supervision_owned_pids 2>/dev/null); do
+        _log "launchd stop: pid $pid still alive after ${LAUNCHD_DRAIN_BUDGET_S}s drain — SIGKILL escalation (no second TERM)"
+        journal_history_append stop_forced_kill \
+            "launchd stop: pid=$pid survived bootout + ${LAUNCHD_DRAIN_BUDGET_S}s drain — SIGKILL escalated (no second TERM; graceful checkpoint write VOIDED)" \
+            >/dev/null 2>&1 || true
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    deadline=$(( $(_now_epoch) + 10 ))
+    while [ "$(_now_epoch)" -lt "$deadline" ]; do
+        _supervision_launchd_drained && return 0
+        sleep 1
+    done
+    _warn "launchd stop: owned pids STILL alive after SIGKILL escalation — stop NOT confirmed; failing (caller halts fail-safe)"
+    return 1
+}
+
 stop_via_stop_script() {
     local stop_script
+    # W4 (D2a, 2026-11-11): the SINGLE source of truth is the SIBLING one level
+    # up of the CALLING script's dir (BASH_SOURCE[1] — promote/rollback/restart
+    # live in scripts/upgrade/, so the leg is scripts/upgrade/../stop-ensemble.sh).
+    # The old `$(pwd)/scripts/stop-ensemble.sh` fallback was DEAD in the install
+    # layout (make install ships only watchdog-watcher.sh into <install>/scripts/
+    # and the executor's cwd is the install dir) and was a trap that masked a
+    # MISSING sibling with an rc=127 mid-stop — deleted. The shell-side
+    # preflight probes (promote/rollback/restart) refuse rc 78 BEFORE any stop.
     stop_script="$(cd "$(dirname "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")" && pwd)/../stop-ensemble.sh"
-    if [ ! -f "$stop_script" ]; then
-        # when lib.sh is sourced from a copied tree, fall back to repo layout
-        stop_script="$(pwd)/scripts/stop-ensemble.sh"
-    fi
     # P1 §5(b) — the STOP SITE: emit exactly ONE machine-readable
     # ENSEMBLE_SUPERVISION_RESULT line (the pre-flight already emitted its
     # own; enforcement stayed there — the stop site NEVER refuses
@@ -4868,6 +4930,15 @@ stop_via_stop_script() {
     # may have drifted across the run — e.g. promote's rollback stop runs
     # ~5min after its pre-flight, post flip + restart).
     supervision_dualfight_check
+    # D2a (2026-11-11) — LAUNCHD branch BEFORE the UNIT branch: bootout is the
+    # M1 barrier; the straggler stop is TERM-idempotent (see
+    # _supervision_stop_launchd). Reached only on a Darwin host whose
+    # preflight verified exactly one launchd job (LAUNCHD_MANAGED:<label>).
+    if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ] \
+       && _supervision_host_allows_launchd && command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1; then
+        _supervision_stop_launchd "$SUPERVISION_UNIT"
+        return $?
+    fi
     # P2 §1 (b″ fix) — UNIT_MANAGED with a resolvable unit name hands the
     # classification VALUE to the stop script (machine-line grammar, same
     # '<state>[:<unit>]' format as the machine line above) so it stops
@@ -5077,6 +5148,11 @@ LAUNCHCTL_BIN="${LAUNCHCTL_BIN:-launchctl}"
 # print). Generous vs a healthy ~sub-second call; a wedged launchctl → a
 # loud refusal, never a boot outage.
 LAUNCHD_PROBE_BUDGET_S="${LAUNCHD_PROBE_BUDGET_S:-5}"
+# Bound on the post-bootout drain wait (mirrors CHILD_STOP_WAIT_S=70: daemon
+# graceful shutdown 60s + 10s margin). bootout TERMs the job; we wait this
+# long for the owned tree + port to drain BEFORE any SIGKILL escalation, and
+# NEVER send a second TERM in that window.
+LAUNCHD_DRAIN_BUDGET_S="${LAUNCHD_DRAIN_BUDGET_S:-70}"
 # The watchdog AGENT label is NOT the daemon job — excluded from the
 # program-ownership predicate (a watchdog-matching launcher would double-count).
 LAUNCHD_WATCHDOG_LABEL="${LAUNCHD_WATCHDOG_LABEL:-com.ensemble.watchdog}"
@@ -5637,6 +5713,41 @@ restart_via_launcher() {
     local hb_prestop="${SUPERVISION_PRESTOP_MAINPID:-}"
     local _hb_pin=""
 
+    # ── D2a launchd hand-back (THE supervised path; 2026-11-11) ────────────
+    # Consume the PRE-STOP classification (never re-derive — the daemon is
+    # DOWN here). LAUNCHD_MANAGED ⇒ M2 supervisor-owned start: `launchctl
+    # bootstrap gui/<uid> <verbatim-plist>`; RunAtLoad=true ⇒ bootstrap ==
+    # start, EXACTLY ONCE. The promote starts NOTHING else — no nohup on the
+    # supervised path (the 2026-11-11 dual-supervisor incident). bootstrap
+    # failure is fail-safe: retry 2x (2s→4s) then return 1 (caller halts);
+    # a bootstrap refusal NEVER degrades to a competing nohup launcher.
+    if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ] \
+       && _supervision_host_allows_launchd; then
+        local lplist lrc lattempt=1
+        lplist="$(_supervision_launchd_plist_path "$SUPERVISION_UNIT")"
+        if [ -z "$lplist" ]; then
+            _warn "launchd hand-back: cannot resolve the VERBATIM plist path for job '$SUPERVISION_UNIT' (label ≠ filename) — failing (never label-derive); caller halts fail-safe"
+            return 1
+        fi
+        lrc=1
+        while [ "$lattempt" -le 2 ]; do
+            _supervision_launchd_bootstrap "$lplist"
+            lrc=$?
+            # rc 0 = started; rc 2 = already loaded (benign ONLY because the
+            # forward path booted out first — the caller's gate revalidates).
+            if [ "$lrc" -eq 0 ] || [ "$lrc" -eq 2 ]; then break; fi
+            _warn "launchd hand-back: bootstrap attempt $lattempt FAILED (rc=$lrc) for '$SUPERVISION_UNIT' — retrying"
+            sleep $(( lattempt * 2 ))
+            lattempt=$(( lattempt + 1 ))
+        done
+        if [ "$lrc" -ne 0 ] && [ "$lrc" -ne 2 ]; then
+            _warn "launchd hand-back: bootstrap EXHAUSTED after retries (last rc=$lrc) — failing (never a nohup fallback on Darwin); caller halts fail-safe"
+            return 1
+        fi
+        _log "hand-back: launchd — bootstrapped job '$SUPERVISION_UNIT' from $lplist (RunAtLoad starts the daemon exactly once; no nohup, no promote-started launcher)"
+        return 0
+    fi
+
     # ── P3 mode selection (consume the PRE-STOP classification) ───────
     if _supervision_host_allows_unit && command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
         case "${SUPERVISION_STATE:-}" in
@@ -5711,7 +5822,15 @@ restart_via_launcher() {
         if [ "${SUPERVISION_EXPLICIT_UNIT:-0}" = "1" ]; then
             _refuse supervision-unit-incapable-host "restart refused: ENSEMBLE_SUPERVISION=unit is explicit (classification UNIT_MANAGED:${SUPERVISION_UNIT}) but unit hand-back is unavailable here (non-Linux / no systemd / no resolvable systemctl) — never silent-degrade to the nohup lineage (the r-f82e surprise class)"
         fi
-        _warn "classification UNIT_MANAGED:${SUPERVISION_UNIT} but unit hand-back is unavailable here (non-Linux / no systemd / no resolvable systemctl) — degrading LOUD to the nohup path"
+        if _supervision_host_allows_launchd; then
+            # D2a: a UNIT_MANAGED classification on Darwin (stale/inconsistent
+            # — the classifier now resolves Darwin to launchd or refuses) can
+            # NOT honor a unit hand-back; the Darwin guard below refuses rather
+            # than degrade to nohup (the 2026-11-11 incident mechanism).
+            _warn "classification UNIT_MANAGED:${SUPERVISION_UNIT} on Darwin — unit hand-back is unavailable; Darwin never degrades to the nohup lineage (refusing at the nohup guard, fail-safe)"
+        else
+            _warn "classification UNIT_MANAGED:${SUPERVISION_UNIT} but unit hand-back is unavailable here (non-Linux / no systemd / no resolvable systemctl) — degrading LOUD to the nohup path"
+        fi
     fi
 
     if [ "$hb_mode" = "unit" ]; then
@@ -5822,6 +5941,16 @@ restart_via_launcher() {
                 _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed: ${_sc_first:-no stderr} — falling back to nohup launcher (comp7 opt-in path)"
             fi
         fi
+    fi
+    # D2a (2026-11-11): NEVER fall through to the nohup lineage on Darwin — a
+    # promote-started launcher against a launchd job IS the dual-supervisor
+    # incident. A Darwin hand-back that reaches here has no verified launchd
+    # job (the preflight would have refused; only a direct call or a hard-set
+    # stale state lands here) — fail-safe refusal (exit 78 halt class), never
+    # a quiet degrade. (The `unsupervised` acknowledgement that would permit a
+    # Darwin nohup lane is D2b.)
+    if _supervision_host_allows_launchd; then
+        _refuse supervision-launchd-not-verified "restart refused: Darwin hand-back reached the nohup fallback with NO verified launchd job (state=${SUPERVISION_STATE:-?} label=${SUPERVISION_UNIT:-?}) — never start a competing nohup launcher (the 2026-11-11 dual-supervisor incident); install/repair the LaunchAgent (make plist-install) and re-run"
     fi
     ( cd "$INSTALL_DIR" && nohup ./launcher.sh >> data/launcher.log 2>&1 & )
     _log "launcher started (nohup) — logs: $INSTALL_DIR/data/launcher.log"

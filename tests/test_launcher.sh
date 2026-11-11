@@ -705,6 +705,23 @@ assert_eq "8c′ current symlink untouched (no rollback)" "releases/v0.10.6" "$(
 assert_eq "8c′ rollback counter NOT incremented" "1" "$(_js_count "$JS_C2")"
 assert_eq "8c′ cooldown NOT armed" "null" "$(_js_field "$JS_C2" cooldown_until)"
 
+# 8c″. D2a SIGKILL mitigation (2026-11-11): fresh txn (age ≤ SWEEP_STALE_S)
+#      with a FRESH heartbeat (< HEARTBEAT_STALE_S) but a DEAD owner_pid — the
+#      SIGKILLed-promote signature (the promote refreshes the heartbeat ⇒ it
+#      is fresh at kill ⇒ the ORIGINAL comp3 does NOT fire ⇒ the sweep would
+#      "leave alone" ⇒ silent boot of a flipped, possibly-broken current).
+#      New contract: owner-dead ALONE is reclaimable (after the bounded
+#      confirmation wait), reaching the flipped disposition — NOT "leaving
+#      alone".
+JS_C3="$JS_TEST_DIR/c3"; _js_fixture "$JS_C3"
+HB_NOW="$(_ts_off 0)"; HB_EPOCH="$(date -u +%s)"
+printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"%s","flipped":true,"owner_pid":999999,"last_heartbeat":%s},"rollback_window_count":{"24h":1,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[]}\n' \
+    "$FRESH_TS" "$HB_EPOCH" "$FRESH_TS" > "$JS_C3/releases/state.json"
+JS_C3_LOG="$( . "$LAUNCHER"; INSTALL_DIR="$JS_C3" _journal_sweep 2>&1 >/dev/null )"
+assert_not_contains "8c″ fresh-heartbeat owner-dead: NOT 'leaving alone' (SIGKILL reclaim)" "leaving alone" "$JS_C3_LOG"
+assert_contains "8c″ fresh-heartbeat owner-dead: comp3-owner-dead fast path fires" "comp3-owner-dead fast path" "$JS_C3_LOG"
+assert_contains "8c″ fresh-heartbeat owner-dead: reaches the flipped disposition (deferred under absent health)" '"event":"sweep_deferred"' "$(_js_journal "$JS_C3")"
+
 # 8d. no journal → silent no-op (pre-existing behavior preserved).
 JS_D="$JS_TEST_DIR/d"; mkdir -p "$JS_D/releases"
 ( . "$LAUNCHER"; INSTALL_DIR="$JS_D" _journal_sweep >/dev/null 2>&1 )

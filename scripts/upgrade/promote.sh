@@ -173,6 +173,26 @@ TARGET_REL="$REL/$VERSION"
 _log "pipeline-scripts rev=${PIPELINE_SCRIPTS_REV:-<unstamped>} (executor-start echo; the arm-time guard reads the lib.sh stamp file)"
 _log "preflight: lock · integrity · journal txn · entry checks"
 
+# ── Stop-script sibling probe (W1, D2a 2026-11-11) ──────────────────────────
+# lib.sh's stop_via_stop_script resolves the stop script as the SIBLING one
+# level up of the CALLING script's dir (BASH_SOURCE[1] — promote.sh lives in
+# scripts/upgrade/, so the leg is scripts/upgrade/../stop-ensemble.sh). A
+# missing sibling aborts rc=127 MID-STOP (the v0.29.16 2026-11-11 halt class —
+# bash: No such file or directory). W2 already added this self-contained probe
+# to restart.sh/rollback.sh; W1 adds it HERE so make upgrade-promote and every
+# promote lane are covered. SELF-CONTAINED (no lib.sh dependency) and refuses
+# BEFORE any lock/txn/stop mutation. The exec-bit requirement matches W2's
+# conservative hardening (every consumer invokes `bash stop-ensemble.sh`).
+_promote_stop_script=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    _promote_stop_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../stop-ensemble.sh"
+fi
+if [ ! -f "$_promote_stop_script" ] || [ ! -x "$_promote_stop_script" ]; then
+    _warn "stop-script sibling not usable at $_promote_stop_script (must exist AND carry the exec bit — every consumer invokes 'bash stop-ensemble.sh') — refusing BEFORE any lock/txn/stop (the stop step would abort rc=127: bash: No such file or directory)"
+    exit 78
+fi
+
+
 # D2-7 (phase-2 fold A4/R20): install the signal handlers BEFORE
 # lock_acquire. The former order (lock first, traps second) left a window
 # where the lock was held but no handler was installed -- a TERM there
@@ -636,6 +656,32 @@ fi
 # in the gate below ride it.
 _enforce_deadline "$promote_deadline" restart
 
+# ── D2a supervised FLIP verification (launchd; provenance → pid → version) ──
+# Order pin: the supervisor's fresh job must be IDENTIFIED before its version
+# is trusted. (1) PROVENANCE: the port holder must be INSTALL_DIR-anchored (the
+# _supervision_owned_pids ownership ladder IS the identity check — there is no
+# separate "provenance" mechanism). (2) pid ≠ pre-stop pid: the launchd job
+# must have produced a NEW daemon, never the pre-stop one. Bounded wait (the
+# supervisor-boot path has no _boot_grace_start window — that helper runs only
+# on the nohup hand-back). Any failure sets gate_fail_reason (routes to 8b).
+if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ]; then
+    _post_pid="" _post_deadline=$(( $(_now_epoch) + LIVEZ_BUDGET_S ))
+    while [ "$(_now_epoch)" -lt "$_post_deadline" ]; do
+        _post_pid="$(_supervision_owned_pids 2>/dev/null | head -1)"
+        [ -n "$_post_pid" ] && break
+        sleep 1
+    done
+    if [ -z "$_post_pid" ]; then
+        gate_fail_reason="launchd verify: no INSTALL_DIR-anchored daemon pid after bootstrap (provenance failed — the job did not start an owned process)"
+        _warn "$gate_fail_reason"
+    elif [ -n "${SUPERVISION_PRESTOP_MAINPID:-}" ] && [ "$_post_pid" = "$SUPERVISION_PRESTOP_MAINPID" ]; then
+        gate_fail_reason="launchd verify: post-bootstrap pid $_post_pid EQUALS the pre-stop pid ${SUPERVISION_PRESTOP_MAINPID} — the supervisor did not start a NEW daemon"
+        _warn "$gate_fail_reason"
+    else
+        _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}) — proceeding to version gate"
+    fi
+fi
+
 # ═══════════════════════════ 7. HEALTH GATE (D2) ═══════════════════════════
 gate_fail_reason=""
 
@@ -794,6 +840,29 @@ PREV_JSON="$(journal_read)"
 PREV="$OLD_CUR"
 [ "$PREV" = "null" ] && PREV=""
 
+# ── D2a 8b DISARM helper (2026-11-11) ──────────────────────────────────────
+# The 8b manifest gate runs BEFORE the rollback stop, so on a launchd-managed
+# host a gate-halt would otherwise leave the supervisor LOADED + ARMED on the
+# BROKEN $VERSION (it would re-arm on the next KeepAlive). FAIL-SAFE: bootout
+# ⇒ DARK + DISARMED + a NAMED journal state + a loud operator message. On a
+# non-launchd host this is a no-op (existing behavior unchanged). Returns 0
+# when disarmed (or not applicable); 1 when a bootout could not be confirmed.
+_promote_disarm_launchd() {
+    local state="$1"
+    [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ] || return 0
+    _supervision_host_allows_launchd || return 0
+    if _supervision_launchd_bootout "$SUPERVISION_UNIT"; then
+        journal_history_append halt "8b gate halt: launchd supervisor DISARMED ($state) — bootout $SUPERVISION_UNIT ⇒ DARK+DISARMED on the broken $VERSION (no self-revival; operator-driven recovery: launchctl bootstrap gui/\$(id -u) <plist> or promote a healthy version)" \
+                                  || true
+        _warn "DISARMED launchd supervisor ($state): bootout $SUPERVISION_UNIT ⇒ DARK + DISARMED — will NOT re-arm on the broken $VERSION. Recovery: launchctl bootstrap gui/$(id -u) $(  _supervision_launchd_plist_path "$SUPERVISION_UNIT" 2>/dev/null || echo '<plist>' )"
+        return 0
+    fi
+    journal_history_append halt "8b gate halt: launchd supervisor DISARM FAILED ($state) — bootout $SUPERVISION_UNIT unconfirmed; supervisor possibly LOADED+ARMED on the broken $VERSION (operator MUST bootout manually)" \
+                              || true
+    _warn "DISARM FAILED ($state): launchctl bootout $SUPERVISION_UNIT did not confirm — the supervisor may be LOADED + ARMED on the broken $VERSION; operator must 'launchctl bootout gui/$(id -u)/$SUPERVISION_UNIT' manually"
+    return 1
+}
+
 # T5 manifest gate FIRST (D-FA4.5): previous must EXIST, be rollback_safe,
 # and NOT be quarantined (M4 — a quarantined previous is a known-bad release;
 # flipping onto it is what quarantine exists to prevent).
@@ -801,6 +870,7 @@ if [ -z "$PREV" ]; then
     journal_close_txn                       || journal_fail_loud "halt(no-previous): close_txn" 78
     journal_set_current "$VERSION"          || journal_fail_loud "halt(no-previous): set_current" 78
     journal_set_previous "null"             || journal_fail_loud "halt(no-previous): set_previous" 78
+    _promote_disarm_launchd "supervisor-disarmed-no-previous" || true
     journal_history_append halt "gate fail ($gate_fail_reason) with NO previous release — halt-for-human, daemon rests on $VERSION (degraded, alerted)" \
                                             || true   # history is advisory; state writes above are the contract
     _warn "HALT-FOR-HUMAN: no previous release to roll back to — daemon stays on $VERSION (degraded). Notify + human recovery per ADR-028."
@@ -810,6 +880,7 @@ fi
 if journal_is_quarantined "$PREV"; then
     journal_close_txn                       || journal_fail_loud "halt(quarantined-previous): close_txn" 78
     journal_set_current "$VERSION"          || journal_fail_loud "halt(quarantined-previous): set_current" 78
+    _promote_disarm_launchd "supervisor-disarmed-prev-quarantined" || true
     journal_history_append halt "gate fail ($gate_fail_reason) but previous $PREV is QUARANTINED (known-bad) — halt-for-human, NO repoint (M4: never auto-flip onto a quarantined release)" \
                                             || true
     _warn "HALT-FOR-HUMAN: previous release $PREV is QUARANTINED — daemon stays on $VERSION (degraded). NO repoint (M4). Human picks the next version (ADR-028)."
@@ -819,6 +890,7 @@ fi
 if [ ! -d "$REL/$PREV" ]; then
     journal_close_txn                       || journal_fail_loud "halt(missing-previous): close_txn" 78
     journal_set_current "$VERSION"          || journal_fail_loud "halt(missing-previous): set_current" 78
+    _promote_disarm_launchd "supervisor-disarmed-prev-missing" || true
     journal_history_append halt "gate fail ($gate_fail_reason) but previous $PREV is MISSING (evicted/manually deleted) — halt-for-human, NO repoint" \
                                             || true
     _warn "HALT-FOR-HUMAN: previous release $PREV missing — daemon stays on $VERSION (degraded). NO repoint (ADR-005 M5)."
@@ -829,6 +901,7 @@ PREV_SAFE="$(manifest_field "$PREV" rollback_safe 2>/dev/null)"
 if [ "$PREV_SAFE" != "true" ]; then
     journal_close_txn                       || journal_fail_loud "halt(unsafe-previous): close_txn" 78
     journal_set_current "$VERSION"          || journal_fail_loud "halt(unsafe-previous): set_current" 78
+    _promote_disarm_launchd "supervisor-disarmed-prev-unsafe" || true
     journal_history_append halt "gate fail ($gate_fail_reason) but previous $PREV has rollback_safe=$PREV_SAFE — halt-for-human, NO repoint (schema-drift guard D-FA4.5)" \
                                             || true
     _warn "HALT-FOR-HUMAN: previous $PREV is NOT rollback_safe — daemon stays on $VERSION (degraded) rather than flipping into schema drift. NO repoint."

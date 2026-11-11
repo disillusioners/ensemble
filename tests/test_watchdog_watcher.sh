@@ -371,6 +371,30 @@ start_fake_livez && {
     WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify.log" \
         bash "$WATCHER" "$INST3" >"$TMP/jrn5.out" 2>&1
     [ "$(wc -l < "$TMP/notify.log" 2>/dev/null | tr -d ' ')" = "2" ] && _pass || _fail "plain sweep/commit must stay quiet (R3.4)"
+    # 11f. D2a SIGKILL-in-window detector: an OPEN in_flight txn with
+    #      flipped:true whose owner_pid is DEAD (a SIGKILLed promote — it
+    #      journals NOTHING) must notify supervisor=absent /
+    #      flipped-current-booted-silently and latch flipped_orphan_seen.
+    printf '%s\n' '{"current":"v1","previous":"v0","in_flight":{"kind":"promote","target":"v1","flipped":true,"owner_pid":999999,"last_heartbeat":1700000000},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+        > "$INST3/releases/state.json"
+    rm -f "$TMP/notify_orphan.log"
+    WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify_orphan.log" \
+        bash "$WATCHER" "$INST3" >"$TMP/jrn6.out" 2>&1
+    [ "$(wc -l < "$TMP/notify_orphan.log" 2>/dev/null | tr -d ' ')" = "1" ] && _pass || _fail "11f flipped-orphan: exactly one notification"
+    grep -q 'WATCHDOG\[flipped-orphan\]' "$TMP/jrn6.out" && _pass || _fail "11f flipped-orphan: must log WATCHDOG[flipped-orphan]"
+    grep -qi 'SIGKILLED in-window' "$TMP/jrn6.out" && _pass || _fail "11f flipped-orphan: log must name the SIGKILL-in-window class"
+    grep -q '^flipped_orphan_seen=999999$' "$INST3/data/.watchdog-alerts-state" 2>/dev/null && _pass || _fail "11f flipped-orphan: latch flipped_orphan_seen=owner"
+    # 11g. latched — unchanged orphan → no re-notify.
+    WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify_orphan.log" \
+        bash "$WATCHER" "$INST3" >"$TMP/jrn7.out" 2>&1
+    [ "$(wc -l < "$TMP/notify_orphan.log" 2>/dev/null | tr -d ' ')" = "1" ] && _pass || _fail "11g flipped-orphan latch: no re-notify while unchanged"
+    # 11h. txn closed (in_flight:null) → latch resets, no notify.
+    printf '%s\n' '{"current":"v1","previous":"v0","in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+        > "$INST3/releases/state.json"
+    WATCHDOG_NOTIFY_CMD="echo notified >> $TMP/notify_orphan.log" \
+        bash "$WATCHER" "$INST3" >"$TMP/jrn8.out" 2>&1
+    [ "$(wc -l < "$TMP/notify_orphan.log" 2>/dev/null | tr -d ' ')" = "1" ] && _pass || _fail "11h flipped-orphan closed: no notify"
+    grep -q '^flipped_orphan_seen=0$' "$INST3/data/.watchdog-alerts-state" 2>/dev/null && _pass || _fail "11h flipped-orphan closed: latch reset to 0"
     stop_fake_livez
 }
 
