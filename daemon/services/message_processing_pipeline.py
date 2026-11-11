@@ -1220,6 +1220,10 @@ class MessageProcessingPipeline:
                 instance_id,
                 message="continue",
                 source="system:injection_drain",
+                # priority=0 (preempt): a SYSTEM-class wake, deliberately
+                # below the HUMAN urgency rung so a queued user message
+                # always outranks it (convention: instance_messaging
+                # _prepare_enqueued_message, priority==1 == user).
                 priority=0,
             )
         except Exception as enqueue_exc:

@@ -39,7 +39,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from daemon.graph import (
     INJECTION_CONTINUATION_MAX,
     create_injection_aware_router,
-    should_continue,
 )
 from daemon.services.message_processing_pipeline import (
     MessageProcessingPipeline,
@@ -226,6 +225,37 @@ class TestTurnEndRouter:
         assert router({}, {"configurable": {"thread_id": "iid-1"}}) == "__end__"
 
 
+def _make_manual_graph(real_graph_module, slot, llm):
+    """The two-node manual graph (an ``agent`` self-loop) behind the
+    manual-graph E2E legs. ``real_graph_module`` is the fixture's copy —
+    the unit shard mocks the ``langgraph`` package, so only that
+    re-imported module is bound to the REAL LangGraph.
+    """
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    agent_node = real_graph_module.create_agent_node(
+        llm_with_tools=llm,
+        system_prompt="you are a test assistant",
+        compactor=None,
+        graph_ref=[None],
+        config=None,
+        llm_config={"model": "test-model", "model_vision": None},
+        retry_config={"transient_attempts": 1, "timeout_attempts": 1},
+        llm_standard=None,
+        injection_slot=slot,
+        report_injection_slot=None,
+        live_hub=None,
+    )
+    router = real_graph_module.create_injection_aware_router(
+        real_graph_module.should_continue, slot
+    )
+    graph = StateGraph(MessagesState)
+    graph.add_node("agent", agent_node)
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", router, {"agent": "agent", END: END})
+    return graph.compile()
+
+
 class TestTurnEndInjectionEndToEnd:
     """The graph-level proof: a message injected mid-turn is consumed.
 
@@ -258,27 +288,7 @@ class TestTurnEndInjectionEndToEnd:
                 None,
             ]
         )
-        agent_node = real_graph_module.create_agent_node(
-            llm_with_tools=llm,
-            system_prompt="you are a test assistant",
-            compactor=None,
-            graph_ref=[None],
-            config=None,
-            llm_config={"model": "test-model", "model_vision": None},
-            retry_config={"transient_attempts": 1, "timeout_attempts": 1},
-            llm_standard=None,
-            injection_slot=slot,
-            report_injection_slot=None,
-            live_hub=None,
-        )
-        router = real_graph_module.create_injection_aware_router(
-            real_graph_module.should_continue, slot
-        )
-        graph = StateGraph(MessagesState)
-        graph.add_node("agent", agent_node)
-        graph.add_edge(START, "agent")
-        graph.add_conditional_edges("agent", router, {"agent": "agent", END: END})
-        compiled = graph.compile()
+        compiled = _make_manual_graph(real_graph_module, slot, llm)
 
         async for _ in compiled.astream(
             {"messages": [HumanMessage(content="original question")]},
@@ -310,27 +320,7 @@ class TestTurnEndInjectionEndToEnd:
         iid = "iid-quiet"
         slot = _StubInjectionSlot()
         llm = _ScriptedLLM()
-        agent_node = real_graph_module.create_agent_node(
-            llm_with_tools=llm,
-            system_prompt="you are a test assistant",
-            compactor=None,
-            graph_ref=[None],
-            config=None,
-            llm_config={"model": "test-model", "model_vision": None},
-            retry_config={"transient_attempts": 1, "timeout_attempts": 1},
-            llm_standard=None,
-            injection_slot=slot,
-            report_injection_slot=None,
-            live_hub=None,
-        )
-        router = real_graph_module.create_injection_aware_router(
-            real_graph_module.should_continue, slot
-        )
-        graph = StateGraph(MessagesState)
-        graph.add_node("agent", agent_node)
-        graph.add_edge(START, "agent")
-        graph.add_conditional_edges("agent", router, {"agent": "agent", END: END})
-        compiled = graph.compile()
+        compiled = _make_manual_graph(real_graph_module, slot, llm)
 
         async for _ in compiled.astream(
             {"messages": [HumanMessage(content="original question")]},
@@ -358,27 +348,17 @@ class TestProductionGraphWiring:
     ):
         """A message injected while the final LLM call is in flight must be
         consumed by the PRODUCTION graph, not dropped."""
-        from langchain_core.messages import AIMessage
-
         iid = "iid-production"
-
-        class _Slot(_StubInjectionSlot):
-            pass
-
-        slot = _Slot()
-
-        class _LLM:
-            def __init__(self):
-                self.calls: list[list[Any]] = []
-
-            def invoke(self, messages):
-                self.calls.append(list(messages))
-                if len(self.calls) == 1:
-                    # The user types while the final LLM call is in flight.
-                    slot.set(iid, "also do X")
-                return AIMessage(content="ok")
-
-        llm = _LLM()
+        slot = _StubInjectionSlot()
+        # The mid-call hook is local to this leg on purpose: the stub must
+        # inject WHILE its final (first) invoke is in flight, and
+        # ``_ScriptedLLM``'s on_call hook covers exactly that.
+        llm = _ScriptedLLM(
+            on_call=[
+                lambda _messages: slot.set(iid, "also do X"),
+                None,
+            ]
+        )
         real_graph_module.build_instance_llms = lambda **_: (llm, llm)
         graph = real_graph_module.build_instance_graph(
             tools=[],
@@ -445,7 +425,10 @@ def _make_context(instance_id: str = "iid-pipeline") -> ProcessingContext:
 
 
 class TestPipelineEndOfTurnDrain:
-    """Acceptance 2 + the normal-completion seam."""
+    """The instance-level end-of-turn drain must fire on BOTH pipeline
+    finalization seams: the WAITING_CHILDREN transition (a parked parent
+    may never run another turn on its own) and the normal turn
+    completion."""
 
     @pytest.mark.asyncio
     async def test_waiting_children_transition_drains_queued_injections(self):
@@ -583,6 +566,15 @@ class TestContinuationBudgetConstant:
 
     def test_cap_is_positive_and_bounded(self):
         assert 0 < INJECTION_CONTINUATION_MAX <= 32
+
+    def test_factory_default_is_the_module_constant(self):
+        """Both production wiring sites rely on the factory default, so a
+        default/constant divergence must fail here rather than silently
+        change the continuation budget."""
+        import inspect
+
+        params = inspect.signature(create_injection_aware_router).parameters
+        assert params["max_continuations"].default is INJECTION_CONTINUATION_MAX
 
 
 # ---------------------------------------------------------------------------
