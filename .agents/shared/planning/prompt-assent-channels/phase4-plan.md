@@ -34,7 +34,7 @@ release exists with its tag and its 4-way sha, and `current` has not moved.
 
 | ID | Decision | Rationale (cite) | Rejected alternatives |
 |---|---|---|---|
-| **D-4.1** | The version is **`v0.29.20`** | the slot is **verified free**: `git ls-remote --tags origin 'v0.29.20*'` → empty; `git tag --list v0.29.20` → empty; the remote max is `v0.29.18` (`a4d7233f2 → df4a92732`) — **re-verified on the build day** (architect §9.1) | reusing v0.29.18 (its release dir exists and it is a ceremony-ready DM-only release — re-cutting it would destroy the DM-only fallback) |
+| **D-4.1** | The version is **`v0.29.20`** | the slot is **verified free**: `git ls-remote --tags origin 'v0.29.20*'` → empty; `git tag --list v0.29.20` → empty; the remote max is **v0.29.19** (tag `649a509b1` → `1132fa4cb`, the concurrent lane); **v0.29.20 free local+origin** — **re-verified on the build day** (architect §9.1) | reusing v0.29.18 (its release dir exists and it is a ceremony-ready DM-only release — re-cutting it would destroy the DM-only fallback) |
 | **D-4.2** | **v0.29.18 is LEFT STANDING** — release dir kept, local tag kept, remote tag untouched; **no disposal step at all** | its content is already an ancestor of the new base (`git merge-base --is-ancestor v0.29.18^{commit} HEAD` → exit 0), so there is nothing to preserve by disposal — and it stays promotable as the **DM-only fallback** (architect §9.3) | disposing it (the v0.28.17 treatment — it would delete the only ceremony-ready DM-only release for no gain) |
 | **D-4.3** | The **migration head is unchanged** — `20261110_221500_create_prompt_assent_tokens.sql`, **128 files** | **D-5** — no new table, no new column, no new migration | adding a 129th migration for a value with no query need |
 | **D-4.4** | The ceremony notes carry the **adapted** K-3 gate wording and **supersede** the DM-only probe text — **from the new side** (a NEW `ceremony-notes.md` in this directory) | the ruling is newer than the parent's notes (they carry no designated-channels mention); the parent set stays frozen (architect §8.6, **D-1**) | leaving the DM-only probe in place (it would probe the wrong surface); editing the parent's notes (frozen set) |
@@ -56,7 +56,7 @@ release exists with its tag and its 4-way sha, and `current` has not moved.
 | **T4.5** | Document the **designation map** in the runbook **`docs/runbooks/prompt-assent.md`** (the target file — no rename; the earlier `prompt_assent.md → prompt-assent.md` arrow in this row was a phantom): the env var name, the exact JSON shape, a worked example (**with placeholder ids only**), the **all-or-nothing** rule, the **id regex** `^[1-9][0-9]{0,31}$`, the **≤ 64** bound, the **restart requirement**, the **"never commit it"** rule, and the statement that designation is an **operator act no agent can perform** — **without leaning on the file-tool deny list** (`bash` is held; the deny list is not a boundary) | the operator can configure the map correctly; the "no agent can designate" property is stated where the operator reads it, in honest terms | `docs/runbooks/prompt-assent.md` | P1 | R-1 | AC6 |
 | **T4.6** | Update the runbook's **arming** wording — *"armed by the Emperor, after the K-3 live **designated-channel** probe — not before"* — and keep the default-OFF statement; add the **re-probe rule**: *re-run probe leg 3 after **any** map edit* (the only typo feedback loop — a valid-format-wrong-id produces no signal at all) | the arming gate and the probe match; a map edit has a mandated re-probe | `docs/runbooks/prompt-assent.md` | T4.3 | — | AC7 |
 | **T4.7** | Add the **CHANGELOG** section for v0.29.20 — the designated-channel capability, the two new codes, the env knob, the unchanged schema, the **accept-and-record** delivery posture | the changelog matches the release | `CHANGELOG.md` | — | — | AC8 |
-| **T4.8** | **Build + tag + verify** the staged release — **merge to latest FIRST** (stage.sh's exact-match gate at `scripts/upgrade/stage.sh:139-151` refuses a non-tip tree), then the version bump (as a **file editor**, house-subject commit `chore(release): bump version to 0.29.19`), the build, the **annotated tag pushed by name** (never `--tags`), the **4-way sha**, the migration-head census, the **slot re-verification immediately before `git tag -a`**, and the verification that `current` is **unmoved** and the lane is **not armed** | a staged, tagged, unpromoted release exists with a recorded sha; `current` unchanged | the build lane's artefacts | T4.1, T4.2 | R-10 | AC9, AC10 |
+| **T4.8** | **Build + tag + verify** the staged release — **merge to latest FIRST** (stage.sh's exact-match gate at `scripts/upgrade/stage.sh:139-151` refuses a non-tip tree), then the version bump (as a **file editor**, house-subject commit `chore(release): bump version to 0.29.20`), the build, the **annotated tag pushed by name** (never `--tags`), the **4-way sha**, the migration-head census, the **slot re-verification immediately before `git tag -a`**, and the verification that `current` is **unmoved** and the lane is **not armed** | a staged, tagged, unpromoted release exists with a recorded sha; `current` unchanged | the build lane's artefacts | T4.1, T4.2 | R-10 | AC9, AC10 |
 
 ---
 
@@ -94,8 +94,7 @@ notes must say: *"**the lane must not be RELIED UPON until the six outcomes are 
 | **3 — designated channel** | the Emperor's **actual** working channel, **single occupant**, map set | *(mint)* | `mint_is_dm=0`, `mint_channel_id` **== the map key**, `mint_user_id` **== the map value** | `action=mint`, `outcome=ok`, `map_digest=…` | the new path works live |
 | **4A — designated channel, map unset** | the **same** channel, map **unset** | `mint-requires-private-channel` | **no** row | `outcome=refused` | the A/B pair isolates the map |
 | **4 — non-designated guild channel** | another guild channel | `mint-requires-private-channel` | **no** row | `outcome=refused` | designation is narrow |
-| **5 — non-pinned user** | a **second ACCOUNT** in the designated channel | *(silence — no refusal, no response)* | the relay bot was **not mentioned** (`require_mention` defaults True) OR the channel fails the adapter's allow-list (`daemon/sources/adapters/discord/adapter.py:163-164`) | use a channel where the bot IS mentioned and passes the gates; silence ≠ pass |
-| `approver-not-pinned` | **no** row | `outcome=refused`, **`flags.mismatch=0`** | the pinned approver is the only authoriser **and nothing burned** |
+| **5 — non-pinned user** | a **second ACCOUNT** in the designated channel | `approver-not-pinned` | **no** row | `outcome=refused`, **`flags.mismatch=0`** | the pinned approver is the only authoriser — **and nothing burned** |
 
 > **A `mint_is_dm=0` row with the WRONG channel is a FAIL** — it means the mint happened in a
 > thread or in the wrong room.
@@ -157,7 +156,7 @@ for.
 | # | Trap | The rule | Verified in this worktree |
 |---|---|---|---|
 | **1** | `stage.sh:328-352` greps the **whole** migration history for `DROP TABLE\|DROP COLUMN` — it **matches** (e.g. `20250326_000000_initial_schema.sql`) ⇒ **`stage.sh` exits 78** unless `ENSEMBLE_ROLLBACK_SAFE=1` is passed **explicitly** | put `ENSEMBLE_ROLLBACK_SAFE=1` **in the argv**; record `rollback_safe=true, source=explicit` | `scripts/upgrade/stage.sh:328-352` — the unset branch warns and `exit 78`; the explicit branch sets `ROLLBACK_SAFE=true; ROLLBACK_SAFE_SRC="explicit=true"` |
-| **2** | `scripts/bump_version.py` commits with the subject **`! New version X`** (`scripts/bump_version.py:150`), violating the house `<type>:<desc>` convention | use `bump_version.py` as a **FILE EDITOR** and commit **`chore(release): bump version to 0.29.19`** — exactly as v0.29.18 did (`d317043aa`) | `scripts/bump_version.py:150` — `"git", "commit", "-m", f"! New version {new_version}"` |
+| **2** | `scripts/bump_version.py` commits with the subject **`! New version X`** (`scripts/bump_version.py:150`), violating the house `<type>:<desc>` convention | use `bump_version.py` as a **FILE EDITOR** and commit **`chore(release): bump version to 0.29.20`** — exactly as v0.29.18's bump did (`d317043aa` — its subject named 0.29.18; ours names 0.29.20) | `scripts/bump_version.py:150` — `"git", "commit", "-m", f"! New version {new_version}"` |
 
 ### 5.2 — The slot re-verification (architect §9.1)
 
@@ -171,19 +170,15 @@ re-cut an existing tag.** Push **by name**, never `--tags`. **A remote tag is ne
 `retention_evict` (`scripts/upgrade/lib.sh:6857-6917`, `RETENTION_KEEP=3` at `:375`) is called
 **only** from `promote.sh:771` and `:927` — **`stage.sh` never evicts** (verified:
 `grep -c retention_evict scripts/upgrade/stage.sh` = **0**). **Staging takes the release count
-5 → 6 and queues nothing.**
+6 → 7 (v0.29.19's staging made it 6) and queues nothing.**
 
-- At the **first** v0.29.20 promote: evict 3 (`v0.29.7`, `v0.29.13`, `v0.29.17` — the three oldest
-  non-pinned) ⇒ **v0.29.18 survives**.
-- It becomes the candidate at the **third** promote (after v0.29.20 and v0.29.21) ⇒ **it survives
-  exactly two further promotes, protected by nothing** (`retention_evict` pins only
-  `current`/`previous`; a script pin is an upgrade-machinery change with its own floor/stamp
-  bump — **out of this lane's scope**).
+- Staging v0.29.20 takes the host to **7 release dirs**; `retention_evict` (`lib.sh`, RETENTION_KEEP=3) evicts the oldest non-pinned dirs until **3 TOTAL remain** — the **FIRST v0.29.20 promote evicts v0.29.7, v0.29.13, v0.29.17 and v0.29.18** (4 dirs): **the DM-only fallback is NOT protected on this host**. Primary stated mitigation = the **re-stage-from-`df4a92732` recovery procedure**: (1) the `v0.29.18` tag + its 4-way sha `aa78f632c4…` survive in git history; (2) `git checkout df4a92732` in a clean worktree (the tag's commit — never re-cut the tag); (3) rebuild `dist/ensemble-prod`; (4) re-run `scripts/upgrade/stage.sh` with `VERSION=v0.29.18` + `ENSEMBLE_ROLLBACK_SAFE=1` (the exact-match gate is satisfied by the existing tag); (5) verify the 4-way sha reproduces. One build+stage cycle restores the fallback.
+- The **retention TRUTH statement** (see §5.3 above) is the binding text — not a survival promise.
 
 **Three records the ceremony note MUST carry** (architect §9.3):
 
 1. the **operator rule** — *no other promote until the designated-channel decision is made*;
-2. the **two-promote survival math** (above);
+2. the **retention TRUTH statement** (above);
 3. the recoverability note — *"if evicted, re-stage from `df4a92732` — the tags survive, the
    option is recoverable at one build+stage cycle"*.
 
@@ -216,8 +211,8 @@ exists"* note.
 | **AC7** | The arming wording names the **designated-channel** probe, and the **re-probe-after-any-map-edit** rule is present |
 | **AC8** | The CHANGELOG's v0.29.20 section matches the shipped behaviour |
 | **AC9** | The release is **tagged by name**, the **4-way sha** matches, `current` is **unmoved**, and the lane is **not armed** |
-| **AC10** | The staging ran with `ENSEMBLE_ROLLBACK_SAFE=1` **in the argv** and records `rollback_safe=true, source=explicit`; the bump commit subject is **`chore(release): bump version to 0.29.19`** |
-| **AC11** | The ceremony note carries the **v0.29.18 protection statement**, the **two-promote survival math**, the recoverability note, the **"no disposal step"** note, and the **"the probe/runbook live outside the release payload"** note |
+| **AC10** | The staging ran with `ENSEMBLE_ROLLBACK_SAFE=1` **in the argv** and records `rollback_safe=true, source=explicit`; the bump commit subject is **`chore(release): bump version to 0.29.20`** |
+| **AC11** | The ceremony note carries the **retention TRUTH statement**, the recoverability note, the **"no disposal step"** note, and the **"the probe/runbook live outside the release payload"** note |
 
 ---
 
@@ -232,6 +227,6 @@ exists"* note.
 - **Do not promote.** `current` stays exactly where it is.
 - **The ceremony notes supersede the parent's DM-only K-3 wording** — say so explicitly, so an
   auditor reading the older notes sees the supersession rather than a contradiction.
-- **The v0.29.18 survival math is time-sensitive**: two further promotes evict it. If the
-  designated-channel decision takes longer than two promotes, re-stage from `df4a92732` rather
-  than promoting something else.
+- **The v0.29.18 retention TRUTH is time-sensitive**: the FIRST v0.29.20 promote evicts it (along
+  with v0.29.7, v0.29.13, v0.29.17). If the designated-channel decision takes longer than one
+  promote cycle, re-stage from `df4a92732` rather than promoting something else.

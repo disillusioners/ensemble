@@ -21,7 +21,7 @@ two new codes), **D-9** (threads).
 
 > **THE TYPED-OUTCOME CONTRACT (B2 — owned by Phase 1 T1.4; unit matrix by T1.5).**
 > `designation_outcome(map, discord_meta, user_id) -> DesignationResult` — a typed result with
-> **four refusal variants** (`designation-config-invalid`, `mint-requires-private-channel`,
+> the **seven neutral variants** (**D-18**: `PASS | NOT_DESIGNATED | GROUP_DM_SHAPE | APPROVER_NOT_PINNED | ABSENT_DISCRIMINATOR | ABSENT_IDENTITY | CONFIG_INVALID`) — NOT side-specific codes (`designation-config-invalid`, `mint-requires-private-channel`,
 > `extraction-incomplete`, `approver-not-pinned`) **plus a PASS variant**. The function owns the
 > leg ordering and returns the typed result; **the gates receive only the typed result** and never
 > re-implement the ordering. **T1.4 owns the contract; T1.5 owns its unit matrix.**

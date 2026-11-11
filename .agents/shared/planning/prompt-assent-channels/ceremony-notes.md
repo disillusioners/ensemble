@@ -158,9 +158,9 @@ That is why §1.7's hygiene rules bind.
 | Field | Value |
 |---|---|
 | `staged_version` | **`v0.29.20`** |
-| slot verification | `git ls-remote --tags origin 'v0.29.20*'` → empty; `git tag --list v0.29.20` → empty; the remote max is `v0.29.18` (`a4d7233f2 → df4a92732`) — **re-verified TWICE: at the start of the day and immediately before `git tag -a`** (three lanes are converging on adjacent slots) |
+| slot verification | `git ls-remote --tags origin 'v0.29.20*'` → empty; `git tag --list v0.29.20` → empty; the remote max is **v0.29.19** (tag `649a509b1` → `1132fa4cb`, the concurrent lane); **v0.29.20 free local+origin** — **re-verified TWICE: at the start of the day and immediately before `git tag -a`** (three lanes are converging on adjacent slots) |
 | **trap 1** | **`ENSEMBLE_ROLLBACK_SAFE=1` MUST be in the argv.** `scripts/upgrade/stage.sh:328-352` greps the **whole** migration history for `DROP TABLE\|DROP COLUMN` — it **matches** ⇒ the unset branch **exits 78**. Record `rollback_safe=true, source=explicit` |
-| **trap 2** | `scripts/bump_version.py` commits with the subject **`! New version X`** (`scripts/bump_version.py:150`) — use it as a **FILE EDITOR** and commit **`chore(release): bump version to 0.29.19`** (as v0.29.18 did: `d317043aa`) |
+| **trap 2** | `scripts/bump_version.py` commits with the subject **`! New version X`** (`scripts/bump_version.py:150`) — use it as a **FILE EDITOR** and commit **`chore(release): bump version to 0.29.20`** (exactly as v0.29.18's bump did (`d317043aa` — its subject named 0.29.18; ours names 0.29.20)) |
 | tag discipline | annotated tag at exact HEAD; **push by name, never `--tags`**; on a slot collision **re-bump to the next free patch slot and record it — never re-cut an existing tag**; **a remote tag is never deleted** |
 | migration head | `20261110_221500_create_prompt_assent_tokens.sql` — **128 files, UNCHANGED** (no table, no column, no migration) |
 | rollback_safe | `true`, **source=explicit** (see trap 1) |
@@ -174,14 +174,11 @@ That is why §1.7's hygiene rules bind.
   DM-only fallback's release dir exists"*.
 - Its content is **already an ancestor** of the new base (`git merge-base --is-ancestor
   v0.29.18^{commit} HEAD` → exit 0) — nothing is preserved *by* disposal.
-- **Staging takes the release count 5 → 6 and queues nothing**: `retention_evict`
+- **Staging takes the release count 6 → 7 (v0.29.19's staging made it 6) and queues nothing**: `retention_evict`
   (`scripts/upgrade/lib.sh:6857-6917`, `RETENTION_KEEP=3` at `:375`) is called **only** from
   `promote.sh:771` and `:927` — **`stage.sh` never evicts** (verified: `grep -c retention_evict
   scripts/upgrade/stage.sh` = 0).
-- **Survival math:** at the **first** v0.29.20 promote, evict 3 (`v0.29.7`, `v0.29.13`,
-  `v0.29.17` — the three oldest non-pinned) ⇒ **v0.29.18 survives**. It becomes the candidate at
-  the **third** promote (after v0.29.20 and v0.29.21) ⇒ **it survives exactly TWO further
-  promotes, protected by NOTHING** (`retention_evict` pins only `current`/`previous`).
+- **Retention TRUTH:** Staging v0.29.20 takes the host to **7 release dirs**; `retention_evict` (`lib.sh`, RETENTION_KEEP=3) evicts the oldest non-pinned dirs until **3 TOTAL remain** — the **FIRST v0.29.20 promote evicts v0.29.7, v0.29.13, v0.29.17 and v0.29.18** (4 dirs): **the DM-only fallback is NOT protected on this host**. Primary stated mitigation = the **re-stage-from-`df4a92732` recovery procedure**: (1) the `v0.29.18` tag + its 4-way sha `aa78f632c4…` survive in git history; (2) `git checkout df4a92732` in a clean worktree (the tag's commit — never re-cut the tag); (3) rebuild `dist/ensemble-prod`; (4) re-run `scripts/upgrade/stage.sh` with `VERSION=v0.29.18` + `ENSEMBLE_ROLLBACK_SAFE=1` (the exact-match gate is satisfied by the existing tag); (5) verify the 4-way sha reproduces. One build+stage cycle restores the fallback.
 - **Operator rule:** *no other promote until the designated-channel decision is made.*
 - **Recoverability:** *"if evicted, re-stage from `df4a92732` — the tags survive, the option is
   recoverable at one build+stage cycle."*
