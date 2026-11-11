@@ -323,8 +323,15 @@ class TestNsTrapCLETargeting:
     # they pin the line as of the review-cycle-1 re-pin commit.
     _GUARD_ANCHOR = "[Compaction][CLE] empty snapshot read"
     _REPLACEMENT_ANCHOR = "[Compaction][CLE] empty replacement"
-    _CLE_GUARD_LINE = 9426
-    _CLE_REPLACEMENT_LINE = 9588
+    # Re-pinned 2026-11-11 (turn-end-injection-drain): daemon/graph.py
+    # grew 142 lines ABOVE the CLE nodes (the end-of-turn injection-drain
+    # router factory + its two wiring sites), so both guards shifted.
+    # Re-computed with the ast.If walk above (NOT a blind bump): the
+    # innermost ``ast.If`` carrying each anchor string is now at
+    # 9568 / 9730 (was 9426 / 9588 — the same walk reproduces the old
+    # values on the pre-change tree).
+    _CLE_GUARD_LINE = 9568
+    _CLE_REPLACEMENT_LINE = 9730
 
     @staticmethod
     def _if_node_with_body_constant(substring: str):
