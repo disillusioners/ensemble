@@ -2262,25 +2262,16 @@ class UpgradeJournalSweepService:
     def _closer_owner_dead(in_flight: dict[str, Any]) -> bool:
         """Owner liveness (P7) — the daemon's own os.kill-based shape.
 
+        D1 (2026-11-11): the predicate now lives ONCE, in
+        ``daemon.tools.upgrade_journal.txn_owner_dead`` (the mirror of
+        lib.sh's ``_txn_owner_dead``) — this shim delegates so the closer
+        and the reclaim can never drift apart.
+
         EPERM ⇒ ALIVE (the process exists under another user — the same
         contract as ``upgrade_journal._pid_alive`` and lib.sh's
-        ``_pid_alive``): a foreign-owned owner is never presumed dead."""
-        owner = in_flight.get("owner_pid")
-        try:
-            pid = int(owner)
-        except (TypeError, ValueError):
-            return True  # missing/garbage owner pid = unverifiable ⇒ dead
-        if pid <= 0:
-            return True
-        try:
-            os.kill(pid, 0)
-            return False
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        except OSError:
-            return True
+        ``_pid_alive``): a foreign-owned owner is never presumed dead.
+        """
+        return uj.txn_owner_dead(in_flight)
 
     def _closer_symlink_flipped(self, data: dict[str, Any], target: str) -> bool:
         """P5's symlink-heal arm — the launcher twin (the kill-window
@@ -2872,6 +2863,7 @@ class UpgradeJournalSweepService:
         retries by simply happening."""
         result: dict[str, int | str | None | dict[str, Any]] = {
             "reconcile": None,
+            "reclaim": None,
             "gc_pruned": 0,
             "skipped": 0,
             "wake": self.WakeSweepResult(),
@@ -2897,6 +2889,34 @@ class UpgradeJournalSweepService:
                 "UpgradeJournalSweepService: liveness guard failed: "
                 f"{type(guard_err).__name__}: {guard_err} — running "
                 "reconcile anyway"
+            )
+        try:
+            # D1 (2026-11-11): the ORPHANED-txn reclaim tick — the daemon
+            # side of the ONE reclaim mechanism. Before this, the sweep
+            # NEVER disposed a dead pre-flip txn (reconcile_pending_op
+            # returns None whenever ``in_flight`` is a dict), so only the
+            # shell preflight could clear it — the 2026-11-11 starvation.
+            # The predicate + the claim-before-adopt disposal live in
+            # ``daemon.tools.upgrade_journal`` (the shell lane's comp3 FAST
+            # PATH rule, mirrored) and the TOOL busy-check arms call the very
+            # same two helpers — no divergent copies. ORDER MATTERS: the
+            # reclaim runs BEFORE the reconcile so the reconcile's
+            # pending-op closure (expiry / terminal event) can fire on the
+            # now-unblocked op.
+            reclaim_note = uj.reclaim_stale_txn(
+                self._install_dir, actor="daemon-sweep"
+            )
+            if reclaim_note:
+                logger.info(
+                    "UpgradeJournalSweepService: reclaim — %s", reclaim_note
+                )
+            result["reclaim"] = reclaim_note
+        except Exception as reclaim_err:  # noqa: BLE001 — a janitor never gates
+            logger.warning(
+                "UpgradeJournalSweepService: reclaim tick failed: %s: %s — "
+                "next tick will retry",
+                type(reclaim_err).__name__,
+                reclaim_err,
             )
         try:
             note = uj.reconcile_pending_op(self._install_dir)

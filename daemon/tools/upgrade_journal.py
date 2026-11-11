@@ -320,6 +320,297 @@ def journal_owner_heartbeat_fresh(install_dir: Path) -> bool:
     return 0 <= age_s <= OWNER_HEARTBEAT_FRESH_S
 
 
+# ── D1 (2026-11-11): the ONE stale-txn reclaim predicate ───────────────────
+#
+# THE STARVATION (observed 2026-11-11): THREE mechanisms disagreed on when a
+# stale promote/restart txn stops blocking a new arm —
+#   (1) the TOOL busy-check arms (upgrade_tools.py system_upgrade /
+#       system_restart) refused FOREVER on a dead pre-flip txn;
+#   (2) the DAEMON-side sweep never disposed it (reconcile_pending_op
+#       returns None whenever ``in_flight`` is a dict — "promote.sh's txn is
+#       live — the op tracks a real run");
+#   (3) only the SHELL preflight cleared it (lib.sh adopt_stale_txn comp3
+#       FAST PATH — "sweep — orphaned pre-flip promote txn cleared at
+#       promote preflight", 03:33:48Z).
+# The shell lane's rule is the REFERENCE (the brief: "match the shell lane's
+# existing rule exactly, do not invent a third"); this module now OWNS it
+# and BOTH python consumers call it — no divergent copies remain.
+#
+# MIRROR of scripts/upgrade/lib.sh:
+#   _txn_heartbeat_stale (:2354) — ``in_flight.last_heartbeat`` (epoch int);
+#       missing/garbage ⇒ STALE (a live txn is ALWAYS heartbeat-written by
+#       journal_open_txn, so an absent value means a hand-edited or legacy
+#       journal); stale ⇔ ``now - hb > HEARTBEAT_STALE_S`` (300s).
+#   _txn_owner_dead (:2372) — ``in_flight.owner_pid``; missing/garbage ⇒
+#       DEAD; ``kill -0`` ESRCH ⇒ DEAD; EPERM ⇒ ALIVE (a foreign-owned owner
+#       is never presumed dead — breaking it would trample live work).
+#   adopt_stale_txn comp3 FAST PATH (:7182) — heartbeat-stale AND owner-dead
+#       ⇒ reclaim NOW (skip the SWEEP_STALE_S=600s age wait); otherwise fall
+#       through to the age gate (a fresh txn stays pipeline-busy).
+#
+# The predicate keeps the shell's TWO independent conjuncts: a live owner OR
+# a fresh heartbeat ⇒ NOT reclaimable ⇒ the arm is refused (fail-closed, no
+# silent double-promote window). ONLY the dead-owner AND stale-heartbeat cell
+# reclaims.
+TXN_HEARTBEAT_STALE_S: int = 300   # lib.sh HEARTBEAT_STALE_S
+
+
+def txn_heartbeat_stale(in_flight: Any, now_epoch: int | None = None) -> bool:
+    """Is the txn's journal heartbeat stale? (mirror of lib.sh
+    ``_txn_heartbeat_stale``)
+
+    ``in_flight.last_heartbeat`` is the SHELL-owned epoch-SECONDS int (the
+    same field ``journal_owner_heartbeat_fresh`` reads). Missing/garbage ⇒
+    STALE (shell-identical: the liveness dimension owns the decision).
+    """
+    if not isinstance(in_flight, dict):
+        return False
+    hb = in_flight.get("last_heartbeat")
+    if isinstance(hb, bool) or not isinstance(hb, int):
+        # Missing/garbage ⇒ stale (lib.sh: a non-digit heartbeat is stale).
+        return True
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+    return (now - int(hb)) > TXN_HEARTBEAT_STALE_S
+
+
+def txn_owner_dead(in_flight: Any) -> bool:
+    """Is the txn's owner process dead? (mirror of lib.sh
+    ``_txn_owner_dead``)
+
+    Missing/garbage owner_pid ⇒ DEAD (unverifiable); ``kill -0`` ESRCH ⇒
+    DEAD; EPERM ⇒ ALIVE (foreign-user owner — never presumed dead). A probe
+    error (any other OSError) ⇒ DEAD, mirroring both lib.sh's
+    ``kill -0``-failure branch and the daemon closer's
+    ``_closer_owner_dead``.
+    """
+    if not isinstance(in_flight, dict):
+        return False
+    owner = in_flight.get("owner_pid")
+    try:
+        pid = int(owner)
+    except (TypeError, ValueError):
+        return True  # missing/garbage owner pid = unverifiable ⇒ dead
+    if pid <= 0:
+        return True
+    try:
+        return not _pid_alive(pid)
+    except OSError:
+        # A probe error is NOT evidence of life (shell-identical).
+        return True
+
+
+def txn_is_reclaimable(
+    in_flight: Any, now_epoch: int | None = None
+) -> tuple[bool, str]:
+    """THE shared predicate — the single source of truth for "may this stale
+    txn be disposed so a new arm may proceed?".
+
+    Returns ``(reclaimable, reason)``. ``reason`` is a stable machine-ish
+    label (``no-in-flight`` / ``owner-alive`` / ``heartbeat-fresh`` /
+    ``heartbeat-stale+owner-dead``) for the refusal text and the history row.
+
+    RECLAIMABLE ⇔ heartbeat stale AND owner dead (the shell's comp3 FAST
+    PATH). A live owner OR a fresh heartbeat ⇒ NOT reclaimable (fail-closed).
+    """
+    if not isinstance(in_flight, dict):
+        return False, "no-in-flight"
+    if not txn_owner_dead(in_flight):
+        return False, "owner-alive"
+    if not txn_heartbeat_stale(in_flight, now_epoch):
+        return False, "heartbeat-fresh"
+    return True, "heartbeat-stale+owner-dead"
+
+
+def _txn_identity(in_flight: dict[str, Any]) -> str:
+    """A stable identity for the txn record — the race-close key.
+
+    The RESTART lane stamps ``run_id`` into ``in_flight``; the PROMOTE lane
+    does NOT (lib.sh ``journal_open_txn`` writes
+    {kind,target,started_at,flipped,owner_pid,last_heartbeat,...}) ⇒ fall
+    back to ``<target>@<started_at>`` (the daemon closer's
+    ``_closer_txn_identity`` shape: stable across ticks, distinct per txn).
+    """
+    run_id = str(in_flight.get("run_id") or "").strip()
+    if run_id:
+        return run_id
+    started = str(in_flight.get("started_at") or "").strip()
+    target = str(in_flight.get("target") or "").strip()
+    if started:
+        return f"{target}@{started}"
+    return target
+
+
+def _pending_op_bound_to_txn(op: PendingOp, in_flight: dict[str, Any]) -> bool:
+    """Is this pending_op the SAME run as this txn? (the pending_op tie-in
+    rule — a reclaim NEVER clears an op it cannot prove is the dead one)
+
+    * the txn carries a run_id (the RESTART lane's shape) ⇒ the op's run_id
+      must equal it;
+    * the PROMOTE lane carries NO run_id (it lives in the pipeline lock) ⇒
+      tie the op to the txn by KIND plus a PROVABLY DEAD executor stamp
+      (``owner_kind == "executor"`` and its pid is dead — the same death the
+      txn evidences). An op still stamped ``tool-arm`` (the executor never
+      ran) is NOT cleared here: the txn's own clearance unblocks the
+      existing expiry closure for that op instead.
+    """
+    txn_run = str(in_flight.get("run_id") or "").strip()
+    if txn_run:
+        return op.run_id == txn_run
+    if op.kind != str(in_flight.get("kind") or ""):
+        return False
+    if op.owner_kind != "executor":
+        return False
+    try:
+        return not _pid_alive(op.owner_pid)
+    except OSError:
+        return True
+
+
+def reclaim_stale_txn(install_dir: Path, *, actor: str) -> str | None:
+    """Dispose an ORPHANED txn (dead owner + stale heartbeat) so a new arm
+    is not starved by it — the python twin of lib.sh ``adopt_stale_txn``'s
+    comp3 FAST PATH (the flipped:false ⇒ clear branch).
+
+    Claim-before-adopt (single winner), mirroring the shell's
+    "runs UNDER the caller's lock" discipline:
+
+      1. READ the journal; no ``in_flight`` ⇒ nothing to do;
+      2. the SHARED predicate (``txn_is_reclaimable``) ⇒ not reclaimable ⇒
+         leave it alone (the caller refuses — fail-closed);
+      3. PRE-FLIP scope: a ``flipped`` txn is mid-ceremony — its recovery
+         (rollback/quarantine, or the serving-green commit) belongs to the
+         shell adopt ceremony and to the daemon's serving-green closer lane,
+         NOT to a bare clear. Left untouched here (the reclaim implements the
+         shell's ``flipped:false → clear`` branch only);
+      4. CLAIM: acquire the pipeline lock (mkdir IS the claim). A dead
+         owner's lock is broken by the existing stale-break branches; a LIVE
+         owner's lock is NOT breakable ⇒ the claim fails ⇒ no reclaim (the
+         arm refuses — fail-closed);
+      5. RE-READ + RE-CHECK under the claim: the txn identity must be
+         unchanged AND still reclaimable. A concurrent armer that already
+         replaced the txn ⇒ its record differs ⇒ NOTHING is cleared (the
+         claim is released and the arm's own lock-acquire decides);
+      6. DISPOSE under the claim: clear ``in_flight``, clear the
+         ``pending_op`` ONLY when it is provably the same run, journal a
+         ``sweep`` history row (the shell's event name for this branch),
+         release the claim.
+
+    Returns a one-line note when a txn was reclaimed, ``None`` otherwise.
+    Never raises — a torn journal leaves everything untouched.
+    """
+    try:
+        data = journal_read(install_dir)
+    except (JournalTorn, OSError) as exc:
+        logger.warning(
+            "upgrade_journal: reclaim_stale_txn journal read FAILED "
+            "(txn left as-is): %s",
+            exc,
+        )
+        return None
+    in_flight = data.get("in_flight")
+    if not isinstance(in_flight, dict):
+        return None
+    reclaimable, reason = txn_is_reclaimable(in_flight)
+    if not reclaimable:
+        logger.debug(
+            "upgrade_journal: reclaim_stale_txn(%s) — txn NOT reclaimable (%s)",
+            actor,
+            reason,
+        )
+        return None
+    if in_flight.get("flipped") is True:
+        logger.info(
+            "upgrade_journal: reclaim_stale_txn(%s) — txn kind=%s target=%s is "
+            "FLIPPED (mid-ceremony) — left untouched (the adopt ceremony / "
+            "the serving-green closer own the flipped branch)",
+            actor,
+            in_flight.get("kind", "?"),
+            in_flight.get("target", "?"),
+        )
+        return None
+    txn_key = _txn_identity(in_flight)
+    claim_run_id = f"reclaim-{mint_run_id()}"
+    acquired, busy_run = lock_acquire(install_dir, claim_run_id)
+    if not acquired:
+        logger.info(
+            "upgrade_journal: reclaim_stale_txn(%s) — pipeline lock held "
+            "(run_id=%s) — not reclaiming",
+            actor,
+            busy_run,
+        )
+        return None
+    try:
+        try:
+            fresh = journal_read(install_dir)
+        except (JournalTorn, OSError) as exc:
+            logger.warning(
+                "upgrade_journal: reclaim_stale_txn re-read FAILED (txn "
+                "left as-is): %s",
+                exc,
+            )
+            return None
+        fresh_inf = fresh.get("in_flight")
+        if not isinstance(fresh_inf, dict):
+            return None  # already disposed by someone else
+        if _txn_identity(fresh_inf) != txn_key:
+            # A NEW txn replaced the one we judged — it is NOT ours to clear
+            # (the concurrent armer's record wins; the arm's own lock
+            # acquisition is the final arbiter).
+            logger.info(
+                "upgrade_journal: reclaim_stale_txn(%s) — txn identity changed "
+                "(%s → %s) — nothing cleared",
+                actor,
+                txn_key,
+                _txn_identity(fresh_inf),
+            )
+            return None
+        still_ok, still_reason = txn_is_reclaimable(fresh_inf)
+        if not still_ok or fresh_inf.get("flipped") is True:
+            logger.info(
+                "upgrade_journal: reclaim_stale_txn(%s) — txn no longer "
+                "reclaimable under the claim (%s) — nothing cleared",
+                actor,
+                still_reason,
+            )
+            return None
+        op = PendingOp.from_json(fresh.get("pending_op"))
+        op_run_id = ""
+        try:
+            ensure_extensions(install_dir)
+            journal_update_field(install_dir, "in_flight", None)
+            if op is not None and _pending_op_bound_to_txn(op, fresh_inf):
+                op_run_id = op.run_id
+                clear_pending_op(install_dir)
+            journal_history_append(
+                install_dir,
+                "sweep",
+                f"orphaned txn reclaimed by {actor} (kind="
+                f"{fresh_inf.get('kind', '?')} target={fresh_inf.get('target', '?')} "
+                f"identity={txn_key} reason=heartbeat-stale+owner-dead; "
+                f"pending_op={op_run_id or 'none'})",
+            )
+        except (JournalTorn, OSError, KeyError) as exc:
+            logger.warning(
+                "upgrade_journal: reclaim_stale_txn disposal write FAILED "
+                "(txn left as-is — operator inspects %s): %s",
+                journal_path(install_dir),
+                exc,
+            )
+            return None
+        return (
+            f"orphaned txn reclaimed by {actor} (kind={fresh_inf.get('kind', '?')} "
+            f"target={fresh_inf.get('target', '?')} identity={txn_key})"
+        )
+    finally:
+        # The claim is ours — release it (the pipeline is free again).
+        try:
+            lock_release(install_dir)
+        except OSError as exc:  # pragma: no cover — file I/O only
+            logger.warning(
+                "upgrade_journal: reclaim_stale_txn lock release FAILED: %s", exc
+            )
+
+
 def journal_init(install_dir: Path) -> None:
     """Create the empty P2.1 journal if absent (idempotent — lib.sh twin)."""
     jp = journal_path(install_dir)
