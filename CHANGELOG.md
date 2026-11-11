@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.19] — 2026-11-12
+
+### Fixed — bind-race: the daemon pre-binds its listener with a bounded EADDRINUSE retry instead of crash-exiting into a restart loop (`feature/bind-race-fix`; 5 commits on base `efa8aaae2`; merge `b83aa2ed315ef55937a4ce7e70673c3ed069556d`)
+
+- **The restart loop's root cause is closed at the bind site.** `daemon/__main__.py` now pre-binds the listener socket via `bind_socket_with_retry` (`daemon/services/bind_retry.py`, new) and hands the bound socket to uvicorn, so a transient `EADDRINUSE` is waited out instead of surfacing as uvicorn's `sys.exit(1)` — the crash exit that drove the 2026-11-11 63-cycle restart loop. Binding happens **before** the lifespan startup, so a daemon that cannot get the port performs **zero** startup steps (no migrations, no MCP warmup, no pool setup) and **zero** teardown steps; the old shape paid both on every failed cycle.
+- **The retry budget is BOUNDED and coupled to the launcher's burst abort.** `daemon.config.daemon.bind_retry_max_wait_seconds` (env `DAEMON_BIND_RETRY_MAX_WAIT_SECONDS`) defaults to **30.0s**, which is also the **hard ceiling**: a request above it is **CLAMPED** with a loud warning, a negative/malformed value reaching the module clamps to 0 (fail fast, the pre-fix behaviour). The ceiling exists because the launcher's burst abort is reachable only while a failed child's uptime `U` stays **≤ 58s** (6 crashes in the 600s window need `310 + 5U ≤ 600`); frozen-path `U ≈ 18.3s` + 30s budget ≈ 48.3s, so the arithmetic holds with margin. The invariant is stated at the constant in both the module and the config field.
+- **`SIGINT` during the bind WAIT exits 3 (`STARTUP_FAILURE`), never 0.** A bare return there would classify as a clean stop — the launcher would log "exit 0, not looping" and **never restart a daemon that had been interrupted mid-bind**. The exit-3 tail is pinned by test.
+- **Tests** — `tests/test_bind_retry.py` (26 tests) + `tests/test_main_entry.py` expansion + the in-tree **mutation matrix** (`tests/bind_retry_mutation_matrix.md`, 12 mutants), plus `tests/unit/test_llm_streaming_wire_verify.py` alignment. Focused trio: 72 passed / 0 failed at the tip.
+- **Rollback = fix-loss-only.** **Zero migration delta** (`git diff --name-status v0.29.18^{commit}..HEAD -- daemon/migrations/` is empty; 128 migrations, head `20261110_221500_create_prompt_assent_tokens.sql` unchanged) — additive in-binary behaviour only; the old binary simply lacks the retry and can roll back onto the same schema.
+
+### Note — version slot
+
+`v0.29.19` is consumed by this release. The prompt-assent Phase 1.5 lane (`feature/assent-designated-channels`) had `v0.29.19` written into its planning set (decisions D-10, ceremony notes, architecture-recommendation §9); that slot is now consumed here, and **that lane must re-derive UP to `v0.29.20` at its bump time** — taking a lower slot after this one would be a version regression on the live install and would break the promote machinery's monotonic `previous`/rollback bookkeeping.
+
 ## [0.29.18] — 2026-11-11
 
 ### Added — prompt-assent: the conversational approval lane, "The Emperor's Word / Assent" (`feature/prompt-assent`; design `.agents/shared/planning/prompt-assent/`, binding ruling `architecture-recommendation.md` @ `df8da01a6`)
