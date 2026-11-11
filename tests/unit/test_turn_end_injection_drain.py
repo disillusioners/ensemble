@@ -583,3 +583,150 @@ class TestContinuationBudgetConstant:
 
     def test_cap_is_positive_and_bounded(self):
         assert 0 < INJECTION_CONTINUATION_MAX <= 32
+
+
+# ---------------------------------------------------------------------------
+# FIX-BACK Y3 — the TERMINATED-revive guard
+# ---------------------------------------------------------------------------
+
+
+class TestHardTerminalReviveGuard:
+    """A hard-terminal instance must NOT be revived by the drain enqueue.
+
+    Stage 7 runs after every normal completion INCLUDING
+    ``watchover_terminate_node → END``. A non-empty FIFO at that point
+    used to make the "continue" enqueue flip TERMINATED / ERROR / FAILED
+    back to RUNNING (``_prepare_enqueued_message``'s
+    ``is_terminal_revival`` branch), overriding the watcher's explicit
+    termination decision. The guard reads the FRESH status from the
+    repository and skips the enqueue (log-only) on a hard-terminal
+    status; the FIFO stays queued for the next revival turn's
+    dispatch-time D2 seam drain — the no-drop guarantee is preserved.
+    """
+
+    @staticmethod
+    def _instance_with_status(status: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(status=status)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status",
+        [
+            "terminated",
+            "error",
+            "failed",
+        ],
+    )
+    async def test_hard_terminal_instance_is_not_revived(self, status):
+        """No enqueue / no revive; the FIFO is retained, not cleared."""
+        manager = _make_manager([{"content": "also do X", "timestamp": "ts"}])
+        repo = manager._instance_repository
+        repo.get.return_value = self._instance_with_status(status)
+        pipeline = _make_pipeline(manager)
+
+        drained = await pipeline._drain_end_of_turn_injections("iid-pipeline")
+
+        assert drained is False
+        manager.enqueue_message.assert_not_awaited()
+        # The status was read FRESH from the repository.
+        repo.get.assert_called_once_with("iid-pipeline")
+        # The FIFO is retained for the next revival turn's D2 drain.
+        manager.clear_injection.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["running", "idle", "completed"])
+    async def test_non_hard_terminal_instance_still_gets_the_follow_up(self, status):
+        """The control: the guard only blocks TERMINATED / ERROR / FAILED.
+
+        COMPLETED is deliberately NOT blocked — reviving a completed root
+        to answer a queued user message is the established new-message
+        lane.
+        """
+        manager = _make_manager([{"content": "also do X", "timestamp": "ts"}])
+        repo = manager._instance_repository
+        repo.get.return_value = self._instance_with_status(status)
+        pipeline = _make_pipeline(manager)
+
+        drained = await pipeline._drain_end_of_turn_injections("iid-pipeline")
+
+        assert drained is True
+        manager.enqueue_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_status_probe_failure_fails_open(self):
+        """A failed fresh-status read does NOT silently skip the enqueue.
+
+        The enqueue below is itself a DB write that fails on its own under
+        the same conditions (already caught + logged), so fail-open cannot
+        silently revive anything — while failing closed would degrade the
+        delivery guarantee on a transient blip.
+        """
+        manager = _make_manager([{"content": "also do X", "timestamp": "ts"}])
+        repo = manager._instance_repository
+        repo.get.side_effect = RuntimeError("db down")
+        pipeline = _make_pipeline(manager)
+
+        drained = await pipeline._drain_end_of_turn_injections("iid-pipeline")
+
+        assert drained is True
+        manager.enqueue_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_missing_repository_still_gets_the_follow_up(self):
+        """No repository wired → no probe possible → the enqueue proceeds."""
+        manager = _make_manager([{"content": "also do X", "timestamp": "ts"}])
+        manager._instance_repository = None
+        pipeline = _make_pipeline(manager)
+
+        drained = await pipeline._drain_end_of_turn_injections("iid-pipeline")
+
+        assert drained is True
+        manager.enqueue_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_terminated_instance_is_not_revived_on_the_normal_path(self):
+        """The guard holds through the full normal-completion pipeline."""
+        manager = _make_manager([{"content": "also do X", "timestamp": "ts"}])
+        repo = manager._instance_repository
+        repo.get.return_value = self._instance_with_status("terminated")
+        pipeline = _make_pipeline(manager)
+        bus = MagicMock(name="DependencyBus")
+        bus.count_pending_for_target = AsyncMock(return_value=0)
+
+        with patch(
+            "daemon.services.message_processing_pipeline.get_dependency_bus",
+            return_value=bus,
+        ):
+            result = await pipeline.execute(
+                _make_context(),
+                holder_id="holder-1",
+                holder_kind="task",
+                callbacks=PipelineCallbacks(),
+            )
+
+        assert result.success is True
+        manager.enqueue_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_terminated_instance_guard_also_holds_on_the_wc_path(self):
+        """The WAITING_CHILDREN transition's drain honours the guard too."""
+        manager = _make_manager([{"content": "also do X", "timestamp": "ts"}])
+        repo = manager._instance_repository
+        repo.get.return_value = self._instance_with_status("terminated")
+        repo.transition_status_if.return_value = MagicMock(agent_id="agent-1")
+        pipeline = _make_pipeline(manager)
+        bus = MagicMock(name="DependencyBus")
+        bus.count_pending_for_target = AsyncMock(return_value=1)
+
+        with patch(
+            "daemon.services.message_processing_pipeline.get_dependency_bus",
+            return_value=bus,
+        ):
+            transitioned = await pipeline._maybe_transition_to_waiting_children(
+                "iid-pipeline"
+            )
+
+        assert transitioned is True
+        manager.enqueue_message.assert_not_awaited()
