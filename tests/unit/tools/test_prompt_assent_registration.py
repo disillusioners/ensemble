@@ -43,6 +43,7 @@ import ast
 import json
 from pathlib import Path
 
+from daemon.config import PromptAssentConfig
 from daemon.tools._tool_registry import (
     CATEGORY_MODULES,
     DYNAMIC_TOOL_NAMES,
@@ -244,7 +245,7 @@ class TestTheInBodyGate:
             encoding="utf-8"
         )
         gate_at = source.find("caller_agent_id != PROMPT_ASSENT_AUTHORIZED_AGENT")
-        switch_at = source.find("if not _resolve_enabled():")
+        switch_at = source.find("if not _resolve_enabled(")
         assert gate_at != -1 and switch_at != -1
         assert gate_at < switch_at, (
             "the ari layer-3 gate must precede the kill-switch read"
@@ -328,17 +329,43 @@ class TestTheSharedDefaults:
         assert PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET == 10
 
     def test_the_module_does_not_re_declare_a_second_default(self) -> None:
-        """The defaults live in ONE place — a second literal would let
-        the resolver and the Phase-4 class drift."""
-        source = (REPO_ROOT / "daemon" / "tools" / "prompt_assent.py").read_text(
+        """The defaults live in ONE place — ``daemon/config.py``, beside
+        the ``PromptAssentConfig`` class (the M5 pattern). BOTH
+        consumers — that class (its field defaults) and the tool's
+        call-time resolver (this module's import) — read the SAME
+        constants; a second literal here would let them drift."""
+        config_source = (REPO_ROOT / "daemon" / "config.py").read_text(
             encoding="utf-8"
         )
-        assert source.count("PROMPT_ASSENT_DEFAULT_ENABLED: bool = False") == 1
+        assert config_source.count(
+            "PROMPT_ASSENT_DEFAULT_ENABLED: bool = False"
+        ) == 1
+        assert config_source.count(
+            "PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET: int = 10"
+        ) == 1
+        tool_source = (REPO_ROOT / "daemon" / "tools" / "prompt_assent.py").read_text(
+            encoding="utf-8"
+        )
         assert (
-            source.count(
-                "PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET: int = 10"
-            )
-            == 1
+            "PROMPT_ASSENT_DEFAULT_ENABLED: bool" not in tool_source
+        ), "the tool module must IMPORT the shared default, never re-declare it"
+        assert (
+            "PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET: int"
+            not in tool_source
+        ), "the tool module must IMPORT the shared default, never re-declare it"
+        # The class's field defaults ARE the shared constants (D-2:
+        # ONE constant, TWO consumers — this class + the resolver).
+        assert (
+            PromptAssentConfig.model_fields["enabled"].default
+            == PROMPT_ASSENT_DEFAULT_ENABLED
+            is False
+        )
+        assert (
+            PromptAssentConfig.model_fields[
+                "hourly_mismatch_budget"
+            ].default
+            == PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET
+            == 10
         )
 
 

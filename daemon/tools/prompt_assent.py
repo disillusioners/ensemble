@@ -82,11 +82,23 @@ cleared by a daemon restart.
 
 KILL-SWITCH (D-2): ``ENSEMBLE_PROMPT_ASSENT_ENABLED``, read AT CALL
 TIME, **default OFF (fail-closed)** through the ONE shared default
-constant (:data:`PROMPT_ASSENT_DEFAULT_ENABLED`) — Phase 4's
-``PromptAssentConfig`` class consumes the SAME constant, so the two can
-never disagree. An indeterminate/invalid value fails CLOSED. The tool
-STAYS REGISTERED when the switch is off (refusal ``lane-disabled``,
+constant (:data:`PROMPT_ASSENT_DEFAULT_ENABLED`, declared beside
+:class:`~daemon.config.PromptAssentConfig` in ``daemon/config.py`` and
+IMPORTED here — this module's resolver and that class are the TWO
+consumers of the SAME constant, so they can never disagree). The
+resolver is the notify_user ``_resolve_bounds`` shape: the per-call env
+value wins over the boot config value, which wins over the shared
+default; every value is parsed THROUGH the model's own validators. An
+indeterminate/invalid value fails CLOSED (an unreadable knob must never
+arm a privileged lane — an invalid kill-switch spelling lands on the
+shared OFF default even when the boot config had armed the lane). The
+tool STAYS REGISTERED when the switch is off (refusal ``lane-disabled``,
 never construction-absence) and the ``mint`` verb is refused too.
+Arming is ONE env var per environment — no code change; the knob is
+read per call, so a flip needs no restart. The config section is
+ENV-ONLY (the ``nest_report`` precedent — no yaml block, no
+``load_config`` pass-through, so a yaml tier could never shadow the
+env knob).
 
 House rules honored: tools NEVER raise — every failure is a typed
 envelope string (REFUSED for the taxonomy codes, FAILED for the internal
@@ -108,8 +120,13 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from ..config import (
+    PROMPT_ASSENT_DEFAULT_ENABLED,
+    PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET,
+    PromptAssentConfig,
+)
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)
@@ -131,17 +148,15 @@ KILL_SWITCH_ENV = "ENSEMBLE_PROMPT_ASSENT_ENABLED"
 PROMPT_ASSENT_AUTHORIZED_AGENT = "ari"
 
 # ── The shared fail-closed defaults (D-2 / K-9) ───────────────────────────
-
-#: THE ONE fail-closed OFF default (D-2). Consumed by BOTH this phase's
-#: defensive resolver AND Phase 4's ``PromptAssentConfig`` class — the
-#: two can never disagree. The architect OVERRULED the earlier split
-#: (P2 "off" / P4 "on"): under EITHER default that split is a defect.
-PROMPT_ASSENT_DEFAULT_ENABLED: bool = False
-
-#: THE ONE default for the hourly mismatch budget (K-9 / D-3b). Phase 4's
-#: config class supplies ``PromptAssentConfig.hourly_mismatch_budget``;
-#: until then this constant IS the default (never a second literal).
-PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET: int = 10
+#
+# The ONE defaults are IMPORTED from ``daemon/config.py`` (top of this
+# file) — declared beside the ``PromptAssentConfig`` class (the M5
+# pattern); BOTH consumers — that class and this module's call-time
+# resolver — read the SAME constants, and this module re-exports the
+# names so existing importers keep working. A structural pin proves no
+# second literal is ever declared here. The architect OVERRULED the
+# earlier split (P2 "off" / P4 "on"): under EITHER default that split
+# is a defect.
 
 #: The factor-2 window FRESHNESS bound (D-6 / J-2) — 600 s on
 #: ``stamped_at``, IN ADDITION to the window's ``expires_at``.
@@ -298,47 +313,169 @@ def reset_mismatch_budget(instance_id: Optional[str] = None) -> None:
 
 
 def _resolve_hourly_budget(manager: Any = None) -> int:
-    """The K-9 budget — the ONE default constant, with the Phase-4 seam.
+    """The K-9 budget — the ONE knob resolver, the ONE default constant.
 
-    Phase 4 lands ``PromptAssentConfig.hourly_mismatch_budget`` (default
-    10) on the daemon config; when that class exists this resolver
-    reads it, and it falls back to
+    Phase 4 landed ``PromptAssentConfig.hourly_mismatch_budget``
+    (default 10) on the daemon config; this resolver reads it through
+    :func:`_resolve_knobs` (the boot config value, the per-call
+    ``ENSEMBLE_PROMPT_ASSENT_HOURLY_MISMATCH_BUDGET`` env tier, or
     :data:`PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET` — the SAME
-    constant (never a second literal).
+    constant the class consumes, never a second literal). The in-RAM
+    MECHANISM below stays P2-owned (D-3b).
     """
-    cfg = getattr(getattr(manager, "config", None), "prompt_assent", None)
-    value = getattr(cfg, "hourly_mismatch_budget", None)
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET
+    return int(_resolve_knobs(manager).hourly_mismatch_budget)
 
 
-# ── The kill-switch (D-2) ─────────────────────────────────────────────────
+# ── The kill-switch + knob resolver (D-2 / K-9 — Phase 4) ─────────────────
+
+#: The env prefix the :class:`~daemon.config.PromptAssentConfig` model
+#: owns — the tool reads the SAME knob names the model does (one
+#: vocabulary, one authority; the notify_user N8 pattern). The
+#: kill-switch's own constant (:data:`KILL_SWITCH_ENV`) is the prefix +
+#: ``ENABLED``.
+PROMPT_ASSENT_ENV_PREFIX = "ENSEMBLE_PROMPT_ASSENT_"
 
 
-def _resolve_enabled() -> bool:
-    """Kill-switch resolver — default OFF, fail-closed, read PER CALL.
+def _coerce_switch(raw: Any) -> Optional[bool]:
+    """The kill-switch boolean spellings — the accepted vocabulary.
 
-    D-2: the switch is read at call time; the tool STAYS REGISTERED when
-    it is off (refusal-at-call, never construction-absence); the
-    ``mint`` verb is refused too; an INDETERMINATE value fails CLOSED
-    (an unreadable knob must never arm a privileged lane).
+    Returns ``None`` for an INDETERMINATE value; the caller fails
+    CLOSED on ``None`` (D-2: an unreadable knob must never arm a
+    privileged lane).
     """
-    raw = os.environ.get(KILL_SWITCH_ENV)
     if raw is None:
-        return PROMPT_ASSENT_DEFAULT_ENABLED
+        return None
     value = str(raw).strip().lower()
     if value in _ON_SPELLINGS:
         return True
     if value in _OFF_SPELLINGS:
         return False
-    logger.warning(
-        "prompt_assent: invalid %s=%r (expected a boolean spelling); "
-        "failing CLOSED (the lane stays disabled)",
-        KILL_SWITCH_ENV,
-        raw,
+    return None
+
+
+def _model_field_defaults() -> dict[str, Any]:
+    """The model's OWN field defaults — the shared constants.
+
+    Built WITHOUT constructing a model instance, so an INVALID ambient
+    env value can never raise here (bare ``PromptAssentConfig()``
+    consults the env tier and would raise on garbage; this reads the
+    field defaults directly).
+    """
+    return {
+        name: field.get_default(call_default_factory=True)
+        for name, field in PromptAssentConfig.model_fields.items()
+    }
+
+
+def _knob_fallbacks(manager: Any = None) -> dict[str, Any]:
+    """The per-knob FALLBACK values (the notify_user shape): the config
+    object's boot-resolved value when the daemon carries one, else the
+    model's own field defaults (the shared constants)."""
+    base = getattr(getattr(manager, "config", None), "prompt_assent", None)
+    fallbacks: dict[str, Any] = {}
+    for name, field in PromptAssentConfig.model_fields.items():
+        value = getattr(base, name, None)
+        if value is None:
+            value = field.get_default(call_default_factory=True)
+        fallbacks[name] = value
+    return fallbacks
+
+
+def _resolve_knobs(manager: Any = None) -> PromptAssentConfig:
+    """The ONE knob resolver — ``PromptAssentConfig`` is the SINGLE
+    authority (the notify_user ``_resolve_bounds`` shape), read AT CALL
+    TIME so tests and operators can flip knobs without a restart.
+
+    Precedence (per knob): the per-call ENV value wins over the boot
+    config value, which wins over the shared field default. The env
+    values are parsed THROUGH the model's own validators — never by
+    hand.
+
+    D-2 fail-closed rules:
+
+    * an INDETERMINATE/INVALID ``ENSEMBLE_PROMPT_ASSENT_ENABLED`` fails
+      CLOSED — to :data:`PROMPT_ASSENT_DEFAULT_ENABLED` (the shared
+      constant), NEVER to the boot value and never open;
+    * an INVALID budget value repairs per-knob to its validated
+      fallback (an invalid knob must not blind the others — the
+      notify_user doctrine) and is named in a warning.
+    """
+    fallbacks = _knob_fallbacks(manager)
+    raw: dict[str, Any] = {}
+
+    # The kill-switch: the boolean spellings are coerced explicitly (the
+    # lane's accepted vocabulary); an INVALID spelling fails CLOSED.
+    enabled_raw = os.environ.get(KILL_SWITCH_ENV)
+    if enabled_raw is not None and str(enabled_raw).strip() != "":
+        coerced = _coerce_switch(enabled_raw)
+        if coerced is None:
+            logger.warning(
+                "prompt_assent: invalid %s=%r (expected a boolean "
+                "spelling); failing CLOSED (the lane stays disabled)",
+                KILL_SWITCH_ENV,
+                enabled_raw,
+            )
+            fallbacks["enabled"] = PROMPT_ASSENT_DEFAULT_ENABLED
+        else:
+            raw["enabled"] = coerced
+
+    budget_raw = os.environ.get(
+        f"{PROMPT_ASSENT_ENV_PREFIX}HOURLY_MISMATCH_BUDGET"
     )
-    return PROMPT_ASSENT_DEFAULT_ENABLED
+    if budget_raw is not None and str(budget_raw).strip() != "":
+        raw["hourly_mismatch_budget"] = budget_raw
+
+    try:
+        return PromptAssentConfig(**{**fallbacks, **raw})
+    except ValidationError as exc:
+        # One invalid knob must not blind the others: pydantic reports
+        # EVERY failing field, so each is repaired with its own
+        # validated fallback (and named in a warning).
+        reasons: dict[str, str] = {}
+        for err in exc.errors():
+            loc = err.get("loc") or ()
+            if loc:
+                reasons[str(loc[0])] = str(err.get("msg", "invalid value"))
+        repaired: dict[str, Any] = {}
+        for name, value in raw.items():
+            if name in reasons:
+                knob_fallback = fallbacks.get(name)
+                logger.warning(
+                    "prompt_assent: %s%s=%r is INVALID (%s) — using the "
+                    "validated fallback %r",
+                    PROMPT_ASSENT_ENV_PREFIX,
+                    name.upper(),
+                    value,
+                    reasons[name],
+                    knob_fallback,
+                )
+                repaired[name] = knob_fallback
+            else:
+                repaired[name] = value
+        try:
+            return PromptAssentConfig(**{**fallbacks, **repaired})
+        except ValidationError as exc2:  # pragma: no cover — defensive
+            logger.warning(
+                "prompt_assent: the knobs are unresolvable even after "
+                "the per-knob fallback (%s) — using the shared defaults",
+                exc2,
+            )
+            return PromptAssentConfig(**_model_field_defaults())
+
+
+def _resolve_enabled(manager: Any = None) -> bool:
+    """Kill-switch resolver — default OFF, fail-closed, read PER CALL.
+
+    D-2: the switch is read at call time; the tool STAYS REGISTERED
+    when it is off (refusal-at-call, never construction-absence); the
+    ``mint`` verb is refused too; an INDETERMINATE value fails CLOSED
+    (an unreadable knob must never arm a privileged lane). The default
+    is THE ONE shared constant (:data:`PROMPT_ASSENT_DEFAULT_ENABLED`,
+    imported from :mod:`daemon.config` — the same constant the
+    ``PromptAssentConfig`` class consumes), so the two consumers can
+    never disagree.
+    """
+    return bool(_resolve_knobs(manager).enabled)
 
 
 # ── Envelopes (notify_user.py:314-321 shape) ─────────────────────────────
@@ -1296,7 +1433,7 @@ async def _dispatch(
         return _not_ari(caller_agent_id)
 
     # ── 1. the kill-switch (call time, fail-closed) ────────────────────
-    if not _resolve_enabled():
+    if not _resolve_enabled(manager):
         _emit_info_line(
             action=action,
             outcome="refused",
