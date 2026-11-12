@@ -133,3 +133,50 @@ class EnsembleConfig(BaseModel):
     def postgres_env_available(self) -> bool:
         """Check if PostgreSQL ENV vars are available."""
         return bool(os.environ.get("POSTGRES_HOST") and os.environ.get("POSTGRES_DB"))
+
+
+def assert_db_resolution_sanctioned(data_dir) -> None:
+    """Fail-closed guard: refuse an ambient-POSTGRES-driven first boot
+    (tier 2) unless ``ENSEMBLE_DB_AMBIENT_ALLOW=1`` is set.
+
+    Fires (sys.exit(78) + marker line) iff:
+      - (data_dir / "ensemble.json") does NOT exist (tier 2 path), AND
+      - POSTGRES_HOST and POSTGRES_DB are both set, AND
+      - ENSEMBLE_DB_AMBIENT_ALLOW != "1".
+
+    Tier 1 (json exists) => does not fire. Tier 3/4 (sqlite) => does not
+    fire. Marker line names the tier + ambient var NAMES only (never
+    values) + the fence var name (F7).
+    """
+    import sys as _sys
+
+    try:
+        dd = Path(data_dir)
+        config_path = dd / "ensemble.json"
+        if config_path.exists():
+            return  # tier 1 — sanctioned
+        host_set = bool(os.environ.get("POSTGRES_HOST"))
+        db_set = bool(os.environ.get("POSTGRES_DB"))
+        if not (host_set and db_set):
+            return  # tier 3/4 — sqlite default, safe
+        if os.environ.get("ENSEMBLE_DB_AMBIENT_ALLOW") == "1":
+            return  # sanctioned
+        ambient_names = []
+        for name in ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB",
+                     "POSTGRES_USER", "POSTGRES_PASSWORD"):
+            if os.environ.get(name):
+                ambient_names.append(name)
+        logger.error(
+            "DB RESOLUTION REFUSED (rogue-containment): tier=ambient "
+            "(ensemble.json absent) with ambient POSTGRES_* present "
+            "(%s) and ENSEMBLE_DB_AMBIENT_ALLOW != 1. "
+            "Refusing before any TCP connection. Set "
+            "ENSEMBLE_DB_AMBIENT_ALLOW=1 for a sanctioned first boot "
+            "(the persisted ensemble.json makes later boots tier 1).",
+            ",".join(ambient_names),
+        )
+        _sys.exit(78)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — fail-closed on guard errors
+        logger.warning("assert_db_resolution_sanctioned unexpected error: %s", exc)

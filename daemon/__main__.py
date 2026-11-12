@@ -208,6 +208,8 @@ def _boot_db_preflight() -> None:
             or os.environ.get("DATA_DIR")
             or "./data"
         )
+        from .ensemble_config import assert_db_resolution_sanctioned
+        assert_db_resolution_sanctioned(data_dir)
         ensemble_config = EnsembleConfig.load_or_create(data_dir)
         if not ensemble_config.is_postgres:
             logger.debug("Boot preflight: SQLite backend — PG check skipped")

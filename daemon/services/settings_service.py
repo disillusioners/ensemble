@@ -238,6 +238,12 @@ def _raw_decision_section() -> Any:
     return raw_yaml_decision()
 
 
+# rogue-containment rider (d): the managed key "limits.metrics_listener_port"
+# is RETIRED (registry entry removed above). An orphaned app_settings row,
+# if present, is ignored by construction. Operator cleanup (dev/fenced DBs
+# only, NEVER live):
+#   DELETE FROM app_settings WHERE key = 'limits.metrics_listener_port';
+# (idempotent, no migration, no schema change).
 MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     # ── v1 (db-backed-settings, 2026-10-15) — the original semaphore knob ──
     "limits.llm_concurrency": ManagedKeySpec(
@@ -521,27 +527,11 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "Takes effect WITHOUT a restart."
         ),
     ),
-    "limits.metrics_listener_port": ManagedKeySpec(
-        key="limits.metrics_listener_port",
-        config_path="limits.metrics_listener_port",
-        env_var="LIMITS_METRICS_LISTENER_PORT",
-        value_type="int",
-        # Mirrors LimitsConfig.metrics_listener_port
-        # Field(default=9798, ge=1024, le=65535).
-        default=9798,
-        ge=1024,
-        le=65535,
-        requires_restart=True,
-        sensitive=False,
-        description=(
-            "Port for the localhost-bound (127.0.0.1 only) /metrics "
-            "exposition listener. Boot-applied (the socket is bound "
-            "once); a bind failure disables the listener and the daemon "
-            "continues. Effective precedence: DB override > env var "
-            "LIMITS_METRICS_LISTENER_PORT > config.yaml literal > "
-            "default."
-        ),
-    ),
+    # (limits.metrics_listener_port retired by rogue-containment rider (d):
+    #  metrics port is now derived = resolved main port + 1, with
+    #  LIMITS_METRICS_LISTENER_PORT as the env escape hatch. The DB
+    #  managed key is inert-by-construction; its registry entry is
+    #  removed. An orphaned app_settings row, if present, is ignored.)
     "limits.metrics_scrape_interval_hint_s": ManagedKeySpec(
         key="limits.metrics_scrape_interval_hint_s",
         config_path="limits.metrics_scrape_interval_hint_s",

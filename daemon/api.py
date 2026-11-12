@@ -724,6 +724,8 @@ async def lifespan(app: FastAPI):
         or os.environ.get("DATA_DIR")
         or "./data"
     )
+    from daemon.ensemble_config import assert_db_resolution_sanctioned
+    assert_db_resolution_sanctioned(data_dir)
     ensemble_config = EnsembleConfig.load_or_create(data_dir)
     app.state.ensemble_config = ensemble_config
     # Stash the data_dir so routers (e.g. database switch) can persist
@@ -2691,8 +2693,13 @@ async def lifespan(app: FastAPI):
         # is on — the state must never be mysterious.
         metrics_gate.log_deferral_once()
 
+        _metrics_port_env = os.environ.get("LIMITS_METRICS_LISTENER_PORT")
+        if _metrics_port_env is not None and str(_metrics_port_env).strip() != "":
+            _metrics_port = int(str(_metrics_port_env).strip())
+        else:
+            _metrics_port = int(config.daemon.port) + 1
         _metrics_listener = MetricsListener(
-            port=int(getattr(config.limits, "metrics_listener_port", 9798)),
+            port=_metrics_port,
         )
         if _metrics_listener.start():
             app.state.metrics_listener = _metrics_listener
